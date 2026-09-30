@@ -16,6 +16,21 @@ afterEach(async () => {
 });
 
 describe("pull request maintenance", () => {
+  it("redacts a Git error before it is cut (#170 review)", async () => {
+    const token = `ghp_${"M1n2B3v4C5".repeat(4)}`;
+    // Git names the missing remote, whose path holds a token, in its error.
+    const fixture = await createFixture("sync", `remote-${token}.git`);
+    await rm(fixture.bare, { recursive: true, force: true });
+    const failure = await maintainPullRequest({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: async () => ({}),
+      pullRequestUpdateSink: vi.fn(),
+    }).then(() => undefined, (error: unknown) => error as Error);
+    expect(failure?.message).toContain("[REDACTED]");
+    expect(failure?.message).not.toContain(token.slice(4));
+  });
+
   it("appends checked workspace changes with one ordinary fast-forward push", async () => {
     const fixture = await createFixture("append");
     await writeFile(join(fixture.checkout, "FIRST.md"), "first unpublished commit\n", "utf8");
@@ -200,10 +215,10 @@ describe("pull request maintenance", () => {
   });
 });
 
-async function createFixture(action: "append" | "sync") {
+async function createFixture(action: "append" | "sync", remoteName = "remote.git") {
   const root = await mkdtemp(join(tmpdir(), "agentx-maintain-test-"));
   temporaryDirectories.push(root);
-  const bare = join(root, "remote.git");
+  const bare = join(root, remoteName);
   const seed = join(root, "seed");
   const checkout = join(root, "repo", "demo");
   await git(root, ["init", "--bare", "--initial-branch=main", bare]);

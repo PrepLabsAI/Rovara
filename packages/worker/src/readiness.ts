@@ -36,7 +36,8 @@ export async function evaluateReadiness(
         stdout: storedCommandOutput(result.stdout),
         stderr: storedCommandOutput(result.stderr),
         index,
-        ready: result.exitCode === 0,
+        // A check that its timeout stopped is not ready, even when it exited 0 on SIGTERM (#170).
+        ready: result.exitCode === 0 && result.timedOut !== true,
       });
     } catch (error) {
       results.push({

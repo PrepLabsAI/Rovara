@@ -15,6 +15,7 @@ import { promisify } from "node:util";
 import {
   StoredProjectDefinitionSchema,
   agentXError,
+  redactText,
   type ProjectCommand,
   type StoredProjectDefinition,
 } from "@agentx/contracts";
@@ -189,7 +190,8 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
         // For example, the step's directory does not exist: still say which step (#154).
         result = { exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : "setup command could not run" };
       }
-      if (result.exitCode !== 0) {
+      // A step that its timeout stopped failed, even when it exited 0 on SIGTERM (#170).
+      if (result.exitCode !== 0 || result.timedOut === true) {
         throw new Error(describeCommandFailure("setup step", index, command, result));
       }
       await assertContainedSymlinks(canonicalRoot);
@@ -216,7 +218,8 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
     return manifest;
   } catch (error) {
     const message = error instanceof Error ? error.message : "workspace preparation failed";
-    await writeManifest(canonicalRoot, { ...manifest, complete: false, failure: message });
+    // The manifest is on the workspace disk: a clone, Git or devcontainer error can carry a secret (#170).
+    await writeManifest(canonicalRoot, { ...manifest, complete: false, failure: redactText(message) });
     throw error;
   }
 }

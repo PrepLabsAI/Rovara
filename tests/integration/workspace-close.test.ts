@@ -14,6 +14,25 @@ afterEach(async () => {
 });
 
 describe("workspace close preflight", () => {
+  it("redacts a Git error before it is cut (#170 review)", async () => {
+    const token = `ghp_${"C1l2O3s4E5".repeat(4)}`;
+    const root = await mkdtemp(join(tmpdir(), "agentx-close-test-"));
+    temporaryDirectories.push(root);
+    const checkout = join(root, "repo", "demo");
+    await mkdir(checkout, { recursive: true });
+    // Git names the missing directory, whose path holds a token, in its error.
+    await writeFile(join(checkout, ".git"), `gitdir: ${join(root, token, "missing")}\n`, "utf8");
+    await mkdir(join(root, ".agentx"), { recursive: true });
+    await writeFile(join(root, ".agentx", "preparation-manifest.json"), JSON.stringify({
+      schemaVersion: 2,
+      complete: true,
+      repositories: [{ name: "demo", path: "repo/demo" }],
+    }), "utf8");
+    const failure = await inspectWorkspaceForClose(root).then(() => undefined, (error: unknown) => error as Error);
+    expect(failure?.message).toContain("[REDACTED]");
+    expect(failure?.message).not.toContain(token.slice(4));
+  });
+
   it("allows a clean workspace whose commits are reachable from a remote", async () => {
     const fixture = await createFixture();
     await expect(inspectWorkspaceForClose(fixture.root)).resolves.toEqual({ safeToClose: true, repositories: [] });

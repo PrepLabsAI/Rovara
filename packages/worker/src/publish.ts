@@ -427,8 +427,8 @@ function assertContained(rootPath: string, candidate: string): void {
 }
 
 function sanitizeGitError(value: string): string {
-  return value
+  // Redacted before it is cut to its last 16 KiB, where Git says what failed (#170).
+  return storedCommandOutput(value
     .replace(/https:\/\/[^@\s/]+@/giu, "https://[redacted]@")
-    .replace(/(authorization:)[^\r\n]*/giu, "$1 [redacted]")
-    .slice(0, 16_384) || "Git command failed";
+    .replace(/(authorization:)[^\r\n]*/giu, "$1 [redacted]"), 16_384) || "Git command failed";
 }

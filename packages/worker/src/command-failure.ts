@@ -1,6 +1,6 @@
 import { DEVELOPER_FAILURE_MESSAGE_MAX, redactSecrets, redactText, type ProjectCommand } from "@agentx/contracts";
 import type { CommandResult } from "./readiness.js";
-import { MAX_COMMAND_OUTPUT_BYTES } from "./collected-process.js";
+import { MAX_COMMAND_OUTPUT_BYTES, redactedTail, withoutSplitPair } from "./collected-process.js";
 
 /** #154: how much of the command, and of its error output, a failure message shows. */
 export const COMMAND_SHOWN_MAX = 120;
@@ -56,25 +56,10 @@ function lastLines(text: string, limit: number): string {
   return withoutSplitPair(joined.slice(joined.length - limit), "start");
 }
 
-/** Drops half of a surrogate pair left at a cut. */
-function withoutSplitPair(text: string, side: "start" | "end"): string {
-  if (side === "start") {
-    const code = text.charCodeAt(0);
-    return code >= 0xdc00 && code <= 0xdfff ? text.slice(1) : text;
-  }
-  const code = text.charCodeAt(text.length - 1);
-  return code >= 0xd800 && code <= 0xdbff ? text.slice(0, -1) : text;
-}
-
 /**
  * A command's output as the worker stores it (#170): redacted first, then cut to its last `limit`
- * characters, from the first whole line after the cut, so a secret straddling the cut leaves no
- * fragment behind.
+ * characters, from a whole line, so a secret straddling the cut leaves no fragment behind.
  */
 export function storedCommandOutput(text: string, limit = MAX_COMMAND_OUTPUT_BYTES): string {
-  const redacted = redactText(text);
-  if (redacted.length <= limit) return redacted;
-  const kept = redacted.slice(redacted.length - limit);
-  const lineBreak = kept.indexOf("\n");
-  return withoutSplitPair(lineBreak >= 0 && lineBreak < kept.length - 1 ? kept.slice(lineBreak + 1) : kept, "start");
+  return redactedTail(text, limit);
 }

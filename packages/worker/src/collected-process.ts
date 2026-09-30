@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { redactText } from "@agentx/contracts";
 
 /** How much of each output stream a command keeps: its last 1 MiB, where errors usually are (#154). */
 export const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
@@ -32,20 +33,31 @@ export interface CollectedProcessOptions {
 }
 
 /**
+ * How much more raw output than MAX_COMMAND_OUTPUT_BYTES a stream keeps, so that a secret the
+ * 1 MiB cut would split is redacted whole before the cut (#170).
+ */
+export const REDACTION_MARGIN_BYTES = 65_536;
+
+/**
  * Runs a process and collects the last MAX_COMMAND_OUTPUT_BYTES of each output stream. More
- * output than that never stops the process. An abort resolves with exitCode null; a process that
- * cannot start rejects. The process leads its own process group, so a timeout stops everything it
- * started: SIGTERM to the group, then SIGKILL after the grace period (#170).
+ * output than that never stops the process, and output that is cut is redacted before the cut
+ * (#170). An abort resolves with exitCode null; a process that cannot start rejects. The process
+ * leads its own process group: a timeout or an abort sends SIGTERM to the group, then SIGKILL after
+ * the grace period (#170). This stops local processes only; a command the process runs somewhere
+ * else, such as in a devcontainer, is not signalled.
  */
 export function runCollected(executable: string, args: readonly string[], options: CollectedProcessOptions = {}): Promise<CollectedProcess> {
   return new Promise((resolvePromise, reject) => {
+    if (options.signal?.aborted) {
+      resolvePromise({ exitCode: null, stdout: "", stderr: "" });
+      return;
+    }
     const child = spawn(executable, [...args], {
       stdio: ["ignore", "pipe", "pipe"],
       // Its own process group, whose ID is its PID, so a timeout can signal its children too.
       detached: true,
       ...(options.cwd !== undefined ? { cwd: options.cwd } : {}),
       ...(options.env !== undefined ? { env: options.env } : {}),
-      ...(options.signal ? { signal: options.signal } : {}),
     });
     const stdout = tailCollector();
     const stderr = tailCollector();
@@ -59,7 +71,22 @@ export function runCollected(executable: string, args: readonly string[], option
       child.stdout.destroy();
       child.stderr.destroy();
     };
-    let killTimer: NodeJS.Timeout | undefined;
+    let stopping = false;
+    // SIGTERM to the group now, SIGKILL after the grace period. The SIGKILL is sent even when the
+    // result has already come back, for a group member that ignores SIGTERM but does not hold the
+    // output open; it does not keep the worker running.
+    const stop = () => {
+      if (stopping) return;
+      stopping = true;
+      signalGroup(child, "SIGTERM");
+      setTimeout(() => {
+        signalGroup(child, "SIGKILL");
+        if (settled) return;
+        // A process that left the group (setsid) may still hold the output open.
+        if (exited) stopReading();
+        else child.once("exit", stopReading);
+      }, options.killGraceMs ?? TIMEOUT_KILL_GRACE_MS).unref();
+    };
     const timer = options.timeoutMs
       ? setTimeout(() => {
         if (exited) {
@@ -69,28 +96,24 @@ export function runCollected(executable: string, args: readonly string[], option
           return;
         }
         timedOut = true;
-        signalGroup(child, "SIGTERM");
-        killTimer = setTimeout(() => {
-          signalGroup(child, "SIGKILL");
-          // A process that left the group (setsid) may still hold the output open.
-          if (exited) stopReading();
-          else child.once("exit", stopReading);
-        }, options.killGraceMs ?? TIMEOUT_KILL_GRACE_MS);
+        stop();
       }, options.timeoutMs)
       : undefined;
+    const onAbort = () => {
+      stop();
+      settle(() => resolvePromise({ exitCode: null, stdout: stdout.text(), stderr: stderr.text() }));
+    };
     const settle = (finish: () => void) => {
       if (settled) return;
       settled = true;
       if (timer !== undefined) clearTimeout(timer);
-      if (killTimer !== undefined) clearTimeout(killTimer);
+      options.signal?.removeEventListener("abort", onAbort);
       finish();
     };
+    options.signal?.addEventListener("abort", onAbort, { once: true });
     child.stdout.on("data", (data: Buffer) => { stdout.add(data); options.onStdout?.(data); });
     child.stderr.on("data", (data: Buffer) => { stderr.add(data); options.onStderr?.(data); });
-    child.on("error", (error) => settle(() => {
-      if (error.name === "AbortError") resolvePromise({ exitCode: null, stdout: stdout.text(), stderr: stderr.text() });
-      else reject(error);
-    }));
+    child.on("error", (error) => settle(() => reject(error)));
     child.on("close", (code, signal) => settle(() => resolvePromise({
       exitCode: code,
       stdout: stdout.text(),
@@ -114,31 +137,66 @@ function signalGroup(child: ChildProcess, signal: NodeJS.Signals): void {
   child.kill(signal);
 }
 
-/** Keeps the last MAX_COMMAND_OUTPUT_BYTES written, from the first whole line after a cut. */
-export function tailCollector(limit = MAX_COMMAND_OUTPUT_BYTES): { add(data: Buffer): void; text(): string } {
+/**
+ * Keeps the last `limit` bytes written, plus `margin` more raw bytes. Output longer than `limit`
+ * is redacted over the whole kept window, then cut to its last `limit` characters, from a whole
+ * line (#170).
+ */
+export function tailCollector(limit = MAX_COMMAND_OUTPUT_BYTES, margin = REDACTION_MARGIN_BYTES): { add(data: Buffer): void; text(): string } {
+  const keep = limit + margin;
   let chunks: Buffer[] = [];
   let size = 0;
+  let cut = false;
   return {
     add(data) {
       chunks.push(data);
       size += data.length;
-      if (size > limit * 2) {
-        const kept = Buffer.concat(chunks).subarray(size - limit);
+      if (size > keep * 2) {
+        const kept = Buffer.concat(chunks).subarray(size - keep);
         chunks = [kept];
         size = kept.length;
+        cut = true;
       }
     },
     text() {
       const all = Buffer.concat(chunks);
-      if (all.length <= limit) return all.toString("utf8");
-      const kept = all.subarray(all.length - limit);
-      // A cut lands inside a line, where it could leave part of a secret that redaction no longer
-      // recognizes: start at the next whole line (#170). Output without a line break keeps it all,
-      // but a cut can start inside a UTF-8 sequence: skip its continuation bytes.
-      const lineBreak = kept.indexOf(0x0a);
-      let start = lineBreak >= 0 && lineBreak < kept.length - 1 ? lineBreak + 1 : 0;
-      while (start < kept.length && start < 3 && ((kept[start] ?? 0) & 0xc0) === 0x80) start += 1;
-      return kept.subarray(start).toString("utf8");
+      if (!cut && all.length <= limit) return all.toString("utf8");
+      const rawCut = cut || all.length > keep;
+      const window = all.length > keep ? all.subarray(all.length - keep) : all;
+      // A raw cut can start inside a UTF-8 sequence: skip its continuation bytes.
+      let start = 0;
+      while (rawCut && start < window.length && start < 3 && ((window[start] ?? 0) & 0xc0) === 0x80) start += 1;
+      return redactedTail(window.subarray(start).toString("utf8"), limit, rawCut);
     },
   };
+}
+
+/**
+ * Redacts the text, then keeps its last `limit` characters (#170). When that cuts it, or when
+ * `alreadyCut` says its start was cut before, it starts at the first whole line, or else after the
+ * first whitespace, so that no fragment of a secret the cut split is kept.
+ */
+export function redactedTail(text: string, limit: number, alreadyCut = false): string {
+  const redacted = redactText(text);
+  const cutHere = redacted.length > limit;
+  if (!cutHere && !alreadyCut) return redacted;
+  return withoutSplitPair(fromWholeLine(cutHere ? redacted.slice(redacted.length - limit) : redacted), "start");
+}
+
+function fromWholeLine(text: string): string {
+  const lineBreak = text.indexOf("\n");
+  if (lineBreak >= 0 && lineBreak < text.length - 1) return text.slice(lineBreak + 1);
+  const space = text.search(/\s/);
+  if (space >= 0 && space < text.length - 1) return text.slice(space + 1);
+  return text;
+}
+
+/** Drops half of a surrogate pair left at a cut. */
+export function withoutSplitPair(text: string, side: "start" | "end"): string {
+  if (side === "start") {
+    const code = text.charCodeAt(0);
+    return code >= 0xdc00 && code <= 0xdfff ? text.slice(1) : text;
+  }
+  const code = text.charCodeAt(text.length - 1);
+  return code >= 0xd800 && code <= 0xdbff ? text.slice(0, -1) : text;
 }
