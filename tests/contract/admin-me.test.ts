@@ -198,7 +198,7 @@ describe("the identity reader's guards", () => {
   it("caps and redacts a verified email used as the name", async () => {
     const planted = `ghp_${"E".repeat(36)}`;
     const long = `${"a".repeat(240)}@example.com`;
-    const reader = adminIdentityReader({ issuer: ISSUER, fetch: vi.fn() as unknown as typeof fetch, now: () => 0, log: vi.fn() });
+    const reader = adminIdentityReader({ issuer: ISSUER, fetch: vi.fn(), now: () => 0, log: vi.fn() });
     const cut = await reader.profile(identity({ email: long, email_verified: true }), undefined);
     expect(cut.email).toBe(long);
     expect(cut.name?.length).toBeLessThanOrEqual(200);
