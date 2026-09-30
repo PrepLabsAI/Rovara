@@ -17,7 +17,7 @@ import { REPLY_WAIT_MS, waitForThreadedReply } from "../setup/reply-watch.js";
 import { BUDGET_TAG_NOTE, checkAlertWebhook } from "./answers.js";
 import type { InitContext } from "./context.js";
 import { CONNECTOR_LABELS, CONNECTOR_TYPES, type ConnectorType, type InstallProgress } from "./install-state.js";
-import { retryOnPage } from "./retry.js";
+import { problemText, retryOnPage } from "./retry.js";
 import { readSlackBotToken } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
 import { adminCard, alertsCard, channelCard, connectorsCard, projectCard, replyCard, type AdminCardInput, type ReplyCardInput } from "./ui/cards.js";
@@ -243,7 +243,14 @@ export function alertsStep(): InitStep<InitContext> {
         // Recorded before the test alarm, so a failed test is retried without subscribing again.
         await progress.update({ alerts: { subscribed: true, tested: false } });
       }
-      await sendTestAlarm({ api: context.setup.alerts, topicArn, env: context.env, shownAs, prompter: context.prompter, write: context.write, sleep: context.sleep, now: context.now });
+      context.surface?.card(alertsCard({ stage: "testing", shownAs }));
+      try {
+        await sendTestAlarm({ api: context.setup.alerts, topicArn, env: context.env, shownAs, prompter: context.prompter, write: context.write, sleep: context.sleep, now: context.now });
+      } catch (error) {
+        // No retry on the page for the test alarm: the card shows the terminal's own next step.
+        context.surface?.card(alertsCard({ stage: "failed", problem: problemText(error) }));
+        throw error;
+      }
       await progress.update({ alerts: { subscribed: true, tested: true } });
       context.surface?.card(alertsCard({ stage: "done", shownAs }));
       return { status: "done", note: `alerts to ${shownAs}, test alarm received` };

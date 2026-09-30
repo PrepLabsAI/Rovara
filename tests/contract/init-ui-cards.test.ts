@@ -222,6 +222,15 @@ describe("the finishing cards", () => {
     expect(alertsCard({ stage: "none" }).lines).toEqual(["No alert address yet. Set one later with agentx config set alerts.address."]);
   });
 
+  it("I1: alerts while the test alarm is out, and a test alarm that failed", () => {
+    expect(alertsCard({ stage: "testing", shownAs: "ops@example.com" })).toEqual({
+      id: "alerts", title: "Alerts", status: "waiting",
+      lines: ["Alerts are subscribed for ops@example.com. AgentX sent a test alarm; answer below whether it arrived."],
+    });
+    const problem = "the test alarm did not arrive; check the subscription is confirmed and your spam folder, then run agentx alerts test";
+    expect(alertsCard({ stage: "failed", problem })).toEqual({ id: "alerts", title: "Alerts", status: "failed", lines: [problem] });
+  });
+
   it("the test reply: how to mention the bot, a link to the channel, and what to fix", () => {
     expect(slackChannelLink("T0123456789", "C0PAY00001")).toBe("https://slack.com/app_redirect?team=T0123456789&channel=C0PAY00001");
     expect(replyCard({ stage: "waiting", ...WHERE, botUserId: "U0BOT00001", minutes: 10 })).toEqual({

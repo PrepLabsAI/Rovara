@@ -7,6 +7,7 @@ import { agentXError } from "@agentx/contracts";
 import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { adminUserStep, alertsStep, e2eStep } from "../../packages/cli/src/init/finish-steps.js";
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
+import { problemText } from "../../packages/cli/src/init/retry.js";
 import { alertsCard } from "../../packages/cli/src/init/ui/cards.js";
 import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
 import { initContext, progressHandle, sampleAnswers, scriptedPrompter, T0, type TestInitContext } from "../support/init-fakes.js";
@@ -71,10 +72,39 @@ describe("the alerts on the page", () => {
     expect(await alertsStep().run(context, progressHandle())).toEqual({ status: "done", note: "alerts to ops@example.com, test alarm received" });
     expect(alerts.subscribed).toHaveLength(1);
     expect(base.asked[0]).toBe("Have you confirmed the subscription? Answer Yes to check again.");
-    // The run's own 10-minute wait, then the confirm card after it, then done.
-    expect(surface.cards.map((card) => card.status)).toEqual(["waiting", "waiting", "ok"]);
+    // The run's own 10-minute wait, then the confirm card after it, then the test alarm, then done.
+    expect(surface.cards.map((card) => card.status)).toEqual(["waiting", "waiting", "waiting", "ok"]);
     expect(surface.cards[0]?.lines).toEqual(alertsCard({ stage: "waiting", shownAs: "ops@example.com" }).lines);
     expect(surface.cards[1]?.lines).toEqual(alertsCard({ stage: "confirm", shownAs: "ops@example.com" }).lines);
+    expect(surface.cards[2]?.lines).toEqual(alertsCard({ stage: "testing", shownAs: "ops@example.com" }).lines);
+  });
+
+  it("I1: a test alarm that did not arrive shows a failed alerts card, and the step fails as on the terminal", async () => {
+    const surface = page();
+    const alerts = fakeAlerts({ confirmAfterPolls: 0, budgetUsd: 100 });
+    context = initContext({ answers, prompter: scriptedPrompter([false]), surface, setup: setupFor(alerts) });
+    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
+    const failure = await alertsStep().run(context, progressHandle()).then(() => undefined, (error: unknown) => error);
+    const terminal = initContext({ answers, prompter: scriptedPrompter([false]), setup: setupFor(fakeAlerts({ confirmAfterPolls: 0, budgetUsd: 100 })) });
+    await writeEnvironmentSettings(terminal.store, STAGING_SETTINGS);
+    const terminalFailure = await alertsStep().run(terminal, progressHandle()).then(() => undefined, (error: unknown) => error);
+    await rm(terminal.home, { recursive: true, force: true });
+    expect(failure).toBeInstanceOf(Error);
+    expect((failure as Error).message).toBe((terminalFailure as Error).message);
+    expect(surface.cards.map((card) => [card.id, card.status])).toEqual([["alerts", "waiting"], ["alerts", "failed"]]);
+    expect(surface.cards[0]?.lines).toEqual(alertsCard({ stage: "testing", shownAs: "ops@example.com" }).lines);
+    expect(surface.cards[1]?.lines).toEqual([problemText(failure)]);
+  });
+
+  it("I1: a test alarm CloudWatch did not record shows a failed alerts card, and the step rejects with that error", async () => {
+    const surface = page();
+    const alerts = fakeAlerts({ confirmAfterPolls: 0, historyEmpty: true, budgetUsd: 100 });
+    context = initContext({ answers, prompter: scriptedPrompter([]), surface, setup: setupFor(alerts) });
+    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
+    const failure = await alertsStep().run(context, progressHandle()).then(() => undefined, (error: unknown) => error);
+    expect((failure as Error).message).toContain("CloudWatch did not record the test alarm going off");
+    expect(surface.cards.map((card) => [card.id, card.status])).toEqual([["alerts", "waiting"], ["alerts", "failed"]]);
+    expect(surface.cards[1]?.lines).toEqual([problemText(failure)]);
   });
 
   it("the terminal path still stops and says to run agentx init again when nobody has confirmed", async () => {

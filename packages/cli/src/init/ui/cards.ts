@@ -226,6 +226,10 @@ export type AlertsCardInput =
   | { stage: "confirm"; shownAs: string }
   /** The run is polling for the confirmation itself, so the page needs no answer. */
   | { stage: "waiting"; shownAs: string }
+  /** Subscribed; the test alarm is out and the operator answers whether it arrived. */
+  | { stage: "testing"; shownAs: string }
+  /** The test alarm failed. The page offers no retry for it, so the problem keeps its own next step. */
+  | { stage: "failed"; problem: string }
   | { stage: "done"; shownAs: string }
   | { stage: "none" };
 
@@ -237,6 +241,8 @@ export function alertsCard(input: AlertsCardInput): WizardCard {
   switch (input.stage) {
     case "confirm": return { ...base, status: "waiting", lines: [confirm(input.shownAs), "Then answer Yes below to check again."] };
     case "waiting": return { ...base, status: "waiting", lines: [confirm(input.shownAs), "This page moves on by itself once it is confirmed (up to 10 minutes)."] };
+    case "testing": return { ...base, status: "waiting", lines: [`Alerts are subscribed for ${input.shownAs}. AgentX sent a test alarm; answer below whether it arrived.`] };
+    case "failed": return { ...base, status: "failed", lines: [input.problem] };
     case "done": return { ...base, status: "ok", lines: [`Alerts go to ${input.shownAs}, and the test alarm arrived.`] };
     case "none": return { ...base, status: "info", lines: ["No alert address yet. Set one later with agentx config set alerts.address."] };
   }
