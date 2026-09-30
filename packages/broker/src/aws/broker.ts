@@ -87,6 +87,8 @@ import {
   type ProjectModelOptions,
   projectCatalogKey,
   type ChannelMembersRequest,
+  INDEX_EXPIRY_ATTRIBUTE,
+  indexExpiresAt,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
@@ -103,7 +105,7 @@ import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConf
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { completedTurn, developerFooter, inertName, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
-import { hashJson, isConditional, isTemporaryAwsError } from "./broker-shared.js";
+import { hashJson, isConditional, isTemporaryAwsError, workerPrompt } from "./broker-shared.js";
 import { channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, finishTaskClose } from "./developer-tasks.js";
@@ -378,7 +380,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
     },
     pullRequests: async (workspaceId) => (await query(`WORKSPACE#${workspaceId}`, "PULL_REQUEST#"))
       .map((item) => ({ repository: String(item.repository), number: Number(item.number), url: String(item.url), state: item.state as "open" | "closed" | "merged" })),
-    acceptTask: (identity, workspaceId, request, extra) => acceptTask(dependencies, identity, workspaceId, request, extra),
+    acceptTask: (identity, workspaceId, request, extra, options) => acceptTask(dependencies, identity, workspaceId, request, extra, options),
     acceptPullRequest: (identity, workspaceId, request, extra) => acceptPullRequest(dependencies, identity, workspaceId, request, extra),
     cancelRunning: async (identity, workspace, extra) => {
       if (workspace.ownerKey !== identity.ownerKey) throw agentXError("NOT_FOUND", "workspace not found");
@@ -2076,6 +2078,9 @@ function channelOperation(dependencies: AwsBrokerDependencies, identity: Authent
     Item: {
       pk: `DEVTASK#${shared.taskId}`, sk: `CHANNEL_OPERATION#${operation.id}`, entityType: "CHANNEL_OPERATION",
       slackUserId: slack.requester.userId, ...(slack.requesterName === undefined ? {} : { name: slack.requesterName }), createdAt: operation.createdAt,
+      // 25c note 2: the State table's TTL attribute, 30 days on; the busy read needs it only while the
+      // operation runs. Shared threads exist only in named environments, whose State table expires on it.
+      [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(operation.createdAt),
     },
     ConditionExpression: "attribute_not_exists(pk)",
   } }];
@@ -2238,7 +2243,7 @@ async function createConversation(
 async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester } },
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean },
   now: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -2259,6 +2264,11 @@ async function taskOperationParts(
     ...input.requester,
   });
   operation.settingsRevision = settings.definition.revision;
+  // 25c note 1: the hash above is the request's own; only the worker's copy gets the re-read line.
+  const prompt = workerPrompt(input.prompt, input.shared === true);
+  if (input.shared === true && prompt === input.prompt) {
+    console.log(JSON.stringify({ component: "broker", event: "developer.shared_reread_omitted", operationId }));
+  }
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
     kind: "task",
@@ -2269,7 +2279,7 @@ async function taskOperationParts(
     callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence),
     payload: {
       conversationId: input.conversationId,
-      prompt: input.prompt,
+      prompt,
       conversationStarted: input.conversationStarted,
       ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
       ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
@@ -2284,6 +2294,7 @@ async function acceptTask(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
+  options: { sharedTask?: boolean } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
@@ -2317,6 +2328,8 @@ async function acceptTask(
     prompt: request.prompt,
     conversationStarted,
     requester: requesterOf(identity),
+    // 25c note 1: a turn from an open shared thread, or the developer's own turn on a shared task.
+    shared: identity.sharedTask?.state === "continue" || options.sharedTask === true,
   }, now);
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [

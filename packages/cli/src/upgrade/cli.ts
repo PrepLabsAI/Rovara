@@ -10,7 +10,7 @@ import { runDoctor } from "../doctor/run.js";
 import { cloudFormationStackReader, stsCallerIdentity } from "../environments/adopt.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { TextWriter } from "../init/prompts.js";
-import { fetchRelease } from "../init/release-fetch.js";
+import { fetchRelease, sourceRelease } from "../init/release-fetch.js";
 import { formatSuccess } from "../output.js";
 import { RELEASE_VERSION } from "../version.js";
 import { runUpgrade, type UpgradeDependencies } from "./run.js";
@@ -32,13 +32,13 @@ export function registerUpgradeCommand(program: Command, context: UpgradeCommand
   program
     .command("upgrade")
     .description("upgrade an environment to a newer release: shows the release notes and every change, stops on a data replacement unless you name it, then runs doctor (operator role; the cdk engine needs admin credentials)")
-    .option("--to <version>", "the release to upgrade to; default: this agentx's own release")
+    .option("--to <version>", "the release to upgrade to; default: this agentx's own release, or for an agentx built from source upgrading a cdk environment, the --source tag")
     .option("--release <dir>", "a release directory (agentx release build output) instead of downloading one")
-    .option("--source <dir>", "the cdk engine only: a clean checkout of the target release's tag")
+    .option("--source <dir>", "the cdk engine only: a clean checkout of the target release's tag; --to or --release, when given, must match it")
     .option("--allow-replace <logical-id>", "accept replacing or deleting this table, user pool, bucket, key or secret; repeat for each", collect, [])
     .option("--export <dir>", "write the upgrade for a platform team's pipeline instead of deploying it")
-    .option("--worker-image <digest-ref>", "worker image by digest (testing only)")
-    .option("--slack-image <digest-ref>", "Slack service image by digest (testing only)")
+    .option("--worker-image <digest-ref>", "worker image by digest; an agentx built from source needs it with --engine cdk when the tag has no published release.json")
+    .option("--slack-image <digest-ref>", "Slack service image by digest; an agentx built from source needs it with --engine cdk when the tag has no published release.json")
     .option("--yes", "apply without asking; every change and the release notes are still printed", false)
     .option("--region <region>", "AWS region of the environment; defaults to your AWS configuration")
     .action(async (options: { to?: string; release?: string; source?: string; allowReplace: string[]; export?: string; workerImage?: string; slackImage?: string; yes: boolean; region?: string }, command: Command) => {
@@ -54,6 +54,7 @@ export function registerUpgradeCommand(program: Command, context: UpgradeCommand
         cloudFormation: overrides.cloudFormation ?? new CloudFormationClient(aws),
         identity: overrides.identity ?? stsCallerIdentity(new STSClient(aws)),
         loadRelease: overrides.loadRelease ?? (async (input) => loadRelease(input.releaseDir ?? await fetchRelease({ version: input.version, home: context.home, fetch: context.fetch, runner, write }))),
+        sourceRelease: overrides.sourceRelease ?? (async (input) => (await sourceRelease({ runner, source: input.source, images: input.images, fetch: context.fetch })).release),
         notes: overrides.notes ?? ((version) => releaseNotes({ fetch: context.fetch, version })),
         prepare: overrides.prepare ?? ((input) => prepareDeployment({
           engine: input.settings.engine, env: input.settings.env, region: input.settings.region, account: input.settings.account,

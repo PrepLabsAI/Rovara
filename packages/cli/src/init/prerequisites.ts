@@ -148,9 +148,12 @@ export async function checkPrerequisites(input: {
   write(`AWS account ${input.caller.account} as ${input.caller.arn}`);
   write(DEDICATED_ACCOUNT_NOTE);
 
-  // The same check and wording as agentx deploy's, collected with every other problem.
-  const regionProblem = releaseRegionProblem(input.release, region);
-  if (regionProblem !== undefined) failed("Region", regionProblem); else input.onCheck?.({ label: "Region", ok: true, detail: `${region} is covered by this release` });
+  // The same check and wording as agentx deploy's, collected with every other problem. The cdk
+  // engine synthesizes its own templates for any region (issue 152), so only the templates engine needs it.
+  if (answers.engine === "templates") {
+    const regionProblem = releaseRegionProblem(input.release, region);
+    if (regionProblem !== undefined) failed("Region", regionProblem); else input.onCheck?.({ label: "Region", ok: true, detail: `${region} is covered by this release` });
+  }
 
   try {
     const quota = await checks.ec2Quota();
