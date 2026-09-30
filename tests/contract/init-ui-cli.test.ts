@@ -479,7 +479,7 @@ describe("agentx init --ui", () => {
     expect(code).toBe(0);
     const last = operator.states.at(-1);
     expect(last?.cards?.map((card) => [card.id, card.status])).toEqual([
-      ["aws", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"], ["admin", "ok"], ["project", "ok"], ["channel", "ok"], ["connectors", "ok"], ["alerts", "ok"], ["reply", "ok"],
+      ["aws", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"], ["admin", "ok"], ["project", "ok"], ["channel", "ok"], ["connectors", "ok"], ["alerts", "ok"], ["reply", "ok"], ["ready", "ok"],
     ]);
     // Every answer came from the scripted operator, and no answer was an address pasted back:
     // the GitHub code arrived through the wizard's own callback.
@@ -490,7 +490,7 @@ describe("agentx init --ui", () => {
     // The screens came in order: each card first appears after the one before it.
     const firstSeen: string[] = [];
     for (const card of operator.states.flatMap((state) => state.cards ?? [])) if (!firstSeen.includes(card.id)) firstSeen.push(card.id);
-    expect(firstSeen).toEqual(["aws", "prerequisites", "github", "slack", "slack-urls", "admin", "project", "channel", "connectors", "alerts", "reply"]);
+    expect(firstSeen).toEqual(["aws", "prerequisites", "github", "slack", "slack-urls", "admin", "project", "channel", "connectors", "alerts", "reply", "ready"]);
   });
 
   it("FR-012: no secret reaches a card, a link, the page's state, the log, the terminal, SSM or the cache", async () => {
@@ -560,5 +560,26 @@ describe("agentx init --ui", () => {
     expect(code).toBe(0);
     expect(operator.states.at(-1)?.cards?.find((card) => card.id === "connectors")?.lines).toEqual(["Connected to payments-api: Linear."]);
     expect(operator.states.at(-1)?.cards?.find((card) => card.id === "alerts")?.lines).toEqual(["Alerts go to ops@example.com, and the test alarm arrived."]);
+  });
+  it("FR-052: the page ends on a ready card that needs no command to finish, and the outcome is still readyText", async () => {
+    const h = await harness();
+    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(code).toBe(0);
+    const last = operator.states.at(-1);
+    const ready = last?.cards?.find((card) => card.id === "ready");
+    expect(ready?.lines[0]).toBe("AgentX environment staging is ready.");
+    expect(ready?.link?.url).toBe("https://slack.com/app_redirect?team=T0TEAM&channel=C0PAY00001");
+    const later = ready?.lines.indexOf("Later, if you want more:") ?? -1;
+    expect(later).toBeGreaterThan(0);
+    expect(ready?.lines.slice(0, later).some((line) => line.includes("agentx --env"))).toBe(false);
+    // The phase 1 outcome is unchanged: the same summary the terminal prints.
+    expect(last?.outcome).toContain("AgentX environment staging is ready.");
+  });
+
+  it("a run stopped with --stop-after shows no ready card", async () => {
+    const h = await harness();
+    const { code, operator } = await h.runUi([...FIRST_RUN], ["--stop-after", "prerequisites"]);
+    expect(code).toBe(0);
+    expect(operator.states.at(-1)?.cards?.some((card) => card.id === "ready")).toBe(false);
   });
 });
