@@ -84,6 +84,7 @@ import {
   type ModelRef,
   type ProjectModelOptions,
   projectCatalogKey,
+  type ChannelMembersRequest,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
@@ -330,6 +331,7 @@ function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDe
     ...(dependencies.turnRecordsTableName === undefined ? {} : { turns: dynamoTurnRecordSource(dependencies.documentClient, dependencies.turnRecordsTableName) }),
     ...(developer?.slackTeamId === undefined ? {} : { slackTeamId: developer.slackTeamId }),
     ...(developer?.channelInfo === undefined ? {} : { channelInfo: developer.channelInfo }),
+    ...(developer === undefined ? {} : { channelMembers: (request: ChannelMembersRequest) => developer.channelMembers(request) }),
     limitDefaults: { member: dependencies.slack?.memberWorkspaceLimit ?? 3, organization: dependencies.slack?.organizationWorkspaceLimit ?? 20 },
     now: Date.now,
     log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
@@ -4614,6 +4616,8 @@ export const handler = createAwsBrokerHandler({
   },
   codeBuild,
   ...(developer ? { developer } : {}),
+  // Spec 025 A12: set only here, so a test harness without its own `me` never reaches the network.
+  adminReads: { me: { issuer: requiredEnvironment("OIDC_ISSUER"), fetch, ...(developer?.slackUserByEmail === undefined ? {} : { slackUserByEmail: developer.slackUserByEmail }) } },
   ...(process.env.TURN_RECORDS_TABLE_NAME ? { turnRecordsTableName: process.env.TURN_RECORDS_TABLE_NAME } : {}),
   ...(process.env.SLACK_THREADS_TABLE_NAME ? { slackThreadsTableName: process.env.SLACK_THREADS_TABLE_NAME } : {}),
   ...(process.env.SLACK_ORCHESTRATOR_ROLE_ARN

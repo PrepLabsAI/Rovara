@@ -34,10 +34,13 @@ import {
   type FailureIndexRecord,
   type ChannelInfoRequest,
   type ChannelInfoResponse,
+  type ChannelMembersRequest,
+  type ChannelMembersResponse,
   type ProjectDefinition,
   type WorkspaceInstance,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
+import { adminIdentityReader, type AdminMeDependencies } from "./admin-me.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { taskKey, taskPointerKey } from "../developer/task-records.js";
 import { workspaceProjectReader, type TurnRecordSource } from "./turns.js";
@@ -54,8 +57,10 @@ export interface AdminReadDependencies {
   channelInfo?: (request: ChannelInfoRequest) => Promise<ChannelInfoResponse>;
   /** The stack parameters' workspace limits, used when no setting exists (FR-053). */
   limitDefaults: { member: number; organization: number };
-  /** Task 11 replaces this field's type with AdminMeDependencies. */
-  me?: unknown;
+  /** DeveloperIdentity's channel-members lookup, where developer sign-in is set up: a private channel's name for a member admin (A11, Q7). */
+  channelMembers?: (request: ChannelMembersRequest) => Promise<ChannelMembersResponse>;
+  /** A12: the admin issuer's userinfo and the Slack email lookup; set only by the production bootstrap. */
+  me?: AdminMeDependencies;
   /** Task 12 replaces this field's type with AdminHealthProbes. */
   health?: unknown;
   now(): number;
@@ -151,38 +156,89 @@ async function listProjects(deps: AdminReadDependencies, identity: Authenticated
 /** Slack caps a channel name at 80 characters; the cap leaves room for a redaction marker. */
 const CHANNEL_NAME_MAX = 200;
 
-/** A11: names for public channels, privacy for all; `available` is false when no name could be read. */
-export async function channelLabels(deps: AdminReadDependencies, channelIds: readonly string[]): Promise<{ labels: Map<string, { name?: string; private: boolean }>; available: boolean }> {
+/**
+ * A11: names for public channels, privacy for all; `available` is false when no name could be read.
+ * A private channel's name is kept only for the IDs `reveal` answers (Q7 as answered: the admin's
+ * linked Slack user is a member); without `reveal`, or when it fails, a private channel is ID only.
+ */
+export async function channelLabels(deps: AdminReadDependencies, channelIds: readonly string[], options: { reveal?: (privateIds: string[]) => Promise<ReadonlySet<string>> } = {}): Promise<{ labels: Map<string, { name?: string; private: boolean }>; available: boolean }> {
   const labels = new Map<string, { name?: string; private: boolean }>();
   const unique = [...new Set(channelIds)].sort();
   if (deps.channelInfo === undefined) return { labels, available: unique.length === 0 };
+  // Slack's answers first, then names: a private channel's name is only ever held in this call.
+  const found = new Map<string, { name: string; isPrivate: boolean }>();
+  let available = true;
   try {
     for (let start = 0; start < unique.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
       const answer = await deps.channelInfo({ kind: "channel-info", channelIds: unique.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) });
-      if (!answer.ok) return { labels, available: false };
+      if (!answer.ok) {
+        available = false;
+        break;
+      }
       // A channel Slack does not return (deleted, or out of the bot's sight) gets no label, so it is
       // listed by ID without name or privacy; the lookup itself worked, so `available` stays true.
-      for (const channel of answer.channels) {
-        // Until Task 11 adds the member check (Q7 as answered), a private channel stays ID only.
-        // A16: a name is text from Slack, so it is redacted and capped before any answer carries it.
-        labels.set(channel.channelId, channel.isPrivate ? { private: true } : { name: redactAndCap(channel.name, CHANNEL_NAME_MAX).text, private: false });
-      }
+      for (const channel of answer.channels) found.set(channel.channelId, { name: channel.name, isPrivate: channel.isPrivate });
     }
   } catch (error) {
     deps.log({ event: "admin.channel_info_failed", error: error instanceof Error ? error.name : "unknown" });
-    return { labels, available: false };
+    available = false;
   }
-  return { labels, available: true };
+  const privateIds = [...found].filter(([, channel]) => channel.isPrivate).map(([channelId]) => channelId);
+  // Q7 as answered: a private channel's name only for an admin who is a member; any failure keeps the ID only.
+  const revealed: ReadonlySet<string> = privateIds.length === 0 || options.reveal === undefined
+    ? new Set<string>()
+    : await options.reveal(privateIds).catch((error: unknown) => {
+      deps.log({ event: "admin.channel_members_failed", error: error instanceof Error ? error.name : "unknown" });
+      return new Set<string>();
+    });
+  for (const [channelId, channel] of found) {
+    // A16: a name is text from Slack, so it is redacted and capped before any answer carries it.
+    const name = redactAndCap(channel.name, CHANNEL_NAME_MAX).text;
+    labels.set(channelId, !channel.isPrivate ? { name, private: false } : revealed.has(channelId) ? { name, private: true } : { private: true });
+  }
+  return { labels, available };
 }
 
-async function listBindings(deps: AdminReadDependencies, url: URL): Promise<AdminBindingsResponse> {
+/** One identity reader per `me` dependencies object, so its caches live as long as the handler. */
+const readers = new WeakMap<AdminMeDependencies, ReturnType<typeof adminIdentityReader>>();
+export function adminReader(deps: AdminReadDependencies): ReturnType<typeof adminIdentityReader> | undefined {
+  if (deps.me === undefined) return undefined;
+  let reader = readers.get(deps.me);
+  if (reader === undefined) {
+    reader = adminIdentityReader({ ...deps.me, now: () => deps.now(), log: (entry) => deps.log(entry) });
+    readers.set(deps.me, reader);
+  }
+  return reader;
+}
+
+/** A11 (Q7): which of the private channels the admin's linked Slack user (A12) is a member of. */
+function memberReveal(deps: AdminReadDependencies, identity: AuthenticatedIdentity, authorization: string | undefined): ((privateIds: string[]) => Promise<ReadonlySet<string>>) | undefined {
+  const reader = adminReader(deps);
+  const members = deps.channelMembers;
+  if (reader === undefined || members === undefined) return undefined;
+  // Asked only when a private channel is bound, so a list of public channels needs no userinfo call.
+  return async (privateIds) => {
+    const slackUserId = (await reader.me(identity, authorization)).slack.userId;
+    if (slackUserId === undefined) return new Set();
+    const memberOf = new Set<string>();
+    for (let start = 0; start < privateIds.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
+      const answer = await members({ kind: "channel-members", slackUserId, channelIds: privateIds.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) });
+      if (!answer.ok) return new Set();
+      for (const channelId of answer.memberOf) memberOf.add(channelId);
+    }
+    return memberOf;
+  };
+}
+
+async function listBindings(deps: AdminReadDependencies, identity: AuthenticatedIdentity, url: URL, authorization: string | undefined): Promise<AdminBindingsResponse> {
   const asked = url.searchParams.get("team");
   const team = asked === null ? deps.slackTeamId : SlackTeamIdSchema.safeParse(asked).success ? asked : null;
   if (team === null) throw agentXError("CONFIG_INVALID", "team must be a Slack team ID, such as T0123456789");
   if (team === undefined) throw agentXError("CONFIG_INVALID", "this environment records no Slack team; send team=<team ID>, such as team=T0123456789");
   const items = await queryAllItems(deps, `SLACK_BINDING#${team}`, "CHANNEL#");
   const rows = items.filter((item) => typeof item.channelId === "string" && typeof item.projectName === "string");
-  const { labels, available } = await channelLabels(deps, rows.map((item) => String(item.channelId)));
+  const reveal = memberReveal(deps, identity, authorization);
+  const { labels, available } = await channelLabels(deps, rows.map((item) => String(item.channelId)), reveal === undefined ? {} : { reveal });
   return {
     bindings: rows
       .map((item) => {
@@ -521,8 +577,15 @@ type AdminRead = (deps: AdminReadDependencies, identity: AuthenticatedIdentity, 
 /** Each later task adds its route here. */
 const ADMIN_READS: Record<string, AdminRead> = {
   "/v1/admin/projects": (deps, identity) => listProjects(deps, identity),
-  "/v1/admin/slack/bindings": (deps, _identity, url) => listBindings(deps, url),
+  "/v1/admin/slack/bindings": (deps, identity, url, request) => listBindings(deps, identity, url, request.headers.authorization),
   "/v1/admin/failures": (deps, _identity, url) => listFailures(deps, url),
   "/v1/admin/usage": (deps, _identity, url) => usageSummary(deps, url),
   "/v1/admin/workspaces": (deps, identity, url) => listWorkspaces(deps, identity, url),
+  "/v1/admin/me": async (deps, identity, _url, request) => {
+    const reader = adminReader(deps);
+    // Without the reader (a test that sets none), only the token's own claims speak.
+    return reader === undefined
+      ? { issuer: identity.issuer, subject: identity.subject, slack: { linked: false, reason: "no_email" } }
+      : reader.me(identity, request.headers.authorization);
+  },
 };

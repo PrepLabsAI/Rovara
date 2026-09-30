@@ -3,7 +3,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 import { bindChannel } from "../support/developer-task-broker.js";
-import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
+import { SLACK_CHANNEL, SLACK_TEAM, issuer } from "../support/slack-broker.js";
 
 describe("GET /v1/admin/slack/bindings (FR-038, FR-030)", () => {
   it("lists the environment team's bindings with public names, and a private channel by ID only", async () => {
@@ -66,5 +66,43 @@ describe("GET /v1/admin/slack/bindings (FR-038, FR-030)", () => {
   it("refuses a non-admin", async () => {
     const { admin } = await createAdminReadBroker();
     expect((await admin("GET", "/v1/admin/slack/bindings", { admin: false })).body.error).toMatchObject({ code: "FORBIDDEN" });
+  });
+});
+
+describe("private channel names for a member admin (A11, Q7 as answered)", () => {
+  const userinfo: typeof globalThis.fetch = async (input) => ((typeof input === "string" ? input : input instanceof URL ? input.href : input.url).endsWith("/.well-known/openid-configuration")
+    ? Response.json({ issuer, userinfo_endpoint: "https://identity.example.test/userinfo" })
+    : Response.json({ sub: "admin-subject", email: "ada@example.com", email_verified: true }));
+  const channelInfo = async (request: { channelIds: string[] }) => ({ ok: true as const, channels: request.channelIds.map((channelId) => (channelId === "C0PRIVATE01" ? { channelId, name: "secret-launch", isPrivate: true } : { channelId, name: "payments-dev", isPrivate: false })) });
+  async function broker(options: { linked: boolean; member: boolean; membersFail?: boolean; membersThrow?: boolean; name?: string }) {
+    const harness = await createAdminReadBroker({
+      channelInfo: options.name === undefined ? channelInfo : async (request) => ({ ok: true as const, channels: (await channelInfo(request)).channels.map((channel) => (channel.isPrivate ? { ...channel, name: options.name } : channel)) }),
+      channelMembers: async (request) => (options.membersThrow ? Promise.reject(Object.assign(new Error("members down"), { name: "TimeoutError" })) : options.membersFail ? { ok: false, error: "slack_unavailable" } : { ok: true, memberOf: options.member && request.slackUserId === "U0ADA00001" ? request.channelIds.filter((id) => id === "C0PRIVATE01") : [] }),
+      brokerExtra: { adminReads: { me: { issuer, fetch: userinfo, slackUserByEmail: async () => (options.linked ? { ok: true, userId: "U0ADA00001" } : { ok: true }) } } },
+    });
+    await bindChannel(harness.handler, "C0PRIVATE01");
+    return harness;
+  }
+  const privateRow = async (options: { linked: boolean; member: boolean; membersFail?: boolean; membersThrow?: boolean; name?: string }) =>
+    ((await (await broker(options)).admin("GET", "/v1/admin/slack/bindings")).body.bindings as Array<Record<string, unknown>>).find((row) => row.channelId === "C0PRIVATE01");
+
+  it("shows a private channel's name when the admin's linked Slack user is a member of it", async () => {
+    expect(await privateRow({ linked: true, member: true })).toMatchObject({ channelName: "secret-launch", private: true });
+  });
+
+  it("lists it by ID only when the admin is not a member, has no Slack link, or the check fails", async () => {
+    for (const options of [{ linked: true, member: false }, { linked: false, member: true }, { linked: true, member: true, membersFail: true }, { linked: true, member: true, membersThrow: true }]) {
+      const row = await privateRow(options);
+      expect(row, JSON.stringify(options)).toMatchObject({ private: true });
+      expect(row, JSON.stringify(options)).not.toHaveProperty("channelName");
+    }
+  });
+
+  it("redacts a revealed private channel's name the same way as a public one (A16)", async () => {
+    const planted = `xoxb-${"1".repeat(12)}-${"2".repeat(13)}-${"a".repeat(24)}`;
+    const row = await privateRow({ linked: true, member: true, name: planted });
+    expect(row).toMatchObject({ private: true });
+    expect(row?.channelName).toContain("[REDACTED]");
+    expect(JSON.stringify(row)).not.toContain(planted);
   });
 });
