@@ -16,7 +16,7 @@ import { installationToken } from "../setup/project-files.js";
 import { waitForThreadedReply } from "../setup/reply-watch.js";
 import { BUDGET_TAG_NOTE, checkAlertWebhook } from "./answers.js";
 import type { InitContext } from "./context.js";
-import { CONNECTOR_TYPES, type ConnectorType, type InstallProgress } from "./install-state.js";
+import { CONNECTOR_LABELS, CONNECTOR_TYPES, type ConnectorType, type InstallProgress } from "./install-state.js";
 import { readSlackBotToken } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
 
@@ -114,7 +114,9 @@ export function firstProjectStep(): InitStep<InitContext> {
   };
 }
 
-export const CONNECTOR_LABELS = { linear: "Linear", jira: "Jira", asana: "Asana" } as const;
+// CONNECTOR_LABELS lives in install-state.ts so the page cards can read it without importing this
+// module; re-exported so existing imports keep working.
+export { CONNECTOR_LABELS };
 
 const isConnectorType = (value: string): value is ConnectorType => (CONNECTOR_TYPES as readonly string[]).includes(value);
 

@@ -3,6 +3,7 @@
 // screens). Every card is built here, from facts a step already has, so the page's words are
 // tested in one place and the page only lays text out. No builder takes a secret, so no card can
 // carry one (FR-012).
+import { CONNECTOR_LABELS, type InstallProgress } from "../install-state.js";
 import { DEDICATED_ACCOUNT_NOTE, type PrerequisiteCheck } from "../prerequisites.js";
 import type { WizardCard } from "./protocol.js";
 
@@ -16,10 +17,10 @@ export function linkLabel(url: string): string {
 }
 
 /** A step's error as a card shows it where the page offers to try again in place: without the
- * terminal's closing "run agentx init again", which would send the operator the wrong way. The
- * terminal's error text is unchanged. */
+ * terminal's closing "run agentx init again" (or "run agentx --env <env> init again"), which would
+ * send the operator the wrong way. The terminal's error text is unchanged. */
 export function onPageProblem(problem: string): string {
-  return problem.replace(/[;,] (?:then )?run agentx init again\.?$/, "");
+  return problem.replace(/[;,] (?:then )?run agentx (?:--env \S+ )?init again\.?$/, "");
 }
 
 export function awsCard(input: { account: string; arn: string; region: string; profile?: string }): WizardCard {
@@ -159,4 +160,132 @@ export function slackUrlsCard(input: SlackUrlsCardInput): WizardCard {
     };
     case "done": return { ...base, status: "ok", lines: [`Slack has verified ${input.eventsUrl}.`] };
   }
+}
+
+/** A link that opens a Slack channel in the Slack app or the browser. */
+export function slackChannelLink(teamId: string, channelId: string): string {
+  return `https://slack.com/app_redirect?team=${encodeURIComponent(teamId)}&channel=${encodeURIComponent(channelId)}`;
+}
+
+export type AdminCardInput =
+  | { stage: "signing-in"; who: string; createdEmail?: string }
+  | { stage: "failed"; problem: string }
+  | { stage: "done"; username: string };
+
+/** FR-050: the admin user and the operator's sign-in. The sign-in page's address comes from the
+ * run itself (the page's Next button), not from this card. */
+export function adminCard(input: AdminCardInput): WizardCard {
+  const base = { id: "admin" as const, title: "Admin user" };
+  switch (input.stage) {
+    case "signing-in": return {
+      ...base, status: "waiting",
+      lines: [
+        ...(input.createdEmail === undefined ? [] : [`Created your admin user ${input.createdEmail}. Cognito emailed a temporary password to ${input.createdEmail}; you choose your own password when you first sign in.`]),
+        `Sign in to AgentX as ${input.who} in the tab the button opens. This page moves on by itself once you have.`,
+      ],
+    };
+    case "failed": return { ...base, status: "failed", lines: [input.problem, "Answer Yes below to sign in again."] };
+    case "done": return { ...base, status: "ok", lines: [`Signed in to AgentX as ${input.username}.`] };
+  }
+}
+
+export function projectCard(input: { name: string; revision: number; repository?: string }): WizardCard {
+  return {
+    id: "project", title: "First project", status: "ok",
+    lines: [`Project ${input.name}, revision ${input.revision}${input.repository === undefined ? "" : `, for ${input.repository}`}, runs on EC2 workers.`],
+  };
+}
+
+export type ChannelCardInput =
+  | { stage: "waiting"; channelName: string; botUserId: string }
+  | { stage: "done"; channelName: string; projectName: string };
+
+export function channelCard(input: ChannelCardInput): WizardCard {
+  const base = { id: "channel" as const, title: "Slack channel" };
+  if (input.stage === "done") return { ...base, status: "ok", lines: [`#${input.channelName} is bound to project ${input.projectName}.`] };
+  return {
+    ...base, status: "waiting",
+    lines: [
+      `The bot cannot see #${input.channelName} yet.`,
+      `If #${input.channelName} is private, type /invite <@${input.botUserId}> in it; if it does not exist, create it. This page moves on by itself (up to 10 minutes).`,
+    ],
+  };
+}
+
+export function connectorsCard(input: { projectName: string; connected: ReadonlyArray<{ label: string; warning?: string }> }): WizardCard {
+  const lines = input.connected.length === 0
+    ? [`No connectors on ${input.projectName} yet. You can add Linear, Jira or Asana later.`]
+    : [
+      `Connected to ${input.projectName}: ${input.connected.map((entry) => entry.label).join(", ")}.`,
+      ...input.connected.flatMap((entry) => (entry.warning === undefined ? [] : [`Warning (${entry.label}): ${entry.warning}.`])),
+    ];
+  return { id: "connectors", title: "Connectors", status: "ok", lines };
+}
+
+export type AlertsCardInput =
+  | { stage: "confirm"; shownAs: string }
+  /** The run is polling for the confirmation itself, so the page needs no answer. */
+  | { stage: "waiting"; shownAs: string }
+  | { stage: "done"; shownAs: string }
+  | { stage: "none" };
+
+/** `shownAs` is an email address, or a webhook's display form (https://host/...), never its secret. */
+export function alertsCard(input: AlertsCardInput): WizardCard {
+  const base = { id: "alerts" as const, title: "Alerts" };
+  const confirm = (shownAs: string): string =>
+    `Confirm the alert subscription for ${shownAs}: open the email from AWS Notifications and choose Confirm subscription (a webhook confirms by opening the SubscribeURL that SNS sent it).`;
+  switch (input.stage) {
+    case "confirm": return { ...base, status: "waiting", lines: [confirm(input.shownAs), "Then answer Yes below to check again."] };
+    case "waiting": return { ...base, status: "waiting", lines: [confirm(input.shownAs), "This page moves on by itself once it is confirmed (up to 10 minutes)."] };
+    case "done": return { ...base, status: "ok", lines: [`Alerts go to ${input.shownAs}, and the test alarm arrived.`] };
+    case "none": return { ...base, status: "info", lines: ["No alert address yet. Set one later with agentx config set alerts.address."] };
+  }
+}
+
+export type ReplyCardInput =
+  | { stage: "waiting"; channelName: string; channelId: string; teamId: string; botUserId: string; minutes: number }
+  | { stage: "failed"; channelName: string; channelId: string; teamId: string; problem: string }
+  | { stage: "done"; channelName: string; seconds: number };
+
+/** FR-051: the test reply, with 15e's note on picking the right bot from Slack's mention list. */
+export function replyCard(input: ReplyCardInput): WizardCard {
+  const base = { id: "reply" as const, title: "Test reply" };
+  if (input.stage === "done") return { ...base, status: "ok", lines: [`AgentX replied in #${input.channelName} in ${input.seconds} seconds.`] };
+  const link = { url: slackChannelLink(input.teamId, input.channelId), label: `Open #${input.channelName} in Slack` };
+  if (input.stage === "failed") return { ...base, status: "failed", lines: [onPageProblem(input.problem), "Fix it, then answer Yes below to watch for a reply again."], link };
+  return {
+    ...base, status: "waiting",
+    lines: [
+      `In #${input.channelName}, post a message that mentions the bot, for example "@<the bot> what can you do?".`,
+      `Type @ and pick the bot from Slack's mention list: a workspace that had an older AgentX app shows two bots with similar names, and this one's member ID is ${input.botUserId}.`,
+      `Waiting up to ${input.minutes} minutes for AgentX to reply in its thread. This page moves on by itself.`,
+    ],
+    link,
+  };
+}
+
+/** FR-052 and Q10: what works now, then the optional commands under "Later, if you want more:".
+ * The same facts as readyText, which the terminal and the page's outcome still show. */
+export function readyCard(input: { env: string; controlPlaneUrl: string; progress: InstallProgress }): WizardCard {
+  const { env, progress } = input;
+  const cli = `agentx --env ${env}`;
+  const { project, slack } = progress;
+  const connectors = progress.connectors ?? [];
+  const teamId = project?.teamId ?? slack?.teamId;
+  return {
+    id: "ready", title: "AgentX is ready", status: "ok",
+    lines: [
+      `AgentX environment ${env} is ready.`,
+      ...(project?.channelName === undefined || slack === undefined ? [] : [`Talk to it: mention the bot (member ID ${slack.botUserId}) in #${project.channelName}, project ${project.name}, revision ${project.revision}.`]),
+      `Developers sign in from their AI tools with: npx @charterarc/agentx login ${input.controlPlaneUrl}`,
+      connectors.length === 0 ? "No connectors yet." : `Connected: ${connectors.map((entry) => CONNECTOR_LABELS[entry.type]).join(", ")}.`,
+      ...connectors.flatMap((entry) => (entry.warning === undefined ? [] : [`Warning (${CONNECTOR_LABELS[entry.type]}): ${entry.warning}.`])),
+      "Later, if you want more:",
+      ...(project === undefined ? [] : [`More connectors: ${cli} connector add linear|jira|asana --project ${project.name}`]),
+      `More projects: ${cli} project add, then ${cli} channel add`,
+      `A test alarm any time: ${cli} alerts test`,
+    ],
+    ...(project?.channelId === undefined || project.channelName === undefined || teamId === undefined
+      ? {} : { link: { url: slackChannelLink(teamId, project.channelId), label: `Open #${project.channelName} in Slack` } }),
+  };
 }
