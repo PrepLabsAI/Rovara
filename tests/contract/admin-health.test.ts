@@ -86,6 +86,7 @@ describe("GET /v1/admin/health, each check's other answers", () => {
     expect((await health({ queueDepths: async () => [{ name: "dispatch", depth: 3 }, { name: "slack-requests", depth: 1 }] })).deadLetterQueuesCheck).toEqual({ status: "warn", detail: "2 queues hold messages" });
     expect((await health({ queueDepths: async () => [{ name: "dispatch", depth: 0 }, { name: "slack-requests", depth: null }] })).deadLetterQueuesCheck).toEqual({ status: "unknown", detail: "1 of 2 queues could not be read" });
     expect((await health({ queueDepths: async () => [{ name: "dispatch", depth: 4 }, { name: "slack-requests", depth: null }] })).deadLetterQueuesCheck).toEqual({ status: "warn", detail: "1 queue holds messages; 1 could not be read" });
+    expect((await health({ queueDepths: async () => [] })).deadLetterQueuesCheck).toEqual({ status: "unknown", detail: "no dead-letter queues were listed" });
     const failing = await health({ queueDepths: async () => { throw Object.assign(new Error("denied"), { name: "AccessDenied" }); } });
     expect(failing).toMatchObject({ deadLetterQueues: [], deadLetterQueuesCheck: { status: "unknown", detail: "could not read the dead-letter queues (AccessDenied)" } });
     const slow = await health({ queueDepths: () => new Promise<never>(() => undefined), timeoutMs: 20 });

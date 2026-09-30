@@ -40,10 +40,12 @@ const failed = (what: string, ms: number, error: unknown): AdminHealthCheck => (
 
 const queueCount = (count: number) => `${count} queue${count === 1 ? "" : "s"}`;
 /**
- * R18: messages waiting in any queue warn (naming how many could not be read as well); otherwise
+ * R18: no queue listed is unknown; messages waiting in any queue warn (naming how many could not be read as well); otherwise
  * a queue whose depth could not be read makes the check unknown; otherwise all are empty.
  */
 function queuesCheck(depths: ReadonlyArray<{ depth: number | null }>): AdminHealthCheck {
+  // A wired probe that lists no queue says nothing about them.
+  if (depths.length === 0) return { status: "unknown", detail: "no dead-letter queues were listed" };
   const holding = depths.filter((queue) => queue.depth !== null && queue.depth > 0).length;
   const unread = depths.filter((queue) => queue.depth === null).length;
   if (holding > 0) return { status: "warn", detail: `${queueCount(holding)} ${holding === 1 ? "holds" : "hold"} messages${unread === 0 ? "" : `; ${unread} could not be read`}` };
