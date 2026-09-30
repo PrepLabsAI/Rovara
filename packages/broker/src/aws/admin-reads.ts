@@ -2,13 +2,22 @@
 // list routes do (A2), and reads by key or by index: no route scans the table, and no route writes.
 import { GetCommand, QueryCommand } from "@aws-sdk/lib-dynamodb";
 import {
+  ADMIN_FAILURES_DEFAULT_HOURS,
+  ADMIN_FAILURES_DEFAULT_LIMIT,
+  ADMIN_INDEX_RETENTION_DAYS,
+  ADMIN_LIST_MAX,
+  AgentXNameSchema,
   CHANNEL_MEMBERS_MAX_CHANNELS,
+  FailureIndexRecordSchema,
+  INDEX_EXPIRY_ATTRIBUTE,
   PROJECT_CATALOG_PK,
   SlackTeamIdSchema,
   agentXError,
   developerTaskPolicy,
   type AdminBindingsResponse,
+  type AdminFailuresResponse,
   type AdminProjectsResponse,
+  type FailureIndexRecord,
   type ChannelInfoRequest,
   type ChannelInfoResponse,
   type ProjectDefinition,
@@ -166,6 +175,94 @@ async function listBindings(deps: AdminReadDependencies, url: URL): Promise<Admi
   };
 }
 
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
+const STORAGE_KEYS = new Set(["pk", "sk", "entityType", INDEX_EXPIRY_ATTRIBUTE]);
+/** A6: DynamoDB's TTL deletes up to 48 hours late; an item past its expiry is never shown. */
+const expired = (deps: AdminReadDependencies, item: Record<string, unknown>) => typeof item[INDEX_EXPIRY_ATTRIBUTE] === "number" && item[INDEX_EXPIRY_ATTRIBUTE] <= Math.floor(deps.now() / 1000);
+const withoutKeys = (item: Record<string, unknown>) => Object.fromEntries(Object.entries(item).filter(([key]) => !STORAGE_KEYS.has(key)));
+
+function timeParam(url: URL, name: string, fallback: number): number {
+  const value = url.searchParams.get(name);
+  if (value === null) return fallback;
+  if (!ISO_TIME.test(value) || Number.isNaN(Date.parse(value))) throw agentXError("CONFIG_INVALID", `${name} must be an ISO 8601 time such as 2026-09-30T00:00:00.000Z`);
+  return Date.parse(value);
+}
+
+/** A window within the index's 30 days: `since` defaults to `defaultHours` before `until`. */
+export function timeWindow(url: URL, now: number, defaultHours: number): { since: string; until: string } {
+  const until = timeParam(url, "until", now);
+  const since = timeParam(url, "since", until - defaultHours * HOUR_MS);
+  if (since > until) throw agentXError("CONFIG_INVALID", "since must be before until");
+  // A7: the window itself spans at most 30 days, so a far-future `until` never walks thousands of day partitions.
+  if (until - since > ADMIN_INDEX_RETENTION_DAYS * DAY_MS) throw agentXError("CONFIG_INVALID", "a window spans at most 30 days; move since or until closer together");
+  if (since < now - ADMIN_INDEX_RETENTION_DAYS * DAY_MS) throw agentXError("CONFIG_INVALID", "AgentX keeps these records 30 days; ask for at most the last 30 days");
+  return { since: new Date(since).toISOString(), until: new Date(until).toISOString() };
+}
+
+export function listLimit(url: URL, fallback: number): number {
+  const value = url.searchParams.get("limit");
+  if (value === null) return fallback;
+  if (!/^\d{1,3}$/.test(value) || Number(value) < 1 || Number(value) > ADMIN_LIST_MAX) throw agentXError("CONFIG_INVALID", "limit must be a whole number from 1 to 100");
+  return Number(value);
+}
+
+function projectParam(url: URL): string | undefined {
+  const value = url.searchParams.get("project");
+  if (value === null) return undefined;
+  // Never echoed: a name that is not a project name could be long or carry markup.
+  if (!AgentXNameSchema.safeParse(value).success) throw agentXError("CONFIG_INVALID", "project must be an AgentX project name");
+  return value;
+}
+
+/** A7: day partition by day, newest first, until `limit`; an unreadable item is counted, not shown. */
+export async function readFailures(deps: AdminReadDependencies, window: { since: string; until: string }, options: { limit: number; project?: string; category?: string }): Promise<{ failures: FailureIndexRecord[]; skipped: number }> {
+  const failures: FailureIndexRecord[] = [];
+  let skipped = 0;
+  for (let day = Date.parse(window.until.slice(0, 10)); day >= Date.parse(window.since.slice(0, 10)) && failures.length < options.limit; day -= DAY_MS) {
+    const pk = `FAILURE#${new Date(day).toISOString().slice(0, 10)}`;
+    let start: Record<string, unknown> | undefined;
+    do {
+      const filters = [...(options.project === undefined ? [] : ["#project = :project"]), ...(options.category === undefined ? [] : ["category = :category"])];
+      const page = await deps.documentClient.send(new QueryCommand({
+        TableName: deps.tableName,
+        KeyConditionExpression: "pk = :pk AND sk BETWEEN :low AND :high",
+        ExpressionAttributeValues: {
+          ":pk": pk, ":low": window.since, ":high": `${window.until}￿`,
+          ...(options.project === undefined ? {} : { ":project": options.project }),
+          ...(options.category === undefined ? {} : { ":category": options.category }),
+        },
+        ...(options.project === undefined ? {} : { ExpressionAttributeNames: { "#project": "project" } }),
+        ...(filters.length === 0 ? {} : { FilterExpression: filters.join(" AND ") }),
+        ScanIndexForward: false,
+        Limit: ADMIN_LIST_MAX,
+        ConsistentRead: true,
+        ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+      })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+      for (const item of page.Items ?? []) {
+        if (expired(deps, item)) continue;
+        const parsed = FailureIndexRecordSchema.safeParse(withoutKeys(item));
+        if (!parsed.success) {
+          skipped += 1;
+          continue;
+        }
+        if (failures.length < options.limit) failures.push(parsed.data);
+      }
+      start = page.LastEvaluatedKey;
+    } while (start !== undefined && failures.length < options.limit);
+  }
+  if (skipped > 0) deps.log({ event: "admin.failure_index_unreadable", count: skipped });
+  return { failures, skipped };
+}
+
+async function listFailures(deps: AdminReadDependencies, url: URL): Promise<AdminFailuresResponse> {
+  const window = timeWindow(url, deps.now(), ADMIN_FAILURES_DEFAULT_HOURS);
+  const project = projectParam(url);
+  const { failures, skipped } = await readFailures(deps, window, { limit: listLimit(url, ADMIN_FAILURES_DEFAULT_LIMIT), ...(project === undefined ? {} : { project }) });
+  return { failures, ...window, ...(skipped > 0 ? { skipped } : {}) };
+}
+
 /** The answer for an admin read route, or undefined when the request is not one. */
 export async function routeAdminRead(
   deps: AdminReadDependencies,
@@ -186,4 +283,5 @@ type AdminRead = (deps: AdminReadDependencies, identity: AuthenticatedIdentity, 
 const ADMIN_READS: Record<string, AdminRead> = {
   "/v1/admin/projects": (deps, identity) => listProjects(deps, identity),
   "/v1/admin/slack/bindings": (deps, _identity, url) => listBindings(deps, url),
+  "/v1/admin/failures": (deps, _identity, url) => listFailures(deps, url),
 };
