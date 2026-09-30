@@ -501,7 +501,9 @@ export async function processSlackRequest(
     const onOperationAccepted = async (operationId: string): Promise<void> => {
       // After the hand-off the redelivery owns the thread; a late acceptance must not move it.
       if (handedOff || saveActiveTurn === undefined) return;
-      const active = { eventId: message.eventId, workspaceId: workspaceForTurn, operationId };
+      // An approval's own text is only "yes": the note names what was approved instead.
+      const approved = claimed ? confirmation?.session.approvals.map((approval) => approval.summary).join("; ") : undefined;
+      const active: ActiveTurn = { eventId: message.eventId, workspaceId: workspaceForTurn, operationId, ...(approved ? { request: `the member approved: ${approved}` } : {}) };
       const saving = (async () => {
         try {
           await saveActiveTurn(subject, active);
@@ -600,8 +602,10 @@ export async function processSlackRequest(
     if (recorder !== undefined) await rememberRefresh(dependencies, log, subject, message.eventId, state.refreshConnectors ?? [], recorder);
     // Only once the member has the reply: a failed post before this is redelivered and resumes.
     if (remembered !== undefined) await forgetActiveTurn();
-    // The model has read the note from a resumed turn; later turns have this one's session.
-    if (state.turnNote !== undefined) {
+    // The model has read the note from a resumed turn, and a turn that answered saved its session,
+    // so later turns have it there. A failed turn saved nothing, so the note stays for the next.
+    // Only the latest resume's note is kept: a second resume replaces it.
+    if (state.turnNote !== undefined && draft.disposition === "answered") {
       try {
         await dependencies.threads.saveTurnNote?.(subject, undefined);
       } catch (error) {

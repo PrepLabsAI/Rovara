@@ -13,7 +13,10 @@ export function createDynamoActiveTurnStore(documentClient: Pick<DynamoDBDocumen
         TableName: tableName,
         Key: key(subject),
         UpdateExpression: "SET activeTurn = :turn",
-        ExpressionAttributeValues: { ":turn": { eventId: turn.eventId, workspaceId: turn.workspaceId, operationId: turn.operationId } },
+        ExpressionAttributeValues: { ":turn": {
+          eventId: turn.eventId, workspaceId: turn.workspaceId, operationId: turn.operationId,
+          ...(turn.request === undefined ? {} : { request: turn.request }),
+        } },
       }), { abortSignal: AbortSignal.timeout(WRITE_TIMEOUT_MS) });
     },
     async saveTurnNote(subject: string, note: TurnNote | undefined): Promise<void> {

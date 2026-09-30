@@ -23,6 +23,13 @@ describe("the active turn on the thread META row", () => {
     expect(activeTurnFromItem(item?.activeTurn)).toEqual(active);
   });
 
+  it("keeps an approval's request with the turn, and reads it back", async () => {
+    const { db, store } = seeded();
+    await store.saveActiveTurn(subject, { ...active, request: "the member approved: close TRK-9" });
+    expect(activeTurnFromItem(db.get(`THREAD#${subject}`, "META")?.activeTurn)).toEqual({ ...active, request: "the member approved: close TRK-9" });
+    expect(activeTurnFromItem({ ...active, request: 7 })).toEqual(active);
+  });
+
   it("clears the turn only for the event that saved it", async () => {
     const { db, store } = seeded();
     await store.saveActiveTurn(subject, active);
