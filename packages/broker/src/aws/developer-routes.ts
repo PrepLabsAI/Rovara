@@ -22,7 +22,11 @@ import {
   type DeveloperTaskPolicy,
   type DeveloperWorkspace,
   type DeveloperWorkspacesResponse,
+  type SlackAuthCheckRequest,
+  type SlackAuthCheckResponse,
   type SlackChannelBinding,
+  type SlackUserByEmailRequest,
+  type SlackUserByEmailResponse,
 } from "@agentx/contracts";
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
 import { META, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
@@ -40,6 +44,10 @@ export interface DeveloperApiConfiguration {
   channelInfo?: (request: ChannelInfoRequest) => Promise<ChannelInfoResponse>;
   /** How long one request waits for channel names in all; the rest stay unnamed. Default 5 seconds. */
   channelInfoDeadlineMs?: number;
+  /** Spec 025 A12: FR-012's email lookup, for an admin's Slack link. */
+  slackUserByEmail?: (request: SlackUserByEmailRequest) => Promise<SlackUserByEmailResponse>;
+  /** Spec 025 A13: the health route's Slack token check. */
+  slackAuthCheck?: () => Promise<SlackAuthCheckResponse>;
   /** Verifies the Authorization header's developer access token (D17; verify-token.ts) and returns its claims. */
   verifyAccessToken(authorization: string | undefined): Promise<Record<string, unknown>>;
 }
@@ -62,6 +70,8 @@ function logDeveloperEvent(entry: Record<string, string>): void {
 }
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "UnknownError");
 const SLACK_UNAVAILABLE = { ok: false, error: "slack_unavailable" } as const;
+/** A Slack or DeveloperIdentity error code: the only error text that may reach a log or an answer (R9). */
+const SLACK_ERROR_CODE = /^[a-z_]{1,64}$/;
 type IdentityRefusal = typeof SLACK_UNAVAILABLE | { ok: false; error: "invalid_request" };
 
 /**
@@ -73,7 +83,7 @@ type IdentityRefusal = typeof SLACK_UNAVAILABLE | { ok: false; error: "invalid_r
  */
 async function identityInvoke<T>(
   invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>,
-  request: ChannelMembersRequest | ChannelInfoRequest,
+  request: ChannelMembersRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest,
   readReply: (reply: Record<string, unknown>) => T | undefined,
   event: string,
 ): Promise<T | IdentityRefusal> {
@@ -102,7 +112,8 @@ async function identityInvoke<T>(
     logDeveloperEvent({ event: `${event}_invalid_request`, reason: "the identity function refused the broker's request; this is a broker bug" });
     return { ok: false, error: "invalid_request" };
   }
-  return failed({ reason: "reply_error", error: reply.ok === false && reply.error === "slack_unavailable" ? "slack_unavailable" : "malformed_reply" });
+  // Only a code-shaped reply error (such as token_revoked) is logged; never free text.
+  return failed({ reason: "reply_error", error: reply.ok === false && typeof reply.error === "string" && SLACK_ERROR_CODE.test(reply.error) ? reply.error : "malformed_reply" });
 }
 
 /** The broker's channel-members check (FR-013) through the DeveloperIdentity function. */
@@ -123,6 +134,27 @@ export function channelInfoThroughLambda(invoke: (payload: Uint8Array) => Promis
   return (request) => identityInvoke(invoke, request, (reply) => (reply.ok === true && Array.isArray(reply.channels)
     ? { ok: true as const, channels: reply.channels.filter(isChannelEntry).map(({ channelId, name, isPrivate }) => ({ channelId, name, isPrivate })) }
     : undefined), "developer.channel_info");
+}
+
+/** A12: who owns a verified email, through DeveloperIdentity; fails closed as slack_unavailable. */
+export function slackUserByEmailThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): (request: SlackUserByEmailRequest) => Promise<SlackUserByEmailResponse> {
+  return (request) => identityInvoke(invoke, request, (reply) => (reply.ok === true
+    ? (typeof reply.userId === "string" ? { ok: true as const, userId: reply.userId } : { ok: true as const })
+    : undefined), "developer.slack_user_by_email");
+}
+
+/** A13: the bot token's auth.test, through DeveloperIdentity. Slack's refusal code passes through. */
+export function slackAuthCheckThroughLambda(invoke: (payload: Uint8Array) => Promise<ChannelMembersInvokeResult>): () => Promise<SlackAuthCheckResponse> {
+  return async () => {
+    let refusal: string | undefined;
+    const answer = await identityInvoke(invoke, { kind: "slack-auth-check" }, (reply) => {
+      if (reply.ok === true && typeof reply.teamId === "string") return { ok: true as const, teamId: reply.teamId };
+      if (reply.ok === false && typeof reply.error === "string" && SLACK_ERROR_CODE.test(reply.error) && reply.error !== "invalid_request") refusal = reply.error;
+      return undefined;
+    }, "developer.slack_auth_check");
+    if (answer.ok) return answer;
+    return { ok: false, error: refusal ?? answer.error };
+  };
 }
 
 /** The broker's copy of each method's enabled-since cutoff (FR-045), from its environment. */

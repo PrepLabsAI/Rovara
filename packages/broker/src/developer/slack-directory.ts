@@ -1,6 +1,6 @@
 // Spec 025 FR-007, FR-012 and FR-013 with the bot token. Every failure to reach Slack is
 // "unavailable": the caller fails closed for access and keeps sessions for refreshes (R18).
-import { CHANNEL_MEMBERS_MAX_CHANNELS, type ChannelInfoResponse, type ChannelMembersResponse } from "@agentx/contracts";
+import { CHANNEL_MEMBERS_MAX_CHANNELS, type ChannelInfoResponse, type ChannelMembersResponse, type SlackAuthCheckResponse } from "@agentx/contracts";
 
 export type SlackUserStatus = "active" | "gone" | "unavailable";
 export interface SlackDirectory {
@@ -13,6 +13,8 @@ export interface SlackDirectory {
    * the per-request call budget or after Slack fails midway, which the caller lists by ID.
    */
   channelInfo(channelIds: readonly string[]): Promise<ChannelInfoResponse>;
+  /** A13: whether the bot token works, with the team Slack says it belongs to. Never the token. */
+  authTest(): Promise<SlackAuthCheckResponse>;
 }
 
 /**
@@ -203,6 +205,18 @@ export function slackDirectory(input: {
       }
       if (failed && channels.length === 0) return { ok: false, error: "slack_unavailable" };
       return { ok: true, channels };
+    },
+    async authTest() {
+      const reply = await get("auth.test", {});
+      if (reply === undefined) return { ok: false, error: "slack_unavailable" };
+      if (reply.body.ok !== true || typeof reply.body.team_id !== "string") {
+        refused("auth.test", reply);
+        // Only an error that is already code-shaped passes: rejected, not stripped (R9).
+        const error = reply.body.error;
+        return { ok: false, error: typeof error === "string" && /^[a-z_]{1,64}$/.test(error) ? error : "no_error_code" };
+      }
+      // The team is reported, not checked against input.teamId, on purpose: the health route compares it.
+      return { ok: true, teamId: reply.body.team_id };
     },
   };
 }

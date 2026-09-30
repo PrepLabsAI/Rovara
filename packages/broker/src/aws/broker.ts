@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import {
@@ -9,10 +10,10 @@ import {
   QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
-  type QueryCommandOutput,
 } from "@aws-sdk/lib-dynamodb";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
+import { SQSClient } from "@aws-sdk/client-sqs";
 import {
   GetSecretValueCommand,
   SecretsManagerClient,
@@ -84,8 +85,12 @@ import {
   type ModelIdentifier,
   type ModelRef,
   type ProjectModelOptions,
+  projectCatalogKey,
+  type ChannelMembersRequest,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
+import { queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
+import { healthProbes } from "./health-probes.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
 import { CatalogCache } from "@agentx/gateway";
@@ -99,7 +104,7 @@ import { developerTokenVerifier } from "../developer/verify-token.js";
 import { completedTurn, developerFooter, inertName, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { hashJson, isConditional, isTemporaryAwsError } from "./broker-shared.js";
-import { channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, type DeveloperApiConfiguration } from "./developer-routes.js";
+import { channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, finishTaskClose } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
@@ -267,6 +272,8 @@ interface AwsBrokerDependencies {
   connectorTypes?: Record<string, ConnectorType>;
   /** Spec 025 C14: the Slack threads table, read for a shared thread's waiting messages; absent in legacy. */
   slackThreadsTableName?: string;
+  /** Spec 025 phase 25d: the admin read routes' injected probes and clock; the defaults serve production. */
+  adminReads?: Partial<Pick<AdminReadDependencies, "me" | "health" | "now" | "log">>;
 }
 
 /**
@@ -317,26 +324,27 @@ export function createDeveloperTaskActions(input: AwsBrokerInput): DeveloperTask
   return developerTaskActions(brokerDependencies(input));
 }
 
-function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTaskActions {
-  /** Every page of a partition's items under a prefix, or the first `limit` of them. */
-  const query = async (pk: string, prefix: string, options: { newestFirst?: boolean; limit?: number } = {}) => {
-    const items: NonNullable<QueryCommandOutput["Items"]> = [];
-    let startKey: Record<string, unknown> | undefined;
-    do {
-      const page = await dependencies.documentClient.send(new QueryCommand({
-        TableName: dependencies.tableName,
-        KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
-        ExpressionAttributeValues: { ":pk": pk, ":prefix": prefix },
-        ConsistentRead: true,
-        ...(options.newestFirst ? { ScanIndexForward: false } : {}),
-        ...(options.limit === undefined ? {} : { Limit: options.limit - items.length }),
-        ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }),
-      }));
-      items.push(...(page.Items ?? []));
-      startKey = page.LastEvaluatedKey;
-    } while (startKey !== undefined && (options.limit === undefined || items.length < options.limit));
-    return items;
+/** Spec 025 phase 25d: what the admin read routes need, from the broker's own dependencies. */
+function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDependencies {
+  const developer = dependencies.developer;
+  return {
+    documentClient: dependencies.documentClient,
+    tableName: dependencies.tableName,
+    ...(dependencies.turnRecordsTableName === undefined ? {} : { turnRecordsTableName: dependencies.turnRecordsTableName }),
+    ...(dependencies.turnRecordsTableName === undefined ? {} : { turns: dynamoTurnRecordSource(dependencies.documentClient, dependencies.turnRecordsTableName) }),
+    ...(developer?.slackTeamId === undefined ? {} : { slackTeamId: developer.slackTeamId }),
+    ...(developer?.channelInfo === undefined ? {} : { channelInfo: developer.channelInfo }),
+    ...(developer === undefined ? {} : { channelMembers: (request: ChannelMembersRequest) => developer.channelMembers(request) }),
+    limitDefaults: { member: dependencies.slack?.memberWorkspaceLimit ?? 3, organization: dependencies.slack?.organizationWorkspaceLimit ?? 20 },
+    now: Date.now,
+    log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
+    ...dependencies.adminReads,
   };
+}
+
+function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTaskActions {
+  /** Every page of a partition's items under a prefix (the admin reads' shared query loop). */
+  const query = (pk: string, prefix: string) => queryAllItems(dependencies, pk, prefix);
   return {
     tableName: dependencies.tableName,
     ...(dependencies.turnRecordsTableName ? { turnRecordsTableName: dependencies.turnRecordsTableName } : {}),
@@ -356,7 +364,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
     workspace: (id) => requireWorkspace(dependencies, id),
     operations: async (workspaceId) => (await query(`WORKSPACE#${workspaceId}`, "OPERATION#"))
       .filter((item) => item.entityType === "OPERATION")
-      .map((item) => publicOperation(item as OperationRecord)),
+      .map((item) => publicOperation(item as unknown as OperationRecord)),
     eventsNewestFirst: (operationId, limit) => operationEventsNewestFirst(dependencies, operationId, limit),
     artifacts: async (workspaceId, operationId) => (await query(`WORKSPACE#${workspaceId}`, "ARTIFACT#"))
       .filter((item) => item.operationId === operationId)
@@ -452,6 +460,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   }
   // Spec 025: the broker actions the developer task routes call, built once per handler.
   const tasks = developerTaskActions(dependencies);
+  const adminReads = adminReadDependencies(dependencies);
   return async (event: HttpApiV2Event | SlackStopTaskEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     if (isSlackStopTaskEvent(event)) {
       try {
@@ -533,6 +542,9 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         adminValues: dependencies.adminValues,
       });
       const body = parseBody(request.body);
+      // Spec 025 phase 25d: the admin read routes (FR-038), each behind the admin claim (A2).
+      const adminRead = await routeAdminRead(adminReads, identity, request, url);
+      if (adminRead !== undefined) return json(adminRead, request.requestId);
 
       if (request.method === "POST" && url.pathname === "/v1/admin/projects") {
         return json(await registerProject(dependencies, identity, body), request.requestId, 201);
@@ -856,6 +868,14 @@ async function registerProject(
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Put: { TableName: dependencies.tableName, Item: record, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: membership } },
+      // Spec 025 A3: the admin project list reads this row instead of scanning the table.
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: projectCatalogKey(definition.name),
+        UpdateExpression: "SET entityType = :entity, #name = :name, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+        ExpressionAttributeNames: { "#name": "name" },
+        ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":now": now },
+      } },
     ] }));
   } catch (error) {
     // A concurrent registration won; answer as a duplicate without contacting the vendor again.
@@ -3600,21 +3620,7 @@ const cancelledTargetStatus = (cancelStatus: OperationStatus): OperationStatus =
 
 /** At most `limit` of an operation's events, newest first, across pages. */
 async function operationEventsNewestFirst(dependencies: AwsBrokerDependencies, operationId: string, limit: number): Promise<StoredEvent[]> {
-  const items: NonNullable<QueryCommandOutput["Items"]> = [];
-  let startKey: Record<string, unknown> | undefined;
-  do {
-    const page = await dependencies.documentClient.send(new QueryCommand({
-      TableName: dependencies.tableName,
-      KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
-      ExpressionAttributeValues: { ":pk": `OPERATION#${operationId}`, ":prefix": "EVENT#" },
-      ConsistentRead: true,
-      ScanIndexForward: false,
-      Limit: limit - items.length,
-      ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }),
-    }));
-    items.push(...(page.Items ?? []));
-    startKey = page.LastEvaluatedKey;
-  } while (startKey !== undefined && items.length < limit);
+  const items = await queryAllItems(dependencies, `OPERATION#${operationId}`, "EVENT#", { limit, newestFirst: true });
   return items.filter((item) => item.entityType === "EVENT").map((item) => parseStoredEvent(item));
 }
 
@@ -4581,6 +4587,8 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
     signInTableName: requiredEnvironment("DEVELOPER_SIGNIN_TABLE_NAME"),
     channelMembers: channelMembersThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     channelInfo: channelInfoThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    slackUserByEmail: slackUserByEmailThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    slackAuthCheck: slackAuthCheckThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // D17: kept for the Lambda's lifetime; an unknown kid refetches at most once a minute.
     verifyAccessToken: developerTokenVerifier({
       issuer,
@@ -4590,6 +4598,10 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
   };
 }
 const developer = developerConfiguration();
+
+// Spec 025 A13: the health route's probes (health-probes.ts); clients are called only per request.
+const cloudWatch = new CloudWatchClient(awsClientConfiguration);
+const sqs = new SQSClient(awsClientConfiguration);
 
 export const handler = createAwsBrokerHandler({
   documentClient,
@@ -4611,6 +4623,20 @@ export const handler = createAwsBrokerHandler({
   },
   codeBuild,
   ...(developer ? { developer } : {}),
+  // Spec 025 A12: set only here, so a test harness without its own `me` never reaches the network.
+  adminReads: {
+    me: { issuer: requiredEnvironment("OIDC_ISSUER"), fetch, ...(developer?.slackUserByEmail === undefined ? {} : { slackUserByEmail: developer.slackUserByEmail }) },
+    health: healthProbes({
+      cloudWatch,
+      sqs,
+      release: process.env.AGENTX_RELEASE_VERSION,
+      alarmPrefix: process.env.AGENTX_ALARM_PREFIX,
+      deadLetterQueues: process.env.HEALTH_DEAD_LETTER_QUEUES,
+      slackAuthCheck: developer?.slackAuthCheck,
+      github: githubCredentials,
+      log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
+    }),
+  },
   ...(process.env.TURN_RECORDS_TABLE_NAME ? { turnRecordsTableName: process.env.TURN_RECORDS_TABLE_NAME } : {}),
   ...(process.env.SLACK_THREADS_TABLE_NAME ? { slackThreadsTableName: process.env.SLACK_THREADS_TABLE_NAME } : {}),
   ...(process.env.SLACK_ORCHESTRATOR_ROLE_ARN

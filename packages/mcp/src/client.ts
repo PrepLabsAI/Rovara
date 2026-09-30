@@ -34,7 +34,7 @@ export interface CallOptions {
 
 export interface ControlPlaneClient {
   /** The environment's agentx-configuration, read without a token. */
-  configuration(): Promise<{ env: string; apiVersion: string; baseUrl: string }>;
+  configuration(): Promise<{ env: string; apiVersion: string; baseUrl: string; adminApiVersion?: string }>;
   projects(): Promise<DeveloperProjectsResponse>;
   startTask(request: StartDeveloperTaskRequest): Promise<DeveloperTaskView>;
   getTask(taskId: string, events: number, options?: CallOptions): Promise<DeveloperTaskView>;
@@ -47,7 +47,8 @@ export interface ControlPlaneClient {
   shareTask(taskId: string, request: ShareDeveloperTaskRequest): Promise<DeveloperTaskView>;
 }
 
-const ConfigurationSchema = z.object({ env: z.string(), apiVersion: z.string() });
+/** Spec 025 A1: adminApiVersion is absent from a control plane from before 25d. */
+const ConfigurationSchema = z.object({ env: z.string(), apiVersion: z.string(), adminApiVersion: z.string().optional() });
 const UNREADABLE = "AgentX answered with something this version of the CLI cannot read; upgrade it";
 const DEFAULT_SIGN_IN = "npx @charterarc/agentx login <your AgentX URL>";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -192,7 +193,7 @@ export function httpControlPlaneClient(options: {
     configuration: async () => {
       const current = await session();
       const value = await send(current, ConfigurationSchema, "GET", "/v1/auth/.well-known/agentx-configuration", undefined, false);
-      return { env: value.env, apiVersion: value.apiVersion, baseUrl: current.baseUrl };
+      return { env: value.env, apiVersion: value.apiVersion, baseUrl: current.baseUrl, ...(value.adminApiVersion === undefined ? {} : { adminApiVersion: value.adminApiVersion }) };
     },
     projects: () => call(DeveloperProjectsResponseSchema, "GET", "/v1/dev/projects"),
     startTask: async (request) => task(await call(DeveloperTaskResponseSchema, "POST", "/v1/dev/tasks", request, true, { busyStep: START_BUSY_STEP })),

@@ -38,6 +38,7 @@ import { runWorkspacesCommand } from "./workspaces-ui/index.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
 import { installMcp, MCP_CLIENTS, runCommand, type McpClientKind, type McpInstallDeps } from "./mcp/install.js";
 import { runMcpServer, type McpServeDeps } from "./mcp/serve.js";
+import type { AdminSession } from "@agentx/mcp";
 import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
 import { resolveDeploymentFile } from "./environments/cache.js";
@@ -844,17 +845,18 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       );
     });
 
-  /** R24: whether this computer holds an unexpired admin sign-in for the developer's environment. */
-  const adminSignedIn = async (env: string | undefined): Promise<boolean> => {
+  /** R24 and spec 025 A14: this computer's unexpired admin sign-in for the developer's environment. Never refreshed (Q4). */
+  const adminSession = async (env: string | undefined): Promise<AdminSession | undefined> => {
     try {
       const name = (await resolveDeveloperEnvironment(home, env)).env;
       const settings = await deploymentSettings({ ...globalOptions(program), env: name });
       const tokens = await services.tokenStore.get(tokenStoreKey(settings.auth));
-      return tokens !== undefined && tokens.expiresAt > Date.now();
+      return tokens !== undefined && tokens.expiresAt > Date.now() ? { baseUrl: settings.controlPlaneUrl.replace(/\/$/, ""), accessToken: tokens.accessToken } : undefined;
     } catch {
-      return false;
+      return undefined;
     }
   };
+  const adminSignedIn = async (env: string | undefined): Promise<boolean> => (await adminSession(env)) !== undefined;
 
   const mcp = program
     .command("mcp")
@@ -871,6 +873,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
           ...developerSession(),
           ...(env === undefined ? {} : { env }),
           adminSignedIn,
+          adminSession,
           stdin: dependencies.stdin ?? process.stdin,
           stdout: (dependencies.stdout ?? process.stdout) as Writable,
           stderr: services.stderr,
