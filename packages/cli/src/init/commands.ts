@@ -44,7 +44,7 @@ import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallPro
 import { confirmInstallPlan } from "./plan.js";
 import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
 import { processPrompter, secretFromSource, unattendedPrompter, type Prompter } from "./prompts.js";
-import { fetchRelease, sourceRelease, unknownImagesMessage } from "./release-fetch.js";
+import { fetchRelease, sourceRelease } from "./release-fetch.js";
 import { problemText, retryOnPage } from "./retry.js";
 import { developerSignInStep } from "./signin-step.js";
 import { slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
@@ -363,12 +363,15 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   // The regions init offers: the release's, or undefined when nothing lists them (a source release
   // whose images all come from flags, so no release.json was read).
   let releaseRegions: string[] | undefined;
+  // Why a source release has no images, when it has none; checked once the saved answers are read.
+  let imagesProblem: string | undefined;
   if (fromSource) {
     if (options.source === undefined) throw agentXError("CONFIG_INVALID", "the cdk engine needs --source <a checkout of a release tag>");
     // "allow": a resume's saved answers may hold both images; they are checked once the answers are known.
     const built = await sourceRelease({ runner, source: options.source, images: { worker: options.flags.workerImage, slack: options.flags.slackImage }, fetch: fetchImplementation, missingReleaseJson: "allow" });
     release = built.release;
     releaseRegions = built.regions;
+    imagesProblem = built.imagesProblem;
   } else {
     release = await loadRelease(options.releaseDir ?? (await fetchRelease({ version, home: services.home, fetch: fetchImplementation, runner, write })));
     releaseRegions = release.regions();
@@ -456,6 +459,12 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
 
   const existingSettings = await readEnvironmentSettings(store, env);
   const stored = await readInstallAnswers(store, env);
+  // Review I2: a release built from the source with no usable release.json has no images; a resume's
+  // saved answers, or else the flags, must then name both. Refused here, before any question.
+  const knownImages = stored === undefined ? { worker: options.flags.workerImage, slack: options.flags.slackImage } : stored.images;
+  if (imagesProblem !== undefined && (["worker", "slack"] as const).some((which) => knownImages?.[which] === undefined && release.manifest.images[which] === undefined)) {
+    throw agentXError("CONFIG_INVALID", imagesProblem);
+  }
   if (stored === undefined && existingSettings !== undefined) {
     throw agentXError("CONFIG_INVALID", existingSettings.naming === "legacy"
       ? `environment ${env} is the deployment adopted with fixed stack names; agentx init cannot install over it. Choose another --env`
@@ -504,11 +513,6 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   // Issue 152: a given or downloaded release must be the checkout's tag, refused here rather than
   // after the plan (prepareDeployment checks it again). A release built from the source is its tag.
   if (answers.engine === "cdk" && options.source !== undefined && !fromSource) await assertSourceAtRelease({ runner, source: options.source, version: release.manifest.version });
-  // Review I2: a release built from the source with no release.json has no images; the answers (a
-  // flag, or a resume's saved ones) must then name both, before anything is checked or shown.
-  if (fromSource && (["worker", "slack"] as const).some((which) => answers.images?.[which] === undefined && release.manifest.images[which] === undefined)) {
-    throw agentXError("CONFIG_INVALID", unknownImagesMessage(release.manifest.version));
-  }
 
   const activePrompter = prompter;
   // With --ui, the page's cards; the terminal path has none (SC-004).

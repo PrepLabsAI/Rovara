@@ -332,6 +332,17 @@ describe("sourceRelease (issue 152)", () => {
     await expect(sourceRelease({ runner: tagged, source: "/src", fetch: github({ [urls.manifest]: "not json" }), missingReleaseJson: "allow" })).rejects.toThrow("is not a valid release manifest");
   });
 
+  it("with missingReleaseJson allow, reports a release.json from another commit instead of refusing, and uses none of its images (re-review m-1)", async () => {
+    const urls = releaseAssetUrls("1.4.0");
+    const { release, imagesProblem } = await sourceRelease({ runner: tagged, source: "/src", fetch: github({ [urls.manifest]: published({ gitCommit: "f".repeat(40) }) }), missingReleaseJson: "allow" });
+    expect(release.manifest.images).toEqual({});
+    expect(imagesProblem).toBe(`the published release 1.4.0 was built from commit ${"f".repeat(40)}, but /src is at ${HEAD}; check out tag v1.4.0 cleanly, or pass --worker-image and --slack-image`);
+    const missing = await sourceRelease({ runner: tagged, source: "/src", fetch: github({}), missingReleaseJson: "allow" });
+    expect(missing.imagesProblem).toContain("release 1.4.0 has no published release.json at");
+    const found = await sourceRelease({ runner: tagged, source: "/src", fetch: github({ [urls.manifest]: published() }), missingReleaseJson: "allow" });
+    expect(found.imagesProblem).toBeUndefined();
+  });
+
   it("gives no region list for a release.json that covers no region (review M5)", async () => {
     const urls = releaseAssetUrls("1.4.0");
     const { regions } = await sourceRelease({ runner: tagged, source: "/src", fetch: github({ [urls.manifest]: published({ templates: [] }) }) });

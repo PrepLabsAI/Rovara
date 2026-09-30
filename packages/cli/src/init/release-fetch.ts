@@ -220,16 +220,25 @@ async function publishedManifest(input: { version: string; fetch: typeof fetch; 
  */
 export async function sourceRelease(input: {
   runner: CommandRunner; source: string; images?: { worker?: string | undefined; slack?: string | undefined } | undefined; fetch: typeof fetch;
-  /** "allow": a tag with no published release.json gives a release with no images, for a caller that
-   * checks the images itself once it knows them (init: a resume's saved answers may hold both). */
+  /** "allow": a tag with no published release.json, or one built from another commit, gives a
+   * release with no images and `imagesProblem` saying why, for a caller that checks the images itself
+   * once it knows them (init: a resume's saved answers may hold both). */
   missingReleaseJson?: "refuse" | "allow";
-}): Promise<{ release: LoadedRelease; regions: string[] | undefined }> {
+}): Promise<{ release: LoadedRelease; regions: string[] | undefined; imagesProblem?: string }> {
   const { source } = input;
   const { version, gitCommit } = await sourceReleaseVersion({ runner: input.runner, source });
   const bothImages = input.images?.worker !== undefined && input.images.slack !== undefined;
-  const published = bothImages ? undefined : await publishedManifest({ version, fetch: input.fetch, missing: input.missingReleaseJson ?? "refuse" });
-  if (published !== undefined && published.gitCommit !== gitCommit) {
-    throw agentXError("CONFIG_INVALID", `the published release ${version} was built from commit ${published.gitCommit}, but ${source} is at ${gitCommit}; check out tag v${version} cleanly, or pass --worker-image and --slack-image`);
+  const allow = input.missingReleaseJson === "allow";
+  const fetched = bothImages ? undefined : await publishedManifest({ version, fetch: input.fetch, missing: allow ? "allow" : "refuse" });
+  // With "allow", a missing or other-commit release.json gives no images, and the reason is handed
+  // back for the caller to refuse with if it turns out to need them.
+  let imagesProblem = !bothImages && fetched === undefined ? unknownImagesMessage(version) : undefined;
+  let published = fetched;
+  if (fetched !== undefined && fetched.gitCommit !== gitCommit) {
+    const mismatch = `the published release ${version} was built from commit ${fetched.gitCommit}, but ${source} is at ${gitCommit}; check out tag v${version} cleanly, or pass --worker-image and --slack-image`;
+    if (!allow) throw agentXError("CONFIG_INVALID", mismatch);
+    imagesProblem = mismatch;
+    published = undefined;
   }
   const manifest: ReleaseManifest = {
     schemaVersion: 1, version, gitCommit, environmentPlaceholder: "qqenv-placeholderqq", templates: [], packages: [],
@@ -246,5 +255,6 @@ export async function sourceRelease(input: {
     },
     // A release.json that covers no region lists none to choose from, the same as none at all.
     regions: published === undefined || published.templates.length === 0 ? undefined : [...new Set(published.templates.map((entry) => entry.region))],
+    ...(imagesProblem === undefined ? {} : { imagesProblem }),
   };
 }

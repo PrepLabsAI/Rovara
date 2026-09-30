@@ -727,16 +727,17 @@ describe("agentx init", () => {
       expect(prompter.asked).toEqual([]);
     });
 
-    // Review I2: a resume's saved answers may hold the images, so the refusal waits for the answers.
-    it("refuses when the tag has no published release.json and an image flag is missing, naming both flags, before the plan", async () => {
+    // Review I2: a resume's saved answers may hold the images, so the refusal waits for the store
+    // read, but still comes before any question.
+    it("refuses when the tag has no published release.json and an image flag is missing, naming both flags, before asking anything", async () => {
       const h = await harness();
-      const prompter = scriptedPrompter(FIRST_RUN.slice(1, -1));
+      const prompter = scriptedPrompter([]);
       const code = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", "--source", "/src", "--worker-image", WORKER], {
         releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
       });
       expect(code).toBe(2);
       expect(h.printed()).toContain(`release 1.4.0 has no published release.json at ${MANIFEST_URL}, so its images are unknown; pass --worker-image and --slack-image, or --release <dir>`);
-      expect(h.printed()).not.toContain("Estimated monthly total");
+      expect(prompter.asked).toEqual([]);
       expect(h.store.calls.filter((call) => call.op === "put")).toEqual([]);
     });
 
