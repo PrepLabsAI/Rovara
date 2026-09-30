@@ -1,13 +1,28 @@
 # Concepts
 
-AgentX is source-available. You install it in your own AWS account, and developers use it from
-Slack. This page explains the parts you meet when you use it. To install it, see the
-[quickstart](quickstart.md).
+AgentX is source-available. You install it in your own AWS account. Developers use it from Slack,
+or hand it tasks from their AI tool (Claude Code, Codex or Cursor). This page explains the parts
+you meet when you use it. To install it, see the [quickstart](quickstart.md) and
+[Installing AgentX](install.md).
 
 ```text
 Slack thread -> hosted Pi orchestrator -> AgentX control plane -> remote Pi coding worker
                                                               -> approved GitHub MCP tools
+AI tool (Claude Code, Codex, Cursor) -> agentx mcp -> AgentX developer task API -> remote Pi coding worker
 ```
+
+## Environments
+
+An **environment** is one AgentX install in an AWS account, made by `agentx init`. It has a name,
+such as `prod`, and every command takes it as `--env <env>`. Its stacks are named
+`agentx-<env>-access`, `-foundation`, `-identity`, `-runtime`, `-control-plane` and `-slack`.
+AgentX recommends a dedicated AWS account for each install: environments that share an account
+are not a security boundary against each other.
+
+The install needs admin credentials. After that, day-2 commands such as `doctor`, `upgrade` and
+`config` run with the narrower operator role the install created, `agentx-<env>-operator`.
+Removing an environment needs admin credentials again. See [Running AgentX](day-two.md),
+[Removing an environment](teardown.md) and [moving AgentX to another AWS account](move-account.md).
 
 ## The orchestrator and the worker
 
@@ -21,12 +36,14 @@ control-plane tools and administrator-approved MCP tools, but no source, file-ed
 tools.
 
 The **worker** owns the coding loop. It runs on an EC2 instance with a persistent, encrypted EBS
-volume, and exposes `read`, `bash`, `edit`, `write`, `grep`, `find` and `ls` inside that thread's
+volume, and exposes `read`, `bash`, `edit`, `write`, `grep`, `find` and `ls` inside that
 workspace. AgentX wraps the worker only to provide authentication, workspace allocation,
 operation fencing, durable callbacks, and Git and tool-evidence artifacts.
 
-The worker session runs at the workspace root, above the repositories. For each prepared
-repository it loads the first of `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md` and
+The worker session runs at the workspace root, above the repositories. AgentX first adds its own
+workspace note. It lists each prepared repository and where it is checked out, and tells the model
+to make each change inside the repository it belongs to. For each prepared repository the worker
+then loads the first of `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md` and
 `CLAUDE.MD` found in the repository root, labelled with that repository's name and path. The files
 are read again for every task, so an edited one applies to the next task. A file that resolves
 outside its repository or exceeds 64 KiB is skipped and reported as a progress event.
@@ -35,16 +52,21 @@ Every coding task publishes a redacted `usage` event and a private `usage.json` 
 record the outcome, the actual provider and model, token counts, the cache-read ratio and Pi's
 estimated cost.
 
-The `agentx` executable administers projects. It cannot submit coding work, and the control plane
-refuses developer operations that do not come from the orchestrator's service identity. See the
-[CLI reference](cli.md).
+The `agentx` executable administers environments and projects. Its `agentx mcp` server also lets a
+signed-in developer's AI tool hand coding tasks to AgentX through the developer task API. The
+control plane refuses every other coding operation that does not come from the orchestrator's
+service identity. See the [CLI reference](cli.md).
 
 ## Projects, revisions and channels
 
 A **project** describes a product: its repositories, setup steps, readiness checks, CodeBuild
-gates and orchestrator instructions. It lives in a YAML file and holds no workspace ID, session
-ID, token or repository secret. See [project configuration](project-configuration.md) and the
-examples in [`../examples/projects/`](../examples/projects/).
+gates and orchestrator instructions. It can also name the models a channel may choose from, the
+connectors the orchestrator may use, rules for which tool calls need confirmation, and how the
+project treats tasks from AI tools (`developerTasks`). It lives in a YAML file and holds no
+workspace ID, session ID, token or repository secret. In an installed environment,
+`agentx project add` writes the file and registers it. See
+[project configuration](project-configuration.md) and the examples in
+[`../examples/projects/`](../examples/projects/).
 
 An administrator registers the project as a **revision**. Revisions are immutable: increment the
 YAML `revision` before registering a changed repository, setup or readiness definition.
@@ -74,17 +96,68 @@ The idle reaper stops compute while keeping the workspace files and conversation
 administrator can also stop idle compute with `agentx admin workspace stop`. The EBS volume
 remains for the next session.
 
-Workspaces are limited to protect cost. Only prepared workspaces count, and they are charged to
-the member whose request first prepared them. Each member may hold at most 3 and the organization
-at most 20. An administrator can change the limits with the `AgentXControlPlane` parameters
-`SlackMemberWorkspaceLimit` and `SlackOrganizationWorkspaceLimit`. See [costs](costs.md).
+Workspaces are limited to protect cost. Threads whose workspace has been prepared count, and so do
+open tasks from AI tools: both share the same limits. The member whose request first prepared a
+thread's workspace is charged for it. Each member may hold at most 3 workspaces and the
+organization at most 20. When a request needs a workspace over either limit, AgentX prepares
+nothing and says which limit was reached. It still answers any part of the request that
+connectors can answer. In an installed environment, `agentx --env <env> config get
+limits.workspacesPerMember` (or `limits.workspacesPerOrg`) shows the limits. `config set` cannot
+change them yet: spec 025 phase 25e adds the way to change them. See [costs](costs.md).
 
 `@AgentX close this workspace` releases a workspace. AgentX first checks every prepared
 repository. Uncommitted changes, untracked files, an unpushed current commit, or commits on a
-local-only branch block closure, and AgentX lists the affected repositories. A clean workspace has
-its EC2 instance terminated and its EBS volume deleted. The workspace and operation records are
-kept as audit history. Later mentions in a closed thread do not create another workspace: start a
-new thread for fresh work.
+local-only branch block closure, and AgentX lists the affected repositories. A running
+preparation, task, publication, maintenance, resume or cancellation also blocks closure until it
+finishes. A clean workspace has its EC2 instance terminated and its EBS volume deleted. The
+workspace and operation records are kept as audit history. Later mentions in a closed thread do
+not create another workspace: start a new thread for fresh work.
+
+## Tasks from an AI tool
+
+A developer signs in with Slack, your company's sign-in, or both, with `agentx login <url>`. They
+need no AWS credentials. `agentx mcp install` adds AgentX to Claude Code, Codex or Cursor, and
+`agentx mcp` gives that tool 11 AgentX tools. With them the tool lists the projects the developer
+may use, starts, checks, continues, shares, cancels and closes coding tasks, and opens pull
+requests.
+
+Each task owns its own isolated, persistent workspace, the same kind a Slack thread gets. A task
+keeps its workspace until the developer closes it, and open tasks count against the same limits
+as Slack threads. A task's workspace setup that is still running after 50 minutes is marked
+failed; the task then reads `setup_failed`, and closing it frees its place in the limits.
+
+A task is private unless it is shared. For a private task, only the developer sees its title,
+instructions, progress and results. Others who can use the project see only that a workspace
+exists, with its status and times, in `agentx workspaces`. Every action is recorded for your
+admins.
+
+A project's `developerTasks` settings decide whether developers may start tasks on it from an AI
+tool. Today a developer can use a project from an AI tool when they are a member of one of its
+bound Slack channels. Direct grants by an admin arrive with spec 025 phase 25e. See
+[Developer tasks](project-configuration.md#developer-tasks) and
+[Use AgentX from Claude Code, Codex or Cursor](mcp-install.md).
+
+## Sharing a task to Slack
+
+A developer can share a task into one of its project's bound Slack channels, when it starts or
+later. AgentX posts a new thread that names who started the task, from which AI tool, its title,
+the project and its status. It then posts when the workspace is ready, when the task ends (with
+the worker's summary), when a pull request opens, when the mode changes, and when the task is
+closed. It never posts the developer's instructions.
+
+There are two modes:
+
+- **View only** (`view`): channel members follow the task, and the developer drives it from their
+  AI tool. A mention in the thread gets a notice instead of running.
+- **Continue** (`continue`): channel members can also mention AgentX in the thread to steer the
+  task on the same workspace, one request at a time, each attributed to the member who sent it.
+
+The project's `developerTasks` settings decide what is allowed: whether every task must be shared,
+the default mode, and whether continue is allowed. A shared task's channel cannot change, and a
+shared task cannot be made private again. An administrator can switch a shared task's mode,
+within those settings, with `agentx --env <env> admin task share-mode`. Sharing is available only
+in environments installed with `agentx init`. See
+[Sharing a task to Slack](mcp-install.md#sharing-a-task-to-slack).
 
 ## What a thread remembers
 
@@ -105,9 +178,9 @@ model it continues on. Closing a thread's workspace ends its conversation with i
 
 Two kinds of check stand between a change and a pull request.
 
-**Readiness checks** are the project's `readiness` commands. They run inside the thread's
-workspace before any candidate is pushed. A failure stops the publication. A readiness command
-whose directory the workspace does not have fails that check rather than being skipped.
+**Readiness checks** are the project's `readiness` commands. They run inside the workspace before
+any candidate is pushed. A failure stops the publication. A readiness command whose directory the
+workspace does not have fails that check rather than being skipped.
 
 **CodeBuild gates** are optional, per repository. They run remotely in AWS CodeBuild against the
 exact pushed commit. CodeBuild projects are administrator-owned infrastructure, and their names
@@ -123,8 +196,9 @@ repository publication at a time. See
 
 ## How a pull request is made
 
-Pull-request creation is explicit. AgentX never publishes automatically after a coding task. You
-ask for it in the thread, naming the repository by its project YAML `name`.
+Pull-request creation is explicit. AgentX never publishes on its own after a coding task. In
+Slack, you ask for it in the thread, naming the repository by its project YAML `name`. From an AI
+tool, you ask the tool to open a pull request when the task is ready.
 
 AgentX then:
 
@@ -137,7 +211,8 @@ AgentX then:
 
 The result includes the pull request URL and number, the commit, the head and base branches and
 the check evidence. Repeating the same accepted request reconciles the existing branch and pull
-request rather than creating a duplicate.
+request rather than creating a duplicate. A pull request created from a thread ends with a link to
+the thread and the Slack members who made requests in it.
 
 From the same thread you can maintain an AgentX-owned pull request by naming the repository and
 pull request number: append new commits, sync the base branch into it, edit its title or body,

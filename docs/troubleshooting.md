@@ -8,12 +8,35 @@ components `slack-ingress` and `slack-orchestrator`. They record event IDs, deci
 `event.ignored` with a reason, and failures by error type. Tokens, request text and response text
 are never written there. See [security](security.md) for what else is kept.
 
+In an environment installed with `agentx init`, start with `agentx --env <env> doctor`. It checks
+the stacks, secrets, Slack, GitHub, connectors, models, alerts, capacity and sign-in, and says how
+to fix each problem. See [check it](day-two.md#check-it).
+
+Where this page names an `AgentX...` stack or alarm, it means the maintainers' deployment. In an
+installed environment, use the matching `agentx-<env>-...` stack or alarm, or `agentx config`
+where a key exists.
+
 ## Login shows `Missing Authentication Token`
 
 Opening the bare Cognito domain directly is not a login flow and can return
 `{"message":"Missing Authentication Token"}`. Always start login through the client, for example
-`agentx login --callback-port 8765`. An administrator login must be an account that carries the
-configured administrator claim, such as membership in the Cognito `agentx-admin` group.
+`agentx --env <env> login --admin`, or `agentx login --callback-port 8765` in the maintainers'
+deployment. An administrator login must be an account that carries the configured administrator
+claim, such as membership in the Cognito `agentx-admin` group.
+
+## A developer cannot sign in or use a project
+
+`agentx --env <env> signin check` checks every piece developer sign-in needs, and says what to
+fix. `signin show` lists which methods are on. See [developer sign-in](day-two.md#developer-sign-in).
+
+The AI tool's errors each say what to do next:
+
+- `SIGN_IN_REQUIRED`: run `npx @charterarc/agentx login <your AgentX URL>`.
+- `PROJECT_ACCESS_DENIED`: join one of the project's Slack channels, or ask an admin.
+- `WORKSPACE_LIMIT`: close a task you no longer need.
+- `UPGRADE_REQUIRED`: run `npx -y @charterarc/agentx@latest mcp install --client <your tool>`.
+
+See [when something goes wrong](mcp-install.md#when-something-goes-wrong).
 
 ## An admin command fails
 
@@ -21,12 +44,32 @@ The exit code names the kind of failure:
 
 | Exit code | Meaning |
 |---|---|
+| 1 | An unexpected internal error |
 | 2 | Invalid input |
 | 3 | Login is required |
 | 4 | Forbidden or not found |
+| 5 | The workspace is busy or not ready |
 | 6 | The control plane is unavailable |
+| 7 | Any other AgentX error |
 
-See the [CLI reference](cli.md) for each command.
+`agentx doctor` exits 2 when any check fails. See the [CLI reference](cli.md) for each command.
+
+## An install, upgrade or removal stops
+
+- **`init`** resumes at the first step that is not done: run the same command again. When the
+  Slack workspace needs an admin to approve the app, `init` stops with status "waiting" and exit
+  code 0. See [installing AgentX](install.md).
+- **`upgrade`** stops at the first failure, and CloudFormation rolls that stack back. Run the same
+  command again: it continues. It also stops before any change that replaces or deletes a table,
+  user pool, bucket, KMS key, secret, queue or log group, and when the access stack changed under
+  the operator role. See [upgrade](day-two.md#upgrade).
+- **`destroy`** continues where it stopped: fix what it names and run it again. See
+  [removing an environment](teardown.md).
+- **A lock left by a cut-off run.** At a terminal, the same caller's next run asks whether to take
+  it over. Someone else's lock is refused until it is 2 hours old. `--yes` never takes a lock over.
+- **No room for the NAT gateways.** Each environment needs two free EC2-VPC Elastic IPs. `init`
+  checks the quotas before it creates anything, and `doctor` warns when fewer than 2 are free. See
+  [before you start](install.md#before-you-start).
 
 ## The bot does not answer in a channel
 
@@ -49,7 +92,13 @@ Search the `slack-ingress` logs for the event.
 
 If no line appears at all, check the Slack app. Socket Mode must be off. Event Subscriptions must
 be on, with the request URL set to the `SlackEventsUrl` output and the bot event `app_mention`
-subscribed. The app must be invited to the channel with `/invite @AgentX`.
+subscribed. The app must be invited to the channel with `/invite @AgentX`. In an installed
+environment, `doctor` checks that the bot token works, that both Request URLs answer a signed
+request, and that the bot is in the channel `init` bound. It does not list channels bound later.
+
+When Slack refuses the bot token (doctor shows "Slack refused the bot token", with a code such as
+`invalid_auth` or `token_revoked`), reinstall the app and store the new token in
+`agentx/<env>/slack`. See [replace the Slack bot token](day-two.md#replace-the-slack-bot-token).
 
 AgentX ignores messages without a mention, edits, bot messages, its own messages, direct messages,
 and users from other Slack organizations.
@@ -58,7 +107,30 @@ and users from other Slack organizations.
 
 `thread.paused` records each request the per-thread limit refused. A thread that sends more than 6
 requests in a minute is paused until the next minute. The `AgentXControlPlane` parameter
-`SlackThreadTurnsPerMinute` changes the limit.
+`SlackThreadTurnsPerMinute` changes the limit. In an installed environment, use
+`agentx --env <env> config set limits.threadTurnsPerMinute <n>` (1 to 60).
+
+## AgentX says a workspace limit was reached
+
+Prepared thread workspaces and open tasks from AI tools share the same limits: 3 per member and
+20 for the organization by default. For the member limit, AgentX links that member's existing
+threads and gives their open task count. Close a thread's workspace (`@AgentX close this
+workspace`) or a task you no longer need. In an installed environment, `config get
+limits.workspacesPerMember` shows the limit, but `config set` cannot change it until spec 025
+phase 25e.
+
+## A task from an AI tool reads `setup_failed`
+
+A task's workspace setup that is still running after 50 minutes is marked failed, and the task
+then reads `setup_failed`. Close it to free its place in the workspace limits.
+
+## A shared task's thread does not run a mention
+
+In a view-only shared thread, a mention gets a notice instead of running. The developer drives the
+task from their AI tool. An administrator can switch it to continue, within the project's
+`developerTasks` settings, with `agentx --env <env> admin task share-mode --task <task-id> --mode
+continue`. With `shareMode.allowContinue: false`, the task stays view only. See
+[shared tasks](day-two.md#shared-tasks).
 
 ## A thread fails with `CONVERSATION_STATE_LOST`
 
@@ -110,8 +182,11 @@ nothing it would list will run.
 
 `gate.classifier_unavailable` at start, with `classifierAvailable: false` in the start line, means
 the runtime does not know the classifier model ID. Every change then asks. Check the
-`AgentXSlackOrchestrator` parameter `GateClassifierModelId`. AgentX also asks when the model errors,
-gives an answer that is not a plain verdict, or does not answer in time (8 seconds by default).
+`AgentXSlackOrchestrator` parameter `GateClassifierModelId`, or in an installed environment
+`agentx --env <env> config get models.classifier`. `config set models.classifier <id>` changes
+it after testing the model with one call. AgentX also asks when the model errors, gives an answer
+that is not a plain verdict, or does not answer in time (8 seconds unless the service's
+`AGENTX_GATE_CLASSIFIER_TIMEOUT_MS` is a whole number of milliseconds from 1 to 60,000).
 
 ## The Details button is missing or shows no details
 
@@ -123,6 +198,10 @@ gives an answer that is not a plain verdict, or does not answer in time (8 secon
 - `interaction.details_read_failed`: the read failed or took more than 1 second. Press Details
   again.
 - `interaction.details_open_failed`: the view could not open.
+- `interaction.details_not_configured`: the ingress Lambda has no `TURN_RECORDS_TABLE_NAME`, so
+  every Details press says the details couldn't be loaded. Approve and Cancel keep working.
+- `interaction.ignored`: after a control-plane rollback, an old button tells the member "This
+  button is no longer available." and opens nothing.
 - Records older than 30 days are no longer kept, and the view says so.
 
 ## A turn record is missing
@@ -145,7 +224,14 @@ restarted each time, moves to the `SlackRequestDeadLetterQueueUrl` queue.
 
 ## An alarm is red
 
-Five alarms ship in `AgentXControlPlane`:
+In an installed environment, `agentx init` subscribes your alert address and sends a test alarm,
+and `agentx --env <env> alerts test` sends another. The alarms are named `agentx-<env>-<Name>` (for
+example `agentx-<env>-ConnectorBroken`) on the topic `agentx-<env>-alerts`, plus Slack service,
+session and shared-task notice alarms such as `agentx-<env>-TurnErrors` and
+`agentx-<env>-DeveloperNoticeDeadLetters`. Changing `alerts.address` leaves the old subscription;
+see [change settings](day-two.md#change-settings).
+
+In the maintainers' deployment, five alarms ship in `AgentXControlPlane`:
 
 | Alarm | What it means |
 |---|---|
@@ -156,7 +242,7 @@ Five alarms ship in `AgentXControlPlane`:
 | `AgentXSlackDeadLetters` | A Slack request exhausted its receives and landed in the dead-letter queue |
 
 All five notify the SNS topic `AgentXOperatorAlerts`, which has no subscription by default.
-Subscribe an address after the first deploy:
+There, subscribe an address after the first deploy:
 
 ```sh
 aws sns subscribe --topic-arn <OperatorAlertsTopicArn output> --protocol email \
@@ -170,9 +256,6 @@ aws cloudwatch set-alarm-state --alarm-name AgentXConnectorBroken --state-value 
 aws cloudwatch set-alarm-state --alarm-name AgentXConnectorBroken --state-value OK --state-reason test
 ```
 
-In an environment installed with `agentx init`, `agentx --env <name> alerts test` sends another
-test alarm.
-
 If an alarm stays red, act on what it tells you:
 
 - `AgentXSlackDeadLetters`: handle the requests in the `SlackRequestDeadLetterQueueUrl` queue, then
@@ -180,7 +263,8 @@ If an alarm stays red, act on what it tells you:
 - `AgentXConnectorNotConnected` or a persistent `AgentXConnectorBroken`: reconnect or disable the
   connector named in the broker logs.
 
-Connector and turn metrics go to the `AgentX` CloudWatch namespace. See
+Connector and turn metrics go to the `AgentX` CloudWatch namespace (`AgentX/<env>` in an
+installed environment). See
 [the metrics contract](../specs/013-connector-gateway/contracts/metrics.md) for the full list.
 
 ## Log event reference
@@ -205,6 +289,11 @@ Connector and turn metrics go to the `AgentX` CloudWatch namespace. See
 | `connector.unusable` | A stored connector's configuration failed to parse; skipped |
 | `gate.decision` | The action gate's decision for one call |
 | `gate.classifier_unavailable` | The classifier model is unknown to the runtime; every change asks |
+| `gate.confirmation_requested` | AgentX asked for a confirmation |
+| `gate.confirmation_approved` | A confirmation was approved |
+| `gate.confirmation_cancelled` | A confirmation was cancelled |
+| `gate.confirmation_refused` | An answer to a confirmation could not be used |
+| `gate.yes_to_all` | A member said "yes to all in this thread" |
 | `gate.confirmation_failed` | A confirmation question could not be saved or posted |
 | `gate.reply_withheld` | A turn's only reply was its confirmation question |
 | `turn_record.write_failed` | A turn record was lost; the member still got the reply |
@@ -216,3 +305,5 @@ Connector and turn metrics go to the `AgentX` CloudWatch namespace. See
 | `interaction.details_invalid` | A turn record failed its schema when opened |
 | `interaction.details_read_failed` | Reading a record failed or took more than 1 second |
 | `interaction.details_open_failed` | The Details view could not open |
+| `interaction.details_not_configured` | The ingress Lambda has no turn records table name; Details cannot load |
+| `interaction.ignored` | A button this release does not know was pressed |

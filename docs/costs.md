@@ -12,16 +12,20 @@ task actually cost.
 An AgentX environment has two kinds of cost.
 
 - **Always-on infrastructure.** Two NAT gateways, the Slack service on Fargate, and small
-  services: API Gateway, Lambda, DynamoDB, SQS, Secrets Manager, KMS and CloudWatch.
+  services: API Gateway, Lambda, DynamoDB, SQS, Secrets Manager, KMS (including the
+  invocation-signing key) and CloudWatch.
 - **Usage.** EC2 worker instances while they run, their root volumes, the EBS volume each
   workspace keeps, and the models: the Slack orchestrator, the gate classifier and the coding
-  worker.
+  worker. Slack threads and tasks from AI tools both use workers and workspace volumes.
 
 ## What `init` estimates
 
 Before it creates anything, `agentx init` prints every stack, role, secret, app and setting it
 will create, and an estimated monthly cost. The estimate is not a quote. The plan itself says
-"your bill will differ".
+"your bill will differ". See [the cost estimate](install.md#with-published-templates-recommended)
+in the install guide.
+
+The figures below come from `estimateMonthlyCost` in `packages/cli/src/init/plan.ts`.
 
 ### Prices
 
@@ -33,7 +37,7 @@ The estimate uses us-east-1 list prices, checked in September 2026, and 730 hour
 | Fargate arm64 | $0.03238 per vCPU-hour, $0.00356 per GB-hour |
 | EC2 m6g.medium, on demand | $0.0385 per hour |
 | EBS gp3 | $0.08 per GB-month |
-| API Gateway, Lambda, DynamoDB, SQS, Secrets Manager, KMS and CloudWatch | about $10 a month in total, at the stated usage |
+| API Gateway, Lambda, DynamoDB, SQS, Secrets Manager, KMS (including the invocation-signing key) and CloudWatch | about $10 a month in total, at the stated usage |
 
 Model prices are per use:
 
@@ -57,27 +61,48 @@ The estimate assumes this usage each month:
 - 1,000 orchestrator turns, each with one classifier check
 - 100 worker sessions
 - 60 worker instance-hours
-- 10 kept workspaces
+- 10 kept workspaces of 20 GiB each
+
+Each running worker also has its own 30 GiB gp3 root volume, deleted with the instance. That is
+separate from the 20 GiB workspace volume, which is kept until the workspace closes.
 
 ### The estimate at the defaults
 
 With the default models (Sonnet 4.6 orchestrator, Nova Lite classifier, Sonnet 4.6 worker), the
-plan's lines are:
+plan's lines are these. They were computed by running the code's own `estimateMonthlyCost` from a
+build, not added by hand.
 
 | Line | Estimate | Basis |
 | --- | --- | --- |
-| Two NAT gateways | $65.70 | 2 x $0.045/hour |
+| Two NAT gateways | $65.70 | 2 x $0.045/hour, plus $0.045 per GB processed (not counted) |
 | Slack service (Fargate, 0.5 vCPU, 1 GB, arm64) | $14.42 | one task, always on |
 | Worker instances (m6g.medium) | $2.31 | 60 instance-hours at $0.0385/hour |
 | Worker root volumes (30 GiB gp3) | $0.20 | 60 instance-hours at 30 GiB gp3; each root volume is deleted with its instance |
 | Workspace volumes | $16.00 | 10 kept workspaces x 20 GiB gp3 at $0.08/GB-month |
-| API Gateway, Lambda, DynamoDB, SQS, Secrets Manager, KMS and CloudWatch | $10.00 | about, at this usage |
+| API Gateway, Lambda, DynamoDB, SQS, Secrets Manager, KMS (including the invocation-signing key) and CloudWatch | $10.00 | about, at this usage |
 | Orchestrator model | $25.00 | 1,000 turns at about $0.025 each |
 | Classifier model | $0.15 | 1,000 checks at about $0.00015 each |
 | Worker model | n/a | no price on file for `us.anthropic.claude-sonnet-4-6` |
 
-These lines add up to $133.78 a month. That total leaves out the worker model and NAT data
+The code's total is $133.78 a month. That total leaves out the worker model and NAT data
 processing. Your own plan prints the figures for the models you choose.
+
+### Infrastructure only
+
+Without any model, the first six lines come to **$108.63 a month**, also computed by the code
+(`estimateMonthlyCost` with no model priced):
+
+| Line | Estimate |
+| --- | --- |
+| Two NAT gateways | $65.70 |
+| Slack service (Fargate) | $14.42 |
+| Worker instances | $2.31 |
+| Worker root volumes | $0.20 |
+| Workspace volumes | $16.00 |
+| Small services | $10.00 |
+
+The NAT gateways, the Slack service and the small services run all the time. The rest grows with
+worker hours and kept workspaces.
 
 ## Model choice
 
@@ -95,22 +120,38 @@ live on Bedrock. The spec records these results:
 The worker keeps its current default, and the classifier defaults to Nova Lite. The full decision
 is in [the installer spec](../specs/015-installer/spec.md).
 
+`init` asks for each model (`--orchestrator-model`, `--classifier-model`, `--worker-model`). After
+the install, `agentx --env <env> config set models.orchestrator|models.classifier|models.worker <id>`
+changes one. A new model must answer a one-token call before anything changes. See
+[change settings](day-two.md#change-settings).
+
 ## What limits cost
 
-- **Idle compute stops.** Each Slack thread gets its own EC2 worker and encrypted EBS volume. The
-  idle reaper stops the compute and keeps the workspace files and conversation state. An
-  administrator can also stop a workspace's idle compute with
+- **Idle compute stops.** Each Slack thread, and each task from an AI tool, gets its own EC2
+  worker and encrypted EBS volume. The idle reaper stops the compute and keeps the workspace files
+  and conversation state. An administrator can also stop a workspace's idle compute with
   `agentx admin workspace stop --workspace <workspace-id>`. See the [CLI reference](cli.md).
-- **Workspace limits.** Only threads with a prepared workspace count. The member whose request
-  first prepares a thread's workspace is charged for it. Each member may hold at most 3 prepared
-  thread workspaces, and the organization at most 20. Over either limit, AgentX prepares nothing
-  and says which limit was reached. An administrator can change the limits with the
-  `AgentXControlPlane` parameters `SlackMemberWorkspaceLimit` and
-  `SlackOrganizationWorkspaceLimit`.
+- **Closing frees the volume.** Closing a clean workspace terminates its EC2 instance and deletes
+  its EBS volume. A task from an AI tool keeps its workspace until the developer closes it. A
+  task's workspace setup still running after 50 minutes is marked failed (`setup_failed`), and
+  closing that task frees its place in the workspace limits.
+- **Workspace limits.** Threads whose workspace has been prepared count, and so do open tasks from
+  AI tools: both share the same limits. The member whose request first prepares a thread's
+  workspace is charged for it. Each member may hold at most 3 workspaces, and the organization at
+  most 20. Over either limit, AgentX prepares nothing and says which limit was reached. In the
+  maintainers' deployment, an administrator changes the limits with the `AgentXControlPlane`
+  parameters `SlackMemberWorkspaceLimit` and `SlackOrganizationWorkspaceLimit`. In an installed
+  environment, `agentx --env <env> config get limits.workspacesPerMember` (or
+  `limits.workspacesPerOrg`) shows them, but `config set` cannot change them until spec 025 phase
+  25e.
 - **A monthly budget.** `init` asks for a monthly AWS budget in whole US dollars. The default is
   100, and 0 means no budget. It creates the budget `agentx-<env>-monthly`, which alerts at 80%
   spent and at 100% forecast. The budget counts either costs tagged `agentx:env` (the default) or
-  the whole account. Set this with `--budget` and `--budget-scope`.
+  the whole account. Set this with `--budget` and `--budget-scope`, and change it later with
+  `agentx --env <env> config set budget.monthlyUsd <usd>` or `budget.scope tag|account`.
+  `agentx doctor` checks that the budget matches its setting.
+- **Removing an environment.** `agentx destroy` deletes the stacks, terminates the workers and
+  deletes their workspace volumes. See [Removing an environment](teardown.md).
 
 A tag-scoped budget reads $0 until someone with billing rights activates the `agentx:env` tag once
 in Billing, Cost allocation tags. The tag appears there up to 24 hours after the first tagged
@@ -139,7 +180,8 @@ are the real record.
 
 ### Prompt caching
 
-The production runtime has a CloudFormation parameter, `PromptCacheRetention`, with the values
-`short` and `long`. It defaults to `long`, so Bedrock cache entries can survive normal gaps
+The runtime stack (`agentx-<env>-runtime` in an installed environment, `AgentXProductionRuntime`
+in the maintainers' deployment) has a CloudFormation parameter, `PromptCacheRetention`, with the
+values `short` and `long`. It defaults to `long`, so Bedrock cache entries can survive normal gaps
 between Slack turns. `cacheReadRatio` in `usage.json` shows how much of each task's input came
 from the cache.
