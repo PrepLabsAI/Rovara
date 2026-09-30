@@ -37,6 +37,14 @@ describe("the health route's grants (A13)", () => {
     const queues = brokerStatements(named).filter((statement) => statement.Action === "sqs:GetQueueAttributes");
     expect(queues).toHaveLength(1);
     expect(queues[0]?.Resource).toHaveLength(4);
+    // Exactly the four queues' own ARNs, one each: no wildcard, no other queue.
+    const queueIds = [/^DispatchDeadLetterQueue[0-9A-F]{8}$/, /^SlackRequestDeadLetterQueue[0-9A-F]{8}$/, /^DeveloperTaskNotifierNoticeDeadLetterQueue[0-9A-F]{8}$/, /^DeveloperTaskNotifierStreamFailureQueue[0-9A-F]{8}$/];
+    const resources = queues[0]?.Resource as Array<{ "Fn::GetAtt"?: [string, string] }>;
+    for (const resource of resources) {
+      expect(resource).toEqual({ "Fn::GetAtt": [expect.any(String), "Arn"] });
+      expect(Object.keys(named.findResources("AWS::SQS::Queue"))).toContain(resource["Fn::GetAtt"]?.[0]);
+    }
+    for (const id of queueIds) expect(resources.filter((resource) => id.test(resource["Fn::GetAtt"]?.[0] ?? ""))).toHaveLength(1);
     const listed = JSON.stringify(brokerEnvironment(named).HEALTH_DEAD_LETTER_QUEUES);
     for (const queue of ["DispatchDeadLetterQueue", "SlackRequestDeadLetterQueue", "NoticeDeadLetterQueue", "StreamFailureQueue"]) expect(listed).toContain(queue);
   });
