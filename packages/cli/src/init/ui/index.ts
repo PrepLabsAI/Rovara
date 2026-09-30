@@ -15,6 +15,34 @@ import type { WizardPhase, WizardResume } from "./protocol.js";
 import { startWizardServer, type WizardServer } from "./server.js";
 import { createWizardHub, isShowableLink, type WizardHub } from "./state.js";
 
+/** Q3: how long a question may wait with no page connected before the terminal says where it is. */
+export const PAGE_CLOSED_MS = 60_000;
+const REMINDER_CHECK_MS = 5_000;
+
+export function pageClosedLine(url: string): string {
+  return `The install page is closed. Open ${url} to continue, or press Ctrl-C to stop; agentx init continues from here next time.`;
+}
+
+/** Says once per question, in the terminal, where to reopen a page that has been closed for a
+ * minute. `check` is called on a timer; tests call it directly. */
+export function pageClosedReminder(input: { hub: WizardHub; url: string; write: (line: string) => void; now: () => number }): { check(): void } {
+  let lastConnected = input.now();
+  let reminded: string | undefined;
+  return {
+    check() {
+      if (input.hub.connected() > 0) {
+        lastConnected = input.now();
+        return;
+      }
+      const waiting = input.hub.state().question?.id;
+      if (waiting === undefined || waiting === reminded) return;
+      if (input.now() - lastConnected < PAGE_CLOSED_MS) return;
+      reminded = waiting;
+      input.write(pageClosedLine(input.url));
+    },
+  };
+}
+
 export interface InstallWizard {
   /** The loopback address the wizard was opened at, session token and all. */
   url: string;
@@ -63,6 +91,9 @@ export async function startInstallWizard(input: {
     input.write(`Open that address in a browser on this machine to continue. From another machine, first run: ssh -L ${server.port}:127.0.0.1:${server.port} <this host>`);
   }
   input.write("Every question agentx init asks is on that page; nothing else needs typing here.");
+  const reminder = pageClosedReminder({ hub, url: server.url, write: input.write, now: Date.now });
+  const timer = setInterval(() => reminder.check(), REMINDER_CHECK_MS);
+  timer.unref();
 
   let closed = false;
   return {
@@ -86,6 +117,7 @@ export async function startInstallWizard(input: {
     async close() {
       if (closed) return;
       closed = true;
+      clearInterval(timer);
       // The hub first: it sends the page its "closed" event over the streams the server then ends.
       hub.close();
       await server.close();

@@ -28,6 +28,8 @@ export interface WizardHub {
   snapshot(): WizardSnapshot;
   state(): WizardState;
   subscribe(listener: WizardListener): () => void;
+  /** How many pages are connected now (their event streams). */
+  connected(): number;
   /** One line for the log pane (the same line `agentx init` writes to stderr). */
   log(line: string): void;
   /** The checklist, in the order the steps run, before any of them has. */
@@ -147,6 +149,7 @@ export function createWizardHub(env: string): WizardHub {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    connected: () => listeners.size,
     log: appendLog,
     setSteps(next) {
       steps = next.map((step) => ({ id: step.id, title: step.title, status: "pending" }));
