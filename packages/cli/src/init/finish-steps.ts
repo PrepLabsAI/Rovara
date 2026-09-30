@@ -17,8 +17,10 @@ import { waitForThreadedReply } from "../setup/reply-watch.js";
 import { BUDGET_TAG_NOTE, checkAlertWebhook } from "./answers.js";
 import type { InitContext } from "./context.js";
 import { CONNECTOR_LABELS, CONNECTOR_TYPES, type ConnectorType, type InstallProgress } from "./install-state.js";
+import { retryOnPage } from "./retry.js";
 import { readSlackBotToken } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
+import { adminCard, type AdminCardInput } from "./ui/cards.js";
 
 /** The environment's settings, which the Slack service step writes; every finishing step and the
  * admin session need them (F21: one message, used by both). */
@@ -49,18 +51,31 @@ export function adminUserStep(): InitStep<InitContext> {
     async run(context, progress) {
       const settings = await requireSettings(context);
       const recorded = progress.current().admin;
+      const show = (card: AdminCardInput) => context.surface?.card(adminCard(card));
+      // FR-050 (Q7): on the page, a sign-in that fails or times out can be tried again; the
+      // terminal stops, as before. The sign-in page itself is the page's Next button (Q5).
+      const signIn = (who: string, createdEmail?: string) => retryOnPage({
+        surface: context.surface, prompter: context.prompter, question: "Sign in again?",
+        failed: (problem) => show({ stage: "failed", problem }),
+        run: async () => {
+          show({ stage: "signing-in", who, ...(createdEmail === undefined ? {} : { createdEmail }) });
+          return context.adminSession();
+        },
+      });
       if (settings.identity.mode === "cognito") {
         const email = recorded?.username ?? context.flags.adminEmail ?? await context.prompter.ask("Your email address, for your AgentX admin user", {
           flag: "--admin-email", validate: (value) => (AlertEmailSchema.safeParse(value).success ? undefined : "must be an email address"),
         });
+        let created = false;
         if (recorded === undefined) {
-          await ensureCognitoAdmin({
+          created = (await ensureCognitoAdmin({
             cognito: context.setup.cognito, poolId: userPoolId(settings), email, write: context.write,
             confirm: (question) => context.prompter.confirm(question, { defaultValue: false }),
-          });
+          })).created;
           await progress.update({ admin: { username: email, mode: "cognito" } });
         }
-        await context.adminSession();
+        await signIn(email, created ? email : undefined);
+        show({ stage: "done", username: email });
         return { status: "done", note: `admin ${email}` };
       }
       // F13 and C6 (FR-021): with your own OIDC, the admin claim is what makes someone an AgentX
@@ -72,9 +87,10 @@ export function adminUserStep(): InitStep<InitContext> {
       if (identity.adminClaim === undefined || identity.adminValues === undefined) {
         throw agentXError("CONFIG_INVALID", `the install's answers name no admin claim; AgentX cannot check that you are an administrator of your own OIDC provider, and an install's answers cannot change halfway. Start a new install with another --env, passing --admin-claim and --admin-values`);
       }
-      const session = await context.adminSession();
+      const session = await signIn("an administrator of your company's sign-in");
       const username = oidcAdminName(session.accessToken);
       await progress.update({ admin: { username, mode: "oidc" } });
+      show({ stage: "done", username });
       return { status: "done", note: `admin ${username} signed in with your OIDC provider` };
     },
   };

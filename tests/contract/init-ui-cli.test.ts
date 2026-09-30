@@ -122,7 +122,7 @@ async function harness() {
     return { code, operator };
   };
   return {
-    store, secrets, deployer, github, plane, out, err, home, base, run, runUi,
+    store, secrets, deployer, github, plane, setup, out, err, home, base, run, runUi,
     printed: () => `${out.join("")}${err.join("")}`,
     /** The terminal, every SSM value, this machine's environment cache, and the project files the
      * finishing steps wrote. */
@@ -479,7 +479,7 @@ describe("agentx init --ui", () => {
     expect(code).toBe(0);
     const last = operator.states.at(-1);
     expect(last?.cards?.map((card) => [card.id, card.status])).toEqual([
-      ["aws", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"],
+      ["aws", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"], ["admin", "ok"],
     ]);
     // Every answer came from the scripted operator, and no answer was an address pasted back:
     // the GitHub code arrived through the wizard's own callback.
@@ -490,7 +490,7 @@ describe("agentx init --ui", () => {
     // The screens came in order: each card first appears after the one before it.
     const firstSeen: string[] = [];
     for (const card of operator.states.flatMap((state) => state.cards ?? [])) if (!firstSeen.includes(card.id)) firstSeen.push(card.id);
-    expect(firstSeen).toEqual(["aws", "prerequisites", "github", "slack", "slack-urls"]);
+    expect(firstSeen).toEqual(["aws", "prerequisites", "github", "slack", "slack-urls", "admin"]);
   });
 
   it("FR-012: no secret reaches a card, a link, the page's state, the log, the terminal, SSM or the cache", async () => {
@@ -526,5 +526,19 @@ describe("agentx init --ui", () => {
     expect(review?.cards?.map((card) => card.id)).toEqual(["aws", "prerequisites"]);
     expect(reconnected?.question?.text).toBe("Create all of this?");
     expect(reconnected?.cards?.map((card) => card.id)).toEqual(["aws", "prerequisites"]);
+  });
+
+  it("FR-050 and Q5: the admin sign-in page is a button on the install page, never a tab opened by itself", async () => {
+    const h = await harness();
+    const SIGN_IN = "https://auth.example.test/oauth2/authorize?client_id=c&state=s";
+    const login: typeof h.setup.login = async (options) => { await options.openBrowser?.(SIGN_IN); return h.setup.login(options); };
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(await h.run(["--ui"], { openBrowser: operator.open, setup: { ...h.setup, login } })).toBe(0);
+    await operator.settled();
+    expect(operator.clicked).toContain(SIGN_IN);
+    expect(operator.opened).toHaveLength(1);
+    const during = operator.states.find((state) => state.link?.url === SIGN_IN);
+    expect(during?.link?.label).toBe("Open auth.example.test");
+    expect(during?.cards?.find((card) => card.id === "admin")?.status).toBe("waiting");
   });
 });
