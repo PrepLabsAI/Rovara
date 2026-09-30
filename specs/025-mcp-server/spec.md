@@ -537,7 +537,13 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   tools only when an admin token is present; and the admin change tools only when an admin token is
   present and at least one confirmation method is available (FR-041). It MUST send
   `notifications/tools/list_changed` when this changes during a session (for example after
-  `agentx login --admin`).
+  `agentx login --admin`). The admin tools are offered only while the control plane also reports a
+  fitting admin API version (`adminApiVersion` in `/v1/auth/.well-known/agentx-configuration`,
+  `1.0` from phase 25d); against a control plane without one, the developer tools keep working and
+  `agentx_whoami` says an AgentX upgrade adds the admin tools. A direct call to a hidden admin tool
+  answers `ADMIN_REQUIRED`, or `UPGRADE_REQUIRED` when AgentX is the older side (owner decision,
+  2026-09-30; Q1, D28). The server does not renew an expired admin sign-in; the admin tools then
+  go away until `agentx login --admin` runs again (owner decision, 2026-09-30; Q4).
 - **FR-029**: Every tool result MUST pass through the contracts package's `redactSecrets` and
   `redactText` before it is returned. Tool results MUST never contain a token, a secret value or a
   secret's contents; a credential appears only as its reference, type and secret name. Redaction
@@ -585,14 +591,14 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
 
   | Tool | Inputs | Output |
   |---|---|---|
-  | `agentx_admin_health` | none | control-plane version; alarm states for the environment's alarms; dead-letter queue depths; Slack token check; GitHub App installation check; per worker mode: whether it is configured and its latest dispatch failure; open workspaces by status |
-  | `agentx_admin_failed_tasks` | `since` (default 24 hours ago); `until` (optional); `project` (optional); `limit` (1 to 100, default 25) | per failure: time, project, origin (`slack` or `ai_tool`), requester, workspace ID, operation kind, failure category, redacted error, turn record link |
-  | `agentx_admin_turns` | `since`; `until` (optional); `project` (optional); `origin` (optional); `thread` or `task_id` (optional); `limit` (1 to 100); `cursor` (optional) | turn records as `GET /v1/admin/turns` returns them, plus the next cursor |
-  | `agentx_admin_usage` | `since`; `until` (optional); `group_by` (`project`, `requester`, `origin` or `day`) | per group: turns, tasks, total task duration, model input and output tokens, and cost in US dollars as the usage records carry it (spec 011) |
+  | `agentx_admin_health` | none | control-plane version; alarm states for the environment's alarms; dead-letter queue depths; Slack token check; GitHub App installation check; per worker mode: whether it is configured and its latest dispatch failure; open workspaces by status. A probe that is not set up or fails answers `unknown` with a reason, the dead-letter queues through their own `deadLetterQueuesCheck` like the alarms' (build ruling R18, 2026-09-30) |
+  | `agentx_admin_failed_tasks` | `since` (default 24 hours ago); `until` (optional); `project` (optional); `limit` (1 to 100, default 25) | per failure: time, project, origin (`slack` or `ai_tool`), requester, workspace ID, operation kind, failure category, redacted error, turn record link: the thread subject or the task ID to pass to `agentx_admin_turns` |
+  | `agentx_admin_turns` | `since`; `until` (optional); `project` (optional); `origin` (optional); `thread` or `task_id` (optional; `task_id` matches the task's own records and the channel turns that carry its ID); `limit` (1 to 100); `cursor` (optional) | turn records as `GET /v1/admin/turns` returns them, plus the next cursor. With a filter, only records that pass every filter count toward `limit`, and one call reads at most 10 index pages before it answers with a cursor (build ruling R11, 2026-09-30); a `project` filter refuses with `RUNTIME_UNAVAILABLE` when a record's project lookup failed, rather than silently dropping that record (build ruling R12, 2026-09-30) |
+  | `agentx_admin_usage` | `since`; `until` (optional); `group_by` (`project`, `requester`, `origin` or `day`) | per group: `turns` (Slack turn records, with the orchestrator model's tokens and cost), `tasks` (worker tasks' usage records, spec 011), total task duration, model input and output tokens from both, cost in US dollars as the records carry it (the sum of known costs), and `cost_unknown` (how many entries carried no cost, counted apart rather than as zero) (owner decision, 2026-09-30; Q6) |
   | `agentx_admin_list_projects` | none | per project: latest revision, registration time, repositories, runtime mode, connector names and types, `developerTasks` settings |
-  | `agentx_admin_list_channels` | none | per binding: channel ID and name, project, updated time |
-  | `agentx_admin_list_credentials` | none | per credential: reference, type, secret name, registered time |
-  | `agentx_admin_list_workspaces` | `project` (optional); `status` (optional); `limit` (1 to 100) | per workspace: ID, project, origin, owner (thread link or developer name), status, last activity; the current workspace limits and counts |
+  | `agentx_admin_list_channels` | none | per binding: channel ID and name, project, updated time; a public channel's name always, a private channel's name only when the admin's linked Slack user is a member of it, else its ID (a failed or missing membership check shows the ID) (owner decision, changed, 2026-09-30; Q7) |
+  | `agentx_admin_list_credentials` | none | per credential: reference, type, secret name, registered time; the list is keyed `references`, since FR-029's redaction replaces anything under a `credentials` key (build ruling R20, 2026-09-30) |
+  | `agentx_admin_list_workspaces` | `project` (optional); `status` (optional); `limit` (1 to 100) | per workspace: ID, project, origin, owner (thread link or developer name), status, last activity; the current workspace limits and counts (in the legacy deployment, which records no Slack team, the organization count is 0; build ruling R15, 2026-09-30) |
   | `agentx_admin_changes` | `since` (default 7 days ago); `until` (optional); `admin` (optional); `outcome` (optional); `limit` (1 to 100); `cursor` (optional) | admin change audit records (FR-051), newest first, plus the next cursor |
 
   **Admin change tools** (each call plans the change, gets the confirmation and, only when
@@ -721,7 +727,15 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   It MUST also serve `GET /v1/admin/projects`, `GET /v1/admin/slack/bindings`,
   `GET /v1/admin/workspaces`, `GET /v1/admin/failures`, `GET /v1/admin/usage`,
   `GET /v1/admin/health`, `GET /v1/admin/me` and `GET /v1/admin/changes` for the admin read tools,
-  with the same admin check as today.
+  with the same admin check as today. The failure index, and a usage index of workers' usage
+  events, are written by the outbox publisher from the state table's stream, best effort (a failed
+  index write never delays dispatch), and expire 30 days on: by the State table's TTL on
+  `indexExpiresAt` in installed environments, and by the session reconciler in the legacy
+  deployment (owner decision, changed, 2026-09-30; Q5, D29). The admin project list is a project
+  catalog written at each registration, together with the environment team's bound projects and
+  the caller's own memberships; no route scans the table (owner decision, 2026-09-30; Q2, D30).
+  `GET /v1/admin/me` names the admin's verified email from the token, or from the admin issuer's
+  `userinfo` endpoint, and whether it matches one Slack user (owner decision, 2026-09-30; Q3, D31).
 
 **Admin changes and confirmation (US6)**
 
@@ -830,6 +844,8 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   `DEVELOPER_API_VERSION` is `1.1` from phase 25b and moves to `1.2` in phase 25c, which adds the
   share route; an MCP server from 25c refuses a 25b control plane with `UPGRADE_REQUIRED` and "ask
   your AgentX admin to upgrade AgentX" (owner decision, 2026-09-29; Q7).
+  `/v1/auth/.well-known/agentx-configuration` also reports `adminApiVersion` (`1.0` from phase
+  25d; FR-028, D28).
 
 **Errors**
 
@@ -1063,6 +1079,27 @@ provisioner allows 45 (FR-055, D21).
 10. **A private channel (FR-031). Refuse.** Sharing into a private bound channel needs the
     developer to be a member of it.
 
+Owner decisions on the phase 25d plan (binding, 2026-09-30). Planning phase 25d (the admin read
+tools and routes) raised seven questions (plans/phase-25d-questions.md); the owner answered all
+seven. Q5 and Q7 were changed; the rest were accepted as recommended. Separately, the owner
+deferred live testing until 25d, 25e and spec 040 phases 2 to 4 are built, for one combined final
+live check.
+
+1. **The admin API's version (FR-028, FR-048). Accepted.** Its own `adminApiVersion`, `1.0`;
+   `DEVELOPER_API_VERSION` stays `1.2` (D28).
+2. **The admin project list (FR-038). Accepted.** The project catalog, the bound projects and the
+   caller's own; no scan (D30).
+3. **The admin's email (FR-038, FR-041). Accepted.** From the admin issuer's `userinfo` endpoint
+   when the token carries none, trusted only when verified (D31).
+4. **Renewing the admin sign-in (FR-028). Accepted.** The MCP server does not renew it, the same as
+   the CLI.
+5. **How index records expire (FR-038). Changed.** DynamoDB TTL on `indexExpiresAt` in installed
+   environments; the reconciler cleans up only in the legacy deployment (D29).
+6. **What `agentx_admin_usage` counts (FR-030). Accepted.** Slack turns and worker tasks, with
+   unknown costs counted apart.
+7. **Private channel names for admins (FR-030). Changed.** Shown only when the admin's linked Slack
+   user is a member of the channel; otherwise the ID.
+
 Decisions made in this spec, all owner-confirmed on 2026-09-27:
 
 - **D1. The control plane issues its own developer tokens** (owner-confirmed, 2026-09-27). It exchanges the Slack or
@@ -1246,6 +1283,47 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
   reply also says how many of their workspaces are tasks started from an AI tool, and to close one
   there with `agentx_close_task`. Only the count reaches the channel, never a task's title or ID
   (D22).
+- **D28. The admin API has its own version** (owner decision, 2026-09-30; Q1). The control plane
+  reports `adminApiVersion` (`1.0` from phase 25d) beside `DEVELOPER_API_VERSION`, which stays
+  `1.2`. The MCP server offers the admin tools only when the admin major matches and the admin
+  minor is not older than the tools need; otherwise the developer tools keep working, the admin
+  tools are not offered, `agentx_whoami` says an AgentX upgrade adds them, and a direct call answers
+  `UPGRADE_REQUIRED`. Why not move `DEVELOPER_API_VERSION` to `1.3`: FR-048 then makes a new CLI
+  refuse every tool, the developer ones included, until the admin upgrades AgentX, although the
+  developer tools did not change. 25e moves only the admin version. FR-028 and FR-048 carry this.
+- **D29. The failure and usage indexes are written by the outbox publisher, and expire by TTL
+  where the table allows it** (owner decision, changed, 2026-09-30; Q5). The outbox publisher
+  already reads every record of the state table's stream, the legacy deployment's included, and
+  may write the table, so it derives each failure and usage index item from the operation changes
+  it reads, with conditional puts so a replayed record writes nothing twice. A failed index write is
+  logged and never fails the batch, so dispatch is never delayed or repeated by it. Why not a third
+  stream reader: the stream keeps two (FR-034, D23). Why not a write in every operation path: each
+  path that ends an operation would need the same write and could miss one; the stream sees every
+  committed change once. Each item carries `indexExpiresAt`, 30 days on; in installed environments
+  the State table's TTL on that attribute deletes it, and in the legacy deployment, whose templates
+  never change, each session reconciler run deletes the items of the days 31 to 45 back, at most
+  500 a run. Every read also stops at 30 days and skips an expired item. FR-038 carries this.
+- **D30. The admin project list comes from a project catalog, not a scan** (owner decision,
+  2026-09-30; Q2). Each registration also writes a catalog entry for its project in its own
+  transaction. The admin project list is the catalog's names, the environment team's bound
+  projects, and the projects the caller registered, each counted only while it still has a
+  revision. A project registered before this release that nobody binds and another admin
+  registered appears after its next revision; the CLI still works on it by name. Why no scan: a
+  scan gets slower and costlier as the table grows, and every admin read would pay for it. A
+  one-time background fill for older projects can be added later without changing this. FR-038
+  carries this.
+- **D31. The admin's email comes from the admin issuer's `userinfo` endpoint** (owner decision,
+  2026-09-30; Q3). `GET /v1/admin/me` takes the admin's name and email from the token's own claims
+  when it carries them, else from the admin issuer's standard OIDC `userinfo` endpoint, called with
+  the admin's own token (found through the issuer's discovery document, HTTPS only, 3-second
+  timeout, cached per token for 5 minutes). The email counts only when it is marked verified; it
+  then says whether it matches one Slack user (FR-012's lookup), which 25e's Slack Confirm button
+  and audit name use. Why: Cognito's access tokens carry no email, and `userinfo` needs no setup.
+  Rejected: sending the ID token with each admin call (more moving parts in the CLI, and it expires
+  with the access token anyway), and a hand-made Slack link per admin (one more setup step, and a
+  mistyped link would send Confirm buttons to the wrong person). An issuer without `userinfo`
+  leaves the admin with no Slack link, and the pop-up confirmation still works. FR-038 carries
+  this.
 
 ## Assumptions and Scope
 
