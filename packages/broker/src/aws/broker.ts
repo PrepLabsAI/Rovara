@@ -327,6 +327,7 @@ function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDe
     documentClient: dependencies.documentClient,
     tableName: dependencies.tableName,
     ...(dependencies.turnRecordsTableName === undefined ? {} : { turnRecordsTableName: dependencies.turnRecordsTableName }),
+    ...(dependencies.turnRecordsTableName === undefined ? {} : { turns: dynamoTurnRecordSource(dependencies.documentClient, dependencies.turnRecordsTableName) }),
     ...(developer?.slackTeamId === undefined ? {} : { slackTeamId: developer.slackTeamId }),
     ...(developer?.channelInfo === undefined ? {} : { channelInfo: developer.channelInfo }),
     limitDefaults: { member: dependencies.slack?.memberWorkspaceLimit ?? 3, organization: dependencies.slack?.organizationWorkspaceLimit ?? 20 },

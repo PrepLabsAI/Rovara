@@ -6,29 +6,37 @@ import {
   ADMIN_FAILURES_DEFAULT_LIMIT,
   ADMIN_INDEX_RETENTION_DAYS,
   ADMIN_LIST_MAX,
+  ADMIN_USAGE_READ_MAX,
+  AdminUsageGroupBySchema,
   AgentXNameSchema,
   CHANNEL_MEMBERS_MAX_CHANNELS,
   FailureIndexRecordSchema,
   INDEX_EXPIRY_ATTRIBUTE,
   PROJECT_CATALOG_PK,
   SlackTeamIdSchema,
+  TaskUsageTelemetrySchema,
+  UsageIndexRecordSchema,
   agentXError,
   developerTaskPolicy,
   redactAndCap,
   type AdminBindingsResponse,
   type AdminFailuresResponse,
   type AdminProjectsResponse,
+  type AdminUsageResponse,
   type FailureIndexRecord,
   type ChannelInfoRequest,
   type ChannelInfoResponse,
   type ProjectDefinition,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
+import type { TurnRecordSource } from "./turns.js";
 
 export interface AdminReadDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   turnRecordsTableName?: string;
+  /** The TurnRecords table's byTime reader, where the broker has that table (A9). */
+  turns?: TurnRecordSource;
   /** The environment's Slack team (named environments); absent in the legacy deployment. */
   slackTeamId?: string;
   /** DeveloperIdentity's channel-info lookup (R10), where developer sign-in is set up. */
@@ -275,6 +283,97 @@ async function listFailures(deps: AdminReadDependencies, url: URL): Promise<Admi
   return { failures, ...window, ...(skipped > 0 ? { skipped } : {}) };
 }
 
+interface UsageEntry { project: string; origin: string; requester: string; day: string; turn: boolean; task: boolean; durationMs: number; input: number; output: number; cost: number | null }
+
+const requesterKey = (value: unknown): string => {
+  const requester = value as { kind?: string; userId?: string; developerId?: string; name?: string } | undefined;
+  if (requester?.kind === "slack" || (requester?.kind === undefined && typeof requester?.userId === "string")) return `slack:${requester.userId}`;
+  if (requester?.kind === "developer") return `developer:${requester.name ?? requester.developerId?.slice(0, 12) ?? "unknown"}`;
+  return "none";
+};
+
+/** A9: worker usage items day partition by day, then Slack turn records; at most 5,000 of each. */
+async function usageEntries(deps: AdminReadDependencies, window: { since: string; until: string }): Promise<{ entries: UsageEntry[]; truncated: boolean }> {
+  const entries: UsageEntry[] = [];
+  let truncated = false;
+  let tasks = 0;
+  for (let day = Date.parse(window.since.slice(0, 10)); day <= Date.parse(window.until.slice(0, 10)) && tasks < ADMIN_USAGE_READ_MAX; day += DAY_MS) {
+    let start: Record<string, unknown> | undefined;
+    do {
+      const page = await deps.documentClient.send(new QueryCommand({
+        TableName: deps.tableName,
+        KeyConditionExpression: "pk = :pk AND sk BETWEEN :low AND :high",
+        ExpressionAttributeValues: { ":pk": `USAGE#${new Date(day).toISOString().slice(0, 10)}`, ":low": window.since, ":high": `${window.until}\uffff` },
+        Limit: ADMIN_LIST_MAX,
+        ConsistentRead: true,
+        ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+      })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+      for (const item of page.Items ?? []) {
+        if (expired(deps, item)) continue;
+        const parsed = UsageIndexRecordSchema.safeParse(withoutKeys(item));
+        if (!parsed.success) continue;
+        const usage = parsed.data;
+        entries.push({ project: usage.project, origin: usage.origin, requester: requesterKey(usage.requester), day: usage.at.slice(0, 10), turn: false, task: true, durationMs: usage.durationMs, input: usage.inputTokens, output: usage.outputTokens, cost: usage.costUsd });
+        tasks += 1;
+      }
+      start = page.LastEvaluatedKey;
+      if (tasks >= ADMIN_USAGE_READ_MAX) {
+        truncated = start !== undefined || day < Date.parse(window.until.slice(0, 10));
+        start = undefined;
+      }
+    } while (start !== undefined);
+  }
+  if (deps.turns !== undefined) {
+    const projects = new Map<string, string | undefined>();
+    let key: Parameters<TurnRecordSource["page"]>[0]["exclusiveStartKey"];
+    let turns = 0;
+    do {
+      const page = await deps.turns.page({ since: window.since, until: window.until, limit: ADMIN_LIST_MAX, nowSeconds: Math.floor(deps.now() / 1000), ...(key === undefined ? {} : { exclusiveStartKey: key }), filter: { origin: "slack" } });
+      for (const item of page.items) {
+        const workspaceId = typeof item.workspaceId === "string" ? item.workspaceId : undefined;
+        if (workspaceId !== undefined && !projects.has(workspaceId)) {
+          const workspace = await getStateItem(deps, { pk: `WORKSPACE#${workspaceId}`, sk: "META" });
+          projects.set(workspaceId, typeof workspace?.projectName === "string" ? workspace.projectName : undefined);
+        }
+        const telemetry = TaskUsageTelemetrySchema.safeParse(item.usage);
+        entries.push({
+          project: (workspaceId === undefined ? undefined : projects.get(workspaceId)) ?? "unknown", origin: "slack", requester: requesterKey(item.requestedBy),
+          day: String(item.receivedAt).slice(0, 10), turn: true, task: false, durationMs: 0,
+          input: telemetry.success ? telemetry.data.tokens.input : 0, output: telemetry.success ? telemetry.data.tokens.output : 0,
+          cost: telemetry.success ? telemetry.data.costUsd : 0,
+        });
+        turns += 1;
+      }
+      key = page.lastEvaluatedKey;
+      if (turns >= ADMIN_USAGE_READ_MAX) { truncated = truncated || key !== undefined; key = undefined; }
+    } while (key !== undefined);
+  }
+  return { entries, truncated };
+}
+
+async function usageSummary(deps: AdminReadDependencies, url: URL): Promise<AdminUsageResponse> {
+  const groupBy = AdminUsageGroupBySchema.safeParse(url.searchParams.get("group_by"));
+  if (!groupBy.success) throw agentXError("CONFIG_INVALID", "group_by must be project, requester, origin or day");
+  const window = timeWindow(url, deps.now(), 24 * 7);
+  const { entries, truncated } = await usageEntries(deps, window);
+  const groups = new Map<string, AdminUsageResponse["groups"][number]>();
+  for (const entry of entries) {
+    const key = entry[groupBy.data];
+    const group = groups.get(key) ?? { key, turns: 0, tasks: 0, taskDurationMs: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, costUnknown: 0 };
+    group.turns += entry.turn ? 1 : 0;
+    group.tasks += entry.task ? 1 : 0;
+    group.taskDurationMs += entry.durationMs;
+    group.inputTokens += entry.input;
+    group.outputTokens += entry.output;
+    if (entry.cost === null) group.costUnknown += 1;
+    else group.costUsd = Math.round((group.costUsd + entry.cost) * 1e6) / 1e6;
+    groups.set(key, group);
+  }
+  // The costliest first, then by key, so the answer reads the same each time.
+  const sorted = [...groups.values()].sort((left, right) => right.costUsd - left.costUsd || left.key.localeCompare(right.key));
+  return { groupBy: groupBy.data, ...window, groups: sorted, truncated };
+}
+
 /** The answer for an admin read route, or undefined when the request is not one. */
 export async function routeAdminRead(
   deps: AdminReadDependencies,
@@ -296,4 +395,5 @@ const ADMIN_READS: Record<string, AdminRead> = {
   "/v1/admin/projects": (deps, identity) => listProjects(deps, identity),
   "/v1/admin/slack/bindings": (deps, _identity, url) => listBindings(deps, url),
   "/v1/admin/failures": (deps, _identity, url) => listFailures(deps, url),
+  "/v1/admin/usage": (deps, _identity, url) => usageSummary(deps, url),
 };
