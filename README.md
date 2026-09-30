@@ -2,7 +2,9 @@
 
 A software factory with a hosted pi-based orchestrator in Slack and remote pi coding workers
 on Amazon EC2 with persistent EBS storage. Administrators prepare shared product definitions and fixed
-development images. Every Slack thread owns an isolated persistent workspace instance.
+development images. Every Slack thread, and every task a developer hands to AgentX from an AI
+tool, owns an isolated persistent workspace instance. A task from an AI tool can also be shared into
+the project's Slack channel.
 
 ## Current status
 
@@ -14,11 +16,37 @@ Closed workspace and operation records and historical project revisions remain r
 deployment modes cannot register projects or execute work. Start a new Slack thread against an
 EC2 project revision for new work.
 
+What is built today:
+
+- **The installer.** `agentx init` installs a complete environment in your own AWS account. Then
+  `project add`, `channel add` and `connector add` add more projects, channels and connectors.
+- **Day-2 commands.** `agentx config`, `doctor`, `upgrade` (and `upgrade --export` for a platform
+  team's pipeline) and `destroy` run and remove an installed environment.
+- **Developer sign-in.** Developers sign in with Slack, your company's sign-in, or both, with
+  `agentx login <url>`. They need no AWS credentials.
+- **Tasks from an AI tool.** `agentx mcp install` adds AgentX to Claude Code, Codex or Cursor, and
+  `agentx mcp` gives that tool 11 AgentX tools. With them it lists the projects the developer may
+  use, starts, checks, continues, shares, cancels and closes coding tasks, and opens pull requests.
+- **Sharing to Slack.** A developer can share a task into the project's Slack channel, view only
+  or open to the channel ("continue"). A project can require sharing, and an administrator can
+  switch a shared task's mode with `agentx admin task share-mode`.
+
+Not built yet:
+
+- Admin tools for AI tools: reading AgentX's state (spec 025 phase 25d) and making confirmed
+  changes (phase 25e).
+- Phases 2 to 4 of the local install page (spec 040): its GitHub and Slack connect screens, the
+  admin user, project and channel screens, and turning the page on by default. Today
+  `init --ui` asks the same questions as the terminal, on a local page.
+
+No AgentX release is published yet; see [releases](docs/releases.md).
+
 ## How AgentX is structured
 
 ```text
 Slack thread -> hosted Pi orchestrator -> AgentX control plane -> remote Pi coding worker
                                                               -> approved GitHub MCP tools
+AI tool (Claude Code, Codex, Cursor) -> agentx mcp -> AgentX developer task API -> remote Pi coding worker
 ```
 
 The hosted Pi session is an orchestration-only client. It has AgentX control-plane and approved
@@ -26,12 +54,15 @@ MCP tools but no source, file-editing, or shell tools. The remote Pi session own
 and exposes `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls` inside that thread's
 workspace.
 AgentX wraps remote Pi only to provide authentication, workspace allocation, operation fencing,
-durable callbacks, and Git/tool-evidence artifacts. The `agentx` executable administers projects;
-it cannot submit coding work, and the control plane refuses developer operations that do not come
-from the orchestrator's service identity.
+durable callbacks, and Git/tool-evidence artifacts. The `agentx` executable administers
+environments and projects. Its `agentx mcp` server also lets a signed-in developer's AI tool hand
+coding tasks to AgentX through the developer task API. Every other coding operation must come from
+the orchestrator's service identity; the control plane refuses it otherwise.
 
 The remote session runs at the workspace root, above the repositories, so Pi's own context-file
-discovery never reaches them. For each prepared repository the worker loads the first of
+discovery never reaches them. AgentX therefore adds its own workspace note first, listing each
+prepared repository and where it is checked out, and telling the model to make each change inside
+the repository it belongs to. For each prepared repository the worker then loads the first of
 `AGENTS.override.md`, `AGENTS.md`, `AGENTS.MD`, `CLAUDE.md`, and `CLAUDE.MD` that exists in the
 repository root, and adds it to the session context labelled with that repository's name and
 workspace path. The files are read again for every task, so an edited one applies to the next
@@ -41,7 +72,8 @@ progress event.
 Every remote coding task also publishes a redacted `usage` operation event and private
 `usage.json` artifact. They record the task outcome, actual Pi provider and model, prompt-cache
 retention mode, input/output/cache token counts, cache-read ratio, and Pi's estimated cost. The
-production runtime exposes `PromptCacheRetention` as a CloudFormation parameter with `short` and
+runtime stack (`AgentXProductionRuntime` in the maintainers' deployment, `agentx-<env>-runtime` in
+an installed one) exposes `PromptCacheRetention` as a CloudFormation parameter with `short` and
 `long` values; it defaults to `long` so Bedrock cache entries can survive normal gaps between
 Slack turns.
 
@@ -104,35 +136,72 @@ node packages/cli/dist/main.js --env <name> init --region us-east-1 --release ./
 12. ends once a person mentions the bot in the channel and gets a threaded reply, and prints the
     command developers use to sign in.
 
+`init` deploys published CloudFormation templates by default; `--engine cdk --source <checkout>`
+deploys with the CDK from a clean checkout of the release's tag instead. `--ui` asks every question
+on a page on `127.0.0.1` instead of in the terminal, with the plan to review and a checklist of
+steps; the terminal is still the default. `--stop-after <step>` runs the steps up to that one and
+stops, for automated tests; running `init` again finishes.
+
+An installed environment's stacks are named `agentx-<env>-access`, `-foundation`, `-identity`,
+`-runtime`, `-control-plane` and `-slack`. Its alarms are named `agentx-<env>-<Name>`, and its
+connector secrets live under `agentx/<env>/connectors/`. The maintainers' own deployment predates
+the installer and keeps fixed names: `AgentXProductionFoundation`, `AgentXProductionRuntime`,
+`AgentXControlPlane` and `AgentXSlackOrchestrator`, with no access or identity stack. Where this
+README names an `AgentX...` stack or a stack parameter, it means the maintainers' deployment; in
+your environment, use the matching `agentx-<env>-...` stack, or `agentx config` where a key exists.
+
 Secrets never go on the command line: each comes from a hidden prompt, a file you point to, or an
 environment variable, and `init` stores it in AWS Secrets Manager, never in its own settings. A
-platform team that must review IAM first can use `agentx init --export <dir>` for a bundle they
-deploy themselves; the operator then continues with `agentx init --resume --env <name> --region
-<region> --from-bundle <dir>`.
+platform team that must review IAM first can use `agentx --env <name> init --export <dir> --region
+<region> --release <dir>` for a bundle they deploy themselves (`--env` must be given explicitly);
+the operator then continues with `agentx --env <name> init --resume --region <region> --from-bundle
+<dir>`.
 
-After the install, day-2 work runs with the operator role that `init` created: `agentx --env
-<name> project add` and `agentx --env <name> channel add` for another project and channel; `agentx
---env <name> connector add linear|jira|asana` to add a connector later; `agentx --env <name> alerts
-test` to send another test alarm.
+After the install, day-2 work runs with the operator role that `init` created:
+
+- `agentx --env <name> project add` and `agentx --env <name> channel add` add another project and
+  channel (the worker image has Python 3 and uv for Python projects).
+- `agentx --env <name> connector add linear|jira|asana` adds a connector later, and
+  `agentx --env <name> alerts test` sends another test alarm.
+- `agentx --env <name> doctor` checks every part of the environment and says how to fix what is
+  wrong.
+- `agentx --env <name> config list`, `config get <key>` and `config set <key> <value>` read and
+  change the models, the per-thread request limit, Slack settings, alerts and the budget. They show
+  the workspace limits too, but cannot change them yet (see "Working in a thread").
+- `agentx --env <name> upgrade` moves to a newer release, showing every change and asking first;
+  `upgrade --export <dir>` writes the upgrade for a platform team's pipeline instead.
+- `agentx --env <name> destroy` removes the environment. It needs admin credentials and an explicit
+  `--env`, and asks you to type the environment's name; `--keep-data` keeps the tables, buckets,
+  secrets, Cognito user pool and KMS keys.
 
 Developers then sign in from their own machines with `agentx login <control plane URL>`, with no
 AWS credentials; `agentx whoami` shows which projects they can use, and `agentx workspaces` opens a
 page on `127.0.0.1` showing those projects and the workspaces in them (`--no-ui` prints the same
-list in the terminal).
+list in the terminal). To hand tasks to AgentX from Claude Code, Codex or Cursor, a developer runs
+`agentx mcp install --client claude-code|codex|cursor` once.
 
-The full guide, including resuming, unattended installs, developer sign-in settings
-(`agentx signin`), and tearing an environment down, is in
-[Installing with agentx init](docs/architecture-production.md#installing-with-agentx-init).
+The guides:
+
+- [Installing AgentX](docs/install.md): each way to install (published templates, cdk, or through
+  a platform team), resuming, unattended installs and the cost estimate.
+- [Running AgentX](docs/day-two.md): the operator role, `doctor`, `upgrade`, `config`, projects,
+  channels, connectors and developer sign-in settings (`agentx signin`).
+- [Removing an environment](docs/teardown.md) and
+  [moving AgentX to another AWS account](docs/move-account.md).
+- [Use AgentX from Claude Code, Codex or Cursor](docs/mcp-install.md): the developer's guide to
+  `agentx mcp`, including sharing a task to Slack.
+- [Releases](docs/releases.md): what a release contains, how one is cut, the owner setup still
+  open, and the release test.
 
 ## Use AgentX
 
 ### 1. Install the administration client
 
-Developers work in Slack, and can also sign in from their own machines (`agentx login <url>`,
-`agentx whoami`, `agentx workspaces`) to see which projects they can use and what is running in
-them. Everything else the `agentx` executable does is
-administration: installing environments, registering projects, binding Slack channels, choosing how
-developers sign in, and stopping idle workspaces.
+Developers work in Slack, or from their AI tool through `agentx mcp`. They can also sign in from
+their own machines (`agentx login <url>`, `agentx whoami`, `agentx workspaces`) to see which
+projects they can use and what is running in them. Everything else the `agentx` executable does is
+administration: installing, upgrading and removing environments, registering projects, binding
+Slack channels, choosing how developers sign in, and stopping idle workspaces.
 
 AgentX requires Node.js 22.19 or newer within the Node 22 release line:
 
@@ -147,6 +216,10 @@ If you do not want a global link, replace `agentx` in the examples below with
 `npm run agentx --`.
 
 ### 2. Register a project and bind its Slack channel
+
+For an environment installed with `agentx init`, pass `--env <name>` to each command below and
+skip the deployment file: `init` already wrote that environment's settings. The deployment file is
+for the maintainers' own `production` deployment.
 
 Two files configure the administration client. One describes the deployment, at
 `~/.agentx/deployment.yaml`, and serves every project:
@@ -164,14 +237,14 @@ The other describes a product, at `~/.agentx/projects/<project-name>.yaml`, sele
 orchestrator instructions, and no workspace ID, session ID, token or repository secret. It no
 longer carries `schemaVersion`, `controlPlaneUrl`, `auth` or `environment.image`: the first three
 moved to the deployment file, and the worker image is pinned by the release, not by the project.
-Registering a file that still has them fails with those field names. See
+Registering a file that still has them fails with those field names. In an installed
+environment, `agentx project add` writes this file for you. See
 [project configuration](docs/project-configuration.md) and the illustrative files in
 [`examples/deployment.yaml`](examples/deployment.yaml) and
 [`examples/projects/`](examples/projects/).
 
 Log in as an administrator, register the immutable revision, then bind the project's channel. For
-an environment installed with `agentx init`, add `--env <name>` to each command; `init` already
-wrote that environment's deployment settings, so no `deployment.yaml` is needed:
+an environment installed with `agentx init`, add `--env <name>` to each command:
 
 ```sh
 agentx login --callback-port 8765
@@ -197,8 +270,9 @@ registering a changed repository, setup or readiness definition. The channel bin
 only the project, so a newly registered revision reaches every new thread without binding again.
 
 For a private GitHub repository, set its `credentialRef` to the GitHub App credential reference
-configured on the control plane (the deployed project uses `github-agentx-sdlc`). The YAML still
-contains no private key or installation token.
+configured on the control plane (the maintainers' deployment uses `github-agentx-sdlc`; in an
+installed environment, `project add` fills in its own). The YAML still contains no private key or
+installation token.
 
 An administrator can release a thread workspace's idle compute without losing its files:
 
@@ -213,28 +287,41 @@ workspace takes the next request:
 agentx admin workspace cancel --workspace <workspace-id>
 ```
 
-Run `agentx --help` or `agentx <command> --help` for the complete surface: `init`, `deploy`,
-`env`, `signin`, `project add`, `channel add`, `connector add linear|jira|asana`, `alerts test`,
-`login`, `logout`, `whoami`, `admin project register`,
-`admin workspace cancel|stop`, and `admin slack bind|unbind`. Developer commands (`login <url>`,
-`whoami`, `logout`) only sign in and show access; coding work happens in Slack. Handing tasks to
-AgentX from an AI tool arrives in a later release (spec 025, phase 25b).
+An administrator can also switch a task that a developer shared from an AI tool between view only
+and continue, within the project's `developerTasks` settings:
 
-An admin command's exit code names the kind of failure: 2 for invalid input, 3 when login is
-required, 4 for forbidden or not found, 6 when the control plane is unavailable.
+```sh
+agentx --env <name> admin task share-mode --task <task-id> --mode view|continue
+```
+
+Run `agentx --help` or `agentx <command> --help` for the complete surface: `init`, `deploy`,
+`upgrade`, `config list|get|set`, `doctor`, `destroy`, `env list|use|adopt`,
+`signin show|enable|disable|check`, `project add`, `channel add`,
+`connector add linear|jira|asana`, `alerts test`, `login`, `logout`, `whoami`, `workspaces`,
+`mcp`, `mcp install`, `admin project register`, `admin workspace cancel|stop`,
+`admin slack bind|unbind`, `admin credential register|authorize|list`, `admin turns export`, and
+`admin task share-mode`. Developer commands are `login <url>`, `whoami`, `workspaces`, `logout`,
+`mcp` and `mcp install`. Coding work happens in Slack, or in a developer's AI tool through
+`agentx mcp`.
+
+A command's exit code names the kind of failure: 2 for invalid input, 3 when login is required, 4
+for forbidden or not found, 5 when the workspace is busy or not ready, 6 when the control plane is
+unavailable, 7 for any other AgentX error, and 1 for an unexpected internal error. `agentx doctor`
+exits 2 when any check fails.
 
 ### 3. Work in the project's Slack channel
 
-AgentX runs a hosted orchestrator for Slack in the production AWS account, so no developer machine
-has to stay online. Slack calls the AgentX Events API route; an ingress Lambda verifies Slack's
-signature, acknowledges in the thread, and queues the request. An ECS Fargate service runs the Pi
-orchestrator for that thread and posts the result back. It can call AgentX orchestration tools and
-administrator-approved GitHub MCP tools; repository coding work runs in the remote Pi worker.
+AgentX runs a hosted orchestrator for Slack in the environment's own AWS account, so no developer
+machine has to stay online. Slack calls the AgentX Events API route; an ingress Lambda verifies
+Slack's signature, acknowledges in the thread, and queues the request. An ECS Fargate service runs
+the Pi orchestrator for that thread and posts the result back. It can call AgentX orchestration
+tools and administrator-approved GitHub MCP tools; repository coding work runs in the remote Pi
+worker.
 
-Each Slack thread has its own workspace. The first mention in a new thread creates a workspace
-for the channel's bound project. Later mentions in that thread, by any channel member, continue
-in the same workspace and Pi conversation. Requests in one thread run in order; different threads
-run in parallel.
+Each Slack thread has its own workspace. The first request in a new thread that needs the remote
+worker creates a workspace for the channel's bound project. Later mentions in that thread, by any
+channel member, continue in the same workspace and Pi conversation. Requests in one thread run in
+order; different threads run in parallel.
 
 An administrator may add a `models` block to a project revision with a `default` model and up to
 16 `approved` provider/model pairs. The default must be in the approved list; optional labels must
@@ -290,6 +377,11 @@ A binder names the arguments the server fills in and the model never sees. Some 
 every tool, such as GitHub's owner and repository; a tool without them is not offered. Others
 are bound only on the tools that have them, such as a Linear team; other tools are offered
 unchanged. A request that supplies a bound argument itself is refused.
+
+In an installed environment, `agentx --env <name> connector add linear|jira|asana` stores the
+credential under `agentx/<env>/connectors/<type>` (for example `agentx/prod/connectors/linear`)
+and registers it for you, so you can skip the manual steps below. They are for the maintainers'
+deployment, whose secrets use `agentx/connectors/<name>`.
 
 Connectors other than GitHub read their credential from an AWS Secrets Manager secret named
 `agentx/connectors/<name>`, registered once with the control plane:
@@ -402,7 +494,7 @@ mentions in that channel are ignored, but it keeps existing thread workspaces.
 
 An existing thread's checkout stays on the revision it was prepared with: `repositories`, `setup`
 and `environment` do not change under a running thread. Everything else follows the project's
-latest registered revision from the next mention onwards — the GitHub MCP policy and the
+latest registered revision from the next mention onwards: the GitHub MCP policy and the
 repositories it may address, `orchestratorInstructions`, `readiness` and each repository's
 `codeBuildGates`. So enabling a tool, correcting a test command or withdrawing a write tool takes
 effect in every thread without starting a new one, and the thread is told once that its settings
@@ -436,15 +528,17 @@ A person can also mention AgentX through another tool that posts with their own 
 such as Claude Code's Slack access or a script. AgentX checks with Slack that the sender is a
 person, then treats the message exactly as if they had typed it. A message posted with a bot token
 is ignored. To answer only typed mentions, set the `AgentXControlPlane` parameter
-`SlackAppPostedMessages` to `ignore`. This also means a person's own tool posting "@AgentX yes"
-counts as that person's confirmation, the same as typing it. The **Approve** button can only be
+`SlackAppPostedMessages` to `ignore` (in an installed environment,
+`agentx --env <name> config set slack.appPostedMessages ignore`). This also means a person's own
+tool posting "@AgentX yes" counts as that person's confirmation, the same as typing it. The **Approve** button can only be
 pressed in Slack, but a typed or tool-posted `@AgentX yes` still counts, so set
 `SlackAppPostedMessages` to `ignore` if only typed confirmations should count.
 
 A thread that sends AgentX more than 6 requests in a minute is paused: AgentX posts one notice and
 runs nothing more in that thread until the next minute. This stops a tool that answers AgentX's
 replies from looping. The `AgentXControlPlane` parameter `SlackThreadTurnsPerMinute` changes the
-limit. A request that AgentX could not queue is not counted, so Slack's retry of it is not held
+limit (in an installed environment, `agentx --env <name> config set limits.threadTurnsPerMinute
+<n>`). A request that AgentX could not queue is not counted, so Slack's retry of it is not held
 against the thread; in the rare case where that happens during a burst at the limit, the thread
 can get a second pause notice in the same minute.
 
@@ -454,13 +548,17 @@ Text such as `<!channel>` in a reply is shown as text and never notifies anyone.
 Pull requests created from a thread end with a link to the thread and the Slack members who made
 requests in it. Every operation records the Slack member who requested it.
 
-Workspaces are limited to protect cost. Only threads whose workspace has been prepared count. The
-member whose request first prepares a thread's workspace is charged for it. Each member may hold
-at most 3 prepared thread workspaces, and the organization at most 20. When a request needs a
-workspace over either limit, AgentX prepares nothing and says which limit was reached; for the
-member limit, it also links that member's existing threads. It still answers any part of the
-request that connectors can answer. An administrator can change the limits with the
+Workspaces are limited to protect cost. Threads whose workspace has been prepared count, and so
+do open tasks from AI tools: both share the same limits. The member whose request first prepares
+a thread's workspace is charged for it. Each member may hold at most 3 workspaces, and the
+organization at most 20. When a request needs a workspace over either limit, AgentX prepares
+nothing and says which limit was reached; for the member limit, it also links that member's
+existing threads and gives their open task count. It still answers any part of the request that
+connectors can answer. In the maintainers' deployment, an administrator changes the limits with the
 `AgentXControlPlane` parameters `SlackMemberWorkspaceLimit` and `SlackOrganizationWorkspaceLimit`.
+An installed environment starts from the same defaults, and `agentx --env <name> config get
+limits.workspacesPerMember` (or `limits.workspacesPerOrg`) shows them. `config set` cannot change
+them yet: the admin tool that does (spec 025 phase 25e) is not built.
 
 To stop the thread's running coding task, mention AgentX in the thread with just a stop request:
 
@@ -494,6 +592,32 @@ retains the workspace and operation records as a closed tombstone for audit and 
 removes the hosted orchestrator conversation session and releases the organization's quota and that
 of the member who prepared the workspace. Later mentions in the closed thread do not create another
 workspace; start a new Slack thread for fresh work.
+
+#### Tasks shared from an AI tool
+
+A developer can share a task they started from their AI tool into one of the project's bound
+channels, with `agentx_share_task` or when starting it. AgentX posts a new thread that names who
+started the task, from which tool, its title, the project and its status, and keeps the thread up
+to date: when the workspace is ready or could not be set up, when the task ends (with the worker's
+summary), when a pull request opens, when the mode changes, and when the task is closed. AgentX's
+own messages in the thread do not include the developer's instructions.
+
+- **View only** (`view`): channel members follow the task, and the developer drives it from their
+  AI tool. A mention in the thread gets a notice instead of running.
+- **Continue** (`continue`): channel members can also mention AgentX in the thread to steer the
+  task on the same workspace, one request at a time, each attributed to the member who sent it.
+
+The project's `developerTasks` settings decide what is allowed: `share: required` shares every
+task, `shareMode.default` picks the mode when none is asked for (`view` unless set), and
+`shareMode.allowContinue: false` keeps every shared task view only. Sharing into a private channel
+needs the developer to be a member of it. A shared task's channel cannot change, and a shared task
+cannot be made private again. An administrator can switch a shared task's mode, within those
+settings, with `agentx --env <name> admin task share-mode --task <task-id> --mode view|continue`.
+Sharing is available only in environments installed with `agentx init`. The developer's side is in
+[Use AgentX from Claude Code, Codex or Cursor](docs/mcp-install.md#sharing-a-task-to-slack).
+
+A task's workspace setup that is still running after 50 minutes is marked failed; the task then
+reads `setup_failed`, and closing it frees its place in the workspace limits.
 
 #### Actions that need your confirmation
 
@@ -580,9 +704,10 @@ What decides that a call is destructive or changes an item, so you can approve t
 
 The model that checks changes is a deployment setting: the `AgentXSlackOrchestrator` parameter
 `GateClassifierModelId`, default Amazon Nova Lite (`amazon.nova-lite-v1:0`). Claude Haiku 4.5
-(`us.anthropic.claude-haiku-4-5-20251001-v1:0`) is an alternative. The installer planned in spec 015
-(`agentx init`) will ask for it during installation. If the model is unavailable, errors, gives an
-answer that is not a plain verdict, or does not answer in time, AgentX asks. The time limit is 8
+(`us.anthropic.claude-haiku-4-5-20251001-v1:0`) is an alternative. In an installed environment,
+`agentx init` asks for it (`--classifier-model`), and `agentx --env <name> config set
+models.classifier <id>` changes it later, after testing the model with one call. If the model is
+unavailable, errors, gives an answer that is not a plain verdict, or does not answer in time, AgentX asks. The time limit is 8
 seconds unless the service's `AGENTX_GATE_CLASSIFIER_TIMEOUT_MS` is a whole number of milliseconds
 from 1 to 60,000; the gate then waits exactly that long. Any other value, including a larger one,
 means 8 seconds. A model ID the
@@ -610,8 +735,7 @@ replacement of the worker process, because neither touches the volume.
 It does not survive losing the volume. If the workspace is replaced, the next request in the thread
 fails with `CONVERSATION_STATE_LOST` rather than starting the thread over on top of files it has no
 memory of. Start a new thread to continue. There is no promised retention period beyond the life of
-the workspace, and the storage mode a thread runs on is what bounds it: the demo deployment's
-microVM storage is time-limited and is not production-durable.
+the workspace's EBS volume.
 
 A conversation that was created before AgentX recorded this state has no transcript to reopen, so
 its next request starts one. If the deployed model changes between turns, the thread keeps its
@@ -701,8 +825,14 @@ AgentX tells the member privately. Long arguments are cut to fit Slack's limits 
 Interactivity, which the action gate's confirmation buttons already turned on; it needs no new
 scope.
 
-Connector and turn metrics go to the `AgentX` CloudWatch namespace; see
-[contracts/metrics.md](specs/013-connector-gateway/contracts/metrics.md) for the full list. Five
+Connector and turn metrics go to the `AgentX` CloudWatch namespace (`AgentX/<env>` in an
+installed environment); see
+[contracts/metrics.md](specs/013-connector-gateway/contracts/metrics.md) for the full list. The
+names below are the maintainers' deployment's. An installed environment has the same alarms named
+`agentx-<env>-<Name>` (for example `agentx-<env>-ConnectorBroken`) on the topic
+`agentx-<env>-alerts`, plus Slack service, session and shared-task notice alarms (such as
+`agentx-<env>-TurnErrors` and `agentx-<env>-DeveloperNoticeDeadLetters`); `agentx init` subscribes
+your alert address and sends a test alarm, and `agentx alerts test` sends another. Five
 alarms ship in `AgentXControlPlane`: `AgentXConnectorBroken` (a connector's discovery failed or a
 vendor changed an approved tool's schema), `AgentXConnectorNotConnected` (a connector's vendor
 credential is missing, revoked or rejected), `AgentXEmptyResponses` (more than three turns in an
@@ -758,8 +888,8 @@ workspace are not inherited by the new PR. A conflict or effective empty diff st
 
 Maintain an AgentX-owned PR from the same thread by naming the repository and PR number: append
 the workspace's new commits, sync the base branch into it, update its title or body, or close and
-reopen it. The orchestrator makes all of these changes — append, sync, edit title/body, close,
-reopen, replace, and revert — through one tool, `agentx_manage_pull_request`, choosing the action
+reopen it. The orchestrator makes all of these changes (append, sync, edit title/body, close,
+reopen, replace, and revert) through one tool, `agentx_manage_pull_request`, choosing the action
 that matches the request.
 
 `append` runs readiness checks and accepts only workspace commits that descend from the recorded
@@ -781,8 +911,9 @@ The installed GitHub App must have these repository permissions:
 - **Contents: Read and write** for cloning and pushing the AgentX branch.
 - **Pull requests: Read and write** for finding or creating the PR.
 
-Change them under **GitHub Settings → Developer settings → GitHub Apps → AgentX SDLC → Permissions
-& events → Repository permissions**. After saving, the installation owner must approve the updated
+Change them under **GitHub Settings → Developer settings → GitHub Apps → your AgentX app (the
+maintainers' is AgentX SDLC; `init` names yours with `--github-app-name`) → Permissions & events →
+Repository permissions**. After saving, the installation owner must approve the updated
 permissions for the installation. The App private key stays in Secrets Manager; it is never sent to
 the worker. AgentX mints short-lived, single-repository tokens separately for clone,
 push, and PR operations.
@@ -827,10 +958,14 @@ candidates together and creating multiple PRs as one unit requires a future mult
 change-set workflow; a CodeBuild project may use secondary sources, but AgentX does not yet bind
 multiple candidate commits atomically.
 
-### 5. Deploy and release
+### 5. Deploy and release (the maintainers' production deployment)
+
+This section describes the maintainers' own deployment and its release pipeline. To move an
+installed environment to a newer release, use `agentx --env <name> upgrade`; see
+[Running AgentX](docs/day-two.md#upgrade).
 
 Registering a project and binding its channel are covered in section 2. Workspaces are created by
-Slack threads, never by an administrator.
+Slack threads and by tasks from AI tools, never by an administrator.
 
 For the production EBS-backed platform, preview the release without changing AWS:
 
@@ -863,8 +998,8 @@ npm run release:prod -- --region "$AWS_REGION" --reuse-unchanged-worker --requir
 | A push to `mainline` that changes | Result |
 |---|---|
 | Only docs, specs, top-level `tests/`, `scripts/` or `.github` | No pipeline execution |
-| `packages/broker`, `infra` or other control-plane code, but no worker image input | Checks, then a control-plane deploy. The deployed worker digest is reused and the runtime is unchanged |
-| A worker image input: `packages/worker`, `packages/contracts`, the Dockerfile, `.dockerignore`, root `package.json`, `package-lock.json` or tsconfigs, or a workspace `package.json` | Checks, a new ARM64 image, a runtime update to `READY` on that digest, then a control-plane deploy |
+| Any other deployable package (`packages/broker`, `cli`, `gateway`, `mcp`, `orchestrator`, `slack-service`), `environments/` or `infra`, but no worker image input | Checks, then a control-plane deploy. The deployed worker digest is reused and the runtime is unchanged |
+| A worker image input: `packages/worker`, `packages/contracts`, `packages/model-runtime`, the Dockerfile, `.dockerignore`, root `package.json`, `package-lock.json` or tsconfigs, or a workspace `package.json` | Checks, a new ARM64 image, a runtime update to `READY` on that digest, then a control-plane deploy |
 
 Whether the worker changed is judged against the deployed image. The pipeline reads the commit
 from the image's `release-<time>-<commit>` tag and diffs the worker image inputs up to `HEAD`. So
@@ -1041,16 +1176,24 @@ Spec 014 phase 14d adds the **Details** button. Operator notes:
   safety, and retry requirements.
 - [Conversation continuity task list](specs/012-conversation-continuity/tasks.md): reopening a
   thread's saved session, and what is verified locally rather than on a deployment.
-- [Task list](specs/001-agentx-foundation/tasks.md): 50 dependency-ordered implementation tasks.
+- [Task list](specs/001-agentx-foundation/tasks.md): the foundation's implementation tasks, in
+  dependency order.
 - [Specification](specs/001-agentx-foundation/spec.md): agreed workflows and acceptance criteria.
 - [Plan](specs/001-agentx-foundation/plan.md): architecture, boundaries and delivery sequence.
 - [Research](specs/001-agentx-foundation/research.md): decisions and primary sources.
-- [Deployed AWS architecture](docs/architecture-deployed-demo.md): current VPC-free demo resources
-  and request flow.
 - [Production AWS architecture](docs/architecture-production.md): EC2 workers and persistent EBS,
   per-session EBS, networking, release, isolation, and migration boundaries.
 - [Contracts](specs/001-agentx-foundation/contracts/): project config, control API and worker protocol.
 - [Validation guide](specs/001-agentx-foundation/quickstart.md).
+- [Installer specification](specs/015-installer/spec.md) and
+  [phase plans](specs/015-installer/plans/README.md): `agentx init`, `upgrade`, `config`, `doctor`
+  and `destroy` (phases 15a to 15e built).
+- [MCP server specification](specs/025-mcp-server/spec.md) and
+  [phase plans](specs/025-mcp-server/plans/README.md): developer sign-in, tasks from AI tools and
+  sharing (phases 25a to 25c built; 25d and 25e not yet).
+- [Local install page specification](specs/040-install-ui/spec.md): `agentx init --ui` (phase 1
+  built; phases 2 to 4 not yet).
+- [Project configuration](docs/project-configuration.md): every field of a project file.
 - [Constitution](.specify/memory/constitution.md): project principles, version 4.0.0.
 
 ## GitHub Spec Kit
@@ -1085,8 +1228,7 @@ npm test
 npm run infra:synth
 ```
 
-The latest observed results are recorded in
-[docs/validation/agentx-foundation.md](docs/validation/agentx-foundation.md). Docker and AWS are
-not required for this local suite.
+The latest results are the CI runs on each pull request. Docker and AWS are not required for this
+local suite.
 
 For Bedrock/OpenRouter configuration, Slack model selection, and the live verification checklist, see [OpenRouter model access](docs/openrouter.md).
