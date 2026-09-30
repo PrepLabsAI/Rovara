@@ -44,7 +44,7 @@ import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallPro
 import { confirmInstallPlan } from "./plan.js";
 import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
 import { processPrompter, secretFromSource, unattendedPrompter, type Prompter } from "./prompts.js";
-import { fetchRelease, sourceRelease } from "./release-fetch.js";
+import { fetchRelease, sourceRelease, unknownImagesMessage } from "./release-fetch.js";
 import { problemText, retryOnPage } from "./retry.js";
 import { developerSignInStep } from "./signin-step.js";
 import { slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
@@ -168,10 +168,12 @@ function eventLine(event: InitEvent): string {
   }
 }
 
-/** Issue 152: a source release whose images all come from flags read no release.json, so there is
- * no region list; the region must then come from --region or the AWS configuration. */
-function noRegionListed(): never {
-  throw agentXError("CONFIG_INVALID", "with no release.json there is no list of regions to choose from; pass --region <region>");
+/** Issue 152: a source release that read no release.json (or one listing no region) has no region
+ * list; the region then comes from --region or the AWS configuration, and init says which it took. */
+function configuredRegion(configured: string | undefined, write: (line: string) => void): string {
+  if (configured === undefined) throw agentXError("CONFIG_INVALID", "with no release.json there is no list of regions to choose from; pass --region <region>, or set a region in your AWS configuration");
+  write(`Region ${configured}, from your AWS configuration; pass --region to choose another`);
+  return configured;
 }
 
 const realSleep = (ms: number) => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, ms));
@@ -363,7 +365,8 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   let releaseRegions: string[] | undefined;
   if (fromSource) {
     if (options.source === undefined) throw agentXError("CONFIG_INVALID", "the cdk engine needs --source <a checkout of a release tag>");
-    const built = await sourceRelease({ runner, source: options.source, images: { worker: options.flags.workerImage, slack: options.flags.slackImage }, fetch: fetchImplementation });
+    // "allow": a resume's saved answers may hold both images; they are checked once the answers are known.
+    const built = await sourceRelease({ runner, source: options.source, images: { worker: options.flags.workerImage, slack: options.flags.slackImage }, fetch: fetchImplementation, missingReleaseJson: "allow" });
     release = built.release;
     releaseRegions = built.regions;
   } else {
@@ -420,12 +423,16 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   const regions = releaseRegions ?? [];
   // The AWS CLI's own region comes first, so a resume looks where the install started.
   const configuredRegions = [processEnv.AWS_REGION, processEnv.AWS_DEFAULT_REGION, awsProfile?.region].filter((value): value is string => value !== undefined && value !== "");
-  const environmentRegion = configuredRegions.find((value) => regions.includes(value));
+  // The cdk engine synthesizes for any region, so the configured one is offered (and is the
+  // default) even when the release does not list it.
+  const [configured] = configuredRegions;
+  const choices = options.flags.engine === "cdk" && configured !== undefined && !regions.includes(configured) ? [configured, ...regions] : regions;
+  const environmentRegion = configuredRegions.find((value) => choices.includes(value));
   // A bundle names its region, so a bundle resume never asks it. With no list to choose from, the
-  // AWS configuration's region is taken as it is.
+  // AWS configuration's region is taken as it is, and said.
   const region = options.region ?? bundle?.region ?? (releaseRegions === undefined
-    ? configuredRegions[0] ?? noRegionListed()
-    : await prompter.choose<string>("AWS region", regions.map((value) => ({ value, label: value })), { flag: "--region", defaultValue: environmentRegion ?? regions[0] ?? "us-east-1" }));
+    ? configuredRegion(configured, write)
+    : await prompter.choose<string>("AWS region", choices.map((value) => ({ value, label: value })), { flag: "--region", defaultValue: environmentRegion ?? choices[0] ?? "us-east-1" }));
   if (bundle !== undefined && bundle.region !== region) throw agentXError("CONFIG_INVALID", `the bundle is for region ${bundle.region}; pass --region ${bundle.region}`);
   // The cdk engine synthesizes its own templates for any region; only the templates engine needs the release to cover it.
   if (options.flags.engine !== "cdk") assertReleaseCoversRegion(release, region);
@@ -497,6 +504,11 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   // Issue 152: a given or downloaded release must be the checkout's tag, refused here rather than
   // after the plan (prepareDeployment checks it again). A release built from the source is its tag.
   if (answers.engine === "cdk" && options.source !== undefined && !fromSource) await assertSourceAtRelease({ runner, source: options.source, version: release.manifest.version });
+  // Review I2: a release built from the source with no release.json has no images; the answers (a
+  // flag, or a resume's saved ones) must then name both, before anything is checked or shown.
+  if (fromSource && (["worker", "slack"] as const).some((which) => answers.images?.[which] === undefined && release.manifest.images[which] === undefined)) {
+    throw agentXError("CONFIG_INVALID", unknownImagesMessage(release.manifest.version));
+  }
 
   const activePrompter = prompter;
   // With --ui, the page's cards; the terminal path has none (SC-004).

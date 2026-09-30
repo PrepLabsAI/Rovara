@@ -323,6 +323,21 @@ describe("sourceRelease (issue 152)", () => {
     expect((error as Error).message).toContain("release 1.4.0 has no published release.json at https://github.com/PrepLabsAI/AgentX/releases/download/v1.4.0/release.json, so its images are unknown; pass --worker-image and --slack-image, or --release <dir>");
   });
 
+  it("with missingReleaseJson allow, goes on with no images and no region list when the tag has no release.json (review I2)", async () => {
+    const { release, regions } = await sourceRelease({ runner: tagged, source: "/src", fetch: github({}), missingReleaseJson: "allow" });
+    expect(release.manifest.images).toEqual({});
+    expect(regions).toBeUndefined();
+    // Only a missing file is allowed: a broken one still refuses.
+    const urls = releaseAssetUrls("1.4.0");
+    await expect(sourceRelease({ runner: tagged, source: "/src", fetch: github({ [urls.manifest]: "not json" }), missingReleaseJson: "allow" })).rejects.toThrow("is not a valid release manifest");
+  });
+
+  it("gives no region list for a release.json that covers no region (review M5)", async () => {
+    const urls = releaseAssetUrls("1.4.0");
+    const { regions } = await sourceRelease({ runner: tagged, source: "/src", fetch: github({ [urls.manifest]: published({ templates: [] }) }) });
+    expect(regions).toBeUndefined();
+  });
+
   it("refuses a published release.json built from another commit than the checkout", async () => {
     const urls = releaseAssetUrls("1.4.0");
     await expect(sourceRelease({ runner: tagged, source: "/src", fetch: github({ [urls.manifest]: published({ gitCommit: "f".repeat(40) }) }) }))

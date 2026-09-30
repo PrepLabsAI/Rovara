@@ -179,7 +179,12 @@ const IMAGE_FLAGS = "pass --worker-image and --slack-image, or --release <dir>";
 
 /** The tag's published release.json, strictly: unlike readReleaseManifest (doctor's best-effort
  * comparison), every failure refuses, naming the address, so the images are never a guess. */
-async function publishedManifest(input: { version: string; fetch: typeof fetch }): Promise<ReleaseManifest> {
+/** The refusal for a release whose images are unknown: no release.json, and an image flag missing. */
+export function unknownImagesMessage(version: string): string {
+  return `release ${version} has no published release.json at ${releaseAssetUrls(version).manifest}, so its images are unknown; ${IMAGE_FLAGS}`;
+}
+
+async function publishedManifest(input: { version: string; fetch: typeof fetch; missing: "refuse" | "allow" }): Promise<ReleaseManifest | undefined> {
   const url = releaseAssetUrls(input.version).manifest;
   let response: Response;
   try {
@@ -187,7 +192,10 @@ async function publishedManifest(input: { version: string; fetch: typeof fetch }
   } catch (error) {
     throw agentXError("RUNTIME_UNAVAILABLE", `could not download ${url} (${errorText(error)}); ${IMAGE_FLAGS}`);
   }
-  if (response.status === 404) throw agentXError("CONFIG_INVALID", `release ${input.version} has no published release.json at ${url}, so its images are unknown; ${IMAGE_FLAGS}`);
+  if (response.status === 404) {
+    if (input.missing === "allow") return undefined;
+    throw agentXError("CONFIG_INVALID", unknownImagesMessage(input.version));
+  }
   if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `downloading ${url} failed with HTTP ${response.status}; try again later, or ${IMAGE_FLAGS}`);
   let parsed: ReturnType<typeof ReleaseManifestSchema.safeParse>;
   try {
@@ -207,14 +215,19 @@ async function publishedManifest(input: { version: string; fetch: typeof fetch }
  * both are given (then nothing is fetched); otherwise the tag's published release.json supplies them
  * (only that file, never the tarball), and it must be the release built from this very commit.
  * The release has no templates and no packages: the cdk engine synthesizes its own and sends no
- * packages. `regions` is the published release's region list when release.json was read, for init's
- * region question; undefined otherwise.
+ * packages. `regions` is the published release's region list when release.json was read and names
+ * one, for init's region question; undefined otherwise.
  */
-export async function sourceRelease(input: { runner: CommandRunner; source: string; images?: { worker?: string | undefined; slack?: string | undefined } | undefined; fetch: typeof fetch }): Promise<{ release: LoadedRelease; regions: string[] | undefined }> {
+export async function sourceRelease(input: {
+  runner: CommandRunner; source: string; images?: { worker?: string | undefined; slack?: string | undefined } | undefined; fetch: typeof fetch;
+  /** "allow": a tag with no published release.json gives a release with no images, for a caller that
+   * checks the images itself once it knows them (init: a resume's saved answers may hold both). */
+  missingReleaseJson?: "refuse" | "allow";
+}): Promise<{ release: LoadedRelease; regions: string[] | undefined }> {
   const { source } = input;
   const { version, gitCommit } = await sourceReleaseVersion({ runner: input.runner, source });
   const bothImages = input.images?.worker !== undefined && input.images.slack !== undefined;
-  const published = bothImages ? undefined : await publishedManifest({ version, fetch: input.fetch });
+  const published = bothImages ? undefined : await publishedManifest({ version, fetch: input.fetch, missing: input.missingReleaseJson ?? "refuse" });
   if (published !== undefined && published.gitCommit !== gitCommit) {
     throw agentXError("CONFIG_INVALID", `the published release ${version} was built from commit ${published.gitCommit}, but ${source} is at ${gitCommit}; check out tag v${version} cleanly, or pass --worker-image and --slack-image`);
   }
@@ -231,6 +244,7 @@ export async function sourceRelease(input: { runner: CommandRunner; source: stri
       template: () => { throw agentXError("CONFIG_INVALID", `${from}, which has no published templates; the cdk engine synthesizes its own`); },
       packagePath: () => { throw agentXError("CONFIG_INVALID", `${from}, which has no packages; the cdk engine sends none`); },
     },
-    regions: published === undefined ? undefined : [...new Set(published.templates.map((entry) => entry.region))],
+    // A release.json that covers no region lists none to choose from, the same as none at all.
+    regions: published === undefined || published.templates.length === 0 ? undefined : [...new Set(published.templates.map((entry) => entry.region))],
   };
 }

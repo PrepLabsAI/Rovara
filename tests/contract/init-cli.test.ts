@@ -643,6 +643,36 @@ describe("agentx init", () => {
       expect(code).toBe(0);
       expect(prompter.asked).not.toContain("AWS region");
       expect(await readInstallAnswers(h.store, "staging")).toMatchObject({ region: "eu-west-1" });
+      // Review M6: the region taken without asking is said.
+      expect(h.printed()).toContain("Region eu-west-1, from your AWS configuration; pass --region to choose another");
+    });
+
+    it("offers and defaults to the configured region although release.json does not list it: the cdk engine synthesizes for any region (review M7)", async () => {
+      const h = await harness();
+      const prompter = scriptedPrompter(["", ...FIRST_RUN.slice(1)]);
+      const code = await h.runWithoutRelease(["--engine", "cdk", "--source", "/src", "--stop-after", "prerequisites"], {
+        releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch, publishedManifest), prompter, processEnv: { AWS_REGION: "eu-west-1" }, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
+      });
+      expect(h.printed()).not.toContain("AgentX error");
+      expect(code).toBe(0);
+      expect(await readInstallAnswers(h.store, "staging")).toMatchObject({ region: "eu-west-1" });
+    });
+
+    it("resumes an install begun with both image flags without them, although the tag has no published release.json (review I2)", async () => {
+      const h = await harness();
+      const first = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", "--source", "/src", ...IMAGES, "--stop-after", "prerequisites"], {
+        releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter: scriptedPrompter([...FIRST_RUN.slice(1)]), deploy: { ...h.deps.deploy, commandRunner: taggedSource },
+      });
+      expect(first).toBe(0);
+      const mark = h.mark();
+      const prompter = scriptedPrompter([...SLACK, ...SIGNIN, ...FINISH]);
+      const code = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", "--source", "/src"], {
+        releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
+      });
+      expect(h.printedSince(mark)).not.toContain("AgentX error");
+      expect(code).toBe(0);
+      expect(h.printedSince(mark)).toContain("Resuming the install of environment staging.");
+      expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.4.0");
     });
 
     it("refuses with no region anywhere, naming --region, before asking anything", async () => {
@@ -652,19 +682,20 @@ describe("agentx init", () => {
         releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
       });
       expect(code).toBe(2);
-      expect(h.printed()).toContain("with no release.json there is no list of regions to choose from; pass --region <region>");
+      expect(h.printed()).toContain("with no release.json there is no list of regions to choose from; pass --region <region>, or set a region in your AWS configuration");
       expect(prompter.asked).toEqual([]);
     });
 
-    it("refuses when the tag has no published release.json and an image flag is missing, naming both flags, before asking anything", async () => {
+    // Review I2: a resume's saved answers may hold the images, so the refusal waits for the answers.
+    it("refuses when the tag has no published release.json and an image flag is missing, naming both flags, before the plan", async () => {
       const h = await harness();
-      const prompter = scriptedPrompter([]);
+      const prompter = scriptedPrompter(FIRST_RUN.slice(1, -1));
       const code = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", "--source", "/src", "--worker-image", WORKER], {
         releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
       });
       expect(code).toBe(2);
       expect(h.printed()).toContain(`release 1.4.0 has no published release.json at ${MANIFEST_URL}, so its images are unknown; pass --worker-image and --slack-image, or --release <dir>`);
-      expect(prompter.asked).toEqual([]);
+      expect(h.printed()).not.toContain("Estimated monthly total");
       expect(h.store.calls.filter((call) => call.op === "put")).toEqual([]);
     });
 
