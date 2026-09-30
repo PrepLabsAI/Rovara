@@ -1,21 +1,20 @@
-import { DynamoDBClient, type AttributeValue } from "@aws-sdk/client-dynamodb";
-import { DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
+import type { StreamRecord } from "../developer/notifications.js";
+import { indexActivity } from "./activity-index.js";
 import { requiredEnvironment, type DurableOutboxRecord } from "./lambda.js";
 
-interface DynamoStreamRecord {
-  eventName?: string;
-  dynamodb?: { NewImage?: Record<string, AttributeValue> };
-}
-
 export interface DynamoStreamEvent {
-  Records?: DynamoStreamRecord[];
+  Records?: StreamRecord[];
 }
 
 export function createOutboxPublisherHandler(dependencies: {
   send: (record: DurableOutboxRecord) => Promise<void>;
   markQueued: (id: string) => Promise<void>;
+  /** Spec 025 A4: the failure and usage indexes, run after dispatch, best effort. */
+  index?: (records: readonly StreamRecord[]) => Promise<unknown>;
 }) {
   return async (event: DynamoStreamEvent): Promise<{ published: number }> => {
     let published = 0;
@@ -26,6 +25,14 @@ export function createOutboxPublisherHandler(dependencies: {
       await dependencies.send(image as DurableOutboxRecord);
       await dependencies.markQueued(image.id);
       published += 1;
+    }
+    if (dependencies.index !== undefined) {
+      try {
+        await dependencies.index(event.Records ?? []);
+      } catch (error) {
+        // A4: dispatch never waits on, or repeats for, the index; the error's name only.
+        console.log(JSON.stringify({ component: "outbox-publisher", event: "activity_index.write_failed", error: error instanceof Error ? error.name : "unknown" }));
+      }
     }
     return { published };
   };
@@ -59,6 +66,16 @@ export const handler = createOutboxPublisherHandler({
       if (!(error instanceof Error) || error.name !== "ConditionalCheckFailedException") throw error;
     }
   },
+  index: (records) => indexActivity(records, {
+    get: async (key) => ((await documentClient.send(new GetCommand({ TableName: required(tableName, "STATE_TABLE_NAME"), Key: key, ConsistentRead: true }))) as { Item?: Record<string, unknown> }).Item,
+    put: async (item) => {
+      try {
+        await documentClient.send(new PutCommand({ TableName: required(tableName, "STATE_TABLE_NAME"), Item: item, ConditionExpression: "attribute_not_exists(pk)" }));
+      } catch (error) {
+        if (!(error instanceof Error) || error.name !== "ConditionalCheckFailedException") throw error;
+      }
+    },
+  }, (entry) => console.log(JSON.stringify({ component: "outbox-publisher", ...entry }))),
 });
 
 function required(value: string | undefined, name: string): string {
