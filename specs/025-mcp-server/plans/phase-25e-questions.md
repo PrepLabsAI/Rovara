@@ -212,3 +212,5 @@ tool.
 **Depends on it:** Tasks 1, 13.
 
 **Owner answer (2026-09-30):** A, the recommendation, accepted: the admin API moves to 1.1.
+
+Controller ruling (2026-09-30, before building 25e): apply the owner's Q7 rule to 25e change confirmations too: a private channel is named in a confirmation (MCP or the Slack DM) only when the admin's linked Slack user is a member; otherwise by ID. Reason: consistency with the owner's 25d answer; cost if wrong: one lookup per confirmation.
