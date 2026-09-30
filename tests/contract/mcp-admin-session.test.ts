@@ -24,11 +24,13 @@ const URL_BASE = "https://abc123.execute-api.us-east-1.amazonaws.com";
 const ISSUER = `${URL_BASE}/v1/auth`;
 const ADMIN_TOKEN = "admin-access-token-planted-4f2a";
 
-async function server(options: { admin?: { expiresAt: number }; adminApiVersion?: string }) {
+async function server(options: { admin?: { expiresAt: number }; adminApiVersion?: string; developerSignIn?: false }) {
   const home = await mkdtemp(join(tmpdir(), "agentx-admin-mcp-"));
   const tokenStore = new InMemoryTokenStore();
-  await saveDeveloperEnvironment(home, "staging", { url: URL_BASE, issuer: ISSUER, tokenEndpoint: `${ISSUER}/token`, revocationEndpoint: `${ISSUER}/revoke` });
-  await tokenStore.set(developerTokenKey(ISSUER), { accessToken: "developer-token", refreshToken: `agxr_${"a".repeat(43)}`, expiresAt: Date.now() + 3_600_000 });
+  if (options.developerSignIn !== false) {
+    await saveDeveloperEnvironment(home, "staging", { url: URL_BASE, issuer: ISSUER, tokenEndpoint: `${ISSUER}/token`, revocationEndpoint: `${ISSUER}/revoke` });
+    await tokenStore.set(developerTokenKey(ISSUER), { accessToken: "developer-token", refreshToken: `agxr_${"a".repeat(43)}`, expiresAt: Date.now() + 3_600_000 });
+  }
   const fetch = vi.fn(async (input: string | URL) => {
     const url = new URL(String(input));
     if (url.pathname === "/v1/auth/.well-known/agentx-configuration") return Response.json({ env: "staging", apiVersion: "1.2", ...(options.adminApiVersion === undefined ? {} : { adminApiVersion: options.adminApiVersion }) });
@@ -83,6 +85,17 @@ describe("agentx mcp and the admin sign-in (A14)", () => {
     await client.callTool({ name: "agentx_whoami", arguments: {} });
     expect((await client.listTools()).tools).toHaveLength(11);
     expect(toolError(await client.callTool({ name: "agentx_admin_health", arguments: {} }))).toMatchObject({ code: "UPGRADE_REQUIRED", next_step: NEXT_STEPS.UPGRADE_REQUIRED });
+  });
+
+  // Final review, item 5: the offer's compatibility check needs the developer sign-in; without it
+  // the admin is told to sign in as a developer, not to run login --admin again.
+  it("answers the compatibility check's SIGN_IN_REQUIRED for an admin with no developer sign-in", async () => {
+    const { client } = await server({ admin: { expiresAt: Date.now() + 600_000 }, adminApiVersion: "1.0", developerSignIn: false });
+    await client.callTool({ name: "agentx_whoami", arguments: {} });
+    expect((await client.listTools()).tools).toHaveLength(11);
+    const refused = toolError(await client.callTool({ name: "agentx_admin_health", arguments: {} }));
+    expect(refused).toMatchObject({ code: "SIGN_IN_REQUIRED" });
+    expect(JSON.stringify(refused)).not.toContain("login --admin");
   });
 });
 

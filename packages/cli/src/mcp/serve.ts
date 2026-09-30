@@ -76,7 +76,15 @@ export function agentxMcpServer(deps: McpServeDeps): McpServer {
   // 10-minute cache holds, so the 30-second check does not read the configuration each time.
   const adminOffer = async (): Promise<AdminOffer> => {
     if ((await deps.adminSession(deps.env)) === undefined) return { admin: NOT_OFFERED };
-    const fit = adminApiFits((await compatibility()).adminApiVersion);
+    let adminApiVersion: string | undefined;
+    try {
+      ({ adminApiVersion } = await compatibility());
+    } catch (error) {
+      // The check needs the developer sign-in: its own answer (SIGN_IN_REQUIRED) says what to do.
+      if (error instanceof ToolError) return { admin: error };
+      throw error;
+    }
+    const fit = adminApiFits(adminApiVersion);
     if (fit !== "fits") return { admin: new ToolError("UPGRADE_REQUIRED", "this AgentX has no admin tools for this CLI yet", fit === "incompatible" ? NEXT_STEPS.UPGRADE_REQUIRED : UPGRADE_AGENTX_STEP) };
     return { admin: undefined };
   };
