@@ -348,14 +348,15 @@ describe("agentx init --export", () => {
     const io = capture();
     const code = await executeCli(["--env", ENV, "init", "--region", REGION], { ...io, init: { deploy: safeDeployDeps(), releaseVersion: null } });
     expect(code).toBe(2);
-    expect(io.err.join("")).toContain("this agentx was built from source and has no published release to download; pass --release <dir>");
+    expect(io.err.join("")).toContain("this agentx was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one), or --engine cdk --source <a checkout of a release tag>");
   });
 
-  it("init --engine cdk from a source build without --release says the cdk engine still reads the release (live check L7)", async () => {
+  // Issue 152 replaces live check L7: --engine cdk --source needs no release (init-cli.test.ts).
+  it("init --engine cdk from a source build without --release or --source says --source is needed, before touching AWS", async () => {
     const io = capture();
-    const code = await executeCli(["--env", ENV, "init", "--region", REGION, "--engine", "cdk", "--source", "/src"], { ...io, init: { deploy: safeDeployDeps(), releaseVersion: null } });
+    const code = await executeCli(["--env", ENV, "init", "--region", REGION, "--engine", "cdk"], { ...io, init: { deploy: safeDeployDeps(), releaseVersion: null } });
     expect(code).toBe(2);
-    expect(io.err.join("")).toContain("--engine cdk builds the stacks from --source, but still reads the release's images and notes from --release <dir> (npm run release:build builds one)");
+    expect(io.err.join("")).toContain("the cdk engine needs --source <a checkout of a release tag>");
   });
 
   it("without an explicit --env refuses: the default is the live production environment", async () => {

@@ -6,6 +6,8 @@ import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rename, rm, 
 import { dirname, join, sep } from "node:path";
 import { agentXError, ReleaseManifestSchema, type ReleaseManifest } from "@agentx/contracts";
 import type { CommandRunner } from "../deploy/cdk-engine.js";
+import { sourceReleaseVersion } from "../deploy/cdk-source.js";
+import type { LoadedRelease } from "../deploy/release.js";
 
 export const RELEASE_REPOSITORY = "PrepLabsAI/AgentX";
 
@@ -106,14 +108,11 @@ async function makeRemovable(path: string): Promise<void> {
  * cache and only renamed into place once it checks out, so a failed or interrupted fetch never
  * leaves a half-written release directory. `loadRelease` then checks every file's checksum.
  */
-export async function fetchRelease(input: { version: string | undefined; engine?: "templates" | "cdk" | undefined; home: string; fetch: typeof fetch; runner: CommandRunner; write(line: string): void }): Promise<string> {
+export async function fetchRelease(input: { version: string | undefined; home: string; fetch: typeof fetch; runner: CommandRunner; write(line: string): void }): Promise<string> {
   const { version } = input;
   if (version === undefined) {
-    // Live check L7: --source replaces the templates, not the release's images and notes.
-    const next = input.engine === "cdk"
-      ? "--engine cdk builds the stacks from --source, but still reads the release's images and notes from --release <dir>"
-      : "pass --release <dir>";
-    throw agentXError("CONFIG_INVALID", `this agentx was built from source and has no published release to download; ${next} (npm run release:build builds one)`);
+    // Issue 152: --engine cdk --source needs no release (sourceRelease), so init never gets here with it.
+    throw agentXError("CONFIG_INVALID", "this agentx was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one), or --engine cdk --source <a checkout of a release tag>");
   }
   const urls = releaseAssetUrls(version);
   const published = await download(input.fetch, urls.manifest, version);
@@ -172,4 +171,66 @@ export async function readReleaseManifest(input: { version: string; home: string
   try { json = JSON.parse(text); } catch { return undefined; }
   const parsed = ReleaseManifestSchema.safeParse(json);
   return parsed.success && parsed.data.version === input.version ? parsed.data : undefined;
+}
+
+
+const errorText = (error: unknown): string => (error instanceof Error ? error.message : String(error));
+const IMAGE_FLAGS = "pass --worker-image and --slack-image, or --release <dir>";
+
+/** The tag's published release.json, strictly: unlike readReleaseManifest (doctor's best-effort
+ * comparison), every failure refuses, naming the address, so the images are never a guess. */
+async function publishedManifest(input: { version: string; fetch: typeof fetch }): Promise<ReleaseManifest> {
+  const url = releaseAssetUrls(input.version).manifest;
+  let response: Response;
+  try {
+    response = await input.fetch(url, { signal: AbortSignal.timeout(15_000) });
+  } catch (error) {
+    throw agentXError("RUNTIME_UNAVAILABLE", `could not download ${url} (${errorText(error)}); ${IMAGE_FLAGS}`);
+  }
+  if (response.status === 404) throw agentXError("CONFIG_INVALID", `release ${input.version} has no published release.json at ${url}, so its images are unknown; ${IMAGE_FLAGS}`);
+  if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `downloading ${url} failed with HTTP ${response.status}; try again later, or ${IMAGE_FLAGS}`);
+  let parsed: ReturnType<typeof ReleaseManifestSchema.safeParse>;
+  try {
+    parsed = ReleaseManifestSchema.safeParse(JSON.parse(await response.text()));
+  } catch {
+    throw agentXError("CONFIG_INVALID", `the published release.json at ${url} is not a valid release manifest; ${IMAGE_FLAGS}`);
+  }
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", `the published release.json at ${url} is not a valid release manifest; ${IMAGE_FLAGS}`);
+  if (parsed.data.version !== input.version) throw agentXError("CONFIG_INVALID", `the published release.json at ${url} is for release ${parsed.data.version}, not ${input.version}`);
+  return parsed.data;
+}
+
+/**
+ * Issue 152: the release a source-built agentx deploys with `--engine cdk --source`, built from the
+ * checkout instead of a release directory. The version is the one release tag at HEAD of the clean
+ * checkout (sourceReleaseVersion). The images are the --worker-image and --slack-image overrides when
+ * both are given (then nothing is fetched); otherwise the tag's published release.json supplies them
+ * (only that file, never the tarball), and it must be the release built from this very commit.
+ * The release has no templates and no packages: the cdk engine synthesizes its own and sends no
+ * packages. `regions` is the published release's region list when release.json was read, for init's
+ * region question; undefined otherwise.
+ */
+export async function sourceRelease(input: { runner: CommandRunner; source: string; images?: { worker?: string | undefined; slack?: string | undefined } | undefined; fetch: typeof fetch }): Promise<{ release: LoadedRelease; regions: string[] | undefined }> {
+  const { source } = input;
+  const { version, gitCommit } = await sourceReleaseVersion({ runner: input.runner, source });
+  const bothImages = input.images?.worker !== undefined && input.images.slack !== undefined;
+  const published = bothImages ? undefined : await publishedManifest({ version, fetch: input.fetch });
+  if (published !== undefined && published.gitCommit !== gitCommit) {
+    throw agentXError("CONFIG_INVALID", `the published release ${version} was built from commit ${published.gitCommit}, but ${source} is at ${gitCommit}; check out tag v${version} cleanly, or pass --worker-image and --slack-image`);
+  }
+  const manifest: ReleaseManifest = {
+    schemaVersion: 1, version, gitCommit, environmentPlaceholder: "qqenv-placeholderqq", templates: [], packages: [],
+    images: published?.images ?? {},
+  };
+  const from = `release ${version} was built from --source ${source}`;
+  return {
+    release: {
+      manifest,
+      dir: source,
+      regions: () => [],
+      template: () => { throw agentXError("CONFIG_INVALID", `${from}, which has no published templates; the cdk engine synthesizes its own`); },
+      packagePath: () => { throw agentXError("CONFIG_INVALID", `${from}, which has no packages; the cdk engine sends none`); },
+    },
+    regions: published === undefined ? undefined : [...new Set(published.templates.map((entry) => entry.region))],
+  };
 }

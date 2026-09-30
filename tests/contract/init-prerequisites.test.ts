@@ -204,6 +204,13 @@ describe("init prerequisites", () => {
     expect(blocked.bootstraps).toBe(0);
   });
 
+  it("checks the region against the release only for the templates engine; the cdk engine synthesizes for any region (issue 152)", async () => {
+    const elsewhere = sampleAnswers({ region: "eu-west-1" });
+    await expect(run(elsewhere)).rejects.toThrow("release 1.2.3 does not cover region eu-west-1; it covers: us-east-1");
+    const lines = await run({ ...elsewhere, engine: "cdk" });
+    expect(lines.join("\n")).not.toContain("does not cover");
+  });
+
   it("checks your own OIDC provider's discovery document names the same issuer", async () => {
     const oidc = sampleAnswers({ identity: { mode: "oidc", issuer: "https://id.example.com", audience: "a", clientId: "c", adminClaim: "groups", adminValues: ["x"] } });
     await expect(run(oidc, passingChecks({ oidcDiscovery: async () => ({ issuer: "https://other.example.com" }) }))).rejects.toThrow(
