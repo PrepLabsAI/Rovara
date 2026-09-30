@@ -40,6 +40,7 @@ import {
   type WorkspaceInstance,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
+import { adminHealth, type AdminHealthProbes } from "./admin-health.js";
 import { adminIdentityReader, type AdminMeDependencies } from "./admin-me.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { taskKey, taskPointerKey } from "../developer/task-records.js";
@@ -61,8 +62,8 @@ export interface AdminReadDependencies {
   channelMembers?: (request: ChannelMembersRequest) => Promise<ChannelMembersResponse>;
   /** A12: the admin issuer's userinfo and the Slack email lookup; set only by the production bootstrap. */
   me?: AdminMeDependencies;
-  /** Task 12 replaces this field's type with AdminHealthProbes. */
-  health?: unknown;
+  /** A13: the health route's probes; Task 13 wires the real ones. A probe left out answers `unknown`. */
+  health?: AdminHealthProbes;
   now(): number;
   log(entry: Record<string, unknown>): void;
 }
@@ -588,4 +589,5 @@ const ADMIN_READS: Record<string, AdminRead> = {
       ? { issuer: identity.issuer, subject: identity.subject, slack: { linked: false, reason: "no_email" } }
       : reader.me(identity, request.headers.authorization);
   },
+  "/v1/admin/health": (deps, identity) => adminHealth(deps, identity),
 };
