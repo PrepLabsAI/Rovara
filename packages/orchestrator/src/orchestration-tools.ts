@@ -123,6 +123,11 @@ export function createOrchestrationTools(
     onConnectorError?: (toolCallId: string, code: string) => void;
     /** Spec 014: present only for a thread whose compute is not prepared yet. */
     worker?: WorkerAccess;
+    /**
+     * Issue 157: told each worker task or follow-up operation as soon as it is accepted, and awaited
+     * before the tool waits on it, so the host can remember it durably. It must not throw.
+     */
+    onOperationAccepted?: (operationId: string) => Promise<void>;
   } = {},
 ): ToolDefinition[] {
   const nextRequestId = options.requestId ?? randomUUID;
@@ -145,6 +150,7 @@ export function createOrchestrationTools(
           prompt: parameters.prompt,
         });
         const operationId = acceptedOperationId(accepted);
+        await options.onOperationAccepted?.(operationId);
         onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: "Remote AgentX worker accepted the task." }));
         return toolResult(await api.taskResult(
           { workspaceId: context.workspaceId, operationId },
@@ -227,6 +233,7 @@ export function createOrchestrationTools(
           prompt: parameters.prompt,
         });
         const operationId = acceptedOperationId(accepted);
+        await options.onOperationAccepted?.(operationId);
         onUpdate?.(toolResult({ operationId, status: "ACCEPTED", message: "Remote AgentX worker accepted the follow-up." }));
         return toolResult(await api.taskResult(
           { workspaceId: context.workspaceId, operationId },

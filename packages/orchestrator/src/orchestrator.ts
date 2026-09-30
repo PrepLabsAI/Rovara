@@ -52,6 +52,8 @@ export interface OrchestratorOptions {
   turnRecorder?: TurnRecorder;
   /** Tests and the offline evaluation register Pi's faux provider here; production creates its own. */
   modelRuntime?: ModelRuntime;
+  /** Issue 157: told each accepted worker task or follow-up operation before its tool waits on it. */
+  onOperationAccepted?: (operationId: string) => Promise<void>;
 }
 
 export type ReplySurface = "slack";
@@ -116,6 +118,7 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
     ...(options.requestId === undefined ? {} : { requestId: options.requestId }),
     ...(recorder === undefined ? {} : { onConnectorError: (toolCallId: string, code: string) => recorder.connectorFailed(toolCallId, code) }),
     ...(options.worker === undefined ? {} : { worker: options.worker }),
+    ...(options.onOperationAccepted === undefined ? {} : { onOperationAccepted: options.onOperationAccepted }),
   });
   assertOrchestrationOnly(customTools, catalogs);
   if (customTools.length > MAX_VISIBLE_TOOLS) {

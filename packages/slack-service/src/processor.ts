@@ -90,6 +90,10 @@ export interface TurnInput {
   recorder?: TurnRecorder;
   /** Connectors whose discovery this turn should bypass the broker's catalog cache. */
   refreshConnectors?: string[];
+  /** Issue 157: told each accepted worker task or follow-up operation, so the thread can remember it. Never throws. */
+  onOperationAccepted?: (operationId: string) => Promise<void>;
+  /** Issue 157: aborted when the turn is handed off to a new task; the host then stops the model. */
+  signal?: AbortSignal;
 }
 
 export type ServiceLog = (event: string, fields: Readonly<Record<string, string | number | boolean>>) => void;

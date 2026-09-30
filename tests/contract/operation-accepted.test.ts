@@ -1,0 +1,89 @@
+// Issue 157: the host hears about each worker operation the moment it is accepted, before the
+// tool waits on it, so a turn stopped mid-wait can be re-attached to that operation later.
+import { describe, expect, it, vi } from "vitest";
+import { createOrchestrationTools } from "../../packages/orchestrator/src/orchestration-tools.js";
+import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
+import { createFixtureDirectory } from "../fixtures/index.js";
+
+const OPERATION = "11111111-1111-4111-8111-111111111111";
+const context = { workspaceId: "22222222-2222-4222-8222-222222222222", conversationId: "33333333-3333-4333-8333-333333333333" };
+
+function fakeApi(order: string[]) {
+  return {
+    submitTask: vi.fn().mockResolvedValue({ operation: { id: OPERATION } }),
+    taskStatus: vi.fn().mockResolvedValue({ id: OPERATION, status: "RUNNING" }),
+    taskResult: vi.fn(async () => {
+      order.push("wait");
+      return { operationId: OPERATION, status: "SUCCEEDED", response: "done" };
+    }),
+    followUp: vi.fn().mockResolvedValue({ operation: { id: OPERATION } }),
+    createPullRequest: vi.fn().mockResolvedValue({ operation: { id: OPERATION } }),
+    managePullRequest: vi.fn().mockResolvedValue({ operation: { id: OPERATION } }),
+    pullRequestResult: vi.fn().mockResolvedValue({ operationId: OPERATION, status: "SUCCEEDED" }),
+  };
+}
+
+function tools(order: string[], onOperationAccepted: (operationId: string) => Promise<void>) {
+  const api = fakeApi(order);
+  const all = createOrchestrationTools(api, context, { requestId: () => "44444444-4444-4444-8444-444444444444", recovery: true, onOperationAccepted });
+  const named = (name: string) => {
+    const found = all.find((tool) => tool.name === name);
+    if (!found) throw new Error(`${name} is missing`);
+    return (parameters: Record<string, unknown>) => found.execute("call-1", parameters, undefined, undefined, {} as never);
+  };
+  return { api, named };
+}
+
+describe("onOperationAccepted", () => {
+  for (const name of ["agentx_submit_task", "agentx_follow_up"] as const) {
+    it(`${name} reports its accepted operation once, and before it waits on it`, async () => {
+      const order: string[] = [];
+      const accepted = vi.fn(async (operationId: string) => {
+        order.push(`accepted ${operationId}`);
+      });
+      await tools(order, accepted).named(name)({ prompt: "fix it" });
+      expect(accepted).toHaveBeenCalledOnce();
+      expect(order).toEqual([`accepted ${OPERATION}`, "wait"]);
+    });
+  }
+
+  it("is not called by the recovery tools, which start no new work", async () => {
+    const accepted = vi.fn(async () => undefined);
+    const { named } = tools([], accepted);
+    await named("agentx_task_status")({ operationId: OPERATION });
+    await named("agentx_task_result")({ operationId: OPERATION });
+    expect(accepted).not.toHaveBeenCalled();
+  });
+
+  it("is not called when the worker never accepted the task", async () => {
+    const accepted = vi.fn(async () => undefined);
+    const { api, named } = tools([], accepted);
+    api.submitTask.mockResolvedValueOnce({});
+    await expect(named("agentx_submit_task")({ prompt: "fix it" })).rejects.toThrow("omitted the operation");
+    expect(accepted).not.toHaveBeenCalled();
+  });
+});
+
+describe("the hosted Slack runtime", () => {
+  it("hands the turn's onOperationAccepted to agentx_submit_task", async () => {
+    const accepted = vi.fn(async () => undefined);
+    const runtime = await createHostedSlackRuntime({
+      message: {
+        version: 1, eventId: "EvACCEPT0001", receivedAt: "2026-09-29T19:30:00.000Z", userId: "U0123456789",
+        thread: { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" }, text: "fix it",
+      },
+      subject: "T0BSHLLUGBD/C0123456789/1695500000.000001",
+      ...context,
+      orchestratorInstructions: "Delegate work.",
+      computePrepared: true,
+      requestId: () => "44444444-4444-4444-8444-444444444444",
+      onOperationAccepted: accepted,
+    }, { stateDirectory: await createFixtureDirectory("agentx-accepted-"), api: fakeApi([]), model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" } });
+    try {
+      await runtime.session.getToolDefinition("agentx_submit_task")!.execute("submit-1", { prompt: "fix it" }, undefined, undefined, {} as never);
+    } finally {
+      await runtime.dispose();
+    }
+    expect(accepted).toHaveBeenCalledExactlyOnceWith(OPERATION);
+  });
+});

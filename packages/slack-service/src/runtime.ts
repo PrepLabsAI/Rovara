@@ -31,6 +31,7 @@ export function createHostedSlackRuntime(input: TurnInput, options: HostedRuntim
     ...(input.worker === undefined ? {} : { worker: input.worker }),
     ...(input.recorder === undefined ? {} : { turnRecorder: input.recorder }),
     ...(input.refreshConnectors === undefined ? {} : { refreshConnectors: input.refreshConnectors }),
+    ...(input.onOperationAccepted === undefined ? {} : { onOperationAccepted: input.onOperationAccepted }),
     actionGate: {
       session: input.gate ?? createGateSession(input.message.userId),
       ...(input.computePrepared === true ? { computePrepared: true } : {}),
