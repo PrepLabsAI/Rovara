@@ -143,7 +143,9 @@ them.
 
 - `enabled`: whether developers may start tasks on this project from an AI tool.
 - `channelMembersMayUse`: whether members of the project's bound Slack channels may use it from
-  an AI tool. With `false`, only people given access to the project directly may.
+  an AI tool. With `false`, only people an admin granted access to the project directly may.
+  Direct grants arrive with spec 025 phase 25e (the admin tool `agentx_admin_grant_project_access`);
+  until then, channel membership is the only way in, so leave this `true`.
 - `share`: with `required`, every task is shared into a bound channel when it starts.
 - `shareMode.default`: the mode a shared task gets when none is asked for.
 - `shareMode.allowContinue`: with `false`, every shared task is view only.

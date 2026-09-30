@@ -144,7 +144,9 @@ There are two modes:
 AgentX posts a new thread in the channel within seconds. The thread says who started the task,
 from which AI tool, its title, the project and its status. AgentX then posts there when the
 workspace is ready, when the task ends (with the worker's summary), when a pull request opens,
-when the mode changes, and when you close the task. Your instructions are not posted.
+when the mode changes, and when you close the task. Your instructions are not posted. Each time you
+send more instructions from your AI tool, the thread gets that request's end message and the
+worker's summary, but not the instructions.
 `agentx_get_task` shows the thread's link once it is posted.
 
 To change the mode later, ask your AI tool to share the task again with the other mode. The

@@ -167,7 +167,8 @@ After the install, day-2 work runs with the operator role that `init` created:
   wrong.
 - `agentx --env <name> config list`, `config get <key>` and `config set <key> <value>` read and
   change the models, the per-thread request limit, Slack settings, alerts and the budget. They show
-  the workspace limits too, but cannot change them yet (see "Working in a thread").
+  the workspace limits too, but cannot change them until spec 025 phase 25e (see "Working in a
+  thread").
 - `agentx --env <name> upgrade` moves to a newer release, showing every change and asking first;
   `upgrade --export <dir>` writes the upgrade for a platform team's pipeline instead.
 - `agentx --env <name> destroy` removes the environment. It needs admin credentials and an explicit
@@ -558,7 +559,8 @@ connectors can answer. In the maintainers' deployment, an administrator changes 
 `AgentXControlPlane` parameters `SlackMemberWorkspaceLimit` and `SlackOrganizationWorkspaceLimit`.
 An installed environment starts from the same defaults, and `agentx --env <name> config get
 limits.workspacesPerMember` (or `limits.workspacesPerOrg`) shows them. `config set` cannot change
-them yet: the admin tool that does (spec 025 phase 25e) is not built.
+them yet. Spec 025 phase 25e adds the way to change them: the admin tool
+`agentx_admin_set_workspace_limits`, and `config set` for these two keys.
 
 To stop the thread's running coding task, mention AgentX in the thread with just a stop request:
 
@@ -600,7 +602,9 @@ channels, with `agentx_share_task` or when starting it. AgentX posts a new threa
 started the task, from which tool, its title, the project and its status, and keeps the thread up
 to date: when the workspace is ready or could not be set up, when the task ends (with the worker's
 summary), when a pull request opens, when the mode changes, and when the task is closed. AgentX's
-own messages in the thread do not include the developer's instructions.
+own messages in the thread do not include the developer's instructions. When the developer sends
+more instructions from their AI tool, the thread gets that request's end message and the worker's
+summary, but not the instructions themselves.
 
 - **View only** (`view`): channel members follow the task, and the developer drives it from their
   AI tool. A mention in the thread gets a notice instead of running.
