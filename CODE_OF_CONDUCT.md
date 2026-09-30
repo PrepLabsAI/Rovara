@@ -10,6 +10,6 @@ discriminate against anyone.
 
 ## Reporting
 
-To report behaviour that breaks this code of conduct, email [conduct contact email]. Reports are
+To report behaviour that breaks this code of conduct, email abhishek2551996@gmail.com and ps06756@gmail.com. Reports are
 handled privately by the maintainers, who follow the enforcement guidelines in the Contributor
 Covenant.

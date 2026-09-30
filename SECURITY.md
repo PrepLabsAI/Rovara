@@ -10,7 +10,7 @@ for it.
 
 - **Preferred:** use GitHub's private reporting. On this repository, open the **Security** tab and
   choose **Report a vulnerability**.
-- **Or email:** [security contact email].
+- **Or email:** abhishek2551996@gmail.com and ps06756@gmail.com (both, so one of us sees it).
 
 Please include:
 
@@ -21,7 +21,7 @@ Please include:
 
 ## What happens next
 
-- We acknowledge your report within [N] working days.
+- We aim to reply within a week. We are a small team; if you have not heard back, email us again.
 - We confirm or rule out the problem, and tell you how we plan to fix it.
 - We fix it in a new release and publish a security advisory that credits you, unless you ask us
   not to.
