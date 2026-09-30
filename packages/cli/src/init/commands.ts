@@ -38,14 +38,17 @@ import {
 import { deployStep } from "./deploy-steps.js";
 import { finishSteps, readSettingsOrThrow, readyText } from "./finish-steps.js";
 import { githubAppStep, githubRestApi, type GitHubApi } from "./github-app.js";
+import { listAwsProfiles, pickAwsProfile, resolveCaller } from "./aws-account.js";
 import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallProgress, type InitAnswers, type InitStepId } from "./install-state.js";
 import { confirmInstallPlan } from "./plan.js";
-import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteChecks } from "./prerequisites.js";
+import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
 import { processPrompter, secretFromSource, unattendedPrompter, type Prompter } from "./prompts.js";
 import { fetchRelease } from "./release-fetch.js";
+import { problemText, retryOnPage } from "./retry.js";
 import { developerSignInStep } from "./signin-step.js";
 import { slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
 import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from "./steps.js";
+import { prerequisitesCard } from "./ui/cards.js";
 import { startInstallWizard, type InstallWizard } from "./ui/index.js";
 import type { WizardResume } from "./ui/protocol.js";
 
@@ -375,9 +378,15 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   const stopIndex = options.stopAfter === undefined ? -1 : steps.findIndex((step) => step.id === options.stopAfter);
   const runSteps = stopIndex < 0 ? steps : steps.slice(0, stopIndex + 1);
 
+  // FR-020 (Q9): on the page, the operator picks the AWS profile before anything reads AWS. It is
+  // put in AWS_PROFILE, which every AWS client built below, and every child process (cdk, the AWS
+  // CLI), reads. processEnv is process.env on a real run. The terminal path asks nothing here.
+  const awsProfile = session.wizard === undefined
+    ? undefined
+    : await pickAwsProfile({ profiles: await listAwsProfiles({ home: services.home, processEnv }), processEnv, prompter });
   const regions = release.regions();
   // The AWS CLI's own region comes first, so a resume looks where the install started.
-  const environmentRegion = [processEnv.AWS_REGION, processEnv.AWS_DEFAULT_REGION].find((value) => value !== undefined && regions.includes(value));
+  const environmentRegion = [processEnv.AWS_REGION, processEnv.AWS_DEFAULT_REGION, awsProfile?.region].find((value) => value !== undefined && regions.includes(value));
   // A bundle names its region, so a bundle resume never asks it.
   const region = options.region ?? bundle?.region ?? (await prompter.choose<string>("AWS region", regions.map((value) => ({ value, label: value })), { flag: "--region", defaultValue: environmentRegion ?? regions[0] ?? "us-east-1" }));
   if (bundle !== undefined && bundle.region !== region) throw agentXError("CONFIG_INVALID", `the bundle is for region ${bundle.region}; pass --region ${bundle.region}`);
@@ -385,7 +394,14 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
 
   const store = deployDeps.store ?? ssmParameterStore(new SSMClient({ region }));
   const secrets = deps.initSecrets ?? secretsManagerInitSecrets(new SecretsManagerClient({ region }));
-  const caller = await (deployDeps.identity ?? stsCallerIdentity(new STSClient({ region }))).get();
+  // FR-020 and FR-021: the account the install lands in, on the page; there, an expired session
+  // is signed in again instead of ending the run. The terminal path throws as before.
+  const caller = await resolveCaller({
+    identity: () => deployDeps.identity ?? stsCallerIdentity(new STSClient({ region })),
+    region, prompter, runner,
+    ...(session.wizard === undefined ? {} : { surface: session.wizard.surface }),
+    ...(awsProfile === undefined ? {} : { profile: awsProfile }),
+  });
   if (options.account !== undefined && options.account !== caller.account) {
     throw agentXError("CONFIG_INVALID", `--account ${options.account} does not match your AWS credentials, which are for account ${caller.account}; use credentials for ${options.account}, or leave --account off`);
   }
@@ -442,12 +458,43 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   if (answers.engine === "cdk" && options.source === undefined) throw agentXError("CONFIG_INVALID", `the cdk engine needs --source <a checkout of tag v${answers.releaseVersion}>`);
 
   const activePrompter = prompter;
+  // With --ui, the page's cards; the terminal path has none (SC-004).
+  const surface = session.wizard?.surface;
+  // Q5: with --ui, every other site is a button on the page. The terminal path opens the system
+  // browser, or prints the address with --no-browser, as before.
+  const stepBrowser = session.wizard?.openLink
+    ?? (options.browser ? neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) : undefined);
   const finalAnswers = answers;
   // A first run's OpenRouter key is not stored until after the plan, so the check uses it directly.
   const pendingKey = collected?.openRouterKey === undefined
     ? undefined
     : { key: collected.openRouterKey, ...(collected.openRouterProviders === undefined ? {} : { providers: collected.openRouterProviders }) };
-  const runPrerequisites = () => checkPrerequisites({ answers: finalAnswers, release, caller, checks, prompter: activePrompter, write, ...(pendingKey === undefined ? {} : { openRouterKey: pendingKey }) });
+  // FR-023 (Q7): on the page, the checks are a checklist, and a failure can be checked again
+  // after the fix; the terminal path stops with the collected problems, as before.
+  const runPrerequisites = () => retryOnPage({
+    surface, prompter: activePrompter, question: "Check the prerequisites again?",
+    // The card already lists every failed check, so the retry shows nothing of its own.
+    failed: () => undefined,
+    run: async () => {
+      const found: PrerequisiteCheck[] = [];
+      const show = (status: "running" | "ok" | "failed") => surface?.card(prerequisitesCard({ status, checks: found }));
+      show("running");
+      try {
+        await checkPrerequisites({
+          answers: finalAnswers, release, caller, checks, prompter: activePrompter, write,
+          onCheck: (check) => { found.push(check); show("running"); },
+          ...(pendingKey === undefined ? {} : { openRouterKey: pendingKey }),
+        });
+      } catch (error) {
+        // A failure no check reported (a cdk bootstrap that fails after yes, say) is still listed,
+        // so the page never shows a failed card with nothing to fix.
+        if (!found.some((check) => !check.ok)) found.push({ label: "Prerequisites", ok: false, detail: problemText(error) });
+        show("failed");
+        throw error;
+      }
+      show("ok");
+    },
+  });
   let prerequisitesPassed = false;
   let rotatedWebhook: string | undefined;
   let rotatedOpenRouterKey: string | undefined;
@@ -503,7 +550,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     const settings = await readSettingsOrThrow(store, env);
     return openAdminSession({
       settings, services: setup, write, now,
-      ...(options.browser ? { openBrowser: neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) } : {}),
+      ...(stepBrowser === undefined ? {} : { openBrowser: stepBrowser }),
       ...(adminClaim === undefined ? {} : { adminClaim }),
     });
   };
@@ -518,7 +565,9 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     secrets,
     prompter: activePrompter,
     write,
-    ...(options.browser ? { openBrowser: neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) } : {}),
+    ...(stepBrowser === undefined ? {} : { openBrowser: stepBrowser }),
+    ...(surface === undefined ? {} : { surface }),
+    ...(session.wizard === undefined ? {} : { manifestHost: session.wizard.manifestHost }),
     now,
     sleep,
     fetch: fetchImplementation,

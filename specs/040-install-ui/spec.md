@@ -95,29 +95,42 @@ browser the wizard prints its URL and falls back to the terminal prompter.
 - **FR-010**: Every request MUST carry a single-use session token minted for that run. A request
   without it MUST be refused.
 - **FR-011**: The server MUST reject any request whose `Origin` or `Referer` is not its own, MUST
-  send no CORS headers, and MUST reject cross-site `Sec-Fetch-Site` values.
+  send no CORS headers, and MUST reject cross-site `Sec-Fetch-Site` values. One exception (Q6):
+  `GET /github/created`, only while the GitHub App step waits for the manifest code, only with the
+  manifest flow's `state` (compared in constant time), once, and only with the listener's own
+  `Host`. Its answer loads nothing and sends no Referer. A late or second callback is refused by the
+  ordinary checks (403 for GitHub's cross-site visit, 401 without a session token) and resolves
+  nothing.
 - **FR-012**: A secret entered in the page MUST pass straight through the existing `cleanSecret` →
   Secrets Manager path. It MUST NOT be echoed back to the page, put in an `InitEvent`, written to
-  an install-progress `note`, or written to disk.
+  an install-progress `note`, or written to disk. In the page, a masked field is emptied as soon as
+  its value is sent, and the question area is emptied once the answer is taken (Q4).
 
 ### Connect AWS
 
 - **FR-020**: The AWS screen MUST list the profiles in the operator's AWS configuration, and for
   the selected one show the resolved `sts:GetCallerIdentity` account id and ARN, so the operator can
-  see which account the install will land in before it starts.
+  see which account the install will land in before it starts. The profiles are read from the AWS
+  CLI's config and credentials files; with two or more, the page asks which; the choice is not
+  stored (Q9).
 - **FR-021**: When credentials are missing or expired (`AUTH_REQUIRED`), the screen MUST offer a
   sign-in action that runs the profile's SSO login and re-resolves the identity, instead of ending
-  the run with advice text.
+  the run with advice text. The sign-in action is `aws sso login --profile <name>` for an IAM
+  Identity Center profile and `aws login --profile <name>` for an `aws login` profile; other
+  profiles get Check again only (Q9).
 - **FR-022**: The region picker MUST offer only the regions the release supports.
 - **FR-023**: The prerequisite checks (region support, Bedrock model access, EC2 vCPU quota) MUST be
   shown as a pass/fail list, each failure with what to do about it, and MUST be re-runnable without
-  restarting `init`.
+  restarting `init`. Checking again is offered on the page only; the terminal path stops as before
+  (Q7). On the page, a prerequisite failure that no check reports is listed as a failed
+  "Prerequisites" item with the error's words.
 
 ### Connect GitHub
 
 - **FR-030**: The GitHub App MUST be created through the existing manifest flow, with the manifest
   form and the callback both served by the wizard's own origin, so the operator stays in the
-  wizard. The existing `state` check MUST still be enforced on the callback.
+  wizard. The existing `state` check MUST still be enforced on the callback. The terminal path
+  keeps its one-time listener.
 - **FR-031**: After creation the wizard MUST link the operator to the app's repository-selection
   page and show the installation wait as a waiting card that resolves when the installation
   appears.
@@ -126,9 +139,11 @@ browser the wizard prints its URL and falls back to the terminal prompter.
 
 - **FR-040**: The Slack screen MUST offer a button that opens Slack's create-app page with the
   generated manifest, then two masked fields for the bot token and signing secret, validated inline
-  by the existing `checkSlackBotToken` and `checkSlackSigningSecret`.
+  by the existing `checkSlackBotToken` and `checkSlackSigningSecret`. A token Slack refuses is
+  pasted again on the page (Q8).
 - **FR-041**: The Request URL verification MUST be shown as a live card with its result, and MUST
-  be re-runnable after the operator fixes the app.
+  be re-runnable after the operator fixes the app. Checking again is offered on the page only; the
+  terminal path stops as before (Q7).
 
 ### Finish the job
 
@@ -176,3 +191,8 @@ browser the wizard prints its URL and falls back to the terminal prompter.
 - **Phasing**: (1) server, prompter, event/log stream, review and resume screens behind `--ui`;
   (2) the three connect screens and the prerequisite checklist; (3) admin user, project, channel
   bind and the test reply; (4) UI on by default plus packaging and docs. Phase 1 is shippable alone.
+  Phase 2 built, see PR #161; its live check is deferred
+  to the combined final live check (owner, 2026-09-30).
+- **Cards.** The page's connect and finishing screens are status cards built in `ui/cards.ts` from
+  facts a step already has; no card builder takes a secret. Steps reach the page through an
+  optional `InstallSurface` on the init context, so the terminal path is unchanged (phase 2).

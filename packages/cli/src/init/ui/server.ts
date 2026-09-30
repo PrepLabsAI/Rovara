@@ -10,9 +10,14 @@
 //   4. The session token, minted for this run, matches. No token, no answer.
 //
 // No response ever carries a CORS header, so a page on another origin cannot read one either way.
+//
+// One exception (Q6): GitHub's redirect back to GET /github/created is a cross-site top-level
+// visit with no session token. It skips checks 2 to 4 only while a GitHub App is awaited, only with
+// this listener's own Host, and is then held to the manifest flow's own state, once.
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { agentXError } from "@agentx/contracts";
+import type { ManifestHost, OpenManifestHost } from "../context.js";
 import { WIZARD_CSP, WIZARD_CSS, WIZARD_JS, wizardHtml } from "./page.js";
 import { WIZARD_TOKEN_HEADER, WIZARD_TOKEN_QUERY, type AnswerReply } from "./protocol.js";
 import type { WizardHub, WizardListener } from "./state.js";
@@ -22,6 +27,32 @@ const MAX_BODY_BYTES = 64 * 1024;
 /** Keeps a browser from dropping an idle event stream while a deploy step runs for minutes. */
 const HEARTBEAT_MS = 20_000;
 
+export const GITHUB_START_PATH = "/github/start";
+export const GITHUB_CALLBACK_PATH = "/github/created";
+
+/** The GitHub form page's policy: its one script (by nonce) submits one form, to GitHub only. */
+export function manifestFormCsp(nonce: string): string {
+  return `default-src 'none'; script-src 'nonce-${nonce}'; form-action https://github.com; base-uri 'none'; frame-ancestors 'none'`;
+}
+
+/** The callback's answer carries nothing and loads nothing, and sends no Referer onward. */
+const CALLBACK_HEADERS: Record<string, string> = {
+  "cache-control": "no-store",
+  "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+  "referrer-policy": "no-referrer",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
+};
+const CALLBACK_PAGE = (text: string) => `<!doctype html><meta charset="utf-8"><title>Install AgentX</title><p>${text}</p>`;
+
+interface ManifestRoute {
+  state: string;
+  page: (redirectUrl: string, nonce?: string) => string;
+  resolve: (code: string) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+}
+
 export interface WizardServer {
   /** The address to open, session token and all. */
   url: string;
@@ -29,6 +60,8 @@ export interface WizardServer {
   token: string;
   /** Ends every event stream and stops listening. The process must be able to exit afterwards. */
   close(): Promise<void>;
+  /** FR-030: serves the GitHub App flow until the code arrives, the wait times out, or `close`. */
+  mountManifest(input: Parameters<OpenManifestHost>[0]): ManifestHost;
 }
 
 const SECURITY_HEADERS: Record<string, string> = {
@@ -95,14 +128,37 @@ export async function startWizardServer(input: { hub: WizardHub; port?: number; 
   const token = input.token ?? randomBytes(32).toString("base64url");
   const streams = new Set<ServerResponse>();
   let expectedOrigin = "";
+  let expectedHost = "";
+  let manifest: ManifestRoute | undefined;
 
   const send = (response: ServerResponse, status: number, type: string, body: string) => {
     response.writeHead(status, { ...SECURITY_HEADERS, "content-type": type, "content-length": Buffer.byteLength(body) });
     response.end(body);
   };
 
+  // Q6: GitHub's redirect back is a cross-site top-level visit with no session token. It is let
+  // through only here: while a GitHub App is awaited, with the flow's own state, once.
+  const githubCallback = (url: URL, route: ManifestRoute, response: ServerResponse): void => {
+    const answer = (status: number, text: string) => {
+      const body = CALLBACK_PAGE(text);
+      response.writeHead(status, { ...CALLBACK_HEADERS, "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(body) });
+      response.end(body);
+    };
+    if (!tokensMatch(url.searchParams.get("state") ?? undefined, route.state)) return answer(400, "This page is from a different agentx init run.");
+    const code = url.searchParams.get("code");
+    if (code === null || code === "") return answer(400, "GitHub sent no code. Go back to the Install AgentX tab.");
+    manifest = undefined;
+    clearTimeout(route.timer);
+    route.resolve(code);
+    // GitHub has not converted the code yet; the Install AgentX tab says whether that worked.
+    return answer(200, "GitHub sent AgentX the new app's code. Go back to the Install AgentX tab to continue.");
+  };
+
   const handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? "/", expectedOrigin);
+    if (request.method === "GET" && url.pathname === GITHUB_CALLBACK_PATH && manifest !== undefined && headerValue(request, "host") === expectedHost) {
+      return githubCallback(url, manifest, response);
+    }
     const refusal = refusalReason({
       host: headerValue(request, "host"),
       origin: headerValue(request, "origin"),
@@ -119,6 +175,14 @@ export async function startWizardServer(input: { hub: WizardHub; port?: number; 
     }
     if (request.method === "GET" && url.pathname === "/app.css") return send(response, 200, "text/css; charset=utf-8", WIZARD_CSS);
     if (request.method === "GET" && url.pathname === "/app.js") return send(response, 200, "text/javascript; charset=utf-8", WIZARD_JS);
+    if (request.method === "GET" && url.pathname === GITHUB_START_PATH) {
+      if (manifest === undefined) return send(response, 404, "text/plain; charset=utf-8", "not found\n");
+      const nonce = randomBytes(16).toString("base64");
+      const body = manifest.page(`${expectedOrigin}${GITHUB_CALLBACK_PATH}`, nonce);
+      response.writeHead(200, { ...SECURITY_HEADERS, "content-security-policy": manifestFormCsp(nonce), "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(body) });
+      response.end(body);
+      return;
+    }
     if (request.method === "GET" && url.pathname === "/state") {
       return send(response, 200, "application/json; charset=utf-8", JSON.stringify(input.hub.snapshot()));
     }
@@ -181,12 +245,46 @@ export async function startWizardServer(input: { hub: WizardHub; port?: number; 
   if (address === null || typeof address === "string") throw agentXError("CONFIG_INVALID", "the install wizard's listener did not bind a TCP port; run agentx init --no-ui");
   const { port } = address;
   expectedOrigin = `http://127.0.0.1:${port}`;
+  expectedHost = `127.0.0.1:${port}`;
 
   return {
     port,
     token,
     url: `${expectedOrigin}/?${WIZARD_TOKEN_QUERY}=${encodeURIComponent(token)}`,
+    mountManifest(next) {
+      if (manifest !== undefined) {
+        clearTimeout(manifest.timer);
+        manifest.reject(agentXError("CONFIG_INVALID", "a newer GitHub App page replaced this one; use the newest one"));
+      }
+      let resolveCode: (code: string) => void = () => undefined;
+      let rejectCode: (error: Error) => void = () => undefined;
+      const code = new Promise<string>((resolvePromise, reject) => { resolveCode = resolvePromise; rejectCode = reject; });
+      code.catch(() => undefined);
+      const timer = setTimeout(() => {
+        if (manifest?.timer === timer) manifest = undefined;
+        rejectCode(agentXError("CONFIG_INVALID", `no GitHub App was created within ${Math.round(next.timeoutMs / 60_000)} minutes; run agentx init again`));
+      }, next.timeoutMs);
+      timer.unref();
+      manifest = { state: next.state, page: next.page, resolve: resolveCode, reject: rejectCode, timer };
+      return {
+        port,
+        // The page and the terminal already hold the session token; the start page needs it.
+        startUrl: `${expectedOrigin}${GITHUB_START_PATH}?${WIZARD_TOKEN_QUERY}=${encodeURIComponent(token)}`,
+        redirectUrl: `${expectedOrigin}${GITHUB_CALLBACK_PATH}`,
+        code,
+        close: () => {
+          if (manifest?.timer !== timer) return;
+          clearTimeout(timer);
+          manifest = undefined;
+        },
+      };
+    },
     async close() {
+      if (manifest !== undefined) {
+        clearTimeout(manifest.timer);
+        manifest.reject(agentXError("CONFIG_INVALID", "the install wizard closed before the GitHub App was created"));
+        manifest = undefined;
+      }
       // Every stream is ended rather than destroyed, so the page sees the "closed" event it was
       // sent before the socket goes; closeAllConnections then frees the keep-alive sockets a
       // browser holds open, which would otherwise keep the process alive.

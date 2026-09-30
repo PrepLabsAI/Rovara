@@ -10,6 +10,7 @@ import type { AdminSession, SetupServices } from "../setup/services.js";
 import type { SigninFlags } from "../signin/collect.js";
 import type { InitAnswers } from "./install-state.js";
 import type { Prompter, SecretSource } from "./prompts.js";
+import type { WizardCard } from "./ui/protocol.js";
 
 export interface InitSecrets extends SecretValueStore {
   /** PutSecretValue on an existing secret. */
@@ -81,6 +82,16 @@ export interface FinishFlags {
   asanaClientId?: string; asanaClientSecret?: SecretSource; asanaBotEmail?: string; asanaProject?: string; linearTeam?: string;
 }
 
+/** The install page, with --ui only. Steps show what they are doing on it, next to the lines they
+ * already write; with no page, every step behaves exactly as before. */
+export interface InstallSurface { card(card: WizardCard): void }
+
+/** Where the GitHub App's manifest form is served and GitHub's redirect is received: the terminal
+ * path's one-time listener (github-app.ts's startManifestListener), or the wizard's own address
+ * with --ui (FR-030). */
+export interface ManifestHost { port: number; startUrl: string; redirectUrl: string; code: Promise<string>; close(): void }
+export type OpenManifestHost = (input: { state: string; page: (redirectUrl: string, nonce?: string) => string; timeoutMs: number }) => Promise<ManifestHost>;
+
 // write, now and sleep are function-typed properties rather than methods, so steps can pass them
 // on (as `write: context.write`) without an unbound-method lint error.
 export interface InitContext {
@@ -96,6 +107,10 @@ export interface InitContext {
   /** Absent with --no-browser. Never throws: false means no browser opened (init already said so),
    * and the step carries on without it. */
   openBrowser?: (url: string) => Promise<boolean>;
+  /** With --ui only: the page's cards. Undefined on the terminal path, and every use is `?.`. */
+  surface?: InstallSurface;
+  /** With --ui only: the wizard serves the GitHub App flow itself. */
+  manifestHost?: OpenManifestHost;
   now: () => number;
   sleep: (ms: number) => Promise<void>;
   fetch: typeof fetch;

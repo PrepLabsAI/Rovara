@@ -3,7 +3,7 @@
 // 128-character cut like macOS `security add-generic-password -w`.
 import { readFile as readFileFromDisk } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
-import { agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError } from "@agentx/contracts";
 
 export interface TextWriter { write(text: string): unknown }
 export interface PromptFlag { flag: string }
@@ -13,8 +13,10 @@ export interface Prompter {
    * with this message instead of taking the default. */
   choose<T extends string>(question: string, choices: ReadonlyArray<{ value: T; label: string }>, options: PromptFlag & { defaultValue: T; unattendedRefusal?: string }): Promise<T>;
   confirm(question: string, options: { defaultValue: boolean }): Promise<boolean>;
-  /** Hidden answer: nothing typed is echoed. A multiline request is refused up front on an interactive prompt. */
-  secret(question: string, options: PromptFlag & { multiline?: boolean }): Promise<string>;
+  /** Hidden answer: nothing typed is echoed. A multiline request is refused up front on an
+   * interactive prompt. `validate` is checked on the field by the install page (spec 040 FR-040);
+   * the terminal's hidden prompt ignores it, and the caller's own check still runs after. */
+  secret(question: string, options: PromptFlag & { multiline?: boolean; validate?: (value: string) => string | undefined }): Promise<string>;
 }
 
 const PASTE_START = "\u001b[200~";
@@ -22,6 +24,26 @@ const PASTE_END = "\u001b[201~";
 
 export function stripPasteMarkers(text: string): string {
   return text.replaceAll(PASTE_START, "").replaceAll(PASTE_END, "");
+}
+
+/** An error's own words for a person: an AgentXError without its own "CODE: " prefix. Any other
+ * error keeps its message whole, so a Node code such as "ENOENT: " stays part of it. */
+export function messageWithoutCode(error: Error): string {
+  const prefix = error instanceof AgentXError ? `${error.code}: ` : undefined;
+  return prefix !== undefined && error.message.startsWith(prefix) ? error.message.slice(prefix.length) : error.message;
+}
+
+/** A check that throws (checkSlackBotToken and the like) as a field validator: the refusal's own
+ * words, without the error code. The checks never quote the value, so neither does this. */
+export function fieldCheck(check: (value: string) => unknown): (value: string) => string | undefined {
+  return (value) => {
+    try {
+      check(value);
+      return undefined;
+    } catch (error) {
+      return error instanceof Error ? messageWithoutCode(error) : "that value is not valid";
+    }
+  };
 }
 
 export function unattendedPrompter(): Prompter {
@@ -201,6 +223,8 @@ export interface SecretSource { file?: string; envName?: string }
 
 export async function secretFromSource(input: {
   what: string; flag: string; source: SecretSource; processEnv: NodeJS.ProcessEnv; prompter: Prompter; multiline?: boolean;
+  /** Checked on the install page's field only; a file or an environment variable has no field. */
+  validate?: (value: string) => string | undefined;
   readFile?: (path: string) => Promise<string>;
 }): Promise<string> {
   const read = input.readFile ?? ((path: string) => readFileFromDisk(path, "utf8"));
@@ -219,7 +243,11 @@ export async function secretFromSource(input: {
     if (raw === undefined) throw agentXError("CONFIG_INVALID", `environment variable ${input.source.envName} (${input.flag}-env) is not set`);
     return clean(raw);
   }
-  const secretOptions = input.multiline === true ? { flag: input.flag, multiline: true } : { flag: input.flag };
+  const secretOptions = {
+    flag: input.flag,
+    ...(input.multiline === true ? { multiline: true } : {}),
+    ...(input.validate === undefined ? {} : { validate: input.validate }),
+  };
   return clean(await input.prompter.secret(input.what, secretOptions));
 }
 

@@ -1,0 +1,162 @@
+// packages/cli/src/init/ui/cards.ts
+// What each screen of the install page says (spec 040 FR-020 to FR-041, and phase 3's finishing
+// screens). Every card is built here, from facts a step already has, so the page's words are
+// tested in one place and the page only lays text out. No builder takes a secret, so no card can
+// carry one (FR-012).
+import { DEDICATED_ACCOUNT_NOTE, type PrerequisiteCheck } from "../prerequisites.js";
+import type { WizardCard } from "./protocol.js";
+
+/** A button's label for an address the run opens: "Open github.com". */
+export function linkLabel(url: string): string {
+  try {
+    return `Open ${new URL(url).host}`;
+  } catch {
+    return "Open the address";
+  }
+}
+
+/** A step's error as a card shows it where the page offers to try again in place: without the
+ * terminal's closing "run agentx init again", which would send the operator the wrong way. The
+ * terminal's error text is unchanged. */
+export function onPageProblem(problem: string): string {
+  return problem.replace(/[;,] (?:then )?run agentx init again\.?$/, "");
+}
+
+export function awsCard(input: { account: string; arn: string; region: string; profile?: string }): WizardCard {
+  return {
+    id: "aws", title: "AWS account", status: "ok",
+    lines: [
+      `AgentX installs into account ${input.account} in ${input.region}.`,
+      `Signed in as ${input.arn}${input.profile === undefined ? "" : ` (profile ${input.profile})`}.`,
+      DEDICATED_ACCOUNT_NOTE,
+    ],
+  };
+}
+
+/** FR-021: the session is missing or expired. `signIn` is the command Sign in runs, when the
+ * profile has one; `ranProblem` is why the last sign-in could not run. */
+export function awsSignedOutCard(input: { profile?: string; problem: string; signIn?: string; ranProblem?: string }): WizardCard {
+  const next = input.signIn !== undefined
+    ? `Choose Sign in to run ${input.signIn}; a browser tab opens for it. If no tab opens, the terminal running agentx init shows the address and code.`
+    : input.profile === undefined
+      ? "Sign in again in a terminal, then choose Check again."
+      : `Update the credentials of profile ${input.profile} in a terminal, then choose Check again.`;
+  return {
+    id: "aws", title: "AWS account", status: "failed",
+    lines: [
+      input.profile === undefined ? "AgentX cannot use your AWS sign-in." : `AgentX cannot use the AWS sign-in of profile ${input.profile}.`,
+      input.problem,
+      ...(input.ranProblem === undefined ? [] : [input.ranProblem]),
+      next,
+    ],
+  };
+}
+
+/** The prerequisites as a checklist (FR-023): each check with its own result, as it finishes. */
+export function prerequisitesCard(input: { status: "running" | "ok" | "failed"; checks: readonly PrerequisiteCheck[] }): WizardCard {
+  const lines = input.status === "running"
+    ? ["Checking this account and region before anything is created."]
+    : input.status === "ok"
+      ? ["Every check passed."]
+      : ["Nothing has been created. Fix each item marked with a cross, then answer Yes below to check again."];
+  return { id: "prerequisites", title: "Prerequisites", status: input.status, lines, checks: input.checks.map((check) => ({ ...check })) };
+}
+
+export type GitHubCardInput =
+  | { stage: "create"; appName: string; account: string; startUrl: string }
+  | { stage: "install"; slug: string; account: string; installUrl: string }
+  | { stage: "repositories"; slug: string; account: string; settingsUrl: string }
+  | { stage: "done"; slug: string; account: string };
+
+/** FR-030 and FR-031: creating the app, then the installation wait, as one card. */
+export function githubCard(input: GitHubCardInput): WizardCard {
+  const base = { id: "github" as const, title: "GitHub App" };
+  switch (input.stage) {
+    case "create": return {
+      ...base, status: "waiting",
+      lines: [`Create the GitHub App "${input.appName}" for ${input.account}. GitHub opens with everything filled in; press Create GitHub App.`, "This page moves on by itself once GitHub sends you back."],
+      link: { url: input.startUrl, label: "Create the GitHub App" },
+    };
+    case "install": return {
+      ...base, status: "waiting",
+      lines: [`Install ${input.slug} on ${input.account} and choose the repositories AgentX may use.`, "Waiting for the installation. This page moves on by itself."],
+      link: { url: input.installUrl, label: "Install the app and choose repositories" },
+    };
+    case "repositories": return {
+      ...base, status: "waiting",
+      lines: [`${input.slug} is installed but can see no repositories.`, "Choose at least one. This page moves on by itself."],
+      link: { url: input.settingsUrl, label: "Choose repositories" },
+    };
+    case "done": return { ...base, status: "ok", lines: [`${input.slug} is installed on ${input.account}.`] };
+  }
+}
+
+export type SlackCardInput =
+  | { stage: "create"; appName: string; createUrl: string }
+  | { stage: "credentials"; appName: string }
+  | { stage: "bot"; user: string; team: string }
+  /** `retry: false` when the page cannot offer a paste again: the problem is shown whole, with its
+   * advice to run agentx init again. */
+  | { stage: "refused"; problem: string; retry?: false }
+  | { stage: "approval"; appName: string; rerun: string }
+  | { stage: "done"; appId: string; teamId: string };
+
+/** FR-040: the Slack app, from the create button to its stored credentials. */
+export function slackAppCard(input: SlackCardInput): WizardCard {
+  const base = { id: "slack" as const, title: "Slack app" };
+  switch (input.stage) {
+    case "create": return {
+      ...base, status: "waiting",
+      lines: [
+        `Create the Slack app "${input.appName}" from AgentX's manifest: pick the workspace, press Next, then Create, then Install to Workspace.`,
+        "If your workspace needs an admin to approve new apps, choose Request to Install, then answer Not yet below.",
+      ],
+      link: { url: input.createUrl, label: "Create the Slack app" },
+    };
+    case "credentials": return {
+      ...base, status: "waiting",
+      lines: [
+        "Paste the Bot User OAuth Token (OAuth & Permissions) and the Signing Secret (Basic Information, App Credentials) below.",
+        "Both go straight to AWS Secrets Manager and are never shown again.",
+      ],
+    };
+    case "bot": return { ...base, status: "waiting", lines: [`Slack says this token belongs to the bot @${input.user} in workspace ${input.team}.`] };
+    case "refused": return {
+      ...base, status: "failed",
+      lines: [input.retry === false ? input.problem : onPageProblem(input.problem), ...(/nothing was saved/i.test(input.problem) ? [] : ["Nothing was saved."])],
+    };
+    case "approval": return { ...base, status: "waiting", lines: [`Slack is waiting for a workspace admin to approve "${input.appName}".`, `Once it is installed, run ${input.rerun}; it continues here.`] };
+    case "done": return { ...base, status: "ok", lines: [`Slack app ${input.appId} is installed in workspace ${input.teamId}.`] };
+  }
+}
+
+export type SlackUrlsCardInput =
+  | { stage: "checking"; eventsUrl: string }
+  | { stage: "waiting-for-secret"; eventsUrl: string }
+  | { stage: "verify"; pageUrl: string }
+  | { stage: "failed"; problem: string; pageUrl: string }
+  | { stage: "done"; eventsUrl: string };
+
+/** FR-041: the Request URL check, live, and run again after a fix. */
+export function slackUrlsCard(input: SlackUrlsCardInput): WizardCard {
+  const base = { id: "slack-urls" as const, title: "Slack Request URL" };
+  const events = "Open Event Subscriptions";
+  switch (input.stage) {
+    case "checking": return { ...base, status: "running", lines: [`Sending ${input.eventsUrl} a signed test request, the way Slack will.`] };
+    case "waiting-for-secret": return {
+      ...base, status: "running",
+      lines: [`Sending ${input.eventsUrl} a signed test request, the way Slack will.`, "The Slack service keeps the old signing secret for up to 5 minutes; checking again every 15 seconds."],
+    };
+    case "verify": return {
+      ...base, status: "waiting",
+      lines: ["AgentX answers Slack's URL check.", "Open Event Subscriptions. If the Request URL is not marked Verified, press Retry there, then answer below."],
+      link: { url: input.pageUrl, label: events },
+    };
+    case "failed": return {
+      ...base, status: "failed",
+      lines: [onPageProblem(input.problem), "Fix it, then answer Yes below to run the check again."],
+      link: { url: input.pageUrl, label: events },
+    };
+    case "done": return { ...base, status: "ok", lines: [`Slack has verified ${input.eventsUrl}.`] };
+  }
+}
