@@ -59,6 +59,8 @@ export function createBroker(options: {
   slackThreadsTableName?: string;
   /** Artifact storage; a bare mock that answers nothing when absent. */
   s3?: { send: (command: never) => Promise<unknown> };
+  /** Spread into the broker input last, for inputs this helper has no option for. */
+  extra?: Record<string, unknown>;
 } = {}) {
   if (!loaded) throw new Error("call loadSlackBroker() in a beforeAll before createBroker()");
   const db = new FakeDynamoDb();
@@ -92,6 +94,7 @@ export function createBroker(options: {
             organizationWorkspaceLimit: options.organizationLimit ?? 20,
           },
         }),
+    ...options.extra,
   };
   const handler = loaded.createAwsBrokerHandler(brokerInput as never);
   return { db, handler, deleteEc2Session, brokerInput };

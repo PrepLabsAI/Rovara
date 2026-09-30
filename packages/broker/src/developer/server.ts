@@ -1,20 +1,27 @@
 // packages/broker/src/developer/server.ts
 // Spec 025 FR-001 to FR-008: the control plane as the developers' sign-in server. Behind
-// ANY /v1/auth/{proxy+} with no authorizer, plus two direct-invoke operations for the broker
-// (channel members, and channel names for R10).
+// ANY /v1/auth/{proxy+} with no authorizer, plus direct-invoke operations for the broker
+// (channel members, channel names for R10, and 25d's email lookup and bot token check).
 // Nothing here logs or echoes a secret, a code, a token or a caught error's message.
 import { randomBytes } from "node:crypto";
 import {
   AGENTX_CLI_CLIENT_ID,
   ChannelInfoRequestSchema,
   ChannelMembersRequestSchema,
+  ADMIN_API_VERSION,
   DEVELOPER_API_VERSION,
+  SlackAuthCheckRequestSchema,
+  SlackUserByEmailRequestSchema,
   isLoopbackRedirectUri,
   type ChannelInfoRequest,
   type ChannelInfoResponse,
   type ChannelMembersRequest,
   type ChannelMembersResponse,
   type DeveloperSignInMethod,
+  type SlackAuthCheckRequest,
+  type SlackAuthCheckResponse,
+  type SlackUserByEmailRequest,
+  type SlackUserByEmailResponse,
 } from "@agentx/contracts";
 import { adaptHttpApiEvent, ownerKeyForSubject, type HttpApiV2Event } from "../aws/lambda.js";
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ProviderResult, type SignInProvider } from "./providers.js";
@@ -337,6 +344,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     return {
       env: config.env,
       apiVersion: DEVELOPER_API_VERSION,
+      adminApiVersion: ADMIN_API_VERSION,
       issuer: config.issuer,
       authorizationEndpoint: endpoint("/authorize"),
       tokenEndpoint: endpoint("/token"),
@@ -377,8 +385,21 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
 
   const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname.startsWith("/v1/auth/callback/");
 
-  return async (event: HttpApiV2Event | ChannelMembersRequest | ChannelInfoRequest): Promise<HttpResult | ChannelMembersResult | ChannelInfoResponse> => {
+  return async (
+    event: HttpApiV2Event | ChannelMembersRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest,
+  ): Promise<HttpResult | ChannelMembersResult | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse> => {
     if ("kind" in event) {
+      if (event.kind === "slack-user-by-email") {
+        const parsed = SlackUserByEmailRequestSchema.safeParse(event);
+        if (!parsed.success) return { ok: false, error: "invalid_request" };
+        const found = await deps.directory.lookupByEmail(parsed.data.email);
+        if (found === "unavailable") return { ok: false, error: "slack_unavailable" };
+        return found === "none" ? { ok: true } : { ok: true, userId: found.userId };
+      }
+      if (event.kind === "slack-auth-check") {
+        if (!SlackAuthCheckRequestSchema.safeParse(event).success) return { ok: false, error: "invalid_request" };
+        return deps.directory.authTest();
+      }
       if (event.kind === "channel-info") {
         const parsed = ChannelInfoRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };
