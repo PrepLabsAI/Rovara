@@ -97,6 +97,11 @@ from a source checkout with a locally built release, and needs container images 
 yourself. When a release is published, the whole install is one command:
 `npx @charterarc/agentx init --env <name>`.
 
+On your own computer, `init` opens an install page in your browser, served only from this computer,
+and asks everything there, from the AWS account to the first reply in Slack. Pass `--no-ui` to
+answer in the terminal instead. SSH sessions, CloudShell, CI and `--yes` use the terminal on their
+own. See [docs/install.md](docs/install.md#the-install-page).
+
 You need:
 
 - AWS administrator credentials for the first run, ideally in an AWS account used only for
@@ -137,9 +142,9 @@ node packages/cli/dist/main.js --env <name> init --region us-east-1 --release ./
     command developers use to sign in.
 
 `init` deploys published CloudFormation templates by default; `--engine cdk --source <checkout>`
-deploys with the CDK from a clean checkout of the release's tag instead. `--ui` asks every question
-on a page on `127.0.0.1` instead of in the terminal, with the plan to review and a checklist of
-steps; the terminal is still the default. `--stop-after <step>` runs the steps up to that one and
+deploys with the CDK from a clean checkout of the release's tag instead. In a terminal on your own
+computer, `init` asks every question on a page on `127.0.0.1` by default; `--no-ui` keeps it in
+the terminal. `--stop-after <step>` runs the steps up to that one and
 stops, for automated tests; running `init` again finishes.
 
 An installed environment's stacks are named `agentx-<env>-access`, `-foundation`, `-identity`,
