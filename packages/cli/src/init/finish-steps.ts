@@ -129,7 +129,8 @@ export function firstProjectStep(): InitStep<InitContext> {
         context.surface?.card(projectCard({ name: added.name, revision: added.revision, ...(repository === undefined ? {} : { repository }) }));
         shown = true;
       }
-      // A project an earlier run recorded is shown without its repository.
+      // A project an earlier run recorded is shown without its repository, as is one added by an
+      // unchanged rerun with --project-name, which chooses no repository.
       if (!shown) context.surface?.card(projectCard({ name: project.name, revision: project.revision }));
       if (project.channelId === undefined) {
         const slack = progress.current().slack;
