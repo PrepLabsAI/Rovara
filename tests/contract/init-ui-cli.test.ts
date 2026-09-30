@@ -120,7 +120,7 @@ async function harness() {
     return { code, operator };
   };
   return {
-    store, secrets, deployer, github, plane, out, err, home, run, runUi,
+    store, secrets, deployer, github, plane, out, err, home, base, run, runUi,
     printed: () => `${out.join("")}${err.join("")}`,
     /** The terminal, every SSM value, this machine's environment cache, and the project files the
      * finishing steps wrote. */
@@ -313,5 +313,33 @@ describe("agentx init --ui", () => {
     expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]), openBrowser: browserThatCreatesGitHubApp(opened) })).toBe(0);
     expect(opened).toContain("https://github.com/apps/agentx-acme-staging/installations/new");
     expect(opened).toContain("https://api.slack.com/apps/A0APP/event-subscriptions");
+  });
+
+  it("FR-020: asks which AWS profile on the page, uses it, and shows the account before anything is created", async () => {
+    const h = await harness();
+    await mkdir(join(h.home, ".aws"), { recursive: true });
+    await writeFile(join(h.home, ".aws", "config"), "[default]\nregion = us-east-1\n[profile dev]\nsso_session = acme\n");
+    const processEnv: NodeJS.ProcessEnv = {};
+    const operator = fakeWizardOperator(["dev", ...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(await h.run(["--ui"], { openBrowser: operator.open, processEnv })).toBe(0);
+    await operator.settled();
+    expect(operator.asked[0]).toBe("AWS profile to install with");
+    expect(processEnv.AWS_PROFILE).toBe("dev");
+    // The account is on the page by the time the review screen asks to create anything.
+    const review = operator.states.find((state) => state.question?.text === "Create all of this?");
+    expect(review?.cards?.find((card) => card.id === "aws")?.lines[0]).toBe("AgentX installs into account 123456789012 in us-east-1.");
+  });
+
+  it("FR-022: the region picker offers only the release's regions", async () => {
+    const h = await harness();
+    // No --region, so the region is the first question; then the first-run answers, and no to the plan.
+    const operator = fakeWizardOperator(["", ...FIRST_RUN.slice(0, -1), false]);
+    await executeCli(["--env", "staging", "init", "--release", await releaseDir(), "--ui"], {
+      stdout: { write: () => undefined }, stderr: { write: () => undefined }, environments: { home: h.home },
+      init: { ...h.base, openBrowser: operator.open },
+    });
+    await operator.settled();
+    const region = operator.states.find((state) => state.question?.text === "AWS region")?.question;
+    expect(region?.choices?.map((choice) => choice.value)).toEqual(["us-east-1"]);
   });
 });

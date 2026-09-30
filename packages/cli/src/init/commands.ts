@@ -38,6 +38,7 @@ import {
 import { deployStep } from "./deploy-steps.js";
 import { finishSteps, readSettingsOrThrow, readyText } from "./finish-steps.js";
 import { githubAppStep, githubRestApi, type GitHubApi } from "./github-app.js";
+import { listAwsProfiles, pickAwsProfile, resolveCaller } from "./aws-account.js";
 import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallProgress, type InitAnswers, type InitStepId } from "./install-state.js";
 import { confirmInstallPlan } from "./plan.js";
 import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteChecks } from "./prerequisites.js";
@@ -375,9 +376,15 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   const stopIndex = options.stopAfter === undefined ? -1 : steps.findIndex((step) => step.id === options.stopAfter);
   const runSteps = stopIndex < 0 ? steps : steps.slice(0, stopIndex + 1);
 
+  // FR-020 (Q9): on the page, the operator picks the AWS profile before anything reads AWS. It is
+  // put in AWS_PROFILE, which every AWS client built below, and every child process (cdk, the AWS
+  // CLI), reads. processEnv is process.env on a real run. The terminal path asks nothing here.
+  const awsProfile = session.wizard === undefined
+    ? undefined
+    : await pickAwsProfile({ profiles: await listAwsProfiles({ home: services.home, processEnv }), processEnv, prompter });
   const regions = release.regions();
   // The AWS CLI's own region comes first, so a resume looks where the install started.
-  const environmentRegion = [processEnv.AWS_REGION, processEnv.AWS_DEFAULT_REGION].find((value) => value !== undefined && regions.includes(value));
+  const environmentRegion = [processEnv.AWS_REGION, processEnv.AWS_DEFAULT_REGION, awsProfile?.region].find((value) => value !== undefined && regions.includes(value));
   // A bundle names its region, so a bundle resume never asks it.
   const region = options.region ?? bundle?.region ?? (await prompter.choose<string>("AWS region", regions.map((value) => ({ value, label: value })), { flag: "--region", defaultValue: environmentRegion ?? regions[0] ?? "us-east-1" }));
   if (bundle !== undefined && bundle.region !== region) throw agentXError("CONFIG_INVALID", `the bundle is for region ${bundle.region}; pass --region ${bundle.region}`);
@@ -385,7 +392,14 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
 
   const store = deployDeps.store ?? ssmParameterStore(new SSMClient({ region }));
   const secrets = deps.initSecrets ?? secretsManagerInitSecrets(new SecretsManagerClient({ region }));
-  const caller = await (deployDeps.identity ?? stsCallerIdentity(new STSClient({ region }))).get();
+  // FR-020 and FR-021: the account the install lands in, on the page; there, an expired session
+  // is signed in again instead of ending the run. The terminal path throws as before.
+  const caller = await resolveCaller({
+    identity: () => deployDeps.identity ?? stsCallerIdentity(new STSClient({ region })),
+    region, prompter, runner,
+    ...(session.wizard === undefined ? {} : { surface: session.wizard.surface }),
+    ...(awsProfile === undefined ? {} : { profile: awsProfile }),
+  });
   if (options.account !== undefined && options.account !== caller.account) {
     throw agentXError("CONFIG_INVALID", `--account ${options.account} does not match your AWS credentials, which are for account ${caller.account}; use credentials for ${options.account}, or leave --account off`);
   }
