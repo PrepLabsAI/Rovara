@@ -582,4 +582,47 @@ describe("agentx init --ui", () => {
     expect(code).toBe(0);
     expect(operator.states.at(-1)?.cards?.some((card) => card.id === "ready")).toBe(false);
   });
+  it("User Story 3 and SC-003: a first install on the page ends with a reply, every card ok, and nothing typed in the terminal", async () => {
+    const h = await harness();
+    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(code).toBe(0);
+    expect(operator.states.at(-1)?.cards?.map((card) => [card.id, card.status])).toEqual([
+      ["aws", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"],
+      ["admin", "ok"], ["project", "ok"], ["channel", "ok"], ["connectors", "ok"], ["alerts", "ok"], ["reply", "ok"], ["ready", "ok"],
+    ]);
+    expect(h.plane.bindings).toEqual(["T0TEAM/C0PAY00001"]);
+    expect(operator.opened).toHaveLength(1);
+  });
+
+  it("FR-012: no finishing secret reaches a card", async () => {
+    const h = await harness();
+    // The finishing steps' seams record what they were handed, so each secret below is proved to
+    // have gone through the run before its absence from the cards is checked.
+    const linearKeys: string[] = [];
+    const vendors = { ...h.setup.vendors, linearTeams: async (key: string) => { linearKeys.push(key); return h.setup.vendors.linearTeams(key); } };
+    const slackChannels = fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: true }]);
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH_WITH_LINEAR]);
+    const code = await h.run(["--ui"], { openBrowser: operator.open, setup: { ...h.setup, vendors, slackChannels } });
+    await operator.settled();
+    expect(code).toBe(0);
+    expect(operator.remaining()).toBe(0);
+    expect(linearKeys).toContain(LINEAR_KEY);
+    expect(JSON.parse(h.secrets.values.get("agentx/staging/connectors/linear") ?? "{}")).toEqual({ apiKey: LINEAR_KEY });
+    expect(slackChannels.tokens.length).toBeGreaterThan(0);
+    expect(slackChannels.tokens.every((token) => token === TEST_BOT_TOKEN)).toBe(true);
+    expect(JSON.parse(h.secrets.values.get("agentx/staging/slack") ?? "{}")).toMatchObject({ botToken: TEST_BOT_TOKEN, clientSecret: "fedcba9876543210fedcba9876543210" });
+    const cards = JSON.stringify(operator.states.map((state) => state.cards));
+    expect(cards).toContain("\"ready\"");
+    for (const secret of [LINEAR_KEY, TEST_BOT_TOKEN, "fedcba9876543210fedcba9876543210"]) expect(cards).not.toContain(secret);
+  });
+
+  it("a resumed install shows the finishing cards of the steps it runs", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).not.toBe(0);
+    h.deployer.fail.clear();
+    const { code, operator } = await h.runUi([...SLACK, ...SIGNIN, ...FINISH]);
+    expect(code).toBe(0);
+    expect(operator.states.at(-1)?.cards?.map((card) => card.id)).toEqual(expect.arrayContaining(["admin", "project", "channel", "reply", "ready"]));
+  });
 });
