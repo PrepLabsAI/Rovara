@@ -12,6 +12,7 @@ import { ReleasePipelineStack } from "./release-pipeline.js";
 import { RetainExceptOnCreate } from "./retention.js";
 import { EnvironmentRolePath } from "./role-path.js";
 import { SlackOrchestratorStack } from "./slack-orchestrator.js";
+import { SwebenchEvalStack, swebenchNames } from "./swebench-eval.js";
 import { WorkerSettingsStack } from "./worker-settings.js";
 
 export function buildAgentXApp(context: Record<string, unknown> = {}): App {
@@ -153,6 +154,15 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
     naming,
     ...(naming.env === undefined ? {} : { stackName: naming.stackName("slack") }),
   });
+  // Spec 043: the SWE-bench eval stack, only when asked for; no release deploys it.
+  if (app.node.tryGetContext("agentxEval") === "enabled") {
+    new SwebenchEvalStack(app, "AgentXEval", {
+      description: "AgentX SWE-bench eval runs: x86 launch template, runner role, state machine and settings",
+      env: { region: deploymentRegion ?? "us-east-1" },
+      naming,
+      stackName: swebenchNames(naming).stackName,
+    });
+  }
   if (naming.env !== undefined) {
     Tags.of(app).add("agentx:env", naming.env);
     // Every environment role goes under /agentx/<env>/, the path the CloudFormation service role is

@@ -13,6 +13,7 @@ import {
 } from "@aws-sdk/lib-dynamodb";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
+import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { SQSClient } from "@aws-sdk/client-sqs";
 import {
   GetSecretValueCommand,
@@ -128,6 +129,19 @@ import {
   type HttpApiV2Event,
   type RuntimeBinding,
 } from "./lambda.js";
+import {
+  deleteSwebenchChannel,
+  getSwebenchChannel,
+  getSwebenchRunForThread,
+  handleSwebenchCallback,
+  isSwebenchCallbackPath,
+  putSwebenchChannel,
+  startSwebenchRun,
+  stopSwebenchRun,
+  type SwebenchDependencies,
+  type SwebenchSlackContext,
+} from "./swebench.js";
+import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
 
 const TERMINAL = new Set<OperationStatus>(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 const MAX_ARTIFACT_BYTES = 5_000_000;
@@ -276,6 +290,8 @@ interface AwsBrokerDependencies {
   slackThreadsTableName?: string;
   /** Spec 025 phase 25d: the admin read routes' injected probes and clock; the defaults serve production. */
   adminReads?: Partial<Pick<AdminReadDependencies, "me" | "health" | "now" | "log">>;
+  /** Spec 043: SWE-bench runs; absent in a harness that does not exercise them. */
+  swebench?: Pick<SwebenchDependencies, "deployment" | "startExecution" | "now">;
 }
 
 /**
@@ -482,6 +498,11 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       const url = new URL(request.path, "https://agentx.invalid");
       // The /v1/dev route has no API Gateway authorizer, so what it carries goes to the developer API or nowhere.
       if (event.routeKey === DEVELOPER_ROUTE_KEY && !url.pathname.startsWith("/v1/dev/")) throw agentXError("NOT_FOUND", "route not found");
+      // Spec 043: an eval runner's callbacks, authorized by the run's own capability.
+      const evalCallback = isSwebenchCallbackPath(url.pathname);
+      if (request.method === "POST" && evalCallback !== undefined) {
+        return json(await handleSwebenchCallback(swebenchDependencies(dependencies), request.headers["x-agentx-callback-capability"], evalCallback.runId, evalCallback.action, parseBody(request.body)), request.requestId);
+      }
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
       const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|pull-request|pull-request-update|codebuild)$/.exec(
         url.pathname,
@@ -528,6 +549,15 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (request.method === "PUT" && serviceUrl.pathname === "/v1/project/model") {
           return json(await putProjectModel(dependencies, identity, parseBody(request.body)), request.requestId);
         }
+        if (request.method === "POST" && serviceUrl.pathname === "/v1/evals/swebench") {
+          return json(await startSwebenchRun(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId);
+        }
+        const evalRun = /^\/v1\/evals\/swebench\/([0-9a-f-]{36})$/.exec(serviceUrl.pathname);
+        if (request.method === "GET" && evalRun?.[1]) {
+          const thread = identity.slack?.thread;
+          if (!thread) throw agentXError("FORBIDDEN", "Slack thread context is required");
+          return json({ run: await getSwebenchRunForThread(swebenchDependencies(dependencies), thread, evalRun[1]) }, request.requestId);
+        }
         return await observeConnectorRoute(request.method, serviceUrl.pathname, () => routeWorkspaceRequest(dependencies, request, serviceUrl, identity));
       }
 
@@ -572,6 +602,10 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       }
       if (slackBinding?.[1] && slackBinding[2] && request.method === "DELETE") {
         return json(await deleteSlackBinding(dependencies, identity, slackBinding[1], slackBinding[2]), request.requestId);
+      }
+      const evalChannel = /^\/v1\/admin\/evals\/channels\/([^/]+)\/([^/]+)$/.exec(url.pathname);
+      if (evalChannel?.[1] && evalChannel[2] && (request.method === "PUT" || request.method === "DELETE" || request.method === "GET")) {
+        return json(await routeSwebenchChannel(dependencies, identity, request.method, evalChannel[1], evalChannel[2], body), request.requestId);
       }
       const cancelTask = /^\/v1\/admin\/workspaces\/([0-9a-f-]+)\/cancel$/.exec(url.pathname);
       if (request.method === "POST" && cancelTask?.[1]) {
@@ -2919,6 +2953,11 @@ async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: S
   const requester = SlackRequesterSchema.parse({ teamId: thread.teamId, userId: event.userId });
   const binding = await getSlackBinding(dependencies, thread.teamId, thread.channelId);
   if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  // Spec 043 FR-005: a thread running a SWE-bench run stops the run.
+  if (dependencies.swebench !== undefined) {
+    const runId = await stopSwebenchRun(swebenchDependencies(dependencies), thread, requester);
+    if (runId !== undefined) return { outcome: "CANCEL_REQUESTED", workspaceId: runId, targetOperationId: runId, cancelOperationId: runId };
+  }
   // Q8: in a continue thread a teammate's stop cancels the task's running task operation, whoever
   // started it, as the developer's own cancel would. A view-only or closed thread, or one whose
   // channel now serves another project (F16), stops nothing.
@@ -4178,6 +4217,64 @@ async function requireAdministrator(
   if (membership.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
 }
 
+/** Spec 043: the SWE-bench module's dependencies, from the broker's. */
+function swebenchDependencies(dependencies: AwsBrokerDependencies): SwebenchDependencies {
+  const swebench = dependencies.swebench;
+  if (swebench === undefined) throw agentXError("NOT_FOUND", "SWE-bench runs are not available in this deployment");
+  return {
+    documentClient: dependencies.documentClient,
+    s3: dependencies.s3,
+    tableName: dependencies.tableName,
+    artifactBucketName: dependencies.artifactBucketName,
+    callbackSigningKey: dependencies.callbackSigningKey,
+    ...swebench,
+  };
+}
+
+/** The thread, requester and project model a SWE-bench run takes from the Slack service identity. */
+function swebenchSlackContext(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity): SwebenchSlackContext {
+  const slack = identity.slack;
+  if (!slack) throw agentXError("FORBIDDEN", "Slack thread context is required");
+  const projectName = slack.binding.projectName;
+  return {
+    thread: slack.thread,
+    requester: slack.requester,
+    projectName,
+    projectModel: async (requested) => {
+      const project = await requireLatestProject(dependencies, projectName);
+      const policy = project.definition.models;
+      if (requested !== undefined) {
+        const approved = policy?.approved.find((candidate) => modelKey(candidate) === modelKey(requested));
+        if (!approved) throw agentXError("CONFIG_INVALID", `model ${requested.provider}/${requested.modelId} is not approved for this project`);
+        return { provider: approved.provider, modelId: approved.modelId };
+      }
+      return (await resolveProjectModel(dependencies, project)).model;
+    },
+  };
+}
+
+/** Spec 043 FR-002: an administrator of the channel's project enables, reads or disables SWE-bench runs there. */
+async function routeSwebenchChannel(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  method: "PUT" | "DELETE" | "GET",
+  teamIdValue: string,
+  channelIdValue: string,
+  body: unknown,
+): Promise<unknown> {
+  const teamId = SlackTeamIdSchema.parse(decodeURIComponent(teamIdValue));
+  const channelId = SlackChannelIdSchema.parse(decodeURIComponent(channelIdValue));
+  const binding = await getSlackBinding(dependencies, teamId, channelId);
+  if (!binding) throw agentXError("NOT_FOUND", "Slack channel binding not found; bind the channel to a project first");
+  await requireAdministrator(dependencies, identity, binding.projectName);
+  const swebench = swebenchDependencies(dependencies);
+  if (method === "PUT") return { channel: await putSwebenchChannel(swebench, teamId, channelId, body), projectName: binding.projectName };
+  if (method === "DELETE") return deleteSwebenchChannel(swebench, teamId, channelId);
+  const channel = await getSwebenchChannel(swebench, teamId, channelId);
+  if (!channel) throw agentXError("NOT_FOUND", "SWE-bench runs are not enabled in this channel");
+  return { channel, projectName: binding.projectName };
+}
+
 const TASK_ID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /**
@@ -4544,6 +4641,7 @@ const s3 = new S3Client(awsClientConfiguration);
 const secretsManager = new SecretsManagerClient(awsClientConfiguration);
 const codeBuild = createCodeBuildGateway(awsClientConfiguration);
 const stepFunctions = new SFNClient(awsClientConfiguration);
+const ssm = new SSMClient(awsClientConfiguration);
 // The broker only deletes ec2-ebs sessions when a workspace closes (#84).
 const ec2Sessions = new SessionManager({
   documentClient,
@@ -4674,4 +4772,18 @@ export const handler = createAwsBrokerHandler({
   async deleteEc2Session(workspaceId) {
     await ec2Sessions.deleteSession(workspaceId);
   },
+  // Spec 043: read per request, so installing the eval stack or a new runner image needs no broker release.
+  ...(process.env.SWEBENCH_SETTINGS_PREFIX
+    ? {
+        swebench: {
+          deployment: () => swebenchDeploymentFromParameters(requiredEnvironment("SWEBENCH_SETTINGS_PREFIX"), async (names) => {
+            const response = await ssm.send(new GetParametersCommand({ Names: [...names] }));
+            return new Map((response.Parameters ?? []).flatMap((parameter) => parameter.Name && parameter.Value ? [[parameter.Name, parameter.Value] as const] : []));
+          }),
+          async startExecution(input) {
+            await stepFunctions.send(new StartExecutionCommand(input));
+          },
+        },
+      }
+    : {}),
 });

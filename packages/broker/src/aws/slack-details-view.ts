@@ -36,6 +36,7 @@ const DISPOSITIONS: Record<TurnDetails["disposition"], string> = {
   yes_to_all_granted: "yes to all granted",
   model_list: "model list",
   model_switch: "model selection",
+  swebench_run: "SWE-bench run",
 };
 
 /** Slack's three control characters; after this, record text cannot form a link, mention or alert. */

@@ -5,6 +5,9 @@ import {
   SlackWorkspaceCloseStartResultSchema,
   ProjectModelOptionsSchema,
   ProjectModelSelectionRequestSchema,
+  SwebenchRunSchema,
+  SwebenchStartRequestSchema,
+  SwebenchStartResultSchema,
 } from "@agentx/contracts";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { pollOperation } from "@agentx/orchestrator/event-client";
@@ -69,6 +72,14 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
     async selectProjectModel(model) {
       const body = ProjectModelSelectionRequestSchema.parse(model);
       return ProjectModelOptionsSchema.parse(await serviceRequest("PUT", "/v1/project/model", body, "project model selection failed"));
+    },
+    async startSwebenchRun(request) {
+      const body = SwebenchStartRequestSchema.parse(request);
+      return SwebenchStartResultSchema.parse(await servicePost("/v1/evals/swebench", body, "SWE-bench run request failed"));
+    },
+    async getSwebenchRun(runId) {
+      const response = await serviceRequest("GET", `/v1/evals/swebench/${encodeURIComponent(runId)}`, undefined, "SWE-bench run lookup failed");
+      return SwebenchRunSchema.parse(response.run);
     },
   };
 }
