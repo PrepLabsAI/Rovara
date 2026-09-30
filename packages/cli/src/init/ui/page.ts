@@ -34,6 +34,8 @@ export function wizardHtml(token: string): string {
 <main>
   <section id="resume" class="card hidden"><h2>Continuing an install</h2><div id="resume-body"></div></section>
   <section id="plan" class="card hidden"><h2>Review</h2><pre id="plan-body"></pre></section>
+  <section id="next" class="card hidden"><h2>Next</h2><div id="next-link"></div></section>
+  <div id="cards"></div>
   <section id="question" class="card hidden"><h2 id="question-text"></h2><div id="question-body"></div><p id="question-error" class="error hidden"></p></section>
   <section id="outcome" class="card hidden"><h2>Finished</h2><p id="outcome-body"></p></section>
   <section class="card"><h2>Steps</h2><ol id="steps"></ol></section>
@@ -74,6 +76,16 @@ button.primary { background: #1a56db; border-color: #1a56db; color: #fff; }
 button[disabled] { cursor: progress; opacity: .6; }
 .error { color: #c62828; margin: .6rem 0 0; }
 .hint { font-size: .85rem; margin: .35rem 0 0; opacity: .7; }
+a.button { border: 1px solid rgba(128,128,128,.5); border-radius: .35rem; display: inline-block; font: inherit; margin-top: .5rem; padding: .45rem 1rem; text-decoration: none; }
+a.button.primary { background: #1a56db; border-color: #1a56db; color: #fff; }
+.card.status p { margin: 0 0 .35rem; }
+.card.status.ok { border-color: #2e7d32; }
+.card.status.waiting { border-color: #b06000; }
+.card.status.failed { border-color: #c62828; }
+ul.checks { list-style: none; margin: .5rem 0 0; padding: 0; }
+ul.checks li { display: flex; gap: .6rem; padding: .15rem 0; }
+ul.checks li.ok .mark { color: #2e7d32; }
+ul.checks li.failed .mark { color: #c62828; }
 `;
 
 const MARKS: Record<string, string> = { pending: "·", running: "•", done: "✓", skipped: "✓", waiting: "…" };
@@ -125,6 +137,61 @@ function renderResume(resume) {
   const next = document.createElement("p");
   next.textContent = resume.continueFrom ? "Continuing from: " + resume.continueFrom : "Every step is already done.";
   body.append(next);
+}
+
+function linkButton(link) {
+  const anchor = document.createElement("a");
+  anchor.className = "button primary";
+  anchor.href = link.url;
+  anchor.target = "_blank";
+  anchor.rel = "noopener noreferrer";
+  anchor.textContent = link.label;
+  return anchor;
+}
+
+function renderCards(cards, link) {
+  const holder = byId("cards");
+  holder.replaceChildren();
+  const offered = new Set();
+  for (const card of cards ?? []) {
+    const section = document.createElement("section");
+    section.className = "card status " + card.status;
+    const title = document.createElement("h2");
+    title.textContent = card.title;
+    section.append(title);
+    for (const line of card.lines) {
+      const paragraph = document.createElement("p");
+      paragraph.textContent = line;
+      section.append(paragraph);
+    }
+    if (card.checks) {
+      const list = document.createElement("ul");
+      list.className = "checks";
+      for (const check of card.checks) {
+        const item = document.createElement("li");
+        item.className = check.ok ? "ok" : "failed";
+        const mark = document.createElement("span");
+        mark.className = "mark";
+        mark.textContent = check.ok ? "\\u2713" : "\\u2717";
+        const text = document.createElement("span");
+        text.textContent = check.label + ": " + check.detail;
+        item.append(mark, text);
+        list.append(item);
+      }
+      section.append(list);
+    }
+    if (card.link) {
+      section.append(linkButton(card.link));
+      offered.add(card.link.url);
+    }
+    holder.append(section);
+  }
+  // The run's own "open this" address, unless a card already offers the same one.
+  const next = link && !offered.has(link.url) ? link : null;
+  show("next", Boolean(next));
+  const slot = byId("next-link");
+  slot.replaceChildren();
+  if (next) slot.append(linkButton(next));
 }
 
 function submit(id, value) {
@@ -197,7 +264,13 @@ function buildQuestion(question) {
     const field = question.multiline ? document.createElement("textarea") : document.createElement("input");
     if (!question.multiline) field.type = question.masked ? "password" : "text";
     field.autocomplete = question.masked ? "off" : "on";
-    if (question.masked) field.spellcheck = false;
+    if (question.masked) {
+      field.spellcheck = false;
+      // Q4: ask password managers neither to fill nor to save a secret.
+      field.setAttribute("data-1p-ignore", "");
+      field.setAttribute("data-lpignore", "true");
+      field.setAttribute("data-bwignore", "");
+    }
     if (question.defaultValue !== undefined && !question.masked) field.placeholder = question.defaultValue;
     body.append(field);
     if (question.defaultValue !== undefined && !question.masked) {
@@ -206,10 +279,15 @@ function buildQuestion(question) {
       hint.textContent = "Leave empty for " + question.defaultValue;
       body.append(hint);
     }
+    read = () => {
+      const value = field.value;
+      // Q4: a secret leaves the field the moment it is sent; a refused one is pasted again.
+      if (question.masked) field.value = "";
+      return value;
+    };
     if (!question.multiline) {
-      field.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); submit(question.id, field.value); } });
+      field.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); submit(question.id, read()); } });
     }
-    read = () => field.value;
     queueMicrotask(() => field.focus());
   }
 
@@ -230,6 +308,7 @@ function render(state) {
     : "Environment " + state.env + ": " + state.phase + ".";
   renderSteps(state.steps);
   renderResume(state.resume);
+  renderCards(state.cards, state.link);
   show("plan", Boolean(state.plan));
   if (state.plan) byId("plan-body").textContent = state.plan;
   show("outcome", Boolean(state.outcome));
@@ -237,6 +316,7 @@ function render(state) {
   if (!state.question) {
     renderedQuestion = null;
     sending = false;
+    byId("question-body").replaceChildren();
     show("question", false);
     return;
   }
