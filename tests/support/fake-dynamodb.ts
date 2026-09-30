@@ -254,10 +254,34 @@ function compareKeys(left: string, right: string): number {
   return left < right ? -1 : 1;
 }
 
+/**
+ * DynamoDB reserved words that are also likely attribute names. Real DynamoDB refuses an expression
+ * that uses one unaliased (ValidationException); spec 043's run result reached production that way
+ * because this fake accepted `result = :result`. Not the whole list, which runs to hundreds of words.
+ */
+const RESERVED_WORDS: ReadonlySet<string> = new Set([
+  "ACTION", "COMMENT", "CONNECTION", "COUNT", "DATA", "DATE", "HASH", "INDEX", "ITEM", "KEY", "KEYS", "LEVEL",
+  "LIMIT", "MODE", "NAME", "OWNER", "PATH", "RESULT", "ROLE", "SESSION", "SIZE", "SOURCE", "STATE", "STATUS",
+  "TABLE", "TIME", "TIMESTAMP", "TTL", "TYPE", "USER", "VALUE", "YEAR", "ZONE",
+]);
+const EXPRESSION_KEYWORDS: ReadonlySet<string> = new Set(["AND", "OR", "NOT", "SET", "ADD", "REMOVE", "DELETE", "IN", "BETWEEN"]);
+
+/** Throws as DynamoDB does when an expression names a reserved word without an #alias. */
+export function assertNoReservedWords(expression: string | undefined): void {
+  if (expression === undefined) return;
+  const words = expression.match(/(?<![#:\w.])[A-Za-z_]\w*\b(?!\s*\()/g) ?? [];
+  const reserved = words.find((word) => !EXPRESSION_KEYWORDS.has(word) && RESERVED_WORDS.has(word.toUpperCase()));
+  if (reserved !== undefined) {
+    throw Object.assign(new Error(`Invalid expression: Attribute name is a reserved keyword; reserved keyword: ${reserved}`), { name: "ValidationException" });
+  }
+}
+
 function toAction(kind: WriteAction["kind"], input: Record<string, unknown>): WriteAction {
   const names = input.ExpressionAttributeNames as Names | undefined;
   const values = input.ExpressionAttributeValues as Values | undefined;
   const condition = input.ConditionExpression as string | undefined;
+  assertNoReservedWords(condition);
+  assertNoReservedWords(input.UpdateExpression as string | undefined);
   if (kind === "Put") {
     const item = structuredClone(input.Item as Item);
     return { kind, key: itemKey(item.pk as string, item.sk as string), apply: () => item, condition, names, values };
