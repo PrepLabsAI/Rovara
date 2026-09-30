@@ -360,6 +360,10 @@ describe("agentx init --ui", () => {
     expect(last?.status).toBe("ok");
     expect(last?.checks?.every((check) => check.ok)).toBe(true);
     expect(last?.checks?.filter((check) => check.label === "EC2 vCPU quota")).toHaveLength(1);
+    // Every check ran again, not only the one that failed.
+    expect(last?.checks?.map((check) => check.label)).toEqual(failed?.checks?.map((check) => check.label));
+    expect(last?.checks?.map((check) => check.label).slice(0, 3)).toEqual(["Region", "EC2 vCPU quota", "Elastic IPs"]);
+    expect(last?.checks?.some((check) => check.label.startsWith("Model "))).toBe(true);
   });
 
   it("FR-023: saying no to checking again creates nothing", async () => {
@@ -370,5 +374,18 @@ describe("agentx init --ui", () => {
     expect(h.printed()).toContain("init cannot start; nothing was created");
     expect(h.deployer.requests).toEqual([]);
     expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
+  });
+
+  it("FR-023: a failure no check reports is still on the checklist, in the error's own words", async () => {
+    const h = await harness();
+    const checks = passingChecks({ cdkBootstrapped: async () => false, runCdkBootstrap: async () => { throw new Error("CDKToolkit stack creation was rolled back"); } });
+    // --engine cdk skips the engine question; then yes to "Run cdk bootstrap ... now?", and no to checking again.
+    const operator = fakeWizardOperator([...FIRST_RUN.slice(1, -1), true, false]);
+    expect(await h.run(["--ui", "--engine", "cdk", "--source", await tmp("agentx-init-ui-source-")], { openBrowser: operator.open, checks })).not.toBe(0);
+    await operator.settled();
+    expect(operator.asked).toContain("Check the prerequisites again?");
+    const failed = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "prerequisites" && card.status === "failed") ?? []).at(-1);
+    expect(failed?.checks?.find((check) => !check.ok)).toEqual({ label: "Prerequisites", ok: false, detail: "CDKToolkit stack creation was rolled back" });
+    expect(h.deployer.requests).toEqual([]);
   });
 });

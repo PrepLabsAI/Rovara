@@ -44,7 +44,7 @@ import { confirmInstallPlan } from "./plan.js";
 import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
 import { processPrompter, secretFromSource, unattendedPrompter, type Prompter } from "./prompts.js";
 import { fetchRelease } from "./release-fetch.js";
-import { retryOnPage } from "./retry.js";
+import { problemText, retryOnPage } from "./retry.js";
 import { developerSignInStep } from "./signin-step.js";
 import { slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
 import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from "./steps.js";
@@ -486,6 +486,9 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
           ...(pendingKey === undefined ? {} : { openRouterKey: pendingKey }),
         });
       } catch (error) {
+        // A failure no check reported (a cdk bootstrap that fails after yes, say) is still listed,
+        // so the page never shows a failed card with nothing to fix.
+        if (!found.some((check) => !check.ok)) found.push({ label: "Prerequisites", ok: false, detail: problemText(error) });
         show("failed");
         throw error;
       }
