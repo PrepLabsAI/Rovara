@@ -269,7 +269,8 @@ async function finishRun(
   const at = now(dependencies).toISOString();
   const values: Record<string, unknown> = { ":status": outcome.status, ":now": at, ":runId": runId };
   ACTIVE_STATUSES.forEach((status, index) => { values[`:active${index}`] = status; });
-  const set = outcome.status === "SUCCEEDED" ? "result = :result" : "#error = :error";
+  // RESULT and STATUS are DynamoDB reserved words, so every attribute here goes through a name.
+  const set = outcome.status === "SUCCEEDED" ? "#result = :result" : "#error = :error";
   if (outcome.status === "SUCCEEDED") values[":result"] = outcome.result;
   else values[":error"] = outcome.error.slice(0, 2_000);
   try {
@@ -281,7 +282,7 @@ async function finishRun(
             Key: swebenchRunKey(runId),
             UpdateExpression: `SET #status = :status, updatedAt = :now, finishedAt = :now, ${set}`,
             ConditionExpression: ACTIVE_STATUSES.map((_, index) => `#status = :active${index}`).join(" OR "),
-            ExpressionAttributeNames: { "#status": "status", ...(outcome.status === "FAILED" ? { "#error": "error" } : {}) },
+            ExpressionAttributeNames: { "#status": "status", ...(outcome.status === "FAILED" ? { "#error": "error" } : { "#result": "result" }) },
             ExpressionAttributeValues: Object.fromEntries(Object.entries(values).filter(([key]) => key !== ":runId")),
           },
         },
