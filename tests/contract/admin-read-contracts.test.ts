@@ -169,6 +169,13 @@ describe("the wire answers read fields a newer control plane adds at any depth (
     for (const [schema, answer] of answers) expect(schema.parse({ ...answer, extra: "kept" })).toMatchObject({ extra: "kept" });
   });
 
+  it("reads the usage answer's skipped count as a whole number, like the failures answer's", () => {
+    const usage = { groupBy: "day", since: ENDED, until: ENDED, groups: [], truncated: false };
+    expect(AdminUsageResponseSchema.parse({ ...usage, skipped: 4 }).skipped).toBe(4);
+    expect(AdminUsageResponseSchema.parse(usage).skipped).toBeUndefined();
+    for (const skipped of [-1, 1.5, "4"]) expect(AdminUsageResponseSchema.safeParse({ ...usage, skipped }).success, String(skipped)).toBe(false);
+  });
+
   it("pins the list and usage read limits (Minor 5)", () => {
     expect(ADMIN_LIST_MAX).toBe(100);
     expect(ADMIN_USAGE_READ_MAX).toBe(5_000);

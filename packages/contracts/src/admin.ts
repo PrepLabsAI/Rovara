@@ -180,6 +180,8 @@ export const AdminUsageResponseSchema = z.object({
   until: z.string(),
   groups: z.array(AdminUsageGroupSchema),
   truncated: z.boolean(),
+  /** Usage items or turns' usage that no longer parse, left out of the groups (A9). */
+  skipped: z.number().int().nonnegative().optional(),
 }).passthrough();
 export type AdminUsageResponse = z.infer<typeof AdminUsageResponseSchema>;
 

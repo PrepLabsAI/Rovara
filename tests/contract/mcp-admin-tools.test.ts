@@ -78,8 +78,8 @@ describe("the admin read tools (FR-030)", () => {
     });
     expect((await client.callTool({ name: "agentx_admin_usage", arguments: { group_by: "project" } })).structuredContent).toMatchObject({ groups: [{ key: "payments", turns: 2, tasks: 1, task_duration_ms: 60_000, input_tokens: 10, output_tokens: 2, cost_usd: 0.5, cost_unknown: 0 }] });
     expect((await client.callTool({ name: "agentx_admin_list_projects", arguments: {} })).structuredContent).toMatchObject({ projects: [{ name: "payments", latest_revision: 2, runtime_mode: "ec2-ebs", developer_tasks: { share: "optional" } }] });
-    expect((await client.callTool({ name: "agentx_admin_list_channels", arguments: {} })).structuredContent).toMatchObject({ bindings: [{ channel_id: "C0123456789", channel_name: "payments-dev", project: "payments" }] });
-    expect((await client.callTool({ name: "agentx_admin_list_credentials", arguments: {} })).structuredContent).toMatchObject({ references: [{ ref: "github-app", type: "github-app", built_in: true }] });
+    expect((await client.callTool({ name: "agentx_admin_list_channels", arguments: {} })).structuredContent).toMatchObject({ bindings: [{ channel_id: "C0123456789", channel_name: "`payments-dev`", project: "payments" }] });
+    expect((await client.callTool({ name: "agentx_admin_list_credentials", arguments: {} })).structuredContent).toMatchObject({ references: [{ ref: "github-app", type: "github-app", secret_name: "gh", built_in: true }] });
     expect((await client.callTool({ name: "agentx_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({ limits: { per_person: 3, per_organization: 20, source: "parameters" } });
   });
 
@@ -148,5 +148,21 @@ describe("the admin read tools (FR-030)", () => {
       expect(tool.description, tool.name).toMatch(/\bUse it\b/);
       expect(tool.description, tool.name).toMatch(/\b(then|next|Next|after|before)\b/);
     }
+    // When to use it comes before what to do next.
+    const failed = ADMIN_READ_TOOLS.find((tool) => tool.name === "agentx_admin_failed_tasks")!.description;
+    expect(failed.indexOf("Use it")).toBeLessThan(failed.indexOf("pass its turn_record"));
+  });
+
+  it("shows a secret named by its ARN by the name alone, so FR-029's redaction keeps it", async () => {
+    const client = await connect({ credentials: async () => ({ credentials: [
+      { ref: "github-app", type: "github-app", secretName: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/staging/github-app-AbCdEf", builtIn: true },
+      { ref: "gov", type: "static-secret", secretName: "arn:aws-us-gov:secretsmanager:us-gov-west-1:111122223333:secret:agentx/staging/connectors/jira-Q1w2E3" },
+    ] }) });
+    const result = await client.callTool({ name: "agentx_admin_list_credentials", arguments: {} });
+    expect(result.structuredContent).toEqual({ references: [
+      { ref: "github-app", type: "github-app", secret_name: "agentx/staging/github-app-AbCdEf", built_in: true },
+      { ref: "gov", type: "static-secret", secret_name: "agentx/staging/connectors/jira-Q1w2E3" },
+    ] });
+    expect(JSON.stringify(result)).not.toContain("[REDACTED]");
   });
 });

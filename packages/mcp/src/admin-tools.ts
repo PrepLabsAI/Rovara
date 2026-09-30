@@ -21,6 +21,16 @@ const limitInput = (fallback: number) => z.number().int().min(1).max(ADMIN_LIST_
 const projectInput = z.string().min(1).max(63).optional().describe("only this project, by its exact name");
 const given = <T extends Record<string, unknown>>(value: T) => Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined)) as { [K in keyof T]: Exclude<T[K], undefined> };
 
+/**
+ * A Secrets Manager ARN's secret name. FR-029's redactText reads the ARN's "secret:<name>" as a
+ * secret pair and would show "secret:[REDACTED]" (the built-in GitHub App's secret is always
+ * named by ARN), so the tool shows the name alone. Any other value is shown as it is.
+ */
+const SECRET_ARN = /^arn:aws[\w-]*:secretsmanager:[^:]+:\d{12}:secret:(.+)$/;
+function secretNameOf(secretName: string): string {
+  return SECRET_ARN.exec(secretName)?.[1] ?? secretName;
+}
+
 function requesterText(requester: AdminRequester): string {
   if (requester.kind === "slack") return `Slack member ${requester.userId}`;
   if (requester.kind === "developer") return `${requester.name === undefined ? requester.developerId.slice(0, 12) : inertName(requester.name)} (developer)`;
@@ -62,7 +72,7 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_admin_failed_tasks",
     title: "List failed AgentX tasks",
-    description: "Lists operations that ended FAILED or INTERRUPTED, newest first: when, the project, where it came from (slack or ai_tool), who asked, the workspace, the operation kind, the failure category and the redacted error. since defaults to 24 hours ago; AgentX keeps 30 days. To see what happened around a failure, pass its turn_record's thread or task_id to agentx_admin_turns. Use it when a task or a Slack turn went wrong, or after agentx_admin_health shows a problem.",
+    description: "Lists operations that ended FAILED or INTERRUPTED, newest first: when, the project, where it came from (slack or ai_tool), who asked, the workspace, the operation kind, the failure category and the redacted error. since defaults to 24 hours ago; AgentX keeps 30 days. Use it when a task or a Slack turn went wrong, or after agentx_admin_health shows a problem. To see what happened around a failure, pass its turn_record's thread or task_id to agentx_admin_turns.",
     inputSchema: {
       since: time.optional().describe("ISO time to start from; 24 hours ago by default"),
       until: time.optional().describe("ISO time to stop at; now by default"),
@@ -136,10 +146,8 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
       const usage = await adminOf(context).usage(given({ groupBy: input.group_by as AdminUsageGroupBy, since: input.since as string | undefined, until: input.until as string | undefined }));
       const groups = usage.groups.map((group) => ({ key: group.key, turns: group.turns, tasks: group.tasks, task_duration_ms: group.taskDurationMs, input_tokens: group.inputTokens, output_tokens: group.outputTokens, cost_usd: group.costUsd, cost_unknown: group.costUnknown }));
       const total = groups.reduce((sum, group) => sum + group.cost_usd, 0);
-      // The route adds skipped (unreadable items) beside the contract's fields; the answer is loose.
-      const skipped = typeof usage.skipped === "number" ? usage.skipped : undefined;
       return {
-        structured: given({ group_by: usage.groupBy, since: usage.since, until: usage.until, truncated: usage.truncated, groups, skipped }),
+        structured: given({ group_by: usage.groupBy, since: usage.since, until: usage.until, truncated: usage.truncated, groups, skipped: usage.skipped }),
         text: `${groups.length} group${groups.length === 1 ? "" : "s"} by ${usage.groupBy}, about $${total.toFixed(2)} in all${usage.truncated ? ", from the first 5,000 records of each kind" : ""}.`,
       };
     },
@@ -175,7 +183,7 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
     outputSchema: { bindings: z.array(z.object({ channel_id: z.string(), channel_name: z.string().optional(), private: z.boolean().optional(), project: z.string(), updated_at: z.string() })), notices: z.array(z.string()) },
     async handler(context) {
       const answer = await adminOf(context).bindings();
-      const bindings = answer.bindings.map((binding) => given({ channel_id: binding.channelId, channel_name: binding.channelName, private: binding.private, project: binding.projectName, updated_at: binding.updatedAt }));
+      const bindings = answer.bindings.map((binding) => given({ channel_id: binding.channelId, channel_name: binding.channelName === undefined ? undefined : inertName(binding.channelName), private: binding.private, project: binding.projectName, updated_at: binding.updatedAt }));
       const note = answer.notices.includes("channel_names_unavailable") ? " Channel names could not be read, so channels are listed by ID." : "";
       return { structured: { bindings, notices: answer.notices }, text: `${bindings.length} bound channel${bindings.length === 1 ? "" : "s"}.${note}` };
     },
@@ -186,12 +194,13 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
     description: "Lists connector credentials by reference, type and secret name, and when each was registered. It never shows a secret's value. Use it when a connector cannot reach its service; then check which projects use the connector with agentx_admin_list_projects.",
     inputSchema: {},
     // Keyed `references`, not `credentials`: FR-029's redactSecrets replaces any value under a
-    // credential-named key, so a `credentials` list would always read [REDACTED].
+    // credential-named key, so a `credentials` list would always read [REDACTED]. secret_name is
+    // the name alone, never an ARN (secretNameOf).
     outputSchema: { references: z.array(z.object({ ref: z.string(), type: z.string(), secret_name: z.string(), registered_at: z.string().optional(), built_in: z.boolean().optional() })) },
     async handler(context) {
       const { credentials } = await adminOf(context).credentials();
       return {
-        structured: { references: credentials.map((entry) => given({ ref: entry.ref, type: entry.type, secret_name: entry.secretName, registered_at: entry.registeredAt, built_in: entry.builtIn })) },
+        structured: { references: credentials.map((entry) => given({ ref: entry.ref, type: entry.type, secret_name: secretNameOf(entry.secretName), registered_at: entry.registeredAt, built_in: entry.builtIn })) },
         // FR-029's redactText reads "credential: x" as a secret pair, so the colon follows "registered".
         text: credentials.length === 0 ? "No connector credentials registered." : `${credentials.length} connector credential${credentials.length === 1 ? "" : "s"} registered: ${credentials.map((entry) => `${entry.ref} (${entry.type})`).join(", ")}.`,
       };
