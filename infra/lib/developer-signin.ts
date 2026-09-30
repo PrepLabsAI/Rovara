@@ -12,6 +12,8 @@ export interface DeveloperSignInParameters {
   slackTeamId: CfnParameter; slack: CfnParameter; oidcIssuer: CfnParameter; oidcClientId: CfnParameter;
   oidcRequiredClaim: CfnParameter; oidcRequiredValues: CfnParameter; oidcDisplayName: CfnParameter;
   slackSince: CfnParameter; oidcSince: CfnParameter;
+  /** Spec 025 E16: whether an admin may confirm a change in the AI tool's own pop-up. */
+  mcpConfirmElicitation: CfnParameter;
 }
 
 /** Declared on the stack itself, so the parameter names are exactly these. */
@@ -28,6 +30,7 @@ export function developerSignInParameters(stack: Stack): DeveloperSignInParamete
     // it stays ended. agentx signin enable sets these; 0 means the method was never turned back on.
     slackSince: new CfnParameter(stack, "DeveloperSignInSlackSince", { type: "String", default: "0", allowedPattern: "^[0-9]{1,12}$", description: "When Slack sign-in was last turned on, in epoch seconds; Slack sessions started before it are refused" }),
     oidcSince: new CfnParameter(stack, "DeveloperOidcSince", { type: "String", default: "0", allowedPattern: "^[0-9]{1,12}$", description: "When company sign-in was last turned on, in epoch seconds; company sessions started before it are refused" }),
+    mcpConfirmElicitation: new CfnParameter(stack, "McpConfirmElicitation", { type: "String", default: "enabled", allowedValues: ["enabled", "disabled"], description: "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button (or the CLI)" }),
   };
 }
 
@@ -94,6 +97,7 @@ export class DeveloperSignIn extends Construct {
       DEVELOPER_OIDC_SECRET_ID: oidcSecretName,
       DEVELOPER_SIGNIN_SLACK_SINCE: p.slackSince.valueAsString,
       DEVELOPER_OIDC_SINCE: p.oidcSince.valueAsString,
+      MCP_CONFIRM_ELICITATION: p.mcpConfirmElicitation.valueAsString,
     }, Duration.seconds(15));
     // Exactly what DeveloperSignInStore sends: GetItem, PutItem, UpdateItem, and TransactWriteItems
     // made of Put and Update items (IAM authorizes each item as PutItem or UpdateItem).
@@ -152,11 +156,13 @@ export class DeveloperSignIn extends Construct {
     broker.addEnvironment("DEVELOPER_OIDC_ISSUER", p.oidcIssuer.valueAsString);
     broker.addEnvironment("DEVELOPER_SIGNIN_SLACK_SINCE", p.slackSince.valueAsString);
     broker.addEnvironment("DEVELOPER_OIDC_SINCE", p.oidcSince.valueAsString);
+    broker.addEnvironment("MCP_CONFIRM_ELICITATION", p.mcpConfirmElicitation.valueAsString);
     fn.grantInvoke(broker);
+    // Spec 025 25e: EMAIL# is the email index resolveDeveloper reads to name a developer by email.
     broker.addToRolePolicy(new iam.PolicyStatement({
       actions: ["dynamodb:GetItem"],
       resources: [table.tableArn],
-      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*"] } },
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SESSION#*", "DEVELOPER#*", "EMAIL#*"] } },
     }));
 
     // FR-037, R27: the developer task routes write immutable AI-tool turn records, only under TASK#.
@@ -165,6 +171,13 @@ export class DeveloperSignIn extends Construct {
       actions: ["dynamodb:PutItem"],
       resources: [props.turnRecords.tableArn],
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["TASK#*"] } },
+    }));
+    // Spec 025 E3: admin change audit records, only under CHANGE#. Written once, then stepped forward
+    // by the broker alone; no delete, and no route edits them (FR-051).
+    broker.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:GetItem"],
+      resources: [props.turnRecords.tableArn],
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["CHANGE#*"] } },
     }));
 
     // The issuer the tokens carry and the broker checks, for operators and scripts to read.

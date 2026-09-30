@@ -650,6 +650,22 @@ export class ControlPlaneStack extends Stack {
         resources: [state.tableArn],
         conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SHARED_TASK#*"] } },
       }));
+      // Spec 025 E14 (C14): the interactivity route hands Slack Confirm and Cancel presses to the broker.
+      slackIngress.addEnvironment("ADMIN_CHANGES", "enabled");
+      // Spec 025 E14, FR-052: the interactivity route logs a press with its change's trace ID; it may
+      // read only that attribute and the keys, by key.
+      slackIngress.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["dynamodb:GetItem"],
+        resources: [state.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ADMIN_CHANGE#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "traceId"] },
+          StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+          // ForAllValues passes when dynamodb:Attributes is absent, and GetItem has no Select, so a read
+          // without a ProjectionExpression (which returns every attribute) must be refused outright.
+          Null: { "dynamodb:Attributes": "false" },
+        },
+      }));
       // C14: TASK_BUSY counts the shared thread's waiting messages.
       broker.addEnvironment("SLACK_THREADS_TABLE_NAME", slackThreads.tableName);
       broker.addToRolePolicy(new iam.PolicyStatement({
