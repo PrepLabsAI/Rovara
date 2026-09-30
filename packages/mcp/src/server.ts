@@ -87,8 +87,10 @@ export function createAgentXMcpServer(options: {
           );
           if (answer.action === "accept") return answer.content?.confirm === true ? "accept" as const : "decline" as const;
           return answer.action;
-        } catch {
-          // The client's error, its timeout or a cancel: never its words, which can quote the message.
+        } catch (error) {
+          // The client's error, its timeout or a cancel: the error's name only, never its words,
+          // which can quote the message.
+          options.log?.({ event: "elicitation.failed", error: error instanceof Error ? error.name : "unknown" });
           return "failed" as const;
         }
       };

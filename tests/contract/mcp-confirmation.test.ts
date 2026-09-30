@@ -105,7 +105,8 @@ describe("the confirmation driver's edges (FR-041, FR-052, R1)", () => {
     const getChange = vi.fn().mockResolvedValueOnce(view()).mockResolvedValueOnce(view({ status: "applied" }));
     const { run: r } = run({ startSlackConfirmation, getChange }, { elicit: async () => "failed" as const });
     await confirmChange(r);
-    for (const call of [...startSlackConfirmation.mock.calls, ...getChange.mock.calls] as unknown[][]) expect(call.at(-1)).toBe("trace-9");
+    // The trace ID is each call's second argument (a poll's third is its options).
+    for (const call of [...startSlackConfirmation.mock.calls, ...getChange.mock.calls] as unknown[][]) expect(call[1]).toBe("trace-9");
   });
 
   it("tries a failed Slack check again at the next poll, logging only the event, change and code", async () => {
@@ -287,7 +288,7 @@ describe("the developer client reads the environment's confirmation methods (C22
 });
 
 describe("the server's pop-up (FR-041)", () => {
-  async function connectWith(elicitation: Record<string, unknown> | undefined, answer: (message: string) => ElicitResult | Promise<ElicitResult>) {
+  async function connectWith(elicitation: Record<string, unknown> | undefined, answer: (message: string) => ElicitResult | Promise<ElicitResult>, log?: (entry: Record<string, unknown>) => void) {
     const seen: { hadElicit?: boolean; answers: string[]; messages: string[] } = { answers: [], messages: [] };
     const probe: ToolDefinition = {
       name: "agentx_probe_confirm", title: "Probe", description: "A test tool.", inputSchema: {}, outputSchema: { answer: z.string() },
@@ -302,7 +303,7 @@ describe("the server's pop-up (FR-041)", () => {
       client: {} as never, clientName: "claude-code", serverVersion: "0.5.0", adminSignedIn: async () => true,
       compatibility: async () => ({ env: "staging", apiVersion: "1.2", adminApiVersion: "1.1" }), now: () => 0, sleep: async () => undefined, newRequestId: () => "33333333-3333-4333-8333-333333333333",
     });
-    const server = createAgentXMcpServer({ version: "0.5.0", context, adminTools: [probe], adminOffer: async () => ({ admin: undefined }) });
+    const server = createAgentXMcpServer({ version: "0.5.0", context, adminTools: [probe], adminOffer: async () => ({ admin: undefined }), ...(log === undefined ? {} : { log }) });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     await server.connect(serverSide);
     const client = new Client({ name: "claude-code", version: "1.0.0" }, { capabilities: elicitation === undefined ? {} : { elicitation } });
@@ -338,5 +339,87 @@ describe("the server's pop-up (FR-041)", () => {
     const urlOnly = await connectWith({ url: {} }, () => ({ action: "accept", content: { confirm: true } }));
     expect((await urlOnly.call()).answer).toBe("absent");
     await urlOnly.close();
+  });
+
+  it("logs a failed pop-up by the error's name only (fix round 1, c)", async () => {
+    const log = vi.fn();
+    const failing = await connectWith({ form: {} }, () => { throw new Error("planted-client-words"); }, log);
+    expect((await failing.call()).answer).toBe("failed");
+    expect(log).toHaveBeenCalledWith({ event: "elicitation.failed", error: expect.any(String) as unknown });
+    expect(JSON.stringify(log.mock.calls)).not.toContain("planted-client-words");
+    expect(JSON.stringify(log.mock.calls)).not.toContain("ledger-dev");
+    await failing.close();
+  });
+});
+
+describe("fix round 1: a cancelled tool call opens no new confirmation path", () => {
+  it("declines with reason cancelled when the tool call is cancelled while the pop-up is open, with or without Slack", async () => {
+    for (const [methodsOffered, answer] of [[["elicitation", "slack"], "failed"], [["elicitation"], "failed"], [["elicitation", "slack"], "accept"]] as const) {
+      const controller = new AbortController();
+      const declineChange = vi.fn(async () => view({ status: "declined" }));
+      const startSlackConfirmation = vi.fn(async () => view());
+      const applyChange = vi.fn(async () => view({ status: "applied" }));
+      const elicit = async () => { controller.abort(); return answer; };
+      const { run: r } = run({ declineChange, startSlackConfirmation, applyChange }, { elicit, change: view({ methodsOffered: [...methodsOffered] }), signal: controller.signal });
+      await expect(confirmChange(r)).rejects.toMatchObject({ code: "CONFIRMATION_DECLINED", message: expect.stringContaining(CHANGE) as unknown });
+      expect(declineChange).toHaveBeenCalledWith(CHANGE, expect.objectContaining({ method: "elicitation", reason: "cancelled" }), "trace-9");
+      expect(startSlackConfirmation).not.toHaveBeenCalled();
+      expect(applyChange).not.toHaveBeenCalled();
+    }
+  });
+
+  it("polls with the tool call's signal and one try (a)", async () => {
+    const getChange = vi.fn(async () => view({ status: "applied" }));
+    const signal = new AbortController().signal;
+    const { run: r } = run({ startSlackConfirmation: async () => view(), getChange }, { change: view({ methodsOffered: ["slack"] }), signal });
+    await confirmChange(r);
+    expect(getChange).toHaveBeenCalledWith(CHANGE, "trace-9", { signal, tries: 1 });
+  });
+
+  it("does not fall back to Slack with under a minute left before the change expires (b)", async () => {
+    const declineChange = vi.fn(async () => view({ status: "declined" }));
+    const startSlackConfirmation = vi.fn(async () => view());
+    const { run: r } = run({ declineChange, startSlackConfirmation }, { elicit: async () => "failed" as const, change: view({ expiresAt: "2026-10-02T09:00:40.000Z" }) });
+    await expect(confirmChange(r)).rejects.toMatchObject({ code: "CONFIRMATION_DECLINED", message: expect.stringContaining("too little time is left to confirm in Slack") as unknown });
+    expect(startSlackConfirmation).not.toHaveBeenCalled();
+    expect(declineChange).toHaveBeenCalledWith(CHANGE, expect.objectContaining({ method: "elicitation", reason: "failed" }), "trace-9");
+  });
+
+  it("logs why the pop-up failed: its timeout or an error, never words (c)", async () => {
+    for (const failure of ["timeout", "error"] as const) {
+      let clock = Date.parse("2026-10-02T09:00:01.000Z");
+      const log = vi.fn();
+      const elicit = async (_message: string, timeoutMs: number) => { clock += failure === "timeout" ? timeoutMs : 100; return "failed" as const; };
+      const { run: r } = run({ startSlackConfirmation: async () => view(), getChange: async () => view({ status: "applied" }), declineChange: async () => view({ status: "declined" }) }, { elicit, now: () => clock, sleep: async (ms: number) => { clock += ms; }, log });
+      // A timed-out pop-up leaves under a minute, so (b) declines instead of Slack; only the log matters here.
+      await confirmChange(r).catch(() => undefined);
+      expect(log).toHaveBeenCalledWith({ event: "change.elicitation_failed", changeId: CHANGE, failure });
+    }
+  });
+
+  it("says a transient apply, decline or Slack failure leaves the change pending, and to ask again (d)", async () => {
+    const session = async () => ({ baseUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", accessToken: "t" });
+    const transient = () => vi.fn(async () => new Response(JSON.stringify({ error: { code: "RUNTIME_UNAVAILABLE", message: `change ${CHANGE} could not be applied just now; try again` } }), { status: 503 }));
+    for (const step of [
+      (client: AdminControlPlaneClient) => client.applyChange(CHANGE, { method: "elicitation" }, "t"),
+      (client: AdminControlPlaneClient) => client.declineChange(CHANGE, { method: "elicitation", reason: "declined" }, "t"),
+      (client: AdminControlPlaneClient) => client.startSlackConfirmation(CHANGE, "t"),
+    ]) {
+      const failure = await step(httpAdminClient({ session, fetch: transient() })).catch((error: unknown) => error);
+      expect(failure).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
+      expect((failure as ToolError).nextStep).toContain("still pending");
+      expect((failure as ToolError).nextStep).toContain("ask for the change again");
+    }
+    // A proposal that could not be planned made no pending change.
+    const planned = await httpAdminClient({ session, fetch: transient(), tries: 1 }).proposeChange({ requestId: "66666666-6666-4666-8666-666666666666", change: { kind: "unbind_channel", channel: "C0LEDGER01" }, client: { cliVersion: "0.6.0" }, methods: ["slack"] }, "t").catch((error: unknown) => error);
+    expect((planned as ToolError).nextStep).not.toContain("still pending");
+  });
+
+  it("passes the tool call's signal to a poll's fetch, and tries it once", async () => {
+    const session = async () => ({ baseUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", accessToken: "t" });
+    const controller = new AbortController();
+    const fetch = vi.fn(async (_url: string, init?: RequestInit) => { controller.abort(); expect(init?.signal?.aborted).toBe(true); return new Response(JSON.stringify({ error: { code: "INTERNAL", message: "down" } }), { status: 503 }); });
+    await expect(httpAdminClient({ session, fetch: fetch as never, sleep: async () => undefined }).getChange(CHANGE, "t", { signal: controller.signal, tries: 1 })).rejects.toBeInstanceOf(ToolError);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

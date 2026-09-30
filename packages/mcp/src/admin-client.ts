@@ -39,7 +39,8 @@ export interface AdminControlPlaneClient {
   // kind or method is a plain string here, and the driver treats one it does not know as neither
   // applied nor pending. Each takes the change tool call's one trace ID (FR-052).
   proposeChange(request: ProposeAdminChangeRequest, traceId: string): Promise<AdminChangeViewWire>;
-  getChange(changeId: string, traceId: string): Promise<AdminChangeViewWire>;
+  /** A poll inside a wait passes the tool call's signal, and one try (the wait polls again). */
+  getChange(changeId: string, traceId: string, options?: { signal?: AbortSignal; tries?: number }): Promise<AdminChangeViewWire>;
   startSlackConfirmation(changeId: string, traceId: string): Promise<AdminChangeViewWire>;
   applyChange(changeId: string, body: ApplyAdminChangeRequest, traceId: string): Promise<AdminChangeViewWire>;
   declineChange(changeId: string, body: DeclineAdminChangeRequest, traceId: string): Promise<AdminChangeViewWire>;
@@ -52,6 +53,8 @@ const CHANGE_CODES = new Set(["CONFIRMATION_UNAVAILABLE", "CONFIRMATION_DECLINED
 /** Input the control plane refuses on a change: the broker's words say which. */
 const CHANGE_INVALID = new Set(["NOT_FOUND", "PROJECT_REVISION_MISMATCH", "WORKSPACE_BUSY", "IDEMPOTENCY_CONFLICT"]);
 export const PROJECT_ADMIN_STEP = "ask an AgentX admin who administers that project to make this change";
+/** A transient failure of a step on a planned change: nothing applied, and the change is still pending. */
+export const CHANGE_PENDING_STEP = "nothing was applied and the change is still pending until it expires; ask for the change again to confirm it";
 
 /** The broker's catch-all refusal for a path it does not serve: a control plane from before 25d. */
 const NOT_AN_ADMIN_ROUTE = "this endpoint serves administration only";
@@ -59,7 +62,7 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** No call, retries included, takes longer than this (the developer client's DEADLINE_MS). */
 const DEADLINE_MS = 45_000;
 
-function refusal(status: number, value: unknown, secret: string): ToolError {
+function refusal(status: number, value: unknown, secret: string, pending = false): ToolError {
   const error = typeof value === "object" && value !== null ? (value as { error?: { code?: unknown; message?: unknown } }).error : undefined;
   const code = typeof error?.code === "string" ? error.code : undefined;
   const message = plainText(error?.message, `AgentX answered HTTP ${status}`, [secret]);
@@ -73,8 +76,13 @@ function refusal(status: number, value: unknown, secret: string): ToolError {
   if (code !== undefined && CHANGE_INVALID.has(code)) return new ToolError("INVALID_REQUEST", message);
   if (code === "FORBIDDEN") return new ToolError("ADMIN_REQUIRED", `AgentX refused: ${message}`, ADMIN_SIGN_IN_STEP);
   if (code === "CONFIG_INVALID") return new ToolError("INVALID_REQUEST", message);
+  // The broker answers RUNTIME_UNAVAILABLE only when nothing applied and the change is still pending.
+  if (pending && code === "RUNTIME_UNAVAILABLE") return new ToolError("CONTROL_PLANE_UNAVAILABLE", message, CHANGE_PENDING_STEP);
   return new ToolError("CONTROL_PLANE_UNAVAILABLE", message, status >= 500 ? NEXT_STEPS.CONTROL_PLANE_UNAVAILABLE : UNEXPECTED_ANSWER_STEP);
 }
+
+/** The request's own timeout, and the caller's signal when it gave one: whichever ends first. */
+const withCaller = (timeout: AbortSignal, caller: AbortSignal | undefined): AbortSignal => (caller === undefined ? timeout : AbortSignal.any([timeout, caller]));
 
 const search = (values: Record<string, string | number | undefined>) => {
   const query = new URLSearchParams();
@@ -88,7 +96,7 @@ export function httpAdminClient(options: { session(): Promise<AdminSession>; fet
   const now = (): number => (options.now ? options.now() : Date.now());
   const deadlineMs = options.deadlineMs ?? DEADLINE_MS;
   const sleep = (ms: number): Promise<void> => (options.sleep ? options.sleep(ms) : new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  async function send<T>(schema: z.ZodType<T>, method: "GET" | "POST", path: string, body: unknown, traceId: string | undefined, attempts: number): Promise<T> {
+  async function send<T>(schema: z.ZodType<T>, method: "GET" | "POST", path: string, body: unknown, traceId: string | undefined, attempts: number, extra: { signal?: AbortSignal; pending?: boolean } = {}): Promise<T> {
     // A ToolError from the session (ADMIN_REQUIRED: no admin sign-in held, Task 16) passes through.
     const session = await options.session();
     const where = plainText(session.baseUrl, "its URL", [session.accessToken]);
@@ -113,7 +121,7 @@ export function httpAdminClient(options: { session(): Promise<AdminSession>; fet
           },
           ...(body === undefined ? {} : { body: JSON.stringify(body) }),
           // Each try gets what is left of the deadline, at most 30 seconds.
-          signal: AbortSignal.timeout(Math.max(1, Math.min(REQUEST_TIMEOUT_MS, deadlineMs - (now() - started)))),
+          signal: withCaller(AbortSignal.timeout(Math.max(1, Math.min(REQUEST_TIMEOUT_MS, deadlineMs - (now() - started)))), extra.signal),
         });
         text = await response.text().catch(() => "");
       } catch {
@@ -124,7 +132,7 @@ export function httpAdminClient(options: { session(): Promise<AdminSession>; fet
       let value: unknown;
       try { value = JSON.parse(text) as unknown; } catch { value = undefined; }
       if (response.status >= 500 && await again(attempt)) continue;
-      if (!response.ok) throw refusal(response.status, value, session.accessToken);
+      if (!response.ok) throw refusal(response.status, value, session.accessToken, extra.pending);
       const parsed = schema.safeParse(value);
       if (!parsed.success) throw new ToolError("CONTROL_PLANE_UNAVAILABLE", "AgentX answered with something this version of the CLI cannot read; upgrade it", NEXT_STEPS.UPGRADE_REQUIRED);
       return parsed.data;
@@ -144,10 +152,10 @@ export function httpAdminClient(options: { session(): Promise<AdminSession>; fet
     // Only the proposal is retried: its requestId makes a repeat the same request. An apply, a
     // decline or a Slack step is sent once. changeId is a UUID the control plane made.
     proposeChange: (request, traceId) => send(ChangeView, "POST", "/v1/admin/changes", request, traceId, tries),
-    getChange: (changeId, traceId) => send(ChangeView, "GET", `/v1/admin/changes/${encodeURIComponent(changeId)}`, undefined, traceId, tries),
-    startSlackConfirmation: (changeId, traceId) => send(ChangeView, "POST", `/v1/admin/changes/${encodeURIComponent(changeId)}/slack`, {}, traceId, 1),
-    applyChange: (changeId, body, traceId) => send(ChangeView, "POST", `/v1/admin/changes/${encodeURIComponent(changeId)}/apply`, body, traceId, 1),
-    declineChange: (changeId, body, traceId) => send(ChangeView, "POST", `/v1/admin/changes/${encodeURIComponent(changeId)}/decline`, body, traceId, 1),
+    getChange: (changeId, traceId, poll) => send(ChangeView, "GET", `/v1/admin/changes/${encodeURIComponent(changeId)}`, undefined, traceId, Math.max(1, poll?.tries ?? tries), poll?.signal === undefined ? {} : { signal: poll.signal }),
+    startSlackConfirmation: (changeId, traceId) => send(ChangeView, "POST", `/v1/admin/changes/${encodeURIComponent(changeId)}/slack`, {}, traceId, 1, { pending: true }),
+    applyChange: (changeId, body, traceId) => send(ChangeView, "POST", `/v1/admin/changes/${encodeURIComponent(changeId)}/apply`, body, traceId, 1, { pending: true }),
+    declineChange: (changeId, body, traceId) => send(ChangeView, "POST", `/v1/admin/changes/${encodeURIComponent(changeId)}/decline`, body, traceId, 1, { pending: true }),
     changes: (query) => send(AdminChangesResponseWireSchema, "GET", `/v1/admin/changes${search({ since: query.since, until: query.until, admin: query.admin, outcome: query.outcome, limit: query.limit, cursor: query.cursor })}`, undefined, undefined, tries),
   };
 }
