@@ -25,6 +25,8 @@ import {
   runDevcontainerCommand,
   type DevcontainerCli,
 } from "./devcontainer.js";
+import { runCollected, type CollectedProcess } from "./collected-process.js";
+import { describeCommandFailure } from "./command-failure.js";
 import { evaluateReadiness, type CommandResult } from "./readiness.js";
 import { gitSafeEnvironment } from "./git.js";
 import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
@@ -182,7 +184,7 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
       if (manifest.completedSetupSteps.includes(index)) continue;
       const result = await commandRunner(command, index, canonicalRoot);
       if (result.exitCode !== 0) {
-        throw new Error(`setup step ${index} exited ${result.exitCode}: ${result.stderr}`);
+        throw new Error(describeCommandFailure("setup step", index, command, result));
       }
       await assertContainedSymlinks(canonicalRoot);
       manifest.completedSetupSteps.push(index);
@@ -193,23 +195,37 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
       { rootPath: canonicalRoot, commands: project.readiness },
       commandRunner,
     );
+    const readinessFailure = readiness.ready ? undefined : describeReadinessFailure(project.readiness, readiness.results);
     const readinessManifest: PreparationManifest = {
       ...manifest,
       readinessResults: readiness.results,
       complete: readiness.ready,
-      ...(!readiness.ready ? { failure: "one or more readiness checks failed" } : {}),
+      ...(readinessFailure !== undefined ? { failure: readinessFailure } : {}),
     };
     manifest = await writeManifest(
       canonicalRoot,
       readiness.ready ? withoutFailure(readinessManifest) : readinessManifest,
     );
-    if (!readiness.ready) throw new Error("one or more readiness checks failed");
+    if (readinessFailure !== undefined) throw new Error(readinessFailure);
     return manifest;
   } catch (error) {
     const message = error instanceof Error ? error.message : "workspace preparation failed";
     await writeManifest(canonicalRoot, { ...manifest, complete: false, failure: message });
     throw error;
   }
+}
+
+/** #154: the first failed readiness check, and how many more failed. */
+function describeReadinessFailure(
+  commands: readonly ProjectCommand[],
+  results: ReadonlyArray<CommandResult & { index: number; ready: boolean }>,
+): string {
+  const failed = results.filter((result) => !result.ready);
+  const first = failed[0];
+  const command = first === undefined ? undefined : commands[first.index];
+  if (first === undefined || command === undefined) return "one or more readiness checks failed";
+  const more = failed.length > 1 ? ` (and ${failed.length - 1} more)` : "";
+  return describeCommandFailure("readiness check", first.index, command, first, more);
 }
 
 async function loadOrCreateManifest(
@@ -327,24 +343,24 @@ export async function runProjectCommand(
   const cwd = containedPath(rootPath, command.cwd);
   const cwdStat = await stat(cwd);
   if (!cwdStat.isDirectory()) throw new Error(`command cwd is not a directory: ${command.cwd}`);
+  let result: CollectedProcess;
   try {
-    const result = await execFileAsync(command.executable, command.args, {
+    result = await runCollected(command.executable, command.args, {
       cwd,
-      timeout: command.timeoutSeconds * 1_000,
-      killSignal: "SIGTERM",
-      maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
-      encoding: "utf8",
+      timeoutMs: command.timeoutSeconds * 1_000,
       env: gitSafeEnvironment(cwd),
     });
-    return { exitCode: 0, stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
-    const processError = error as Error & { code?: number | string; stdout?: string; stderr?: string };
-    return {
-      exitCode: typeof processError.code === "number" ? processError.code : -1,
-      stdout: processError.stdout ?? "",
-      stderr: processError.stderr ?? processError.message,
-    };
+    // The command could not start (for example, its executable does not exist).
+    return { exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : "command could not start" };
   }
+  return {
+    exitCode: result.exitCode ?? -1,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    ...(result.signal !== undefined ? { signal: result.signal } : {}),
+    ...(result.timedOut === true ? { timedOut: true } : {}),
+  };
 }
 
 function containedPath(rootPath: string, configuredPath: string): string {
