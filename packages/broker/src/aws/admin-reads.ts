@@ -7,6 +7,7 @@ import {
   ADMIN_INDEX_RETENTION_DAYS,
   ADMIN_LIST_MAX,
   ADMIN_USAGE_READ_MAX,
+  ADMIN_WORKSPACES_DEFAULT_LIMIT,
   AdminUsageGroupBySchema,
   AgentXNameSchema,
   CHANNEL_MEMBERS_MAX_CHANNELS,
@@ -16,19 +17,29 @@ import {
   SlackTeamIdSchema,
   TaskUsageTelemetrySchema,
   UsageIndexRecordSchema,
+  WORKSPACE_PROJECT_INDEX,
+  WorkspaceInstanceSchema,
+  WorkspaceStatusSchema,
   agentXError,
   developerTaskPolicy,
+  parseSlackThreadSubject,
   redactAndCap,
+  slackThreadUrl,
+  workspaceRecordFields,
   type AdminBindingsResponse,
   type AdminFailuresResponse,
   type AdminProjectsResponse,
   type AdminUsageResponse,
+  type AdminWorkspacesResponse,
   type FailureIndexRecord,
   type ChannelInfoRequest,
   type ChannelInfoResponse,
   type ProjectDefinition,
+  type WorkspaceInstance,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
+import { readWorkspaceLimits } from "../developer/limits.js";
+import { taskKey, taskPointerKey } from "../developer/task-records.js";
 import type { TurnRecordSource } from "./turns.js";
 
 export interface AdminReadDependencies {
@@ -374,6 +385,94 @@ async function usageSummary(deps: AdminReadDependencies, url: URL): Promise<Admi
   return { groupBy: groupBy.data, ...window, groups: sorted, truncated };
 }
 
+/** A10: a project's workspaces from spec 041's byWorkspaceProject index, newest first, at most `cap`. Task 12 counts statuses with it. */
+export async function projectWorkspaceRows(deps: AdminReadDependencies, project: string, cap: number): Promise<{ rows: WorkspaceInstance[]; truncated: boolean }> {
+  const rows: WorkspaceInstance[] = [];
+  let start: Record<string, unknown> | undefined;
+  let truncated = false;
+  do {
+    const page = await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName,
+      IndexName: WORKSPACE_PROJECT_INDEX.name,
+      KeyConditionExpression: "#project = :project",
+      ExpressionAttributeNames: { "#project": WORKSPACE_PROJECT_INDEX.partitionKey },
+      ExpressionAttributeValues: { ":project": project },
+      ScanIndexForward: false,
+      Limit: ADMIN_LIST_MAX,
+      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+    })) as { Items?: Array<Record<string, unknown>>; LastEvaluatedKey?: Record<string, unknown> };
+    for (const item of page.Items ?? []) {
+      const parsed = WorkspaceInstanceSchema.safeParse(workspaceRecordFields(item));
+      if (parsed.success) rows.push(parsed.data);
+      else deps.log({ event: "admin.workspace_unreadable", project });
+    }
+    start = page.LastEvaluatedKey;
+    if (rows.length >= cap) {
+      truncated = start !== undefined || rows.length > cap;
+      start = undefined;
+    }
+  } while (start !== undefined);
+  return { rows: rows.slice(0, cap), truncated };
+}
+
+/** A10: a task's ID and developer name, or a Slack thread's link; never a task's title (D22). */
+export async function workspaceOwner(deps: AdminReadDependencies, workspace: WorkspaceInstance): Promise<{ origin: "slack" | "ai_tool"; owner: { threadUrl?: string; taskId?: string; developerName?: string } }> {
+  const pointer = await getStateItem(deps, taskPointerKey(workspace.id));
+  if (typeof pointer?.taskId === "string") {
+    const task = await getStateItem(deps, taskKey(pointer.taskId));
+    return { origin: "ai_tool", owner: { taskId: pointer.taskId, ...(typeof task?.developerName === "string" ? { developerName: task.developerName } : {}) } };
+  }
+  const thread = await getStateItem(deps, { pk: `SLACK_THREAD#${workspace.ownerKey}`, sk: "META" });
+  if (typeof thread?.thread === "string") {
+    try {
+      return { origin: "slack", owner: { threadUrl: slackThreadUrl(parseSlackThreadSubject(thread.thread)) } };
+    } catch {
+      // An unreadable subject is shown as no owner, never echoed.
+    }
+  }
+  return { origin: "slack", owner: {} };
+}
+
+const counterCount = async (deps: AdminReadDependencies, key: { pk: string; sk: string }): Promise<number> => {
+  const count = (await getStateItem(deps, key))?.count;
+  return typeof count === "number" && count >= 0 ? count : 0;
+};
+
+/** How many workspaces one project's read takes before the route sorts and cuts to `limit`. */
+const WORKSPACES_READ_PER_PROJECT = 1_000;
+
+async function listWorkspaces(deps: AdminReadDependencies, identity: AuthenticatedIdentity, url: URL): Promise<AdminWorkspacesResponse> {
+  const project = projectParam(url);
+  const statusText = url.searchParams.get("status");
+  const status = statusText === null ? undefined : WorkspaceStatusSchema.safeParse(statusText);
+  if (status !== undefined && !status.success) throw agentXError("CONFIG_INVALID", `status must be one of ${WorkspaceStatusSchema.options.join(", ")}`);
+  const limit = listLimit(url, ADMIN_WORKSPACES_DEFAULT_LIMIT);
+  const projects = project === undefined ? await adminProjectNames(deps, identity) : [project];
+  const found: WorkspaceInstance[] = [];
+  let truncated = false;
+  for (const name of projects) {
+    const { rows, truncated: more } = await projectWorkspaceRows(deps, name, WORKSPACES_READ_PER_PROJECT);
+    truncated = truncated || more;
+    found.push(...rows.filter((row) => (status === undefined ? row.status !== "CLOSED" : row.status === status.data)));
+  }
+  found.sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  if (found.length > limit) truncated = true;
+  const workspaces: AdminWorkspacesResponse["workspaces"] = [];
+  for (const workspace of found.slice(0, limit)) {
+    const { origin, owner } = await workspaceOwner(deps, workspace);
+    workspaces.push({ id: workspace.id, project: workspace.projectName, origin, owner, status: workspace.status, busy: workspace.activeOperationId !== null, lastActivityAt: workspace.updatedAt });
+  }
+  const limits = await readWorkspaceLimits(deps.documentClient, deps.tableName, deps.limitDefaults, (entry) => deps.log(entry));
+  const organization = deps.slackTeamId === undefined ? 0 : await counterCount(deps, { pk: `SLACK_LIMIT#${deps.slackTeamId}`, sk: "ORGANIZATION" });
+  const developerOrganization = await counterCount(deps, { pk: "DEVELOPER_LIMIT#ORGANIZATION", sk: "ORGANIZATION" });
+  return {
+    workspaces,
+    limits: { perPerson: limits.member, perOrganization: limits.organization, source: limits.source },
+    counts: { organization, ...(developerOrganization > 0 ? { developerOrganization } : {}) },
+    truncated,
+  };
+}
+
 /** The answer for an admin read route, or undefined when the request is not one. */
 export async function routeAdminRead(
   deps: AdminReadDependencies,
@@ -396,4 +495,5 @@ const ADMIN_READS: Record<string, AdminRead> = {
   "/v1/admin/slack/bindings": (deps, _identity, url) => listBindings(deps, url),
   "/v1/admin/failures": (deps, _identity, url) => listFailures(deps, url),
   "/v1/admin/usage": (deps, _identity, url) => usageSummary(deps, url),
+  "/v1/admin/workspaces": (deps, identity, url) => listWorkspaces(deps, identity, url),
 };
