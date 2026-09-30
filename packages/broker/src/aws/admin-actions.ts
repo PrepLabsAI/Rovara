@@ -78,10 +78,12 @@ export async function resolveDeveloper(deps: AdminActionDependencies, reference:
   throw agentXError("CONFIG_INVALID", "developer must be a developer ID, an email or a Slack user ID such as U0123456789");
 }
 
-export async function projectGrant(deps: AdminActionDependencies, project: string, developerId: string): Promise<{ role: "developer" | "administrator" } | undefined> {
-  const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: `MEMBER#${developerId}`, sk: `PROJECT#${project}` }, ConsistentRead: true })) as { Item?: { role?: unknown } };
+/** The membership row's role, and when it was granted (null for a row without that, such as an administrator's). */
+export async function projectGrant(deps: AdminActionDependencies, project: string, developerId: string): Promise<{ role: "developer" | "administrator"; grantedAt: string | null } | undefined> {
+  const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: { pk: `MEMBER#${developerId}`, sk: `PROJECT#${project}` }, ConsistentRead: true })) as { Item?: { role?: unknown; grantedAt?: unknown } };
   const role = response.Item?.role;
-  return role === "developer" || role === "administrator" ? { role } : undefined;
+  if (role !== "developer" && role !== "administrator") return undefined;
+  return { role, grantedAt: typeof response.Item?.grantedAt === "string" ? response.Item.grantedAt : null };
 }
 
 /** FR-013.1: a `developer` ProjectMembership row. An administrator row for the same key is kept as it is. */

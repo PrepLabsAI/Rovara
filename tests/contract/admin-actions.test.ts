@@ -72,11 +72,12 @@ describe("grants (FR-013.1)", () => {
     expect(await grantProjectAccess(d, ADMIN, "payments", id)).toEqual({ granted: true, already: false });
     expect(d.db.get(`MEMBER#${id}`, "PROJECT#payments")).toMatchObject({ entityType: "MEMBERSHIP", ownerKey: id, projectName: "payments", role: "developer", grantedBy: ADMIN, grantedAt: "2026-10-02T09:00:00.000Z" });
     expect(await grantProjectAccess(d, ADMIN, "payments", id)).toEqual({ granted: true, already: true });
-    expect(await projectGrant(d, "payments", id)).toEqual({ role: "developer" });
+    expect(await projectGrant(d, "payments", id)).toEqual({ role: "developer", grantedAt: "2026-10-02T09:00:00.000Z" });
     expect(await revokeProjectAccess(d, "payments", id)).toEqual({ revoked: true });
     expect(await revokeProjectAccess(d, "payments", id)).toEqual({ revoked: false });
     expect(await projectGrant(d, "payments", id)).toBeUndefined();
     d.db.set({ pk: `MEMBER#${id}`, sk: "PROJECT#ledger", entityType: "MEMBERSHIP", ownerKey: id, projectName: "ledger", role: "administrator" });
+    expect(await projectGrant(d, "ledger", id)).toEqual({ role: "administrator", grantedAt: null });
     await expect(grantProjectAccess(d, ADMIN, "ledger", id)).rejects.toMatchObject({ code: "CONFIG_INVALID" });
     expect(await revokeProjectAccess(d, "ledger", id)).toEqual({ revoked: false });
     expect(d.db.get(`MEMBER#${id}`, "PROJECT#ledger")).toMatchObject({ role: "administrator" });

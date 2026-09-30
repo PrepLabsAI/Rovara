@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { planChange, stateHash, type PlanDependencies } from "../../packages/broker/src/aws/admin-change-plans.js";
 import { developerIdForSlackUser } from "../../packages/broker/src/aws/admin-actions.js";
+import { emailIndexKey } from "../../packages/broker/src/developer/store.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 import { MAYA } from "../support/developer-task-broker.js";
 
@@ -132,7 +133,8 @@ describe("ending a sign-in (E9, Q3)", () => {
   it("says every session ends at once and that they may sign in again", async () => {
     const { deps, identity } = await harness();
     expect((await planChange(deps, identity, { kind: "revoke_signin", developer: MAYA.developerId })).effect).toBe("End every AgentX sign-in session of Maya Chen (signs in with Slack). Their AI tools stop reaching AgentX at once; they may sign in again with agentx login. Their running tasks keep running.");
-    await expect(planChange(deps, identity, { kind: "revoke_signin", developer: "U0NEW00001" })).rejects.toMatchObject({ code: "NOT_FOUND" });
+    await expect(planChange(deps, identity, { kind: "revoke_signin", developer: "U0NEW00001" })).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: Slack user U0NEW00001 has never signed in to AgentX, so there is no sign-in to end" });
+    await expect(planChange(deps, identity, { kind: "revoke_project_access", project: "payments", developer: "U0NEW00001" })).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: Slack user U0NEW00001 has no grant for payments, so there is nothing to revoke" });
   });
 
   it("needs the admin claim, moves the hash when sessions were ended since, and applies through the sign-in service", async () => {
@@ -144,6 +146,32 @@ describe("ending a sign-in (E9, Q3)", () => {
     expect(endDeveloperSessions).not.toHaveBeenCalled();
     await plan.apply(identity);
     expect(endDeveloperSessions).toHaveBeenCalledWith(expect.objectContaining({ kind: "end-developer-sessions", developerId: MAYA.developerId }));
+  });
+});
+
+describe("a developer named by email (Q4, FR-051)", () => {
+  it("never shows the email in an effect, details, snapshot or error", async () => {
+    const { deps, identity, db } = await harness();
+    const email = "nia.park@example.com";
+    const developerId = "a".repeat(64);
+    db.set({ pk: `DEVELOPER#${developerId}`, sk: "META", developerId, provider: "oidc", displayName: "Nia Park", email });
+    db.set({ ...emailIndexKey(email), entityType: "DEVELOPER_EMAIL", developerId });
+    const grant = await planChange(deps, identity, { kind: "grant_project_access", project: "payments", developer: email });
+    expect(grant.effect).toBe("Grant Nia Park (signs in with the company sign-in) access to project payments. They have no grant today. They can then hand tasks to payments from their AI tool.");
+    expect(grant.details).toMatchObject({ developerId, via: "email" });
+    const signin = await planChange(deps, identity, { kind: "revoke_signin", developer: email });
+    for (const plan of [grant, signin]) expect(JSON.stringify({ effect: plan.effect, details: plan.details, snapshot: plan.snapshot })).not.toContain(email);
+    const stranger = "ghost.user@example.com";
+    for (const input of [
+      { kind: "grant_project_access" as const, project: "payments", developer: stranger },
+      { kind: "revoke_project_access" as const, project: "payments", developer: stranger },
+      { kind: "revoke_signin" as const, developer: stranger },
+    ]) {
+      const error = await planChange(deps, identity, input).then(() => undefined, (caught: unknown) => caught as Error);
+      expect(error).toMatchObject({ code: "NOT_FOUND" });
+      expect(error!.message).not.toContain(stranger);
+      expect(error!.message).not.toContain("ghost");
+    }
   });
 });
 

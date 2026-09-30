@@ -268,11 +268,16 @@ const planCredential: Planner = async (deps, identity, input) => {
   };
 };
 
-/** How a developer is named in an effect: by profile once they signed in, else by what the admin gave. */
+/** How a developer is named: by profile once they signed in, else by what the admin gave. */
 function describeDeveloper(resolved: ResolvedDeveloper): string {
   if (resolved.profile !== undefined) return `${resolved.profile.displayName} (signs in with ${resolved.profile.provider === "slack" ? "Slack" : "the company sign-in"})`;
-  if (resolved.slackUserId !== undefined) return `Slack user ${resolved.slackUserId} (not signed in to AgentX yet; the grant applies when they sign in with Slack)`;
-  return `developer ${resolved.developerId.slice(0, 12)} (not signed in to AgentX yet)`;
+  if (resolved.slackUserId !== undefined) return `Slack user ${resolved.slackUserId}`;
+  return `developer ${resolved.developerId.slice(0, 12)}`;
+}
+/** An effect's note for someone who has not signed in yet; a grant says when it takes hold. */
+function notSignedIn(resolved: ResolvedDeveloper, grant: boolean): string {
+  if (resolved.profile !== undefined) return "";
+  return grant && resolved.slackUserId !== undefined ? " (not signed in to AgentX yet; the grant applies when they sign in with Slack)" : " (not signed in to AgentX yet)";
 }
 
 /** The admin claim alone (Q7): org-wide changes name no project. */
@@ -291,13 +296,6 @@ async function projectMustExist(deps: PlanDependencies, identity: AuthenticatedI
   const latest = await latestProjectRecord(deps.reads, project);
   if (latest === undefined) throw agentXError("NOT_FOUND", `project ${project} is not registered; check the project's name, or register it with agentx admin project register`);
   return latest;
-}
-
-/** The grant row as the hash covers it: its role and when it was made, so a new grant is new state. */
-async function grantRow(deps: PlanDependencies, project: string, developerId: string) {
-  const item = await getStateItem(deps.reads, { pk: `MEMBER#${developerId}`, sk: `PROJECT#${project}` });
-  if (item?.role !== "developer" && item?.role !== "administrator") return undefined;
-  return { role: item.role, grantedAt: typeof item.grantedAt === "string" ? item.grantedAt : null };
 }
 
 const planStop: Planner = async (deps, identity, input) => {
@@ -335,7 +333,7 @@ const planGrant: Planner = async (deps, identity, input) => {
   if (current?.role === "administrator") throw agentXError("CONFIG_INVALID", `${describeDeveloper(resolved)} already administers ${input.project}; there is nothing to change`);
   const project = input.project;
   return {
-    effect: `Grant ${describeDeveloper(resolved)} access to project ${project}. They have no grant today. They can then hand tasks to ${project} from their AI tool.`,
+    effect: `Grant ${describeDeveloper(resolved)}${notSignedIn(resolved, true)} access to project ${project}. They have no grant today. They can then hand tasks to ${project} from their AI tool.`,
     details: { developerId: resolved.developerId, via: resolved.via, project },
     // Who the effect names is state too: a first sign-in since planning changes the effect.
     snapshot: { grant: null, profile: resolved.profile === undefined ? null : { displayName: resolved.profile.displayName, provider: resolved.profile.provider } },
@@ -352,14 +350,14 @@ const planRevoke: Planner = async (deps, identity, input) => {
   const latest = await projectMustExist(deps, identity, input.project);
   await deps.handlers.requireAdministrator(identity, input.project);
   const resolved = await resolveDeveloper(deps.actions, input.developer);
-  const current = await grantRow(deps, input.project, resolved.developerId);
+  const current = await projectGrant(deps.actions, input.project, resolved.developerId);
   // An administrator row is never a grant: revoking never removes an administrator.
   if (current?.role !== "developer") throw agentXError("NOT_FOUND", `${describeDeveloper(resolved)} has no grant for ${input.project}, so there is nothing to revoke`);
   const project = input.project;
   const channelMembersMayUse = developerTaskPolicy(latest.definition).channelMembersMayUse;
   const channels = channelMembersMayUse ? ` If they are a member of one of ${project}'s Slack channels, they keep access through it.` : "";
   return {
-    effect: `Revoke the granted access of ${describeDeveloper(resolved)} to project ${project}. Their running tasks keep running.${channels}`,
+    effect: `Revoke the granted access of ${describeDeveloper(resolved)}${notSignedIn(resolved, false)} to project ${project}. Their running tasks keep running.${channels}`,
     details: { developerId: resolved.developerId, via: resolved.via, project },
     snapshot: { grant: current, channelMembersMayUse, profile: resolved.profile === undefined ? null : { displayName: resolved.profile.displayName, provider: resolved.profile.provider } },
     apply: async (applier) => {
@@ -373,7 +371,7 @@ const planEndSessions: Planner = async (deps, identity, input) => {
   if (input.kind !== "revoke_signin") throw new Error("wrong planner");
   requireAdminClaim(identity);
   const resolved = await resolveDeveloper(deps.actions, input.developer);
-  if (resolved.profile === undefined) throw agentXError("NOT_FOUND", `${describeDeveloper(resolved)} has never signed in, so there is no sign-in to end`);
+  if (resolved.profile === undefined) throw agentXError("NOT_FOUND", `${describeDeveloper(resolved)} has never signed in to AgentX, so there is no sign-in to end`);
   return {
     effect: `End every AgentX sign-in session of ${describeDeveloper(resolved)}. Their AI tools stop reaching AgentX at once; they may sign in again with agentx login. Their running tasks keep running.`,
     details: { developerId: resolved.developerId, via: resolved.via },
@@ -415,6 +413,7 @@ const planLimits: Planner = async (deps, identity, input) => {
   return {
     effect: effect.length > ADMIN_CHANGE_EFFECT_MAX ? `${effect.slice(0, ADMIN_CHANGE_EFFECT_MAX - 3)}...` : effect,
     details: { current: { perPerson: current.member, perOrganization: current.organization, source: current.source }, next, organizationCount, over: over.length },
+    // The counts are informational and change often, so they are deliberately outside the hash.
     snapshot: { setting: setting === undefined ? null : { perPerson: setting.perPerson ?? null, perOrganization: setting.perOrganization ?? null, updatedAt: setting.updatedAt ?? null }, defaults: deps.reads.limitDefaults },
     apply: async (applier) => setWorkspaceLimits(deps.actions, { issuer: applier.issuer, subject: applier.subject }, next),
   };
