@@ -2,7 +2,10 @@
 
 Phase 1 (the wizard server, the browser prompter, the event and log streams, and the review and
 resume screens behind `--ui`) merged as PR #146. Planning phases 2 to 4 raised thirteen decisions the
-spec leaves open. Each has two to four options, the recommended one first.
+spec leaves open. Each has two to four options, the recommended one first. The owner answered all
+thirteen on 2026-09-30, each as recommended. The owner also ruled that no live testing happens
+until spec 025 phases 25d and 25e and spec 040 phases 2 to 4 are all built; each plan's live-check
+task is deferred to one combined final live check, and its steps are that check's checklist.
 
 The plans follow every recommendation. A task that depends on an answer says "Depends on Q<n>", so
 a different answer changes only the tasks named below it. Each plan's last spec task records the
@@ -33,6 +36,8 @@ removed.
 
 **Depends on it:** phase 4 Tasks 1 and 4.
 
+**Owner answer (2026-09-30):** as recommended (option A).
+
 ## Q2. What happens on a machine with no browser (SSH, CloudShell, a container)?
 
 User Story 4 says the wizard "prints its URL and falls back to the terminal prompter". Both at once
@@ -51,6 +56,8 @@ would mean two places answering the same question.
 
 **Depends on it:** phase 4 Task 2.
 
+**Owner answer (2026-09-30):** as recommended (option A).
+
 ## Q3. What happens when the browser tab is closed in the middle of an install?
 
 Today (phase 1) the run keeps waiting for the page's answer, with no word in the terminal. The page
@@ -68,6 +75,8 @@ comes back whole when the address is opened again (it gets a full snapshot on co
 **Cost if wrong:** low. One timer in the wizard (phase 4 Task 2).
 
 **Depends on it:** phase 4 Task 2.
+
+**Owner answer (2026-09-30):** as recommended (option A).
 
 ## Q4. How are secrets typed into the page?
 
@@ -89,6 +98,8 @@ the field's own behaviour.
 
 **Depends on it:** phase 2 Task 1.
 
+**Owner answer (2026-09-30):** as recommended (option A).
+
 ## Q5. When the install needs another site (GitHub, Slack, the AgentX sign-in page), who opens it?
 
 The terminal path opens the system browser for each one. In the page, a new tab that appears on its
@@ -103,6 +114,8 @@ own is easy to miss, and some browsers block it.
 **Cost if wrong:** low. One function (`openLink`) decides it.
 
 **Depends on it:** phase 2 Tasks 2 and 5; phase 3 Task 2.
+
+**Owner answer (2026-09-30):** as recommended (option A).
 
 ## Q6. May the page accept GitHub's redirect back, which comes from another site?
 
@@ -124,6 +137,8 @@ should look hardest (phase 2 Review Focus).
 
 **Depends on it:** phase 2 Task 5.
 
+**Owner answer (2026-09-30):** as recommended (option A).
+
 ## Q7. When a check fails on the page, does the page offer to try again?
 
 FR-023 (prerequisites), FR-041 (the Request URL) and FR-051 (the test reply) ask for checks that can
@@ -141,6 +156,8 @@ again". The alert subscription wait also stops the run when nobody has confirmed
 
 **Depends on it:** phase 2 Tasks 2, 4 and 7; phase 3 Tasks 4 and 5.
 
+**Owner answer (2026-09-30):** as recommended (option A).
+
 ## Q8. When Slack refuses a bot token that looks right, what does the page do?
 
 FR-040 asks for the two format checks (`checkSlackBotToken`, `checkSlackSigningSecret`) inline. A
@@ -156,6 +173,8 @@ pasted in the wrong field), or the operator can say "no, that is not the right b
 **Cost if wrong:** low. One loop in the Slack step.
 
 **Depends on it:** phase 2 Task 6.
+
+**Owner answer (2026-09-30):** as recommended (option A).
 
 ## Q9. How does the AWS screen pick and sign in to a profile?
 
@@ -178,6 +197,8 @@ FR-020 and FR-021 ask for a profile list, the chosen profile's account, and a si
 
 **Depends on it:** phase 2 Task 3.
 
+**Owner answer (2026-09-30):** as recommended (option A).
+
 ## Q10. What does the last screen say about day-2 commands?
 
 FR-052 says the manual follow-up commands go once the install finishes the job itself. They have:
@@ -192,6 +213,8 @@ ones (more projects, more connectors, a test alarm).
 **Cost if wrong:** low. One card builder.
 
 **Depends on it:** phase 3 Task 6.
+
+**Owner answer (2026-09-30):** as recommended (option A).
 
 ## Q11. Where do the page's files live?
 
@@ -210,6 +233,8 @@ the CLI; the CLI ships only as the npm package.
 
 **Depends on it:** phase 4 Task 3.
 
+**Owner answer (2026-09-30):** as recommended (option A).
+
 ## Q12. Is the page the default on Windows?
 
 `openSystemBrowser` supports macOS (`open`) and Linux (`xdg-open`) only; on Windows it throws.
@@ -222,6 +247,8 @@ the CLI; the CLI ships only as the npm package.
 **Cost if wrong:** low. One platform check in `browserAvailable`.
 
 **Depends on it:** phase 4 Task 1.
+
+**Owner answer (2026-09-30):** as recommended (option A).
 
 ## Q13. How do the three phases ship and get live-checked?
 
@@ -240,3 +267,5 @@ phase with your go-ahead, and PRs that target mainline (no stacked PRs).
 **Cost if wrong:** a day of calendar time either way.
 
 **Depends on it:** every plan's live-check task.
+
+**Owner answer (2026-09-30):** as recommended (option A) for the three PRs, one per phase. The live checks are changed: none runs per phase. One combined final live check runs after spec 025 phases 25d and 25e and spec 040 phases 2 to 4 are all built, using the three plans' live-check steps as its checklist.

@@ -702,7 +702,13 @@ git commit -m "docs(spec-040): record the phase 4 rulings and answers; spec 040 
 
 ---
 
-### Task 6: Live check (owner present): the default, headless, and a closed tab
+### Task 6: Live check (deferred to the combined final live check) (owner present): the default, headless, and a closed tab
+
+> **Deferred to the combined final live check (owner, 2026-09-30).** No live testing happens until
+> spec 025 phases 25d and 25e and spec 040 phases 2 to 4 are all built. This task is not run when
+> this phase is built; its steps below are kept as the checklist for that one final check, run in a
+> single throwaway environment, with the owner's go-ahead.
+
 
 This task changes no code unless it finds a defect (fixed with a failing test first, in its task).
 It is cheap by design (Q13): it stops after the prerequisites, which creates only the install's SSM
@@ -761,4 +767,5 @@ It uses `live40d` on the Mac and `live40e` in CloudShell, in `us-east-1`.
   `pageClosedReminder` are Task 2's; the reminder uses phase 1's `WizardHub.state().question`.
   `NO_BROWSER_LINE` is one constant, printed by `commands.ts` and quoted by the docs test.
 - **Review Focus.** 1, 2 and 5 in Task 1; 3 and 4 in Task 2.
-- **The owner's answers.** Not yet given; Task 5 stops for any answer that differs.
+- **The owner's answers (2026-09-30).** All thirteen as recommended, so no task changes; the live
+  check is deferred to the combined final live check (owner, 2026-09-30).

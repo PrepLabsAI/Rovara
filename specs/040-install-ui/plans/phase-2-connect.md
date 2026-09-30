@@ -2505,7 +2505,13 @@ git commit -m "docs(spec-040): record the phase 2 rulings and the owner's answer
 
 ---
 
-### Task 10: Live check in a throwaway environment (owner present)
+### Task 10: Live check (deferred to the combined final live check) in a throwaway environment (owner present)
+
+> **Deferred to the combined final live check (owner, 2026-09-30).** No live testing happens until
+> spec 025 phases 25d and 25e and spec 040 phases 2 to 4 are all built. This task is not run when
+> this phase is built; its steps below are kept as the checklist for that one final check, run in a
+> single throwaway environment, with the owner's go-ahead.
+
 
 This task changes no code unless it finds a defect. A defect is fixed with a failing test first,
 in the task that owns the code, then reviewed. It tests the real connect screens: a real browser,
@@ -2599,5 +2605,5 @@ It uses a new environment, `live40b`, in `us-east-1`.
   and its Request URL are different steps.
 - **Review Focus.** Each line has its test in the owning task: 1 and 2 in Task 5, 3 in Task 6, 4 in
   Task 3, 5 in Task 4.
-- **The owner's answers.** Not yet given; the plan follows every recommendation, and Task 9 stops
-  for any answer that differs.
+- **The owner's answers (2026-09-30).** All thirteen as recommended, so no task changes; the live
+  check is deferred to the combined final live check (owner, 2026-09-30).
