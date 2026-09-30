@@ -40,6 +40,10 @@ export interface DeployEnvironmentInput {
   /** An upgrade reads each deployed stack's parameters here, to keep OPERATOR_PARAMETERS (Task 1 of
    * phase 15e). Required for an upgrade that deploys a part with operator parameters. */
   deployedParameters?: (stackName: string) => Promise<Record<string, string> | undefined>;
+  /** The parameter names each part's template declares, when the engine knows them better than the
+   * release does: the cdk engine's synth of its source (issue 152, prepareDeployment). Omitted, they
+   * are read from the release's own templates (templateParameterNames), as the templates engine does. */
+  declaredParameters?: (part: DeployPart) => ReadonlySet<string>;
 }
 
 export interface DeployEnvironmentResult {
@@ -192,6 +196,8 @@ function assertDeployAllowed(existing: EnvironmentSettings | undefined, mode: "i
 export async function deployEnvironment(input: DeployEnvironmentInput): Promise<DeployEnvironmentResult> {
   const { mode, engine, answers, release, deployer, store, secrets, holder } = input;
   const env = answers.env;
+  const declaredBy = input.declaredParameters;
+  const declaredFor = (part: DeployPart): ReadonlySet<string> | undefined => (declaredBy === undefined ? templateParameterNames(release, part, env) : declaredBy(part));
   const now = input.now ?? Date.now;
 
   assertDeployAllowed(await readEnvironmentSettings(store, env), mode, engine, input.parts, env);
@@ -272,9 +278,9 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
       const stackName = environmentStackName(env, part);
       const rawParameters = stackParameters(part, fullAnswers, outputs, { packages: engine === "templates" });
       // F24: only when this deploy is actually sending a stored sign-in choice to the control plane
-      // is the release's template even consulted (every other deploy never calls `release.template`).
+      // are the declared parameters even consulted (every other deploy never calls `release.template`).
       let parameters = part === "control-plane" && developerSignIn !== undefined
-        ? withDeclaredSignIn(rawParameters, templateParameterNames(release, "control-plane", env))
+        ? withDeclaredSignIn(rawParameters, declaredFor("control-plane"))
         : rawParameters;
       if (mode === "upgrade" && OPERATOR_PARAMETERS[part].length > 0) {
         // The F6 guard above already refused this before anything deployed. Never skip carrying the
@@ -285,7 +291,7 @@ export async function deployEnvironment(input: DeployEnvironmentInput): Promise<
         const deployed = await input.deployedParameters(stackName);
         // The template is read only when there is something to keep: most upgrades read none.
         const candidates = OPERATOR_PARAMETERS[part].filter((name) => deployed?.[name] !== undefined && !Object.hasOwn(parameters, name));
-        const declared = candidates.length === 0 ? undefined : templateParameterNames(release, part, env);
+        const declared = candidates.length === 0 ? undefined : declaredFor(part);
         const { kept, dropped } = keptOperatorParameters({ part, computed: parameters, deployed, declared });
         parameters = { ...kept, ...parameters };
         droppedParameters.push(...dropped.map((entry) => ({ stackName, ...entry })));
