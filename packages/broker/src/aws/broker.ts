@@ -3678,6 +3678,8 @@ async function completedTurnItems(
   return [{ Put: { TableName: table, Item: item, ConditionExpression: "attribute_not_exists(pk)" } }];
 }
 
+const TERMINAL_ERROR_MAX = 16_384;
+
 async function recordTerminalResult(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
@@ -3694,7 +3696,9 @@ async function recordTerminalResult(
   const now = new Date().toISOString();
   const terminalStatus = status as OperationStatus;
   let recordedStatus: OperationStatus = terminalStatus;
-  const error = typeof input.error === "string" ? input.error.slice(0, 16_384) : undefined;
+  // #154: the worker's error can quote a command's output, so it is redacted before it is stored,
+  // and redactAndCap redacts before it caps.
+  const error = typeof input.error === "string" ? redactAndCap(input.error, TERMINAL_ERROR_MAX).text : undefined;
   const result = operation.kind === "publish" && status === "SUCCEEDED"
     ? PullRequestResultSchema.parse(input.result)
     : operation.kind === "close" && status === "SUCCEEDED"

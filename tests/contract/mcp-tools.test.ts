@@ -500,3 +500,25 @@ describe("agentx_open_pull_request and agentx_close_task return at once (R22, Ow
     expect(result.structuredContent).toMatchObject({ unpublished: [{ repository: "demo", reasons: ["unpushed_head"] }] });
   });
 });
+
+describe("the next step after a failure during setup (#154)", () => {
+  it("says to start a new task, not to continue it, when compute was lost during setup", async () => {
+    const lost = view("FAILED", { failure: { category: "worker_unavailable", stage: "setup", message: "workspace compute was lost during setup; close this task and start a new one" } });
+    const result = await (await connect({ getTask: async () => lost })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+    expect(text(result)).toContain("It never started: close it with agentx_close_task and start a new one.");
+    expect(text(result)).not.toContain("agentx_continue_task");
+    expect(result.structuredContent).toMatchObject({ failure: { category: "worker_unavailable", stage: "setup" } });
+  });
+
+  it("declares the failure's stage in the task tools' output schema", async () => {
+    const { tools } = await (await connect({})).listTools();
+    const failure = (tools.find((tool) => tool.name === "agentx_get_task")?.outputSchema?.properties as Record<string, { properties?: Record<string, unknown> }> | undefined)?.failure;
+    expect(failure?.properties).toHaveProperty("stage");
+  });
+
+  it("still offers agentx_continue_task when compute was lost during a task", async () => {
+    const lost = view("FAILED", { failure: { category: "worker_unavailable", message: "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request" } });
+    const result = await (await connect({ getTask: async () => lost })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+    expect(text(result)).toContain("Send new instructions with agentx_continue_task, or close it with agentx_close_task.");
+  });
+});

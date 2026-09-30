@@ -19,6 +19,7 @@ import {
   type AiToolTurnRecord,
   type DeveloperRequester,
   type DeveloperTaskEvent,
+  type DeveloperTaskFailure,
   type DeveloperTaskFailureCategory,
   type DeveloperTaskShare,
   type DeveloperTaskStatus,
@@ -173,15 +174,23 @@ export function failureCategory(kind: string, status: string, error: string | un
   return "task_failed";
 }
 
-const failureOf = (kind: string, status: string, error: string | undefined) => ({
-  category: failureCategory(kind, status, error),
-  // redactAndCap redacts then caps surrogate-pair-safely (a plain .slice can split an emoji).
-  message: redactAndCap(error ?? `the ${kind} operation ended ${status}`, DEVELOPER_FAILURE_MESSAGE_MAX).text,
-});
+const COMPUTE_LOST = /^RUNTIME_UNAVAILABLE: workspace compute was lost\b/;
+/** #154: a setup that never finished cannot be continued, so "retry the request" is wrong there. */
+export const COMPUTE_LOST_DURING_SETUP = "workspace compute was lost during setup; close this task and start a new one";
+
+function failureOf(kind: string, status: string, error: string | undefined): DeveloperTaskFailure {
+  const category = failureCategory(kind, status, error);
+  if (kind !== "prepare") {
+    // redactAndCap redacts then caps surrogate-pair-safely (a plain .slice can split an emoji).
+    return { category, message: redactAndCap(error ?? `the ${kind} operation ended ${status}`, DEVELOPER_FAILURE_MESSAGE_MAX).text };
+  }
+  const text = error !== undefined && COMPUTE_LOST.test(error) ? COMPUTE_LOST_DURING_SETUP : error ?? `the ${kind} operation ended ${status}`;
+  return { category, stage: "setup", message: redactAndCap(text, DEVELOPER_FAILURE_MESSAGE_MAX).text };
+}
 
 export interface DerivedStatus {
   status: DeveloperTaskStatus;
-  failure?: { category: DeveloperTaskFailureCategory; message: string };
+  failure?: DeveloperTaskFailure;
   closing: boolean;
   current?: OperationFacts;
 }

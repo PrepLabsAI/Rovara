@@ -185,6 +185,110 @@ describe("workspace preparation", () => {
   });
 });
 
+// #154: a failed setup step or readiness check says which command failed, and why, with the last
+// lines of its error output, redacted before they are cut.
+describe("a failed setup or readiness command (#154)", () => {
+  const TOKEN = `ghp_${"A1b2C3d4E5".repeat(4)}`;
+
+  async function preparing(name: string, commands: { setup?: ProjectDefinition["setup"]; readiness?: ProjectDefinition["readiness"] }) {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const source = await createGitFixture(name);
+    const project = { ...fixtureProject([{ name, commit: source.commit }]), ...commands } satisfies ProjectDefinition;
+    const materializer: RepositoryMaterializer = async (_repository, destination) => {
+      await run("git", ["clone", "--quiet", source.directory, destination]);
+    };
+    const failure = await prepareWorkspace({ rootPath: root, project, materializer }).then(
+      () => { throw new Error("preparation unexpectedly succeeded"); },
+      (error: unknown) => error as Error,
+    );
+    const manifest = JSON.parse(await readFile(join(root, ".agentx/preparation-manifest.json"), "utf8")) as { failure?: string };
+    return { message: failure.message, manifest };
+  }
+
+  it("names the step's command and directory and says it timed out, with its limit", async () => {
+    const { message, manifest } = await preparing("timeout", {
+      setup: [{ cwd: "repo/timeout", executable: "sleep", args: ["30"], timeoutSeconds: 1 }],
+    });
+    expect(message).toBe("setup step 0 (sleep 30 in repo/timeout) timed out after 1 s");
+    expect(manifest.failure).toBe(message);
+  });
+
+  it("says a step exited with its code and shows only the last lines of its error output", async () => {
+    const { message } = await preparing("noisy", {
+      setup: [{ cwd: "repo/noisy", executable: "sh", args: ["-c", "i=1; while [ $i -le 100 ]; do echo line-$i >&2; i=$((i+1)); done; exit 3"], timeoutSeconds: 10 }],
+    });
+    expect(message).toMatch(/^setup step 0 \(sh -c i=1; .* in repo\/noisy\) exited 3\nLast lines:\n/);
+    const lines = message.split("Last lines:\n")[1]!.split("\n");
+    expect(lines).toHaveLength(20);
+    expect(lines[0]).toBe("line-81");
+    expect(lines.at(-1)).toBe("line-100");
+    expect(message).not.toContain("line-80\n");
+    expect(message.length).toBeLessThanOrEqual(1_000);
+  });
+
+  it("keeps the end of more than 1 MiB of error output, where the error is, and lets the step finish", async () => {
+    const script = "process.stderr.write(\"noise\\n\".repeat(400000)); process.stderr.write(\"the real error\\n\"); process.exitCode = 1;";
+    const { message } = await preparing("flood", {
+      setup: [{ cwd: "repo/flood", executable: process.execPath, args: ["-e", script], timeoutSeconds: 20 }],
+    });
+    expect(message).toMatch(/\) exited 1\nLast lines:\n/);
+    expect(message.endsWith("noise\nthe real error")).toBe(true);
+  });
+
+  it("says a step could not run when its executable does not exist (#154 review)", async () => {
+    const { message } = await preparing("missing-exe", {
+      setup: [{ cwd: "repo/missing-exe", executable: "agentx-no-such-command-154", args: [], timeoutSeconds: 10 }],
+    });
+    expect(message).toMatch(/^setup step 0 \(agentx-no-such-command-154 in repo\/missing-exe\) could not run\nLast lines:\n.*ENOENT/);
+  });
+
+  it("names the step when its directory does not exist (#154 review)", async () => {
+    const { message } = await preparing("missing-cwd", {
+      setup: [{ cwd: "repo/missing-cwd/nowhere", executable: "true", args: [], timeoutSeconds: 10 }],
+    });
+    expect(message).toBe("setup step 0 (true in repo/missing-cwd/nowhere) could not run\nLast lines:\ndirectory does not exist in this workspace: repo/missing-cwd/nowhere");
+  });
+
+  it("caps the command at 120 characters", async () => {
+    const { message } = await preparing("long", {
+      setup: [{ cwd: "repo/long", executable: "sh", args: ["-c", `exit 1; ${"x".repeat(300)}`], timeoutSeconds: 10 }],
+    });
+    const shown = /^setup step 0 \((.*) in repo\/long\) exited 1$/.exec(message)?.[1];
+    expect(shown).toBeDefined();
+    expect(shown!.length).toBeLessThanOrEqual(120);
+    expect(shown!.endsWith("...")).toBe(true);
+  });
+
+  it("says a step was killed by a signal", async () => {
+    const { message } = await preparing("killed", {
+      setup: [{ cwd: "repo/killed", executable: "sh", args: ["-c", "kill -KILL $$"], timeoutSeconds: 10 }],
+    });
+    expect(message).toBe("setup step 0 (sh -c kill -KILL $$ in repo/killed) was killed by SIGKILL");
+  });
+
+  it("redacts a token in the step's arguments and in its error output, before the output is cut", async () => {
+    const { message, manifest } = await preparing("secret", {
+      setup: [{ cwd: "repo/secret", executable: "sh", args: ["-c", `echo "fatal: bad credentials ${TOKEN}" >&2; exit 1`, "--token", TOKEN], timeoutSeconds: 10 }],
+    });
+    expect(message).not.toContain(TOKEN);
+    expect(message).not.toContain(TOKEN.slice(0, 12));
+    expect(message).toContain("--token [REDACTED]");
+    expect(message).toContain("fatal: bad credentials [REDACTED]");
+    expect(JSON.stringify(manifest.failure)).not.toContain(TOKEN.slice(0, 12));
+  });
+
+  it("names the first failed readiness check, how it failed, and how many more failed", async () => {
+    const { message } = await preparing("ready", {
+      readiness: [
+        { cwd: "repo/ready", executable: "true", args: [], timeoutSeconds: 10 },
+        { cwd: "repo/ready", executable: "sh", args: ["-c", "echo 2 tests failed >&2; exit 1"], timeoutSeconds: 10 },
+        { cwd: "repo/ready", executable: "false", args: [], timeoutSeconds: 10 },
+      ],
+    });
+    expect(message).toBe("readiness check 1 (sh -c echo 2 tests failed >&2; exit 1 in repo/ready) exited 1 (and 1 more)\nLast lines:\n2 tests failed");
+  });
+});
+
 async function createGitFixture(name: string): Promise<{ directory: string; commit: string }> {
   const directory = await mkdtemp(join(tmpdir(), `agentx-${name}-source-`));
   await run("git", ["init", "--quiet", "--initial-branch=main", directory]);
