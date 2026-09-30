@@ -86,6 +86,12 @@ export interface FinishFlags {
  * already write; with no page, every step behaves exactly as before. */
 export interface InstallSurface { card(card: WizardCard): void }
 
+/** Where the GitHub App's manifest form is served and GitHub's redirect is received: the terminal
+ * path's one-time listener (github-app.ts's startManifestListener), or the wizard's own address
+ * with --ui (FR-030). */
+export interface ManifestHost { port: number; startUrl: string; redirectUrl: string; code: Promise<string>; close(): void }
+export type OpenManifestHost = (input: { state: string; page: (redirectUrl: string, nonce?: string) => string; timeoutMs: number }) => Promise<ManifestHost>;
+
 // write, now and sleep are function-typed properties rather than methods, so steps can pass them
 // on (as `write: context.write`) without an unbound-method lint error.
 export interface InitContext {
@@ -103,6 +109,8 @@ export interface InitContext {
   openBrowser?: (url: string) => Promise<boolean>;
   /** With --ui only: the page's cards. Undefined on the terminal path, and every use is `?.`. */
   surface?: InstallSurface;
+  /** With --ui only: the wizard serves the GitHub App flow itself. */
+  manifestHost?: OpenManifestHost;
   now: () => number;
   sleep: (ms: number) => Promise<void>;
   fetch: typeof fetch;

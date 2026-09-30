@@ -388,4 +388,18 @@ describe("agentx init --ui", () => {
     expect(failed?.checks?.find((check) => !check.ok)).toEqual({ label: "Prerequisites", ok: false, detail: "CDKToolkit stack creation was rolled back" });
     expect(h.deployer.requests).toEqual([]);
   });
+
+  it("FR-030 and FR-031: the GitHub App is created and installed through the wizard's own address, shown as cards", async () => {
+    const h = await harness();
+    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(code).toBe(0);
+    const wizardOrigin = new URL(operator.opened[0] ?? "").origin;
+    expect(operator.clicked).toContain(`${wizardOrigin}/github/start?t=${new URL(operator.opened[0] ?? "").searchParams.get("t") ?? ""}`);
+    expect(h.github.conversions).toEqual(["0123456789abcdef0123"]);
+    const stages = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "github").map((card) => card.lines[0]) ?? []);
+    // The app's name is the first run's default ("AgentX <account> <env>"); its slug is GitHub's.
+    expect(stages).toContain('Create the GitHub App "AgentX acme staging" for acme. GitHub opens with everything filled in; press Create GitHub App.');
+    expect(stages).toContain("Install agentx-acme-staging on acme and choose the repositories AgentX may use.");
+    expect(stages.at(-1)).toBe("agentx-acme-staging is installed on acme.");
+  });
 });

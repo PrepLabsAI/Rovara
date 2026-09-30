@@ -5,7 +5,7 @@
 // Nothing about what init does changes here. This module is injected through the seams init already
 // has -- `Prompter`, `onEvent`, `write(line)` and `openBrowser(url)` -- so the terminal path and
 // `--yes` are untouched.
-import type { InstallSurface } from "../context.js";
+import type { InstallSurface, OpenManifestHost } from "../context.js";
 import type { Prompter } from "../prompts.js";
 import type { InitEvent } from "../steps.js";
 import type { InitStepId } from "../install-state.js";
@@ -24,6 +24,8 @@ export interface InstallWizard {
   /** Q5: the init context's openBrowser with --ui. The address becomes a button on the page, and
    * the operator opens it; nothing is opened on its own. Always true: the page shows it. */
   openLink: (url: string) => Promise<boolean>;
+  /** FR-030: the GitHub App's manifest form and GitHub's redirect, on the wizard's own address. */
+  manifestHost: OpenManifestHost;
   hub: WizardHub;
   /** One line for the log pane: the same line init writes to stderr. */
   log(line: string): void;
@@ -71,6 +73,7 @@ export async function startInstallWizard(input: {
       hub.showLink({ url, label: linkLabel(url) });
       return true;
     },
+    manifestHost: async (input) => server.mountManifest(input),
     log: (line) => hub.log(line),
     event: (event) => hub.applyEvent(event),
     setSteps: (steps) => hub.setSteps(steps),

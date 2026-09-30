@@ -5,9 +5,10 @@
 import { createSign, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { agentXError } from "@agentx/contracts";
-import type { InitContext } from "./context.js";
+import type { InitContext, ManifestHost, OpenManifestHost } from "./context.js";
 import { checkPrivateKeyPem, secretFromSource } from "./prompts.js";
 import type { InitStep } from "./steps.js";
+import { githubCard } from "./ui/cards.js";
 
 export const AGENTX_HOMEPAGE = "https://github.com/PrepLabsAI/AgentX";
 export const GITHUB_WAIT_MS = 15 * 60 * 1000;
@@ -41,13 +42,14 @@ export function githubNewAppUrl(input: { account: string; accountType: "organiza
 
 const escapeHtml = (text: string) => text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 
-export function manifestFormPage(input: { actionUrl: string; manifest: GitHubManifest }): string {
+export function manifestFormPage(input: { actionUrl: string; manifest: GitHubManifest; nonce?: string }): string {
+  const script = input.nonce === undefined ? "<script>" : `<script nonce="${escapeHtml(input.nonce)}">`;
   return [
     "<!doctype html><meta charset=\"utf-8\"><title>Create the AgentX GitHub App</title>",
     `<form id="manifest-form" method="post" action="${escapeHtml(input.actionUrl)}">`,
     `<input type="hidden" name="manifest" value="${escapeHtml(JSON.stringify(input.manifest))}">`,
     "<p>Opening GitHub with the AgentX GitHub App filled in.</p><button type=\"submit\">Continue to GitHub</button></form>",
-    "<script>document.getElementById(\"manifest-form\").submit()</script>",
+    `${script}document.getElementById("manifest-form").submit()</script>`,
   ].join("\n");
 }
 
@@ -66,10 +68,10 @@ export function parseManifestCallback(pasted: string, expectedState: string): st
   return text;
 }
 
-export interface ManifestListener { port: number; startUrl: string; redirectUrl: string; code: Promise<string>; close(): void }
+export type ManifestListener = ManifestHost;
 
 /** `port` is for tests; the default 0 asks the system for a free port. */
-export async function startManifestListener(input: { state: string; page: (redirectUrl: string) => string; timeoutMs: number; port?: number }): Promise<ManifestListener> {
+export async function startManifestListener(input: { state: string; page: (redirectUrl: string, nonce?: string) => string; timeoutMs: number; port?: number }): Promise<ManifestListener> {
   let resolveCode: (code: string) => void = () => undefined;
   let rejectCode: (error: Error) => void = () => undefined;
   const code = new Promise<string>((resolvePromise, reject) => { resolveCode = resolvePromise; rejectCode = reject; });
@@ -194,9 +196,15 @@ async function createWithManifest(context: InitContext, api: GitHubApi): Promise
   const { account, accountType, appName } = context.answers.github;
   const state = randomBytes(16).toString("hex");
   const actionUrl = githubNewAppUrl({ account, accountType, state });
-  const listener = await startManifestListener({ state, page: (redirectUrl) => manifestFormPage({ actionUrl, manifest: githubAppManifest({ appName, redirectUrl }) }), timeoutMs: GITHUB_WAIT_MS });
+  const openHost: OpenManifestHost = context.manifestHost ?? startManifestListener;
+  const listener = await openHost({
+    state,
+    page: (redirectUrl, nonce) => manifestFormPage({ actionUrl, manifest: githubAppManifest({ appName, redirectUrl }), ...(nonce === undefined ? {} : { nonce }) }),
+    timeoutMs: GITHUB_WAIT_MS,
+  });
   try {
     context.write(`Create the GitHub App "${appName}" for ${account}: GitHub opens with everything filled in; press Create GitHub App.`);
+    context.surface?.card(githubCard({ stage: "create", appName, account, startUrl: listener.startUrl }));
     let code: string;
     let opened = false;
     if (context.openBrowser !== undefined) {
@@ -297,6 +305,7 @@ export function githubAppStep(api: GitHubApi): InitStep<InitContext> {
           throw agentXError("CONFIG_INVALID", `installation ${installationId} of GitHub App ${app.appId} is not on ${account}; check --github-installation-id`);
         }
       } else {
+        context.surface?.card(githubCard({ stage: "install", slug: app.slug, account, installUrl }));
         context.write(`Install the app on ${account} and choose the repositories AgentX may use: ${installUrl}`);
         if (context.openBrowser !== undefined) await context.openBrowser(installUrl);
         for (;;) {
@@ -316,12 +325,14 @@ export function githubAppStep(api: GitHubApi): InitStep<InitContext> {
         if ((await api.repositoryCount(token.token)) > 0) break;
         if (!told) {
           context.write(`The app is installed but can see no repositories. Choose at least one at ${installationSettingsUrl(accountType, account, installationId)}`);
+          context.surface?.card(githubCard({ stage: "repositories", slug: app.slug, account, settingsUrl: installationSettingsUrl(accountType, account, installationId) }));
           told = true;
         }
         if (context.now() >= deadline) throw agentXError("CONFIG_INVALID", `the GitHub App can see no repositories; choose at least one at ${installationSettingsUrl(accountType, account, installationId)}, then run agentx init again`);
         await context.sleep(POLL_MS);
       }
       await progress.update({ github: { ...app, installationId } });
+      context.surface?.card(githubCard({ stage: "done", slug: app.slug, account }));
       return { status: "done", note: `GitHub App ${app.slug} installed on ${account}` };
     },
   };

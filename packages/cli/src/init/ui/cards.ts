@@ -54,3 +54,32 @@ export function prerequisitesCard(input: { status: "running" | "ok" | "failed"; 
       : ["Nothing has been created. Fix each item marked with a cross, then answer Yes below to check again."];
   return { id: "prerequisites", title: "Prerequisites", status: input.status, lines, checks: input.checks.map((check) => ({ ...check })) };
 }
+
+export type GitHubCardInput =
+  | { stage: "create"; appName: string; account: string; startUrl: string }
+  | { stage: "install"; slug: string; account: string; installUrl: string }
+  | { stage: "repositories"; slug: string; account: string; settingsUrl: string }
+  | { stage: "done"; slug: string; account: string };
+
+/** FR-030 and FR-031: creating the app, then the installation wait, as one card. */
+export function githubCard(input: GitHubCardInput): WizardCard {
+  const base = { id: "github" as const, title: "GitHub App" };
+  switch (input.stage) {
+    case "create": return {
+      ...base, status: "waiting",
+      lines: [`Create the GitHub App "${input.appName}" for ${input.account}. GitHub opens with everything filled in; press Create GitHub App.`, "This page moves on by itself once GitHub sends you back."],
+      link: { url: input.startUrl, label: "Create the GitHub App" },
+    };
+    case "install": return {
+      ...base, status: "waiting",
+      lines: [`Install ${input.slug} on ${input.account} and choose the repositories AgentX may use.`, "Waiting for the installation. This page moves on by itself."],
+      link: { url: input.installUrl, label: "Install the app and choose repositories" },
+    };
+    case "repositories": return {
+      ...base, status: "waiting",
+      lines: [`${input.slug} is installed but can see no repositories.`, "Choose at least one. This page moves on by itself."],
+      link: { url: input.settingsUrl, label: "Choose repositories" },
+    };
+    case "done": return { ...base, status: "ok", lines: [`${input.slug} is installed on ${input.account}.`] };
+  }
+}

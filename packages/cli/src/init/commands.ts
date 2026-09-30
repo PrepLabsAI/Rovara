@@ -567,6 +567,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     write,
     ...(stepBrowser === undefined ? {} : { openBrowser: stepBrowser }),
     ...(surface === undefined ? {} : { surface }),
+    ...(session.wizard === undefined ? {} : { manifestHost: session.wizard.manifestHost }),
     now,
     sleep,
     fetch: fetchImplementation,
