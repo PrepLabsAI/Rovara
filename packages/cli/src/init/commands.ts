@@ -48,6 +48,7 @@ import { problemText, retryOnPage } from "./retry.js";
 import { developerSignInStep } from "./signin-step.js";
 import { slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
 import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from "./steps.js";
+import { browserAvailable, NO_BROWSER_LINE, resolveUiMode } from "./ui-mode.js";
 import { prerequisitesCard, readyCard } from "./ui/cards.js";
 import { startInstallWizard, type InstallWizard } from "./ui/index.js";
 import type { WizardResume } from "./ui/protocol.js";
@@ -68,6 +69,10 @@ export interface InitCliDependencies {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   processEnv?: NodeJS.ProcessEnv;
+  /** Whether a person is at an interactive terminal (default: stdin is a TTY). */
+  isInteractive?: () => boolean;
+  /** Whether a browser opened here would show on this machine's screen (default: browserAvailable). */
+  browserAvailable?: () => boolean;
   /** Overrides RELEASE_VERSION; null means a build from source. */
   releaseVersion?: string | null;
   /** Overrides how the run's deployment is built (tests: a cleanup that fails). */
@@ -85,8 +90,8 @@ export interface InitOptions {
   source?: string;
   yes: boolean;
   browser: boolean;
-  /** --ui / --no-ui: ask on a page on 127.0.0.1 instead of in the terminal. Undefined means
-   * neither was given; in this release that still means the terminal. */
+  /** --ui / --no-ui. Undefined means neither was given: the page in an interactive terminal that
+   * can open a browser, else the terminal (resolveUiMode). */
   ui?: boolean;
   resume: boolean;
   flags: InitFlags;
@@ -349,10 +354,15 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     throw agentXError("CONFIG_INVALID", `release ${release.manifest.version} is a prerelease; agentx init installs only published releases (x.y.z). Pass --release <dir> with a published release`);
   }
 
-  // FR-001: --ui asks on a page on 127.0.0.1 instead of in the terminal, so no TTY is needed. An
-  // injected prompter still wins, so a test can drive the wizard's screens without a browser.
+  // FR-001: --ui, --no-ui, or (neither given) the page in an interactive terminal on a machine
+  // that can open a browser. --no-browser reads as "no browser here" for the default (Q2).
+  const uiMode = resolveUiMode({
+    ui: options.ui, yes: options.yes, injectedPrompter: deps.prompter !== undefined,
+    interactive: (deps.isInteractive ?? (() => process.stdin.isTTY === true))(),
+    browser: options.browser && (deps.browserAvailable ?? (() => browserAvailable({ platform: process.platform, env: processEnv })))(),
+  });
   let prompter: Prompter;
-  if (options.ui === true) {
+  if (uiMode.mode === "page") {
     if (options.yes) throw agentXError("CONFIG_INVALID", "agentx init --ui asks its questions on a page; --yes answers them without asking. Use one or the other");
     const wizard = await startInstallWizard({
       env, write,
@@ -364,9 +374,11 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     prompter = deps.prompter;
   } else if (options.yes) {
     prompter = unattendedPrompter();
-  } else if (process.stdin.isTTY !== true) {
-    throw agentXError("CONFIG_INVALID", "agentx init asks questions; run it in a terminal, pass --ui to answer them in a browser, or pass --yes with a flag for every answer");
   } else {
+    if (uiMode.noBrowser === true) write(NO_BROWSER_LINE);
+    if (process.stdin.isTTY !== true) {
+      throw agentXError("CONFIG_INVALID", "agentx init asks questions; run it in a terminal, pass --ui to answer them in a browser, or pass --yes with a flag for every answer");
+    }
     prompter = processPrompter(services.stderr);
   }
   if (options.slackInstall !== undefined) prompter = answeringSlackInstall(prompter, options.slackInstall);

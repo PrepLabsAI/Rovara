@@ -628,4 +628,33 @@ describe("agentx init --ui", () => {
     expect(operator.states.at(-1)?.cards?.map((card) => card.id)).toEqual(expect.arrayContaining(["admin", "project", "channel", "reply", "ready"]));
     expect(operator.states.at(-1)?.cards?.find((card) => card.id === "ready")?.status).toBe("ok");
   });
+
+  it("FR-001: with neither flag, an interactive terminal that can open a browser gets the page", async () => {
+    const h = await harness();
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    // No --ui, and no injected prompter: the default decides.
+    expect(await h.run([], { openBrowser: operator.open, isInteractive: () => true, browserAvailable: () => true })).toBe(0);
+    await operator.settled();
+    expect(operator.opened[0]).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/\?t=/);
+    expect(operator.remaining()).toBe(0);
+  });
+
+  // The terminal path refuses without a TTY; a developer running the suite with one attached would
+  // be asked on stdin instead, so the test runs only where stdin is not a TTY (always, in CI).
+  it.skipIf(process.stdin.isTTY === true)("User Story 4: with no browser, the terminal asks, after one line saying how to get the page", async () => {
+    const h = await harness();
+    const refused = fakeWizardOperator([]);
+    // No TTY in the test process: the terminal path refuses, as before, but only after the line.
+    expect(await h.run([], { openBrowser: refused.open, isInteractive: () => true, browserAvailable: () => false })).not.toBe(0);
+    expect(refused.opened).toEqual([]);
+    expect(h.printed()).toContain("No browser here, so agentx init asks in this terminal. To use the install page instead, run agentx init --ui and open the address it prints (over SSH, forward its port with ssh -L).");
+  });
+
+  it.skipIf(process.stdin.isTTY === true)("--no-browser with neither flag is the terminal, with the same line", async () => {
+    const h = await harness();
+    const none = fakeWizardOperator([]);
+    await h.run(["--no-browser"], { openBrowser: none.open, isInteractive: () => true, browserAvailable: () => true });
+    expect(none.opened).toEqual([]);
+    expect(h.printed()).toContain("No browser here, so agentx init asks in this terminal.");
+  });
 });
