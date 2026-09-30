@@ -30,8 +30,8 @@ export interface AdminReadDependencies {
   log(entry: Record<string, unknown>): void;
 }
 
-/** Every item under `pk` with the sort key prefix, or the first `limit` of them. */
-export async function queryAllItems(deps: AdminReadDependencies, pk: string, prefix: string, options: { limit?: number; newestFirst?: boolean } = {}): Promise<Array<Record<string, unknown>>> {
+/** Every item under `pk` with the sort key prefix, or the first `limit` of them. The broker's developer task actions share it. */
+export async function queryAllItems(deps: Pick<AdminReadDependencies, "documentClient" | "tableName">, pk: string, prefix: string, options: { limit?: number; newestFirst?: boolean } = {}): Promise<Array<Record<string, unknown>>> {
   const items: Array<Record<string, unknown>> = [];
   let start: Record<string, unknown> | undefined;
   do {
@@ -56,17 +56,24 @@ export async function getStateItem(deps: AdminReadDependencies, key: { pk: strin
 }
 
 /** The latest revision's record, or undefined when the project has none. */
-export async function latestProjectRecord(deps: AdminReadDependencies, name: string): Promise<{ definition: ProjectDefinition; runtimeBinding: { deploymentMode: string }; registeredAt: string } | undefined> {
+export async function latestProjectRecord(deps: AdminReadDependencies, name: string): Promise<LatestProjectRecord | undefined> {
   const [item] = await queryAllItems(deps, `PROJECT#${name}`, "REV#", { limit: 1, newestFirst: true });
   if (item === undefined) return undefined;
-  return item as unknown as { definition: ProjectDefinition; runtimeBinding: { deploymentMode: string }; registeredAt: string };
+  return item as unknown as LatestProjectRecord;
 }
+
+type LatestProjectRecord = { definition: ProjectDefinition; runtimeBinding: { deploymentMode: string }; registeredAt: string };
 
 /**
  * A3 (Q2): the catalog's names, the environment team's bound projects, and the caller's own
  * membership rows. Sorted and unique; a name is kept only while the project has a revision.
  */
 export async function adminProjectNames(deps: AdminReadDependencies, identity: AuthenticatedIdentity): Promise<string[]> {
+  return (await adminProjects(deps, identity)).map((project) => project.name);
+}
+
+/** A3's names with each one's latest revision, read once: the read that proves a name also serves the list. */
+async function adminProjects(deps: AdminReadDependencies, identity: AuthenticatedIdentity): Promise<Array<{ name: string; latest: LatestProjectRecord }>> {
   const [catalog, bindings, memberships] = await Promise.all([
     queryAllItems(deps, PROJECT_CATALOG_PK, "PROJECT#"),
     deps.slackTeamId === undefined ? Promise.resolve([]) : queryAllItems(deps, `SLACK_BINDING#${deps.slackTeamId}`, "CHANNEL#"),
@@ -77,8 +84,11 @@ export async function adminProjectNames(deps: AdminReadDependencies, identity: A
   for (const item of bindings) if (typeof item.projectName === "string") names.add(item.projectName);
   for (const item of memberships) if (typeof item.projectName === "string") names.add(item.projectName);
   const sorted = [...names].sort();
-  const exists = await Promise.all(sorted.map(async (name) => (await queryAllItems(deps, `PROJECT#${name}`, "REV#", { limit: 1 })).length > 0));
-  return sorted.filter((_, index) => exists[index]);
+  const latest = await Promise.all(sorted.map((name) => latestProjectRecord(deps, name)));
+  return sorted.flatMap((name, index) => {
+    const record = latest[index];
+    return record === undefined ? [] : [{ name, latest: record }];
+  });
 }
 
 type Definition = Omit<ProjectDefinition, "integrations"> & { integrations?: { githubMcp?: unknown; connectors?: Array<{ name?: unknown; type?: unknown }> } };
@@ -86,9 +96,7 @@ type Definition = Omit<ProjectDefinition, "integrations"> & { integrations?: { g
 /** FR-030: name, latest revision, registration time, repositories, mode, connectors and task policy. Never the instructions. */
 async function listProjects(deps: AdminReadDependencies, identity: AuthenticatedIdentity): Promise<AdminProjectsResponse> {
   const projects: AdminProjectsResponse["projects"] = [];
-  for (const name of await adminProjectNames(deps, identity)) {
-    const latest = await latestProjectRecord(deps, name);
-    if (latest === undefined) continue;
+  for (const { name, latest } of await adminProjects(deps, identity)) {
     const definition = latest.definition as Definition;
     const connectors = (definition.integrations?.connectors ?? [])
       .filter((entry): entry is { name: string; type: string } => typeof entry.name === "string" && typeof entry.type === "string")

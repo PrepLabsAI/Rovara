@@ -29,6 +29,8 @@ describe("GET /v1/admin/projects (FR-038, FR-030)", () => {
     const { db, admin } = await createAdminReadBroker();
     db.delete("PROJECT_CATALOG", "PROJECT#payments");
     expect((await admin("GET", "/v1/admin/projects")).body.projects).toEqual([expect.objectContaining({ name: "payments" })]);
+    // The binding alone: an admin with no membership row still finds it through the team's binding.
+    expect((await admin("GET", "/v1/admin/projects", { subject: "another-admin" })).body.projects).toEqual([expect.objectContaining({ name: "payments" })]);
     // Unbound as well: only the registering admin's membership row names it now.
     for (const binding of db.find((item) => item.entityType === "SLACK_BINDING")) db.delete(String(binding.pk), String(binding.sk));
     expect((await admin("GET", "/v1/admin/projects")).body.projects).toEqual([expect.objectContaining({ name: "payments" })]);

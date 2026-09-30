@@ -128,17 +128,28 @@ export class FakeDynamoDb {
         const high = ranged[6] === undefined ? undefined : values[ranged[6]] as string;
         const found = this.find((item) => item[partition] === values[ranged[2]!] && typeof item[sort] === "string"
           && compareKeys(item[sort], low) >= 0 && (high === undefined || compareKeys(item[sort], high) <= 0))
-          .sort((left, right) => compareKeys(left[sort] as string, right[sort] as string));
+          // Items that share a sort value keep one order, by table key, so a page boundary between them skips nothing.
+          .sort((left, right) => compareTuples(indexOrder(left, sort), indexOrder(right, sort)));
         if (input.ScanIndexForward === false) found.reverse();
         const start = input.ExclusiveStartKey as Record<string, unknown> | undefined;
-        const after = start === undefined ? found : found.filter((item) => compareKeys(item[sort] as string, String(start[sort])) * (input.ScanIndexForward === false ? -1 : 1) > 0);
+        const after = start === undefined
+          ? found
+          : found.filter((item) => compareTuples(indexOrder(item, sort), indexOrder(start, sort)) * (input.ScanIndexForward === false ? -1 : 1) > 0);
         return after.map((item) => structuredClone(item));
       }
       // A secondary index keyed by one attribute: `<attribute> = :value`, sparse like DynamoDB's.
       const indexed = INDEX_EQUALS.exec(String(input.KeyConditionExpression));
       if (!indexed) throw new Error(`FakeDynamoDb does not support the index key condition ${String(input.KeyConditionExpression)}`);
       const attribute = indexed[1]!.startsWith("#") ? names[indexed[1]!]! : indexed[1]!;
-      return this.find((item) => item[attribute] !== undefined && item[attribute] === values[indexed[2]!]).map((item) => structuredClone(item));
+      // The table's own (insertion) order, as before; ExclusiveStartKey resumes after that item in it.
+      const found = this.find((item) => item[attribute] !== undefined && item[attribute] === values[indexed[2]!]);
+      const start = input.ExclusiveStartKey as { pk?: unknown; sk?: unknown } | undefined;
+      if (start === undefined) return found.map((item) => structuredClone(item));
+      const position = found.findIndex((item) => item.pk === start.pk && item.sk === start.sk);
+      if (position === -1) {
+        throw Object.assign(new Error("FakeDynamoDb resumes a single-attribute index only after an item still in it"), { name: "ValidationException" });
+      }
+      return found.slice(position + 1).map((item) => structuredClone(item));
     }
     // A sort key range, as the operation events page reads it: `pk = :pk AND sk BETWEEN :a AND :b`.
     const range = /^pk = :pk AND sk BETWEEN (:[a-zA-Z]+) AND (:[a-zA-Z]+)$/.exec(String(input.KeyConditionExpression));
@@ -161,7 +172,10 @@ export class FakeDynamoDb {
       const bound = values[before[1]!] as string;
       const found = this.find((item) => item.pk === values[":pk"] && compareKeys(item.sk as string, bound) < 0)
         .sort((left, right) => compareKeys(left.sk as string, right.sk as string));
-      return found.map((item) => structuredClone(item));
+      // ExclusiveStartKey resumes after that key (this range is read oldest first only).
+      const start = input.ExclusiveStartKey as { sk?: unknown } | undefined;
+      const after = start === undefined ? found : found.filter((item) => compareKeys(item.sk as string, String(start.sk)) > 0);
+      return after.map((item) => structuredClone(item));
     }
     const match = /^pk = :pk AND begins_with\(sk, (:[a-zA-Z]+)\)$/.exec(String(input.KeyConditionExpression));
     if (!match) throw new Error(`FakeDynamoDb does not support the key condition ${String(input.KeyConditionExpression)}`);
@@ -216,6 +230,19 @@ export class FakeDynamoDb {
 
 const INDEX_EQUALS = /^(#?[A-Za-z0-9_]+) = (:[A-Za-z0-9_]+)$/;
 const INDEX_RANGE = /^(#?[A-Za-z0-9_]+) = (:[A-Za-z0-9_]+) AND (#?[A-Za-z0-9_]+) (>=|BETWEEN) (:[A-Za-z0-9_]+)(?: AND (:[A-Za-z0-9_]+))?$/;
+
+/** An index item's position: its sort value, then its table keys. */
+function indexOrder(item: Record<string, unknown>, sort: string): string[] {
+  return [String(item[sort]), String(item.pk), String(item.sk)];
+}
+
+function compareTuples(left: string[], right: string[]): number {
+  for (let index = 0; index < left.length; index += 1) {
+    const order = compareKeys(left[index]!, right[index]!);
+    if (order !== 0) return order;
+  }
+  return 0;
+}
 
 function itemKey(pk: string, sk: string): string {
   return `${pk}\u0000${sk}`;

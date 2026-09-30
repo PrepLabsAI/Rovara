@@ -9,7 +9,6 @@ import {
   QueryCommand,
   TransactWriteCommand,
   UpdateCommand,
-  type QueryCommandOutput,
 } from "@aws-sdk/lib-dynamodb";
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
@@ -87,7 +86,7 @@ import {
   projectCatalogKey,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
-import { routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
+import { queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
 import { CatalogCache } from "@agentx/gateway";
@@ -338,25 +337,8 @@ function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDe
 }
 
 function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTaskActions {
-  /** Every page of a partition's items under a prefix, or the first `limit` of them. */
-  const query = async (pk: string, prefix: string, options: { newestFirst?: boolean; limit?: number } = {}) => {
-    const items: NonNullable<QueryCommandOutput["Items"]> = [];
-    let startKey: Record<string, unknown> | undefined;
-    do {
-      const page = await dependencies.documentClient.send(new QueryCommand({
-        TableName: dependencies.tableName,
-        KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
-        ExpressionAttributeValues: { ":pk": pk, ":prefix": prefix },
-        ConsistentRead: true,
-        ...(options.newestFirst ? { ScanIndexForward: false } : {}),
-        ...(options.limit === undefined ? {} : { Limit: options.limit - items.length }),
-        ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }),
-      }));
-      items.push(...(page.Items ?? []));
-      startKey = page.LastEvaluatedKey;
-    } while (startKey !== undefined && (options.limit === undefined || items.length < options.limit));
-    return items;
-  };
+  /** Every page of a partition's items under a prefix (the admin reads' shared query loop). */
+  const query = (pk: string, prefix: string) => queryAllItems(dependencies, pk, prefix);
   return {
     tableName: dependencies.tableName,
     ...(dependencies.turnRecordsTableName ? { turnRecordsTableName: dependencies.turnRecordsTableName } : {}),
@@ -376,7 +358,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
     workspace: (id) => requireWorkspace(dependencies, id),
     operations: async (workspaceId) => (await query(`WORKSPACE#${workspaceId}`, "OPERATION#"))
       .filter((item) => item.entityType === "OPERATION")
-      .map((item) => publicOperation(item as OperationRecord)),
+      .map((item) => publicOperation(item as unknown as OperationRecord)),
     eventsNewestFirst: (operationId, limit) => operationEventsNewestFirst(dependencies, operationId, limit),
     artifacts: async (workspaceId, operationId) => (await query(`WORKSPACE#${workspaceId}`, "ARTIFACT#"))
       .filter((item) => item.operationId === operationId)
@@ -3632,21 +3614,7 @@ const cancelledTargetStatus = (cancelStatus: OperationStatus): OperationStatus =
 
 /** At most `limit` of an operation's events, newest first, across pages. */
 async function operationEventsNewestFirst(dependencies: AwsBrokerDependencies, operationId: string, limit: number): Promise<StoredEvent[]> {
-  const items: NonNullable<QueryCommandOutput["Items"]> = [];
-  let startKey: Record<string, unknown> | undefined;
-  do {
-    const page = await dependencies.documentClient.send(new QueryCommand({
-      TableName: dependencies.tableName,
-      KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
-      ExpressionAttributeValues: { ":pk": `OPERATION#${operationId}`, ":prefix": "EVENT#" },
-      ConsistentRead: true,
-      ScanIndexForward: false,
-      Limit: limit - items.length,
-      ...(startKey === undefined ? {} : { ExclusiveStartKey: startKey }),
-    }));
-    items.push(...(page.Items ?? []));
-    startKey = page.LastEvaluatedKey;
-  } while (startKey !== undefined && items.length < limit);
+  const items = await queryAllItems(dependencies, `OPERATION#${operationId}`, "EVENT#", { limit, newestFirst: true });
   return items.filter((item) => item.entityType === "EVENT").map((item) => parseStoredEvent(item));
 }
 
