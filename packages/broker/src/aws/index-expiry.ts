@@ -18,7 +18,9 @@ const PREFIXES = ["FAILURE#", "USAGE#"] as const;
 
 export async function expireIndexDays(client: Client, tableName: string, now: Date, log: (entry: Record<string, unknown>) => void = () => undefined): Promise<{ deleted: number }> {
   let deleted = 0;
-  for (let back = ADMIN_INDEX_RETENTION_DAYS + 1; back <= ADMIN_INDEX_RETENTION_DAYS + INDEX_EXPIRY_LOOKBACK_DAYS; back += 1) {
+  // Oldest day first: under a backlog, the days about to leave the look-back window are cleared first.
+  // The loops stop as soon as the run's budget is spent.
+  for (let back = ADMIN_INDEX_RETENTION_DAYS + INDEX_EXPIRY_LOOKBACK_DAYS; back > ADMIN_INDEX_RETENTION_DAYS && deleted < INDEX_EXPIRY_DELETES_PER_RUN; back -= 1) {
     const day = new Date(now.getTime() - back * DAY_MS).toISOString().slice(0, 10);
     for (const prefix of PREFIXES) {
       if (deleted >= INDEX_EXPIRY_DELETES_PER_RUN) break;

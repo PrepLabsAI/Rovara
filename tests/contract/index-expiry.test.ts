@@ -24,6 +24,17 @@ describe("index expiry (A6)", () => {
     expect(await expireIndexDays(db, "state", NOW)).toEqual({ deleted: 20 });
   });
 
+  it("clears the oldest day first under a backlog, so days about to leave the window go first", async () => {
+    const db = new FakeDynamoDb();
+    for (let n = 0; n < 300; n += 1) {
+      db.set(item("FAILURE#", "2026-09-30", n)); // 31 days back
+      db.set(item("FAILURE#", "2026-09-16", n)); // 45 days back
+    }
+    expect(await expireIndexDays(db, "state", NOW)).toEqual({ deleted: INDEX_EXPIRY_DELETES_PER_RUN });
+    expect(db.find((entry) => entry.pk === "FAILURE#2026-09-16")).toEqual([]);
+    expect(db.find((entry) => entry.pk === "FAILURE#2026-09-30")).toHaveLength(100);
+  });
+
   it("runs only where the State table has no TTL (INDEX_EXPIRY=ttl is set in named environments)", () => {
     expect(indexSweepWanted({})).toBe(true);
     expect(indexSweepWanted({ INDEX_EXPIRY: "ttl" })).toBe(false);

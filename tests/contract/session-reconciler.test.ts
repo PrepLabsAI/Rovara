@@ -278,6 +278,15 @@ describe("reconciler: stuck setups (spec 025 FR-055)", () => {
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerStuckSetups: 0, ReconcilerStuckSetupErrors: 0 }));
   });
 
+  it("still runs the index expiry when the sweep throws, and still rethrows the sweep's error (A6, F17)", async () => {
+    const failure = Object.assign(new Error("PLANTED-SWEEP-MESSAGE"), { name: "ProvisionedThroughputExceededException" });
+    const expireIndexDays = vi.fn(async () => ({ deleted: 0 }));
+    const { reconcile, emit } = setup({ sweepStuckSetups: async () => { throw failure; }, expireIndexDays });
+    await expect(reconcile()).rejects.toBe(failure);
+    expect(expireIndexDays).toHaveBeenCalledExactlyOnceWith(NOW);
+    expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ReconcilerStuckSetupErrors: 1 }));
+  });
+
   it("runs the index expiry, and a failed expiry is logged and does not fail the run (A6)", async () => {
     const logs: Array<Record<string, unknown>> = [];
     const expireIndexDays = vi.fn(async () => { throw Object.assign(new Error("PLANTED-EXPIRY-MESSAGE"), { name: "ThrottlingException" }); });
