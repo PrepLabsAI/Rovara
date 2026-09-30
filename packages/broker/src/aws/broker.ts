@@ -84,8 +84,10 @@ import {
   type ModelIdentifier,
   type ModelRef,
   type ProjectModelOptions,
+  projectCatalogKey,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
+import { routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
 import { CatalogCache } from "@agentx/gateway";
@@ -267,6 +269,8 @@ interface AwsBrokerDependencies {
   connectorTypes?: Record<string, ConnectorType>;
   /** Spec 025 C14: the Slack threads table, read for a shared thread's waiting messages; absent in legacy. */
   slackThreadsTableName?: string;
+  /** Spec 025 phase 25d: the admin read routes' injected probes and clock; the defaults serve production. */
+  adminReads?: Partial<Pick<AdminReadDependencies, "me" | "health" | "now" | "log">>;
 }
 
 /**
@@ -315,6 +319,22 @@ function brokerDependencies(input: AwsBrokerInput): AwsBrokerDependencies {
 /** The broker actions developer task routes call (spec 025); tests and the route wiring use this factory. */
 export function createDeveloperTaskActions(input: AwsBrokerInput): DeveloperTaskActions {
   return developerTaskActions(brokerDependencies(input));
+}
+
+/** Spec 025 phase 25d: what the admin read routes need, from the broker's own dependencies. */
+function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDependencies {
+  const developer = dependencies.developer;
+  return {
+    documentClient: dependencies.documentClient,
+    tableName: dependencies.tableName,
+    ...(dependencies.turnRecordsTableName === undefined ? {} : { turnRecordsTableName: dependencies.turnRecordsTableName }),
+    ...(developer?.slackTeamId === undefined ? {} : { slackTeamId: developer.slackTeamId }),
+    ...(developer?.channelInfo === undefined ? {} : { channelInfo: developer.channelInfo }),
+    limitDefaults: { member: dependencies.slack?.memberWorkspaceLimit ?? 3, organization: dependencies.slack?.organizationWorkspaceLimit ?? 20 },
+    now: Date.now,
+    log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
+    ...dependencies.adminReads,
+  };
 }
 
 function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTaskActions {
@@ -452,6 +472,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   }
   // Spec 025: the broker actions the developer task routes call, built once per handler.
   const tasks = developerTaskActions(dependencies);
+  const adminReads = adminReadDependencies(dependencies);
   return async (event: HttpApiV2Event | SlackStopTaskEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     if (isSlackStopTaskEvent(event)) {
       try {
@@ -533,6 +554,9 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         adminValues: dependencies.adminValues,
       });
       const body = parseBody(request.body);
+      // Spec 025 phase 25d: the admin read routes (FR-038), each behind the admin claim (A2).
+      const adminRead = await routeAdminRead(adminReads, identity, request, url);
+      if (adminRead !== undefined) return json(adminRead, request.requestId);
 
       if (request.method === "POST" && url.pathname === "/v1/admin/projects") {
         return json(await registerProject(dependencies, identity, body), request.requestId, 201);
@@ -856,6 +880,14 @@ async function registerProject(
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Put: { TableName: dependencies.tableName, Item: record, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: membership } },
+      // Spec 025 A3: the admin project list reads this row instead of scanning the table.
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: projectCatalogKey(definition.name),
+        UpdateExpression: "SET entityType = :entity, #name = :name, firstRegisteredAt = if_not_exists(firstRegisteredAt, :now)",
+        ExpressionAttributeNames: { "#name": "name" },
+        ExpressionAttributeValues: { ":entity": "PROJECT_CATALOG", ":name": definition.name, ":now": now },
+      } },
     ] }));
   } catch (error) {
     // A concurrent registration won; answer as a duplicate without contacting the vendor again.
