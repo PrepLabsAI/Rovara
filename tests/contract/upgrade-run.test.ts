@@ -11,6 +11,7 @@ import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import { readEnvironmentSettings, writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import { writeSlackTeamId } from "../../packages/cli/src/signin/settings.js";
 import { executeCli } from "../../packages/cli/src/main.js";
+import { prepareDeployment } from "../../packages/cli/src/deploy/commands.js";
 import { agentXError } from "@agentx/contracts";
 import { accessChanged, runUpgrade, type UpgradeDependencies } from "../../packages/cli/src/upgrade/run.js";
 import { SETTINGS } from "../support/doctor-fakes.js";
@@ -434,6 +435,18 @@ describe("agentx upgrade with the cdk engine", () => {
     });
     await runUpgrade({ ...options, source: "/src", to: "1.3.0" }, h.deps);
     expect(loaded).toEqual([{ version: "1.3.0" }]);
+  });
+
+  it("refuses a --to that is not the source's tag before anything deploys, through the real prepare (review M9)", async () => {
+    const h = await cdk({ cliVersion: undefined, loadRelease: async () => release("1.3.0") });
+    const tagged = { async run(_command: string, args: string[]) { return { stdout: args[0] === "tag" ? "v1.4.0\n" : "" }; } };
+    h.deps.prepare = (input) => prepareDeployment({
+      engine: "cdk", env: "staging", region: "us-east-1", account: "123456789012", identityMode: "cognito", release: input.release, source: "/src",
+      deps: { identity: h.deps.identity, store: h.store, secrets: memoryInitSecrets({}), commandRunner: tagged }, stderr: { write: () => undefined },
+    });
+    await expect(runUpgrade({ ...options, source: "/src", to: "1.3.0" }, h.deps)).rejects.toThrow("the cdk engine must run from a checkout of tag v1.3.0; /src is at v1.4.0");
+    expect(h.deployer.deployed).toEqual([]);
+    expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.2.3");
   });
 
   it("reports the config keys the synth drops, not the ones the release's templates drop (issue 152)", async () => {

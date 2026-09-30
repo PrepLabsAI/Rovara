@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentXError, environmentStackName } from "@agentx/contracts";
+import { CDK_CONSTRUCT_IDS } from "../../packages/cli/src/deploy/cdk-engine.js";
 import { prepareDeployment } from "../../packages/cli/src/deploy/commands.js";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { environmentCachePath } from "../../packages/cli/src/environments/cache.js";
@@ -673,6 +674,46 @@ describe("agentx init", () => {
       expect(code).toBe(0);
       expect(h.printedSince(mark)).toContain("Resuming the install of environment staging.");
       expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.4.0");
+    });
+
+    it("runs the real cdk deployment: build, one synth whose folder is removed, then cdk deploy (review M9)", async () => {
+      const h = await harness();
+      await h.store.put("/cdk-bootstrap/hnb659fds/version", "21");
+      const calls: Array<{ line: string; cwd: string }> = [];
+      const synthDirs: string[] = [];
+      const runner = {
+        async run(command: string, args: string[], options: { cwd: string }) {
+          calls.push({ line: [command, ...args.slice(0, 3)].join(" "), cwd: options.cwd });
+          if (command === "git") return taggedSource.run(command, args);
+          if (args[2] === "synth") {
+            const outDir = args[args.indexOf("-o") + 1] as string;
+            synthDirs.push(outDir);
+            const artifacts: Record<string, unknown> = {};
+            for (const [part, id] of Object.entries(CDK_CONSTRUCT_IDS)) {
+              await writeFile(join(outDir, `${id}.template.json`), JSON.stringify({ Parameters: {} }));
+              artifacts[id] = { type: "aws:cloudformation:stack", properties: { templateFile: `${id}.template.json`, stackName: environmentStackName("staging", part as never) } };
+            }
+            await writeFile(join(outDir, "manifest.json"), JSON.stringify({ version: "54.0.0", artifacts }));
+          }
+          const outputsFile = args.indexOf("--outputs-file") >= 0 ? args[args.indexOf("--outputs-file") + 1] : undefined;
+          if (outputsFile !== undefined) await writeFile(outputsFile, JSON.stringify(allStackOutputs()));
+          return { stdout: "" };
+        },
+      };
+      // No deployer override: the real prepareDeployment builds the cdk engine.
+      const deploy = { ...h.deps.deploy };
+      delete deploy.deployer;
+      const code = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", "--source", "/src", ...IMAGES, "--stop-after", "access"], {
+        releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter: scriptedPrompter([...FIRST_RUN.slice(1)]),
+        deploy: { ...deploy, commandRunner: runner, stackOutputs: async () => undefined },
+      });
+      expect(h.printed()).not.toContain("AgentX error");
+      expect(code).toBe(0);
+      const lines = calls.filter((call) => call.line.startsWith("npm") || call.line.startsWith("npx")).map((call) => call.line);
+      expect(lines).toEqual(["npm ci", "npm run build", "npx --no-install cdk synth", "npx --no-install cdk deploy"]);
+      expect(calls.every((call) => call.cwd === "/src")).toBe(true);
+      expect(synthDirs).toHaveLength(1);
+      await expect(stat(synthDirs[0] as string)).rejects.toThrow();
     });
 
     it("refuses with no region anywhere, naming --region, before asking anything", async () => {

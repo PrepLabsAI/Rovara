@@ -457,7 +457,7 @@ describe("the cdk source (issue 152)", () => {
     expect([...declared("access")]).toEqual([]);
   });
 
-  it("synthesizes once, from the source, with exactly the deploy's app and context, into a directory it removes", async () => {
+  it("synthesizes once, from the source, into a directory it removes, with the app and context it shares with the deploy (cdkAppArguments)", async () => {
     const runner = synthRunner({});
     await synthDeclaredParameters({ runner, source: "/src", env: "staging", region: "eu-west-1", identityMode: "oidc" });
     expect(runner.calls).toHaveLength(1);
