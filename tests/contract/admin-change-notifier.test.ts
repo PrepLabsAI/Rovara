@@ -271,6 +271,7 @@ describe("delivering the message safely (C9)", () => {
     const other = notifier(none);
     await other.deliver(outcomeNotice);
     expect([...h.updates, ...other.updates]).toEqual([]);
+    expect(other.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.notice", kind: "admin_change_outcome", outcome: "stale" }));
   });
 
   it("keeps the stored change readable by the broker after the notifier's writes", async () => {

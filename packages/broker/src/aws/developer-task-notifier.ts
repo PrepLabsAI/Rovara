@@ -252,7 +252,9 @@ async function deliverAdminChange(deps: NotifierDependencies, notice: Notice): P
   const change = await readChange(deps, notice.changeId);
   if (change === undefined) return "stale";
   if (notice.kind === "admin_change_outcome") {
-    if (change.dm === undefined || change.dmEditedAt !== undefined) return "delivered";
+    // No message to edit: nothing was posted, so there is nothing to deliver.
+    if (change.dm === undefined) return "stale";
+    if (change.dmEditedAt !== undefined) return "delivered";
     if (deps.update === undefined) return "stale";
     // Only a stored end edits the message: a still-pending change keeps its buttons (C13).
     const message = adminChangeOutcomeMessage(change);

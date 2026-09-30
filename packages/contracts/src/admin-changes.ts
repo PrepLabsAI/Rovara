@@ -216,6 +216,7 @@ export const AdminChangePendingRecordSchema = z.object({
   traceId: z.string().min(1).max(128),
   claimedAt: Time.optional(),
   slackRequestedAt: Time.optional(),
+  /** E13: the direct message. `editedAt` is unused and kept only so the strict object still reads any record carrying it; the edit time is the top-level `dmEditedAt` (ruling B2). */
   dm: z.object({ channel: z.string().min(1).max(64), ts: z.string().min(1).max(64), postedAt: Time, editedAt: Time.optional() }).strict().optional(),
   /** E13: the notifier's claim on posting the direct message, so two deliveries never both post it. */
   dmClaimedAt: Time.optional(),
