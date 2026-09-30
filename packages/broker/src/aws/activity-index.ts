@@ -29,8 +29,12 @@ export interface IndexStore {
 
 const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 const FAILED = new Set(["FAILED", "INTERRUPTED"]);
-/** The requester schema's limit on a developer's display name. */
+/** The index schemas' limits: a field over one is cut or dropped, so the row is still written. */
 const REQUESTER_NAME_MAX = 200;
+const PROJECT_MAX = 63;
+const THREAD_MAX = 128;
+/** Without a deadline from the caller, the index stops this long after it starts (A4). */
+export const INDEX_DEFAULT_BUDGET_MS = 10_000;
 const text = (value: unknown): string | undefined => (typeof value === "string" && value !== "" ? value : undefined);
 const record = (value: unknown): Record<string, unknown> | undefined => (value && typeof value === "object" ? (value as Record<string, unknown>) : undefined);
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
@@ -40,7 +44,7 @@ interface Context { project: string; origin: "slack" | "ai_tool"; taskId?: strin
 /** A5: the project, the origin and the turn record link, from the workspace's own records. */
 async function contextOf(store: IndexStore, workspaceId: string): Promise<Context> {
   const workspace = await store.get({ pk: `WORKSPACE#${workspaceId}`, sk: "META" });
-  const project = text(workspace?.projectName) ?? "unknown";
+  const project = text(workspace?.projectName)?.slice(0, PROJECT_MAX) ?? "unknown";
   const pointer = await store.get(taskPointerKey(workspaceId));
   const taskId = text(pointer?.taskId);
   if (taskId !== undefined) {
@@ -49,7 +53,9 @@ async function contextOf(store: IndexStore, workspaceId: string): Promise<Contex
     return { project, origin: "ai_tool", taskId, ...(developerName === undefined ? {} : { developerName }) };
   }
   const ownerKey = text(workspace?.ownerKey);
-  const thread = ownerKey === undefined ? undefined : text((await store.get({ pk: `SLACK_THREAD#${ownerKey}`, sk: "META" }))?.thread);
+  const stored = ownerKey === undefined ? undefined : text((await store.get({ pk: `SLACK_THREAD#${ownerKey}`, sk: "META" }))?.thread);
+  // A thread subject too long to parse is left out: the failure is still listed, without its link.
+  const thread = stored !== undefined && stored.length <= THREAD_MAX ? stored : undefined;
   return { project, origin: "slack", ...(thread === undefined ? {} : { thread }) };
 }
 
@@ -72,7 +78,7 @@ const link = (context: Context) => ({ ...(context.taskId === undefined ? {} : { 
 async function failureItem(store: IndexStore, next: Record<string, unknown>): Promise<Record<string, unknown> | "invalid"> {
   const workspaceId = String(next.workspaceId);
   const context = await contextOf(store, workspaceId);
-  const kind = String(next.kind);
+  const kind = text(next.kind) ?? "unknown";
   const status = String(next.status) as FailureIndexRecord["status"];
   const error = text(next.error);
   const endedAt = new Date(text(next.updatedAt) ?? Date.now()).toISOString();
@@ -106,8 +112,19 @@ async function usageItem(store: IndexStore, event: Record<string, unknown>): Pro
   return { ...usageIndexKey(at, operationId), entityType: "USAGE_INDEX", [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(at), ...indexed };
 }
 
-export async function indexActivity(records: readonly StreamRecord[], store: IndexStore, log: (entry: Record<string, unknown>) => void): Promise<{ failures: number; usage: number; failed: number }> {
+/**
+ * Indexes a batch's failures and usage events. `deadline` (epoch milliseconds) bounds the work so
+ * the publisher never runs past its timeout (a timed-out batch would be dispatched again, A4):
+ * once it passes, the records left are skipped and counted in one log line.
+ */
+export async function indexActivity(
+  records: readonly StreamRecord[],
+  store: IndexStore,
+  log: (entry: Record<string, unknown>) => void,
+  deadline: number = Date.now() + INDEX_DEFAULT_BUDGET_MS,
+): Promise<{ failures: number; usage: number; failed: number }> {
   const result = { failures: 0, usage: 0, failed: 0 };
+  const work: Array<{ failure: boolean; next: Record<string, unknown> }> = [];
   for (const entry of records) {
     const image = entry.dynamodb?.NewImage;
     if (image === undefined) continue;
@@ -121,7 +138,13 @@ export async function indexActivity(records: readonly StreamRecord[], store: Ind
     }
     const failure = next.entityType === "OPERATION" && FAILED.has(String(next.status)) && !TERMINAL.has(String(previous?.status));
     const usage = next.entityType === "EVENT" && next.type === "usage" && entry.eventName === "INSERT";
-    if (!failure && !usage) continue;
+    if (failure || usage) work.push({ failure, next });
+  }
+  for (const [position, { failure, next }] of work.entries()) {
+    if (Date.now() >= deadline) {
+      log({ event: "activity_index.deadline_reached", skipped: work.length - position });
+      break;
+    }
     const operationId = String(failure ? next.id : next.operationId);
     try {
       const item = failure ? await failureItem(store, next) : await usageItem(store, next);

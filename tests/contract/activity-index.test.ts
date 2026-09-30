@@ -174,13 +174,69 @@ describe("index items parse as the admin routes read them", () => {
     expect(FailureIndexRecordSchema.safeParse(strip(named.puts[0])).success).toBe(true);
   });
 
+  it("cuts a long project name to 63 characters and drops a thread that would not parse", async () => {
+    const index = store([
+      { pk: `WORKSPACE#${WORKSPACE}`, sk: "META", projectName: "p".repeat(64), ownerKey: OWNER },
+      { pk: `SLACK_THREAD#${OWNER}`, sk: "META", thread: "t".repeat(129) },
+    ]);
+    const result = await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" }))], index, vi.fn());
+    expect(result).toEqual({ failures: 1, usage: 0, failed: 0 });
+    expect(index.puts[0]).toMatchObject({ project: "p".repeat(63), origin: "slack" });
+    expect(index.puts[0]).not.toHaveProperty("thread");
+    expect(FailureIndexRecordSchema.safeParse(strip(index.puts[0])).success).toBe(true);
+  });
+
+  it("names a missing operation kind unknown, not undefined", async () => {
+    const index = store(slackWorkspace);
+    const withoutKind: Record<string, unknown> = operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z" });
+    delete withoutKind.kind;
+    await indexActivity([modified(operation({}), withoutKind)], index, vi.fn());
+    expect(index.puts[0]).toMatchObject({ kind: "unknown", error: "the unknown operation ended FAILED" });
+    expect(FailureIndexRecordSchema.safeParse(strip(index.puts[0])).success).toBe(true);
+  });
+
   it("writes nothing for an item that still would not parse, and logs its operation ID only", async () => {
-    const index = store([{ pk: `WORKSPACE#${WORKSPACE}`, sk: "META", projectName: "p".repeat(64) }]);
+    const index = store(slackWorkspace);
     const log = vi.fn();
-    const result = await indexActivity([modified(operation({}), operation({ status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z", error: "secret detail" }))], index, log);
+    const result = await indexActivity([modified(operation({ id: "not-a-uuid" }), operation({ id: "not-a-uuid", status: "FAILED", updatedAt: "2026-09-30T08:15:00.000Z", error: "secret detail" }))], index, log);
     expect(index.puts).toEqual([]);
     expect(result).toEqual({ failures: 0, usage: 0, failed: 1 });
-    expect(log).toHaveBeenCalledWith({ event: "activity_index.record_invalid", operationId: OPERATION });
+    expect(log).toHaveBeenCalledWith({ event: "activity_index.record_invalid", operationId: "not-a-uuid" });
     expect(JSON.stringify(log.mock.calls)).not.toContain("secret detail");
+  });
+});
+
+// A4: the index never pushes the publisher past its timeout, or the batch would be dispatched again.
+describe("the index's deadline (A4)", () => {
+  const failedAt = (id: string, at: string) => modified(operation({ id }), operation({ id, sk: `OPERATION#${id}`, status: "FAILED", updatedAt: at }), id);
+  const SECOND = "44444444-4444-4444-8444-444444444444";
+
+  it("indexes nothing once the deadline has passed, and logs how many records it skipped", async () => {
+    const index = store(slackWorkspace);
+    const log = vi.fn();
+    const result = await indexActivity([
+      failedAt(OPERATION, "2026-09-30T08:15:00.000Z"),
+      modified(operation({}), operation({ status: "SUCCEEDED" })),
+      failedAt(SECOND, "2026-09-30T08:16:00.000Z"),
+    ], index, log, Date.now() - 1);
+    expect(index.puts).toEqual([]);
+    expect(result).toEqual({ failures: 0, usage: 0, failed: 0 });
+    expect(log.mock.calls).toEqual([[{ event: "activity_index.deadline_reached", skipped: 2 }]]);
+  });
+
+  it("stops between records when the deadline passes mid-batch", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.parse("2026-09-30T08:20:00.000Z"));
+      const index = store(slackWorkspace);
+      index.put = async (item) => { index.puts.push(item); vi.setSystemTime(Date.parse("2026-09-30T08:20:10.000Z")); };
+      const log = vi.fn();
+      const result = await indexActivity([failedAt(OPERATION, "2026-09-30T08:15:00.000Z"), failedAt(SECOND, "2026-09-30T08:16:00.000Z")], index, log, Date.parse("2026-09-30T08:20:05.000Z"));
+      expect(result).toEqual({ failures: 1, usage: 0, failed: 0 });
+      expect(index.puts).toHaveLength(1);
+      expect(log).toHaveBeenCalledWith({ event: "activity_index.deadline_reached", skipped: 1 });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

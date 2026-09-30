@@ -3,20 +3,28 @@ import { DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@
 import { SQSClient, SendMessageCommand } from "@aws-sdk/client-sqs";
 import { unmarshall } from "@aws-sdk/util-dynamodb";
 import type { StreamRecord } from "../developer/notifications.js";
-import { indexActivity } from "./activity-index.js";
+import { INDEX_DEFAULT_BUDGET_MS, indexActivity } from "./activity-index.js";
 import { requiredEnvironment, type DurableOutboxRecord } from "./lambda.js";
 
 export interface DynamoStreamEvent {
   Records?: StreamRecord[];
 }
 
+/** The part of the Lambda context the publisher reads. */
+export interface PublisherContext {
+  getRemainingTimeInMillis(): number;
+}
+
+/** A4: time kept back from the Lambda's remaining time, so the index ends before the timeout. */
+export const INDEX_SAFETY_MARGIN_MS = 5_000;
+
 export function createOutboxPublisherHandler(dependencies: {
   send: (record: DurableOutboxRecord) => Promise<void>;
   markQueued: (id: string) => Promise<void>;
   /** Spec 025 A4: the failure and usage indexes, run after dispatch, best effort. */
-  index?: (records: readonly StreamRecord[]) => Promise<unknown>;
+  index?: (records: readonly StreamRecord[], options?: { deadline: number }) => Promise<unknown>;
 }) {
-  return async (event: DynamoStreamEvent): Promise<{ published: number }> => {
+  return async (event: DynamoStreamEvent, context?: PublisherContext): Promise<{ published: number }> => {
     let published = 0;
     for (const record of event.Records ?? []) {
       if (!record.dynamodb?.NewImage || !["INSERT", "MODIFY"].includes(record.eventName ?? "")) continue;
@@ -28,7 +36,10 @@ export function createOutboxPublisherHandler(dependencies: {
     }
     if (dependencies.index !== undefined) {
       try {
-        await dependencies.index(event.Records ?? []);
+        const records = event.Records ?? [];
+        await (context === undefined
+          ? dependencies.index(records)
+          : dependencies.index(records, { deadline: Date.now() + context.getRemainingTimeInMillis() - INDEX_SAFETY_MARGIN_MS }));
       } catch (error) {
         // A4: dispatch never waits on, or repeats for, the index; the error's name only.
         console.log(JSON.stringify({ component: "outbox-publisher", event: "activity_index.write_failed", error: error instanceof Error ? error.name : "unknown" }));
@@ -66,7 +77,7 @@ export const handler = createOutboxPublisherHandler({
       if (!(error instanceof Error) || error.name !== "ConditionalCheckFailedException") throw error;
     }
   },
-  index: (records) => indexActivity(records, {
+  index: (records, options) => indexActivity(records, {
     get: async (key) => ((await documentClient.send(new GetCommand({ TableName: required(tableName, "STATE_TABLE_NAME"), Key: key, ConsistentRead: true }))) as { Item?: Record<string, unknown> }).Item,
     put: async (item) => {
       try {
@@ -75,7 +86,7 @@ export const handler = createOutboxPublisherHandler({
         if (!(error instanceof Error) || error.name !== "ConditionalCheckFailedException") throw error;
       }
     },
-  }, (entry) => console.log(JSON.stringify({ component: "outbox-publisher", ...entry }))),
+  }, (entry) => console.log(JSON.stringify({ component: "outbox-publisher", ...entry })), options?.deadline ?? Date.now() + INDEX_DEFAULT_BUDGET_MS),
 });
 
 function required(value: string | undefined, name: string): string {
