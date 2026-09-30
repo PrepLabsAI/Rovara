@@ -25,7 +25,7 @@ const hex = () => randomUUID().replaceAll("-", "").slice(0, 17);
 
 type Start = (input: { stateMachineArn: string; name: string; input: string }) => Promise<string>;
 
-function setup(options: { instances?: InstanceView[]; volumes?: VolumeView[]; executions?: Record<string, ExecutionStatus>; ping?: ReconcilerDependencies["ping"]; sweepStuckSetups?: ReconcilerDependencies["sweepStuckSetups"]; log?: ReconcilerDependencies["log"] } = {}) {
+function setup(options: { instances?: InstanceView[]; volumes?: VolumeView[]; executions?: Record<string, ExecutionStatus>; ping?: ReconcilerDependencies["ping"]; sweepStuckSetups?: ReconcilerDependencies["sweepStuckSetups"]; expireIndexDays?: ReconcilerDependencies["expireIndexDays"]; log?: ReconcilerDependencies["log"] } = {}) {
   const db = new FakeDynamoDb();
   const start = vi.fn<Start>(async ({ name }) => `arn:aws:states:us-east-1:111122223333:execution:provisioner:${name}`);
   const sessions = new SessionManager({
@@ -55,6 +55,7 @@ function setup(options: { instances?: InstanceView[]; volumes?: VolumeView[]; ex
     now: () => NOW,
     log: options.log ?? (() => undefined),
     ...(options.sweepStuckSetups === undefined ? {} : { sweepStuckSetups: options.sweepStuckSetups }),
+    ...(options.expireIndexDays === undefined ? {} : { expireIndexDays: options.expireIndexDays }),
   });
   return { db, sessions, state, start, terminate, deleteVolume, quarantine, emit, reconcile };
 }
@@ -275,5 +276,20 @@ describe("reconciler: stuck setups (spec 025 FR-055)", () => {
     const { reconcile, emit } = setup();
     expect((await reconcile()).stuckSetups).toEqual([]);
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerStuckSetups: 0, ReconcilerStuckSetupErrors: 0 }));
+  });
+
+  it("runs the index expiry, and a failed expiry is logged and does not fail the run (A6)", async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    const expireIndexDays = vi.fn(async () => { throw Object.assign(new Error("PLANTED-EXPIRY-MESSAGE"), { name: "ThrottlingException" }); });
+    const { reconcile, emit } = setup({ expireIndexDays, log: (entry) => { logs.push(entry); } });
+    await expect(reconcile()).resolves.toBeDefined();
+    expect(expireIndexDays).toHaveBeenCalledExactlyOnceWith(NOW);
+    expect(logs).toContainEqual({ event: "reconciler.index_expiry_failed", errorName: "ThrottlingException" });
+    expect(JSON.stringify(logs)).not.toContain("PLANTED-EXPIRY-MESSAGE");
+    // A6: the metrics are the same set as before; the expiry adds none.
+    expect(Object.keys(emit.mock.calls[0]![0])).not.toContain("ReconcilerIndexExpiry");
+    const baseline = setup();
+    await baseline.reconcile();
+    expect(Object.keys(emit.mock.calls[0]![0])).toEqual(Object.keys(baseline.emit.mock.calls[0]![0]));
   });
 });
