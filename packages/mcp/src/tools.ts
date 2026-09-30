@@ -6,6 +6,7 @@ import {
   DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY, inertName, type DeveloperTaskView,
 } from "@agentx/contracts";
 import { z } from "zod";
+import type { AdminControlPlaneClient } from "./admin-client.js";
 import type { ControlPlaneClient } from "./client.js";
 import type { Compatibility } from "./compatibility.js";
 import { ToolError, plainText } from "./errors.js";
@@ -22,6 +23,8 @@ export interface ToolContext {
   now(): number;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
   newRequestId(): string;
+  /** Spec 025 A14: the admin sign-in's client; absent when the server has none. */
+  admin?: AdminControlPlaneClient;
 }
 export interface ToolCall {
   signal: AbortSignal;
