@@ -8,7 +8,6 @@ import { DeveloperTaskFailureCategorySchema } from "./developer-tasks.js";
 import { looseCopy } from "./loose.js";
 import { DeveloperTaskPolicySchema } from "./project.js";
 import { SlackChannelIdSchema, SlackTeamIdSchema, SlackUserIdSchema } from "./slack.js";
-import { WorkspaceStatusSchema } from "./workspace.js";
 
 /** A1 (Q1): the admin API's own version, reported beside DEVELOPER_API_VERSION. */
 export const ADMIN_API_VERSION = "1.0";
@@ -115,8 +114,12 @@ export const FailureIndexRecordSchema = z.object({
 });
 export type FailureIndexRecord = z.infer<typeof FailureIndexRecordSchema>;
 
-/** A failure as the failures answer carries it: the stored record's fields, loose all the way down. */
-const AdminFailureSchema = FailureIndexRecordSchema.extend({ requester: AdminRequesterWireSchema }).passthrough();
+/**
+ * A failure as the failures answer carries it: the stored record's fields, loose all the way down.
+ * R23: the category is any string on the wire, so a category a newer control plane adds does not
+ * fail an older CLI's whole answer; FailureIndexRecordSchema, the stored side, stays strict.
+ */
+const AdminFailureSchema = FailureIndexRecordSchema.extend({ requester: AdminRequesterWireSchema, category: z.string() }).passthrough();
 
 export const UsageIndexRecordSchema = z.object({
   ...IndexIdentity,
@@ -190,7 +193,8 @@ export const AdminWorkspaceSchema = z.object({
   project: z.string(),
   origin: AdminOriginSchema,
   owner: z.object({ threadUrl: z.string().optional(), taskId: Uuid.optional(), developerName: z.string().optional() }),
-  status: WorkspaceStatusSchema,
+  /** R23: any string on the wire, so a status a newer control plane adds does not fail the answer; the route sends WorkspaceStatusSchema's values. */
+  status: z.string(),
   busy: z.boolean(),
   lastActivityAt: z.string(),
 });

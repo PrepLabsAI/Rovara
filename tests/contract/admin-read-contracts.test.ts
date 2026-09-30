@@ -21,6 +21,7 @@ import {
   SlackAuthCheckRequestSchema,
   SlackUserByEmailRequestSchema,
   UsageIndexRecordSchema,
+  WorkspaceStatusSchema,
   failureIndexKey,
   indexDay,
   indexExpiresAt,
@@ -151,9 +152,22 @@ describe("the wire answers read fields a newer control plane adds at any depth (
     expect(AdminRequesterSchema.safeParse({ kind: "none", why: "admin" }).success).toBe(false);
   });
 
-  it("keeps closed enums closed on the wire", () => {
-    expect(AdminFailuresResponseSchema.safeParse({ failures: [{ ...FAILURE, category: "cosmic_rays" }], since: ENDED, until: ENDED }).success).toBe(false);
+  it("keeps the requester's kinds closed on the wire", () => {
     expect(AdminFailuresResponseSchema.safeParse({ failures: [{ ...FAILURE, requester: { kind: "robot" } }], since: ENDED, until: ENDED }).success).toBe(false);
+  });
+
+  // Ruling R23: a category or workspace status a newer control plane adds does not fail an older
+  // CLI's whole answer; the stored record stays strict.
+  it("reads a failure category and a workspace status it does not know, while the stored record refuses them", () => {
+    const failures = AdminFailuresResponseSchema.parse({ failures: [{ ...FAILURE, category: "cosmic_rays" }], since: ENDED, until: ENDED });
+    expect(failures.failures[0]?.category).toBe("cosmic_rays");
+    expect(FailureIndexRecordSchema.safeParse({ ...FAILURE, category: "cosmic_rays" }).success).toBe(false);
+    const workspaces = AdminWorkspacesResponseSchema.parse({
+      workspaces: [{ id: WORKSPACE, project: "payments", origin: "slack", owner: {}, status: "HIBERNATING", busy: false, lastActivityAt: ENDED }],
+      limits: { perPerson: 3, perOrganization: 20, source: "parameters" }, counts: { organization: 1 }, truncated: false,
+    });
+    expect(workspaces.workspaces[0]?.status).toBe("HIBERNATING");
+    expect(WorkspaceStatusSchema.safeParse("HIBERNATING").success).toBe(false);
   });
 
   it("keeps an extra top-level field on every admin answer (Minor 5)", () => {
