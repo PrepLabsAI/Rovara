@@ -94,7 +94,7 @@ describe("init deploy steps", () => {
     homes.push(context.home);
     await context.store.put("/agentx/staging/slack/teamId", "T0TEAM1");
     await context.store.put("/agentx/staging/signin", JSON.stringify({ schemaVersion: 1, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: "arn:aws:iam::123456789012:user/alice" }));
-    const inner = context.deployment;
+    const inner = context.deployment.bind(context);
     // fakeRelease's template() throws: only the synth's set can answer for the control plane.
     context.deployment = async () => ({ ...(await inner()), declaredParameters: (part) => new Set(part === "control-plane" ? ["SlackTeamId"] : []) });
     const progress = progressHandle({ ...emptyProgress("staging", T0), github: GITHUB });
