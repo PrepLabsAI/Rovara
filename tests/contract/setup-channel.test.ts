@@ -248,6 +248,19 @@ describe("waiting for the threaded reply (FR-018 step 11)", () => {
       .rejects.toThrow("no AgentX reply in #payments within 1 minute;");
   });
 
+  it("M3: reports every failed turn it saw, so a second watch skips them all", async () => {
+    const plane = fakeControlPlane();
+    const first = turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 + 1000).toISOString(), disposition: "error" });
+    const second = turn({ subject: `${TEAM}/C0PAY00001/2.1`, receivedAt: new Date(T0 + 2000).toISOString(), disposition: "failed" });
+    plane.turns = [first, second];
+    const reported = new Set<string>();
+    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock(), reported }))
+      .rejects.toThrow("but the turn ended as error;");
+    expect([...reported]).toEqual([String(first.eventId), String(second.eventId)]);
+    await expect(waitForThreadedReply({ env: "staging", session, fetch: plane.fetch, teamId: TEAM, channelId: "C0PAY00001", channelName: "payments", botUserId: BOT, rerun: "agentx init", write: () => undefined, ...clock(), timeoutMs: 60_000, reported }))
+      .rejects.toThrow("no AgentX reply in #payments within 1 minute;");
+  });
+
   it("asks the export for turns since just before the prompt", async () => {
     const plane = fakeControlPlane();
     plane.turns = [turn({ subject: `${TEAM}/C0PAY00001/1.1`, receivedAt: new Date(T0 + 1000).toISOString() })];

@@ -20,7 +20,7 @@ export async function waitForThreadedReply(input: {
   rerun: string;
   write: (line: string) => void; sleep: (ms: number) => Promise<void>; now: () => number; timeoutMs?: number;
   /** Event ids of turns an earlier watch already reported as failed: skipped here, so a second
-   * watch waits for a new mention (spec 040 FR-051). A newly failed turn is added before the throw. */
+   * watch waits for a new mention (spec 040 FR-051). Every newly failed turn is added before the throw. */
   reported?: Set<string>;
 }): Promise<{ eventId: string; seconds: number }> {
   const timeout = input.timeoutMs ?? REPLY_WAIT_MS;
@@ -43,7 +43,8 @@ export async function waitForThreadedReply(input: {
     }
     const other = mine[0];
     if (other !== undefined) {
-      input.reported?.add(other.eventId);
+      // Every turn seen here ended unanswered, so a second watch skips them all, not just the first.
+      for (const entry of mine) input.reported?.add(entry.eventId);
       throw agentXError("RUNTIME_UNAVAILABLE", `AgentX replied in #${input.channelName}, but the turn ended as ${other.disposition}${other.error === undefined ? "" : ` (${other.error.name})`}; see agentx --env ${input.env} admin turns export --since 15m, fix it, then run ${input.rerun} again`);
     }
     if (input.now() - started >= timeout) {
