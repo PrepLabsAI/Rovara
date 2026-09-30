@@ -208,4 +208,6 @@ browser the wizard prints its URL and falls back to the terminal prompter.
   optional `InstallSurface` on the init context, so the terminal path is unchanged (phase 2).
 - **Retry on the page.** Where the page offers to try again, its failure cards drop the terminal's
   closing "run agentx ... init again" advice (phase 2); phase 3's test reply card follows the same
-  rule (R2).
+  rule (R2), and so does the admin card's failed sign-in. A failure the page offers no retry for
+  (the test alarm, an OIDC token with no name to record) keeps its own next step.
+- Noted for phase 4: a failed sign-in's link stays as the page button while Sign in again? is asked, and a channel card stays waiting after the invite timeout.
