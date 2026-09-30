@@ -936,6 +936,16 @@ export async function finishTaskClose(
       UpdateExpression: "SET closedAt = :now", ConditionExpression: "attribute_exists(pk)",
       ExpressionAttributeValues: { ":now": now },
     } }]),
+    // E20 (25c C22): the close's own completed record, in the close's transaction, so it commits once.
+    ...(deps.actions.turnRecordsTableName === undefined ? [] : [{ Put: {
+      TableName: deps.actions.turnRecordsTableName,
+      Item: aiToolTurn({
+        party: partyOfTask(current), turnId: closeOperationId ?? randomUUID(), action: "close", phase: "completed", outcome: "succeeded",
+        receivedAt: now, finishedAt: now, request: "close", response: "The task is closed, and its workspace is released.",
+        ...(closeOperationId === undefined ? {} : { operationId: closeOperationId }),
+      }),
+      ConditionExpression: "attribute_not_exists(pk)",
+    } }]),
     ...extra,
   ];
   let current = task;

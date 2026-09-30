@@ -109,7 +109,7 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
-import { completedTurn, developerFooter, inertName, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
+import { aiToolTurn, completedTurn, developerFooter, inertName, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { hashJson, isConditional, isTemporaryAwsError } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration } from "./developer-routes.js";
@@ -3774,6 +3774,21 @@ async function completedTurnItems(
     const target = await getItem<OperationRecord>(dependencies, operationKey(operation.workspaceId, operation.targetOperationId));
     if (target !== undefined && (target.kind === "task" || target.kind === "publish") && !TERMINAL.has(target.status)) {
       ended = { operation: target, status: cancelledTargetStatus(terminalStatus) };
+    }
+  }
+  // E20 (25c C22): a close that found unpublished work did not close; its refusal is its completed
+  // record, in the preflight result's transaction. A safe preflight's record is finishTaskClose's.
+  if (operation.kind === "close" && terminalStatus === "SUCCEEDED") {
+    const preflight = WorkspaceClosePreflightResultSchema.safeParse(outcome.result);
+    const requester = operation.requestedBy;
+    if (preflight.success && !preflight.data.safeToClose && requester !== undefined && "kind" in requester && requester.kind === "developer") {
+      const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+      if (task === undefined) return [];
+      const listed = preflight.data.repositories.map((repository) => `${repository.name} (${repository.reasons.join(", ")})`).join("; ");
+      return [{ Put: { TableName: table, Item: aiToolTurn({
+        party: partyOfTask(task), turnId: operation.id, operationId: operation.id, action: "close", phase: "completed", outcome: "refused",
+        receivedAt: operation.createdAt, finishedAt: now, request: "close", response: `Not closed: unpublished work in ${listed}`,
+      }), ConditionExpression: "attribute_not_exists(pk)" } }];
     }
   }
   if (ended === undefined) return [];
