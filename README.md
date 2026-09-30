@@ -35,9 +35,6 @@ Not built yet:
 
 - Admin tools for AI tools: reading AgentX's state (spec 025 phase 25d) and making confirmed
   changes (phase 25e).
-- Phases 2 to 4 of the local install page (spec 040): its GitHub and Slack connect screens, the
-  admin user, project and channel screens, and turning the page on by default. Today
-  `init --ui` asks the same questions as the terminal, on a local page.
 
 No AgentX release is published yet; see [releases](docs/releases.md).
 
