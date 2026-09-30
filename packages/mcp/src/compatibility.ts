@@ -1,5 +1,5 @@
 // Spec 025 FR-048 and R23: the control plane's API version decides whether the tools work.
-import { DEVELOPER_API_VERSION, apiVersionCompatible } from "@agentx/contracts";
+import { DEVELOPER_API_VERSION, apiVersionCompatible, type AgentXConfigurationConfirm } from "@agentx/contracts";
 import type { ControlPlaneClient } from "./client.js";
 import { NEXT_STEPS, ToolError, UPGRADE_AGENTX_STEP, plainText } from "./errors.js";
 
@@ -15,16 +15,20 @@ export interface Compatibility {
   notice?: string;
   /** Spec 025 A1: the control plane's admin API version; absent before 25d. */
   adminApiVersion?: string;
+  /** Spec 025 E16 (C22): the confirmation methods the environment allows; absent before 25e. */
+  confirm?: AgentXConfigurationConfirm;
 }
 
 /** Spec 025 A1: the admin read tools arrived in admin API 1.0. */
 export const REQUIRED_ADMIN_MINOR = 0;
+/** Spec 025 Q11, C17: the admin change routes and agentx_admin_changes arrived in admin API 1.1. */
+export const REQUIRED_CHANGE_ADMIN_MINOR = 1;
 
-export function adminApiFits(version: string | undefined): "fits" | "missing" | "too_old" | "incompatible" {
+export function adminApiFits(version: string | undefined, requiredMinor: number = REQUIRED_ADMIN_MINOR): "fits" | "missing" | "too_old" | "incompatible" {
   if (version === undefined) return "missing";
   const match = /^(\d+)\.(\d+)$/.exec(version);
   if (match === null || match[1] !== "1") return "incompatible";
-  return Number(match[2]) >= REQUIRED_ADMIN_MINOR ? "fits" : "too_old";
+  return Number(match[2]) >= requiredMinor ? "fits" : "too_old";
 }
 
 const version = (value: string): [number, number] | undefined => {
@@ -60,6 +64,7 @@ export function compatibilityChecker(client: ControlPlaneClient, options: { now?
       env: configuration.env,
       apiVersion: configuration.apiVersion,
       ...(configuration.adminApiVersion === undefined ? {} : { adminApiVersion: configuration.adminApiVersion }),
+      ...(configuration.confirm === undefined ? {} : { confirm: configuration.confirm }),
       ...(upgradeNotice ? { notice: `a newer AgentX CLI is available for API ${configuration.apiVersion}; ${NEXT_STEPS.UPGRADE_REQUIRED}` } : {}),
     };
     cached = { at: now(), value };
