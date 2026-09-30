@@ -201,7 +201,7 @@ browser the wizard prints its URL and falls back to the terminal prompter.
   bind and the test reply; (4) UI on by default plus packaging and docs. Phase 1 is shippable alone.
   Phase 2 built, see PR #161; its live check is deferred
   to the combined final live check (owner, 2026-09-30).
-  Phase 3 built (PR after #161 merges); live check deferred to the combined final live check
+  Phase 3 built, see PR #164; live check deferred to the combined final live check
   (owner, 2026-09-30).
 - **Cards.** The page's connect and finishing screens are status cards built in `ui/cards.ts` from
   facts a step already has; no card builder takes a secret. Steps reach the page through an
