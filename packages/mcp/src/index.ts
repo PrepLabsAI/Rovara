@@ -1,4 +1,5 @@
 export * from "./admin-client.js";
+export * from "./admin-tools.js";
 export * from "./client.js";
 export * from "./errors.js";
 export * from "./offer.js";
