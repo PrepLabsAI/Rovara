@@ -3,7 +3,7 @@
 // changes nothing: it says what will happen, hashes what it read, and says how to apply it through
 // the existing handler. Every value it shows passes through redaction first.
 import {
-  ADMIN_CHANGE_EFFECT_MAX, AgentXNameSchema, CredentialRegistrationSchema, SlackChannelIdSchema, agentXError, isCredentialKey, redactSecrets, redactText,
+  ADMIN_CHANGE_EFFECT_MAX, AgentXNameSchema, CredentialRegistrationSchema, SlackChannelIdSchema, agentXError, redactSecrets, redactText,
   type AdminChangeInput, type AdminChangeKind, type ChannelByNameRequest, type ChannelByNameResponse, type ProjectDefinition,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
@@ -57,33 +57,34 @@ const show = (value: unknown): string => {
 
 const REDACTED = "[REDACTED]";
 
-/** Each leaf by path; a leaf under a credential-named key, or a credential-named pair's value, is marked secret (as redactSecrets decides). */
-function leaves(value: unknown, path: string, into: Map<string, { value: unknown; secret: boolean }>, secret = false): Map<string, { value: unknown; secret: boolean }> {
-  if (Array.isArray(value)) value.forEach((entry, index) => leaves(entry, `${path}[${index}]`, into, secret));
-  else if (value !== null && typeof value === "object") {
-    const record = value as Record<string, unknown>;
-    const pairName = [record.name, record.key, record.Name, record.Key].find((name) => typeof name === "string");
-    const pairSecret = typeof pairName === "string" && isCredentialKey(pairName);
-    for (const [key, entry] of Object.entries(record)) {
-      leaves(entry, path === "" ? key : `${path}.${key}`, into, secret || isCredentialKey(key) || (pairSecret && /^value$/i.test(key)));
-    }
-  } else into.set(path, { value, secret });
+/** Each leaf by path. */
+function leaves(value: unknown, path: string, into: Map<string, unknown>): Map<string, unknown> {
+  if (Array.isArray(value)) value.forEach((entry, index) => leaves(entry, `${path}[${index}]`, into));
+  else if (value !== null && typeof value === "object") for (const [key, entry] of Object.entries(value)) leaves(entry, path === "" ? key : `${path}.${key}`, into);
+  else into.set(path, value);
   return into;
 }
 
-/** Leaf by leaf, in the order the new definition names them, then what it removed. */
+/**
+ * Leaf by leaf, in the order the new definition names them, then what it removed. Changes are
+ * found on the raw values; what is shown comes from redactSecrets of the whole value, so every
+ * rule it has applies (credential keys, name/value pairs, header tuples, argv flags). A leaf
+ * redactSecrets folded away or renamed (a redacted key, a whole credential-named object) shows
+ * as redacted.
+ */
 export function fieldDiff(before: unknown, after: unknown, max = 200): Array<{ field: string; from?: string; to?: string }> {
   const old = leaves(before, "", new Map());
   const next = leaves(after, "", new Map());
-  const shown = (leaf: { value: unknown; secret: boolean }) => show(leaf.secret && leaf.value !== null && leaf.value !== undefined ? REDACTED : leaf.value);
+  const oldShown = leaves(redactSecrets(before), "", new Map());
+  const nextShown = leaves(redactSecrets(after), "", new Map());
+  const shown = (from: Map<string, unknown>, field: string) => show(from.has(field) ? from.get(field) : REDACTED);
   const changes: Array<{ field: string; from?: string; to?: string }> = [];
   // A field name is the definition's own text, so it is redacted like a value.
-  for (const [field, leaf] of next) {
-    const was = old.get(field);
-    if (was === undefined) changes.push({ field: redactText(field), to: shown(leaf) });
-    else if (JSON.stringify(was.value) !== JSON.stringify(leaf.value)) changes.push({ field: redactText(field), from: shown(was), to: shown(leaf) });
+  for (const [field, value] of next) {
+    if (!old.has(field)) changes.push({ field: redactText(field), to: shown(nextShown, field) });
+    else if (JSON.stringify(old.get(field)) !== JSON.stringify(value)) changes.push({ field: redactText(field), from: shown(oldShown, field), to: shown(nextShown, field) });
   }
-  for (const [field, leaf] of old) if (!next.has(field)) changes.push({ field: redactText(field), from: shown(leaf) });
+  for (const [field] of old) if (!next.has(field)) changes.push({ field: redactText(field), from: shown(oldShown, field) });
   return changes.slice(0, max);
 }
 

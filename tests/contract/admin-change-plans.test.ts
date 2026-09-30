@@ -160,6 +160,19 @@ describe("a project revision (E7, E11)", () => {
     expect(JSON.stringify(db.find(() => true))).not.toContain(PLANTED);
   });
 
+  it("applies every redactSecrets rule to a diff's values: argv flags and header tuples", async () => {
+    const { deps, identity } = await harness();
+    const setup = [
+      { cwd: "repo/demo", executable: "npm", args: ["run", "seed", "--password", "plain-pass-123"], timeoutSeconds: 60 },
+      { cwd: "repo/demo", executable: "docker", args: ["exec", "db", "mysql", "-p", "plain-mysql-456"], timeoutSeconds: 60 },
+      { cwd: "repo/demo", executable: "curl", args: ["Authorization", "Bearer plain-bearer-789"], timeoutSeconds: 60 },
+    ];
+    const plan = await planChange(deps, identity, { kind: "register_project_revision", definition: { name: "payments", revision: 2, repositories: [repository], setup, readiness: [], orchestratorInstructions: "Delegate." } });
+    expect(JSON.stringify([plan.effect, plan.confirmationEffect, plan.details])).not.toMatch(/plain-pass-123|plain-mysql-456|plain-bearer-789/);
+    expect(plan.effect).toContain("setup[0].args[3]");
+    expect(plan.effect).toContain("[REDACTED]");
+  });
+
   it("refuses a first revision, an existing revision, a retired field and an invalid definition", async () => {
     const { deps, identity } = await harness();
     await expect(planChange(deps, identity, { kind: "register_project_revision", definition: { name: "ledger", revision: 1 } })).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: project ledger has no revision yet; register its first revision with agentx admin project register" });
