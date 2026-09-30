@@ -44,7 +44,7 @@ import { adminHealth, type AdminHealthProbes } from "./admin-health.js";
 import { adminIdentityReader, type AdminMeDependencies } from "./admin-me.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { taskKey, taskPointerKey } from "../developer/task-records.js";
-import { workspaceProjectReader, type TurnRecordSource } from "./turns.js";
+import { listLimitParam, validTime, workspaceProjectReader, type TurnRecordSource } from "./turns.js";
 
 export interface AdminReadDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -233,6 +233,8 @@ function memberReveal(deps: AdminReadDependencies, identity: AuthenticatedIdenti
 
 async function listBindings(deps: AdminReadDependencies, identity: AuthenticatedIdentity, url: URL, authorization: string | undefined): Promise<AdminBindingsResponse> {
   const asked = url.searchParams.get("team");
+  // R24 (A11): an environment that records its Slack team lists that team's bindings only.
+  if (asked !== null && deps.slackTeamId !== undefined) throw agentXError("CONFIG_INVALID", "this environment records its Slack team; leave out team");
   const team = asked === null ? deps.slackTeamId : SlackTeamIdSchema.safeParse(asked).success ? asked : null;
   if (team === null) throw agentXError("CONFIG_INVALID", "team must be a Slack team ID, such as T0123456789");
   if (team === undefined) throw agentXError("CONFIG_INVALID", "this environment records no Slack team; send team=<team ID>, such as team=T0123456789");
@@ -260,7 +262,6 @@ async function listBindings(deps: AdminReadDependencies, identity: Authenticated
 
 const HOUR_MS = 3_600_000;
 const DAY_MS = 86_400_000;
-const ISO_TIME = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/;
 const STORAGE_KEYS = new Set(["pk", "sk", "entityType", INDEX_EXPIRY_ATTRIBUTE]);
 /** A6: DynamoDB's TTL deletes up to 48 hours late; an item past its expiry is never shown. */
 const expired = (deps: AdminReadDependencies, item: Record<string, unknown>) => typeof item[INDEX_EXPIRY_ATTRIBUTE] === "number" && item[INDEX_EXPIRY_ATTRIBUTE] <= Math.floor(deps.now() / 1000);
@@ -269,7 +270,8 @@ const withoutKeys = (item: Record<string, unknown>) => Object.fromEntries(Object
 function timeParam(url: URL, name: string, fallback: number): number {
   const value = url.searchParams.get(name);
   if (value === null) return fallback;
-  if (!ISO_TIME.test(value) || Number.isNaN(Date.parse(value))) throw agentXError("CONFIG_INVALID", `${name} must be an ISO 8601 time such as 2026-09-30T00:00:00.000Z`);
+  // turns.ts's check: a date that does not exist (February 31, hour 24) is refused, not rolled over.
+  if (!validTime(value)) throw agentXError("CONFIG_INVALID", `${name} must be an ISO 8601 time such as 2026-09-30T00:00:00.000Z`);
   return Date.parse(value);
 }
 
@@ -285,10 +287,7 @@ export function timeWindow(url: URL, now: number, defaultHours: number): { since
 }
 
 export function listLimit(url: URL, fallback: number): number {
-  const value = url.searchParams.get("limit");
-  if (value === null) return fallback;
-  if (!/^\d{1,3}$/.test(value) || Number(value) < 1 || Number(value) > ADMIN_LIST_MAX) throw agentXError("CONFIG_INVALID", "limit must be a whole number from 1 to 100");
-  return Number(value);
+  return listLimitParam(url.searchParams.get("limit"), fallback);
 }
 
 function projectParam(url: URL): string | undefined {

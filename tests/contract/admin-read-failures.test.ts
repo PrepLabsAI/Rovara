@@ -1,7 +1,7 @@
 // tests/contract/admin-read-failures.test.ts
 // Spec 025 A7, US5 scenario 3: failures in a window, newest first, from the failure index.
 import { describe, expect, it } from "vitest";
-import { readFailures, type AdminReadDependencies } from "../../packages/broker/src/aws/admin-reads.js";
+import { readFailures, timeWindow, type AdminReadDependencies } from "../../packages/broker/src/aws/admin-reads.js";
 import { failureIndexKey } from "../../packages/contracts/src/index.js";
 import { createAdminReadBroker } from "../support/admin-read-broker.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -52,6 +52,15 @@ describe("GET /v1/admin/failures (FR-038, A7)", () => {
     for (const query of [`since=${old}`, "since=2026-09-30T10:00:00.000Z&until=2026-09-30T09:00:00.000Z", "limit=0", "limit=101", "project=%3Cscript%3E", "since=yesterday", `since=${new Date(Date.now() - 86_400_000).toISOString()}&until=2999-01-01T00:00:00.000Z`]) {
       expect((await admin("GET", `/v1/admin/failures?${query}`)).body.error, query).toMatchObject({ code: "CONFIG_INVALID" });
     }
+  });
+
+  // Final review, item 6: a date that does not exist is refused, never rolled over to the next month.
+  it("refuses a time that does not exist, such as February 31 or hour 24", () => {
+    const now = Date.parse("2026-03-05T00:00:00.000Z");
+    for (const [name, value] of [["until", "2026-02-31T00:00:00.000Z"], ["since", "2026-02-30T08:00:00.000Z"], ["until", "2026-03-03T24:00:00.000Z"]] as const) {
+      expect(() => timeWindow(new URL(`https://agentx.example/v1/admin/failures?${name}=${value}`), now, 24), value).toThrow(`${name} must be an ISO 8601 time such as 2026-09-30T00:00:00.000Z`);
+    }
+    expect(timeWindow(new URL("https://agentx.example/v1/admin/failures?until=2026-02-28T23:59:59.999Z"), now, 24).until).toBe("2026-02-28T23:59:59.999Z");
   });
 
   it("says the index keeps 30 days when since is older than that", async () => {

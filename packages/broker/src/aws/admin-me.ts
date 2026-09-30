@@ -24,7 +24,8 @@ const displayName = (value: unknown) => {
 const claimsOf = (claims: Record<string, unknown>) => ({ name: displayName(claims.name), email: verified(claims.email_verified) ? text(claims.email, 254) : undefined });
 /** The token's name first, then userinfo's, then the email. */
 const profileFrom = (name: string | undefined, email: string | undefined): Profile => {
-  const shown = name ?? email;
+  // T11: an email shown as the name is redacted and capped like any other name.
+  const shown = name ?? (email === undefined ? undefined : redactAndCap(email, 200).text);
   return { ...(shown === undefined ? {} : { name: shown }), ...(email === undefined ? {} : { email }) };
 };
 

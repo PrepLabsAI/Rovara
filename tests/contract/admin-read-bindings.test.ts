@@ -64,6 +64,17 @@ describe("GET /v1/admin/slack/bindings (FR-038, FR-030)", () => {
     expect((await admin("GET", "/v1/admin/slack/bindings?team=<script>")).body.error).toMatchObject({ code: "CONFIG_INVALID" });
   });
 
+  // Ruling R24 (A11): an environment that records its Slack team lists that team only.
+  it("refuses team= where the environment records its Slack team, and says to leave it out", async () => {
+    const { admin } = await createAdminReadBroker();
+    for (const team of [SLACK_TEAM, "T0OTHER0001"]) {
+      expect((await admin("GET", `/v1/admin/slack/bindings?team=${team}`)).body.error).toEqual({
+        code: "CONFIG_INVALID", message: "this environment records its Slack team; leave out team",
+      });
+    }
+    expect((await admin("GET", "/v1/admin/slack/bindings")).body.bindings).toHaveLength(1);
+  });
+
   it("refuses a non-admin", async () => {
     const { admin } = await createAdminReadBroker();
     expect((await admin("GET", "/v1/admin/slack/bindings", { admin: false })).body.error).toMatchObject({ code: "FORBIDDEN" });

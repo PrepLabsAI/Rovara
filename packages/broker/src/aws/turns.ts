@@ -103,11 +103,7 @@ export class TurnRecordExport {
     const filter = turnFilter(query);
     const wantedProject = query.get("project");
     if (wantedProject !== null && !AgentXNameSchema.safeParse(wantedProject).success) throw agentXError("CONFIG_INVALID", "project must be an AgentX project name such as payments; list them with agentx_admin_list_projects");
-    const limitText = query.get("limit");
-    if (limitText !== null && (!/^\d{1,3}$/.test(limitText) || Number(limitText) < 1 || Number(limitText) > ADMIN_LIST_MAX)) {
-      throw agentXError("CONFIG_INVALID", `limit must be a whole number from 1 to ${ADMIN_LIST_MAX}`);
-    }
-    const limit = limitText === null ? TURN_EXPORT_PAGE : Number(limitText);
+    const limit = listLimitParam(query.get("limit"), TURN_EXPORT_PAGE);
     const filtered = filter !== undefined || wantedProject !== null;
     const cursor = query.get("cursor");
     const exclusiveStartKey = cursor === null ? undefined : decodeCursor(cursor, since, until);
@@ -299,7 +295,15 @@ function startKey(value: unknown): TurnRecordStartKey | undefined {
  * forward (2026-02-31 becomes March 3, T24:00 the next day), so the written calendar date must
  * exist and the hour must be 00 to 23.
  */
-function validTime(value: string): boolean {
+/** `limit` from 1 to ADMIN_LIST_MAX, or `fallback` when absent; the admin read routes share it. */
+export function listLimitParam(value: string | null, fallback: number): number {
+  if (value === null) return fallback;
+  if (!/^\d{1,3}$/.test(value) || Number(value) < 1 || Number(value) > ADMIN_LIST_MAX) throw agentXError("CONFIG_INVALID", `limit must be a whole number from 1 to ${ADMIN_LIST_MAX}`);
+  return Number(value);
+}
+
+/** An ISO 8601 time that names a real date and hour: February 31 or hour 24 is refused, not rolled over. */
+export function validTime(value: string): boolean {
   const match = ISO_TIME.exec(value);
   if (!match || Number.isNaN(Date.parse(value))) return false;
   const [year, month, day, hour] = match.slice(1, 5).map(Number) as [number, number, number, number];

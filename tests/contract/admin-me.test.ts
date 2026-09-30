@@ -194,6 +194,19 @@ describe("the identity reader's guards", () => {
     }
   });
 
+  // Final review, item 8 (T11): an email shown as the name is capped and redacted like any other name.
+  it("caps and redacts a verified email used as the name", async () => {
+    const planted = `ghp_${"E".repeat(36)}`;
+    const long = `${"a".repeat(240)}@example.com`;
+    const reader = adminIdentityReader({ issuer: ISSUER, fetch: vi.fn() as unknown as typeof fetch, now: () => 0, log: vi.fn() });
+    const cut = await reader.profile(identity({ email: long, email_verified: true }), undefined);
+    expect(cut.email).toBe(long);
+    expect(cut.name?.length).toBeLessThanOrEqual(200);
+    const redacted = await reader.profile(identity({ email: `${planted}@example.com`, email_verified: true }), undefined);
+    expect(redacted.name).toContain("[REDACTED]");
+    expect(redacted.name).not.toContain(planted);
+  });
+
   it("keeps the token's name when userinfo adds only a verified email", async () => {
     const fake = issuerFake({ userinfo: () => Response.json({ sub: "admin-subject", email: "ada@example.com", email_verified: true }) });
     const reader = adminIdentityReader({ issuer: ISSUER, fetch: fake.fetch, now: () => 0, log: vi.fn() });
