@@ -60,6 +60,17 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
         ...(operation.result === undefined ? {} : { result: operation.result }),
       };
     },
+    async taskResult(workspaceId, operationId, signal) {
+      // The same wait and final response agentx_task_result gives the model (issue 157).
+      const result = await client(workspaceId).taskResult({ workspaceId, operationId }, signal === undefined ? {} : { signal }) as {
+        status: string; response?: string; error?: string;
+      };
+      return {
+        status: result.status,
+        ...(result.response === undefined ? {} : { response: result.response }),
+        ...(result.error === undefined ? {} : { error: result.error }),
+      };
+    },
     async createConversation(workspaceId) {
       return (await client(workspaceId).createConversation()).id;
     },

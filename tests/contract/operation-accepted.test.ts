@@ -2,7 +2,7 @@
 // tool waits on it, so a turn stopped mid-wait can be re-attached to that operation later.
 import { describe, expect, it, vi } from "vitest";
 import { createOrchestrationTools } from "../../packages/orchestrator/src/orchestration-tools.js";
-import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
+import { createHostedSlackRuntime, stopModelOnAbort } from "../../packages/slack-service/src/runtime.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 
 const OPERATION = "11111111-1111-4111-8111-111111111111";
@@ -85,5 +85,38 @@ describe("the hosted Slack runtime", () => {
       await runtime.dispose();
     }
     expect(accepted).toHaveBeenCalledExactlyOnceWith(OPERATION);
+  });
+});
+
+describe("stopping a handed-off turn's model", () => {
+  it("aborts the session when the turn's signal fires, once, and not after the turn let go", async () => {
+    const abort = vi.fn(async () => undefined);
+    const controller = new AbortController();
+    const release = stopModelOnAbort(controller.signal, { session: { abort } });
+    expect(abort).not.toHaveBeenCalled();
+    controller.abort();
+    controller.abort();
+    expect(abort).toHaveBeenCalledOnce();
+    release();
+
+    const later = new AbortController();
+    stopModelOnAbort(later.signal, { session: { abort } })();
+    later.abort();
+    expect(abort).toHaveBeenCalledOnce();
+  });
+
+  it("aborts at once for a signal that already fired, and swallows a failed abort", async () => {
+    const abort = vi.fn(async () => {
+      throw new Error("not running");
+    });
+    stopModelOnAbort(AbortSignal.abort(), { session: { abort } });
+    expect(abort).toHaveBeenCalledOnce();
+    await Promise.resolve();
+  });
+
+  it("does nothing without a signal", () => {
+    const abort = vi.fn(async () => undefined);
+    stopModelOnAbort(undefined, { session: { abort } })();
+    expect(abort).not.toHaveBeenCalled();
   });
 });

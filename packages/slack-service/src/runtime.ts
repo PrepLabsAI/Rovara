@@ -98,3 +98,21 @@ export function gateDecisionLogFields(eventId: string, decision: GateDecision): 
     ...(decision.usage === undefined ? {} : { classifierInputTokens: decision.usage.input, classifierOutputTokens: decision.usage.output, classifierCost: decision.usage.cost }),
   };
 }
+
+/**
+ * Issue 157: stops the turn's model when the processor hands the turn off, so the old task starts
+ * no further tool call while the new task resumes it. Returns the function that lets go.
+ */
+export function stopModelOnAbort(signal: AbortSignal | undefined, runtime: { session: { abort(): Promise<void> } }): () => void {
+  if (signal === undefined) return () => undefined;
+  const stop = () => {
+    // The task is stopping anyway; an abort that fails leaves nothing more to do.
+    runtime.session.abort().catch(() => undefined);
+  };
+  if (signal.aborted) {
+    stop();
+    return () => undefined;
+  }
+  signal.addEventListener("abort", stop, { once: true });
+  return () => signal.removeEventListener("abort", stop);
+}

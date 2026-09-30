@@ -251,10 +251,7 @@ describe("resuming a redelivered turn", () => {
   it("uses the operation's status alone when the thread API cannot read task results", async () => {
     const { posts, dependencies, meta, waitForOperation } = harness(async () => "unused");
     const api = dependencies.api;
-    dependencies.api = (message) => {
-      const { taskResult: _unused, ...rest } = api(message);
-      return rest;
-    };
+    dependencies.api = (message) => ({ ...api(message), taskResult: undefined });
     waitForOperation.mockResolvedValueOnce({ status: "SUCCEEDED" });
     meta.activeTurn = remembered("EvWORK000024");
     await processSlackRequest(slackMessage("EvWORK000024", "fix the bug"), dependencies, { finalAttempt: false, redelivered: true });

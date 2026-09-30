@@ -15,13 +15,15 @@ import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { SLACK_QUEUED_BEHIND_ATTRIBUTE, confirmationBlocks, queuedBehindOf, sharedNoticeClaim, type SlackRequestMessage } from "@agentx/contracts";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { runOrchestratorTurn } from "@agentx/orchestrator/orchestrator";
+import { createDynamoActiveTurnStore } from "./active-turn-store.js";
 import { createDynamoConfirmationStore } from "./confirmation-store.js";
 import { runConsumer, type QueueClient } from "./consumer.js";
 import { processSlackRequest, type ServiceLog, type ThreadServiceApi, type ThreadStore, type TurnInput } from "./processor.js";
 import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createSlackUserNames } from "./user-names.js";
 import { createThreadApi } from "./thread-api.js";
-import { classifierTimeoutMs, createHostedClassifier, createHostedSlackRuntime, gateDecisionLogFields } from "./runtime.js";
+import { HANDOFF_MILLISECONDS, activeTurnFromItem } from "./interrupted-turn.js";
+import { classifierTimeoutMs, createHostedClassifier, createHostedSlackRuntime, gateDecisionLogFields, stopModelOnAbort } from "./runtime.js";
 import { DynamoTurnRecordWriter } from "./turn-records.js";
 
 const MAX_RECEIVE_COUNT = 5;
@@ -121,15 +123,20 @@ const threads: ThreadStore = {
       settingsRevision?: number;
       closedAt?: string;
       refreshConnectors?: unknown;
+      activeTurn?: unknown;
     } | undefined;
+    const activeTurn = activeTurnFromItem(item?.activeTurn);
     return {
       ...(item?.workspaceId === undefined ? {} : { workspaceId: item.workspaceId }),
       ...(item?.conversationId === undefined ? {} : { conversationId: item.conversationId }),
       ...(item?.settingsRevision === undefined ? {} : { settingsRevision: item.settingsRevision }),
       ...(item?.closedAt === undefined ? {} : { closedAt: item.closedAt }),
       ...(Array.isArray(item?.refreshConnectors) ? { refreshConnectors: item.refreshConnectors.filter((name): name is string => typeof name === "string") } : {}),
+      ...(activeTurn === undefined ? {} : { activeTurn }),
     };
   },
+  // Issue 157: the worker operation a turn waits on, so a redelivery after a deploy can resume it.
+  ...createDynamoActiveTurnStore(documentClient, threadsTableName),
   async saveConversation(subject, state) {
     await documentClient.send(new UpdateCommand({
       TableName: threadsTableName,
@@ -232,10 +239,12 @@ async function runTurn(input: TurnInput): Promise<string> {
       // One line per gate decision until turn records carry them; never the call's arguments.
       onGateDecision: (decision) => log("gate.decision", gateDecisionLogFields(input.message.eventId, decision)),
     });
+    // Issue 157: a handed-off turn's model stops, and its unfinished session is not saved.
+    const letGo = stopModelOnAbort(input.signal, runtime);
     try {
       const response = await runOrchestratorTurn(runtime, input.message.text, input.recorder);
       const written = runtime.session.sessionManager.getSessionFile();
-      if (written !== undefined && await exists(written)) {
+      if (input.signal?.aborted !== true && written !== undefined && await exists(written)) {
         await s3.send(new PutObjectCommand({
           Bucket: sessionBucketName,
           Key: sessionKey(input.subject),
@@ -245,6 +254,7 @@ async function runTurn(input: TurnInput): Promise<string> {
       }
       return response;
     } finally {
+      letGo();
       await runtime.dispose();
     }
   } finally {
@@ -293,7 +303,8 @@ const queue: QueueClient = {
 const controller = new AbortController();
 for (const signal of ["SIGTERM", "SIGINT"] as const) {
   process.once(signal, () => {
-    log("service.stopping", { signal });
+    // Running turns get until the hand-off deadline (issue 157); nothing new starts.
+    log("service.stopping", { signal, handoffMilliseconds: HANDOFF_MILLISECONDS });
     controller.abort();
   });
 }
@@ -319,6 +330,7 @@ await runConsumer(queue, (message, context) => processSlackRequest(message, {
   visibilitySeconds: VISIBILITY_SECONDS,
   heartbeatMilliseconds: 5 * 60 * 1_000,
   signal: controller.signal,
+  handoffMilliseconds: HANDOFF_MILLISECONDS,
   log,
 });
 log("service.stopped", {});
