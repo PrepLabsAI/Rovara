@@ -281,6 +281,9 @@ function buildQuestion(question) {
     }
     read = () => {
       const value = field.value;
+      // A press while an answer is in flight sends nothing (submit ignores it), so the field keeps
+      // what was typed.
+      if (sending) return value;
       // Q4: a secret leaves the field the moment it is sent; a refused one is pasted again.
       if (question.masked) field.value = "";
       return value;

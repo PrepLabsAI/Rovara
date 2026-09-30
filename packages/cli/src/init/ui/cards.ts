@@ -15,6 +15,13 @@ export function linkLabel(url: string): string {
   }
 }
 
+/** A step's error as a card shows it where the page offers to try again in place: without the
+ * terminal's closing "run agentx init again", which would send the operator the wrong way. The
+ * terminal's error text is unchanged. */
+export function onPageProblem(problem: string): string {
+  return problem.replace(/[;,] (?:then )?run agentx init again\.?$/, "");
+}
+
 export function awsCard(input: { account: string; arn: string; region: string; profile?: string }): WizardCard {
   return {
     id: "aws", title: "AWS account", status: "ok",
@@ -30,7 +37,7 @@ export function awsCard(input: { account: string; arn: string; region: string; p
  * profile has one; `ranProblem` is why the last sign-in could not run. */
 export function awsSignedOutCard(input: { profile?: string; problem: string; signIn?: string; ranProblem?: string }): WizardCard {
   const next = input.signIn !== undefined
-    ? `Choose Sign in to run ${input.signIn}; a browser tab opens for it.`
+    ? `Choose Sign in to run ${input.signIn}; a browser tab opens for it. If no tab opens, the terminal running agentx init shows the address and code.`
     : input.profile === undefined
       ? "Sign in again in a terminal, then choose Check again."
       : `Update the credentials of profile ${input.profile} in a terminal, then choose Check again.`;
@@ -112,7 +119,10 @@ export function slackAppCard(input: SlackCardInput): WizardCard {
       ],
     };
     case "bot": return { ...base, status: "waiting", lines: [`Slack says this token belongs to the bot @${input.user} in workspace ${input.team}.`] };
-    case "refused": return { ...base, status: "failed", lines: [input.problem, "Nothing was saved."] };
+    case "refused": return {
+      ...base, status: "failed",
+      lines: [onPageProblem(input.problem), ...(/nothing was saved/i.test(input.problem) ? [] : ["Nothing was saved."])],
+    };
     case "approval": return { ...base, status: "waiting", lines: [`Slack is waiting for a workspace admin to approve "${input.appName}".`, `Once it is installed, run ${input.rerun}; it continues here.`] };
     case "done": return { ...base, status: "ok", lines: [`Slack app ${input.appId} is installed in workspace ${input.teamId}.`] };
   }
@@ -128,7 +138,7 @@ export type SlackUrlsCardInput =
 /** FR-041: the Request URL check, live, and run again after a fix. */
 export function slackUrlsCard(input: SlackUrlsCardInput): WizardCard {
   const base = { id: "slack-urls" as const, title: "Slack Request URL" };
-  const events = { url: "", label: "Open Event Subscriptions" };
+  const events = "Open Event Subscriptions";
   switch (input.stage) {
     case "checking": return { ...base, status: "running", lines: [`Sending ${input.eventsUrl} a signed test request, the way Slack will.`] };
     case "waiting-for-secret": return {
@@ -138,9 +148,13 @@ export function slackUrlsCard(input: SlackUrlsCardInput): WizardCard {
     case "verify": return {
       ...base, status: "waiting",
       lines: ["AgentX answers Slack's URL check.", "Open Event Subscriptions. If the Request URL is not marked Verified, press Retry there, then answer below."],
-      link: { ...events, url: input.pageUrl },
+      link: { url: input.pageUrl, label: events },
     };
-    case "failed": return { ...base, status: "failed", lines: [input.problem, "Fix it, then answer Yes below to run the check again."], link: { ...events, url: input.pageUrl } };
+    case "failed": return {
+      ...base, status: "failed",
+      lines: [onPageProblem(input.problem), "Fix it, then answer Yes below to run the check again."],
+      link: { url: input.pageUrl, label: events },
+    };
     case "done": return { ...base, status: "ok", lines: [`Slack has verified ${input.eventsUrl}.`] };
   }
 }

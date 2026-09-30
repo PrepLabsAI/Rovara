@@ -86,6 +86,22 @@ describe("choosing the profile", () => {
     expect(processEnv.AWS_PROFILE).toBe("dev");
   });
 
+  it("keeps an AWS_PROFILE it cannot list (a credential_process section, say) when it is the only one, without asking", async () => {
+    const processEnv: NodeJS.ProcessEnv = { AWS_PROFILE: "vault" };
+    const prompter = scriptedPrompter([]);
+    expect(await pickAwsProfile({ profiles: [], processEnv, prompter })).toEqual({ name: "vault", kind: "other" });
+    expect(prompter.asked).toEqual([]);
+    expect(processEnv.AWS_PROFILE).toBe("vault");
+  });
+
+  it("offers an unlisted AWS_PROFILE beside the listed one, as the default, and never swaps it silently", async () => {
+    const processEnv: NodeJS.ProcessEnv = { AWS_PROFILE: "vault" };
+    const prompter = scriptedPrompter([""]);
+    expect(await pickAwsProfile({ profiles: [DEV], processEnv, prompter })).toEqual({ name: "vault", kind: "other" });
+    expect(prompter.asked).toEqual(["AWS profile to install with"]);
+    expect(processEnv.AWS_PROFILE).toBe("vault");
+  });
+
   it("asks nothing when keys are in the environment, which win over any profile", async () => {
     const processEnv: NodeJS.ProcessEnv = { AWS_ACCESS_KEY_ID: "AKIAENV" };
     expect(await pickAwsProfile({ profiles: [DEV, { name: "default", kind: "keys" }], processEnv, prompter: scriptedPrompter([]) })).toBeUndefined();
@@ -130,7 +146,7 @@ describe("the account the install lands in", () => {
     expect(page.cards[0]?.lines).toEqual([
       "AgentX cannot use the AWS sign-in of profile dev.",
       "AWS credentials missing or expired: The security token included in the request is expired",
-      "Choose Sign in to run aws sso login --profile dev; a browser tab opens for it.",
+      "Choose Sign in to run aws sso login --profile dev; a browser tab opens for it. If no tab opens, the terminal running agentx init shows the address and code.",
     ]);
   });
 
@@ -144,6 +160,25 @@ describe("the account the install lands in", () => {
     })).rejects.toBe(failure);
     expect(prompter.asked).toEqual(["Your AWS sign-in is missing or has expired. What next?", "Your AWS sign-in is missing or has expired. What next?"]);
     expect(page.cards.at(-1)?.lines).toContain("could not run aws sso login --profile dev: spawn aws ENOENT");
+  });
+
+  it("names a sign-in that could not start in one line, without the command twice or a stderr tail", async () => {
+    const page = surface();
+    const prompter = scriptedPrompter(["signin", "signin", "stop"]);
+    let runs = 0;
+    const failing: CommandRunner = {
+      async run() {
+        runs += 1;
+        throw new Error(runs === 1
+          ? "aws sso login --profile dev could not start: spawn aws ENOENT"
+          : "aws sso login --profile dev exited with code 255:\nError when retrieving token from sso: Token has expired and refresh failed\nsecond line");
+      },
+    };
+    await expect(resolveCaller({ identity: () => ({ get: async () => { throw expired(); } }), region: "us-east-1", prompter, runner: failing, surface: page, profile: DEV })).rejects.toThrow("expired");
+    const problems = page.cards.map((card) => card.lines[2]);
+    expect(problems[1]).toBe("aws sso login --profile dev could not start: spawn aws ENOENT");
+    expect(problems[2]).toBe("aws sso login --profile dev exited with code 255");
+    for (const card of page.cards) for (const line of card.lines) expect(line).not.toContain("\n");
   });
 
   it("offers only check again for a profile AgentX cannot sign in to, and rethrows anything that is not a sign-in problem", async () => {

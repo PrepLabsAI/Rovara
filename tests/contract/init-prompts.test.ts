@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { agentXError } from "@agentx/contracts";
 import {
   checkPrivateKeyPem, checkSlackBotToken, checkSlackSigningSecret, cleanSecret, fieldCheck, readHidden, secretFromSource,
   terminalPrompter, unattendedPrompter,
@@ -214,6 +215,13 @@ describe("fieldCheck and the terminal's secret prompt (spec 040 FR-040)", () => 
     const check = fieldCheck(checkSlackSigningSecret);
     expect(check("0123456789abcdef0123456789abcdef")).toBeUndefined();
     expect(check("nothex")).toBe("a Slack signing secret is 32 lowercase hexadecimal characters (Basic Information, App Credentials, Signing Secret)");
+  });
+
+  it("keeps a Node error's own code in the field message; only an AgentXError's code is dropped", () => {
+    const nodeError = fieldCheck(() => { throw new Error("ENOENT: no such file or directory"); });
+    expect(nodeError("x")).toBe("ENOENT: no such file or directory");
+    const agentx = fieldCheck(() => { throw agentXError("CONFIG_INVALID", "UPPER_CASE: words the check wrote"); });
+    expect(agentx("x")).toBe("UPPER_CASE: words the check wrote");
   });
 
   it("the terminal's hidden prompt ignores validate, so a bad value still fails where it always did", async () => {

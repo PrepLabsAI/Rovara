@@ -73,8 +73,15 @@ export async function listAwsProfiles(input: { home: string; processEnv: NodeJS.
 /** FR-020: the profile the install uses, put in AWS_PROFILE before any AWS client is built. None
  * when keys in the environment win over every profile, or when this machine has no profile. */
 export async function pickAwsProfile(input: { profiles: AwsProfile[]; processEnv: NodeJS.ProcessEnv; prompter: Prompter }): Promise<AwsProfile | undefined> {
-  const { profiles, processEnv } = input;
+  const { processEnv } = input;
   if (processEnv.AWS_ACCESS_KEY_ID !== undefined) return undefined;
+  // An AWS_PROFILE this module cannot list (a credentials-file section with credential_process or
+  // role_arn, say) is still the operator's choice: it is offered, and it is the default, rather
+  // than silently replaced by another account's profile.
+  const named = processEnv.AWS_PROFILE;
+  const profiles = named === undefined || named === "" || input.profiles.some((profile) => profile.name === named)
+    ? input.profiles
+    : [{ name: named, kind: "other" as const }, ...input.profiles];
   const first = profiles[0];
   if (first === undefined) return undefined;
   const current = profiles.find((profile) => profile.name === (processEnv.AWS_PROFILE ?? "default")) ?? first;
@@ -95,6 +102,13 @@ export async function pickAwsProfile(input: { profiles: AwsProfile[]; processEnv
 export function signInCommand(profile: AwsProfile): { command: "aws"; args: string[]; display: string } | undefined {
   const args = profile.kind === "sso" ? ["sso", "login", "--profile", profile.name] : profile.kind === "login" ? ["login", "--profile", profile.name] : undefined;
   return args === undefined ? undefined : { command: "aws", args, display: `aws ${args.join(" ")}` };
+}
+
+/** Why the sign-in could not run, in one line: the runner's message names the command already
+ * ("aws sso login --profile dev could not start: ...") and may end in a multi-line stderr tail. */
+function ranProblemText(display: string, error: unknown): string {
+  const first = (error instanceof Error ? error.message : String(error)).split(/\r?\n/, 1)[0]?.trim().replace(/:$/, "") ?? "";
+  return first.startsWith(display) ? first : `could not run ${display}: ${first}`;
 }
 
 const isSignInProblem = (error: unknown): boolean => {
@@ -136,7 +150,7 @@ export async function resolveCaller(input: {
         try {
           await input.runner.run(signIn.command, signIn.args, { cwd: process.cwd(), display: signIn.display });
         } catch (runError) {
-          ranProblem = `could not run ${signIn.display}: ${runError instanceof Error ? runError.message : String(runError)}`;
+          ranProblem = ranProblemText(signIn.display, runError);
         }
       }
     }

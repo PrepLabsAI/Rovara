@@ -3,7 +3,7 @@
 // 128-character cut like macOS `security add-generic-password -w`.
 import { readFile as readFileFromDisk } from "node:fs/promises";
 import { createInterface } from "node:readline/promises";
-import { agentXError } from "@agentx/contracts";
+import { AgentXError, agentXError } from "@agentx/contracts";
 
 export interface TextWriter { write(text: string): unknown }
 export interface PromptFlag { flag: string }
@@ -26,6 +26,13 @@ export function stripPasteMarkers(text: string): string {
   return text.replaceAll(PASTE_START, "").replaceAll(PASTE_END, "");
 }
 
+/** An error's own words for a person: an AgentXError without its own "CODE: " prefix. Any other
+ * error keeps its message whole, so a Node code such as "ENOENT: " stays part of it. */
+export function messageWithoutCode(error: Error): string {
+  const prefix = error instanceof AgentXError ? `${error.code}: ` : undefined;
+  return prefix !== undefined && error.message.startsWith(prefix) ? error.message.slice(prefix.length) : error.message;
+}
+
 /** A check that throws (checkSlackBotToken and the like) as a field validator: the refusal's own
  * words, without the error code. The checks never quote the value, so neither does this. */
 export function fieldCheck(check: (value: string) => unknown): (value: string) => string | undefined {
@@ -34,7 +41,7 @@ export function fieldCheck(check: (value: string) => unknown): (value: string) =
       check(value);
       return undefined;
     } catch (error) {
-      return error instanceof Error ? error.message.replace(/^[A-Z_]+: /, "") : "that value is not valid";
+      return error instanceof Error ? messageWithoutCode(error) : "that value is not valid";
     }
   };
 }

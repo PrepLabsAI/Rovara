@@ -34,7 +34,9 @@ describe("the GitHub App flow on the wizard's own address", () => {
     expect(response.status).toBe(200);
     const csp = response.headers.get("content-security-policy") ?? "";
     const nonce = /'nonce-([^']+)'/.exec(csp)?.[1] ?? "";
-    expect(csp).toBe(manifestFormCsp(nonce));
+    expect(nonce).not.toBe("");
+    expect(csp).toBe(`default-src 'none'; script-src 'nonce-${nonce}'; form-action https://github.com; base-uri 'none'; frame-ancestors 'none'`);
+    expect(manifestFormCsp(nonce)).toBe(csp);
     expect(csp).toContain("form-action https://github.com");
     const html = await response.text();
     expect(html).toContain(`<script nonce="${nonce}">`);
@@ -51,7 +53,8 @@ describe("the GitHub App flow on the wizard's own address", () => {
     expect(answer.status).toBe(200);
     expect(answer.headers.get("referrer-policy")).toBe("no-referrer");
     expect(answer.headers.get("access-control-allow-origin")).toBeNull();
-    expect(await answer.text()).toContain("Go back to the Install AgentX tab to continue.");
+    // It claims only what is true yet: GitHub sent the code; the conversion happens after.
+    expect(await answer.text()).toContain("GitHub sent AgentX the new app's code. Go back to the Install AgentX tab to continue.");
     await expect(mount.code).resolves.toBe("0123456789abcdef0123");
     // Review Focus 2: a second callback (a second GitHub tab) is refused like any other request:
     // with GitHub's cross-site headers that is the ordinary cross-site refusal, checked before the token.
@@ -69,7 +72,10 @@ describe("the GitHub App flow on the wizard's own address", () => {
     expect(await settled(mount.code)).toBe("pending");
     expect((await fetch(`${origin}${GITHUB_CALLBACK_PATH}?state=${STATE}`, { headers: fromGitHub })).status).toBe(400);
     expect(await settled(mount.code)).toBe("pending");
-    mount.close();
+    // The refusals left the wait intact: the right callback still resolves the code.
+    const right = await fetch(`${origin}${GITHUB_CALLBACK_PATH}?code=0123456789abcdef0123&state=${STATE}`, { headers: fromGitHub });
+    expect(right.status).toBe(200);
+    await expect(mount.code).resolves.toBe("0123456789abcdef0123");
   });
 
   it("refuses a callback that names another Host, even with the right state", async () => {
@@ -95,6 +101,34 @@ describe("the GitHub App flow on the wizard's own address", () => {
     expect((await fetch(`${origin}${GITHUB_CALLBACK_PATH}?code=0123456789abcdef0123&state=${STATE}`)).status).toBe(401);
     // Without a mount the start page is not there either.
     expect((await fetch(`${origin}/github/start`, { headers: { [WIZARD_TOKEN_HEADER]: TOKEN } })).status).toBe(404);
+  });
+
+  it("while a GitHub App is awaited, every other route keeps every check", async () => {
+    const { server, origin } = await wizard();
+    const mount = server.mountManifest({ state: STATE, page, timeoutMs: 60_000 });
+    // A cross-site read of the state, even with the token, is refused.
+    const state = await fetch(`${origin}/state`, { headers: { ...fromGitHub, [WIZARD_TOKEN_HEADER]: TOKEN } });
+    expect(state.status).toBe(403);
+    expect(await state.text()).toBe("cross-site request\n");
+    // And without the token, same-site or not.
+    expect((await fetch(`${origin}/state`)).status).toBe(401);
+    // Only GET reaches the callback's exception: a POST with the right state is refused, and resolves nothing.
+    const posted = await fetch(`${origin}${GITHUB_CALLBACK_PATH}?code=0123456789abcdef0123&state=${STATE}`, { method: "POST", headers: fromGitHub });
+    expect([401, 403]).toContain(posted.status);
+    expect(await settled(mount.code)).toBe("pending");
+    const postedNoHeaders = await fetch(`${origin}${GITHUB_CALLBACK_PATH}?code=0123456789abcdef0123&state=${STATE}`, { method: "POST" });
+    expect(postedNoHeaders.status).toBe(401);
+    expect(await settled(mount.code)).toBe("pending");
+    // Only the exact path: a trailing slash is another route, refused like any other.
+    expect((await fetch(`${origin}${GITHUB_CALLBACK_PATH}/?code=0123456789abcdef0123&state=${STATE}`, { headers: fromGitHub })).status).toBe(403);
+    expect((await fetch(`${origin}${GITHUB_CALLBACK_PATH}/?code=0123456789abcdef0123&state=${STATE}`)).status).toBe(401);
+    expect(await settled(mount.code)).toBe("pending");
+    // The start page still needs the session token while the flow is mounted.
+    expect((await fetch(`${origin}/github/start`)).status).toBe(401);
+    expect((await fetch(`${origin}/github/start?t=not-the-token`)).status).toBe(401);
+    // The right callback still works after all of that.
+    expect((await fetch(`${origin}${GITHUB_CALLBACK_PATH}?code=0123456789abcdef0123&state=${STATE}`, { headers: fromGitHub })).status).toBe(200);
+    await expect(mount.code).resolves.toBe("0123456789abcdef0123");
   });
 
   it("rejects the wait when the wizard closes", async () => {

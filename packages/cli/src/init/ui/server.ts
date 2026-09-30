@@ -138,27 +138,26 @@ export async function startWizardServer(input: { hub: WizardHub; port?: number; 
 
   // Q6: GitHub's redirect back is a cross-site top-level visit with no session token. It is let
   // through only here: while a GitHub App is awaited, with the flow's own state, once.
-  const githubCallback = (url: URL, response: ServerResponse): void => {
-    const route = manifest;
+  const githubCallback = (url: URL, route: ManifestRoute, response: ServerResponse): void => {
     const answer = (status: number, text: string) => {
       const body = CALLBACK_PAGE(text);
       response.writeHead(status, { ...CALLBACK_HEADERS, "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(body) });
       response.end(body);
     };
-    if (route === undefined) return answer(404, "Not found.");
     if (!tokensMatch(url.searchParams.get("state") ?? undefined, route.state)) return answer(400, "This page is from a different agentx init run.");
     const code = url.searchParams.get("code");
     if (code === null || code === "") return answer(400, "GitHub sent no code. Go back to the Install AgentX tab.");
     manifest = undefined;
     clearTimeout(route.timer);
     route.resolve(code);
-    return answer(200, "AgentX has the new GitHub App. Go back to the Install AgentX tab to continue.");
+    // GitHub has not converted the code yet; the Install AgentX tab says whether that worked.
+    return answer(200, "GitHub sent AgentX the new app's code. Go back to the Install AgentX tab to continue.");
   };
 
   const handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
     const url = new URL(request.url ?? "/", expectedOrigin);
     if (request.method === "GET" && url.pathname === GITHUB_CALLBACK_PATH && manifest !== undefined && headerValue(request, "host") === expectedHost) {
-      return githubCallback(url, response);
+      return githubCallback(url, manifest, response);
     }
     const refusal = refusalReason({
       host: headerValue(request, "host"),

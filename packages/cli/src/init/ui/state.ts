@@ -37,7 +37,9 @@ export interface WizardHub {
   showResume(resume: WizardResume): void;
   /** Shows a card, or replaces the one with the same id where it stands. */
   showCard(card: WizardCard): void;
-  /** The address the run now waits on the operator to open. Cleared when a step starts or ends. */
+  /** The address the run now waits on the operator to open. Cleared on every step event (a step
+   * started, done, skipped or waiting), and when the card that offered the same address is
+   * replaced by one that no longer offers it. */
   showLink(link: WizardLink): void;
   /** Publishes a question and resolves with the answer the page posts, once `check` accepts it. */
   ask(question: NewQuestion, check: AnswerCheck): Promise<string>;
@@ -64,12 +66,23 @@ interface Pending {
 /** Logged, without the address, when a link fails isShowableLink. */
 export const LINK_REFUSED = "the installer left out a link it could not check (only https:// addresses are shown)";
 
-const LOOPBACK_LINK = /^http:\/\/127\.0\.0\.1:\d{1,5}\//;
+const LOOPBACK_LINK = /^http:\/\/127\.0\.0\.1:(\d{1,5})\//;
+
+/** This machine's 127.0.0.1 listener, on a port a listener can have (1 to 65535). */
+function isLoopbackLink(url: string): boolean {
+  const port = Number(LOOPBACK_LINK.exec(url)?.[1] ?? "0");
+  if (port < 1 || port > 65535) return false;
+  try {
+    return new URL(url).hostname === "127.0.0.1";
+  } catch {
+    return false;
+  }
+}
 
 /** True for an address the page may offer as a link: this machine's 127.0.0.1 listener, or an
  * https:// address with a host and no user name or password in it. */
 export function isShowableLink(url: string): boolean {
-  if (LOOPBACK_LINK.test(url)) return true;
+  if (isLoopbackLink(url)) return true;
   try {
     const parsed = new URL(url);
     return parsed.protocol === "https:" && parsed.hostname !== "" && parsed.username === "" && parsed.password === "";
@@ -157,7 +170,11 @@ export function createWizardHub(env: string): WizardHub {
         appendLog(LINK_REFUSED);
         shown = withoutLink(next);
       }
-      cards = cards.some((existing) => existing.id === shown.id)
+      const replaced = cards.find((existing) => existing.id === shown.id);
+      // The run's link came from the card being replaced (Slack's create button, GitHub's install
+      // page): once the new card no longer offers it, it is stale, and the page drops it too.
+      if (replaced?.link !== undefined && link?.url === replaced.link.url && shown.link?.url !== replaced.link.url) link = undefined;
+      cards = replaced !== undefined
         ? cards.map((existing) => (existing.id === shown.id ? shown : existing))
         : [...cards, shown];
       publish();

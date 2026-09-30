@@ -13,7 +13,7 @@ import { linkLabel } from "./cards.js";
 import { browserPrompter } from "./prompter.js";
 import type { WizardPhase, WizardResume } from "./protocol.js";
 import { startWizardServer, type WizardServer } from "./server.js";
-import { createWizardHub, type WizardHub } from "./state.js";
+import { createWizardHub, isShowableLink, type WizardHub } from "./state.js";
 
 export interface InstallWizard {
   /** The loopback address the wizard was opened at, session token and all. */
@@ -22,7 +22,8 @@ export interface InstallWizard {
   /** The page's cards, for the init context (context.surface). */
   surface: InstallSurface;
   /** Q5: the init context's openBrowser with --ui. The address becomes a button on the page, and
-   * the operator opens it; nothing is opened on its own. Always true: the page shows it. */
+   * the operator opens it; nothing is opened on its own. True when the page shows it; false when
+   * isShowableLink refuses it, so the step falls back to its terminal instructions. */
   openLink: (url: string) => Promise<boolean>;
   /** FR-030: the GitHub App's manifest form and GitHub's redirect, on the wizard's own address. */
   manifestHost: OpenManifestHost;
@@ -71,7 +72,9 @@ export async function startInstallWizard(input: {
     surface: { card: (card) => hub.showCard(card) },
     openLink: async (url) => {
       hub.showLink({ url, label: linkLabel(url) });
-      return true;
+      // A refused address is not on the page, so no one can open it: say so, as a browser that
+      // would not open does.
+      return isShowableLink(url);
     },
     manifestHost: async (input) => server.mountManifest(input),
     log: (line) => hub.log(line),

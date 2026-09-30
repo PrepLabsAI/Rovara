@@ -46,4 +46,10 @@ describe("retryOnPage", () => {
     expect(problemText(expired)).toBe("AWS credentials missing or expired: The security token included in the request is expired");
     expect(problemText("plain")).toBe("plain");
   });
+
+  it("strips only an AgentXError's own code, never a Node error's (ENOENT: ...)", () => {
+    expect(problemText(agentXError("RUNTIME_UNAVAILABLE", "https://x/slack/events answered HTTP 500"))).toBe("https://x/slack/events answered HTTP 500");
+    expect(problemText(new Error("ENOENT: no such file or directory, open '/tmp/key.pem'"))).toBe("ENOENT: no such file or directory, open '/tmp/key.pem'");
+    expect(problemText(new Error("EACCES: permission denied"))).toBe("EACCES: permission denied");
+  });
 });

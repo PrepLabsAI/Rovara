@@ -4,14 +4,13 @@
 // as it always has, asking nothing, so the terminal's questions and errors stay as they are.
 import { cliErrorFor } from "../deploy/commands.js";
 import type { InstallSurface } from "./context.js";
-import type { Prompter } from "./prompts.js";
+import { messageWithoutCode, type Prompter } from "./prompts.js";
 
 /** The error's own words for a card: mapped as the rest of the CLI maps it (an expired AWS
- * session reads as one), without the "CODE: " prefix. */
+ * session reads as one), without an AgentXError's "CODE: " prefix. */
 export function problemText(error: unknown): string {
   const mapped = cliErrorFor(error);
-  const message = mapped instanceof Error ? mapped.message : String(mapped);
-  return message.replace(/^[A-Z_]+: /, "");
+  return mapped instanceof Error ? messageWithoutCode(mapped) : String(mapped);
 }
 
 export async function retryOnPage<T>(input: {
