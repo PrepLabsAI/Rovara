@@ -130,9 +130,12 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
     const [, broker] = ofType("AWS::Lambda::Function").find(([id]) => id.startsWith("Broker"))!;
     expect(Object.keys((broker.Properties.Environment as { Variables: Record<string, unknown> }).Variables)).toEqual(expect.arrayContaining(["DELETER_ARN"]));
     const roleId = (broker.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
-    const start = roleStatements(roleId).find((st) => [st.Action].flat().includes("states:StartExecution"))!;
-    expect(JSON.stringify(start.Resource)).toContain("SessionsDeleter");
-    expect(JSON.stringify(start.Resource)).not.toContain("SessionsProvisioner");
+    const starts = roleStatements(roleId).filter((st) => [st.Action].flat().includes("states:StartExecution"));
+    expect(JSON.stringify(starts.map((st) => st.Resource))).toContain("SessionsDeleter");
+    // Never the provisioner, in any statement. The only other machine is spec 043's SWE-bench eval.
+    expect(JSON.stringify(starts.map((st) => st.Resource))).not.toContain("SessionsProvisioner");
+    expect(starts.map((st) => JSON.stringify(st.Resource)).filter((resource) => !resource.includes("SessionsDeleter")))
+      .toEqual([expect.stringContaining(":stateMachine:agentx-production-swebench-eval") as unknown]);
     // The broker stays outside the VPC.
     expect(broker.Properties.VpcConfig).toBeUndefined();
   });

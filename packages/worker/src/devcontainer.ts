@@ -166,6 +166,24 @@ export async function runDevcontainerCommand(
  * `devcontainer exec` client alone would leave it running there.
  */
 export function devcontainerBashOperations(cli: DevcontainerCli, target: DevcontainerTarget): BashOperations {
+  return containerBashOperations((command, options) => cli.run([
+    "exec", ...targetArgs(target),
+    ...Object.entries(options.env ?? {}).flatMap(([name, value]) => ["--remote-env", `${name}=${value}`]),
+    ...command,
+  ], options));
+}
+
+/**
+ * Runs one command in a container: `devcontainer exec` for a project's devcontainer, `docker exec`
+ * for a SWE-bench task container (spec 043).
+ */
+export type ContainerExec = (
+  command: readonly string[],
+  options: { env?: Record<string, string>; signal?: AbortSignal; onStdout?: (data: Buffer) => void; onStderr?: (data: Buffer) => void },
+) => Promise<DevcontainerProcess>;
+
+/** The agent's shell in a container, each command in its own process group (see devcontainerBashOperations). */
+export function containerBashOperations(exec: ContainerExec): BashOperations {
   return {
     async exec(command, cwd, { onData, signal, timeout, env }) {
       if (signal?.aborted) throw new Error("aborted");
@@ -173,7 +191,7 @@ export function devcontainerBashOperations(cli: DevcontainerCli, target: Devcont
       let stopping: Promise<unknown> | undefined;
       // bash, not sh: dash's kill does not take a negative process group ID.
       const stop = () => {
-        stopping ??= cli.run(["exec", ...targetArgs(target), "bash", "-c", 'kill -TERM -- "-$(cat "$1")" 2>/dev/null; rm -f "$1"', "bash", groupFile], {})
+        stopping ??= exec(["bash", "-c", 'kill -TERM -- "-$(cat "$1")" 2>/dev/null; rm -f "$1"', "bash", groupFile], {})
           .catch(() => undefined);
       };
       const controller = new AbortController();
@@ -184,14 +202,13 @@ export function devcontainerBashOperations(cli: DevcontainerCli, target: Devcont
       const onAbort = () => { stop(); controller.abort(); };
       signal?.addEventListener("abort", onAbort, { once: true });
       try {
-        const result = await cli.run([
-          "exec", ...targetArgs(target), ...sessionEnvironment(env),
+        const result = await exec([
           "bash", "-c",
           // Job control only while starting the command, which puts it in its own process group;
           // left on, bash would also print a "Done" line into the output.
           'set -m; (cd -- "$1" && eval "$2") & child=$!; set +m; echo "$child" > "$3"; wait "$child"; status=$?; rm -f "$3"; exit "$status"',
           "bash", cwd, command, groupFile,
-        ], { signal: controller.signal, onStdout: onData, onStderr: onData });
+        ], { env: sessionEnvironment(env), signal: controller.signal, onStdout: onData, onStderr: onData });
         await stopping;
         if (signal?.aborted) throw new Error("aborted");
         if (timedOut) throw new Error(`timeout:${String(timeout)}`);
@@ -220,10 +237,9 @@ function targetArgs(target: DevcontainerTarget): string[] {
 }
 
 /** pi's PI_* session variables, which its shell tool exposes to commands. */
-function sessionEnvironment(env: NodeJS.ProcessEnv | undefined): string[] {
-  return Object.entries(env ?? {})
-    .filter(([name, value]) => name.startsWith("PI_") && value !== undefined)
-    .flatMap(([name, value]) => ["--remote-env", `${name}=${String(value)}`]);
+function sessionEnvironment(env: NodeJS.ProcessEnv | undefined): Record<string, string> {
+  return Object.fromEntries(Object.entries(env ?? {})
+    .filter((entry): entry is [string, string] => entry[0].startsWith("PI_") && entry[1] !== undefined));
 }
 
 function lastJsonLine(output: string): Record<string, unknown> | undefined {

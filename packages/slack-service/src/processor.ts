@@ -19,6 +19,7 @@ import {
   type TurnRecord,
   type ModelIdentifier,
   type ProjectModelOptions,
+  parseSwebenchCommand,
 } from "@agentx/contracts";
 import type { WorkerAccess } from "@agentx/orchestrator";
 import type { GateSession } from "@agentx/orchestrator/action-gate";
@@ -30,6 +31,7 @@ import { NEW_WORKSPACE_MESSAGE, STILL_PREPARING_MESSAGE, limitMessage, preparati
 import { escapeText, slackReplyText } from "./slack-format.js";
 import { buildTurnRecord, emitTurnMetrics, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
 import { matchApprovedModel, modelName, modelOptionsMessage, parseModelCommand } from "./model-command.js";
+import { runSwebenchCommand, type SwebenchApi } from "./swebench-command.js";
 import { SHARED_CLOSE_REFUSED_MESSAGE, SHARED_SETUP_FAILED_MESSAGE, TASK_STILL_BUSY_MESSAGE, taskBusy, waitForIdleTask } from "./shared-task.js";
 
 export interface ThreadServiceApi {
@@ -42,6 +44,9 @@ export interface ThreadServiceApi {
   createConversation(workspaceId: string): Promise<string>;
   listProjectModels?(): Promise<ProjectModelOptions>;
   selectProjectModel?(model: ModelIdentifier): Promise<ProjectModelOptions>;
+  /** Spec 043: absent where the control plane has no SWE-bench routes. */
+  startSwebenchRun?: SwebenchApi["startSwebenchRun"];
+  getSwebenchRun?: SwebenchApi["getSwebenchRun"];
 }
 
 export interface ThreadState {
@@ -114,6 +119,8 @@ export interface ProcessorDependencies {
   postWithBlocks?: (thread: SlackThread, text: string, blocks: unknown[]) => Promise<void>;
   /** C13: a Slack member's display name, for a continue-mode turn's record. */
   userName?: (userId: string) => Promise<string | undefined>;
+  /** Waits between polls of a SWE-bench run (spec 043); a timer when absent. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** Where a reply's Details button points, and how to post it. */
@@ -171,6 +178,25 @@ export async function processSlackRequest(
   // Set when this turn waited for workspace setup up front, which the member was told about.
   let waitedForSetup = false;
   try {
+    const swebenchCommand = parseSwebenchCommand(message.text);
+    if (swebenchCommand !== undefined) {
+      draft.disposition = "swebench_run";
+      if (api.startSwebenchRun === undefined || api.getSwebenchRun === undefined) throw new Error("SWE-bench runs are unavailable in this deployment");
+      await runSwebenchCommand(swebenchCommand, {
+        startSwebenchRun: (request) => api.startSwebenchRun!(request),
+        getSwebenchRun: (runId) => api.getSwebenchRun!(runId),
+        ...(api.listProjectModels === undefined ? {} : { listProjectModels: () => api.listProjectModels!() }),
+      }, {
+        // The same run for a redelivered event.
+        requestId: deterministicUuid(`${message.eventId}:swebench`),
+        post,
+        // A redelivered event resumes waiting for the run it started; the thread already has its notice.
+        announce: options.redelivered !== true,
+        ...(dependencies.sleep === undefined ? {} : { sleep: dependencies.sleep }),
+      });
+      finished = true;
+      return;
+    }
     const modelCommand = parseModelCommand(message.text);
     if (modelCommand !== undefined) {
       if (api.listProjectModels === undefined) throw new Error("project model selection is unavailable in this deployment");

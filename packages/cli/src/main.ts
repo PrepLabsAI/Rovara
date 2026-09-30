@@ -27,6 +27,7 @@ import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
 import { setTaskShareMode } from "./admin/task-share-mode.js";
 import { cancelWorkspaceTask } from "./admin/cancel.js";
+import { disableEvalChannel, enableEvalChannel, parseMaxCostUsd, showEvalChannel } from "./admin/eval.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
@@ -456,6 +457,46 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         channelId: options.channel,
       }, services.fetchImplementation);
       services.stdout.write(formatSuccess(result, globals.json));
+    });
+
+  const adminEval = admin.command("eval").description("SWE-bench runs from Slack (spec 043): `@agentx eval swebench <dataset> <instance>` in an enabled channel");
+  const evalChannel = (options: { team: string; channel: string }, settings: { controlPlaneUrl: string }, accessToken: string) => ({
+    controlPlaneUrl: settings.controlPlaneUrl, accessToken, teamId: options.team, channelId: options.channel,
+  });
+  adminEval
+    .command("enable")
+    .description("let any member of a bound channel start SWE-bench runs, each capped at a cost ceiling")
+    .requiredOption("--team <team-id>", "Slack team ID, for example T0123456789")
+    .requiredOption("--channel <channel-id>", "Slack channel ID, for example C0123456789")
+    .option("--max-cost-usd <usd>", "per-run cost ceiling in US dollars, from 1 to 100 (default 10)", parseMaxCostUsd)
+    .action(async (options: { team: string; channel: string; maxCostUsd?: number }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await enableEvalChannel({
+        ...evalChannel(options, settings, accessToken),
+        ...(options.maxCostUsd === undefined ? {} : { maxCostUsd: options.maxCostUsd }),
+      }, services.fetchImplementation);
+      services.stdout.write(formatSuccess(result, globals.json));
+    });
+  adminEval
+    .command("show")
+    .description("show whether a channel may start SWE-bench runs, and its cost ceiling")
+    .requiredOption("--team <team-id>", "Slack team ID")
+    .requiredOption("--channel <channel-id>", "Slack channel ID")
+    .action(async (options: { team: string; channel: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      services.stdout.write(formatSuccess(await showEvalChannel(evalChannel(options, settings, accessToken), services.fetchImplementation), globals.json));
+    });
+  adminEval
+    .command("disable")
+    .description("stop a channel from starting SWE-bench runs; a run in progress finishes")
+    .requiredOption("--team <team-id>", "Slack team ID")
+    .requiredOption("--channel <channel-id>", "Slack channel ID")
+    .action(async (options: { team: string; channel: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      services.stdout.write(formatSuccess(await disableEvalChannel(evalChannel(options, settings, accessToken), services.fetchImplementation), globals.json));
     });
 
   const adminCredential = admin.command("credential").description("register connector credentials stored in Secrets Manager under agentx/connectors/ or agentx/<env>/connectors/");
