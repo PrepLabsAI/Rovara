@@ -15,7 +15,7 @@ import { INIT_STEP_IDS, installAnswersParameterName, readInstallProgress } from 
 import { readEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import {
   allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, fakeSlackApi, HOLDER, memoryInitSecrets, passingChecks, scriptedDeployer, scriptedPrompter,
-  slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_SIGNING_SECRET,
+  slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET,
 } from "../support/init-fakes.js";
 import { fakeWizardOperator } from "../support/wizard-browser.js";
 import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "../support/fake-cloudformation.js";
@@ -436,5 +436,39 @@ describe("agentx init --ui", () => {
     const slack = fakeSlackApi({ authTest: async () => ({ ok: false, error: "invalid_auth" }) });
     expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, "installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET]), slack })).not.toBe(0);
     expect(h.printed()).toContain("Slack refused the bot token (invalid_auth); copy it again from OAuth & Permissions");
+  });
+
+  it("User Story 2: a first install shows each connect screen in order, each ends ok, and nothing was copied by hand", async () => {
+    const h = await harness();
+    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(code).toBe(0);
+    const last = operator.states.at(-1);
+    expect(last?.cards?.map((card) => [card.id, card.status])).toEqual([
+      ["aws", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"],
+    ]);
+    // Every answer came from the scripted operator, and no answer was an address pasted back:
+    // the GitHub code arrived through the wizard's own callback.
+    expect(operator.asked).not.toContain("Paste that address (or just its code)");
+    expect(operator.opened).toHaveLength(1);
+  });
+
+  it("FR-012: no secret reaches a card, a link, the page's state, the log, the terminal, SSM or the cache", async () => {
+    const h = await harness();
+    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH_WITH_LINEAR]);
+    expect(code).toBe(0);
+    const cards = JSON.stringify(operator.states.map((state) => [state.cards, state.link]));
+    for (const secret of [TEST_BOT_TOKEN, TEST_SIGNING_SECRET, "fedcba9876543210fedcba9876543210", LINEAR_KEY, TEST_PRIVATE_KEY.split("\n")[1] ?? "missing"]) {
+      expect(secret.length).toBeGreaterThan(10);
+      expect(cards).not.toContain(secret);
+      expect(JSON.stringify(operator.states)).not.toContain(secret);
+      expect(await h.everywhere()).not.toContain(secret);
+    }
+  });
+
+  it("a page that reconnects mid-install gets every card back in its snapshot", async () => {
+    const h = await harness();
+    const { operator } = await h.runUi([...FIRST_RUN.slice(0, -1), false]);
+    const review = operator.states.find((state) => state.question?.text === "Create all of this?");
+    expect(review?.cards?.map((card) => card.id)).toEqual(["aws", "prerequisites"]);
   });
 });
