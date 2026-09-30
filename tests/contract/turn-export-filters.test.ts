@@ -90,4 +90,50 @@ describe("the admin turn filters (A8)", () => {
     expect(pages.flat()).toEqual(["EvE0000005", "EvE0000003", "EvE0000002", "EvE0000001"]);
     expect(pages[0]).toEqual(["EvE0000005", "EvE0000003"]);
   });
+
+  it("reads on past a page of other projects to find a project's records (R11)", async () => {
+    const other = "22222222-2222-4222-8222-222222222222";
+    const ledger = "11111111-1111-4111-8111-111111111111";
+    const first = [slack("EvOTHER00001", "2026-09-30T11:00:00.000Z", { workspaceId: other }), slack("EvOTHER00002", "2026-09-30T10:00:00.000Z", { workspaceId: other })];
+    const match = slack("EvLEDGER0001", "2026-09-30T09:00:00.000Z", { workspaceId: ledger });
+    const page = vi.fn<TurnRecordSource["page"]>(async (input) => input.exclusiveStartKey === undefined
+      ? { items: first, lastEvaluatedKey: { pk: first[1]!.pk, sk: first[1]!.sk, exportPk: "TURNS", exportSk: first[1]!.exportSk } }
+      : { items: [match] });
+    const projectOf = vi.fn(async (workspaceId: string) => (workspaceId === ledger ? "ledger" : "payments"));
+    const answer = await new TurnRecordExport({ source: { page }, projectOf, now: () => now }).page(new URLSearchParams({ since: "2026-09-29T00:00:00Z", project: "ledger", limit: "2" }));
+    expect(page).toHaveBeenCalledTimes(2);
+    expect(projectOf).toHaveBeenCalledTimes(2);
+    expect(answer.turns.map((turn) => (turn as { eventId?: string }).eventId)).toEqual(["EvLEDGER0001"]);
+    expect(answer.cursor).toBeUndefined();
+  });
+
+  it("refuses a project filter when a project lookup failed, and never drops the record silently (R12)", async () => {
+    const workspaceId = "11111111-1111-4111-8111-111111111111";
+    const log = vi.fn();
+    const source = { page: async () => ({ items: [slack("EvONE0000001", "2026-09-30T10:00:00.000Z", { workspaceId })] }) };
+    const projectOf = async () => { throw Object.assign(new Error("throttled"), { name: "ProvisionedThroughputExceededException" }); };
+    const refused = new TurnRecordExport({ source, projectOf, now: () => now, log }).page(new URLSearchParams({ since: "2026-09-29T00:00:00Z", project: "ledger" }));
+    await expect(refused).rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    await expect(refused).rejects.toThrow("could not look up the projects of some turn records; try again");
+    expect(log).toHaveBeenCalledWith(JSON.stringify({ component: "broker", event: "turn_record.project_unavailable", workspaceId, errorName: "ProvisionedThroughputExceededException" }));
+    // Without a project filter the record still comes back, without a project, as before.
+    const answer = await new TurnRecordExport({ source, projectOf, now: () => now, log: () => undefined }).page(new URLSearchParams({ since: "2026-09-29T00:00:00Z" }));
+    expect(answer.turns).toHaveLength(1);
+  });
+
+  it("says what to do next when until, project or task is wrong", async () => {
+    const turns = new TurnRecordExport({ source: { page: async () => ({ items: [] }) }, projectOf: async () => undefined, now: () => now });
+    const cases: [Record<string, string>, string][] = [
+      [{ until: "2026-09-28T00:00:00Z" }, "until must not be before since; send an until at or after since"],
+      [{ project: "<b>" }, "project must be an AgentX project name such as payments; list them with agentx_admin_list_projects"],
+      [{ task: "nope" }, "task must be a task ID such as 33333333-3333-4333-8333-333333333333"],
+    ];
+    for (const [query, message] of cases) {
+      const refused = turns.page(new URLSearchParams({ since: "2026-09-29T00:00:00Z", ...query }));
+      await expect(refused).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+      await expect(refused).rejects.toThrow(message);
+    }
+    // until equal to since is accepted.
+    await expect(turns.page(new URLSearchParams({ since: "2026-09-29T00:00:00Z", until: "2026-09-29T00:00:00Z" }))).resolves.toEqual({ turns: [] });
+  });
 });

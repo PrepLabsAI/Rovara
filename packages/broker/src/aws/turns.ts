@@ -99,10 +99,10 @@ export class TurnRecordExport {
     const untilText = query.get("until");
     if (untilText !== null && !validTime(untilText)) throw agentXError("CONFIG_INVALID", "until must be an ISO 8601 time such as 2026-09-30T00:00:00.000Z");
     const until = untilText === null ? undefined : new Date(untilText).toISOString();
-    if (until !== undefined && until < since) throw agentXError("CONFIG_INVALID", "until must be after since");
+    if (until !== undefined && until < since) throw agentXError("CONFIG_INVALID", "until must not be before since; send an until at or after since");
     const filter = turnFilter(query);
     const wantedProject = query.get("project");
-    if (wantedProject !== null && !AgentXNameSchema.safeParse(wantedProject).success) throw agentXError("CONFIG_INVALID", "project must be an AgentX project name");
+    if (wantedProject !== null && !AgentXNameSchema.safeParse(wantedProject).success) throw agentXError("CONFIG_INVALID", "project must be an AgentX project name such as payments; list them with agentx_admin_list_projects");
     const limitText = query.get("limit");
     if (limitText !== null && (!/^\d{1,3}$/.test(limitText) || Number(limitText) < 1 || Number(limitText) > ADMIN_LIST_MAX)) {
       throw agentXError("CONFIG_INVALID", `limit must be a whole number from 1 to ${ADMIN_LIST_MAX}`);
@@ -113,26 +113,75 @@ export class TurnRecordExport {
     const exclusiveStartKey = cursor === null ? undefined : decodeCursor(cursor, since, until);
     const nowSeconds = Math.floor((this.options.now ?? Date.now)() / 1000);
     const log = this.options.log ?? ((line: string) => console.log(line));
-    // Without a filter this reads once, exactly as before; with one it reads on to fill limit,
-    // at most ADMIN_TURN_FILTER_PAGES index pages per call, then hands out a cursor.
-    const items: Record<string, unknown>[] = [];
+    // invalidBefore: how many malformed items came before this record, so a page cut short by
+    // size reports only the ones it passed; the rest are counted on the page that reaches them.
+    const records: { record: ExportedTurnRecord; key: TurnRecordStartKey | undefined; invalidBefore: number }[] = [];
+    const invalidKeys: string[] = [];
+    const invalidFields = new Set<string>();
+    let invalid = 0;
+    // One lookup per distinct workspace, all of a batch at once, cached across pages.
+    const projects = new Map<string, string | undefined>();
+    let lookupFailed = false;
+    const lookUp = async (batch: typeof records) => {
+      const workspaceIds = [...new Set(batch.flatMap(({ record }) => record.workspaceId === undefined ? [] : [record.workspaceId]))]
+        .filter((workspaceId) => !projects.has(workspaceId));
+      const found = await Promise.all(workspaceIds.map(async (workspaceId) => [
+        workspaceId,
+        await this.options.projectOf(workspaceId).catch((error: unknown) => {
+          lookupFailed = true;
+          log(JSON.stringify({ component: "broker", event: "turn_record.project_unavailable", workspaceId, errorName: errorName(error) }));
+          return undefined;
+        }),
+      ] as const));
+      for (const [workspaceId, project] of found) projects.set(workspaceId, project);
+      // Spec 025 R12: a project filter never drops a record whose project it could not learn.
+      if (wantedProject !== null && lookupFailed) throw agentXError("RUNTIME_UNAVAILABLE", "could not look up the projects of some turn records; try again");
+    };
+    const projectOf = ({ record }: { record: ExportedTurnRecord }) => record.workspaceId === undefined ? undefined : projects.get(record.workspaceId);
+    // A record with no workspace has no project, so a project filter drops it too.
+    const matches = (entry: (typeof records)[number]) => wantedProject === null || projectOf(entry) === wantedProject;
+    // Without a filter this reads once, exactly as before; with one it reads on until limit records
+    // pass every filter, at most ADMIN_TURN_FILTER_PAGES index pages per call, then hands out a cursor.
     let lastEvaluatedKey: TurnRecordStartKey | undefined = exclusiveStartKey;
     let reads = 0;
-    try {
-      do {
-        const page = await this.options.source.page({
+    let matched = 0;
+    do {
+      let page: Awaited<ReturnType<TurnRecordSource["page"]>>;
+      try {
+        page = await this.options.source.page({
           since, ...(until === undefined ? {} : { until }), limit, nowSeconds,
           ...(lastEvaluatedKey === undefined ? {} : { exclusiveStartKey: lastEvaluatedKey }),
           ...(filter === undefined ? {} : { filter }),
         });
-        items.push(...page.items);
-        lastEvaluatedKey = page.lastEvaluatedKey;
-        reads += 1;
-      } while (filtered && lastEvaluatedKey !== undefined && items.length < limit && reads < ADMIN_TURN_FILTER_PAGES);
-    } catch (error) {
-      log(JSON.stringify({ component: "broker", event: "turn_record.read_failed", errorName: errorName(error) }));
-      throw agentXError("RUNTIME_UNAVAILABLE", "could not read turn records; try again");
-    }
+      } catch (error) {
+        log(JSON.stringify({ component: "broker", event: "turn_record.read_failed", errorName: errorName(error) }));
+        throw agentXError("RUNTIME_UNAVAILABLE", "could not read turn records; try again");
+      }
+      lastEvaluatedKey = page.lastEvaluatedKey;
+      reads += 1;
+      const pageRecords: typeof records = [];
+      for (const item of page.items) {
+        if (typeof item.expiresAt === "number" && item.expiresAt <= nowSeconds) continue;
+        const schema = item.origin === "ai_tool" ? AiToolTurnRecordSchema : TurnRecordSchema;
+        const parsed = schema.safeParse(Object.fromEntries(Object.entries(item).filter(([key]) => !STORAGE_KEYS.has(key))));
+        if (!parsed.success) {
+          invalid += 1;
+          if (invalidKeys.length < LOGGED_KEY_LIMIT) invalidKeys.push(typeof item.sk === "string" ? item.sk.slice(0, 160) : "unknown");
+          // Top-level field names only: issue messages and nested paths can quote stored values.
+          for (const issue of parsed.error.issues) {
+            if (invalidFields.size >= LOGGED_KEY_LIMIT) break;
+            const field = issue.path[0];
+            invalidFields.add(typeof field === "string" && Object.hasOwn(schema.shape, field) ? field : "(root)");
+          }
+          continue;
+        }
+        pageRecords.push({ record: parsed.data, key: startKey(Object.fromEntries(KEY_NAMES.map((name) => [name, item[name]]))), invalidBefore: invalid });
+      }
+      records.push(...pageRecords);
+      // Spec 025 R11: a project filter is matched page by page, so a page of other projects reads on.
+      if (wantedProject !== null) await lookUp(pageRecords);
+      matched += pageRecords.filter(matches).length;
+    } while (filtered && lastEvaluatedKey !== undefined && matched < limit && reads < ADMIN_TURN_FILTER_PAGES);
     let next: string | undefined;
     if (lastEvaluatedKey !== undefined) {
       next = Buffer.from(JSON.stringify(lastEvaluatedKey)).toString("base64url");
@@ -142,44 +191,12 @@ export class TurnRecordExport {
         throw agentXError("RUNTIME_UNAVAILABLE", "could not continue the turn record export; try again");
       }
     }
-    // invalidBefore: how many malformed items came before this record, so a page cut short by
-    // size reports only the ones it passed; the rest are counted on the page that reaches them.
-    const records: { record: ExportedTurnRecord; key: TurnRecordStartKey | undefined; invalidBefore: number }[] = [];
-    const invalidKeys: string[] = [];
-    const invalidFields = new Set<string>();
-    let invalid = 0;
-    for (const item of items) {
-      if (typeof item.expiresAt === "number" && item.expiresAt <= nowSeconds) continue;
-      const schema = item.origin === "ai_tool" ? AiToolTurnRecordSchema : TurnRecordSchema;
-      const parsed = schema.safeParse(Object.fromEntries(Object.entries(item).filter(([key]) => !STORAGE_KEYS.has(key))));
-      if (!parsed.success) {
-        invalid += 1;
-        if (invalidKeys.length < LOGGED_KEY_LIMIT) invalidKeys.push(typeof item.sk === "string" ? item.sk.slice(0, 160) : "unknown");
-        // Top-level field names only: issue messages and nested paths can quote stored values.
-        for (const issue of parsed.error.issues) {
-          if (invalidFields.size >= LOGGED_KEY_LIMIT) break;
-          const field = issue.path[0];
-          invalidFields.add(typeof field === "string" && Object.hasOwn(schema.shape, field) ? field : "(root)");
-        }
-        continue;
-      }
-      records.push({ record: parsed.data, key: startKey(Object.fromEntries(KEY_NAMES.map((name) => [name, item[name]]))), invalidBefore: invalid });
-    }
     if (invalid > 0) {
       log(JSON.stringify({ component: "broker", event: "turn_record.invalid", count: invalid, keys: invalidKeys, fields: [...invalidFields] }));
     }
-    // One lookup per distinct workspace on the page, all at once.
-    const workspaceIds = [...new Set(records.flatMap(({ record }) => record.workspaceId === undefined ? [] : [record.workspaceId]))];
-    const projects = new Map(await Promise.all(workspaceIds.map(async (workspaceId) => [
-      workspaceId,
-      await this.options.projectOf(workspaceId).catch((error: unknown) => {
-        log(JSON.stringify({ component: "broker", event: "turn_record.project_unavailable", workspaceId, errorName: errorName(error) }));
-        return undefined;
-      }),
-    ] as const)));
-    const projectOf = ({ record }: { record: ExportedTurnRecord }) => record.workspaceId === undefined ? undefined : projects.get(record.workspaceId);
-    // A record with no workspace has no project, so a project filter drops it too.
-    let kept = wantedProject === null ? records : records.filter((entry) => projectOf(entry) === wantedProject);
+    // Without a project filter, the lookup happens once for the whole page, as before.
+    if (wantedProject === null) await lookUp(records);
+    let kept = wantedProject === null ? records : records.filter(matches);
     let skipped = invalid;
     if (kept.length > limit) {
       // Several filtered pages can carry more than limit; resume after the last record kept.
@@ -265,7 +282,7 @@ function turnFilter(query: URLSearchParams): TurnFilter | undefined {
       throw agentXError("CONFIG_INVALID", "thread must be a thread subject such as T0123456789/C0123456789/1695500000.000100");
     }
   }
-  if (task !== null && !UUID.test(task)) throw agentXError("CONFIG_INVALID", "task must be a task ID");
+  if (task !== null && !UUID.test(task)) throw agentXError("CONFIG_INVALID", "task must be a task ID such as 33333333-3333-4333-8333-333333333333");
   const filter: TurnFilter = { ...(origin === null ? {} : { origin }), ...(thread === null ? {} : { thread }), ...(task === null ? {} : { task }) };
   return Object.keys(filter).length === 0 ? undefined : filter;
 }
