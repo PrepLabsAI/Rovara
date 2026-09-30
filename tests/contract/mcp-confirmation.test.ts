@@ -402,7 +402,6 @@ describe("fix round 1: a cancelled tool call opens no new confirmation path", ()
     const transient = () => vi.fn(async () => new Response(JSON.stringify({ error: { code: "RUNTIME_UNAVAILABLE", message: `change ${CHANGE} could not be applied just now; try again` } }), { status: 503 }));
     for (const step of [
       (client: AdminControlPlaneClient) => client.applyChange(CHANGE, { method: "elicitation" }, "t"),
-      (client: AdminControlPlaneClient) => client.declineChange(CHANGE, { method: "elicitation", reason: "declined" }, "t"),
       (client: AdminControlPlaneClient) => client.startSlackConfirmation(CHANGE, "t"),
     ]) {
       const failure = await step(httpAdminClient({ session, fetch: transient() })).catch((error: unknown) => error);
@@ -410,6 +409,12 @@ describe("fix round 1: a cancelled tool call opens no new confirmation path", ()
       expect((failure as ToolError).nextStep).toContain("still pending");
       expect((failure as ToolError).nextStep).toContain("ask for the change again");
     }
+    // Follow-up: a decline that failed has nothing left to do; the change expires on its own.
+    const declined = await httpAdminClient({ session, fetch: transient() }).declineChange(CHANGE, { method: "elicitation", reason: "declined" }, "t").catch((error: unknown) => error);
+    expect(declined).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE" });
+    expect((declined as ToolError).nextStep).toContain("nothing was applied");
+    expect((declined as ToolError).nextStep).toContain("expires on its own");
+    expect((declined as ToolError).nextStep).not.toContain("ask for the change again");
     // A proposal that could not be planned made no pending change.
     const planned = await httpAdminClient({ session, fetch: transient(), tries: 1 }).proposeChange({ requestId: "66666666-6666-4666-8666-666666666666", change: { kind: "unbind_channel", channel: "C0LEDGER01" }, client: { cliVersion: "0.6.0" }, methods: ["slack"] }, "t").catch((error: unknown) => error);
     expect((planned as ToolError).nextStep).not.toContain("still pending");
@@ -421,5 +426,42 @@ describe("fix round 1: a cancelled tool call opens no new confirmation path", ()
     const fetch = vi.fn(async (_url: string, init?: RequestInit) => { controller.abort(); expect(init?.signal?.aborted).toBe(true); return new Response(JSON.stringify({ error: { code: "INTERNAL", message: "down" } }), { status: 503 }); });
     await expect(httpAdminClient({ session, fetch: fetch as never, sleep: async () => undefined }).getChange(CHANGE, "t", { signal: controller.signal, tries: 1 })).rejects.toBeInstanceOf(ToolError);
     expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("follow-up: a timed-out pop-up can still fall back to Slack (Review Focus 3)", () => {
+  const started = Date.parse("2026-10-02T09:00:01.000Z");
+  const left = Date.parse(view().expiresAt) - started;
+
+  it("leaves Slack's minute and the 30 second margin when Slack is offered, and keeps the cap when it is not", async () => {
+    const timeouts: number[] = [];
+    for (const methodsOffered of [["elicitation", "slack"], ["elicitation"]]) {
+      const elicit = vi.fn(async (_message: string, timeoutMs: number) => { timeouts.push(timeoutMs); return "accept" as const; });
+      const { run: r } = run({ applyChange: async () => view({ status: "applied" }) }, { elicit, change: view({ methodsOffered }) });
+      await confirmChange(r);
+    }
+    expect(timeouts).toEqual([Math.min(9 * 60_000, left - 30_000 - 60_000), Math.min(9 * 60_000, left - 30_000)]);
+  });
+
+  it("falls back to Slack after a pop-up that timed out, saying it went unanswered", async () => {
+    let clock = started;
+    const startSlackConfirmation = vi.fn(async () => view());
+    const progress = vi.fn(async () => undefined);
+    const elicit = async (_message: string, timeoutMs: number) => { clock += timeoutMs; return "failed" as const; };
+    const { run: r } = run({ startSlackConfirmation, getChange: async () => view({ status: "applied", methodUsed: "slack" }) }, { elicit, now: () => clock, sleep: async (ms: number) => { clock += ms; }, progress });
+    expect(await confirmChange(r)).toMatchObject({ outcome: "applied" });
+    expect(startSlackConfirmation).toHaveBeenCalledWith(CHANGE, "trace-9");
+    expect(progress).toHaveBeenCalledWith(expect.any(Number), 300, expect.stringContaining("the pop-up went unanswered"));
+  });
+
+  it("says a timed-out pop-up went unanswered when it declines, not that it could not be shown", async () => {
+    let clock = started;
+    const declineChange = vi.fn(async () => view({ status: "declined" }));
+    const elicit = async (_message: string, timeoutMs: number) => { clock += timeoutMs; return "failed" as const; };
+    const { run: r } = run({ declineChange }, { elicit, now: () => clock, change: view({ methodsOffered: ["elicitation"] }) });
+    const failure = await confirmChange(r).catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "CONFIRMATION_DECLINED", message: expect.stringContaining("the confirmation pop-up went unanswered") as unknown });
+    expect((failure as ToolError).message).not.toContain("could not be shown");
+    expect(declineChange).toHaveBeenCalledWith(CHANGE, expect.objectContaining({ reason: "failed" }), "trace-9");
   });
 });
