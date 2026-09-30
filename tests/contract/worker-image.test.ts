@@ -37,6 +37,26 @@ describe("the worker image", () => {
     expect(toolsStage).toMatch(/echo "\$compose_sha {2}\/tmp\/docker-compose" \| sha256sum -c -/);
   });
 
+  it("runs the worker under tini, a pinned Debian package, so orphaned command processes are reaped (#170)", () => {
+    // Commands run in their own process group (#170); a grandchild they leave behind is reparented
+    // to PID 1, which must reap it.
+    const install = /apt-get install --yes --no-install-recommends ([^\n\\]+)/.exec(finalStage)?.[1] ?? "";
+    expect(install.split(/\s+/)).toContain("tini=0.19.0-1+b3");
+    expect(finalStage).toMatch(/\nENTRYPOINT \["\/usr\/bin\/tini", "--"\]\n/);
+    expect(finalStage).toMatch(/\nCMD \["node", "packages\/worker\/dist\/main\.js"\]\n?$/);
+    expect(finalStage.indexOf("ENTRYPOINT")).toBeLessThan(finalStage.indexOf("\nCMD "));
+  });
+
+  it("is started by the EC2 boot script without overriding its entrypoint (#170, characterization)", () => {
+    const boot = readFileSync("packages/worker/ec2/boot.sh", "utf8");
+    const run = boot.split("\n").find((line) => line.startsWith("ExecStart=$docker run ")) ?? "";
+    expect(run).not.toBe("");
+    expect(run).not.toContain("--entrypoint");
+    expect(run).not.toContain("--init");
+    // The image is the last argument: no command after it replaces CMD either.
+    expect(run.trimEnd().endsWith("$AGENTX_WORKER_IMAGE")).toBe(true);
+  });
+
   it("runs as the node user", () => {
     expect(finalStage).toMatch(/\nUSER node\n/);
   });
