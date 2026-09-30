@@ -54,7 +54,16 @@ export interface OrchestratorOptions {
   modelRuntime?: ModelRuntime;
   /** Issue 157: told each accepted worker task or follow-up operation before its tool waits on it. */
   onOperationAccepted?: (operationId: string) => Promise<void>;
+  /** Issue 157: once aborted, every later tool call is blocked; the turn was handed off to a new task. */
+  stopSignal?: AbortSignal;
+  /** Issue 157: trusted AgentX context for this turn only, such as what a resumed task did. */
+  turnNote?: string;
 }
+
+/** What the model hears for a tool call made after its turn was handed off (issue 157). */
+export const HANDOFF_TOOL_REASON = "AgentX is restarting, so this call was not run. Do not call any more tools; the request will be picked up again.";
+/** The custom message type of a turn note (issue 157). */
+export const TURN_NOTE_MESSAGE_TYPE = "agentx-turn-note";
 
 export type ReplySurface = "slack";
 
@@ -159,6 +168,23 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
       }));
     },
   };
+  // Issue 157: registered before the gate, so a handed-off turn's call is refused before it is classified.
+  const stopSignal = options.stopSignal;
+  const stopExtension: InlineExtension | undefined = stopSignal === undefined ? undefined : {
+    name: "agentx-turn-handoff",
+    hidden: true,
+    factory: (pi) => {
+      pi.on("tool_call", () => (stopSignal.aborted ? { block: true, reason: HANDOFF_TOOL_REASON } : undefined));
+    },
+  };
+  const turnNote = options.turnNote;
+  const noteExtension: InlineExtension | undefined = turnNote === undefined ? undefined : {
+    name: "agentx-turn-note",
+    hidden: true,
+    factory: (pi) => {
+      pi.on("before_agent_start", () => ({ message: { customType: TURN_NOTE_MESSAGE_TYPE, content: turnNote, display: false } }));
+    },
+  };
   const gate = options.actionGate === undefined ? undefined : actionGateExtension({
     ...options.actionGate,
     facts: connectorToolFacts(catalogs),
@@ -181,7 +207,7 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
     model: options.model,
     systemPrompt: orchestratorSystemPrompt(options.projectInstructions, manifest, options.replySurface),
     customTools,
-    extensions: [boundaryExtension, ...(gate === undefined ? [] : [gate]), ...(recorder === undefined ? [] : [recorder.extension()])],
+    extensions: [boundaryExtension, ...(stopExtension === undefined ? [] : [stopExtension]), ...(noteExtension === undefined ? [] : [noteExtension]), ...(gate === undefined ? [] : [gate]), ...(recorder === undefined ? [] : [recorder.extension()])],
     ...(options.onExtensionError === undefined ? {} : { onExtensionError: options.onExtensionError }),
     ...(recorder === undefined ? {} : { turnRecorder: recorder }),
   });

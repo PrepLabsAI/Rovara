@@ -105,13 +105,15 @@ describe("stopping a handed-off turn's model", () => {
     expect(abort).toHaveBeenCalledOnce();
   });
 
-  it("aborts at once for a signal that already fired, and swallows a failed abort", async () => {
+  it("aborts at once for a signal that already fired, and reports a failed abort instead of throwing", async () => {
     const abort = vi.fn(async () => {
-      throw new Error("not running");
+      throw Object.assign(new Error("not running"), { name: "StateError" });
     });
-    stopModelOnAbort(AbortSignal.abort(), { session: { abort } });
+    const failed = vi.fn();
+    stopModelOnAbort(AbortSignal.abort(), { session: { abort } }, failed);
     expect(abort).toHaveBeenCalledOnce();
-    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(failed).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ name: "StateError" }));
   });
 
   it("does nothing without a signal", () => {
@@ -145,4 +147,18 @@ describe("running a hosted turn that may be handed off", () => {
     expect(await runHostedTurn({ session: { abort } }, undefined, async () => "answered")).toBe("answered");
     expect(abort).not.toHaveBeenCalled();
   });
+});
+
+describe("a task tool whose turn was handed off", () => {
+  for (const name of ["agentx_submit_task", "agentx_follow_up"] as const) {
+    it(`${name} starts no worker task once the turn's signal has fired`, async () => {
+      const accepted = vi.fn(async () => undefined);
+      const api = fakeApi([]);
+      const tool = createOrchestrationTools(api, context, { requestId: () => "44444444-4444-4444-8444-444444444444", onOperationAccepted: accepted }).find((entry) => entry.name === name)!;
+      await expect(tool.execute("call-1", { prompt: "fix it" }, AbortSignal.abort(), undefined, {} as never)).rejects.toThrow("AgentX is restarting");
+      expect(api.submitTask).not.toHaveBeenCalled();
+      expect(api.followUp).not.toHaveBeenCalled();
+      expect(accepted).not.toHaveBeenCalled();
+    });
+  }
 });

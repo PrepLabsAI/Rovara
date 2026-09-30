@@ -32,6 +32,8 @@ export function createHostedSlackRuntime(input: TurnInput, options: HostedRuntim
     ...(input.recorder === undefined ? {} : { turnRecorder: input.recorder }),
     ...(input.refreshConnectors === undefined ? {} : { refreshConnectors: input.refreshConnectors }),
     ...(input.onOperationAccepted === undefined ? {} : { onOperationAccepted: input.onOperationAccepted }),
+    ...(input.signal === undefined ? {} : { stopSignal: input.signal }),
+    ...(input.turnNote === undefined ? {} : { turnNote: input.turnNote }),
     actionGate: {
       session: input.gate ?? createGateSession(input.message.userId),
       ...(input.computePrepared === true ? { computePrepared: true } : {}),
@@ -103,11 +105,16 @@ export function gateDecisionLogFields(eventId: string, decision: GateDecision): 
  * Issue 157: stops the turn's model when the processor hands the turn off, so the old task starts
  * no further tool call while the new task resumes it. Returns the function that lets go.
  */
-export function stopModelOnAbort(signal: AbortSignal | undefined, runtime: { session: { abort(): Promise<void> } }): () => void {
+export function stopModelOnAbort(
+  signal: AbortSignal | undefined,
+  runtime: { session: { abort(): Promise<void> } },
+  onAbortFailed: (error: unknown) => void = () => undefined,
+): () => void {
   if (signal === undefined) return () => undefined;
   const stop = () => {
-    // The task is stopping anyway; an abort that fails leaves nothing more to do.
-    runtime.session.abort().catch(() => undefined);
+    // The task is stopping anyway; a failed abort is only reported. The turn's stop signal still
+    // blocks every later tool call.
+    runtime.session.abort().catch(onAbortFailed);
   };
   if (signal.aborted) {
     stop();
@@ -125,9 +132,10 @@ export async function runHostedTurn<T>(
   runtime: { session: { abort(): Promise<void> } },
   signal: AbortSignal | undefined,
   run: () => Promise<T>,
+  onAbortFailed?: (error: unknown) => void,
 ): Promise<T> {
   if (signal?.aborted === true) throw new Error("the turn was handed off before the model started");
-  const letGo = stopModelOnAbort(signal, runtime);
+  const letGo = stopModelOnAbort(signal, runtime, onAbortFailed);
   try {
     return await run();
   } finally {

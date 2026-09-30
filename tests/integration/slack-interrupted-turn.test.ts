@@ -6,14 +6,17 @@ import {
   type PendingConfirmation,
   type SlackRequestMessage,
   type SlackThreadWorkspaceResult,
+  type SlackThreadPrepareResult,
 } from "../../packages/contracts/src/index.js";
 import { argumentsHash } from "../../packages/orchestrator/src/action-gate.js";
 import { createDynamoConfirmationStore } from "../../packages/slack-service/src/confirmation-store.js";
 import { ALREADY_USED_BY_THIS_REQUEST_TEXT } from "../../packages/slack-service/src/confirmations.js";
 import {
-  CONTINUE_TEXT, HANDOFF_FINAL_TEXT, HANDOFF_TASK_TEXT, HANDOFF_TEXT, TurnHandedOffError, type ActiveTurn,
+  CONTINUE_TEXT, HANDOFF_APPROVED_TEXT, HANDOFF_FINAL_TEXT, HANDOFF_TASK_TEXT, HANDOFF_TEXT, RESUME_NOT_FOUND_TEXT, TurnHandedOffError, type ActiveTurn, type TurnNote,
 } from "../../packages/slack-service/src/interrupted-turn.js";
 import { processSlackRequest, type ProcessorDependencies, type ThreadState, type TurnInput } from "../../packages/slack-service/src/processor.js";
+import { agentXError } from "../../packages/contracts/src/index.js";
+import { preparationFailedMessage } from "../../packages/slack-service/src/messages.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const thread = { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" };
@@ -32,6 +35,7 @@ function slackMessage(eventId: string, text: string, overrides: Partial<SlackReq
 /** The processor over a real confirmation store and an in-memory thread META row. */
 function harness(turn: (input: TurnInput) => Promise<string>, options: {
   taskResult?: (workspaceId: string, operationId: string, signal?: AbortSignal) => Promise<{ status: string; response?: string; error?: string }>;
+  status?: "READY" | "UNPREPARED";
 } = {}) {
   const db = new FakeDynamoDb();
   let now = start;
@@ -40,7 +44,10 @@ function harness(turn: (input: TurnInput) => Promise<string>, options: {
   const logs: Array<{ event: string; fields: Readonly<Record<string, string | number | boolean>> }> = [];
   const meta: ThreadState = { workspaceId, conversationId };
   const ensureWorkspace = vi.fn(async (): Promise<SlackThreadWorkspaceResult> => ({
-    outcome: "WORKSPACE", workspaceId, status: "READY", operationId: null, created: false, orchestratorInstructions: "Delegate.",
+    outcome: "WORKSPACE", workspaceId, status: options.status ?? "READY", operationId: null, created: false, orchestratorInstructions: "Delegate.",
+  }));
+  const prepareWorkspace = vi.fn(async (): Promise<SlackThreadPrepareResult> => ({
+    outcome: "WORKSPACE", workspaceId, status: "PREPARING", operationId: "77777777-7777-4777-8777-777777777777", created: true,
   }));
   const finish = vi.fn(async () => undefined);
   const taskResult = vi.fn(options.taskResult ?? (async (_workspace: string, operationId: string) => ({ status: "SUCCEEDED", response: `finished ${operationId}` })));
@@ -51,10 +58,14 @@ function harness(turn: (input: TurnInput) => Promise<string>, options: {
   const clearActiveTurn = vi.fn(async (_subject: string, eventId: string) => {
     if (meta.activeTurn?.eventId === eventId) delete meta.activeTurn;
   });
+  const saveTurnNote = vi.fn(async (_subject: string, note: TurnNote | undefined) => {
+    if (note === undefined) delete meta.turnNote;
+    else meta.turnNote = note;
+  });
   const confirmations = createDynamoConfirmationStore(db, "threads", () => now);
   const dependencies: ProcessorDependencies = {
-    api: () => ({ ensureWorkspace, createConversation: async () => conversationId, waitForOperation, taskResult, startClose: vi.fn(), completeClose: vi.fn() }),
-    threads: { load: async () => structuredClone(meta), saveConversation: vi.fn(), saveSettingsRevision: vi.fn(), close: vi.fn(), finish, saveActiveTurn, clearActiveTurn },
+    api: () => ({ ensureWorkspace, prepareWorkspace, createConversation: async () => conversationId, waitForOperation, taskResult, startClose: vi.fn(), completeClose: vi.fn() }),
+    threads: { load: async () => structuredClone(meta), saveConversation: vi.fn(), saveSettingsRevision: vi.fn(), close: vi.fn(), finish, saveActiveTurn, clearActiveTurn, saveTurnNote },
     runTurn: async (input) => { turns.push(input); return turn(input); },
     post: async (_thread, text) => { posts.push(text); },
     postConfirmation: async () => undefined,
@@ -63,7 +74,7 @@ function harness(turn: (input: TurnInput) => Promise<string>, options: {
     log: (event, fields) => { logs.push({ event, fields }); },
   };
   return {
-    db, posts, turns, logs, meta, ensureWorkspace, finish, confirmations, dependencies, taskResult, waitForOperation, saveActiveTurn, clearActiveTurn,
+    db, posts, turns, logs, meta, ensureWorkspace, finish, confirmations, dependencies, taskResult, waitForOperation, saveActiveTurn, clearActiveTurn, saveTurnNote,
     advance: (ms: number) => { now += ms; },
   };
 }
@@ -321,5 +332,136 @@ describe("resuming a redelivered turn", () => {
     expect(turns).toHaveLength(1);
     expect(posts.slice(-2)).toEqual([HANDOFF_TASK_TEXT, `The task that was running when AgentX restarted has finished:\nfinished ${OPERATION}\n\n${CONTINUE_TEXT}`]);
     expect(await confirmations.load(subject)).toMatchObject({ usedBy: "EvYES0000028" });
+  });
+});
+
+describe("after the hand-off (review fixes)", () => {
+  it("posts nothing more from the old turn once it is handed off, and logs each dropped post", async () => {
+    const handoff = new AbortController();
+    let finishSetup: (status: string) => void = () => undefined;
+    const { posts, logs, dependencies, waitForOperation } = harness(async (input) => {
+      const ready = input.worker!.ensureReady();
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      handoff.abort();
+      await ready;
+      return "unused";
+    }, { status: "UNPREPARED" });
+    waitForOperation.mockImplementationOnce(() => new Promise((resolve) => { finishSetup = (status) => resolve({ status }); }));
+    await expect(processSlackRequest(slackMessage("EvWORK000031", "fix the bug"), dependencies, { finalAttempt: false, handoff: handoff.signal }))
+      .rejects.toBeInstanceOf(TurnHandedOffError);
+    const before = [...posts];
+    expect(before.at(-1)).toBe(HANDOFF_TEXT);
+    finishSetup("FAILED");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(posts).toEqual(before);
+    expect(posts).not.toContain(preparationFailedMessage("FAILED"));
+    expect(logs).toContainEqual({ event: "turn.post_after_handoff", fields: { eventId: "EvWORK000031" } });
+  });
+
+  it("tells a member whose approval was claimed, with no task remembered, that it may have started and will not run again", async () => {
+    const handoff = new AbortController();
+    const { posts, confirmations, dependencies } = harness(async (input) => {
+      handoff.abort();
+      return new Promise<string>((_resolve, reject) => input.signal!.addEventListener("abort", () => reject(new Error("aborted")), { once: true }));
+    });
+    await confirmations.save(subject, pendingClose());
+    await expect(processSlackRequest(slackMessage("EvYES0000032", "yes"), dependencies, { finalAttempt: false, handoff: handoff.signal }))
+      .rejects.toBeInstanceOf(TurnHandedOffError);
+    expect(posts.at(-1)).toBe(HANDOFF_APPROVED_TEXT);
+    expect(HANDOFF_APPROVED_TEXT).toBe("AgentX restarted while working on this. What you approved may already have started, so I won't run it again.");
+  });
+
+  it("releases on time when Slack does not answer the notice", async () => {
+    const handoff = new AbortController();
+    const { logs, dependencies } = harness(blockedTurn(() => handoff.abort()));
+    const post = dependencies.post;
+    dependencies.post = async (thread, text) => (text === HANDOFF_TASK_TEXT ? new Promise<void>(() => undefined) : post(thread, text));
+    dependencies.handoffNoticeMilliseconds = 20;
+    await expect(processSlackRequest(slackMessage("EvWORK000033", "fix the bug"), dependencies, { finalAttempt: false, handoff: handoff.signal }))
+      .rejects.toBeInstanceOf(TurnHandedOffError);
+    expect(logs).toContainEqual({ event: "turn.interrupted_notice_failed", fields: { eventId: "EvWORK000033", errorName: "TimeoutError" } });
+  });
+
+  it("waits for a save already in flight, so the notice and log name the task", async () => {
+    const handoff = new AbortController();
+    const { posts, logs, meta, saveActiveTurn, dependencies } = harness(async (input) => {
+      const saving = input.onOperationAccepted!(OPERATION);
+      handoff.abort();
+      await saving;
+      return new Promise<string>(() => undefined);
+    });
+    saveActiveTurn.mockImplementationOnce(async (_subject, active) => {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      meta.activeTurn = active;
+    });
+    await expect(processSlackRequest(slackMessage("EvWORK000034", "fix the bug"), dependencies, { finalAttempt: false, handoff: handoff.signal }))
+      .rejects.toBeInstanceOf(TurnHandedOffError);
+    expect(posts.at(-1)).toBe(HANDOFF_TASK_TEXT);
+    expect(logs).toContainEqual({ event: "turn.interrupted", fields: { eventId: "EvWORK000034", workspaceId, operationId: OPERATION } });
+  });
+
+  it("logs how the old turn ended after its hand-off", async () => {
+    const handoff = new AbortController();
+    const { logs, dependencies } = harness(blockedTurn(() => handoff.abort()));
+    await expect(processSlackRequest(slackMessage("EvWORK000035", "fix the bug"), dependencies, { finalAttempt: false, handoff: handoff.signal }))
+      .rejects.toBeInstanceOf(TurnHandedOffError);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(logs).toContainEqual({ event: "turn.after_handoff", fields: { eventId: "EvWORK000035", outcome: "failed", errorName: "AbortError" } });
+  });
+
+  it("clears the remembered task after a final-attempt hand-off", async () => {
+    const handoff = new AbortController();
+    const { meta, dependencies } = harness(blockedTurn(() => handoff.abort()));
+    await processSlackRequest(slackMessage("EvWORK000036", "fix the bug"), dependencies, { finalAttempt: true, handoff: handoff.signal });
+    expect(meta.activeTurn).toBeUndefined();
+  });
+
+  it("says so, and finishes, when the remembered task no longer exists", async () => {
+    const { posts, meta, finish, dependencies } = harness(async () => "unused", {
+      taskResult: async () => { throw agentXError("NOT_FOUND", "operation not found"); },
+    });
+    meta.activeTurn = { eventId: "EvWORK000037", workspaceId, operationId: OPERATION };
+    await processSlackRequest(slackMessage("EvWORK000037", "fix the bug"), dependencies, { finalAttempt: false, redelivered: true });
+    expect(posts).toEqual([RESUME_NOT_FOUND_TEXT]);
+    expect(meta.activeTurn).toBeUndefined();
+    expect(finish).toHaveBeenCalledOnce();
+  });
+});
+
+describe("the next turn after a resume", () => {
+  it("hands the model a note with the earlier request and what its task did, once", async () => {
+    const { turns, meta, dependencies } = harness(async () => "Opened the pull request.", {
+      taskResult: async () => ({ status: "SUCCEEDED", response: "Pushed the fix." }),
+    });
+    meta.activeTurn = { eventId: "EvWORK000041", workspaceId, operationId: OPERATION };
+    await processSlackRequest(slackMessage("EvWORK000041", "fix the login bug"), dependencies, { finalAttempt: false, redelivered: true });
+    expect(meta.turnNote?.eventId).toBe("EvWORK000041");
+    await processSlackRequest(slackMessage("EvWORK000042", "continue with the PR"), dependencies, { finalAttempt: false });
+    const note = turns[0]!.turnNote!;
+    expect(note).toContain("fix the login bug");
+    expect(note).toContain("Pushed the fix.");
+    expect(note).toContain(OPERATION);
+    expect(note).toContain("not from the member");
+    expect(meta.turnNote).toBeUndefined();
+    await processSlackRequest(slackMessage("EvWORK000043", "thanks"), dependencies, { finalAttempt: false });
+    expect(turns[1]!.turnNote).toBeUndefined();
+  });
+
+  it("keeps the note when the next turn is interrupted too", async () => {
+    const handoff = new AbortController();
+    const { meta, dependencies } = harness(blockedTurn(() => handoff.abort()));
+    meta.turnNote = { eventId: "EvWORK000000", text: "earlier task finished" };
+    await expect(processSlackRequest(slackMessage("EvWORK000044", "continue"), dependencies, { finalAttempt: false, handoff: handoff.signal }))
+      .rejects.toBeInstanceOf(TurnHandedOffError);
+    expect(meta.turnNote).toEqual({ eventId: "EvWORK000000", text: "earlier task finished" });
+  });
+
+  it("logs a note it could not save, and still finishes the resume", async () => {
+    const { logs, meta, finish, saveTurnNote, dependencies } = harness(async () => "unused");
+    saveTurnNote.mockRejectedValueOnce(Object.assign(new Error("throttled"), { name: "ProvisionedThroughputExceededException" }));
+    meta.activeTurn = { eventId: "EvWORK000045", workspaceId, operationId: OPERATION };
+    await processSlackRequest(slackMessage("EvWORK000045", "fix it"), dependencies, { finalAttempt: false, redelivered: true });
+    expect(logs).toContainEqual({ event: "turn.note_save_failed", fields: { eventId: "EvWORK000045", errorName: "ProvisionedThroughputExceededException" } });
+    expect(finish).toHaveBeenCalledOnce();
   });
 });

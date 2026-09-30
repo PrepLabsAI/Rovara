@@ -134,4 +134,15 @@ describe("stopping the consumer", () => {
     expect(visibility).toEqual([["receipt-Ev000000A2", 0]]);
     expect(logs).toContainEqual(["message.release_failed", { errorName: "ReceiptHandleIsInvalid" }]);
   });
+
+  it("does not wait long on a heartbeat that never answers before it releases", async () => {
+    const { queue, visibility } = fakeQueue(async () => []);
+    const extend = queue.extendVisibility.bind(queue);
+    queue.extendVisibility = async (receipt, seconds) => (seconds === 0 ? extend(receipt, seconds) : new Promise<void>(() => undefined));
+    await processGroup(queue, async () => {
+      await pause(25);
+      throw new TurnHandedOffError();
+    }, [queueMessage("Ev000000A1", "thread-a")], { ...groupOptions, heartbeatMilliseconds: 10, beatWaitMilliseconds: 20 }, () => undefined);
+    expect(visibility).toEqual([["receipt-Ev000000A1", 0]]);
+  });
 });

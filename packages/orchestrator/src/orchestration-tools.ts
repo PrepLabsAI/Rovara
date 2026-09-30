@@ -36,6 +36,9 @@ export interface WorkerAccess {
   ensureReady(): Promise<WorkerRefusal | undefined>;
 }
 
+/** Issue 157: why a task tool started nothing, once its turn was handed off to a new task. */
+const TASK_NOT_STARTED = "AgentX is restarting, so the task was not started.";
+
 /** A thread with no compute has no changes to publish; preparing a fresh clone would not change that. */
 export const NO_WORKSPACE_TO_PUBLISH = {
   status: "NO_WORKSPACE",
@@ -144,6 +147,8 @@ export function createOrchestrationTools(
       execute: async (_id, parameters, signal, onUpdate) => {
         const refusal = await options.worker?.ensureReady();
         if (refusal) return toolResult(refusal);
+        // Issue 157: preparing the worker can take minutes; a turn handed off meanwhile starts nothing.
+        if (signal?.aborted === true) throw new Error(TASK_NOT_STARTED);
         const accepted = await api.submitTask({
           ...context,
           requestId: nextRequestId(),
@@ -227,6 +232,8 @@ export function createOrchestrationTools(
       execute: async (_id, parameters, signal, onUpdate) => {
         const refusal = await options.worker?.ensureReady();
         if (refusal) return toolResult(refusal);
+        // Issue 157: preparing the worker can take minutes; a turn handed off meanwhile starts nothing.
+        if (signal?.aborted === true) throw new Error(TASK_NOT_STARTED);
         const accepted = await api.followUp({
           ...context,
           requestId: nextRequestId(),

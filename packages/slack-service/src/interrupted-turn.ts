@@ -21,8 +21,45 @@ export const HANDOFF_MILLISECONDS = 90_000;
 
 export const HANDOFF_TASK_TEXT = "AgentX restarted while working on this. The task is still running; I'll post its result here.";
 export const HANDOFF_TEXT = "AgentX restarted while working on this. I'll pick this request up again in a moment.";
-export const HANDOFF_FINAL_TEXT = "AgentX restarted while working on this and has already retried it too many times, so I stopped. Ask me to check on it, or ask again.";
+export const HANDOFF_APPROVED_TEXT = "AgentX restarted while working on this. What you approved may already have started, so I won't run it again.";
+export const HANDOFF_FINAL_TEXT = "AgentX restarted while working on this and has already retried it too many times, so I stopped. Ask me again if you still want it.";
+export const RESUME_NOT_FOUND_TEXT = "AgentX restarted while working on this, and I can no longer find the task it started, so I can't post its result. Ask me again if you still want it.";
 export const CONTINUE_TEXT = "Ask me to continue for any step after this one (for example the pull request).";
+
+/** What a resumed turn did, kept on the META row for the next turn's model to read once. */
+export interface TurnNote {
+  eventId: string;
+  text: string;
+}
+
+/** Longest request and result a turn note quotes. */
+const NOTE_REQUEST_LIMIT = 2_000;
+const NOTE_RESULT_LIMIT = 8_000;
+
+/**
+ * The next turn's note: the interrupted request and what its task did. The interrupted turn's own
+ * session was not saved, so without it the model would not know what "continue" refers to.
+ */
+export function turnNoteText(request: string, turn: ActiveTurn, posted: string): string {
+  return [
+    "Note from AgentX, not from the member: AgentX restarted while working on an earlier request in this thread, so that turn ended early and its conversation was not saved.",
+    `The earlier request was: ${cap(request, NOTE_REQUEST_LIMIT)}`,
+    `AgentX then waited for the worker task it had started (operation ${turn.operationId}) and posted this to the thread:`,
+    cap(posted, NOTE_RESULT_LIMIT),
+    "Nothing after that task was done. If the member asks you to continue, carry on from there, and do not run that task again.",
+  ].join("\n");
+}
+
+function cap(text: string, limit: number): string {
+  return text.length > limit ? `${text.slice(0, limit)}…` : text;
+}
+
+/** The META row's turnNote, or undefined when it is missing or unreadable. */
+export function turnNoteFromItem(value: unknown): TurnNote | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const { eventId, text } = value as Record<string, unknown>;
+  return typeof eventId === "string" && typeof text === "string" && eventId.length > 0 && text.length > 0 ? { eventId, text } : undefined;
+}
 
 /** Thrown by a turn handed off at the deadline; the consumer releases its message at once. */
 export class TurnHandedOffError extends Error {

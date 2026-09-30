@@ -41,6 +41,8 @@ type GroupOptions = Pick<ConsumerOptions, "maxReceiveCount" | "visibilitySeconds
   /** Once aborted, a later message of the group is released rather than started. */
   stop?: AbortSignal;
   handoff?: AbortSignal;
+  /** How long a release waits for a heartbeat already sent. Default 5 seconds. */
+  beatWaitMilliseconds?: number;
 };
 
 // Each Slack thread is one FIFO message group: its messages run one at a time, and different threads run in parallel.
@@ -126,7 +128,7 @@ export async function processGroup(
         // Issue 157: the new task takes this and the rest of the thread now, in order. The heartbeat
         // stops first, and one already sent lands first, so none can hide a released message again.
         clearInterval(heartbeat);
-        await beat;
+        if (beat !== undefined) await Promise.race([beat, pause(options.beatWaitMilliseconds ?? 5_000)]);
         await release(queue, group.slice(index), "handed_off", log);
         return;
       }
@@ -171,6 +173,12 @@ function parseJson(value: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+function pause(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds).unref?.();
+  });
 }
 
 function delay(milliseconds: number, signal: AbortSignal): Promise<void> {

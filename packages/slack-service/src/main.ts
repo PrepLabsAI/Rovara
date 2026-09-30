@@ -22,7 +22,7 @@ import { processSlackRequest, type ServiceLog, type ThreadServiceApi, type Threa
 import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createSlackUserNames } from "./user-names.js";
 import { createThreadApi } from "./thread-api.js";
-import { HANDOFF_MILLISECONDS, activeTurnFromItem } from "./interrupted-turn.js";
+import { HANDOFF_MILLISECONDS, activeTurnFromItem, turnNoteFromItem } from "./interrupted-turn.js";
 import { classifierTimeoutMs, createHostedClassifier, createHostedSlackRuntime, gateDecisionLogFields, runHostedTurn } from "./runtime.js";
 import { DynamoTurnRecordWriter } from "./turn-records.js";
 
@@ -124,8 +124,10 @@ const threads: ThreadStore = {
       closedAt?: string;
       refreshConnectors?: unknown;
       activeTurn?: unknown;
+      turnNote?: unknown;
     } | undefined;
     const activeTurn = activeTurnFromItem(item?.activeTurn);
+    const turnNote = turnNoteFromItem(item?.turnNote);
     return {
       ...(item?.workspaceId === undefined ? {} : { workspaceId: item.workspaceId }),
       ...(item?.conversationId === undefined ? {} : { conversationId: item.conversationId }),
@@ -133,6 +135,7 @@ const threads: ThreadStore = {
       ...(item?.closedAt === undefined ? {} : { closedAt: item.closedAt }),
       ...(Array.isArray(item?.refreshConnectors) ? { refreshConnectors: item.refreshConnectors.filter((name): name is string => typeof name === "string") } : {}),
       ...(activeTurn === undefined ? {} : { activeTurn }),
+      ...(turnNote === undefined ? {} : { turnNote }),
     };
   },
   // Issue 157: the worker operation a turn waits on, so a redelivery after a deploy can resume it.
@@ -241,7 +244,9 @@ async function runTurn(input: TurnInput): Promise<string> {
     });
     try {
       // Issue 157: a handed-off turn's model stops (or never starts), and its unfinished session is not saved.
-      const response = await runHostedTurn(runtime, input.signal, () => runOrchestratorTurn(runtime, input.message.text, input.recorder));
+      const response = await runHostedTurn(runtime, input.signal, () => runOrchestratorTurn(runtime, input.message.text, input.recorder), (error) => {
+        log("turn.abort_failed", { eventId: input.message.eventId, errorName: error instanceof Error ? error.name : "unknown" });
+      });
       const written = runtime.session.sessionManager.getSessionFile();
       if (input.signal?.aborted !== true && written !== undefined && await exists(written)) {
         await s3.send(new PutObjectCommand({
@@ -332,3 +337,7 @@ await runConsumer(queue, (message, context) => processSlackRequest(message, {
   log,
 });
 log("service.stopped", {});
+// Issue 157: a handed-off turn may still be winding down in this process; its message already
+// belongs to the new task, so nothing here may run on until SIGKILL. Logs go to stdout, which is
+// written synchronously for the awslogs driver's pipe on Linux.
+process.exit(0);
