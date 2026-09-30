@@ -162,6 +162,26 @@ describe("the offer's queued recheck (A15, review fix)", () => {
   });
 });
 
+describe("the offer's last-moment refresh (A15, review fix 2)", () => {
+  it("never loses a refresh that lands just as a read finishes: every refresh is followed by a read that starts after it", async () => {
+    // A refresh asked for on each of many microtask ticks around the end of a read: whichever tick
+    // falls between the loop's last check and the clearing of the running read, its read must run.
+    for (let ticks = 0; ticks < 12; ticks += 1) {
+      let asked = 0;
+      let seen = -1;
+      const read = vi.fn(async (): Promise<AdminOffer> => { seen = asked; return { admin: undefined }; });
+      const tool = { enabled: false, enable: () => { tool.enabled = true; }, disable: () => { tool.enabled = false; } };
+      const offer = new ToolOffer({ tools: new Map([["t", tool]]), read });
+      const pending: Array<Promise<void>> = [offer.refresh()];
+      for (let tick = 0; tick < ticks; tick += 1) await Promise.resolve();
+      asked += 1;
+      pending.push(offer.refresh());
+      await Promise.all(pending);
+      await vi.waitFor(() => expect(seen).toBe(asked));
+    }
+  });
+});
+
 /** An inner transport that records what is sent, and lets the test deliver messages. */
 function fakeTransport() {
   const sent: JSONRPCMessage[] = [];

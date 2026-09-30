@@ -33,11 +33,17 @@ export class ToolOffer {
       return this.running;
     }
     this.running = (async () => {
-      do {
-        this.again = false;
-        await this.readOnce();
-      } while (this.again);
-    })().finally(() => { this.running = undefined; });
+      try {
+        do {
+          this.again = false;
+          await this.readOnce();
+        } while (this.again);
+      } finally {
+        // Cleared in the same step as the loop's last check, so a refresh after it starts a new read
+        // (a .finally() on the promise would run a few microtasks later and lose that refresh).
+        this.running = undefined;
+      }
+    })();
     return this.running;
   }
 
