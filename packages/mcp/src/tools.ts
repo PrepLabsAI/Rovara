@@ -51,7 +51,7 @@ const instructionsInput = z.string().min(1).describe("complete instructions for 
 
 const TaskShape = {
   task_id: z.string(), title: z.string(), project: z.string(), status: DeveloperTaskStatusSchema,
-  failure: z.object({ category: z.string(), message: z.string() }).optional(),
+  failure: z.object({ category: z.string(), stage: z.string().optional(), message: z.string() }).optional(),
   starting_revision: z.number(), client: z.string(), shared: z.boolean(), share_mode: z.string().nullable(),
   share_reason: z.string().optional(), share_mode_reason: z.string().optional(),
   channel: z.object({ id: z.string(), name: z.string().optional() }).optional(),
@@ -115,7 +115,9 @@ function nextFor(task: DeveloperTaskView): string {
     case "CLOSED":
       return "Its workspace is released.";
     default:
-      return task.failure?.category === "setup_failed"
+      // #154: a failure during setup (setup_failed, or compute lost before setup finished) leaves
+      // nothing to continue.
+      return task.failure?.category === "setup_failed" || task.failure?.stage === "setup"
         ? "It never started: close it with agentx_close_task and start a new one."
         : "Send new instructions with agentx_continue_task, or close it with agentx_close_task.";
   }
