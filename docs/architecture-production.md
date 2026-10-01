@@ -126,7 +126,10 @@ flowchart LR
   turn is waiting on the task, meaning no `activeTurn` naming it was seen in the last 15 minutes. An
   `activeTurn` with no `seenAt`, written by an older Slack service, counts as a waiter until the task
   is idle 48 hours. The reconciler cancels through the cancel route's own code and posts one note in
-  the thread. It never touches tasks started from an AI tool (MCP developer tasks).
+  the thread. It never touches tasks started from an AI tool (MCP developer tasks). To do this the
+  named reconciler holds the callback signing key, which also derives the repository-grant signing
+  key, and it can read the whole Slack secret, not just the bot token. Both were held before only by
+  the broker (the key) and the Slack-facing functions (the secret).
 
 `AgentXControlPlane` owns the ingress, queue, thread storage, Slack secret, and orchestrator task
 role, because the broker must know that role before the service exists. `AgentXSlackOrchestrator`

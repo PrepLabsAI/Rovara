@@ -236,10 +236,11 @@ export async function processSlackRequest(
   let finished = false;
   // Issue 173: the turn this attempt shows it waits on, stamped with seenAt on save, on resume and on
   // each SQS heartbeat, so the reconciler's backstop knows it is alive. A failed save is written by
-  // the next stamp.
+  // the next stamp. Forgetting the turn waits for every stamp in flight, so none lands after the clear;
+  // and a turn that may have been recorded by a stamp is forgotten even if its first save failed.
   let waitingOn: ActiveTurn | undefined;
   let stamping = true;
-  let stampInFlight: Promise<void> | undefined;
+  const stampsInFlight = new Set<Promise<void>>();
   const seenNow = () => new Date(dependencies.now?.() ?? Date.now()).toISOString();
   const stampActiveTurn = dependencies.threads.stampActiveTurn?.bind(dependencies.threads);
   const stampTurn = (): Promise<void> => {
@@ -253,14 +254,15 @@ export async function processSlackRequest(
         log("turn.active_stamp_failed", { eventId: message.eventId, errorName: errorName(error) });
       }
     })();
-    stampInFlight = run;
+    stampsInFlight.add(run);
+    void run.finally(() => stampsInFlight.delete(run));
     return run;
   };
   options.onHeartbeat?.(() => { void stampTurn(); });
   const forgetActiveTurn = async (): Promise<void> => {
     // Issue 173: no stamp may land after the clear and bring the turn back.
     stamping = false;
-    if (stampInFlight !== undefined) await stampInFlight;
+    await Promise.allSettled([...stampsInFlight]);
     try {
       await dependencies.threads.clearActiveTurn?.(subject, message.eventId);
     } catch (error) {
@@ -732,7 +734,7 @@ export async function processSlackRequest(
     }
     if (recorder !== undefined) await rememberRefresh(dependencies, log, subject, message.eventId, state.refreshConnectors ?? [], recorder);
     // Only once the member has the reply: a failed post before this is redelivered and resumes.
-    if (remembered !== undefined) await forgetActiveTurn();
+    if (remembered !== undefined || waitingOn !== undefined) await forgetActiveTurn();
     // The model has read the note from a resumed turn, and a turn that answered saved its session,
     // so later turns have it there. A failed turn saved nothing, so the note stays for the next.
     // Only the latest resume's note is kept: a second resume replaces it.
@@ -775,7 +777,7 @@ export async function processSlackRequest(
       await notice({
         none: HANDOFF_FINAL_IDLE_TEXT, requested: HANDOFF_FINAL_TEXT, finished: HANDOFF_FINAL_FINISHED_TEXT, failed: HANDOFF_FINAL_CANCEL_FAILED_TEXT,
       }[cancelled ?? "none"]);
-      if (remembered !== undefined) await forgetActiveTurn();
+      if (remembered !== undefined || waitingOn !== undefined) await forgetActiveTurn();
       finished = true;
       return;
     }
@@ -795,7 +797,7 @@ export async function processSlackRequest(
     await post(after === undefined ? abandoned : `${abandoned}\n\n${after}`).catch((postError: unknown) => {
       log("request.abandoned_notice_failed", { eventId: message.eventId, errorName: errorName(postError) });
     });
-    if (remembered !== undefined) await forgetActiveTurn();
+    if (remembered !== undefined || waitingOn !== undefined) await forgetActiveTurn();
     finished = true;
   } finally {
     // Issue 173: whatever happened, this attempt shows nothing more.

@@ -16,7 +16,7 @@ import { failActiveOperation } from "./outbox-failure.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
 import { expireIndexDays, indexSweepWanted } from "./index-expiry.js";
 import { sweepStuckSetups } from "./stuck-setup.js";
-import { slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopWanted, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
+import { slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopConfiguration, unwaitedTaskBackstopWanted, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
 import { cachedSlackPoster } from "./developer-task-notifier.js";
 
 /** A just-launched instance or just-created volume is not judged until its session has recorded it. */
@@ -178,11 +178,13 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
           ReconcilerUnwaitedTasksCancelled: report.unwaitedTasks.cancelled.length,
           ReconcilerUnwaitedTaskFailures: report.unwaitedTasks.failed.length,
           ReconcilerUnwaitedTaskReadFailures: report.unwaitedTasks.readFailures.length,
+          // No alarm: a bot removed from a channel or a bad secret shows here and in the logs.
+          ReconcilerUnwaitedTaskNoteFailures: report.unwaitedTasks.noteFailures,
         };
       } catch (error) {
         log({ event: "reconciler.unwaited_task_sweep_failed", errorName: error instanceof Error ? error.name : "unknown" });
         // Nothing was cancelled or tried: the sweep's own reads failed.
-        unwaitedMetrics = { ReconcilerUnwaitedTasksCancelled: 0, ReconcilerUnwaitedTaskFailures: 0, ReconcilerUnwaitedTaskReadFailures: 1 };
+        unwaitedMetrics = { ReconcilerUnwaitedTasksCancelled: 0, ReconcilerUnwaitedTaskFailures: 0, ReconcilerUnwaitedTaskReadFailures: 1, ReconcilerUnwaitedTaskNoteFailures: 0 };
       }
     }
 
@@ -349,6 +351,10 @@ function unwaitedTaskSweep(): NonNullable<ReconcilerDependencies["sweepUnwaitedT
     log,
   }, workspaceIds, now);
 }
+
+// Issue 173: a half-wired environment runs without the backstop; say so once, by the missing names.
+const backstop = unwaitedTaskBackstopConfiguration(process.env);
+if (backstop.state === "partial") console.log(JSON.stringify({ component: "session-reconciler", event: "reconciler.unwaited_task_backstop_partial", missing: backstop.missing.join(",") }));
 
 export const handler = createReconcilerHandler({
   sessions: new SessionManager({

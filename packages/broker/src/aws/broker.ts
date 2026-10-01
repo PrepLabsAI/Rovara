@@ -184,8 +184,6 @@ interface ProjectModelSelectionRecord {
   updatedBy: SlackRequester;
 }
 
-
-
 interface PullRequestRecord {
   pk: string;
   sk: string;
@@ -2943,7 +2941,6 @@ async function acceptCancellation(
   return requestCancellation(dependencies, workspace, targetOperationId, requesterOf(identity));
 }
 
-
 async function stopWorkspace(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
@@ -4225,7 +4222,6 @@ function approvedDefault(defaultModel: ModelRef, approved: readonly ModelRef[]):
   return model;
 }
 
-
 async function requirePullRequest(
   dependencies: AwsBrokerDependencies,
   workspaceId: string,
@@ -4384,9 +4380,6 @@ async function adminTaskShareMode(dependencies: AwsBrokerDependencies, identity:
   );
 }
 
-
-
-
 /** Whether closing a workspace of this mode deletes its storage. */
 function closeReleasesStorage(workspace: WorkspaceInstance): boolean {
   switch (workspace.deploymentMode) {
@@ -4413,8 +4406,6 @@ function workspaceRuntime(runtimeBinding: RuntimeBinding) {
   }
 }
 
-/** Routes to the workspace's own runtime unless a project binding is given. */
-
 function workspaceItem(workspace: WorkspaceInstance) {
   // Spec 041: the sparse byWorkspaceProject index attributes make this record findable by project,
   // which is how a developer's workspaces are listed. They are storage keys, not record fields, so
@@ -4438,7 +4429,6 @@ function projectKey(nameValue: string, revision: number) {
 function workspaceKey(id: string) {
   return { pk: `WORKSPACE#${id}`, sk: "META" };
 }
-
 
 function pullRequestKey(workspaceId: string, repository: string, number: number) {
   return {
@@ -4501,7 +4491,6 @@ async function exchangeRepositoryCredential(
     access,
   });
 }
-
 
 function verifyCapability(
   dependencies: AwsBrokerDependencies,

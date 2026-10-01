@@ -74,7 +74,12 @@ function withoutUnwaitedTaskBackstop(template: unknown): unknown {
   expect(removed).toStrictEqual([
     {
       Action: "dynamodb:GetItem",
-      Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] } },
+      Condition: {
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "activeTurn"] },
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] },
+        Null: { "dynamodb:Attributes": "false" },
+        StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+      },
       Effect: "Allow",
       Resource: { "Fn::GetAtt": [threadsId, "Arn"] },
       Sid: "ReadThreadWaiters",

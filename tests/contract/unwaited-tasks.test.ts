@@ -313,3 +313,53 @@ describe("the backstop: where it runs (#173)", () => {
     expect(unwaitedTaskBackstopWanted({})).toBe(false);
   });
 });
+
+describe("the backstop: review hardening (#173)", () => {
+  it("does not cancel when a worker event lands between the idle check and the cancel", async () => {
+    const { db, sweep, current, event, cancels, postNote, logs } = await runningTask();
+    const original = db.send;
+    let raced = false;
+    db.send = async (command) => {
+      if (!raced && command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("\"CANCEL_REQUESTED\"")) {
+        raced = true;
+        event(0);
+      }
+      return original(command);
+    };
+    expect(await sweep()).toMatchObject({ cancelled: [], failed: [] });
+    expect(raced).toBe(true);
+    expect(current().status).toBe("RUNNING");
+    expect(cancels()).toHaveLength(0);
+    expect(postNote).not.toHaveBeenCalled();
+    expect(logs).toContainEqual(expect.objectContaining({ event: "unwaited_task.skipped", reason: "active-again" }));
+  });
+
+  it("reads only the activeTurn from the thread's META row, never its notes", async () => {
+    const { db, sweep } = await runningTask();
+    const original = db.send;
+    const threadReads: Array<Record<string, unknown>> = [];
+    db.send = async (command) => {
+      if (command.input.TableName === "threads") threadReads.push(command.input);
+      return original(command);
+    };
+    await sweep();
+    expect(threadReads).toHaveLength(1);
+    expect(threadReads[0]).toMatchObject({ ProjectionExpression: "activeTurn" });
+  });
+
+  it("logs why it leaves a workspace alone when its Slack thread record is missing or points elsewhere", async () => {
+    const missing = await runningTask();
+    delete missing.db.find((item) => item.entityType === "SLACK_THREAD")[0]!.thread;
+    await missing.sweep();
+    expect(missing.logs).toContainEqual({ event: "unwaited_task.skipped", workspaceId: missing.workspaceId, reason: "not-a-slack-thread" });
+  });
+
+  it("says when its configuration is only partly present, so a half-wired environment is visible", async () => {
+    const { unwaitedTaskBackstopConfiguration } = await import("../../packages/broker/src/aws/unwaited-tasks.js");
+    const named = { SLACK_THREADS_TABLE_NAME: "threads", SLACK_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/staging/slack-AbCdEf", CALLBACK_SIGNING_KEY: "k".repeat(32) };
+    expect(unwaitedTaskBackstopConfiguration(named)).toEqual({ state: "on" });
+    expect(unwaitedTaskBackstopConfiguration({})).toEqual({ state: "off" });
+    expect(unwaitedTaskBackstopConfiguration({ ...named, CALLBACK_SIGNING_KEY: undefined })).toEqual({ state: "partial", missing: ["CALLBACK_SIGNING_KEY"] });
+  });
+});
+

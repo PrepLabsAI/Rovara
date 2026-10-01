@@ -38,12 +38,17 @@ describe("the unwaited task backstop's infrastructure (#173)", () => {
     }
   });
 
-  it("lets the named reconciler read the Slack threads table by key, THREAD# items only, and nothing else there", () => {
+  it("lets the named reconciler read only the activeTurn of THREAD# items in the Slack threads table, by key", () => {
     const { statements } = reconciler(named);
     const threads = statements.filter((statement) => JSON.stringify(statement.Resource).includes(threadsTableId(named)));
     expect(threads).toEqual([{
       Sid: "ReadThreadWaiters", Effect: "Allow", Action: "dynamodb:GetItem", Resource: { "Fn::GetAtt": [threadsTableId(named), "Arn"] },
-      Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] } },
+      Condition: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] },
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "activeTurn"] },
+        StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        Null: { "dynamodb:Attributes": "false" },
+      },
     }]);
   });
 

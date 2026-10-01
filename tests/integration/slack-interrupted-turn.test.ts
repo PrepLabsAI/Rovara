@@ -857,5 +857,96 @@ describe("showing the turn is alive (#173)", () => {
     await processSlackRequest(slackMessage("EvLIVE000005", "is it done?"), dependencies, { finalAttempt: false });
     expect(during).toEqual(other);
   });
+
+  it("waits for every stamp still in flight before it forgets the turn, so none lands after the clear (review)", async () => {
+    const { onHeartbeat, beat } = heartbeats();
+    let release!: (answer: string) => void;
+    const { meta, stampActiveTurn, advance, dependencies } = harness(async (input) => {
+      await input.onOperationAccepted!(OPERATION);
+      return new Promise<string>((resolve) => { release = resolve; });
+    });
+    const held: Array<() => void> = [];
+    // Each stamp is held open until the test lets it land, as a slow DynamoDB write would be.
+    stampActiveTurn.mockImplementation(async (_subject, active) => {
+      await new Promise<void>((resolve) => held.push(resolve));
+      if (meta.activeTurn !== undefined && meta.activeTurn.eventId !== active.eventId) return false;
+      meta.activeTurn = active;
+      return true;
+    });
+    const attempt = processSlackRequest(slackMessage("EvLIVE000006", "fix the bug"), dependencies, { finalAttempt: false, onHeartbeat });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    advance(60_000);
+    void beat();
+    advance(60_000);
+    void beat();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(held).toHaveLength(2);
+    release("Fixed it.");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // The turn is finishing, but both stamps are still open: the newer lands, then, later, the older.
+    held[1]!();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    held[0]!();
+    await attempt;
+    expect(meta).not.toHaveProperty("activeTurn");
+  });
+
+  it("forgets a turn recorded only by a stamp that was still in flight when the turn ended (review)", async () => {
+    const { onHeartbeat, beat } = heartbeats();
+    let release!: (answer: string) => void;
+    const { meta, saveActiveTurn, stampActiveTurn, dependencies } = harness(async (input) => {
+      await input.onOperationAccepted!(OPERATION);
+      return new Promise<string>((resolve) => { release = resolve; });
+    });
+    saveActiveTurn.mockRejectedValueOnce(Object.assign(new Error("throttled"), { name: "ProvisionedThroughputExceededException" }));
+    let land!: () => void;
+    stampActiveTurn.mockImplementationOnce(async (_subject, active) => {
+      await new Promise<void>((resolve) => { land = resolve; });
+      meta.activeTurn = active;
+      return true;
+    });
+    const attempt = processSlackRequest(slackMessage("EvLIVE000007", "fix the bug"), dependencies, { finalAttempt: false, onHeartbeat });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    void beat();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    release("Fixed it.");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    land();
+    await attempt;
+    expect(meta).not.toHaveProperty("activeTurn");
+  });
+
+  /** A turn that re-attaches to an earlier operation through a recovery tool, then waits until the host stops the model. */
+  const attachedTurn = (attached: string, started: () => void) => async (input: TurnInput) => {
+    await input.onOperationAttached!(attached);
+    started();
+    return new Promise<string>((_resolve, reject) => {
+      input.signal!.addEventListener("abort", () => reject(Object.assign(new Error("aborted"), { name: "AbortError" })), { once: true });
+    });
+  };
+
+  it("hands a re-attached wait off like any other, and the redelivery resumes that operation (review)", async () => {
+    const ATTACHED = "66666666-6666-4666-8666-666666666666";
+    const handoff = new AbortController();
+    const { meta, taskResult, turns, posts, dependencies } = harness(attachedTurn(ATTACHED, () => handoff.abort()));
+    await expect(processSlackRequest(slackMessage("EvLIVE000008", "is it done?"), dependencies, { finalAttempt: false, handoff: handoff.signal }))
+      .rejects.toBeInstanceOf(TurnHandedOffError);
+    expect(meta.activeTurn).toEqual({ eventId: "EvLIVE000008", workspaceId, operationId: ATTACHED, seenAt: iso(start) });
+    await processSlackRequest(slackMessage("EvLIVE000008", "is it done?"), dependencies, { finalAttempt: false, redelivered: true });
+    expect(turns).toHaveLength(1);
+    expect(taskResult).toHaveBeenCalledWith(workspaceId, ATTACHED, expect.anything());
+    expect(posts.at(-1)).toContain(`finished ${ATTACHED}`);
+    expect(meta).not.toHaveProperty("activeTurn");
+  });
+
+  it("asks a re-attached operation to stop when the last attempt gives up, as for a task it started (review)", async () => {
+    const ATTACHED = "66666666-6666-4666-8666-666666666666";
+    const handoff = new AbortController();
+    const { meta, cancelOperation, posts, dependencies } = harness(attachedTurn(ATTACHED, () => handoff.abort()));
+    await processSlackRequest(slackMessage("EvLIVE000009", "is it done?"), dependencies, { finalAttempt: true, handoff: handoff.signal });
+    expect(cancelOperation).toHaveBeenCalledExactlyOnceWith(workspaceId, ATTACHED);
+    expect(posts.at(-1)).toBe(HANDOFF_FINAL_TEXT);
+    expect(meta).not.toHaveProperty("activeTurn");
+  });
 });
 

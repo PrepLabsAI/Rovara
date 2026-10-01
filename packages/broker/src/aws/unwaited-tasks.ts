@@ -10,6 +10,9 @@
 // Idle: the latest worker event's timestamp (the event the worker's callback stored last, found by
 // the operation's eventSequence), else the operation's updatedAt, else its createdAt. updatedAt
 // alone is not enough: the broker refreshes it only when the task starts running, not per event.
+// The event's timestamp is the worker's clock: one running ahead is capped at now, and one running
+// behind makes the task look idle for longer by that much (workers keep NTP time). The cancel is
+// written only while no new event has landed since the idle check.
 //
 // Waiting: the thread's activeTurn names the task and its seenAt is under 15 minutes old. The
 // Slack service stamps seenAt when it saves the turn and on every SQS heartbeat (5 minutes) while
@@ -78,7 +81,7 @@ export interface UnwaitedTaskSweepResult {
   noteFailures: number;
 }
 
-type Candidate = { workspace: Record<string, unknown>; operationId: string; thread: SlackThreadPlace & { teamId: string } };
+type Candidate = { workspace: Record<string, unknown>; operationId: string; eventSequence: number; thread: SlackThreadPlace & { teamId: string } };
 
 const errorName = (error: unknown) => error instanceof Error ? error.name : "unknown";
 
@@ -88,31 +91,34 @@ async function candidate(
   workspaceId: string,
   now: Date,
 ): Promise<Candidate | { skip: string } | undefined> {
-  const get = async (tableName: string, pk: string, sk: string) => ((await dependencies.client.send(new GetCommand({
-    TableName: tableName, Key: { pk, sk }, ConsistentRead: true,
+  const get = async (tableName: string, pk: string, sk: string, projection?: string) => ((await dependencies.client.send(new GetCommand({
+    TableName: tableName, Key: { pk, sk }, ConsistentRead: true, ...(projection === undefined ? {} : { ProjectionExpression: projection }),
   }))) as { Item?: Record<string, unknown> }).Item;
   const state = (pk: string, sk: string) => get(dependencies.tableName, pk, sk);
   const workspace = await state(`WORKSPACE#${workspaceId}`, "META");
   const operationId = workspace?.activeOperationId;
   if (workspace === undefined || typeof operationId !== "string" || operationId.length === 0) return undefined;
   const operation = await state(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`);
-  if (operation?.kind !== "task" || !LIVE.has(String(operation.status))) return undefined;
+  // Every operation record carries an eventSequence (from 0); one without cannot be judged.
+  if (operation?.kind !== "task" || !LIVE.has(String(operation.status)) || typeof operation.eventSequence !== "number") return undefined;
   if ((operation.requestedBy as { kind?: unknown } | undefined)?.kind === "developer") return undefined;
-  const sequence = typeof operation.eventSequence === "number" ? operation.eventSequence : 0;
+  const sequence = operation.eventSequence;
   const latestEvent = sequence > 0 ? await state(`OPERATION#${operationId}`, `EVENT#${String(sequence).padStart(12, "0")}`) : undefined;
   const idle = now.getTime() - lastActivityAt(operation, latestEvent, now);
   if (idle <= UNWAITED_TASK_IDLE_LIMIT_MS) return undefined;
   const pointer = taskPointerKey(workspaceId);
   if (await state(pointer.pk, pointer.sk) !== undefined) return undefined;
-  if (typeof workspace.ownerKey !== "string") return undefined;
+  // Logged, so a mis-wired thread is visible: an API or CLI workspace has no thread record either.
+  if (typeof workspace.ownerKey !== "string") return { skip: "not-a-slack-thread" };
   const record = await state(`SLACK_THREAD#${workspace.ownerKey}`, "META");
   const parts = typeof record?.thread === "string" ? record.thread.split("/") : [];
-  if (record?.workspaceId !== workspaceId || parts.length !== 3 || parts.some((part) => part.length === 0)) return undefined;
+  if (record?.workspaceId !== workspaceId || parts.length !== 3 || parts.some((part) => part.length === 0)) return { skip: "not-a-slack-thread" };
   const [teamId, channelId, threadTs] = parts as [string, string, string];
-  const meta = await get(dependencies.threadsTableName, `THREAD#${record.thread as string}`, "META");
+  // The activeTurn alone: never the thread's other fields, such as a turn note with the member's words.
+  const meta = await get(dependencies.threadsTableName, `THREAD#${record.thread as string}`, "META", "activeTurn");
   const waiter = waiterOf(meta?.activeTurn, operationId, idle, now);
   if (waiter !== undefined) return { skip: waiter };
-  return { workspace, operationId, thread: { teamId, channelId, threadTs } };
+  return { workspace, operationId, eventSequence: sequence, thread: { teamId, channelId, threadTs } };
 }
 
 /** Why the activeTurn counts as a waiter for this task, or undefined when it does not. */
@@ -158,10 +164,11 @@ export async function sweepUnwaitedTasks(
     let answer: Awaited<ReturnType<typeof requestCancellation>>;
     try {
       const workspace = WorkspaceInstanceSchema.parse(workspaceRecordFields(found.workspace));
-      // The cancel route's own path. onlyLive: a result or a member's stop that lands first wins.
+      // The cancel route's own path. onlyLive: a result, a member's stop or a new worker event that
+      // lands first wins.
       answer = await requestCancellation({
         documentClient: dependencies.client as never, tableName: dependencies.tableName, callbackSigningKey: dependencies.callbackSigningKey,
-      }, workspace, operationId, {}, () => [], { onlyLive: true });
+      }, workspace, operationId, {}, () => [], { onlyLive: true, eventSequence: found.eventSequence });
     } catch (error) {
       // The error's name only: a message could carry stored data. Still live, so retried next run.
       result.failed.push(operationId);
@@ -169,7 +176,7 @@ export async function sweepUnwaitedTasks(
       continue;
     }
     if (answer.duplicate) {
-      dependencies.log({ event: "unwaited_task.skipped", ...fields, reason: answer.alreadyCancelling ? "already-cancelling" : "finished" });
+      dependencies.log({ event: "unwaited_task.skipped", ...fields, reason: answer.alreadyCancelling ? "already-cancelling" : answer.activeAgain ? "active-again" : "finished" });
       continue;
     }
     result.cancelled.push(operationId);
@@ -184,9 +191,23 @@ export async function sweepUnwaitedTasks(
   return result;
 }
 
-/** The backstop runs only where the infrastructure named the threads table, the Slack secret and the signing key: named environments. */
+const BACKSTOP_SETTINGS = ["SLACK_THREADS_TABLE_NAME", "SLACK_SECRET_ARN", "CALLBACK_SIGNING_KEY"] as const;
+
+/**
+ * Whether the infrastructure named the threads table, the Slack secret and the signing key (named
+ * environments), none of them (the legacy deployment), or only some: a half-wired environment, which
+ * the reconciler logs by the missing names.
+ */
+export function unwaitedTaskBackstopConfiguration(env: NodeJS.ProcessEnv): { state: "on" | "off" } | { state: "partial"; missing: string[] } {
+  const missing = BACKSTOP_SETTINGS.filter((name) => !env[name]);
+  if (missing.length === 0) return { state: "on" };
+  if (missing.length === BACKSTOP_SETTINGS.length) return { state: "off" };
+  return { state: "partial", missing };
+}
+
+/** The backstop runs only where all of its settings are present. */
 export function unwaitedTaskBackstopWanted(env: NodeJS.ProcessEnv): boolean {
-  return Boolean(env.SLACK_THREADS_TABLE_NAME && env.SLACK_SECRET_ARN && env.CALLBACK_SIGNING_KEY);
+  return unwaitedTaskBackstopConfiguration(env).state === "on";
 }
 
 /**

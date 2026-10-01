@@ -128,6 +128,7 @@ export function publicOperation(record: OperationRecord): Operation {
   });
 }
 
+/** Routes to the workspace's own runtime unless a project binding is given. */
 export function outboxRecord(
   workspace: WorkspaceInstance,
   invocation: WorkerInvocation,
@@ -194,8 +195,8 @@ export async function requestCancellation(
   targetOperationId: string,
   requester: { requestedBy?: OperationRequester },
   extra: ExtraItems = () => [],
-  options: { onlyLive?: boolean } = {},
-): Promise<{ operation: Operation; duplicate: boolean; alreadyCancelling?: true }> {
+  options: { onlyLive?: boolean; eventSequence?: number } = {},
+): Promise<{ operation: Operation; duplicate: boolean; alreadyCancelling?: true; activeAgain?: true }> {
   const workspaceId = workspace.id;
   const target = await requireOperation(dependencies, workspaceId, targetOperationId);
   if (TERMINAL.has(target.status)) return { operation: publicOperation(target), duplicate: true };
@@ -234,11 +235,16 @@ export async function requestCancellation(
         // Issue 173: the backstop cancels only a target still live and not yet asked to cancel, so a
         // result that lands first stands and a member's stop that lands first wins (one cancel, no
         // note). Every other caller keeps the fence-only condition: a repeated cancel queues again.
-        ConditionExpression: options.onlyLive ? "fence = :fence AND (#status = :accepted OR #status = :dispatching OR #status = :running)" : "fence = :fence",
+        // Issue 173: with eventSequence, also only while no new worker event landed since it was read
+        // (every operation record is written with an eventSequence, from 0).
+        ConditionExpression: options.onlyLive
+          ? `fence = :fence AND (#status = :accepted OR #status = :dispatching OR #status = :running)${options.eventSequence === undefined ? "" : " AND eventSequence = :sequence"}`
+          : "fence = :fence",
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: {
           ":cancel": "CANCEL_REQUESTED", ":now": now, ":fence": workspace.fence,
           ...(options.onlyLive ? { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":running": "RUNNING" } : {}),
+          ...(options.onlyLive && options.eventSequence !== undefined ? { ":sequence": options.eventSequence } : {}),
         },
       } },
       { Put: { TableName: dependencies.tableName, Item: operation } },
@@ -250,8 +256,12 @@ export async function requestCancellation(
     // The target finished while the cancel was being written: answer as for a finished target.
     const current = await requireOperation(dependencies, workspaceId, targetOperationId);
     if (TERMINAL.has(current.status)) return { operation: publicOperation(current), duplicate: true };
-    // Only an onlyLive cancel can fail this way: another cancel was recorded first.
+    // Only an onlyLive cancel can fail these ways: another cancel was recorded first, or the task
+    // showed new activity since it was judged idle.
     if (options.onlyLive && current.status === "CANCEL_REQUESTED") return { operation: publicOperation(current), duplicate: true, alreadyCancelling: true };
+    if (options.onlyLive && options.eventSequence !== undefined && current.eventSequence !== options.eventSequence) {
+      return { operation: publicOperation(current), duplicate: true, activeAgain: true };
+    }
     throw agentXError("WORKSPACE_BUSY", "the workspace changed while the cancel was being recorded; try again");
   }
   return { operation: publicOperation(operation), duplicate: false };

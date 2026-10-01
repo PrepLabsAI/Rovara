@@ -293,7 +293,15 @@ export class SessionLifecycle extends Construct {
       sid: "ReadThreadWaiters",
       actions: ["dynamodb:GetItem"],
       resources: [slackThreads.tableArn],
-      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] } },
+      conditions: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] },
+        // The activeTurn alone, never the thread's other fields. ForAllValues passes when
+        // dynamodb:Attributes is absent, and GetItem has no Select, so a read without a
+        // ProjectionExpression (which returns every attribute) is refused outright.
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "activeTurn"] },
+        StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        Null: { "dynamodb:Attributes": "false" },
+      },
     }));
     this.reconciler.addToRolePolicy(new iam.PolicyStatement({ sid: "PostUnwaitedTaskNote", actions: ["secretsmanager:GetSecretValue"], resources: [slackSecret.secretArn] }));
     // A failed cancel or read is retried on the next run; failures on two runs in a row mean it is not recovering.
