@@ -70,6 +70,19 @@ describe("provisioner", () => {
     expect(JSON.stringify(states.ProbeTimedOut)).toContain("within 10 minutes");
   });
 
+  // #211: the probe step throws when a failed boot reports itself on /ping. That error must reach
+  // MarkFailed with its text in well under a minute, not after the 10 minute probe window.
+  it("fails the provisioning within a minute of a probe error, keeping the error's text", () => {
+    const probe = states.ProbePing!;
+    const retry = probe.Retry as Array<{ ErrorEquals: string[]; IntervalSeconds: number; MaxAttempts: number; BackoffRate: number }>;
+    expect(retry).toHaveLength(1);
+    const { IntervalSeconds, MaxAttempts, BackoffRate } = retry[0]!;
+    const retryWaitSeconds = Array.from({ length: MaxAttempts }, (_, attempt) => IntervalSeconds * BackoffRate ** attempt).reduce((a, b) => a + b, 0);
+    expect(PROBE_INTERVAL_SECONDS + retryWaitSeconds).toBeLessThan(60);
+    expect(probe.Catch).toEqual([{ ErrorEquals: ["States.ALL"], Next: "Cleanup", Assign: { failure: "{% $states.errorOutput.Error & ': ' & $states.errorOutput.Cause %}" } }]);
+    expect((states.MarkFailed!.Arguments!.Payload as Record<string, unknown>).error).toBe("{% $substring($string($failure), 0, 4000) %}");
+  });
+
   it("sends every failure through cleanup: terminate any instance, keep the volume, mark failed", () => {
     for (const [name, state] of Object.entries(states)) {
       if (state.Type !== "Task" || name === "MarkFailed" || name === "TerminateInstance") continue;

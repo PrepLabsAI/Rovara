@@ -12,6 +12,14 @@ import { SessionManager } from "./sessions.js";
 /** The worker's health endpoint (#80 leaves it unauthenticated for exactly this probe). */
 const WORKER_PORT = 8080;
 const PING_TIMEOUT_MS = 2_000;
+/**
+ * #211: what a failed boot answers on the worker's port instead of the worker (boot.sh's
+ * report_boot_failure), with the reason in plain words.
+ */
+const BOOT_FAILED_STATUS = "BootFailed";
+/** The error the probe step throws for a reported boot failure; ProbePing's Catch fails the session. */
+const BOOT_FAILED_ERROR = "WorkerBootFailed";
+const BOOT_FAILURE_REASON_MAX = 300;
 
 const uuid = z.string().uuid();
 const generation = z.number().int().positive();
@@ -48,8 +56,45 @@ export interface SessionStepsDependencies {
   bootScript: () => string;
   controlPlaneUrl: string;
   logGroupName: string;
-  /** GET on the worker's /ping; resolves to the reported status, rejects when unreachable. */
-  ping: (url: string) => Promise<string | undefined>;
+  /** GET on the worker's /ping; resolves to what it reported, rejects when unreachable. */
+  ping: (url: string) => Promise<WorkerPing | undefined>;
+}
+
+/** The body of the worker's /ping, or of a failed boot's report in its place. */
+export interface WorkerPing {
+  status?: string;
+  reason?: string;
+}
+
+/** One short line of plain text: the reason reaches the Slack thread through markFailed. */
+function bootFailureReason(reason: unknown): string {
+  const text = typeof reason === "string" ? reason.replace(/[\p{Cc}\s]+/gu, " ").trim() : "";
+  return (text === "" ? "the boot script failed without a reason" : text).slice(0, BOOT_FAILURE_REASON_MAX);
+}
+
+/**
+ * What MarkFailed receives for a reported boot failure is ProbePing's Catch text: the Lambda error's
+ * type, then its whole payload as JSON, stack trace included. This keeps only the reason.
+ */
+function plainFailure(error: string): string {
+  const prefix = `${BOOT_FAILED_ERROR}: `;
+  if (!error.startsWith(prefix)) return error;
+  try {
+    const cause = JSON.parse(error.slice(prefix.length)) as { errorMessage?: unknown };
+    return typeof cause.errorMessage === "string" ? `worker boot failed: ${bootFailureReason(cause.errorMessage)}` : error;
+  } catch {
+    return error;
+  }
+}
+
+/** GET on a worker's /ping. Any HTTP status: a failed boot answers 503 with its reason. */
+export async function pingWorker(url: string, timeoutMs = PING_TIMEOUT_MS): Promise<WorkerPing> {
+  const response = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  const body = await response.json() as { status?: unknown; reason?: unknown };
+  return {
+    ...(typeof body.status === "string" ? { status: body.status } : {}),
+    ...(typeof body.reason === "string" ? { reason: body.reason } : {}),
+  };
 }
 
 export function createSessionStepsHandler(dependencies: SessionStepsDependencies) {
@@ -82,18 +127,26 @@ export function createSessionStepsHandler(dependencies: SessionStepsDependencies
         await dependencies.sessions.markInstance(step.workspaceId, step.generation, step.instanceId, step.privateIp);
         return {};
       case "probePing": {
-        let status: string | undefined;
+        let ping: WorkerPing | undefined;
         try {
-          status = await dependencies.ping(`http://${step.privateIp}:${WORKER_PORT}/ping`);
+          ping = await dependencies.ping(`http://${step.privateIp}:${WORKER_PORT}/ping`);
         } catch {
-          status = undefined;
+          ping = undefined;
+        }
+        const status = ping?.status;
+        if (status === BOOT_FAILED_STATUS) {
+          // Fails the provisioning now: the worker will never answer, so waiting out the probe
+          // window would only make the user wait for the same failure.
+          const failure = new Error(bootFailureReason(ping?.reason));
+          failure.name = BOOT_FAILED_ERROR;
+          throw failure;
         }
         return { healthy: status === "Healthy" || status === "HealthyBusy", status: status ?? "Unreachable" };
       }
       case "markReady":
         return dependencies.sessions.markReady(step.workspaceId, step.generation);
       case "markFailed":
-        return dependencies.sessions.markFailed(step.workspaceId, step.generation, step.error);
+        return dependencies.sessions.markFailed(step.workspaceId, step.generation, plainFailure(step.error));
       case "markDeleted":
         await dependencies.sessions.markDeleted(step.workspaceId);
         return {};
@@ -139,9 +192,5 @@ export const handler = createSessionStepsHandler({
   bootScript: () => readFileSync(join(process.env.LAMBDA_TASK_ROOT ?? ".", "boot.sh"), "utf8"),
   controlPlaneUrl: process.env.CONTROL_PLANE_URL ?? "",
   logGroupName: process.env.WORKER_LOG_GROUP_NAME ?? "",
-  async ping(url) {
-    const response = await fetch(url, { signal: AbortSignal.timeout(PING_TIMEOUT_MS) });
-    const body = await response.json() as { status?: unknown };
-    return typeof body.status === "string" ? body.status : undefined;
-  },
+  ping: (url) => pingWorker(url),
 });

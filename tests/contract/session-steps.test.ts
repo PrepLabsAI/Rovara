@@ -1,12 +1,14 @@
 import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { describe, expect, it, vi } from "vitest";
-import { createSessionStepsHandler, type SessionStepsDependencies } from "../../packages/broker/src/aws/session-steps.js";
+import { createSessionStepsHandler, pingWorker, type SessionStepsDependencies } from "../../packages/broker/src/aws/session-steps.js";
 
 const bootScript = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
 const workspaceId = randomUUID();
 
-function setup(ping: SessionStepsDependencies["ping"] = async () => "Healthy") {
+function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "Healthy" })) {
   const sessions = {
     markVolume: vi.fn(async () => undefined),
     markInstance: vi.fn(async () => undefined),
@@ -62,14 +64,68 @@ describe("session steps", () => {
   });
 
   it.each([
-    ["Healthy", async () => "Healthy", { healthy: true, status: "Healthy" }],
-    ["HealthyBusy", async () => "HealthyBusy", { healthy: true, status: "HealthyBusy" }],
+    ["Healthy", async () => ({ status: "Healthy" }), { healthy: true, status: "Healthy" }],
+    ["HealthyBusy", async () => ({ status: "HealthyBusy" }), { healthy: true, status: "HealthyBusy" }],
     ["unreachable", async () => { throw new Error("connect ECONNREFUSED"); }, { healthy: false, status: "Unreachable" }],
     ["no status", async () => undefined, { healthy: false, status: "Unreachable" }],
+    ["an empty answer", async () => ({}), { healthy: false, status: "Unreachable" }],
   ] as const)("probes the worker's /ping on its private address: %s", async (_name, ping, expected) => {
     const { handler, ping: spy } = setup(ping);
     expect(await handler({ action: "probePing", privateIp: "10.42.128.10" })).toEqual(expected);
     expect(spy).toHaveBeenCalledWith("http://10.42.128.10:8080/ping");
+  });
+
+  // #211: a failed boot answers /ping with its reason, so the probe fails the provisioning at once
+  // (ProbePing's Catch goes to Cleanup) instead of waiting out the 10 minute /ping window.
+  it("fails the probe at once with the reason a failed boot reports", async () => {
+    const { handler } = setup(async () => ({ status: "BootFailed", reason: "could not install Docker: package download failed after 5 tries" }));
+    const probe = handler({ action: "probePing", privateIp: "10.42.128.10" });
+    await expect(probe).rejects.toThrow("could not install Docker: package download failed after 5 tries");
+    await expect(probe).rejects.toMatchObject({ name: "WorkerBootFailed" });
+  });
+
+  it("keeps a reported boot failure reason to one short line of plain text", async () => {
+    const { handler } = setup(async () => ({ status: "BootFailed", reason: `bad\u0000\nline\t${"x".repeat(1_000)}` }));
+    const error = await handler({ action: "probePing", privateIp: "10.42.128.10" }).catch((failure: unknown) => failure as Error);
+    expect(error).toMatchObject({ name: "WorkerBootFailed" });
+    expect(error.message.startsWith("bad line x")).toBe(true);
+    expect(error.message).toHaveLength(300);
+    const { handler: unexplained } = setup(async () => ({ status: "BootFailed", reason: 42 as unknown as string }));
+    await expect(unexplained({ action: "probePing", privateIp: "10.42.128.10" })).rejects.toThrow("the boot script failed without a reason");
+  });
+
+  it("names a reported boot failure in plain words when the session is marked failed", async () => {
+    const { handler, sessions } = setup();
+    // What ProbePing's Catch hands MarkFailed: the Lambda error's type, then its payload as JSON.
+    const cause = JSON.stringify({ errorType: "WorkerBootFailed", errorMessage: "could not install Docker: package download failed after 5 tries", trace: ["WorkerBootFailed: could not install Docker", "    at probe (session-steps.js:1:1)"] });
+    await handler({ action: "markFailed", workspaceId, generation: 1, error: `WorkerBootFailed: ${cause}` });
+    expect(sessions.markFailed).toHaveBeenCalledWith(workspaceId, 1, "worker boot failed: could not install Docker: package download failed after 5 tries");
+    // Any other failure text is passed on as it is.
+    await handler({ action: "markFailed", workspaceId, generation: 1, error: "worker did not answer /ping within 10 minutes" });
+    expect(sessions.markFailed).toHaveBeenLastCalledWith(workspaceId, 1, "worker did not answer /ping within 10 minutes");
+    await handler({ action: "markFailed", workspaceId, generation: 1, error: "WorkerBootFailed: not json" });
+    expect(sessions.markFailed).toHaveBeenLastCalledWith(workspaceId, 1, "WorkerBootFailed: not json");
+  });
+
+  it("reads the worker's status, and a failed boot's reason, from /ping whatever the HTTP status", async () => {
+    const answers: Record<string, [number, string]> = {
+      "/healthy": [200, JSON.stringify({ status: "Healthy" })],
+      "/failed": [503, JSON.stringify({ status: "BootFailed", reason: "could not download the worker image after 5 tries" })],
+      "/garbage": [500, "<html>"],
+    };
+    const server = createServer((request, response) => {
+      const [status, body] = answers[request.url ?? ""] ?? [404, ""];
+      response.writeHead(status, { "content-type": "application/json" }).end(body);
+    });
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+    try {
+      expect(await pingWorker(`${base}/healthy`)).toEqual({ status: "Healthy" });
+      expect(await pingWorker(`${base}/failed`)).toEqual({ status: "BootFailed", reason: "could not download the worker image after 5 tries" });
+      await expect(pingWorker(`${base}/garbage`)).rejects.toThrow();
+    } finally {
+      await new Promise((resolve) => server.close(resolve));
+    }
   });
 
   it("refuses unknown steps and anything but a private IPv4 address to probe", async () => {
