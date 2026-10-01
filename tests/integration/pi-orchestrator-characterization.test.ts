@@ -5,7 +5,7 @@
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type Context } from "@earendil-works/pi-ai";
 import type { AgentSessionRuntime, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
@@ -40,6 +40,19 @@ function api() {
 
 const toolUse = (...calls: ReturnType<typeof fauxToolCall>[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
 const keys = (value: unknown): string[] => Object.keys(value as object).sort();
+/** A copy taken when the event fires. structuredClone keeps undefined-valued keys; JSON is the fallback for what it refuses. */
+const snapshot = <T>(value: T): T => {
+  try { return structuredClone(value); } catch { return JSON.parse(JSON.stringify(value)) as T; }
+};
+/**
+ * What the model is offered on one call: the system prompt, the conversation (copied) and the tool names.
+ * The only code phase 2 may change: read the prompt/tools from the leading system message (pi-ai getCurrentSystemPrompt).
+ */
+const modelView = (modelContext: Context) => ({
+  systemPrompt: modelContext.systemPrompt,
+  messages: JSON.parse(JSON.stringify(modelContext.messages.filter((message) => (message as { role: string }).role !== "system"))) as Context["messages"],
+  tools: (modelContext.tools ?? []).map((tool) => tool.name),
+});
 type Message = { role?: string; toolName?: string; isError?: boolean; stopReason?: string; content?: unknown };
 const toolResults = (runtime: AgentSessionRuntime) => (runtime.session.messages as Message[]).flatMap((message) =>
   message.role === "toolResult" ? [{ tool: message.toolName, isError: message.isError, text: (message.content as Array<{ text?: string }>).map((block) => block.text ?? "").join("") }] : []);
@@ -104,7 +117,7 @@ describe("orchestrator extensions on Pi 0.85.1", () => {
     const { modelRuntime, faux } = await fauxModelRuntime();
     const note = "PINNED NOTE: the resumed task already opened PR 7.";
     const seen: unknown[] = [];
-    faux.setResponses([(modelContext) => { seen.push(JSON.parse(JSON.stringify(modelContext.messages))); return fauxAssistantMessage("Ok."); }]);
+    faux.setResponses([(modelContext) => { seen.push(modelView(modelContext).messages); return fauxAssistantMessage("Ok."); }]);
     const runtime = await createOrchestratorRuntime({ stateDirectory: await createFixtureDirectory("agentx-char-note-"), projectInstructions: "Delegate.", api: api(), context, modelRuntime, model: FAUX_MODEL, turnNote: note });
     try {
       expect(await runOrchestratorTurn(runtime, "hello")).toBe("Ok.");
@@ -220,7 +233,7 @@ describe("orchestrator event shapes on Pi 0.85.1", () => {
     const original = recorder.extension();
     if (typeof original === "function") throw new Error("expected the recorder's named extension");
     const seen: Array<{ type: string; event: Record<string, unknown> }> = [];
-    let toolCallCtx: Record<string, unknown> | undefined;
+    let toolCallCtxKeys: string[] = [];
     let branchAtToolCall: Array<Record<string, unknown>> = [];
     let signalAtToolCall: unknown;
     const names = ["project_trust", "resources_discover", "session_start", "session_info_changed", "session_before_switch", "session_before_fork", "session_before_compact",
@@ -234,10 +247,11 @@ describe("orchestrator event shapes on Pi 0.85.1", () => {
       const on = pi.on.bind(pi) as unknown as (name: string, handler: (event: Record<string, unknown>, ctx: Record<string, unknown>) => undefined) => void;
       for (const name of names) {
         on(name, (event, ctx) => {
-          seen.push({ type: name, event });
+          seen.push({ type: name, event: snapshot(event) });
           if (name === "tool_call") {
-            toolCallCtx = ctx;
-            // Read during the call: Pi makes a captured ctx throw once its session is disposed.
+            // Read during the call: Pi makes a captured ctx throw once its session is disposed, and its
+            // functions cannot be copied, so its key set is what is kept.
+            toolCallCtxKeys = keys(ctx);
             signalAtToolCall = ctx.signal;
             branchAtToolCall = (ctx.sessionManager as { getBranch(): Array<Record<string, unknown>> }).getBranch();
           }
@@ -266,7 +280,9 @@ describe("orchestrator event shapes on Pi 0.85.1", () => {
       "message_start", "message_update", "message_end", "turn_end",
       "agent_end", "agent_settled", "session_shutdown",
     ]);
-    expect(keys(seen.find((entry) => entry.type === "message_update")!.event)).toEqual(["assistantMessageEvent", "message", "type"]);
+    const updates = seen.filter((entry) => entry.type === "message_update");
+    expect(updates.length).toBeGreaterThan(0);
+    expect(updates.map((entry) => keys(entry.event))).toEqual(Array(updates.length).fill(["assistantMessageEvent", "message", "type"]));
     const one = (type: string) => {
       const matches = seen.filter((entry) => entry.type === type);
       expect(matches, type).toHaveLength(1);
@@ -281,7 +297,7 @@ describe("orchestrator event shapes on Pi 0.85.1", () => {
     expect(start).toEqual({ type: "tool_execution_start", toolCallId: "call-list-1", toolName: "tracker__list_items", args: { status: "open" } });
     expect(keys(toolCall)).toEqual(["input", "toolCallId", "toolName", "type"]);
     expect(toolCall).toEqual({ type: "tool_call", toolCallId: "call-list-1", toolName: "tracker__list_items", input: { status: "open" } });
-    expect(keys(toolCallCtx)).toEqual(["abort", "compact", "cwd", "getContextUsage", "getSystemPrompt", "hasPendingMessages", "hasUI", "isIdle", "isProjectTrusted",
+    expect(toolCallCtxKeys).toEqual(["abort", "compact", "cwd", "getContextUsage", "getSystemPrompt", "hasPendingMessages", "hasUI", "isIdle", "isProjectTrusted",
       "mode", "model", "modelRegistry", "scopedModels", "sessionManager", "shutdown", "signal", "thinkingLevel", "ui"]);
     expect(signalAtToolCall).toBeInstanceOf(AbortSignal);
     expect(keys(toolResult)).toEqual(["content", "details", "input", "isError", "toolCallId", "toolName", "type", "usage"]);
@@ -327,7 +343,7 @@ describe("orchestrator event shapes on Pi 0.85.1", () => {
     for (const message of messages) expect(keys(message)).toEqual(expect.arrayContaining(["role", "content"]));
     expect(keys(messages.at(-1))).toContain("stopReason");
     expect(keys(toolCall)).toEqual(expect.arrayContaining(["toolCallId", "toolName", "input"]));
-    expect(keys(toolCallCtx)).toEqual(expect.arrayContaining(["sessionManager", "signal"]));
+    expect(toolCallCtxKeys).toEqual(expect.arrayContaining(["sessionManager", "signal"]));
     expect(keys(branchAtToolCall[2])).toEqual(expect.arrayContaining(["type", "message"]));
     expect(keys(branchAtToolCall[2]!.message)).toEqual(expect.arrayContaining(["role", "content"]));
     // And the readers really took them: the recorder kept the call and the stop, the gate counted the run.
