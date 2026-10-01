@@ -5,7 +5,7 @@
 // with only its fetch replaced by a recording transport. Offline.
 // Characterization: every expected value below was observed on 0.85.1, then pinned exactly.
 import { rm } from "node:fs/promises";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
 import { createConfiguredModelRuntime } from "../../packages/model-runtime/src/index.js";
 import { createPiSessionRuntime, runOrchestratorTurn } from "../../packages/orchestrator/src/orchestrator.js";
@@ -49,6 +49,10 @@ const userContext = { systemPrompt: "Test", messages: [{ role: "user" as const, 
 const noTimes = (messages: readonly unknown[]) => JSON.parse(JSON.stringify(messages), (key: string, v: unknown) => (key === "timestamp" ? PLACEHOLDER : v)) as unknown[];
 
 describe("OpenRouter custom provider on Pi 0.85.1", () => {
+  // Pi adds its OpenRouter attribution headers only while install telemetry is on, and PI_TELEMETRY wins over settings.
+  beforeEach(() => { vi.stubEnv("PI_TELEMETRY", "1"); });
+  afterEach(() => { vi.unstubAllEnvs(); });
+
   // protects packages/model-runtime/src/index.ts (safeOpenRouterStream request path)
   // guards: custom providers receive TranscriptContext (0.99)
   it("sends this exact request for a system prompt, one user message and one tool", async () => {
@@ -63,7 +67,7 @@ describe("OpenRouter custom provider on Pi 0.85.1", () => {
     const request = captured[0]!;
     expect(request.url).toBe("https://openrouter.ai/api/v1/chat/completions");
     // The headers this provider path sets, pinned exactly: the key, the JSON body, and Pi's OpenRouter
-    // attribution (provider-attribution.js; on while install telemetry is, the default).
+    // attribution (provider-attribution.js; on because PI_TELEMETRY is stubbed to 1 above).
     const pinnedHeaders = { "authorization": `Bearer ${secret}`, "content-type": "application/json",
       "http-referer": "https://pi.dev", "x-openrouter-categories": "cli-agent", "x-openrouter-title": "pi" };
     expect(Object.fromEntries(Object.keys(pinnedHeaders).map((name) => [name, request.headers[name]]))).toEqual(pinnedHeaders);
