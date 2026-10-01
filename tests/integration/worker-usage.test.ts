@@ -51,6 +51,7 @@ describe("worker usage telemetry", () => {
       outcome,
       provider: "fixture",
       modelId: "fixture?token=[REDACTED]",
+      thinkingLevel: "high",
       cacheRetention: "long",
       tokens: { input: 100, output: 50, cacheRead: 80, cacheWrite: 20, total: 250 },
       cacheReadRatio: 0.4,
@@ -137,7 +138,7 @@ function usageAdapter(
           await writeFile(join(rootPath, "task-complete.txt"), "complete\n");
         },
         async abort() {},
-        getModel: () => ({ provider: "fixture", modelId: "fixture?token=top-secret" }),
+        getModel: () => ({ provider: "fixture", modelId: "fixture?token=top-secret", thinkingLevel: "high" as const }),
         getSessionStats: () => ({
           sessionFile,
           sessionId: "usage-session",

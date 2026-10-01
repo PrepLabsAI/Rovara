@@ -181,6 +181,8 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
     await rm(resolve(dirname(root), ".pro-tasks", config.runId), { recursive: true, force: true }).catch(() => undefined);
     await rm(secbenchGrade, { recursive: true, force: true }).catch(() => undefined);
   }
+  // The level the session actually ran with, read before the session is disposed; never the requested one.
+  const thinkingLevel = agent?.session.getModel().thinkingLevel;
   if (agent !== undefined) {
     const transcript = await readFile(agent.session.sessionFile).catch(() => undefined);
     if (transcript !== undefined) await save("transcript.jsonl", transcript, "application/x-ndjson");
@@ -195,7 +197,7 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
     offlineSettings: [...OFFLINE_SETTINGS],
     // What a later comparison needs to know about how the run was set up (pilot lesson, 2026-10-01).
     limits: swebenchAgentLimits(config.dataset),
-    thinkingLevel: dependencies.model.thinkingLevel ?? "default",
+    ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
     ...(secbenchRun === undefined ? {} : {
       secbenchSetup: {
         promptTemplateSha256: SECBENCH_PATCH_TEMPLATE_SHA256,

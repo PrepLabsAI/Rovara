@@ -211,7 +211,7 @@ function fakeAdapter(turn: FakeTurn, observed: { aborted: boolean; steered: stri
         },
         async steer(text) { observed.steered.push(text); },
         async abort() { observed.aborted = true; release?.(); },
-        getModel: () => ({ provider: "amazon-bedrock", modelId: "fixture-model" }),
+        getModel: () => ({ provider: "amazon-bedrock", modelId: "fixture-model", thinkingLevel: "medium" as const }),
         getSessionStats: () => ({
           sessionFile, sessionId: "fake", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2,
           tokens: { input: tokens, output: 0, cacheRead: 0, cacheWrite: 0, total: tokens }, cost,
@@ -394,7 +394,8 @@ describe("one SWE-bench run (spec 043 FR-008 to FR-015)", () => {
     expect(graded[0]).toContain("\\Z");
     expect([...artifacts.keys()].sort()).toEqual(["harness/report.json", "patch.diff", "result.json", "transcript.jsonl"]);
     expect(JSON.parse(artifacts.get("result.json")!)).toMatchObject({
-      resolved: true, offlineSettings: ["astropy-iers-offline"], artifacts: ["harness/report.json", "patch.diff", "transcript.jsonl"],
+      // The run asked for no level; result.json records what the session reported, never "default".
+      resolved: true, thinkingLevel: "medium", offlineSettings: ["astropy-iers-offline"], artifacts: ["harness/report.json", "patch.diff", "transcript.jsonl"],
     });
     const container = `agentx-swebench-${RUN_ID}`;
     const started = calls.find((call) => call[0] === "run")!;
