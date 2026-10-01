@@ -49,6 +49,7 @@ export class SessionLifecycle extends Construct {
   private readonly dispatcherSecurityGroupId: CfnParameter;
   private readonly privateSubnetIds: CfnParameter;
   private readonly invokeSigningKey: kms.IKey;
+  private readonly notifyOperator: cloudwatchActions.SnsAction;
 
   constructor(scope: Construct, id: string, props: SessionLifecycleProps) {
     super(scope, id);
@@ -56,6 +57,7 @@ export class SessionLifecycle extends Construct {
     const { naming } = props;
     this.naming = naming;
     this.invokeSigningKey = props.invokeSigningKey;
+    this.notifyOperator = props.notifyOperator;
     // Parameter ids match the foundation outputs they are filled from.
     const parameter = (name: string, description: string) => new CfnParameter(stack, name, { type: "String", description });
     const privateSubnetIds = parameter("PrivateSubnetIds", "Comma-separated private subnet IDs of the foundation VPC");
@@ -273,6 +275,36 @@ export class SessionLifecycle extends Construct {
     this.connectExecutions(dispatcher);
     dispatcher.addEnvironment("INVOKE_SIGNING_KEY_ARN", this.invokeSigningKey.keyArn);
     this.provisioner.grantStartExecution(dispatcher);
+  }
+
+  /**
+   * Issue 195, named environments only: the reconciler queues a stuck cancel again, once, by asking
+   * the broker (which checks again and uses the cancel route's own path), so it may invoke the
+   * broker function alone. The alarm reports every stuck cancel retried or ended, and any failure.
+   */
+  connectStuckCancelRetry(broker: lambda.IFunction): void {
+    this.reconciler.addEnvironment("BROKER_FUNCTION_NAME", broker.functionName);
+    this.reconciler.addToRolePolicy(new iam.PolicyStatement({ sid: "RetryStuckCancels", actions: ["lambda:InvokeFunction"], resources: [broker.functionArn] }));
+    const counted = (metricName: string) => new cloudwatch.Metric({ namespace: this.naming.metricsNamespace, metricName, statistic: "Maximum", period: Duration.minutes(15) });
+    new cloudwatch.Alarm(this, "StuckCancelsAlarm", {
+      alarmName: this.naming.alarmName("StuckCancels"),
+      alarmDescription: "The reconciler found a task whose cancel never reached its worker, and queued the cancel again or ended the task (or failed to). Check the reconciler's logs for stuck_cancel events: a retried cancel that finishes, or an ended task, needs no action; repeated ones point at a dispatch or worker fault.",
+      metric: new cloudwatch.MathExpression({
+        expression: "FILL(retries, 0) + FILL(ended, 0) + FILL(interrupted, 0) + FILL(failures, 0)",
+        usingMetrics: {
+          retries: counted("ReconcilerStuckCancelRetries"),
+          ended: counted("ReconcilerStuckCancelsEnded"),
+          interrupted: counted("ReconcilerStuckCancelsInterrupted"),
+          failures: counted("ReconcilerStuckCancelFailures"),
+        },
+        period: Duration.minutes(15),
+        label: "Stuck cancels retried, ended or failed",
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(this.notifyOperator);
   }
 
   /** The broker starts the deleter when an ec2-ebs workspace closes (#84). */

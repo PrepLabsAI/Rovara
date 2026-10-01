@@ -713,6 +713,9 @@ export class ControlPlaneStack extends Stack {
     const sessions = new SessionLifecycle(this, "Sessions", { naming, state, invokeSigningKey, notifyOperator });
     // A6: where the State table expires index items itself, the reconciler's legacy sweep is off.
     if (naming.env !== undefined) sessions.reconciler.addEnvironment("INDEX_EXPIRY", "ttl");
+    // Issue 195: a stuck cancel on a live worker is queued again through the broker. Named
+    // environments only: the legacy template is unchanged, and its reconciler only logs and counts.
+    if (naming.env !== undefined) sessions.connectStuckCancelRetry(broker);
     // Own both attachments in this releasable stack. Secret changes must never mutate the
     // protected foundation template or require a separate foundation change set.
     grantOpenRouterSecret(this, [slackOrchestratorRole.roleName, sessions.instanceRoleName]);
