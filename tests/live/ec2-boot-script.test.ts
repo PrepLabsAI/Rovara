@@ -26,10 +26,28 @@ case "$VOLUME_STATE" in
 esac
 mkdir -p /shims
 name=$(basename "$device")
+# The disk view: lsblk shows the root disk, then the volume's disk unless LSBLK_MODE hides it
+# ("none") or shows it only once the boot script has rescanned the PCI bus ("after-rescan"). BY_ID
+# links the disk under /dev/disk/by-id; SYSFS gives it an NVMe name whose sysfs serial is padded.
+# The script reads them under /tmp/host, never the container's own /sys or PCI bus.
 cat > /shims/lsblk <<EOF
 #!/bin/bash
-echo "$name vol0123456789abcdef0"
+echo "nvme0n1 vol0aaaaaaaaaaaaaaaa"
+case "\$LSBLK_MODE" in
+  none) ;;
+  after-rescan) [[ "\$(cat /tmp/host/sys/bus/pci/rescan 2>/dev/null)" == 1 ]] && echo "$name vol0123456789abcdef0" ;;
+  *) echo "$name vol0123456789abcdef0" ;;
+esac
 EOF
+mkdir -p /tmp/host/sys/block/nvme0n1/device /tmp/host/sys/bus/pci /tmp/host/dev/disk/by-id
+printf 'vol0aaaaaaaaaaaaaaaa\n' > /tmp/host/sys/block/nvme0n1/device/serial
+[[ -z "$BY_ID" ]] || ln -s "$device" /tmp/host/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0123456789abcdef0
+if [[ -n "$SYSFS" ]]; then
+  IFS=: read -r major minor < "/sys/class/block/$name/dev"
+  mknod /dev/nvme9n1 b "$major" "$minor"
+  mkdir -p /tmp/host/sys/block/nvme9n1/device
+  printf 'vol0123456789abcdef0    \n' > /tmp/host/sys/block/nvme9n1/device/serial
+fi
 # The metadata token call fails CURL_FAILURES times before it succeeds.
 cat > /shims/curl <<'EOF'
 #!/bin/bash
@@ -70,6 +88,7 @@ exit 1
 EOF
 # systemctl fails the one call named by SYSTEMCTL_FAILS, such as "restart docker.service".
 printf '#!/bin/bash\necho "systemctl $*" >> /tmp/calls.log\n[[ "$*" != "$SYSTEMCTL_FAILS" ]]\n' > /shims/systemctl
+printf '#!/bin/bash\necho "udevadm $*" >> /tmp/calls.log\n' > /shims/udevadm
 # Records the wait instead of waiting, so the retry backoff costs the test nothing.
 printf '#!/bin/bash\necho "sleep $*" >> /tmp/calls.log\n' > /shims/sleep
 # Records the transient unit's options and runs its command in the background, as systemd would.
@@ -85,7 +104,7 @@ touch /tmp/calls.log /etc/fstab
 # Stands in for the socket the Docker daemon creates; the worker unit reads its group.
 mkdir -p /var/run && touch /var/run/docker.sock
 echo "$USER_DATA_B64" | base64 -d > /tmp/user-data.sh
-PATH=/shims:$PATH AGENTX_DEVICE_WAIT_SECONDS=4 bash /tmp/user-data.sh
+PATH=/shims:$PATH AGENTX_HOST_ROOT=/tmp/host bash /tmp/user-data.sh
 echo "@@exit=$?"
 echo "@@ping=$(python3 - <<'EOF'
 import time, urllib.error, urllib.request
@@ -101,6 +120,7 @@ else:
     print("unreachable")
 EOF
 )"
+echo "@@rescan=$(cat /tmp/host/sys/bus/pci/rescan 2>/dev/null)"
 echo "@@type=$(blkid --probe --output value --match-tag TYPE "$device")"
 echo "@@mounted=$(mountpoint -q /mnt/workspace && echo yes || echo no)"
 echo "@@owner=$(stat -c %u:%g /mnt/workspace 2>/dev/null)"
@@ -137,6 +157,12 @@ interface Faults {
   awsFails?: boolean;
   systemctlFails?: string;
   deadlineSeconds?: number;
+  /** How lsblk shows the volume's disk: with its serial (the default), not at all, or only after a PCI rescan. */
+  lsblk?: "match" | "none" | "after-rescan";
+  /** Links the volume's disk under /dev/disk/by-id. */
+  byId?: boolean;
+  /** Lists the volume's disk in sysfs as nvme9n1, with its serial padded. */
+  sysfs?: boolean;
 }
 
 async function boot(bootConfig: Ec2WorkerBootConfig, volumeState: "blank" | "existing" | "foreign", faults: Faults = {}) {
@@ -151,6 +177,9 @@ async function boot(bootConfig: Ec2WorkerBootConfig, volumeState: "blank" | "exi
     "--env", `CURL_FAILURES=${faults.curlFailures ?? 0}`,
     "--env", `AWS_FAILS=${faults.awsFails ? "1" : ""}`,
     "--env", `AGENTX_BOOT_DEADLINE_SECONDS=${faults.deadlineSeconds ?? ""}`,
+    "--env", `LSBLK_MODE=${faults.lsblk ?? "match"}`,
+    "--env", `BY_ID=${faults.byId ? "1" : ""}`,
+    "--env", `SYSFS=${faults.sysfs ? "1" : ""}`,
     "--env", `USER_DATA_B64=${userData}`,
     IMAGE, "bash", "-c", HARNESS,
   ], { encoding: "utf8", timeout: 120_000 });
@@ -160,7 +189,7 @@ async function boot(bootConfig: Ec2WorkerBootConfig, volumeState: "blank" | "exi
   const calls = section("calls");
   return {
     exit: Number(field("exit")), type: field("type"), mounted: field("mounted") === "yes", owner: field("owner"),
-    kept: field("kept"), envMode: field("envmode"), ping: field("ping"),
+    kept: field("kept"), envMode: field("envmode"), ping: field("ping"), rescan: field("rescan"),
     fstab: section("fstab"), env: section("env"), unit: section("unit"), calls, log: result.stderr,
     sleeps: calls.split("\n").filter((line) => line.startsWith("sleep ")).map((line) => Number(line.slice("sleep ".length))),
     count: (call: string) => calls.split("\n").filter((line) => line === call).length,
@@ -216,6 +245,11 @@ describe.skipIf(!ENABLED)("EC2 boot script on arm64", () => {
     expect(result.calls).not.toContain("dnf");
     expect(result.ping).toBe("unreachable");
     expect(result.log).not.toContain("retrying");
+    // lsblk finds the disk at once, so the PCI bus is never rescanned.
+    expect(result.rescan).toBe("");
+    expect(result.calls).not.toContain("udevadm");
+    expect(result.log).not.toContain("rescan");
+    expect(result.log).toMatch(/formatting new volume vol-0123456789abcdef0 \(\/dev\/loop\d+\) as ext4/);
   }, 180_000);
 
   it("retries a failing Docker install with growing waits and boots once it succeeds", async () => {
@@ -325,12 +359,59 @@ describe.skipIf(!ENABLED)("EC2 boot script on arm64", () => {
     expect(result.mounted).toBe(false);
   }, 180_000);
 
-  it("fails when the volume is never attached", async () => {
+  it("finds the volume's disk through /dev/disk/by-id when lsblk shows no serial for it (#223)", async () => {
+    const result = await boot(config(), "blank", { lsblk: "none", byId: true });
+    expect(result.exit, result.log).toBe(0);
+    expect(result.log).toMatch(/formatting new volume vol-0123456789abcdef0 \(\/dev\/loop\d+\) as ext4/);
+    expect(result.mounted).toBe(true);
+    expect(result.sleeps).toEqual([]);
+    expect(result.rescan).toBe("");
+    expect(result.calls).toContain("systemctl enable --now agentx-worker.service");
+  }, 180_000);
+
+  it("finds the volume's disk through its padded sysfs serial when lsblk and by-id miss it (#223)", async () => {
+    const result = await boot(config(), "blank", { lsblk: "none", sysfs: true });
+    expect(result.exit, result.log).toBe(0);
+    expect(result.log).toContain("formatting new volume vol-0123456789abcdef0 (/dev/nvme9n1) as ext4");
+    expect(result.mounted).toBe(true);
+    expect(result.sleeps).toEqual([]);
+    expect(result.rescan).toBe("");
+    expect(result.calls).toContain("systemctl enable --now agentx-worker.service");
+  }, 180_000);
+
+  it("rescans the PCI bus after 20 seconds and finds a disk the kernel missed (#223)", async () => {
+    const result = await boot(config(), "blank", { lsblk: "after-rescan" });
+    expect(result.exit, result.log).toBe(0);
+    // Ten 2 second waits (20 seconds), one rescan, then the disk is there.
+    expect(result.sleeps).toEqual(Array(10).fill(2));
+    expect(result.rescan).toBe("1");
+    expect(result.count("udevadm settle --timeout=10")).toBe(1);
+    expect(result.log).toContain(
+      "agentx-boot: workspace disk vol-0123456789abcdef0 has not appeared after 20s; rescanning the PCI bus (1 of 3)",
+    );
+    expect(result.mounted).toBe(true);
+    expect(result.calls).toContain("systemctl enable --now agentx-worker.service");
+    expect(result.ping).toBe("unreachable");
+  }, 180_000);
+
+  it("fails after 120 seconds and 3 rescans when the disk never appears, saying what it saw (#223)", async () => {
     const result = await boot(config({ volumeId: "vol-0fffffffffffffff0" }), "blank");
+    const reason = "workspace disk vol-0fffffffffffffff0 is attached in AWS but did not appear on this machine after 120s (rescanned 3 times)";
     expect(result.exit).not.toBe(0);
-    expect(result.log).toMatch(/was not attached within 4s/);
+    expect(result.sleeps).toEqual(Array(60).fill(2));
+    expect(result.count("udevadm settle --timeout=10")).toBe(3);
+    expect(result.log).toContain("has not appeared after 20s; rescanning the PCI bus (1 of 3)");
+    expect(result.log).toContain("has not appeared after 50s; rescanning the PCI bus (2 of 3)");
+    expect(result.log).toContain("has not appeared after 80s; rescanning the PCI bus (3 of 3)");
+    // What the machine did see, so an operator can tell a missing disk from a mismatched one.
+    expect(result.log).toContain("agentx-boot: lsblk saw: nvme0n1 vol0aaaaaaaaaaaaaaaa\n");
+    expect(result.log).toMatch(/agentx-boot: lsblk saw: loop\d+ vol0123456789abcdef0\n/);
+    expect(result.log).toContain("agentx-boot: sysfs saw: nvme0n1 vol0aaaaaaaaaaaaaaaa\n");
+    expect(result.log).toContain(`agentx-boot: FAILED: ${reason}\n`);
+    expect(result.mounted).toBe(false);
+    expect(result.calls).not.toContain("docker");
     // Reported once, although fail ran in a command substitution's subshell.
     expect(result.count("systemd-run --unit=agentx-boot-failure --collect --property=Type=notify")).toBe(1);
-    expect(result.ping).toBe(bootFailedPing("volume vol-0fffffffffffffff0 was not attached within 4s"));
+    expect(result.ping).toBe(bootFailedPing(reason));
   }, 180_000);
 });

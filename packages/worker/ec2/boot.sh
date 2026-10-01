@@ -21,8 +21,10 @@ readonly WORKER_CONTAINER=agentx-worker
 # and named volumes survive an idle stop (#121). The worker's walks skip it (DOCKER_DATA_DIRECTORY).
 readonly DOCKER_DATA_ROOT=$MOUNT_PATH/.docker
 readonly DOCKER_SOCKET=/var/run/docker.sock
-# The provisioner attaches the volume after the instance is running, so it may appear late.
-readonly DEVICE_WAIT_SECONDS=${AGENTX_DEVICE_WAIT_SECONDS:-300}
+# The provisioner attaches the volume after the instance is running, so it may appear late (#223).
+readonly DEVICE_WAIT_SECONDS=${AGENTX_DEVICE_WAIT_SECONDS:-120}
+# Where /sys and /dev/disk are read; the tests point it elsewhere.
+readonly HOST_ROOT=${AGENTX_HOST_ROOT:-}
 # Network steps try 5 times, waiting 2, 4, 8 and 16 seconds (each plus up to half again as jitter,
 # at most 30 seconds before jitter): at most 45 seconds of waiting per step.
 readonly RETRY_ATTEMPTS=5
@@ -144,23 +146,46 @@ imds_once() {
 
 imds() { retry "could not read the instance's $1 from instance metadata" imds_once "$1"; }
 
-# A Nitro instance exposes an EBS volume as an NVMe disk whose serial is the volume ID without its dash.
-volume_device() {
-  local serial=${AGENTX_VOLUME_ID//-/}
-  lsblk --nodeps --noheadings --output NAME,SERIAL | awk -v serial="$serial" '$2 == serial { print "/dev/" $1; exit }'
+# Prints "NAME SERIAL" for each NVMe disk in sysfs, without the serial's padding.
+sysfs_disks() {
+  local file name
+  for file in "$HOST_ROOT"/sys/block/nvme*/device/serial; do
+    [[ -e "$file" ]] || continue
+    name=${file%/device/serial}
+    printf '%s %s\n' "${name##*/}" "$(tr -d '[:space:]' <"$file")"
+  done
 }
 
-wait_for_device() {
-  local deadline=$((SECONDS + DEVICE_WAIT_SECONDS)) device
-  while ((SECONDS < deadline)); do
-    device=$(volume_device)
-    if [[ -n "$device" && -b "$device" ]]; then
-      printf '%s\n' "$device"
-      return
-    fi
-    sleep 2
+# A Nitro instance exposes an EBS volume as an NVMe disk whose serial is the volume ID without its
+# dash. lsblk, sysfs or the by-id link may each be the first to show it.
+volume_device() {
+  local serial=${AGENTX_VOLUME_ID//-/} device
+  for device in $({ lsblk -dno NAME,SERIAL; sysfs_disks; } 2>/dev/null | awk -v s="$serial" '$2 == s { print "/dev/" $1 }') \
+    "$(readlink -f "$HOST_ROOT/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_$serial")"; do
+    if [[ -b "$device" ]]; then printf '%s\n' "$device"; return; fi
   done
-  fail "volume $AGENTX_VOLUME_ID was not attached within ${DEVICE_WAIT_SECONDS}s"
+}
+
+# Rescans the PCI bus at 20, 50 and 80s in case the kernel missed the hot-add. The time waited is
+# at least the sleeps, as the tests' sleep is instant.
+wait_for_device() {
+  local start=$SECONDS waited=0 rescans=0 device line
+  until device=$(volume_device) && [[ -n "$device" ]]; do
+    ((waited >= SECONDS - start)) || waited=$((SECONDS - start))
+    if ((waited >= DEVICE_WAIT_SECONDS)); then
+      lsblk -dno NAME,SERIAL,MODEL 2>&1 | while read -r line; do log "lsblk saw: $line"; done || true
+      sysfs_disks | while read -r line; do log "sysfs saw: $line"; done || true
+      fail "workspace disk $AGENTX_VOLUME_ID is attached in AWS but did not appear on this machine after ${DEVICE_WAIT_SECONDS}s (rescanned $rescans times)"
+    elif ((rescans < 3 && waited >= 20 + 30 * rescans)); then
+      rescans=$((rescans + 1))
+      log "workspace disk $AGENTX_VOLUME_ID has not appeared after ${waited}s; rescanning the PCI bus ($rescans of 3)"
+      { echo 1 >"$HOST_ROOT/sys/bus/pci/rescan" && timeout 15 udevadm settle --timeout=10; } || log "the PCI rescan failed"
+    else
+      sleep 2
+      waited=$((waited + 2))
+    fi
+  done
+  printf '%s\n' "$device"
 }
 
 # Formats only a volume that is blank and that this generation created. A blank volume that should
