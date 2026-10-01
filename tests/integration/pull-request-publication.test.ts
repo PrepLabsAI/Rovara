@@ -496,6 +496,15 @@ describe("publication check results (#170)", () => {
     expect(failure?.message).not.toContain(TOKEN.slice(4));
   });
 
+  it("runs a publish-time readiness check with its own env (#54)", async () => {
+    const fixture = await createFixture();
+    const checks = await runReadinessChecks(fixture.root, withReadiness(fixture, [
+      { cwd: "repo/demo", executable: "sh", args: ["-c", 'test "$CHECK_MODE" = strict'], timeoutSeconds: 10, env: { CHECK_MODE: "strict" } },
+      { cwd: "repo/demo", executable: "sh", args: ["-c", 'test -z "${CHECK_MODE-}"'], timeoutSeconds: 10 },
+    ]));
+    expect(checks.map((check) => check.outcome)).toEqual(["passed", "passed"]);
+  }, 30_000);
+
   it("says timed_out only when the timer fired: a signal or a failed start is a failure", async () => {
     const fixture = await createFixture();
     const checks = await runReadinessChecks(fixture.root, withReadiness(fixture, [
