@@ -16,6 +16,7 @@ import type { RepositoryCredentialProvider } from "./repository-credentials.js";
 import { runReadinessChecks } from "./publish.js";
 import { storedCommandOutput } from "./command-failure.js";
 import type { PreparationManifest } from "./prepare.js";
+import type { DevcontainerCli } from "./devcontainer.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT = 1_048_576;
@@ -27,8 +28,12 @@ export async function maintainPullRequest(options: {
   credentialProvider: RepositoryCredentialProvider;
   pullRequestUpdateSink: PullRequestUpdateSink;
   codeBuildSink?: CodeBuildSink;
+  /** The `devcontainer` CLI, as a seam for tests. */
+  devcontainerCli?: DevcontainerCli;
 }): Promise<PullRequestLifecycleResult> {
   const { invocation } = options;
+  // In the devcontainer preparation recorded, as at publication (#183).
+  const readinessOptions = options.devcontainerCli !== undefined ? { devcontainerCli: options.devcontainerCli } : {};
   const rootPath = await realpath(resolve(options.rootPath));
   const manifest = await loadManifest(rootPath, invocation);
   const repository = invocation.payload.project.repositories.find(
@@ -72,7 +77,7 @@ export async function maintainPullRequest(options: {
     if (currentHead === remoteHead && !status.trim()) {
       throw agentXError("CONFIG_INVALID", "repository has no new changes to append");
     }
-    const checks = await runReadinessChecks(rootPath, invocation);
+    const checks = await runReadinessChecks(rootPath, invocation, manifest, readinessOptions);
     if (checks.some((check) => check.outcome !== "passed")) {
       throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
     }
@@ -134,7 +139,14 @@ export async function maintainPullRequest(options: {
     }
     commit = (await git(repositoryPath, ["rev-parse", "HEAD"])).trim();
   }
-  const checks = await runReadinessChecks(rootPath, invocation);
+  let checks: Awaited<ReturnType<typeof runReadinessChecks>>;
+  try {
+    checks = await runReadinessChecks(rootPath, invocation, manifest, readinessOptions);
+  } catch (error) {
+    // For example, the devcontainer did not start: the merge is not kept either.
+    if (!reconciled) await git(repositoryPath, ["reset", "--hard", remoteHead]);
+    throw error;
+  }
   if (checks.some((check) => check.outcome !== "passed")) {
     if (!reconciled) await git(repositoryPath, ["reset", "--hard", remoteHead]);
     throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");

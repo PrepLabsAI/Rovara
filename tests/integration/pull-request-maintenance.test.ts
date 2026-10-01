@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import type { WorkerInvocation } from "@agentx/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { maintainPullRequest } from "../../packages/worker/src/maintain-pull-request.js";
+import type { DevcontainerCli, DevcontainerProcess } from "../../packages/worker/src/devcontainer.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories: string[] = [];
@@ -215,7 +216,89 @@ describe("pull request maintenance", () => {
   });
 });
 
-async function createFixture(action: "append" | "sync", remoteName = "remote.git") {
+// #183: pull request updates run readiness where preparation did, like publication.
+describe("pull request maintenance checks in a devcontainer (#183)", () => {
+  const UP_OUTPUT = "{\"outcome\":\"success\",\"containerId\":\"f832494aef96\",\"remoteUser\":\"node\",\"remoteWorkspaceFolder\":\"/workspaces/demo\"}";
+  function fakeCli(exec: () => DevcontainerProcess, up: () => DevcontainerProcess = () => ({ exitCode: 0, stdout: UP_OUTPUT, stderr: "" })) {
+    const calls: string[][] = [];
+    const cli: DevcontainerCli = {
+      run: async (args) => {
+        calls.push([...args]);
+        return args[0] === "up" ? up() : exec();
+      },
+    };
+    return { cli, calls };
+  }
+  const sink = async () => ({ url: "https://github.com/example/demo/pull/7", state: "open" as const, reconciled: false });
+
+  it("runs an append's checks through devcontainer exec", async () => {
+    const fixture = await createFixture("append", "remote.git", { devcontainer: true });
+    await writeFile(join(fixture.checkout, "APPEND.md"), "review update\n", "utf8");
+    const { cli, calls } = fakeCli(() => ({ exitCode: 0, stdout: "checked in the container\n", stderr: "" }));
+    const result = await maintainPullRequest({
+      rootPath: fixture.root, invocation: fixture.invocation, credentialProvider: async () => ({}),
+      pullRequestUpdateSink: sink, devcontainerCli: cli,
+    });
+    const workspaceFolder = join(await realpath(fixture.root), "repo/demo");
+    expect(result.checks).toEqual([expect.objectContaining({ outcome: "passed", stdout: "checked in the container\n" })]);
+    expect(calls.map((args) => args[0])).toEqual(["up", "exec"]);
+    expect(calls[1]!.slice(0, 3)).toEqual(["exec", "--workspace-folder", workspaceFolder]);
+    expect(calls[1]!.slice(9, 10)).toEqual([workspaceFolder]);
+    expect(calls[1]!.slice(11)).toEqual([process.execPath, "-e", "process.exit(0)"]);
+  });
+
+  it("runs a sync's checks through devcontainer exec, and keeps the PR head when one fails there", async () => {
+    const fixture = await createFixture("sync", "remote.git", { devcontainer: true });
+    await writeFile(join(fixture.seed, "UPSTREAM.md"), "latest base\n", "utf8");
+    await git(fixture.seed, ["add", "UPSTREAM.md"]);
+    await commit(fixture.seed, "upstream");
+    await git(fixture.seed, ["push", "origin", "main"]);
+    const { cli, calls } = fakeCli(() => ({ exitCode: 1, stdout: "", stderr: "tests failed\n" }));
+    const update = vi.fn();
+    await expect(maintainPullRequest({
+      rootPath: fixture.root, invocation: fixture.invocation, credentialProvider: async () => ({}),
+      pullRequestUpdateSink: update, devcontainerCli: cli,
+    })).rejects.toThrow(/readiness checks failed/i);
+    expect(calls.map((args) => args[0])).toEqual(["up", "exec"]);
+    expect(update).not.toHaveBeenCalled();
+    expect(await git(fixture.checkout, ["rev-parse", "HEAD"])).toBe(`${fixture.pullRequestHead}\n`);
+    expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+  });
+
+  it("resets a sync's merge when the devcontainer does not start, and pushes nothing", async () => {
+    const fixture = await createFixture("sync", "remote.git", { devcontainer: true });
+    await writeFile(join(fixture.seed, "UPSTREAM.md"), "latest base\n", "utf8");
+    await git(fixture.seed, ["add", "UPSTREAM.md"]);
+    await commit(fixture.seed, "upstream");
+    await git(fixture.seed, ["push", "origin", "main"]);
+    const { cli } = fakeCli(
+      () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      () => ({ exitCode: 1, stdout: "{\"outcome\":\"error\",\"message\":\"Docker is not running\"}", stderr: "" }),
+    );
+    const update = vi.fn();
+    await expect(maintainPullRequest({
+      rootPath: fixture.root, invocation: fixture.invocation, credentialProvider: async () => ({}),
+      pullRequestUpdateSink: update, devcontainerCli: cli,
+    })).rejects.toThrow("devcontainer did not start: Docker is not running");
+    expect(update).not.toHaveBeenCalled();
+    expect(await git(fixture.checkout, ["rev-parse", "HEAD"])).toBe(`${fixture.pullRequestHead}\n`);
+    expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+  });
+
+  it("runs checks on the host when preparation recorded no devcontainer", async () => {
+    const fixture = await createFixture("append");
+    await writeFile(join(fixture.checkout, "APPEND.md"), "review update\n", "utf8");
+    const { cli, calls } = fakeCli(() => ({ exitCode: 0, stdout: "", stderr: "" }));
+    const result = await maintainPullRequest({
+      rootPath: fixture.root, invocation: fixture.invocation, credentialProvider: async () => ({}),
+      pullRequestUpdateSink: sink, devcontainerCli: cli,
+    });
+    expect(result.checks).toEqual([expect.objectContaining({ outcome: "passed", exitCode: 0 })]);
+    expect(calls).toEqual([]);
+  });
+});
+
+async function createFixture(action: "append" | "sync", remoteName = "remote.git", options: { devcontainer?: boolean } = {}) {
   const root = await mkdtemp(join(tmpdir(), "agentx-maintain-test-"));
   temporaryDirectories.push(root);
   const bare = join(root, remoteName);
@@ -246,6 +329,7 @@ async function createFixture(action: "append" | "sync", remoteName = "remote.git
     repositories: [{ name: "demo", url: remoteUrl, path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }],
     setup: [],
     readiness: [{ cwd: "repo/demo", executable: process.execPath, args: ["-e", "process.exit(0)"], timeoutSeconds: 10 }],
+    ...(options.devcontainer === true ? { devcontainer: { repository: "demo" } } : {}),
     orchestratorInstructions: "Delegate coding work.",
   } as const;
   await mkdir(join(root, ".agentx"), { recursive: true });
@@ -259,6 +343,10 @@ async function createFixture(action: "append" | "sync", remoteName = "remote.git
       resolvedAt: new Date().toISOString(), completedAt: new Date().toISOString(),
     }],
     completedSetupSteps: [], readinessResults: [], creationIdentity: "test", complete: true,
+    // Preparation records the devcontainer it started (#121).
+    ...(options.devcontainer === true
+      ? { devcontainer: { repository: "demo", configPath: "repo/demo/.devcontainer/devcontainer.json", containerId: "f832494aef96", startedAt: new Date().toISOString() } }
+      : {}),
     updatedAt: new Date().toISOString(),
   }), "utf8");
   const invocation = {

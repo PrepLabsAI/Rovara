@@ -877,7 +877,7 @@ Delete any leftover `~/.agentx/state` directory and, if your OS credential store
 
 Pull-request creation is explicit; AgentX never publishes automatically after a coding task. The
 registered project's `readiness` commands run inside the EC2 workspace before a candidate is
-pushed. Optional repository `codeBuildGates` then run remotely against that exact pushed commit.
+pushed, inside the project's dev container when it has one. Optional repository `codeBuildGates` then run remotely against that exact pushed commit.
 AgentX rejects an empty diff, merge conflicts, or any failed/timed-out check before creating a PR.
 
 Ask for it in the thread, naming the repository by its project YAML `name`, for example:

@@ -83,6 +83,9 @@ devcontainer:
 
 `repository` must name a registered repository. Dev containers run on EC2 workers.
 
+Readiness runs when the workspace is prepared and again before each pull request is published or updated, each time inside the dev container when the project has one.
+A project without a dev container runs its commands on the worker. Before checks run at publication, AgentX starts the dev container if it is stopped; if it does not start, nothing is pushed.
+
 ### Models
 
 ```yaml

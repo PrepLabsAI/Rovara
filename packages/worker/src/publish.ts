@@ -16,9 +16,16 @@ import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js"
 import type { PullRequestSink } from "./callback-client.js";
 import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
 import type { RepositoryCredentialProvider } from "./repository-credentials.js";
-import { runProjectCommand, type PreparationManifest } from "./prepare.js";
+import { runProjectCommand, type PreparationCommandRunner, type PreparationManifest } from "./prepare.js";
 import { storedCommandOutput } from "./command-failure.js";
 import type { CommandResult } from "./readiness.js";
+import {
+  createDevcontainerCli,
+  ensureDevcontainer,
+  preparedDevcontainerTarget,
+  runDevcontainerCommand,
+  type DevcontainerCli,
+} from "./devcontainer.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT = 1_048_576;
@@ -31,6 +38,8 @@ export interface PublishWorkspaceOptions {
   credentialProvider: RepositoryCredentialProvider;
   pullRequestSink: PullRequestSink;
   codeBuildSink?: CodeBuildSink;
+  /** The `devcontainer` CLI, as a seam for tests. */
+  devcontainerCli?: DevcontainerCli;
 }
 
 export async function publishWorkspace(
@@ -98,7 +107,9 @@ export async function publishWorkspace(
     });
   }
 
-  const checks: PublicationCheckResult[] = await runReadinessChecks(rootPath, invocation);
+  const checks: PublicationCheckResult[] = await runReadinessChecks(rootPath, invocation, manifest, {
+    ...(options.devcontainerCli !== undefined ? { devcontainerCli: options.devcontainerCli } : {}),
+  });
   if (checks.some((check) => check.outcome !== "passed")) {
     throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
   }
@@ -336,12 +347,28 @@ async function loadCompleteManifest(
   return manifest;
 }
 
+/**
+ * Runs the project's readiness checks where preparation ran them (#183): in the devcontainer that the
+ * preparation manifest records, through the same runner (its timeout stops the command inside the
+ * container, #174), otherwise on the host. The devcontainer is started first, as for a task: on a
+ * resumed instance its containers are stopped. A devcontainer that does not start fails the call.
+ */
 export async function runReadinessChecks(
   rootPath: string,
   invocation: CheckedInvocation,
+  manifest: Pick<PreparationManifest, "devcontainer" | "repositories">,
+  options: { devcontainerCli?: DevcontainerCli } = {},
 ): Promise<PublicationCheckResult[]> {
+  const readiness = invocation.payload.project.readiness;
+  let runner: PreparationCommandRunner = runProjectCommand;
+  const target = preparedDevcontainerTarget(rootPath, manifest);
+  if (target !== undefined && readiness.length > 0) {
+    const cli = options.devcontainerCli ?? createDevcontainerCli();
+    await ensureDevcontainer(cli, target);
+    runner = (command) => runDevcontainerCommand(cli, target, command);
+  }
   const results: PublicationCheckResult[] = [];
-  for (const [index, command] of invocation.payload.project.readiness.entries()) {
+  for (const [index, command] of readiness.entries()) {
     const startedAt = new Date().toISOString();
     // Readiness comes from the project's latest revision, which may name a repository this
     // workspace was never prepared with. Fail the check rather than skip a gate.
@@ -360,7 +387,13 @@ export async function runReadinessChecks(
       });
       continue;
     }
-    const result = await runProjectCommand(command, index, rootPath);
+    let result: CommandResult;
+    try {
+      result = await runner(command, index, rootPath);
+    } catch (error) {
+      // For example, the devcontainer has no bash (#174). A failed check, as at preparation.
+      result = { exitCode: -1, stdout: "", stderr: error instanceof Error ? error.message : "readiness command could not run" };
+    }
     results.push({
       index,
       cwd: command.cwd,
