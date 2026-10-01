@@ -24,6 +24,7 @@ import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@
 import { AgentXError, WorkspaceInstanceSchema, workspaceRecordFields } from "@agentx/contracts";
 import { taskPointerKey } from "../developer/task-records.js";
 import { getItem, requestCancellation, type CancellationDependencies } from "./cancellation.js";
+import { releaseFailedPreparation } from "./failed-preparation.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 
@@ -263,6 +264,8 @@ async function release(
         ExpressionAttributeValues: { ":released": releasedStatus(operation), ":now": at.toISOString(), ":operation": operationId, ":fence": operation.fence },
       } },
     ] }));
+    // #213: a prepare's workspace freed as PREPARATION_FAILED stops counting toward the limits.
+    if (releasedStatus(operation) === "PREPARATION_FAILED") await releaseFailedPreparation(client, tableName, workspaceId);
     return true;
   } catch (failure) {
     if (failure instanceof Error && failure.name === "TransactionCanceledException") return false;
@@ -304,6 +307,7 @@ async function end(
         ExpressionAttributeValues: { ":released": released, ":now": now, ":operation": operationId, ":fence": operation.fence },
       } },
     ] }));
+    if (released === "PREPARATION_FAILED") await releaseFailedPreparation(client, tableName, workspaceId);
     return true;
   } catch (failure) {
     if (failure instanceof Error && failure.name === "TransactionCanceledException") return false;

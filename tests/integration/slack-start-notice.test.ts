@@ -117,7 +117,7 @@ describe("the start notice only when the member was told to wait", () => {
   it("is not posted when setup fails, as today", async () => {
     const h = harness(workspace({ status: "PREPARING", operationId, created: true }), "FAILED");
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false, queuedBehind: 0 });
-    expect(h.posts).toEqual([SETTING_UP, "AgentX could not set up this thread's workspace (FAILED). Mention me again in this thread to retry."]);
+    expect(h.posts).toEqual([SETTING_UP, "AgentX could not set up this thread's workspace (FAILED). The workspace was released, so it no longer counts toward the workspace limit. Mention me again in this thread to start fresh."]);
   });
 
   it("hands the queue count to the processor", async () => {

@@ -9,6 +9,7 @@
 // the table).
 import { DeleteCommand, GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { taskPointerKey } from "../developer/task-records.js";
+import { releaseFailedPreparation } from "./failed-preparation.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 
@@ -89,8 +90,8 @@ async function settle(client: Client, tableName: string, watch: SetupWatch, now:
           ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":running": "RUNNING", ":cancelRequested": "CANCEL_REQUESTED",
         },
       } },
-      // As any failed developer-task prepare: the workspace reads setup_failed, and closing the task
-      // frees its slot (FR-020, ruling F20). The sweep itself releases no slot.
+      // As any failed developer-task prepare: the workspace reads setup_failed, and its slot is
+      // released once this commits (#213, which replaced ruling F20).
       { Update: {
         TableName: tableName, Key: { ...workspaceKey, sk: "META" },
         UpdateExpression: "SET #status = :released, updatedAt = :now REMOVE activeOperationId, closeError",
@@ -105,6 +106,7 @@ async function settle(client: Client, tableName: string, watch: SetupWatch, now:
       } },
       { Delete: drop },
     ] }));
+    await releaseFailedPreparation(client, tableName, watch.workspaceId);
     return "failed";
   } catch (error) {
     // A result landed first: it stands, and the next run drops the watch.

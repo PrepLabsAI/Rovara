@@ -385,7 +385,7 @@ describe("Slack request processing", () => {
     });
     await processSlackRequest(slackMessage(), harness.dependencies, { finalAttempt: false });
     expect(harness.turns).toHaveLength(0);
-    expect(harness.posts.at(-1)).toBe("AgentX could not set up this thread's workspace (FAILED). Mention me again in this thread to retry.");
+    expect(harness.posts.at(-1)).toBe("AgentX could not set up this thread's workspace (FAILED). The workspace was released, so it no longer counts toward the workspace limit. Mention me again in this thread to start fresh.");
     expect(harness.finished).toHaveLength(1);
   });
 
