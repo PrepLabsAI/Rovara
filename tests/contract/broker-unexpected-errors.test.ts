@@ -100,6 +100,15 @@ describe("the OIDC route catch-all (#48)", () => {
     expect(lines.join("\n")).not.toContain(AWS_TEXT);
   });
 
+  it("logs where an unexpected error without a message was thrown", async () => {
+    const { handler, db } = await createAdminBroker({});
+    // Node's own stack header for an empty message is the bare name, with no colon.
+    failing(db, Object.assign(new RangeError(), { stack: "RangeError\n    at thrower (/var/task/index.js:12:34)" }));
+    await register(handler);
+    const logged = lines.map((line) => JSON.parse(line) as Record<string, unknown>).filter((line) => line.event === "request.unexpected_error");
+    expect(logged).toEqual([expect.objectContaining({ name: "RangeError", at: "at thrower (/var/task/index.js:12:34)" })]);
+  });
+
   it("keeps a CredentialUnavailable's own words, which AgentX wrote and which name no secret", async () => {
     const { handler, db } = await createAdminBroker({});
     failing(db, new CredentialUnavailable("credential linear-key is not registered"));

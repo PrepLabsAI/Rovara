@@ -757,7 +757,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
  */
 function thrownAt(error: unknown): string | undefined {
   if (!(error instanceof Error) || typeof error.stack !== "string") return undefined;
-  const header = `${error.name}: ${error.message}`;
+  // Node writes the bare name when the message is empty.
+  const header = error.message === "" ? error.name : `${error.name}: ${error.message}`;
   if (!error.stack.startsWith(header)) return undefined;
   return error.stack.slice(header.length).split("\n").map((line) => line.trim()).find((line) => line.startsWith("at "));
 }
@@ -765,7 +766,8 @@ function thrownAt(error: unknown): string | undefined {
 /**
  * Issue #48: the answer to an error that is not an AgentXError. A temporary AWS error answers 503
  * RUNTIME_UNAVAILABLE, so the caller tries again; any other keeps CONFIG_INVALID. Apart from a
- * schema refusal, no answer carries the error's own words, and the log carries only its name.
+ * schema refusal or a CredentialUnavailable, no answer carries the error's own words, and the log
+ * carries only its name and, for an unexpected one, where it was thrown.
  */
 function unexpectedErrorAnswer(error: unknown, requestId: string): { statusCode: number; headers: Record<string, string>; body: string } {
   // A schema refusal is AgentX's own words: zod 4 never quotes the raw input, though a refinement

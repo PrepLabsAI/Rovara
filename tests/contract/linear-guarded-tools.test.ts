@@ -26,7 +26,7 @@ const project = (revision: number, connectors: unknown[]) => ({
 });
 
 /** The production linear type over a registered key, whose vendor answers with the recorded Linear tools. */
-function linearOverFixture(options: { keepCredential: boolean; tools?: typeof LINEAR_FIXTURE_TOOLS }): ConnectorType {
+function linearOverFixture(options: { keepCredential: boolean; tools?: typeof LINEAR_FIXTURE_TOOLS; connected?: { count: number } }): ConnectorType {
   const db = new FakeDynamoDb();
   db.set({ pk: "CREDENTIALS", sk: "REF#linear-key", entityType: "CREDENTIAL", ref: "linear-key", type: "static-secret", secretName: "agentx/connectors/linear-key", registeredBy: "admin", registeredAt: "2026-09-24T00:00:00.000Z" });
   const credentialRegistry = new CredentialRegistry({
@@ -34,7 +34,10 @@ function linearOverFixture(options: { keepCredential: boolean; tools?: typeof LI
     githubApp: { ref: "github-app", secretName: "agentx/connectors/github-app" },
     documentClient: db as never, tableName: "state",
   });
-  const connect = vi.fn(async () => ({ tools: options.tools ?? LINEAR_FIXTURE_TOOLS, call: vi.fn(), close: async () => undefined }));
+  const connect = vi.fn(async () => {
+    if (options.connected) options.connected.count += 1;
+    return { tools: options.tools ?? LINEAR_FIXTURE_TOOLS, call: vi.fn(), close: async () => undefined };
+  });
   return {
     type: "linear",
     resolve: (config, definition) => {
@@ -112,7 +115,8 @@ describe("registering and planning a revision that approves such a tool (#49)", 
   });
 
   it("keeps the warning when the registration lost the write race and answers as a duplicate", async () => {
-    const broker = await createAdminChangeBroker({ connectorTypes: { linear: linearOverFixture({ keepCredential: false }) } });
+    const connected = { count: 0 };
+    const broker = await createAdminChangeBroker({ connectorTypes: { linear: linearOverFixture({ keepCredential: false, connected }) } });
     const body = { definition: project(1, [linear(["list_issues", "delete_comment"])]), runtimeBinding, preflight: true };
     const send = broker.db.send;
     let raced = false;
@@ -128,6 +132,8 @@ describe("registering and planning a revision that approves such a tool (#49)", 
     const registered = await broker.admin("POST", "/v1/admin/projects", { body });
     expect(raced).toBe(true);
     expect(registered.body).toMatchObject({ duplicate: true, warnings: [DELETE_COMMENT_WARNING] });
+    // The duplicate answer reuses the first preflight: the vendor is contacted once.
+    expect(connected.count).toBe(1);
   });
 
   it("lists the warning in a revision change's plan", async () => {
