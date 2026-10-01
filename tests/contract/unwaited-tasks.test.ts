@@ -33,7 +33,7 @@ function harness(stop?: (workspaceId: string, operationId: string) => Promise<Un
     db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)!.status = "CANCEL_REQUESTED";
     return { outcome: "CANCEL_REQUESTED", cancelOperationId: randomUUID(), thread: THREAD };
   }));
-  const postNote = vi.fn(async (_thread: { channelId: string; threadTs: string }, _text: string) => undefined);
+  const postNote = vi.fn<(thread: { channelId: string; threadTs: string }, text: string) => Promise<void>>(async () => undefined);
   const sweep = (workspaceIds: string[], at = NOW) => sweepUnwaitedTasks({ client: db, tableName: "state", stopTask, postNote, log: (entry) => { logs.push(entry); } }, workspaceIds, at);
   return { db, logs, stopTask, postNote, sweep };
 }
@@ -159,7 +159,7 @@ describe("the unwaited task backstop: invoking the broker (#173)", () => {
   const reply = (statusCode: number, body: unknown) => ({ Payload: new TextEncoder().encode(JSON.stringify({ statusCode, body: JSON.stringify(body) })) });
 
   it("sends the broker the internal event and reads its answer", async () => {
-    const invoke = vi.fn(async (_payload: string) => reply(200, { outcome: "CANCEL_REQUESTED", cancelOperationId: "c-1", thread: THREAD, requestId: "session-reconciler" }));
+    const invoke = vi.fn<(payload: string) => Promise<{ Payload: Uint8Array }>>(async () => reply(200, { outcome: "CANCEL_REQUESTED", cancelOperationId: "c-1", thread: THREAD, requestId: "session-reconciler" }));
     const stop = createBrokerTaskStopper(invoke);
     expect(await stop("w-1", "o-1")).toEqual({ outcome: "CANCEL_REQUESTED", cancelOperationId: "c-1", thread: THREAD });
     expect(JSON.parse(invoke.mock.calls[0]![0])).toEqual({ source: "agentx.session-reconciler", action: "stop-unwaited-task", workspaceId: "w-1", operationId: "o-1" });

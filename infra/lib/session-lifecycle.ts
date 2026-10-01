@@ -284,7 +284,7 @@ export class SessionLifecycle extends Construct {
    * the cancel route's own path), so it may invoke the broker function alone; and it posts the
    * thread's note with the bot token, so it may read the Slack secret alone.
    */
-  connectUnwaitedTaskBackstop(broker: lambda.IFunction, slackSecret: secretsmanager.ISecret): void {
+  connectUnwaitedTaskBackstop(broker: lambda.IFunction, slackSecret: secretsmanager.Secret): void {
     this.reconciler.addEnvironment("BROKER_FUNCTION_NAME", broker.functionName);
     this.reconciler.addEnvironment("SLACK_SECRET_ARN", slackSecret.secretArn);
     this.reconciler.addToRolePolicy(new iam.PolicyStatement({ sid: "StopUnwaitedTasks", actions: ["lambda:InvokeFunction"], resources: [broker.functionArn] }));
