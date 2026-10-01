@@ -300,7 +300,7 @@ export class SessionLifecycle extends Construct {
           unretried: counted("ReconcilerStuckCancelsUnretried"),
         },
         period: Duration.minutes(15),
-        label: "Stuck cancels retried, ended or failed",
+        label: "Stuck cancels retried, ended, failed or unretried",
       }),
       threshold: 1,
       evaluationPeriods: 1,

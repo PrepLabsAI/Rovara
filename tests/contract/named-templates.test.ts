@@ -137,7 +137,7 @@ function withoutStuckCancelAlarm(template: unknown): unknown {
       ComparisonOperator: "GreaterThanOrEqualToThreshold",
       EvaluationPeriods: 1,
       Metrics: [
-        { Expression: "FILL(retries, 0) + FILL(ended, 0) + FILL(interrupted, 0) + FILL(failures, 0) + FILL(unretried, 0)", Id: "expr_1", Label: "Stuck cancels retried, ended or failed", ReturnData: true },
+        { Expression: "FILL(retries, 0) + FILL(ended, 0) + FILL(interrupted, 0) + FILL(failures, 0) + FILL(unretried, 0)", Id: "expr_1", Label: "Stuck cancels retried, ended, failed or unretried", ReturnData: true },
         stat("retries", "ReconcilerStuckCancelRetries"),
         stat("ended", "ReconcilerStuckCancelsEnded"),
         stat("interrupted", "ReconcilerStuckCancelsInterrupted"),
