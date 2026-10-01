@@ -21,7 +21,7 @@
 // for a release INTERRUPTED with the sweep's retry recorded) under the fence read, and on the
 // workspace still being held by it, so a cancel result that lands first stands.
 import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { WorkspaceInstanceSchema, workspaceRecordFields } from "@agentx/contracts";
+import { AgentXError, WorkspaceInstanceSchema, workspaceRecordFields } from "@agentx/contracts";
 import { taskPointerKey } from "../developer/task-records.js";
 import { getItem, requestCancellation, type CancellationDependencies } from "./cancellation.js";
 
@@ -163,16 +163,24 @@ async function settle(
   } catch (error) {
     // The retry stays recorded, so it is never tried again; the retry limit ends the task.
     result.failed.push(operationId);
-    log({ event: "stuck_cancel.retry_failed", ...ids, errorName: error instanceof Error ? error.name : "unknown" });
+    // The cancel path's refusals (STALE_FENCE, WORKSPACE_BUSY) share a name; their code is a fixed
+    // value, never stored data, so it is logged too.
+    log({ event: "stuck_cancel.retry_failed", ...ids, errorName: error instanceof Error ? error.name : "unknown", ...(error instanceof AgentXError ? { errorCode: error.code } : {}) });
     return;
   }
   if (retry.outcome === "REQUEUED") {
     result.retried.push(operationId);
     log({ event: "stuck_cancel.retried", ...ids, cancelOperationId: retry.cancelOperationId });
   } else {
+    // A lost race (finished, not active, not CANCEL_REQUESTED) is routine. A fence that moved without
+    // the active operation, or a retry not recorded first, should never happen: counted as a
+    // failure so the alarm sees it.
+    if (UNEXPECTED_SKIPS.has(retry.reason)) result.failed.push(operationId);
     log({ event: "stuck_cancel.retry_skipped", ...ids, reason: retry.reason });
   }
 }
+
+const UNEXPECTED_SKIPS: ReadonlySet<string> = new Set(["fence-changed", "not-claimed"]);
 
 const LIVE_CANCEL = new Set(["ACCEPTED", "DISPATCHING", "RUNNING"]);
 
@@ -332,11 +340,15 @@ export function createCancelRetrier(dependencies: { client: Client; tableName: s
 }
 
 /**
- * The key the retried cancel's callbacks are signed with. The reconciler holds it in named
- * environments only (#173), so only there is a stuck cancel on a live worker queued again; the
- * legacy reconciler has none, and only logs and counts it.
+ * The production retryCancel, where the reconciler holds the callback signing key the retried
+ * cancel's callbacks are signed with. It holds it in named environments only (#173), so only there
+ * is a stuck cancel on a live worker queued again; the legacy reconciler has none, and only logs and
+ * counts it.
  */
-export function stuckCancelSigningKey(environment: Record<string, string | undefined>): string | undefined {
+export function stuckCancelRetrier(
+  environment: Record<string, string | undefined>,
+  state: { client: Client; tableName: string },
+): StuckCancelDependencies["retryCancel"] {
   const key = environment.CALLBACK_SIGNING_KEY;
-  return key === undefined || key.length === 0 ? undefined : key;
+  return key === undefined || key.length === 0 ? undefined : createCancelRetrier({ ...state, callbackSigningKey: key });
 }

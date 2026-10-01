@@ -8,11 +8,12 @@ import {
   STUCK_CANCEL_LOST_MESSAGE,
   STUCK_CANCEL_MS,
   STUCK_CANCEL_RETRY_MS,
-  stuckCancelSigningKey,
+  stuckCancelRetrier,
   sweepStuckCancels,
   type StuckCancelCandidate,
   type StuckCancelDependencies,
 } from "../../packages/broker/src/aws/stuck-cancels.js";
+import { agentXError } from "@agentx/contracts";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const NOW = new Date("2026-10-01T12:00:00.000Z");
@@ -153,6 +154,23 @@ describe("a stuck cancel whose compute is alive", () => {
     expect(retryCancel).toHaveBeenCalledTimes(1);
     // The retry limit still ends it.
     expect((await sweep(candidate, minutesLater(31))).interrupted).toEqual([task.operationId]);
+  });
+
+  it("logs the error code of a retry the cancel path refused (a fixed code, never the message)", async () => {
+    const { db, sweep, logs } = setup({ retry: async () => { throw agentXError("STALE_FENCE", "PLANTED-STALE-MESSAGE"); } });
+    const task = seedTask(db, "CANCEL_REQUESTED", 31);
+    expect(await sweep([{ workspaceId: task.workspaceId, compute: "alive" }])).toEqual({ ...empty, failed: [task.operationId] });
+    expect(logs).toEqual([{ event: "stuck_cancel.retry_failed", workspaceId: task.workspaceId, operationId: task.operationId, errorName: "AgentXError", errorCode: "STALE_FENCE" }]);
+    expect(JSON.stringify(logs)).not.toContain("PLANTED-STALE-MESSAGE");
+  });
+
+  it("counts a retry skipped for a reason that should never happen as a failure, so the alarm sees it", async () => {
+    for (const reason of ["fence-changed", "not-claimed"]) {
+      const { db, sweep, logs } = setup({ retry: async () => ({ outcome: "SKIPPED", reason }) });
+      const task = seedTask(db, "CANCEL_REQUESTED", 31);
+      expect(await sweep([{ workspaceId: task.workspaceId, compute: "alive" }])).toEqual({ ...empty, failed: [task.operationId] });
+      expect(logs).toEqual([{ event: "stuck_cancel.retry_skipped", workspaceId: task.workspaceId, operationId: task.operationId, reason }]);
+    }
   });
 
   it("logs a retry that was skipped, and still ends it after the retry limit", async () => {
@@ -335,10 +353,11 @@ describe("failures", () => {
 
 describe("where the retry is wired", () => {
   it("only where the reconciler holds the callback signing key (named environments), as #173's backstop", () => {
-    expect(stuckCancelSigningKey({ CALLBACK_SIGNING_KEY: "k".repeat(64) })).toBe("k".repeat(64));
-    expect(stuckCancelSigningKey({})).toBeUndefined();
-    expect(stuckCancelSigningKey({ CALLBACK_SIGNING_KEY: "" })).toBeUndefined();
+    const state = { client: new FakeDynamoDb(), tableName: "state" };
+    expect(stuckCancelRetrier({ CALLBACK_SIGNING_KEY: "k".repeat(64) }, state)).toBeTypeOf("function");
+    expect(stuckCancelRetrier({}, state)).toBeUndefined();
+    expect(stuckCancelRetrier({ CALLBACK_SIGNING_KEY: "" }, state)).toBeUndefined();
     // The broker's name no longer turns the retry on: the reconciler never invokes the broker.
-    expect(stuckCancelSigningKey({ BROKER_FUNCTION_NAME: "agentx-staging-broker" })).toBeUndefined();
+    expect(stuckCancelRetrier({ BROKER_FUNCTION_NAME: "agentx-staging-broker" }, state)).toBeUndefined();
   });
 });

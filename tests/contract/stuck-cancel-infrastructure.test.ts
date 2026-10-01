@@ -56,11 +56,12 @@ describe("the stuck-cancel retry's infrastructure (#195)", () => {
       ComparisonOperator: "GreaterThanOrEqualToThreshold",
       EvaluationPeriods: 1,
       Metrics: [
-        { Expression: "FILL(retries, 0) + FILL(ended, 0) + FILL(interrupted, 0) + FILL(failures, 0)", Id: "expr_1", Label: "Stuck cancels retried, ended or failed", ReturnData: true },
+        { Expression: "FILL(retries, 0) + FILL(ended, 0) + FILL(interrupted, 0) + FILL(failures, 0) + FILL(unretried, 0)", Id: "expr_1", Label: "Stuck cancels retried, ended or failed", ReturnData: true },
         { Id: "retries", MetricStat: { Metric: stat("ReconcilerStuckCancelRetries"), Period: 900, Stat: "Maximum" }, ReturnData: false },
         { Id: "ended", MetricStat: { Metric: stat("ReconcilerStuckCancelsEnded"), Period: 900, Stat: "Maximum" }, ReturnData: false },
         { Id: "interrupted", MetricStat: { Metric: stat("ReconcilerStuckCancelsInterrupted"), Period: 900, Stat: "Maximum" }, ReturnData: false },
         { Id: "failures", MetricStat: { Metric: stat("ReconcilerStuckCancelFailures"), Period: 900, Stat: "Maximum" }, ReturnData: false },
+        { Id: "unretried", MetricStat: { Metric: stat("ReconcilerStuckCancelsUnretried"), Period: 900, Stat: "Maximum" }, ReturnData: false },
       ],
       Threshold: 1,
       TreatMissingData: "notBreaching",

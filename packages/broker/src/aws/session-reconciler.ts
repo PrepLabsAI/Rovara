@@ -16,7 +16,7 @@ import { failActiveOperation } from "./outbox-failure.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
 import { expireIndexDays, indexSweepWanted } from "./index-expiry.js";
 import { sweepStuckSetups } from "./stuck-setup.js";
-import { createCancelRetrier, stuckCancelSigningKey, sweepStuckCancels, type StuckCancelCandidate, type StuckCancelCompute, type StuckCancelSweepResult } from "./stuck-cancels.js";
+import { stuckCancelRetrier, sweepStuckCancels, type StuckCancelCandidate, type StuckCancelCompute, type StuckCancelSweepResult } from "./stuck-cancels.js";
 import { slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopConfiguration, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
 import { cachedSlackPoster } from "./developer-task-notifier.js";
 
@@ -137,7 +137,9 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
     }
 
     // Issue 195: after the session repairs above (a lost READY worker's operation is already failed),
-    // and in its own try, so a failure here never stops the repairs that follow.
+    // and in its own try, so a failure here never stops the repairs that follow. Compute is judged
+    // from this run's snapshot: a worker the repairs above just stopped still counts as alive, so
+    // its one retry may be spent on it. The next run sees it gone and ends the task.
     const stuckCancelMetrics = await reconcileStuckCancels(dependencies, sessions, instanceById, now, report, log);
 
     // Volumes no session claims.
@@ -393,8 +395,7 @@ const tag = (tags: Array<{ Key?: string | undefined; Value?: string | undefined 
  * environment's reconciler holds that key (#173), so the legacy one logs and counts it instead.
  */
 function stuckCancelSweep(): NonNullable<ReconcilerDependencies["sweepStuckCancels"]> {
-  const callbackSigningKey = stuckCancelSigningKey(process.env);
-  const retryCancel = callbackSigningKey === undefined ? undefined : createCancelRetrier({ client: documentClient, tableName, callbackSigningKey });
+  const retryCancel = stuckCancelRetrier(process.env, { client: documentClient, tableName });
   const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }));
   return (candidates, now) => sweepStuckCancels({ client: documentClient, tableName, ...(retryCancel === undefined ? {} : { retryCancel }), log }, candidates, now);
 }

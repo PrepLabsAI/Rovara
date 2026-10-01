@@ -289,12 +289,15 @@ export class SessionLifecycle extends Construct {
       alarmName: this.naming.alarmName("StuckCancels"),
       alarmDescription: "The reconciler found a task whose cancel never reached its worker, and queued the cancel again or ended the task (or failed to). Check the reconciler's logs for stuck_cancel events: a retried cancel that finishes, or an ended task, needs no action; repeated ones point at a dispatch or worker fault.",
       metric: new cloudwatch.MathExpression({
-        expression: "FILL(retries, 0) + FILL(ended, 0) + FILL(interrupted, 0) + FILL(failures, 0)",
+        // unretried stays 0 where the reconciler holds the signing key; it alarms if a named
+        // environment ever loses it, so live workers' stuck cancels are never left unseen.
+        expression: "FILL(retries, 0) + FILL(ended, 0) + FILL(interrupted, 0) + FILL(failures, 0) + FILL(unretried, 0)",
         usingMetrics: {
           retries: counted("ReconcilerStuckCancelRetries"),
           ended: counted("ReconcilerStuckCancelsEnded"),
           interrupted: counted("ReconcilerStuckCancelsInterrupted"),
           failures: counted("ReconcilerStuckCancelFailures"),
+          unretried: counted("ReconcilerStuckCancelsUnretried"),
         },
         period: Duration.minutes(15),
         label: "Stuck cancels retried, ended or failed",
