@@ -32,8 +32,8 @@ const COMMAND_WRAPPER = 'set -m; (cd -- "$1" && shift 2 && exec "$@") & child=$!
 const SHELL_WRAPPER = 'set -m; (cd -- "$1" && shift 2 && eval "$1") & child=$!; set +m; echo "$child" > "$2"; wait "$child"; status=$?; rm -f "$2"; exit "$status"';
 // TERM waits up to 5 s for the group file, then keeps the group ID in "$1.stop": the wrapper removes
 // the group file once the group leader exits, and KILL still needs the ID (#174 review).
-const KILL_TERM = 'for _ in {1..50}; do [ -s "$1" ] && break; sleep 0.1; done; p=$(cat "$1" 2>/dev/null) || exit 0; echo "$p" > "$1.stop"; kill -TERM -- "-$p" 2>&1 || ! kill -0 -- "-$p" 2>/dev/null';
-const KILL_KILL = 'p=$(cat "$1.stop" 2>/dev/null || cat "$1" 2>/dev/null); rm -f "$1" "$1.stop"; [ -n "$p" ] || exit 0; kill -0 -- "-$p" 2>/dev/null || exit 0; kill -KILL -- "-$p" 2>&1 || ! kill -0 -- "-$p" 2>/dev/null';
+const KILL_TERM = 'for _ in {1..50}; do [ -s "$1" ] && break; sleep 0.1; done; p=$(cat "$1" 2>/dev/null) || exit 0; case "$p" in ""|*[!0-9]*) exit 0;; esac; echo "$p" > "$1.stop"; out=$(kill -TERM -- "-$p" 2>&1) && exit 0; case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1';
+const KILL_KILL = 'p=$(cat "$1.stop" 2>/dev/null || cat "$1" 2>/dev/null); rm -f "$1" "$1.stop"; case "$p" in ""|*[!0-9]*) exit 0;; esac; out=$(kill -KILL -- "-$p" 2>&1) && exit 0; case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1';
 const NO_BASH = 'OCI runtime exec failed: exec failed: unable to start container process: exec: "bash": executable file not found in $PATH: unknown';
 
 /**
@@ -398,6 +398,24 @@ describe("the devcontainer CLI seam", () => {
       { onData: (data) => output.push(data.toString()), timeout: 1 },
     )).rejects.toThrow("timeout:1");
     await expectGone(Number.parseInt(output.join("").trim(), 10));
+  }, 30_000);
+
+  it("reports a stop that kill refused, with real bash, rather than calling the group gone (#174 review)", async () => {
+    // BASH_ENV, read by the kill execs' bash only, makes kill refuse every signal as a group owned by
+    // root would: "Operation not permitted" is not "No such process".
+    const directory = await mkdtemp(join(tmpdir(), "agentx-174-"));
+    const refusing = join(directory, "refusing-kill.sh");
+    await writeFile(refusing, 'kill() { echo "bash: kill: (${3#-}) - Operation not permitted" >&2; return 1; }\n');
+    const exec: ContainerExec = (command, options) => runCollected(command[0]!, command.slice(1), {
+      ...options,
+      ...(command.some((arg) => arg.includes("kill -TERM") || arg.includes("kill -KILL")) ? { env: { PATH: process.env.PATH, BASH_ENV: refusing } } : {}),
+    });
+    const output: string[] = [];
+    await expect(containerBashOperations(exec).exec("exec sleep 2", tmpdir(), { onData: (data) => output.push(data.toString()), timeout: 0.5 }))
+      .rejects.toThrow("timeout:0.5");
+    const text = output.join("");
+    expect(text).toMatch(/AgentX could not stop the command in the container \(TERM\): bash: kill: \(\d+\) - Operation not permitted/);
+    expect(text).toMatch(/AgentX could not stop the command in the container \(KILL\): bash: kill: \(\d+\) - Operation not permitted/);
   }, 30_000);
 
   it("fails the agent's shell command with a clear error when the devcontainer has no bash (#174)", async () => {

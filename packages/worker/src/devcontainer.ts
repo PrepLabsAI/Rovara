@@ -25,11 +25,12 @@ const NO_BASH_MESSAGE = "the container has no bash, which AgentX needs to run co
  * Sends SIGTERM to the command's process group. It waits up to 5 s for the group file, which the
  * wrapper writes only once the command has started, and keeps the group ID in "$1.stop": the wrapper
  * removes the group file as soon as the group leader exits, and the KILL step still needs the ID.
- * It fails only when kill fails and the group still exists.
+ * Only "No such process" counts as a group already gone; any other kill error (such as "Operation
+ * not permitted" for a group running as root) is printed and fails the exec.
  */
-const TERM_SCRIPT = 'for _ in {1..50}; do [ -s "$1" ] && break; sleep 0.1; done; p=$(cat "$1" 2>/dev/null) || exit 0; echo "$p" > "$1.stop"; kill -TERM -- "-$p" 2>&1 || ! kill -0 -- "-$p" 2>/dev/null';
+const TERM_SCRIPT = 'for _ in {1..50}; do [ -s "$1" ] && break; sleep 0.1; done; p=$(cat "$1" 2>/dev/null) || exit 0; case "$p" in ""|*[!0-9]*) exit 0;; esac; echo "$p" > "$1.stop"; out=$(kill -TERM -- "-$p" 2>&1) && exit 0; case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1';
 /** Sends SIGKILL to what is left of the process group, if anything, and removes both files. */
-const KILL_SCRIPT = 'p=$(cat "$1.stop" 2>/dev/null || cat "$1" 2>/dev/null); rm -f "$1" "$1.stop"; [ -n "$p" ] || exit 0; kill -0 -- "-$p" 2>/dev/null || exit 0; kill -KILL -- "-$p" 2>&1 || ! kill -0 -- "-$p" 2>/dev/null';
+const KILL_SCRIPT = 'p=$(cat "$1.stop" 2>/dev/null || cat "$1" 2>/dev/null); rm -f "$1" "$1.stop"; case "$p" in ""|*[!0-9]*) exit 0;; esac; out=$(kill -KILL -- "-$p" 2>&1) && exit 0; case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1';
 
 /**
  * Where a project's devcontainer runs (#121). The whole workspace is mounted into the container at
@@ -220,8 +221,8 @@ export type ContainerExec = (
 
 /**
  * The agent's shell in a container, each command in its own process group (see devcontainerBashOperations).
- * A timeout reports back once the stop sequence has run (up to the 5 s grace period, or sooner when
- * the command's output ends first, plus the kill execs); an abort reports back at once.
+ * A timeout reports back after the stop sequence: the TERM exec, the 5 s grace period, then the KILL
+ * exec (each exec bounded at 10 s); an abort reports back at once.
  */
 export function containerBashOperations(exec: ContainerExec): BashOperations {
   return {
@@ -286,7 +287,7 @@ async function runInContainerGroup(
         (error: unknown) => error instanceof Error ? error.message : "the exec could not run",
       ),
       new Promise<string>((resolveTimer) => {
-        timer = setTimeout(() => resolveTimer(`no answer within ${KILL_EXEC_TIMEOUT_MS / 1_000} s`), KILL_EXEC_TIMEOUT_MS);
+        timer = setTimeout(() => resolveTimer(`no answer within ${KILL_EXEC_TIMEOUT_MS / 1_000} s`), KILL_EXEC_TIMEOUT_MS).unref();
       }),
     ]);
     clearTimeout(timer);
@@ -296,7 +297,8 @@ async function runInContainerGroup(
   const stop = () => {
     stopping ??= (async () => {
       await signalGroup("TERM", TERM_SCRIPT);
-      await new Promise((resolveGrace) => setTimeout(resolveGrace, TIMEOUT_KILL_GRACE_MS));
+      // unref'd: after an abort the sequence finishes in the background and does not keep the worker running.
+      await new Promise((resolveGrace) => setTimeout(resolveGrace, TIMEOUT_KILL_GRACE_MS).unref());
       await signalGroup("KILL", KILL_SCRIPT);
       controller.abort();
     })();
