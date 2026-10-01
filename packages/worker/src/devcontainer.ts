@@ -20,7 +20,16 @@ const KILL_EXEC_TIMEOUT_MS = 10_000;
 const CLIENT_TIMEOUT_MARGIN_MS = 10_000;
 /** What a container without bash says when an exec asks for it (Docker, then Podman/crun) (#174). */
 const NO_BASH = /exec: "bash": executable file not found|executable file `bash` not found/;
-const NO_BASH_MESSAGE = "the devcontainer has no bash, which AgentX needs to run commands in it; add bash to its image";
+const NO_BASH_MESSAGE = "the container has no bash, which AgentX needs to run commands in it; add bash to its image";
+/**
+ * Sends SIGTERM to the command's process group. It waits up to 5 s for the group file, which the
+ * wrapper writes only once the command has started, and keeps the group ID in "$1.stop": the wrapper
+ * removes the group file as soon as the group leader exits, and the KILL step still needs the ID.
+ * It fails only when kill fails and the group still exists.
+ */
+const TERM_SCRIPT = 'for _ in {1..50}; do [ -s "$1" ] && break; sleep 0.1; done; p=$(cat "$1" 2>/dev/null) || exit 0; echo "$p" > "$1.stop"; kill -TERM -- "-$p" 2>&1 || ! kill -0 -- "-$p" 2>/dev/null';
+/** Sends SIGKILL to what is left of the process group, if anything, and removes both files. */
+const KILL_SCRIPT = 'p=$(cat "$1.stop" 2>/dev/null || cat "$1" 2>/dev/null); rm -f "$1" "$1.stop"; [ -n "$p" ] || exit 0; kill -0 -- "-$p" 2>/dev/null || exit 0; kill -KILL -- "-$p" 2>&1 || ! kill -0 -- "-$p" 2>/dev/null';
 
 /**
  * Where a project's devcontainer runs (#121). The whole workspace is mounted into the container at
@@ -172,10 +181,16 @@ export async function runDevcontainerCommand(
   return {
     exitCode: result.exitCode ?? -1,
     stdout: result.stdout,
-    stderr: result.stderr,
+    stderr: withStopFailures(result.stderr, run.stopFailures),
     ...(result.signal !== undefined ? { signal: result.signal } : {}),
     ...(run.timedOut || result.timedOut === true ? { timedOut: true } : {}),
   };
+}
+
+/** The command's stderr, then a line for each step of the stop sequence that failed. */
+function withStopFailures(stderr: string, failures: readonly string[]): string {
+  if (failures.length === 0) return stderr;
+  return [...(stderr === "" ? [] : [stderr.replace(/\n$/, "")]), ...failures].join("\n");
 }
 
 /**
@@ -203,7 +218,11 @@ export type ContainerExec = (
   },
 ) => Promise<DevcontainerProcess>;
 
-/** The agent's shell in a container, each command in its own process group (see devcontainerBashOperations). */
+/**
+ * The agent's shell in a container, each command in its own process group (see devcontainerBashOperations).
+ * A timeout reports back once the stop sequence has run (up to the 5 s grace period, or sooner when
+ * the command's output ends first, plus the kill execs); an abort reports back at once.
+ */
 export function containerBashOperations(exec: ContainerExec): BashOperations {
   return {
     async exec(command, cwd, { onData, signal, timeout, env }) {
@@ -221,6 +240,7 @@ export function containerBashOperations(exec: ContainerExec): BashOperations {
         onStderr: onData,
       });
       if (run.aborted) throw new Error("aborted");
+      for (const failure of run.stopFailures) onData(Buffer.from(`\n${failure}\n`));
       if (run.timedOut) throw new Error(`timeout:${String(timeout)}`);
       return { exitCode: run.result.exitCode };
     },
@@ -243,32 +263,43 @@ interface ContainerGroupCommand {
 
 /**
  * Runs a command in a container in its own process group, whose ID goes to a file in the container's
- * /tmp. A timeout or an abort stops the group there, not just the local exec client: a second exec
- * sends it SIGTERM, and another SIGKILL after TIMEOUT_KILL_GRACE_MS, which also removes the file
- * (#174). The KILL is sent even when the result has already come back, for a group member that
- * ignores SIGTERM but does not hold the output open. An abort ends the local client at once; a
- * timeout lets it run through the grace period, so output the command prints while it stops still
- * arrives. bash, not sh: dash's kill does not take a negative process group ID, so a container
- * without bash fails with an error that says so.
+ * /tmp. A timeout or an abort stops the group there, not just the local exec client (#174): one exec
+ * sends the group SIGTERM, and TIMEOUT_KILL_GRACE_MS after it answers another sends SIGKILL to any
+ * member still running (one that ignores SIGTERM, even once the group leader has exited) and removes
+ * the files. Then the local client is aborted, if it is still running. Each kill exec may take
+ * KILL_EXEC_TIMEOUT_MS. A timeout waits for the whole sequence and reports each step that failed in
+ * `stopFailures`; an abort ends the local client at once and does not wait. bash, not sh: dash's kill
+ * does not take a negative process group ID, so a container without bash fails with an error that says so.
  */
 async function runInContainerGroup(
   exec: ContainerExec,
   command: ContainerGroupCommand,
-): Promise<{ result: DevcontainerProcess; timedOut: boolean; aborted: boolean }> {
+): Promise<{ result: DevcontainerProcess; timedOut: boolean; aborted: boolean; stopFailures: string[] }> {
   const groupFile = `/tmp/${command.groupFilePrefix}-${randomUUID()}.pgid`;
   const controller = new AbortController();
-  const signalGroup = (script: string) => {
-    void exec(["bash", "-c", script, "bash", groupFile], { timeoutMs: KILL_EXEC_TIMEOUT_MS }).catch(() => undefined);
+  const stopFailures: string[] = [];
+  const signalGroup = async (step: "TERM" | "KILL", script: string): Promise<void> => {
+    let timer: NodeJS.Timeout | undefined;
+    const failure = await Promise.race([
+      exec(["bash", "-c", script, "bash", groupFile], { timeoutMs: KILL_EXEC_TIMEOUT_MS }).then(
+        (result) => result.exitCode === 0 ? undefined : stopFailureReason(result),
+        (error: unknown) => error instanceof Error ? error.message : "the exec could not run",
+      ),
+      new Promise<string>((resolveTimer) => {
+        timer = setTimeout(() => resolveTimer(`no answer within ${KILL_EXEC_TIMEOUT_MS / 1_000} s`), KILL_EXEC_TIMEOUT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (failure !== undefined) stopFailures.push(`AgentX could not stop the command in the container (${step}): ${failure}`);
   };
-  let stopping = false;
+  let stopping: Promise<void> | undefined;
   const stop = () => {
-    if (stopping) return;
-    stopping = true;
-    signalGroup('kill -TERM -- "-$(cat "$1")" 2>/dev/null');
-    setTimeout(() => {
-      signalGroup('kill -KILL -- "-$(cat "$1")" 2>/dev/null; rm -f "$1"');
+    stopping ??= (async () => {
+      await signalGroup("TERM", TERM_SCRIPT);
+      await new Promise((resolveGrace) => setTimeout(resolveGrace, TIMEOUT_KILL_GRACE_MS));
+      await signalGroup("KILL", KILL_SCRIPT);
       controller.abort();
-    }, TIMEOUT_KILL_GRACE_MS).unref();
+    })();
   };
   let timedOut = false;
   let aborted = false;
@@ -291,14 +322,25 @@ async function runInContainerGroup(
       ...(command.onStdout !== undefined ? { onStdout: command.onStdout } : {}),
       ...(command.onStderr !== undefined ? { onStderr: command.onStderr } : {}),
     });
-    if (!timedOut && !aborted && (result.exitCode === 126 || result.exitCode === 127) && NO_BASH.test(result.stderr)) {
+    const wasAborted = aborted || command.signal?.aborted === true;
+    // A timeout waits for the stop sequence, so the result says whether it worked.
+    if (timedOut && !wasAborted) await stopping;
+    // bash never started when the container has none, so there is no output.
+    if (!timedOut && !wasAborted && result.exitCode !== 0 && result.stdout === "" && NO_BASH.test(result.stderr)) {
       throw new Error(NO_BASH_MESSAGE);
     }
-    return { result, timedOut, aborted: aborted || command.signal?.aborted === true };
+    return { result, timedOut, aborted: wasAborted, stopFailures: [...stopFailures] };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
     command.signal?.removeEventListener("abort", onAbort);
   }
+}
+
+/** Why a kill exec failed: the last line it printed, or its exit status. */
+function stopFailureReason(result: DevcontainerProcess): string {
+  const last = `${result.stdout}\n${result.stderr}`.trim().split("\n").at(-1)?.trim() ?? "";
+  if (last !== "") return last.slice(0, 300);
+  return result.timedOut === true ? "timed out" : `exit ${String(result.exitCode)}`;
 }
 
 /** `devcontainer exec` in the target's devcontainer, with the given variables set there. */
