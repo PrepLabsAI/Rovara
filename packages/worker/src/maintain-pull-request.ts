@@ -3,6 +3,7 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
+  AgentXError,
   PullRequestLifecycleResultSchema,
   agentXError,
   type WorkerInvocation,
@@ -144,12 +145,11 @@ export async function maintainPullRequest(options: {
     checks = await runReadinessChecks(rootPath, invocation, manifest, readinessOptions);
   } catch (error) {
     // For example, the devcontainer did not start: the merge is not kept either.
-    if (!reconciled) await git(repositoryPath, ["reset", "--hard", remoteHead]);
-    throw error;
+    throw reconciled ? error : await undoMerge(repositoryPath, remoteHead, error);
   }
   if (checks.some((check) => check.outcome !== "passed")) {
-    if (!reconciled) await git(repositoryPath, ["reset", "--hard", remoteHead]);
-    throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
+    const failure = agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
+    throw reconciled ? failure : await undoMerge(repositoryPath, remoteHead, failure);
   }
   const codeBuildChecks = reconciled
     ? []
@@ -227,6 +227,21 @@ async function isAncestor(directory: string, ancestor: string, descendant: strin
     const exitCode = (error as { code?: unknown }).code;
     if (exitCode === 1) return false;
     throw agentXError("CONFIG_INVALID", "Git could not compare pull request history");
+  }
+}
+
+/**
+ * Resets a sync's merge after its checks failed or could not run, and returns the error to throw: the
+ * original one, which also says when the reset failed, so a failed reset never hides why.
+ */
+async function undoMerge(repositoryPath: string, remoteHead: string, error: unknown): Promise<unknown> {
+  try {
+    await git(repositoryPath, ["reset", "--hard", remoteHead]);
+    return error;
+  } catch (resetError) {
+    const reason = `the merge could not be undone: ${resetError instanceof AgentXError ? resetError.message.replace(/^[A-Z_]+: /u, "") : "Git reset failed"}`;
+    if (error instanceof AgentXError) return agentXError(error.code, `${error.message.replace(`${error.code}: `, "")}; ${reason}`);
+    return new Error(`${error instanceof Error ? error.message : "readiness checks could not run"}; ${reason}`);
   }
 }
 

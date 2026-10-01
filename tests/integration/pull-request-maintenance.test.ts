@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { writeFileSync } from "node:fs";
 import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -283,6 +284,47 @@ describe("pull request maintenance checks in a devcontainer (#183)", () => {
     expect(update).not.toHaveBeenCalled();
     expect(await git(fixture.checkout, ["rev-parse", "HEAD"])).toBe(`${fixture.pullRequestHead}\n`);
     expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+  });
+
+  it("still says why the checks could not run when the sync's merge cannot be undone either", async () => {
+    const fixture = await createFixture("sync", "remote.git", { devcontainer: true });
+    await writeFile(join(fixture.seed, "UPSTREAM.md"), "latest base\n", "utf8");
+    await git(fixture.seed, ["add", "UPSTREAM.md"]);
+    await commit(fixture.seed, "upstream");
+    await git(fixture.seed, ["push", "origin", "main"]);
+    const { cli } = fakeCli(
+      () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      () => {
+        // Another Git process holds the index, so the reset after this failure fails too.
+        writeFileSync(join(fixture.checkout, ".git", "index.lock"), "");
+        return { exitCode: 1, stdout: "{\"outcome\":\"error\",\"message\":\"Docker is not running\"}", stderr: "" };
+      },
+    );
+    const failure = await maintainPullRequest({
+      rootPath: fixture.root, invocation: fixture.invocation, credentialProvider: async () => ({}),
+      pullRequestUpdateSink: vi.fn(), devcontainerCli: cli,
+    }).then(() => undefined, (error: unknown) => error as Error);
+    expect(failure?.message).toContain("devcontainer did not start: Docker is not running");
+    expect(failure?.message).toContain("the merge could not be undone");
+    expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+  });
+
+  it("still says the checks failed when the sync's merge cannot be undone either", async () => {
+    const fixture = await createFixture("sync", "remote.git", { devcontainer: true });
+    await writeFile(join(fixture.seed, "UPSTREAM.md"), "latest base\n", "utf8");
+    await git(fixture.seed, ["add", "UPSTREAM.md"]);
+    await commit(fixture.seed, "upstream");
+    await git(fixture.seed, ["push", "origin", "main"]);
+    const { cli } = fakeCli(() => {
+      writeFileSync(join(fixture.checkout, ".git", "index.lock"), "");
+      return { exitCode: 1, stdout: "", stderr: "tests failed\n" };
+    });
+    const failure = await maintainPullRequest({
+      rootPath: fixture.root, invocation: fixture.invocation, credentialProvider: async () => ({}),
+      pullRequestUpdateSink: vi.fn(), devcontainerCli: cli,
+    }).then(() => undefined, (error: unknown) => error as Error);
+    expect(failure?.message).toContain("one or more registered readiness checks failed");
+    expect(failure?.message).toContain("the merge could not be undone");
   });
 
   it("runs checks on the host when preparation recorded no devcontainer", async () => {

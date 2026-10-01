@@ -595,6 +595,34 @@ describe("publication checks in a devcontainer (#183)", () => {
     expect(calls).toEqual([]);
   });
 
+  it("follows the devcontainer preparation recorded, not the project's latest revision", async () => {
+    // Prepared with a devcontainer; the latest revision has none. The workspace keeps its devcontainer.
+    const prepared = await createFixture(true, "remote.git", { devcontainer: true });
+    const withoutDevcontainer = structuredClone(prepared.invocation) as typeof prepared.invocation & { payload: { project: { devcontainer?: unknown } } };
+    delete withoutDevcontainer.payload.project.devcontainer;
+    const inContainer = fakeCli();
+    const [containerCheck] = await runReadinessChecks(await realpath(prepared.root), withoutDevcontainer, await manifestOf(prepared), { devcontainerCli: inContainer.cli });
+    expect(containerCheck!.outcome).toBe("passed");
+    expect(inContainer.calls.map((args) => args[0])).toEqual(["up", "exec"]);
+
+    // Prepared without one; the latest revision adds it. The checks stay on the host.
+    const host = await createFixture();
+    const withDevcontainer = structuredClone(host.invocation) as typeof host.invocation & { payload: { project: { devcontainer?: unknown } } };
+    withDevcontainer.payload.project.devcontainer = { repository: "demo" };
+    const onHost = fakeCli();
+    const [hostCheck] = await runReadinessChecks(await realpath(host.root), withDevcontainer, await manifestOf(host), { devcontainerCli: onHost.cli });
+    expect(hostCheck!.outcome).toBe("passed");
+    expect(onHost.calls).toEqual([]);
+  });
+
+  it("does not start the devcontainer for a project with no readiness checks", async () => {
+    const fixture = await createFixture(true, "remote.git", { devcontainer: true });
+    const { cli, calls } = fakeCli();
+    const checks = await runReadinessChecks(await realpath(fixture.root), withReadiness(fixture, []), await manifestOf(fixture), { devcontainerCli: cli });
+    expect(checks).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
   it("stops a timed-out check inside the container: TERM to its process group, then KILL", async () => {
     const fixture = await createFixture(true, "remote.git", { devcontainer: true });
     const { cli, calls, kills } = stoppableCli();
@@ -689,8 +717,8 @@ describe("publication checks in a devcontainer (#183)", () => {
   it("is what the project configuration guide says", async () => {
     const guide = await readFile("docs/project-configuration.md", "utf8");
     expect(guide).toContain(
-      "Readiness runs when the workspace is prepared and again before each pull request is published or updated, "
-      + "each time inside the dev container when the project has one.",
+      "`readiness` runs when the workspace is prepared and again before each pull request is published\n"
+      + "or updated, each time inside the dev container when the workspace was prepared with one.",
     );
   });
 });
