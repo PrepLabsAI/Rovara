@@ -8,7 +8,6 @@ import {
 } from "@aws-sdk/client-ec2";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DescribeExecutionCommand, SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
-import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { Ec2RuntimeBinding, WorkspaceSession, WorkspaceSessionState } from "@agentx/contracts";
@@ -17,7 +16,7 @@ import { failActiveOperation } from "./outbox-failure.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
 import { expireIndexDays, indexSweepWanted } from "./index-expiry.js";
 import { sweepStuckSetups } from "./stuck-setup.js";
-import { createBrokerTaskStopper, slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopWanted, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
+import { slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopWanted, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
 import { cachedSlackPoster } from "./developer-task-notifier.js";
 
 /** A just-launched instance or just-created volume is not judged until its session has recorded it. */
@@ -46,7 +45,7 @@ export interface ReconcilerReport {
   quarantinedVolumes: string[];
   /** Spec 025 FR-055: workspaces whose developer-task setup the sweep failed this run. */
   stuckSetups: string[];
-  /** Issue 173: Slack tasks cancelled with nobody waiting; present only where the backstop is wired. */
+  /** Issue 173: idle Slack tasks cancelled with nobody waiting; present only where the backstop is wired. */
   unwaitedTasks?: UnwaitedTaskSweepResult;
 }
 
@@ -70,7 +69,7 @@ export interface ReconcilerDependencies {
   /** Spec 025 FR-055: fails developer-task prepares 50 minutes old; absent in tests that do not need it. */
   sweepStuckSetups?: (now: Date) => Promise<{ failed: string[] }>;
   /**
-   * Issue 173: cancels Slack thread tasks live over 4 hours with nobody waiting, among the given
+   * Issue 173: cancels Slack thread tasks idle over 24 hours with nobody waiting, among the given
    * workspaces. Named environments only; absent in the legacy deployment and in tests that do not need it.
    */
   sweepUnwaitedTasks?: (workspaceIds: Iterable<string>, now: Date) => Promise<UnwaitedTaskSweepResult>;
@@ -327,17 +326,16 @@ const ownFilters = () => [
 const tag = (tags: Array<{ Key?: string | undefined; Value?: string | undefined }> | undefined, key: string) => tags?.find((candidate) => candidate.Key === key)?.Value;
 
 /**
- * Issue 173, named environments only: the broker cancels (the reconciler may invoke only it) and the
- * note is posted with the Slack bot token (the reconciler may read only that secret).
+ * Issue 173, named environments only: the reconciler cancels through the shared cancel code (it
+ * already reads and writes the State table; the outbox publisher dispatches the cancel), reads the
+ * thread's activeTurn (GetItem on THREAD# keys only), and posts the note with the bot token (the
+ * Slack secret alone).
  */
 function unwaitedTaskSweep(): NonNullable<ReconcilerDependencies["sweepUnwaitedTasks"]> {
-  const lambda = new LambdaClient(awsClientConfiguration);
   const secrets = new SecretsManagerClient(awsClientConfiguration);
-  const brokerFunctionName = requiredEnvironment("BROKER_FUNCTION_NAME");
   const slackSecretArn = requiredEnvironment("SLACK_SECRET_ARN");
-  const stopTask = createBrokerTaskStopper((payload) => lambda.send(new InvokeCommand({
-    FunctionName: brokerFunctionName, InvocationType: "RequestResponse", Payload: Buffer.from(payload),
-  })));
+  const threadsTableName = requiredEnvironment("SLACK_THREADS_TABLE_NAME");
+  const callbackSigningKey = requiredEnvironment("CALLBACK_SIGNING_KEY");
   // A bad secret fails the note as SlackSecretInvalid, the name the sweep logs; never the secret's text.
   const post = cachedSlackPoster(() => secrets.send(new GetSecretValueCommand({ SecretId: slackSecretArn }))
     .then((secret) => slackBotTokenFrom(secret.SecretString)));
@@ -345,7 +343,8 @@ function unwaitedTaskSweep(): NonNullable<ReconcilerDependencies["sweepUnwaitedT
   return (workspaceIds, now) => sweepUnwaitedTasks({
     client: documentClient,
     tableName,
-    stopTask,
+    threadsTableName,
+    callbackSigningKey,
     postNote: async (thread, text) => { await post({ channel: thread.channelId, threadTs: thread.threadTs, text }); },
     log,
   }, workspaceIds, now);

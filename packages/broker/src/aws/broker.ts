@@ -31,7 +31,6 @@ import {
   ConnectorCallRequestSchema,
   GitHubMcpRequestSchema,
   OperationRequestSchema,
-  OperationSchema,
   PullRequestRequestSchema,
   PullRequestLifecycleRequestSchema,
   PullRequestLifecycleResultSchema,
@@ -112,7 +111,10 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
-import { isUnwaitedTaskCandidate, type UnwaitedTaskStop } from "./unwaited-tasks.js";
+import {
+  TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
+  type CallbackClaims, type OperationRecord,
+} from "./cancellation.js";
 import { aiToolTurn, completedTurn, developerFooter, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { AWS_TEMPORARY_MESSAGE, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, workerPrompt } from "./broker-shared.js";
@@ -134,7 +136,6 @@ import {
   parseRuntimeBinding,
   requiredEnvironment,
   type AdaptedHttpRequest,
-  type DurableOutboxRecord,
   type HttpApiV2Event,
   type RuntimeBinding,
 } from "./lambda.js";
@@ -152,7 +153,6 @@ import {
 } from "./swebench.js";
 import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
 
-const TERMINAL = new Set<OperationStatus>(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 const MAX_ARTIFACT_BYTES = 5_000_000;
 const EVENT_TRANSACTION_CHUNK = 80;
 
@@ -184,49 +184,7 @@ interface ProjectModelSelectionRecord {
   updatedBy: SlackRequester;
 }
 
-interface OperationRecord extends Operation {
-  pk: string;
-  sk: string;
-  entityType: "OPERATION";
-  eventSequence: number;
-  targetOperationId?: string;
-  /** The project revision whose non-disk settings applied, which may be newer than the workspace's. */
-  settingsRevision?: number;
-  publication?: {
-    repository: string;
-    repositoryUrl: string;
-    headBranch: string;
-    baseBranch: string;
-    title: string;
-    body?: string;
-    /** Spec 025 FR-023: a developer's pull request opens as a draft unless they ask otherwise. */
-    draft?: boolean;
-    mode?: "create" | "replace" | "revert";
-    targetPullRequestNumber?: number;
-    revertCommit?: string;
-    codeBuildGates: CodeBuildGateDefinition[];
-  };
-  maintenance?: {
-    action: "append" | "sync";
-    repository: string;
-    repositoryUrl: string;
-    pullRequestNumber: number;
-    headBranch: string;
-    baseBranch: string;
-    expectedHeadCommit: string;
-    codeBuildGates: CodeBuildGateDefinition[];
-  };
-  candidateCommit?: string;
-  closePreviousStatus?: "READY" | "STOPPED";
-}
 
-interface CallbackClaims {
-  workspaceId: string;
-  operationId: string;
-  fence: number;
-  actions: Array<"events" | "artifacts" | "result" | "pull-request" | "pull-request-update" | "codebuild">;
-  expiresAt: number;
-}
 
 interface PullRequestRecord {
   pk: string;
@@ -581,7 +539,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent | AdminChangePressEvent | UnwaitedTaskStopEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | AdminChangePressEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
@@ -590,18 +548,6 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       } catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "admin_change.press_failed", changeId: event.changeId, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
         return json({ outcome: "failed", changeId: event.changeId }, "slack-ingress", 500);
-      }
-    }
-    // Issue 173: the reconciler backstop, invoked directly by the reconciler (never through API Gateway).
-    if (isUnwaitedTaskStopEvent(event)) {
-      try {
-        return json(await stopUnwaitedTask(dependencies, event), "session-reconciler");
-      } catch (error) {
-        if (error instanceof AgentXError) {
-          return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "session-reconciler", error.statusCode);
-        }
-        // The error's name only: never a message that could carry stored data.
-        return json({ error: { code: "INTERNAL", message: error instanceof Error ? error.name : "unknown" } }, "session-reconciler", 500);
       }
     }
     if (isSlackStopTaskEvent(event)) {
@@ -2997,79 +2943,6 @@ async function acceptCancellation(
   return requestCancellation(dependencies, workspace, targetOperationId, requesterOf(identity));
 }
 
-/**
- * Asks the worker to cancel an operation: the target moves to CANCEL_REQUESTED and a cancel
- * operation is queued for the worker. Callers authorize first (the workspace's owner, an
- * administrator, or a member of the workspace's Slack thread).
- */
-async function requestCancellation(
-  dependencies: AwsBrokerDependencies,
-  workspace: WorkspaceInstance,
-  targetOperationId: string,
-  requester: { requestedBy?: OperationRequester },
-  extra: ExtraItems = () => [],
-  options: { onlyLive?: boolean } = {},
-): Promise<{ operation: Operation; duplicate: boolean; alreadyCancelling?: true }> {
-  const workspaceId = workspace.id;
-  const target = await requireOperation(dependencies, workspaceId, targetOperationId);
-  if (TERMINAL.has(target.status)) return { operation: publicOperation(target), duplicate: true };
-  if (workspace.activeOperationId !== targetOperationId) throw agentXError("STALE_FENCE", "operation no longer owns the workspace");
-  const now = new Date().toISOString();
-  const operationId = randomUUID();
-  const operation = operationRecord({
-    id: operationId,
-    workspaceId,
-    kind: "cancel",
-    requestId: randomUUID(),
-    payloadHash: hashJson({ targetOperationId }),
-    status: "ACCEPTED",
-    fence: workspace.fence,
-    createdAt: now,
-    updatedAt: now,
-    ...requester,
-  }, targetOperationId);
-  const invocation: WorkerInvocation = {
-    protocolVersion: 1,
-    kind: "cancel",
-    operationId,
-    workspaceId,
-    fence: workspace.fence,
-    projectRevision: workspace.projectRevision,
-    callbackCapability: issueCapability(dependencies, workspaceId, operationId, workspace.fence),
-    payload: { targetOperationId },
-  };
-  const outbox = outboxRecord(workspace, invocation);
-  try {
-    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
-      { Update: {
-        TableName: dependencies.tableName,
-        Key: operationKey(workspaceId, targetOperationId),
-        UpdateExpression: "SET #status = :cancel, updatedAt = :now",
-        // Issue 173: the backstop cancels only a target still live and not yet asked to cancel, so a
-        // result that lands first stands and a member's stop that lands first wins (one cancel, no
-        // note). Every other caller keeps the fence-only condition: a repeated cancel queues again.
-        ConditionExpression: options.onlyLive ? "fence = :fence AND (#status = :accepted OR #status = :dispatching OR #status = :running)" : "fence = :fence",
-        ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: {
-          ":cancel": "CANCEL_REQUESTED", ":now": now, ":fence": workspace.fence,
-          ...(options.onlyLive ? { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":running": "RUNNING" } : {}),
-        },
-      } },
-      { Put: { TableName: dependencies.tableName, Item: operation } },
-      { Put: { TableName: dependencies.tableName, Item: outbox } },
-      ...extra(publicOperation(operation)),
-    ] }));
-  } catch (error) {
-    if (!isConditional(error)) throw error;
-    // The target finished while the cancel was being written: answer as for a finished target.
-    const current = await requireOperation(dependencies, workspaceId, targetOperationId);
-    if (TERMINAL.has(current.status)) return { operation: publicOperation(current), duplicate: true };
-    // Only an onlyLive cancel can fail this way: another cancel was recorded first.
-    if (options.onlyLive && current.status === "CANCEL_REQUESTED") return { operation: publicOperation(current), duplicate: true, alreadyCancelling: true };
-    throw agentXError("WORKSPACE_BUSY", "the workspace changed while the cancel was being recorded; try again");
-  }
-  return { operation: publicOperation(operation), duplicate: false };
-}
 
 async function stopWorkspace(
   dependencies: AwsBrokerDependencies,
@@ -3167,64 +3040,6 @@ async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: S
   const workspace = await requireWorkspace(dependencies, record.workspaceId);
   if (workspace.ownerKey !== ownerKey) throw agentXError("FORBIDDEN", "workspace does not belong to this thread");
   return cancelRunningTask(dependencies, workspace, { requestedBy: requester });
-}
-
-/**
- * Issue 173: the reconciler backstop asks the broker to cancel a Slack thread's coding task that has
- * run past the limit with nobody waiting on it. Invoked by the reconciler Lambda only, never through
- * API Gateway, and only in named environments (the legacy reconciler has no grant to invoke it).
- */
-export interface UnwaitedTaskStopEvent {
-  source: "agentx.session-reconciler";
-  action: "stop-unwaited-task";
-  workspaceId: string;
-  operationId: string;
-}
-
-export function isUnwaitedTaskStopEvent(event: unknown): event is UnwaitedTaskStopEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  // API Gateway always sets requestContext, so a request from outside can never take this path.
-  return value.source === "agentx.session-reconciler" && value.action === "stop-unwaited-task" && value.requestContext === undefined;
-}
-
-/**
- * Checks everything again, so the reconciler can never cancel more than this allows: the operation
- * is the workspace's active coding task, live past the limit, not started from an AI tool, its
- * workspace belongs to a Slack thread, and the thread's activeTurn (issue 157) does not name it.
- * Then it cancels through requestCancellation, as the cancel route does.
- */
-async function stopUnwaitedTask(dependencies: AwsBrokerDependencies, event: UnwaitedTaskStopEvent): Promise<UnwaitedTaskStop> {
-  if (dependencies.slackThreadsTableName === undefined) throw agentXError("NOT_FOUND", "the Slack threads table is not set up in this deployment");
-  const workspaceId = uuid(event.workspaceId, "workspaceId");
-  const operationId = uuid(event.operationId, "operationId");
-  const skipped = (reason: string): UnwaitedTaskStop => ({ outcome: "SKIPPED", reason });
-  const workspace = await requireWorkspace(dependencies, workspaceId);
-  if (workspace.activeOperationId !== operationId) return skipped("not-active");
-  const target = await requireOperation(dependencies, workspaceId, operationId);
-  if (!isUnwaitedTaskCandidate(target as unknown as Record<string, unknown>, new Date())) return skipped("not-a-candidate");
-  // MCP developer tasks run with no waiter by design: never touched.
-  if (await getItem(dependencies, taskPointerKey(workspaceId)) !== undefined) return skipped("developer-task");
-  const record = await getItem<{ workspaceId?: unknown; thread?: unknown }>(dependencies, slackThreadKey(workspace.ownerKey));
-  const parts = typeof record?.thread === "string" ? record.thread.split("/") : [];
-  const thread = SlackThreadSchema.safeParse({ teamId: parts[0], channelId: parts[1], threadTs: parts[2] });
-  if (record?.workspaceId !== workspaceId || parts.length !== 3 || !thread.success) return skipped("not-a-slack-thread");
-  const meta = await dependencies.documentClient.send(new GetCommand({
-    TableName: dependencies.slackThreadsTableName,
-    Key: { pk: `THREAD#${slackThreadSubject(thread.data)}`, sk: "META" },
-    ConsistentRead: true,
-  })) as { Item?: { activeTurn?: unknown } };
-  const activeTurn = meta.Item?.activeTurn;
-  if (activeTurn !== undefined && activeTurn !== null) {
-    const named = typeof activeTurn === "object" ? (activeTurn as { operationId?: unknown }).operationId : undefined;
-    // An activeTurn that cannot be read may name this task, so it counts as a waiter.
-    if (typeof named !== "string" || named.length === 0) return skipped("waiter-unreadable");
-    if (named === operationId) return skipped("waited-on");
-  }
-  const result = await requestCancellation(dependencies, workspace, operationId, {}, () => [], { onlyLive: true });
-  // A duplicate means the task finished, or another cancel was recorded, before this one.
-  if (result.duplicate) return skipped(result.alreadyCancelling ? "already-cancelling" : "finished");
-  return { outcome: "CANCEL_REQUESTED", cancelOperationId: result.operation.id, thread: { channelId: thread.data.channelId, threadTs: thread.data.threadTs } };
 }
 
 async function handleCallback(
@@ -4410,15 +4225,6 @@ function approvedDefault(defaultModel: ModelRef, approved: readonly ModelRef[]):
   return model;
 }
 
-async function requireOperation(
-  dependencies: AwsBrokerDependencies,
-  workspaceId: string,
-  operationId: string,
-): Promise<OperationRecord> {
-  const operation = await getItem<OperationRecord>(dependencies, operationKey(workspaceId, operationId));
-  if (!operation) throw agentXError("NOT_FOUND", "operation not found");
-  return operation;
-}
 
 async function requirePullRequest(
   dependencies: AwsBrokerDependencies,
@@ -4578,45 +4384,8 @@ async function adminTaskShareMode(dependencies: AwsBrokerDependencies, identity:
   );
 }
 
-async function getItem<T>(dependencies: AwsBrokerDependencies, key: { pk: string; sk: string }): Promise<T | undefined> {
-  const response = await dependencies.documentClient.send(new GetCommand({
-    TableName: dependencies.tableName,
-    Key: key,
-    ConsistentRead: true,
-  }));
-  return response.Item as T | undefined;
-}
 
-function operationRecord(operation: Operation, targetOperationId?: string): OperationRecord {
-  const parsed = OperationSchema.parse(operation);
-  return {
-    pk: `WORKSPACE#${parsed.workspaceId}`,
-    sk: `OPERATION#${parsed.id}`,
-    entityType: "OPERATION",
-    eventSequence: 0,
-    ...parsed,
-    ...(targetOperationId === undefined ? {} : { targetOperationId }),
-  };
-}
 
-function publicOperation(record: OperationRecord): Operation {
-  return OperationSchema.parse({
-    id: record.id,
-    workspaceId: record.workspaceId,
-    kind: record.kind,
-    requestId: record.requestId,
-    payloadHash: record.payloadHash,
-    status: record.status,
-    fence: record.fence,
-    createdAt: record.createdAt,
-    updatedAt: record.updatedAt,
-    ...(record.conversationId === undefined ? {} : { conversationId: record.conversationId }),
-    ...(record.heartbeatAt === undefined ? {} : { heartbeatAt: record.heartbeatAt }),
-    ...(record.result === undefined ? {} : { result: record.result }),
-    ...(typeof record.error === "string" ? { error: record.error } : {}),
-    ...(record.requestedBy === undefined ? {} : { requestedBy: record.requestedBy }),
-  });
-}
 
 /** Whether closing a workspace of this mode deletes its storage. */
 function closeReleasesStorage(workspace: WorkspaceInstance): boolean {
@@ -4645,35 +4414,6 @@ function workspaceRuntime(runtimeBinding: RuntimeBinding) {
 }
 
 /** Routes to the workspace's own runtime unless a project binding is given. */
-function outboxRecord(
-  workspace: WorkspaceInstance,
-  invocation: WorkerInvocation,
-  routing: RuntimeBinding | WorkspaceInstance = workspace,
-): DurableOutboxRecord & { pk: string; sk: string; createdAt: string } {
-  const id = randomUUID();
-  const key = { pk: `OUTBOX#${id}`, sk: "OUTBOX" };
-  const common = {
-    id,
-    entityType: "OUTBOX",
-    status: "PENDING",
-    operationId: invocation.operationId,
-    workspaceId: workspace.id,
-  } as const;
-  const mismatch = () => agentXError(
-    "CONFIG_INVALID",
-    `a ${workspace.deploymentMode} workspace cannot be routed to a ${routing.deploymentMode} runtime`,
-  );
-  switch (workspace.deploymentMode) {
-    case "instances-ebs":
-    case "demo-microvm":
-      throw agentXError("RUNTIME_UNAVAILABLE", "retired workspace cannot execute work");
-    case "ec2-ebs":
-      if (routing.deploymentMode !== "ec2-ebs") throw mismatch();
-      return { ...key, ...common, deploymentMode: "ec2-ebs", invocation, createdAt: new Date().toISOString() };
-    default:
-      return unhandledDeploymentMode(workspace);
-  }
-}
 
 function workspaceItem(workspace: WorkspaceInstance) {
   // Spec 041: the sparse byWorkspaceProject index attributes make this record findable by project,
@@ -4699,9 +4439,6 @@ function workspaceKey(id: string) {
   return { pk: `WORKSPACE#${id}`, sk: "META" };
 }
 
-function operationKey(workspaceId: string, operationId: string) {
-  return { pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` };
-}
 
 function pullRequestKey(workspaceId: string, repository: string, number: number) {
   return {
@@ -4765,30 +4502,6 @@ async function exchangeRepositoryCredential(
   });
 }
 
-function issueCapability(
-  dependencies: AwsBrokerDependencies,
-  workspaceId: string,
-  operationId: string,
-  fence: number,
-  allowPullRequest = false,
-): string {
-  const claims: CallbackClaims = {
-    workspaceId,
-    operationId,
-    fence,
-    actions: [
-      "artifacts",
-      "events",
-      "result",
-      ...(allowPullRequest
-        ? ["pull-request" as const, "pull-request-update" as const, "codebuild" as const]
-        : []),
-    ],
-    expiresAt: Math.floor(Date.now() / 1_000) + 32_400,
-  };
-  const body = Buffer.from(JSON.stringify(claims)).toString("base64url");
-  return `${body}.${createHmac("sha256", dependencies.callbackSigningKey).update(body).digest("base64url")}`;
-}
 
 function verifyCapability(
   dependencies: AwsBrokerDependencies,

@@ -1,4 +1,4 @@
-// Issue 173: the reconciler backstop's grants are exact (invoke the broker, read the Slack secret),
+// Issue 173: the reconciler backstop's grants are exact (read thread waiters, read the Slack secret),
 // and they, its environment and its alarm exist only in named environments. The legacy templates
 // are proven byte-identical by legacy-templates.test.ts.
 import { App } from "aws-cdk-lib";
@@ -21,7 +21,7 @@ function reconciler(template: Template) {
     .flatMap((policy) => policy.Properties.PolicyDocument.Statement);
   return { environment: fn.Properties.Environment?.Variables ?? {}, statements };
 }
-const brokerId = (template: Template) => Object.keys(template.findResources("AWS::Lambda::Function")).find((id) => /^Broker[0-9A-F]{8}$/.test(id))!;
+const threadsTableId = (template: Template) => Object.keys(template.findResources("AWS::DynamoDB::Table")).find((id) => id.startsWith("SlackThreads"))!;
 const slackSecretId = (template: Template) => Object.keys(template.findResources("AWS::SecretsManager::Secret")).find((id) => id.startsWith("SlackSecret"))!;
 const actionsOf = (statements: Statement[]) => statements.flatMap((statement) => [statement.Action].flat());
 const backstopAlarms = (template: Template) => (Object.values(template.findResources("AWS::CloudWatch::Alarm")) as Alarm[])
@@ -31,10 +31,20 @@ describe("the unwaited task backstop's infrastructure (#173)", () => {
   const named = Template.fromStack(new ControlPlaneStack(new App(), "UnwaitedControlPlane", { naming: environmentNaming("staging") }));
   const legacy = Template.fromStack(new ControlPlaneStack(new App(), "UnwaitedLegacyControlPlane"));
 
-  it("lets the named reconciler invoke the broker function alone, and nothing else", () => {
+  it("never lets the reconciler invoke the broker: the backstop cancels inside the reconciler", () => {
+    for (const template of [named, legacy]) {
+      expect(actionsOf(reconciler(template).statements).filter((action) => action.startsWith("lambda:"))).toEqual([]);
+      expect(reconciler(template).environment).not.toHaveProperty("BROKER_FUNCTION_NAME");
+    }
+  });
+
+  it("lets the named reconciler read the Slack threads table by key, THREAD# items only, and nothing else there", () => {
     const { statements } = reconciler(named);
-    const invoke = statements.filter((statement) => actionsOf([statement]).some((action) => action.startsWith("lambda:")));
-    expect(invoke).toEqual([{ Sid: "StopUnwaitedTasks", Effect: "Allow", Action: "lambda:InvokeFunction", Resource: { "Fn::GetAtt": [brokerId(named), "Arn"] } }]);
+    const threads = statements.filter((statement) => JSON.stringify(statement.Resource).includes(threadsTableId(named)));
+    expect(threads).toEqual([{
+      Sid: "ReadThreadWaiters", Effect: "Allow", Action: "dynamodb:GetItem", Resource: { "Fn::GetAtt": [threadsTableId(named), "Arn"] },
+      Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] } },
+    }]);
   });
 
   it("lets the named reconciler read the Slack secret alone, for the bot token, and nothing else", () => {
@@ -43,10 +53,11 @@ describe("the unwaited task backstop's infrastructure (#173)", () => {
     expect(secrets).toEqual([{ Sid: "PostUnwaitedTaskNote", Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { Ref: slackSecretId(named) } }]);
   });
 
-  it("names the broker and the Slack secret to the named reconciler", () => {
+  it("names the threads table, the Slack secret and the callback signing key to the named reconciler", () => {
     expect(reconciler(named).environment).toMatchObject({
-      BROKER_FUNCTION_NAME: { Ref: brokerId(named) },
+      SLACK_THREADS_TABLE_NAME: { Ref: threadsTableId(named) },
       SLACK_SECRET_ARN: { Ref: slackSecretId(named) },
+      CALLBACK_SIGNING_KEY: { Ref: "CallbackSigningKey" },
     });
   });
 
@@ -68,8 +79,8 @@ describe("the unwaited task backstop's infrastructure (#173)", () => {
 
   it("adds none of it to the legacy deployment", () => {
     const { environment, statements } = reconciler(legacy);
-    expect(environment).not.toHaveProperty("BROKER_FUNCTION_NAME");
-    expect(environment).not.toHaveProperty("SLACK_SECRET_ARN");
+    for (const name of ["BROKER_FUNCTION_NAME", "SLACK_SECRET_ARN", "SLACK_THREADS_TABLE_NAME", "CALLBACK_SIGNING_KEY"]) expect(environment).not.toHaveProperty(name);
+    expect(JSON.stringify(statements)).not.toContain("SlackThreads");
     expect(actionsOf(statements).filter((action) => action.startsWith("lambda:") || action.startsWith("secretsmanager:"))).toEqual([]);
     expect(backstopAlarms(legacy)).toEqual([]);
   });

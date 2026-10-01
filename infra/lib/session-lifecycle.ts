@@ -279,21 +279,28 @@ export class SessionLifecycle extends Construct {
   }
 
   /**
-   * Issue 173, named environments only: the reconciler cancels a Slack thread's task left running
-   * over 4 hours with nobody waiting. It asks the broker to cancel (the broker checks again and uses
-   * the cancel route's own path), so it may invoke the broker function alone; and it posts the
-   * thread's note with the bot token, so it may read the Slack secret alone.
+   * Issue 173, named environments only: the reconciler stops a Slack thread's task idle over 24
+   * hours with nobody waiting. It cancels through the shared cancel code, which writes the State
+   * table (already granted; the outbox publisher dispatches the cancel) and signs the cancel's worker
+   * callbacks with the callback signing key, as the broker does. It reads the thread's activeTurn by
+   * key (THREAD# items only) and posts the thread's note with the bot token (the Slack secret alone).
    */
-  connectUnwaitedTaskBackstop(broker: lambda.IFunction, slackSecret: secretsmanager.Secret): void {
-    this.reconciler.addEnvironment("BROKER_FUNCTION_NAME", broker.functionName);
+  connectUnwaitedTaskBackstop(slackThreads: dynamodb.Table, slackSecret: secretsmanager.Secret, callbackSigningKey: string): void {
+    this.reconciler.addEnvironment("SLACK_THREADS_TABLE_NAME", slackThreads.tableName);
     this.reconciler.addEnvironment("SLACK_SECRET_ARN", slackSecret.secretArn);
-    this.reconciler.addToRolePolicy(new iam.PolicyStatement({ sid: "StopUnwaitedTasks", actions: ["lambda:InvokeFunction"], resources: [broker.functionArn] }));
+    this.reconciler.addEnvironment("CALLBACK_SIGNING_KEY", callbackSigningKey);
+    this.reconciler.addToRolePolicy(new iam.PolicyStatement({
+      sid: "ReadThreadWaiters",
+      actions: ["dynamodb:GetItem"],
+      resources: [slackThreads.tableArn],
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] } },
+    }));
     this.reconciler.addToRolePolicy(new iam.PolicyStatement({ sid: "PostUnwaitedTaskNote", actions: ["secretsmanager:GetSecretValue"], resources: [slackSecret.secretArn] }));
     // A failed cancel or read is retried on the next run; failures on two runs in a row mean it is not recovering.
     const failures = (metricName: string) => new cloudwatch.Metric({ namespace: this.naming.metricsNamespace, metricName, statistic: "Maximum", period: Duration.minutes(10) });
     new cloudwatch.Alarm(this, "UnwaitedTaskFailuresAlarm", {
       alarmName: this.naming.alarmName("UnwaitedTaskFailures"),
-      alarmDescription: "The reconciler could not check or cancel Slack tasks left running over 4 hours with nobody waiting, on two runs in a row. Check the reconciler's logs for unwaited_task.cancel_failed, unwaited_task.read_failed and reconciler.unwaited_task_sweep_failed.",
+      alarmDescription: "The reconciler could not check or cancel Slack tasks idle over 24 hours with nobody waiting, on two runs in a row. Check the reconciler's logs for unwaited_task.cancel_failed, unwaited_task.read_failed and reconciler.unwaited_task_sweep_failed.",
       metric: new cloudwatch.MathExpression({
         expression: "FILL(cancels, 0) + FILL(reads, 0)",
         usingMetrics: { cancels: failures("ReconcilerUnwaitedTaskFailures"), reads: failures("ReconcilerUnwaitedTaskReadFailures") },

@@ -42,9 +42,9 @@ function withoutDispatchDeadLettersAlarm(template: unknown): unknown {
 }
 
 /**
- * Issue 173 adds the reconciler backstop to a named control plane, and nothing else: its two
- * environment variables, its two statements and its alarm. They are checked here to be exactly
- * these, then taken out, so the rest of the template must still match the recorded snapshot.
+ * Issue 173 adds the reconciler backstop to a named control plane, and nothing else: three
+ * environment variables, two statements and one alarm. Each is checked strictly to be exactly
+ * this, then taken out, so the rest of the template must still match the recorded snapshot.
  */
 function withoutUnwaitedTaskBackstop(template: unknown): unknown {
   const resources = (template as { Resources: Record<string, Resource> }).Resources;
@@ -52,30 +52,58 @@ function withoutUnwaitedTaskBackstop(template: unknown): unknown {
   expect(reconcilerEntry).toBeDefined();
   const reconciler = reconcilerEntry![1];
   const variables = (reconciler.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-  const brokerId = Object.keys(resources).find((id) => /^Broker[0-9A-F]{8}$/.test(id))!;
+  const threadsId = Object.keys(resources).find((id) => id.startsWith("SlackThreads") && resources[id]!.Type === "AWS::DynamoDB::Table")!;
   const slackSecretId = Object.keys(resources).find((id) => id.startsWith("SlackSecret") && resources[id]!.Type === "AWS::SecretsManager::Secret")!;
-  expect(variables.BROKER_FUNCTION_NAME).toEqual({ Ref: brokerId });
-  expect(variables.SLACK_SECRET_ARN).toEqual({ Ref: slackSecretId });
-  delete variables.BROKER_FUNCTION_NAME;
-  delete variables.SLACK_SECRET_ARN;
+  const topicId = Object.keys(resources).find((id) => id.startsWith("OperatorAlerts") && resources[id]!.Type === "AWS::SNS::Topic");
+  expect(threadsId).toBeDefined();
+  expect(slackSecretId).toBeDefined();
+  expect(topicId).toBeDefined();
+  const added = { SLACK_THREADS_TABLE_NAME: { Ref: threadsId }, SLACK_SECRET_ARN: { Ref: slackSecretId }, CALLBACK_SIGNING_KEY: { Ref: "CallbackSigningKey" } };
+  expect(Object.fromEntries(Object.keys(added).map((name) => [name, variables[name]]))).toStrictEqual(added);
+  for (const name of Object.keys(added)) delete variables[name];
   const roleId = (reconciler.Properties.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"][0];
   const policies = Object.values(resources).filter((resource) => resource.Type === "AWS::IAM::Policy"
     && (resource.Properties.Roles as Array<{ Ref?: string }>).some((role) => role.Ref === roleId));
-  const added = new Set(["StopUnwaitedTasks", "PostUnwaitedTaskNote"]);
+  const sids = new Set(["ReadThreadWaiters", "PostUnwaitedTaskNote"]);
   const removed: Statement[] = [];
   for (const policy of policies) {
     const document = policy.Properties.PolicyDocument as { Statement: Statement[] };
-    removed.push(...document.Statement.filter((statement) => added.has(statement.Sid ?? "")));
-    document.Statement = document.Statement.filter((statement) => !added.has(statement.Sid ?? ""));
+    removed.push(...document.Statement.filter((statement) => sids.has(statement.Sid ?? "")));
+    document.Statement = document.Statement.filter((statement) => !sids.has(statement.Sid ?? ""));
   }
-  expect(removed).toEqual([
-    { Sid: "StopUnwaitedTasks", Effect: "Allow", Action: "lambda:InvokeFunction", Resource: { "Fn::GetAtt": [brokerId, "Arn"] } },
-    { Sid: "PostUnwaitedTaskNote", Effect: "Allow", Action: "secretsmanager:GetSecretValue", Resource: { Ref: slackSecretId } },
+  expect(removed).toStrictEqual([
+    {
+      Action: "dynamodb:GetItem",
+      Condition: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] } },
+      Effect: "Allow",
+      Resource: { "Fn::GetAtt": [threadsId, "Arn"] },
+      Sid: "ReadThreadWaiters",
+    },
+    { Action: "secretsmanager:GetSecretValue", Effect: "Allow", Resource: { Ref: slackSecretId }, Sid: "PostUnwaitedTaskNote" },
   ]);
   const alarms = Object.keys(resources).filter((id) => id.startsWith("SessionsUnwaitedTaskFailuresAlarm"));
   expect(alarms).toHaveLength(1);
-  expect(resources[alarms[0]!]!.Properties).toMatchObject({ AlarmName: "agentx-staging-UnwaitedTaskFailures" });
-  expect(JSON.stringify(resources[alarms[0]!]!.Properties.Metrics)).toContain("ReconcilerUnwaitedTaskReadFailures");
+  const failures = (id: string, metricName: string) => ({
+    Id: id, MetricStat: { Metric: { MetricName: metricName, Namespace: "AgentX/staging" }, Period: 600, Stat: "Maximum" }, ReturnData: false,
+  });
+  expect(resources[alarms[0]!]).toStrictEqual({
+    Type: "AWS::CloudWatch::Alarm",
+    Properties: {
+      AlarmActions: [{ Ref: topicId }],
+      AlarmDescription: "The reconciler could not check or cancel Slack tasks idle over 24 hours with nobody waiting, on two runs in a row. Check the reconciler's logs for unwaited_task.cancel_failed, unwaited_task.read_failed and reconciler.unwaited_task_sweep_failed.",
+      AlarmName: "agentx-staging-UnwaitedTaskFailures",
+      ComparisonOperator: "GreaterThanOrEqualToThreshold",
+      EvaluationPeriods: 2,
+      Metrics: [
+        { Expression: "FILL(cancels, 0) + FILL(reads, 0)", Id: "expr_1", Label: "Unwaited task cancel and read failures", ReturnData: true },
+        failures("cancels", "ReconcilerUnwaitedTaskFailures"),
+        failures("reads", "ReconcilerUnwaitedTaskReadFailures"),
+      ],
+      Tags: [{ Key: "agentx:env", Value: "staging" }],
+      Threshold: 1,
+      TreatMissingData: "notBreaching",
+    },
+  });
   delete resources[alarms[0]!];
   return template;
 }
