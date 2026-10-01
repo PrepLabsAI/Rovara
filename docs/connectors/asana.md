@@ -1,6 +1,6 @@
 # Asana connector
 
-AgentX is open source and self-hosted. There is no shared Asana app. Your organisation creates its
+AgentX is source-available and self-hosted. There is no shared Asana app. Your organisation creates its
 own Asana app and its own bot user, stores the app's client secret and the bot user's refresh
 token in your own AWS Secrets Manager, and registers them with `agentx admin credential authorize`.
 This guide walks you through that, end to end, for one Asana project.
