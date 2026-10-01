@@ -38,6 +38,15 @@ interface CommandResult {
   stderr: string;
 }
 
+/** Takes `--env <name>` out of the arguments, leaving every other argument in place. */
+export function splitEnvFlag(argv: readonly string[]): { env?: string; rest: string[] } {
+  const index = argv.indexOf("--env");
+  if (index < 0) return { rest: [...argv] };
+  const env = argv[index + 1];
+  if (env === undefined || env.startsWith("--")) throw new Error("--env requires a value");
+  return { env, rest: argv.filter((_, position) => position !== index && position !== index + 1) };
+}
+
 export function parseReleaseArgs(
   argv: readonly string[],
   environment = process.env,

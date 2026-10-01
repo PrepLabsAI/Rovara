@@ -2,7 +2,7 @@
 
 **Feature Branch**: `feat/045-secbench-patch`  
 **Created**: 2026-10-01  
-**Status**: Implemented; awaiting release (SC-003)  
+**Status**: Implemented and released (SC-003 checked 2026-10-01)  
 **Input**: Request to measure the AgentX coding agent on a security benchmark, after specs 043 and 044 put
 SWE-bench and SWE-Bench Pro runs in Slack
 
@@ -165,4 +165,10 @@ grading.
   (FR-008's `TMPDIR` arrangement), which SC-003's first production run exercises.
 - **SC-003**: In production, from the eval channel, one instance runs end to end on Sonnet 4.6, with the result in the
   thread, artifacts in S3, and the instance terminated afterwards.
+  Checked on 2026-10-01 (run `deba2b61`, release `a4b862f`): `njs.cve-2022-32414` resolved on Sonnet 4.6 in all three
+  modes; the agent finished after 27m 40s for $7.23 (17.2M tokens, 98% cache reads). The grading container's log shows
+  the patch applied, the build passed and the PoC exited 0 with no sanitizer report, so FR-008's `TMPDIR` arrangement
+  works from inside the runner container. All artifacts reached S3 and the instance terminated. The agent's fix (one
+  line in `njs_vmcode.c`) differs from the reference patch (input checks in `njs_promise.c`), which is the "no
+  regression tests" caveat in practice.
 - **SC-004**: Typecheck, lint and the full test suite pass; SWE-bench and SWE-Bench Pro runs are unchanged.
