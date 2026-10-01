@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "bin": {
-    "agentx": "./dist/main.js"
+    "agentx": "./dist/bin.js"
   },
   "dependencies": {
     "@agentx/contracts": "0.1.0",
