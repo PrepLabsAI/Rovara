@@ -1,8 +1,8 @@
-# Experiment Specification: Cost per Solved Task Across Models
+# Experiment Specification: The Final Campaign — SWE-bench, SEC-bench and Cost per Solved Task Across Models
 
 **Feature Branch**: `docs/046-model-cost-comparison`  
 **Created**: 2026-10-01  
-**Status**: Draft; blocked on batch runs (see Dependencies)  
+**Status**: Draft; the last step before launch, run once the build work below is done  
 **Input**: The first production SEC-bench run (spec 045 SC-003) cost $7.23 on Sonnet 4.6, and we asked whether
 GLM, Kimi or DeepSeek would be cheaper for the same results
 
@@ -22,6 +22,19 @@ price lists. Three things from 2026-10-01 show why:
 
 So we measure it ourselves, on our agent, with the harness we already have.
 
+## Role: the one paid campaign before launch
+
+Decision (2026-10-01): before launch, no model money goes on regression checks. Everything is built first: the Pi
+0.99 upgrade (050), agent verification (051), per-model thinking levels (053), and batch runs (052). Then this
+campaign runs once, on the finished agent, and produces the three results that matter:
+
+1. **SWE-bench results** for the AgentX coding agent.
+2. **SEC-bench results.**
+3. **The model comparison on both:** resolve rate and cost per solved task.
+
+It also validates spec 051. The rate at which the agent's claim disagrees with AgentX's check or the grader is
+reported per model.
+
 ## The question
 
 For each candidate model, on the same tasks, under the same agent and limits: **what share of tasks does it solve,
@@ -35,6 +48,8 @@ The result informs two decisions, which this experiment does not make by itself:
 
 ## Dependencies
 
+- **D-0: The build work comes first.** Specs 050 (Pi 0.99), 051 (verification) and 053's per-model thinking level must be
+  released before the campaign, and the runner image is then frozen for it.
 - **D-A: Batch runs (spec 052, not yet written).** Today the runner allows one run per deployment, started by hand from
   Slack. This experiment needs a batch of (task, model, repeat) runs, with several running at once, each recorded
   with its result. The batch spec (052) is a separate piece of work, and the SWE-bench learnings session recommended it.
@@ -49,7 +64,11 @@ The result informs two decisions, which this experiment does not make by itself:
 
 ### Tasks
 
-- **Benchmark:** SEC-bench patch task (spec 045). One family, so the grader is the same for every run.
+- **SEC-bench (patch task, spec 045):** as below.
+- **SWE-bench:** the dataset and slice are open (Q-4). The recommendation is a SWE-Bench Pro slice, harder and newer,
+  with a small Verified slice so the results can be compared with public numbers. It uses the same models,
+  controls and analysis as SEC-bench, with its own budget line (Q-5).
+- **SEC-bench task selection:**
 - **Phase 1 (screen):** 8 instances. **Phase 2 (confirm):** more tasks and repeats for the one or two models Phase 1
   picks out, budgeted separately.
 - **Selection:** stratified across projects (no more than 2 per project) and sanitizer types, drawn once with a
@@ -68,6 +87,12 @@ The result informs two decisions, which this experiment does not make by itself:
 | MiniMax M3 | OpenRouter, one pinned provider | low price with cached reads; about a sixth of Sonnet |
 
 Opus 5 is out until its Bedrock agreement is accepted.
+
+### Shakedown, then freeze
+
+Before the full campaign, run a **shakedown slice**: 1 SEC-bench task and 1 SWE-bench task on all six models, about
+$20, cheapest models first. Fix what it shows, then **freeze the runner image** by digest. Any fix after the freeze
+means the runs it affects are run again, so every model is compared on the same agent.
 
 ### Controls (identical for every run)
 
@@ -141,7 +166,11 @@ baseline matters least to re-measure. Phase 2 is planned and budgeted after Phas
 
 - **Q-1** (answered 2026-10-01): six models, including Qwen3 Coder Plus and MiniMax M3.
 - **Q-2** (answered 2026-10-01): Phase 1 capped at $200.
-- **Q-3:** Run before or after the agent verification fix (D-B)? Recommended: after.
+- **Q-3** (answered 2026-10-01): after the verification fix, as part of the final campaign.
+- **Q-4:** Which SWE-bench: a Pro slice plus a small Verified slice (recommended), Verified only, or Pro only? And how
+  many tasks?
+- **Q-5:** The total campaign budget. SEC-bench Phase 1 is capped at $200. Adding a similar-sized SWE-bench part
+  brings the total to roughly $300-450.
 
 ## Success Criteria
 
