@@ -224,7 +224,9 @@ async function createDefaultSession(
 /**
  * The agent's shell: pi's bash tool, in the project's devcontainer when `operations` says so (#121),
  * with AgentX's git identity in its environment so a commit there works without the agent writing
- * an identity into the repository (#208).
+ * an identity into the repository (#208). It replaces pi's built-in bash tool on purpose, so pi's
+ * shell settings (shellCommandPrefix, shellPath) do not apply: AgentX's agent directory has none,
+ * and a repository's own pi settings must not change how the agent's shell runs.
  */
 export function agentShellTool(cwd: string, operations?: BashOperations): ToolDefinition {
   // The typed definition's render callbacks are narrower than customTools' generic slot.

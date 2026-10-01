@@ -1,12 +1,12 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { diffStat, type WorkerInvocation } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
-import { publishWorkspaceDiff, workspaceFingerprint, type WorkerArtifact } from "../../packages/worker/src/artifacts.js";
+import { MISSING_BASE_NOTE, publishWorkspaceDiff, workspaceFingerprint, type WorkerArtifact } from "../../packages/worker/src/artifacts.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
 import type { PiSessionAdapter, PiSessionHandle } from "../../packages/worker/src/pi-session.js";
@@ -448,6 +448,21 @@ describe("changes the agent commits count as changes (#208)", () => {
     const third = await runScripted([edit("README.md", false)], { prepared, conversationId, conversationStarted: true });
     await expect(third.result).resolves.toBeDefined();
     expect(progressMessages(third.events)).toContainEqual(expect.stringContaining("but no repository changed"));
+  });
+
+  it("says so in the diff when the starting commit is gone, and still counts the moved HEAD", async () => {
+    const { rootPath, repository } = await preparedRepository();
+    const manifestPath = join(rootPath, ".agentx/preparation-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { repositories: Array<{ resolvedCommit: string }> };
+    manifest.repositories[0]!.resolvedCommit = "0".repeat(40);
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    let content = "";
+    await expect(publishWorkspaceDiff(rootPath, async (artifact) => { content = artifact.content; })).resolves.toEqual({ changed: true });
+    expect(content).toBe(`## app\n\n${MISSING_BASE_NOTE}\n### status\n\n### diff\n`);
+    expect(diffStat(content)).toEqual([]);
+    await writeFile(join(repository, "README.md"), "uncommitted\n");
+    await publishWorkspaceDiff(rootPath, async (artifact) => { content = artifact.content; });
+    expect(diffStat(content)).toEqual([{ repository: "app", path: "README.md", added: 1, removed: 1 }]);
   });
 
   it("publishWorkspaceDiff and the workspace fingerprint both see a commit on a clean tree", async () => {

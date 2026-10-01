@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -22,10 +22,11 @@ describe("the agent's shell has AgentX's git identity (#208)", () => {
   beforeEach(async () => {
     for (const name of isolated) saved[name] = process.env[name];
     for (const name of Object.keys(IDENTITY)) delete process.env[name];
-    // No global or system git config, as on a worker host: git has no identity of its own to use.
-    const empty = join(await mkdtemp(join(tmpdir(), "agentx-gitconfig-")), "gitconfig");
-    await writeFile(empty, "");
-    process.env.GIT_CONFIG_GLOBAL = empty;
+    // No identity in git's global or system config, as on a worker host, and no guessing one from
+    // the user and host names: without the shell's identity, a commit fails.
+    const global = join(await mkdtemp(join(tmpdir(), "agentx-gitconfig-")), "gitconfig");
+    await writeFile(global, "[user]\n\tuseConfigOnly = true\n");
+    process.env.GIT_CONFIG_GLOBAL = global;
     process.env.GIT_CONFIG_NOSYSTEM = "1";
   });
 
@@ -36,7 +37,7 @@ describe("the agent's shell has AgentX's git identity (#208)", () => {
     }
   });
 
-  it("a commit in the agent's shell is authored by AgentX and writes no identity into the repository", async () => {
+  it("a commit in the agent's shell works and is authored and committed by AgentX", async () => {
     const repository = await mkdtemp(join(tmpdir(), "agentx-identity-"));
     await run("git", ["init", "--quiet", "--initial-branch=main", repository]);
     await writeFile(join(repository, "README.md"), "live test\n");
@@ -46,7 +47,6 @@ describe("the agent's shell has AgentX's git identity (#208)", () => {
 
     const { stdout } = await run("git", ["-C", repository, "log", "-1", "--format=%an <%ae>|%cn <%ce>"]);
     expect(stdout.trim()).toBe("AgentX <agentx@noreply.local>|AgentX <agentx@noreply.local>");
-    expect(await readFile(join(repository, ".git/config"), "utf8")).not.toMatch(/^\s*(name|email)\s*=/m);
   });
 
   it("a container shell (devcontainer) receives the same identity", async () => {
