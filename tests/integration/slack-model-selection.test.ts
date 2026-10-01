@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProjectModelOptions, SlackRequestMessage } from "../../packages/contracts/src/index.js";
+import { ProjectModelOptionsSchema } from "../../packages/contracts/src/index.js";
+import { modelOptionsMessage } from "../../packages/slack-service/src/model-command.js";
 import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
 
 const options: ProjectModelOptions = {
@@ -43,6 +45,22 @@ function harness() {
 }
 
 describe("Slack project model commands", () => {
+  it("shows the thinking level on approved entries that carry one and leaves the others unchanged", () => {
+    const parsed = ProjectModelOptionsSchema.parse({
+      projectName: "payments",
+      approved: [
+        { provider: "openrouter", modelId: "z-ai/glm-5.3", label: "GLM 5.3", thinkingLevel: "medium" },
+        { provider: "amazon-bedrock", modelId: "fast-v1", label: "Fast" },
+      ],
+      current: { provider: "openrouter", modelId: "z-ai/glm-5.3", label: "GLM 5.3", thinkingLevel: "medium" },
+      source: "default",
+    });
+    expect(modelOptionsMessage(parsed).split("\n").slice(1, 3)).toEqual([
+      "• GLM 5.3 (thinking: medium) — `openrouter/z-ai/glm-5.3` _(current)_",
+      "• Fast — `amazon-bedrock/fast-v1`",
+    ]);
+  });
+
   it("distinguishes approved OpenRouter and Bedrock models by provider", async () => {
     const h = harness();
     const mixed = { ...options, approved: [options.approved[0]!, { provider: "openrouter", modelId: "balanced-v1", label: "Router" }] };
