@@ -10,8 +10,8 @@
 // Spec 048 FR-010 and FR-011: every question also carries the page's own words (question-copy.ts):
 // a label, a why line, an example, a hint for an empty field, and verb buttons. The terminal's own
 // question text and behavior never change; help is page-only.
-import { stripPasteMarkers, type Prompter, type QuestionHelp } from "../prompts.js";
-import type { WizardButton } from "./protocol.js";
+import { stripPasteMarkers, type FormField, type Prompter, type QuestionHelp } from "../prompts.js";
+import type { WizardButton, WizardField } from "./protocol.js";
 import { pageHint, questionHelp } from "./question-copy.js";
 import type { AnswerCheck, NewQuestion, WizardHub } from "./state.js";
 
@@ -100,6 +100,52 @@ export function browserPrompter(hub: WizardHub): Prompter {
         { kind: "secret", text: question, masked: true, ...(multiline ? { multiline: true } : {}), ...pageFields(help) },
         secretCheck(question, multiline, options.validate),
       );
+    },
+    async form(title, fields, options) {
+      const help = questionHelp({ kind: "form", text: title, ...(options.help === undefined ? {} : { given: options.help }) });
+      const toField = (field: FormField, kept?: string, error?: string): WizardField => {
+        const fieldHelp = questionHelp({ kind: field.secret === true ? "secret" : "ask", text: field.question, flag: field.flag, ...(field.help === undefined ? {} : { given: field.help }) });
+        const hint = field.secret === true ? undefined : pageHint(field.defaultValue, fieldHelp);
+        return {
+          name: field.name, label: fieldHelp.label ?? field.question,
+          ...(fieldHelp.why === undefined ? {} : { why: fieldHelp.why }),
+          ...(fieldHelp.example === undefined ? {} : { example: fieldHelp.example }),
+          ...(hint === undefined ? {} : { hint }),
+          ...(field.secret === true ? { masked: true } : {}),
+          // FR-012: only a plain value is ever sent back to the page, never a secret.
+          ...(field.secret !== true && kept !== undefined ? { value: kept } : {}),
+          ...(error === undefined ? {} : { error }),
+        };
+      };
+      const question = (kept: Record<string, string> = {}, errors: Record<string, string> = {}): NewQuestion => ({
+        kind: "form", text: title, ...pageFields(help), fields: fields.map((field) => toField(field, kept[field.name], errors[field.name])),
+      });
+      const raw = await hub.ask(question(), (posted) => {
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(posted);
+        } catch {
+          return { error: "the form could not be read; try again" };
+        }
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { error: "the form could not be read; try again" };
+        const given = parsed as Record<string, unknown>;
+        const values: Record<string, string> = {};
+        const errors: Record<string, string> = {};
+        for (const field of fields) {
+          const value = typeof given[field.name] === "string" ? (given[field.name] as string) : "";
+          const check = field.secret === true
+            ? secretCheck(field.question, false, field.validate)
+            : askCheck({ ...(field.defaultValue === undefined ? {} : { defaultValue: field.defaultValue }), ...(field.validate === undefined ? {} : { validate: field.validate }) });
+          const result = check(value);
+          if ("error" in result) errors[field.name] = result.error;
+          else values[field.name] = result.value;
+        }
+        const refused = Object.keys(errors).length;
+        if (refused === 0) return { value: JSON.stringify(values) };
+        const kept = Object.fromEntries(fields.filter((field) => field.secret !== true && values[field.name] !== undefined).map((field) => [field.name, values[field.name] ?? ""]));
+        return { error: refused === 1 ? "Check the field marked below." : `Check the ${refused} fields marked below.`, retry: question(kept, errors) };
+      });
+      return JSON.parse(raw) as Record<string, string>;
     },
   };
 }

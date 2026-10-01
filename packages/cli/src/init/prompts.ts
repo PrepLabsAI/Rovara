@@ -39,6 +39,32 @@ export interface Prompter {
    * interactive prompt. `validate` is checked on the field by the install page (spec 040 FR-040);
    * the terminal's hidden prompt ignores it, and the caller's own check still runs after. */
   secret(question: string, options: PromptFlag & { multiline?: boolean; validate?: (value: string) => string | undefined; help?: QuestionHelp }): Promise<string>;
+  /** Optional: several related values on one screen (the install page). */
+  form?(title: string, fields: readonly FormField[], options: { help?: QuestionHelp }): Promise<Record<string, string>>;
+}
+
+/** Spec 048 FR-012: one value of a form. `question` and `flag` are what the terminal asks. */
+export interface FormField {
+  name: string;
+  question: string;
+  flag: string;
+  defaultValue?: string;
+  secret?: boolean;
+  validate?: (value: string) => string | undefined;
+  help?: QuestionHelp;
+}
+
+/** The page's one form, or, with no form on this prompter (the terminal), the same questions in order. */
+export async function askForm(prompter: Prompter, title: string, fields: readonly FormField[], options: { help?: QuestionHelp } = {}): Promise<Record<string, string>> {
+  if (prompter.form !== undefined) return prompter.form(title, fields, options);
+  const values: Record<string, string> = {};
+  for (const field of fields) {
+    const validate = field.validate === undefined ? {} : { validate: field.validate };
+    values[field.name] = field.secret === true
+      ? await prompter.secret(field.question, { flag: field.flag, ...validate })
+      : await prompter.ask(field.question, { flag: field.flag, ...(field.defaultValue === undefined ? {} : { defaultValue: field.defaultValue }), ...validate });
+  }
+  return values;
 }
 
 const PASTE_START = "\u001b[200~";

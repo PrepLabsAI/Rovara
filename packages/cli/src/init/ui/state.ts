@@ -24,8 +24,9 @@ const withNote = (link: WizardLink): WizardLink => ({ ...link, note: NEW_TAB_NOT
 export const LOG_BACKLOG = 1000;
 
 /** Checks and normalizes one posted answer. `error` is shown on the field and the question is asked
- * again; `value` is what the `Prompter` caller receives. */
-export type AnswerCheck = (raw: string) => { value: string } | { error: string };
+ * again; `value` is what the `Prompter` caller receives. `retry` republishes a different question
+ * than the one asked (a form redisplays its fields with the valid ones kept and errors marked). */
+export type AnswerCheck = (raw: string) => { value: string } | { error: string; retry?: NewQuestion };
 
 export interface WizardListener {
   state(state: WizardState): void;
@@ -293,7 +294,7 @@ export function createWizardHub(env: string, options: { now?: () => number; logP
       const checked = waiting.check(value);
       if ("error" in checked) {
         // Never echo `value`: it may be a secret. Only the check's own message reaches the page.
-        pending = { ...waiting, question: publishQuestion(waiting.asked, checked.error) };
+        pending = { ...waiting, question: publishQuestion(checked.retry ?? waiting.asked, checked.error) };
         return checked.error;
       }
       pending = undefined;

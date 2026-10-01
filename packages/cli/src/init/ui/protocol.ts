@@ -12,12 +12,15 @@ import type { JourneyPhaseId, JourneyView } from "./journey.js";
 export const WIZARD_TOKEN_HEADER = "x-agentx-wizard-token";
 export const WIZARD_TOKEN_QUERY = "t";
 
-export type QuestionKind = "ask" | "choose" | "confirm" | "secret" | "actions";
+export type QuestionKind = "ask" | "choose" | "confirm" | "secret" | "actions" | "form";
 
 export interface WizardChoice { value: string; label: string }
 
 /** A button on the page. A confirm has two; an actions question one per choice. */
 export interface WizardButton { value: string; label: string; primary: boolean }
+
+/** One field of a form question. A masked field never carries a value back to the page. */
+export interface WizardField { name: string; label: string; why?: string; example?: string; hint?: string; masked?: boolean; value?: string; error?: string }
 
 export interface WizardQuestion {
   /** Fresh per question, and again after an inline rejection, so a stale page cannot answer twice. */
@@ -42,6 +45,8 @@ export interface WizardQuestion {
   multiline?: boolean;
   /** Why the previous answer was refused, shown on the field rather than ending the run (FR-003). */
   error?: string;
+  /** form: its fields, in order. The answer is a JSON object of field name to value. */
+  fields?: WizardField[];
 }
 
 export type StepStatus = "pending" | "skipped" | "running" | "done" | "waiting" | "failed";
