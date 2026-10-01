@@ -1,15 +1,16 @@
 import { SWEBENCH_DATASETS, type SwebenchDataset } from "@agentx/contracts";
 
-/** The fields of a SWE-bench row the runner reads; the harness gets the whole row. */
+/**
+ * The fields of a row the runner reads; the swebench harness gets the whole row. A SWE-Bench Pro row
+ * names its image `docker_image`, which the loader copies to `image` (spec 044).
+ */
 export interface SwebenchInstance {
   instance_id: string;
   repo: string;
   base_commit: string;
   problem_statement: string;
-  /** The prebuilt x86 image, as the SWE-bench/* datasets name it. */
+  /** The prebuilt x86 image. */
   image: string;
-  FAIL_TO_PASS: string[] | string;
-  PASS_TO_PASS: string[] | string;
   [field: string]: unknown;
 }
 
@@ -32,9 +33,10 @@ export interface DatasetOptions {
 export async function loadSwebenchInstance(dataset: SwebenchDataset, instanceId: string, options: DatasetOptions = {}): Promise<SwebenchInstance> {
   const fetchImplementation = options.fetch ?? fetch;
   const sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
-  const name = SWEBENCH_DATASETS[dataset];
+  const { name, config, family } = SWEBENCH_DATASETS[dataset];
   const where = `"instance_id"='${instanceId.replace(/'/g, "''")}'`;
-  const filterUrl = `${DATASETS_SERVER}/filter?${new URLSearchParams({ dataset: name, config: "default", split: "test", where, offset: "0", length: "1" }).toString()}`;
+  const filterUrl = `${DATASETS_SERVER}/filter?${new URLSearchParams({ dataset: name, config, split: "test", where, offset: "0", length: "1" }).toString()}`;
+  const instanceRow = (row: Record<string, unknown>, id: string) => normalizedRow(family === "pro" && row.image === undefined ? { ...row, image: row.docker_image } : row, id);
   for (let attempt = 1; attempt <= FILTER_ATTEMPTS; attempt += 1) {
     const page = await readPage(fetchImplementation, filterUrl);
     if (page.rows !== undefined) {
@@ -46,7 +48,7 @@ export async function loadSwebenchInstance(dataset: SwebenchDataset, instanceId:
   }
   // The filter index never became available: scan the split instead.
   for (let offset = 0; ; offset += PAGE_LENGTH) {
-    const url = `${DATASETS_SERVER}/rows?${new URLSearchParams({ dataset: name, config: "default", split: "test", offset: String(offset), length: String(PAGE_LENGTH) }).toString()}`;
+    const url = `${DATASETS_SERVER}/rows?${new URLSearchParams({ dataset: name, config, split: "test", offset: String(offset), length: String(PAGE_LENGTH) }).toString()}`;
     const page = await readPage(fetchImplementation, url);
     if (page.rows === undefined) throw new Error(`could not read ${name} from the Hugging Face datasets server: ${page.error ?? "no rows"}`);
     const row = page.rows.find((candidate) => candidate.instance_id === instanceId);
@@ -74,7 +76,7 @@ async function readPage(fetchImplementation: typeof fetch, url: string): Promise
   return { rows, ...(typeof body.num_rows_total === "number" ? { total: body.num_rows_total } : {}) };
 }
 
-function instanceRow(row: Record<string, unknown>, instanceId: string): SwebenchInstance {
+function normalizedRow(row: Record<string, unknown>, instanceId: string): SwebenchInstance {
   for (const field of ["instance_id", "repo", "base_commit", "problem_statement", "image"] as const) {
     if (typeof row[field] !== "string" || row[field] === "") throw new Error(`${instanceId}'s row has no ${field}`);
   }

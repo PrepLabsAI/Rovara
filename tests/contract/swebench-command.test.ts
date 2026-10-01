@@ -27,7 +27,8 @@ describe("the eval swebench command (spec 043 FR-001)", () => {
 
   it.each([
     ["eval swebench", /which dataset/],
-    ["eval swebench pro django__django-11099", /Unknown dataset “pro”/],
+    ["eval swebench enterprise django__django-11099", /Unknown dataset “enterprise”/],
+    ["eval swebench pro django__django-11099", /not a SWE-Bench Pro instance ID/],
     ["eval swebench verified", /which instance/],
     ["eval swebench verified not-an-instance", /not a SWE-bench instance ID/],
     ["eval swebench verified django__django-11099 django__django-11100", /exactly one instance/],
@@ -36,7 +37,7 @@ describe("the eval swebench command (spec 043 FR-001)", () => {
     const command = parseSwebenchCommand(text);
     expect(command?.kind).toBe("invalid");
     expect(command?.kind === "invalid" ? command.message : "").toMatch(message);
-    expect(command?.kind === "invalid" ? command.message : "").toContain("eval swebench <verified|lite|full>");
+    expect(command?.kind === "invalid" ? command.message : "").toContain("eval swebench <verified|lite|full|pro|pro-hard>");
   });
 });
 

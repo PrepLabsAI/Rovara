@@ -14,6 +14,22 @@ the thread cancels the run. One run is active per deployment at a time.
 A run measures the coding agent: the worker's Pi session, tools, prompts and model. It does not use a
 project workspace, devcontainer or pull request, and does not measure the Slack orchestrator.
 
+### SWE-Bench Pro (spec 044)
+
+`pro` names SWE-Bench Pro V2's 642 tasks and `pro-hard` its HARD-51 subset (tasks at least two of five
+frontier model families failed). Their IDs look like `instance_NodeBB__NodeBB-<commit>-v<suffix>`; the
+`instance_id` column of `ScaleAI/SWE-bench_Pro` on Hugging Face lists them.
+
+```
+@agentx eval swebench pro-hard instance_NodeBB__NodeBB-8168c6c40707478f71b8af60300830fe554c778c-vf2cf3cbd463b7ad942381f1c6d077626485a1e9e model Claude Sonnet 4.6
+```
+
+A Pro run differs from a SWE-bench run in four ways: the agent works from the task's `instruction.md` (PR
+description, requirements and new interfaces); the repository is at `/app` (a few at `/testbed`); the
+agent has Pro's 50-minute budget and a 400-call tool backstop; and the task's own Harbor verifier grades
+the patch in a fresh container. The task's files come from `scaleapi/SWE-bench_Pro-os` at a pinned commit,
+checked against its `SHA256SUMS`, and the hidden tests never enter the agent's container.
+
 ## How a run works
 
 ```mermaid

@@ -29,12 +29,26 @@ export async function pullTaskImage(docker: DockerCli, image: string): Promise<s
   return digest;
 }
 
-/** Copies the image's /testbed to `hostFolder`, which must not exist yet. */
-export async function copyTestbed(docker: DockerCli, image: string, hostFolder: string): Promise<void> {
+/**
+ * Where the image keeps the repository: SWE-bench's at /testbed, SWE-Bench Pro's at /app and a few
+ * at /testbed (spec 044 FR-004).
+ */
+export async function findRepository(docker: DockerCli, image: string): Promise<string> {
+  const found = await checked(docker, [
+    "run", "--rm", "--platform", TASK_PLATFORM, "--network", "none", "--entrypoint", "sh", image, "-c",
+    "for d in /app /testbed; do if [ -d \"$d/.git\" ]; then echo \"$d\"; exit 0; fi; done; exit 3",
+  ], `find the repository in ${image}`, { timeoutMs: 5 * 60_000 });
+  const path = found.stdout.trim().split("\n").pop() ?? "";
+  if (path !== "/app" && path !== TESTBED) throw new Error(`${image} has no git repository at /app or /testbed`);
+  return path;
+}
+
+/** Copies the image's repository (/testbed unless given) to `hostFolder`, which must not exist yet. */
+export async function copyTestbed(docker: DockerCli, image: string, hostFolder: string, repository: string = TESTBED): Promise<void> {
   const name = `agentx-swebench-copy-${randomUUID()}`;
   await checked(docker, ["create", "--platform", TASK_PLATFORM, "--name", name, image], `create a container from ${image}`);
   try {
-    await checked(docker, ["cp", `${name}:${TESTBED}`, hostFolder], "copy /testbed out of the image", { timeoutMs: 20 * 60_000 });
+    await checked(docker, ["cp", `${name}:${repository}`, hostFolder], `copy ${repository} out of the image`, { timeoutMs: 20 * 60_000 });
   } finally {
     await docker.run(["rm", "--force", name]).catch(() => undefined);
   }
@@ -42,15 +56,16 @@ export async function copyTestbed(docker: DockerCli, image: string, hostFolder: 
 
 /**
  * Starts the task container the agent's shell runs in (FR-009, FR-011): no network, the host copy of
- * /testbed mounted back at /testbed so the image's editable install sees the agent's edits, and the
+ * the repository mounted back where the image keeps it, so the image's install sees the agent's edits, and the
  * run's root mounted at its own path so the shell's working directory exists in the container.
  * Every shell command starts in the image's `testbed` conda environment, with the offline data
  * settings (offline.ts), through BASH_ENV.
  */
 export async function startTaskContainer(
   docker: DockerCli,
-  input: { image: string; name: string; rootPath: string; testbedHost: string },
+  input: { image: string; name: string; rootPath: string; testbedHost: string; repository?: string },
 ): Promise<void> {
+  const repository = input.repository ?? TESTBED;
   const environmentFile = resolve(input.rootPath, ".agentx", "swebench-shell.sh");
   const offline = await offlineSettings(input.rootPath);
   await writeFile(environmentFile, [
@@ -68,9 +83,9 @@ export async function startTaskContainer(
     "--name", input.name,
     "--network", "none",
     "--volume", `${input.rootPath}:${input.rootPath}`,
-    "--volume", `${input.testbedHost}:${TESTBED}`,
+    "--volume", `${input.testbedHost}:${repository}`,
     "--env", `BASH_ENV=${environmentFile}`,
-    "--workdir", TESTBED,
+    "--workdir", repository,
     "--entrypoint", "tail",
     input.image, "-f", "/dev/null",
   ], `start the task container from ${input.image}`, { timeoutMs: 5 * 60_000 });

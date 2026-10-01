@@ -25,6 +25,9 @@ export type ToolLoopAction =
  * rerunning a failing test is never a loop.
  */
 export class ToolLoopGuard {
+  /** The tool-call backstop; SWE-Bench Pro runs raise it for their long-horizon tasks (spec 044 FR-005). */
+  constructor(private readonly toolCallLimit: number = TOOL_CALL_LIMIT) {}
+
   private readonly started = new Map<string, string>();
   private calls = 0;
   private streakSignature: string | undefined;
@@ -38,8 +41,8 @@ export class ToolLoopGuard {
     if (value.type === "tool_execution_start") {
       this.calls += 1;
       if (callId !== undefined) this.started.set(callId, `${String(value.toolName)}\u0000${stableJson(value.args)}`);
-      if (this.calls > TOOL_CALL_LIMIT) {
-        return { kind: "stop", error: agentXError("OPERATION_INTERRUPTED", `the agent used more than ${TOOL_CALL_LIMIT} tool calls in one task; stopped it. Split the request into smaller tasks.`) };
+      if (this.calls > this.toolCallLimit) {
+        return { kind: "stop", error: agentXError("OPERATION_INTERRUPTED", `the agent used more than ${this.toolCallLimit} tool calls in one task; stopped it. Split the request into smaller tasks.`) };
       }
       return { kind: "none" };
     }

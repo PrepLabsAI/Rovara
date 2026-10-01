@@ -5,17 +5,35 @@ import { ModelIdentifierSchema } from "./models.js";
 import { SlackRequesterSchema, SlackThreadSchema, SlackChannelIdSchema, SlackTeamIdSchema } from "./slack.js";
 import { TaskUsageTelemetrySchema } from "./usage.js";
 
-/** The datasets a run may name, and the Hugging Face dataset each maps to. */
+/**
+ * The datasets a run may name: the Hugging Face dataset and config each reads, and its family.
+ * `swebench` tasks are graded by the swebench harness (spec 043), `pro` tasks by their own Harbor
+ * verifier (spec 044).
+ */
 export const SWEBENCH_DATASETS = {
-  verified: "SWE-bench/SWE-bench_Verified",
-  lite: "SWE-bench/SWE-bench_Lite",
-  full: "SWE-bench/SWE-bench",
+  verified: { name: "SWE-bench/SWE-bench_Verified", config: "default", family: "swebench" },
+  lite: { name: "SWE-bench/SWE-bench_Lite", config: "default", family: "swebench" },
+  full: { name: "SWE-bench/SWE-bench", config: "default", family: "swebench" },
+  pro: { name: "ScaleAI/SWE-bench_Pro", config: "default", family: "pro" },
+  "pro-hard": { name: "ScaleAI/SWE-bench_Pro", config: "hard", family: "pro" },
 } as const;
 
-export const SwebenchDatasetSchema = z.enum(["verified", "lite", "full"]);
+export const SwebenchDatasetSchema = z.enum(["verified", "lite", "full", "pro", "pro-hard"]);
 
 /** `<owner>__<repository>-<number>`, as every SWE-bench instance ID is written. */
-export const SwebenchInstanceIdSchema = z.string().max(128).regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*__[A-Za-z0-9][A-Za-z0-9_.-]*-\d+$/, "not a SWE-bench instance ID");
+const SWEBENCH_INSTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]*__[A-Za-z0-9][A-Za-z0-9_.-]*-\d+$/;
+/** `instance_<owner>__<repository>-<40 hex>`, mostly with `-v<suffix>`, as SWE-Bench Pro writes them (spec 044 FR-001). */
+const SWEBENCH_PRO_INSTANCE_ID = /^instance_[A-Za-z0-9][A-Za-z0-9_.-]*__[A-Za-z0-9][A-Za-z0-9_.-]*-[0-9a-f]{40}(?:-v[A-Za-z0-9]{1,64})?$/;
+
+export const SwebenchInstanceIdSchema = z.string().max(200).refine(
+  (value) => SWEBENCH_INSTANCE_ID.test(value) || SWEBENCH_PRO_INSTANCE_ID.test(value),
+  "not a SWE-bench instance ID",
+);
+
+/** Whether an instance ID is written as the dataset's family writes them. */
+export function swebenchInstanceIdFits(dataset: SwebenchDataset, instanceId: string): boolean {
+  return (SWEBENCH_DATASETS[dataset].family === "pro" ? SWEBENCH_PRO_INSTANCE_ID : SWEBENCH_INSTANCE_ID).test(instanceId);
+}
 
 /** Per-run cost ceiling bounds and default, in USD (spec 043 FR-002, D-2). */
 export const SWEBENCH_COST_CEILING_DEFAULT_USD = 10;
@@ -26,6 +44,17 @@ export const SwebenchCostCeilingSchema = z.number().finite().min(SWEBENCH_COST_C
 /** How long the agent may work (FR-013) and how long the instance may live (FR-006). */
 export const SWEBENCH_AGENT_TIME_LIMIT_SECONDS = 60 * 60;
 export const SWEBENCH_RUN_TIME_LIMIT_SECONDS = 2 * 60 * 60;
+
+/**
+ * The agent's limits per family. Pro follows its locked protocol's 50-minute budget, and its
+ * long-horizon tasks get twice the tool-call backstop (spec 044 FR-005, D-3). Two hours still cover
+ * a Pro run: the agent's 50 minutes, a verifier that typically takes minutes, and setup.
+ */
+export function swebenchAgentLimits(dataset: SwebenchDataset): { timeLimitSeconds: number; toolCallLimit: number } {
+  return SWEBENCH_DATASETS[dataset].family === "pro"
+    ? { timeLimitSeconds: 50 * 60, toolCallLimit: 400 }
+    : { timeLimitSeconds: SWEBENCH_AGENT_TIME_LIMIT_SECONDS, toolCallLimit: 200 };
+}
 
 /** An administrator's enablement of one bound channel (FR-002). */
 export const SwebenchChannelSchema = z.object({
@@ -139,14 +168,17 @@ export function parseSwebenchCommand(text: string): SwebenchCommand | undefined 
   const match = COMMAND.exec(command);
   if (!match) return undefined;
   const words = (match[1] ?? "").trim().split(/\s+/u).filter((word) => word.length > 0);
-  const usage = "Use `eval swebench <verified|lite|full> <instance-id> [model <name>]`.";
+  const usage = "Use `eval swebench <verified|lite|full|pro|pro-hard> <instance-id> [model <name>]`.";
   const dataset = SwebenchDatasetSchema.safeParse(words[0]?.toLowerCase());
   if (!dataset.success) {
     return { kind: "invalid", message: words[0] === undefined ? `Tell me which dataset and instance to run. ${usage}` : `Unknown dataset “${words[0]}”. ${usage}` };
   }
   const instanceId = words[1];
   if (instanceId === undefined) return { kind: "invalid", message: `Tell me which instance to run. ${usage}` };
-  if (!SwebenchInstanceIdSchema.safeParse(instanceId).success) return { kind: "invalid", message: `“${instanceId}” is not a SWE-bench instance ID. ${usage}` };
+  if (!SwebenchInstanceIdSchema.safeParse(instanceId).success || !swebenchInstanceIdFits(dataset.data, instanceId)) {
+    const expected = SWEBENCH_DATASETS[dataset.data].family === "pro" ? "a SWE-Bench Pro instance ID (`instance_<owner>__<repo>-<commit>-v<suffix>`)" : "a SWE-bench instance ID (`<owner>__<repo>-<number>`)";
+    return { kind: "invalid", message: `“${instanceId}” is not ${expected}. ${usage}` };
+  }
   const rest = words.slice(2);
   if (rest.length === 0) return { kind: "run", dataset: dataset.data, instanceId };
   if (rest[0]?.toLowerCase() !== "model") {
