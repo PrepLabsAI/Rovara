@@ -448,7 +448,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   // is signed in again instead of ending the run. The terminal path throws as before.
   const caller = await resolveCaller({
     identity: () => deployDeps.identity ?? stsCallerIdentity(new STSClient({ region })),
-    region, prompter, runner,
+    region, prompter, runner, write,
     ...(session.wizard === undefined ? {} : { surface: session.wizard.surface }),
     ...(awsProfile === undefined ? {} : { profile: awsProfile }),
   });

@@ -45,8 +45,13 @@ export interface PendingOpenRouterKey { key: string; providers?: readonly string
  * FR-027, FR-060); Task 12 is the first to fill it in. */
 export interface PrerequisiteCheck { label: string; ok: boolean; detail: string; technical?: string }
 
-export const DEDICATED_ACCOUNT_NOTE =
-  "AgentX recommends a dedicated AWS account for each install: environments that share an account are not a security boundary against each other.";
+/** FR-017: shown once, on the account card. */
+export const DEDICATED_ACCOUNT_NOTE = "Tip: a separate AWS account just for AgentX keeps its costs and permissions apart from your other work.";
+/** FR-016. */
+export const ROOT_WARNING = "You are signed in as the AWS root user. AgentX works, but AWS advises an admin user instead.";
+/** AWS's guide to an IAM user with admin rights. Confirm it loads before committing (curl -sI); if AWS moved it, use the IAM User Guide page on creating an administrative user. */
+export const ADMIN_USER_GUIDE_URL = "https://docs.aws.amazon.com/IAM/latest/UserGuide/getting-started-account-iam.html";
+export const isRootUser = (arn: string): boolean => /^arn:aws[a-z-]*:iam::\d{12}:root$/.test(arn);
 
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "");
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));

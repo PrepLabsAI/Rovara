@@ -3,13 +3,14 @@
 // list prices checked on the date in PRICES_CHECKED; the orchestrator per-turn figures come from the
 // 2026-09-25 evaluation in the spec's Decisions.
 import {
-  agentXError, defaultBoundaryName, environmentCloudFormationRoleName, environmentOperatorRoleName, environmentRolePath, environmentStackName,
+  defaultBoundaryName, environmentCloudFormationRoleName, environmentOperatorRoleName, environmentRolePath, environmentStackName,
 } from "@agentx/contracts";
 import { installOrder } from "../deploy/parameters.js";
 import { callbackSigningKeySecretName } from "../deploy/signing-key.js";
 import { openRouterSecretName } from "./answers.js";
 import type { InitAnswers } from "./install-state.js";
 import type { Prompter } from "./prompts.js";
+import { operatorStop } from "./stop.js";
 
 const PRICES_CHECKED = "September 2026";
 const HOURS_PER_MONTH = 730;
@@ -137,6 +138,6 @@ export function installPlanText(answers: InitAnswers, estimate: CostEstimate, no
 export async function confirmInstallPlan(input: { answers: InitAnswers; notes: readonly string[]; prompter: Prompter; write: (text: string) => void; extras?: PlanExtras }): Promise<void> {
   input.write(installPlanText(input.answers, estimateMonthlyCost(input.answers.models), input.notes, input.extras));
   if (!(await input.prompter.confirm("Create all of this?", { defaultValue: false }))) {
-    throw agentXError("CONFIG_INVALID", "install declined; nothing was created");
+    throw operatorStop("install declined; nothing was created");
   }
 }

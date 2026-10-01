@@ -5,7 +5,7 @@
 // so the page's words are tested in one place and the page only lays text out. No builder takes a
 // secret, so no card can carry one (FR-012).
 import { CONNECTOR_LABELS, type InstallProgress } from "../install-state.js";
-import { DEDICATED_ACCOUNT_NOTE, type PrerequisiteCheck } from "../prerequisites.js";
+import { ADMIN_USER_GUIDE_URL, DEDICATED_ACCOUNT_NOTE, ROOT_WARNING, type PrerequisiteCheck } from "../prerequisites.js";
 import type { WizardCard } from "./protocol.js";
 
 /** A button's label for an address the run opens: "Open github.com". */
@@ -44,6 +44,20 @@ export function awsCard(input: { account: string; arn: string; region: string; p
       `You are signed in as ${signedInAs(input.arn)}${input.profile === undefined ? "" : `, with the AWS profile ${input.profile}`}.`,
       DEDICATED_ACCOUNT_NOTE,
     ],
+    details: [input.arn],
+  };
+}
+
+/** FR-016: the caller is the AWS root user. The page still offers to continue. */
+export function rootUserCard(input: { account: string; arn: string; region: string; profile?: string }): WizardCard {
+  return {
+    id: "aws", title: "AWS account", status: "waiting",
+    lines: [
+      `AgentX installs into AWS account ${input.account} in ${input.region}.`,
+      ROOT_WARNING,
+      "You can continue as root. A few day-two commands need an admin user instead; the ready screen says which.",
+    ],
+    link: { url: ADMIN_USER_GUIDE_URL, label: "How to create an admin user" },
     details: [input.arn],
   };
 }
