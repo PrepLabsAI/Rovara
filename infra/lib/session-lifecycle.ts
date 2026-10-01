@@ -14,6 +14,7 @@ import {
   type aws_kms as kms,
   type aws_lambda as lambda,
   aws_logs as logs,
+  type aws_secretsmanager as secretsmanager,
   aws_scheduler as scheduler,
   aws_scheduler_targets as schedulerTargets,
   aws_stepfunctions as sfn,
@@ -49,6 +50,7 @@ export class SessionLifecycle extends Construct {
   private readonly dispatcherSecurityGroupId: CfnParameter;
   private readonly privateSubnetIds: CfnParameter;
   private readonly invokeSigningKey: kms.IKey;
+  private readonly notifyOperator: cloudwatchActions.SnsAction;
 
   constructor(scope: Construct, id: string, props: SessionLifecycleProps) {
     super(scope, id);
@@ -56,6 +58,7 @@ export class SessionLifecycle extends Construct {
     const { naming } = props;
     this.naming = naming;
     this.invokeSigningKey = props.invokeSigningKey;
+    this.notifyOperator = props.notifyOperator;
     // Parameter ids match the foundation outputs they are filled from.
     const parameter = (name: string, description: string) => new CfnParameter(stack, name, { type: "String", description });
     const privateSubnetIds = parameter("PrivateSubnetIds", "Comma-separated private subnet IDs of the foundation VPC");
@@ -273,6 +276,29 @@ export class SessionLifecycle extends Construct {
     this.connectExecutions(dispatcher);
     dispatcher.addEnvironment("INVOKE_SIGNING_KEY_ARN", this.invokeSigningKey.keyArn);
     this.provisioner.grantStartExecution(dispatcher);
+  }
+
+  /**
+   * Issue 173, named environments only: the reconciler cancels a Slack thread's task left running
+   * over 4 hours with nobody waiting. It asks the broker to cancel (the broker checks again and uses
+   * the cancel route's own path), so it may invoke the broker function alone; and it posts the
+   * thread's note with the bot token, so it may read the Slack secret alone.
+   */
+  connectUnwaitedTaskBackstop(broker: lambda.IFunction, slackSecret: secretsmanager.ISecret): void {
+    this.reconciler.addEnvironment("BROKER_FUNCTION_NAME", broker.functionName);
+    this.reconciler.addEnvironment("SLACK_SECRET_ARN", slackSecret.secretArn);
+    this.reconciler.addToRolePolicy(new iam.PolicyStatement({ sid: "StopUnwaitedTasks", actions: ["lambda:InvokeFunction"], resources: [broker.functionArn] }));
+    this.reconciler.addToRolePolicy(new iam.PolicyStatement({ sid: "PostUnwaitedTaskNote", actions: ["secretsmanager:GetSecretValue"], resources: [slackSecret.secretArn] }));
+    // A failed cancel is retried on the next run; failures on two runs in a row mean it is not recovering.
+    new cloudwatch.Alarm(this, "UnwaitedTaskFailuresAlarm", {
+      alarmName: this.naming.alarmName("UnwaitedTaskFailures"),
+      alarmDescription: "The reconciler could not cancel a Slack task left running over 4 hours with nobody waiting, on two runs in a row. Check the reconciler's logs for unwaited_task.cancel_failed.",
+      metric: new cloudwatch.Metric({ namespace: this.naming.metricsNamespace, metricName: "ReconcilerUnwaitedTaskFailures", statistic: "Maximum", period: Duration.minutes(10) }),
+      threshold: 1,
+      evaluationPeriods: 2,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(this.notifyOperator);
   }
 
   /** The broker starts the deleter when an ec2-ebs workspace closes (#84). */
