@@ -16,6 +16,7 @@ import { copyTestbed, pullTaskImage, removeContainer, startTaskContainer, taskCo
 import { loadSwebenchInstance, type DatasetOptions } from "./dataset.js";
 import { gradePrediction, type GradeReport } from "./grade.js";
 import { createGitRunner, predictionPatch, stripHistory, untrackedFiles } from "./history.js";
+import { OFFLINE_SETTINGS } from "./offline.js";
 
 export interface RunReporter {
   /** Tells the control plane the agent is about to start. */
@@ -128,7 +129,9 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
     if (transcript !== undefined) await save("transcript.jsonl", transcript, "application/x-ndjson");
     agent.session.dispose();
   }
-  await save("result.json", JSON.stringify({ ...result, artifacts: [...saved].sort() }, null, 2), "application/json");
+  // The offline settings go in the artifact only: the broker's result schema is strict, and the
+  // runner image can ship before a broker that knows a new field.
+  await save("result.json", JSON.stringify({ ...result, offlineSettings: [...OFFLINE_SETTINGS], artifacts: [...saved].sort() }, null, 2), "application/json");
   await reporter.result(result);
   return result;
 }

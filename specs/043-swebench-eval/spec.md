@@ -102,6 +102,15 @@ measure the Slack orchestrator or the workspace lifecycle.
   The run's capability reaches only its own callback routes. Outbound traffic is HTTPS through the NAT to ECR,
   Docker Hub, Hugging Face, PyPI, the model provider and the control plane.
 
+### Offline data settings
+
+- **FR-018**: The agent's task container MUST load a pytest plugin that stops astropy refreshing its
+  leap-second and Earth-orientation (IERS) tables from the internet (`auto_download = False`,
+  `auto_max_age = None`), so untouched tests pass offline as they do in grading. It does nothing where astropy
+  is not installed, never reaches the grading container, and is recorded in `result.json` as
+  `offlineSettings`. Plain scripts are not covered: astropy only prints a warning there, and its config file
+  cannot express `auto_max_age = None`.
+
 ## Out of Scope
 
 Batches of instances and parallel fan-out (a follow-up once the pilot works), SWE-Bench Pro, Multimodal and Live
@@ -119,6 +128,12 @@ Batches of instances and parallel fan-out (a follow-up once the pilot works), SW
 - **D-4** (2026-09-30): The broker cannot read the Slack token (D11), and production has no notifier, so the
   Slack service waits for the run in the thread, polling every 30 seconds, as it waits for a coding task. The
   thread's later messages queue behind it; `stop` is handled before the queue.
+
+- **D-5** (2026-09-30): The agent stays offline (FR-011), with per-library offline data
+  settings, rather than opening the network for testing. On `astropy__astropy-13398` offline astropy failed
+  untouched tests (leap-second refresh), the agent took its own regressions for that noise, and declared
+  success. With the plugin the module passes offline (69 passed, 3 skipped), as in grading. Network access
+  would let the agent fetch the upstream fix and make scores incomparable.
 
 ## Success Criteria
 
