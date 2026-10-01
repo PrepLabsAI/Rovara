@@ -21,9 +21,9 @@ readonly WORKER_CONTAINER=agentx-worker
 # and named volumes survive an idle stop (#121). The worker's walks skip it (DOCKER_DATA_DIRECTORY).
 readonly DOCKER_DATA_ROOT=$MOUNT_PATH/.docker
 readonly DOCKER_SOCKET=/var/run/docker.sock
-# The provisioner attaches the volume after the instance is running, so it may appear late (#223).
+# The provisioner attaches the volume after the instance is running, so it may appear late.
 readonly DEVICE_WAIT_SECONDS=${AGENTX_DEVICE_WAIT_SECONDS:-120}
-# Where /sys and /dev/disk are read; the tests point it elsewhere.
+# Where /sys and /dev/disk are; tests set it.
 readonly HOST_ROOT=${AGENTX_HOST_ROOT:-}
 # Network steps try 5 times, waiting 2, 4, 8 and 16 seconds (each plus up to half again as jitter,
 # at most 30 seconds before jitter): at most 45 seconds of waiting per step.
@@ -157,7 +157,7 @@ sysfs_disks() {
 }
 
 # A Nitro instance exposes an EBS volume as an NVMe disk whose serial is the volume ID without its
-# dash. lsblk, sysfs or the by-id link may each be the first to show it.
+# dash. lsblk, sysfs or by-id may show it first (#223).
 volume_device() {
   local serial=${AGENTX_VOLUME_ID//-/} device
   for device in $({ lsblk -dno NAME,SERIAL; sysfs_disks; } 2>/dev/null | awk -v s="$serial" '$2 == s { print "/dev/" $1 }') \
@@ -166,20 +166,21 @@ volume_device() {
   done
 }
 
-# Rescans the PCI bus at 20, 50 and 80s in case the kernel missed the hot-add. The time waited is
-# at least the sleeps, as the tests' sleep is instant.
+# Rescans the PCI bus at 20, 50 and 80s in case the kernel missed the hot-add. waited is at least
+# the sleeps, as the tests' sleep is instant.
 wait_for_device() {
-  local start=$SECONDS waited=0 rescans=0 device line
+  local start=$SECONDS waited=0 tries=0 rescans=0 device line
   until device=$(volume_device) && [[ -n "$device" ]]; do
     ((waited >= SECONDS - start)) || waited=$((SECONDS - start))
     if ((waited >= DEVICE_WAIT_SECONDS)); then
       lsblk -dno NAME,SERIAL,MODEL 2>&1 | while read -r line; do log "lsblk saw: $line"; done || true
       sysfs_disks | while read -r line; do log "sysfs saw: $line"; done || true
-      fail "workspace disk $AGENTX_VOLUME_ID is attached in AWS but did not appear on this machine after ${DEVICE_WAIT_SECONDS}s (rescanned $rescans times)"
-    elif ((rescans < 3 && waited >= 20 + 30 * rescans)); then
-      rescans=$((rescans + 1))
-      log "workspace disk $AGENTX_VOLUME_ID has not appeared after ${waited}s; rescanning the PCI bus ($rescans of 3)"
-      { echo 1 >"$HOST_ROOT/sys/bus/pci/rescan" && timeout 15 udevadm settle --timeout=10; } || log "the PCI rescan failed"
+      fail "workspace disk $AGENTX_VOLUME_ID is attached in AWS but did not appear on this machine after ${waited}s (rescanned $rescans times)"
+    elif ((tries < 3 && waited >= 20 + 30 * tries)); then
+      tries=$((tries + 1))
+      log "workspace disk $AGENTX_VOLUME_ID has not appeared after ${waited}s; rescanning the PCI bus ($tries of 3)"
+      if echo 1 >"$HOST_ROOT/sys/bus/pci/rescan"; then rescans=$((rescans + 1)); else log "could not rescan the PCI bus"; fi
+      timeout 15 udevadm settle --timeout=10 || true
     else
       sleep 2
       waited=$((waited + 2))

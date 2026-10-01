@@ -40,6 +40,8 @@ case "\$LSBLK_MODE" in
 esac
 EOF
 mkdir -p /tmp/host/sys/block/nvme0n1/device /tmp/host/sys/bus/pci /tmp/host/dev/disk/by-id
+# With RESCAN_FAILS, the rescan file is a directory, so writing it fails.
+[[ -z "$RESCAN_FAILS" ]] || mkdir /tmp/host/sys/bus/pci/rescan
 printf 'vol0aaaaaaaaaaaaaaaa\n' > /tmp/host/sys/block/nvme0n1/device/serial
 [[ -z "$BY_ID" ]] || ln -s "$device" /tmp/host/dev/disk/by-id/nvme-Amazon_Elastic_Block_Store_vol0123456789abcdef0
 if [[ -n "$SYSFS" ]]; then
@@ -104,6 +106,8 @@ touch /tmp/calls.log /etc/fstab
 # Stands in for the socket the Docker daemon creates; the worker unit reads its group.
 mkdir -p /var/run && touch /var/run/docker.sock
 echo "$USER_DATA_B64" | base64 -d > /tmp/user-data.sh
+# The container is privileged, so AGENTX_HOST_ROOT must stay: without it the script would rescan the
+# real PCI bus. The rescan test fails if it goes, since it reads the rescan file under /tmp/host.
 PATH=/shims:$PATH AGENTX_HOST_ROOT=/tmp/host bash /tmp/user-data.sh
 echo "@@exit=$?"
 echo "@@ping=$(python3 - <<'EOF'
@@ -163,6 +167,8 @@ interface Faults {
   byId?: boolean;
   /** Lists the volume's disk in sysfs as nvme9n1, with its serial padded. */
   sysfs?: boolean;
+  /** Makes every write to the PCI rescan file fail. */
+  rescanFails?: boolean;
 }
 
 async function boot(bootConfig: Ec2WorkerBootConfig, volumeState: "blank" | "existing" | "foreign", faults: Faults = {}) {
@@ -180,6 +186,7 @@ async function boot(bootConfig: Ec2WorkerBootConfig, volumeState: "blank" | "exi
     "--env", `LSBLK_MODE=${faults.lsblk ?? "match"}`,
     "--env", `BY_ID=${faults.byId ? "1" : ""}`,
     "--env", `SYSFS=${faults.sysfs ? "1" : ""}`,
+    "--env", `RESCAN_FAILS=${faults.rescanFails ? "1" : ""}`,
     "--env", `USER_DATA_B64=${userData}`,
     IMAGE, "bash", "-c", HARNESS,
   ], { encoding: "utf8", timeout: 120_000 });
@@ -412,6 +419,16 @@ describe.skipIf(!ENABLED)("EC2 boot script on arm64", () => {
     expect(result.calls).not.toContain("docker");
     // Reported once, although fail ran in a command substitution's subshell.
     expect(result.count("systemd-run --unit=agentx-boot-failure --collect --property=Type=notify")).toBe(1);
+    expect(result.ping).toBe(bootFailedPing(reason));
+  }, 180_000);
+
+  it("says so when the PCI rescan cannot be written, and does not count it as a rescan (#223)", async () => {
+    const result = await boot(config({ volumeId: "vol-0fffffffffffffff0" }), "blank", { rescanFails: true });
+    const reason = "workspace disk vol-0fffffffffffffff0 is attached in AWS but did not appear on this machine after 120s (rescanned 0 times)";
+    expect(result.exit).not.toBe(0);
+    expect(result.sleeps).toEqual(Array(60).fill(2));
+    expect(result.log.split("\n").filter((line) => line === "agentx-boot: could not rescan the PCI bus")).toHaveLength(3);
+    expect(result.count("udevadm settle --timeout=10")).toBe(3);
     expect(result.ping).toBe(bootFailedPing(reason));
   }, 180_000);
 });

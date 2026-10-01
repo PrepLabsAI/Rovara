@@ -269,13 +269,22 @@ export function ec2WorkerUserData(config: Ec2WorkerBootConfig, bootScript: strin
   if (parsed.openRouterSecretArn) variables.push(["AGENTX_OPENROUTER_SECRET_ARN", parsed.openRouterSecretArn]);
   if (parsed.openRouterProviders) variables.push(["AGENTX_OPENROUTER_PROVIDERS", parsed.openRouterProviders]);
   const body = bootScript.replace(/^#!.*\n/, "");
-  return [
+  const userData = [
     "#!/bin/bash",
     "# Rendered by ec2WorkerUserData (@agentx/contracts).",
     ...variables.map(([name, value]) => `export ${name}='${value}'`),
     body,
   ].join("\n");
+  // EC2 rejects larger user data with an error that does not say which part grew (#223).
+  const size = Buffer.byteLength(userData, "utf8");
+  if (size >= EC2_USER_DATA_MAX_BYTES) {
+    throw new Error(`worker user data is ${size} bytes; EC2 allows less than ${EC2_USER_DATA_MAX_BYTES}`);
+  }
+  return userData;
 }
+
+/** EC2's limit on user data before base64 encoding. */
+export const EC2_USER_DATA_MAX_BYTES = 16_384;
 
 export type Ec2WorkerBootConfig = z.infer<typeof Ec2WorkerBootConfigSchema>;
 export type Ec2RuntimeBinding = z.infer<typeof Ec2RuntimeBindingSchema>;
