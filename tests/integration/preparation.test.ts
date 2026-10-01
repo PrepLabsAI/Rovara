@@ -277,6 +277,47 @@ describe("a failed setup or readiness command (#154)", () => {
     expect(JSON.stringify(manifest.failure)).not.toContain(TOKEN.slice(0, 12));
   });
 
+  it("fails a setup step that timed out even when it exited 0 on SIGTERM (#170 review)", async () => {
+    const { message } = await preparing("trapped", {
+      setup: [{ cwd: "repo/trapped", executable: "sh", args: ["-c", "trap 'exit 0' TERM; sleep 30 & wait"], timeoutSeconds: 1 }],
+    });
+    expect(message).toBe("setup step 0 (sh -c trap 'exit 0' TERM; sleep 30 & wait in repo/trapped) timed out after 1 s");
+  });
+
+  it("is not ready when a readiness check timed out, even when it exited 0 on SIGTERM (#170 review)", async () => {
+    const { message } = await preparing("trapready", {
+      readiness: [{ cwd: "repo/trapready", executable: "sh", args: ["-c", "trap 'exit 0' TERM; sleep 30 & wait"], timeoutSeconds: 1 }],
+    });
+    expect(message).toBe("readiness check 0 (sh -c trap 'exit 0' TERM; sleep 30 & wait in repo/trapready) timed out after 1 s");
+  });
+
+  it("stores a failed preparation's reason in the manifest redacted (#170 review)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const project = fixtureProject([{ name: "clonefail", commit: "a".repeat(40) }]);
+    const materializer: RepositoryMaterializer = async () => {
+      throw new Error(`fatal: could not read from remote: bad credentials ${TOKEN}`);
+    };
+    await expect(prepareWorkspace({ rootPath: root, project, materializer })).rejects.toThrow(/could not read/);
+    const stored = await readFile(join(root, ".agentx/preparation-manifest.json"), "utf8");
+    expect(stored).not.toContain(TOKEN);
+    expect((JSON.parse(stored) as { failure?: string }).failure).toBe("fatal: could not read from remote: bad credentials [REDACTED]");
+  });
+
+  it("stores a readiness check's output in the manifest redacted, never raw (#170)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const source = await createGitFixture("stored");
+    const project = {
+      ...fixtureProject([{ name: "stored", commit: source.commit }]),
+      readiness: [{ cwd: "repo/stored", executable: "sh", args: ["-c", `echo "token ${TOKEN}"; echo "again ${TOKEN}" >&2`], timeoutSeconds: 10 }],
+    } satisfies ProjectDefinition;
+    const materializer: RepositoryMaterializer = async (_repository, destination) => {
+      await run("git", ["clone", "--quiet", source.directory, destination]);
+    };
+    const manifest = await prepareWorkspace({ rootPath: root, project, materializer });
+    expect(manifest.readinessResults[0]).toMatchObject({ ready: true, stdout: "token [REDACTED]\n", stderr: "again [REDACTED]\n" });
+    expect(await readFile(join(root, ".agentx/preparation-manifest.json"), "utf8")).not.toContain(TOKEN);
+  });
+
   it("names the first failed readiness check, how it failed, and how many more failed", async () => {
     const { message } = await preparing("ready", {
       readiness: [

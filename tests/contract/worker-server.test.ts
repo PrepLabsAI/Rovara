@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkerInvocation } from "@agentx/contracts";
@@ -68,6 +68,28 @@ describe("worker HTTP contract", () => {
       { operationId: invocation.operationId, status: "SUCCEEDED" },
     ]));
     expect((await journal.get(invocation.operationId))?.status).toBe("SUCCEEDED");
+  });
+
+  it("redacts a failed operation's error before it is journaled or reported (#170)", async () => {
+    const token = `ghp_${"Q1w2E3r4T5".repeat(4)}`;
+    const root = await mkdtemp(join(tmpdir(), "agentx-terminal-"));
+    const journal = new OperationJournal(root);
+    const terminal: Array<{ operationId: string; status: string; error?: string }> = [];
+    const state = createWorkerServerState(
+      journal,
+      { execute: async () => { throw new Error(`fatal: could not read from https://github.com/x?token=1 ${token}`); } },
+      { onTerminal: async (result) => { terminal.push(result); } },
+    );
+    const invocation = taskInvocation();
+
+    await handleWorkerRequest(invocationRequest(invocation), state);
+    await vi.waitFor(() => expect(terminal).toHaveLength(1));
+    expect(terminal[0]).toMatchObject({ status: "FAILED" });
+    expect(terminal[0]!.error).toContain("[REDACTED]");
+    expect(terminal[0]!.error).not.toContain(token);
+    const record = await journal.get(invocation.operationId);
+    expect(record?.error).toBe(terminal[0]!.error);
+    expect(await readFile(join(root, ".agentx/operations", `${invocation.operationId}.json`), "utf8")).not.toContain(token);
   });
 
   it("retries a failed terminal callback three times, waiting 2 s, 8 s and 30 s", async () => {

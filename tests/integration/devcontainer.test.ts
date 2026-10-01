@@ -1,11 +1,11 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { chmod, mkdir, mkdtemp, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, realpath, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { ProjectDefinitionSchema, type ProjectDefinition, type WorkerInvocation } from "@agentx/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   devcontainerBashOperations,
   devcontainerTarget,
@@ -15,7 +15,7 @@ import {
   type DevcontainerCli,
   type DevcontainerProcess,
 } from "../../packages/worker/src/devcontainer.js";
-import { runCollected } from "../../packages/worker/src/collected-process.js";
+import { TIMEOUT_KILL_GRACE_MS, runCollected, tailCollector } from "../../packages/worker/src/collected-process.js";
 import type { PiSessionAdapter, PiSessionInput } from "../../packages/worker/src/pi-session.js";
 import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
@@ -277,8 +277,130 @@ describe("the collected process under the devcontainer CLI (#154)", () => {
     expect(result).not.toHaveProperty("timedOut");
   });
 
+  it("kills a process that ignores SIGTERM once the grace period after its timeout ends (#170)", async () => {
+    const started = Date.now();
+    const script = "process.on('SIGTERM', () => undefined); setInterval(() => undefined, 1000); console.log('ready')";
+    // The timeout leaves Node time to install its SIGTERM handler, even on a loaded machine.
+    const result = await runCollected(process.execPath, ["-e", script], { timeoutMs: 1_500, killGraceMs: 300 });
+    expect(result).toMatchObject({ exitCode: null, signal: "SIGKILL", timedOut: true });
+    expect(result.stdout).toBe("ready\n");
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  it("signals the whole process group at a timeout, so a grandchild stops too (#170)", async () => {
+    // The shell prints its background child's process ID, then waits for it. The grandchild holds
+    // the output open, so the result comes back early only when it was stopped too.
+    const started = Date.now();
+    const result = await runCollected("sh", ["-c", "sleep 30 & echo $!; wait"], { timeoutMs: 300, killGraceMs: 300 });
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(result.timedOut).toBe(true);
+    const grandchild = Number.parseInt(result.stdout.trim(), 10);
+    expect(Number.isInteger(grandchild) && grandchild > 0).toBe(true);
+    await expectGone(grandchild);
+  });
+
+  it("still kills a group member that ignores SIGTERM after the process itself has exited (#170 review)", async () => {
+    // The shell dies on SIGTERM, but its background child ignores SIGTERM and does not hold the
+    // output, so the result comes back before the grace period ends.
+    const result = await runCollected("sh", ["-c", "(trap '' TERM; exec sleep 30) >/dev/null 2>&1 & echo $!; wait"], { timeoutMs: 500, killGraceMs: 300 });
+    expect(result.timedOut).toBe(true);
+    await expectGone(Number.parseInt(result.stdout.trim(), 10));
+  });
+
+  it("stops the whole process group on an abort, with SIGKILL after the grace period (#170 review)", async () => {
+    const controller = new AbortController();
+    let output = "";
+    const running = runCollected("sh", ["-c", "trap '' TERM; (trap '' TERM; exec sleep 30) & echo $!; wait"], {
+      signal: controller.signal,
+      killGraceMs: 300,
+      onStdout: (data) => {
+        output += data.toString("utf8");
+        if (output.includes("\n")) controller.abort();
+      },
+    });
+    const result = await running;
+    expect(result.exitCode).toBeNull();
+    const grandchild = Number.parseInt(output.trim(), 10);
+    expect(Number.isInteger(grandchild) && grandchild > 0).toBe(true);
+    await expectGone(grandchild);
+  });
+
+  it("does not start a process for an already aborted signal (#170 review)", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    const marker = join(tmpdir(), `agentx-170-${randomUUID()}`);
+    const result = await runCollected("sh", ["-c", `touch ${marker}`], { signal: controller.signal });
+    expect(result.exitCode).toBeNull();
+    await new Promise((resolveWait) => setTimeout(resolveWait, 200));
+    await expect(stat(marker)).rejects.toThrow(/ENOENT/);
+  });
+
+  it("waits 5 seconds after SIGTERM before SIGKILL by default (#170)", () => {
+    expect(TIMEOUT_KILL_GRACE_MS).toBe(5_000);
+  });
+
   it("rejects when the executable does not exist", async () => {
     await expect(runCollected("agentx-no-such-command-154", [])).rejects.toThrow(/ENOENT/);
+  });
+
+  it("starts cut output at a whole line, so no fragment of a line split by the cut is kept (#170)", async () => {
+    const script = "process.stdout.write(\"0123456789abcdef\\n\".repeat(200000)); process.stdout.write(\"END\\n\");";
+    const result = await runCollected(process.execPath, ["-e", script]);
+    expect(result.stdout.length).toBeLessThanOrEqual(1_048_576);
+    expect(result.stdout.startsWith("0123456789abcdef\n")).toBe(true);
+    expect(result.stdout.endsWith("\nEND\n")).toBe(true);
+  });
+
+  it("redacts a token that the 1 MiB cut splits, in output with no line break (#170 review)", async () => {
+    const token = `ghp_${"S1t2R3a4D5".repeat(4)}`;
+    // The last 1 MiB starts 21 characters before the token's end.
+    const script = [
+      `const tail = " y".repeat(${(1_048_576 - 22) / 2});`,
+      "process.stdout.write(\"x\".repeat(2 * 1048576));",
+      `process.stdout.write(${JSON.stringify(token)} + " " + tail);`,
+    ].join("\n");
+    const result = await runCollected(process.execPath, ["-e", script]);
+    expect(result.stdout.length).toBeLessThanOrEqual(1_048_576);
+    expect(result.stdout.endsWith(" y y y")).toBe(true);
+    expect(result.stdout).not.toContain(token.slice(-20));
+  });
+
+  it("redacts a private key that the 1 MiB cut splits (#170 review)", async () => {
+    // About half the key's 25 KiB falls inside the last 1 MiB.
+    const script = [
+      "const body = Array.from({ length: 400 }, (_, index) => \"KEYLINE\" + String(index).padStart(4, \"0\") + \"q\".repeat(53));",
+      "const pem = [\"-----BEGIN OPENSSH PRIVATE KEY-----\", ...body, \"-----END OPENSSH PRIVATE KEY-----\"].join(\"\\n\");",
+      "process.stdout.write(\"before\\n\".repeat(300000));",
+      "process.stdout.write(pem + \"\\n\");",
+      "process.stdout.write(\"after the key\\n\".repeat(Math.floor((1048576 - 12000) / 14)));",
+    ].join("\n");
+    const result = await runCollected(process.execPath, ["-e", script]);
+    expect(result.stdout.length).toBeLessThanOrEqual(1_048_576);
+    expect(result.stdout).not.toContain("KEYLINE");
+    expect(result.stdout.endsWith("after the key\n")).toBe(true);
+  });
+
+  it("redacts a private key that the cut splits in output of multi-byte characters (#170 review)", () => {
+    // Each filler line is 3 bytes a character, so a cut counted in characters would keep the key's
+    // end without its BEGIN line.
+    const collector = tailCollector(200, 60);
+    collector.add(Buffer.from("日本語日本語日本語\n".repeat(20)));
+    collector.add(Buffer.from("-----BEGIN RSA PRIVATE KEY-----\nKEYBODY1\nKEYBODY2\n-----END RSA PRIVATE KEY-----\n"));
+    // The last 260 bytes kept start inside the key, after its BEGIN line.
+    collector.add(Buffer.from("日本語日本語日本語\n".repeat(7)));
+    const text = collector.text();
+    expect(text).not.toContain("KEYBODY");
+    expect(Buffer.byteLength(text)).toBeLessThanOrEqual(200);
+    expect(text.endsWith("日本語日本語日本語\n")).toBe(true);
+  });
+
+  it("keeps no fragment of a token when the last write is larger than twice the limit (#170 review)", () => {
+    const collector = tailCollector(20, 0);
+    collector.add(Buffer.from("line1\nSECRET_ghp_abcdefghijklmnopqrstuvwxyz\nend\n"));
+    expect(collector.text()).toBe("end\n");
+    const margined = tailCollector(20);
+    margined.add(Buffer.from("line1\nSECRET_ghp_abcdefghijklmnopqrstuvwxyz\nend\n"));
+    expect(margined.text()).toBe("end\n");
   });
 
   it("keeps the last 1 MiB of output, not the first", async () => {
@@ -290,3 +412,9 @@ describe("the collected process under the devcontainer CLI (#154)", () => {
     expect(result.stderr.endsWith("END-OF-OUTPUT")).toBe(true);
   });
 });
+
+/** Waits up to 3 s for a process to be gone. */
+async function expectGone(pid: number): Promise<void> {
+  expect(Number.isInteger(pid) && pid > 0).toBe(true);
+  await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(/ESRCH/), { timeout: 3_000, interval: 50 });
+}

@@ -39,11 +39,24 @@ export function byDeadline<T>(deadline: number, run: (signal: AbortSignal) => Pr
   return Promise.race([run(signal), timedOut]);
 }
 
-/** A4: every store call is bounded by the deadline, so a hung request cannot outlive the publisher. */
-function bounded(store: IndexStore, deadline: number): IndexStore {
+/** Settles when `signal` aborts: rejects with its reason when `run` has not answered by then. */
+function untilAborted<T>(signal: AbortSignal, run: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason as Error);
+  const aborted = new Promise<never>((_, reject) => {
+    signal.addEventListener("abort", () => reject(signal.reason as Error), { once: true });
+  });
+  return Promise.race([run(signal), aborted]);
+}
+
+/**
+ * A4: every store call is bounded by one deadline signal for the whole batch, so a hung request
+ * cannot outlive the publisher, and once that signal has fired no further record is started, even
+ * when its timer fired before Date.now() reached the deadline.
+ */
+function bounded(store: IndexStore, signal: AbortSignal): IndexStore {
   return {
-    get: (key) => byDeadline(deadline, (signal) => store.get(key, { signal })),
-    put: (item) => byDeadline(deadline, (signal) => store.put(item, { signal })),
+    get: (key) => untilAborted(signal, (callSignal) => store.get(key, { signal: callSignal })),
+    put: (item) => untilAborted(signal, (callSignal) => store.put(item, { signal: callSignal })),
   };
 }
 
@@ -143,7 +156,8 @@ export async function indexActivity(
   log: (entry: Record<string, unknown>) => void,
   deadline: number = Date.now() + INDEX_DEFAULT_BUDGET_MS,
 ): Promise<{ failures: number; usage: number; failed: number }> {
-  const store = bounded(unbounded, deadline);
+  const deadlineSignal = AbortSignal.timeout(Math.max(1, deadline - Date.now()));
+  const store = bounded(unbounded, deadlineSignal);
   const result = { failures: 0, usage: 0, failed: 0 };
   const work: Array<{ failure: boolean; next: Record<string, unknown> }> = [];
   for (const entry of records) {
@@ -162,7 +176,7 @@ export async function indexActivity(
     if (failure || usage) work.push({ failure, next });
   }
   for (const [position, { failure, next }] of work.entries()) {
-    if (Date.now() >= deadline) {
+    if (deadlineSignal.aborted || Date.now() >= deadline) {
       log({ event: "activity_index.deadline_reached", skipped: work.length - position });
       break;
     }
