@@ -585,6 +585,9 @@ To release a thread workspace, mention AgentX in that thread with an explicit cl
 @AgentX close this workspace
 ```
 
+`close the workspace`, `please close this workspace` and `can you close the workspace?` work too; only
+the whole message counts, so `@AgentX close the modal` is an ordinary request.
+
 A thread that never needed the worker has no workspace. A close request there says so and changes
 nothing.
 
