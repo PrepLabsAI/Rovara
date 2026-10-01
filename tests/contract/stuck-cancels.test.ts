@@ -266,7 +266,7 @@ describe("asking the broker to retry", () => {
   });
 
   it("invokes the broker with the retry event and returns its answer", async () => {
-    const invoke = vi.fn(async (_payload: string) => answer(200, { outcome: "REQUEUED", cancelOperationId: "cancel-2", requestId: "session-reconciler" }));
+    const invoke = vi.fn<(payload: string) => Promise<ReturnType<typeof answer>>>(async () => answer(200, { outcome: "REQUEUED", cancelOperationId: "cancel-2", requestId: "session-reconciler" }));
     const retry = createBrokerCancelRetrier(invoke);
     expect(await retry("workspace-1", "operation-1")).toEqual({ outcome: "REQUEUED", cancelOperationId: "cancel-2" });
     expect(JSON.parse(invoke.mock.calls[0]![0])).toEqual({ source: "agentx.session-reconciler", action: "retry-stuck-cancel", workspaceId: "workspace-1", operationId: "operation-1" });

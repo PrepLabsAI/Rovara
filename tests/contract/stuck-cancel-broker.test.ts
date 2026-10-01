@@ -15,8 +15,6 @@ beforeAll(async () => {
   await loadSlackBroker();
 });
 
-type Invoke = (event: unknown) => Promise<{ statusCode: number; body: string }>;
-
 /** A thread's task the member stopped, whose cancel the reconciler has recorded one retry for. */
 async function stuckCancel(options: { claimed?: boolean } = {}) {
   const broker = createBroker();
@@ -28,13 +26,13 @@ async function stuckCancel(options: { claimed?: boolean } = {}) {
     requestId: randomUUID(), conversationId: (conversation.body.conversation as { id: string }).id, prompt: "run the tests",
   });
   const taskOperationId = (task.body.operation as { id: string }).id;
-  const stopped = await (broker.handler as unknown as Invoke)({ source: "agentx.slack-ingress", action: "stop-task", thread: slackThread, userId: pratik });
+  const stopped = await broker.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: slackThread, userId: pratik });
   const firstCancelId = (JSON.parse(stopped.body) as { cancelOperationId: string }).cancelOperationId;
   const operation = () => broker.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${taskOperationId}`)!;
   if (options.claimed !== false) broker.db.set({ ...operation(), cancelRetriedAt: new Date().toISOString() });
   const cancels = () => broker.db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel" && item.targetOperationId === taskOperationId);
   const retry = async (fields: Record<string, unknown> = {}) => {
-    const response = await (broker.handler as unknown as Invoke)({ source: "agentx.session-reconciler", action: "retry-stuck-cancel", workspaceId, operationId: taskOperationId, ...fields });
+    const response = await broker.handler({ source: "agentx.session-reconciler", action: "retry-stuck-cancel", workspaceId, operationId: taskOperationId, ...fields });
     return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
   };
   return { ...broker, workspaceId, taskOperationId, firstCancelId, operation, cancels, retry };

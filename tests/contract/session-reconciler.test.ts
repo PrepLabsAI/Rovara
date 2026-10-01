@@ -346,9 +346,9 @@ describe("reconciler: stuck cancels (issue 195)", () => {
 
   it("ends a stuck cancel on a stopped session, re-queues one on a live worker, and counts each", async () => {
     const retryCancel = vi.fn<NonNullable<StuckCancelDependencies["retryCancel"]>>(async () => ({ outcome: "REQUEUED", cancelOperationId: randomUUID() }));
-    let db!: FakeDynamoDb;
-    const { db: seeded, state, reconcile, emit } = setup({ sweepStuckCancels: (candidates, now) => sweepStuckCancels({ client: db, tableName: "state", retryCancel }, candidates, now) });
-    db = seeded;
+    const table: { db?: FakeDynamoDb } = {};
+    const { db, state, reconcile, emit } = setup({ sweepStuckCancels: (candidates, now) => sweepStuckCancels({ client: table.db!, tableName: "state", retryCancel }, candidates, now) });
+    table.db = db;
     const stopped = seedStuckCancel(db, "STOPPED", { volumeId: `vol-${hex()}` });
     const worker = ready();
     const live = seedStuckCancel(db, "READY", worker);
