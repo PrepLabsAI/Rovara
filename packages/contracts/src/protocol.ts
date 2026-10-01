@@ -1,8 +1,26 @@
 import { z } from "zod";
 import { StoredProjectDefinitionSchema } from "./project.js";
-import { ModelSelectionSchema } from "./models.js";
+import { ModelSelectionSchema, type ModelSelection } from "./models.js";
 
 export const AGENTX_PROTOCOL_VERSION = 1 as const;
+
+/**
+ * Optional invocation fields that this build's worker parses and an older one does not (spec 053).
+ * Worker payload schemas are strict, and a running EC2 worker keeps its image until the idle reaper
+ * stops it, so an older worker rejects an invocation that carries one of these. A worker reports the
+ * list on GET /ping, and the eval runner image release records it beside the image, so the control
+ * plane sends such a field only to a build that lists it.
+ */
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel"] as const;
+export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number];
+/** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
+export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
+
+/** The model as a build with `features` can parse it: the thinking level only where it is listed. */
+export function modelSelectionFor(model: ModelSelection, features: readonly string[]): ModelSelection {
+  if (model.thinkingLevel === undefined || features.includes("model.thinkingLevel")) return model;
+  return { provider: model.provider, modelId: model.modelId };
+}
 
 const InvocationBaseSchema = z.object({
   protocolVersion: z.literal(AGENTX_PROTOCOL_VERSION),

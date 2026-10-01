@@ -72,6 +72,39 @@ describe("project worker model selection", () => {
     expect(invocation.payload.modelSelectionDiagnostic).toMatch(/no longer approved/);
   });
 
+  it("carries the approved entry's thinking level into the task, and no level key where the entry has none (spec 053)", async () => {
+    const leveled = {
+      default: models.default,
+      approved: [models.approved[0]!, { ...models.approved[1]!, thinkingLevel: "low" }],
+    };
+    const { handler, db } = createBroker();
+    await registerSlackProject(handler, { models: leveled });
+    const workspace = await ensureWorkspace(handler, thread, user);
+    const workspaceId = workspace.body.workspaceId as string;
+    markReady(db, workspaceId);
+    const conversation = await serviceCall(handler, thread, user, "POST", `/v1/service/workspaces/${workspaceId}/conversations`, {});
+    const conversationId = (conversation.body.conversation as { id: string }).id;
+    const taskModel = async () => {
+      const task = await serviceCall(handler, thread, user, "POST", `/v1/service/workspaces/${workspaceId}/tasks`, { requestId: randomUUID(), conversationId, prompt: "test it" });
+      expect(task.status).toBe(202);
+      const operationId = (task.body.operation as { id: string }).id;
+      const invocation = db.find((item) => item.entityType === "OUTBOX" && item.operationId === operationId)[0]!.invocation as { payload: Record<string, unknown> };
+      // The task is finished so the next one can start on the same workspace.
+      markReady(db, workspaceId);
+      return invocation.payload.model as Record<string, unknown>;
+    };
+
+    // The project default has no level: the key is absent, not undefined.
+    const byDefault = await taskModel();
+    expect(byDefault).toEqual({ provider: "amazon-bedrock", modelId: "default-model" });
+    expect(Object.keys(byDefault)).not.toContain("thinkingLevel");
+
+    // A member selects by identifier only; the level comes from the approved entry.
+    const selected = await serviceCall(handler, thread, user, "PUT", "/v1/service/project/model", { provider: "amazon-bedrock", modelId: "fast-model" });
+    expect(selected.status).toBe(200);
+    expect(await taskModel()).toEqual({ provider: "amazon-bedrock", modelId: "fast-model", thinkingLevel: "low" });
+  });
+
   it("omits the task model for a legacy project", async () => {
     const { handler, db } = createBroker();
     await registerSlackProject(handler);

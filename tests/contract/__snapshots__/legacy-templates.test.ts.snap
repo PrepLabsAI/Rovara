@@ -742,6 +742,26 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                       {
                         "Ref": "AWS::AccountId",
                       },
+                      ":parameter/agentx/production/eval/runner-features",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
                       ":parameter/agentx/production/worker-image",
                     ],
                   ],

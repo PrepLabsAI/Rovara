@@ -2,7 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { KMSClient, SignCommand } from "@aws-sdk/client-kms";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
+import { WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
 import { requiredEnvironment, type DurableOutboxRecord, type Ec2OutboxRecord } from "./lambda.js";
 import type { Ec2Delivery } from "./ec2-delivery.js";
 import { failOutboxOperation } from "./outbox-failure.js";
@@ -118,6 +118,8 @@ const kms = new KMSClient(awsClientConfiguration);
 const sfn = new SFNClient(awsClientConfiguration);
 /** A worker answers /invocations as soon as it has journaled the operation. */
 const WORKER_POST_TIMEOUT_MS = 10_000;
+/** Asking a worker what it parses (spec 053); one that does not answer gets no optional field. */
+const WORKER_PING_TIMEOUT_MS = 3_000;
 
 const deliverEc2 = createEc2Delivery({
   sessions: new SessionManager({
@@ -149,6 +151,11 @@ const deliverEc2 = createEc2Delivery({
       signal: AbortSignal.timeout(WORKER_POST_TIMEOUT_MS),
     });
     return { status: response.status, body: await response.text() };
+  },
+  async workerFeatures(url) {
+    const response = await fetch(url, { signal: AbortSignal.timeout(WORKER_PING_TIMEOUT_MS) });
+    const features = (await response.json() as Record<string, unknown>)[WORKER_PING_FEATURES_FIELD];
+    return Array.isArray(features) ? features.filter((feature): feature is string => typeof feature === "string") : [];
   },
   async progress(record, message) {
     await appendOperationEvent(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), {

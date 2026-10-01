@@ -257,7 +257,21 @@ export const SWEBENCH_SETTING_PARAMETERS = {
   settings: "eval/settings",
   /** Written by the runner image release: an ECR linux/amd64 worker image pinned by digest. */
   runnerImage: "eval/runner-image",
+  /**
+   * Written by the runner image release after the image (spec 053): SwebenchRunnerFeaturesSchema as
+   * JSON, the invocation features of the build behind `runnerImage`. A runner image released before
+   * this parameter existed has none, and a value naming another image is stale.
+   */
+  runnerFeatures: "eval/runner-features",
 } as const;
+
+/** What the runner image release records beside the image: the optional run fields its build parses. */
+export const SwebenchRunnerFeaturesSchema = z.object({
+  runnerImage: z.string().min(1).max(512),
+  features: z.array(z.string().min(1).max(64)).max(32),
+}).strict();
+
+export type SwebenchRunnerFeatures = z.infer<typeof SwebenchRunnerFeaturesSchema>;
 
 /** What the eval stack tells the broker about itself. */
 export const SwebenchSettingsSchema = z.object({

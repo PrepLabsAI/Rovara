@@ -85,6 +85,7 @@ import {
   modelKey,
   type ModelIdentifier,
   type ModelRef,
+  type ModelSelection,
   type ProjectModelOptions,
   projectCatalogKey,
   type ChannelMembersRequest,
@@ -4294,7 +4295,7 @@ async function putProjectModel(
 async function resolveProjectModel(
   dependencies: AwsBrokerDependencies,
   project: RegisteredProjectRecord,
-): Promise<{ model?: ModelIdentifier; diagnostic?: string }> {
+): Promise<{ model?: ModelSelection; diagnostic?: string }> {
   const policy = project.definition.models;
   if (!policy) return {};
   const selection = await getItem<ProjectModelSelectionRecord>(dependencies, projectModelSelectionKey(project.definition.name));
@@ -4303,10 +4304,19 @@ async function resolveProjectModel(
     : policy.approved.find((candidate) => modelKey(candidate) === modelKey(selection.model));
   const effective = selected ?? approvedDefault(policy.default, policy.approved);
   return {
-    model: { provider: effective.provider, modelId: effective.modelId },
+    model: approvedSelection(effective),
     ...(selection !== undefined && selected === undefined
       ? { diagnostic: `The project's selected coding model ${selection.model.provider}/${selection.model.modelId} is no longer approved. This task uses the project default ${effective.provider}/${effective.modelId}.` }
       : {}),
+  };
+}
+
+/** Spec 053: what a task or eval run runs: the approved entry's model and, only when it has one, its level. */
+function approvedSelection(model: ModelRef): ModelSelection {
+  return {
+    provider: model.provider,
+    modelId: model.modelId,
+    ...(model.thinkingLevel === undefined ? {} : { thinkingLevel: model.thinkingLevel }),
   };
 }
 
@@ -4418,7 +4428,7 @@ function swebenchSlackContext(dependencies: AwsBrokerDependencies, identity: Aut
       if (requested !== undefined) {
         const approved = policy?.approved.find((candidate) => modelKey(candidate) === modelKey(requested));
         if (!approved) throw agentXError("CONFIG_INVALID", `model ${requested.provider}/${requested.modelId} is not approved for this project`);
-        return { provider: approved.provider, modelId: approved.modelId };
+        return approvedSelection(approved);
       }
       return (await resolveProjectModel(dependencies, project)).model;
     },

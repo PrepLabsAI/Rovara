@@ -63,6 +63,61 @@ describe("ec2-ebs delivery", () => {
     })).toEqual({ ok: false, reason: "expired" });
   });
 
+  describe("the thinking level and workers built before it (spec 053)", () => {
+    function taskRecord(model: Record<string, unknown>): Ec2OutboxRecord {
+      const record = recordFor();
+      const invocation = {
+        ...record.invocation,
+        kind: "task",
+        payload: { conversationId: randomUUID(), prompt: "test it", model },
+      } as WorkerInvocation;
+      return { ...record, invocation };
+    }
+    const leveled = { provider: "amazon-bedrock", modelId: "fast", thinkingLevel: "low" };
+    const posted = (post: ReturnType<typeof delivery>["post"]) => (JSON.parse(post.mock.calls[0]![1].body) as { payload: { model: Record<string, unknown> } }).payload.model;
+
+    it("keeps the level for a worker whose /ping lists the feature", async () => {
+      const workerFeatures = vi.fn<NonNullable<Ec2DeliveryDependencies["workerFeatures"]>>(async () => ["model.thinkingLevel"]);
+      const { deliver, post } = delivery({ workerFeatures });
+      const record = taskRecord(leveled);
+      expect(await deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(workerFeatures).toHaveBeenCalledExactlyOnceWith("http://10.42.128.10:8080/ping");
+      expect(posted(post)).toEqual(leveled);
+    });
+
+    it("drops only the level for a worker that lists no features, or cannot be asked, and keeps the token valid", async () => {
+      for (const workerFeatures of [async () => [], async () => { throw new Error("timeout"); }]) {
+        const { deliver, post } = delivery({ workerFeatures });
+        const record = taskRecord(leveled);
+        expect(await deliver(record, record.invocation)).toBe("DELIVERED");
+        const model = posted(post);
+        expect(model).toEqual({ provider: "amazon-bedrock", modelId: "fast" });
+        expect(Object.keys(model)).not.toContain("thinkingLevel");
+        const body = JSON.parse(post.mock.calls[0]![1].body) as WorkerInvocation;
+        const verified = verifyInvokeAuthorization(post.mock.calls[0]![1].authorization, {
+          publicKey: keys.publicKey, workspaceId: record.workspaceId, generation: 3, now: () => Math.floor(NOW / 1_000),
+        });
+        expect(verified.ok && invocationMatchesClaims(body, verified.claims)).toBe(true);
+      }
+    });
+
+    it("drops the level when the dispatcher has no way to ask the worker", async () => {
+      const { deliver, post } = delivery();
+      const record = taskRecord(leveled);
+      await deliver(record, record.invocation);
+      expect(posted(post)).toEqual({ provider: "amazon-bedrock", modelId: "fast" });
+    });
+
+    it("does not ask the worker when the invocation carries no level", async () => {
+      const workerFeatures = vi.fn(async () => []);
+      const { deliver, post } = delivery({ workerFeatures });
+      const record = taskRecord({ provider: "amazon-bedrock", modelId: "fast" });
+      await deliver(record, record.invocation);
+      expect(workerFeatures).not.toHaveBeenCalled();
+      expect(JSON.parse(post.mock.calls[0]![1].body)).toEqual(record.invocation);
+    });
+  });
+
   it("parks the record and records one progress event while the session is not ready", async () => {
     const { deliver, post, progress } = delivery({ sessions: { ensureSession: async () => ({ ready: false, generation: 1, state: "PROVISIONING" }) } });
     const record = recordFor();

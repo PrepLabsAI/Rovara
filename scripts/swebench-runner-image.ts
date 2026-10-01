@@ -4,7 +4,7 @@
 // pushes it to the worker repository with a `swebench-` tag, and points the eval runner-image
 // parameter at its digest. The broker reads that parameter per run, so no other release is needed.
 // A production write: run it yourself, after the eval stack is deployed (docs/swebench-eval.md).
-import { environmentSettingsPrefix, SWEBENCH_SETTING_PARAMETERS } from "@agentx/contracts";
+import { environmentSettingsPrefix, SWEBENCH_SETTING_PARAMETERS, WORKER_INVOCATION_FEATURES, type SwebenchRunnerFeatures } from "@agentx/contracts";
 import { Runner, assertDigestImage, buildAndPushImage, parseReleaseArgs, splitEnvFlag, verifyRepositoryImage } from "./release-common.js";
 
 const LEGACY_SETTINGS_PREFIX = "/agentx/production/";
@@ -16,7 +16,9 @@ if (argv.includes("--help")) {
 }
 const { env, rest } = splitEnvFlag(argv);
 const options = parseReleaseArgs(rest);
-const parameterName = `${env === undefined ? LEGACY_SETTINGS_PREFIX : environmentSettingsPrefix(env)}${SWEBENCH_SETTING_PARAMETERS.runnerImage}`;
+const settingsPrefix = env === undefined ? LEGACY_SETTINGS_PREFIX : environmentSettingsPrefix(env);
+const parameterName = `${settingsPrefix}${SWEBENCH_SETTING_PARAMETERS.runnerImage}`;
+const featuresParameterName = `${settingsPrefix}${SWEBENCH_SETTING_PARAMETERS.runnerFeatures}`;
 
 const runner = new Runner(options);
 const revision = runner.capture("git", ["rev-parse", "HEAD"]).stdout.trim();
@@ -31,7 +33,7 @@ if (options.dryRun) {
   process.stdout.write([
     `Would build packages/worker for linux/amd64 at ${revision.slice(0, 12)},`,
     `push it to ${repositoryUri} with a swebench- tag,`,
-    `and set ${parameterName} in ${options.region} to its digest.`,
+    `and set ${parameterName} in ${options.region} to its digest, then ${featuresParameterName} to the run fields it parses.`,
     "",
   ].join("\n"));
   process.exit(0);
@@ -60,4 +62,8 @@ const image = await buildAndPushImage(runner, options, {
 assertDigestImage(image, repositoryUri);
 verifyRepositoryImage(runner, options, image);
 runner.aws(["ssm", "put-parameter", "--region", options.region, "--name", parameterName, "--type", "String", "--value", image, "--overwrite"]);
-process.stdout.write(`\nSWE-bench runner image: ${image}\nWrote ${parameterName}.\n`);
+// Spec 053: after the image, and naming it, so the broker never reads features for an image that
+// lacks them; a features value left by an older image names that image and is ignored.
+const features: SwebenchRunnerFeatures = { runnerImage: image, features: [...WORKER_INVOCATION_FEATURES] };
+runner.aws(["ssm", "put-parameter", "--region", options.region, "--name", featuresParameterName, "--type", "String", "--value", JSON.stringify(features), "--overwrite"]);
+process.stdout.write(`\nSWE-bench runner image: ${image}\nWrote ${parameterName} and ${featuresParameterName}.\n`);

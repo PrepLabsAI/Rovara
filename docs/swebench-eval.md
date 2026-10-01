@@ -112,8 +112,11 @@ Every step writes to the AWS account; an administrator runs them.
    A named environment adds `-c agentxEnv=<name>`, and its stack is `agentx-<name>-eval`.
 3. **Build the runner image**: `npm run swebench:runner-image` (add `--env <name>` for a named
    environment). It builds the worker image for `linux/amd64`, pushes it with a `swebench-` tag (never
-   `release-`, which the repository keeps only twenty of), and writes `<settings prefix>eval/runner-image`.
-   Run it again to ship a runner change; the broker reads the parameter per run.
+   `release-`, which the repository keeps only twenty of), and writes `<settings prefix>eval/runner-image`,
+   then `eval/runner-features`: the run fields that image parses. The broker sends a model's thinking
+   level (spec 053) only to a runner image recorded there, so rebuild the runner image after a release
+   for runs to use the approved levels. Run it again to ship a runner change; the broker reads the
+   parameters per run.
 4. **Enable a channel**: `agentx admin eval enable --team <T…> --channel <C…> [--max-cost-usd 10]`.
    The channel must already be bound to a project. `agentx admin eval show` and `disable` read and
    remove the setting.
