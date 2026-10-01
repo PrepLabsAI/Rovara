@@ -789,14 +789,18 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   `applying`, `applied`, `declined`, `expired` or `failed`), the times, and the trace ID. A request
   carries a `requestId`; a repeated `requestId` from the same admin answers the change it already
   made (`ADMIN_CHANGE_REQUEST#<ownerKey>` / `<requestId>`), so a retried tool call plans nothing
-  twice. Both items expire by the State table's TTL 30 days after the proposal. The pending change
-  keeps the raw input, since the apply needs it; no log line, DM, tool result or audit record
-  carries that input except through `redactSecrets` (FR-051, SC-004) (controller ruling,
+  twice; the same `requestId` with a different change is refused with `IDEMPOTENCY_CONFLICT`.
+  Both items expire by the State table's TTL 30 days after the proposal. The pending change keeps
+  the raw input only while it can still apply, since the apply needs it, and the step that ends
+  the change (applied, declined, expired or failed) removes it; no log line, DM, tool result or
+  audit record carries that input except through `redactSecrets` (FR-051, SC-004), and the audit
+  record names a channel only by its ID, never by a name the admin typed (controller rulings,
   2026-09-30).
 - **FR-040**: A confirmed change MUST be applied in one transaction that checks that the change is
   pending, unexpired, planned by the same admin, confirmed by an offered method, and that the state
   hash still matches; it MUST then apply the change through the existing admin handler and mark it
-  used. A change MUST apply at most once. A declined change (the elicitation declined or cancelled,
+  used (see D32: the claim and its audit step commit in one transaction; the handler's write
+  follows). A change MUST apply at most once. A declined change (the elicitation declined or cancelled,
   or the Slack Cancel button) MUST be marked declined through `POST /v1/admin/changes/{id}/decline`
   or the interactivity route.
 
@@ -815,9 +819,8 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
 - **FR-041**: The confirmation methods, in order of preference:
   1. **MCP elicitation** (the client's pop-up), when the client declared the `elicitation`
      capability and the environment allows it (`mcp.confirm.elicitation`, default on; see the notes
-     below). The server
-     MUST send `elicitation/create` with the effect text and one boolean field, and call
-     `POST /v1/admin/changes/{id}/apply` only on `accept` with the field true.
+     below). The server MUST send `elicitation/create` with the effect text and one boolean field,
+     and call `POST /v1/admin/changes/{id}/apply` only on `accept` with the field true.
   2. **Slack Confirm button**, when the admin's verified email claim matches one Slack user of the
      environment's team (the lookup of FR-012). The notifier MUST send that user a direct message
      with the effect and Confirm and Cancel buttons. The Slack interactivity route MUST accept a
@@ -863,8 +866,7 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
     from the planning admin, as D12 accepts any command a person types (owner decision, 2026-09-30;
     25e Q6; D35). No AI tool can offer it.
 - **FR-042**: The CLI's existing `agentx admin ...` commands MUST keep working unchanged, without
-  this confirmation, because a person types them. Every existing `agentx admin` command keeps
-  working unchanged. The new `agentx admin project grant|revoke` and `agentx config set limits.*`
+  this confirmation, because a person types them. The new `agentx admin project grant|revoke` and `agentx config set limits.*`
   go through the change path with the `cli` method and its audit (owner requirement, 2026-09-29).
 - **FR-051**: Every admin change request MUST have one audit record, whatever its outcome, holding:
   - who asked: the admin's issuer, subject and display name;
