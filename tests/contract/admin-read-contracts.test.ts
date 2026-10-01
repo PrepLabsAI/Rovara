@@ -76,7 +76,7 @@ describe("the index records (A5)", () => {
 
 describe("the wire shapes", () => {
   it("adds the admin API version beside the developer one, which stays 1.2 (A1)", () => {
-    expect(ADMIN_API_VERSION).toBe("1.0");
+    expect(ADMIN_API_VERSION).toBe("1.1");
     expect(DEVELOPER_API_VERSION).toBe("1.2");
     expect(ADMIN_INDEX_RETENTION_DAYS).toBe(30);
   });

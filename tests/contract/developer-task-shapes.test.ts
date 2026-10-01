@@ -109,6 +109,27 @@ describe("the task view", () => {
   });
 });
 
+describe("the task view's failure stage (#154)", () => {
+  const view = {
+    taskId: requestId, title: "Fix", project: "payments", status: "FAILED", startingRevision: 7, client: "Claude Code", shared: false,
+    createdAt: "2026-09-27T12:00:00.000Z", updatedAt: "2026-09-27T12:00:05.000Z", events: [],
+  };
+
+  it("carries stage setup when the failure happened while the workspace was set up", () => {
+    const failure = { category: "worker_unavailable", stage: "setup", message: "workspace compute was lost during setup; close this task and start a new one" };
+    expect(DeveloperTaskViewSchema.parse({ ...view, failure }).failure).toEqual(failure);
+  });
+
+  it("still parses a failure without a stage, from a control plane that predates it", () => {
+    expect(DeveloperTaskViewSchema.parse({ ...view, failure: { category: "task_failed", message: "x" } }).failure).toEqual({ category: "task_failed", message: "x" });
+  });
+
+  it("drops a stage this release does not know, rather than refusing the view", () => {
+    const parsed = DeveloperTaskViewSchema.parse({ ...view, failure: { category: "task_failed", stage: "a-future-stage", message: "x" } });
+    expect(parsed.failure).toEqual({ category: "task_failed", message: "x" });
+  });
+});
+
 describe("developer API 1.2 (R23, Q7)", () => {
   it("reports 1.2 and adds the project's task policy and channel names", () => {
     expect(DEVELOPER_API_VERSION).toBe("1.2");

@@ -2,12 +2,14 @@
 // developer's session (packages/cli); the hosted endpoint will give it another.
 import { randomUUID } from "node:crypto";
 import {
+  AgentXConfigurationConfirmSchema,
   AgentXError,
   DeveloperCloseResponseSchema,
   DeveloperProjectsResponseSchema,
   DeveloperPullRequestResponseSchema,
   DeveloperTaskListResponseSchema,
   DeveloperTaskResponseSchema,
+  type AgentXConfigurationConfirm,
   type ContinueDeveloperTaskRequest,
   type DeveloperCloseResponse,
   type DeveloperProjectsResponse,
@@ -34,7 +36,7 @@ export interface CallOptions {
 
 export interface ControlPlaneClient {
   /** The environment's agentx-configuration, read without a token. */
-  configuration(): Promise<{ env: string; apiVersion: string; baseUrl: string; adminApiVersion?: string }>;
+  configuration(): Promise<{ env: string; apiVersion: string; baseUrl: string; adminApiVersion?: string; confirm?: AgentXConfigurationConfirm }>;
   projects(): Promise<DeveloperProjectsResponse>;
   startTask(request: StartDeveloperTaskRequest): Promise<DeveloperTaskView>;
   getTask(taskId: string, events: number, options?: CallOptions): Promise<DeveloperTaskView>;
@@ -48,7 +50,8 @@ export interface ControlPlaneClient {
 }
 
 /** Spec 025 A1: adminApiVersion is absent from a control plane from before 25d. */
-const ConfigurationSchema = z.object({ env: z.string(), apiVersion: z.string(), adminApiVersion: z.string().optional() });
+/** Spec 025 E16 (C22): confirm is absent from a control plane from before 25e. */
+const ConfigurationSchema = z.object({ env: z.string(), apiVersion: z.string(), adminApiVersion: z.string().optional(), confirm: AgentXConfigurationConfirmSchema.optional() });
 const UNREADABLE = "AgentX answered with something this version of the CLI cannot read; upgrade it";
 const DEFAULT_SIGN_IN = "npx @charterarc/agentx login <your AgentX URL>";
 const REQUEST_TIMEOUT_MS = 30_000;
@@ -193,7 +196,11 @@ export function httpControlPlaneClient(options: {
     configuration: async () => {
       const current = await session();
       const value = await send(current, ConfigurationSchema, "GET", "/v1/auth/.well-known/agentx-configuration", undefined, false);
-      return { env: value.env, apiVersion: value.apiVersion, baseUrl: current.baseUrl, ...(value.adminApiVersion === undefined ? {} : { adminApiVersion: value.adminApiVersion }) };
+      return {
+        env: value.env, apiVersion: value.apiVersion, baseUrl: current.baseUrl,
+        ...(value.adminApiVersion === undefined ? {} : { adminApiVersion: value.adminApiVersion }),
+        ...(value.confirm === undefined ? {} : { confirm: value.confirm }),
+      };
     },
     projects: () => call(DeveloperProjectsResponseSchema, "GET", "/v1/dev/projects"),
     startTask: async (request) => task(await call(DeveloperTaskResponseSchema, "POST", "/v1/dev/tasks", request, true, { busyStep: START_BUSY_STEP })),

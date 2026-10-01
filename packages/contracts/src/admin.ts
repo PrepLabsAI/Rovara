@@ -9,8 +9,8 @@ import { looseCopy } from "./loose.js";
 import { DeveloperTaskPolicySchema } from "./project.js";
 import { SlackChannelIdSchema, SlackTeamIdSchema, SlackUserIdSchema } from "./slack.js";
 
-/** A1 (Q1): the admin API's own version, reported beside DEVELOPER_API_VERSION. */
-export const ADMIN_API_VERSION = "1.0";
+/** A1 (25d Q1) and E18 (25e Q11): 1.1 adds the change routes and GET /v1/admin/changes. */
+export const ADMIN_API_VERSION = "1.1";
 export const ADMIN_LIST_MAX = 100;
 export const ADMIN_FAILURES_DEFAULT_LIMIT = 25;
 export const ADMIN_WORKSPACES_DEFAULT_LIMIT = 50;

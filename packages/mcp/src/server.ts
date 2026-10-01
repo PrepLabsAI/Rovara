@@ -3,9 +3,10 @@
 // since all of it goes into the AI tool's model context.
 import { McpServer, type RegisteredTool } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
+import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { DEVELOPER_TASK_SUMMARY_MAX, redactSecrets, redactText } from "@agentx/contracts";
 import { ToolError } from "./errors.js";
-import { NOT_OFFERED, ToolOffer, guardTransport, type AdminOffer } from "./offer.js";
+import { NOT_OFFERED, ToolOffer, guardTransport, type AdminOffer, type AdminToolGroup } from "./offer.js";
 import { RequestIdMemory } from "./request-ids.js";
 import { DEVELOPER_TOOLS, type ToolCall, type ToolContext, type ToolDefinition } from "./tools.js";
 
@@ -17,6 +18,10 @@ const MOST_ITEMS = 200;
 const LONGEST_TEXT = 20_000;
 const LONGEST_ERROR = 2_000;
 const LONGEST_PROGRESS = 300;
+/** Spec 025 FR-041: the pop-up's message, the change's effect (at most 4,000 characters) and a question. */
+const LONGEST_ELICITATION = 4_200;
+/** The pop-up asks one yes or no question; no is the default. */
+const CONFIRM_SCHEMA = { type: "object" as const, properties: { confirm: { type: "boolean" as const, title: "Apply this change", default: false } }, required: ["confirm"] };
 
 /** Redacted first, then cut, so a cut never leaves part of a secret that redaction would miss. */
 const safeText = (text: string, limit: number): string => redactText(text).slice(0, limit);
@@ -46,12 +51,20 @@ function errorResult(failure: ToolError) {
 
 export function createAgentXMcpServer(options: {
   version: string;
-  context(clientName: string | undefined): ToolContext;
+  /** Spec 025 FR-051: the client's version too, as it reported it at initialize. */
+  context(clientName: string | undefined, clientVersion?: string): ToolContext;
   log?(entry: Record<string, unknown>): void;
   /** Spec 025 A15: registered once, disabled until the offer says the admin sign-in fits. */
   adminTools?: readonly ToolDefinition[];
-  /** Spec 025 A15: whether the admin tools are offered; absent, they never are. */
-  adminOffer?: () => Promise<AdminOffer>;
+  /** Spec 025 FR-052: agentx_admin_changes, registered and switched like the admin tools (group audit). */
+  auditTools?: readonly ToolDefinition[];
+  /** Spec 025 FR-030: the change tools, registered and switched like the admin tools (group changes). */
+  changeTools?: readonly ToolDefinition[];
+  /**
+   * Spec 025 A15, FR-041: whether the admin tools are offered; absent, they never are. It learns
+   * whether the client declared form elicitation, so the change tools can need a method it has.
+   */
+  adminOffer?: (client: { elicitation: boolean }) => Promise<AdminOffer>;
   /** How often the offer is checked while connected; 30 seconds by default. */
   recheckMs?: number;
 }): McpServer {
@@ -59,19 +72,43 @@ export function createAgentXMcpServer(options: {
   // One memory per server (one per AI tool session), so a retried call reuses its request ID.
   const requestIds = new RequestIdMemory();
   // Filled below; the offer switches whatever the map holds.
-  const adminRegistered = new Map<string, RegisteredTool>();
+  const adminRegistered = new Map<string, { tool: RegisteredTool; group: AdminToolGroup }>();
+  /** FR-041: the pop-up needs a client that declared form elicitation (the same test as `elicit` below). */
+  const clientElicits = (): boolean => server.server.getClientCapabilities()?.elicitation?.form !== undefined;
+  const readOffer = options.adminOffer;
   const offer = new ToolOffer({
     tools: adminRegistered,
-    read: options.adminOffer ?? (async () => ({ admin: NOT_OFFERED })),
+    read: readOffer === undefined ? async () => ({ admin: NOT_OFFERED }) : () => readOffer({ elicitation: clientElicits() }),
     ...(options.log === undefined ? {} : { log: (entry: Record<string, unknown>) => options.log?.(entry) }),
   });
   const register = (tool: ToolDefinition): RegisteredTool => server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema }, async (input: Record<string, unknown>, extra) => {
     try {
-      const context = options.context(server.server.getClientVersion()?.name);
+      const client = server.server.getClientVersion();
+      const context = options.context(client?.name, client?.version);
       const progressToken = extra._meta?.progressToken;
+      // Spec 025 FR-041: a pop-up only for a client that declared form elicitation (the SDK reads
+      // an older client's empty elicitation object as form). It is sent without a mode, the
+      // original shape every form client reads, and tied to this tool call's request.
+      const elicit = !clientElicits() ? undefined : async (message: string, timeoutMs: number, signal: AbortSignal) => {
+        try {
+          const answer = await extra.sendRequest(
+            { method: "elicitation/create", params: { message: safeText(message, LONGEST_ELICITATION), requestedSchema: CONFIRM_SCHEMA } },
+            ElicitResultSchema,
+            { signal, timeout: timeoutMs },
+          );
+          if (answer.action === "accept") return answer.content?.confirm === true ? "accept" as const : "decline" as const;
+          return answer.action;
+        } catch (error) {
+          // The client's error, its timeout or a cancel: the error's name only, never its words,
+          // which can quote the message.
+          options.log?.({ event: "elicitation.failed", error: error instanceof Error ? error.name : "unknown" });
+          return "failed" as const;
+        }
+      };
       const call: ToolCall = {
         signal: extra.signal,
         requestIds,
+        ...(elicit === undefined ? {} : { elicit }),
         ...(options.log === undefined ? {} : { log: (entry: Record<string, unknown>) => options.log?.(entry) }),
         ...(progressToken === undefined ? {} : {
           progress: async (progress: number, total: number | undefined, message: string) => {
@@ -96,10 +133,13 @@ export function createAgentXMcpServer(options: {
   });
   for (const tool of DEVELOPER_TOOLS) register(tool);
   // Disabled at once: not connected yet, so nothing is sent.
-  for (const tool of options.adminTools ?? []) {
-    const registered = register(tool);
-    registered.disable();
-    adminRegistered.set(tool.name, registered);
+  const groups: Array<[AdminToolGroup, readonly ToolDefinition[]]> = [["admin", options.adminTools ?? []], ["audit", options.auditTools ?? []], ["changes", options.changeTools ?? []]];
+  for (const [group, tools] of groups) {
+    for (const tool of tools) {
+      const registered = register(tool);
+      registered.disable();
+      adminRegistered.set(tool.name, { tool: registered, group });
+    }
   }
   // A15: checked when the client initializes, then on a timer, and after every call (above).
   const initialized = server.server.oninitialized;

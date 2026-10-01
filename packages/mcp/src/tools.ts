@@ -25,6 +25,14 @@ export interface ToolContext {
   newRequestId(): string;
   /** Spec 025 A14: the admin sign-in's client; absent when the server has none. */
   admin?: AdminControlPlaneClient;
+  /** Spec 025 FR-051: the MCP client's own version, as it reported it. */
+  clientVersion?: string;
+  /**
+   * Spec 025 FR-041: the confirmation methods the environment allows and the signed-in admin can
+   * use (Slack needs their Slack link). The server adds the client's own: the pop-up needs a
+   * client that declared form elicitation. Absent, no change can be confirmed.
+   */
+  confirmation?(): Promise<{ elicitation: boolean; slack: boolean }>;
 }
 export interface ToolCall {
   signal: AbortSignal;
@@ -32,6 +40,11 @@ export interface ToolCall {
   /** The server's memory of request IDs made for calls that left request_id out. */
   requestIds?: RequestIdMemory;
   log?(entry: Record<string, unknown>): void;
+  /**
+   * Spec 025 FR-041: the client's own pop-up, asking yes or no; absent when the client declared no
+   * form elicitation. "failed" when it could not be shown or answered in time.
+   */
+  elicit?(message: string, timeoutMs: number, signal: AbortSignal): Promise<"accept" | "decline" | "cancel" | "failed">;
 }
 export interface ToolResult { structured: Record<string, unknown>; text: string }
 export interface ToolDefinition {
@@ -51,13 +64,13 @@ const instructionsInput = z.string().min(1).describe("complete instructions for 
 
 const TaskShape = {
   task_id: z.string(), title: z.string(), project: z.string(), status: DeveloperTaskStatusSchema,
-  failure: z.object({ category: z.string(), message: z.string() }).optional(),
+  failure: z.object({ category: z.string(), stage: z.string().optional(), message: z.string() }).optional(),
   starting_revision: z.number(), client: z.string(), shared: z.boolean(), share_mode: z.string().nullable(),
   share_reason: z.string().optional(), share_mode_reason: z.string().optional(),
   channel: z.object({ id: z.string(), name: z.string().optional() }).optional(),
   thread_url: z.string().optional(), share_posting: z.boolean().optional(), share_post_failed: z.boolean().optional(),
   channel_turns: z.array(z.object({ author: z.string(), slack_user: z.string(), at: z.string(), request: z.string(), outcome: z.string() })).optional(),
-  closing: z.boolean().optional(), created_at: z.string(), updated_at: z.string(),
+  closing: z.boolean().optional(), created_at: z.string(), updated_at: z.string().describe("when the latest request on this task started; share changes do not move it"),
   events: z.array(z.object({ at: z.string(), kind: z.string(), text: z.string() })),
   summary: z.string().optional(),
   changed_files: z.array(z.object({ repository: z.string(), path: z.string(), added: z.number(), removed: z.number() })).optional(),
@@ -115,7 +128,9 @@ function nextFor(task: DeveloperTaskView): string {
     case "CLOSED":
       return "Its workspace is released.";
     default:
-      return task.failure?.category === "setup_failed"
+      // #154: a failure during setup (setup_failed, or compute lost before setup finished) leaves
+      // nothing to continue.
+      return task.failure?.category === "setup_failed" || task.failure?.stage === "setup"
         ? "It never started: close it with agentx_close_task and start a new one."
         : "Send new instructions with agentx_continue_task, or close it with agentx_close_task.";
   }
@@ -155,7 +170,7 @@ function instructions(value: unknown): string {
  * The caller's request_id, else one remembered for this call's content for 15 minutes, so an
  * unchanged retry (after the AI tool's own timeout, say) reaches AgentX as the same request.
  */
-function requestIdFor(context: ToolContext, call: ToolCall, input: Record<string, unknown>, content: readonly unknown[], group?: string): string {
+export function requestIdFor(context: ToolContext, call: ToolCall, input: Record<string, unknown>, content: readonly unknown[], group?: string): string {
   const given = input.request_id as string | undefined;
   if (given !== undefined) return given;
   return call.requestIds === undefined ? context.newRequestId() : call.requestIds.idFor(content, context.now(), () => context.newRequestId(), group);
@@ -323,7 +338,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       status: DeveloperTaskStatusSchema.optional().describe("only tasks with this status"),
       limit: z.number().int().min(1).max(DEVELOPER_TASK_LIST_MAX).optional().describe("how many tasks to show, 1 to 50; 20 by default"),
     },
-    outputSchema: { tasks: z.array(z.object({ task_id: z.string(), title: z.string(), project: z.string(), status: z.string(), created_at: z.string(), updated_at: z.string(), shared: z.boolean() })) },
+    outputSchema: { tasks: z.array(z.object({ task_id: z.string(), title: z.string(), project: z.string(), status: z.string(), created_at: z.string(), updated_at: z.string().describe("when the latest request on this task started; share changes do not move it"), shared: z.boolean() })) },
     async handler(context, input) {
       const tasks = await context.client.listTasks({
         limit: (input.limit as number | undefined) ?? DEVELOPER_TASK_LIST_DEFAULT,

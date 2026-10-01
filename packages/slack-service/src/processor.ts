@@ -19,6 +19,7 @@ import {
   type TurnRecord,
   type ModelIdentifier,
   type ProjectModelOptions,
+  parseSwebenchCommand,
 } from "@agentx/contracts";
 import type { WorkerAccess } from "@agentx/orchestrator";
 import type { GateSession } from "@agentx/orchestrator/action-gate";
@@ -35,6 +36,7 @@ import {
   HANDOFF_FINAL_FINISHED_TEXT, HANDOFF_FINAL_IDLE_TEXT, HANDOFF_FINAL_TEXT, HANDOFF_TASK_TEXT, HANDOFF_TEXT, RESUME_NOT_FOUND_TEXT, TurnHandedOffError, resumedResultText, turnNoteText,
   type ActiveTurn, type TurnNote,
 } from "./interrupted-turn.js";
+import { runSwebenchCommand, type SwebenchApi } from "./swebench-command.js";
 import { SHARED_CLOSE_REFUSED_MESSAGE, SHARED_SETUP_FAILED_MESSAGE, TASK_STILL_BUSY_MESSAGE, taskBusy, waitForIdleTask } from "./shared-task.js";
 
 export interface ThreadServiceApi {
@@ -54,6 +56,9 @@ export interface ThreadServiceApi {
   createConversation(workspaceId: string): Promise<string>;
   listProjectModels?(): Promise<ProjectModelOptions>;
   selectProjectModel?(model: ModelIdentifier): Promise<ProjectModelOptions>;
+  /** Spec 043: absent where the control plane has no SWE-bench routes. */
+  startSwebenchRun?: SwebenchApi["startSwebenchRun"];
+  getSwebenchRun?: SwebenchApi["getSwebenchRun"];
 }
 
 /** Issue 167: a cancel was queued for a task still running, or the task had already finished. */
@@ -149,6 +154,8 @@ export interface ProcessorDependencies {
   handoffNoticeMilliseconds?: number;
   /** Issue 167: how long cancelling an abandoned task may take before the turn finishes anyway. Default 5 seconds. */
   cancelTaskMilliseconds?: number;
+  /** Waits between polls of a SWE-bench run (spec 043); a timer when absent. */
+  sleep?: (ms: number) => Promise<void>;
 }
 
 /** Issue 157: a save already in flight at the hand-off gets this long to land. */
@@ -323,6 +330,36 @@ export async function processSlackRequest(
         return;
       }
     }
+    const swebenchCommand = parseSwebenchCommand(message.text);
+    if (swebenchCommand !== undefined) {
+      draft.disposition = "swebench_run";
+      if (api.startSwebenchRun === undefined || api.getSwebenchRun === undefined) throw new Error("SWE-bench runs are unavailable in this deployment");
+      if (options.handoff?.aborted === true) throw new TurnHandedOffError();
+      // Issue 157: the wait is handed off at the deadline like a turn; the redelivery resumes the same run.
+      const swebenchRun = runSwebenchCommand(swebenchCommand, {
+        startSwebenchRun: (request) => api.startSwebenchRun!(request),
+        getSwebenchRun: (runId) => api.getSwebenchRun!(runId),
+        ...(api.listProjectModels === undefined ? {} : { listProjectModels: () => api.listProjectModels!() }),
+      }, {
+        // The same run for a redelivered event.
+        requestId: deterministicUuid(`${message.eventId}:swebench`),
+        post,
+        // A redelivered event resumes waiting for the run it started; the thread already has its notice.
+        announce: options.redelivered !== true,
+        ...(dependencies.sleep === undefined ? {} : { sleep: dependencies.sleep }),
+      });
+      try {
+        await untilHandoff(swebenchRun, options.handoff);
+      } catch (error) {
+        if (error instanceof TurnHandedOffError) {
+          handedOff = true;
+          reportAfterHandoff(swebenchRun);
+        }
+        throw error;
+      }
+      finished = true;
+      return;
+    }
     const modelCommand = parseModelCommand(message.text);
     if (modelCommand !== undefined) {
       if (api.listProjectModels === undefined) throw new Error("project model selection is unavailable in this deployment");
@@ -470,7 +507,7 @@ export async function processSlackRequest(
       if (prepared.status !== "SUCCEEDED") {
         draft.disposition = "workspace_unavailable";
         log("workspace.preparation_failed", { eventId: message.eventId, status: prepared.status });
-        await post(preparationFailedMessage(prepared.status));
+        await post(preparationFailedMessage(prepared.status, prepared.error));
         finished = true;
         return;
       }

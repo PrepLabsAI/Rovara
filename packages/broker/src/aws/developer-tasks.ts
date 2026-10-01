@@ -728,7 +728,7 @@ async function continueTask(deps: DeveloperTaskRouteDependencies, caller: Develo
         party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
         request: request.instructions, response: `Continuing task ${taskId} as operation ${operation.id}.`, operationId: operation.id,
       })),
-    ]);
+    ], { sharedTask: task.shared === true });
   } catch (error) {
     return busyOrClosing(deps, task, error);
   }
@@ -896,10 +896,14 @@ export async function finishTaskClose(
   task: DeveloperTaskRecord,
   closeOperationId: string | undefined,
   extra: TransactItems = [],
+  /** When the close was requested (its preflight operation's createdAt): the completed record's receivedAt. */
+  requestedAt?: string,
 ): Promise<void> {
   const workspace = await deps.actions.workspace(task.workspaceId);
   if (workspace.status !== "CLOSED") await deps.actions.deleteCompute(workspace);
   const now = new Date().toISOString();
+  // Fixed across the retries below, so every attempt writes the same record key.
+  const closeTurn = { turnId: closeOperationId ?? randomUUID(), receivedAt: requestedAt ?? now };
   const closing = (current: DeveloperTaskRecord): TransactItems => [
     ...(workspace.status === "CLOSED" ? [] : [{ Update: {
       TableName: deps.tableName,
@@ -935,6 +939,17 @@ export async function finishTaskClose(
       Key: sharedTaskKey({ teamId: current.share.teamId, channelId: current.share.channelId, threadTs: current.share.threadTs }),
       UpdateExpression: "SET closedAt = :now", ConditionExpression: "attribute_exists(pk)",
       ExpressionAttributeValues: { ":now": now },
+    } }]),
+    // E20 (25c C22): the close's own completed record, in the close's transaction, so it commits once.
+    // No requester check: only the task's developer can close it, a shared one too (C11).
+    ...(deps.actions.turnRecordsTableName === undefined ? [] : [{ Put: {
+      TableName: deps.actions.turnRecordsTableName,
+      Item: aiToolTurn({
+        party: partyOfTask(current), turnId: closeTurn.turnId, action: "close", phase: "completed", outcome: "succeeded",
+        receivedAt: closeTurn.receivedAt, finishedAt: now, request: "close", response: "The task is closed, and its workspace is released.",
+        ...(closeOperationId === undefined ? {} : { operationId: closeOperationId }),
+      }),
+      ConditionExpression: "attribute_not_exists(pk)",
     } }]),
     ...extra,
   ];
@@ -978,7 +993,7 @@ export async function resumeClose(deps: DeveloperTaskRouteDependencies, task: De
   const safe = safeClose(loaded ?? await workspaceReads(deps, task));
   if (safe === undefined) return false;
   try {
-    await finishTaskClose(deps, task, safe.id);
+    await finishTaskClose(deps, task, safe.id, [], safe.createdAt);
     return true;
   } catch (error) {
     log(deps, { event: "developer.task_close_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
@@ -1012,9 +1027,9 @@ function notClosedMessage(reads: WorkspaceReads, operation: Operation | undefine
 }
 
 /** A setup-failed task's close (ruling F15: its accepted record commits with the close). */
-async function closeNeverStarted(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, record: TransactItems[number]): Promise<void> {
+async function closeNeverStarted(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, record: TransactItems[number], receivedAt: string): Promise<void> {
   try {
-    await finishTaskClose(deps, task, undefined, [record]);
+    await finishTaskClose(deps, task, undefined, [record], receivedAt);
   } catch (error) {
     // The compute refuses while it is starting or stopping: its own words, not busy()'s.
     if (error instanceof AgentXError && error.code === "WORKSPACE_BUSY") throw agentXError("TASK_BUSY", COMPUTE_STOPPING);
@@ -1048,7 +1063,7 @@ async function closeTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     const workspace = await deps.actions.workspace(task.workspaceId);
     if (workspace.status === "PREPARATION_FAILED") {
       // A task whose setup failed has nothing to check: it closes now and frees its slot.
-      await closeNeverStarted(deps, task, record("Closed; the task's workspace never started."));
+      await closeNeverStarted(deps, task, record("Closed; the task's workspace never started."), receivedAt);
     } else if (workspace.status === "PREPARING") {
       throw agentXError("TASK_BUSY", `task ${taskId} is still starting; cancel it with agentx_cancel_task, then close it once it has stopped`);
     } else if (workspace.status !== "CLOSED") {

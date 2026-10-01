@@ -10,6 +10,7 @@ import {
 } from "@agentx/contracts";
 import { gitSafeEnvironment } from "./git.js";
 import type { PreparationManifest } from "./prepare.js";
+import { storedCommandOutput } from "./command-failure.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT = 1_048_576;
@@ -60,7 +61,8 @@ async function git(directory: string, args: readonly string[]): Promise<string> 
     return result.stdout;
   } catch (error) {
     const processError = error as Error & { stderr?: string };
-    throw agentXError("CONFIG_INVALID", (processError.stderr ?? processError.message).slice(0, 16_384));
+    // Redacted before it is cut to its last 16 KiB, where Git says what failed (#170).
+    throw agentXError("CONFIG_INVALID", storedCommandOutput(processError.stderr ?? processError.message, 16_384));
   }
 }
 

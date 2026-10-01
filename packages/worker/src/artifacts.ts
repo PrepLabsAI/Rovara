@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
 import type { PreparationManifest } from "./prepare.js";
@@ -21,11 +22,16 @@ export interface WorkerArtifact {
 
 export type ArtifactSink = (artifact: WorkerArtifact) => Promise<void>;
 
-export async function publishWorkspaceDiff(rootPath: string, sink: ArtifactSink): Promise<void> {
+/**
+ * Publishes every repository's status and diff as one artifact. `changed` is true when any
+ * repository's `git status` lists a change, including an untracked file (#158).
+ */
+export async function publishWorkspaceDiff(rootPath: string, sink: ArtifactSink): Promise<{ changed: boolean }> {
   const manifest = JSON.parse(
     await readFile(resolve(rootPath, ".agentx/preparation-manifest.json"), "utf8"),
   ) as PreparationManifest;
   const sections: string[] = [];
+  let changed = false;
   for (const repository of manifest.repositories) {
     const directory = resolve(rootPath, repository.path);
     const { stdout } = await execFileAsync(
@@ -38,6 +44,7 @@ export async function publishWorkspaceDiff(rootPath: string, sink: ArtifactSink)
       ["-C", directory, "status", "--short", "--untracked-files=all"],
       { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
     );
+    if (status.trim() !== "") changed = true;
     sections.push(`## ${repository.name}\n\n### status\n${status}\n### diff\n${stdout}`);
   }
   await sink({
@@ -45,6 +52,40 @@ export async function publishWorkspaceDiff(rootPath: string, sink: ArtifactSink)
     mediaType: "text/plain; charset=utf-8",
     content: boundWorkspaceDiff(String(redactCredentials(sections.join("\n")))),
   });
+  return { changed };
+}
+
+/**
+ * A digest of every repository's uncommitted state: its status, its diff against HEAD, and the
+ * size and modification time of each untracked file. Two equal digests mean a task changed
+ * nothing, even when an earlier turn left the tree changed (#158). An untracked directory that
+ * git lists as one entry (such as a nested repository) is covered only by its own size and time.
+ */
+export async function workspaceFingerprint(rootPath: string): Promise<string> {
+  const manifest = JSON.parse(
+    await readFile(resolve(rootPath, ".agentx/preparation-manifest.json"), "utf8"),
+  ) as PreparationManifest;
+  const hash = createHash("sha256");
+  for (const repository of manifest.repositories) {
+    const directory = resolve(rootPath, repository.path);
+    const { stdout: status } = await execFileAsync(
+      "git",
+      ["-C", directory, "status", "--porcelain", "-z", "--untracked-files=all"],
+      { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
+    );
+    const { stdout: diff } = await execFileAsync(
+      "git",
+      ["-C", directory, "diff", "--no-ext-diff", "--binary", "HEAD", "--"],
+      { timeout: 60_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
+    );
+    hash.update(`${repository.name}\u0000${status}\u0000${diff}\u0000`);
+    for (const entry of status.split("\u0000")) {
+      if (!entry.startsWith("?? ")) continue;
+      const file = await stat(resolve(directory, entry.slice(3))).catch(() => undefined);
+      hash.update(`${entry}\u0000${file?.size ?? -1}\u0000${file?.mtimeMs ?? -1}\u0000`);
+    }
+  }
+  return hash.digest("hex");
 }
 
 export function boundWorkspaceDiff(content: string): string {

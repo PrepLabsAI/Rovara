@@ -1,8 +1,8 @@
 import { readFile, realpath } from "node:fs/promises";
-import { resolve } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
-import { publishWorkspaceDiff, type ArtifactSink } from "./artifacts.js";
+import { publishWorkspaceDiff, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
 import {
   createDevcontainerCli,
@@ -127,12 +127,15 @@ export async function runTaskInvocation(
   const unregisterCancellation = dependencies.cancellationController?.register(invocation.operationId, session);
   // A model repeating the same failing call is told once, then stopped (#127).
   const loopGuard = new ToolLoopGuard();
+  // A task whose every edit or write failed, and that changed nothing, did not do its job (#158).
+  const fileChanges = new FileChangeAttempts([canonicalRoot, resolve(dependencies.rootPath)]);
   let loopStop: Error | undefined;
   // pi ends a turn normally even when its model call failed or was aborted; only the last assistant
   // message says so (#136).
   let lastAssistant: AssistantOutcome | undefined;
   const unsubscribe = session.subscribe((event) => {
     if (eventType(event) === "tool_end") toolEvidence.push(redactCredentials(event));
+    fileChanges.observe(event);
     void events.append(eventType(event), event).catch(() => undefined);
     lastAssistant = assistantOutcome(event) ?? lastAssistant;
     if (loopStop !== undefined) return;
@@ -150,6 +153,19 @@ export async function runTaskInvocation(
     let taskResult: TaskInvocationResult | undefined;
     let taskFailure: Error | undefined;
     let evidenceFailure: unknown;
+    let evidenceAttempted = false;
+    let diffAttempted = false;
+    const reportUnsaved = async (name: string): Promise<void> => {
+      await events.append("progress", { message: `AgentX could not save ${name} for this task.` }).catch(() => undefined);
+    };
+    const publishEvidence = async (): Promise<void> => {
+      evidenceAttempted = true;
+      await dependencies.artifactSink({
+        name: "test-and-tool-evidence.json",
+        mediaType: "application/json",
+        content: JSON.stringify(toolEvidence, null, 2),
+      });
+    };
     try {
       await events.append("lifecycle", {
         status: "RUNNING",
@@ -157,17 +173,40 @@ export async function runTaskInvocation(
         conversation: { started: true, reopened: registered !== undefined },
       });
       for (const message of contextDiagnostics) await events.append("progress", { message });
+      // The state before the prompt, so a turn is judged by what it changed, not by what earlier
+      // turns left in the tree (#158).
+      let before: string | undefined;
+      try {
+        before = await workspaceFingerprint(dependencies.rootPath);
+      } catch {
+        await events.append("progress", {
+          message: "AgentX could not record the workspace state before this task; it will judge the task by the final diff only.",
+        });
+      }
       await session.prompt(invocation.payload.prompt);
       // An abort can end the prompt without an error; the guard's reason is the task's outcome.
       if (loopStop !== undefined) throw loopStop;
       const modelFailure = failedTurn(lastAssistant);
       if (modelFailure !== undefined) throw modelFailure;
-      await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
-      await dependencies.artifactSink({
-        name: "test-and-tool-evidence.json",
-        mediaType: "application/json",
-        content: JSON.stringify(toolEvidence, null, 2),
-      });
+      diffAttempted = true;
+      const { changed: dirty } = await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
+      await publishEvidence();
+      // With a before state, "changed" means this turn changed the tree (a revert counts); without
+      // one, or when the after state cannot be read, a non-empty diff counts as a change.
+      let changed = dirty;
+      if (before !== undefined) {
+        try {
+          changed = await workspaceFingerprint(dependencies.rootPath) !== before;
+        } catch {
+          await events.append("progress", {
+            message: "AgentX could not record the workspace state after this task; it judged the task by the final diff only.",
+          });
+        }
+      }
+      const noChange = fileChanges.noChangeFailure(changed);
+      if (noChange !== undefined) throw noChange;
+      const warning = fileChanges.emptyDiffWarning(changed);
+      if (warning !== undefined) await events.append("progress", { message: warning });
       outcome = "SUCCEEDED";
       await events.append("result", {
         status: "SUCCEEDED",
@@ -191,6 +230,24 @@ export async function runTaskInvocation(
           await events.append("error", { message: taskFailure.message });
         } catch (reportingError) {
           evidenceFailure = reportingError;
+        }
+      }
+      // Best effort, like usage: a failed task keeps what it did, for the member and for debugging.
+      // A cancelled task does not wait for git to diff the workspace; its evidence is cheap.
+      if (!evidenceAttempted) {
+        try {
+          await publishEvidence();
+        } catch (artifactError) {
+          evidenceFailure ??= artifactError;
+          await reportUnsaved("test-and-tool-evidence.json");
+        }
+      }
+      if (!diffAttempted && outcome !== "CANCELLED") {
+        try {
+          await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
+        } catch (artifactError) {
+          evidenceFailure ??= artifactError;
+          await reportUnsaved("workspace.diff");
         }
       }
     }
@@ -227,6 +284,97 @@ export async function runTaskInvocation(
     unregisterCancellation?.();
     session.dispose();
   }
+}
+
+const FILE_CHANGE_TOOLS: ReadonlySet<string> = new Set(["edit", "write"]);
+const MAX_REPORTED_PATH = 200;
+
+/**
+ * Counts the agent's edit and write calls, and keeps the file and a fixed-wording reason for the
+ * last failure. The tool's own error text is never kept, so the task's error names files, never
+ * file contents.
+ */
+class FileChangeAttempts {
+  constructor(private readonly roots: readonly string[]) {}
+
+  private readonly paths = new Map<string, string>();
+  private readonly tools = new Set<string>();
+  private tried = 0;
+  private failed = 0;
+  private last: { path: string; reason: string } | undefined;
+
+  observe(event: unknown): void {
+    if (!event || typeof event !== "object") return;
+    const value = event as { type?: unknown; toolCallId?: unknown; toolName?: unknown; args?: unknown; isError?: unknown; result?: unknown };
+    if (typeof value.toolName !== "string" || !FILE_CHANGE_TOOLS.has(value.toolName)) return;
+    const callId = typeof value.toolCallId === "string" ? value.toolCallId : undefined;
+    if (value.type === "tool_execution_start") {
+      const path = value.args && typeof value.args === "object" ? (value.args as { path?: unknown }).path : undefined;
+      if (callId !== undefined && typeof path === "string") this.paths.set(callId, path);
+      return;
+    }
+    if (value.type !== "tool_execution_end") return;
+    const path = callId === undefined ? undefined : this.paths.get(callId);
+    if (callId !== undefined) this.paths.delete(callId);
+    const text = toolResultText(value.result);
+    // pi refuses an edit whose result equals the file: the change is already there. That is
+    // neither a try nor a failure.
+    if (value.isError === true && /No changes made to/.test(text)) return;
+    this.tried += 1;
+    this.tools.add(value.toolName);
+    if (value.isError !== true) return;
+    this.failed += 1;
+    this.last = {
+      path: path === undefined ? "unknown file" : this.reportedPath(path),
+      reason: failureReason(value.toolName, text),
+    };
+  }
+
+  /** The path relative to the workspace when it is inside it, without control characters, redacted and bounded. */
+  private reportedPath(path: string): string {
+    // Control and format characters (bidi overrides, line separators) would garble a message people read.
+    const clean = path.replace(/[\p{Cc}\p{Cf}\u2028\u2029]/gu, "");
+    const root = isAbsolute(clean) ? this.roots.find((candidate) => isInside(candidate, clean)) : undefined;
+    const shown = root === undefined ? clean : relative(root, clean) || ".";
+    return String(redactCredentials(shown)).slice(0, MAX_REPORTED_PATH);
+  }
+
+  /** The task's error when the agent tried to change files, every try failed, and no repository changed. */
+  noChangeFailure(changed: boolean): Error | undefined {
+    if (changed || this.tried === 0 || this.failed !== this.tried || this.last === undefined) return undefined;
+    const kinds = ["edit", "write"].filter((tool) => this.tools.has(tool)).join(" and ");
+    const count = this.tried === 1 ? `the only ${kinds} call failed` : `all ${this.tried} ${kinds} calls failed`;
+    return agentXError("OPERATION_INTERRUPTED", `no file changed: ${count} (last: ${this.last.path}, ${this.last.reason})`);
+  }
+
+  /** A warning when edits or writes succeeded but no repository changed; the task still succeeds. */
+  emptyDiffWarning(changed: boolean): string | undefined {
+    const succeeded = this.tried - this.failed;
+    if (changed || succeeded === 0) return undefined;
+    return `The agent reported ${succeeded} successful edit or write ${succeeded === 1 ? "call" : "calls"}, but no repository changed. ` +
+      "The edits may have landed outside the project's repositories or in files git ignores.";
+  }
+}
+
+function isInside(root: string, path: string): boolean {
+  const inner = relative(root, path);
+  return !(inner === ".." || inner.startsWith(`..${sep}`) || isAbsolute(inner));
+}
+
+function failureReason(toolName: string, text: string): string {
+  if (/Could not find (the exact text|edits\[\d+\])/.test(text)) return "the text to replace was not found";
+  if (/Found \d+ occurrences of/.test(text)) return "the text to replace matched more than once";
+  return `the ${toolName} returned an error`;
+}
+
+function toolResultText(result: unknown): string {
+  if (typeof result === "string") return result;
+  const content = result && typeof result === "object" ? (result as { content?: unknown }).content : undefined;
+  if (!Array.isArray(content)) return "";
+  return content.map((part: unknown) => {
+    const text = part && typeof part === "object" ? (part as { text?: unknown }).text : undefined;
+    return typeof text === "string" ? text : "";
+  }).join("");
 }
 
 interface AssistantOutcome {

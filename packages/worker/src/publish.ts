@@ -17,6 +17,8 @@ import type { PullRequestSink } from "./callback-client.js";
 import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
 import type { RepositoryCredentialProvider } from "./repository-credentials.js";
 import { runProjectCommand, type PreparationManifest } from "./prepare.js";
+import { storedCommandOutput } from "./command-failure.js";
+import type { CommandResult } from "./readiness.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT = 1_048_576;
@@ -351,7 +353,7 @@ export async function runReadinessChecks(
         executable: command.executable,
         exitCode: 127,
         stdout: "",
-        stderr: `readiness command ${index} cannot run: ${command.cwd} is not a directory in this workspace`,
+        stderr: storedCommandOutput(`readiness command ${index} cannot run: ${command.cwd} is not a directory in this workspace`),
         startedAt,
         completedAt: new Date().toISOString(),
         outcome: "failed",
@@ -364,14 +366,27 @@ export async function runReadinessChecks(
       cwd: command.cwd,
       executable: command.executable,
       exitCode: result.exitCode,
-      stdout: result.stdout.slice(0, 1_048_576),
-      stderr: result.stderr.slice(0, 1_048_576),
+      // Redacted, then cut to the last lines (#170).
+      stdout: storedCommandOutput(result.stdout),
+      stderr: storedCommandOutput(withEnding(result.stderr, index, command.timeoutSeconds, result)),
       startedAt,
       completedAt: new Date().toISOString(),
-      outcome: result.exitCode === 0 ? "passed" : result.exitCode === -1 ? "timed_out" : "failed",
+      // Timed out only when its own timer fired: a signal or a failed start is a failure (#170).
+      outcome: result.timedOut === true ? "timed_out" : result.exitCode === 0 ? "passed" : "failed",
     });
   }
   return results;
+}
+
+/** Adds a line saying how a check ended, when a timeout or a signal ended it (#170). */
+function withEnding(stderr: string, index: number, timeoutSeconds: number, result: CommandResult): string {
+  const ending = result.timedOut === true
+    ? `readiness command ${index} timed out after ${timeoutSeconds} s`
+    : result.signal !== undefined
+      ? `readiness command ${index} was killed by ${result.signal}`
+      : undefined;
+  if (ending === undefined) return stderr;
+  return `${stderr}${stderr === "" || stderr.endsWith("\n") ? "" : "\n"}${ending}\n`;
 }
 
 async function missingCommandDirectory(rootPath: string, cwd: string): Promise<boolean> {
@@ -412,8 +427,8 @@ function assertContained(rootPath: string, candidate: string): void {
 }
 
 function sanitizeGitError(value: string): string {
-  return value
+  // Redacted before it is cut to its last 16 KiB, where Git says what failed (#170).
+  return storedCommandOutput(value
     .replace(/https:\/\/[^@\s/]+@/giu, "https://[redacted]@")
-    .replace(/(authorization:)[^\r\n]*/giu, "$1 [redacted]")
-    .slice(0, 16_384) || "Git command failed";
+    .replace(/(authorization:)[^\r\n]*/giu, "$1 [redacted]"), 16_384) || "Git command failed";
 }

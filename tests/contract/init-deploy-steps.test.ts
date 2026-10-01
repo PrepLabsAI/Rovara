@@ -89,6 +89,21 @@ describe("init deploy steps", () => {
     expect(context.deployer.requests.find((request) => request.part === "control-plane")?.parameters.SlackAppPostedMessages).toBe("ignore");
   });
 
+  it("hands deployEnvironment the deployment's declared parameters, the cdk engine's synth (issue 152)", async () => {
+    const context = initContext({ answers: sampleAnswers({ engine: "cdk" }) });
+    homes.push(context.home);
+    await context.store.put("/agentx/staging/slack/teamId", "T0TEAM1");
+    await context.store.put("/agentx/staging/signin", JSON.stringify({ schemaVersion: 1, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: "arn:aws:iam::123456789012:user/alice" }));
+    const inner = context.deployment.bind(context);
+    // fakeRelease's template() throws: only the synth's set can answer for the control plane.
+    context.deployment = async () => ({ ...(await inner()), declaredParameters: (part) => new Set(part === "control-plane" ? ["SlackTeamId"] : []) });
+    const progress = progressHandle({ ...emptyProgress("staging", T0), github: GITHUB });
+    for (const id of ["access", "core", "control-plane"] as const) await deployStep({ id, title: id }).run(context, progress);
+    const controlPlane = context.deployer.requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlane.parameters.SlackTeamId).toBe("T0TEAM1");
+    expect(controlPlane.parameters).not.toHaveProperty("DeveloperSignInSlack");
+  });
+
   it("after the Slack service, requires settings, writes the local cache and runs the after hook", async () => {
     const context = initContext();
     homes.push(context.home);

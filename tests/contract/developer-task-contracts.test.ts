@@ -90,6 +90,7 @@ describe("developer error codes (FR-049)", () => {
   it.each([
     ["PROJECT_NOT_FOUND", 404], ["PROJECT_ACCESS_DENIED", 403], ["PROJECT_TASKS_DISABLED", 403], ["TASK_NOT_FOUND", 404],
     ["TASK_BUSY", 409], ["CHANNEL_REQUIRED", 409], ["WORKSPACE_LIMIT", 409], ["SLACK_UNAVAILABLE", 503], ["CHANNEL_AMBIGUOUS", 409],
+    ["CONFIRMATION_UNAVAILABLE", 409], ["CONFIRMATION_DECLINED", 409], ["CONFIRMATION_EXPIRED", 409], ["CHANGE_STALE", 409],
   ] as const)("%s answers HTTP %i", (code, status) => {
     expect(agentXError(code, "x").statusCode).toBe(status);
   });

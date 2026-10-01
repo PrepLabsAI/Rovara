@@ -1940,6 +1940,15 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Description": "Complete Secrets Manager ARN containing the GitHub App private key PEM",
       "Type": "String",
     },
+    "McpConfirmElicitation": {
+      "AllowedValues": [
+        "enabled",
+        "disabled",
+      ],
+      "Default": "enabled",
+      "Description": "enabled: an admin may confirm a change from an AI tool in the tool's own pop-up; disabled: only the Slack Confirm button (or the CLI)",
+      "Type": "String",
+    },
     "OidcAudience": {
       "Type": "String",
     },
@@ -2219,6 +2228,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 ],
               ],
             },
+            "MCP_CONFIRM_ELICITATION": {
+              "Ref": "McpConfirmElicitation",
+            },
             "OIDC_ISSUER": {
               "Ref": "OidcIssuer",
             },
@@ -2246,6 +2258,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "STATE_TABLE_NAME": {
               "Ref": "State1C20CC9A",
             },
+            "SWEBENCH_SETTINGS_PREFIX": "/agentx/staging/",
             "TURN_RECORDS_TABLE_NAME": {
               "Ref": "TurnRecords69ECFCD9",
             },
@@ -2573,6 +2586,196 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               },
             },
             {
+              "Action": "ssm:GetParameters",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/staging/eval/settings",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/staging/eval/runner-image",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/staging/worker-image",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/staging/worker-model-provider",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/staging/worker-model-id",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/staging/worker-prompt-cache-retention",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/staging/worker-openrouter-secret-arn",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/staging/worker-openrouter-providers",
+                    ],
+                  ],
+                },
+              ],
+            },
+            {
+              "Action": "states:StartExecution",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":states:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":stateMachine:agentx-staging-swebench-eval",
+                  ],
+                ],
+              },
+            },
+            {
               "Action": "dynamodb:Query",
               "Effect": "Allow",
               "Resource": [
@@ -2631,6 +2834,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                   "dynamodb:LeadingKeys": [
                     "SESSION#*",
                     "DEVELOPER#*",
+                    "EMAIL#*",
                   ],
                 },
               },
@@ -2648,6 +2852,27 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 "ForAllValues:StringLike": {
                   "dynamodb:LeadingKeys": [
                     "TASK#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "TurnRecords69ECFCD9",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "dynamodb:PutItem",
+                "dynamodb:UpdateItem",
+                "dynamodb:GetItem",
+              ],
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "CHANGE#*",
                   ],
                 },
               },
@@ -2960,6 +3185,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                 "DeveloperSignInTokenKey9F4912A4",
                 "Arn",
               ],
+            },
+            "MCP_CONFIRM_ELICITATION": {
+              "Ref": "McpConfirmElicitation",
             },
             "SLACK_SECRET_ARN": {
               "Ref": "SlackSecretEA96F13F",
@@ -3594,6 +3822,26 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             },
             {
               "Action": [
+                "dynamodb:GetItem",
+                "dynamodb:UpdateItem",
+              ],
+              "Condition": {
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "ADMIN_CHANGE#*",
+                  ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
                 "sqs:SendMessage",
                 "sqs:GetQueueAttributes",
                 "sqs:GetQueueUrl",
@@ -3815,6 +4063,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             },
             {
               "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["OPERATION"]},"requestedBy":{"M":{"kind":{"S":["developer"]}}},"status":{"S":["SUCCEEDED","FAILED","CANCELLED","INTERRUPTED"]}}}}",
+            },
+            {
+              "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["ADMIN_CHANGE"]}}}}",
             },
           ],
         },
@@ -7624,6 +7875,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         },
         "Environment": {
           "Variables": {
+            "ADMIN_CHANGES": "enabled",
             "BROKER_FUNCTION_NAME": {
               "Ref": "BrokerE1355FD6",
             },
@@ -8016,6 +8268,36 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                   "dynamodb:LeadingKeys": [
                     "SHARED_TASK#*",
                   ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "traceId",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "ADMIN_CHANGE#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
                 },
               },
               "Effect": "Allow",

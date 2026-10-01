@@ -1,6 +1,6 @@
 // Spec 025 FR-007, FR-012 and FR-013 with the bot token. Every failure to reach Slack is
 // "unavailable": the caller fails closed for access and keeps sessions for refreshes (R18).
-import { CHANNEL_MEMBERS_MAX_CHANNELS, type ChannelInfoResponse, type ChannelMembersResponse, type SlackAuthCheckResponse } from "@agentx/contracts";
+import { CHANNEL_MEMBERS_MAX_CHANNELS, type ChannelByNameResponse, type ChannelInfoResponse, type ChannelMembersResponse, type SlackAuthCheckResponse } from "@agentx/contracts";
 
 export type SlackUserStatus = "active" | "gone" | "unavailable";
 export interface SlackDirectory {
@@ -15,6 +15,8 @@ export interface SlackDirectory {
   channelInfo(channelIds: readonly string[]): Promise<ChannelInfoResponse>;
   /** A13: whether the bot token works, with the team Slack says it belongs to. Never the token. */
   authTest(): Promise<SlackAuthCheckResponse>;
+  /** E12 (Q8): a public channel of the team by its exact name, or none. A private channel is never found by name. */
+  channelByName(name: string): Promise<ChannelByNameResponse>;
 }
 
 /**
@@ -29,6 +31,8 @@ const CACHE_CAP = 500;
 const TIMEOUT_MS = 5_000;
 /** Cold conversations.info calls one channelInfo request may make: names are only for display. */
 export const CHANNEL_INFO_MAX_CALLS = 20;
+/** Pages of 200 one channelByName request reads before it answers "no such channel". */
+export const CHANNEL_BY_NAME_MAX_PAGES = 10;
 /** Matched to the contract's batch: every channel of a full cold batch, twice (a second page each). */
 const MAX_CALLS_PER_REQUEST = 2 * CHANNEL_MEMBERS_MAX_CHANNELS;
 
@@ -217,6 +221,27 @@ export function slackDirectory(input: {
       }
       // The team is reported, not checked against input.teamId, on purpose: the health route compares it.
       return { ok: true, teamId: reply.body.team_id };
+    },
+    async channelByName(name) {
+      if (input.teamId === undefined) return { ok: false, error: "slack_unavailable" };
+      let cursor = "";
+      // E12: public channels only, at most 10 pages of 200; a private channel is given by ID.
+      for (let page = 0; page < CHANNEL_BY_NAME_MAX_PAGES; page += 1) {
+        const reply = await get("conversations.list", { types: "public_channel", exclude_archived: "true", limit: "200", ...(cursor === "" ? {} : { cursor }) });
+        if (reply === undefined) return { ok: false, error: "slack_unavailable" };
+        if (reply.body.ok !== true || !Array.isArray(reply.body.channels)) {
+          refused("conversations.list", reply);
+          return { ok: false, error: "slack_unavailable" };
+        }
+        for (const channel of reply.body.channels as Array<{ id?: unknown; name?: unknown; is_private?: unknown }>) {
+          // Fail closed (Q8): a channel is found only when Slack says it is public.
+          if (channel.name === name && typeof channel.id === "string" && channel.is_private === false) return { ok: true, channel: { channelId: channel.id, name } };
+        }
+        const next = (reply.body.response_metadata as { next_cursor?: unknown } | undefined)?.next_cursor;
+        cursor = typeof next === "string" ? next : "";
+        if (cursor === "") break;
+      }
+      return { ok: true };
     },
   };
 }

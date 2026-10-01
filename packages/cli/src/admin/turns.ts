@@ -7,13 +7,16 @@ const RETENTION_MS = 30 * UNIT_MS.d;
 /** Guards against an endless export if the control plane ever hands back a growing cursor chain. */
 const MAX_PAGES = 10_000;
 
-/** "30m", "12h" or "7d" before now, as the ISO time the export route expects. */
-export function parseSince(value: string, now = Date.now()): string {
+/**
+ * "30m", "12h" or "7d" before now, as the ISO time the export route expects. `noun` names the
+ * records the command exports, for the refusal's words (C18): turn records unless told otherwise.
+ */
+export function parseSince(value: string, now = Date.now(), noun = "turn records"): string {
   const match = DURATION.exec(value.trim());
   if (!match) throw agentXError("CONFIG_INVALID", "--since must be a duration such as 30m, 12h or 7d");
   const milliseconds = Number(match[1]) * UNIT_MS[match[2] as keyof typeof UNIT_MS];
   if (milliseconds <= 0 || milliseconds > RETENTION_MS) {
-    throw agentXError("CONFIG_INVALID", "--since must be more than zero and at most 30d; turn records are kept 30 days");
+    throw agentXError("CONFIG_INVALID", `--since must be more than zero and at most 30d; ${noun} are kept 30 days`);
   }
   return new Date(now - milliseconds).toISOString();
 }

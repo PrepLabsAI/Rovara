@@ -168,3 +168,13 @@ export type SlackUserByEmailResponse = { ok: true; userId?: string } | { ok: fal
 export const SlackAuthCheckRequestSchema = z.object({ kind: z.literal("slack-auth-check") }).strict();
 export type SlackAuthCheckRequest = z.infer<typeof SlackAuthCheckRequestSchema>;
 export type SlackAuthCheckResponse = { ok: true; teamId: string } | { ok: false; error: string };
+
+/** Spec 025 E9 (Q3): an admin ends every sign-in session a developer has; they may sign in again. */
+export const EndDeveloperSessionsRequestSchema = z.object({ kind: z.literal("end-developer-sessions"), developerId: z.string().regex(/^[a-f0-9]{64}$/), at: z.string().datetime() }).strict();
+export type EndDeveloperSessionsRequest = z.infer<typeof EndDeveloperSessionsRequestSchema>;
+export type EndDeveloperSessionsResponse = { ok: true } | { ok: false; error: "not_found" | "invalid_request" | "unavailable" };
+
+/** Spec 025 E12 (Q8): a public channel of the environment's team, by its name. */
+export const ChannelByNameRequestSchema = z.object({ kind: z.literal("channel-by-name"), name: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,79}$/) }).strict();
+export type ChannelByNameRequest = z.infer<typeof ChannelByNameRequestSchema>;
+export type ChannelByNameResponse = { ok: true; channel?: { channelId: string; name: string } } | { ok: false; error: "slack_unavailable" | "invalid_request" };

@@ -4,6 +4,7 @@
  * the thread remembered, posting its result instead of running the model (and any approved call)
  * again.
  */
+import { redactAndCap } from "@agentx/contracts";
 
 /** The worker operation a turn was waiting on, kept on the thread's META row until the turn ends. */
 export interface ActiveTurn {
@@ -86,13 +87,25 @@ export class TurnHandedOffError extends Error {
   }
 }
 
+/** #154: the most of a failed operation's error a resumed turn's reply shows (the task view's own limit). */
+export const RESUME_FAILURE_REASON_MAX = 1_000;
+
+/**
+ * A failed operation's error, redacted again and capped, as the setup failure notice does (#154):
+ * the broker redacts worker errors when it receives them, and this keeps an older stored error out too.
+ */
+function failureReason(error: string): string {
+  const redacted = redactAndCap(error, RESUME_FAILURE_REASON_MAX);
+  return redacted.truncated ? `${redacted.text}...` : redacted.text;
+}
+
 /** The resumed turn's reply: the operation's result or failure reason, then how to go on. */
 export function resumedResultText(result: { status: string; response?: string | undefined; error?: string | undefined }): string {
   const head = result.status === "SUCCEEDED"
     ? result.response === undefined || result.response.trim().length === 0
       ? "The task that was running when AgentX restarted has finished, without a final message."
       : `The task that was running when AgentX restarted has finished:\n${result.response}`
-    : `The task that was running when AgentX restarted ended as ${result.status.toLowerCase()}${result.error ? `: ${result.error}` : "."}`;
+    : `The task that was running when AgentX restarted ended as ${result.status.toLowerCase()}${result.error ? `: ${failureReason(result.error)}` : "."}`;
   return `${head}\n\n${CONTINUE_TEXT}`;
 }
 

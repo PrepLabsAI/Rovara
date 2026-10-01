@@ -13,11 +13,12 @@ export async function createAdminReadBroker(options: Parameters<typeof createDev
   const connectorCredentials = { secrets: { read: async () => undefined }, githubApp: GITHUB_APP_CREDENTIAL };
   const harness = await createDeveloperTaskBroker({ ...options, brokerExtra: { connectorCredentials, ...options.brokerExtra } });
   /** The OIDC entry point as an admin (the `groups` claim holds `admins`), or as a non-admin. */
-  const admin = async (method: string, path: string, call: { admin?: boolean; subject?: string; headers?: Record<string, string> } = {}) => {
+  const admin = async (method: string, path: string, call: { admin?: boolean; subject?: string; headers?: Record<string, string>; body?: unknown } = {}) => {
     const claims = { iss: issuer, sub: call.subject ?? ADMIN_SUBJECT, groups: call.admin === false ? [] : ["admins"] };
     const response = await harness.handler({
       version: "2.0", rawPath: path.split("?")[0], rawQueryString: path.split("?")[1] ?? "",
       headers: { authorization: "Bearer admin-token-for-tests", ...call.headers },
+      ...(call.body === undefined ? {} : { body: JSON.stringify(call.body) }),
       requestContext: { requestId: randomUUID(), http: { method }, authorizer: { jwt: { claims } } },
     });
     return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };

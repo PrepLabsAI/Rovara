@@ -12,7 +12,7 @@ describe("config keys (FR-048)", () => {
       "models.orchestrator", "models.classifier", "models.worker",
       "limits.workspacesPerMember", "limits.workspacesPerOrg", "limits.threadTurnsPerMinute",
       "slack.appPostedMessages", "alerts.address", "alerts.slowTurnMinutes",
-      "budget.monthlyUsd", "budget.scope",
+      "budget.monthlyUsd", "budget.scope", "mcp.confirmElicitation",
     ]);
   });
 

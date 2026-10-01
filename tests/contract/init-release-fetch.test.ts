@@ -4,9 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { afterEach, describe, expect, it } from "vitest";
+import { AgentXError } from "@agentx/contracts";
 import type { CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
 import { realCommandRunner } from "../../packages/cli/src/deploy/commands.js";
-import { fetchRelease, readReleaseManifest, releaseAssetUrls, releaseCacheDir } from "../../packages/cli/src/init/release-fetch.js";
+import { fetchRelease, readReleaseManifest, releaseAssetUrls, releaseCacheDir, sourceRelease } from "../../packages/cli/src/init/release-fetch.js";
 import { CLI_VERSION, RELEASE_VERSION, isPrereleaseVersion } from "../../packages/cli/src/version.js";
 
 const dirs: string[] = [];
@@ -224,14 +225,11 @@ describe("fetching the release for this CLI", () => {
       .rejects.toThrow("release 9.9.9 was not found at https://github.com/PrepLabsAI/AgentX/releases/download/v9.9.9/release.json; check the version is published, or pass --release <dir>");
   });
 
-  it("tells a CLI built from source that --engine cdk still reads the release's images and notes (live check L7)", async () => {
-    await expect(fetchRelease({ version: undefined, engine: "cdk", home: await tmp("agentx-home-"), fetch: github({}), runner, write: () => undefined }))
-      .rejects.toThrow("this agentx was built from source and has no published release to download; --engine cdk builds the stacks from --source, but still reads the release's images and notes from --release <dir> (npm run release:build builds one)");
-  });
-
-  it("asks a CLI built from source to pass --release", async () => {
+  // Issue 152 replaces live check L7's refusal: --engine cdk --source now needs no release at all
+  // (sourceRelease below), so the only thing left to say is how to give one or the other.
+  it("asks a CLI built from source to pass --release, or --engine cdk with --source", async () => {
     await expect(fetchRelease({ version: undefined, home: await tmp("agentx-home-"), fetch: github({}), runner, write: () => undefined }))
-      .rejects.toThrow("this agentx was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one)");
+      .rejects.toThrow("this agentx was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one), or --engine cdk --source <a checkout of a release tag>");
   });
 });
 
@@ -269,5 +267,120 @@ describe("readReleaseManifest (doctor's release check)", () => {
     expect(await readReleaseManifest({ version: "1.2.3", home, fetch: (async () => new Response("not json", { status: 200 })) })).toBeUndefined();
     expect(await readReleaseManifest({ version: "1.2.4", home, fetch: (async () => new Response(JSON.stringify(manifest), { status: 200 })) })).toBeUndefined();
     expect(await readReleaseManifest({ version: "unversioned", home, fetch: (async () => { throw new Error("no call expected"); }) })).toBeUndefined();
+  });
+});
+
+// Issue 152: a source-built agentx with --engine cdk --source builds its release from the checkout:
+// the version from its tag, the images from the flags or the tag's published release.json.
+describe("sourceRelease (issue 152)", () => {
+  const HEAD = "e".repeat(40);
+  const WORKER = `public.ecr.aws/agentx/agentx-worker@sha256:${"b".repeat(64)}`;
+  const SLACK = `public.ecr.aws/agentx/agentx-slack@sha256:${"c".repeat(64)}`;
+  const OVERRIDE = `123456789012.dkr.ecr.us-east-1.amazonaws.com/w@sha256:${"d".repeat(64)}`;
+  const tagged: CommandRunner = {
+    async run(_command, args) {
+      if (args[0] === "status") return { stdout: "" };
+      if (args[0] === "rev-parse") return { stdout: `${HEAD}\n` };
+      return { stdout: "v1.4.0\n" };
+    },
+  };
+  const published = (overrides: Record<string, unknown> = {}) => JSON.stringify({
+    schemaVersion: 1, version: "1.4.0", gitCommit: HEAD, environmentPlaceholder: "qqenv-placeholderqq",
+    templates: ["us-east-1", "us-west-2"].map((region) => ({ region, part: "access", file: `templates/${region}/access.template.json`, sha256: "0".repeat(64) })),
+    packages: [], images: { worker: WORKER, slack: SLACK }, ...overrides,
+  });
+  const noFetch = (async () => { throw new Error("test setup: nothing may be fetched"); }) as unknown as typeof fetch;
+
+  it("needs no release when both image flags are given: the version is the tag's, and nothing is fetched", async () => {
+    const { release, regions } = await sourceRelease({ runner: tagged, source: "/src", images: { worker: OVERRIDE, slack: OVERRIDE }, fetch: noFetch });
+    expect(release.manifest).toEqual({ schemaVersion: 1, version: "1.4.0", gitCommit: HEAD, environmentPlaceholder: "qqenv-placeholderqq", templates: [], packages: [], images: {} });
+    expect(release.regions()).toEqual([]);
+    expect(regions).toBeUndefined();
+  });
+
+  it("without image flags, reads the tag's published release.json and never downloads the tarball", async () => {
+    const urls = releaseAssetUrls("1.4.0");
+    const fetched = github({ [urls.manifest]: published(), [urls.tarball]: "must not be downloaded" });
+    const { release, regions } = await sourceRelease({ runner: tagged, source: "/src", fetch: fetched });
+    expect(fetched.requested).toEqual([urls.manifest]);
+    expect(release.manifest.images).toEqual({ worker: WORKER, slack: SLACK });
+    expect(release.manifest.templates).toEqual([]);
+    expect(release.manifest.packages).toEqual([]);
+    expect(regions).toEqual(["us-east-1", "us-west-2"]);
+  });
+
+  it("reads release.json for the image a flag does not give", async () => {
+    const urls = releaseAssetUrls("1.4.0");
+    const fetched = github({ [urls.manifest]: published() });
+    const { release } = await sourceRelease({ runner: tagged, source: "/src", images: { worker: OVERRIDE }, fetch: fetched });
+    expect(fetched.requested).toEqual([urls.manifest]);
+    expect(release.manifest.images.slack).toBe(SLACK);
+  });
+
+  it("refuses when the tag has no published release.json and an image flag is missing, naming both flags", async () => {
+    const error = await sourceRelease({ runner: tagged, source: "/src", fetch: github({}) }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AgentXError);
+    expect((error as Error).message).toContain("release 1.4.0 has no published release.json at https://github.com/PrepLabsAI/AgentX/releases/download/v1.4.0/release.json, so its images are unknown; pass --worker-image and --slack-image, or --release <dir>");
+  });
+
+  it("with missingReleaseJson allow, goes on with no images and no region list when the tag has no release.json (review I2)", async () => {
+    const { release, regions } = await sourceRelease({ runner: tagged, source: "/src", fetch: github({}), missingReleaseJson: "allow" });
+    expect(release.manifest.images).toEqual({});
+    expect(regions).toBeUndefined();
+    // Only a missing file is allowed: a broken one still refuses.
+    const urls = releaseAssetUrls("1.4.0");
+    await expect(sourceRelease({ runner: tagged, source: "/src", fetch: github({ [urls.manifest]: "not json" }), missingReleaseJson: "allow" })).rejects.toThrow("is not a valid release manifest");
+  });
+
+  it("with missingReleaseJson allow, reports a release.json from another commit instead of refusing, and uses none of its images (re-review m-1)", async () => {
+    const urls = releaseAssetUrls("1.4.0");
+    const { release, imagesProblem } = await sourceRelease({ runner: tagged, source: "/src", fetch: github({ [urls.manifest]: published({ gitCommit: "f".repeat(40) }) }), missingReleaseJson: "allow" });
+    expect(release.manifest.images).toEqual({});
+    expect(imagesProblem).toBe(`the published release 1.4.0 was built from commit ${"f".repeat(40)}, but /src is at ${HEAD}; check out tag v1.4.0 cleanly, or pass --worker-image and --slack-image`);
+    const missing = await sourceRelease({ runner: tagged, source: "/src", fetch: github({}), missingReleaseJson: "allow" });
+    expect(missing.imagesProblem).toContain("release 1.4.0 has no published release.json at");
+    const found = await sourceRelease({ runner: tagged, source: "/src", fetch: github({ [urls.manifest]: published() }), missingReleaseJson: "allow" });
+    expect(found.imagesProblem).toBeUndefined();
+  });
+
+  it("gives no region list for a release.json that covers no region (review M5)", async () => {
+    const urls = releaseAssetUrls("1.4.0");
+    const { regions } = await sourceRelease({ runner: tagged, source: "/src", fetch: github({ [urls.manifest]: published({ templates: [] }) }) });
+    expect(regions).toBeUndefined();
+  });
+
+  it("refuses a published release.json built from another commit than the checkout", async () => {
+    const urls = releaseAssetUrls("1.4.0");
+    await expect(sourceRelease({ runner: tagged, source: "/src", fetch: github({ [urls.manifest]: published({ gitCommit: "f".repeat(40) }) }) }))
+      .rejects.toThrow(`the published release 1.4.0 was built from commit ${"f".repeat(40)}, but /src is at ${HEAD}; check out tag v1.4.0 cleanly, or pass --worker-image and --slack-image`);
+  });
+
+  it("refuses a published release.json that is not a valid release manifest, or names another version", async () => {
+    const urls = releaseAssetUrls("1.4.0");
+    await expect(sourceRelease({ runner: tagged, source: "/src", fetch: github({ [urls.manifest]: "not json" }) }))
+      .rejects.toThrow(`the published release.json at ${urls.manifest} is not a valid release manifest`);
+    await expect(sourceRelease({ runner: tagged, source: "/src", fetch: github({ [urls.manifest]: published({ images: { worker: "latest" } }) }) }))
+      .rejects.toThrow(`the published release.json at ${urls.manifest} is not a valid release manifest`);
+    await expect(sourceRelease({ runner: tagged, source: "/src", fetch: github({ [urls.manifest]: published({ version: "1.4.1" }) }) }))
+      .rejects.toThrow(`the published release.json at ${urls.manifest} is for release 1.4.1, not 1.4.0`);
+  });
+
+  it("names the address when release.json cannot be downloaded", async () => {
+    const urls = releaseAssetUrls("1.4.0");
+    const failing = (async () => new Response("", { status: 503 })) as unknown as typeof fetch;
+    await expect(sourceRelease({ runner: tagged, source: "/src", fetch: failing })).rejects.toThrow(`downloading ${urls.manifest} failed with HTTP 503`);
+    const offline = (async () => { throw new Error("getaddrinfo ENOTFOUND github.com"); }) as unknown as typeof fetch;
+    await expect(sourceRelease({ runner: tagged, source: "/src", fetch: offline })).rejects.toThrow(`could not download ${urls.manifest} (getaddrinfo ENOTFOUND github.com); pass --worker-image and --slack-image, or --release <dir>`);
+  });
+
+  it("refuses a checkout that is not at one release tag, before fetching anything", async () => {
+    const untagged: CommandRunner = { async run(_command, args) { return { stdout: args[0] === "tag" ? "" : "" }; } };
+    await expect(sourceRelease({ runner: untagged, source: "/src", fetch: noFetch })).rejects.toThrow("/src is at no release tag");
+  });
+
+  it("never serves templates or packages: the cdk engine synthesizes its own", async () => {
+    const { release } = await sourceRelease({ runner: tagged, source: "/src", images: { worker: OVERRIDE, slack: OVERRIDE }, fetch: noFetch });
+    expect(() => release.template("access", "us-east-1", "staging")).toThrow("release 1.4.0 was built from --source /src, which has no published templates");
+    expect(() => release.packagePath("x")).toThrow("release 1.4.0 was built from --source /src, which has no packages");
   });
 });
