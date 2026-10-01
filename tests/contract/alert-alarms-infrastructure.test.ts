@@ -108,6 +108,36 @@ describe("FR-047 budget in the control-plane stack (environment naming)", () => 
   });
 });
 
+describe("issue #46: the dispatch dead-letter queue alarm (environment naming)", () => {
+  it("alarms on any visible message in the dispatch dead-letter queue, sending to the environment's topic", () => {
+    const found = Object.values(controlPlane.findResources("AWS::CloudWatch::Alarm", { Properties: { AlarmName: "agentx-staging-DispatchDeadLetters" } })) as Array<{ Properties: Record<string, unknown>; Condition?: string }>;
+    expect(found).toHaveLength(1);
+    const dispatch = found[0]!;
+    const [queueId] = Object.keys(controlPlane.findResources("AWS::SQS::Queue")).filter((id) => /^DispatchDeadLetterQueue[0-9A-F]{8}$/.test(id));
+    expect(queueId).toBeDefined();
+    expect(dispatch.Properties.Namespace).toBe("AWS/SQS");
+    expect(dispatch.Properties.MetricName).toBe("ApproximateNumberOfMessagesVisible");
+    expect(dispatch.Properties.Dimensions).toEqual([{ Name: "QueueName", Value: { "Fn::GetAtt": [queueId, "QueueName"] } }]);
+    expect(dispatch.Properties.Statistic).toBe("Maximum");
+    expect(dispatch.Properties.Period).toBe(300);
+    expect(dispatch.Properties.Threshold).toBe(1);
+    expect(dispatch.Properties.EvaluationPeriods).toBe(1);
+    expect(dispatch.Properties.ComparisonOperator).toBe("GreaterThanOrEqualToThreshold");
+    expect(dispatch.Properties.TreatMissingData).toBe("notBreaching");
+    expect(dispatch.Condition).toBeUndefined();
+    const [topicId] = Object.keys(controlPlane.findResources("AWS::SNS::Topic")).filter((id) => id.startsWith("OperatorAlerts"));
+    expect(topicId).toBeDefined();
+    expect(dispatch.Properties.AlarmActions).toEqual([{ Ref: topicId }]);
+  });
+
+  it("names the alarm with a single-word suffix, so the admin health route lists it as this environment's", () => {
+    const prefix = naming.alarmName("");
+    const name = naming.alarmName("DispatchDeadLetters");
+    expect(name.startsWith(prefix)).toBe(true);
+    expect(name.slice(prefix.length)).not.toContain("-");
+  });
+});
+
 describe("the legacy stacks stay as they are", () => {
   it("adds none of this without environment naming", () => {
     const legacySlack = Template.fromStack(new SlackOrchestratorStack(new App(), "LegacySlack"));
@@ -115,5 +145,8 @@ describe("the legacy stacks stay as they are", () => {
     expect(Object.keys(legacySlack.findResources("AWS::CloudWatch::Alarm"))).toEqual([]);
     const legacyControlPlane = Template.fromStack(new ControlPlaneStack(new App(), "LegacyControlPlane"));
     expect(Object.keys(legacyControlPlane.findResources("AWS::Budgets::Budget"))).toEqual([]);
+    expect(Object.keys(legacyControlPlane.findResources("AWS::CloudWatch::Alarm", { Properties: { AlarmName: "AgentXDispatchDeadLetters" } }))).toEqual([]);
+    const legacyAlarmQueues = Object.values(legacyControlPlane.findResources("AWS::CloudWatch::Alarm")).map((resource) => JSON.stringify((resource as { Properties: { Dimensions?: unknown } }).Properties.Dimensions ?? []));
+    expect(legacyAlarmQueues.some((dimensions) => dimensions.includes("DispatchDeadLetterQueue"))).toBe(false);
   });
 });
