@@ -131,10 +131,16 @@ describe("issue #46: the dispatch dead-letter queue alarm (environment naming)",
   });
 
   it("names the alarm with a single-word suffix, so the admin health route lists it as this environment's", () => {
+    // health-probes.ts skips any name with a further hyphen after the prefix (a sibling environment).
     const prefix = naming.alarmName("");
-    const name = naming.alarmName("DispatchDeadLetters");
-    expect(name.startsWith(prefix)).toBe(true);
-    expect(name.slice(prefix.length)).not.toContain("-");
+    const [queueId] = Object.keys(controlPlane.findResources("AWS::SQS::Queue")).filter((id) => /^DispatchDeadLetterQueue[0-9A-F]{8}$/.test(id));
+    const names = Object.values(controlPlane.findResources("AWS::CloudWatch::Alarm"))
+      .map((resource) => resource as { Properties: { AlarmName?: string; Dimensions?: unknown } })
+      .filter((resource) => JSON.stringify(resource.Properties.Dimensions ?? []).includes(`"${queueId}"`))
+      .map((resource) => resource.Properties.AlarmName);
+    expect(names).toHaveLength(1);
+    expect(names[0]!.startsWith(prefix)).toBe(true);
+    expect(names[0]!.slice(prefix.length)).toMatch(/^[A-Za-z0-9]+$/);
   });
 });
 
