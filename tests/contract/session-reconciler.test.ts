@@ -25,7 +25,7 @@ const hex = () => randomUUID().replaceAll("-", "").slice(0, 17);
 
 type Start = (input: { stateMachineArn: string; name: string; input: string }) => Promise<string>;
 
-function setup(options: { instances?: InstanceView[]; volumes?: VolumeView[]; executions?: Record<string, ExecutionStatus>; ping?: ReconcilerDependencies["ping"]; sweepStuckSetups?: ReconcilerDependencies["sweepStuckSetups"]; expireIndexDays?: ReconcilerDependencies["expireIndexDays"]; log?: ReconcilerDependencies["log"] } = {}) {
+function setup(options: { instances?: InstanceView[]; volumes?: VolumeView[]; executions?: Record<string, ExecutionStatus>; ping?: ReconcilerDependencies["ping"]; sweepStuckSetups?: ReconcilerDependencies["sweepStuckSetups"]; expireIndexDays?: ReconcilerDependencies["expireIndexDays"]; sweepUnwaitedTasks?: ReconcilerDependencies["sweepUnwaitedTasks"]; log?: ReconcilerDependencies["log"] } = {}) {
   const db = new FakeDynamoDb();
   const start = vi.fn<Start>(async ({ name }) => `arn:aws:states:us-east-1:111122223333:execution:provisioner:${name}`);
   const sessions = new SessionManager({
@@ -56,6 +56,7 @@ function setup(options: { instances?: InstanceView[]; volumes?: VolumeView[]; ex
     log: options.log ?? (() => undefined),
     ...(options.sweepStuckSetups === undefined ? {} : { sweepStuckSetups: options.sweepStuckSetups }),
     ...(options.expireIndexDays === undefined ? {} : { expireIndexDays: options.expireIndexDays }),
+    ...(options.sweepUnwaitedTasks === undefined ? {} : { sweepUnwaitedTasks: options.sweepUnwaitedTasks }),
   });
   return { db, sessions, state, start, terminate, deleteVolume, quarantine, emit, reconcile };
 }
@@ -300,5 +301,44 @@ describe("reconciler: stuck setups (spec 025 FR-055)", () => {
     const baseline = setup();
     await baseline.reconcile();
     expect(Object.keys(emit.mock.calls[0]![0])).toEqual(Object.keys(baseline.emit.mock.calls[0]![0]));
+  });
+});
+
+describe("reconciler: unwaited Slack tasks (#173)", () => {
+  it("hands the sweep every live session's workspace, reports what it cancelled and counts it", async () => {
+    const readyWorkspace = seedSession(new FakeDynamoDb(), "READY");
+    const sweep = vi.fn(async () => ({ cancelled: ["op-1"], failed: ["op-2"], noteFailures: 0 }));
+    const { db, reconcile, emit } = setup({ sweepUnwaitedTasks: sweep });
+    const live = seedSession(db, "STOPPED", { volumeId: `vol-${hex()}` });
+    const provisioning = seedSession(db, "PROVISIONING", { executionArn: "arn:aws:states:us-east-1:111122223333:execution:provisioner:x" });
+    const report = await reconcile();
+    expect(sweep).toHaveBeenCalledOnce();
+    const [workspaceIds, at] = sweep.mock.calls[0]! as unknown as [Iterable<string>, Date];
+    expect([...workspaceIds].sort()).toEqual([live, provisioning].sort());
+    expect([...workspaceIds]).not.toContain(readyWorkspace);
+    expect(at).toEqual(NOW);
+    expect(report.unwaitedTasks).toEqual({ cancelled: ["op-1"], failed: ["op-2"], noteFailures: 0 });
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerUnwaitedTasksCancelled: 1, ReconcilerUnwaitedTaskFailures: 1 }));
+  });
+
+  it("logs a sweep that throws by its error name, counts it, and still finishes the run", async () => {
+    const orphan: InstanceView = { instanceId: `i-${hex()}`, state: "running", launchedAt: minutesAgo(30) };
+    const logs: Array<Record<string, unknown>> = [];
+    const failure = Object.assign(new Error("PLANTED-UNWAITED-MESSAGE"), { name: "ProvisionedThroughputExceededException" });
+    const expireIndexDays = vi.fn(async () => ({ deleted: 0 }));
+    const { reconcile, emit, terminate } = setup({ instances: [orphan], sweepUnwaitedTasks: async () => { throw failure; }, expireIndexDays, log: (entry) => { logs.push(entry); } });
+    await expect(reconcile()).resolves.toBeDefined();
+    expect(terminate).toHaveBeenCalledWith(orphan.instanceId);
+    expect(expireIndexDays).toHaveBeenCalledOnce();
+    expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ReconcilerOrphanInstances: 1, ReconcilerUnwaitedTasksCancelled: 0, ReconcilerUnwaitedTaskFailures: 1 }));
+    expect(logs).toContainEqual({ event: "reconciler.unwaited_task_sweep_failed", errorName: "ProvisionedThroughputExceededException" });
+    expect(JSON.stringify(logs)).not.toContain("PLANTED-UNWAITED-MESSAGE");
+  });
+
+  it("adds no metric and no report field where the backstop is not wired (the legacy deployment)", async () => {
+    const { reconcile, emit } = setup();
+    const report = await reconcile();
+    expect(report).not.toHaveProperty("unwaitedTasks");
+    expect(Object.keys(emit.mock.calls[0]![0]).filter((name) => name.includes("Unwaited"))).toEqual([]);
   });
 });

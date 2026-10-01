@@ -112,6 +112,7 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
+import { isUnwaitedTaskCandidate, type UnwaitedTaskStop } from "./unwaited-tasks.js";
 import { aiToolTurn, completedTurn, developerFooter, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { hashJson, isConditional, isTemporaryAwsError, workerPrompt } from "./broker-shared.js";
@@ -580,7 +581,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent | AdminChangePressEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | AdminChangePressEvent | UnwaitedTaskStopEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
@@ -589,6 +590,18 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       } catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "admin_change.press_failed", changeId: event.changeId, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
         return json({ outcome: "failed", changeId: event.changeId }, "slack-ingress", 500);
+      }
+    }
+    // Issue 173: the reconciler backstop, invoked directly by the reconciler (never through API Gateway).
+    if (isUnwaitedTaskStopEvent(event)) {
+      try {
+        return json(await stopUnwaitedTask(dependencies, event), "session-reconciler");
+      } catch (error) {
+        if (error instanceof AgentXError) {
+          return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "session-reconciler", error.statusCode);
+        }
+        // The error's name only: never a message that could carry stored data.
+        return json({ error: { code: "INTERNAL", message: error instanceof Error ? error.name : "unknown" } }, "session-reconciler", 500);
       }
     }
     if (isSlackStopTaskEvent(event)) {
@@ -3098,6 +3111,64 @@ async function stopSlackThreadTask(dependencies: AwsBrokerDependencies, event: S
   const workspace = await requireWorkspace(dependencies, record.workspaceId);
   if (workspace.ownerKey !== ownerKey) throw agentXError("FORBIDDEN", "workspace does not belong to this thread");
   return cancelRunningTask(dependencies, workspace, { requestedBy: requester });
+}
+
+/**
+ * Issue 173: the reconciler backstop asks the broker to cancel a Slack thread's coding task that has
+ * run past the limit with nobody waiting on it. Invoked by the reconciler Lambda only, never through
+ * API Gateway, and only in named environments (the legacy reconciler has no grant to invoke it).
+ */
+export interface UnwaitedTaskStopEvent {
+  source: "agentx.session-reconciler";
+  action: "stop-unwaited-task";
+  workspaceId: string;
+  operationId: string;
+}
+
+export function isUnwaitedTaskStopEvent(event: unknown): event is UnwaitedTaskStopEvent {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  // API Gateway always sets requestContext, so a request from outside can never take this path.
+  return value.source === "agentx.session-reconciler" && value.action === "stop-unwaited-task" && value.requestContext === undefined;
+}
+
+/**
+ * Checks everything again, so the reconciler can never cancel more than this allows: the operation
+ * is the workspace's active coding task, live past the limit, not started from an AI tool, its
+ * workspace belongs to a Slack thread, and the thread's activeTurn (issue 157) does not name it.
+ * Then it cancels through requestCancellation, as the cancel route does.
+ */
+async function stopUnwaitedTask(dependencies: AwsBrokerDependencies, event: UnwaitedTaskStopEvent): Promise<UnwaitedTaskStop> {
+  if (dependencies.slackThreadsTableName === undefined) throw agentXError("NOT_FOUND", "the Slack threads table is not set up in this deployment");
+  const workspaceId = uuid(event.workspaceId, "workspaceId");
+  const operationId = uuid(event.operationId, "operationId");
+  const skipped = (reason: string): UnwaitedTaskStop => ({ outcome: "SKIPPED", reason });
+  const workspace = await requireWorkspace(dependencies, workspaceId);
+  if (workspace.activeOperationId !== operationId) return skipped("not-active");
+  const target = await requireOperation(dependencies, workspaceId, operationId);
+  if (!isUnwaitedTaskCandidate(target as unknown as Record<string, unknown>, new Date())) return skipped("not-a-candidate");
+  // MCP developer tasks run with no waiter by design: never touched.
+  if (await getItem(dependencies, taskPointerKey(workspaceId)) !== undefined) return skipped("developer-task");
+  const record = await getItem<{ workspaceId?: unknown; thread?: unknown }>(dependencies, slackThreadKey(workspace.ownerKey));
+  const parts = typeof record?.thread === "string" ? record.thread.split("/") : [];
+  const thread = SlackThreadSchema.safeParse({ teamId: parts[0], channelId: parts[1], threadTs: parts[2] });
+  if (record?.workspaceId !== workspaceId || parts.length !== 3 || !thread.success) return skipped("not-a-slack-thread");
+  const meta = await dependencies.documentClient.send(new GetCommand({
+    TableName: dependencies.slackThreadsTableName,
+    Key: { pk: `THREAD#${slackThreadSubject(thread.data)}`, sk: "META" },
+    ConsistentRead: true,
+  })) as { Item?: { activeTurn?: unknown } };
+  const activeTurn = meta.Item?.activeTurn;
+  if (activeTurn !== undefined && activeTurn !== null) {
+    const named = typeof activeTurn === "object" ? (activeTurn as { operationId?: unknown }).operationId : undefined;
+    // An activeTurn that cannot be read may name this task, so it counts as a waiter.
+    if (typeof named !== "string" || named.length === 0) return skipped("waiter-unreadable");
+    if (named === operationId) return skipped("waited-on");
+  }
+  const result = await requestCancellation(dependencies, workspace, operationId, {});
+  // A duplicate means the task finished before the cancel was recorded.
+  if (result.duplicate) return skipped("finished");
+  return { outcome: "CANCEL_REQUESTED", cancelOperationId: result.operation.id, thread: { channelId: thread.data.channelId, threadTs: thread.data.threadTs } };
 }
 
 async function handleCallback(

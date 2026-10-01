@@ -8,6 +8,8 @@ import {
 } from "@aws-sdk/client-ec2";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DescribeExecutionCommand, SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
+import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
+import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { Ec2RuntimeBinding, WorkspaceSession, WorkspaceSessionState } from "@agentx/contracts";
 import { requiredEnvironment } from "./lambda.js";
@@ -15,6 +17,8 @@ import { failActiveOperation } from "./outbox-failure.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
 import { expireIndexDays, indexSweepWanted } from "./index-expiry.js";
 import { sweepStuckSetups } from "./stuck-setup.js";
+import { createBrokerTaskStopper, sweepUnwaitedTasks, unwaitedTaskBackstopWanted, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
+import { cachedSlackPoster } from "./developer-task-notifier.js";
 
 /** A just-launched instance or just-created volume is not judged until its session has recorded it. */
 export const GRACE_MS = 15 * 60_000;
@@ -42,6 +46,8 @@ export interface ReconcilerReport {
   quarantinedVolumes: string[];
   /** Spec 025 FR-055: workspaces whose developer-task setup the sweep failed this run. */
   stuckSetups: string[];
+  /** Issue 173: Slack tasks cancelled with nobody waiting; present only where the backstop is wired. */
+  unwaitedTasks?: UnwaitedTaskSweepResult;
 }
 
 export interface ReconcilerDependencies {
@@ -63,6 +69,11 @@ export interface ReconcilerDependencies {
   emit: (metrics: Record<string, number>) => void;
   /** Spec 025 FR-055: fails developer-task prepares 50 minutes old; absent in tests that do not need it. */
   sweepStuckSetups?: (now: Date) => Promise<{ failed: string[] }>;
+  /**
+   * Issue 173: cancels Slack thread tasks live over 4 hours with nobody waiting, among the given
+   * workspaces. Named environments only; absent in the legacy deployment and in tests that do not need it.
+   */
+  sweepUnwaitedTasks?: (workspaceIds: Iterable<string>, now: Date) => Promise<UnwaitedTaskSweepResult>;
   /** Spec 025 A6: deletes failure and usage index days older than 30 days; absent in tests that do not need it. */
   expireIndexDays?: (now: Date) => Promise<{ deleted: number }>;
   now?: () => Date;
@@ -157,6 +168,20 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
       }
     }
 
+    // Issue 173: after the repairs above, so a failure here never stops them. Each failed cancel is
+    // logged by the sweep and retried on the next run (the task is still live), so a failure here is
+    // logged by its error name, counted for the UnwaitedTaskFailures alarm, and the run goes on.
+    let unwaitedMetrics: Record<string, number> = {};
+    if (dependencies.sweepUnwaitedTasks !== undefined) {
+      try {
+        report.unwaitedTasks = await dependencies.sweepUnwaitedTasks(sessions.keys(), new Date(now));
+        unwaitedMetrics = { ReconcilerUnwaitedTasksCancelled: report.unwaitedTasks.cancelled.length, ReconcilerUnwaitedTaskFailures: report.unwaitedTasks.failed.length };
+      } catch (error) {
+        log({ event: "reconciler.unwaited_task_sweep_failed", errorName: error instanceof Error ? error.name : "unknown" });
+        unwaitedMetrics = { ReconcilerUnwaitedTasksCancelled: 0, ReconcilerUnwaitedTaskFailures: 1 };
+      }
+    }
+
     // Spec 025 A6: housekeeping. A failure is logged by its error name and the run goes on; the
     // next run's 15-day look-back catches the day up, so no metric or report field changes.
     if (dependencies.expireIndexDays !== undefined) {
@@ -178,6 +203,7 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
       ReconcilerQuarantinedVolumes: report.quarantinedVolumes.length,
       ReconcilerStuckSetups: report.stuckSetups.length,
       ReconcilerStuckSetupErrors: sweepError === undefined ? 0 : 1,
+      ...unwaitedMetrics,
     });
     if (sweepError !== undefined) throw sweepError;
     return report;
@@ -295,6 +321,35 @@ const ownFilters = () => [
 ];
 const tag = (tags: Array<{ Key?: string | undefined; Value?: string | undefined }> | undefined, key: string) => tags?.find((candidate) => candidate.Key === key)?.Value;
 
+/**
+ * Issue 173, named environments only: the broker cancels (the reconciler may invoke only it) and the
+ * note is posted with the Slack bot token (the reconciler may read only that secret).
+ */
+function unwaitedTaskSweep(): NonNullable<ReconcilerDependencies["sweepUnwaitedTasks"]> {
+  const lambda = new LambdaClient(awsClientConfiguration);
+  const secrets = new SecretsManagerClient(awsClientConfiguration);
+  const brokerFunctionName = requiredEnvironment("BROKER_FUNCTION_NAME");
+  const slackSecretArn = requiredEnvironment("SLACK_SECRET_ARN");
+  const stopTask = createBrokerTaskStopper((payload) => lambda.send(new InvokeCommand({
+    FunctionName: brokerFunctionName, InvocationType: "RequestResponse", Payload: Buffer.from(payload),
+  })));
+  const post = cachedSlackPoster(async () => {
+    const secret = await secrets.send(new GetSecretValueCommand({ SecretId: slackSecretArn }));
+    const botToken = (JSON.parse(secret.SecretString ?? "{}") as { botToken?: unknown }).botToken;
+    // Never the secret's text in an error: it is logged by name only anyway.
+    if (typeof botToken !== "string" || !botToken.startsWith("xoxb-")) throw Object.assign(new Error("the Slack secret has no bot token"), { name: "SlackSecretInvalid" });
+    return botToken;
+  });
+  const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }));
+  return (workspaceIds, now) => sweepUnwaitedTasks({
+    client: documentClient,
+    tableName,
+    stopTask,
+    postNote: async (thread, text) => { await post({ channel: thread.channelId, threadTs: thread.threadTs, text }); },
+    log,
+  }, workspaceIds, now);
+}
+
 export const handler = createReconcilerHandler({
   sessions: new SessionManager({
     documentClient,
@@ -379,6 +434,7 @@ export const handler = createReconcilerHandler({
   },
   binding: (workspaceId) => workspaceBinding(documentClient, tableName, workspaceId),
   sweepStuckSetups: (now) => sweepStuckSetups(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))),
+  ...(unwaitedTaskBackstopWanted(process.env) ? { sweepUnwaitedTasks: unwaitedTaskSweep() } : {}),
   ...(indexSweepWanted(process.env) ? { expireIndexDays: (now: Date) => expireIndexDays(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))) } : {}),
   emit(metrics) {
     console.log(JSON.stringify({
