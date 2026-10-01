@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { createSlackIngressHandler } from "../../packages/broker/src/aws/slack-ingress.js";
 import { createSlackInteractivityHandler } from "../../packages/broker/src/aws/slack-interactivity.js";
 import {
-  missingScopes, probeSlackUrls, readSlackTeamIdFromSecret, SIGN_IN_BOT_SCOPES, signSlackRequest, slackAppManifest, slackAppStep, slackBotDisplayName, slackCreateAppUrl,
+  botNameOf, missingScopes, probeSlackUrls, readSlackTeamIdFromSecret, SIGN_IN_BOT_SCOPES, signSlackRequest, slackAppManifest, slackAppStep, slackBotDisplayName, slackCreateAppUrl,
   slackSecretName, slackSecretWithBot, SlackTeamIdError, slackSecretWithSignIn, slackSignInCallbackUrl, slackWebApi, verifySlackUrls,
 } from "../../packages/cli/src/init/slack-app.js";
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
@@ -82,6 +82,16 @@ describe("Slack app manifest", () => {
       "x-slack-request-timestamp": "1800000000",
       "x-slack-signature": `v0=${createHmac("sha256", TEST_SIGNING_SECRET).update("v0:1800000000:{}").digest("hex")}`,
     });
+  });
+});
+
+describe("the bot's display handle (FR-026, FR-027)", () => {
+  it("uses the handle Slack reported, else derives one from the app name", () => {
+    const withHandle = { ...emptyProgress("staging", T0), slack: { appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT", botName: "agentx-acme-staging" } };
+    expect(botNameOf(withHandle, "AgentX acme (staging)")).toBe("agentx-acme-staging");
+    const withoutHandle = { ...emptyProgress("staging", T0), slack: { appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT" } };
+    expect(botNameOf(withoutHandle, "AgentX acme (staging)")).toBe(slackBotDisplayName("AgentX acme (staging)"));
+    expect(botNameOf(emptyProgress("staging", T0), "AgentX")).toBe("agentx");
   });
 });
 
@@ -166,7 +176,7 @@ describe("Slack app step", () => {
     const progress = progressHandle();
     expect(await slackAppStep(fakeSlackApi()).run(context, progress)).toMatchObject({ status: "done" });
     expect(storedSlack(context)).toEqual({ signingSecret: TEST_SIGNING_SECRET, botToken: TEST_BOT_TOKEN });
-    expect(progress.value().slack).toEqual({ appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT" });
+    expect(progress.value().slack).toEqual({ appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT", botName: "agentx", teamName: "Acme" });
     const printed = context.lines.join("\n");
     expect(printed).not.toContain(TEST_BOT_TOKEN);
     expect(printed).not.toContain(TEST_SIGNING_SECRET);
@@ -254,15 +264,18 @@ describe("Slack app step", () => {
         .rejects.toThrow("slackBotToken" in secretFlags ? "Slack refused the bot token (invalid_auth)" : "could not read --slack-signing-secret-file");
       expect(prompter.asked).not.toContain("Paste the Slack bot token and signing secret again?");
       expect(storedSlack(context).botToken).toBe("unset");
-      // The page still shows the failure on the Slack card.
-      expect(surface.cards.at(-1)).toMatchObject({ id: "slack", status: "failed" });
-      expect(surface.cards.at(-1)?.lines[0]).toContain("slackBotToken" in secretFlags ? "Slack refused the bot token (invalid_auth)" : "could not read --slack-signing-secret-file");
+      // The page still shows the failure on the Slack card, in plain words, with the raw problem in its details.
+      expect(surface.cards.at(-1)).toMatchObject({ id: "slack", status: "failed", lines: ["Slack did not accept those values.", "Nothing was saved."] });
+      expect(surface.cards.at(-1)?.details?.[0]).toContain("slackBotToken" in secretFlags ? "Slack refused the bot token (invalid_auth)" : "could not read --slack-signing-secret-file");
     }
-    // With no retry on the page, the card keeps the terminal's advice to run agentx init again.
+    // With no retry on the page, the card keeps the terminal's advice to run agentx init again in its details.
     const context = slackContext(["installed", TEST_SIGNING_SECRET], { surface, secretFlags: { slackBotToken: { envName: "BOT" } }, processEnv: { BOT: TEST_BOT_TOKEN } });
     await expect(slackAppStep(fakeSlackApi({ botsInfo: async () => ({ ok: false, error: "missing_scope" }) })).run(context, progressHandle()))
       .rejects.toThrow("Slack bots.info did not return the app id (missing_scope); run agentx init again");
-    expect(surface.cards.at(-1)).toMatchObject({ id: "slack", status: "failed", lines: ["Slack bots.info did not return the app id (missing_scope); run agentx init again", "Nothing was saved."] });
+    expect(surface.cards.at(-1)).toMatchObject({
+      id: "slack", status: "failed", lines: ["Slack did not accept those values.", "Nothing was saved."],
+      details: ["Slack bots.info did not return the app id (missing_scope); run agentx init again"],
+    });
   });
 
   it("without a page, a credential from an environment variable that Slack refuses fails with no card", async () => {
@@ -421,7 +434,7 @@ describe("verifying the Slack URLs after the Slack service deploys", () => {
       ["slack-urls", "running"], ["slack-urls", "running"], ["slack-urls", "waiting"], ["slack-urls", "failed"],
       ["slack-urls", "running"], ["slack-urls", "waiting"], ["slack-urls", "ok"],
     ]);
-    expect(surface.cards[1]?.lines).toContain("The Slack service keeps the old signing secret for up to 5 minutes; checking again every 15 seconds.");
+    expect(surface.cards[1]?.lines).toContain("AgentX can take up to 5 minutes to start using the new Signing Secret. Checking again every 15 seconds.");
     expect(surface.cards[3]?.link).toEqual({ url: "https://api.slack.com/apps/A0APP/event-subscriptions", label: "Open Event Subscriptions" });
     expect(JSON.stringify(surface.cards)).not.toContain(TEST_SIGNING_SECRET);
   });
@@ -439,8 +452,9 @@ describe("verifying the Slack URLs after the Slack service deploys", () => {
     await verifySlackUrls(context, withSlack());
     expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual(["Run the Request URL check again?", "Does Slack show the Request URL as Verified?"]);
     const failed = surface.cards.find((card) => card.status === "failed");
-    expect(failed?.lines[0]).toBe(`${EVENTS} answered HTTP 500; check the control plane's SlackIngress logs`);
-    expect(failed?.lines[0]).not.toMatch(/^[A-Z_]+: /);
+    expect(failed?.lines).toEqual(["Slack's check of the address did not pass.", "Fix it, then choose Check again below."]);
+    expect(failed?.details?.[0]).toBe(`${EVENTS} answered HTTP 500; check the control plane's SlackIngress logs`);
+    expect(failed?.details?.[0]).not.toMatch(/^[A-Z_]+: /);
     expect(surface.cards.at(-1)?.status).toBe("ok");
   });
 

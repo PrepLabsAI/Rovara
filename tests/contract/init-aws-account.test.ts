@@ -117,10 +117,11 @@ describe("the account the install lands in", () => {
     expect(page.cards).toEqual([{
       id: "aws", title: "AWS account", status: "ok",
       lines: [
-        "AgentX installs into account 123456789012 in us-east-1.",
-        `Signed in as ${HOLDER} (profile dev).`,
+        "AgentX installs into AWS account 123456789012 in us-east-1.",
+        "You are signed in as alice (role Admin), with the AWS profile dev.",
         "AgentX recommends a dedicated AWS account for each install: environments that share an account are not a security boundary against each other.",
       ],
+      details: [HOLDER],
     }]);
   });
 
@@ -144,9 +145,8 @@ describe("the account the install lands in", () => {
     expect(clients).toBe(2);
     expect(page.cards.map((card) => card.status)).toEqual(["failed", "ok"]);
     expect(page.cards[0]?.lines).toEqual([
-      "AgentX cannot use the AWS sign-in of profile dev.",
-      "AWS credentials missing or expired: The security token included in the request is expired",
-      "Choose Sign in to run aws sso login --profile dev; a browser tab opens for it. If no tab opens, the terminal running agentx init shows the address and code.",
+      "The AWS sign-in of the profile dev is missing or has ended.",
+      "Choose Sign in again. A browser tab opens for the AWS sign-in; finish it there, then come back to this tab.",
     ]);
   });
 
@@ -159,7 +159,7 @@ describe("the account the install lands in", () => {
       runner: runner(Object.assign(new Error("spawn aws ENOENT"), { code: "ENOENT" })), surface: page, profile: DEV,
     })).rejects.toBe(failure);
     expect(prompter.asked).toEqual(["Your AWS sign-in is missing or has expired. What next?", "Your AWS sign-in is missing or has expired. What next?"]);
-    expect(page.cards.at(-1)?.lines).toContain("could not run aws sso login --profile dev: spawn aws ENOENT");
+    expect(page.cards.at(-1)?.details).toContain("could not run aws sso login --profile dev: spawn aws ENOENT");
   });
 
   it("names a sign-in that could not start in one line, without the command twice or a stderr tail", async () => {
@@ -175,7 +175,7 @@ describe("the account the install lands in", () => {
       },
     };
     await expect(resolveCaller({ identity: () => ({ get: async () => { throw expired(); } }), region: "us-east-1", prompter, runner: failing, surface: page, profile: DEV })).rejects.toThrow("expired");
-    const problems = page.cards.map((card) => card.lines[2]);
+    const problems = page.cards.map((card) => card.details?.[2]);
     expect(problems[1]).toBe("aws sso login --profile dev could not start: spawn aws ENOENT");
     expect(problems[2]).toBe("aws sso login --profile dev exited with code 255");
     for (const card of page.cards) for (const line of card.lines) expect(line).not.toContain("\n");
@@ -189,7 +189,7 @@ describe("the account the install lands in", () => {
       region: "us-east-1", prompter: scriptedPrompter(["retry"]), runner: runner(), surface: page, profile: { name: "legacy", kind: "keys" },
     });
     expect(caller.account).toBe("123456789012");
-    expect(page.cards[0]?.lines.at(-1)).toBe("Update the credentials of profile legacy in a terminal, then choose Check again.");
+    expect(page.cards[0]?.lines.at(-1)).toBe("Sign in to AWS again another way, then choose I signed in another way, check again.");
 
     const denied = Object.assign(new Error("not authorized to perform sts:GetCallerIdentity"), { name: "AccessDeniedException" });
     await expect(resolveCaller({ identity: () => ({ get: async () => { throw denied; } }), region: "us-east-1", prompter: scriptedPrompter([]), runner: runner(), surface: surface(), profile: DEV })).rejects.toBe(denied);

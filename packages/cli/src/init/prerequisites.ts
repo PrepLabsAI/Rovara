@@ -40,8 +40,10 @@ export type OpenRouterCheckConfig = Partial<NonNullable<ModelsAnswers["openRoute
 /** An OpenRouter key collected by init's questions, not yet stored in Secrets Manager. */
 export interface PendingOpenRouterKey { key: string; providers?: readonly string[] }
 /** One prerequisite's result, for the page's checklist (spec 040 FR-023). `detail` is the ok line
- * without its "ok " prefix, or the problem exactly as the error lists it. */
-export interface PrerequisiteCheck { label: string; ok: boolean; detail: string }
+ * without its "ok " prefix, or the problem exactly as the error lists it. `technical` is extra raw
+ * detail (an error code, an ARN) the page keeps collapsed rather than putting in `detail` (spec 048
+ * FR-027, FR-060); Task 12 is the first to fill it in. */
+export interface PrerequisiteCheck { label: string; ok: boolean; detail: string; technical?: string }
 
 export const DEDICATED_ACCOUNT_NOTE =
   "AgentX recommends a dedicated AWS account for each install: environments that share an account are not a security boundary against each other.";

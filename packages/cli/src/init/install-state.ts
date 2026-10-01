@@ -78,7 +78,12 @@ export const InstallProgressSchema = z.object({
     privateKeySecretArn: z.string().regex(SECRET_ARN),
     installationId: z.string().regex(/^\d+$/).optional(),
   }).strict().optional(),
-  slack: z.object({ appId: z.string().regex(/^A[A-Z0-9]+$/), teamId: z.string().regex(/^T[A-Z0-9]+$/), botUserId: z.string().regex(/^[UW][A-Z0-9]+$/) }).strict().optional(),
+  slack: z.object({
+    appId: z.string().regex(/^A[A-Z0-9]+$/), teamId: z.string().regex(/^T[A-Z0-9]+$/), botUserId: z.string().regex(/^[UW][A-Z0-9]+$/),
+    /** Spec 048 FR-026 and FR-027: the bot's handle and the workspace's name, as Slack reported them. */
+    botName: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,79}$/).optional(),
+    teamName: z.string().min(1).max(100).optional(),
+  }).strict().optional(),
   admin: z.object({ username: z.string().min(3).max(128), mode: z.enum(["cognito", "oidc"]) }).strict().optional(),
   project: z.object({
     name: z.string().regex(AGENTX_NAME_PATTERN),

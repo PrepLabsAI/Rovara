@@ -232,4 +232,18 @@ describe("the install wizard's server", () => {
     await hub.closeRequested();
     expect(asked).toBe(true);
   });
+
+  it("FR-037: GitHub's return tab closes itself where the browser allows, and says to go back otherwise", async () => {
+    const { server, origin } = await wizard();
+    const host = server.mountManifest({ state: "s".repeat(32), page: () => "<p>form</p>", timeoutMs: 60_000 });
+    const response = await fetch(`${origin}/github/created?code=0123456789abcdef0123&state=${"s".repeat(32)}`, { headers: { "sec-fetch-site": "cross-site" } });
+    expect(response.status).toBe(200);
+    const csp = response.headers.get("content-security-policy") ?? "";
+    const nonce = /script-src 'nonce-([^']+)'/.exec(csp)?.[1];
+    expect(nonce).toBeDefined();
+    const body = await response.text();
+    expect(body).toContain(`<script nonce="${nonce}">window.close()</script>`);
+    expect(body).toContain("GitHub sent AgentX the new app. You can close this tab and go back to the Install AgentX tab.");
+    await expect(host.code).resolves.toBe("0123456789abcdef0123");
+  });
 });

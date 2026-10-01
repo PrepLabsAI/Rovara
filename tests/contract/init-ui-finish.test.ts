@@ -28,10 +28,10 @@ describe("the admin user on the page (FR-050)", () => {
     expect(await adminUserStep().run(context, progressHandle())).toEqual({ status: "done", note: `admin ${ADMIN_EMAIL}` });
     expect(surface.cards.map((card) => [card.id, card.status, card.lines])).toEqual([
       ["admin", "waiting", [
-        `Created your admin user ${ADMIN_EMAIL}. Cognito emailed a temporary password to ${ADMIN_EMAIL}; you choose your own password when you first sign in.`,
-        `Sign in to AgentX as ${ADMIN_EMAIL} in the tab the button opens. This page moves on by itself once you have.`,
+        `AgentX made your admin sign-in for ${ADMIN_EMAIL}. Look for an email with your temporary password; you choose your own when you first sign in.`,
+        `Sign in to AgentX as ${ADMIN_EMAIL} in the tab the Sign in button opens. This page moves on by itself when you have.`,
       ]],
-      ["admin", "ok", [`Signed in to AgentX as ${ADMIN_EMAIL}.`]],
+      ["admin", "ok", [`You are signed in to AgentX as ${ADMIN_EMAIL}.`]],
     ]);
   });
 
@@ -88,8 +88,8 @@ describe("the admin user on the page (FR-050)", () => {
       await writeEnvironmentSettings(context.store, OIDC_SETTINGS);
       expect(await adminUserStep().run(context, progressHandle())).toEqual({ status: "done", note: "admin bob@example.com signed in with your OIDC provider" });
       expect(surface.cards.map((card) => [card.id, card.status, card.lines])).toEqual([
-        ["admin", "waiting", ["Sign in to AgentX as an administrator of your company's sign-in in the tab the button opens. This page moves on by itself once you have."]],
-        ["admin", "ok", ["Signed in to AgentX as bob@example.com."]],
+        ["admin", "waiting", ["Sign in to AgentX as an administrator of your company's sign-in in the tab the Sign in button opens. This page moves on by itself when you have."]],
+        ["admin", "ok", ["You are signed in to AgentX as bob@example.com."]],
       ]);
     });
 
@@ -102,7 +102,8 @@ describe("the admin user on the page (FR-050)", () => {
       expect((failure as Error).message).toContain("your sign-in token has no email or sub claim of 3 to 128 characters");
       expect((context.prompter as ReturnType<typeof scriptedPrompter>).asked).toEqual([]);
       expect(surface.cards.map((card) => [card.id, card.status])).toEqual([["admin", "waiting"], ["admin", "failed"]]);
-      expect(surface.cards[1]?.lines).toEqual([problemText(failure)]);
+      expect(surface.cards[1]?.lines).toEqual(["The sign-in did not finish."]);
+      expect(surface.cards[1]?.details).toEqual([problemText(failure)]);
     });
 
     it("a token the page cannot retry drops the sign-in's button when the failed card shows", async () => {
@@ -147,7 +148,7 @@ describe("the first project on the page, resumed (M6)", () => {
       projectCard({ name: "payments-api", revision: 1 }),
       channelCard({ stage: "done", channelName: "payments", projectName: "payments-api" }),
     ]);
-    expect(surface.cards[0]?.lines).toEqual(["Project payments-api, revision 1, runs on EC2 workers."]);
+    expect(surface.cards[0]?.lines).toEqual(["The project payments-api is set up."]);
     expect(slackChannels.finds()).toBe(0);
   });
 });
@@ -168,10 +169,10 @@ describe("the first project's channel wait on the page", () => {
     expect((failure as Error).message).toContain("the bot cannot see a channel named #payments after 10 minutes");
     expect(surface.cards).toEqual([
       projectCard({ name: "payments-api", revision: 1 }),
-      channelCard({ stage: "waiting", channelName: "payments", botUserId: "U0BOT00001" }),
+      channelCard({ stage: "waiting", channelName: "payments", botName: "agentx" }),
       channelCard({ stage: "failed", channelName: "payments", problem: problemText(failure) }),
     ]);
-    expect(surface.cards[2]?.lines).toEqual(["the bot cannot see a channel named #payments after 10 minutes; create it in Slack (or invite the bot to it, if it is private), then run this again"]);
+    expect(surface.cards[2]?.details).toEqual(["the bot cannot see a channel named #payments after 10 minutes; create it in Slack (or invite the bot to it, if it is private), then run this again"]);
   });
 
   it("a failure before the invite wait shows no channel card", async () => {
@@ -220,7 +221,8 @@ describe("the alerts on the page", () => {
     expect((failure as Error).message).toBe((terminalFailure as Error).message);
     expect(surface.cards.map((card) => [card.id, card.status])).toEqual([["alerts", "waiting"], ["alerts", "failed"]]);
     expect(surface.cards[0]?.lines).toEqual(alertsCard({ stage: "testing", shownAs: "ops@example.com" }).lines);
-    expect(surface.cards[1]?.lines).toEqual([problemText(failure)]);
+    expect(surface.cards[1]?.lines).toEqual(["The test alert could not be sent."]);
+    expect(surface.cards[1]?.details).toEqual([problemText(failure)]);
   });
 
   it("I1: a test alarm CloudWatch did not record shows a failed alerts card, and the step rejects with that error", async () => {
@@ -231,7 +233,8 @@ describe("the alerts on the page", () => {
     const failure = await alertsStep().run(context, progressHandle()).then(() => undefined, (error: unknown) => error);
     expect((failure as Error).message).toContain("CloudWatch did not record the test alarm going off");
     expect(surface.cards.map((card) => [card.id, card.status])).toEqual([["alerts", "waiting"], ["alerts", "failed"]]);
-    expect(surface.cards[1]?.lines).toEqual([problemText(failure)]);
+    expect(surface.cards[1]?.lines).toEqual(["The test alert could not be sent."]);
+    expect(surface.cards[1]?.details).toEqual([problemText(failure)]);
   });
 
   it("the terminal path still stops and says to run agentx init again when nobody has confirmed", async () => {
@@ -279,7 +282,7 @@ describe("the test reply on the page (FR-051)", () => {
       ["waiting", "https://slack.com/app_redirect?team=T0123456789&channel=C0PAY00001"],
       ["ok", undefined],
     ]);
-    expect(surface.cards[0]?.lines[1]).toContain("this one's member ID is U0BOT00001");
+    expect(surface.cards[0]?.lines[1]).toContain("pick agentx");
   });
 
   it("Review Focus 1: counts a mention made just before the watch started", async () => {
@@ -302,7 +305,7 @@ describe("the test reply on the page (FR-051)", () => {
     context = initContext({ prompter, surface, setup: setupServices({ fetch: plane.fetch }), adminSession: async () => session });
     expect(await e2eStep().run(context, progress())).toEqual({ status: "done", note: "a mention in #payments got a threaded reply in 7 seconds" });
     expect(base.asked).toEqual(["Watch for the reply again?"]);
-    expect(surface.cards.find((card) => card.status === "failed")?.lines[0]).toContain("but the turn ended as error");
+    expect(surface.cards.find((card) => card.status === "failed")?.details?.[0]).toContain("but the turn ended as error");
     // Ruling R2: on the page the card says to answer Yes below, not to run init again.
     expect(surface.cards.find((card) => card.status === "failed")?.lines.join(" ")).not.toContain("init again");
   });

@@ -18,7 +18,7 @@ import { BUDGET_TAG_NOTE, checkAlertWebhook } from "./answers.js";
 import type { InitContext } from "./context.js";
 import { CONNECTOR_LABELS, CONNECTOR_TYPES, type ConnectorType, type InstallProgress } from "./install-state.js";
 import { problemText, retryOnPage } from "./retry.js";
-import { readSlackBotToken } from "./slack-app.js";
+import { botNameOf, readSlackBotToken } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
 import { adminCard, alertsCard, channelCard, connectorsCard, projectCard, replyCard, type AdminCardInput, type ReplyCardInput } from "./ui/cards.js";
 import { STEP_PLAN } from "./ui/journey.js";
@@ -148,7 +148,7 @@ export function firstProjectStep(): InitStep<InitContext> {
             prompter: context.prompter, write: context.write, sleep: context.sleep, now: context.now, services: context.setup, flags: context.flags,
             onWaiting: (channelName) => {
               waitingFor = channelName;
-              context.surface?.card(channelCard({ stage: "waiting", channelName, botUserId: slack.botUserId }));
+              context.surface?.card(channelCard({ stage: "waiting", channelName, botName: botNameOf(progress.current(), context.answers.slack.appName) }));
             },
           });
         } catch (error) {
@@ -309,7 +309,7 @@ export function e2eStep(): InitStep<InitContext> {
         surface: context.surface, prompter: context.prompter, question: "Watch for the reply again?",
         failed: (problem) => show({ stage: "failed", ...where, problem }),
         run: async () => {
-          show({ stage: "waiting", ...where, botUserId: slack.botUserId, minutes: Math.round(REPLY_WAIT_MS / 60_000) });
+          show({ stage: "waiting", ...where, botName: botNameOf(progress.current(), context.answers.slack.appName), minutes: Math.round(REPLY_WAIT_MS / 60_000) });
           return waitForThreadedReply({
             env: context.env, session: await context.adminSession(), fetch: context.setup.fetch, teamId: slack.teamId, channelId: where.channelId,
             channelName: where.channelName, botUserId: slack.botUserId, rerun: `agentx --env ${context.env} init`, write: context.write, sleep: context.sleep, now: context.now,

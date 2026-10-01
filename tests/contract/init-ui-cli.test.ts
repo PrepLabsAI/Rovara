@@ -331,7 +331,7 @@ describe("agentx init --ui", () => {
     expect(processEnv.AWS_PROFILE).toBe("dev");
     // The account is on the page by the time the review screen asks to create anything.
     const review = operator.states.find((state) => state.question?.text === "Create all of this?");
-    expect(review?.cards?.find((card) => card.id === "aws")?.lines[0]).toBe("AgentX installs into account 123456789012 in us-east-1.");
+    expect(review?.cards?.find((card) => card.id === "aws")?.lines[0]).toBe("AgentX installs into AWS account 123456789012 in us-east-1.");
   });
 
   it("FR-022: the region picker offers only the release's regions", async () => {
@@ -429,10 +429,11 @@ describe("agentx init --ui", () => {
     expect(operator.clicked).toContain(`${wizardOrigin}/github/start?t=${new URL(operator.opened[0] ?? "").searchParams.get("t") ?? ""}`);
     expect(h.github.conversions).toEqual(["0123456789abcdef0123"]);
     const stages = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "github").map((card) => card.lines[0]) ?? []);
-    // The app's name is the first run's default ("AgentX <account> <env>"); its slug is GitHub's.
-    expect(stages).toContain('Create the GitHub App "AgentX acme staging" for acme. GitHub opens with everything filled in; press Create GitHub App.');
-    expect(stages).toContain("Install agentx-acme-staging on acme and choose the repositories AgentX may use.");
-    expect(stages.at(-1)).toBe("agentx-acme-staging is installed on acme.");
+    // The app's name is the first run's default ("AgentX <account> <env>"); its slug is GitHub's,
+    // kept in the card's details rather than its words.
+    expect(stages).toContain('Create the GitHub app "AgentX acme staging" for acme.');
+    expect(stages).toContain('Install "AgentX acme staging" on acme. Choose only the repositories AgentX should work on.');
+    expect(stages.at(-1)).toBe('"AgentX acme staging" is installed on acme.');
   });
 
   it("FR-040: the Slack app is created from a button, and a wrong token is refused on the field", async () => {
@@ -446,7 +447,7 @@ describe("agentx init --ui", () => {
     expect(JSON.stringify(operator.states)).not.toContain("USERtokenVALUE");
     expect(await h.everywhere()).not.toContain("USERtokenVALUE");
     const slack = operator.states.at(-1)?.cards?.find((card) => card.id === "slack");
-    expect(slack).toMatchObject({ status: "ok", lines: ["Slack app A0APP is installed in workspace T0TEAM."] });
+    expect(slack).toMatchObject({ status: "ok", lines: ['"AgentX" is installed in the Acme workspace.'] });
   });
 
   it("Q8: when Slack refuses a token that looks right, the page asks for both again and saves nothing until one works", async () => {
@@ -559,8 +560,8 @@ describe("agentx init --ui", () => {
     await operator.settled();
     const channel = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "channel") ?? []);
     expect(channel.map((card) => card.status)).toContain("waiting");
-    expect(channel.at(-1)).toMatchObject({ status: "ok", lines: ["#payments is bound to project payments-api."] });
-    expect(operator.states.at(-1)?.cards?.find((card) => card.id === "project")?.lines).toEqual(["Project payments-api, revision 1, for acme/payments-api, runs on EC2 workers."]);
+    expect(channel.at(-1)).toMatchObject({ status: "ok", lines: ["AgentX answers in #payments for payments-api."] });
+    expect(operator.states.at(-1)?.cards?.find((card) => card.id === "project")?.lines).toEqual(["The project payments-api is set up for acme/payments-api."]);
   });
 
   it("the connectors card lists what was connected", async () => {
@@ -568,7 +569,7 @@ describe("agentx init --ui", () => {
     const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH_WITH_LINEAR]);
     expect(code).toBe(0);
     expect(operator.states.at(-1)?.cards?.find((card) => card.id === "connectors")?.lines).toEqual(["Connected to payments-api: Linear."]);
-    expect(operator.states.at(-1)?.cards?.find((card) => card.id === "alerts")?.lines).toEqual(["Alerts go to ops@example.com, and the test alarm arrived."]);
+    expect(operator.states.at(-1)?.cards?.find((card) => card.id === "alerts")?.lines).toEqual(["Alerts go to ops@example.com, and the test alert arrived."]);
   });
 
   it("FR-052: the page ends on a ready card that needs no command to finish, and the outcome is still readyText", async () => {

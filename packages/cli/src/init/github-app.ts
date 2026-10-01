@@ -260,7 +260,7 @@ export function githubAppStep(api: GitHubApi): InitStep<InitContext> {
 }
 
 async function runGitHubAppStep(context: InitContext, progress: ProgressHandle, api: GitHubApi, show: (card: GitHubCardInput) => void): Promise<StepOutcome> {
-  const { account, accountType } = context.answers.github;
+  const { account, accountType, appName } = context.answers.github;
   const name = githubAppSecretName(context.env);
   const requireArn = async () => {
     const arn = await context.secrets.arn(name);
@@ -326,7 +326,7 @@ async function runGitHubAppStep(context: InitContext, progress: ProgressHandle, 
       throw agentXError("CONFIG_INVALID", `installation ${installationId} of GitHub App ${app.appId} is not on ${account}; check --github-installation-id`);
     }
   } else {
-    show({ stage: "install", slug: app.slug, account, installUrl });
+    show({ stage: "install", appName, slug: app.slug, account, installUrl });
     context.write(`Install the app on ${account} and choose the repositories AgentX may use: ${installUrl}`);
     if (context.openBrowser !== undefined) await context.openBrowser(installUrl);
     for (;;) {
@@ -346,13 +346,13 @@ async function runGitHubAppStep(context: InitContext, progress: ProgressHandle, 
     if ((await api.repositoryCount(token.token)) > 0) break;
     if (!told) {
       context.write(`The app is installed but can see no repositories. Choose at least one at ${installationSettingsUrl(accountType, account, installationId)}`);
-      show({ stage: "repositories", slug: app.slug, account, settingsUrl: installationSettingsUrl(accountType, account, installationId) });
+      show({ stage: "repositories", appName, slug: app.slug, account, settingsUrl: installationSettingsUrl(accountType, account, installationId) });
       told = true;
     }
     if (context.now() >= deadline) throw agentXError("CONFIG_INVALID", `the GitHub App can see no repositories; choose at least one at ${installationSettingsUrl(accountType, account, installationId)}, then run agentx init again`);
     await context.sleep(POLL_MS);
   }
   await progress.update({ github: { ...app, installationId } });
-  show({ stage: "done", slug: app.slug, account });
+  show({ stage: "done", appName, slug: app.slug, account });
   return { status: "done", note: `GitHub App ${app.slug} installed on ${account}` };
 }
