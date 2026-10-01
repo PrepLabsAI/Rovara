@@ -314,9 +314,10 @@ export interface ChangedFile { repository: string; path: string; added: number; 
 
 /**
  * Changed files from the worker's workspace.diff artifact: per repository a "## <name>" section
- * with "### status" (git status --short) and "### diff" (git diff HEAD). Lines are counted only
+ * with "### status" (git status --short) and "### diff" (git diff against the commit the workspace
+ * was prepared at, or HEAD with a note when that commit is gone, #208). Lines are counted only
  * inside hunks, so a removed line that starts with "--" is not taken for a file header.
- * Untracked files (status "??") are listed with no line counts, since git diff HEAD omits them.
+ * Untracked files (status "??") are listed with no line counts, since git diff omits them.
  */
 export function diffStat(diff: string, limit = 200): ChangedFile[] {
   const files: ChangedFile[] = [];

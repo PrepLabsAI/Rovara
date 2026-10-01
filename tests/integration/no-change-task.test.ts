@@ -1,12 +1,12 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import type { WorkerInvocation } from "@agentx/contracts";
+import { diffStat, type WorkerInvocation } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
-import { publishWorkspaceDiff, type WorkerArtifact } from "../../packages/worker/src/artifacts.js";
+import { MISSING_BASE_NOTE, publishWorkspaceDiff, workspaceFingerprint, type WorkerArtifact } from "../../packages/worker/src/artifacts.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
 import type { PiSessionAdapter, PiSessionHandle } from "../../packages/worker/src/pi-session.js";
@@ -378,6 +378,104 @@ describe("publishWorkspaceDiff reports whether anything changed", () => {
   });
 });
 
+const commitAll = async (repository: string, message = "agent change"): Promise<void> => {
+  await run("git", ["-C", repository, "add", "-A"]);
+  await run("git", ["-C", repository, "-c", "user.name=t", "-c", "user.email=t@t.test", "commit", "--quiet", "-m", message]);
+};
+const workspaceDiff = (artifacts: WorkerArtifact[]) => artifacts.find(({ name }) => name === "workspace.diff")!.content;
+
+describe("changes the agent commits count as changes (#208)", () => {
+  it("an edit that the agent then commits: no warning, and the diff and changed files show it", async () => {
+    const { events, artifacts, result } = await runScripted([
+      edit("README.md", false),
+      effect(async (repository) => {
+        await writeFile(join(repository, "README.md"), "old body text\nlive test\n");
+        await commitAll(repository);
+      }),
+    ]);
+    await expect(result).resolves.toBeDefined();
+    expect(usageOutcome(events)).toBe("SUCCEEDED");
+    expect(progressMessages(events).some((message) => /no repository changed/i.test(message))).toBe(false);
+    const diff = workspaceDiff(artifacts);
+    expect(diff).toContain("+live test");
+    expect(diffStat(diff)).toEqual([{ repository: "app", path: "README.md", added: 1, removed: 0 }]);
+  });
+
+  it("every edit call fails but a bash change is committed: the task succeeds", async () => {
+    const { events, result } = await runScripted([
+      edit("README.md", true),
+      edit("README.md", true),
+      tool("bash", { command: "perl -i -pe 's/old/new/' README.md && git commit -am x" }),
+      effect(async (repository) => {
+        await writeFile(join(repository, "README.md"), "new body text\n");
+        await commitAll(repository);
+      }),
+    ]);
+    await expect(result).resolves.toBeDefined();
+    expect(usageOutcome(events)).toBe("SUCCEEDED");
+    expect(events.some((event) => event.type === "error")).toBe(false);
+  });
+
+  it("committed and uncommitted changes since the workspace was prepared both show in the diff", async () => {
+    const { artifacts, result } = await runScripted([
+      effect(async (repository) => {
+        await writeFile(join(repository, "README.md"), "committed\n");
+        await commitAll(repository);
+        await writeFile(join(repository, "NOTES.md"), "uncommitted\n");
+      }),
+    ]);
+    await expect(result).resolves.toBeDefined();
+    expect(diffStat(workspaceDiff(artifacts))).toEqual([
+      { repository: "app", path: "README.md", added: 1, removed: 1 },
+      { repository: "app", path: "NOTES.md", added: 0, removed: 0 },
+    ]);
+  });
+
+  it("a later turn that changes nothing after an earlier turn committed is still caught", async () => {
+    const prepared = await preparedRepository();
+    const conversationId = randomUUID();
+    const first = await runScripted([
+      edit("README.md", false),
+      effect(async (repository) => {
+        await writeFile(join(repository, "README.md"), "turn one\n");
+        await commitAll(repository);
+      }),
+    ], { prepared, conversationId });
+    await expect(first.result).resolves.toBeDefined();
+
+    const second = await runScripted([edit("README.md", true)], { prepared, conversationId, conversationStarted: true });
+    await expect(second.result).rejects.toThrow("no file changed: the only edit call failed (last: README.md, the text to replace was not found)");
+    const third = await runScripted([edit("README.md", false)], { prepared, conversationId, conversationStarted: true });
+    await expect(third.result).resolves.toBeDefined();
+    expect(progressMessages(third.events)).toContainEqual(expect.stringContaining("but no repository changed"));
+  });
+
+  it("says so in the diff when the starting commit is gone, and still counts the moved HEAD", async () => {
+    const { rootPath, repository } = await preparedRepository();
+    const manifestPath = join(rootPath, ".agentx/preparation-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as { repositories: Array<{ resolvedCommit: string }> };
+    manifest.repositories[0]!.resolvedCommit = "0".repeat(40);
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    let content = "";
+    await expect(publishWorkspaceDiff(rootPath, async (artifact) => { content = artifact.content; })).resolves.toEqual({ changed: true });
+    expect(content).toBe(`## app\n\n${MISSING_BASE_NOTE}\n### status\n\n### diff\n`);
+    expect(diffStat(content)).toEqual([]);
+    await writeFile(join(repository, "README.md"), "uncommitted\n");
+    await publishWorkspaceDiff(rootPath, async (artifact) => { content = artifact.content; });
+    expect(diffStat(content)).toEqual([{ repository: "app", path: "README.md", added: 1, removed: 1 }]);
+  });
+
+  it("publishWorkspaceDiff and the workspace fingerprint both see a commit on a clean tree", async () => {
+    const { rootPath, repository } = await preparedRepository();
+    const sink = async () => undefined;
+    const before = await workspaceFingerprint(rootPath);
+    await writeFile(join(repository, "README.md"), "committed\n");
+    await commitAll(repository);
+    await expect(publishWorkspaceDiff(rootPath, sink)).resolves.toEqual({ changed: true });
+    expect(await workspaceFingerprint(rootPath)).not.toBe(before);
+  });
+});
+
 async function preparedRepository(): Promise<{ rootPath: string; repository: string }> {
   const rootPath = await mkdtemp(join(tmpdir(), "agentx-no-change-"));
   const repository = join(rootPath, "repo/app");
@@ -386,11 +484,12 @@ async function preparedRepository(): Promise<{ rootPath: string; repository: str
   await writeFile(join(repository, "README.md"), "old body text\n");
   await run("git", ["-C", repository, "add", "."]);
   await run("git", ["-C", repository, "-c", "user.name=AgentX", "-c", "user.email=agentx@example.test", "commit", "--quiet", "-m", "fixture"]);
+  const resolvedCommit = (await run("git", ["-C", repository, "rev-parse", "HEAD"])).stdout.trim();
   const now = new Date().toISOString();
   await mkdir(join(rootPath, ".agentx"));
   await writeFile(join(rootPath, ".agentx/preparation-manifest.json"), JSON.stringify({
     schemaVersion: 2, projectName: "no-change", projectRevision: 1,
-    repositories: [{ name: "app", path: "repo/app", defaultBranch: "main", resolvedCommit: "fixture", resolvedAt: now, completedAt: now }],
+    repositories: [{ name: "app", path: "repo/app", defaultBranch: "main", resolvedCommit, resolvedAt: now, completedAt: now }],
     completedSetupSteps: [], readinessResults: [], creationIdentity: "fixture", complete: true, updatedAt: now,
   }));
   return { rootPath, repository };
