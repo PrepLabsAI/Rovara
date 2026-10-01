@@ -132,6 +132,17 @@ describe("the agentx executable (packages/cli/src/bin.ts)", () => {
     }
   });
 
+  it("docs state the owner's Node policy: 22.19 or newer, Node 22 LTS recommended, not Node 22 only", async () => {
+    const docs = ["README.md", ...(await readdir(join(repoRoot, "docs"), { recursive: true })).filter((file) => file.endsWith(".md")).map((file) => join("docs", file))];
+    for (const doc of docs) {
+      const text = await readFile(join(repoRoot, doc), "utf8");
+      expect(text, doc).not.toMatch(/Node 22 only|within the Node 22|You need Node 22 and/);
+    }
+    for (const doc of ["README.md", "docs/install.md", "docs/mcp-install.md"]) {
+      expect(await readFile(join(repoRoot, doc), "utf8"), doc).toMatch(/22\.19 or newer \(Node 22 LTS recommended\)/);
+    }
+  });
+
   it("is the bin of the CLI package and of npm run agentx", async () => {
     const cliManifest = JSON.parse(await readFile(join(repoRoot, "packages", "cli", "package.json"), "utf8")) as { bin: Record<string, string> };
     expect(cliManifest.bin).toEqual({ agentx: "./dist/bin.js" });

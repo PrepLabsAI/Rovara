@@ -1,8 +1,9 @@
 # Use AgentX from Claude Code, Codex or Cursor
 
 AgentX runs a small MCP server on your computer. Your AI tool uses it to hand AgentX a coding task
-on a project you may use, check on it, continue it, and open a pull request. You need Node 22 and
-the URL of your company's AgentX (ask your AgentX admin).
+on a project you may use, check on it, continue it, and open a pull request. You need
+Node 22.19 or newer (Node 22 LTS recommended) and the URL of your company's AgentX (ask your
+AgentX admin).
 
 Sign in once, in any terminal:
 

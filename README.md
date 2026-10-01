@@ -107,7 +107,7 @@ You need:
 - A GitHub organization or personal account to own AgentX's GitHub App.
 - A Slack workspace where you can create and install apps.
 - Model access: Amazon Bedrock (the default) in the chosen region, or an OpenRouter API key.
-- Node.js 22.19 or newer within the Node 22 release line. AWS CloudShell comes with Node 20: see
+- Node.js 22.19 or newer (Node 22 LTS recommended). AWS CloudShell comes with Node 20: see
   [Node 22 in AWS CloudShell](docs/install.md#node-22-in-aws-cloudshell) for a one-line install.
 
 From a source checkout today:
@@ -207,7 +207,7 @@ projects they can use and what is running in them. Everything else the `agentx` 
 administration: installing, upgrading and removing environments, registering projects, binding
 Slack channels, choosing how developers sign in, and stopping idle workspaces.
 
-AgentX requires Node.js 22.19 or newer within the Node 22 release line:
+AgentX requires Node.js 22.19 or newer (Node 22 LTS recommended):
 
 ```sh
 npm ci
@@ -1241,7 +1241,7 @@ Validate the active feature now:
 
 ## Local validation
 
-Use Node 22.19 or newer within the Node 22 line:
+Use Node 22.19 or newer (Node 22 LTS recommended):
 
 ```sh
 npm ci

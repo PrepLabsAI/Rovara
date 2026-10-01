@@ -19,7 +19,7 @@ You need:
 - **Admin credentials in that account for the first run** (for example `aws login` or an SSO
   profile). The platform team path needs them only on the platform team's side. Later, day-2
   commands use the narrower operator role that the install creates.
-- **Node 22.19 or later** (Node 22 only). AWS CloudShell comes with Node 20; see
+- **Node 22.19 or newer (Node 22 LTS recommended).** AWS CloudShell comes with Node 20; see
   [Node 22 in AWS CloudShell](#node-22-in-aws-cloudshell). With an older Node, `agentx` stops
   before it does anything and says what to install.
 - **A GitHub organization or personal account** that will own the AgentX GitHub App.
