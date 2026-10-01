@@ -2,7 +2,7 @@
 
 **Feature Branch**: `docs/053-thinking-level` (spec), then `feat/053-thinking-level`  
 **Created**: 2026-10-01  
-**Status**: Draft  
+**Status**: Implemented; awaiting release  
 **Input**: SWE-bench pilot finding A3, and the Pi review's quick win "thinking level per model". Narrowed on
 2026-10-01 to what spec 046's final campaign needs.
 
@@ -26,23 +26,28 @@ also not recorded anywhere a later comparison can read.
   `thinkingLevel: "off" | "minimal" | "low" | "medium" | "high" | "xhigh"`, so each approved model in a project
   definition, and the default, can carry one.
 - **FR-002:** Coding tasks and eval runs resolve the level in this order:
-  1. a batch file's per-model override (spec 052);
+  1. a batch file's per-model override (spec 052; delivered by spec 052, not in this branch);
   2. the project's approved-model entry;
   3. today's default: `medium` for any model that supports reasoning, `off` otherwise, for **both** providers.
 
-  OpenRouter no longer falls back to Pi's default. This removes today's provider-dependent behaviour.
+  The worker now makes this default explicit for both providers, where it used to leave it to the session layer.
+  OpenRouter did not inherit Pi's `high` there: the session already defaulted to `medium`, and Pi's clamp raised a
+  level the model does not support (GLM 5.3: `medium` ran as `high`). FR-003 refuses such an explicit level instead.
 - **FR-003:** An approved model's `thinkingLevel` (on an approved entry or the default) that the model does not
   support is refused when the project definition is saved, instead of being clamped by Pi to another level. The
   supported levels are the ones Pi's catalog gives the model (pi-ai `getSupportedThinkingLevels`), so a level other
   than `off` on a model that does not support reasoning is refused, and so is `off` on a model that always reasons.
   The message names the model and lists its supported levels, for example
-  `GLM 5.3 (z-ai/glm-5.3) does not support thinking level "medium"; supported: low, high, max`. Where the catalog
+  `GLM 5.3 (z-ai/glm-5.3) does not support thinking level "medium"; supported: low, high`. Where the catalog
   cannot tell at save time (a model it does not know), the definition is accepted and the refusal happens at first
   use. An unset level is not checked; the session records the level Pi actually used (FR-004).
 - **FR-004:** The level actually used is recorded:
   - in task usage telemetry (`thinkingLevel`, beside provider and model);
   - in each eval run's `result.json`. That record exists since spec 045's run-setup fields; it now holds the
     resolved level, never "default".
+  On a resumed conversation Pi may not append a new `thinking_level_change` entry to the transcript (pi-coding-agent
+  `sdk.js:240-244` appends one only when the saved session has none), so a transcript can show a stale level. Usage
+  telemetry and `result.json` are the record of the level used.
 - **FR-005:** The Slack `models` reply shows each approved model's level, for example "GLM 5.3 (thinking: medium)".
   Setting a level stays an admin action, through the project definition, as approving models is today.
 
@@ -68,7 +73,7 @@ These are for later.
 - **SC-001:** Tests cover:
   - schema validation, including the save-time refusal of a level the model does not support (non-reasoning models
     included);
-  - the resolution order: batch override, then project entry, then default;
+  - the resolution order: project entry, then default (the batch override is spec 052's);
   - both providers getting `medium` by default;
   - the level reaching the Pi session;
   - the level in usage telemetry and `result.json`;

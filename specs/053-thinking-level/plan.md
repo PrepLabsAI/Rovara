@@ -22,7 +22,7 @@
 ## Review Focus
 
 1. **Strict-schema rollout.** `protocol.ts`'s invocation schema is strict. A worker built before this change rejects a payload with `model.thinkingLevel`. Confirm how worker images and the control plane release together (`scripts/release-production.ts`: the worker image is published before the control plane). Make sure the broker does not send the field to a worker that cannot parse it; the safe default is for the control plane to send it only after the worker image that accepts it is released. Pin this with a test or document it in the PR.
-2. **OpenRouter default change.** OpenRouter reasoning models now get `medium` where they used to inherit Pi's default (`high`). A test pins it.
+2. **OpenRouter default.** OpenRouter reasoning models get an explicit `medium`. They did not inherit Pi's `high` at the session layer before: the session already defaulted to `medium`, and Pi's clamp raised a level the model does not support (GLM 5.3: `medium` ran as `high`). A test pins the default and the real clamp.
 3. **Recording the resolved level.** `result.json` and telemetry record the level the session actually used (read back from the session, `getModel` or the thinking level), not the requested one.
 
 ---

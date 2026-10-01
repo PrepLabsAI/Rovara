@@ -141,7 +141,7 @@ running). If it does not start, nothing is pushed.
 models:
   default: { provider: amazon-bedrock, modelId: us.anthropic.claude-sonnet-4-6 }
   approved:
-    - { provider: amazon-bedrock, modelId: us.anthropic.claude-sonnet-4-6, label: Sonnet }
+    - { provider: amazon-bedrock, modelId: us.anthropic.claude-sonnet-4-6, label: Sonnet, thinkingLevel: medium }
 ```
 
 `approved` lists 1 to 16 models with unique provider and model ID pairs and optional, unique labels.
@@ -149,6 +149,16 @@ The default must be one of them. In the bound channel, `@agentx models` lists th
 `@agentx use <label>` selects one for every workspace in the project from its next coding turn. The model IDs shown here are examples;
 use the IDs your deployment can reach, and see [OpenRouter model access](openrouter.md) for
 OpenRouter.
+
+`thinkingLevel` (optional, on an `approved` entry or the `default`) sets how hard the model thinks:
+`off`, `minimal`, `low`, `medium`, `high` or `xhigh`. Tasks and eval runs use the level on the
+model's `approved` entry. Without one, a model that supports reasoning runs at `medium` and any
+other model at `off`, on every provider; Pi raises a level the model does not support to the next
+one it does. An explicit level the model does not support is refused when the definition is saved,
+and the error lists the levels it supports, for example
+`GLM 5.3 (z-ai/glm-5.3) does not support thinking level "medium"; supported: low, high`. A model
+the catalog does not know is checked when it is first used instead. The `models` reply shows each
+level that is set, for example `Sonnet (thinking: medium)`.
 
 ### Integrations
 
