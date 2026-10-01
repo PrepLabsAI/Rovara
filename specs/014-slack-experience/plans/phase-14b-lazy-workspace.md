@@ -209,7 +209,8 @@ Rollback rules:
    repositories) keep following the latest revision on every message, and "Settings updated to
    revision N" keeps working unchanged. Cost if wrong: a thread that waits a long time before its
    first coding request builds an older revision's disk; the fix is to pass the latest definition
-   in `startThreadPreparation`.
+   in `startThreadPreparation`. Superseded by #12 (first slice): `startThreadPreparation` now
+   builds an UNPREPARED workspace from the latest revision and writes it onto the record.
 5. **A failed preparation keeps today's retry.** `PREPARATION_FAILED` is a charged, prepared status,
    so the next message retries preparation up front exactly as today (FR-005), even when the first
    attempt was lazy. Cost if wrong: one connector-only message after a failure waits for a retry.

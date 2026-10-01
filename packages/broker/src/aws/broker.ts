@@ -1821,7 +1821,10 @@ async function createUnpreparedThreadWorkspace(
   };
 }
 
-/** A workspace record pinned to the thread's starting revision and runtime, with fence 0 and no operation. */
+/**
+ * A workspace record naming the thread's starting revision and runtime, with fence 0 and no
+ * operation. startThreadPreparation replaces the revision with the latest one when it prepares.
+ */
 function unpreparedWorkspace(project: RegisteredProjectRecord, ownerKey: string): WorkspaceInstance {
   const now = new Date().toISOString();
   return WorkspaceInstanceSchema.parse({
@@ -1883,9 +1886,12 @@ async function prepareThreadWorkspace(
  * Moves an UNPREPARED thread workspace to PREPARING. The same transaction writes the prepare
  * operation and outbox item, charges the requesting member and the organization, and records that
  * member as the thread's starter, whose charge closing releases. So a limit counts only prepared
- * threads. The disk is built from the revision the thread started with, as
- * retryWorkspacePreparation does. Any other status is answered as it stands: a racing request
- * prepared it already.
+ * threads. An UNPREPARED workspace has no disk yet, so it is built from the project's latest
+ * registered revision (#12), not the one the thread started with. The same transaction writes
+ * that revision onto the workspace record, so the record, the operation's payload hash, the
+ * invocation and the outbox routing all name one revision. From then on the workspace stays on
+ * it, as retryWorkspacePreparation does. Any other status is answered as it stands: a racing
+ * request prepared it already.
  */
 async function startThreadPreparation(
   dependencies: AwsBrokerDependencies,
@@ -1901,7 +1907,10 @@ async function startThreadPreparation(
     return { outcome: "WORKSPACE", workspaceId: workspace.id, status: workspace.status, operationId: workspace.activeOperationId, created: false };
   }
   const effective = await effectiveSlackLimits(dependencies, limits);
-  const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+  // One read of the latest revision feeds every field below, so a revision registered meanwhile
+  // cannot mix in. The fence condition refuses the write if the workspace changed since it was read.
+  const latest = await requireLatestProject(dependencies, workspace.projectName);
+  const projectRevision = latest.definition.revision;
   const now = new Date().toISOString();
   const operationId = randomUUID();
   const fence = workspace.fence + 1;
@@ -1910,7 +1919,7 @@ async function startThreadPreparation(
     workspaceId: workspace.id,
     kind: "prepare",
     requestId,
-    payloadHash: hashJson({ projectName: workspace.projectName, projectRevision: workspace.projectRevision, targetOwnerKey: identity.ownerKey }),
+    payloadHash: hashJson({ projectName: workspace.projectName, projectRevision, targetOwnerKey: identity.ownerKey }),
     status: "ACCEPTED",
     fence,
     createdAt: now,
@@ -1923,27 +1932,30 @@ async function startThreadPreparation(
     operationId,
     workspaceId: workspace.id,
     fence,
-    projectRevision: workspace.projectRevision,
+    projectRevision,
     callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence),
     payload: {
-      project: pinned.definition,
-      repositoryGrant: issueRepositoryGrant(dependencies, pinned, identity.ownerKey, workspace.id, operationId),
+      project: latest.definition,
+      repositoryGrant: issueRepositoryGrant(dependencies, latest, identity.ownerKey, workspace.id, operationId),
     },
   };
-  const updated = WorkspaceInstanceSchema.parse({ ...workspace, status: "PREPARING", activeOperationId: operationId, fence, updatedAt: now });
-  const outbox = outboxRecord(updated, invocation, pinned.runtimeBinding);
+  // The runtime fields stay the workspace's own (only deploymentMode today); outboxRecord refuses a
+  // latest revision whose runtime does not match, before anything is written.
+  const updated = WorkspaceInstanceSchema.parse({ ...workspace, projectRevision, status: "PREPARING", activeOperationId: operationId, fence, updatedAt: now });
+  const outbox = outboxRecord(updated, invocation, latest.runtimeBinding);
   const { teamId, userId } = slack.requester;
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Update: {
         TableName: dependencies.tableName,
         Key: workspaceKey(workspace.id),
-        UpdateExpression: "SET #status = :preparing, activeOperationId = :operation, fence = :nextFence, updatedAt = :now",
+        UpdateExpression: "SET #status = :preparing, projectRevision = :revision, activeOperationId = :operation, fence = :nextFence, updatedAt = :now",
         ConditionExpression: "ownerKey = :owner AND #status = :unprepared AND fence = :currentFence",
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: {
           ":owner": identity.ownerKey,
           ":preparing": "PREPARING",
+          ":revision": projectRevision,
           ":unprepared": "UNPREPARED",
           ":operation": operationId,
           ":nextFence": fence,
@@ -2081,8 +2093,9 @@ async function existingThreadWorkspace(
   includeSettingsRevision: boolean,
 ): Promise<SlackThreadWorkspaceResult> {
   await recordThreadRequester(dependencies, identity, workspace.id, false);
-  // Preparation rebuilds the workspace's disk, so it keeps the revision the workspace was created
-  // with. Everything the model is told comes from the project's latest registered revision.
+  // Preparation rebuilds the workspace's disk, so it keeps the revision recorded on the workspace
+  // (for a Slack thread, the latest revision when its compute was first prepared). Everything the
+  // model is told comes from the project's latest registered revision.
   const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
   const settings = await requireLatestProject(dependencies, workspace.projectName);
   const applied = {

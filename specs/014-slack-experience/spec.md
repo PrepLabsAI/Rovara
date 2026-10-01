@@ -156,7 +156,9 @@ listing the `save_issue` call and its result; nothing is posted to the thread.
 - A thread with no workspace receives "close this workspace": AgentX says there is nothing to
   close.
 - A connector-only thread later needs the worker while the project's latest revision has changed:
-  the workspace uses the revision the thread started with, as threads do today.
+  the workspace is built from the latest revision, and its record moves to that revision when
+  preparation starts (#12, first slice). A workspace that is already prepared, or whose
+  preparation failed, stays on the revision it was prepared from.
 - The classifier model is unavailable or slow: the gate asks the person rather than allowing.
 - A confirmation is never answered: it expires after 24 hours; a later "yes" says the request
   expired.
@@ -249,10 +251,10 @@ listing the `save_issue` call and its result; nothing is posted to the thread.
 ### Key Entities
 
 - **Thread record**: exists from the first message. Holds the project, the revision the thread
-  started with, connectors, conversation and a workspace record. The workspace record's status is
-  UNPREPARED until a tool first needs the worker; only then is compute prepared and the limit
-  charged. Connector routes, the connector ledger and conversations use the workspace ID from the
-  first message.
+  started with (replaced by the latest revision when compute is first prepared), connectors,
+  conversation and a workspace record. The workspace record's status is UNPREPARED until a tool
+  first needs the worker; only then is compute prepared and the limit charged. Connector routes,
+  the connector ledger and conversations use the workspace ID from the first message.
 - **Action policy**: the built-in defaults plus a project's rules. Each rule has a tool name
   pattern, an optional connector, and an outcome of `allow`, `ask` or `deny`.
 - **Pending confirmation**: the thread, the requesting member, the exact call (tool plus a hash of
