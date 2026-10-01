@@ -144,7 +144,8 @@ function readmeText(name: string): string {
   return [
     `# ${name}`,
     "",
-    "AgentX installer and administration CLI, bundled as a single self-contained script with no",
+    "AgentX installer and administration CLI, bundled as one self-contained script",
+    "(bin/agentx-cli.mjs) behind a small entry that checks the Node version, with no",
     "runtime dependencies of its own. See LICENSE for terms (Functional Source License 1.1, ALv2",
     "future license). The notices and license texts of the open-source packages the bundle",
     "includes are in THIRD_PARTY_NOTICES.",

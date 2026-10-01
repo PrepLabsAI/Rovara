@@ -2,7 +2,7 @@
 // executable checks the running Node first, before it loads the rest of the CLI (and so before
 // any AWS SDK import or AWS call), and says plainly what to do.
 import { execFile } from "node:child_process";
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -31,7 +31,7 @@ describe("nodeVersionProblem", () => {
   it("in AWS CloudShell, prints the one-line Node 22 install and says it only touches this CloudShell", () => {
     const message = nodeVersionProblem("20.20.2", { AWS_EXECUTION_ENV: "CloudShell" });
     expect(message).toBe([
-      "AgentX needs Node 22.19 or newer; this is Node 20.20.2. In AWS CloudShell, run this command, then run agentx again:",
+      "AgentX needs Node 22.19 or newer; this is Node 20.20.2. In AWS CloudShell, run this command in its default Bash shell, then run agentx again:",
       "",
       `  ${CLOUDSHELL_NODE_INSTALL_COMMAND}`,
       "",
@@ -111,6 +111,27 @@ describe("the agentx executable (packages/cli/src/bin.ts)", () => {
     }
   });
 
+  it("loads nothing before the check but node-version.ts, and node-version.ts loads nothing", async () => {
+    const staticImports = async (file: string): Promise<string[]> => {
+      const source = await readFile(join(repoRoot, "packages", "cli", "src", file), "utf8");
+      const { code } = await transform(source, { loader: "ts", format: "esm", target: "esnext" });
+      const program = parse(code, { ecmaVersion: "latest", sourceType: "module", allowHashBang: true });
+      return program.body.flatMap((node) =>
+        node.type === "ImportDeclaration" || node.type === "ExportAllDeclaration" || (node.type === "ExportNamedDeclaration" && node.source)
+          ? [String(node.source!.value)]
+          : []);
+    };
+    expect(await staticImports("bin.ts")).toEqual(["./node-version.js"]);
+    expect(await staticImports("node-version.ts")).toEqual([]);
+  });
+
+  it("no user-facing doc runs dist/main.js, which skips the check", async () => {
+    const docs = ["README.md", ...(await readdir(join(repoRoot, "docs"), { recursive: true })).filter((file) => file.endsWith(".md")).map((file) => join("docs", file))];
+    for (const doc of docs) {
+      expect(await readFile(join(repoRoot, doc), "utf8"), doc).not.toContain("cli/dist/main.js");
+    }
+  });
+
   it("is the bin of the CLI package and of npm run agentx", async () => {
     const cliManifest = JSON.parse(await readFile(join(repoRoot, "packages", "cli", "package.json"), "utf8")) as { bin: Record<string, string> };
     expect(cliManifest.bin).toEqual({ agentx: "./dist/bin.js" });
@@ -135,6 +156,8 @@ describe("the Node version floor and the CloudShell command have one source", ()
     expect(CLOUDSHELL_NODE_INSTALL_COMMAND).toContain("https://nodejs.org/dist/$V/SHASUMS256.txt");
     expect(CLOUDSHELL_NODE_INSTALL_COMMAND).toContain("sha256sum -c -");
     expect(CLOUDSHELL_NODE_INSTALL_COMMAND).toContain("D=$HOME/.local/node22");
+    // Unpacked beside the old one and swapped in only once complete.
+    expect(CLOUDSHELL_NODE_INSTALL_COMMAND).toMatch(/sha256sum -c - && tar -xzf "\$F" --strip-components=1 && rm "\$F"\) && rm -rf "\$D" && mv "\$D\.new" "\$D"/);
     expect(CLOUDSHELL_NODE_INSTALL_COMMAND).not.toMatch(/sudo|\/usr\/|\| *(ba)?sh\b/);
   });
 

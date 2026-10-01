@@ -118,7 +118,7 @@ npm run release:build -- --version <x.y.z> --out ./release \
   --worker-image <worker repo@sha256:...> --slack-image <slack repo@sha256:...>
 
 export AWS_PROFILE=<an admin profile for the target account>
-node packages/cli/dist/main.js --env <name> init --region us-east-1 --release ./release \
+node packages/cli/dist/bin.js --env <name> init --region us-east-1 --release ./release \
   --worker-image <worker repo@sha256:...> --slack-image <slack repo@sha256:...>
 ```
 

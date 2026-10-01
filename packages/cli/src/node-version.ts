@@ -22,11 +22,13 @@ export const CLOUDSHELL_NODE_VERSION = "22.23.3";
 /**
  * One line to paste in AWS CloudShell. It downloads the official Node binary for this machine
  * (x86_64 or aarch64) from nodejs.org into ~/.local/node22 (the home folder is the only storage
- * CloudShell keeps), checks it against nodejs.org's SHASUMS256.txt before unpacking it, and puts
- * it on PATH for this session and, through ~/.bashrc, for later ones. It needs no sudo and changes
- * nothing outside the home folder. docs/install.md shows the same line (a test checks they match).
+ * CloudShell keeps), checks it against nodejs.org's SHASUMS256.txt before unpacking it, unpacks it
+ * into ~/.local/node22.new and only then swaps it in (so a failed or newer install never mixes with
+ * the one already there), and puts it on PATH for this session and, through ~/.bashrc, for later
+ * ones. It needs no sudo and changes nothing outside the home folder. It is Bash (CloudShell's
+ * default shell). docs/install.md shows the same line (a test checks they match).
  */
-export const CLOUDSHELL_NODE_INSTALL_COMMAND = String.raw`V=v${CLOUDSHELL_NODE_VERSION} A=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && F=node-$V-linux-$A.tar.gz && D=$HOME/.local/node22 && mkdir -p "$D" && (cd "$D" && curl -fsSLO "https://nodejs.org/dist/$V/$F" && curl -fsSL "https://nodejs.org/dist/$V/SHASUMS256.txt" | grep " $F\$" | sha256sum -c - && tar -xzf "$F" --strip-components=1 && rm "$F") && (grep -qs 'local/node22/bin' ~/.bashrc || echo 'export PATH="$HOME/.local/node22/bin:$PATH"' >> ~/.bashrc) && export PATH="$D/bin:$PATH" && node --version`;
+export const CLOUDSHELL_NODE_INSTALL_COMMAND = String.raw`V=v${CLOUDSHELL_NODE_VERSION} A=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && F=node-$V-linux-$A.tar.gz && D=$HOME/.local/node22 && rm -rf "$D.new" && mkdir -p "$D.new" && (cd "$D.new" && curl -fSL --progress-bar -O "https://nodejs.org/dist/$V/$F" && curl -fsSL "https://nodejs.org/dist/$V/SHASUMS256.txt" | grep " $F\$" | sha256sum -c - && tar -xzf "$F" --strip-components=1 && rm "$F") && rm -rf "$D" && mv "$D.new" "$D" && (grep -qs 'local/node22/bin' ~/.bashrc || echo 'export PATH="$HOME/.local/node22/bin:$PATH"' >> ~/.bashrc) && export PATH="$D/bin:$PATH" && node --version`;
 
 function parseVersion(text: string): number[] | undefined {
   const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(text);
@@ -64,7 +66,7 @@ export function nodeVersionProblem(nodeVersion: string, env: Readonly<Record<str
     return `${first} Install Node 22 from https://nodejs.org, then run agentx again.`;
   }
   return [
-    `${first} In AWS CloudShell, run this command, then run agentx again:`,
+    `${first} In AWS CloudShell, run this command in its default Bash shell, then run agentx again:`,
     "",
     `  ${CLOUDSHELL_NODE_INSTALL_COMMAND}`,
     "",
