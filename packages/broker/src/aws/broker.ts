@@ -118,7 +118,7 @@ import { AWS_TEMPORARY_MESSAGE, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditio
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, finishTaskClose } from "./developer-tasks.js";
-import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
+import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
 import { RepositoryGrantService } from "../repository-access.js";
@@ -979,7 +979,7 @@ function parseRegistrationInput(value: unknown): { definition: ProjectDefinition
 }
 
 /** Registration's refusals and preflight, for a new revision; registerProject and a change plan share them. */
-async function registrationChecks(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, definition: ProjectDefinition, wantsPreflight: boolean): Promise<RegistrationPreflight | undefined> {
+async function registrationChecks(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, definition: ProjectDefinition, wantsPreflight: boolean): Promise<PreflightOutcome | undefined> {
   const budget = toolBudget(approvedToolCount(definition));
   const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
   const nameProblems = presentedNameProblems(definition);
@@ -994,25 +994,25 @@ async function registrationChecks(dependencies: AwsBrokerDependencies, identity:
   if (!wantsPreflight) return undefined;
   const result = await preflightConnectors(connectors(), definition, identity.ownerKey);
   if (result.refusals.length > 0) throw agentXError("CONFIG_INVALID", result.refusals.join("; "));
-  return result.report;
+  return { report: result.report, warnings: result.warnings };
 }
 
 async function registerProject(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   value: unknown,
-  checked?: { report?: RegistrationPreflight },
+  checked?: { preflight?: PreflightOutcome },
 ): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean; warnings?: string[]; preflight?: RegistrationPreflight }> {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   const { definition, runtimeBinding, wantsPreflight } = parseRegistrationInput(value);
   const budget = toolBudget(approvedToolCount(definition));
   const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
-  const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: RegistrationPreflight | undefined) => {
+  const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: PreflightOutcome | undefined) => {
     const warnings = registrationWarnings(budget.warning, preflight);
     return {
       project, duplicate,
       tools: { maximum: budget.maximum, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT },
-      ...(warnings.length ? { warnings } : {}), ...(preflight ? { preflight } : {}),
+      ...(warnings.length ? { warnings } : {}), ...(preflight ? { preflight: preflight.report } : {}),
     };
   };
   const key = projectKey(definition.name, definition.revision);
@@ -1025,8 +1025,8 @@ async function registerProject(
       throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
     }
     // A revision stored before the static checks existed stays idempotent: report, never refuse.
-    const preflight = checked?.report
-      ?? (wantsPreflight ? (await preflightConnectors(connectors(), definition, identity.ownerKey)).report : undefined);
+    const preflight = checked?.preflight
+      ?? (wantsPreflight ? await preflightConnectors(connectors(), definition, identity.ownerKey) : undefined);
     return respond(withoutKeys(existing), true, preflight);
   }
   const preflight = await registrationChecks(dependencies, identity, definition, wantsPreflight);
@@ -1055,7 +1055,7 @@ async function registerProject(
     ] }));
   } catch (error) {
     // A concurrent registration won; answer as a duplicate without contacting the vendor again.
-    if (isConditional(error)) return registerProject(dependencies, identity, value, preflight ? { report: preflight } : {});
+    if (isConditional(error)) return registerProject(dependencies, identity, value, preflight ? { preflight } : {});
     throw error;
   }
   return respond(withoutKeys(record), false, preflight);

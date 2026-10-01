@@ -25,7 +25,8 @@ Two limits can apply. You set the first one in Linear; AgentX enforces the secon
    another. Before it reads, updates or comments on an existing issue, it checks that the issue is
    in the project's team. This check covers exactly `get_issue`, `save_issue`, `list_comments` and
    `save_comment`. Any other tool that addresses an issue or comment, for example `delete_comment`,
-   is not checked, so it must not be approved.
+   is not checked, so it must not be approved. Registration with preflight warns about any approved
+   tool outside this set that takes an `id`, `issueId` or `commentId`.
 
 Tools that take no team, such as `list_teams`, `list_users` or `get_workspace`, reach everything
 the key reaches, and the guard in point 2 does not cover them. Approve them only if that is
@@ -207,6 +208,7 @@ What the other results mean:
 | `Warning: connector linear: Linear is not connected: Linear rejected the credential twice; check the Linear API key's permissions and team access` | The key is wrong, revoked or lacks permissions. Check steps 1 to 3. |
 | `Warning: connector linear: tool X skipped: not offered by the vendor` | The tool name is wrong or Linear renamed it. Check the name. |
 | `Warning: connector linear: tool X skipped: requires arguments outside allowedArguments` | Add the named arguments to `allowedArguments`. |
+| `Warning: connector linear: tool X names an item (id) the Linear team check does not cover, so it can reach other teams; remove its approval` | The tool addresses an issue or comment that AgentX does not check is in the project's team. Remove it from `tools` and register a new revision. The revision still registers, so the tool works until you do. |
 
 ## 7. Try it in Slack
 
