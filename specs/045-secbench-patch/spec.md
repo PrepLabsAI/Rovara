@@ -2,7 +2,7 @@
 
 **Feature Branch**: `feat/045-secbench-patch`  
 **Created**: 2026-10-01  
-**Status**: Draft; SC-002 (x86 offline-build check) gates implementation  
+**Status**: Draft; SC-002 checked 2026-10-01 (offline build and evaluator pass); ready to plan  
 **Input**: Request to measure the AgentX coding agent on a security benchmark, after specs 043 and 044 put
 SWE-bench and SWE-Bench Pro runs in Slack
 
@@ -138,12 +138,10 @@ grading.
 
 ## Open Questions
 
-- **Q-1**: Does `secb build` succeed with `--network none`? Unverified: the research run under arm64 emulation failed
-  at njs `./configure` for an emulation reason. If a project's build fetches dependencies, the options are a per-image
-  warm-up build before the network is cut, or excluding those instances; SC-002 decides.
-- **Q-2**: How long do the large projects' sanitizer builds take on 4 vCPUs? Each `secb build` the agent runs counts
-  against its 60 minutes. SC-002 measures it; if gpac or PHP builds take more than about 5 minutes, the time limit for
-  this family is revisited.
+- **Q-1** (answered 2026-10-01, SC-002): `secb build` succeeds with `--network none` for njs, gpac and ImageMagick, and
+  the unpatched PoC fires the sanitizer in each.
+- **Q-2** (answered 2026-10-01, SC-002): sanitizer builds on an `m7i.xlarge` took 12 s (njs), 84 s (gpac) and 44 s
+  (ImageMagick), so the 60-minute limit stands.
 
 ## Success Criteria
 
@@ -156,6 +154,11 @@ grading.
   `secb build` and `secb repro` work in the task container with `--network none` (the unpatched PoC fires the
   sanitizer), build times are recorded, and the pinned evaluator, driven as FR-008 describes, resolves the gold patch
   and does not resolve an empty one.
+  Checked on 2026-10-01 on an `m7i.xlarge` (AL2023, Docker, Python 3.11) in the eval subnet: all three built and
+  reproduced offline (njs SEGV, gpac SEGV, ImageMagick heap-buffer-overflow), each image held one commit, and the
+  pinned evaluator with the pinned packages loaded 300 instances and graded njs's gold patch resolved in all three
+  modes (16 s) and an empty patch unresolved. Not covered: the evaluator driven from inside the runner container
+  (FR-008's `TMPDIR` arrangement), which SC-003's first production run exercises.
 - **SC-003**: In production, from the eval channel, one instance runs end to end on Sonnet 4.6, with the result in the
   thread, artifacts in S3, and the instance terminated afterwards.
 - **SC-004**: Typecheck, lint and the full test suite pass; SWE-bench and SWE-Bench Pro runs are unchanged.
