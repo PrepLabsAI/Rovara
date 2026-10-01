@@ -69,6 +69,13 @@ describe("an admin looks at AgentX from an AI tool (US5)", () => {
     expect([...new Set(sentByTools)].sort()).toEqual(["GetCommand", "QueryCommand"]);
   });
 
+  it("lists the admin read tools in the first tools/list after connecting, for a client that lists once (issue 203)", async () => {
+    const { harness } = await failedTask();
+    const mcp = await adminSignedInClient(harness);
+    // Codex lists once and does not re-list on list_changed: no poll here.
+    expect((await mcp.names()).filter((name) => name.startsWith("agentx_admin_") && ADMIN_TOOLS.includes(name))).toEqual(ADMIN_TOOLS);
+  });
+
   it("offers no admin tool to a developer without an admin sign-in, and refuses a direct call with ADMIN_REQUIRED", async () => {
     const { harness } = await failedTask();
     const mcp = await adminSignedInClient(harness, { adminToken: null });

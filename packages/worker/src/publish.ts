@@ -11,7 +11,7 @@ import {
   type PullRequestLifecycleResult,
   type WorkerInvocation,
 } from "@agentx/contracts";
-import { gitSafeEnvironment } from "./git.js";
+import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME, gitSafeEnvironment } from "./git.js";
 import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
 import type { PullRequestSink } from "./callback-client.js";
 import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
@@ -203,7 +203,7 @@ async function prepareRevertCommit(input: {
   if (parents.length < 2) throw agentXError("CONFIG_INVALID", "cannot revert a root commit");
   try {
     await git(input.repositoryPath, [
-      "-c", "user.name=AgentX", "-c", "user.email=agentx@noreply.local",
+      "-c", `user.name=${AGENTX_GIT_NAME}`, "-c", `user.email=${AGENTX_GIT_EMAIL}`,
       "revert", "--no-edit", ...(parents.length > 2 ? ["-m", "1"] : []), input.revertCommit,
     ]);
   } catch {
@@ -228,9 +228,9 @@ async function prepareCleanPublicationCommit(input: {
   const workspaceTree = (await git(input.repositoryPath, ["write-tree"])).trim();
   const workspaceCommit = (await git(input.repositoryPath, [
     "-c",
-    "user.name=AgentX",
+    `user.name=${AGENTX_GIT_NAME}`,
     "-c",
-    "user.email=agentx@noreply.local",
+    `user.email=${AGENTX_GIT_EMAIL}`,
     "commit-tree",
     workspaceTree,
     "-p",
@@ -271,9 +271,9 @@ async function prepareCleanPublicationCommit(input: {
 
   const commit = (await git(input.repositoryPath, [
     "-c",
-    "user.name=AgentX",
+    `user.name=${AGENTX_GIT_NAME}`,
     "-c",
-    "user.email=agentx@noreply.local",
+    `user.email=${AGENTX_GIT_EMAIL}`,
     "commit-tree",
     mergedTree,
     "-p",

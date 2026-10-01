@@ -127,6 +127,27 @@ describe("pull request publication", () => {
     expect(await git(fixture.bare, ["rev-list", "--count", `refs/heads/${result.headBranch}`])).toBe("2\n");
   });
 
+  it("publishes a change the agent committed on a detached HEAD, leaving a clean tree (#208)", async () => {
+    const fixture = await createFixture();
+    await git(fixture.checkout, ["checkout", "--detach"]);
+    await writeFile(join(fixture.checkout, "README.md"), "initial\nlive test\n", "utf8");
+    await git(fixture.checkout, ["add", "README.md"]);
+    await git(fixture.checkout, ["-c", "user.name=AgentX", "-c", "user.email=agentx@noreply.local", "commit", "-m", "Add live test line"]);
+    expect(await git(fixture.checkout, ["status", "--porcelain"])).toBe("");
+    const pullRequestSink = vi.fn(async () => ({ number: 13, url: "https://github.com/example/demo/pull/13", reconciled: false }));
+
+    const result = await publishWorkspace({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: async () => ({}),
+      pullRequestSink,
+    });
+
+    expect(result).toMatchObject({ repository: "demo", number: 13, baseBranch: "main" });
+    expect(pullRequestSink).toHaveBeenCalledWith(expect.objectContaining({ commit: result.commit }));
+    expect(await git(fixture.bare, ["show", `refs/heads/${result.headBranch}:README.md`])).toBe("initial\nlive test\n");
+  });
+
   it("creates a pull request only after CodeBuild succeeds for the exact candidate", async () => {
     const fixture = await createFixture();
     await writeFile(join(fixture.checkout, "README.md"), "validated change\n", "utf8");

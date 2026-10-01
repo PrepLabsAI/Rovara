@@ -9,7 +9,7 @@ import {
   type WorkerInvocation,
   type PullRequestLifecycleResult,
 } from "@agentx/contracts";
-import { gitSafeEnvironment } from "./git.js";
+import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME, gitSafeEnvironment } from "./git.js";
 import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
 import type { PullRequestUpdateSink } from "./callback-client.js";
 import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
@@ -89,7 +89,7 @@ export async function maintainPullRequest(options: {
       throw agentXError("CONFIG_INVALID", "repository has no effective changes to append");
     }
     commit = (await git(repositoryPath, [
-      "-c", "user.name=AgentX", "-c", "user.email=agentx@noreply.local",
+      "-c", `user.name=${AGENTX_GIT_NAME}`, "-c", `user.email=${AGENTX_GIT_EMAIL}`,
       "commit-tree", workspaceTree, "-p", remoteHead,
       "-m", `AgentX: update PR #${invocation.payload.pullRequestNumber}`,
     ])).trim();
@@ -131,7 +131,7 @@ export async function maintainPullRequest(options: {
   } else {
     try {
       await git(repositoryPath, [
-        "-c", "user.name=AgentX", "-c", "user.email=agentx@noreply.local",
+        "-c", `user.name=${AGENTX_GIT_NAME}`, "-c", `user.email=${AGENTX_GIT_EMAIL}`,
         "merge", "--no-edit", "--no-ff", remoteBase,
       ]);
     } catch {

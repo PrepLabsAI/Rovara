@@ -8,6 +8,7 @@ import {
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { runCollected, TIMEOUT_KILL_GRACE_MS } from "./collected-process.js";
+import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import type { CommandResult } from "./readiness.js";
 
 const UP_TIMEOUT_MS = 20 * 60_000;
@@ -376,10 +377,14 @@ function targetArgs(target: DevcontainerTarget): string[] {
   return ["--workspace-folder", target.workspaceFolder, "--config", target.configPath];
 }
 
-/** pi's PI_* session variables, which its shell tool exposes to commands. */
+/**
+ * pi's PI_* session variables, which its shell tool exposes to commands, and AgentX's git identity,
+ * which the agent's shell sets (#208). The worker's other variables stay out of the container.
+ */
 function sessionEnvironment(env: NodeJS.ProcessEnv | undefined): Record<string, string> {
   return Object.fromEntries(Object.entries(env ?? {})
-    .filter((entry): entry is [string, string] => entry[0].startsWith("PI_") && entry[1] !== undefined));
+    .filter((entry): entry is [string, string] =>
+      (entry[0].startsWith("PI_") || Object.hasOwn(AGENTX_GIT_IDENTITY_ENVIRONMENT, entry[0])) && entry[1] !== undefined));
 }
 
 function lastJsonLine(output: string): Record<string, unknown> | undefined {

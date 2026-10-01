@@ -6,7 +6,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ElicitResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { DEVELOPER_TASK_SUMMARY_MAX, redactSecrets, redactText } from "@agentx/contracts";
 import { ToolError } from "./errors.js";
-import { NOT_OFFERED, ToolOffer, guardTransport, type AdminOffer, type AdminToolGroup } from "./offer.js";
+import { FIRST_LIST_WAIT_MS, NOT_OFFERED, ToolOffer, guardTransport, type AdminOffer, type AdminToolGroup } from "./offer.js";
 import { RequestIdMemory } from "./request-ids.js";
 import { DEVELOPER_TOOLS, type ToolCall, type ToolContext, type ToolDefinition } from "./tools.js";
 
@@ -67,8 +67,11 @@ export function createAgentXMcpServer(options: {
   adminOffer?: (client: { elicitation: boolean }) => Promise<AdminOffer>;
   /** How often the offer is checked while connected; 30 seconds by default. */
   recheckMs?: number;
+  /** Issue 203: how long the first tools/list waits for the first offer check; FIRST_LIST_WAIT_MS by default. */
+  firstListWaitMs?: number;
 }): McpServer {
-  const server = new McpServer({ name: "agentx", version: options.version });
+  // Issue 203: one list_changed per offer change, not one per tool switched (see offer.ts).
+  const server = new McpServer({ name: "agentx", version: options.version }, { debouncedNotificationMethods: ["notifications/tools/list_changed"] });
   // One memory per server (one per AI tool session), so a retried call reuses its request ID.
   const requestIds = new RequestIdMemory();
   // Filled below; the offer switches whatever the map holds.
@@ -141,11 +144,12 @@ export function createAgentXMcpServer(options: {
       adminRegistered.set(tool.name, { tool: registered, group });
     }
   }
-  // A15: checked when the client initializes, then on a timer, and after every call (above).
+  // A15: checked when the client initializes, then on a timer, and after every call (above). The
+  // first tools/list may have started that check already (issue 203 review); one read serves both.
   const initialized = server.server.oninitialized;
   server.server.oninitialized = () => {
     initialized?.();
-    void offer.refresh();
+    offer.begin();
     offer.start(options.recheckMs ?? 30_000);
   };
   // The timer ends with the connection, however it ends.
@@ -159,8 +163,10 @@ export function createAgentXMcpServer(options: {
     offer.stop();
     await closeServer();
   };
-  // A15: the guard answers a direct call to a hidden admin tool; see offer.ts.
+  // A15: the guard answers a direct call to a hidden admin tool; see offer.ts. Issue 203: it also
+  // holds the first tools/list until the first offer check answers, at most firstListWaitMs.
+  const firstListWaitMs = options.firstListWaitMs ?? FIRST_LIST_WAIT_MS;
   const connect = server.connect.bind(server);
-  server.connect = (transport: Transport) => connect(guardTransport(transport, (name) => offer.refusal(name), errorResult));
+  server.connect = (transport: Transport) => connect(guardTransport(transport, (name) => offer.refusal(name), errorResult, () => offer.ready(firstListWaitMs)));
   return server;
 }
