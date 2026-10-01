@@ -177,6 +177,8 @@ export async function runDevcontainerCommand(
     cwd,
     args: [command.executable, ...command.args],
     timeoutMs: command.timeoutSeconds * 1_000,
+    // The command's own variables (#54) reach the command only, never the TERM and KILL execs.
+    ...(command.env !== undefined ? { env: { ...command.env } } : {}),
   });
   const { result } = run;
   return {
@@ -349,7 +351,7 @@ function stopFailureReason(result: DevcontainerProcess): string {
 function devcontainerExec(cli: DevcontainerCli, target: DevcontainerTarget): ContainerExec {
   return (command, { env, ...options }) => cli.run([
     "exec", ...targetArgs(target),
-    ...Object.entries(env ?? {}).flatMap(([name, value]) => ["--remote-env", `${name}=${value}`]),
+    ...remoteEnvArgs(env),
     ...command,
   ], options);
 }
@@ -363,6 +365,11 @@ export function createDevcontainerCli(): DevcontainerCli {
       return runCollected(process.execPath, [script, ...args], options);
     },
   };
+}
+
+/** Variables set in the devcontainer for one exec only: a project command's `env` (#54), pi's PI_* variables. */
+function remoteEnvArgs(env: Readonly<Record<string, string>> | undefined): string[] {
+  return Object.entries(env ?? {}).flatMap(([name, value]) => ["--remote-env", `${name}=${value}`]);
 }
 
 function targetArgs(target: DevcontainerTarget): string[] {
