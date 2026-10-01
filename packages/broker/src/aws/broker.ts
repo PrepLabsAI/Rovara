@@ -2959,7 +2959,8 @@ const CANCELLABLE_KINDS: ReadonlySet<string> = new Set(["task"]);
 
 type TaskCancellation =
   | { outcome: "CANCEL_REQUESTED"; workspaceId: string; targetOperationId: string; cancelOperationId: string }
-  | { outcome: "NOTHING_RUNNING"; workspaceId?: string };
+  // Issue 196: finishedStatus names the final status when the running task had already finished.
+  | { outcome: "NOTHING_RUNNING"; workspaceId?: string; finishedStatus?: OperationStatus };
 
 /** Cancels the workspace's running task, if it has one (#126). */
 async function cancelRunningTask(
@@ -2971,12 +2972,13 @@ async function cancelRunningTask(
   const targetOperationId = workspace.activeOperationId;
   if (!targetOperationId) return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
   const target = await requireOperation(dependencies, workspace.id, targetOperationId);
-  if (!CANCELLABLE_KINDS.has(target.kind) || TERMINAL.has(target.status) || target.status === "CANCEL_REQUESTED") {
+  if (!CANCELLABLE_KINDS.has(target.kind) || target.status === "CANCEL_REQUESTED") {
     return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
   }
+  if (TERMINAL.has(target.status)) return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id, finishedStatus: target.status };
   const result = await requestCancellation(dependencies, workspace, targetOperationId, requester, extra);
   // A duplicate here means the task finished before the cancel was recorded.
-  if (result.duplicate) return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id };
+  if (result.duplicate) return { outcome: "NOTHING_RUNNING", workspaceId: workspace.id, finishedStatus: result.operation.status };
   return { outcome: "CANCEL_REQUESTED", workspaceId: workspace.id, targetOperationId, cancelOperationId: result.operation.id };
 }
 

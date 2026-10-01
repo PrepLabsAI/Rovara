@@ -373,7 +373,7 @@ async function createFixture(action: "append" | "sync", remoteName = "remote.git
     readiness: [{ cwd: "repo/demo", executable: process.execPath, args: ["-e", "process.exit(0)"], timeoutSeconds: 10 }],
     ...(options.devcontainer === true ? { devcontainer: { repository: "demo" } } : {}),
     orchestratorInstructions: "Delegate coding work.",
-  } as const;
+  };
   await mkdir(join(root, ".agentx"), { recursive: true });
   await writeFile(join(root, ".agentx", "preparation-manifest.json"), JSON.stringify({
     schemaVersion: 2,
@@ -403,7 +403,7 @@ async function createFixture(action: "append" | "sync", remoteName = "remote.git
       action, project, repository: "demo", pullRequestNumber: 7, headBranch, baseBranch: "main",
       expectedHeadCommit: pullRequestHead, repositoryGrant: "push-grant",
     },
-  } as const satisfies Extract<WorkerInvocation, { kind: "maintain" }>;
+  } satisfies Extract<WorkerInvocation, { kind: "maintain" }>;
   return { root, bare, seed, checkout, invocation, headBranch, pullRequestHead };
 }
 

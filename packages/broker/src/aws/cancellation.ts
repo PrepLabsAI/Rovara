@@ -232,18 +232,20 @@ export async function requestCancellation(
         TableName: dependencies.tableName,
         Key: operationKey(workspaceId, targetOperationId),
         UpdateExpression: "SET #status = :cancel, updatedAt = :now",
-        // Issue 173: the backstop cancels only a target still live and not yet asked to cancel, so a
-        // result that lands first stands and a member's stop that lands first wins (one cancel, no
-        // note). Every other caller keeps the fence-only condition: a repeated cancel queues again.
-        // Issue 173: with eventSequence, also only while no new worker event landed since it was read
-        // (every operation record is written with an eventSequence, from 0).
+        // Issue 196: only a target not yet finished, so a result that lands between the read above
+        // and this write keeps its final status. By default CANCEL_REQUESTED is still running: a
+        // repeated cancel queues again, so a cancel whose dispatch was lost can be sent again.
+        // Issue 173: the backstop (onlyLive) leaves out CANCEL_REQUESTED, so a member's stop that
+        // lands first wins (one cancel, no note). With eventSequence, also only while no new worker
+        // event landed since it was read (every operation record is written with an eventSequence, from 0).
         ConditionExpression: options.onlyLive
           ? `fence = :fence AND (#status = :accepted OR #status = :dispatching OR #status = :running)${options.eventSequence === undefined ? "" : " AND eventSequence = :sequence"}`
-          : "fence = :fence",
+          : "fence = :fence AND (#status = :accepted OR #status = :dispatching OR #status = :running OR #status = :cancel)",
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: {
           ":cancel": "CANCEL_REQUESTED", ":now": now, ":fence": workspace.fence,
-          ...(options.onlyLive ? { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":running": "RUNNING" } : {}),
+          // Unconditional: both conditions use them.
+          ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":running": "RUNNING",
           ...(options.onlyLive && options.eventSequence !== undefined ? { ":sequence": options.eventSequence } : {}),
         },
       } },

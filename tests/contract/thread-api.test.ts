@@ -143,6 +143,21 @@ describe("the Slack service's thread client", () => {
       expect(db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string } | undefined)?.kind === "cancel")).toHaveLength(0);
     });
 
+    it("answers a task that finishes just before the cancel is written as finished, keeping its status (#196)", async () => {
+      const { db, handler, workspaceId, operationId } = await runningTask();
+      // The task's result lands between the broker's read and its write; the fake evaluates the real condition.
+      const original = db.send;
+      db.send = async (command) => {
+        if (command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("\"CANCEL_REQUESTED\"")) {
+          db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)!.status = "FAILED";
+        }
+        return original(command);
+      };
+      expect(await threadApi(handler).cancelOperation!(workspaceId, operationId)).toEqual({ outcome: "finished", status: "FAILED" });
+      expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)).toMatchObject({ status: "FAILED" });
+      expect(db.find((item) => item.entityType === "OUTBOX" && (item.invocation as { kind?: string } | undefined)?.kind === "cancel")).toHaveLength(0);
+    });
+
     it("counts a queued cancel as requested without reading the rest of the broker's answer", async () => {
       const signedFetch: typeof fetch = async () => new Response(JSON.stringify({ operation: { id: randomUUID() }, duplicate: false }), { status: 202 });
       const api = createThreadApi({ controlPlaneUrl: "https://agentx.example.test", signedFetch });

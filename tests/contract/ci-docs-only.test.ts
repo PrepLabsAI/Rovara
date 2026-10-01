@@ -47,7 +47,7 @@ describe("the docs-only check (CI skips the heavy steps for a Markdown-only pull
     const workflow = YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
     const steps = workflow.jobs.local!.steps;
     const heavy = steps.filter((step) => step.run !== undefined && step.id !== "scope" && step.name !== "Markdown-only change");
-    expect(heavy.map((step) => step.name ?? step.run)).toEqual(["npm ci", "npm run typecheck", "npm run lint", "npm test", "npm run infra:synth", "Release builds are reproducible"]);
+    expect(heavy.map((step) => step.name ?? step.run)).toEqual(["npm ci", "npm run typecheck", "npm run typecheck:all", "npm run lint", "npm test", "npm run infra:synth", "Release builds are reproducible"]);
     for (const step of heavy) expect(step.if, step.name ?? step.run).toBe("steps.scope.outputs.docs_only != 'true'");
     const setupNode = steps.find((step) => step.uses === "actions/setup-node@v5")!;
     expect(setupNode.if).toBeUndefined();

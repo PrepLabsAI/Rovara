@@ -15,7 +15,7 @@ const view = (status: DeveloperTaskView["status"], extra: Partial<DeveloperTaskV
   taskId: TASK, title: "Fix the flaky retry test", project: "payments", status, startingRevision: 7, client: "Claude Code", shared: false,
   createdAt: "2026-09-27T12:00:00.000Z", updatedAt: "2026-09-27T12:00:00.000Z", events: [], ...extra,
 });
-const text = (result: { content?: unknown }) => (result.content as Array<{ text: string }>)[0]?.text ?? "";
+const text = (result: unknown) => (result as { content?: Array<{ text: string }> }).content?.[0]?.text ?? "";
 
 async function connect(client: Partial<ControlPlaneClient>, overrides: Partial<ToolContext> = {}, clientName = "claude-code", log?: (entry: Record<string, unknown>) => void) {
   let now = 0;
@@ -329,6 +329,24 @@ describe("the other task tools (FR-030)", () => {
     const result = await (await connect({ cancelTask })).callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
     expect(cancelTask).toHaveBeenCalledWith(TASK, "33333333-3333-4333-8333-333333333333");
     expect(result.structuredContent).toMatchObject({ status: "CANCELLED" });
+  });
+
+  it("says plainly that a task which already finished was not cancelled, with its final status (#196)", async () => {
+    for (const status of ["SUCCEEDED", "FAILED"] as const) {
+      const cancelTask = vi.fn(async () => view(status));
+      const result = await (await connect({ cancelTask })).callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
+      expect(result.structuredContent).toMatchObject({ status });
+      expect(text(result), status).toContain(`The task had already finished as ${status}, so nothing was cancelled.`);
+    }
+  });
+
+  it("does not say already finished for a task it stopped or is stopping (#196)", async () => {
+    // INTERRUPTED is also how a queued cancel that failed ends, so a retried cancel may read it.
+    for (const status of ["CANCELLED", "INTERRUPTED", "RUNNING", "STARTING"] as const) {
+      const cancelTask = vi.fn(async () => view(status));
+      const result = await (await connect({ cancelTask })).callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
+      expect(text(result), status).not.toContain("already finished");
+    }
   });
 
   it("lists projects with channels and policy, and no description (R28)", async () => {
