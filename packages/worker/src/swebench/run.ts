@@ -4,6 +4,7 @@ import {
   SWEBENCH_DATASETS,
   createTaskUsageTelemetry,
   swebenchAgentLimits,
+  swebenchFamily,
   type SwebenchRunResult,
   type SwebenchRunnerConfig,
   type TaskUsageOutcome,
@@ -14,11 +15,13 @@ import { redactCredentials } from "../events.js";
 import type { PiSessionAdapter, WorkspaceModelConfiguration } from "../pi-session.js";
 import { runSwebenchAgent, type AgentRun } from "./agent.js";
 import { copyTestbed, findRepository, pullTaskImage, removeContainer, startTaskContainer, taskContainerExec, TESTBED, type DockerCli } from "./containers.js";
-import { loadSwebenchInstance, type DatasetOptions } from "./dataset.js";
+import { datasetRevision, loadSwebenchInstance, type DatasetOptions } from "./dataset.js";
 import { gradePrediction, type GradeReport } from "./grade.js";
 import { gradeProPrediction } from "./grade-pro.js";
-import { createGitRunner, predictionPatch, stripHistory, untrackedFiles } from "./history.js";
+import { gradeSecbenchPrediction, SECBENCH_EVALUATOR_COMMIT, type SecbenchGradeReport } from "./grade-secbench.js";
+import { createGitRunner, predictionPatch, SECBENCH_SOURCE_EXTENSIONS, stripHistory, untrackedFiles } from "./history.js";
 import { OFFLINE_SETTINGS } from "./offline.js";
+import { SECBENCH_PATCH_TEMPLATE_SHA256, SECBENCH_SMOLAGENTS_COMMIT, secbenchPatchPrompt } from "./secbench-prompt.js";
 import { loadProTask, type ProTask, type ProTaskOptions } from "./pro-task.js";
 
 export interface RunReporter {
@@ -40,6 +43,7 @@ export interface SwebenchRunDependencies {
   piAdapter?: PiSessionAdapter;
   grade?: typeof gradePrediction;
   gradePro?: typeof gradeProPrediction;
+  gradeSecbench?: typeof gradeSecbenchPrediction;
   proTask?: ProTaskOptions;
   timeLimitMs?: number;
 }
@@ -48,7 +52,9 @@ export interface SwebenchRunDependencies {
  * One SWE-bench run (spec 043 FR-008 to FR-015): load the instance, pull its image, copy the
  * repository out and strip its history, run the agent in the task container, grade the patch, and
  * report. SWE-bench tasks are graded by the official harness; SWE-Bench Pro tasks (spec 044) take
- * their prompt from instruction.md and are graded by their own verifier. Any failure before grading
+ * their prompt from instruction.md and are graded by their own verifier. SEC-bench patch tasks
+ * (spec 045) run in the project's `work_dir` with SEC-bench's own prompt, and are graded by
+ * SEC-bench's evaluator. Any failure before grading
  * is reported as a FAILED result; the run never throws once the reporter is reachable.
  */
 export async function runSwebench(config: SwebenchRunnerConfig, dependencies: SwebenchRunDependencies): Promise<SwebenchRunResult> {
@@ -59,6 +65,8 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
   let agent: AgentRun | undefined;
   let usage: TaskUsageTelemetry | undefined;
   let taskCommit: string | undefined;
+  let secbenchRun: { datasetRevision?: string } | undefined;
+  const secbenchGrade = resolve(dirname(root), ".secbench-grade", config.runId);
   const saved = new Set<string>();
   const save = async (name: string, body: string | Buffer, contentType: string) => {
     try {
@@ -72,10 +80,16 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
   try {
     await rm(root, { recursive: true, force: true });
     await mkdir(resolve(root, ".agentx"), { recursive: true });
-    const pro = SWEBENCH_DATASETS[config.dataset].family === "pro";
+    const family = swebenchFamily(config.dataset);
+    const pro = family === "pro";
+    const secbench = family === "secbench";
     const limits = swebenchAgentLimits(config.dataset);
     log("instance.loading", { dataset: config.dataset, instanceId: config.instanceId });
     const instance = await loadSwebenchInstance(config.dataset, config.instanceId, dependencies.dataset);
+    if (secbench) {
+      const revision = await datasetRevision(SWEBENCH_DATASETS[config.dataset].name, dependencies.dataset);
+      secbenchRun = revision === undefined ? {} : { datasetRevision: revision };
+    }
     // Pro's hidden tests live beside the run's root, never inside it: the task container mounts the root.
     let proTask: ProTask | undefined;
     if (pro) {
@@ -85,7 +99,8 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
     }
     log("image.pulling", { image: instance.image });
     const imageDigest = await pullTaskImage(docker, instance.image);
-    const repository = pro ? await findRepository(docker, instance.image) : TESTBED;
+    // SEC-bench keeps each project at its row's work_dir under /src (spec 045 FR-004).
+    const repository = pro ? await findRepository(docker, instance.image) : secbench ? String(instance.work_dir) : TESTBED;
     await copyTestbed(docker, instance.image, testbed, repository);
     const git = createGitRunner(testbed);
     const imageHead = await stripHistory(git, instance.base_commit);
@@ -102,25 +117,32 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
       maxCostUsd: config.maxCostUsd,
       timeLimitMs: dependencies.timeLimitMs ?? limits.timeLimitSeconds * 1_000,
       toolCallLimit: limits.toolCallLimit,
+      ...(secbench ? { prompt: secbenchPatchPrompt(instance as unknown as { work_dir: string; bug_description: string; sanitizer_report: string }, testbed) } : {}),
       ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }),
     });
     log("agent.stopped", { stopReason: agent.stopReason, agentSeconds: agent.agentSeconds });
     usage = sessionUsage(agent, dependencies.model, agent.stopReason === "finished" ? "SUCCEEDED" : "FAILED");
     await removeContainer(docker, container);
-    const patch = await predictionPatch(git, imageHead, untrackedBefore);
+    const patch = await predictionPatch(git, imageHead, untrackedBefore, secbench ? SECBENCH_SOURCE_EXTENSIONS : undefined);
     await save("patch.diff", patch, "text/x-diff");
-    let grade: GradeReport | undefined;
+    let grade: GradeReport | SecbenchGradeReport | undefined;
     if (patch.trim().length > 0) {
       log("grading", { patchBytes: Buffer.byteLength(patch) });
-      grade = proTask === undefined
-        ? await (dependencies.grade ?? gradePrediction)({ directory: resolve(root, "grade"), runId: config.runId, instance, patch })
-        : await (dependencies.gradePro ?? gradeProPrediction)({
+      if (secbench) {
+        // Outside the run's root, which the agent's container mounts; inside RUN_ROOT, which the
+        // runner container mounts at its own path, so the evaluator's bind mounts resolve on the host.
+        grade = await (dependencies.gradeSecbench ?? gradeSecbenchPrediction)({ directory: secbenchGrade, instanceId: config.instanceId, patch });
+      } else if (proTask === undefined) {
+        grade = await (dependencies.grade ?? gradePrediction)({ directory: resolve(root, "grade"), runId: config.runId, instance, patch });
+      } else {
+        grade = await (dependencies.gradePro ?? gradeProPrediction)({
           directory: resolve(dirname(root), ".pro-tasks", config.runId, "grade"),
           image: instance.image,
           testsDirectory: proTask.testsDirectory,
           patch,
           verifierTimeoutSeconds: proTask.verifierTimeoutSeconds,
         }, docker);
+      }
       for (const file of grade.files) {
         const body = await readFile(file.path).catch(() => undefined);
         if (body !== undefined) await save(file.name, body, file.name.endsWith(".json") ? "application/json" : "text/plain");
@@ -132,7 +154,7 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
       stopReason: agent.stopReason,
       ...(agent.detail === undefined ? {} : { stopDetail: agent.detail.slice(0, 500) }),
       patchBytes: Buffer.byteLength(patch),
-      ...(grade === undefined ? {} : { failToPass: grade.failToPass, passToPass: grade.passToPass }),
+      ...(grade === undefined ? {} : "secbench" in grade ? { secbench: grade.secbench } : { failToPass: grade.failToPass, passToPass: grade.passToPass }),
       agentSeconds: agent.agentSeconds,
       imageDigest,
       usage,
@@ -150,6 +172,7 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
   } finally {
     await removeContainer(docker, container);
     await rm(resolve(dirname(root), ".pro-tasks", config.runId), { recursive: true, force: true }).catch(() => undefined);
+    await rm(secbenchGrade, { recursive: true, force: true }).catch(() => undefined);
   }
   if (agent !== undefined) {
     const transcript = await readFile(agent.session.sessionFile).catch(() => undefined);
@@ -163,6 +186,17 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
     dataset: config.dataset,
     ...(taskCommit === undefined ? {} : { taskCommit }),
     offlineSettings: [...OFFLINE_SETTINGS],
+    // What a later comparison needs to know about how the run was set up (pilot lesson, 2026-10-01).
+    limits: swebenchAgentLimits(config.dataset),
+    thinkingLevel: dependencies.model.thinkingLevel ?? "default",
+    ...(secbenchRun === undefined ? {} : {
+      secbench: {
+        promptTemplateSha256: SECBENCH_PATCH_TEMPLATE_SHA256,
+        smolagentsCommit: SECBENCH_SMOLAGENTS_COMMIT,
+        evaluatorCommit: SECBENCH_EVALUATOR_COMMIT,
+        ...secbenchRun,
+      },
+    }),
     artifacts: [...saved].sort(),
   }, null, 2), "application/json");
   await reporter.result(result);
