@@ -126,7 +126,8 @@ export function createSessionStepsHandler(dependencies: SessionStepsDependencies
           ...(settings.openRouterProviders ? { openRouterProviders: settings.openRouterProviders } : {}),
           logGroupName: dependencies.logGroupName,
         }, dependencies.bootScript());
-        return { userData: Buffer.from(userData, "utf8").toString("base64") };
+        // Already base64 gzip, the form RunInstances takes (#229).
+        return { userData };
       }
       case "recordVolume":
         await dependencies.sessions.markVolume(step.workspaceId, step.generation, step.volumeId);

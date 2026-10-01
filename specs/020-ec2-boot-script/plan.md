@@ -5,7 +5,9 @@
 The script is a real file, `packages/worker/ec2/boot.sh`, so it can be shellchecked and run. RunInstances
 user data replaces a launch template's, so the provisioner renders user data per launch:
 `ec2WorkerUserData(config, bootScript)` in `packages/contracts/src/session.ts` validates an
-`Ec2WorkerBootConfig` and prepends it as single-quoted exports. How the script text reaches the
+`Ec2WorkerBootConfig` and prepends it as single-quoted exports (`ec2WorkerBootScript`), then gzips and
+base64-encodes it once, which keeps it far under EC2's 16 KB limit; cloud-init decompresses gzip user
+data before running it (#229). How the script text reaches the
 provisioning Lambda (for example an esbuild text loader) is #83's choice.
 
 The worker runs under a systemd unit rather than a Docker restart policy, so `RequiresMountsFor` can

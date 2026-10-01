@@ -105,7 +105,9 @@ chmod +x /shims/*
 touch /tmp/calls.log /etc/fstab
 # Stands in for the socket the Docker daemon creates; the worker unit reads its group.
 mkdir -p /var/run && touch /var/run/docker.sock
-echo "$USER_DATA_B64" | base64 -d > /tmp/user-data.sh
+# The real user data is gzip (#229); cloud-init unpacks it, so the harness does too and runs the script.
+( set -o pipefail; echo "$USER_DATA_B64" | base64 -d | python3 -c 'import gzip, sys; sys.stdout.buffer.write(gzip.decompress(sys.stdin.buffer.read()))' > /tmp/user-data.sh ) \
+  && [ -s /tmp/user-data.sh ] || { echo "user data did not decode" >&2; echo "@@exit=99"; exit 1; }
 # The container is privileged, so AGENTX_HOST_ROOT must stay: without it the script would rescan the
 # real PCI bus. The rescan test fails if it goes, since it reads the rescan file under /tmp/host.
 PATH=/shims:$PATH AGENTX_HOST_ROOT=/tmp/host bash /tmp/user-data.sh
@@ -173,7 +175,8 @@ interface Faults {
 
 async function boot(bootConfig: Ec2WorkerBootConfig, volumeState: "blank" | "existing" | "foreign", faults: Faults = {}) {
   const script = await readFile(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
-  const userData = Buffer.from(ec2WorkerUserData(bootConfig, script), "utf8").toString("base64");
+  // Already base64 gzip, exactly what RunInstances receives (#229).
+  const userData = ec2WorkerUserData(bootConfig, script);
   const result = spawnSync("docker", [
     "run", "--rm", "--privileged", "--platform", "linux/arm64",
     "--env", `VOLUME_STATE=${volumeState}`,

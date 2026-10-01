@@ -2,8 +2,10 @@ import { randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
+import { gunzipSync } from "node:zlib";
 import { describe, expect, it, vi } from "vitest";
 import { createSessionStepsHandler, pingWorker, type SessionStepsDependencies } from "../../packages/broker/src/aws/session-steps.js";
+import { ec2WorkerBootScript } from "../../packages/contracts/src/session.js";
 
 const bootScript = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
 const workspaceId = randomUUID();
@@ -38,10 +40,14 @@ function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "
 }
 
 describe("session steps", () => {
-  it("renders the boot script as base64 user data for one generation's volume", async () => {
+  it("renders the boot script as base64 gzip user data for one generation's volume (#229)", async () => {
     const { handler } = setup();
     const result = await handler({ action: "launchConfiguration", workspaceId, generation: 2, volumeId: "vol-0123456789abcdef0", expectNewVolume: false }) as { userData: string };
-    const userData = Buffer.from(result.userData, "base64").toString("utf8");
+    // RunInstances takes UserData as base64, once; EC2 hands cloud-init the gzip, which it decompresses.
+    const raw = Buffer.from(result.userData, "base64");
+    expect([...raw.subarray(0, 2)]).toEqual([0x1f, 0x8b]);
+    expect(raw.length).toBeLessThan(16_384);
+    const userData = gunzipSync(raw).toString("utf8");
     expect(userData.startsWith("#!/bin/bash\n")).toBe(true);
     expect(userData).toContain(`export AGENTX_WORKSPACE_ID='${workspaceId}'`);
     expect(userData).toContain("export AGENTX_SESSION_GENERATION='2'");
@@ -49,8 +55,21 @@ describe("session steps", () => {
     expect(userData).toContain("export AGENTX_MODEL_ID='amazon.nova-pro-v1:0'");
     expect(userData).toContain("export AGENTX_LOG_GROUP='/agentx/production/worker'");
     expect(userData).toContain('main "$@"');
-    // EC2 limits user data to 16 KB before encoding.
-    expect(Buffer.byteLength(userData)).toBeLessThan(16_384);
+    expect(userData).toBe(ec2WorkerBootScript({
+      workspaceId,
+      generation: 2,
+      volumeId: "vol-0123456789abcdef0",
+      expectNewVolume: false,
+      workerImage: `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production@sha256:${"a".repeat(64)}`,
+      invokePublicKey: `MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE${"A".repeat(88)}`,
+      controlPlaneUrl: "https://abc.execute-api.us-east-1.amazonaws.com",
+      modelProvider: "amazon-bedrock",
+      modelId: "amazon.nova-pro-v1:0",
+      promptCacheRetention: "long",
+      openRouterSecretArn: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/openrouter-AbCdEf",
+      openRouterProviders: "anthropic,amazon-bedrock",
+      logGroupName: "/agentx/production/worker",
+    }, bootScript));
   });
 
   it("records the volume and instance, and marks the session ready, failed or deleted", async () => {
