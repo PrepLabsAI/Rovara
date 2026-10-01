@@ -47,6 +47,21 @@ describe("EC2 worker user data", () => {
     expect(Buffer.byteLength(userData)).toBeLessThan(16_384);
   });
 
+  it("stays inside EC2's 16 KB user data limit with every optional value set (#223)", () => {
+    const userData = ec2WorkerUserData({
+      ...config,
+      generation: 99_999,
+      invokePublicKey: "A".repeat(124),
+      openRouterSecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/production/openrouter-AbCdEf",
+      openRouterProviders: "anthropic,openai,google",
+    }, bootScript);
+    expect(Buffer.byteLength(userData)).toBeLessThan(16_384);
+  });
+
+  it("refuses to render user data EC2 would reject for its size (#223)", () => {
+    expect(() => ec2WorkerUserData(config, `${bootScript}${"#".repeat(4_096)}\n`)).toThrow(/worker user data is \d+ bytes; EC2 allows less than 16384/);
+  });
+
   it("exports exactly the variables the boot script requires", () => {
     const required = /for name in ([\s\S]*?); do/.exec(bootScript)?.[1]?.split(/[\s\\]+/).filter(Boolean) ?? [];
     const exported = [...ec2WorkerUserData(config, bootScript).matchAll(/^export (\w+)=/gm)].map((match) => match[1]);
