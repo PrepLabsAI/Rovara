@@ -114,7 +114,7 @@ import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConf
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { aiToolTurn, completedTurn, developerFooter, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
-import { hashJson, isConditional, isTemporaryAwsError, workerPrompt } from "./broker-shared.js";
+import { AWS_TEMPORARY_MESSAGE, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, workerPrompt } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, finishTaskClose } from "./developer-tasks.js";
@@ -598,7 +598,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (error instanceof AgentXError) {
           return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
         }
-        return json({ error: { code: "CONFIG_INVALID", message: error instanceof Error ? error.message : "invalid request" } }, "slack-ingress", 400);
+        return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
     const request = adaptHttpApiEvent(event);
@@ -746,10 +746,26 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (error instanceof AgentXError) {
         return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, request.requestId, error.statusCode);
       }
-      const message = error instanceof Error ? error.message : "invalid request";
-      return json({ error: { code: "CONFIG_INVALID", message } }, request.requestId, 400);
+      return unexpectedErrorAnswer(error, request.requestId);
     }
   };
+}
+
+/**
+ * Issue #48: the answer to an error that is not an AgentXError. A temporary AWS error answers 503
+ * RUNTIME_UNAVAILABLE, so the caller tries again; any other keeps CONFIG_INVALID. Apart from a
+ * schema refusal, no answer carries the error's own words, and the log carries only its name.
+ */
+function unexpectedErrorAnswer(error: unknown, requestId: string): { statusCode: number; headers: Record<string, string>; body: string } {
+  // A schema refusal of the request is AgentX's own words (zod 4 names the field, never its value).
+  if (error instanceof ZodError) return json({ error: { code: "CONFIG_INVALID", message: error.message } }, requestId, 400);
+  const name = error instanceof Error ? error.name : "unknown";
+  if (isTemporaryAwsError(error)) {
+    console.log(JSON.stringify({ component: "broker", event: "aws.temporary_error", requestId, name }));
+    return json({ error: { code: "RUNTIME_UNAVAILABLE", message: AWS_TEMPORARY_MESSAGE } }, requestId, 503);
+  }
+  console.log(JSON.stringify({ component: "broker", event: "request.unexpected_error", requestId, name }));
+  return json({ error: { code: "CONFIG_INVALID", message: UNEXPECTED_REQUEST_MESSAGE } }, requestId, 400);
 }
 
 async function routeWorkspaceRequest(
@@ -4690,7 +4706,13 @@ function object(value: unknown, label: string): Record<string, unknown> {
 }
 
 function parseBody(body: string | undefined): unknown {
-  return body ? JSON.parse(body) as unknown : {};
+  if (!body) return {};
+  try {
+    return JSON.parse(body) as unknown;
+  } catch {
+    // Issue #48: the parser's own words quote the body, so fixed words instead.
+    throw agentXError("CONFIG_INVALID", "the request body is not valid JSON");
+  }
 }
 
 function uuid(value: unknown, label: string): string {
