@@ -53,46 +53,9 @@ export function wizardHtml(token: string): string {
 `;
 }
 
-export const WIZARD_CSS = `:root { color-scheme: light dark; }
-body { font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0 auto; max-width: 52rem; padding: 1.5rem 1rem 4rem; }
-h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
-h2 { font-size: .85rem; letter-spacing: .06em; margin: 0 0 .75rem; text-transform: uppercase; opacity: .7; }
-header p { margin: 0 0 1.5rem; opacity: .75; }
-.card { border: 1px solid rgba(128,128,128,.35); border-radius: .5rem; margin-bottom: 1rem; padding: 1rem; }
-.hidden { display: none; }
-pre { font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin: 0; max-height: 26rem; overflow: auto; white-space: pre-wrap; word-break: break-word; }
-#log { max-height: 18rem; opacity: .85; }
-#outcome-body { white-space: pre-wrap; }
-ol#steps { list-style: none; margin: 0; padding: 0; }
-ol#steps li { display: flex; gap: .6rem; padding: .2rem 0; }
-ol#steps li .mark { flex: none; width: 1.3rem; text-align: center; }
-li.pending { opacity: .5; }
-li.running { font-weight: 600; }
-li.waiting { color: #b06000; }
-li.done .mark, li.skipped .mark { color: #2e7d32; }
-li .note { display: block; font-size: .85rem; opacity: .8; }
-label { display: block; margin-bottom: .5rem; }
-input[type=text], input[type=password], textarea, select { border: 1px solid rgba(128,128,128,.5); border-radius: .35rem; box-sizing: border-box; font: inherit; padding: .45rem .6rem; width: 100%; }
-textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-height: 8rem; }
-.choices { display: grid; gap: .35rem; margin-bottom: .75rem; }
-.choices label { align-items: baseline; display: flex; gap: .5rem; margin: 0; }
-.buttons { display: flex; gap: .5rem; margin-top: .75rem; }
-button { border: 1px solid rgba(128,128,128,.5); border-radius: .35rem; cursor: pointer; font: inherit; padding: .45rem 1rem; }
-button.primary { background: #1a56db; border-color: #1a56db; color: #fff; }
-button[disabled] { cursor: progress; opacity: .6; }
-.error { color: #c62828; margin: .6rem 0 0; }
-.hint { font-size: .85rem; margin: .35rem 0 0; opacity: .7; }
-a.button { border: 1px solid rgba(128,128,128,.5); border-radius: .35rem; display: inline-block; font: inherit; margin-top: .5rem; padding: .45rem 1rem; text-decoration: none; }
-a.button.primary { background: #1a56db; border-color: #1a56db; color: #fff; }
-.card.status p { margin: 0 0 .35rem; }
-.card.status.ok { border-color: #2e7d32; }
-.card.status.waiting { border-color: #b06000; }
-.card.status.failed { border-color: #c62828; }
-ul.checks { list-style: none; margin: .5rem 0 0; padding: 0; }
-ul.checks li { display: flex; gap: .6rem; padding: .15rem 0; }
-ul.checks li.ok .mark { color: #2e7d32; }
-ul.checks li.failed .mark { color: #c62828; }
-`;
+// The installer's design system (type scale, spacing, color tokens and component classes) now
+// lives in design.ts; re-exported here so server.ts keeps its existing import unchanged.
+export { WIZARD_CSS } from "./design.js";
 
 const MARKS: Record<string, string> = { pending: "·", running: "•", done: "✓", skipped: "✓", waiting: "…" };
 
