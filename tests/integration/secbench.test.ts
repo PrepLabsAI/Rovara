@@ -10,7 +10,8 @@ import { SECBENCH_PATCH_TEMPLATE, SECBENCH_PATCH_TEMPLATE_SHA256, secbenchPatchP
 import { createGitRunner, predictionPatch, SECBENCH_SOURCE_EXTENSIONS, untrackedFiles } from "../../packages/worker/src/swebench/history.js";
 import { gradeSecbenchPrediction, SECBENCH_EVALUATOR_COMMIT, SECBENCH_EVALUATOR_PACKAGES } from "../../packages/worker/src/swebench/grade-secbench.js";
 import type { ProcessRunner } from "../../packages/worker/src/swebench/grade.js";
-import type { SwebenchRunResult } from "@agentx/contracts";
+import type { SecbenchVerdict, SwebenchRun, SwebenchRunResult } from "@agentx/contracts";
+import { resultMessage } from "../../packages/slack-service/src/swebench-command.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
 import { runSwebench, type RunReporter } from "../../packages/worker/src/swebench/run.js";
 import type { PiSessionAdapter, PiSessionHandle } from "../../packages/worker/src/pi-session.js";
@@ -402,3 +403,45 @@ describe("a SEC-bench run (spec 045 FR-004 to FR-011)", () => {
   });
 });
 
+
+describe("the SEC-bench result in the thread (spec 045 FR-010)", () => {
+  const run = (secbench: SecbenchVerdict | undefined, resolved: boolean): SwebenchRun => ({
+    runId: RUN_ID, dataset: "secbench-patch", instanceId: "njs.cve-2022-32414",
+    model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" }, maxCostUsd: 10,
+    thread: { teamId: "T0BSHLLUGBD", channelId: "C0C5NCSC3K7", threadTs: "1790817668.039179" },
+    requestedBy: { teamId: "T0BSHLLUGBD", userId: "U0BSRRRADC1" },
+    status: "SUCCEEDED", createdAt: "2026-10-01T12:00:00.000Z", updatedAt: "2026-10-01T12:10:00.000Z",
+    result: {
+      outcome: "GRADED", resolved, stopReason: "finished", patchBytes: 120, agentSeconds: 245,
+      imageDigest: `hwiwonlee/secb.eval.x86_64.njs.cve-2022-32414@sha256:${"a".repeat(64)}`,
+      usage: { schemaVersion: 1, outcome: "SUCCEEDED", provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6", cacheRetention: "short", tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15 }, cacheReadRatio: 0, costUsd: 0.31 },
+      artifactsPrefix: `evals/${RUN_ID}/`,
+      ...(secbench === undefined ? {} : { secbench }),
+    },
+  });
+  const verdict = { strict: true, medium: true, generous: true, pocExitCode: 0, sanitizerReport: false, timedOut: false };
+
+  it("says what a pass means", () => {
+    const message = resultMessage(run(verdict, true));
+    expect(message).toContain("*Resolved* `njs.cve-2022-32414` (SEC-bench patch task).");
+    expect(message).toContain("• Check: the PoC no longer triggers the sanitizer and the patched project builds (sanitizer-verified, no regression tests)");
+    expect(message).toContain("• Modes: strict pass, medium pass, generous pass");
+    expect(message).not.toContain("FAIL_TO_PASS");
+  });
+
+  it.each([
+    [{ ...verdict, strict: false, medium: false, generous: false, failedStep: "apply" as const }, "• Check: the patch did not apply"],
+    [{ ...verdict, strict: false, medium: false, generous: false, failedStep: "build" as const }, "• Check: the patched project did not build"],
+    [{ ...verdict, strict: false, medium: false, generous: false, failedStep: "poc" as const, pocExitCode: 1, sanitizerReport: true }, "• Check: the PoC still triggers the sanitizer"],
+    [{ ...verdict, strict: false, medium: false, generous: false, failedStep: "poc" as const, pocExitCode: 124, timedOut: true }, "• Check: the PoC timed out"],
+    [{ ...verdict, strict: false, medium: false, generous: true, failedStep: "poc" as const, pocExitCode: 3 }, "• Check: the PoC exited with 3, not the expected code"],
+  ])("explains an unresolved patch", (secbench, line) => {
+    expect(resultMessage(run(secbench, false))).toContain(line);
+  });
+
+  it("names SEC-bench when nothing was graded, and leaves SWE-bench's wording alone", () => {
+    expect(resultMessage(run(undefined, false))).toContain("• Check: not run, because the agent changed nothing");
+    expect(resultMessage({ ...run(verdict, true), status: "CANCELLED" })).toBe("The SEC-bench run of `njs.cve-2022-32414` was cancelled and its instance terminated.");
+    expect(resultMessage({ ...run(verdict, true), dataset: "verified", instanceId: "django__django-11099", status: "CANCELLED" })).toBe("The SWE-bench run of `django__django-11099` was cancelled and its instance terminated.");
+  });
+});

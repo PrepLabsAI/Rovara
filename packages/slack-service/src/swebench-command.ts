@@ -3,8 +3,10 @@
 import {
   SWEBENCH_RUN_TIME_LIMIT_SECONDS,
   SWEBENCH_TERMINAL_STATUSES,
+  swebenchFamily,
   type ModelIdentifier,
   type ProjectModelOptions,
+  type SecbenchVerdict,
   type SwebenchCommand,
   type SwebenchDataset,
   type SwebenchRun,
@@ -34,6 +36,10 @@ const DATASET_NAMES: Record<SwebenchDataset, string> = {
   pro: "SWE-Bench Pro", "pro-hard": "SWE-Bench Pro HARD-51",
   "secbench-patch": "SEC-bench patch task",
 };
+function benchmark(dataset: SwebenchDataset): string {
+  return swebenchFamily(dataset) === "secbench" ? "SEC-bench" : "SWE-bench";
+}
+
 /** The broker's state machine ends every run within its ceiling; the wait allows for the last poll. */
 const WAIT_LIMIT_MS = (SWEBENCH_RUN_TIME_LIMIT_SECONDS + 15 * 60) * 1_000;
 
@@ -70,7 +76,7 @@ export async function runSwebenchCommand(command: SwebenchCommand, api: Swebench
   const run = started.run;
   if (options.announce !== false && !SWEBENCH_TERMINAL_STATUSES.has(run.status)) {
     await options.post([
-      `Started a SWE-bench run of \`${escapeText(run.instanceId)}\` from ${DATASET_NAMES[run.dataset]} on \`${escapeText(run.model.provider)}/${escapeText(run.model.modelId)}\`, with a cost ceiling of ${usd(run.maxCostUsd)}.`,
+      `Started a ${benchmark(run.dataset)} run of \`${escapeText(run.instanceId)}\` from ${DATASET_NAMES[run.dataset]} on \`${escapeText(run.model.provider)}/${escapeText(run.model.modelId)}\`, with a cost ceiling of ${usd(run.maxCostUsd)}.`,
       "It runs on its own instance and usually takes 15 to 60 minutes. I'll post the result here; say `stop` to cancel it.",
     ].join("\n"));
   }
@@ -84,7 +90,7 @@ async function waitForRun(api: SwebenchApi, run: SwebenchRun, options: SwebenchC
   const deadline = now() + WAIT_LIMIT_MS;
   let current = run;
   while (!SWEBENCH_TERMINAL_STATUSES.has(current.status)) {
-    if (now() > deadline) throw new Error(`SWE-bench run ${run.runId} did not finish within its time limit`);
+    if (now() > deadline) throw new Error(`${benchmark(run.dataset)} run ${run.runId} did not finish within its time limit`);
     await sleep(options.pollMilliseconds ?? 30_000);
     current = await api.getSwebenchRun(run.runId);
   }
@@ -94,24 +100,39 @@ async function waitForRun(api: SwebenchApi, run: SwebenchRun, options: SwebenchC
 /** The thread's result message (spec 043 SC-003): resolved or not, tests, why the agent stopped, time, cost and artifacts. */
 export function resultMessage(run: SwebenchRun): string {
   const task = `\`${escapeText(run.instanceId)}\``;
-  if (run.status === "CANCELLED") return `The SWE-bench run of ${task} was cancelled and its instance terminated.`;
+  if (run.status === "CANCELLED") return `The ${benchmark(run.dataset)} run of ${task} was cancelled and its instance terminated.`;
   if (run.status === "FAILED" || run.result === undefined) {
-    return `The SWE-bench run of ${task} failed: ${escapeText(run.error ?? "no reason was recorded")}`;
+    return `The ${benchmark(run.dataset)} run of ${task} failed: ${escapeText(run.error ?? "no reason was recorded")}`;
   }
   const result = run.result;
   const lines = [
     result.resolved ? `*Resolved* ${task} (${DATASET_NAMES[run.dataset]}).` : `*Not resolved:* ${task} (${DATASET_NAMES[run.dataset]}).`,
   ];
-  if (result.failToPass !== undefined && result.passToPass !== undefined) {
+  if (result.secbench !== undefined) {
+    lines.push(...secbenchLines(result.secbench, result.resolved));
+  } else if (result.failToPass !== undefined && result.passToPass !== undefined) {
     lines.push(`• Tests: FAIL_TO_PASS ${result.failToPass.passed}/${result.failToPass.total}, PASS_TO_PASS ${result.passToPass.passed}/${result.passToPass.total}`);
   } else {
-    lines.push("• Tests: not run, because the agent changed nothing");
+    lines.push(swebenchFamily(run.dataset) === "secbench" ? "• Check: not run, because the agent changed nothing" : "• Tests: not run, because the agent changed nothing");
   }
   lines.push(`• Agent: ${stopped(result.stopReason)} after ${duration(result.agentSeconds)}${result.stopDetail === undefined ? "" : ` (${escapeText(result.stopDetail)})`}`);
   const cost = result.usage.costUsd === null ? "unknown cost" : usd(result.usage.costUsd);
   lines.push(`• Cost: ${cost} for ${result.usage.tokens.total.toLocaleString("en-US")} tokens on \`${escapeText(result.usage.provider)}/${escapeText(result.usage.modelId)}\``);
   lines.push(`• Patch, transcript and harness logs: \`${escapeText(result.artifactsPrefix)}\` in the artifact bucket`);
   return lines.join("\n");
+}
+
+/** SEC-bench's verdict in words (spec 045 FR-010); a pass always says what SEC-bench does not check. */
+function secbenchLines(verdict: SecbenchVerdict, resolved: boolean): string[] {
+  const check = resolved
+    ? "the PoC no longer triggers the sanitizer and the patched project builds (sanitizer-verified, no regression tests)"
+    : verdict.failedStep === "apply" ? "the patch did not apply"
+    : verdict.failedStep === "build" ? "the patched project did not build"
+    : verdict.timedOut ? "the PoC timed out"
+    : verdict.sanitizerReport ? "the PoC still triggers the sanitizer"
+    : `the PoC exited with ${verdict.pocExitCode ?? "an unknown code"}, not the expected code`;
+  const mode = (passed: boolean) => (passed ? "pass" : "fail");
+  return [`• Check: ${check}`, `• Modes: strict ${mode(verdict.strict)}, medium ${mode(verdict.medium)}, generous ${mode(verdict.generous)}`];
 }
 
 function stopped(reason: NonNullable<SwebenchRun["result"]>["stopReason"]): string {
