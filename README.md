@@ -847,7 +847,10 @@ installed environment); see
 names below are the maintainers' deployment's. An installed environment has the same alarms named
 `agentx-<env>-<Name>` (for example `agentx-<env>-ConnectorBroken`) on the topic
 `agentx-<env>-alerts`, plus Slack service, session and shared-task notice alarms (such as
-`agentx-<env>-TurnErrors` and `agentx-<env>-DeveloperNoticeDeadLetters`); `agentx init` subscribes
+`agentx-<env>-TurnErrors` and `agentx-<env>-DeveloperNoticeDeadLetters`), and
+`agentx-<env>-DispatchDeadLetters`. That last one fires when a worker dispatch job exhausts its
+receives and lands in the dispatch dead-letter queue. To clear it, find the job's operation ID in
+the dispatcher logs, then redrive or purge the `DispatchDeadLetterQueueUrl` queue. `agentx init` subscribes
 your alert address and sends a test alarm, and `agentx alerts test` sends another. Five
 alarms ship in `AgentXControlPlane`: `AgentXConnectorBroken` (a connector's discovery failed or a
 vendor changed an approved tool's schema), `AgentXConnectorNotConnected` (a connector's vendor
