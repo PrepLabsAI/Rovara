@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -8,6 +8,9 @@ import type { WorkerInvocation } from "@agentx/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { publishWorkspace, runReadinessChecks } from "../../packages/worker/src/publish.js";
 import { storedCommandOutput } from "../../packages/worker/src/command-failure.js";
+import { TIMEOUT_KILL_GRACE_MS } from "../../packages/worker/src/collected-process.js";
+import type { DevcontainerCli, DevcontainerProcess } from "../../packages/worker/src/devcontainer.js";
+import type { PreparationManifest } from "../../packages/worker/src/prepare.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories: string[] = [];
@@ -462,7 +465,7 @@ describe("publication check results (#170)", () => {
     const script = `process.stdout.write("line of output\\n".repeat(200000)); console.log("last line ${TOKEN}")`;
     const [check] = await runReadinessChecks(fixture.root, withReadiness(fixture, [
       { cwd: "repo/demo", executable: process.execPath, args: ["-e", script], timeoutSeconds: 20 },
-    ]));
+    ]), await manifestOf(fixture));
     expect(check!.stdout.length).toBeLessThanOrEqual(1_048_576);
     expect(check!.stdout.endsWith("last line [REDACTED]\n")).toBe(true);
     expect(check!.stdout.startsWith("line of output\n")).toBe(true);
@@ -511,7 +514,7 @@ describe("publication check results (#170)", () => {
       { cwd: "repo/demo", executable: process.execPath, args: ["-e", "process.kill(process.pid, 'SIGKILL')"], timeoutSeconds: 10 },
       { cwd: "repo/demo", executable: "agentx-no-such-check-170", args: [], timeoutSeconds: 10 },
       { cwd: "repo/demo", executable: process.execPath, args: ["-e", "setInterval(() => undefined, 1000)"], timeoutSeconds: 1 },
-    ]));
+    ]), await manifestOf(fixture));
     expect(checks.map((check) => [check.exitCode, check.outcome])).toEqual([[-1, "failed"], [-1, "failed"], [-1, "timed_out"]]);
     expect(checks[0]!.stderr).toContain("readiness command 0 was killed by SIGKILL");
     expect(checks[1]!.stderr).toContain("ENOENT");
@@ -519,12 +522,262 @@ describe("publication check results (#170)", () => {
   }, 30_000);
 });
 
+// #183: publication runs each readiness check where preparation did: in the devcontainer the
+// preparation manifest records, otherwise on the host.
+describe("publication checks in a devcontainer (#183)", () => {
+  const TOKEN = `ghp_${"Q1w2E3r4T5".repeat(4)}`;
+  // Not on the worker host: a check that runs on the host fails to start.
+  const CONTAINER_ONLY = "agentx-container-only-check-183";
+
+  function withReadiness(
+    fixture: Awaited<ReturnType<typeof createFixture>>,
+    readiness: Array<Record<string, unknown>>,
+  ): typeof fixture.invocation {
+    const invocation = structuredClone(fixture.invocation) as typeof fixture.invocation & {
+      payload: { project: { readiness: Array<Record<string, unknown>> } };
+    };
+    invocation.payload.project.readiness = readiness;
+    return invocation;
+  }
+
+  it("runs a devcontainer project's check through devcontainer exec, after starting the container", async () => {
+    const fixture = await createFixture(true, "remote.git", { devcontainer: true });
+    await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+    const invocation = withReadiness(fixture, [{ cwd: "repo/demo", executable: CONTAINER_ONLY, args: ["--all"], timeoutSeconds: 30 }]);
+    const { cli, calls } = fakeCli(() => ({ exitCode: 0, stdout: "checked in the container\n", stderr: "" }));
+
+    const result = await publishWorkspace({
+      rootPath: fixture.root,
+      invocation,
+      credentialProvider: async () => ({}),
+      pullRequestSink: async () => ({ number: 8, url: "https://github.com/example/demo/pull/8", reconciled: false }),
+      devcontainerCli: cli,
+    });
+
+    const root = await realpath(fixture.root);
+    const workspaceFolder = join(root, "repo/demo");
+    const configPath = join(root, "repo/demo/.devcontainer/devcontainer.json");
+    expect(result.checks).toEqual([expect.objectContaining({
+      index: 0, cwd: "repo/demo", executable: CONTAINER_ONLY, exitCode: 0, outcome: "passed",
+      stdout: "checked in the container\n", stderr: "",
+    })]);
+    // A resumed instance has its containers stopped, so publication starts it first, as a task does.
+    expect(calls.map((args) => args[0])).toEqual(["up", "exec"]);
+    expect(calls[0]!.slice(0, 5)).toEqual(["up", "--workspace-folder", workspaceFolder, "--config", configPath]);
+    const exec = calls[1]!;
+    expect(exec.slice(0, 7)).toEqual(["exec", "--workspace-folder", workspaceFolder, "--config", configPath, "bash", "-c"]);
+    expect(exec[7]).toContain('exec "$@"');
+    expect(exec[8]).toBe("bash");
+    expect(exec[9]).toBe(workspaceFolder);
+    expect(exec[10]).toMatch(/^\/tmp\/agentx-command-[0-9a-f-]+\.pgid$/);
+    expect(exec.slice(11)).toEqual([CONTAINER_ONLY, "--all"]);
+  });
+
+  it("fails a devcontainer project's check that fails in the container, and pushes nothing", async () => {
+    const fixture = await createFixture(true, "remote.git", { devcontainer: true });
+    await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+    const { cli } = fakeCli(() => ({ exitCode: 2, stdout: "", stderr: "lint failed\n" }));
+    const sink = vi.fn();
+    await expect(publishWorkspace({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: async () => ({}),
+      pullRequestSink: sink,
+      devcontainerCli: cli,
+    })).rejects.toThrow(/readiness checks failed/i);
+    expect(sink).not.toHaveBeenCalled();
+    await expect(git(fixture.bare, ["rev-parse", `refs/heads/${fixture.invocation.payload.headBranch}`])).rejects.toThrow();
+  });
+
+  it("runs a project's check on the host when preparation recorded no devcontainer", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+    const { cli, calls } = fakeCli();
+    const result = await publishWorkspace({
+      rootPath: fixture.root,
+      invocation: withReadiness(fixture, [{ cwd: "repo/demo", executable: process.execPath, args: ["-e", "console.log('on the host')"], timeoutSeconds: 10 }]),
+      credentialProvider: async () => ({}),
+      pullRequestSink: async () => ({ number: 9, url: "https://github.com/example/demo/pull/9", reconciled: false }),
+      devcontainerCli: cli,
+    });
+    expect(result.checks).toEqual([expect.objectContaining({ outcome: "passed", stdout: "on the host\n" })]);
+    expect(calls).toEqual([]);
+  });
+
+  it("follows the devcontainer preparation recorded, not the project's latest revision", async () => {
+    // Prepared with a devcontainer; the latest revision has none. The workspace keeps its devcontainer.
+    const prepared = await createFixture(true, "remote.git", { devcontainer: true });
+    const withoutDevcontainer = structuredClone(prepared.invocation) as typeof prepared.invocation & { payload: { project: { devcontainer?: unknown } } };
+    delete withoutDevcontainer.payload.project.devcontainer;
+    const inContainer = fakeCli();
+    const [containerCheck] = await runReadinessChecks(await realpath(prepared.root), withoutDevcontainer, await manifestOf(prepared), { devcontainerCli: inContainer.cli });
+    expect(containerCheck!.outcome).toBe("passed");
+    expect(inContainer.calls.map((args) => args[0])).toEqual(["up", "exec"]);
+
+    // Prepared without one; the latest revision adds it. The checks stay on the host.
+    const host = await createFixture();
+    const withDevcontainer = structuredClone(host.invocation) as typeof host.invocation & { payload: { project: { devcontainer?: unknown } } };
+    withDevcontainer.payload.project.devcontainer = { repository: "demo" };
+    const onHost = fakeCli();
+    const [hostCheck] = await runReadinessChecks(await realpath(host.root), withDevcontainer, await manifestOf(host), { devcontainerCli: onHost.cli });
+    expect(hostCheck!.outcome).toBe("passed");
+    expect(onHost.calls).toEqual([]);
+  });
+
+  it("does not start the devcontainer for a project with no readiness checks", async () => {
+    const fixture = await createFixture(true, "remote.git", { devcontainer: true });
+    const { cli, calls } = fakeCli();
+    const checks = await runReadinessChecks(await realpath(fixture.root), withReadiness(fixture, []), await manifestOf(fixture), { devcontainerCli: cli });
+    expect(checks).toEqual([]);
+    expect(calls).toEqual([]);
+  });
+
+  it("stops a timed-out check inside the container: TERM to its process group, then KILL", async () => {
+    const fixture = await createFixture(true, "remote.git", { devcontainer: true });
+    const { cli, calls, kills } = stoppableCli();
+    const started = Date.now();
+    const [check] = await runReadinessChecks(
+      await realpath(fixture.root),
+      withReadiness(fixture, [{ cwd: "repo/demo", executable: "sleep", args: ["300"], timeoutSeconds: 1 }]),
+      await manifestOf(fixture),
+      { devcontainerCli: cli },
+    );
+    expect(check).toMatchObject({ index: 0, exitCode: -1, outcome: "timed_out" });
+    expect(check!.stderr).toContain("readiness command 0 timed out after 1 s");
+    const groupFile = calls.find((args) => args.includes("sleep"))![10]!;
+    expect(kills().map((args) => args.at(-1))).toEqual([groupFile, groupFile]);
+    expect(kills()[0]!.some((arg) => arg.includes("kill -TERM"))).toBe(true);
+    expect(kills()[1]!.some((arg) => arg.includes("kill -KILL"))).toBe(true);
+    // The TERM step, then the grace period before KILL: the check did not end at its own timeout.
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_000 + TIMEOUT_KILL_GRACE_MS);
+  }, 30_000);
+
+  it("says in a timed-out check's stored output when the container refused to stop it", async () => {
+    const fixture = await createFixture(true, "remote.git", { devcontainer: true });
+    const { cli } = stoppableCli({ kill: async () => ({ exitCode: 1, stdout: "bash: kill: (4242) - Operation not permitted\n", stderr: "" }) });
+    const [check] = await runReadinessChecks(
+      await realpath(fixture.root),
+      withReadiness(fixture, [{ cwd: "repo/demo", executable: "sleep", args: ["300"], timeoutSeconds: 1 }]),
+      await manifestOf(fixture),
+      { devcontainerCli: cli },
+    );
+    expect(check!.outcome).toBe("timed_out");
+    expect(check!.stderr).toContain("AgentX could not stop the command in the container (TERM): bash: kill: (4242) - Operation not permitted");
+  }, 30_000);
+
+  it("stores a devcontainer check's output redacted and cut to its last lines, as on the host (#170)", async () => {
+    const fixture = await createFixture(true, "remote.git", { devcontainer: true });
+    await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+    const { cli } = fakeCli(() => ({
+      exitCode: 0,
+      stdout: `${"line of output\n".repeat(200_000)}last line ${TOKEN}\n`,
+      stderr: `auth with ${TOKEN} ok\n`,
+    }));
+    const result = await publishWorkspace({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: async () => ({}),
+      pullRequestSink: async () => ({ number: 10, url: "https://github.com/example/demo/pull/10", reconciled: false }),
+      devcontainerCli: cli,
+    });
+    const [check] = result.checks;
+    expect(check!.outcome).toBe("passed");
+    expect(check!.stdout.length).toBeLessThanOrEqual(1_048_576);
+    expect(check!.stdout.startsWith("line of output\n")).toBe(true);
+    expect(check!.stdout.endsWith("last line [REDACTED]\n")).toBe(true);
+    expect(check!.stderr).toBe("auth with [REDACTED] ok\n");
+    expect(JSON.stringify(result)).not.toContain(TOKEN);
+    for (const file of await filesUnder(join(fixture.root, ".agentx"))) {
+      expect(await readFile(file, "utf8")).not.toContain(TOKEN);
+    }
+  }, 30_000);
+
+  it("fails a check that cannot run because the container has no bash, saying why", async () => {
+    const fixture = await createFixture(true, "remote.git", { devcontainer: true });
+    const { cli } = fakeCli(() => ({ exitCode: 127, stdout: "", stderr: NO_BASH }));
+    const [check] = await runReadinessChecks(await realpath(fixture.root), fixture.invocation, await manifestOf(fixture), { devcontainerCli: cli });
+    expect(check).toMatchObject({ index: 0, exitCode: -1, outcome: "failed" });
+    expect(check!.stderr).toContain("the container has no bash");
+  });
+
+  it("refuses to publish when the devcontainer does not start, and pushes nothing", async () => {
+    const fixture = await createFixture(true, "remote.git", { devcontainer: true });
+    await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+    const calls: string[][] = [];
+    const cli: DevcontainerCli = {
+      run: async (args) => {
+        calls.push([...args]);
+        return { exitCode: 1, stdout: "{\"outcome\":\"error\",\"message\":\"Docker is not running\"}", stderr: "" };
+      },
+    };
+    const sink = vi.fn();
+    await expect(publishWorkspace({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: async () => ({}),
+      pullRequestSink: sink,
+      devcontainerCli: cli,
+    })).rejects.toThrow("devcontainer did not start: Docker is not running");
+    expect(calls.map((args) => args[0])).toEqual(["up"]);
+    expect(sink).not.toHaveBeenCalled();
+    await expect(git(fixture.bare, ["rev-parse", `refs/heads/${fixture.invocation.payload.headBranch}`])).rejects.toThrow();
+  });
+
+  it("is what the project configuration guide says", async () => {
+    const guide = await readFile("docs/project-configuration.md", "utf8");
+    expect(guide).toContain(
+      "`readiness` runs when the workspace is prepared and again before each pull request is published\n"
+      + "or updated, each time inside the dev container when the workspace was prepared with one.",
+    );
+  });
+});
+
+const NO_BASH = 'OCI runtime exec failed: exec failed: unable to start container process: exec: "bash": executable file not found in $PATH: unknown';
+const UP_OUTPUT = "{\"outcome\":\"success\",\"containerId\":\"f832494aef96\",\"remoteUser\":\"node\",\"remoteWorkspaceFolder\":\"/workspaces/demo\"}";
+
+/** A fake `devcontainer` CLI: `up` succeeds, and `exec` answers with `execResult`. */
+function fakeCli(execResult: (args: readonly string[]) => DevcontainerProcess = () => ({ exitCode: 0, stdout: "", stderr: "" })) {
+  const calls: string[][] = [];
+  const cli: DevcontainerCli = {
+    run: (args) => {
+      calls.push([...args]);
+      return Promise.resolve(args[0] === "up" ? { exitCode: 0, stdout: UP_OUTPUT, stderr: "" } : execResult(args));
+    },
+  };
+  return { cli, calls };
+}
+
+/** A fake `devcontainer` CLI whose command runs until its client is aborted, and whose kill execs answer with `kill`. */
+function stoppableCli(behaviour: { kill?: () => Promise<DevcontainerProcess> } = {}) {
+  const calls: string[][] = [];
+  const isKill = (args: readonly string[]) => args.some((arg) => arg.includes("kill -TERM") || arg.includes("kill -KILL"));
+  const cli: DevcontainerCli = {
+    run: (args, options) => {
+      calls.push([...args]);
+      if (args[0] === "up") return Promise.resolve({ exitCode: 0, stdout: UP_OUTPUT, stderr: "" });
+      if (isKill(args)) return behaviour.kill?.() ?? Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+      return new Promise((resolveRun) => {
+        options.signal?.addEventListener("abort", () => resolveRun({ exitCode: null, stdout: "", stderr: "" }), { once: true });
+      });
+    },
+  };
+  return { cli, calls, kills: () => calls.filter(isKill) };
+}
+
+async function manifestOf(fixture: { root: string }): Promise<PreparationManifest> {
+  return JSON.parse(await readFile(join(fixture.root, ".agentx", "preparation-manifest.json"), "utf8")) as PreparationManifest;
+}
+
 async function filesUnder(directory: string): Promise<string[]> {
   const entries = await readdir(directory, { withFileTypes: true, recursive: true });
   return entries.filter((entry) => entry.isFile()).map((entry) => join(entry.parentPath, entry.name));
 }
 
-async function createFixture(checkPasses: boolean | "timeout" = true, remoteName = "remote.git") {
+async function createFixture(
+  checkPasses: boolean | "timeout" = true,
+  remoteName = "remote.git",
+  options: { devcontainer?: boolean } = {},
+) {
   const root = await mkdtemp(join(tmpdir(), "agentx-publish-test-"));
   temporaryDirectories.push(root);
   const bare = join(root, remoteName);
@@ -566,6 +819,7 @@ async function createFixture(checkPasses: boolean | "timeout" = true, remoteName
       ],
       timeoutSeconds: checkPasses === "timeout" ? 1 : 10,
     }],
+    ...(options.devcontainer === true ? { devcontainer: { repository: "demo" } } : {}),
     orchestratorInstructions: "Delegate coding work.",
   } as const;
   await mkdir(join(root, ".agentx"), { recursive: true });
@@ -587,6 +841,10 @@ async function createFixture(checkPasses: boolean | "timeout" = true, remoteName
     readinessResults: [],
     creationIdentity: "test",
     complete: true,
+    // Preparation records the devcontainer it started (#121).
+    ...(options.devcontainer === true
+      ? { devcontainer: { repository: "demo", configPath: "repo/demo/.devcontainer/devcontainer.json", containerId: "f832494aef96", startedAt: new Date().toISOString() } }
+      : {}),
     updatedAt: new Date().toISOString(),
   }), "utf8");
   const invocation = {
