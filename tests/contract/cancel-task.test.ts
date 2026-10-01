@@ -165,6 +165,17 @@ describe("the cancel routes when the cancel races its target (final review I2)",
   });
 });
 
+describe("a repeated owner cancel (#173 review: the shared cancel path is unchanged for its callers)", () => {
+  it("still queues a fresh cancel for a target already CANCEL_REQUESTED, so a cancel whose dispatch was lost can be sent again", async () => {
+    const { db, handler, workspaceId, taskOperationId } = await runningTask();
+    const path = `/v1/service/workspaces/${workspaceId}/operations/${taskOperationId}/cancel`;
+    expect((await serviceCall(handler, thread, pratik, "POST", path)).status).toBe(202);
+    const again = await serviceCall(handler, thread, pratik, "POST", path);
+    expect(again).toMatchObject({ status: 202, body: { duplicate: false, operation: { kind: "cancel" } } });
+    expect(cancelOperations(db, workspaceId)).toHaveLength(2);
+  });
+});
+
 /**
  * Issue 196: the task's own result lands between the cancel's read of its target and the cancel's
  * write. Nothing is faked about the write: the fake DynamoDB evaluates the cancel's real condition
@@ -240,16 +251,5 @@ describe("a task that finishes just before the cancel is written (#196)", () => 
     expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${taskOperationId}`)).toMatchObject({ status: "CANCEL_REQUESTED" });
     expect(cancelOperations(db, workspaceId)).toHaveLength(1);
     expect(cancelOutbox(db)).toHaveLength(1);
-  });
-});
-
-describe("a repeated owner cancel (#173 review: the shared cancel path is unchanged for its callers)", () => {
-  it("still queues a fresh cancel for a target already CANCEL_REQUESTED, so a cancel whose dispatch was lost can be sent again", async () => {
-    const { db, handler, workspaceId, taskOperationId } = await runningTask();
-    const path = `/v1/service/workspaces/${workspaceId}/operations/${taskOperationId}/cancel`;
-    expect((await serviceCall(handler, thread, pratik, "POST", path)).status).toBe(202);
-    const again = await serviceCall(handler, thread, pratik, "POST", path);
-    expect(again).toMatchObject({ status: 202, body: { duplicate: false, operation: { kind: "cancel" } } });
-    expect(cancelOperations(db, workspaceId)).toHaveLength(2);
   });
 });

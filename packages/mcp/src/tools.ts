@@ -177,7 +177,7 @@ export function requestIdFor(context: ToolContext, call: ToolCall, input: Record
 }
 const optional = (value: unknown) => value ?? null;
 /** Issue 196: the statuses a cancel answers with only when the task had already finished. */
-const ALREADY_FINISHED: ReadonlySet<DeveloperTaskView["status"]> = new Set(["SUCCEEDED", "FAILED", "INTERRUPTED"]);
+const ALREADY_FINISHED: ReadonlySet<DeveloperTaskView["status"]> = new Set(["SUCCEEDED", "FAILED"]);
 /** What makes a cancel the same cancel: the tool and its task (final review M3). */
 const cancelContent = (taskId: unknown): readonly unknown[] => ["agentx_cancel_task", taskId];
 /** What makes a share the same share: the task, the mode asked for and the channel named. */
@@ -386,7 +386,8 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       // retry reaches AgentX as the same cancel. A second cancel within 15 minutes is a no-op.
       const task = await context.client.cancelTask(input.task_id as string, requestIdFor(context, call, input, cancelContent(input.task_id)));
       // Issue 196: a task that had already finished keeps its result; say so plainly. CANCELLED is
-      // left out: a task stopped before its instructions ran reads CANCELLED at once.
+      // left out (a task stopped before its instructions ran reads CANCELLED at once), and so is
+      // INTERRUPTED (a queued cancel that failed ends so, and a retried cancel may read it).
       const finished = ALREADY_FINISHED.has(task.status) ? `The task had already finished as ${task.status}, so nothing was cancelled. ` : "";
       return { structured: taskOutput(task), text: `${finished}${taskText(task)}` };
     },

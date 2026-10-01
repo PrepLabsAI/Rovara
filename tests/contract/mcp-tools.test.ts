@@ -332,7 +332,7 @@ describe("the other task tools (FR-030)", () => {
   });
 
   it("says plainly that a task which already finished was not cancelled, with its final status (#196)", async () => {
-    for (const status of ["SUCCEEDED", "FAILED", "INTERRUPTED"] as const) {
+    for (const status of ["SUCCEEDED", "FAILED"] as const) {
       const cancelTask = vi.fn(async () => view(status));
       const result = await (await connect({ cancelTask })).callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
       expect(result.structuredContent).toMatchObject({ status });
@@ -341,7 +341,8 @@ describe("the other task tools (FR-030)", () => {
   });
 
   it("does not say already finished for a task it stopped or is stopping (#196)", async () => {
-    for (const status of ["CANCELLED", "RUNNING", "STARTING"] as const) {
+    // INTERRUPTED is also how a queued cancel that failed ends, so a retried cancel may read it.
+    for (const status of ["CANCELLED", "INTERRUPTED", "RUNNING", "STARTING"] as const) {
       const cancelTask = vi.fn(async () => view(status));
       const result = await (await connect({ cancelTask })).callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
       expect(text(result), status).not.toContain("already finished");

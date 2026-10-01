@@ -484,7 +484,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       }, services.fetchImplementation);
       // Issue 196: a task that had already finished keeps its result; say so plainly.
       const finished = (result as { finishedStatus?: unknown } | null)?.finishedStatus;
-      const plain = typeof finished === "string" ? `The task had already finished as ${finished}, so nothing was cancelled.` : result;
+      const plain = finished === "CANCELLED" ? "The task was already cancelled."
+        : typeof finished === "string" ? `The task had already finished as ${finished}, so nothing was cancelled.` : result;
       services.stdout.write(formatSuccess(globals.json ? result : plain, globals.json));
     });
   adminWorkspace

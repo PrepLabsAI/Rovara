@@ -96,6 +96,21 @@ describe("AgentX administration workflow", () => {
     expect(JSON.parse(json.output)).toEqual({ ok: true, data: answer });
   });
 
+  it("admin workspace cancel says a task already cancelled was already cancelled (#196 review)", async () => {
+    const context = await administratorContext("agentx-cli-cancel-");
+    const workspaceId = randomUUID();
+    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ outcome: "NOTHING_RUNNING", workspaceId, finishedStatus: "CANCELLED" }, { status: 202 }));
+    let output = "";
+    const exitCode = await executeCli([...context.globals, "admin", "workspace", "cancel", "--workspace", workspaceId], {
+      fetchImplementation,
+      tokenStore: context.tokens,
+      stdout: { write(text) { output += text; } },
+      stderr: { write(text) { throw new Error(text); } },
+    });
+    expect(exitCode).toBe(0);
+    expect(output).toBe("The task was already cancelled.\n");
+  });
+
   it("binds a Slack channel to the selected project", async () => {
     const context = await administratorContext("agentx-cli-bind-");
     const fetchImplementation = vi.fn<typeof fetch>(async (input, init) => {

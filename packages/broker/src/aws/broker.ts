@@ -3033,9 +3033,9 @@ async function requestCancellation(
         UpdateExpression: "SET #status = :cancel, updatedAt = :now",
         // Issue 196: only a target not yet finished, so a result that lands between the read above
         // and this write keeps its final status. CANCEL_REQUESTED is still running: a repeated
-        // cancel queues again, so a cancel whose dispatch was lost can be sent again. (Issue 173's
-        // opt-in "live-only" condition stays useful on top of this: it also leaves out
-        // CANCEL_REQUESTED, so of two racing cancels only one is queued.)
+        // cancel queues again, so a cancel whose dispatch was lost can be sent again. (If issue
+        // 173's opt-in "live-only" option lands, it narrows this by leaving out CANCEL_REQUESTED;
+        // the values below stay unconditional, since this default condition uses them all.)
         ConditionExpression: "fence = :fence AND (#status = :accepted OR #status = :dispatching OR #status = :running OR #status = :cancel)",
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: {
