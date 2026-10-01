@@ -65,6 +65,26 @@ describe("the tool loop guard", () => {
     expect(actions(guard, events)).toEqual([]);
   });
 
+  it("does not let a successful read, grep, find or ls end a failing edit streak (#158)", () => {
+    const guard = new ToolLoopGuard();
+    const failingEdit = () => toolCall(
+      { path: "README.md", edits: [{ oldText: "a", newText: "b" }] },
+      { isError: true, text: "Could not find the exact text in README.md. The old text must match exactly including all whitespace and newlines." },
+      "edit",
+    );
+    const lookups = [
+      toolCall({ path: "README.md" }, { isError: false, text: "# Title" }, "read"),
+      toolCall({ pattern: "Title" }, { isError: false, text: "README.md:1" }, "grep"),
+      toolCall({ pattern: "*.md" }, { isError: false, text: "README.md" }, "find"),
+      toolCall({ path: "." }, { isError: false, text: "README.md" }, "ls"),
+      toolCall({ path: "README.md" }, { isError: false, text: "# Title" }, "read"),
+    ];
+    const found = lookups.flatMap((lookup) => actions(guard, [...lookup, ...failingEdit()]));
+    expect(found.map((action) => action.kind)).toEqual(["warn", "stop"]);
+    const stop = found.at(-1)!;
+    expect(stop.kind === "stop" && stop.error.message).toMatch(/repeated the same failing edit call 5 times/);
+  });
+
   it("matches arguments regardless of key order", () => {
     const guard = new ToolLoopGuard();
     const events = [

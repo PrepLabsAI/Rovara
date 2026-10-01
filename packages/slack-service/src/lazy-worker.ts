@@ -78,7 +78,7 @@ export function createLazyWorker(input: {
     if (result.status === "PREPARING" && result.operationId) {
       await input.post(result.created ? NEW_WORKSPACE_MESSAGE : STILL_PREPARING_MESSAGE);
       const controller = new AbortController();
-      let prepared: { status: string } | "TIMED_OUT";
+      let prepared: { status: string; error?: string | undefined } | "TIMED_OUT";
       try {
         prepared = await withDeadline(
           input.api.waitForOperation(result.workspaceId, result.operationId, controller.signal),
@@ -97,7 +97,7 @@ export function createLazyWorker(input: {
       }
       if (prepared.status !== "SUCCEEDED") {
         input.log("workspace.preparation_failed", { eventId: input.eventId, status: prepared.status });
-        await input.post(preparationFailedMessage(prepared.status));
+        await input.post(preparationFailedMessage(prepared.status, prepared.error));
         return unavailableRefusal(`workspace setup ${prepared.status.toLowerCase()}`);
       }
       return undefined;

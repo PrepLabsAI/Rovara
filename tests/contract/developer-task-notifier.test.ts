@@ -4,6 +4,7 @@
 import { randomUUID } from "node:crypto";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
+import { indexExpiresAt } from "@agentx/contracts";
 import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
 import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import type { Notice } from "../../packages/broker/src/developer/notifications.js";
@@ -58,7 +59,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
   const active = () => String((harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { activeOperationId: string }).activeOperationId);
   return {
     ...harness, stream, posts, queue, logs, pump, handle, taskId, workspaceId, active, deliveryFailed, retryLater,
-    advance: (ms: number) => { clock += ms; }, fail: (code: string | undefined) => { failing = code; },
+    advance: (ms: number) => { clock += ms; }, fail: (code: string | undefined) => { failing = code; }, now: () => clock,
   };
 }
 
@@ -399,5 +400,158 @@ describe("chat.postMessage", () => {
     await post({ channel: SLACK_CHANNEL, text: "hi" });
     // Loaded once at first, and once after each refusal; a rate limit keeps the token.
     expect(loadToken).toHaveBeenCalledTimes(3);
+  });
+});
+
+describe("notice markers expire after 30 days (25c note 2)", () => {
+  const expiry = (h: { now(): number }) => indexExpiresAt(new Date(h.now()).toISOString());
+  const notices = (db: FakeDynamoDb) => db.find((item) => item.entityType === "NOTICE");
+
+  it("gives every delivered marker, the start's and each reply's, the TTL attribute", async () => {
+    const h = await notifierHarness();
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    const markers = notices(h.db);
+    expect(markers.length).toBeGreaterThanOrEqual(3);
+    for (const marker of markers) expect(marker).toMatchObject({ deliveredAt: expect.any(String) as string, indexExpiresAt: expiry(h) });
+  });
+
+  it("gives a start claim whose post failed the TTL attribute", async () => {
+    const h = await notifierHarness();
+    h.fail("ratelimited");
+    await h.pump();
+    const claim = h.db.get(`DEVTASK#${h.taskId}`, `NOTICE#${h.taskId}:start`);
+    expect(claim).not.toHaveProperty("deliveredAt");
+    expect(claim).toMatchObject({ indexExpiresAt: expiry(h) });
+  });
+
+  it("gives a kept start ts the TTL attribute", async () => {
+    const h = await notifierHarness({ shareToChannel: true }, {
+      documentClient: (db) => ({
+        send: async (command: unknown) => {
+          if (command instanceof TransactWriteCommand) throw Object.assign(new Error("the table is unavailable"), { name: "InternalServerError" });
+          return db.send(command as Parameters<FakeDynamoDb["send"]>[0]);
+        },
+      }),
+    });
+    await h.pump();
+    expect(h.db.get(`DEVTASK#${h.taskId}`, `NOTICE#${h.taskId}:start`)).toMatchObject({ postedTs: expect.any(String) as string, indexExpiresAt: expiry(h) });
+  });
+});
+
+describe("an uncertain start post is logged (25c note 3)", () => {
+  const uncertain = (logs: Array<Record<string, unknown>>) => logs.filter((entry) => entry.event === "developer_notifier.start_post_uncertain");
+
+  /** The real poster, over a fake fetch: what the Lambda posts with. */
+  const poster = (fetchImplementation: () => Promise<Response>, loadToken: () => Promise<string> = async () => BOT_TOKEN) =>
+    cachedSlackPoster(loadToken, Date.now, fetchImplementation);
+
+  it("logs a start post whose request failed before Slack answered, once, with the error's name only", async () => {
+    let calls = 0;
+    const h = await notifierHarness({ shareToChannel: true }, {
+      post: poster(async () => { calls += 1; throw Object.assign(new Error(`the operation was aborted ${BOT_TOKEN}`), { name: "TimeoutError" }); }),
+    });
+    await h.pump();
+    expect(calls).toBe(1);
+    expect(uncertain(h.logs)).toEqual([{ event: "developer_notifier.start_post_uncertain", reason: "post_error", taskId: h.taskId, error: "TimeoutError" }]);
+    expect(JSON.stringify(h.logs)).not.toContain(BOT_TOKEN);
+  });
+
+  it("logs a start post whose 2xx answer could not be read, since Slack may have posted it", async () => {
+    const h = await notifierHarness({ shareToChannel: true }, {
+      post: poster(async () => ({ ok: true, status: 200, json: async () => { throw Object.assign(new Error("body cut off"), { name: "AbortError" }); } }) as unknown as Response),
+    });
+    await h.pump();
+    expect(uncertain(h.logs)).toEqual([{ event: "developer_notifier.start_post_uncertain", reason: "post_error", taskId: h.taskId, error: "SlackPostError" }]);
+  });
+
+  it("logs a start post that met a 5xx answer", async () => {
+    const h = await notifierHarness({ shareToChannel: true }, {
+      post: poster(async () => ({ ok: false, status: 503, json: async () => { throw new Error("not json"); } }) as unknown as Response),
+    });
+    await h.pump();
+    expect(uncertain(h.logs)).toHaveLength(1);
+  });
+
+  it("does not log a start post that never left because the bot token could not be loaded", async () => {
+    let fetched = 0;
+    const h = await notifierHarness({ shareToChannel: true }, {
+      post: poster(async () => { fetched += 1; throw new Error("unreachable"); }, async () => { throw Object.assign(new Error("throttled"), { name: "ThrottlingException" }); }),
+    });
+    await h.pump();
+    expect(fetched).toBe(0);
+    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.retry", kind: "start", reason: "ThrottlingException" }));
+    expect(uncertain(h.logs)).toEqual([]);
+  });
+
+  it("does not log a start post Slack refused with its own error code", async () => {
+    const h = await notifierHarness({ shareToChannel: true }, {
+      post: poster(async () => ({ ok: true, status: 200, json: async () => ({ ok: false, error: "channel_not_found" }) }) as unknown as Response),
+    });
+    await h.pump();
+    expect(uncertain(h.logs)).toEqual([]);
+  });
+
+  it("does not log a post Slack refused", async () => {
+    const h = await notifierHarness();
+    h.fail("ratelimited");
+    await h.pump();
+    expect(uncertain(h.logs)).toEqual([]);
+  });
+
+  it("does not log a reply's failed post, only the start's", async () => {
+    let failReplies = false;
+    let ts = 1_695_500_000_000_300;
+    const h = await notifierHarness({ shareToChannel: true }, {
+      post: async (input) => {
+        if (failReplies && input.threadTs !== undefined) throw Object.assign(new Error("fetch failed"), { name: "TypeError" });
+        ts += 1;
+        const text = String(ts);
+        return { ts: `${text.slice(0, 10)}.${text.slice(10)}` };
+      },
+    });
+    await h.pump();
+    failReplies = true;
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    expect(uncertain(h.logs)).toEqual([]);
+  });
+
+  it("logs a lapsed start claim with no posted ts, once, and posts again", async () => {
+    const h = await notifierHarness();
+    await h.handle({ Records: h.stream.take().map((record) => ({ ...record, eventSource: "aws:dynamodb" })) });
+    // A delivery claimed the post and then died before it recorded anything.
+    h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `NOTICE#${h.taskId}:start`, entityType: "NOTICE", postingUntil: h.now() - 1 });
+    await h.pump();
+    expect(h.posts).toHaveLength(1);
+    expect(uncertain(h.logs)).toEqual([{ event: "developer_notifier.start_post_uncertain", reason: "claim_lapsed", taskId: h.taskId }]);
+  });
+
+  it("logs a lapsed claim once when two deliveries find it at the same time, from the one that wins the claim", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const h = await notifierHarness({ shareToChannel: true }, { post: async () => { await gate; return { ts: "1695500000.000200" }; } });
+    await h.handle({ Records: h.stream.take().map((record) => ({ ...record, eventSource: "aws:dynamodb" })) });
+    const start = h.queue.find((entry) => entry.notice.kind === "start")!.notice;
+    h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `NOTICE#${h.taskId}:start`, entityType: "NOTICE", postingUntil: h.now() - 1 });
+    const delivery = (id: string) => h.handle({ Records: [{ eventSource: "aws:sqs", messageId: id, receiptHandle: id, body: JSON.stringify(start), attributes: { ApproximateReceiveCount: "1" } }] });
+    const both = Promise.all([delivery("first"), delivery("second")]);
+    await vi.waitFor(() => expect(uncertain(h.logs)).toHaveLength(1));
+    release();
+    await both;
+    expect(uncertain(h.logs)).toEqual([{ event: "developer_notifier.start_post_uncertain", reason: "claim_lapsed", taskId: h.taskId }]);
+  });
+
+  it("does not log a start claim given back after Slack refused the post", async () => {
+    const h = await notifierHarness();
+    h.fail("ratelimited");
+    await h.pump();
+    h.fail(undefined);
+    await h.pump();
+    expect(h.posts).toHaveLength(1);
+    expect(uncertain(h.logs)).toEqual([]);
   });
 });

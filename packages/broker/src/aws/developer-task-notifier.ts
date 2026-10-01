@@ -7,7 +7,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { AdminChangePendingRecordSchema, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, adminChangeKey, lastAssistantResponse, sharedTaskKey, type PendingChange } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, AdminChangePendingRecordSchema, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, adminChangeKey, indexExpiresAt, lastAssistantResponse, sharedTaskKey, type PendingChange } from "@agentx/contracts";
 import { adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
@@ -15,7 +15,7 @@ import { deriveTaskStatus, failureCategory, taskKey, taskPointerKey, type Develo
 import { isConditional } from "./broker-shared.js";
 import { requiredEnvironment } from "./lambda.js";
 import { parseSlackSecrets } from "./slack-ingress.js";
-import { SlackPostError, chatPostMessage, chatUpdate } from "./slack-web.js";
+import { SlackPostError, chatPostMessage, chatUpdate, postMayHaveLanded } from "./slack-web.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
@@ -68,12 +68,19 @@ async function getItem<T>(deps: NotifierDependencies, key: { pk: string; sk: str
   return ((await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: key, ConsistentRead: true }))) as { Item?: T }).Item;
 }
 
+/**
+ * 25c note 2 (owner answer, 2026-09-30): every NOTICE item carries the State table's TTL attribute,
+ * 30 days on, far past the hour a notice is delivered in. Only named environments run the notifier,
+ * and their State table expires items on this attribute.
+ */
+const noticeExpiry = (deps: NotifierDependencies) => ({ [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(new Date(deps.now()).toISOString()) });
+
 /** A delivered marker replaces a start's posted-but-unrecorded marker, never another delivered one. */
 const MARKER_CONDITION = "attribute_not_exists(pk) OR attribute_not_exists(deliveredAt)";
 
 async function putMarker(deps: NotifierDependencies, marker: { pk: string; sk: string }): Promise<void> {
   try {
-    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: new Date(deps.now()).toISOString() }, ConditionExpression: MARKER_CONDITION }));
+    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: new Date(deps.now()).toISOString(), ...noticeExpiry(deps) }, ConditionExpression: MARKER_CONDITION }));
   } catch (error) {
     if (!isConditional(error)) throw error;
   }
@@ -145,7 +152,7 @@ async function recordThread(deps: NotifierDependencies, taskId: string, threadTs
           },
           ConditionExpression: "attribute_not_exists(pk)",
         } },
-        { Put: { TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: now }, ConditionExpression: MARKER_CONDITION } },
+        { Put: { TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: now, ...noticeExpiry(deps) }, ConditionExpression: MARKER_CONDITION } },
       ] }));
       return;
     } catch (error) {
@@ -288,10 +295,14 @@ async function deliverAdminChange(deps: NotifierDependencies, notice: Notice): P
     // Another delivery is posting it now; this one is retried and then finds it delivered.
     throw new DmPending();
   }
+  // 25c note 3, as for the start message: a claim taken over from a delivery that died, or a post
+  // that may have landed, can mean a second message. Logged with the IDs and the error's name only.
+  if (change.dmClaimedAt !== undefined) deps.log({ event: "admin_change.dm_post_uncertain", reason: "claim_lapsed", changeId: change.changeId, traceId: change.traceId });
   let posted: { ts: string; channel?: string };
   try {
     posted = await deps.post({ channel: change.slackUserId, ...adminChangeMessage(change, deps.now()) });
   } catch (error) {
+    if (postMayHaveLanded(error)) deps.log({ event: "admin_change.dm_post_uncertain", reason: "post_error", changeId: change.changeId, traceId: change.traceId, error: errorName(error) });
     // Gives the claim back at once, so the retry need not wait for it to lapse. Best effort.
     try {
       await deps.documentClient.send(new UpdateCommand({
@@ -332,9 +343,10 @@ async function claimStart(deps: NotifierDependencies, marker: { pk: string; sk: 
   try {
     await deps.documentClient.send(new UpdateCommand({
       TableName: deps.tableName, Key: marker,
-      UpdateExpression: "SET entityType = :notice, postingUntil = :until",
+      UpdateExpression: "SET entityType = :notice, postingUntil = :until, #expires = :expires",
       ConditionExpression: "attribute_not_exists(deliveredAt) AND attribute_not_exists(postedTs) AND (attribute_not_exists(postingUntil) OR postingUntil < :now)",
-      ExpressionAttributeValues: { ":notice": "NOTICE", ":until": until, ":now": deps.now() },
+      ExpressionAttributeNames: { "#expires": INDEX_EXPIRY_ATTRIBUTE },
+      ExpressionAttributeValues: { ":notice": "NOTICE", ":until": until, ":now": deps.now(), ":expires": noticeExpiry(deps)[INDEX_EXPIRY_ATTRIBUTE] },
     }));
     return true;
   } catch (error) {
@@ -355,7 +367,7 @@ async function releaseStart(deps: NotifierDependencies, marker: { pk: string; sk
   }
 }
 
-interface NoticeMarker { deliveredAt?: string; postedTs?: string }
+interface NoticeMarker { deliveredAt?: string; postedTs?: string; postingUntil?: number }
 
 /**
  * C1: a start message posted but not recorded keeps its ts on the notice's marker, so the next
@@ -364,7 +376,7 @@ interface NoticeMarker { deliveredAt?: string; postedTs?: string }
  */
 async function keepPostedTs(deps: NotifierDependencies, marker: { pk: string; sk: string }, ts: string): Promise<void> {
   try {
-    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", postedTs: ts } }));
+    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", postedTs: ts, ...noticeExpiry(deps) } }));
   } catch (error) {
     deps.log({ event: "developer_notifier.posted_ts_lost", error: errorName(error) });
   }
@@ -391,6 +403,9 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
       await recordThread(deps, task.taskId, delivered.postedTs, marker);
       return "recorded";
     }
+    // 25c note 3 (owner answer, 2026-09-30): a start post may have landed without its ts being kept,
+    // so the next post can be a second start message. Left as is; these logs count how often.
+    const lapsed = delivered?.postingUntil !== undefined && delivered.postingUntil < deps.now();
     const until = deps.now() + START_LEASE_MS;
     if (!await claimStart(deps, marker, until)) {
       const current = await getItem<NoticeMarker>(deps, marker);
@@ -402,6 +417,8 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
       // Another delivery is posting it now: this one is retried, and then finds it delivered.
       throw new StartPending();
     }
+    // Logged by the delivery that won the claim only, so one lapse is counted once.
+    if (lapsed) deps.log({ event: "developer_notifier.start_post_uncertain", reason: "claim_lapsed", taskId: task.taskId });
     const status = await currentStatus(deps, task);
     let ts: string;
     try {
@@ -410,6 +427,8 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
         text: startMessage({ developerName: task.developerName, slackUserId: task.slackUserId, client: task.client, title: task.title, project: task.project, mode: share.mode, status, sharedReason: share.sharedReason }),
       }));
     } catch (error) {
+      // Slack's own error code means nothing was posted; a lost or unreadable answer may not.
+      if (postMayHaveLanded(error)) deps.log({ event: "developer_notifier.start_post_uncertain", reason: "post_error", taskId: task.taskId, error: errorName(error) });
       await releaseStart(deps, marker, until);
       throw error;
     }

@@ -4,6 +4,10 @@ export interface CommandResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /** The signal that ended the command, when one did (#154). */
+  signal?: string;
+  /** True when the command's own timeoutSeconds ended it (#154). */
+  timedOut?: boolean;
 }
 
 export type ReadinessCommandRunner = (

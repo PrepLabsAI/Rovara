@@ -8,7 +8,7 @@
 import { randomUUID } from "node:crypto";
 import type { InitStepId } from "../install-state.js";
 import type { InitEvent } from "../steps.js";
-import type { WizardPhase, WizardQuestion, WizardResume, WizardSnapshot, WizardState, WizardStep } from "./protocol.js";
+import type { WizardCard, WizardLink, WizardPhase, WizardQuestion, WizardResume, WizardSnapshot, WizardState, WizardStep } from "./protocol.js";
 
 /** How many log lines the page is given on connect; the terminal keeps all of them either way. */
 export const LOG_BACKLOG = 1000;
@@ -28,6 +28,8 @@ export interface WizardHub {
   snapshot(): WizardSnapshot;
   state(): WizardState;
   subscribe(listener: WizardListener): () => void;
+  /** How many pages are connected now (their event streams). */
+  connected(): number;
   /** One line for the log pane (the same line `agentx init` writes to stderr). */
   log(line: string): void;
   /** The checklist, in the order the steps run, before any of them has. */
@@ -35,6 +37,15 @@ export interface WizardHub {
   applyEvent(event: InitEvent): void;
   showPlan(text: string): void;
   showResume(resume: WizardResume): void;
+  /** Shows a card, or replaces the one with the same id where it stands. */
+  showCard(card: WizardCard): void;
+  /** The address the run now waits on the operator to open. Cleared on every step event (a step
+   * started, done, skipped or waiting), and when the card that offered the same address is
+   * replaced by one that no longer offers it. */
+  showLink(link: WizardLink): void;
+  /** Drops the run's link: the address it offered no longer leads anywhere useful (a sign-in
+   * that failed). */
+  clearLink(): void;
   /** Publishes a question and resolves with the answer the page posts, once `check` accepts it. */
   ask(question: NewQuestion, check: AnswerCheck): Promise<string>;
   /** The page's answer. Returns the message to show on the field, or undefined when accepted. */
@@ -57,6 +68,39 @@ interface Pending {
   reject: (error: Error) => void;
 }
 
+/** Logged, without the address, when a link fails isShowableLink. */
+export const LINK_REFUSED = "the installer left out a link it could not check (only https:// addresses are shown)";
+
+const LOOPBACK_LINK = /^http:\/\/127\.0\.0\.1:(\d{1,5})\//;
+
+/** This machine's 127.0.0.1 listener, on a port a listener can have (1 to 65535). */
+function isLoopbackLink(url: string): boolean {
+  const port = Number(LOOPBACK_LINK.exec(url)?.[1] ?? "0");
+  if (port < 1 || port > 65535) return false;
+  try {
+    return new URL(url).hostname === "127.0.0.1";
+  } catch {
+    return false;
+  }
+}
+
+/** True for an address the page may offer as a link: this machine's 127.0.0.1 listener, or an
+ * https:// address with a host and no user name or password in it. */
+export function isShowableLink(url: string): boolean {
+  if (isLoopbackLink(url)) return true;
+  try {
+    const parsed = new URL(url);
+    return parsed.protocol === "https:" && parsed.hostname !== "" && parsed.username === "" && parsed.password === "";
+  } catch {
+    return false;
+  }
+}
+
+/** The card without its link. */
+function withoutLink(card: WizardCard): WizardCard {
+  return { id: card.id, title: card.title, status: card.status, lines: card.lines, ...(card.checks === undefined ? {} : { checks: card.checks }) };
+}
+
 export function createWizardHub(env: string): WizardHub {
   let phase: WizardPhase = "running";
   let steps: WizardStep[] = [];
@@ -64,6 +108,8 @@ export function createWizardHub(env: string): WizardHub {
   let plan: string | undefined;
   let resume: WizardResume | undefined;
   let outcome: string | undefined;
+  let cards: WizardCard[] = [];
+  let link: WizardLink | undefined;
   const log: string[] = [];
   const listeners = new Set<WizardListener>();
   let pending: Pending | undefined;
@@ -76,6 +122,8 @@ export function createWizardHub(env: string): WizardHub {
     ...(question === undefined ? {} : { question }),
     ...(plan === undefined ? {} : { plan }),
     ...(resume === undefined ? {} : { resume }),
+    ...(cards.length === 0 ? {} : { cards }),
+    ...(link === undefined ? {} : { link }),
     ...(outcome === undefined ? {} : { outcome }),
   });
   const publish = () => { const current = state(); for (const listener of listeners) listener.state(current); };
@@ -91,6 +139,11 @@ export function createWizardHub(env: string): WizardHub {
     publish();
     return question;
   };
+  const appendLog = (line: string) => {
+    log.push(line);
+    if (log.length > LOG_BACKLOG * 2) log.splice(0, log.length - LOG_BACKLOG);
+    for (const listener of listeners) listener.log(line);
+  };
 
   return {
     state,
@@ -99,16 +152,15 @@ export function createWizardHub(env: string): WizardHub {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    log(line) {
-      log.push(line);
-      if (log.length > LOG_BACKLOG * 2) log.splice(0, log.length - LOG_BACKLOG);
-      for (const listener of listeners) listener.log(line);
-    },
+    connected: () => listeners.size,
+    log: appendLog,
     setSteps(next) {
       steps = next.map((step) => ({ id: step.id, title: step.title, status: "pending" }));
       publish();
     },
     applyEvent(event) {
+      // The link belonged to the step that just started or ended.
+      link = undefined;
       switch (event.kind) {
         case "step-skipped": return changeStep(event.id, event.title, { status: "skipped" });
         case "step-started": return changeStep(event.id, event.title, { status: "running" });
@@ -118,6 +170,33 @@ export function createWizardHub(env: string): WizardHub {
     },
     showPlan(text) { plan = text; publish(); },
     showResume(next) { resume = next; publish(); },
+    showCard(next) {
+      let shown = next;
+      if (next.link !== undefined && !isShowableLink(next.link.url)) {
+        appendLog(LINK_REFUSED);
+        shown = withoutLink(next);
+      }
+      const replaced = cards.find((existing) => existing.id === shown.id);
+      // The run's link came from the card being replaced (Slack's create button, GitHub's install
+      // page): once the new card no longer offers it, it is stale, and the page drops it too.
+      if (replaced?.link !== undefined && link?.url === replaced.link.url && shown.link?.url !== replaced.link.url) link = undefined;
+      cards = replaced !== undefined
+        ? cards.map((existing) => (existing.id === shown.id ? shown : existing))
+        : [...cards, shown];
+      publish();
+    },
+    showLink(next) {
+      if (!isShowableLink(next.url)) {
+        appendLog(LINK_REFUSED);
+        return;
+      }
+      link = next;
+      publish();
+    },
+    clearLink() {
+      link = undefined;
+      publish();
+    },
     async ask(next, check) {
       if (closed) throw new Error("the install wizard has closed");
       if (pending !== undefined) throw new Error("the install wizard is already waiting on a question");

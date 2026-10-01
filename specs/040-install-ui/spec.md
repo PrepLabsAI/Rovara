@@ -67,7 +67,8 @@ AgentX reply in its thread, with no command run by hand.
 `--yes` unattended installs, CI, CloudShell and SSH sessions keep working exactly as they do today.
 
 **Independent Test**: the existing `agentx init --yes` tests pass unchanged, and on a host with no
-browser the wizard prints its URL and falls back to the terminal prompter.
+browser init prints one line saying how to use the page (`--ui`, and `ssh -L` over SSH), then asks in
+the terminal (Q2).
 
 ## Requirements
 
@@ -76,9 +77,14 @@ browser the wizard prints its URL and falls back to the terminal prompter.
 - **FR-001**: `agentx init --ui` MUST start an HTTP server bound to `127.0.0.1` on an ephemeral
   port, open the operator's browser at it, and serve the wizard. `--no-ui` MUST force the terminal
   path. When neither is given, the UI is used if a browser is available and the session is
-  interactive; otherwise the terminal prompter is used.
+  interactive; otherwise the terminal prompter is used. A browser is available when the session is
+  not over SSH, not in CloudShell or CI, and the machine is macOS, or Linux with a display; Windows
+  uses the terminal by default (Q12). `--no-browser` with neither flag means the terminal. Without a
+  browser, in an interactive terminal with neither flag and no `--yes`, `init` prints one line saying
+  how to get the page, then asks in the terminal (Q2).
 - **FR-002**: The server MUST exit with the `init` run. It MUST NOT outlive the command, and MUST
-  NOT bind any address other than the loopback one.
+  NOT bind any address other than the loopback one. When a question waits and no page has been
+  connected for a minute, the terminal says once, for that question, where to reopen the page (Q3).
 - **FR-003**: A `browserPrompter()` MUST implement `Prompter` against the page: `ask`, `choose`,
   `confirm` and `secret` each render as a question and resolve with the posted answer. Validation
   rejections MUST be shown inline on the field rather than thrown as a failed run.
@@ -95,29 +101,42 @@ browser the wizard prints its URL and falls back to the terminal prompter.
 - **FR-010**: Every request MUST carry a single-use session token minted for that run. A request
   without it MUST be refused.
 - **FR-011**: The server MUST reject any request whose `Origin` or `Referer` is not its own, MUST
-  send no CORS headers, and MUST reject cross-site `Sec-Fetch-Site` values.
+  send no CORS headers, and MUST reject cross-site `Sec-Fetch-Site` values. One exception (Q6):
+  `GET /github/created`, only while the GitHub App step waits for the manifest code, only with the
+  manifest flow's `state` (compared in constant time), once, and only with the listener's own
+  `Host`. Its answer loads nothing and sends no Referer. A late or second callback is refused by the
+  ordinary checks (403 for GitHub's cross-site visit, 401 without a session token) and resolves
+  nothing.
 - **FR-012**: A secret entered in the page MUST pass straight through the existing `cleanSecret` →
   Secrets Manager path. It MUST NOT be echoed back to the page, put in an `InitEvent`, written to
-  an install-progress `note`, or written to disk.
+  an install-progress `note`, or written to disk. In the page, a masked field is emptied as soon as
+  its value is sent, and the question area is emptied once the answer is taken (Q4).
 
 ### Connect AWS
 
 - **FR-020**: The AWS screen MUST list the profiles in the operator's AWS configuration, and for
   the selected one show the resolved `sts:GetCallerIdentity` account id and ARN, so the operator can
-  see which account the install will land in before it starts.
+  see which account the install will land in before it starts. The profiles are read from the AWS
+  CLI's config and credentials files; with two or more, the page asks which; the choice is not
+  stored (Q9).
 - **FR-021**: When credentials are missing or expired (`AUTH_REQUIRED`), the screen MUST offer a
   sign-in action that runs the profile's SSO login and re-resolves the identity, instead of ending
-  the run with advice text.
+  the run with advice text. The sign-in action is `aws sso login --profile <name>` for an IAM
+  Identity Center profile and `aws login --profile <name>` for an `aws login` profile; other
+  profiles get Check again only (Q9).
 - **FR-022**: The region picker MUST offer only the regions the release supports.
 - **FR-023**: The prerequisite checks (region support, Bedrock model access, EC2 vCPU quota) MUST be
   shown as a pass/fail list, each failure with what to do about it, and MUST be re-runnable without
-  restarting `init`.
+  restarting `init`. Checking again is offered on the page only; the terminal path stops as before
+  (Q7). On the page, a prerequisite failure that no check reports is listed as a failed
+  "Prerequisites" item with the error's words.
 
 ### Connect GitHub
 
 - **FR-030**: The GitHub App MUST be created through the existing manifest flow, with the manifest
   form and the callback both served by the wizard's own origin, so the operator stays in the
-  wizard. The existing `state` check MUST still be enforced on the callback.
+  wizard. The existing `state` check MUST still be enforced on the callback. The terminal path
+  keeps its one-time listener.
 - **FR-031**: After creation the wizard MUST link the operator to the app's repository-selection
   page and show the installation wait as a waiting card that resolves when the installation
   appears.
@@ -126,23 +145,34 @@ browser the wizard prints its URL and falls back to the terminal prompter.
 
 - **FR-040**: The Slack screen MUST offer a button that opens Slack's create-app page with the
   generated manifest, then two masked fields for the bot token and signing secret, validated inline
-  by the existing `checkSlackBotToken` and `checkSlackSigningSecret`.
+  by the existing `checkSlackBotToken` and `checkSlackSigningSecret`. A token Slack refuses is
+  pasted again on the page (Q8).
 - **FR-041**: The Request URL verification MUST be shown as a live card with its result, and MUST
-  be re-runnable after the operator fixes the app.
+  be re-runnable after the operator fixes the app. Checking again is offered on the page only; the
+  terminal path stops as before (Q7).
 
 ### Finish the job
 
 - **FR-050**: After deployment the wizard MUST create the Cognito admin user, sign the operator in,
-  register the first project and bind a Slack channel, as screens in the same run.
+  register the first project and bind a Slack channel, as screens in the same run. On the page,
+  the sign-in page is a button (Q5), and a sign-in that fails or times out can be tried again (Q7).
+  A private channel's invite wait and the alert subscription's confirmation are cards that resolve
+  by themselves: the alert card waits on the page (up to 10 minutes) and, after that, the alert
+  wait can be checked again on the page.
 - **FR-051**: The final screen MUST confirm a real reply in the bound channel, and MUST report what
-  to fix when it does not arrive.
-- **FR-052**: `nextStepsText()`'s manual follow-up commands MUST be removed from the UI path once
-  FR-050 and FR-051 hold.
+  to fix when it does not arrive. A second watch ignores a turn the first one already reported as
+  failed. On the page, a failed or missed reply can be watched for again (Q7); the terminal path
+  stops as before.
+- **FR-052**: The page's last card leads with what works now (where to talk to AgentX, how
+  developers sign in) and lists the optional day-2 commands under 'Later, if you want more'. No
+  command is needed to finish; `nextStepsText()` no longer exists (spec 015 phase 15d2 removed
+  it). (Q10.)
 
 ### Packaging
 
-- **FR-060**: The wizard's static assets MUST ship in `release:build` output and in the published
-  npm package.
+- **FR-060**: The wizard's page, stylesheet and module are compiled into the CLI and ship in its
+  published npm package, which a pack test checks. `release:build` builds the CloudFormation release
+  and does not carry the CLI (Q11).
 - **FR-061**: The README and `docs/` install instructions MUST describe the UI path and `--no-ui`.
 
 ## Success Criteria
@@ -169,10 +199,29 @@ browser the wizard prints its URL and falls back to the terminal prompter.
 
 ## Decisions
 
-- **Location**: `packages/cli/src/init/ui/`, static assets built to `packages/cli/dist/ui/`. Not a
-  separate package: it ships with the CLI and shares the init types.
+- **Location**: `packages/cli/src/init/ui/`. The page's assets are text in `ui/page.ts`, compiled
+  with the rest of the CLI (Q11). Not a separate package: it ships with the CLI and shares the init
+  types.
 - **Terminal path stays**: the UI is additive. `InitCliDependencies` is already a DI seam, so the
-  UI is injected and the existing tests are untouched.
+  UI is injected and the existing tests are untouched. It stays the default for `--yes`, CI,
+  CloudShell, SSH and any session without a browser (Q1).
 - **Phasing**: (1) server, prompter, event/log stream, review and resume screens behind `--ui`;
   (2) the three connect screens and the prerequisite checklist; (3) admin user, project, channel
   bind and the test reply; (4) UI on by default plus packaging and docs. Phase 1 is shippable alone.
+  Phase 2 built, see PR #161; its live check is deferred
+  to the combined final live check (owner, 2026-09-30).
+  Phase 3 built, see PR #164; live check deferred to the combined final live check
+  (owner, 2026-09-30).
+  Phase 4 built, see PR #165; live check deferred to the combined final live
+  check (owner, 2026-09-30).
+- **Cards.** The page's connect and finishing screens are status cards built in `ui/cards.ts` from
+  facts a step already has; no card builder takes a secret. Steps reach the page through an
+  optional `InstallSurface` on the init context, so the terminal path is unchanged (phase 2).
+- **Retry on the page.** Where the page offers to try again, its failure cards drop the terminal's
+  closing "run agentx ... init again" advice (phase 2); phase 3's test reply card follows the same
+  rule (R2), and so does the admin card's failed sign-in. A failure the page offers no retry for
+  (the test alarm, an OIDC token with no name to record) keeps its own next step.
+- Phase 4 fixed the two notes from phase 3, and the GitHub App card the same way. On the page, a
+  failed sign-in drops its sign-in button, so none is left while Sign in again? is asked. The
+  channel card and the GitHub App card show failed, with the error's own words and next step (the
+  page offers no retry there), when their wait times out or the step fails after a waiting card.

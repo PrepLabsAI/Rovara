@@ -26,13 +26,15 @@ function askCheck(options: { defaultValue?: string; validate?: (value: string) =
 
 /** `cleanSecret`'s own rules, applied on the field: the common mis-paste (an empty field, or a
  * value with the surrounding text copied with it) becomes an inline error rather than a dead run.
- * `cleanSecret` still runs afterwards on the way to Secrets Manager; this only front-runs it. */
-function secretCheck(what: string, multiline: boolean): AnswerCheck {
+ * `cleanSecret` still runs afterwards on the way to Secrets Manager; this only front-runs it.
+ * `validate` (FR-040) then checks the cleaned value, so a refusal never sees the paste markers. */
+function secretCheck(what: string, multiline: boolean, validate?: (value: string) => string | undefined): AnswerCheck {
   return (raw) => {
     const value = stripPasteMarkers(raw).trim();
     if (value === "") return { error: `the ${what} is empty` };
     if (!multiline && /\s/.test(value)) return { error: `the ${what} contains spaces or line breaks; copy it again and paste only the value` };
-    return { value };
+    const problem = validate?.(value);
+    return problem === undefined ? { value } : { error: problem };
   };
 }
 
@@ -71,7 +73,7 @@ export function browserPrompter(hub: WizardHub): Prompter {
       const multiline = options.multiline === true;
       return hub.ask(
         { kind: "secret", text: question, masked: true, ...(multiline ? { multiline: true } : {}) },
-        secretCheck(question, multiline),
+        secretCheck(question, multiline, options.validate),
       );
     },
   };

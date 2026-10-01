@@ -46,6 +46,19 @@ describe("subscribing the alert address (FR-045)", () => {
     expect(await ensureSubscribed({ api, topicArn: TOPIC, target: { kind: "email", address: "ops@example.com" }, write: () => undefined, ...clock() })).toBe("pending");
   });
 
+  it("says once that the confirmation wait begins, while the subscription is still pending (spec 040)", async () => {
+    let waits = 0;
+    const api = fakeAlerts({ confirmAfterPolls: 1_000 });
+    expect(await ensureSubscribed({ api, topicArn: TOPIC, target: { kind: "email", address: "ops@example.com" }, write: () => undefined, onWaiting: () => { waits += 1; }, ...clock() })).toBe("pending");
+    expect(waits).toBe(1);
+  });
+
+  it("never says the wait begins for a subscription already confirmed", async () => {
+    let waits = 0;
+    expect(await ensureSubscribed({ api: fakeAlerts({ existing: CONFIRMED }), topicArn: TOPIC, target: { kind: "email", address: "ops@example.com" }, write: () => undefined, onWaiting: () => { waits += 1; }, ...clock() })).toBe("confirmed");
+    expect(waits).toBe(0);
+  });
+
   it("subscribes a webhook without ever printing its address, only its host", async () => {
     const api = fakeAlerts({ confirmAfterPolls: 1 });
     const lines: string[] = [];

@@ -294,6 +294,63 @@ describe("delivering the message safely (C9)", () => {
   });
 });
 
+// 25c note 3 applied to E13: the Confirm message is claimed and posted once, as the start message
+// is, so a post that may have landed (and a lapsed claim) is logged the same way.
+describe("an uncertain Confirm message post is logged (25c note 3)", () => {
+  const uncertain = (logs: Array<Record<string, unknown>>) => logs.filter((entry) => entry.event === "admin_change.dm_post_uncertain");
+  const poster = (fetchImplementation: () => Promise<Response>) => cachedSlackClient(async () => BOT_TOKEN, Date.now, fetchImplementation).post;
+
+  it("logs a post whose request failed before Slack answered, with the IDs and the error's name only", async () => {
+    const db = new FakeDynamoDb();
+    db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z" }));
+    const h = notifier(db, Date.parse("2026-10-02T09:01:00.000Z"), {
+      post: poster(async () => { throw Object.assign(new Error(`the operation was aborted ${BOT_TOKEN}`), { name: "TimeoutError" }); }),
+    });
+    await h.deliver(dmNotice);
+    expect(uncertain(h.logs)).toEqual([{ event: "admin_change.dm_post_uncertain", reason: "post_error", changeId: CHANGE, traceId: "trace-7", error: "TimeoutError" }]);
+    expect(JSON.stringify(h.logs)).not.toContain(BOT_TOKEN);
+    expect(JSON.stringify(h.logs)).not.toContain(PLANTED);
+  });
+
+  it("logs a post that met a 5xx answer, and not one Slack refused with its own error code", async () => {
+    const db = new FakeDynamoDb();
+    db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z" }));
+    const h = notifier(db, Date.parse("2026-10-02T09:01:00.000Z"), {
+      post: poster(async () => ({ ok: false, status: 503, json: async () => { throw new Error("not json"); } }) as unknown as Response),
+    });
+    await h.deliver(dmNotice);
+    expect(uncertain(h.logs)).toEqual([{ event: "admin_change.dm_post_uncertain", reason: "post_error", changeId: CHANGE, traceId: "trace-7", error: "SlackPostError" }]);
+    const refusedDb = new FakeDynamoDb();
+    refusedDb.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z" }));
+    const refused = notifier(refusedDb, Date.parse("2026-10-02T09:01:00.000Z"), {
+      post: poster(async () => Response.json({ ok: false, error: "channel_not_found" })),
+    });
+    await refused.deliver(dmNotice);
+    expect(uncertain(refused.logs)).toEqual([]);
+  });
+
+  it("logs a claim left by a delivery that died, once, from the delivery that takes it over", async () => {
+    const db = new FakeDynamoDb();
+    db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z", dmClaimedAt: "2026-10-02T09:00:50.000Z" }));
+    const h = notifier(db);
+    await h.deliver(dmNotice);
+    expect(uncertain(h.logs)).toEqual([]);
+    h.clock.now = Date.parse("2026-10-02T09:02:00.000Z");
+    await h.deliver(dmNotice);
+    expect(h.posts).toHaveLength(1);
+    expect(uncertain(h.logs)).toEqual([{ event: "admin_change.dm_post_uncertain", reason: "claim_lapsed", changeId: CHANGE, traceId: "trace-7" }]);
+  });
+
+  it("logs nothing for a first post that lands", async () => {
+    const db = new FakeDynamoDb();
+    db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z" }));
+    const h = notifier(db);
+    await h.deliver(dmNotice);
+    expect(h.posts).toHaveLength(1);
+    expect(uncertain(h.logs)).toEqual([]);
+  });
+});
+
 describe("Slack's two calls", () => {
   it("chat.postMessage sends the blocks and answers the message's channel", async () => {
     const ok = vi.fn(async () => Response.json({ ok: true, ts: "1696237200.000100", channel: "D0ADMINDM1" }));

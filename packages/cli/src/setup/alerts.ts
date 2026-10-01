@@ -86,7 +86,9 @@ async function withoutEndpoint<T>(target: AlertTarget, action: () => Promise<T>)
   }
 }
 
-export async function ensureSubscribed(input: { api: AlertsApi; topicArn: string; target: AlertTarget; write: (line: string) => void; sleep: (ms: number) => Promise<void>; now: () => number }): Promise<"confirmed" | "pending"> {
+/** `onWaiting` is called once, when the subscription is still pending and the wait for its
+ * confirmation begins (the install page shows a card for that wait). */
+export async function ensureSubscribed(input: { api: AlertsApi; topicArn: string; target: AlertTarget; write: (line: string) => void; sleep: (ms: number) => Promise<void>; now: () => number; onWaiting?: () => void }): Promise<"confirmed" | "pending"> {
   const { target } = input;
   const protocol = target.kind === "email" ? "email" : "https";
   const endpoint = target.kind === "email" ? target.address : target.endpoint;
@@ -105,6 +107,7 @@ export async function ensureSubscribed(input: { api: AlertsApi; topicArn: string
     }
     found = await find();
   }
+  if (found?.arn === PENDING) input.onWaiting?.();
   const deadline = input.now() + CONFIRM_WAIT_MS;
   while (found !== undefined && found.arn === PENDING) {
     if (input.now() >= deadline) return "pending";

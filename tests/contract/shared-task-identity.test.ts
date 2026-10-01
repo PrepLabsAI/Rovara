@@ -2,6 +2,7 @@
 // Spec 025 FR-054, C11, C13, C14: a shared thread's service calls, resolved by the broker.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { indexExpiresAt } from "@agentx/contracts";
 import { MAYA, createDeveloperTaskBroker, markThreadPosted, teammate } from "../support/developer-task-broker.js";
 import { SLACK_TEAM, loadSlackBroker } from "../support/slack-broker.js";
 
@@ -76,6 +77,27 @@ describe("a continue thread acts on the task's workspace (FR-054)", () => {
     const operationId = String((accepted.body.operation as { id: string }).id);
     expect(h.db.get(`WORKSPACE#${h.workspaceId}`, `OPERATION#${operationId}`)).toMatchObject({ kind: "task", requestedBy: { teamId: SLACK_TEAM, userId: PRIYA } });
     expect(h.db.get(`DEVTASK#${h.taskId}`, `CHANNEL_OPERATION#${operationId}`)).toMatchObject({ slackUserId: PRIYA, name: "Priya" });
+  });
+
+  it("gives the channel operation marker the 30-day TTL attribute (25c note 2)", async () => {
+    const h = await continueThread();
+    const accepted = await channelTask(h, "Priya");
+    const operationId = String((accepted.body.operation as { id: string; createdAt: string }).id);
+    const createdAt = String((accepted.body.operation as { createdAt: string }).createdAt);
+    expect(h.db.get(`DEVTASK#${h.taskId}`, `CHANNEL_OPERATION#${operationId}`)).toMatchObject({ indexExpiresAt: indexExpiresAt(createdAt) });
+  });
+
+  it("writes no TTL attribute for an ordinary thread's request, which has no channel operation marker (25c note 2)", async () => {
+    const h = await continueThread();
+    const other = `${SLACK_TEAM}/${h.subject.split("/")[1]}/1695500000.000900`;
+    const own = String((await teammate(h.handler, other, PRIYA, "POST", "/v1/service/threads/workspace", { requestId: randomUUID(), includeIntegrations: true })).body.workspaceId);
+    const preparing = (h.db.get(`WORKSPACE#${own}`, "META") as { activeOperationId: string | null }).activeOperationId;
+    if (preparing !== null) await h.finish(own, preparing, "SUCCEEDED");
+    const conversation = String(((await teammate(h.handler, other, PRIYA, "POST", `/v1/service/workspaces/${own}/conversations`, {})).body.conversation as { id: string }).id);
+    const before = new Set(h.db.find((item) => item.indexExpiresAt !== undefined));
+    expect((await teammate(h.handler, other, PRIYA, "POST", `/v1/service/workspaces/${own}/tasks`, { requestId: randomUUID(), conversationId: conversation, prompt: "hello" })).status).toBe(202);
+    expect(h.db.find((item) => item.indexExpiresAt !== undefined && !before.has(item))).toEqual([]);
+    expect(h.db.find((item) => item.entityType === "CHANNEL_OPERATION" && item.pk !== `DEVTASK#${h.taskId}`)).toEqual([]);
   });
 
   it("writes no AI-tool completed record under the developer's name when a teammate's operation ends (F3)", async () => {

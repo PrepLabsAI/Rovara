@@ -1,4 +1,3 @@
-import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
@@ -8,9 +7,9 @@ import {
   type StoredProjectDefinition,
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
+import { runCollected } from "./collected-process.js";
 import type { CommandResult } from "./readiness.js";
 
-const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
 const UP_TIMEOUT_MS = 20 * 60_000;
 
 /**
@@ -34,6 +33,10 @@ export interface DevcontainerProcess {
   exitCode: number | null;
   stdout: string;
   stderr: string;
+  /** The signal that ended the CLI, when one did (#154). */
+  signal?: string;
+  /** True when the command's timeout stopped the CLI (#154). */
+  timedOut?: boolean;
 }
 
 /**
@@ -132,6 +135,7 @@ export async function ensureDevcontainer(cli: DevcontainerCli, target: Devcontai
       remoteWorkspaceFolder: typeof outcome.remoteWorkspaceFolder === "string" ? outcome.remoteWorkspaceFolder : "",
     };
   }
+  if (result.timedOut === true) throw new Error(`devcontainer did not start: timed out after ${UP_TIMEOUT_MS / 60_000} min`);
   const reason = [outcome?.message, outcome?.description].filter((part) => typeof part === "string").join(": ");
   throw new Error(`devcontainer did not start${reason ? `: ${reason}` : ` (exit ${String(result.exitCode)})`}`);
 }
@@ -147,7 +151,13 @@ export async function runDevcontainerCommand(
     "exec", ...targetArgs(target),
     "sh", "-c", 'cd -- "$1" && shift && exec "$@"', "sh", cwd, command.executable, ...command.args,
   ], { timeoutMs: command.timeoutSeconds * 1_000 });
-  return { exitCode: result.exitCode ?? -1, stdout: result.stdout, stderr: result.stderr };
+  return {
+    exitCode: result.exitCode ?? -1,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    ...(result.signal !== undefined ? { signal: result.signal } : {}),
+    ...(result.timedOut === true ? { timedOut: true } : {}),
+  };
 }
 
 /**
@@ -156,6 +166,24 @@ export async function runDevcontainerCommand(
  * `devcontainer exec` client alone would leave it running there.
  */
 export function devcontainerBashOperations(cli: DevcontainerCli, target: DevcontainerTarget): BashOperations {
+  return containerBashOperations((command, options) => cli.run([
+    "exec", ...targetArgs(target),
+    ...Object.entries(options.env ?? {}).flatMap(([name, value]) => ["--remote-env", `${name}=${value}`]),
+    ...command,
+  ], options));
+}
+
+/**
+ * Runs one command in a container: `devcontainer exec` for a project's devcontainer, `docker exec`
+ * for a SWE-bench task container (spec 043).
+ */
+export type ContainerExec = (
+  command: readonly string[],
+  options: { env?: Record<string, string>; signal?: AbortSignal; onStdout?: (data: Buffer) => void; onStderr?: (data: Buffer) => void },
+) => Promise<DevcontainerProcess>;
+
+/** The agent's shell in a container, each command in its own process group (see devcontainerBashOperations). */
+export function containerBashOperations(exec: ContainerExec): BashOperations {
   return {
     async exec(command, cwd, { onData, signal, timeout, env }) {
       if (signal?.aborted) throw new Error("aborted");
@@ -163,7 +191,7 @@ export function devcontainerBashOperations(cli: DevcontainerCli, target: Devcont
       let stopping: Promise<unknown> | undefined;
       // bash, not sh: dash's kill does not take a negative process group ID.
       const stop = () => {
-        stopping ??= cli.run(["exec", ...targetArgs(target), "bash", "-c", 'kill -TERM -- "-$(cat "$1")" 2>/dev/null; rm -f "$1"', "bash", groupFile], {})
+        stopping ??= exec(["bash", "-c", 'kill -TERM -- "-$(cat "$1")" 2>/dev/null; rm -f "$1"', "bash", groupFile], {})
           .catch(() => undefined);
       };
       const controller = new AbortController();
@@ -174,14 +202,13 @@ export function devcontainerBashOperations(cli: DevcontainerCli, target: Devcont
       const onAbort = () => { stop(); controller.abort(); };
       signal?.addEventListener("abort", onAbort, { once: true });
       try {
-        const result = await cli.run([
-          "exec", ...targetArgs(target), ...sessionEnvironment(env),
+        const result = await exec([
           "bash", "-c",
           // Job control only while starting the command, which puts it in its own process group;
           // left on, bash would also print a "Done" line into the output.
           'set -m; (cd -- "$1" && eval "$2") & child=$!; set +m; echo "$child" > "$3"; wait "$child"; status=$?; rm -f "$3"; exit "$status"',
           "bash", cwd, command, groupFile,
-        ], { signal: controller.signal, onStdout: onData, onStderr: onData });
+        ], { env: sessionEnvironment(env), signal: controller.signal, onStdout: onData, onStderr: onData });
         await stopping;
         if (signal?.aborted) throw new Error("aborted");
         if (timedOut) throw new Error(`timeout:${String(timeout)}`);
@@ -200,23 +227,7 @@ export function createDevcontainerCli(): DevcontainerCli {
   const script = resolve(dirname(require.resolve("@devcontainers/cli/package.json")), "devcontainer.js");
   return {
     run(args, options) {
-      return new Promise((resolvePromise, reject) => {
-        const child = spawn(process.execPath, [script, ...args], {
-          stdio: ["ignore", "pipe", "pipe"],
-          ...(options.signal ? { signal: options.signal } : {}),
-          ...(options.timeoutMs ? { timeout: options.timeoutMs } : {}),
-          killSignal: "SIGTERM",
-        });
-        const stdout = boundedCollector();
-        const stderr = boundedCollector();
-        child.stdout.on("data", (data: Buffer) => { stdout.add(data); options.onStdout?.(data); });
-        child.stderr.on("data", (data: Buffer) => { stderr.add(data); options.onStderr?.(data); });
-        child.on("error", (error) => {
-          if (error.name === "AbortError") resolvePromise({ exitCode: null, stdout: stdout.text(), stderr: stderr.text() });
-          else reject(error);
-        });
-        child.on("close", (code) => resolvePromise({ exitCode: code, stdout: stdout.text(), stderr: stderr.text() }));
-      });
+      return runCollected(process.execPath, [script, ...args], options);
     },
   };
 }
@@ -226,10 +237,9 @@ function targetArgs(target: DevcontainerTarget): string[] {
 }
 
 /** pi's PI_* session variables, which its shell tool exposes to commands. */
-function sessionEnvironment(env: NodeJS.ProcessEnv | undefined): string[] {
-  return Object.entries(env ?? {})
-    .filter(([name, value]) => name.startsWith("PI_") && value !== undefined)
-    .flatMap(([name, value]) => ["--remote-env", `${name}=${String(value)}`]);
+function sessionEnvironment(env: NodeJS.ProcessEnv | undefined): Record<string, string> {
+  return Object.fromEntries(Object.entries(env ?? {})
+    .filter((entry): entry is [string, string] => entry[0].startsWith("PI_") && entry[1] !== undefined));
 }
 
 function lastJsonLine(output: string): Record<string, unknown> | undefined {
@@ -242,20 +252,6 @@ function lastJsonLine(output: string): Record<string, unknown> | undefined {
     }
   }
   return undefined;
-}
-
-function boundedCollector(): { add(data: Buffer): void; text(): string } {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  return {
-    add(data) {
-      if (size >= MAX_COMMAND_OUTPUT_BYTES) return;
-      const kept = data.subarray(0, MAX_COMMAND_OUTPUT_BYTES - size);
-      chunks.push(kept);
-      size += kept.length;
-    },
-    text: () => Buffer.concat(chunks).toString("utf8"),
-  };
 }
 
 function contained(parent: string, path: string): string {

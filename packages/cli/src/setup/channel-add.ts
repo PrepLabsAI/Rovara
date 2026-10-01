@@ -77,6 +77,8 @@ export async function addChannel(input: {
   session: AdminSession; botToken: string; teamId: string; botUserId: string; projectName: string;
   prompter: Prompter; write: (line: string) => void; sleep: (ms: number) => Promise<void>; now: () => number;
   services: Pick<SetupServices, "fetch" | "slackChannels">; flags: { channel?: string };
+  /** The install page's channel card (spec 040 phase 3): told once, with the invite line. */
+  onWaiting?: (channelName: string) => void;
 }): Promise<{ channelId: string; channelName: string }> {
   const typed = input.flags.channel ?? await input.prompter.ask("Which Slack channel should the project use?", {
     flag: "--channel", validate: (value) => (CHANNEL_NAME.test(value.trim()) ? undefined : "a channel name, such as payments"),
@@ -99,6 +101,7 @@ export async function addChannel(input: {
     if (channel !== undefined) break;
     if (!askedForInvite && wait === FIND_POLL_MS) {
       input.write(`The bot cannot see #${name} yet. If #${name} is private, type /invite <@${input.botUserId}> in it; if it does not exist, create it. Waiting up to 10 minutes.`);
+      input.onWaiting?.(name);
       askedForInvite = true;
     }
     if (input.now() >= deadline) {

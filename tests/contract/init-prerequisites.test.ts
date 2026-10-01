@@ -12,6 +12,7 @@ import {
   endpointMissing,
   modelCheckProblem,
   NAT_ELASTIC_IPS,
+  type PrerequisiteCheck,
   withDeadline,
 } from "../../packages/cli/src/init/prerequisites.js";
 import type { InitAnswers } from "../../packages/cli/src/init/install-state.js";
@@ -201,6 +202,13 @@ describe("init prerequisites", () => {
     const blocked = passingChecks({ cdkBootstrapped: async () => false, converse: async () => { throw awsError("ValidationException", "The provided model identifier is invalid."); } });
     await expect(run(sampleAnswers({ engine: "cdk" }), blocked, scriptedPrompter([]))).rejects.toThrow("is not a Bedrock model id");
     expect(blocked.bootstraps).toBe(0);
+  });
+
+  it("checks the region against the release only for the templates engine; the cdk engine synthesizes for any region (issue 152)", async () => {
+    const elsewhere = sampleAnswers({ region: "eu-west-1" });
+    await expect(run(elsewhere)).rejects.toThrow("release 1.2.3 does not cover region eu-west-1; it covers: us-east-1");
+    const lines = await run({ ...elsewhere, engine: "cdk" });
+    expect(lines.join("\n")).not.toContain("does not cover");
   });
 
   it("checks your own OIDC provider's discovery document names the same issuer", async () => {
@@ -458,5 +466,68 @@ describe("fix round 1", () => {
     expect(sa).toBe(
       "anthropic.claude-haiku-4-5-20251001-v1:0 must be called through an inference profile in sa-east-1; use the inference profile id listed in the Bedrock console for sa-east-1 instead (--worker-model)",
     );
+  });
+});
+
+describe("the prerequisite checklist (spec 040 FR-023)", () => {
+  const run = (checks: ReturnType<typeof passingChecks>, onCheck?: (check: PrerequisiteCheck) => void) => {
+    const lines: string[] = [];
+    const done = checkPrerequisites({
+      answers: sampleAnswers(), release: fakeRelease(), caller: { account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice" },
+      checks, prompter: scriptedPrompter([]), write: (line) => { lines.push(line); }, ...(onCheck === undefined ? {} : { onCheck }),
+    });
+    return { lines, done };
+  };
+
+  it("reports each check as it finishes, and writes exactly the lines it wrote before", async () => {
+    const reported: PrerequisiteCheck[] = [];
+    const withList = run(passingChecks(), (check) => { reported.push(check); });
+    await withList.done;
+    const without = run(passingChecks());
+    await without.done;
+    expect(withList.lines).toEqual(without.lines);
+    expect(reported.map((check) => [check.label, check.ok])).toEqual([
+      ["Region", true], ["EC2 vCPU quota", true], ["Elastic IPs", true],
+      ...[...new Set([sampleAnswers().models.orchestrator, sampleAnswers().models.classifier, sampleAnswers().models.worker])].map((model) => [`Model ${model}`, true]),
+    ]);
+    expect(reported[1]).toEqual({ label: "EC2 vCPU quota", ok: true, detail: "EC2 Standard on-demand vCPU quota is 32 in us-east-1" });
+  });
+
+  it("reports passing Node, npx and CDK bootstrap checks for the cdk engine, and still writes no line for them", async () => {
+    const lists = async (onCheck?: (check: PrerequisiteCheck) => void) => {
+      const lines: string[] = [];
+      await checkPrerequisites({
+        answers: sampleAnswers({ engine: "cdk" }), release: fakeRelease(), caller: { account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice" },
+        checks: passingChecks(), prompter: scriptedPrompter([]), write: (line) => { lines.push(line); }, ...(onCheck === undefined ? {} : { onCheck }),
+      });
+      return lines;
+    };
+    const reported: PrerequisiteCheck[] = [];
+    const withList = await lists((check) => { reported.push(check); });
+    expect(withList).toEqual(await lists());
+    expect(reported.slice(-3)).toEqual([
+      { label: "Node", ok: true, detail: "Node v22.20.0" },
+      { label: "npx", ok: true, detail: "npx 10.9.0" },
+      { label: "CDK bootstrap", ok: true, detail: "CDK is bootstrapped in us-east-1" },
+    ]);
+  });
+
+  it("never reports a failing page callback as a CDK bootstrap read failure", async () => {
+    const onCheck = (check: PrerequisiteCheck) => { if (check.label === "CDK bootstrap" && check.ok) throw new Error("the page's card could not be drawn"); };
+    const done = checkPrerequisites({
+      answers: sampleAnswers({ engine: "cdk" }), release: fakeRelease(), caller: { account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice" },
+      checks: passingChecks(), prompter: scriptedPrompter([]), write: () => undefined, onCheck,
+    });
+    const message = await done.then(() => "resolved", (error: unknown) => (error as Error).message);
+    expect(message).toBe("the page's card could not be drawn");
+  });
+
+  it("reports a failed check with the same words the error lists", async () => {
+    const reported: PrerequisiteCheck[] = [];
+    const { done } = run(passingChecks({ ec2Quota: async () => 0 }), (check) => { reported.push(check); });
+    await expect(done).rejects.toThrow("EC2 Standard on-demand vCPU quota in us-east-1 must be at least 1");
+    expect(reported.find((check) => check.label === "EC2 vCPU quota")).toEqual({
+      label: "EC2 vCPU quota", ok: false, detail: "EC2 Standard on-demand vCPU quota in us-east-1 must be at least 1 for an m6g.medium worker; request an increase in Service Quotas",
+    });
   });
 });

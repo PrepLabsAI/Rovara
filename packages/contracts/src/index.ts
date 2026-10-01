@@ -26,3 +26,4 @@ export * from "./usage.js";
 export * from "./workspace.js";
 export * from "./admin.js";
 export * from "./admin-changes.js";
+export * from "./swebench.js";

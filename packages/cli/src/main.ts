@@ -28,6 +28,7 @@ import { stopWorkspace } from "./admin/stop.js";
 import { setTaskShareMode } from "./admin/task-share-mode.js";
 import { cancelWorkspaceTask } from "./admin/cancel.js";
 import { askToApply, exportChanges, runCliChange } from "./admin/changes.js";
+import { disableEvalChannel, enableEvalChannel, parseMaxCostUsd, showEvalChannel } from "./admin/eval.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
@@ -533,6 +534,46 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       services.stdout.write(formatSuccess(result, globals.json));
     });
 
+  const adminEval = admin.command("eval").description("SWE-bench runs from Slack (spec 043): `@agentx eval swebench <dataset> <instance>` in an enabled channel");
+  const evalChannel = (options: { team: string; channel: string }, settings: { controlPlaneUrl: string }, accessToken: string) => ({
+    controlPlaneUrl: settings.controlPlaneUrl, accessToken, teamId: options.team, channelId: options.channel,
+  });
+  adminEval
+    .command("enable")
+    .description("let any member of a bound channel start SWE-bench runs, each capped at a cost ceiling")
+    .requiredOption("--team <team-id>", "Slack team ID, for example T0123456789")
+    .requiredOption("--channel <channel-id>", "Slack channel ID, for example C0123456789")
+    .option("--max-cost-usd <usd>", "per-run cost ceiling in US dollars, from 1 to 100 (default 10)", parseMaxCostUsd)
+    .action(async (options: { team: string; channel: string; maxCostUsd?: number }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await enableEvalChannel({
+        ...evalChannel(options, settings, accessToken),
+        ...(options.maxCostUsd === undefined ? {} : { maxCostUsd: options.maxCostUsd }),
+      }, services.fetchImplementation);
+      services.stdout.write(formatSuccess(result, globals.json));
+    });
+  adminEval
+    .command("show")
+    .description("show whether a channel may start SWE-bench runs, and its cost ceiling")
+    .requiredOption("--team <team-id>", "Slack team ID")
+    .requiredOption("--channel <channel-id>", "Slack channel ID")
+    .action(async (options: { team: string; channel: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      services.stdout.write(formatSuccess(await showEvalChannel(evalChannel(options, settings, accessToken), services.fetchImplementation), globals.json));
+    });
+  adminEval
+    .command("disable")
+    .description("stop a channel from starting SWE-bench runs; a run in progress finishes")
+    .requiredOption("--team <team-id>", "Slack team ID")
+    .requiredOption("--channel <channel-id>", "Slack channel ID")
+    .action(async (options: { team: string; channel: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      services.stdout.write(formatSuccess(await disableEvalChannel(evalChannel(options, settings, accessToken), services.fetchImplementation), globals.json));
+    });
+
   const adminCredential = admin.command("credential").description("register connector credentials stored in Secrets Manager under agentx/connectors/ or agentx/<env>/connectors/");
   adminCredential
     .command("register")
@@ -800,15 +841,15 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--export <dir>", "write a self-contained bundle a platform team deploys to create the access stack")
     .option("--region <region>", "AWS region to deploy into")
     .option("--account <account>", "AWS account id; defaults to the caller's own account (sts GetCallerIdentity, read-only)")
-    .option("--release <dir>", "release directory (agentx release build output); default: download the release matching this agentx")
+    .option("--release <dir>", "release directory (agentx release build output); default: download the release matching this agentx. An agentx built from source needs none with --engine cdk --source")
     .addOption(new Option("--engine <engine>", "deploy engine: published CloudFormation templates, or cdk from a source checkout").choices(["templates", "cdk"]))
-    .option("--source <dir>", "git checkout of the release's source tag; required for --engine cdk")
+    .option("--source <dir>", "clean git checkout of a release tag; required for --engine cdk. An agentx built from source takes the version from its tag")
     .option("--resume", "only continue an install already under way; never start a new one", false)
     .option("--from-bundle <dir>", "with --resume: continue an install whose access stack a platform team deployed from this export bundle")
     .option("--yes", "answer every question with its default or its flag, without asking; the plan is still printed. Confirmations such as the Slack bot and workspace check and \"Request URL Verified?\" are answered yes, so check the printed summary afterwards", false)
-    .option("--no-browser", "print every address to open instead of opening a browser")
-    .option("--ui", "ask every question on a page on 127.0.0.1 instead of in the terminal")
-    .option("--no-ui", "ask every question in the terminal (the default in this release)")
+    .option("--no-browser", "print every address to open instead of opening a browser, and ask in the terminal unless --ui is given")
+    .option("--ui", "ask every question on a page on 127.0.0.1 (the default in an interactive terminal that can open a browser)")
+    .option("--no-ui", "ask every question in the terminal")
     .addOption(new Option("--identity <mode>", "identity provider").choices(["cognito", "oidc"]).default("cognito"))
     .option("--oidc-issuer <url>", "your OIDC provider's issuer URL (required with --identity oidc)")
     .option("--oidc-audience <audience>", "your OIDC provider's audience (required with --identity oidc)")
@@ -848,8 +889,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--slack-bot-token-env <NAME>", "environment variable holding the Slack Bot User OAuth Token")
     .option("--slack-signing-secret-file <path>", "file holding the Slack signing secret")
     .option("--slack-signing-secret-env <NAME>", "environment variable holding the Slack signing secret")
-    .option("--worker-image <digest-ref>", "worker image by digest (testing only)")
-    .option("--slack-image <digest-ref>", "Slack service image by digest (testing only)")
+    .option("--worker-image <digest-ref>", "worker image by digest; an agentx built from source needs it with --engine cdk when the tag has no published release.json")
+    .option("--slack-image <digest-ref>", "Slack service image by digest; an agentx built from source needs it with --engine cdk when the tag has no published release.json")
     .option("--admin-email <email>", "Cognito: your email, for the AgentX admin user")
     .option("--repository <owner/name>", "the first project's repository")
     .option("--project-name <name>", "the first project's name (default: the repository's)")
@@ -1066,7 +1107,7 @@ function parsePort(value: string): number {
 interface InitCommandOptions extends SignInCommandOptions {
   region?: string; account?: string; release?: string; engine?: "templates" | "cdk"; source?: string;
   resume: boolean; yes: boolean; browser: boolean; fromBundle?: string; stopAfter?: string;
-  /** --ui / --no-ui. Undefined when neither was given: in this release that is the terminal. */
+  /** --ui / --no-ui. Undefined when neither was given (resolveUiMode decides). */
   ui?: boolean;
   identity: "cognito" | "oidc"; oidcIssuer?: string; oidcAudience?: string; oidcClientId?: string; adminClaim?: string; adminValues?: string;
   modelProvider?: string; orchestratorProvider?: string; classifierProvider?: string; workerProvider?: string; openrouterSecretArn?: string; openrouterProviders?: string;

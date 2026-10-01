@@ -58,6 +58,20 @@ describe("the tool list (FR-027, FR-028, SC-010)", () => {
     }
   });
 
+  it("says what updated_at means wherever a tool returns it (25c note 4)", async () => {
+    const { tools } = await (await connect({})).listTools();
+    const found: Array<{ tool: string; description: unknown }> = [];
+    const walk = (tool: string, node: unknown): void => {
+      if (node === null || typeof node !== "object") return;
+      const properties = (node as { properties?: Record<string, unknown> }).properties;
+      if (properties?.updated_at !== undefined) found.push({ tool, description: (properties.updated_at as { description?: unknown }).description });
+      for (const value of Object.values(node)) walk(tool, value);
+    };
+    for (const tool of tools) walk(tool.name, tool.outputSchema);
+    expect(found.map((entry) => entry.tool)).toEqual(expect.arrayContaining(["agentx_get_task", "agentx_list_tasks"]));
+    for (const entry of found) expect(entry.description, entry.tool).toBe("when the latest request on this task started; share changes do not move it");
+  });
+
   it("offers the owner's share tool and no admin tool in this phase (Q2: an admin switches a mode with the CLI)", async () => {
     const { tools } = await (await connect({})).listTools();
     expect(tools.map((tool) => tool.name).filter((name) => name.includes("share") || name.includes("admin"))).toEqual(["agentx_share_task"]);
@@ -498,5 +512,27 @@ describe("agentx_open_pull_request and agentx_close_task return at once (R22, Ow
     const getTask = async () => view("SUCCEEDED", { unpublished: [{ repository: "demo", reasons: ["unpushed_head"] }] });
     const result = await (await connect({ getTask })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
     expect(result.structuredContent).toMatchObject({ unpublished: [{ repository: "demo", reasons: ["unpushed_head"] }] });
+  });
+});
+
+describe("the next step after a failure during setup (#154)", () => {
+  it("says to start a new task, not to continue it, when compute was lost during setup", async () => {
+    const lost = view("FAILED", { failure: { category: "worker_unavailable", stage: "setup", message: "workspace compute was lost during setup; close this task and start a new one" } });
+    const result = await (await connect({ getTask: async () => lost })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+    expect(text(result)).toContain("It never started: close it with agentx_close_task and start a new one.");
+    expect(text(result)).not.toContain("agentx_continue_task");
+    expect(result.structuredContent).toMatchObject({ failure: { category: "worker_unavailable", stage: "setup" } });
+  });
+
+  it("declares the failure's stage in the task tools' output schema", async () => {
+    const { tools } = await (await connect({})).listTools();
+    const failure = (tools.find((tool) => tool.name === "agentx_get_task")?.outputSchema?.properties as Record<string, { properties?: Record<string, unknown> }> | undefined)?.failure;
+    expect(failure?.properties).toHaveProperty("stage");
+  });
+
+  it("still offers agentx_continue_task when compute was lost during a task", async () => {
+    const lost = view("FAILED", { failure: { category: "worker_unavailable", message: "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request" } });
+    const result = await (await connect({ getTask: async () => lost })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+    expect(text(result)).toContain("Send new instructions with agentx_continue_task, or close it with agentx_close_task.");
   });
 });

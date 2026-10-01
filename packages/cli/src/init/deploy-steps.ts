@@ -99,6 +99,7 @@ export function deployStep(input: { id: DeployStepId; title: string; after?: (co
         holder: context.holder,
         parts: [...parts],
         lockHeld: true,
+        ...(deployment.declaredParameters === undefined ? {} : { declaredParameters: deployment.declaredParameters }),
         onEvent: (event) => context.write(progressLine(event)),
         now: context.now,
       });

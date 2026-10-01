@@ -128,6 +128,10 @@ target release's tag (the operator role cannot use CDK's bootstrap resources):
 agentx --env <env> upgrade --region <region> --to <version> --source <checkout of v<version>>
 ```
 
+`--to` or `--release`, when given, must be the checkout's tag. An `agentx` built from source needs
+neither: it upgrades to the checkout's tag, and reads the images from `--worker-image` and
+`--slack-image`, or else from that tag's `release.json` on GitHub.
+
 **For a pipeline: `upgrade --export`.** This writes the upgrade as files and changes nothing:
 
 ```sh

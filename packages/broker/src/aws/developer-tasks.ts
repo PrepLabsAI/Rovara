@@ -728,7 +728,7 @@ async function continueTask(deps: DeveloperTaskRouteDependencies, caller: Develo
         party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
         request: request.instructions, response: `Continuing task ${taskId} as operation ${operation.id}.`, operationId: operation.id,
       })),
-    ]);
+    ], { sharedTask: task.shared === true });
   } catch (error) {
     return busyOrClosing(deps, task, error);
   }

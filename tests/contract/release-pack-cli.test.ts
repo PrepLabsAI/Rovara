@@ -46,6 +46,17 @@ describe("publishable CLI package", () => {
     expect(help).toContain("env");
     expect(help).toContain("admin");
 
+    // FR-060: the install page is inside the installed package's one bundled file, and init's
+    // help names both ways to ask.
+    const initHelp = (await run(bin, ["init", "--help"])).stdout;
+    expect(initHelp).toContain("--ui");
+    expect(initHelp).toContain("--no-ui");
+    expect(initHelp).toContain("the default in an interactive terminal that can open a browser");
+    const bundle = await readFile(join(project, "node_modules", "@charterarc", "agentx", "bin", "agentx.mjs"), "utf8");
+    expect(bundle).toContain("<title>Install AgentX</title>");
+    expect(bundle).toContain("x-agentx-wizard-token");
+    expect(bundle).toContain("renderCards(state.cards, state.link);");
+
     // The owners' license ruling (FSL-1.1-ALv2) travels with the installed package, not just the
     // staged one packCli wrote before running `npm pack`.
     const installedLicense = await readFile(join(project, "node_modules", "@charterarc", "agentx", "LICENSE"), "utf8");

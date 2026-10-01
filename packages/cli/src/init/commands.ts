@@ -14,7 +14,8 @@ import { authorizeCredential, secretsManagerAuthorizeSecrets } from "../admin/au
 import { loginWithPkce, openSystemBrowser } from "../auth.js";
 import { cliErrorFor, cloudFormationOutputsReader, prepareDeployment, realCommandRunner, type DeployCliDependencies, type PreparedDeployment, type Writer } from "../deploy/commands.js";
 import { readBundleAnswers, type BundleAnswers } from "../deploy/export-bundle.js";
-import { assertReleaseCoversRegion, loadRelease } from "../deploy/release.js";
+import { assertSourceAtRelease } from "../deploy/cdk-engine.js";
+import { assertReleaseCoversRegion, loadRelease, type LoadedRelease } from "../deploy/release.js";
 import { stsCallerIdentity } from "../environments/adopt.js";
 import type { LockRecord } from "../environments/lock.js";
 import { ssmParameterStore, type ParameterStore } from "../environments/parameter-store.js";
@@ -38,14 +39,18 @@ import {
 import { deployStep } from "./deploy-steps.js";
 import { finishSteps, readSettingsOrThrow, readyText } from "./finish-steps.js";
 import { githubAppStep, githubRestApi, type GitHubApi } from "./github-app.js";
+import { listAwsProfiles, pickAwsProfile, resolveCaller } from "./aws-account.js";
 import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallProgress, type InitAnswers, type InitStepId } from "./install-state.js";
 import { confirmInstallPlan } from "./plan.js";
-import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteChecks } from "./prerequisites.js";
+import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
 import { processPrompter, secretFromSource, unattendedPrompter, type Prompter } from "./prompts.js";
-import { fetchRelease } from "./release-fetch.js";
+import { fetchRelease, sourceRelease } from "./release-fetch.js";
+import { problemText, retryOnPage } from "./retry.js";
 import { developerSignInStep } from "./signin-step.js";
 import { slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
 import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from "./steps.js";
+import { browserAvailable, NO_BROWSER_LINE, resolveUiMode } from "./ui-mode.js";
+import { prerequisitesCard, readyCard } from "./ui/cards.js";
 import { startInstallWizard, type InstallWizard } from "./ui/index.js";
 import type { WizardResume } from "./ui/protocol.js";
 
@@ -65,6 +70,10 @@ export interface InitCliDependencies {
   sleep?: (ms: number) => Promise<void>;
   now?: () => number;
   processEnv?: NodeJS.ProcessEnv;
+  /** Whether a person is at an interactive terminal (default: stdin is a TTY). */
+  isInteractive?: () => boolean;
+  /** Whether a browser opened here would show on this machine's screen (default: browserAvailable). */
+  browserAvailable?: () => boolean;
   /** Overrides RELEASE_VERSION; null means a build from source. */
   releaseVersion?: string | null;
   /** Overrides how the run's deployment is built (tests: a cleanup that fails). */
@@ -82,8 +91,8 @@ export interface InitOptions {
   source?: string;
   yes: boolean;
   browser: boolean;
-  /** --ui / --no-ui: ask on a page on 127.0.0.1 instead of in the terminal. Undefined means
-   * neither was given; in this release that still means the terminal. */
+  /** --ui / --no-ui. Undefined means neither was given: the page in an interactive terminal that
+   * can open a browser, else the terminal (resolveUiMode). */
   ui?: boolean;
   resume: boolean;
   flags: InitFlags;
@@ -157,6 +166,14 @@ function eventLine(event: InitEvent): string {
     case "step-done": return `done: ${event.title}`;
     case "step-waiting": return `waiting: ${event.title}`;
   }
+}
+
+/** Issue 152: a source release that read no release.json (or one listing no region) has no region
+ * list; the region then comes from --region or the AWS configuration, and init says which it took. */
+function configuredRegion(configured: string | undefined, write: (line: string) => void): string {
+  if (configured === undefined) throw agentXError("CONFIG_INVALID", "with no release.json there is no list of regions to choose from; pass --region <region>, or set a region in your AWS configuration");
+  write(`Region ${configured}, from your AWS configuration; pass --region to choose another`);
+  return configured;
 }
 
 const realSleep = (ms: number) => new Promise<void>((resolvePromise) => setTimeout(resolvePromise, ms));
@@ -339,17 +356,40 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
 
   // The release comes first: a CLI built from source is told to pass --release before anything else.
   const version = deps.releaseVersion === undefined ? RELEASE_VERSION : deps.releaseVersion ?? undefined;
-  const releaseDir = options.releaseDir ?? (await fetchRelease({ version, engine: options.flags.engine, home: services.home, fetch: fetchImplementation, runner, write }));
-  const release = await loadRelease(releaseDir);
+  // Issue 152: a CLI built from source with --engine cdk (on the command line: the engine question
+  // comes after the release) builds its release from the --source checkout instead.
+  const fromSource = options.releaseDir === undefined && version === undefined && options.flags.engine === "cdk";
+  let release: LoadedRelease;
+  // The regions init offers: the release's, or undefined when nothing lists them (a source release
+  // whose images all come from flags, so no release.json was read).
+  let releaseRegions: string[] | undefined;
+  // Why a source release has no images, when it has none; checked once the saved answers are read.
+  let imagesProblem: string | undefined;
+  if (fromSource) {
+    if (options.source === undefined) throw agentXError("CONFIG_INVALID", "the cdk engine needs --source <a checkout of a release tag>");
+    // "allow": a resume's saved answers may hold both images; they are checked once the answers are known.
+    const built = await sourceRelease({ runner, source: options.source, images: { worker: options.flags.workerImage, slack: options.flags.slackImage }, fetch: fetchImplementation, missingReleaseJson: "allow" });
+    release = built.release;
+    releaseRegions = built.regions;
+    imagesProblem = built.imagesProblem;
+  } else {
+    release = await loadRelease(options.releaseDir ?? (await fetchRelease({ version, home: services.home, fetch: fetchImplementation, runner, write })));
+    releaseRegions = release.regions();
+  }
   // F23: the saved answers take only x.y.z, so a prerelease would otherwise fail after the plan.
   if (isPrereleaseVersion(release.manifest.version)) {
     throw agentXError("CONFIG_INVALID", `release ${release.manifest.version} is a prerelease; agentx init installs only published releases (x.y.z). Pass --release <dir> with a published release`);
   }
 
-  // FR-001: --ui asks on a page on 127.0.0.1 instead of in the terminal, so no TTY is needed. An
-  // injected prompter still wins, so a test can drive the wizard's screens without a browser.
+  // FR-001: --ui, --no-ui, or (neither given) the page in an interactive terminal on a machine
+  // that can open a browser. --no-browser reads as "no browser here" for the default (Q2).
+  const uiMode = resolveUiMode({
+    ui: options.ui, yes: options.yes, injectedPrompter: deps.prompter !== undefined,
+    interactive: (deps.isInteractive ?? (() => process.stdin.isTTY === true))(),
+    browser: options.browser && (deps.browserAvailable ?? (() => browserAvailable({ platform: process.platform, env: processEnv })))(),
+  });
   let prompter: Prompter;
-  if (options.ui === true) {
+  if (uiMode.mode === "page") {
     if (options.yes) throw agentXError("CONFIG_INVALID", "agentx init --ui asks its questions on a page; --yes answers them without asking. Use one or the other");
     const wizard = await startInstallWizard({
       env, write,
@@ -361,9 +401,11 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     prompter = deps.prompter;
   } else if (options.yes) {
     prompter = unattendedPrompter();
-  } else if (process.stdin.isTTY !== true) {
-    throw agentXError("CONFIG_INVALID", "agentx init asks questions; run it in a terminal, pass --ui to answer them in a browser, or pass --yes with a flag for every answer");
   } else {
+    if (uiMode.noBrowser === true) write(NO_BROWSER_LINE);
+    if (process.stdin.isTTY !== true) {
+      throw agentXError("CONFIG_INVALID", "agentx init asks questions; run it in a terminal, pass --ui to answer them in a browser, or pass --yes with a flag for every answer");
+    }
     prompter = processPrompter(services.stderr);
   }
   if (options.slackInstall !== undefined) prompter = answeringSlackInstall(prompter, options.slackInstall);
@@ -375,17 +417,39 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   const stopIndex = options.stopAfter === undefined ? -1 : steps.findIndex((step) => step.id === options.stopAfter);
   const runSteps = stopIndex < 0 ? steps : steps.slice(0, stopIndex + 1);
 
-  const regions = release.regions();
+  // FR-020 (Q9): on the page, the operator picks the AWS profile before anything reads AWS. It is
+  // put in AWS_PROFILE, which every AWS client built below, and every child process (cdk, the AWS
+  // CLI), reads. processEnv is process.env on a real run. The terminal path asks nothing here.
+  const awsProfile = session.wizard === undefined
+    ? undefined
+    : await pickAwsProfile({ profiles: await listAwsProfiles({ home: services.home, processEnv }), processEnv, prompter });
+  const regions = releaseRegions ?? [];
   // The AWS CLI's own region comes first, so a resume looks where the install started.
-  const environmentRegion = [processEnv.AWS_REGION, processEnv.AWS_DEFAULT_REGION].find((value) => value !== undefined && regions.includes(value));
-  // A bundle names its region, so a bundle resume never asks it.
-  const region = options.region ?? bundle?.region ?? (await prompter.choose<string>("AWS region", regions.map((value) => ({ value, label: value })), { flag: "--region", defaultValue: environmentRegion ?? regions[0] ?? "us-east-1" }));
+  const configuredRegions = [processEnv.AWS_REGION, processEnv.AWS_DEFAULT_REGION, awsProfile?.region].filter((value): value is string => value !== undefined && value !== "");
+  // The cdk engine synthesizes for any region, so the configured one is offered (and is the
+  // default) even when the release does not list it.
+  const [configured] = configuredRegions;
+  const choices = options.flags.engine === "cdk" && configured !== undefined && !regions.includes(configured) ? [configured, ...regions] : regions;
+  const environmentRegion = configuredRegions.find((value) => choices.includes(value));
+  // A bundle names its region, so a bundle resume never asks it. With no list to choose from, the
+  // AWS configuration's region is taken as it is, and said.
+  const region = options.region ?? bundle?.region ?? (releaseRegions === undefined
+    ? configuredRegion(configured, write)
+    : await prompter.choose<string>("AWS region", choices.map((value) => ({ value, label: value })), { flag: "--region", defaultValue: environmentRegion ?? choices[0] ?? "us-east-1" }));
   if (bundle !== undefined && bundle.region !== region) throw agentXError("CONFIG_INVALID", `the bundle is for region ${bundle.region}; pass --region ${bundle.region}`);
-  assertReleaseCoversRegion(release, region);
+  // The cdk engine synthesizes its own templates for any region; only the templates engine needs the release to cover it.
+  if (options.flags.engine !== "cdk") assertReleaseCoversRegion(release, region);
 
   const store = deployDeps.store ?? ssmParameterStore(new SSMClient({ region }));
   const secrets = deps.initSecrets ?? secretsManagerInitSecrets(new SecretsManagerClient({ region }));
-  const caller = await (deployDeps.identity ?? stsCallerIdentity(new STSClient({ region }))).get();
+  // FR-020 and FR-021: the account the install lands in, on the page; there, an expired session
+  // is signed in again instead of ending the run. The terminal path throws as before.
+  const caller = await resolveCaller({
+    identity: () => deployDeps.identity ?? stsCallerIdentity(new STSClient({ region })),
+    region, prompter, runner,
+    ...(session.wizard === undefined ? {} : { surface: session.wizard.surface }),
+    ...(awsProfile === undefined ? {} : { profile: awsProfile }),
+  });
   if (options.account !== undefined && options.account !== caller.account) {
     throw agentXError("CONFIG_INVALID", `--account ${options.account} does not match your AWS credentials, which are for account ${caller.account}; use credentials for ${options.account}, or leave --account off`);
   }
@@ -395,6 +459,12 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
 
   const existingSettings = await readEnvironmentSettings(store, env);
   const stored = await readInstallAnswers(store, env);
+  // Review I2: a release built from the source with no usable release.json has no images; a resume's
+  // saved answers, or else the flags, must then name both. Refused here, before any question.
+  const knownImages = stored === undefined ? { worker: options.flags.workerImage, slack: options.flags.slackImage } : stored.images;
+  if (imagesProblem !== undefined && (["worker", "slack"] as const).some((which) => knownImages?.[which] === undefined && release.manifest.images[which] === undefined)) {
+    throw agentXError("CONFIG_INVALID", imagesProblem);
+  }
   if (stored === undefined && existingSettings !== undefined) {
     throw agentXError("CONFIG_INVALID", existingSettings.naming === "legacy"
       ? `environment ${env} is the deployment adopted with fixed stack names; agentx init cannot install over it. Choose another --env`
@@ -440,14 +510,48 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   }
   // F7: once, now that the engine is known, and before anything is checked, shown or created.
   if (answers.engine === "cdk" && options.source === undefined) throw agentXError("CONFIG_INVALID", `the cdk engine needs --source <a checkout of tag v${answers.releaseVersion}>`);
+  // Issue 152: a given or downloaded release must be the checkout's tag, refused here rather than
+  // after the plan (prepareDeployment checks it again). A release built from the source is its tag.
+  if (answers.engine === "cdk" && options.source !== undefined && !fromSource) await assertSourceAtRelease({ runner, source: options.source, version: release.manifest.version });
 
   const activePrompter = prompter;
+  // With --ui, the page's cards; the terminal path has none (SC-004).
+  const surface = session.wizard?.surface;
+  // Q5: with --ui, every other site is a button on the page. The terminal path opens the system
+  // browser, or prints the address with --no-browser, as before.
+  const stepBrowser = session.wizard?.openLink
+    ?? (options.browser ? neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) : undefined);
   const finalAnswers = answers;
   // A first run's OpenRouter key is not stored until after the plan, so the check uses it directly.
   const pendingKey = collected?.openRouterKey === undefined
     ? undefined
     : { key: collected.openRouterKey, ...(collected.openRouterProviders === undefined ? {} : { providers: collected.openRouterProviders }) };
-  const runPrerequisites = () => checkPrerequisites({ answers: finalAnswers, release, caller, checks, prompter: activePrompter, write, ...(pendingKey === undefined ? {} : { openRouterKey: pendingKey }) });
+  // FR-023 (Q7): on the page, the checks are a checklist, and a failure can be checked again
+  // after the fix; the terminal path stops with the collected problems, as before.
+  const runPrerequisites = () => retryOnPage({
+    surface, prompter: activePrompter, question: "Check the prerequisites again?",
+    // The card already lists every failed check, so the retry shows nothing of its own.
+    failed: () => undefined,
+    run: async () => {
+      const found: PrerequisiteCheck[] = [];
+      const show = (status: "running" | "ok" | "failed") => surface?.card(prerequisitesCard({ status, checks: found }));
+      show("running");
+      try {
+        await checkPrerequisites({
+          answers: finalAnswers, release, caller, checks, prompter: activePrompter, write,
+          onCheck: (check) => { found.push(check); show("running"); },
+          ...(pendingKey === undefined ? {} : { openRouterKey: pendingKey }),
+        });
+      } catch (error) {
+        // A failure no check reported (a cdk bootstrap that fails after yes, say) is still listed,
+        // so the page never shows a failed card with nothing to fix.
+        if (!found.some((check) => !check.ok)) found.push({ label: "Prerequisites", ok: false, detail: problemText(error) });
+        show("failed");
+        throw error;
+      }
+      show("ok");
+    },
+  });
   let prerequisitesPassed = false;
   let rotatedWebhook: string | undefined;
   let rotatedOpenRouterKey: string | undefined;
@@ -503,7 +607,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     const settings = await readSettingsOrThrow(store, env);
     return openAdminSession({
       settings, services: setup, write, now,
-      ...(options.browser ? { openBrowser: neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) } : {}),
+      ...(stepBrowser === undefined ? {} : { openBrowser: stepBrowser }),
       ...(adminClaim === undefined ? {} : { adminClaim }),
     });
   };
@@ -518,7 +622,9 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     secrets,
     prompter: activePrompter,
     write,
-    ...(options.browser ? { openBrowser: neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) } : {}),
+    ...(stepBrowser === undefined ? {} : { openBrowser: stepBrowser }),
+    ...(surface === undefined ? {} : { surface }),
+    ...(session.wizard === undefined ? {} : { manifestHost: session.wizard.manifestHost }),
     now,
     sleep,
     fetch: fetchImplementation,
@@ -570,6 +676,11 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     }
     const settings = result.status === "complete" ? await readEnvironmentSettings(store, env) : undefined;
     const progress = result.status === "complete" ? await readInstallProgress(store, env) : undefined;
+    // FR-052: the page's last card says what works now; the terminal and the page's outcome keep
+    // readyText.
+    if (surface !== undefined && settings !== undefined && progress !== undefined) {
+      surface.card(readyCard({ env, controlPlaneUrl: settings.controlPlaneUrl, progress }));
+    }
     return {
       ...result, env, resumed: stored !== undefined,
       ...(settings === undefined ? {} : { controlPlaneUrl: settings.controlPlaneUrl }),

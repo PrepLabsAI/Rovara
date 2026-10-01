@@ -3,8 +3,9 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { agentXError } from "@agentx/contracts";
 import {
-  checkPrivateKeyPem, checkSlackBotToken, checkSlackSigningSecret, cleanSecret, readHidden, secretFromSource,
+  checkPrivateKeyPem, checkSlackBotToken, checkSlackSigningSecret, cleanSecret, fieldCheck, readHidden, secretFromSource,
   terminalPrompter, unattendedPrompter,
 } from "../../packages/cli/src/init/prompts.js";
 import { scriptedPrompter } from "../support/init-fakes.js";
@@ -206,5 +207,25 @@ describe("terminal prompter", () => {
     });
     await expect(prompter.secret("GitHub App private key", { flag: "--github-private-key", multiline: true }))
       .rejects.toThrow("a multi-line GitHub App private key cannot be pasted into a hidden prompt; pass --github-private-key-file <path> or --github-private-key-env <NAME>");
+  });
+});
+
+describe("fieldCheck and the terminal's secret prompt (spec 040 FR-040)", () => {
+  it("turns a throwing check into a field message without the error code", () => {
+    const check = fieldCheck(checkSlackSigningSecret);
+    expect(check("0123456789abcdef0123456789abcdef")).toBeUndefined();
+    expect(check("nothex")).toBe("a Slack signing secret is 32 lowercase hexadecimal characters (Basic Information, App Credentials, Signing Secret)");
+  });
+
+  it("keeps a Node error's own code in the field message; only an AgentXError's code is dropped", () => {
+    const nodeError = fieldCheck(() => { throw new Error("ENOENT: no such file or directory"); });
+    expect(nodeError("x")).toBe("ENOENT: no such file or directory");
+    const agentx = fieldCheck(() => { throw agentXError("CONFIG_INVALID", "UPPER_CASE: words the check wrote"); });
+    expect(agentx("x")).toBe("UPPER_CASE: words the check wrote");
+  });
+
+  it("the terminal's hidden prompt ignores validate, so a bad value still fails where it always did", async () => {
+    const prompter = terminalPrompter({ readLine: async () => "", readSecret: async () => "not-a-token", write: () => undefined });
+    await expect(prompter.secret("Slack bot token", { flag: "--slack-bot-token", validate: () => "refused" })).resolves.toBe("not-a-token");
   });
 });

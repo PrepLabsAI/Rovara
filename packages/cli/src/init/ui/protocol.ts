@@ -49,6 +49,33 @@ export interface WizardResume {
   continueFrom?: string;
 }
 
+/** A status card's id: one card per id, and a newer card with the same id replaces it in place.
+ * Phase 3 appends the finishing screens' ids. */
+export type CardId =
+  | "aws" | "prerequisites" | "github" | "slack" | "slack-urls"
+  // Phase 3's finishing screens, appended.
+  | "admin" | "project" | "channel" | "connectors" | "alerts" | "reply" | "ready";
+
+export type CardStatus = "info" | "running" | "waiting" | "ok" | "failed";
+
+/** An address the operator opens from the page, in a new tab. Only an `https://` address or this
+ * machine's `http://127.0.0.1:<port>/` is ever shown (state.ts's isShowableLink). */
+export interface WizardLink { url: string; label: string }
+
+/** One line of a checklist card, such as one prerequisite. */
+export interface WizardCheck { label: string; ok: boolean; detail: string }
+
+/** What one part of the install looks like right now. Text only, built by ui/cards.ts from facts a
+ * step already has. No card builder takes a secret, so no card can carry one (FR-012). */
+export interface WizardCard {
+  id: CardId;
+  title: string;
+  status: CardStatus;
+  lines: string[];
+  checks?: WizardCheck[];
+  link?: WizardLink;
+}
+
 export type WizardPhase = "running" | "finished" | "failed";
 
 export interface WizardState {
@@ -59,6 +86,10 @@ export interface WizardState {
   /** `confirmInstallPlan`'s priced plan, shown as the review screen (FR-005). */
   plan?: string;
   resume?: WizardResume;
+  /** The connect and finishing screens' cards, in the order each first appeared. */
+  cards?: WizardCard[];
+  /** The one address the run is waiting on the operator to open, when no card offers it. */
+  link?: WizardLink;
   /** How the run ended, once it has. */
   outcome?: string;
 }

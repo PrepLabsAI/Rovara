@@ -55,6 +55,32 @@ describe("task status (R4, FR-025)", () => {
     expect(derived.failure?.message.length).toBeLessThanOrEqual(1_000);
   });
 
+  it("marks a failed setup with stage setup, and a failed task without a stage (#154)", () => {
+    const setup = deriveTaskStatus({ workspaceStatus: "PREPARATION_FAILED", pointer: {}, operations: [op("prepare", "FAILED", "t1", "setup step 0 (npm ci in repo/app) exited 1")] });
+    expect(setup.failure).toEqual({ category: "setup_failed", stage: "setup", message: "setup step 0 (npm ci in repo/app) exited 1" });
+    const task = deriveTaskStatus({ workspaceStatus: "READY", pointer: {}, operations: [op("prepare", "SUCCEEDED", "t1"), op("task", "FAILED", "t2", "the model call failed")] });
+    expect(task.failure).toEqual({ category: "task_failed", message: "the model call failed" });
+  });
+
+  it("keeps compute lost during setup worker_unavailable, and says to start a new task, not to retry (#154)", () => {
+    const derived = deriveTaskStatus({
+      workspaceStatus: "PREPARATION_FAILED", pointer: {},
+      operations: [op("prepare", "FAILED", "t1", "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request")],
+    });
+    expect(derived.failure).toEqual({
+      category: "worker_unavailable", stage: "setup",
+      message: "workspace compute was lost during setup; close this task and start a new one",
+    });
+  });
+
+  it("keeps the retry wording when compute is lost during a task, after setup finished (#154)", () => {
+    const derived = deriveTaskStatus({
+      workspaceStatus: "READY", pointer: {},
+      operations: [op("prepare", "SUCCEEDED", "t1"), op("task", "FAILED", "t2", "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request")],
+    });
+    expect(derived.failure).toEqual({ category: "worker_unavailable", message: "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request" });
+  });
+
   it("marks a close in progress without changing the status", () => {
     const derived = deriveTaskStatus({ workspaceStatus: "CLOSING", pointer: {}, operations: [op("task", "SUCCEEDED", "t2"), op("close", "RUNNING", "t3")] });
     expect(derived).toMatchObject({ status: "SUCCEEDED", closing: true });

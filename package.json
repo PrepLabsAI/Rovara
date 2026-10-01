@@ -28,6 +28,7 @@
     "release:build": "tsx scripts/release/build.ts",
     "release:verify": "tsx scripts/release/verify.ts",
     "release:pack-cli": "tsx scripts/release/pack-cli.ts",
+    "swebench:runner-image": "tsx scripts/swebench-runner-image.ts",
     "infra:synth": "npm run build --workspace @agentx/infra && cdk synth --app 'node infra/dist/bin/agentx.js'"
   },
   "devDependencies": {
