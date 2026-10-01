@@ -1,0 +1,554 @@
+import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
+import { cp, access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { afterEach, describe, expect, it } from "vitest";
+import { datasetRevision, loadSwebenchInstance } from "../../packages/worker/src/swebench/dataset.js";
+import { SECBENCH_PATCH_TEMPLATE, SECBENCH_PATCH_TEMPLATE_SHA256, secbenchPatchPrompt } from "../../packages/worker/src/swebench/secbench-prompt.js";
+import { createGitRunner, predictionPatch, SECBENCH_SOURCE_EXTENSIONS, untrackedFiles } from "../../packages/worker/src/swebench/history.js";
+import { gradeSecbenchPrediction, SECBENCH_EVALUATOR_COMMIT, SECBENCH_EVALUATOR_PACKAGES } from "../../packages/worker/src/swebench/grade-secbench.js";
+import type { ProcessRunner } from "../../packages/worker/src/swebench/grade.js";
+import type { SecbenchVerdict, SwebenchRun, SwebenchRunResult } from "@agentx/contracts";
+import { resultMessage } from "../../packages/slack-service/src/swebench-command.js";
+import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import { runSwebench, type RunReporter } from "../../packages/worker/src/swebench/run.js";
+import type { PiSessionAdapter, PiSessionHandle } from "../../packages/worker/src/pi-session.js";
+import { MAX_COMMAND_OUTPUT_BYTES, tailCollector } from "../../packages/worker/src/collected-process.js";
+
+const exec = promisify(execFile);
+
+const RUN_ID = "11111111-2222-4333-8444-555555555555";
+
+/** A SEC-bench row; the hidden fields hold markers that must never reach the agent. */
+const SECBENCH_ROW = {
+  instance_id: "njs.cve-2022-32414",
+  repo: "nginx/njs",
+  project_name: "njs",
+  lang: "c++",
+  work_dir: "/src/njs",
+  sanitizer: "address",
+  bug_description: "A crash in njs_vmcode_interpreter when running a crafted script.",
+  base_commit: "f65981b0b8fcf02d69a40bc934803c25c9f607ab",
+  build_sh: "#!/bin/bash\n",
+  secb_sh: "#!/bin/bash\n",
+  dockerfile: "FROM base\n",
+  patch: "MARKER-GOLD-PATCH",
+  exit_code: 987654,
+  sanitizer_report: "==1==ERROR: AddressSanitizer: SEGV on unknown address",
+  bug_report: "MARKER-BUG-REPORT",
+};
+
+function fakeServer(rows: Array<Record<string, unknown>>, requested: string[] = []): typeof fetch {
+  return (async (url: string) => {
+    requested.push(url);
+    return new Response(JSON.stringify({ rows: rows.map((row) => ({ row })), num_rows_total: rows.length }));
+  }) as unknown as typeof fetch;
+}
+
+describe("loading a SEC-bench instance (spec 045 FR-003)", () => {
+  it("reads the eval split and names the :patch image", async () => {
+    const requested: string[] = [];
+    const instance = await loadSwebenchInstance("secbench-patch", "njs.cve-2022-32414", { fetch: fakeServer([SECBENCH_ROW], requested) });
+    expect(requested[0]).toContain("dataset=SEC-bench%2FSEC-bench");
+    expect(requested[0]).toContain("split=eval");
+    expect(instance).toMatchObject({ image: "hwiwonlee/secb.eval.x86_64.njs.cve-2022-32414:patch", work_dir: "/src/njs", problem_statement: SECBENCH_ROW.bug_description });
+  });
+
+  it.each(["/etc", "/src/../etc", "src/njs", "/src/", "/src/njs/./x"])("refuses the work_dir %j", async (work_dir) => {
+    await expect(loadSwebenchInstance("secbench-patch", "njs.cve-2022-32414", { fetch: fakeServer([{ ...SECBENCH_ROW, work_dir }]) })).rejects.toThrow(/work_dir/);
+  });
+
+  it("refuses a row without its sanitizer report", async () => {
+    await expect(loadSwebenchInstance("secbench-patch", "njs.cve-2022-32414", { fetch: fakeServer([{ ...SECBENCH_ROW, sanitizer_report: "" }]) })).rejects.toThrow(/sanitizer_report/);
+  });
+
+  it("keeps reading SWE-bench's test split", async () => {
+    const requested: string[] = [];
+    await loadSwebenchInstance("verified", "django__django-11099", {
+      fetch: fakeServer([{ instance_id: "django__django-11099", repo: "django/django", base_commit: "a".repeat(40), problem_statement: "p", image: "swebench/x" }], requested),
+    });
+    expect(requested[0]).toContain("split=test");
+  });
+
+  it("reads the dataset revision, or none when Hugging Face does not answer", async () => {
+    const ok = (async () => new Response(JSON.stringify({ sha: "11422e774857272b8f5460c699dca7a64046308b" }))) as unknown as typeof fetch;
+    const down = (async () => new Response("", { status: 503 })) as unknown as typeof fetch;
+    expect(await datasetRevision("SEC-bench/SEC-bench", { fetch: ok })).toBe("11422e774857272b8f5460c699dca7a64046308b");
+    expect(await datasetRevision("SEC-bench/SEC-bench", { fetch: down })).toBeUndefined();
+  });
+
+  it("reads no dataset revision when the request throws or the sha is not a commit", async () => {
+    const throws = (async () => { throw new TypeError("fetch failed"); }) as unknown as typeof fetch;
+    const notACommit = (async () => new Response(JSON.stringify({ sha: "main" }))) as unknown as typeof fetch;
+    const shortSha = (async () => new Response(JSON.stringify({ sha: "11422e7" }))) as unknown as typeof fetch;
+    expect(await datasetRevision("SEC-bench/SEC-bench", { fetch: throws })).toBeUndefined();
+    expect(await datasetRevision("SEC-bench/SEC-bench", { fetch: notACommit })).toBeUndefined();
+    expect(await datasetRevision("SEC-bench/SEC-bench", { fetch: shortSha })).toBeUndefined();
+  });
+});
+
+describe("the SEC-bench patch prompt (spec 045 FR-005)", () => {
+  it("bundles SEC-bench's template byte for byte", () => {
+    expect(SECBENCH_PATCH_TEMPLATE_SHA256).toBe("0ec4ffc90183fce6e5497b052146d8893b3bed90b8f311351dbd1cc70b766bab");
+    expect(createHash("sha256").update(SECBENCH_PATCH_TEMPLATE, "utf8").digest("hex")).toBe(SECBENCH_PATCH_TEMPLATE_SHA256);
+  });
+
+  it("puts the bug description and sanitizer report after AgentX's preamble", () => {
+    const prompt = secbenchPatchPrompt(SECBENCH_ROW, "/mnt/eval/r1/testbed");
+    expect(prompt.startsWith("You are working in the repository at /mnt/eval/r1/testbed (also /src/njs in the shell).")).toBe(true);
+    expect(prompt).toContain("no network access");
+    expect(prompt).toContain(`<issue_description>\n${SECBENCH_ROW.bug_description}\n---\n${SECBENCH_ROW.sanitizer_report}\n</issue_description>`);
+    expect(prompt).not.toMatch(/\{\{|\}\}/);
+  });
+
+  it("never passes the gold patch, the bug report or the expected exit code", () => {
+    const prompt = secbenchPatchPrompt(SECBENCH_ROW, "/mnt/eval/r1/testbed");
+    for (const hidden of ["MARKER-GOLD-PATCH", "MARKER-BUG-REPORT", "987654"]) expect(prompt).not.toContain(hidden);
+  });
+
+  it("does not expand template syntax that appears in the row's text", () => {
+    const prompt = secbenchPatchPrompt({ ...SECBENCH_ROW, bug_description: "parser fails on {{ work_dir }}" }, "/h");
+    expect(prompt).toContain("parser fails on {{ work_dir }}");
+  });
+});
+
+describe("the SEC-bench prediction (spec 045 FR-007)", () => {
+  const repositories: string[] = [];
+  afterEach(async () => {
+    for (const path of repositories.splice(0)) await rm(path, { recursive: true, force: true });
+  });
+
+  it("keeps changed, new and deleted C and C++ sources, and leaves build outputs and earlier untracked files out", async () => {
+    const path = await mkdtemp(join(tmpdir(), "agentx-secbench-"));
+    repositories.push(path);
+    const git = (...args: string[]) => exec("git", args, { cwd: path }).then((result) => result.stdout.trim());
+    await git("init", "--quiet");
+    await git("config", "user.email", "t@example.com");
+    await git("config", "user.name", "Test");
+    await mkdir(join(path, "src"));
+    await writeFile(join(path, "src/vm.c"), "int f(void) { return 0; }\n");
+    await writeFile(join(path, "src/unused.c"), "int unused(void) { return 0; }\n");
+    await writeFile(join(path, "Makefile"), "all:\n");
+    await writeFile(join(path, ".gitignore"), "gen/\n");
+    await git("add", ".");
+    await git("commit", "--quiet", "-m", "base");
+    const head = await git("rev-parse", "HEAD");
+    // Untracked before the agent started, as the image left it: not the agent's change.
+    await writeFile(join(path, "src/image_only.c"), "int image_only(void) { return 0; }\n");
+    const runner = createGitRunner(path);
+    const before = await untrackedFiles(runner);
+    await writeFile(join(path, "src/vm.c"), "int f(void) { return 1; }\n");
+    await rm(join(path, "src/unused.c"));
+    await writeFile(join(path, "src/guard.h"), "#define GUARD 1\n");
+    await writeFile(join(path, "Makefile"), "all: changed\n");
+    await mkdir(join(path, "build"));
+    await writeFile(join(path, "build/vm.o"), "object");
+    await writeFile(join(path, "config.log"), "log");
+    await mkdir(join(path, "gen"));
+    await writeFile(join(path, "gen/parser.c"), "generated");
+    const patch = await predictionPatch(runner, head, before, SECBENCH_SOURCE_EXTENSIONS);
+    expect(patch).toContain("src/vm.c");
+    expect(patch).toContain("src/guard.h");
+    expect(patch).toContain("deleted file mode 100644");
+    expect(patch).toContain("--- a/src/unused.c");
+    for (const excluded of ["Makefile", "build/vm.o", "config.log", "gen/parser.c", "src/image_only.c"]) expect(patch).not.toContain(excluded);
+  });
+});
+
+const STEP_LOGS = {
+  fixed: "Step 1: Git apply\nSUCCESS: Git apply passed; exit code=0\nStep 2: Compile\nSUCCESS: Compile passed; exit code=0\nStep 3: Run PoC\nRun PoC exit code: 0\nSUCCESS: Run PoC passed; exit code=0\n",
+  stillReported: "Step 3: Run PoC\n==12==ERROR: AddressSanitizer: SEGV on unknown address\n==12==ABORTING\nRun PoC exit code: 1\nTENTATIVE: Run PoC; exit code=1\n",
+  noBuild: "Step 2: Compile\nFAIL_STEP: Compile; exit code=2\n",
+  noApply: "Step 1: Git apply\nFAIL_STEP: Git apply; exit code=1\n",
+  timeout: "Step 3: Run PoC\nRun PoC exit code: 124\nTENTATIVE: Run PoC; exit code=124\n",
+};
+
+type Outcome = { logs: string; exitCode: number; success: Record<"strict" | "medium" | "generous", boolean>; reason?: string };
+
+/** Answers git, uv and the evaluator as the real ones do, writing the three reports the evaluator writes. */
+function fakeEvaluator(outcome: Outcome | undefined, options: { loaded?: string; evaluatorExit?: number; stdout?: string; afterLoaded?: string } = {}) {
+  const calls: Array<{ executable: string; args: readonly string[]; env?: NodeJS.ProcessEnv; cwd?: string }> = [];
+  const run: ProcessRunner = async (executable, args, processOptions) => {
+    calls.push({ executable, args, ...(processOptions?.env === undefined ? {} : { env: processOptions.env }), ...(processOptions?.cwd === undefined ? {} : { cwd: processOptions.cwd }) });
+    if (executable === "git" && args.includes("rev-parse")) return { exitCode: 0, stdout: `${SECBENCH_EVALUATOR_COMMIT}\n`, stderr: "" };
+    const output = args.indexOf("--output-dir");
+    if (output < 0) return { exitCode: 0, stdout: "", stderr: "" };
+    if (outcome !== undefined) {
+      await mkdir(args[output + 1]!, { recursive: true });
+      for (const mode of ["strict", "medium", "generous"] as const) {
+        const line = { instance_id: "njs.cve-2022-32414", success: outcome.success[mode], reason: outcome.reason ?? "", git_patch: "", exit_code: outcome.exitCode, logs: outcome.logs, model_name: "unknown_model" };
+        await writeFile(join(args[output + 1]!, `report_${mode}.jsonl`), `${JSON.stringify(line)}\n`);
+      }
+    }
+    // Streams its output to the callbacks and keeps only the tail, as runCollected does.
+    const stdout = tailCollector();
+    const stderr = tailCollector();
+    const emit = (collector: ReturnType<typeof tailCollector>, callback: ((data: Buffer) => void) | undefined, text: string) => {
+      for (let at = 0; at < text.length; at += 65_536) {
+        const chunk = Buffer.from(text.slice(at, at + 65_536));
+        collector.add(chunk);
+        callback?.(chunk);
+      }
+    };
+    emit(stdout, processOptions?.onStdout, options.stdout ?? "");
+    emit(stderr, processOptions?.onStderr, `${options.loaded ?? "INFO | Loaded 300 instances from SEC-bench/SEC-bench\n"}${options.afterLoaded ?? ""}`);
+    return { exitCode: options.evaluatorExit ?? 0, stdout: stdout.text(), stderr: stderr.text() };
+  };
+  return { run, calls };
+}
+
+const ALL = (value: boolean) => ({ strict: value, medium: value, generous: value });
+
+describe("grading with SEC-bench's evaluator (spec 045 FR-008, FR-008a, FR-009)", () => {
+  const grade = async (outcome: Outcome | undefined, options?: Parameters<typeof fakeEvaluator>[1]) => {
+    const directory = await mkdtemp(join(tmpdir(), "agentx-secbench-grade-"));
+    const fake = fakeEvaluator(outcome, options);
+    const report = gradeSecbenchPrediction({ directory, instanceId: "njs.cve-2022-32414", patch: "diff --git a/src/vm.c b/src/vm.c\n" }, fake.run);
+    return { directory, report, calls: fake.calls };
+  };
+
+  it("fetches the pinned evaluator, installs only the pinned packages, and writes the prediction as preds.json", async () => {
+    const { directory, report, calls } = await grade({ logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) });
+    await report;
+    expect(calls.some((call) => call.executable === "git" && call.args.includes("fetch") && call.args.includes(SECBENCH_EVALUATOR_COMMIT))).toBe(true);
+    const install = calls.find((call) => call.executable === "uv" && call.args.includes("install"));
+    expect(install?.args.slice(-SECBENCH_EVALUATOR_PACKAGES.length)).toEqual([...SECBENCH_EVALUATOR_PACKAGES]);
+    expect(install?.args.some((arg) => arg.includes("requirements"))).toBe(false);
+    const preds = JSON.parse(await readFile(join(directory, "input/preds.json"), "utf8")) as unknown;
+    expect(preds).toEqual({ "njs.cve-2022-32414": { model_patch: "diff --git a/src/vm.c b/src/vm.c\n" } });
+  });
+
+  it("runs the evaluator with TMPDIR inside its own directory, so the host's Docker can mount it", async () => {
+    const { directory, report, calls } = await grade({ logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) });
+    await report;
+    const evaluator = calls.find((call) => call.args.includes("secb.evaluator.eval_instances"));
+    expect(evaluator?.args).toEqual(expect.arrayContaining(["--type", "patch", "--agent", "swea", "--mode", "all", "--split", "eval"]));
+    expect(evaluator?.env?.TMPDIR?.startsWith(`${directory}/`)).toBe(true);
+    expect(evaluator?.env?.LOGURU_LEVEL).toBe("INFO");
+  });
+
+  it("finds the Loaded line as the output streams, though more than 1 MiB of log follows it", async () => {
+    const container = "DEBUG | container output line that the evaluator logs in full\n".repeat(Math.ceil((2 * MAX_COMMAND_OUTPUT_BYTES) / 60));
+    const { report, calls } = await grade({ logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) }, { afterLoaded: container });
+    expect(await report).toMatchObject({ resolved: true });
+    expect(calls.some((call) => call.args.includes("secb.evaluator.eval_instances"))).toBe(true);
+  });
+
+  it.each([
+    ["fixed", { logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) }, { resolved: true, secbench: { ...ALL(true), pocExitCode: 0, sanitizerReport: false, timedOut: false } }],
+    ["still reported", { logs: STEP_LOGS.stillReported, exitCode: 1, success: ALL(false) }, { resolved: false, secbench: { ...ALL(false), failedStep: "poc", pocExitCode: 1, sanitizerReport: true, timedOut: false } }],
+    ["no build", { logs: STEP_LOGS.noBuild, exitCode: 2, success: ALL(false) }, { resolved: false, secbench: { ...ALL(false), failedStep: "build", sanitizerReport: false, timedOut: false } }],
+    ["no apply", { logs: STEP_LOGS.noApply, exitCode: 1, success: ALL(false) }, { resolved: false, secbench: { ...ALL(false), failedStep: "apply", sanitizerReport: false, timedOut: false } }],
+    ["timeout", { logs: STEP_LOGS.timeout, exitCode: 124, success: ALL(false) }, { resolved: false, secbench: { ...ALL(false), failedStep: "poc", pocExitCode: 124, sanitizerReport: false, timedOut: true } }],
+  ] as const)("reads the verdict when the patch is %s", async (_, outcome, expected) => {
+    const { report } = await grade(outcome);
+    expect(await report).toMatchObject(expected);
+  });
+
+  it("takes medium as resolved when only strict fails", async () => {
+    const { report } = await grade({ logs: STEP_LOGS.fixed.replace("Run PoC exit code: 0", "Run PoC exit code: 1"), exitCode: 1, success: { strict: false, medium: true, generous: true } });
+    expect(await report).toMatchObject({ resolved: true, secbench: { strict: false, medium: true, pocExitCode: 1 } });
+  });
+
+  it("fails, rather than reporting unresolved, when the dataset did not load", async () => {
+    const { report } = await grade({ logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) }, { loaded: "ERROR | Failed to load dataset SEC-bench/SEC-bench\n\n" });
+    await expect(report).rejects.toThrow(/did not load the dataset.*: ERROR \| Failed to load dataset SEC-bench\/SEC-bench$/);
+  });
+
+  it("fails when the evaluator could not start the grading container", async () => {
+    const { report } = await grade({ logs: "Failed to pull image hwiwonlee/secb.eval.x86_64.njs.cve-2022-32414:patch: 404", exitCode: -1, success: ALL(false), reason: "Patch evaluation failed: exit code -1." });
+    await expect(report).rejects.toThrow(/could not grade.*Failed to pull/);
+  });
+
+  it("reads a sanitizer report only when the evaluator's extract_sanitizer_report does", async () => {
+    const start = "Step 3: Run PoC\n==12==ERROR: AddressSanitizer: SEGV on unknown address\nRun PoC exit code: 1\n";
+    const cases: Array<[string, boolean]> = [
+      // The start line alone holds one of utils.py's SANITIZER_ERROR_PATTERNS.
+      [start, true],
+      [`${start}    #0 0x55bc7958543b in f\n`, true],
+      [STEP_LOGS.stillReported, true],
+      ["Step 3: Run PoC\nfoo.c:12:3: runtime error: signed integer overflow\nSUMMARY: UndefinedBehaviorSanitizer: undefined-behavior foo.c:12:3\nRun PoC exit code: 1\n", true],
+      ["Step 3: Run PoC\n==7==WARNING: ThreadSanitizer: data race\n    #0 0x55bc7958543b in f\n", true],
+      ["Step 3: Run PoC\n==7==WARNING: ThreadSanitizer: data race\nRun PoC exit code: 1\n", false],
+      ["Step 3: Run PoC\nRun PoC exit code: 1\nTENTATIVE: Run PoC; exit code=1\n", false],
+    ];
+    for (const [logs, expected] of cases) {
+      const { report } = await grade({ logs, exitCode: 1, success: ALL(false) });
+      expect((await report).secbench.sanitizerReport).toBe(expected);
+    }
+  });
+
+  it("fails when a report is missing or the evaluator exits non-zero", async () => {
+    await expect((await grade(undefined)).report).rejects.toThrow(/report_strict.jsonl/);
+    await expect((await grade({ logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) }, { evaluatorExit: 1, loaded: "INFO | Loaded 300 instances\nTraceback (most recent call last):\nModuleNotFoundError: No module named 'secb'\n\n" })).report)
+      .rejects.toThrow(/exited 1: INFO \| Loaded 300 instances Traceback \(most recent call last\): ModuleNotFoundError: No module named 'secb'$/);
+  });
+
+  it("says which report it could not read, and why", async () => {
+    const unreadable = await grade({ logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) }, {});
+    await unreadable.report;
+    await writeFile(join(unreadable.directory, "output/report_medium.jsonl"), "{not json\n");
+    const again = gradeSecbenchPrediction({ directory: unreadable.directory, instanceId: "njs.cve-2022-32414", patch: "p" }, async (executable, args, options) => {
+      if (executable === "git" && args.includes("rev-parse")) return { exitCode: 0, stdout: `${SECBENCH_EVALUATOR_COMMIT}\n`, stderr: "" };
+      options?.onStderr?.(Buffer.from("INFO | Loaded 300 instances\n"));
+      return { exitCode: 0, stdout: "", stderr: "INFO | Loaded 300 instances\n" };
+    });
+    await expect(again).rejects.toThrow("SEC-bench's evaluator wrote unreadable JSON in report_medium.jsonl");
+
+    const folder = await grade({ logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) }, {});
+    await folder.report;
+    await rm(join(folder.directory, "output/report_strict.jsonl"));
+    await mkdir(join(folder.directory, "output/report_strict.jsonl"));
+    const misread = gradeSecbenchPrediction({ directory: folder.directory, instanceId: "njs.cve-2022-32414", patch: "p" }, async (executable, args, options) => {
+      if (executable === "git" && args.includes("rev-parse")) return { exitCode: 0, stdout: `${SECBENCH_EVALUATOR_COMMIT}\n`, stderr: "" };
+      options?.onStderr?.(Buffer.from("INFO | Loaded 300 instances\n"));
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+    await expect(misread).rejects.toThrow(/^could not read SEC-bench's report_strict\.jsonl: EISDIR/);
+  });
+
+  it("keeps the reports, the evaluator's log and the container log for the artifacts (FR-011)", async () => {
+    const { report } = await grade({ logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) });
+    expect((await report).files.map((file) => file.name)).toEqual([
+      "harness/report_strict.jsonl", "harness/report_medium.jsonl", "harness/report_generous.jsonl", "harness/evaluator.log", "harness/container.log",
+    ]);
+  });
+});
+
+async function templateRepository(): Promise<{ path: string; head: string }> {
+  const path = await mkdtemp(join(tmpdir(), "agentx-secbench-image-"));
+  const git = (...args: string[]) => exec("git", args, { cwd: path }).then((result) => result.stdout.trim());
+  await git("init", "--quiet");
+  await git("config", "user.email", "t@example.com");
+  await git("config", "user.name", "Test");
+  await writeFile(join(path, "vm.c"), "int f(void) { return 0; }\n");
+  await git("add", ".");
+  await git("commit", "--quiet", "-m", "base");
+  return { path, head: await git("rev-parse", "HEAD") };
+}
+
+function fakeDocker(template: string, calls: string[][]): DockerCli {
+  const ok = (stdout = "") => ({ exitCode: 0, stdout, stderr: "" });
+  return {
+    async run(args) {
+      calls.push([...args]);
+      if (args[0] === "image") return ok(JSON.stringify([`hwiwonlee/secb.eval.x86_64.njs.cve-2022-32414@sha256:${"b".repeat(64)}`]));
+      if (args[0] === "cp") await cp(template, args[2]!, { recursive: true });
+      return ok();
+    },
+  };
+}
+
+/** A Pi session that fixes vm.c, leaves a build output, and finishes. */
+function editingAdapter(testbed: string, observed: { prompt?: string }, files: Record<string, string> = { "vm.c": "int f(void) { return 1; }\n", "vm.o": "object" }): PiSessionAdapter {
+  return {
+    async create({ sessionDirectory }) {
+      const sessionFile = join(sessionDirectory, "fake.jsonl");
+      await writeFile(sessionFile, "{\"type\":\"session\"}\n");
+      const listeners = new Set<(event: unknown) => void>();
+      const handle: PiSessionHandle = {
+        conversationId: "fake",
+        sessionFile,
+        async prompt(text) {
+          observed.prompt = text;
+          for (const [name, body] of Object.entries(files)) await writeFile(join(testbed, name), body);
+          for (const listener of listeners) listener({ type: "message_end", message: { role: "assistant", stopReason: "stop" } });
+        },
+        async steer() {},
+        async abort() {},
+        getModel: () => ({ provider: "amazon-bedrock", modelId: "fixture-model" }),
+        getSessionStats: () => ({
+          sessionFile, sessionId: "fake", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2,
+          tokens: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, total: 100 }, cost: 0.05,
+        }),
+        subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener); },
+        dispose() {},
+      };
+      return handle;
+    },
+  };
+}
+
+describe("a SEC-bench run (spec 045 FR-004 to FR-011)", () => {
+  const cleanup: string[] = [];
+  afterEach(async () => {
+    for (const path of cleanup.splice(0)) await rm(path, { recursive: true, force: true });
+  });
+
+  it("runs the agent in the project's folder, grades only sources outside the agent's mounts, and records the configuration", async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), "agentx-secbench-run-"));
+    const template = await templateRepository();
+    cleanup.push(rootPath, template.path);
+    const calls: string[][] = [];
+    const artifacts = new Map<string, string>();
+    let reported: SwebenchRunResult | undefined;
+    const reporter: RunReporter = {
+      async started() {},
+      async artifact(name, body) { artifacts.set(name, body.toString()); },
+      async result(result) { reported = result; },
+    };
+    const row = { ...SECBENCH_ROW, base_commit: template.head };
+    const fetchImplementation = (async (url: string) => url.includes("/api/datasets/")
+      ? new Response(JSON.stringify({ sha: "11422e774857272b8f5460c699dca7a64046308b" }))
+      : new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }))) as unknown as typeof fetch;
+    const graded: Array<{ directory: string; instanceId: string; patch: string }> = [];
+    const observed: { prompt?: string } = {};
+    const result = await runSwebench({
+      runId: RUN_ID, dataset: "secbench-patch", instanceId: "njs.cve-2022-32414",
+      model: { provider: "amazon-bedrock", modelId: "fixture-model" }, maxCostUsd: 10,
+      controlPlaneUrl: "https://control.example.com", capability: "cap", artifactBucket: "bucket",
+      artifactsPrefix: `evals/${RUN_ID}/`,
+    }, {
+      rootPath,
+      model: { provider: "amazon-bedrock", modelId: "fixture-model", thinkingLevel: "medium" },
+      docker: fakeDocker(template.path, calls),
+      reporter,
+      log: () => {},
+      dataset: { fetch: fetchImplementation },
+      piAdapter: editingAdapter(join(rootPath, RUN_ID, "testbed"), observed),
+      gradeSecbench: async (input) => {
+        graded.push(input);
+        return { resolved: true, secbench: { strict: true, medium: true, generous: true, pocExitCode: 0, sanitizerReport: false, timedOut: false }, files: [] };
+      },
+    });
+
+    expect(result).toMatchObject({ outcome: "GRADED", resolved: true, secbench: { medium: true } });
+    expect(reported).toEqual(result);
+    expect(result.outcome === "GRADED" ? result.failToPass : "x").toBeUndefined();
+    // The task container mounts the copy where the image keeps the project, with no network.
+    const started = calls.find((args) => args[0] === "run" && args.includes("--detach"))!;
+    expect(started).toEqual(expect.arrayContaining(["--network", "none", "--volume", `${join(rootPath, RUN_ID, "testbed")}:/src/njs`, "--workdir", "/src/njs"]));
+    expect(observed.prompt).toContain(SECBENCH_ROW.bug_description);
+    for (const hidden of ["MARKER-GOLD-PATCH", "MARKER-BUG-REPORT", "987654"]) expect(observed.prompt).not.toContain(hidden);
+    // The prediction holds the source change and not the build output.
+    expect(graded[0]!.patch).toContain("vm.c");
+    expect(graded[0]!.patch).not.toContain("vm.o");
+    // Grading happens under RUN_ROOT, outside the run's root that the agent's container mounts.
+    expect(graded[0]!.directory).toBe(join(rootPath, ".secbench-grade", RUN_ID));
+    await expect(access(graded[0]!.directory)).rejects.toThrow();
+    const saved = JSON.parse(artifacts.get("result.json")!) as Record<string, unknown>;
+    expect(saved).toMatchObject({
+      dataset: "secbench-patch",
+      thinkingLevel: "medium",
+      limits: { timeLimitSeconds: 3_600, toolCallLimit: 200 },
+      secbench: { medium: true, pocExitCode: 0 },
+      secbenchSetup: {
+        promptTemplateSha256: "0ec4ffc90183fce6e5497b052146d8893b3bed90b8f311351dbd1cc70b766bab",
+        smolagentsCommit: "a945dba9d6f2594cd94eb00d77f6b41a92fea88b",
+        evaluatorCommit: "31eb43485a3de47da260be0f978528b1f2314415",
+        datasetRevision: "11422e774857272b8f5460c699dca7a64046308b",
+      },
+    });
+  });
+
+  it("does not grade a run whose only change is a build output", async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), "agentx-secbench-run-"));
+    const template = await templateRepository();
+    cleanup.push(rootPath, template.path);
+    const artifacts = new Map<string, string>();
+    const row = { ...SECBENCH_ROW, base_commit: template.head };
+    const fetchImplementation = (async (url: string) => url.includes("/api/datasets/")
+      ? new Response(JSON.stringify({ sha: "11422e774857272b8f5460c699dca7a64046308b" }))
+      : new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }))) as unknown as typeof fetch;
+    let gradeCalls = 0;
+    const result = await runSwebench({
+      runId: RUN_ID, dataset: "secbench-patch", instanceId: "njs.cve-2022-32414",
+      model: { provider: "amazon-bedrock", modelId: "fixture-model" }, maxCostUsd: 10,
+      controlPlaneUrl: "https://control.example.com", capability: "cap", artifactBucket: "bucket",
+      artifactsPrefix: `evals/${RUN_ID}/`,
+    }, {
+      rootPath,
+      model: { provider: "amazon-bedrock", modelId: "fixture-model" },
+      docker: fakeDocker(template.path, []),
+      reporter: { async started() {}, async artifact(name, body) { artifacts.set(name, body.toString()); }, async result() {} },
+      log: () => {},
+      dataset: { fetch: fetchImplementation },
+      piAdapter: editingAdapter(join(rootPath, RUN_ID, "testbed"), {}, { "vm.o": "object" }),
+      gradeSecbench: async () => { gradeCalls += 1; throw new Error("must not be graded"); },
+    });
+    expect(gradeCalls).toBe(0);
+    expect(result).toMatchObject({ outcome: "GRADED", resolved: false, patchBytes: 0 });
+    expect(result).not.toHaveProperty("secbench");
+  });
+
+  it("keeps the evaluator's log when grading fails, and fails the run with its cause (FR-008a, FR-011)", async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), "agentx-secbench-run-"));
+    const template = await templateRepository();
+    cleanup.push(rootPath, template.path);
+    const artifacts = new Map<string, { body: string; contentType: string }>();
+    const row = { ...SECBENCH_ROW, base_commit: template.head };
+    const fetchImplementation = (async (url: string) => url.includes("/api/datasets/")
+      ? new Response(JSON.stringify({ sha: "11422e774857272b8f5460c699dca7a64046308b" }))
+      : new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }))) as unknown as typeof fetch;
+    let gradeDirectory = "";
+    const result = await runSwebench({
+      runId: RUN_ID, dataset: "secbench-patch", instanceId: "njs.cve-2022-32414",
+      model: { provider: "amazon-bedrock", modelId: "fixture-model" }, maxCostUsd: 10,
+      controlPlaneUrl: "https://control.example.com", capability: "cap", artifactBucket: "bucket",
+      artifactsPrefix: `evals/${RUN_ID}/`,
+    }, {
+      rootPath,
+      model: { provider: "amazon-bedrock", modelId: "fixture-model" },
+      docker: fakeDocker(template.path, []),
+      reporter: { async started() {}, async artifact(name, body, contentType) { artifacts.set(name, { body: body.toString(), contentType }); }, async result() {} },
+      log: () => {},
+      dataset: { fetch: fetchImplementation },
+      piAdapter: editingAdapter(join(rootPath, RUN_ID, "testbed"), {}),
+      gradeSecbench: async (input) => {
+        gradeDirectory = input.directory;
+        await mkdir(input.directory, { recursive: true });
+        await writeFile(join(input.directory, "evaluator.log"), "INFO | Loaded 0 instances\n");
+        throw new Error("SEC-bench's evaluator did not load the dataset, so its medium verdict would be strict's: INFO | Loaded 0 instances");
+      },
+    });
+    expect(result).toMatchObject({ outcome: "FAILED", error: expect.stringContaining("did not load the dataset") as unknown });
+    expect(artifacts.get("harness/evaluator.log")).toEqual({ body: "INFO | Loaded 0 instances\n", contentType: "text/plain" });
+    expect(artifacts.has("harness/container.log")).toBe(false);
+    expect(JSON.parse(artifacts.get("result.json")!.body)).toMatchObject({ artifacts: expect.arrayContaining(["harness/evaluator.log", "patch.diff"]) as unknown });
+    await expect(access(gradeDirectory)).rejects.toThrow();
+  });
+});
+
+describe("the SEC-bench result in the thread (spec 045 FR-010)", () => {
+  const run = (secbench: SecbenchVerdict | undefined, resolved: boolean): SwebenchRun => ({
+    runId: RUN_ID, dataset: "secbench-patch", instanceId: "njs.cve-2022-32414",
+    model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" }, maxCostUsd: 10,
+    thread: { teamId: "T0BSHLLUGBD", channelId: "C0C5NCSC3K7", threadTs: "1790817668.039179" },
+    requestedBy: { teamId: "T0BSHLLUGBD", userId: "U0BSRRRADC1" },
+    status: "SUCCEEDED", createdAt: "2026-10-01T12:00:00.000Z", updatedAt: "2026-10-01T12:10:00.000Z",
+    result: {
+      outcome: "GRADED", resolved, stopReason: "finished", patchBytes: 120, agentSeconds: 245,
+      imageDigest: `hwiwonlee/secb.eval.x86_64.njs.cve-2022-32414@sha256:${"a".repeat(64)}`,
+      usage: { schemaVersion: 1, outcome: "SUCCEEDED", provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6", cacheRetention: "short", tokens: { input: 10, output: 5, cacheRead: 0, cacheWrite: 0, total: 15 }, cacheReadRatio: 0, costUsd: 0.31 },
+      artifactsPrefix: `evals/${RUN_ID}/`,
+      ...(secbench === undefined ? {} : { secbench }),
+    },
+  });
+  const verdict = { strict: true, medium: true, generous: true, pocExitCode: 0, sanitizerReport: false, timedOut: false };
+
+  it("says what a pass means", () => {
+    const message = resultMessage(run(verdict, true));
+    expect(message).toContain("*Resolved* `njs.cve-2022-32414` (SEC-bench patch task).");
+    expect(message).toContain("• Check: the PoC no longer triggers the sanitizer and the patched project builds (sanitizer-verified, no regression tests)");
+    expect(message).toContain("• Modes: strict pass, medium pass, generous pass");
+    expect(message).not.toContain("FAIL_TO_PASS");
+  });
+
+  it.each([
+    [{ ...verdict, strict: false, medium: false, generous: false, failedStep: "apply" as const }, "• Check: the patch did not apply"],
+    [{ ...verdict, strict: false, medium: false, generous: false, failedStep: "build" as const }, "• Check: the patched project did not build"],
+    [{ ...verdict, strict: false, medium: false, generous: false, failedStep: "poc" as const, pocExitCode: 1, sanitizerReport: true }, "• Check: the PoC still triggers the sanitizer"],
+    [{ ...verdict, strict: false, medium: false, generous: false, failedStep: "poc" as const, pocExitCode: 124, timedOut: true }, "• Check: the PoC timed out"],
+    [{ ...verdict, strict: false, medium: false, generous: true, failedStep: "poc" as const, pocExitCode: 3 }, "• Check: the PoC exited with 3, not the expected code"],
+  ])("explains an unresolved patch", (secbench, line) => {
+    expect(resultMessage(run(secbench, false))).toContain(line);
+  });
+
+  it("names SEC-bench when nothing was graded, and leaves SWE-bench's wording alone", () => {
+    expect(resultMessage(run(undefined, false))).toContain("• Check: not run, because the agent changed nothing");
+    expect(resultMessage({ ...run(verdict, true), status: "CANCELLED" })).toBe("The SEC-bench run of `njs.cve-2022-32414` was cancelled and its instance terminated.");
+    expect(resultMessage({ ...run(verdict, true), dataset: "verified", instanceId: "django__django-11099", status: "CANCELLED" })).toBe("The SWE-bench run of `django__django-11099` was cancelled and its instance terminated.");
+  });
+});

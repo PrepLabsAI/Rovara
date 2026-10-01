@@ -117,15 +117,15 @@ describe("starting a run (spec 043 FR-001 to FR-006)", () => {
     const again = await start(handler, { requestId });
     expect(again.body.run).toEqual(first.body.run);
     expect(startExecution).toHaveBeenCalledTimes(1);
-    expect((await start(handler, {}, otherThread)).body).toMatchObject({ outcome: "REFUSED", reason: "RUN_ACTIVE" });
+    expect((await start(handler, {}, otherThread)).body).toMatchObject({ outcome: "REFUSED", reason: "RUN_ACTIVE", message: expect.stringMatching(/^Another eval run is in progress/) as unknown });
   });
 
   it("refuses a run where eval is not installed or the channel is not enabled", async () => {
     const notInstalled = await evalBroker({ installed: false });
     await enable(notInstalled.handler);
-    expect((await start(notInstalled.handler)).body).toMatchObject({ outcome: "REFUSED", reason: "NOT_INSTALLED" });
+    expect((await start(notInstalled.handler)).body).toMatchObject({ outcome: "REFUSED", reason: "NOT_INSTALLED", message: expect.stringMatching(/^Eval runs are not installed in this deployment\./) as unknown });
     const notEnabled = await evalBroker();
-    expect((await start(notEnabled.handler)).body).toMatchObject({ outcome: "REFUSED", reason: "NOT_ENABLED", message: expect.stringContaining("agentx admin eval enable") as unknown });
+    expect((await start(notEnabled.handler)).body).toMatchObject({ outcome: "REFUSED", reason: "NOT_ENABLED", message: expect.stringMatching(/^Eval runs are not enabled in this channel\. .*agentx admin eval enable/) as unknown });
     expect(notEnabled.startExecution).not.toHaveBeenCalled();
   });
 

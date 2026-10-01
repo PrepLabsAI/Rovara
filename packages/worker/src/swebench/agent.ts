@@ -18,6 +18,8 @@ export interface AgentRunInput {
   bashOperations: BashOperations;
   paths: DevcontainerPaths;
   problemStatement: string;
+  /** The whole prompt, when the family builds its own (spec 045 FR-005); otherwise swebenchPrompt's. */
+  prompt?: string;
   maxCostUsd: number;
   timeLimitMs: number;
   /** The tool-loop guard's call backstop; its default when absent. */
@@ -82,7 +84,7 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
   });
   const timer = setTimeout(() => halt("time_limit", `the agent reached its ${Math.round(input.timeLimitMs / 60_000)}-minute limit`), input.timeLimitMs);
   try {
-    await session.prompt(swebenchPrompt(input.problemStatement, input.paths.hostFolder, input.paths.containerFolder));
+    await session.prompt(input.prompt ?? swebenchPrompt(input.problemStatement, input.paths.hostFolder, input.paths.containerFolder));
   } catch (error) {
     // An abort for one of the limits may end the prompt with an error; the limit is the outcome.
     if (stop === undefined) thrown = error instanceof Error ? error.message : String(error);

@@ -118,11 +118,11 @@ export async function startSwebenchRun(dependencies: SwebenchDependencies, conte
   }
   const deployment = await dependencies.deployment();
   if (deployment === undefined) {
-    return { outcome: "REFUSED", reason: "NOT_INSTALLED", message: "SWE-bench runs are not installed in this deployment. Ask an administrator to deploy the eval stack and runner image." };
+    return { outcome: "REFUSED", reason: "NOT_INSTALLED", message: "Eval runs are not installed in this deployment. Ask an administrator to deploy the eval stack and runner image." };
   }
   const channel = await getSwebenchChannel(dependencies, context.thread.teamId, context.thread.channelId);
   if (channel === undefined) {
-    return { outcome: "REFUSED", reason: "NOT_ENABLED", message: "SWE-bench runs are not enabled in this channel. An administrator can enable them with `agentx admin eval enable`." };
+    return { outcome: "REFUSED", reason: "NOT_ENABLED", message: "Eval runs are not enabled in this channel. An administrator can enable them with `agentx admin eval enable`." };
   }
   const model = await context.projectModel(request.model) ?? deployment.defaultModel;
   const active = await get(dependencies, ACTIVE_KEY);
@@ -350,7 +350,7 @@ function withoutKeys(item: Record<string, unknown>, keys: readonly string[]): Re
 
 function refusedActive(holder: Record<string, unknown>): SwebenchStartResult {
   const since = typeof holder.startedAt === "string" ? ` (started ${holder.startedAt})` : "";
-  return { outcome: "REFUSED", reason: "RUN_ACTIVE", message: `Another SWE-bench run is in progress${since}. One run at a time is allowed; try again when it finishes.` };
+  return { outcome: "REFUSED", reason: "RUN_ACTIVE", message: `Another eval run is in progress${since}. One run at a time is allowed; try again when it finishes.` };
 }
 
 function isConditionFailure(error: unknown): boolean {
