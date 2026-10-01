@@ -55,7 +55,7 @@ The result informs two decisions, which this experiment does not make by itself:
   fixed seed from the 300 `eval` IDs, and committed as `specs/046-model-cost-comparison/tasks.txt` before any run.
   Include `njs.cve-2022-32414` as a known-solvable control.
 
-### Models (proposed, for Abhishek to confirm)
+### Models (confirmed 2026-10-01)
 
 | Model | Route | Why it is in |
 |---|---|---|
@@ -63,6 +63,8 @@ The result informs two decisions, which this experiment does not make by itself:
 | GLM 5.3 | OpenRouter, one pinned provider | strongest open-weight candidate in the published data |
 | DeepSeek V4 Pro | OpenRouter, one pinned provider | about 20x cheaper per token; the price outlier |
 | Kimi K2.6 | OpenRouter, one pinned provider | cached-read pricing (K3 has none listed) |
+| Qwen3 Coder Plus | OpenRouter, one pinned provider | a coding-tuned open-weight model; priced at about a third of Sonnet |
+| MiniMax M3 | OpenRouter, one pinned provider | low price with cached reads; about a sixth of Sonnet |
 
 Opus 5 is out until its Bedrock agreement is accepted.
 
@@ -94,7 +96,7 @@ Opus 5 is out until its Bedrock agreement is accepted.
 - **Cost per solved task** per model: total spend divided by tasks solved. This is the headline number.
 - **Paired comparison.** Per task, compare each model against Sonnet on the share of repeats solved. Report where
   models disagree, not only the totals.
-- **Honesty about power.** With 10 tasks x 3 repeats, only large differences (roughly 25 points or more in resolve
+- **Honesty about power.** With 10 tasks x 3 repeats per model, only large differences (roughly 25 points or more in resolve
   rate) will be clear. Smaller gaps are reported as "not distinguishable", not as wins.
 - **Failure review.** Read the transcripts of every failed run for one task per model. Classify each failure as
   wrong fix, false claim of success, ran out of time or calls, or tool trouble.
@@ -113,10 +115,14 @@ Estimated from the measured SEC-bench run and the pilot. Real costs depend on tu
 
 | Phase | Runs | Model spend (estimate) | EC2 (m7i.xlarge) |
 |---|---|---|---|
-| 1: 10 tasks x 4 models x 3 repeats | 120 | about $250-450 (Sonnet about $220 of it) | about $15 |
-| 2: 20 more tasks | 240 | about $500-900 | about $30 |
+| 1: 10 tasks x 6 models x 3 repeats | 180 | about $400-700 | about $25 |
+| 2: 20 more tasks | 360 | about $800-1,400 | about $50 |
 
-Stop rule: if Phase 1 spend passes $500, stop and review before continuing.
+Phase 1 at the measured token mix, per model for 30 runs: Sonnet 4.6 about $220, GLM 5.3 about $100, Qwen3
+Coder Plus about $80, Kimi K2.6 about $45, MiniMax M3 about $35, DeepSeek V4 Pro about $10. That is about $490
+before turn-count differences, which the pilot showed can double a model's cost.
+
+Stop rule: if Phase 1 spend passes $750, stop and review before continuing.
 
 ## Out of Scope
 
@@ -128,14 +134,14 @@ Stop rule: if Phase 1 spend passes $500, stop and review before continuing.
 
 ## Open Questions
 
-- **Q-1:** Confirm the model list, and whether to add Qwen3 Coder Plus or MiniMax M3.
-- **Q-2:** Confirm the Phase 1 budget and the $500 stop rule.
+- **Q-1** (answered 2026-10-01): six models, including Qwen3 Coder Plus and MiniMax M3.
+- **Q-2:** Confirm the Phase 1 budget and the $750 stop rule.
 - **Q-3:** Run before or after the agent verification fix (D-B)? Recommended: after.
 
 ## Success Criteria
 
 - **SC-001:** `tasks.txt` and the model, thinking-level and provider settings are committed before the first run.
-- **SC-002:** All 120 Phase 1 runs are recorded, and failed or cancelled runs are listed separately.
+- **SC-002:** All 180 Phase 1 runs are recorded, and failed or cancelled runs are listed separately.
 - **SC-003:** A short report goes in this folder, with the resolve rate and interval, cost per solved task, the
   paired comparison and the failure review per model, and a recommendation for the two decisions above that says
   how confident it is.
