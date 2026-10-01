@@ -98,6 +98,7 @@ export function taskContainerExec(docker: DockerCli, name: string): ContainerExe
     ...Object.entries(options.env ?? {}).flatMap(([key, value]) => ["--env", `${key}=${value}`]),
     name, ...command,
   ], {
+    ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
     ...(options.signal === undefined ? {} : { signal: options.signal }),
     ...(options.onStdout === undefined ? {} : { onStdout: options.onStdout }),
     ...(options.onStderr === undefined ? {} : { onStderr: options.onStderr }),

@@ -7,11 +7,13 @@ import { promisify } from "node:util";
 import { ProjectDefinitionSchema, type ProjectDefinition, type WorkerInvocation } from "@agentx/contracts";
 import { describe, expect, it, vi } from "vitest";
 import {
+  containerBashOperations,
   devcontainerBashOperations,
   devcontainerTarget,
   ensureDevcontainer,
   preparedDevcontainerTarget,
   runDevcontainerCommand,
+  type ContainerExec,
   type DevcontainerCli,
   type DevcontainerProcess,
 } from "../../packages/worker/src/devcontainer.js";
@@ -25,6 +27,38 @@ const UP_OUTPUT = [
   "{\"type\":\"text\",\"level\":2,\"text\":\"Resolving Remote\"}",
   "{\"outcome\":\"success\",\"containerId\":\"f832494aef96\",\"remoteUser\":\"node\",\"remoteWorkspaceFolder\":\"/workspaces/sample\"}",
 ].join("\n");
+
+const COMMAND_WRAPPER = 'set -m; (cd -- "$1" && shift 2 && exec "$@") & child=$!; set +m; echo "$child" > "$2"; wait "$child"; status=$?; rm -f "$2"; exit "$status"';
+const SHELL_WRAPPER = 'set -m; (cd -- "$1" && shift 2 && eval "$1") & child=$!; set +m; echo "$child" > "$2"; wait "$child"; status=$?; rm -f "$2"; exit "$status"';
+// TERM waits up to 5 s for the group file, then keeps the group ID in "$1.stop": the wrapper removes
+// the group file once the group leader exits, and KILL still needs the ID (#174 review).
+const KILL_TERM = 'for _ in {1..50}; do [ -s "$1" ] && break; sleep 0.1; done; p=$(cat "$1" 2>/dev/null) || exit 0; case "$p" in ""|*[!0-9]*) exit 0;; esac; echo "$p" > "$1.stop"; out=$(kill -TERM -- "-$p" 2>&1) && exit 0; case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1';
+const KILL_KILL = 'p=$(cat "$1.stop" 2>/dev/null || cat "$1" 2>/dev/null); rm -f "$1" "$1.stop"; case "$p" in ""|*[!0-9]*) exit 0;; esac; out=$(kill -KILL -- "-$p" 2>&1) && exit 0; case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1';
+const NO_BASH = 'OCI runtime exec failed: exec failed: unable to start container process: exec: "bash": executable file not found in $PATH: unknown';
+
+/**
+ * A fake `devcontainer` CLI whose command runs until its client is aborted (or `main` says otherwise),
+ * and whose kill execs answer with `kill` (#174).
+ */
+function stoppableCli(behaviour: {
+  main?: (options: Parameters<DevcontainerCli["run"]>[1]) => Promise<DevcontainerProcess>;
+  kill?: () => Promise<DevcontainerProcess>;
+} = {}) {
+  const calls: string[][] = [];
+  const options: Array<Parameters<DevcontainerCli["run"]>[1]> = [];
+  const cli: DevcontainerCli = {
+    run: (args, runOptions) => {
+      calls.push([...args]);
+      options.push(runOptions);
+      if (args.some((arg) => arg === KILL_TERM || arg === KILL_KILL)) return behaviour.kill?.() ?? Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+      return behaviour.main?.(runOptions) ?? new Promise((resolve) => {
+        runOptions.signal?.addEventListener("abort", () => resolve({ exitCode: null, stdout: "", stderr: "" }), { once: true });
+      });
+    },
+  };
+  const kills = () => calls.filter((args) => args.some((arg) => arg === KILL_TERM || arg === KILL_KILL));
+  return { cli, calls, options, kills };
+}
 
 /** A fake `devcontainer` CLI: `up` succeeds, and `exec` answers with `execResult`. */
 function fakeCli(execResult: (args: readonly string[]) => DevcontainerProcess = () => ({ exitCode: 0, stdout: "", stderr: "" })) {
@@ -84,12 +118,152 @@ describe("the devcontainer CLI seam", () => {
     const { cli, calls, options } = fakeCli(() => ({ exitCode: 3, stdout: "out", stderr: "err" }));
     const result = await runDevcontainerCommand(cli, target, { cwd: "repo/sample/apps", executable: "npm", args: ["run", "test"], timeoutSeconds: 60 });
     expect(result).toEqual({ exitCode: 3, stdout: "out", stderr: "err" });
+    // bash, in its own process group whose ID goes to a group file, so a timeout can stop it in the
+    // container (#174). The executable and its arguments are positional: never re-read by a shell.
+    const groupFile = calls[0]![10];
+    expect(groupFile).toMatch(/^\/tmp\/agentx-command-[0-9a-f-]+\.pgid$/);
     expect(calls[0]).toEqual([
       "exec", "--workspace-folder", target.workspaceFolder, "--config", target.configPath,
-      "sh", "-c", 'cd -- "$1" && shift && exec "$@"', "sh", "/mnt/workspace/repo/sample/apps", "npm", "run", "test",
+      "bash", "-c", COMMAND_WRAPPER, "bash", "/mnt/workspace/repo/sample/apps", groupFile, "npm", "run", "test",
     ]);
-    expect(options[0]).toEqual({ timeoutMs: 60_000 });
+    expect(COMMAND_WRAPPER).not.toContain("eval");
+    // The CLI's own timeout is only a safety net: the command's timeout, the grace period, and 10 s more.
+    expect(Object.keys(options[0]!).sort()).toEqual(["signal", "timeoutMs"]);
+    expect(options[0]!.timeoutMs).toBe(60_000 + TIMEOUT_KILL_GRACE_MS + 10_000);
+    expect(options[0]!.signal).toBeInstanceOf(AbortSignal);
+    expect(calls).toHaveLength(1);
     await expect(runDevcontainerCommand(cli, target, { cwd: "../outside", executable: "true", args: [], timeoutSeconds: 1 })).rejects.toThrow(/escapes/);
+  });
+
+  it("stops a timed-out project command in the container: TERM to its process group, then KILL after the grace period (#174)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { cli, calls, options, kills } = stoppableCli();
+      const running = runDevcontainerCommand(cli, target, { cwd: "repo/sample", executable: "sleep", args: ["300"], timeoutSeconds: 60 });
+      await vi.advanceTimersByTimeAsync(59_999);
+      expect(kills()).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      const groupFile = calls[0]![10]!;
+      expect(kills()).toEqual([[
+        "exec", "--workspace-folder", target.workspaceFolder, "--config", target.configPath, "bash", "-c", KILL_TERM, "bash", groupFile,
+      ]]);
+      // The command's client keeps running through the grace period.
+      expect(options[0]!.signal!.aborted).toBe(false);
+      await vi.advanceTimersByTimeAsync(TIMEOUT_KILL_GRACE_MS - 1);
+      expect(kills()).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(kills()[1]).toEqual([
+        "exec", "--workspace-folder", target.workspaceFolder, "--config", target.configPath, "bash", "-c", KILL_KILL, "bash", groupFile,
+      ]);
+      await expect(running).resolves.toEqual({ exitCode: -1, timedOut: true, stdout: "", stderr: "" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports a timed-out project command whose process group stopped on TERM, and still sends KILL after the grace period (#174)", async () => {
+    vi.useFakeTimers();
+    try {
+      let finish: (result: DevcontainerProcess) => void = () => undefined;
+      const { cli, kills } = stoppableCli({
+        main: () => new Promise((resolve) => { finish = resolve; }),
+        kill: () => {
+          finish({ exitCode: 143, stdout: "partial", stderr: "" });
+          return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+        },
+      });
+      const running = runDevcontainerCommand(cli, target, { cwd: "repo/sample", executable: "sleep", args: ["300"], timeoutSeconds: 1 });
+      let settled = false;
+      void running.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(kills()).toHaveLength(1);
+      // A group member that ignores TERM, and does not hold the output open, still gets KILL, and
+      // the result waits for it.
+      await vi.advanceTimersByTimeAsync(TIMEOUT_KILL_GRACE_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(kills()[1]).toContain(KILL_KILL);
+      await expect(running).resolves.toEqual({ exitCode: 143, timedOut: true, stdout: "partial", stderr: "" });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends no kill to a project command that finishes in time, and leaves no timer behind (#174)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { cli, calls } = stoppableCli({ main: () => Promise.resolve({ exitCode: 0, stdout: "ok", stderr: "" }) });
+      await expect(runDevcontainerCommand(cli, target, { cwd: "repo/sample", executable: "true", args: [], timeoutSeconds: 60 }))
+        .resolves.toEqual({ exitCode: 0, stdout: "ok", stderr: "" });
+      expect(vi.getTimerCount()).toBe(0);
+      await vi.advanceTimersByTimeAsync(10 * 60_000);
+      expect(calls).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("ends a timed-out project command whose kill execs never return, waiting at most 10 s for each, and says the stop failed (#174)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { cli, options, kills } = stoppableCli({ kill: () => new Promise(() => undefined) });
+      const running = runDevcontainerCommand(cli, target, { cwd: "repo/sample", executable: "sleep", args: ["300"], timeoutSeconds: 2 });
+      let settled = false;
+      void running.then(() => { settled = true; });
+      await vi.advanceTimersByTimeAsync(2_000 + 10_000 + TIMEOUT_KILL_GRACE_MS + 10_000 - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await expect(running).resolves.toEqual({
+        exitCode: -1, timedOut: true, stdout: "",
+        stderr: [
+          "AgentX could not stop the command in the container (TERM): no answer within 10 s",
+          "AgentX could not stop the command in the container (KILL): no answer within 10 s",
+        ].join("\n"),
+      });
+      expect(kills()).toHaveLength(2);
+      // Each kill exec has a timeout of its own, so a hung one does not stay running.
+      for (const [index, args] of options.entries()) {
+        if (index === 0) continue;
+        expect(args.timeoutMs, String(index)).toBe(10_000);
+      }
+      expect(options).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("says in a timed-out project command's output when a kill exec failed (#174 review)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { cli } = stoppableCli({
+        kill: () => Promise.resolve({ exitCode: 1, stdout: "bash: line 1: kill: (4242) - Operation not permitted\n", stderr: "" }),
+      });
+      const running = runDevcontainerCommand(cli, target, { cwd: "repo/sample", executable: "sleep", args: ["300"], timeoutSeconds: 1 });
+      await vi.advanceTimersByTimeAsync(1_000 + TIMEOUT_KILL_GRACE_MS);
+      await expect(running).resolves.toEqual({
+        exitCode: -1, timedOut: true, stdout: "",
+        stderr: [
+          "AgentX could not stop the command in the container (TERM): bash: line 1: kill: (4242) - Operation not permitted",
+          "AgentX could not stop the command in the container (KILL): bash: line 1: kill: (4242) - Operation not permitted",
+        ].join("\n"),
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("fails a project command with a clear error when the devcontainer has no bash (#174)", async () => {
+    const { cli } = fakeCli(() => ({ exitCode: 127, stdout: "", stderr: NO_BASH }));
+    await expect(runDevcontainerCommand(cli, target, { cwd: "repo/sample", executable: "npm", args: ["ci"], timeoutSeconds: 60 }))
+      .rejects.toThrow("the container has no bash, which AgentX needs to run commands in it; add bash to its image");
+    // A missing project executable is the command's own failure, not a missing bash.
+    const missing = fakeCli(() => ({ exitCode: 127, stdout: "", stderr: "bash: line 1: exec: nope: not found\n" }));
+    await expect(runDevcontainerCommand(missing.cli, target, { cwd: "repo/sample", executable: "nope", args: [], timeoutSeconds: 60 }))
+      .resolves.toEqual({ exitCode: 127, stdout: "", stderr: "bash: line 1: exec: nope: not found\n" });
+    // Output means bash started: a command that itself fails to find bash somewhere else is its own failure.
+    const nested = fakeCli(() => ({ exitCode: 127, stdout: "running in the other container\n", stderr: NO_BASH }));
+    await expect(runDevcontainerCommand(nested.cli, target, { cwd: "repo/sample", executable: "docker", args: ["exec", "other", "bash"], timeoutSeconds: 60 }))
+      .resolves.toEqual({ exitCode: 127, stdout: "running in the other container\n", stderr: NO_BASH });
   });
 
   it("reports a project command its timeout stopped, and the signal that ended it (#154)", async () => {
@@ -99,33 +273,155 @@ describe("the devcontainer CLI seam", () => {
   });
 
   it("streams the agent's shell, forwards pi's session variables, and stops the command's process group on timeout", async () => {
-    const calls: Array<readonly string[]> = [];
-    const cli: DevcontainerCli = {
-      run: (args, options) => {
-        calls.push(args);
-        if (args.includes("kill -TERM -- \"-$(cat \"$1\")\" 2>/dev/null; rm -f \"$1\"")) return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
-        options.onStdout?.(Buffer.from("hello\n"));
-        // A long command: it ends when the operations abort their client.
-        return new Promise((resolve) => options.signal?.addEventListener("abort", () => resolve({ exitCode: null, stdout: "", stderr: "" })));
-      },
-    };
-    const output: string[] = [];
-    const operations = devcontainerBashOperations(cli, target);
-    await expect(operations.exec("sleep 60", "/mnt/workspace/repo/sample", {
-      onData: (data) => output.push(data.toString()), timeout: 0.05, env: { PI_SESSION_ID: "s1", HOME: "/home/node" },
-    })).rejects.toThrow("timeout:0.05");
-    expect(output).toEqual(["hello\n"]);
-    const shell = calls[0]!;
-    expect(shell).toEqual(expect.arrayContaining(["--remote-env", "PI_SESSION_ID=s1", "bash", "-c", "/mnt/workspace/repo/sample", "sleep 60"]));
-    expect(shell).not.toContain("HOME=/home/node");
-    // The stop runs under bash (dash's kill refuses a negative process group) with the same group file.
-    const groupFile = shell.at(-1);
-    expect(groupFile).toMatch(/^\/tmp\/agentx-shell-[0-9a-f-]+\.pgid$/);
-    expect(calls[1]!.slice(-5)).toEqual(["bash", "-c", "kill -TERM -- \"-$(cat \"$1\")\" 2>/dev/null; rm -f \"$1\"", "bash", groupFile]);
+    vi.useFakeTimers();
+    try {
+      const calls: Array<readonly string[]> = [];
+      const cli: DevcontainerCli = {
+        run: (args, options) => {
+          calls.push(args);
+          if (args.some((arg) => arg === KILL_TERM || arg === KILL_KILL)) return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+          options.onStdout?.(Buffer.from("hello\n"));
+          // A long command: it ends when the operations abort their client.
+          return new Promise((resolve) => options.signal?.addEventListener("abort", () => resolve({ exitCode: null, stdout: "", stderr: "" })));
+        },
+      };
+      const output: string[] = [];
+      const operations = devcontainerBashOperations(cli, target);
+      const running = operations.exec("sleep 60", "/mnt/workspace/repo/sample", {
+        onData: (data) => output.push(data.toString()), timeout: 0.05, env: { PI_SESSION_ID: "s1", HOME: "/home/node" },
+      });
+      const failed = expect(running).rejects.toThrow("timeout:0.05");
+      await vi.advanceTimersByTimeAsync(50);
+      const shell = calls[0]!;
+      // The stop runs under bash (dash's kill refuses a negative process group) with the same group file.
+      const groupFile = shell.at(-2);
+      expect(groupFile).toMatch(/^\/tmp\/agentx-shell-[0-9a-f-]+\.pgid$/);
+      expect(shell).toEqual([
+        "exec", "--workspace-folder", target.workspaceFolder, "--config", target.configPath,
+        "--remote-env", "PI_SESSION_ID=s1",
+        "bash", "-c", SHELL_WRAPPER, "bash", "/mnt/workspace/repo/sample", groupFile, "sleep 60",
+      ]);
+      expect(shell).not.toContain("HOME=/home/node");
+      expect(calls[1]!.slice(-5)).toEqual(["bash", "-c", KILL_TERM, "bash", groupFile]);
+      // KILL after the grace period, for a process that ignores TERM (#174).
+      await vi.advanceTimersByTimeAsync(TIMEOUT_KILL_GRACE_MS);
+      expect(calls[2]!.slice(-5)).toEqual(["bash", "-c", KILL_KILL, "bash", groupFile]);
+      await failed;
+      expect(output).toEqual(["hello\n"]);
 
-    const aborted = new AbortController();
-    aborted.abort();
-    await expect(operations.exec("true", "/mnt/workspace", { onData: () => undefined, signal: aborted.signal })).rejects.toThrow("aborted");
+      const aborted = new AbortController();
+      aborted.abort();
+      await expect(operations.exec("true", "/mnt/workspace", { onData: () => undefined, signal: aborted.signal })).rejects.toThrow("aborted");
+      expect(calls).toHaveLength(3);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops the agent's shell command at once on an abort: TERM in the container, then KILL after the grace period (#174)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { cli, options, kills } = stoppableCli();
+      const controller = new AbortController();
+      const running = devcontainerBashOperations(cli, target).exec("sleep 60", "/mnt/workspace", { onData: () => undefined, signal: controller.signal });
+      const failed = expect(running).rejects.toThrow("aborted");
+      await vi.advanceTimersByTimeAsync(0);
+      controller.abort();
+      await failed;
+      expect(options[0]!.signal!.aborted).toBe(true);
+      expect(kills()).toHaveLength(1);
+      expect(kills()[0]).toContain(KILL_TERM);
+      await vi.advanceTimersByTimeAsync(TIMEOUT_KILL_GRACE_MS);
+      expect(kills()).toHaveLength(2);
+      expect(kills()[1]).toContain(KILL_KILL);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("tells the agent when its timed-out command could not be stopped in the container (#174 review)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { cli } = stoppableCli({ kill: () => Promise.resolve({ exitCode: 1, stdout: "kill: Operation not permitted\n", stderr: "" }) });
+      const output: string[] = [];
+      const running = devcontainerBashOperations(cli, target).exec("sleep 60", "/mnt/workspace", { onData: (data) => output.push(data.toString()), timeout: 1 });
+      const failed = expect(running).rejects.toThrow("timeout:1");
+      await vi.advanceTimersByTimeAsync(1_000 + TIMEOUT_KILL_GRACE_MS);
+      await failed;
+      expect(output).toEqual([
+        "\nAgentX could not stop the command in the container (TERM): kill: Operation not permitted\n",
+        "\nAgentX could not stop the command in the container (KILL): kill: Operation not permitted\n",
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("sends no kill for an agent's shell command that finishes in time, and leaves no timer behind (#174 review)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { cli, calls } = stoppableCli({ main: () => Promise.resolve({ exitCode: 2, stdout: "", stderr: "" }) });
+      await expect(devcontainerBashOperations(cli, target).exec("false", "/mnt/workspace", { onData: () => undefined, timeout: 60 }))
+        .resolves.toEqual({ exitCode: 2 });
+      expect(vi.getTimerCount()).toBe(0);
+      expect(calls).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("reports an abort that arrives during a timed-out agent's shell command's grace period as an abort (#174 review)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { cli, kills } = stoppableCli();
+      const controller = new AbortController();
+      const running = devcontainerBashOperations(cli, target).exec("sleep 60", "/mnt/workspace", { onData: () => undefined, signal: controller.signal, timeout: 1 });
+      const failed = expect(running).rejects.toThrow("aborted");
+      await vi.advanceTimersByTimeAsync(2_000);
+      controller.abort();
+      await failed;
+      // One stop sequence, not a second one for the abort.
+      await vi.advanceTimersByTimeAsync(TIMEOUT_KILL_GRACE_MS);
+      expect(kills().map((args) => args.at(-3))).toEqual([KILL_TERM, KILL_KILL]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("stops a timed-out command's whole process group with real bash, including a member that ignores TERM after the leader exits (#174 review)", async () => {
+    // The container is this machine: the exec runs bash directly, so the wrapper and kill scripts run for real.
+    const exec: ContainerExec = (command, options) => runCollected(command[0]!, command.slice(1), options);
+    const output: string[] = [];
+    await expect(containerBashOperations(exec).exec(
+      "(trap '' TERM; exec sleep 30) >/dev/null 2>&1 & echo $!; exec sleep 30",
+      tmpdir(),
+      { onData: (data) => output.push(data.toString()), timeout: 1 },
+    )).rejects.toThrow("timeout:1");
+    await expectGone(Number.parseInt(output.join("").trim(), 10));
+  }, 30_000);
+
+  it("reports a stop that kill refused, with real bash, rather than calling the group gone (#174 review)", async () => {
+    // BASH_ENV, read by the kill execs' bash only, makes kill refuse every signal as a group owned by
+    // root would: "Operation not permitted" is not "No such process".
+    const directory = await mkdtemp(join(tmpdir(), "agentx-174-"));
+    const refusing = join(directory, "refusing-kill.sh");
+    await writeFile(refusing, 'kill() { echo "bash: kill: (${3#-}) - Operation not permitted" >&2; return 1; }\n');
+    const exec: ContainerExec = (command, options) => runCollected(command[0]!, command.slice(1), {
+      ...options,
+      ...(command.some((arg) => arg.includes("kill -TERM") || arg.includes("kill -KILL")) ? { env: { PATH: process.env.PATH, BASH_ENV: refusing } } : {}),
+    });
+    const output: string[] = [];
+    await expect(containerBashOperations(exec).exec("exec sleep 2", tmpdir(), { onData: (data) => output.push(data.toString()), timeout: 0.5 }))
+      .rejects.toThrow("timeout:0.5");
+    const text = output.join("");
+    expect(text).toMatch(/AgentX could not stop the command in the container \(TERM\): bash: kill: \(\d+\) - Operation not permitted/);
+    expect(text).toMatch(/AgentX could not stop the command in the container \(KILL\): bash: kill: \(\d+\) - Operation not permitted/);
+  }, 30_000);
+
+  it("fails the agent's shell command with a clear error when the devcontainer has no bash (#174)", async () => {
+    const { cli } = fakeCli(() => ({ exitCode: 127, stdout: "", stderr: NO_BASH }));
+    await expect(devcontainerBashOperations(cli, target).exec("ls", "/mnt/workspace", { onData: () => undefined }))
+      .rejects.toThrow("the container has no bash, which AgentX needs to run commands in it; add bash to its image");
   });
 });
 
@@ -161,6 +457,15 @@ describe("preparing a workspace with a devcontainer", () => {
     const { cli } = fakeCli(() => ({ exitCode: null, signal: "SIGTERM", timedOut: true, stdout: "", stderr: "" }));
     await expect(prepareWorkspace({ rootPath: root, project, materializer, devcontainerCli: cli }))
       .rejects.toThrow(`setup step 0 (npm ci in ${project.setup[0]!.cwd}) timed out after ${project.setup[0]!.timeoutSeconds} s`);
+  });
+
+  it("says which setup step could not run because the devcontainer has no bash (#174)", async () => {
+    const { root, project, materializer } = await fixture();
+    const { cli } = fakeCli(() => ({ exitCode: 127, stdout: "", stderr: NO_BASH }));
+    await expect(prepareWorkspace({ rootPath: root, project, materializer, devcontainerCli: cli }))
+      .rejects.toThrow(`setup step 0 (npm ci in ${project.setup[0]!.cwd}) could not run`);
+    await expect(prepareWorkspace({ rootPath: root, project, materializer, devcontainerCli: cli }))
+      .rejects.toThrow("the container has no bash");
   });
 
   it("skips Docker's data root on the workspace volume, which is root's and holds links outside the workspace", async () => {
