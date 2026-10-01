@@ -52,7 +52,7 @@ export function registerConfigCommands(program: Command, context: ConfigCommandC
       cloudFormation: overrides.cloudFormation ?? new CloudFormationClient(aws),
       stacks: overrides.stacks ?? cloudFormationStackReader(new CloudFormationClient(aws)),
       identity: overrides.identity ?? stsCallerIdentity(new STSClient(aws)),
-      // Built for the environment's region once its settings are read. Only converse and openRouter
+      // Built for the environment's region once its settings are read. Only converse, openRouter and directProvider
       // are used; the account is not needed for them.
       checks: overrides.checks ?? ((environmentRegion) => awsPrerequisiteChecks({ region: environmentRegion, account: "000000000000", store, runner: realCommandRunner(context.stderr), fetch: context.fetch })),
       alerts: overrides.alerts ?? awsAlertsApi({ sns: new SNSClient(aws), cloudWatch: new CloudWatchClient(aws), budgets: new BudgetsClient({ region: "us-east-1" }) }),

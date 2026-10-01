@@ -745,6 +745,7 @@ export interface InitExportOptions {
   workerModel: string;
   orchestratorProvider?: string; classifierProvider?: string; workerProvider?: string;
   openrouterSecretArn?: string; openrouterProviders?: string;
+  anthropicSecretArn?: string; openaiSecretArn?: string;
 }
 
 export interface InitExportResult {
@@ -829,6 +830,8 @@ async function initExport(options: InitExportOptions, deps: DeployCliDependencie
         ...(options.workerProvider ? { worker: options.workerProvider } : {}),
       } } : {}),
       ...(options.openrouterSecretArn ? { openRouter: { secretArn: options.openrouterSecretArn, ...(options.openrouterProviders ? { providers: options.openrouterProviders.split(",") } : {}) } } : {}),
+      ...(options.anthropicSecretArn ? { anthropic: { secretArn: options.anthropicSecretArn } } : {}),
+      ...(options.openaiSecretArn ? { openai: { secretArn: options.openaiSecretArn } } : {}),
     }),
     identity: identityAnswers,
     // The export bundle always replaces this with `{{github:...}}` markers (markerAnswers in

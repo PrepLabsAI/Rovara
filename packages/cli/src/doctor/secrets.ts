@@ -1,5 +1,8 @@
 // FR-050: that secrets exist and have the right shape. Values are read only to judge their shape;
 // no message here is built from a value.
+import { KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, keyedProviderSecretName, type KeyedModelProvider } from "@agentx/contracts";
+import { providerKeyProblem } from "@agentx/model-runtime/config";
+import { providerSecretArn } from "../deploy/answer-schemas.js";
 import { githubAppSecretName, parseAppSecret } from "../init/github-app.js";
 import { checkAlertWebhook } from "../init/answers.js";
 import { slackSecretName } from "../init/slack-app.js";
@@ -27,7 +30,9 @@ function slackShape(value: string): string | undefined {
   return undefined;
 }
 
-const ownOpenRouterSecret = (env: string) => new RegExp(`:secret:agentx/${env}/openrouter-[A-Za-z0-9]{6}$`);
+/** The secret init creates for a keyed provider, by its ARN: Secrets Manager adds a six-character
+ * suffix to the name, and anchoring on it keeps agentx/<env>/openrouter-mine from passing for it. */
+const ownProviderSecret = (env: string, provider: KeyedModelProvider) => new RegExp(`:secret:${keyedProviderSecretName(env, provider)}-[A-Za-z0-9]{6}$`);
 
 export async function secretChecks(context: DoctorContext): Promise<DoctorCheck[]> {
   const { env, settings, answers, services } = context;
@@ -59,14 +64,16 @@ export async function secretChecks(context: DoctorContext): Promise<DoctorCheck[
     });
   }
   const checks: DoctorCheck[] = [];
-  const openRouterArn = settings.models.openRouter?.secretArn;
-  if (openRouterArn !== undefined) {
-    // Secrets Manager adds a six-character suffix to a secret's name in its ARN; anchoring on it keeps
-    // agentx/<env>/openrouter-mine from passing for the environment's own secret.
-    if (ownOpenRouterSecret(env).test(openRouterArn)) {
-      rules.push({ name: `agentx/${env}/openrouter`, shape: (value) => (value.trim() === "" ? "is empty" : undefined), fix: `store the OpenRouter key again: ${put(`agentx/${env}/openrouter`, "openrouter-key.txt")}` });
+  for (const provider of KEYED_PROVIDER_IDS) {
+    const arn = providerSecretArn(settings.models, provider);
+    if (arn === undefined) continue;
+    const { label, secretName } = KEYED_MODEL_PROVIDERS[provider];
+    const name = keyedProviderSecretName(env, provider);
+    if (ownProviderSecret(env, provider).test(arn)) {
+      // The value is never shown: only whether it is empty or the wrong kind of key.
+      rules.push({ name, shape: (value) => (value.trim() === "" ? "is empty" : providerKeyProblem(provider, value.trim())), fix: `store the ${label} key again: ${put(name, `${secretName}-key.txt`)}` });
     } else {
-      checks.push(check("secrets", "OpenRouter key", "skip", `the OpenRouter key is in a secret you made yourself (${openRouterArn}), which doctor's role cannot read; check it yourself`));
+      checks.push(check("secrets", `${label} key`, "skip", `the ${label} key is in a secret you made yourself (${arn}), which doctor's role cannot read; check it yourself`));
     }
   }
   for (const rule of rules) {

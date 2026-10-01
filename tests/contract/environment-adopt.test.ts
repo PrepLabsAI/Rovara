@@ -43,6 +43,21 @@ describe("agentx env adopt", () => {
     expect(settings.models.openRouter).toEqual({ secretArn, providers: ["anthropic"] });
     expect(await readEnvironmentSettings(store, "production")).toEqual(settings);
   });
+  it("adopts Anthropic and OpenAI secret references, and refuses stacks that disagree on one (spec 054)", async () => {
+    const stacks = structuredClone(liveStacks);
+    const anthropic = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/production/anthropic-AbCdEf";
+    const openai = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/production/openai-AbCdEf";
+    Object.assign(stacks.AgentXSlackOrchestrator!.parameters, { ModelProvider: "anthropic", AnthropicSecretArn: anthropic, OpenAISecretArn: "" });
+    Object.assign(stacks.AgentXProductionRuntime!.parameters, { ModelProvider: "openai", AnthropicSecretArn: anthropic, OpenAISecretArn: openai });
+    const settings = await (await run(stacks)).result;
+    expect(settings.models.providers).toEqual({ orchestrator: "anthropic", classifier: "amazon-bedrock", worker: "openai" });
+    expect(settings.models.anthropic).toEqual({ secretArn: anthropic });
+    expect(settings.models.openai).toEqual({ secretArn: openai });
+
+    const drifted = structuredClone(stacks);
+    drifted.AgentXControlPlane!.parameters.AnthropicSecretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:other-AbCdEf";
+    await expect((await run(drifted)).result).rejects.toThrow("Anthropic secret references differ");
+  });
   it("uses the same stack names as the infra's legacy naming", () => {
     expect(ADOPTED_STACK_NAMES).toEqual(LEGACY_STACK_NAMES);
   });

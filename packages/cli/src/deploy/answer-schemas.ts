@@ -6,6 +6,7 @@
 // validation: both import the same regex or schema object, so a region, account, identity, models,
 // images or alert-email answer is refused (or accepted) identically wherever it is checked.
 import { z } from "zod";
+import { MODEL_PROVIDERS, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN, type KeyedModelProvider } from "@agentx/contracts";
 
 /** Shared with `runInitExport`'s own `--region`/`--account` validation, so both commands refuse the
  * same malformed values the same way. */
@@ -31,15 +32,26 @@ export const IdentityAnswersSchema = z.discriminatedUnion("mode", [
     .strict(),
 ]);
 
-const ModelProviderSchema = z.enum(["amazon-bedrock", "openrouter"]);
+const ModelProviderSchema = z.enum(MODEL_PROVIDERS);
+/** A direct provider's key: only the ARN of the secret holding it (spec 054). */
+const DirectKeySchema = z.object({ secretArn: z.string().max(SECRET_ARN_MAX_LENGTH).regex(SECRET_ARN_PATTERN) }).strict();
 export const ModelsAnswersSchema = z.object({
   orchestrator: z.string().min(1), classifier: z.string().min(1), worker: z.string().min(1),
   providers: z.object({ orchestrator: ModelProviderSchema.optional(), classifier: ModelProviderSchema.optional(), worker: ModelProviderSchema.optional() }).strict().optional(),
   openRouter: z.object({
-    secretArn: z.string().regex(/^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+$/),
+    secretArn: z.string().regex(SECRET_ARN_PATTERN),
     providers: z.array(z.string().regex(/^[a-z0-9][a-z0-9_/-]{0,79}$/)).min(1).optional(),
   }).strict().optional(),
+  anthropic: DirectKeySchema.optional(),
+  openai: DirectKeySchema.optional(),
 }).strict();
+
+/** The providers whose key the answers hold an ARN for, and that ARN. OpenRouter's lives under openRouter. */
+export const DIRECT_PROVIDERS = ["anthropic", "openai"] as const;
+export type DirectProvider = (typeof DIRECT_PROVIDERS)[number];
+export function providerSecretArn(models: ModelsAnswers, provider: KeyedModelProvider): string | undefined {
+  return provider === "openrouter" ? models.openRouter?.secretArn : models[provider]?.secretArn;
+}
 export type ModelsAnswers = z.infer<typeof ModelsAnswersSchema>;
 
 export const ImagesAnswersSchema = z.object({ worker: z.string().min(1).optional(), slack: z.string().min(1).optional() }).strict();

@@ -1,7 +1,7 @@
 import { DescribeStacksCommand, type CloudFormationClient, type DescribeStacksCommandOutput } from "@aws-sdk/client-cloudformation";
 import { GetCallerIdentityCommand, type STSClient } from "@aws-sdk/client-sts";
-import { agentXError, DEFAULT_ENVIRONMENT, type StackPart } from "@agentx/contracts";
-import { ModelsAnswersSchema } from "../deploy/answer-schemas.js";
+import { agentXError, DEFAULT_ENVIRONMENT, KEYED_MODEL_PROVIDERS, type StackPart } from "@agentx/contracts";
+import { DIRECT_PROVIDERS, ModelsAnswersSchema, type DirectProvider } from "../deploy/answer-schemas.js";
 import { writeEnvironmentCache } from "./cache.js";
 import { withEnvironmentLock } from "./lock.js";
 import type { ParameterStore } from "./parameter-store.js";
@@ -146,6 +146,7 @@ export async function adoptEnvironment(input: {
       worker: required(runtime, names.runtime, "parameters", "ModelId"),
       ...(Object.values(providers).some((provider) => provider !== "amazon-bedrock") ? { providers } : {}),
       ...(secretArn ? { openRouter: { secretArn, ...(routing ? { providers: routing.split(",") } : {}) } } : {}),
+      ...directKeyAnswers([control, runtime, slack]),
     });
     const settings: EnvironmentSettings = {
       schemaVersion: 1,
@@ -180,4 +181,18 @@ function errnoDetail(error: unknown): string {
   if (!(error instanceof Error)) return "";
   const code = "code" in error && typeof (error as NodeJS.ErrnoException).code === "string" ? (error as NodeJS.ErrnoException).code : undefined;
   return ` (${error.name}${code ? `: ${code}` : ""})`;
+}
+
+/** Anthropic and OpenAI secret references from the stacks that carry them (spec 054). Every stack
+ * that sets one must set the same ARN: a mismatch means a role reads a secret it has no grant for. */
+function directKeyAnswers(stacks: ReadonlyArray<{ parameters: Record<string, string | undefined> }>): Partial<Record<DirectProvider, { secretArn: string }>> {
+  const answers: Partial<Record<DirectProvider, { secretArn: string }>> = {};
+  for (const provider of DIRECT_PROVIDERS) {
+    const { stackParameter, label } = KEYED_MODEL_PROVIDERS[provider];
+    const arns = new Set(stacks.map((stack) => stack.parameters[stackParameter]).filter((arn): arn is string => arn !== undefined && arn !== ""));
+    if (arns.size > 1) throw agentXError("CONFIG_INVALID", `${label} secret references differ between the control-plane, worker and Slack stacks; align ${stackParameter} before adopting`);
+    const [secretArn] = arns;
+    if (secretArn !== undefined) answers[provider] = { secretArn };
+  }
+  return answers;
 }

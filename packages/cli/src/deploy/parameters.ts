@@ -2,11 +2,11 @@
 // It turns the operator's answers, a release manifest, and the stack outputs collected so far into
 // the exact CloudFormation Parameters map for one environment stack. The caller (phase 15d's `agentx
 // init`/`agentx upgrade`) reads secrets and calls CloudFormation; this file only computes values.
-import { CONTROL_PLANE_FOUNDATION_PARAMETERS, ImageDigest, environmentStackName } from "@agentx/contracts";
+import { CONTROL_PLANE_FOUNDATION_PARAMETERS, ImageDigest, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS, environmentStackName } from "@agentx/contracts";
 import type { ReleaseManifest, StackPart } from "@agentx/contracts";
 import { signInStackParameters, type StoredDeveloperSignIn } from "../signin/settings.js";
 
-import type { ModelsAnswers } from "./answer-schemas.js";
+import { providerSecretArn, type ModelsAnswers } from "./answer-schemas.js";
 
 export type StackOutputs = Record<string, string>;
 
@@ -214,7 +214,12 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
   };
 
   const openRouter = answers.models.openRouter;
-  const secret = openRouter ? { OpenRouterSecretArn: openRouter.secretArn } : {};
+  // Each keyed provider's secret ARN, for the stacks that declare <Provider>SecretArn; only when
+  // configured, so an older template without the parameter is never sent it.
+  const secret = Object.fromEntries(KEYED_PROVIDER_IDS.flatMap((provider) => {
+    const arn = providerSecretArn(answers.models, provider);
+    return arn === undefined ? [] : [[KEYED_MODEL_PROVIDERS[provider].stackParameter, arn]];
+  }));
   const routing = openRouter?.providers ? { OpenRouterProviders: openRouter.providers.join(",") } : {};
   switch (part) {
     case "access":
