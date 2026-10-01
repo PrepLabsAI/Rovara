@@ -10,6 +10,7 @@ import { checkPrivateKeyPem, secretFromSource } from "./prompts.js";
 import { problemText } from "./retry.js";
 import type { InitStep, ProgressHandle, StepOutcome } from "./steps.js";
 import { githubCard, type GitHubCardInput } from "./ui/cards.js";
+import { STEP_PLAN } from "./ui/journey.js";
 
 export const AGENTX_HOMEPAGE = "https://github.com/PrepLabsAI/AgentX";
 export const GITHUB_WAIT_MS = 15 * 60 * 1000;
@@ -239,7 +240,7 @@ async function usePreMadeApp(context: InitContext, api: GitHubApi, appId: string
 export function githubAppStep(api: GitHubApi): InitStep<InitContext> {
   return {
     id: "github-app",
-    title: "Create and install the GitHub App",
+    title: STEP_PLAN["github-app"].title,
     async run(context, progress) {
       // A GitHub card left waiting when the step fails would say it still waits: the page shows
       // the failure instead. With no page nothing is shown, and the error is the same either way.

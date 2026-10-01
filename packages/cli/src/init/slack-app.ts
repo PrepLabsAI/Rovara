@@ -12,6 +12,7 @@ import { checkSlackBotToken, checkSlackSigningSecret, fieldCheck, secretFromSour
 import { problemText, retryOnPage } from "./retry.js";
 import type { InitStep, ProgressHandle } from "./steps.js";
 import { slackAppCard, type SlackCardInput, slackUrlsCard, type SlackUrlsCardInput } from "./ui/cards.js";
+import { STEP_PLAN } from "./ui/journey.js";
 
 // channels:join, channels:read and groups:read serve 15d2's `channel add`; users:read.email and
 // im:write serve developer sign-in (spec 025 FR-044). Adding scopes later forces a reinstall (R10).
@@ -284,7 +285,7 @@ async function controlPlaneSlackUrls(context: InitContext): Promise<{ stackName:
 export function slackAppStep(api: SlackApi): InitStep<InitContext> {
   return {
     id: "slack-app",
-    title: "Create the Slack app",
+    title: STEP_PLAN["slack-app"].title,
     async run(context, progress) {
       const { env } = context;
       const { appName } = context.answers.slack;

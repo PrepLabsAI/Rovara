@@ -21,6 +21,7 @@ import { problemText, retryOnPage } from "./retry.js";
 import { readSlackBotToken } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
 import { adminCard, alertsCard, channelCard, connectorsCard, projectCard, replyCard, type AdminCardInput, type ReplyCardInput } from "./ui/cards.js";
+import { STEP_PLAN } from "./ui/journey.js";
 
 /** The environment's settings, which the Slack service step writes; every finishing step and the
  * admin session need them (F21: one message, used by both). */
@@ -47,7 +48,7 @@ function oidcAdminName(accessToken: string): string {
 export function adminUserStep(): InitStep<InitContext> {
   return {
     id: "admin-user",
-    title: "Create the admin user and sign in",
+    title: STEP_PLAN["admin-user"].title,
     async run(context, progress) {
       const settings = await requireSettings(context);
       const recorded = progress.current().admin;
@@ -111,7 +112,7 @@ export function adminUserStep(): InitStep<InitContext> {
 export function firstProjectStep(): InitStep<InitContext> {
   return {
     id: "first-project",
-    title: "Set up the first project and its channel",
+    title: STEP_PLAN["first-project"].title,
     async run(context, progress) {
       const session = await context.adminSession();
       let project = progress.current().project;
@@ -188,7 +189,7 @@ export function parseConnectorsFlag(value: string): Set<ConnectorType> {
 export function connectorsStep(): InitStep<InitContext> {
   return {
     id: "connectors",
-    title: "Offer the Linear, Jira and Asana connectors",
+    title: STEP_PLAN.connectors.title,
     async run(context, progress) {
       const wanted = context.flags.connectors === undefined ? undefined : parseConnectorsFlag(context.flags.connectors);
       const project = progress.current().project;
@@ -227,7 +228,7 @@ export function connectorsStep(): InitStep<InitContext> {
 export function alertsStep(): InitStep<InitContext> {
   return {
     id: "alerts",
-    title: "Subscribe alerts, check the budget, and send a test alarm",
+    title: STEP_PLAN.alerts.title,
     async run(context, progress) {
       const { answers } = context;
       const settings = await requireSettings(context);
@@ -293,7 +294,7 @@ async function requireWebhook(context: InitContext, name: string): Promise<strin
 export function e2eStep(): InitStep<InitContext> {
   return {
     id: "e2e",
-    title: "Check that AgentX answers in Slack",
+    title: STEP_PLAN.e2e.title,
     async run(context, progress) {
       const { project, slack } = progress.current();
       if (project?.channelId === undefined || project.channelName === undefined || slack === undefined) {

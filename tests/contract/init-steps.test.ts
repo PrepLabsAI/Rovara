@@ -3,8 +3,11 @@
 // failed step (so the next run retries it), and records but stops on a waiting step (FR-035).
 import { describe, expect, it, vi } from "vitest";
 import { agentXError } from "@agentx/contracts";
-import { installProgressParameterName, readInstallProgress, type InitStepId } from "../../packages/cli/src/init/install-state.js";
+import { initSteps } from "../../packages/cli/src/init/commands.js";
+import { installProgressParameterName, INIT_STEP_IDS, readInstallProgress, type InitStepId } from "../../packages/cli/src/init/install-state.js";
 import { runInitSteps, type InitEvent, type InitStep, type StepOutcome } from "../../packages/cli/src/init/steps.js";
+import { STEP_PLAN } from "../../packages/cli/src/init/ui/journey.js";
+import { fakeGitHubApi, fakeSlackApi } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 const ENV = "staging";
@@ -168,5 +171,12 @@ describe("init step runner", () => {
     expect(never.run).not.toHaveBeenCalled();
     expect(failing.values.has(LOCK)).toBe(false);
     expect(failing.values.has(installProgressParameterName(ENV))).toBe(false);
+  });
+});
+
+describe("step names", () => {
+  it("spec 048 FR-080: every step is named in plain words, from the journey's one list", () => {
+    expect(initSteps({ github: fakeGitHubApi(), slack: fakeSlackApi() }).map((step) => [step.id, step.title]))
+      .toEqual(INIT_STEP_IDS.map((id) => [id, STEP_PLAN[id].title]));
   });
 });

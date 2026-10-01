@@ -123,13 +123,13 @@ describe("links", () => {
 
   it("clears the run's link when its step ends, or when the next one starts", () => {
     const hub = createWizardHub("staging");
-    hub.setSteps([{ id: "github-app", title: "Create and install the GitHub App" }, { id: "control-plane", title: "Deploy the control plane and runtime" }]);
+    hub.setSteps([{ id: "github-app", title: "Create the GitHub app" }, { id: "control-plane", title: "Start the AgentX service" }]);
     hub.showLink({ url: "https://github.com/apps/agentx-acme-staging/installations/new", label: "Open github.com" });
     expect(hub.state().link).toEqual({ url: "https://github.com/apps/agentx-acme-staging/installations/new", label: "Open github.com", note: NEW_TAB_NOTE });
-    hub.applyEvent({ kind: "step-done", id: "github-app", title: "Create and install the GitHub App" });
+    hub.applyEvent({ kind: "step-done", id: "github-app", title: "Create the GitHub app" });
     expect(hub.state().link).toBeUndefined();
     hub.showLink({ url: "https://api.slack.com/apps", label: "Open api.slack.com" });
-    hub.applyEvent({ kind: "step-started", id: "control-plane", title: "Deploy the control plane and runtime" });
+    hub.applyEvent({ kind: "step-started", id: "control-plane", title: "Start the AgentX service" });
     expect(hub.state().link).toBeUndefined();
   });
 });

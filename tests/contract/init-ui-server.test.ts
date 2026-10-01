@@ -186,7 +186,7 @@ describe("the install wizard's server", () => {
 
   it("streams the snapshot, then every state change and log line, then the close", async () => {
     const { hub, server, origin } = await wizard();
-    hub.setSteps([{ id: "prerequisites", title: "Check prerequisites" }]);
+    hub.setSteps([{ id: "prerequisites", title: "Check your AWS account" }]);
     hub.log("fetching the release");
     const stream = await request(origin, "/events");
     expect(stream.headers.get("content-type")).toBe("text/event-stream; charset=utf-8");
@@ -202,10 +202,10 @@ describe("the install wizard's server", () => {
     };
     await until("event: snapshot");
     expect(text).toContain('"log":["fetching the release"]');
-    hub.log("==> Check prerequisites");
+    hub.log("==> Check your AWS account");
     await until("event: log");
-    expect(text).toContain('data: "==> Check prerequisites"');
-    hub.applyEvent({ kind: "step-started", id: "prerequisites", title: "Check prerequisites" });
+    expect(text).toContain('data: "==> Check your AWS account"');
+    hub.applyEvent({ kind: "step-started", id: "prerequisites", title: "Check your AWS account" });
     await until("event: state");
     expect(text).toContain('"status":"running"');
     hub.close();

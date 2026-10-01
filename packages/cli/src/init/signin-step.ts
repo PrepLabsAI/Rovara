@@ -13,6 +13,7 @@ import { readSignInSettings, type DeveloperSignInSettings } from "../signin/sett
 import type { InitContext } from "./context.js";
 import type { SlackApi } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
+import { STEP_PLAN } from "./ui/journey.js";
 
 /** Combines the Slack and company credentials collected for --signin both into the one
  * `applySignInChange` accepts, so both are stored, only once, only after the single change is
@@ -53,7 +54,7 @@ export function combinedCredentials(slack: SignInCredentials | undefined, oidc: 
 export function developerSignInStep(input: { slack: SlackApi }): InitStep<InitContext> {
   return {
     id: "developer-signin",
-    title: "Set up developer sign-in",
+    title: STEP_PLAN["developer-signin"].title,
     async run(context, progress) {
       const { env } = context;
       if ((await readSignInSettings(context.store, env)) !== undefined) return { status: "done", note: "developer sign-in was already set up" };

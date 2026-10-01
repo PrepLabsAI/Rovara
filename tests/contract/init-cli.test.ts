@@ -244,7 +244,7 @@ describe("agentx init", () => {
     expect(await h.run([], { prompter, setup })).toBe(0);
     expect(prompter.remaining()).toBe(0);
     const resumed = h.printedSince(mark);
-    expect(resumed).toContain("already done: Set up developer sign-in");
+    expect(resumed).toContain("already done: Turn on developer sign-in");
     expect(resumed).toContain("AgentX environment staging is ready.");
     expect(resumed).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com\n");
   });
@@ -260,8 +260,8 @@ describe("agentx init", () => {
     const prompter = scriptedPrompter([]);
     expect(await h.run([], { prompter })).toBe(0);
     const rerun = h.printedSince(mark);
-    expect(rerun).toContain("already done: Create the admin user and sign in");
-    expect(rerun).toContain("already done: Set up the first project and its channel");
+    expect(rerun).toContain("already done: Sign in to AgentX");
+    expect(rerun).toContain("already done: Set up your first project");
     expect(rerun).toContain("AgentX environment staging is ready.");
     expect(h.cognito.created).toEqual([ADMIN_EMAIL]);
     expect(h.plane.registered).toHaveLength(1);
@@ -272,7 +272,7 @@ describe("agentx init", () => {
     const h = await harness();
     h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
     expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).not.toBe(0);
-    expect(h.printed()).toContain('init stopped at "Deploy the control plane and runtime": Resource limit exceeded. Run agentx init --env staging --region us-east-1 again to continue from this step.');
+    expect(h.printed()).toContain('init stopped at "Start the AgentX service": Resource limit exceeded. Run agentx init --env staging --region us-east-1 again to continue from this step.');
     expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
     h.deployer.fail.clear();
     h.deployer.requests.length = 0;
@@ -292,7 +292,7 @@ describe("agentx init", () => {
     expect(h.deployer.requests).toEqual([]);
     expect(h.store.values.get(installProgressParameterName("staging"))).toBe(before);
     expect(h.store.values.get(settingsParameterName("staging"))).toBe(settingsBefore);
-    expect(h.printed()).toContain("already done: Deploy the Slack service");
+    expect(h.printed()).toContain("already done: Start the Slack connection");
   });
 
   it("stops before creating anything when a model cannot be used", async () => {
@@ -357,7 +357,7 @@ describe("agentx init", () => {
     h.deployer.fail.set(environmentStackName("staging", "access"), agentXError("CONFIG_INVALID", "stack agentx-staging-access failed to create earlier and must be deleted before it can be deployed again (aws cloudformation delete-stack --stack-name agentx-staging-access --region us-east-1)"));
     expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).toBe(2);
     const printed = h.printed();
-    expect(printed).toContain('init stopped at "Deploy the access stack (IAM roles, artifact bucket, image cache)": stack agentx-staging-access failed to create earlier');
+    expect(printed).toContain('init stopped at "Set up AWS permissions": stack agentx-staging-access failed to create earlier');
     expect(printed).toContain("Run agentx init --env staging --region us-east-1 again to continue from this step.");
     expect(printed).not.toContain("agentx deploy");
     expect(printed).not.toContain("answers file");
@@ -457,7 +457,7 @@ describe("agentx init", () => {
     expect(await h.run(without(UNATTENDED, "--channel"), { processEnv: UNATTENDED_ENV })).not.toBe(0);
     const rerun = h.printedSince(mark);
     expect(rerun).not.toContain("agentx init --yes needs");
-    expect(rerun).toContain('init stopped at "Set up the first project and its channel"');
+    expect(rerun).toContain('init stopped at "Set up your first project"');
     expect(rerun).toContain("with --yes, pass --channel");
     const progress = await readInstallProgress(h.store, "staging");
     expect(progress?.admin?.username).toBe(ADMIN_EMAIL);
@@ -541,7 +541,7 @@ describe("agentx init", () => {
       cleanup: async () => { throw new Error("directory busy"); },
     });
     expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN), prepareDeployment: prepare })).not.toBe(0);
-    expect(h.printed()).toContain('init stopped at "Deploy the control plane and runtime": Resource limit exceeded.');
+    expect(h.printed()).toContain('init stopped at "Start the AgentX service": Resource limit exceeded.');
     expect(h.printed()).toContain("could not remove temporary files: directory busy");
   });
 
@@ -986,7 +986,7 @@ describe("init --resume --from-bundle (FR-026)", () => {
     expect(await h.run(["--resume", "--from-bundle", dir], { prompter: scriptedPrompter([]), stackStatus: ACCESS_DEPLOYED, deploy })).not.toBe(0);
     const rerun = h.printedSince(mark);
     expect(rerun).not.toContain("you are using the AgentX operator role");
-    expect(rerun).toContain("already done: Deploy the access stack");
+    expect(rerun).toContain("already done: Set up AWS permissions");
     expect((await readInstallProgress(h.store, "staging"))?.steps.access).toMatchObject({ status: "done", note: "deployed by your platform team from the export bundle" });
     expect(deployer.requests.map((request) => request.part)).toEqual(["foundation", "foundation"]);
   });

@@ -52,6 +52,7 @@ import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from 
 import { browserAvailable, NO_BROWSER_LINE, resolveUiMode } from "./ui-mode.js";
 import { prerequisitesCard, readyCard } from "./ui/cards.js";
 import { startInstallWizard, type InstallWizard } from "./ui/index.js";
+import { STEP_PLAN } from "./ui/journey.js";
 import type { WizardResume } from "./ui/protocol.js";
 
 export interface InitCliDependencies {
@@ -128,7 +129,7 @@ export const PLATFORM_TEAM_ACCESS_NOTE = "deployed by your platform team from th
 /** The access stack's deploy step, refused up front under the operator role: the operator role
  * cannot create IAM roles, so the deploy would only fail later on IAM. */
 function accessStep(): InitStep<InitContext> {
-  const deploy = deployStep({ id: "access", title: "Deploy the access stack (IAM roles, artifact bucket, image cache)" });
+  const deploy = deployStep({ id: "access", title: STEP_PLAN.access.title });
   return {
     ...deploy,
     async run(context, progress) {
@@ -142,18 +143,18 @@ export function initSteps(input: { github: GitHubApi; slack: SlackApi }): InitSt
   return [
     {
       id: "prerequisites",
-      title: "Check prerequisites",
+      title: STEP_PLAN.prerequisites.title,
       async run(context) {
         if (!context.prerequisitesPassed) await context.runPrerequisites();
         return { status: "done" };
       },
     },
     accessStep(),
-    deployStep({ id: "core", title: "Deploy the foundation and identity stacks" }),
+    deployStep({ id: "core", title: STEP_PLAN.core.title }),
     githubAppStep(input.github),
-    deployStep({ id: "control-plane", title: "Deploy the control plane and runtime" }),
+    deployStep({ id: "control-plane", title: STEP_PLAN["control-plane"].title }),
     slackAppStep(input.slack),
-    deployStep({ id: "slack-service", title: "Deploy the Slack service", after: verifySlackUrls }),
+    deployStep({ id: "slack-service", title: STEP_PLAN["slack-service"].title, after: verifySlackUrls }),
     developerSignInStep({ slack: input.slack }),
     ...finishSteps(),
   ];

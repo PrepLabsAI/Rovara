@@ -159,7 +159,7 @@ describe("agentx init --ui", () => {
     expect(last?.steps.map((step) => step.id)).toEqual([...INIT_STEP_IDS]);
     expect(operator.states.some((state) => state.steps.some((step) => step.status === "running"))).toBe(true);
     expect(operator.states.at(-1)?.steps.every((step) => step.status === "done")).toBe(true);
-    expect(last?.log.join("\n")).toContain("done: Create and install the GitHub App");
+    expect(last?.log.join("\n")).toContain("done: Create the GitHub app");
   });
 
   it("FR-012: no secret typed on the page reaches the page's state, the log, the terminal, SSM or the cache", async () => {
@@ -209,12 +209,12 @@ describe("agentx init --ui", () => {
     expect(code).toBe(0);
     const resume = operator.states.find((state) => state.resume !== undefined)?.resume;
     expect(resume?.completed).toEqual([
-      "Check prerequisites",
-      "Deploy the access stack (IAM roles, artifact bucket, image cache)",
-      "Deploy the foundation and identity stacks",
-      "Create and install the GitHub App",
+      "Check your AWS account",
+      "Set up AWS permissions",
+      "Build the network and sign-in",
+      "Create the GitHub app",
     ]);
-    expect(resume?.continueFrom).toBe("Deploy the control plane and runtime");
+    expect(resume?.continueFrom).toBe("Start the AgentX service");
     // The resumed run reuses the app the first one made, exactly as the terminal path does.
     expect(h.github.conversions).toHaveLength(1);
   });
@@ -254,8 +254,8 @@ describe("agentx init --ui", () => {
     expect(h.plane.bindings).toEqual(["T0TEAM/C0PAY00001"]);
     // The finishing steps' progress lines reached the page's log pane.
     const last = operator.states.at(-1);
-    expect(last?.log.join("\n")).toContain("done: Set up the first project and its channel");
-    expect(last?.log.join("\n")).toContain("done: Check that AgentX answers in Slack");
+    expect(last?.log.join("\n")).toContain("done: Set up your first project");
+    expect(last?.log.join("\n")).toContain("done: Get a first reply in Slack");
     // The page ends on the same summary the terminal does, developer sign-in command and all.
     expect(last).toMatchObject({ phase: "finished" });
     expect(last?.outcome).toContain("AgentX environment staging is ready.");
