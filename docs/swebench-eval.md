@@ -30,6 +30,27 @@ agent has Pro's 50-minute budget and a 400-call tool backstop; and the task's ow
 the patch in a fresh container. The task's files come from `scaleapi/SWE-bench_Pro-os` at a pinned commit,
 checked against its `SHA256SUMS`, and the hidden tests never enter the agent's container.
 
+### SEC-bench patch tasks (spec 045)
+
+`eval secbench patch <id>` runs one of SEC-bench's 300 C/C++ vulnerabilities (200 CVEs, 100 OSS-Fuzz
+bugs). IDs look like `njs.cve-2022-32414` or `libxml2.ossfuzz-417247563`; the `instance_id` column of
+`SEC-bench/SEC-bench` (split `eval`) lists them.
+
+```
+@agentx eval secbench patch njs.cve-2022-32414 model Claude Sonnet 4.6
+```
+
+The agent gets SEC-bench's own patch prompt (bug description and sanitizer report) in the task's
+`:patch` image, offline, with the original PoC in `/testcase` so it can run `secb build` and
+`secb repro`. SEC-bench's evaluator, pinned to a commit, grades the C/C++ source changes in a fresh
+container: the patch applies, the project builds, and the PoC no longer triggers the sanitizer.
+Resolved is its `medium` verdict; `strict` and `generous` are shown too. SEC-bench runs no
+regression tests, so a pass is "sanitizer-verified, no regression tests"; say so wherever a number
+is shown. Its reports and the grading container's log are under the run's `harness/` artifacts.
+
+Ship order: the control plane release (its result schema knows the SEC-bench verdict) before
+`npm run swebench:runner-image`.
+
 ## How a run works
 
 ```mermaid
@@ -116,6 +137,7 @@ Every step writes to the AWS account; an administrator runs them.
 | `patch.diff` | The agent's change: the prediction the harness graded |
 | `transcript.jsonl` | The Pi session |
 | `harness/report.json`, `harness/test_output.txt`, `harness/run_instance.log` | The official harness's report and logs |
-| `result.json` | What the runner reported, with the list of saved artifacts |
+| `harness/report_<mode>.jsonl`, `harness/evaluator.log`, `harness/container.log` | SEC-bench's reports and logs (spec 045) |
+| `result.json` | What the runner reported, with the list of saved artifacts. It also records `limits` and `thinkingLevel`, and for SEC-bench `secbench` (the verdict) and `secbenchSetup` (prompt template checksum, smolagents commit, evaluator commit, dataset revision) |
 
 The runner's own log is in the `…/swebench` log group, in a stream named `<run>/<instance>`.

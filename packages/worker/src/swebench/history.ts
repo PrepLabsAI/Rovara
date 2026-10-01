@@ -2,6 +2,9 @@ import { runCollected } from "../collected-process.js";
 
 export type GitRunner = (args: readonly string[]) => Promise<string>;
 
+/** The files SEC-bench's agents put in a prediction (spec 045 FR-007). */
+export const SECBENCH_SOURCE_EXTENSIONS = [".c", ".cpp", ".h", ".hpp", ".cc", ".hh"] as const;
+
 /** git in `repository`, trusting it although another user owns it: the copy keeps the image's owners. */
 export function createGitRunner(repository: string): GitRunner {
   return async (args) => {
@@ -46,10 +49,13 @@ export async function untrackedFiles(git: GitRunner): Promise<Set<string>> {
 /**
  * The prediction: every change to tracked files since the image's HEAD (the tree the harness applies
  * it to), plus the files the agent created (untracked, not ignored, absent before it started), as
- * one patch `git apply` takes.
+ * one patch `git apply` takes. With `sourceExtensions`, only files with those extensions, as
+ * SEC-bench's agents collect theirs, so what the agent's builds leave in the repository stays out.
  */
-export async function predictionPatch(git: GitRunner, imageHead: string, untrackedBefore: ReadonlySet<string>): Promise<string> {
-  const created = [...await untrackedFiles(git)].filter((path) => !untrackedBefore.has(path));
+export async function predictionPatch(git: GitRunner, imageHead: string, untrackedBefore: ReadonlySet<string>, sourceExtensions?: readonly string[]): Promise<string> {
+  const kept = (path: string) => sourceExtensions === undefined || sourceExtensions.some((extension) => path.endsWith(extension));
+  const created = [...await untrackedFiles(git)].filter((path) => !untrackedBefore.has(path) && kept(path));
   if (created.length > 0) await git(["add", "--intent-to-add", "--", ...created]);
-  return git(["diff", "--binary", imageHead]);
+  const pathspecs = sourceExtensions === undefined ? [] : ["--", ...sourceExtensions.map((extension) => `*${extension}`)];
+  return git(["diff", "--binary", imageHead, ...pathspecs]);
 }

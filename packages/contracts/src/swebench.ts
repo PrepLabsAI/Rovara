@@ -6,33 +6,44 @@ import { SlackRequesterSchema, SlackThreadSchema, SlackChannelIdSchema, SlackTea
 import { TaskUsageTelemetrySchema } from "./usage.js";
 
 /**
- * The datasets a run may name: the Hugging Face dataset and config each reads, and its family.
+ * The datasets a run may name: the Hugging Face dataset, config and split each reads, and its family.
  * `swebench` tasks are graded by the swebench harness (spec 043), `pro` tasks by their own Harbor
- * verifier (spec 044).
+ * verifier (spec 044), `secbench` tasks by SEC-bench's evaluator (spec 045).
  */
 export const SWEBENCH_DATASETS = {
-  verified: { name: "SWE-bench/SWE-bench_Verified", config: "default", family: "swebench" },
-  lite: { name: "SWE-bench/SWE-bench_Lite", config: "default", family: "swebench" },
-  full: { name: "SWE-bench/SWE-bench", config: "default", family: "swebench" },
-  pro: { name: "ScaleAI/SWE-bench_Pro", config: "default", family: "pro" },
-  "pro-hard": { name: "ScaleAI/SWE-bench_Pro", config: "hard", family: "pro" },
+  verified: { name: "SWE-bench/SWE-bench_Verified", config: "default", split: "test", family: "swebench" },
+  lite: { name: "SWE-bench/SWE-bench_Lite", config: "default", split: "test", family: "swebench" },
+  full: { name: "SWE-bench/SWE-bench", config: "default", split: "test", family: "swebench" },
+  pro: { name: "ScaleAI/SWE-bench_Pro", config: "default", split: "test", family: "pro" },
+  "pro-hard": { name: "ScaleAI/SWE-bench_Pro", config: "hard", split: "test", family: "pro" },
+  "secbench-patch": { name: "SEC-bench/SEC-bench", config: "default", split: "eval", family: "secbench" },
 } as const;
 
-export const SwebenchDatasetSchema = z.enum(["verified", "lite", "full", "pro", "pro-hard"]);
+export const SwebenchDatasetSchema = z.enum(["verified", "lite", "full", "pro", "pro-hard", "secbench-patch"]);
+
+export type SwebenchFamily = (typeof SWEBENCH_DATASETS)[keyof typeof SWEBENCH_DATASETS]["family"];
+
+export function swebenchFamily(dataset: SwebenchDataset): SwebenchFamily {
+  return SWEBENCH_DATASETS[dataset].family;
+}
 
 /** `<owner>__<repository>-<number>`, as every SWE-bench instance ID is written. */
 const SWEBENCH_INSTANCE_ID = /^[A-Za-z0-9][A-Za-z0-9_.-]*__[A-Za-z0-9][A-Za-z0-9_.-]*-\d+$/;
 /** `instance_<owner>__<repository>-<40 hex>`, mostly with `-v<suffix>`, as SWE-Bench Pro writes them (spec 044 FR-001). */
 const SWEBENCH_PRO_INSTANCE_ID = /^instance_[A-Za-z0-9][A-Za-z0-9_.-]*__[A-Za-z0-9][A-Za-z0-9_.-]*-[0-9a-f]{40}(?:-v[A-Za-z0-9]{1,64})?$/;
+/** `<project>.cve-<year>-<number>` or `<project>.ossfuzz-<number>`, as SEC-bench writes them (spec 045 FR-001). */
+const SECBENCH_INSTANCE_ID = /^[a-z0-9][a-z0-9_+-]*\.(?:cve-\d{4}-\d{4,}|ossfuzz-\d+)$/;
+
+const INSTANCE_IDS: Record<SwebenchFamily, RegExp> = { swebench: SWEBENCH_INSTANCE_ID, pro: SWEBENCH_PRO_INSTANCE_ID, secbench: SECBENCH_INSTANCE_ID };
 
 export const SwebenchInstanceIdSchema = z.string().max(200).refine(
-  (value) => SWEBENCH_INSTANCE_ID.test(value) || SWEBENCH_PRO_INSTANCE_ID.test(value),
-  "not a SWE-bench instance ID",
+  (value) => Object.values(INSTANCE_IDS).some((pattern) => pattern.test(value)),
+  "not an eval instance ID",
 );
 
 /** Whether an instance ID is written as the dataset's family writes them. */
 export function swebenchInstanceIdFits(dataset: SwebenchDataset, instanceId: string): boolean {
-  return (SWEBENCH_DATASETS[dataset].family === "pro" ? SWEBENCH_PRO_INSTANCE_ID : SWEBENCH_INSTANCE_ID).test(instanceId);
+  return INSTANCE_IDS[swebenchFamily(dataset)].test(instanceId);
 }
 
 /** Per-run cost ceiling bounds and default, in USD (spec 043 FR-002, D-2). */
@@ -51,7 +62,7 @@ export const SWEBENCH_RUN_TIME_LIMIT_SECONDS = 2 * 60 * 60;
  * a Pro run: the agent's 50 minutes, a verifier that typically takes minutes, and setup.
  */
 export function swebenchAgentLimits(dataset: SwebenchDataset): { timeLimitSeconds: number; toolCallLimit: number } {
-  return SWEBENCH_DATASETS[dataset].family === "pro"
+  return swebenchFamily(dataset) === "pro"
     ? { timeLimitSeconds: 50 * 60, toolCallLimit: 400 }
     : { timeLimitSeconds: SWEBENCH_AGENT_TIME_LIMIT_SECONDS, toolCallLimit: 200 };
 }
@@ -76,6 +87,18 @@ export const SwebenchStopReasonSchema = z.enum(["finished", "time_limit", "cost_
 
 const TestCount = z.object({ passed: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).strict();
 
+/** SEC-bench's evaluator verdict (spec 045 FR-009): its three modes, and what the proof of concept did. */
+export const SecbenchVerdictSchema = z.object({
+  strict: z.boolean(),
+  medium: z.boolean(),
+  generous: z.boolean(),
+  /** The step that failed; absent when all three ran. */
+  failedStep: z.enum(["apply", "build", "poc"]).optional(),
+  pocExitCode: z.number().int().optional(),
+  sanitizerReport: z.boolean(),
+  timedOut: z.boolean(),
+}).strict();
+
 /** The runner's report of a graded run (FR-014, FR-015). */
 export const SwebenchGradedResultSchema = z.object({
   outcome: z.literal("GRADED"),
@@ -88,6 +111,8 @@ export const SwebenchGradedResultSchema = z.object({
   /** The harness's test counts; absent when there was no patch to grade. */
   failToPass: TestCount.optional(),
   passToPass: TestCount.optional(),
+  /** SEC-bench runs (spec 045): the evaluator's verdict, in place of test counts. */
+  secbench: SecbenchVerdictSchema.optional(),
   agentSeconds: z.number().int().nonnegative(),
   imageDigest: z.string().max(256),
   usage: TaskUsageTelemetrySchema,
@@ -162,37 +187,62 @@ export type SwebenchCommand =
   | { kind: "invalid"; message: string };
 
 const COMMAND = /^eval\s+swebench\b(.*)$/isu;
+const SECBENCH_COMMAND = /^eval\s+secbench\b(.*)$/isu;
+const SWEBENCH_USAGE = "Use `eval swebench <verified|lite|full|pro|pro-hard> <instance-id> [model <name>]`.";
+const SECBENCH_USAGE = "Use `eval secbench patch <instance-id> [model <name>]`.";
+
+const EXPECTED_ID: Record<SwebenchFamily, string> = {
+  swebench: "a SWE-bench instance ID (`<owner>__<repo>-<number>`)",
+  pro: "a SWE-Bench Pro instance ID (`instance_<owner>__<repo>-<commit>-v<suffix>`)",
+  secbench: "a SEC-bench instance ID (`<project>.cve-<year>-<number>` or `<project>.ossfuzz-<number>`)",
+};
 
 export function parseSwebenchCommand(text: string): SwebenchCommand | undefined {
   const command = text.replace(/^\s*<@[A-Z0-9]+>\s*/iu, "").trim().replace(/[.!?]+$/u, "");
+  const secbench = SECBENCH_COMMAND.exec(command);
+  if (secbench) return parseSecbenchWords(words(secbench[1]));
   const match = COMMAND.exec(command);
   if (!match) return undefined;
-  const words = (match[1] ?? "").trim().split(/\s+/u).filter((word) => word.length > 0);
-  const usage = "Use `eval swebench <verified|lite|full|pro|pro-hard> <instance-id> [model <name>]`.";
-  const dataset = SwebenchDatasetSchema.safeParse(words[0]?.toLowerCase());
-  if (!dataset.success) {
-    return { kind: "invalid", message: words[0] === undefined ? `Tell me which dataset and instance to run. ${usage}` : `Unknown dataset “${words[0]}”. ${usage}` };
+  const rest = words(match[1]);
+  const dataset = SwebenchDatasetSchema.safeParse(rest[0]?.toLowerCase());
+  // One spelling per benchmark: SEC-bench is `eval secbench`, not a swebench dataset.
+  if (!dataset.success || swebenchFamily(dataset.data) === "secbench") {
+    return { kind: "invalid", message: rest[0] === undefined ? `Tell me which dataset and instance to run. ${SWEBENCH_USAGE}` : `Unknown dataset “${rest[0]}”. ${SWEBENCH_USAGE}` };
   }
-  const instanceId = words[1];
+  return instanceAndModel(dataset.data, rest.slice(1), SWEBENCH_USAGE);
+}
+
+function parseSecbenchWords(rest: string[]): SwebenchCommand {
+  const task = rest[0]?.toLowerCase();
+  if (task === undefined) return { kind: "invalid", message: `Tell me which task and instance to run. ${SECBENCH_USAGE}` };
+  if (task === "poc") return { kind: "invalid", message: `SEC-bench's PoC task is not available yet. ${SECBENCH_USAGE}` };
+  if (task !== "patch") return { kind: "invalid", message: `Unknown task “${rest[0]}”. ${SECBENCH_USAGE}` };
+  return instanceAndModel("secbench-patch", rest.slice(1), SECBENCH_USAGE);
+}
+
+function instanceAndModel(dataset: SwebenchDataset, rest: string[], usage: string): SwebenchCommand {
+  const instanceId = rest[0];
   if (instanceId === undefined) return { kind: "invalid", message: `Tell me which instance to run. ${usage}` };
-  if (!SwebenchInstanceIdSchema.safeParse(instanceId).success || !swebenchInstanceIdFits(dataset.data, instanceId)) {
-    const expected = SWEBENCH_DATASETS[dataset.data].family === "pro" ? "a SWE-Bench Pro instance ID (`instance_<owner>__<repo>-<commit>-v<suffix>`)" : "a SWE-bench instance ID (`<owner>__<repo>-<number>`)";
-    return { kind: "invalid", message: `“${instanceId}” is not ${expected}. ${usage}` };
+  if (!SwebenchInstanceIdSchema.safeParse(instanceId).success || !swebenchInstanceIdFits(dataset, instanceId)) {
+    return { kind: "invalid", message: `“${instanceId}” is not ${EXPECTED_ID[swebenchFamily(dataset)]}. ${usage}` };
   }
-  const rest = words.slice(2);
-  if (rest.length === 0) return { kind: "run", dataset: dataset.data, instanceId };
-  if (rest[0]?.toLowerCase() !== "model") {
-    return { kind: "invalid", message: `A run takes exactly one instance for now. ${usage}` };
-  }
-  const modelSelector = rest.slice(1).join(" ");
+  const after = rest.slice(1);
+  if (after.length === 0) return { kind: "run", dataset, instanceId };
+  if (after[0]?.toLowerCase() !== "model") return { kind: "invalid", message: `A run takes exactly one instance for now. ${usage}` };
+  const modelSelector = after.slice(1).join(" ");
   if (modelSelector.length === 0) return { kind: "invalid", message: `Tell me which model after \`model\`. ${usage}` };
-  return { kind: "run", dataset: dataset.data, instanceId, modelSelector };
+  return { kind: "run", dataset, instanceId, modelSelector };
+}
+
+function words(value: string | undefined): string[] {
+  return (value ?? "").trim().split(/\s+/u).filter((word) => word.length > 0);
 }
 
 export type SwebenchDataset = z.infer<typeof SwebenchDatasetSchema>;
 export type SwebenchChannel = z.infer<typeof SwebenchChannelSchema>;
 export type SwebenchRunStatus = z.infer<typeof SwebenchRunStatusSchema>;
 export type SwebenchStopReason = z.infer<typeof SwebenchStopReasonSchema>;
+export type SecbenchVerdict = z.infer<typeof SecbenchVerdictSchema>;
 export type SwebenchGradedResult = z.infer<typeof SwebenchGradedResultSchema>;
 export type SwebenchRunResult = z.infer<typeof SwebenchRunResultSchema>;
 export type SwebenchStartRequest = z.infer<typeof SwebenchStartRequestSchema>;
