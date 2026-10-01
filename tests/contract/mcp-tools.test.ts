@@ -331,6 +331,23 @@ describe("the other task tools (FR-030)", () => {
     expect(result.structuredContent).toMatchObject({ status: "CANCELLED" });
   });
 
+  it("says plainly that a task which already finished was not cancelled, with its final status (#196)", async () => {
+    for (const status of ["SUCCEEDED", "FAILED", "INTERRUPTED"] as const) {
+      const cancelTask = vi.fn(async () => view(status));
+      const result = await (await connect({ cancelTask })).callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
+      expect(result.structuredContent).toMatchObject({ status });
+      expect(text(result), status).toContain(`The task had already finished as ${status}, so nothing was cancelled.`);
+    }
+  });
+
+  it("does not say already finished for a task it stopped or is stopping (#196)", async () => {
+    for (const status of ["CANCELLED", "RUNNING", "STARTING"] as const) {
+      const cancelTask = vi.fn(async () => view(status));
+      const result = await (await connect({ cancelTask })).callTool({ name: "agentx_cancel_task", arguments: { task_id: TASK } });
+      expect(text(result), status).not.toContain("already finished");
+    }
+  });
+
   it("lists projects with channels and policy, and no description (R28)", async () => {
     const projects = async () => ({
       developer: { id: "d".repeat(64), name: "Maya Chen", provider: "slack" as const },

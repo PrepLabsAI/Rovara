@@ -189,6 +189,25 @@ describe("cancel", () => {
     expect((await post("cancel", { requestId: randomUUID() })).body.task).toMatchObject({ status: "SUCCEEDED" });
   });
 
+  it("keeps the final status of a turn that finishes just before the cancel is written, and queues no cancel (#196)", async () => {
+    const { db, post, task, active, turns } = await finished();
+    await post("continue", { requestId: randomUUID(), instructions: "long job" });
+    const running = active();
+    // The turn's result lands between the cancel's read and its write; the fake evaluates the real condition.
+    const original = db.send;
+    db.send = async (command) => {
+      if (command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("\"CANCEL_REQUESTED\"")) {
+        db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${running}`)!.status = "SUCCEEDED";
+      }
+      return original(command);
+    };
+    const response = await post("cancel", { requestId: randomUUID() });
+    expect(response.body.task).toMatchObject({ status: "SUCCEEDED" });
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${running}`)).toMatchObject({ status: "SUCCEEDED" });
+    expect(db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel")).toHaveLength(0);
+    expect(turns().filter((item) => item.action === "cancel")).toEqual([expect.objectContaining({ responseText: "Nothing was running." })]);
+  });
+
   it("repeated with the same requestId returns the task and writes nothing more (F14)", async () => {
     // Nothing running.
     const idle = await finished();
