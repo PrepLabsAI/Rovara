@@ -23,6 +23,8 @@
     "test:e2e": "vitest run tests/e2e",
     "test:boot-script": "AGENTX_BOOT_SCRIPT_DOCKER=1 vitest run tests/live/ec2-boot-script.test.ts",
     "typecheck": "tsc -b --pretty false",
+    "typecheck:all": "tsc -b --pretty false && node scripts/typecheck-baseline.ts check",
+    "typecheck:baseline": "tsc -b --pretty false && node scripts/typecheck-baseline.ts update",
     "release:prod": "tsx scripts/release-production.ts",
     "session:e2e": "tsx scripts/session-e2e.ts",
     "release:build": "tsx scripts/release/build.ts",

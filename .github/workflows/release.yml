@@ -23,7 +23,7 @@ jobs:
       - uses: actions/setup-node@v5
         with: { node-version-file: .node-version, cache: npm }
       - run: npm ci
-      - run: npm run typecheck && npm run lint && npm run build && npm test && npm run infra:synth
+      - run: npm run typecheck && npm run typecheck:all && npm run lint && npm run build && npm test && npm run infra:synth
 
   images:
     needs: test
