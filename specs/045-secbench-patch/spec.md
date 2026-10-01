@@ -89,7 +89,8 @@ every place a SEC-bench number is shown (thread, site, deck) MUST say "sanitizer
   The evaluator starts its own fresh container from the `:patch` image (with Docker's default network, as
   published), applies the patch, builds, and runs the PoC with a 10-second limit. It bind-mounts a Python temporary
   directory into that container, and the host's Docker resolves the path, so the runner MUST set `TMPDIR` to a folder
-  under the run's root, which the runner container mounts at its own path (spec 043's arrangement); otherwise the
+  under `RUN_ROOT` but outside the run's root (which the agent's container mounts); the runner container mounts
+  `RUN_ROOT` at its own path (spec 043's arrangement); otherwise the
   grading container sees an empty `/tmp` and every patch fails to apply.
 - **FR-008a**: Two evaluator failures look like an unresolved patch and MUST instead fail the run: a dataset that did
   not load (the evaluator logs and continues with no rows, which silently turns `medium` into `strict`; the runner

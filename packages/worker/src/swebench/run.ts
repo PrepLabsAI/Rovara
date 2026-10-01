@@ -89,6 +89,7 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
     if (secbench) {
       const revision = await datasetRevision(SWEBENCH_DATASETS[config.dataset].name, dependencies.dataset);
       secbenchRun = revision === undefined ? {} : { datasetRevision: revision };
+      if (revision === undefined) log("dataset.revision_unknown", { dataset: config.dataset });
     }
     // Pro's hidden tests live beside the run's root, never inside it: the task container mounts the root.
     let proTask: ProTask | undefined;
@@ -190,7 +191,7 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
     limits: swebenchAgentLimits(config.dataset),
     thinkingLevel: dependencies.model.thinkingLevel ?? "default",
     ...(secbenchRun === undefined ? {} : {
-      secbench: {
+      secbenchSetup: {
         promptTemplateSha256: SECBENCH_PATCH_TEMPLATE_SHA256,
         smolagentsCommit: SECBENCH_SMOLAGENTS_COMMIT,
         evaluatorCommit: SECBENCH_EVALUATOR_COMMIT,

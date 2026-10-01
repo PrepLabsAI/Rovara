@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cp, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { cp, access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { datasetRevision, loadSwebenchInstance } from "../../packages/worker/src/swebench/dataset.js";
 import { SECBENCH_PATCH_TEMPLATE, SECBENCH_PATCH_TEMPLATE_SHA256, secbenchPatchPrompt } from "../../packages/worker/src/swebench/secbench-prompt.js";
 import { createGitRunner, predictionPatch, SECBENCH_SOURCE_EXTENSIONS, untrackedFiles } from "../../packages/worker/src/swebench/history.js";
@@ -270,7 +270,7 @@ function fakeDocker(template: string, calls: string[][]): DockerCli {
 }
 
 /** A Pi session that fixes vm.c, leaves a build output, and finishes. */
-function editingAdapter(testbed: string, observed: { prompt?: string }): PiSessionAdapter {
+function editingAdapter(testbed: string, observed: { prompt?: string }, files: Record<string, string> = { "vm.c": "int f(void) { return 1; }\n", "vm.o": "object" }): PiSessionAdapter {
   return {
     async create({ sessionDirectory }) {
       const sessionFile = join(sessionDirectory, "fake.jsonl");
@@ -281,8 +281,7 @@ function editingAdapter(testbed: string, observed: { prompt?: string }): PiSessi
         sessionFile,
         async prompt(text) {
           observed.prompt = text;
-          await writeFile(join(testbed, "vm.c"), "int f(void) { return 1; }\n");
-          await writeFile(join(testbed, "vm.o"), "object");
+          for (const [name, body] of Object.entries(files)) await writeFile(join(testbed, name), body);
           for (const listener of listeners) listener({ type: "message_end", message: { role: "assistant", stopReason: "stop" } });
         },
         async steer() {},
@@ -301,9 +300,15 @@ function editingAdapter(testbed: string, observed: { prompt?: string }): PiSessi
 }
 
 describe("a SEC-bench run (spec 045 FR-004 to FR-011)", () => {
+  const cleanup: string[] = [];
+  afterEach(async () => {
+    for (const path of cleanup.splice(0)) await rm(path, { recursive: true, force: true });
+  });
+
   it("runs the agent in the project's folder, grades only sources outside the agent's mounts, and records the configuration", async () => {
     const rootPath = await mkdtemp(join(tmpdir(), "agentx-secbench-run-"));
     const template = await templateRepository();
+    cleanup.push(rootPath, template.path);
     const calls: string[][] = [];
     const artifacts = new Map<string, string>();
     let reported: SwebenchRunResult | undefined;
@@ -344,24 +349,56 @@ describe("a SEC-bench run (spec 045 FR-004 to FR-011)", () => {
     const started = calls.find((args) => args[0] === "run" && args.includes("--detach"))!;
     expect(started).toEqual(expect.arrayContaining(["--network", "none", "--volume", `${join(rootPath, RUN_ID, "testbed")}:/src/njs`, "--workdir", "/src/njs"]));
     expect(observed.prompt).toContain(SECBENCH_ROW.bug_description);
+    for (const hidden of ["MARKER-GOLD-PATCH", "MARKER-BUG-REPORT", "987654"]) expect(observed.prompt).not.toContain(hidden);
     // The prediction holds the source change and not the build output.
     expect(graded[0]!.patch).toContain("vm.c");
     expect(graded[0]!.patch).not.toContain("vm.o");
     // Grading happens under RUN_ROOT, outside the run's root that the agent's container mounts.
-    expect(graded[0]!.directory.startsWith(`${rootPath}/`)).toBe(true);
-    expect(graded[0]!.directory.startsWith(`${join(rootPath, RUN_ID)}/`)).toBe(false);
+    expect(graded[0]!.directory).toBe(join(rootPath, ".secbench-grade", RUN_ID));
+    await expect(access(graded[0]!.directory)).rejects.toThrow();
     const saved = JSON.parse(artifacts.get("result.json")!) as Record<string, unknown>;
     expect(saved).toMatchObject({
       dataset: "secbench-patch",
       thinkingLevel: "medium",
       limits: { timeLimitSeconds: 3_600, toolCallLimit: 200 },
-      secbench: {
+      secbench: { medium: true, pocExitCode: 0 },
+      secbenchSetup: {
         promptTemplateSha256: "0ec4ffc90183fce6e5497b052146d8893b3bed90b8f311351dbd1cc70b766bab",
         smolagentsCommit: "a945dba9d6f2594cd94eb00d77f6b41a92fea88b",
         evaluatorCommit: "31eb43485a3de47da260be0f978528b1f2314415",
         datasetRevision: "11422e774857272b8f5460c699dca7a64046308b",
       },
     });
-    await rm(rootPath, { recursive: true, force: true });
+  });
+
+  it("does not grade a run whose only change is a build output", async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), "agentx-secbench-run-"));
+    const template = await templateRepository();
+    cleanup.push(rootPath, template.path);
+    const artifacts = new Map<string, string>();
+    const row = { ...SECBENCH_ROW, base_commit: template.head };
+    const fetchImplementation = (async (url: string) => url.includes("/api/datasets/")
+      ? new Response(JSON.stringify({ sha: "11422e774857272b8f5460c699dca7a64046308b" }))
+      : new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }))) as unknown as typeof fetch;
+    let gradeCalls = 0;
+    const result = await runSwebench({
+      runId: RUN_ID, dataset: "secbench-patch", instanceId: "njs.cve-2022-32414",
+      model: { provider: "amazon-bedrock", modelId: "fixture-model" }, maxCostUsd: 10,
+      controlPlaneUrl: "https://control.example.com", capability: "cap", artifactBucket: "bucket",
+      artifactsPrefix: `evals/${RUN_ID}/`,
+    }, {
+      rootPath,
+      model: { provider: "amazon-bedrock", modelId: "fixture-model" },
+      docker: fakeDocker(template.path, []),
+      reporter: { async started() {}, async artifact(name, body) { artifacts.set(name, body.toString()); }, async result() {} },
+      log: () => {},
+      dataset: { fetch: fetchImplementation },
+      piAdapter: editingAdapter(join(rootPath, RUN_ID, "testbed"), {}, { "vm.o": "object" }),
+      gradeSecbench: async () => { gradeCalls += 1; throw new Error("must not be graded"); },
+    });
+    expect(gradeCalls).toBe(0);
+    expect(result).toMatchObject({ outcome: "GRADED", resolved: false, patchBytes: 0 });
+    expect(result).not.toHaveProperty("secbench");
   });
 });
+
