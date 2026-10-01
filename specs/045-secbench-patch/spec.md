@@ -2,7 +2,7 @@
 
 **Feature Branch**: `feat/045-secbench-patch`  
 **Created**: 2026-10-01  
-**Status**: Draft; SC-002 checked 2026-10-01 (offline build and evaluator pass); ready to plan  
+**Status**: Implemented; awaiting release (SC-003)  
 **Input**: Request to measure the AgentX coding agent on a security benchmark, after specs 043 and 044 put
 SWE-bench and SWE-Bench Pro runs in Slack
 
@@ -90,12 +90,15 @@ every place a SEC-bench number is shown (thread, site, deck) MUST say "sanitizer
   published), applies the patch, builds, and runs the PoC with a 10-second limit. It bind-mounts a Python temporary
   directory into that container, and the host's Docker resolves the path, so the runner MUST set `TMPDIR` to a folder
   under `RUN_ROOT` but outside the run's root (which the agent's container mounts); the runner container mounts
-  `RUN_ROOT` at its own path (spec 043's arrangement); otherwise the
-  grading container sees an empty `/tmp` and every patch fails to apply.
+  `RUN_ROOT` at its own path (spec 043's arrangement); otherwise the grading container sees an empty `/tmp` and every
+  patch fails to apply.
 - **FR-008a**: Two evaluator failures look like an unresolved patch and MUST instead fail the run: a dataset that did
   not load (the evaluator logs and continues with no rows, which silently turns `medium` into `strict`; the runner
-  requires its `Loaded 300 instances` log line), and a container that could not be created or pulled (exit code `-1`,
-  with a `Failed to` message in its logs). A missing `report_medium.jsonl` or one without the instance also fails the run.
+  requires its `Loaded 300 instances` log line, read as the output streams, with the evaluator at loguru's `INFO`
+  level), and a container that could not be created or pulled (exit code `-1`, with a `Failed to` message in its
+  logs). At the pinned commit a dataset that did not load also reports exit code `-1` with `Instance not found in
+  dataset`, which the `-1` check catches too. A missing `report_medium.jsonl` or one without the instance also fails
+  the run.
 - **FR-009**: The run is resolved when the evaluator's `medium` report says success, which is the published default.
   The result MUST also record the `strict` and `generous` verdicts, the step that failed (apply, build, PoC), the PoC's
   exit code, and whether a sanitizer report or a timeout was seen. An empty prediction is reported unresolved without

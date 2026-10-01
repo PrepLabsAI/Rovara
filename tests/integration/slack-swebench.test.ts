@@ -144,9 +144,9 @@ describe("the eval swebench command in the Slack service (spec 043)", () => {
   });
 
   it("posts the broker's refusal, and a usage hint for a malformed command", async () => {
-    const refused = harness([], async () => ({ outcome: "REFUSED", reason: "NOT_ENABLED", message: "SWE-bench runs are not enabled in this channel." }));
+    const refused = harness([], async () => ({ outcome: "REFUSED", reason: "NOT_ENABLED", message: "Eval runs are not enabled in this channel." }));
     await processSlackRequest(message("eval swebench verified django__django-11099"), refused.dependencies, { finalAttempt: false });
-    expect(refused.posts).toEqual(["SWE-bench runs are not enabled in this channel."]);
+    expect(refused.posts).toEqual(["Eval runs are not enabled in this channel."]);
     expect(refused.getSwebenchRun).not.toHaveBeenCalled();
     const invalid = harness();
     await processSlackRequest(message("eval swebench enterprise django__django-11099"), invalid.dependencies, { finalAttempt: false });
@@ -174,5 +174,20 @@ describe("the result message (spec 043 SC-003)", () => {
     expect(lines[2]).toBe("• Agent: stopped at the cost ceiling after 7m 05s (the run reached its cost ceiling of 10.00 USD)");
     expect(resultMessage(run({ status: "FAILED", error: "could not pull <image>" }))).toBe("The SWE-bench run of `django__django-11099` failed: could not pull &lt;image&gt;");
     expect(resultMessage(run({ status: "CANCELLED" }))).toBe("The SWE-bench run of `django__django-11099` was cancelled and its instance terminated.");
+  });
+});
+
+describe("SEC-bench wording around the result (spec 045 FR-010)", () => {
+  const secbench = { dataset: "secbench-patch" as const, instanceId: "njs.cve-2022-32414" };
+
+  it("announces a SEC-bench run as one", async () => {
+    const h = harness([run({ ...secbench, status: "FAILED", error: "x" })], async () => ({ outcome: "STARTED", run: run(secbench) }));
+    await processSlackRequest(message("<@UAGENTX> eval secbench patch njs.cve-2022-32414"), h.dependencies, { finalAttempt: false });
+    expect(h.startSwebenchRun).toHaveBeenCalledWith(expect.objectContaining(secbench));
+    expect(h.posts[0]).toContain("Started a SEC-bench run of `njs.cve-2022-32414` from SEC-bench patch task on `amazon-bedrock/balanced-v1`, with a cost ceiling of $10.00.");
+  });
+
+  it("names SEC-bench when the run failed", () => {
+    expect(resultMessage(run({ ...secbench, status: "FAILED", error: "SEC-bench's evaluator exited 1: boom" }))).toBe("The SEC-bench run of `njs.cve-2022-32414` failed: SEC-bench's evaluator exited 1: boom");
   });
 });
