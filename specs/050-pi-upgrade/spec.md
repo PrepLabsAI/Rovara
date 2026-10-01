@@ -40,11 +40,12 @@ numbers, and SWE-bench and SEC-bench runs.
 - **FR-003 (phase 2):** The upgrade pins both packages at exactly 0.99.2 and passes every phase 1 test without
   editing its assertions. Where 0.99 deliberately changes something AgentX relies on (for example `user_bash` failing
   closed), AgentX adapts so the test still holds. If a test truly must change, the PR says why, line by line.
-- **FR-004 (phase 2):** Before and after the upgrade, the same 8 baseline eval runs (2 SWE-bench Verified and 2
-  SEC-bench tasks, each on Sonnet 4.6 and GLM 5.3) are compared. A task that resolved before and fails after blocks
-  the release until it is explained.
-- **FR-005 (phase 2):** Live checks on a test deployment before production: one Slack coding task end to end, a
-  cancel, one OpenRouter model, one SWE-bench and one SEC-bench run. The previous release tag is ready for rollback.
+- **FR-004 (phase 2):** No paid regression runs before launch (decision 2026-10-01: Pi is heavily tested upstream,
+  AgentX has no users yet, and model spend is saved for the final campaign in spec 046). The characterization tests
+  and CI are the gate. The 0.85.1 runs already made are kept in `baseline.md` for reference only.
+- **FR-005 (phase 2):** After release, one cheap pipeline smoke run (a SEC-bench or SWE-bench task on an inexpensive
+  OpenRouter model, about $0.50) confirms the eval path works end to end before the final campaign depends on it. The
+  previous release tag is noted for rollback.
 
 ## Out of Scope
 
@@ -54,5 +55,5 @@ can spawn commands and interpolate secrets). Changing the orchestrator's tool be
 ## Success Criteria
 
 - **SC-001:** Phase 1 tests merged on 0.85.1, green in CI.
-- **SC-002:** Phase 2 PR green with no characterization assertion weakened, and the baseline comparison attached.
-- **SC-003:** Released through the pipeline, with live checks passed, and no rollback needed within a day.
+- **SC-002:** Phase 2 PR green with no characterization assertion weakened (only the `modelView()` helpers change).
+- **SC-003:** Released through the pipeline, and the smoke run (FR-005) graded end to end.
