@@ -23,7 +23,7 @@ import {
 import type { Construct } from "constructs";
 import { SWEBENCH_SETTING_PARAMETERS, environmentRolePath } from "@agentx/contracts";
 import type { AgentXNaming } from "./naming.js";
-import { grantOpenRouterSecret } from "./openrouter.js";
+import { grantProviderKeySecrets } from "./model-keys.js";
 import { SWEBENCH_DEPLOYMENT_MODE, SWEBENCH_RUN_TAG, swebenchEvalDefinition } from "./swebench-eval-definition.js";
 
 /** Amazon Linux 2023 for x86: SWE-bench publishes x86 task images only. */
@@ -102,8 +102,8 @@ export class SwebenchEvalStack extends Stack {
       actions: ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
       resources: [`arn:${Aws.PARTITION}:bedrock:*::foundation-model/*`, `arn:${Aws.PARTITION}:bedrock:${Aws.REGION}:${Aws.ACCOUNT_ID}:*`],
     }));
-    // The worker settings' OpenRouter key, when the deployment has one (same parameter as the runtime stack's).
-    grantOpenRouterSecret(this, [instanceRole.roleName]);
+    // The worker settings' provider keys, when the deployment has them (same parameters as the runtime stack's).
+    grantProviderKeySecrets(this, [instanceRole.roleName]);
     instanceRole.addToPolicy(new iam.PolicyStatement({
       sid: "RunnerLogs",
       actions: ["logs:CreateLogStream", "logs:PutLogEvents"],
