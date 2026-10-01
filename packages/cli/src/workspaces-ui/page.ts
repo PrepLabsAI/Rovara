@@ -5,6 +5,9 @@
 // The page has no inline script and no inline style, so the strict CSP below holds. Every node is
 // built with `textContent`, so a project name, a workspace id or a server message is text, never
 // markup.
+//
+// Every same-origin asset this page links to must carry the session token in its URL: the server
+// refuses any request without it (tests/contract/local-page-assets.test.ts).
 import { UI_TOKEN_HEADER, UI_TOKEN_QUERY } from "./protocol.js";
 
 export const WORKSPACES_CSP = [
@@ -17,10 +20,13 @@ export const WORKSPACES_CSP = [
   "frame-ancestors 'none'",
 ].join("; ");
 
-/** The module is loaded with the session token in its own URL, so the page needs no inline script
- * to hand it over and the token is never written into the document. */
+/** The stylesheet and the module each carry the session token in their own URL, because the server
+ * refuses every request without it; the module reads it back from `import.meta.url`, so the page
+ * needs no inline script to hand it over. */
 export function workspacesHtml(token: string): string {
-  const script = `/app.js?${UI_TOKEN_QUERY}=${encodeURIComponent(token)}`;
+  const query = `${UI_TOKEN_QUERY}=${encodeURIComponent(token)}`;
+  const stylesheet = `/app.css?${query}`;
+  const script = `/app.js?${query}`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -28,7 +34,7 @@ export function workspacesHtml(token: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="same-origin">
 <title>AgentX workspaces</title>
-<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="${stylesheet}">
 </head>
 <body>
 <header>
