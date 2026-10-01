@@ -106,8 +106,8 @@ describe("the eval swebench command in the Slack service (spec 043)", () => {
     expect(refused.posts).toEqual(["SWE-bench runs are not enabled in this channel."]);
     expect(refused.getSwebenchRun).not.toHaveBeenCalled();
     const invalid = harness();
-    await processSlackRequest(message("eval swebench pro django__django-11099"), invalid.dependencies, { finalAttempt: false });
-    expect(invalid.posts[0]).toContain("Unknown dataset “pro”");
+    await processSlackRequest(message("eval swebench enterprise django__django-11099"), invalid.dependencies, { finalAttempt: false });
+    expect(invalid.posts[0]).toContain("Unknown dataset “enterprise”");
     expect(invalid.startSwebenchRun).not.toHaveBeenCalled();
   });
 });

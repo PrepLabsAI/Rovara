@@ -20,14 +20,16 @@ export interface AgentRunInput {
   problemStatement: string;
   maxCostUsd: number;
   timeLimitMs: number;
+  /** The tool-loop guard's call backstop; its default when absent. */
+  toolCallLimit?: number;
   piAdapter?: PiSessionAdapter;
   now?: () => number;
 }
 
-/** The fixed preamble before the issue text (FR-012). */
-export function swebenchPrompt(problemStatement: string, repositoryFolder: string): string {
+/** The fixed preamble before the issue text (FR-012); a Pro task's issue is its instruction.md (spec 044 FR-003). */
+export function swebenchPrompt(problemStatement: string, repositoryFolder: string, containerFolder = "/testbed"): string {
   return [
-    `You are working in the repository at ${repositoryFolder} (also /testbed in the shell).`,
+    `You are working in the repository at ${repositoryFolder} (also ${containerFolder} in the shell).`,
     "Resolve the issue below by changing the repository's non-test source files.",
     "Do not modify, add or delete tests: hidden tests will check your change.",
     "Shell commands run in the repository's own Python environment, with no network access.",
@@ -60,7 +62,7 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
     stop = { reason, detail };
     void session.abort().catch(() => undefined);
   };
-  const guard = new ToolLoopGuard();
+  const guard = new ToolLoopGuard(input.toolCallLimit);
   const unsubscribe = session.subscribe((event) => {
     const action = guard.observe(event);
     if (action.kind === "warn") void session.steer?.(action.message).catch(() => undefined);
@@ -77,7 +79,7 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
   });
   const timer = setTimeout(() => halt("time_limit", `the agent reached its ${Math.round(input.timeLimitMs / 60_000)}-minute limit`), input.timeLimitMs);
   try {
-    await session.prompt(swebenchPrompt(input.problemStatement, input.paths.hostFolder));
+    await session.prompt(swebenchPrompt(input.problemStatement, input.paths.hostFolder, input.paths.containerFolder));
   } catch (error) {
     // An abort for one of the limits may end the prompt with an error; the limit is the outcome.
     if (stop === undefined) modelError ??= error instanceof Error ? error.message : String(error);
