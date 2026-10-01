@@ -139,7 +139,7 @@ describe("ec2-ebs delivery", () => {
       await expect(workerPingFeatures("http://w/ping", redirect)).rejects.toThrow(/HTTP 302/);
     });
 
-    describe("a project definition carried by prepare and publish", () => {
+    describe("a project definition carried by prepare, publish and maintain", () => {
       const models = {
         default: { provider: "amazon-bedrock", modelId: "fast", thinkingLevel: "low", label: "Fast" },
         approved: [
@@ -165,20 +165,25 @@ describe("ec2-ebs delivery", () => {
           ...(projectModels === undefined ? {} : { models: projectModels }),
         };
       }
-      function projectRecord(kind: "prepare" | "publish", projectModels: unknown): Ec2OutboxRecord {
+      function projectRecord(kind: "prepare" | "publish" | "maintain", projectModels: unknown): Ec2OutboxRecord {
         const record = recordFor();
         const payload = kind === "prepare"
           ? { project: projectWith(projectModels), repositoryGrant: "signed-grant" }
-          : {
-            project: projectWith(projectModels), repository: "api", title: "Fix it", headBranch: `agentx/${randomUUID()}`,
-            repositoryGrant: "signed-grant", mode: "create",
-          };
+          : kind === "publish"
+            ? {
+              project: projectWith(projectModels), repository: "api", title: "Fix it", headBranch: `agentx/${randomUUID()}`,
+              repositoryGrant: "signed-grant", mode: "create",
+            }
+            : {
+              action: "sync", project: projectWith(projectModels), repository: "api", pullRequestNumber: 7,
+              headBranch: `agentx/${randomUUID()}`, baseBranch: "main", expectedHeadCommit: "a".repeat(40), repositoryGrant: "signed-grant",
+            };
         return { ...record, invocation: { ...record.invocation, kind, payload } as unknown as WorkerInvocation };
       }
       const postedModels = (post: ReturnType<typeof delivery>["post"]) =>
         (JSON.parse(post.mock.calls[0]![1].body) as { payload: { project: { models?: unknown } } }).payload.project.models;
 
-      for (const kind of ["prepare", "publish"] as const) {
+      for (const kind of ["prepare", "publish", "maintain"] as const) {
         it(`${kind}: keeps every level for a worker whose /ping lists the feature`, async () => {
           const workerFeatures = vi.fn<NonNullable<Ec2DeliveryDependencies["workerFeatures"]>>(async () => ["model.thinkingLevel"]);
           const { deliver, post } = delivery({ workerFeatures });

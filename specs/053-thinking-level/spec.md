@@ -48,6 +48,8 @@ also not recorded anywhere a later comparison can read.
   On a resumed conversation Pi may not append a new `thinking_level_change` entry to the transcript (pi-coding-agent
   `sdk.js:240-244` appends one only when the saved session has none), so a transcript can show a stale level. Usage
   telemetry and `result.json` are the record of the level used.
+  Under the rollout rule, the usage event sent to the control plane carries `thinkingLevel` only when the task's
+  approved entry set one; `usage.json` and `result.json` always record the level used.
 - **FR-005:** The Slack `models` reply shows each approved model's level, for example "GLM 5.3 (thinking: medium)".
   Setting a level stays an admin action, through the project definition, as approving models is today.
 

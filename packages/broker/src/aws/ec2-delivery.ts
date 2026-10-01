@@ -72,8 +72,8 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
  * Spec 053: the invocation as the worker can parse it. Worker payloads are strict and a running
  * worker keeps its image after a release (or after a worker-image rollback), so a thinking level goes
  * only to a worker whose /ping lists it. A task's level is dropped and the worker runs at its own
- * default level; prepare and publish carry the whole stored project definition, whose models carry
- * levels the worker does not use there, so those are stripped. The invoke token signs the operation,
+ * default level. Prepare, publish and maintain carry the whole stored project definition, whose
+ * models carry levels the worker does not use there, so those are stripped. The invoke token signs the operation,
  * not the payload, so dropping a field leaves it valid. A ping that fails fails the attempt: the
  * worker journals a hash of the whole invocation, so a retry must send what the first attempt would
  * have, and a blip must not run a capable worker at the default level.
@@ -109,7 +109,7 @@ async function forWorker(
 /** The first thinking level the invocation carries: a task's model, or a project definition's models. */
 function carriedThinkingLevel(invocation: WorkerInvocation): string | undefined {
   if (invocation.kind === "task") return invocation.payload.model?.thinkingLevel;
-  if (invocation.kind !== "prepare" && invocation.kind !== "publish") return undefined;
+  if (!carriesProject(invocation)) return undefined;
   const models = invocation.payload.project.models;
   if (models === undefined) return undefined;
   return [models.default, ...models.approved].find((model) => model.thinkingLevel !== undefined)?.thinkingLevel;
@@ -121,14 +121,19 @@ function withoutUnparsedFields(invocation: WorkerInvocation, features: readonly 
     const model = modelSelectionFor(invocation.payload.model, features);
     return model === invocation.payload.model ? invocation : { ...invocation, payload: { ...invocation.payload, model } };
   }
-  if ((invocation.kind !== "prepare" && invocation.kind !== "publish") || features.includes("model.thinkingLevel")) return invocation;
+  if (!carriesProject(invocation) || features.includes("model.thinkingLevel")) return invocation;
   const models = invocation.payload.project.models;
   if (models === undefined) return invocation;
   const project = { ...invocation.payload.project, models: { default: withoutLevel(models.default), approved: models.approved.map(withoutLevel) } };
-  // Two identical branches so each keeps its own payload type within the discriminated union.
-  return invocation.kind === "prepare"
-    ? { ...invocation, payload: { ...invocation.payload, project } }
-    : { ...invocation, payload: { ...invocation.payload, project } };
+  // Identical branches so each keeps its own payload type within the discriminated union.
+  if (invocation.kind === "prepare") return { ...invocation, payload: { ...invocation.payload, project } };
+  if (invocation.kind === "publish") return { ...invocation, payload: { ...invocation.payload, project } };
+  return { ...invocation, payload: { ...invocation.payload, project } };
+}
+
+/** Prepare, publish and maintain carry the whole stored project definition; cancel, resume and close carry none. */
+function carriesProject(invocation: WorkerInvocation): invocation is Extract<WorkerInvocation, { kind: "prepare" | "publish" | "maintain" }> {
+  return invocation.kind === "prepare" || invocation.kind === "publish" || invocation.kind === "maintain";
 }
 
 function withoutLevel<Model extends { thinkingLevel?: unknown }>(model: Model): Omit<Model, "thinkingLevel"> {
