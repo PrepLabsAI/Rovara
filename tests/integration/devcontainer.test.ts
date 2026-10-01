@@ -135,6 +135,44 @@ describe("the devcontainer CLI seam", () => {
     await expect(runDevcontainerCommand(cli, target, { cwd: "../outside", executable: "true", args: [], timeoutSeconds: 1 })).rejects.toThrow(/escapes/);
   });
 
+  it("passes a project command's env into the devcontainer as --remote-env, through the process group wrapper (#54, #174)", async () => {
+    const { cli, calls, options } = fakeCli();
+    await runDevcontainerCommand(cli, target, {
+      cwd: "repo/sample", executable: "npm", args: ["ci"], timeoutSeconds: 60, env: { NODE_ENV: "test", JAVA_OPTS: "-Xmx2g -Da=b=c", EMPTY_OK: "" },
+    });
+    const groupFile = calls[0]![16];
+    expect(groupFile).toMatch(/^\/tmp\/agentx-command-[0-9a-f-]+\.pgid$/);
+    expect(calls[0]).toEqual([
+      "exec", "--workspace-folder", target.workspaceFolder, "--config", target.configPath,
+      "--remote-env", "NODE_ENV=test", "--remote-env", "JAVA_OPTS=-Xmx2g -Da=b=c", "--remote-env", "EMPTY_OK=",
+      "bash", "-c", COMMAND_WRAPPER, "bash", "/mnt/workspace/repo/sample", groupFile, "npm", "ci",
+    ]);
+    // The variables go on the command line only: the CLI's own environment is not touched.
+    expect(Object.keys(options[0]!).sort()).toEqual(["signal", "timeoutMs"]);
+  });
+
+  it("sends a timed-out project command's env to the command only, never to the TERM and KILL execs (#54, #174)", async () => {
+    vi.useFakeTimers();
+    try {
+      const { cli, calls, options, kills } = stoppableCli();
+      const running = runDevcontainerCommand(cli, target, {
+        cwd: "repo/sample", executable: "sleep", args: ["300"], timeoutSeconds: 60, env: { NODE_ENV: "test" },
+      });
+      await vi.advanceTimersByTimeAsync(60_000 + TIMEOUT_KILL_GRACE_MS);
+      await expect(running).resolves.toEqual({ exitCode: -1, timedOut: true, stdout: "", stderr: "" });
+      expect(calls[0]!.slice(5, 7)).toEqual(["--remote-env", "NODE_ENV=test"]);
+      const groupFile = calls[0]![12]!;
+      expect(kills()).toEqual([
+        ["exec", "--workspace-folder", target.workspaceFolder, "--config", target.configPath, "bash", "-c", KILL_TERM, "bash", groupFile],
+        ["exec", "--workspace-folder", target.workspaceFolder, "--config", target.configPath, "bash", "-c", KILL_KILL, "bash", groupFile],
+      ]);
+      for (const kill of kills()) expect(kill.join("\n")).not.toContain("NODE_ENV");
+      for (const runOptions of options) expect(runOptions).not.toHaveProperty("env");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("stops a timed-out project command in the container: TERM to its process group, then KILL after the grace period (#174)", async () => {
     vi.useFakeTimers();
     try {
@@ -437,6 +475,21 @@ describe("preparing a workspace with a devcontainer", () => {
     expect(calls.map((args) => args[0])).toEqual(["up", "exec", "exec"]);
     expect(calls[1]).toEqual(expect.arrayContaining(["npm", "ci"]));
     expect(calls[2]).toEqual(expect.arrayContaining([join(canonical, "repo/sample"), "npm", "run", "typecheck"]));
+  });
+
+  it("runs setup and readiness in the devcontainer with their own env (#54)", async () => {
+    const { root, project, materializer } = await fixture();
+    const withEnv = {
+      ...project,
+      setup: [{ ...project.setup[0]!, env: { SETUP_ONLY: "1" } }],
+      readiness: [{ ...project.readiness[0]!, env: { CHECK_ONLY: "2" } }],
+    };
+    const { cli, calls } = fakeCli();
+    await expect(prepareWorkspace({ rootPath: root, project: withEnv, materializer, devcontainerCli: cli })).resolves.toMatchObject({ complete: true });
+    expect(calls[1]).toEqual(expect.arrayContaining(["--remote-env", "SETUP_ONLY=1"]));
+    expect(calls[1]).not.toContain("CHECK_ONLY=2");
+    expect(calls[2]).toEqual(expect.arrayContaining(["--remote-env", "CHECK_ONLY=2"]));
+    expect(calls[2]).not.toContain("SETUP_ONLY=1");
   });
 
   it("starts the devcontainer again when a failed preparation resumes", async () => {

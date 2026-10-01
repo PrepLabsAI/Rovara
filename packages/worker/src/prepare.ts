@@ -359,7 +359,7 @@ export async function runProjectCommand(
     result = await runCollected(command.executable, command.args, {
       cwd,
       timeoutMs: command.timeoutSeconds * 1_000,
-      env: gitSafeEnvironment(cwd),
+      env: gitSafeEnvironment(cwd, command.env),
     });
   } catch (error) {
     // The command could not start (for example, its executable does not exist).
