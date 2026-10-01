@@ -2,7 +2,8 @@
 # Boots an AgentX EC2 worker (issue #81): mounts the workspace volume and runs the worker image.
 #
 # Runs once, as root, as the instance's user data. The provisioner prepends the configuration with
-# ec2WorkerUserData (@agentx/contracts), which validates every value before it reaches this script.
+# ec2WorkerBootScript (@agentx/contracts), which validates every value before it reaches this script,
+# and sends the result gzip-compressed (ec2WorkerUserData), which cloud-init unpacks (#229).
 # Steps that use the network retry with exponential backoff (retry). Any failure exits non-zero,
 # leaves the worker stopped and reports why on the worker's /ping port (report_boot_failure), so the
 # provisioner's health probe fails the session at once (#211); the probe's 10 minute timeout stays

@@ -1,9 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
+import { gunzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import {
+  EC2_USER_DATA_MAX_BYTES,
   Ec2WorkerBootConfigSchema,
+  ec2WorkerBootScript,
   ec2WorkerUserData,
   type Ec2WorkerBootConfig,
 } from "../../packages/contracts/src/session.js";
@@ -27,15 +30,15 @@ const config: Ec2WorkerBootConfig = {
 describe("EC2 worker user data", () => {
   it("passes OpenRouter references to the container and rejects secrets or shell injection", () => {
     const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/test/openrouter-AbCdEf";
-    const rendered = ec2WorkerUserData({ ...config, openRouterSecretArn: secretArn, openRouterProviders: "anthropic,openai" }, bootScript);
+    const rendered = ec2WorkerBootScript({ ...config, openRouterSecretArn: secretArn, openRouterProviders: "anthropic,openai" }, bootScript);
     expect(rendered).toContain(`export AGENTX_OPENROUTER_SECRET_ARN='${secretArn}'`);
     expect(rendered).toContain("AGENTX_OPENROUTER_SECRET_ARN=${AGENTX_OPENROUTER_SECRET_ARN:-}");
     expect(rendered).not.toContain("OPENROUTER_API_KEY");
-    expect(() => ec2WorkerUserData({ ...config, openRouterSecretArn: "sk-key" }, bootScript)).toThrow();
-    expect(() => ec2WorkerUserData({ ...config, openRouterProviders: "anthropic';touch /tmp/bad" }, bootScript)).toThrow();
+    expect(() => ec2WorkerBootScript({ ...config, openRouterSecretArn: "sk-key" }, bootScript)).toThrow();
+    expect(() => ec2WorkerBootScript({ ...config, openRouterProviders: "anthropic';touch /tmp/bad" }, bootScript)).toThrow();
   });
   it("prepends every boot value to the script as a quoted export", () => {
-    const userData = ec2WorkerUserData(config, bootScript);
+    const userData = ec2WorkerBootScript(config, bootScript);
     expect(userData.startsWith("#!/bin/bash\n")).toBe(true);
     expect(userData.match(/^#!/gm)).toHaveLength(1);
     expect(userData).toContain(`export AGENTX_WORKSPACE_ID='${config.workspaceId}'`);
@@ -44,27 +47,48 @@ describe("EC2 worker user data", () => {
     expect(userData).toContain(`export AGENTX_MODEL_ID='${config.modelId}'`);
     expect(userData).toContain("export PI_CACHE_RETENTION='short'");
     expect(userData.endsWith("main \"$@\"\n")).toBe(true);
-    expect(Buffer.byteLength(userData)).toBeLessThan(16_384);
   });
 
-  it("stays inside EC2's 16 KB user data limit with every optional value set (#223)", () => {
-    const userData = ec2WorkerUserData({
+  it("sends the boot script as base64 gzip user data that cloud-init unpacks to exactly that script (#229)", () => {
+    const encoded = ec2WorkerUserData(config, bootScript);
+    expect(encoded).toMatch(/^[A-Za-z0-9+/]+={0,2}$/);
+    const raw = Buffer.from(encoded, "base64");
+    // cloud-init recognizes gzip user data by its magic bytes and decompresses it before running it.
+    expect([...raw.subarray(0, 2)]).toEqual([0x1f, 0x8b]);
+    expect(gunzipSync(raw).toString("utf8")).toBe(ec2WorkerBootScript(config, bootScript));
+  });
+
+  it("leaves real headroom under EC2's 16 KB user data limit with every optional value set (#223, #229)", () => {
+    const worstCase: Ec2WorkerBootConfig = {
       ...config,
       generation: 99_999,
-      invokePublicKey: "A".repeat(124),
+      invokePublicKey: "A".repeat(1_024),
+      controlPlaneUrl: `https://${"a".repeat(504)}`,
+      modelProvider: "p".repeat(128),
+      modelId: "m".repeat(256),
       openRouterSecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/production/openrouter-AbCdEf",
       openRouterProviders: "anthropic,openai,google",
-    }, bootScript);
-    expect(Buffer.byteLength(userData)).toBeLessThan(16_384);
+      logGroupName: `/${"l".repeat(511)}`,
+    };
+    // EC2 measures user data before base64 encoding; the worst case stays under half its limit.
+    expect(Buffer.from(ec2WorkerUserData(worstCase, bootScript), "base64").length).toBeLessThan(8_192);
+  });
+
+  it("measures the limit on the compressed user data, not the script (#229)", () => {
+    const longScript = `${bootScript}${"#".repeat(EC2_USER_DATA_MAX_BYTES)}\n`;
+    expect(Buffer.byteLength(ec2WorkerBootScript(config, longScript))).toBeGreaterThan(EC2_USER_DATA_MAX_BYTES);
+    expect(Buffer.from(ec2WorkerUserData(config, longScript), "base64").length).toBeLessThan(EC2_USER_DATA_MAX_BYTES);
   });
 
   it("refuses to render user data EC2 would reject for its size (#223)", () => {
-    expect(() => ec2WorkerUserData(config, `${bootScript}${"#".repeat(4_096)}\n`)).toThrow(/worker user data is \d+ bytes; EC2 allows less than 16384/);
+    // Random bytes do not compress, so this pushes the compressed user data past the limit.
+    const incompressible = `${bootScript}# ${randomBytes(EC2_USER_DATA_MAX_BYTES).toString("base64")}\n`;
+    expect(() => ec2WorkerUserData(config, incompressible)).toThrow(/worker user data is \d+ bytes compressed; EC2 allows less than 16384/);
   });
 
   it("exports exactly the variables the boot script requires", () => {
     const required = /for name in ([\s\S]*?); do/.exec(bootScript)?.[1]?.split(/[\s\\]+/).filter(Boolean) ?? [];
-    const exported = [...ec2WorkerUserData(config, bootScript).matchAll(/^export (\w+)=/gm)].map((match) => match[1]);
+    const exported = [...ec2WorkerBootScript(config, bootScript).matchAll(/^export (\w+)=/gm)].map((match) => match[1]);
     expect(required.length).toBeGreaterThan(0);
     expect(exported.sort()).toEqual(required.sort());
   });
@@ -78,7 +102,7 @@ describe("EC2 worker user data", () => {
   });
 
   it("renders a script bash accepts", () => {
-    const checked = spawnSync("bash", ["-n"], { input: ec2WorkerUserData(config, bootScript), encoding: "utf8" });
+    const checked = spawnSync("bash", ["-n"], { input: ec2WorkerBootScript(config, bootScript), encoding: "utf8" });
     expect(checked.status, checked.stderr).toBe(0);
   });
 
@@ -94,6 +118,7 @@ describe("EC2 worker user data", () => {
     ["a generation of 0", { generation: 0 }],
     ["an unknown cache retention", { promptCacheRetention: "forever" }],
   ])("refuses %s", (_name, override) => {
+    expect(() => ec2WorkerBootScript({ ...config, ...override } as Ec2WorkerBootConfig, bootScript)).toThrow();
     expect(() => ec2WorkerUserData({ ...config, ...override } as Ec2WorkerBootConfig, bootScript)).toThrow();
   });
 

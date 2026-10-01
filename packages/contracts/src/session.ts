@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { gzipSync } from "node:zlib";
 import { z } from "zod";
 
 // Contracts for ec2-ebs workspaces, whose compute the Session Manager provisions on self-managed
@@ -217,7 +218,7 @@ const SHELL_SAFE = /^[A-Za-z0-9._:/@+=-]+$/;
 
 /**
  * What an EC2 worker boots with. The provisioner renders it into user data with
- * `ec2WorkerUserData`; `packages/worker/ec2/boot.sh` reads each field from the variable named here.
+ * `ec2WorkerUserData` (the script itself is `ec2WorkerBootScript`); `packages/worker/ec2/boot.sh` reads each field from the variable named here.
  */
 export const Ec2WorkerBootConfigSchema = z
   .object({
@@ -250,8 +251,11 @@ export const Ec2WorkerBootConfigSchema = z
   })
   .strict();
 
-/** The boot script's user data: a validated configuration block, then the script itself. */
-export function ec2WorkerUserData(config: Ec2WorkerBootConfig, bootScript: string): string {
+/**
+ * The script cloud-init runs on a worker: a validated configuration block, then the boot script.
+ * `ec2WorkerUserData` sends it compressed; the boot-script harness runs it as is.
+ */
+export function ec2WorkerBootScript(config: Ec2WorkerBootConfig, bootScript: string): string {
   const parsed = Ec2WorkerBootConfigSchema.parse(config);
   const variables: Array<[string, string]> = [
     ["AGENTX_WORKSPACE_ID", parsed.workspaceId],
@@ -269,18 +273,26 @@ export function ec2WorkerUserData(config: Ec2WorkerBootConfig, bootScript: strin
   if (parsed.openRouterSecretArn) variables.push(["AGENTX_OPENROUTER_SECRET_ARN", parsed.openRouterSecretArn]);
   if (parsed.openRouterProviders) variables.push(["AGENTX_OPENROUTER_PROVIDERS", parsed.openRouterProviders]);
   const body = bootScript.replace(/^#!.*\n/, "");
-  const userData = [
+  return [
     "#!/bin/bash",
-    "# Rendered by ec2WorkerUserData (@agentx/contracts).",
+    "# Rendered by ec2WorkerBootScript (@agentx/contracts).",
     ...variables.map(([name, value]) => `export ${name}='${value}'`),
     body,
   ].join("\n");
+}
+
+/**
+ * The worker's RunInstances UserData: the boot script gzip-compressed, then base64 encoded once,
+ * as RunInstances takes it. cloud-init recognizes gzip user data and decompresses it before
+ * running the script (#229). Pass the result to EC2 as is; encoding it again breaks the boot.
+ */
+export function ec2WorkerUserData(config: Ec2WorkerBootConfig, bootScript: string): string {
+  const compressed = gzipSync(Buffer.from(ec2WorkerBootScript(config, bootScript), "utf8"), { level: 9 });
   // EC2 rejects larger user data with an error that does not say which part grew (#223).
-  const size = Buffer.byteLength(userData, "utf8");
-  if (size >= EC2_USER_DATA_MAX_BYTES) {
-    throw new Error(`worker user data is ${size} bytes; EC2 allows less than ${EC2_USER_DATA_MAX_BYTES}`);
+  if (compressed.length >= EC2_USER_DATA_MAX_BYTES) {
+    throw new Error(`worker user data is ${compressed.length} bytes compressed; EC2 allows less than ${EC2_USER_DATA_MAX_BYTES}`);
   }
-  return userData;
+  return compressed.toString("base64");
 }
 
 /** EC2's limit on user data before base64 encoding. */
