@@ -8,6 +8,7 @@ import type {
 import { processGroup, runConsumer, type QueueClient, type QueueMessage } from "../../packages/slack-service/src/consumer.js";
 import { deterministicUuid, requestIdSequence } from "../../packages/slack-service/src/ids.js";
 import {
+  isCloseWorkspaceRequest,
   processSlackRequest,
   type ProcessorDependencies,
   type ThreadState,
@@ -142,6 +143,68 @@ describe("signed control-plane service requests", () => {
   });
 });
 
+describe("Slack close command matching (#103)", () => {
+  // A wrong close discards a workspace, so the matcher accepts only a narrow,
+  // whole-message close request and rejects anything that carries other work.
+  it.each([
+    "close this workspace",
+    "close workspace",
+    "Close the workspace",
+    "close the workspace",
+    "please close this workspace",
+    "close this workspace please",
+    "can you close the workspace?",
+    "<@U123> Close the workspace.",
+    "close this workspace, thanks",
+    "close my workspace",
+    "close our workspace",
+    "Could you please close the workspace?",
+    "would you close this workspace",
+    "will you close the workspace",
+    "pls close this workspace",
+    "kindly close the workspace",
+    "ok close the workspace",
+    "okay, close this workspace",
+    "close the workspace, please",
+    "close the workspace thank you",
+    "close the workspace please!",
+    "can you close the workspace? thanks",
+    "  close   the\tworkspace  ",
+    "CLOSE THIS WORKSPACE!!",
+  ])("accepts %j", (text) => {
+    expect(isCloseWorkspaceRequest(text)).toBe(true);
+  });
+
+  it.each([
+    "why did the workspace close?",
+    "close the modal in index.html",
+    "close the modal in the form",
+    "don't close the workspace",
+    "don\u2019t close the workspace",
+    "close the workspace after the PR merges",
+    "close workspace tab",
+    "please close the workspace and open a PR",
+    "can you close the workspace and then fix the login bug",
+    "done? also fix X",
+    "done",
+    "close",
+    "workspace",
+    "close the the workspace",
+    "close this thread's workspace",
+    "please please close the workspace",
+    "ok please close the workspace",
+    "close the workspace please please",
+    "shut down the workspace",
+    "delete this workspace",
+    "close this workspace\nthen fix the tests",
+    "I want to close the workspace",
+    "should I close the workspace?",
+    "",
+  ])("rejects %j", (text) => {
+    expect(isCloseWorkspaceRequest(text)).toBe(false);
+  });
+});
+
 describe("Slack request processing", () => {
   it("closes a clean workspace before ensuring one or running a model turn", async () => {
     const operationId = "55555555-5555-4555-8555-555555555555";
@@ -150,6 +213,22 @@ describe("Slack request processing", () => {
       closeOperation: { status: "SUCCEEDED", result: { safeToClose: true, repositories: [] } },
     });
     await processSlackRequest(slackMessage({ text: "<@UAGENTX> Close this workspace." }), harness.dependencies, { finalAttempt: false });
+    expect(harness.ensureWorkspace).not.toHaveBeenCalled();
+    expect(harness.turns).toHaveLength(0);
+    expect(harness.posts).toEqual([
+      "Checking this workspace for unpublished work before closing it.",
+      "Workspace closed. Its runtime session and persistent workspace storage have been released.",
+    ]);
+    expect(harness.closed).toEqual([{ workspaceId, closedAt: "2026-09-24T08:00:00.000Z" }]);
+  });
+
+  it("starts a close for a natural phrasing such as \"Close the workspace\" (#103)", async () => {
+    const operationId = "55555555-5555-4555-8555-555555555555";
+    const harness = processorHarness({
+      closeStart: { outcome: "PREFLIGHT", workspaceId, operationId, status: "ACCEPTED" },
+      closeOperation: { status: "SUCCEEDED", result: { safeToClose: true, repositories: [] } },
+    });
+    await processSlackRequest(slackMessage({ text: "Close the workspace" }), harness.dependencies, { finalAttempt: false });
     expect(harness.ensureWorkspace).not.toHaveBeenCalled();
     expect(harness.turns).toHaveLength(0);
     expect(harness.posts).toEqual([

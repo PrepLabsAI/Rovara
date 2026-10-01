@@ -621,14 +621,25 @@ function errorSummary(error: unknown): { name: string; code?: string } {
   };
 }
 
+// A close discards a clean workspace, so this accepts only a whole-message close
+// request: at most one polite lead-in, one polite tail, and nothing else. Any
+// other words (for example "close the modal" or "close the workspace and open a
+// PR") go to the model instead.
+const CLOSE_POLITE_PREFIX = /^(?:(?:please|pls|kindly|ok|okay),? |(?:can|could|would|will) you (?:please )?)/u;
+const CLOSE_POLITE_SUFFIX = /,? (?:please|thanks|thank you)$/u;
+const CLOSE_COMMAND = /^close (?:(?:the|this|my|our) )?workspace$/u;
+
 export function isCloseWorkspaceRequest(text: string): boolean {
-  const normalized = text
-    .replace(/^\s*<@[A-Z0-9]+>\s*/iu, "")
-    .trim()
-    .replace(/[.!?]+$/u, "")
-    .trim()
-    .toLowerCase();
-  return normalized === "close this workspace" || normalized === "close workspace";
+  const stripTrailingPunctuation = (value: string) => value.replace(/[.!?]+$/u, "").trim();
+  const normalized = stripTrailingPunctuation(
+    text
+      .replace(/^\s*<@[A-Z0-9]+>\s*/iu, "")
+      .replace(/\s+/gu, " ")
+      .trim()
+      .toLowerCase(),
+  );
+  const withoutSuffix = stripTrailingPunctuation(normalized.replace(CLOSE_POLITE_SUFFIX, ""));
+  return CLOSE_COMMAND.test(withoutSuffix.replace(CLOSE_POLITE_PREFIX, ""));
 }
 
 function closeBlockedMessage(result: ReturnType<typeof WorkspaceClosePreflightResultSchema.parse>): string {
