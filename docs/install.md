@@ -234,7 +234,8 @@ access stack from it with their credentials; you deploy the rest with the operat
    It changes nothing in AWS. It makes two read-only calls (your account id, and whether `<env>`
    is already installed), so it needs credentials for the target account. `--operator-principal`
    is who may assume the operator role; without it, any principal in the account that IAM allows
-   may. To use OpenRouter, create its secret yourself and pass `--openrouter-secret-arn <arn>`.
+   may. To use OpenRouter, Anthropic or OpenAI, create the key's secret yourself and pass
+   `--openrouter-secret-arn`, `--anthropic-secret-arn` or `--openai-secret-arn <arn>`.
 
 2. **What the bundle holds.** No secret. It has:
    - `README.md`: the steps for the platform team, and how to tear the environment down;

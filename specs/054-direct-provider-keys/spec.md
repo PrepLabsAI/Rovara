@@ -2,7 +2,7 @@
 
 **Feature Branch**: `docs/054-direct-provider-keys` (spec), then `feat/054-direct-provider-keys`  
 **Created**: 2026-10-01  
-**Status**: Draft  
+**Status**: Implemented on `feat/054-direct-provider-keys`; awaiting release and live verification (SC-003, SC-004)  
 **Input**: "Let's add support for bringing your own API key for Claude or OpenAI." Clarified on 2026-10-01: the key
 belongs to the installation's administrator (not a project or a Slack user), and all three model roles can use it.
 
@@ -162,10 +162,8 @@ same flags. `agentx doctor` reports a missing or empty key secret and gives the 
 
 ## Open Questions
 
-1. Are D3's OpenAI defaults acceptable, or should init ask for OpenAI model IDs with no default, as it does for
-   OpenRouter?
-2. Should we fall back to Bedrock on a missing key (D2), or fail the turn with "no Anthropic key configured"?
-   Failing is stricter for installs that have no Bedrock access at all.
+Both were settled on 2026-10-01 when implementation was approved, by taking the recommendations: D3's
+defaults for both providers, and D2's fallback to Bedrock on a missing key.
 
 ## Success Criteria
 

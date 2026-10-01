@@ -112,7 +112,7 @@ You need:
   Later day-2 commands use a narrower operator role that `init` creates.
 - A GitHub organization or personal account to own AgentX's GitHub App.
 - A Slack workspace where you can create and install apps.
-- Model access: Amazon Bedrock (the default) in the chosen region, or an OpenRouter API key.
+- Model access: Amazon Bedrock (the default) in the chosen region, or your own OpenRouter, Anthropic or OpenAI API key.
 - Node.js 22.19 or newer (Node 22 LTS recommended). AWS CloudShell comes with Node 20: see
   [Node 22 in AWS CloudShell](docs/install.md#node-22-in-aws-cloudshell) for a one-line install.
 
@@ -1267,4 +1267,4 @@ more errors than its baseline or a new file gets any. After you fix some, run
 The latest results are the CI runs on each pull request. Docker and AWS are not required for this
 local suite.
 
-For Bedrock/OpenRouter configuration, Slack model selection, and the live verification checklist, see [OpenRouter model access](docs/openrouter.md).
+For Bedrock/OpenRouter configuration, Slack model selection, and the live verification checklist, see [OpenRouter model access](docs/openrouter.md). To use your own Anthropic or OpenAI API key, see [Your own Anthropic or OpenAI API key](docs/model-providers.md).

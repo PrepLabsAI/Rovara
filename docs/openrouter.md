@@ -2,7 +2,8 @@
 
 AgentX can use Bedrock, OpenRouter, or both. Each model is identified by its `provider` and
 `modelId`. Project approval controls which coding models Slack users can select. The worker,
-Slack orchestrator, and action-gate classifier have independent defaults.
+Slack orchestrator, and action-gate classifier have independent defaults. To call Anthropic or
+OpenAI directly with your own key, see [Your own Anthropic or OpenAI API key](model-providers.md).
 
 ## Configure an installation
 
