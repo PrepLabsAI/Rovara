@@ -580,6 +580,16 @@ describe("reading the eval settings from SSM (spec 043 FR-016)", () => {
     await expect(swebenchDeploymentFromParameters(prefix, values(complete))).resolves.toEqual(deployment);
   });
 
+  it("passes the keyed providers' secret references to the runner, and none when a release has not set them", async () => {
+    const anthropic = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/production/anthropic-AbCdEf";
+    const openai = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/production/openai-AbCdEf";
+    const configured = await swebenchDeploymentFromParameters(prefix, values({ ...complete,
+      "worker-anthropic-secret-arn": anthropic, "worker-openai-secret-arn": openai }));
+    expect(configured?.environment).toEqual({ ...deployment.environment, AGENTX_ANTHROPIC_SECRET_ARN: anthropic, AGENTX_OPENAI_SECRET_ARN: openai });
+    const unset = await swebenchDeploymentFromParameters(prefix, values({ ...complete, "worker-anthropic-secret-arn": "none" }));
+    expect(unset?.environment).toEqual(deployment.environment);
+  });
+
   it("is not installed until both the settings and a runner image exist", async () => {
     // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
     const { "eval/runner-image": _image, ...withoutImage } = complete;

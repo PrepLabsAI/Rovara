@@ -10,6 +10,7 @@ import {
   ec2WorkerUserData,
   type Ec2WorkerBootConfig,
 } from "../../packages/contracts/src/session.js";
+import { SECRET_ARN_MAX_LENGTH } from "../../packages/contracts/src/model-providers.js";
 
 const bootScript = readFileSync(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
 
@@ -37,6 +38,17 @@ describe("EC2 worker user data", () => {
     expect(() => ec2WorkerBootScript({ ...config, openRouterSecretArn: "sk-key" }, bootScript)).toThrow();
     expect(() => ec2WorkerBootScript({ ...config, openRouterProviders: "anthropic';touch /tmp/bad" }, bootScript)).toThrow();
   });
+  it.each([["anthropicSecretArn", "AGENTX_ANTHROPIC_SECRET_ARN", "ANTHROPIC_API_KEY"], ["openaiSecretArn", "AGENTX_OPENAI_SECRET_ARN", "OPENAI_API_KEY"]] as const)(
+    "passes the %s reference to the container, never a key", (field, variable, keyVariable) => {
+      const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/test/direct-AbCdEf";
+      const rendered = ec2WorkerBootScript({ ...config, [field]: secretArn }, bootScript);
+      expect(rendered).toContain(`export ${variable}='${secretArn}'`);
+      expect(rendered).toContain(`${variable}=\${${variable}:-}`);
+      expect(rendered).not.toContain(keyVariable);
+      expect(ec2WorkerBootScript(config, bootScript)).not.toContain(`export ${variable}=`);
+      expect(() => ec2WorkerBootScript({ ...config, [field]: "sk-ant-api03-key" }, bootScript)).toThrow();
+      expect(() => ec2WorkerBootScript({ ...config, [field]: `${secretArn}';touch /tmp/bad` }, bootScript)).toThrow();
+    });
   it("prepends every boot value to the script as a quoted export", () => {
     const userData = ec2WorkerBootScript(config, bootScript);
     expect(userData.startsWith("#!/bin/bash\n")).toBe(true);
@@ -75,10 +87,13 @@ describe("EC2 worker user data", () => {
       modelId: noise(256),
       openRouterSecretArn: `${secretPrefix}${noise(2_048 - secretPrefix.length)}`,
       openRouterProviders: [...Array.from({ length: 6 }, () => lower(80)), lower(26)].join(","),
+      anthropicSecretArn: `${secretPrefix}${noise(SECRET_ARN_MAX_LENGTH - secretPrefix.length)}`,
+      openaiSecretArn: `${secretPrefix}${noise(SECRET_ARN_MAX_LENGTH - secretPrefix.length)}`,
       logGroupName: `/${noise(511)}`,
     });
     expect(worstCase.controlPlaneUrl).toHaveLength(512);
     expect(worstCase.openRouterProviders).toHaveLength(512);
+    expect(worstCase.anthropicSecretArn).toHaveLength(SECRET_ARN_MAX_LENGTH);
     const compressed = Buffer.from(ec2WorkerUserData(worstCase, bootScript), "base64").length;
     // EC2 measures user data before base64 encoding; at least 4 KB of it stays free for boot changes.
     expect(compressed).toBeLessThanOrEqual(EC2_USER_DATA_MAX_BYTES - 4_096);

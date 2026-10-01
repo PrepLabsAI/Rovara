@@ -2,6 +2,7 @@ export * from "./access-policies.js";
 export * from "./action-policy.js";
 export * from "./item-paths.js";
 export * from "./models.js";
+export * from "./model-providers.js";
 export * from "./errors.js";
 export * from "./connectors.js";
 export * from "./credentials.js";

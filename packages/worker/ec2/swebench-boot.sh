@@ -58,7 +58,7 @@ main() {
     printf 'AWS_REGION=%s\n' "$region"
     printf 'AGENTX_SWEBENCH_ROOT=%s\n' "$RUN_ROOT"
     printf 'AGENTX_SWEBENCH_RUN=%s\n' "$(launch_field run)"
-    for name in PI_CACHE_RETENTION AGENTX_OPENROUTER_SECRET_ARN AGENTX_OPENROUTER_PROVIDERS; do
+    for name in PI_CACHE_RETENTION AGENTX_OPENROUTER_SECRET_ARN AGENTX_OPENROUTER_PROVIDERS AGENTX_ANTHROPIC_SECRET_ARN AGENTX_OPENAI_SECRET_ARN; do
       value=$(launch_field "environment.$name")
       [[ -z "$value" ]] || printf '%s=%s\n' "$name" "$value"
     done
