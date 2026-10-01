@@ -60,6 +60,7 @@ function processorHarness(options: {
   const closed: Array<{ workspaceId: string; closedAt: string }> = [];
   const finished: string[] = [];
   const createConversation = vi.fn(async () => "33333333-3333-4333-8333-333333333333");
+  const startClose = vi.fn(async (): Promise<SlackWorkspaceCloseStartResult> => options.closeStart ?? { outcome: "NOT_FOUND" });
   const ensureWorkspace = vi.fn(async () => {
     if (options.ensureError) throw options.ensureError;
     return options.workspace ?? workspaceResult();
@@ -67,7 +68,7 @@ function processorHarness(options: {
   const dependencies: ProcessorDependencies = {
     api: () => ({
       ensureWorkspace,
-      startClose: async () => options.closeStart ?? { outcome: "NOT_FOUND" },
+      startClose,
       completeClose: async (_requestId, operationId) => ({
         outcome: "CLOSED",
         workspaceId,
@@ -101,7 +102,7 @@ function processorHarness(options: {
       posts.push(text);
     },
   };
-  return { dependencies, posts, turns, saved, savedRevisions, closed, finished, createConversation, ensureWorkspace };
+  return { dependencies, posts, turns, saved, savedRevisions, closed, finished, createConversation, ensureWorkspace, startClose };
 }
 
 describe("deterministic request IDs", () => {
@@ -160,7 +161,6 @@ describe("Slack close command matching (#103)", () => {
     "close our workspace",
     "Could you please close the workspace?",
     "would you close this workspace",
-    "will you close the workspace",
     "pls close this workspace",
     "kindly close the workspace",
     "ok close the workspace",
@@ -199,9 +199,16 @@ describe("Slack close command matching (#103)", () => {
     "close this workspace\nthen fix the tests",
     "I want to close the workspace",
     "should I close the workspace?",
+    "will you close the workspace when the PR merges?",
+    "will you close the workspace",
     "",
   ])("rejects %j", (text) => {
     expect(isCloseWorkspaceRequest(text)).toBe(false);
+  });
+
+  it("rejects an over-long message before running any pattern, even one that would fold to a close", () => {
+    expect(isCloseWorkspaceRequest(`close${" ".repeat(300)}workspace`)).toBe(false);
+    expect(isCloseWorkspaceRequest(`${"!".repeat(40_000)}a`)).toBe(false);
   });
 });
 
@@ -236,6 +243,14 @@ describe("Slack request processing", () => {
       "Workspace closed. Its runtime session and persistent workspace storage have been released.",
     ]);
     expect(harness.closed).toEqual([{ workspaceId, closedAt: "2026-09-24T08:00:00.000Z" }]);
+  });
+
+  it("sends a message that only mentions closing to a model turn without starting a close (#103)", async () => {
+    const harness = processorHarness();
+    await processSlackRequest(slackMessage({ text: "close the modal in index.html" }), harness.dependencies, { finalAttempt: false });
+    expect(harness.startClose).not.toHaveBeenCalled();
+    expect(harness.turns).toHaveLength(1);
+    expect(harness.turns[0]?.message.text).toBe("close the modal in index.html");
   });
 
   it("does not create a workspace for a close request in an empty thread", async () => {
