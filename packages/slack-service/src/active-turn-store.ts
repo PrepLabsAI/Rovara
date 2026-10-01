@@ -5,6 +5,13 @@ import type { ActiveTurn, TurnNote } from "./interrupted-turn.js";
 const WRITE_TIMEOUT_MS = 5_000;
 
 /** Issue 157: the worker operation a turn waits on (`activeTurn`) and the next turn's note (`turnNote`), on the thread's META item. */
+/** The activeTurn attribute as stored: only its known fields. */
+const stored = (turn: ActiveTurn) => ({
+  eventId: turn.eventId, workspaceId: turn.workspaceId, operationId: turn.operationId,
+  ...(turn.request === undefined ? {} : { request: turn.request }),
+  ...(turn.seenAt === undefined ? {} : { seenAt: turn.seenAt }),
+});
+
 export function createDynamoActiveTurnStore(documentClient: Pick<DynamoDBDocumentClient, "send">, tableName: string) {
   const key = (subject: string) => ({ pk: `THREAD#${subject}`, sk: "META" });
   return {
@@ -13,11 +20,27 @@ export function createDynamoActiveTurnStore(documentClient: Pick<DynamoDBDocumen
         TableName: tableName,
         Key: key(subject),
         UpdateExpression: "SET activeTurn = :turn",
-        ExpressionAttributeValues: { ":turn": {
-          eventId: turn.eventId, workspaceId: turn.workspaceId, operationId: turn.operationId,
-          ...(turn.request === undefined ? {} : { request: turn.request }),
-        } },
+        ExpressionAttributeValues: { ":turn": stored(turn) },
       }), { abortSignal: AbortSignal.timeout(WRITE_TIMEOUT_MS) });
+    },
+    /**
+     * Issue 173: writes the turn again with a fresh seenAt, unless another event's turn is saved
+     * there. True when written. Also records a turn whose first save failed.
+     */
+    async stampActiveTurn(subject: string, turn: ActiveTurn): Promise<boolean> {
+      try {
+        await documentClient.send(new UpdateCommand({
+          TableName: tableName,
+          Key: key(subject),
+          UpdateExpression: "SET activeTurn = :turn",
+          ConditionExpression: "attribute_not_exists(activeTurn) OR activeTurn.eventId = :event",
+          ExpressionAttributeValues: { ":turn": stored(turn), ":event": turn.eventId },
+        }), { abortSignal: AbortSignal.timeout(WRITE_TIMEOUT_MS) });
+        return true;
+      } catch (error) {
+        if (error instanceof Error && error.name === "ConditionalCheckFailedException") return false;
+        throw error;
+      }
     },
     async saveTurnNote(subject: string, note: TurnNote | undefined): Promise<void> {
       await documentClient.send(new UpdateCommand({

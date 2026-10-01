@@ -1245,10 +1245,16 @@ Use Node 22.19 or newer within the Node 22 line:
 ```sh
 npm ci
 npm run typecheck
+npm run typecheck:all
 npm run lint
 npm test
 npm run infra:synth
 ```
+
+`npm run typecheck:all` also type-checks tests/ and scripts/ (tsconfig.lint.json). Those files still
+have known errors, listed per file in tests/typecheck-baseline.json. The check fails if a file gets
+more errors than its baseline or a new file gets any. After you fix some, run
+`npm run typecheck:baseline` to lower the baseline and commit it. It never raises a count.
 
 The latest results are the CI runs on each pull request. Docker and AWS are not required for this
 local suite.

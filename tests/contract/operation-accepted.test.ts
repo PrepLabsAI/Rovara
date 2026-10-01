@@ -64,6 +64,51 @@ describe("onOperationAccepted", () => {
   });
 });
 
+describe("onOperationAttached (#173)", () => {
+  it("agentx_task_result reports the operation it re-attaches to once, before it waits, and never as accepted", async () => {
+    const order: string[] = [];
+    const accepted = vi.fn(async () => undefined);
+    const attached = vi.fn(async (operationId: string) => { order.push(`attached ${operationId}`); });
+    const api = fakeApi(order);
+    const tool = createOrchestrationTools(api, context, { requestId: () => "44444444-4444-4444-8444-444444444444", recovery: true, onOperationAccepted: accepted, onOperationAttached: attached })
+      .find((entry) => entry.name === "agentx_task_result")!;
+    await tool.execute("call-1", { operationId: OPERATION }, undefined, undefined, {} as never);
+    expect(attached).toHaveBeenCalledExactlyOnceWith(OPERATION);
+    expect(order).toEqual([`attached ${OPERATION}`, "wait"]);
+    expect(accepted).not.toHaveBeenCalled();
+  });
+
+  it("is not called by agentx_task_status, which waits on nothing", async () => {
+    const attached = vi.fn(async () => undefined);
+    const tool = createOrchestrationTools(fakeApi([]), context, { recovery: true, onOperationAttached: attached }).find((entry) => entry.name === "agentx_task_status")!;
+    await tool.execute("call-1", { operationId: OPERATION }, undefined, undefined, {} as never);
+    expect(attached).not.toHaveBeenCalled();
+  });
+
+  it("is handed from the hosted Slack runtime to agentx_task_result", async () => {
+    const attached = vi.fn(async () => undefined);
+    const runtime = await createHostedSlackRuntime({
+      message: {
+        version: 1, eventId: "EvATTACH0001", receivedAt: "2026-09-29T19:30:00.000Z", userId: "U0123456789",
+        thread: { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" }, text: "is it done?",
+      },
+      subject: "T0BSHLLUGBD/C0123456789/1695500000.000001",
+      ...context,
+      orchestratorInstructions: "Delegate work.",
+      computePrepared: true,
+      recoverableOperations: [OPERATION],
+      requestId: () => "44444444-4444-4444-8444-444444444444",
+      onOperationAttached: attached,
+    }, { stateDirectory: await createFixtureDirectory("agentx-attached-"), api: fakeApi([]), model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" } });
+    try {
+      await runtime.session.getToolDefinition("agentx_task_result")!.execute("result-1", { operationId: OPERATION }, undefined, undefined, {} as never);
+    } finally {
+      await runtime.dispose();
+    }
+    expect(attached).toHaveBeenCalledExactlyOnceWith(OPERATION);
+  });
+});
+
 describe("the hosted Slack runtime", () => {
   it("hands the turn's onOperationAccepted to agentx_submit_task", async () => {
     const accepted = vi.fn(async () => undefined);

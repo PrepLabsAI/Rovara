@@ -14,6 +14,7 @@ import {
   type aws_kms as kms,
   type aws_lambda as lambda,
   aws_logs as logs,
+  type aws_secretsmanager as secretsmanager,
   aws_scheduler as scheduler,
   aws_scheduler_targets as schedulerTargets,
   aws_stepfunctions as sfn,
@@ -302,6 +303,50 @@ export class SessionLifecycle extends Construct {
       }),
       threshold: 1,
       evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(this.notifyOperator);
+  }
+
+  /**
+   * Issue 173, named environments only: the reconciler stops a Slack thread's task idle over 24
+   * hours with nobody waiting. It cancels through the shared cancel code, which writes the State
+   * table (already granted; the outbox publisher dispatches the cancel) and signs the cancel's worker
+   * callbacks with the callback signing key, as the broker does. It reads the thread's activeTurn by
+   * key (THREAD# items only) and posts the thread's note with the bot token (the Slack secret alone).
+   */
+  connectUnwaitedTaskBackstop(slackThreads: dynamodb.Table, slackSecret: secretsmanager.Secret, callbackSigningKey: string): void {
+    this.reconciler.addEnvironment("SLACK_THREADS_TABLE_NAME", slackThreads.tableName);
+    this.reconciler.addEnvironment("SLACK_SECRET_ARN", slackSecret.secretArn);
+    this.reconciler.addEnvironment("CALLBACK_SIGNING_KEY", callbackSigningKey);
+    this.reconciler.addToRolePolicy(new iam.PolicyStatement({
+      sid: "ReadThreadWaiters",
+      actions: ["dynamodb:GetItem"],
+      resources: [slackThreads.tableArn],
+      conditions: {
+        "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["THREAD#*"] },
+        // The activeTurn alone, never the thread's other fields. ForAllValues passes when
+        // dynamodb:Attributes is absent, and GetItem has no Select, so a read without a
+        // ProjectionExpression (which returns every attribute) is refused outright.
+        "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "activeTurn"] },
+        StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+        Null: { "dynamodb:Attributes": "false" },
+      },
+    }));
+    this.reconciler.addToRolePolicy(new iam.PolicyStatement({ sid: "PostUnwaitedTaskNote", actions: ["secretsmanager:GetSecretValue"], resources: [slackSecret.secretArn] }));
+    // A failed cancel or read is retried on the next run; failures on two runs in a row mean it is not recovering.
+    const failures = (metricName: string) => new cloudwatch.Metric({ namespace: this.naming.metricsNamespace, metricName, statistic: "Maximum", period: Duration.minutes(10) });
+    new cloudwatch.Alarm(this, "UnwaitedTaskFailuresAlarm", {
+      alarmName: this.naming.alarmName("UnwaitedTaskFailures"),
+      alarmDescription: "The reconciler could not check or cancel Slack tasks idle over 24 hours with nobody waiting, on two runs in a row. Check the reconciler's logs for unwaited_task.cancel_failed, unwaited_task.read_failed and reconciler.unwaited_task_sweep_failed.",
+      metric: new cloudwatch.MathExpression({
+        expression: "FILL(cancels, 0) + FILL(reads, 0)",
+        usingMetrics: { cancels: failures("ReconcilerUnwaitedTaskFailures"), reads: failures("ReconcilerUnwaitedTaskReadFailures") },
+        period: Duration.minutes(10),
+        label: "Unwaited task cancel and read failures",
+      }),
+      threshold: 1,
+      evaluationPeriods: 2,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(this.notifyOperator);

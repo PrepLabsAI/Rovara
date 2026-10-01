@@ -28,10 +28,14 @@ jobs:
           node scripts/ci-docs-only.ts "$RUNNER_TEMP/changed.txt"
       - name: Markdown-only change
         if: steps.scope.outputs.docs_only == 'true'
-        run: echo "Only Markdown that no test reads changed; typecheck, lint, tests, synth and the release check are skipped."
+        run: echo "Only Markdown that no test reads changed; typecheck, the stricter type check, lint, tests, synth and the release check are skipped."
       - run: npm ci
         if: steps.scope.outputs.docs_only != 'true'
       - run: npm run typecheck
+        if: steps.scope.outputs.docs_only != 'true'
+      # The stricter type check (tsconfig.lint.json, which also covers tests/ and scripts/) may not
+      # add errors beyond tests/typecheck-baseline.json (issue #50, scripts/typecheck-baseline.ts).
+      - run: npm run typecheck:all
         if: steps.scope.outputs.docs_only != 'true'
       - run: npm run lint
         if: steps.scope.outputs.docs_only != 'true'

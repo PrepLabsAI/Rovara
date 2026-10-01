@@ -716,6 +716,9 @@ export class ControlPlaneStack extends Stack {
     // Issue 195: a stuck cancel on a live worker is queued again through the broker. Named
     // environments only: the legacy template is unchanged, and its reconciler only logs and counts.
     if (naming.env !== undefined) sessions.connectStuckCancelRetry(broker);
+    // Issue 173: the backstop for idle Slack tasks nobody waits on. Named environments only: the
+    // legacy template is unchanged.
+    if (naming.env !== undefined) sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKey.valueAsString);
     // Own both attachments in this releasable stack. Secret changes must never mutate the
     // protected foundation template or require a separate foundation change set.
     grantOpenRouterSecret(this, [slackOrchestratorRole.roleName, sessions.instanceRoleName]);

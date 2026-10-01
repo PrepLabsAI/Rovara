@@ -821,7 +821,7 @@ async function createFixture(
     }],
     ...(options.devcontainer === true ? { devcontainer: { repository: "demo" } } : {}),
     orchestratorInstructions: "Delegate coding work.",
-  } as const;
+  };
   await mkdir(join(root, ".agentx"), { recursive: true });
   await writeFile(join(root, ".agentx", "preparation-manifest.json"), JSON.stringify({
     schemaVersion: 2,
@@ -856,6 +856,8 @@ async function createFixture(
     projectRevision: 1,
     callbackCapability: "c".repeat(64),
     payload: {
+      // The schema's default, written out so the fixture matches the parsed invocation type.
+      mode: "create",
       project,
       repository: "demo",
       title: "Publish demo change",
@@ -863,7 +865,7 @@ async function createFixture(
       headBranch: `agentx/${operationId}`,
       repositoryGrant: "push-grant",
     },
-  } as const satisfies Extract<WorkerInvocation, { kind: "publish" }>;
+  } satisfies Extract<WorkerInvocation, { kind: "publish" }>;
   return { root, bare, seed, checkout, invocation };
 }
 

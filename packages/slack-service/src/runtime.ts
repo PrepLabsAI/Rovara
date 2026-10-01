@@ -32,6 +32,7 @@ export function createHostedSlackRuntime(input: TurnInput, options: HostedRuntim
     ...(input.recorder === undefined ? {} : { turnRecorder: input.recorder }),
     ...(input.refreshConnectors === undefined ? {} : { refreshConnectors: input.refreshConnectors }),
     ...(input.onOperationAccepted === undefined ? {} : { onOperationAccepted: input.onOperationAccepted }),
+    ...(input.onOperationAttached === undefined ? {} : { onOperationAttached: input.onOperationAttached }),
     ...(input.signal === undefined ? {} : { stopSignal: input.signal }),
     ...(input.turnNote === undefined ? {} : { turnNote: input.turnNote }),
     actionGate: {

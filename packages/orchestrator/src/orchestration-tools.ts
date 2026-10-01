@@ -131,6 +131,11 @@ export function createOrchestrationTools(
      * before the tool waits on it, so the host can remember it durably. It must not throw.
      */
     onOperationAccepted?: (operationId: string) => Promise<void>;
+    /**
+     * Issue 173: told the operation agentx_task_result re-attaches to, before it waits, so the host
+     * can show a turn waits on it. It starts no work. It must not throw.
+     */
+    onOperationAttached?: (operationId: string) => Promise<void>;
   } = {},
 ): ToolDefinition[] {
   const nextRequestId = options.requestId ?? randomUUID;
@@ -212,15 +217,18 @@ export function createOrchestrationTools(
       description:
         "Recovery only: wait for a previously interrupted operation and retrieve its final remote assistant response.",
       parameters: operationParameters,
-      execute: async (_id, parameters, signal, onUpdate) => toolResult(
-        await api.taskResult(
-          { workspaceId: context.workspaceId, operationId: parameters.operationId },
-          {
-            ...(signal === undefined ? {} : { signal }),
-            onProgress: (progress) => onUpdate?.(toolResult(progress)),
-          },
-        ),
-      ),
+      execute: async (_id, parameters, signal, onUpdate) => {
+        await options.onOperationAttached?.(parameters.operationId);
+        return toolResult(
+          await api.taskResult(
+            { workspaceId: context.workspaceId, operationId: parameters.operationId },
+            {
+              ...(signal === undefined ? {} : { signal }),
+              onProgress: (progress) => onUpdate?.(toolResult(progress)),
+            },
+          ),
+        );
+      },
     }),
     defineTool({
       name: "agentx_follow_up",
