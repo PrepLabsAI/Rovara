@@ -14,6 +14,7 @@ import {
   type BashSpawnContext,
   type ToolDefinition,
   SessionManager,
+  SettingsManager,
   type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
@@ -179,15 +180,7 @@ async function createDefaultSession(
         `configured model ${input.model.provider}/${input.model.modelId} is unavailable`,
       );
     }
-    const resourceLoader = new DefaultResourceLoader({
-      cwd: input.cwd,
-      agentDir: input.agentDirectory,
-      noExtensions: true,
-      noPromptTemplates: true,
-      noThemes: true,
-      agentsFilesOverride: appendRepositoryContextFiles(input.contextFiles),
-    });
-    await resourceLoader.reload();
+    const { resourceLoader, settingsManager } = await createWorkerResources(input);
     const { session } = await createAgentSession({
       cwd: input.cwd,
       agentDir: input.agentDirectory,
@@ -201,6 +194,7 @@ async function createDefaultSession(
         ...(input.devcontainerPaths === undefined ? [] : devcontainerFileTools(input.cwd, input.devcontainerPaths)),
       ],
       resourceLoader,
+      settingsManager,
       sessionManager: manager,
     });
     const sessionFile = session.sessionFile;
@@ -228,6 +222,30 @@ async function createDefaultSession(
  * shell settings (shellCommandPrefix, shellPath) do not apply: AgentX's agent directory has none,
  * and a repository's own pi settings must not change how the agent's shell runs.
  */
+/**
+ * The worker's Pi settings and resources. Pi trusts its working folder by default: a `.pi/SYSTEM.md` there replaces
+ * the system prompt, `.pi/settings.json` changes the default model and thinking level, and skills load from the
+ * folder and from the home directory. The worker trusts none of it and loads no skills; AgentX passes the context
+ * files itself. One settings manager serves the loader and the session, which would otherwise make its own trusted one.
+ */
+export async function createWorkerResources(
+  input: Pick<PiSessionInput, "cwd" | "agentDirectory" | "contextFiles">,
+): Promise<{ resourceLoader: DefaultResourceLoader; settingsManager: SettingsManager }> {
+  const settingsManager = SettingsManager.create(input.cwd, input.agentDirectory, { projectTrusted: false });
+  const resourceLoader = new DefaultResourceLoader({
+    cwd: input.cwd,
+    agentDir: input.agentDirectory,
+    settingsManager,
+    noExtensions: true,
+    noSkills: true,
+    noPromptTemplates: true,
+    noThemes: true,
+    agentsFilesOverride: appendRepositoryContextFiles(input.contextFiles),
+  });
+  await resourceLoader.reload({ resolveProjectTrust: async () => false });
+  return { resourceLoader, settingsManager };
+}
+
 export function agentShellTool(cwd: string, operations?: BashOperations): ToolDefinition {
   // The typed definition's render callbacks are narrower than customTools' generic slot.
   return createBashToolDefinition(cwd, {
