@@ -132,6 +132,101 @@ describe("ec2-ebs delivery", () => {
       await expect(workerPingFeatures("http://w/ping", unreachable)).rejects.toThrow("fetch failed");
     });
 
+    it("fails the attempt when the worker's /ping answers with a non-2xx status", async () => {
+      const ping = vi.fn(async () => new Response(JSON.stringify({ status: "Unhealthy", invocationFeatures: [] }), { status: 503 })) as unknown as typeof fetch;
+      await expect(workerPingFeatures("http://w/ping", ping)).rejects.toThrow(/HTTP 503/);
+      const redirect = vi.fn(async () => new Response("{}", { status: 302 })) as unknown as typeof fetch;
+      await expect(workerPingFeatures("http://w/ping", redirect)).rejects.toThrow(/HTTP 302/);
+    });
+
+    describe("a project definition carried by prepare and publish", () => {
+      const models = {
+        default: { provider: "amazon-bedrock", modelId: "fast", thinkingLevel: "low", label: "Fast" },
+        approved: [
+          { provider: "amazon-bedrock", modelId: "fast", thinkingLevel: "low", label: "Fast" },
+          { provider: "openrouter", modelId: "z-ai/glm-5.3" },
+        ],
+      };
+      const unleveledModels = {
+        default: { provider: "amazon-bedrock", modelId: "fast", label: "Fast" },
+        approved: [
+          { provider: "amazon-bedrock", modelId: "fast", label: "Fast" },
+          { provider: "openrouter", modelId: "z-ai/glm-5.3" },
+        ],
+      };
+      function projectWith(projectModels: unknown) {
+        return {
+          name: "payments",
+          revision: 1,
+          repositories: [{ name: "api", url: "https://git.example.test/api.git", path: "repo/api", defaultBranch: "main", credentialRef: "api-readwrite" }],
+          setup: [],
+          readiness: [],
+          orchestratorInstructions: "Delegate coding to the remote worker.",
+          ...(projectModels === undefined ? {} : { models: projectModels }),
+        };
+      }
+      function projectRecord(kind: "prepare" | "publish", projectModels: unknown): Ec2OutboxRecord {
+        const record = recordFor();
+        const payload = kind === "prepare"
+          ? { project: projectWith(projectModels), repositoryGrant: "signed-grant" }
+          : {
+            project: projectWith(projectModels), repository: "api", title: "Fix it", headBranch: `agentx/${randomUUID()}`,
+            repositoryGrant: "signed-grant", mode: "create",
+          };
+        return { ...record, invocation: { ...record.invocation, kind, payload } as unknown as WorkerInvocation };
+      }
+      const postedModels = (post: ReturnType<typeof delivery>["post"]) =>
+        (JSON.parse(post.mock.calls[0]![1].body) as { payload: { project: { models?: unknown } } }).payload.project.models;
+
+      for (const kind of ["prepare", "publish"] as const) {
+        it(`${kind}: keeps every level for a worker whose /ping lists the feature`, async () => {
+          const workerFeatures = vi.fn<NonNullable<Ec2DeliveryDependencies["workerFeatures"]>>(async () => ["model.thinkingLevel"]);
+          const { deliver, post } = delivery({ workerFeatures });
+          const record = projectRecord(kind, models);
+          expect(await deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(workerFeatures).toHaveBeenCalledExactlyOnceWith("http://10.42.128.10:8080/ping");
+          expect(JSON.parse(post.mock.calls[0]![1].body)).toEqual(record.invocation);
+        });
+
+        it(`${kind}: strips only the levels for a worker built before them, and keeps the token valid`, async () => {
+          const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+          const { deliver, post } = delivery({ workerFeatures: async () => [] });
+          const record = projectRecord(kind, models);
+          expect(await deliver(record, record.invocation)).toBe("DELIVERED");
+          expect(postedModels(post)).toEqual(unleveledModels);
+          const body = JSON.parse(post.mock.calls[0]![1].body) as WorkerInvocation;
+          const sentPayload = record.invocation.payload as { project: Record<string, unknown> };
+          expect(body).toEqual({ ...record.invocation, payload: { ...sentPayload, project: { ...sentPayload.project, models: unleveledModels } } });
+          const verified = verifyInvokeAuthorization(post.mock.calls[0]![1].authorization, {
+            publicKey: keys.publicKey, workspaceId: record.workspaceId, generation: 3, now: () => Math.floor(NOW / 1_000),
+          });
+          expect(verified.ok && invocationMatchesClaims(body, verified.claims)).toBe(true);
+          expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+            event: "dispatch.thinking_level_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
+          }));
+          log.mockRestore();
+        });
+
+        it(`${kind}: fails the attempt, posting nothing, when the worker's /ping does not answer`, async () => {
+          const { deliver, post } = delivery({ workerFeatures: async () => { throw new Error("timeout"); } });
+          const record = projectRecord(kind, models);
+          await expect(deliver(record, record.invocation)).rejects.toThrow(/RUNTIME_UNAVAILABLE: could not ask the EC2 worker .*timeout/);
+          expect(post).not.toHaveBeenCalled();
+        });
+
+        it(`${kind}: does not ask the worker when the definition carries no level`, async () => {
+          const workerFeatures = vi.fn(async () => []);
+          for (const projectModels of [unleveledModels, undefined]) {
+            const { deliver, post } = delivery({ workerFeatures });
+            const record = projectRecord(kind, projectModels);
+            await deliver(record, record.invocation);
+            expect(JSON.parse(post.mock.calls[0]![1].body)).toEqual(record.invocation);
+          }
+          expect(workerFeatures).not.toHaveBeenCalled();
+        });
+      }
+    });
+
     it("does not ask the worker when the invocation carries no level", async () => {
       const workerFeatures = vi.fn(async () => []);
       const { deliver, post } = delivery({ workerFeatures });

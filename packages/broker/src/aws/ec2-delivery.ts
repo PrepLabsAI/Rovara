@@ -70,18 +70,21 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
 
 /**
  * Spec 053: the invocation as the worker can parse it. Worker payloads are strict and a running
- * worker keeps its image after a release, so a task's thinking level goes only to a worker whose
- * /ping lists it; otherwise the worker runs at its own default level. The invoke token signs the
- * operation, not the payload, so dropping the field leaves it valid. A ping that fails fails the
- * attempt: the worker journals a hash of the whole invocation, so a retry must send what the first
- * attempt would have, and a blip must not run a capable worker at the default level.
+ * worker keeps its image after a release (or after a worker-image rollback), so a thinking level goes
+ * only to a worker whose /ping lists it. A task's level is dropped and the worker runs at its own
+ * default level; prepare and publish carry the whole stored project definition, whose models carry
+ * levels the worker does not use there, so those are stripped. The invoke token signs the operation,
+ * not the payload, so dropping a field leaves it valid. A ping that fails fails the attempt: the
+ * worker journals a hash of the whole invocation, so a retry must send what the first attempt would
+ * have, and a blip must not run a capable worker at the default level.
  */
 async function forWorker(
   invocation: WorkerInvocation,
   pingUrl: string,
   workerFeatures: Ec2DeliveryDependencies["workerFeatures"],
 ): Promise<WorkerInvocation> {
-  if (invocation.kind !== "task" || invocation.payload.model?.thinkingLevel === undefined) return invocation;
+  const requestedThinkingLevel = carriedThinkingLevel(invocation);
+  if (requestedThinkingLevel === undefined) return invocation;
   let features: readonly string[] = [];
   if (workerFeatures !== undefined) {
     try {
@@ -90,15 +93,46 @@ async function forWorker(
       throw agentXError("RUNTIME_UNAVAILABLE", `could not ask the EC2 worker which invocation fields it parses: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512));
     }
   }
-  const model = modelSelectionFor(invocation.payload.model, features);
-  if (model === invocation.payload.model) return invocation;
+  const sent = withoutUnparsedFields(invocation, features);
+  if (sent === invocation) return invocation;
   console.log(JSON.stringify({
     component: "dispatcher",
     event: "dispatch.thinking_level_omitted",
     reason: workerFeatures === undefined ? "no-probe" : "worker-lacks-feature",
-    requestedThinkingLevel: invocation.payload.model.thinkingLevel,
+    requestedThinkingLevel,
     operationId: invocation.operationId,
     workspaceId: invocation.workspaceId,
   }));
-  return { ...invocation, payload: { ...invocation.payload, model } };
+  return sent;
+}
+
+/** The first thinking level the invocation carries: a task's model, or a project definition's models. */
+function carriedThinkingLevel(invocation: WorkerInvocation): string | undefined {
+  if (invocation.kind === "task") return invocation.payload.model?.thinkingLevel;
+  if (invocation.kind !== "prepare" && invocation.kind !== "publish") return undefined;
+  const models = invocation.payload.project.models;
+  if (models === undefined) return undefined;
+  return [models.default, ...models.approved].find((model) => model.thinkingLevel !== undefined)?.thinkingLevel;
+}
+
+function withoutUnparsedFields(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind === "task") {
+    if (invocation.payload.model === undefined) return invocation;
+    const model = modelSelectionFor(invocation.payload.model, features);
+    return model === invocation.payload.model ? invocation : { ...invocation, payload: { ...invocation.payload, model } };
+  }
+  if ((invocation.kind !== "prepare" && invocation.kind !== "publish") || features.includes("model.thinkingLevel")) return invocation;
+  const models = invocation.payload.project.models;
+  if (models === undefined) return invocation;
+  const project = { ...invocation.payload.project, models: { default: withoutLevel(models.default), approved: models.approved.map(withoutLevel) } };
+  // Two identical branches so each keeps its own payload type within the discriminated union.
+  return invocation.kind === "prepare"
+    ? { ...invocation, payload: { ...invocation.payload, project } }
+    : { ...invocation, payload: { ...invocation.payload, project } };
+}
+
+function withoutLevel<Model extends { thinkingLevel?: unknown }>(model: Model): Omit<Model, "thinkingLevel"> {
+  const rest: Model = { ...model };
+  delete rest.thinkingLevel;
+  return rest;
 }

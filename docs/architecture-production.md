@@ -176,6 +176,15 @@ such field is a model's thinking level (spec 053):
   retry must send the same payload.
 - The worker can journal a different payload, and so answer a retry with an idempotency conflict,
   only when its image changes between two attempts of one delivery. That failure is loud.
+- Prepare and publish carry the whole stored project definition, whose approved and default models
+  may have a level. The dispatcher asks the worker the same way and, for a worker that lacks the
+  feature, strips the levels from the definition's models (a worker does not use them there). This
+  also covers a worker-image rollback: a project saved with levels still prepares and publishes on
+  the older image, and its tasks run at that worker's default level.
+- The other direction: the release command ships the worker image before the control plane, so a
+  new worker can run while the old control plane, whose usage schema is strict, still takes its
+  callbacks. A worker puts the level in the usage event only when the invocation carried one, which
+  only a control plane that parses it sends. The `usage.json` artifact always records it.
 - The Slack service and the dispatcher also parse strictly, and they deploy just after or alongside
   the control plane. That is harmless: no project stored before this release has a level, and an
   administrator would have to set one within those minutes.

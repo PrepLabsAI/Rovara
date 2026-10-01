@@ -123,10 +123,12 @@ const WORKER_PING_TIMEOUT_MS = 3_000;
 
 /**
  * Spec 053: the invocation features a worker reports on GET /ping; none for a worker built before
- * them, whose /ping has no such field. A worker that does not answer rejects, failing the attempt.
+ * them, whose /ping has no such field. A worker that does not answer, or answers with a non-2xx
+ * status, rejects, failing the attempt rather than dropping the level.
  */
 export async function workerPingFeatures(url: string, fetchPing: typeof fetch = fetch): Promise<string[]> {
   const response = await fetchPing(url, { signal: AbortSignal.timeout(WORKER_PING_TIMEOUT_MS) });
+  if (!response.ok) throw new Error(`worker /ping returned HTTP ${response.status}`);
   const body: unknown = await response.json();
   const features = typeof body === "object" && body !== null ? (body as Record<string, unknown>)[WORKER_PING_FEATURES_FIELD] : undefined;
   return Array.isArray(features) ? features.filter((feature): feature is string => typeof feature === "string") : [];
