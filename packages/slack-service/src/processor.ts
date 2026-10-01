@@ -93,6 +93,11 @@ export interface ThreadStore {
   claimSharedNotice?(subject: string, nowSeconds: number, kind: "view" | "closed"): Promise<boolean>;
   /** Issue 157: remembers the worker operation this event's turn waits on. Absent: a redelivery runs the turn again, as before. */
   saveActiveTurn?(subject: string, turn: ActiveTurn): Promise<void>;
+  /**
+   * Issue 173: writes this event's turn again with a fresh seenAt, unless another event's turn is
+   * saved; true when written. Absent: the turn is stamped only when saved.
+   */
+  stampActiveTurn?(subject: string, turn: ActiveTurn): Promise<boolean>;
   /** Issue 157: forgets the remembered operation, only if it is still this event's. */
   clearActiveTurn?(subject: string, eventId: string): Promise<void>;
   /** Issue 157: keeps (or, with undefined, forgets) the note the next turn's model reads. */
@@ -122,6 +127,8 @@ export interface TurnInput {
   refreshConnectors?: string[];
   /** Issue 157: told each accepted worker task or follow-up operation, so the thread can remember it. Never throws. */
   onOperationAccepted?: (operationId: string) => Promise<void>;
+  /** Issue 173: told the operation a recovery tool re-attaches to, so the thread can show the turn waits on it. Never throws. */
+  onOperationAttached?: (operationId: string) => Promise<void>;
   /** Issue 157: aborted when the turn is handed off to a new task; the host then stops the model. */
   signal?: AbortSignal;
   /** Issue 157: what a resumed earlier turn in this thread did, for the model to read this turn only. */
@@ -183,6 +190,8 @@ export async function processSlackRequest(
     redelivered?: boolean;
     /** Issue 157: aborted at the hand-off deadline after SIGTERM; a turn still running is then handed off. */
     handoff?: AbortSignal;
+    /** Issue 173: calls the listener on each SQS heartbeat while this message runs. */
+    onHeartbeat?: (listener: () => void) => void;
   },
 ): Promise<void> {
   const subject = slackThreadSubject(message.thread);
@@ -225,7 +234,33 @@ export async function processSlackRequest(
   };
   const api = dependencies.api(message);
   let finished = false;
+  // Issue 173: the turn this attempt shows it waits on, stamped with seenAt on save, on resume and on
+  // each SQS heartbeat, so the reconciler's backstop knows it is alive. A failed save is written by
+  // the next stamp.
+  let waitingOn: ActiveTurn | undefined;
+  let stamping = true;
+  let stampInFlight: Promise<void> | undefined;
+  const seenNow = () => new Date(dependencies.now?.() ?? Date.now()).toISOString();
+  const stampActiveTurn = dependencies.threads.stampActiveTurn?.bind(dependencies.threads);
+  const stampTurn = (): Promise<void> => {
+    const target = waitingOn;
+    if (!stamping || handedOff || target === undefined || stampActiveTurn === undefined) return Promise.resolve();
+    const run = (async () => {
+      try {
+        const turn: ActiveTurn = { ...target, seenAt: seenNow() };
+        if (await stampActiveTurn(subject, turn)) remembered = turn;
+      } catch (error) {
+        log("turn.active_stamp_failed", { eventId: message.eventId, errorName: errorName(error) });
+      }
+    })();
+    stampInFlight = run;
+    return run;
+  };
+  options.onHeartbeat?.(() => { void stampTurn(); });
   const forgetActiveTurn = async (): Promise<void> => {
+    // Issue 173: no stamp may land after the clear and bring the turn back.
+    stamping = false;
+    if (stampInFlight !== undefined) await stampInFlight;
     try {
       await dependencies.threads.clearActiveTurn?.(subject, message.eventId);
     } catch (error) {
@@ -234,6 +269,8 @@ export async function processSlackRequest(
   };
   const resumeTurn = async (active: ActiveTurn): Promise<void> => {
     log("turn.resuming", { eventId: message.eventId, workspaceId: active.workspaceId, operationId: active.operationId });
+    waitingOn = active;
+    await stampTurn();
     const waitStop = new AbortController();
     const waiting = api.taskResult === undefined
       ? api.waitForOperation(active.workspaceId, active.operationId, waitStop.signal)
@@ -587,7 +624,10 @@ export async function processSlackRequest(
       accepted = { workspaceId: workspaceForTurn, operationId };
       // An approval's own text is only "yes": the note names what was approved instead.
       const approved = claimed ? confirmation?.session.approvals.map((approval) => approval.summary).join("; ") : undefined;
-      const active: ActiveTurn = { eventId: message.eventId, workspaceId: workspaceForTurn, operationId, ...(approved ? { request: `the member approved: ${approved}` } : {}) };
+      const base: ActiveTurn = { eventId: message.eventId, workspaceId: workspaceForTurn, operationId, ...(approved ? { request: `the member approved: ${approved}` } : {}) };
+      // Issue 173: shown as waited on from now; if the save fails, the next heartbeat writes it.
+      waitingOn = base;
+      const active: ActiveTurn = { ...base, seenAt: seenNow() };
       const saving = (async () => {
         try {
           await saveActiveTurn(subject, active);
@@ -598,6 +638,12 @@ export async function processSlackRequest(
       })();
       pendingSave = saving;
       await saving;
+    };
+    /** Issue 173: a recovery tool re-attached to an operation; the thread shows this turn waits on it. */
+    const onOperationAttached = async (operationId: string): Promise<void> => {
+      if (handedOff || stampActiveTurn === undefined) return;
+      waitingOn = { eventId: message.eventId, workspaceId: workspaceForTurn, operationId };
+      await stampTurn();
     };
     try {
       const turn = dependencies.runTurn({
@@ -619,6 +665,7 @@ export async function processSlackRequest(
         ...(state.refreshConnectors?.length ? { refreshConnectors: state.refreshConnectors } : {}),
         // A service that cannot remember operations, or is never stopped mid-turn, runs the turn as before.
         ...(dependencies.threads.saveActiveTurn === undefined ? {} : { onOperationAccepted }),
+        ...(stampActiveTurn === undefined ? {} : { onOperationAttached }),
         ...(options.handoff === undefined ? {} : { signal: turnStop.signal }),
         ...(state.turnNote === undefined ? {} : { turnNote: state.turnNote.text }),
       });
@@ -751,6 +798,8 @@ export async function processSlackRequest(
     if (remembered !== undefined) await forgetActiveTurn();
     finished = true;
   } finally {
+    // Issue 173: whatever happened, this attempt shows nothing more.
+    stamping = false;
     if (finished) {
       // Only a finished event is recorded: an attempt that throws for redelivery leaves the one
       // record to the attempt that finishes (SC-006).

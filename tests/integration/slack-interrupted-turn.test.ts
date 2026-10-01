@@ -27,6 +27,7 @@ const workspaceId = "11111111-1111-4111-8111-111111111111";
 const conversationId = "33333333-3333-4333-8333-333333333333";
 const start = Date.parse("2026-09-29T19:30:00.000Z");
 const OPERATION = "55555555-5555-4555-8555-555555555555";
+const iso = (at: number) => new Date(at).toISOString();
 const close = { tool: "tracker__close_item", input: { id: "TRK-9" } };
 
 function slackMessage(eventId: string, text: string, overrides: Partial<SlackRequestMessage> = {}): SlackRequestMessage {
@@ -59,6 +60,12 @@ function harness(turn: (input: TurnInput) => Promise<string>, options: {
   const saveActiveTurn = vi.fn(async (_subject: string, active: ActiveTurn) => {
     meta.activeTurn = active;
   });
+  // Issue 173: as the store's conditional write: none saved, or this event's.
+  const stampActiveTurn = vi.fn(async (_subject: string, active: ActiveTurn) => {
+    if (meta.activeTurn !== undefined && meta.activeTurn.eventId !== active.eventId) return false;
+    meta.activeTurn = active;
+    return true;
+  });
   const clearActiveTurn = vi.fn(async (_subject: string, eventId: string) => {
     if (meta.activeTurn?.eventId === eventId) delete meta.activeTurn;
   });
@@ -69,7 +76,7 @@ function harness(turn: (input: TurnInput) => Promise<string>, options: {
   const confirmations = createDynamoConfirmationStore(db, "threads", () => now);
   const dependencies: ProcessorDependencies = {
     api: () => ({ ensureWorkspace, prepareWorkspace, createConversation: async () => conversationId, waitForOperation, taskResult, cancelOperation, startClose: vi.fn(), completeClose: vi.fn() }),
-    threads: { load: async () => structuredClone(meta), saveConversation: vi.fn(), saveSettingsRevision: vi.fn(), close: vi.fn(), finish, saveActiveTurn, clearActiveTurn, saveTurnNote },
+    threads: { load: async () => structuredClone(meta), saveConversation: vi.fn(), saveSettingsRevision: vi.fn(), close: vi.fn(), finish, saveActiveTurn, stampActiveTurn, clearActiveTurn, saveTurnNote },
     runTurn: async (input) => { turns.push(input); return turn(input); },
     post: async (_thread, text) => { posts.push(text); },
     postConfirmation: async () => undefined,
@@ -78,7 +85,7 @@ function harness(turn: (input: TurnInput) => Promise<string>, options: {
     log: (event, fields) => { logs.push({ event, fields }); },
   };
   return {
-    db, posts, turns, logs, meta, ensureWorkspace, finish, confirmations, dependencies, taskResult, waitForOperation, cancelOperation, saveActiveTurn, clearActiveTurn, saveTurnNote,
+    db, posts, turns, logs, meta, ensureWorkspace, finish, confirmations, dependencies, taskResult, waitForOperation, cancelOperation, saveActiveTurn, stampActiveTurn, clearActiveTurn, saveTurnNote,
     advance: (ms: number) => { now += ms; },
   };
 }
@@ -126,7 +133,7 @@ describe("remembering the turn's worker operation", () => {
       return "Fixed it.";
     });
     await processSlackRequest(slackMessage("EvWORK000001", "fix the bug"), dependencies, { finalAttempt: false });
-    expect(during?.activeTurn).toEqual({ eventId: "EvWORK000001", workspaceId, operationId: OPERATION });
+    expect(during?.activeTurn).toEqual({ eventId: "EvWORK000001", workspaceId, operationId: OPERATION, seenAt: iso(start) });
     expect(posts.at(-1)).toBe("Fixed it.");
     expect(meta.activeTurn).toBeUndefined();
   });
@@ -165,7 +172,7 @@ describe("handing a turn off when the service stops", () => {
     expect(logs).toContainEqual({ event: "turn.interrupted", fields: { eventId: "EvWORK000011", workspaceId, operationId: OPERATION } });
     expect(turns[0]!.signal!.aborted).toBe(true);
     // The operation stays remembered for the redelivery, and the request is not finished.
-    expect(meta.activeTurn).toEqual({ eventId: "EvWORK000011", workspaceId, operationId: OPERATION });
+    expect(meta.activeTurn).toEqual({ eventId: "EvWORK000011", workspaceId, operationId: OPERATION, seenAt: iso(start) });
     expect(finish).not.toHaveBeenCalled();
   });
 
@@ -330,7 +337,8 @@ describe("resuming a redelivered turn", () => {
       .rejects.toBeInstanceOf(TurnHandedOffError);
     expect(posts).toEqual([HANDOFF_TASK_TEXT]);
     expect(logs).toContainEqual({ event: "turn.interrupted", fields: { eventId: "EvWORK000027", workspaceId, operationId: OPERATION } });
-    expect(meta.activeTurn).toEqual(remembered("EvWORK000027"));
+    // The resume stamped the turn as alive when it re-attached (#173).
+    expect(meta.activeTurn).toEqual({ ...remembered("EvWORK000027"), seenAt: iso(start) });
     expect(finish).not.toHaveBeenCalled();
   });
 
@@ -344,7 +352,7 @@ describe("resuming a redelivered turn", () => {
     await confirmations.save(subject, pendingClose());
     const yes = slackMessage("EvYES0000028", "yes");
     await expect(processSlackRequest(yes, dependencies, { finalAttempt: false, handoff: handoff.signal })).rejects.toBeInstanceOf(TurnHandedOffError);
-    expect(meta.activeTurn).toEqual({ ...remembered("EvYES0000028"), request: "the member approved: tracker__close_item: id=TRK-9" });
+    expect(meta.activeTurn).toEqual({ ...remembered("EvYES0000028"), request: "the member approved: tracker__close_item: id=TRK-9", seenAt: iso(start) });
     await processSlackRequest(yes, dependencies, { finalAttempt: false, redelivered: true, handoff: new AbortController().signal });
     expect(approvedRuns).toHaveBeenCalledOnce();
     expect(turns).toHaveLength(1);
@@ -755,3 +763,99 @@ describe("stopping the task nobody waits on any more (issue 167)", () => {
     expect(posts.at(-1)).toBe(HANDOFF_FINAL_CANCEL_FAILED_TEXT);
   });
 });
+
+describe("showing the turn is alive (#173)", () => {
+  /** A heartbeat hook as the consumer gives one: `beat` runs the listeners, as each SQS heartbeat does. */
+  const heartbeats = () => {
+    const listeners: Array<() => void> = [];
+    return { onHeartbeat: (listener: () => void) => { listeners.push(listener); }, beat: async () => { for (const listener of listeners) listener(); await new Promise((resolve) => setTimeout(resolve, 0)); } };
+  };
+
+  it("stamps seenAt again on each heartbeat while the turn waits on its task", async () => {
+    const { onHeartbeat, beat } = heartbeats();
+    let release!: (answer: string) => void;
+    const { meta, advance, dependencies } = harness(async (input) => {
+      await input.onOperationAccepted!(OPERATION);
+      return new Promise<string>((resolve) => { release = resolve; });
+    });
+    const attempt = processSlackRequest(slackMessage("EvLIVE000001", "fix the bug"), dependencies, { finalAttempt: false, onHeartbeat });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(meta.activeTurn).toEqual({ eventId: "EvLIVE000001", workspaceId, operationId: OPERATION, seenAt: iso(start) });
+    advance(5 * 60_000);
+    await beat();
+    expect(meta.activeTurn).toEqual({ eventId: "EvLIVE000001", workspaceId, operationId: OPERATION, seenAt: iso(start + 5 * 60_000) });
+    release("Fixed it.");
+    await attempt;
+    expect(meta).not.toHaveProperty("activeTurn");
+    // A heartbeat after the turn forgot its task never brings it back.
+    await beat();
+    expect(meta).not.toHaveProperty("activeTurn");
+  });
+
+  it("records the turn on the next heartbeat when its first save failed", async () => {
+    const { onHeartbeat, beat } = heartbeats();
+    let release!: (answer: string) => void;
+    const { meta, saveActiveTurn, logs, advance, dependencies } = harness(async (input) => {
+      await input.onOperationAccepted!(OPERATION);
+      return new Promise<string>((resolve) => { release = resolve; });
+    });
+    saveActiveTurn.mockRejectedValueOnce(Object.assign(new Error("throttled"), { name: "ProvisionedThroughputExceededException" }));
+    const attempt = processSlackRequest(slackMessage("EvLIVE000002", "fix the bug"), dependencies, { finalAttempt: false, onHeartbeat });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(meta).not.toHaveProperty("activeTurn");
+    expect(logs).toContainEqual({ event: "turn.active_save_failed", fields: { eventId: "EvLIVE000002", errorName: "ProvisionedThroughputExceededException" } });
+    advance(60_000);
+    await beat();
+    expect(meta.activeTurn).toEqual({ eventId: "EvLIVE000002", workspaceId, operationId: OPERATION, seenAt: iso(start + 60_000) });
+    release("Fixed it.");
+    await attempt;
+    // Recorded late, it is still forgotten when the turn ends.
+    expect(meta).not.toHaveProperty("activeTurn");
+  });
+
+  it("logs a failed stamp by its error name and keeps going", async () => {
+    const { onHeartbeat, beat } = heartbeats();
+    let release!: (answer: string) => void;
+    const { stampActiveTurn, logs, dependencies } = harness(async (input) => {
+      await input.onOperationAccepted!(OPERATION);
+      return new Promise<string>((resolve) => { release = resolve; });
+    });
+    stampActiveTurn.mockRejectedValueOnce(Object.assign(new Error("PLANTED"), { name: "ProvisionedThroughputExceededException" }));
+    const attempt = processSlackRequest(slackMessage("EvLIVE000003", "fix the bug"), dependencies, { finalAttempt: false, onHeartbeat });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await beat();
+    expect(logs).toContainEqual({ event: "turn.active_stamp_failed", fields: { eventId: "EvLIVE000003", errorName: "ProvisionedThroughputExceededException" } });
+    expect(JSON.stringify(logs)).not.toContain("PLANTED");
+    release("Fixed it.");
+    await attempt;
+  });
+
+  it("records and stamps the operation a recovery tool re-attaches to", async () => {
+    const { onHeartbeat } = heartbeats();
+    const ATTACHED = "66666666-6666-4666-8666-666666666666";
+    let during: ThreadState["activeTurn"];
+    const { meta, dependencies } = harness(async (input) => {
+      await input.onOperationAttached!(ATTACHED);
+      during = structuredClone(meta.activeTurn);
+      return "It finished.";
+    });
+    await processSlackRequest(slackMessage("EvLIVE000004", "is it done?"), dependencies, { finalAttempt: false, onHeartbeat });
+    expect(during).toEqual({ eventId: "EvLIVE000004", workspaceId, operationId: ATTACHED, seenAt: iso(start) });
+    expect(meta).not.toHaveProperty("activeTurn");
+  });
+
+  it("never records a re-attached operation over another event's turn", async () => {
+    const ATTACHED = "66666666-6666-4666-8666-666666666666";
+    const other: ActiveTurn = { eventId: "EvOTHER00001", workspaceId, operationId: OPERATION, seenAt: iso(start) };
+    let during: ThreadState["activeTurn"];
+    const { meta, dependencies } = harness(async (input) => {
+      meta.activeTurn = other;
+      await input.onOperationAttached!(ATTACHED);
+      during = structuredClone(meta.activeTurn);
+      return "It finished.";
+    });
+    await processSlackRequest(slackMessage("EvLIVE000005", "is it done?"), dependencies, { finalAttempt: false });
+    expect(during).toEqual(other);
+  });
+});
+

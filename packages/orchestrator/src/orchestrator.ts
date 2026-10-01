@@ -54,6 +54,8 @@ export interface OrchestratorOptions {
   modelRuntime?: ModelRuntime;
   /** Issue 157: told each accepted worker task or follow-up operation before its tool waits on it. */
   onOperationAccepted?: (operationId: string) => Promise<void>;
+  /** Issue 173: told the operation a recovery tool re-attaches to before it waits on it. */
+  onOperationAttached?: (operationId: string) => Promise<void>;
   /** Issue 157: once aborted, every later tool call is blocked; the turn was handed off to a new task. */
   stopSignal?: AbortSignal;
   /** Issue 157: trusted AgentX context for this turn only, such as what a resumed task did. */
@@ -128,6 +130,7 @@ export async function createOrchestratorRuntime(options: OrchestratorOptions): P
     ...(recorder === undefined ? {} : { onConnectorError: (toolCallId: string, code: string) => recorder.connectorFailed(toolCallId, code) }),
     ...(options.worker === undefined ? {} : { worker: options.worker }),
     ...(options.onOperationAccepted === undefined ? {} : { onOperationAccepted: options.onOperationAccepted }),
+    ...(options.onOperationAttached === undefined ? {} : { onOperationAttached: options.onOperationAttached }),
   });
   assertOrchestrationOnly(customTools, catalogs);
   if (customTools.length > MAX_VISIBLE_TOOLS) {
