@@ -4,15 +4,20 @@
 // createWorkspacePiSession / openRegisteredWorkspacePiSession with createDefaultPiSessionAdapter, and only
 // the model runtime is swapped for Pi's scripted faux model. Offline.
 // Characterization: every expected value below was observed on 0.85.1, then pinned exactly.
+import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type Context, type FauxResponseStep } from "@earendil-works/pi-ai";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
+import type { WorkerInvocation } from "../../packages/contracts/src/index.js";
+import { WorkerCancellationController, WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";
 import type { DevcontainerPaths } from "../../packages/worker/src/devcontainer.js";
+import type { WorkerEvent } from "../../packages/worker/src/events.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "../../packages/worker/src/git.js";
-import { createDefaultPiSessionAdapter, createWorkspacePiSession, openRegisteredWorkspacePiSession, type PiSessionHandle } from "../../packages/worker/src/pi-session.js";
+import { createDefaultPiSessionAdapter, createWorkspacePiSession, openRegisteredWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle } from "../../packages/worker/src/pi-session.js";
+import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
@@ -20,9 +25,18 @@ const keys = (value: unknown): string[] => Object.keys(value as object).sort();
 const toolUse = (...calls: ReturnType<typeof fauxToolCall>[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
 // structuredClone keeps a key whose value is undefined, so the key pins below see every key Pi sets.
 const snapshot = <T>(value: T): T => structuredClone(value);
-/** What the model is sent: its context holds tool functions, which structuredClone refuses, so the messages go through JSON. */
-type ModelContext = Pick<Context, "systemPrompt" | "messages">;
-const sent = (context: Context): ModelContext => JSON.parse(JSON.stringify({ systemPrompt: context.systemPrompt, messages: context.messages })) as ModelContext;
+/**
+ * What the model is offered on one call: the system prompt, the conversation and the tool names. The context
+ * holds tool functions, which structuredClone refuses, so the messages are copied through JSON.
+ * The only code phase 2 may change: read the prompt/tools from the leading system message (pi-ai getCurrentSystemPrompt).
+ */
+type ModelView = { systemPrompt: string | undefined; messages: Context["messages"]; tools: string[] };
+const modelView = (context: Context): ModelView => ({
+  systemPrompt: context.systemPrompt,
+  messages: JSON.parse(JSON.stringify(context.messages.filter((message) => (message as { role: string }).role !== "system"))) as Context["messages"],
+  tools: (context.tools ?? []).map((tool) => tool.name),
+});
+const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const anyNumber = expect.any(Number) as number;
 type Event = Record<string, unknown> & { type: string; message?: Record<string, unknown> };
 // Pi's faux provider streams in randomly sized chunks, so a run of message_update events is pinned as one.
@@ -82,14 +96,15 @@ async function settle(handle: PiSessionHandle, text: string): Promise<string> {
 describe("the worker's Pi session on Pi 0.85.1", () => {
   it("runs a plain turn: persisted session file, stable conversation ID, the configured model, and these stats", async () => {
     // protects packages/worker/src/pi-session.ts (createDefaultSession handle); guards: SessionStats and session ID changes (0.99)
-    const { handle, rootPath } = await workerSession([fauxAssistantMessage("Hello.")]);
+    const views: ModelView[] = [];
+    const { handle, rootPath } = await workerSession([(context) => { views.push(modelView(context)); return fauxAssistantMessage("Hello."); }]);
     try {
       const conversationId = handle.conversationId;
       expect(await settle(handle, "hi")).toBe("resolved");
       expect(existsSync(handle.sessionFile)).toBe(true);
       expect(dirname(handle.sessionFile)).toBe(join(await realpath(rootPath), "agent-sessions"));
       // Without a broker-issued ID the conversation ID is Pi's session ID, a UUIDv7 that names the session file.
-      expect(conversationId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+      expect(conversationId).toMatch(UUID_V7);
       expect(handle.conversationId).toBe(conversationId);
       expect(basename(handle.sessionFile)).toMatch(new RegExp(`^\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-\\d{3}Z_${conversationId}\\.jsonl$`));
       expect(handle.getModel()).toEqual({ provider: "agentx-faux", modelId: "scripted" });
@@ -105,6 +120,9 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
       for (const value of Object.values(stats.tokens)) expect(Number.isSafeInteger(value) && value >= 0).toBe(true);
       expect(stats.tokens.total).toBeGreaterThan(0);
       expect((await sessionEntries(handle.sessionFile)).map((entry) => entry.type)).toEqual(["session", "model_change", "thinking_level_change", "message", "message"]);
+      // Exactly Pi's seven built-in tools, bash being AgentX's shell: no MCP, codemode or tool_search tool is offered.
+      expect(views).toHaveLength(1);
+      expect([...views[0]!.tools].sort()).toEqual(["bash", "edit", "find", "grep", "ls", "read", "write"]);
     } finally { handle.dispose(); }
   });
 
@@ -114,17 +132,18 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
     try {
       expect(await settle(handle, "hi")).toBe("resolved");
       expect(handle.conversationId).toBe("33333333-3333-4333-8333-333333333333");
-      expect(handle.getSessionStats().sessionId).not.toBe("33333333-3333-4333-8333-333333333333");
+      // Pi still names the session with its own UUIDv7; only the handle's conversation ID is the broker's.
+      expect(handle.getSessionStats().sessionId).toMatch(UUID_V7);
     } finally { handle.dispose(); }
   });
 
   it("runs the model's bash call through AgentX's shell, in the workspace, and shows the model its output", async () => {
     // protects packages/worker/src/pi-session.ts (agentShellTool replaces the built-in bash); guards: customTools override and BashOperations changes (0.99)
     const shell = recordingShell();
-    const contexts: ModelContext[] = [];
+    const contexts: ModelView[] = [];
     const { handle, rootPath } = await workerSession([
       toolUse(fauxToolCall("bash", { command: "echo pinned" }, { id: "call-bash-1" })),
-      (context) => { contexts.push(sent(context)); return fauxAssistantMessage("Done."); },
+      (context) => { contexts.push(modelView(context)); return fauxAssistantMessage("Done."); },
     ], { bashOperations: shell.operations });
     try {
       expect(await settle(handle, "run it")).toBe("resolved");
@@ -148,10 +167,10 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
     const { handle } = await workerSession([
       toolUse(fauxToolCall("read", { path: "/workspaces/repo/a.txt" }, { id: "call-read-1" })),
       (context) => {
-        results.push(sent(context).messages.at(-1));
+        results.push(modelView(context).messages.at(-1));
         return toolUse(fauxToolCall("edit", { path: "/workspaces/repo/a.txt", edits: [{ oldText: "alpha", newText: "beta" }] }, { id: "call-edit-1" }));
       },
-      (context) => { results.push(sent(context).messages.at(-1)); return fauxAssistantMessage("Edited."); },
+      (context) => { results.push(modelView(context).messages.at(-1)); return fauxAssistantMessage("Edited."); },
     ], { rootPath, devcontainerPaths: { hostFolder, containerFolder: "/workspaces/repo" } });
     try {
       expect(await settle(handle, "edit a.txt")).toBe("resolved");
@@ -172,7 +191,7 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
     await mkdir(join(rootPath, "repos/web"), { recursive: true });
     await writeFile(join(rootPath, "repos/web/AGENTS.md"), "PINNED: run npm test before committing.\n");
     const prompts: string[] = [];
-    const { handle } = await workerSession([(context) => { prompts.push(context.systemPrompt ?? ""); return fauxAssistantMessage("Ok."); }], { rootPath });
+    const { handle } = await workerSession([(context) => { prompts.push(modelView(context).systemPrompt ?? ""); return fauxAssistantMessage("Ok."); }], { rootPath });
     try {
       expect(await settle(handle, "go")).toBe("resolved");
       const root = await realpath(rootPath);
@@ -192,6 +211,18 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
       ].join("\n"));
       expect(prompts[0]!.split("<project_context>")).toHaveLength(2);
       expect(prompts[0]!.startsWith("You are an expert coding assistant operating inside pi, a coding agent harness.")).toBe(true);
+      // The prompt's section boundaries in order (headings ending in a colon, XML-ish tags, the working
+      // directory line), so a section 0.99 inserts anywhere is caught. The temp root reads <ROOT>.
+      const boundaries = prompts[0]!.split(root).join("<ROOT>").split("\n")
+        .filter((line) => /^<\/?[a-z_]+( .*)?>$/.test(line) || /^[A-Z][^.]*:$/.test(line) || line.startsWith("Current working directory: "));
+      expect(boundaries).toEqual([
+        "Available tools:", "Guidelines:",
+        "Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):",
+        "<project_context>", "Project-specific instructions and guidelines:",
+        "<project_instructions path=\"AgentX workspace\">", "AgentX workspace note (written by AgentX, not by any repository):", "</project_instructions>",
+        "<project_instructions path=\"<ROOT>/repos/web/AGENTS.md\">", "</project_instructions>",
+        "</project_context>", "Current working directory: <ROOT>",
+      ]);
     } finally { handle.dispose(); }
   });
 
@@ -201,8 +232,8 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
     expect(await settle(handle, "first prompt")).toBe("resolved");
     const { conversationId, sessionFile } = handle;
     handle.dispose();
-    const contexts: ModelContext[] = [];
-    faux.setResponses([(context) => { contexts.push(sent(context)); return fauxAssistantMessage("Two."); }]);
+    const contexts: ModelView[] = [];
+    faux.setResponses([(context) => { contexts.push(modelView(context)); return fauxAssistantMessage("Two."); }]);
     const resumed = await openRegisteredWorkspacePiSession({ rootPath, model: FAUX_MODEL, conversationId, sessionFile }, adapter);
     try {
       expect({ conversationId: resumed.conversationId, sessionFile: resumed.sessionFile }).toEqual({ conversationId, sessionFile });
@@ -227,9 +258,9 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
   it("delivers a steer before the next model call, and ends an aborted turn with an error message_end and a resolved prompt", async () => {
     // protects packages/worker/src/pi-session.ts (steer, abort) and the loop guard's steer (tool-loop-guard.ts, run-task.ts:142-145); guards: steering queue and abort semantics (0.99)
     const shell = recordingShell("ok\n");
-    const contexts: ModelContext[] = [];
+    const contexts: ModelView[] = [];
     const call = (n: number): FauxResponseStep => (context) => {
-      contexts.push(sent(context));
+      contexts.push(modelView(context));
       return toolUse(fauxToolCall("bash", { command: `echo ${n}` }, { id: `call-${n}` }));
     };
     const { handle, events } = await workerSession([call(1), call(2), call(3), fauxAssistantMessage("Never sent.")], { bashOperations: shell.operations });
@@ -294,7 +325,8 @@ describe("the worker's message_end payloads on Pi 0.85.1", () => {
       toolUse(fauxToolCall("bash", { command: "echo pinned" }, { id: "call-bash-1" })),
       fauxAssistantMessage("Done."),
       fauxAssistantMessage([], { stopReason: "error", errorMessage: "pinned failure" }),
-      // Aborts while the model is streaming its answer, so the stream itself ends as aborted.
+      // Aborts inside the faux factory, before the reply starts streaming: the stream sees an aborted signal
+      // and ends as aborted ("Request was aborted"), unlike the between-calls abort in the steer test.
       () => { void running.handle!.abort(); return fauxAssistantMessage("A reply long enough to stream in more than one chunk."); },
     ], { bashOperations: shell.operations });
     running.handle = handle;
@@ -368,7 +400,9 @@ describe("the worker's session event shapes on Pi 0.85.1", () => {
     expect(keys(one("agent_start"))).toEqual(["type"]);
     expect(keys(one("agent_settled"))).toEqual(["type"]);
     expect(events.filter((event) => event.type === "turn_start").map((event) => keys(event))).toEqual([["type"], ["type"]]);
-    expect(keys(events.find((event) => event.type === "message_update"))).toEqual(["assistantMessageEvent", "message", "type"]);
+    const messageUpdates = events.filter((event) => event.type === "message_update");
+    expect(messageUpdates.length).toBeGreaterThan(0);
+    expect(messageUpdates.map((event) => keys(event))).toEqual(Array(messageUpdates.length).fill(["assistantMessageEvent", "message", "type"]));
     expect(events.filter((event) => event.type === "message_start").map((event) => keys(event))).toEqual(Array(4).fill(["message", "type"]));
 
     expect(keys(start)).toEqual(["args", "toolCallId", "toolName", "type"]);
@@ -379,9 +413,10 @@ describe("the worker's session event shapes on Pi 0.85.1", () => {
       { type: "tool_execution_update", toolCallId: "call-bash-1", toolName: "bash", args: { command: "echo pinned" }, partialResult: { content: [{ type: "text", text: "pinned\n" }], details: {} } },
     ]);
     expect(keys(end)).toEqual(["isError", "result", "toolCallId", "toolName", "type"]);
-    // Snapshotted through JSON: the result's details is undefined, so it is absent here.
-    expect(end).toEqual({ type: "tool_execution_end", toolCallId: "call-bash-1", toolName: "bash", isError: false, result: { content: [{ type: "text", text: "pinned\n" }] } });
+    // The result carries a details key whose value is undefined; toEqual ignores undefined, so it is pinned on its own.
+    expect(end).toEqual({ type: "tool_execution_end", toolCallId: "call-bash-1", toolName: "bash", isError: false, result: { content: [{ type: "text", text: "pinned\n" }], details: undefined } });
     expect(keys(end.result)).toEqual(["content", "details"]);
+    expect((end.result as { details?: unknown }).details).toBeUndefined();
 
     const messageEnds = events.filter((event) => event.type === "message_end");
     expect(messageEnds.map((event) => keys(event))).toEqual(Array(4).fill(["message", "type"]));
@@ -414,5 +449,96 @@ describe("the worker's session event shapes on Pi 0.85.1", () => {
     for (const event of messageEnds) expect(keys(event)).toEqual(expect.arrayContaining(["type", "message"]));
     for (const event of messageEnds) expect(keys(event.message)).toContain("role");
     for (const event of messageEnds.filter((entry) => entry.message!.role === "assistant")) expect(keys(event.message)).toContain("stopReason");
+  });
+});
+
+/**
+ * A task cancelled while its bash call runs, through runTaskInvocation and the real cancellation controller.
+ * The adapter is the default one; the wrapper only subscribes, and cancels when `cancelOn` first matches.
+ */
+async function cancelDuringTool(command: string, cancelOn: (event: Event) => boolean) {
+  const { modelRuntime, faux } = await fauxModelRuntime();
+  let factoryCalls = 0;
+  faux.setResponses([
+    () => { factoryCalls += 1; return toolUse(fauxToolCall("bash", { command }, { id: "call-cancel-1" })); },
+    () => { factoryCalls += 1; return fauxAssistantMessage("Done."); },
+  ]);
+  const base = createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) });
+  const cancellation = new WorkerCancellationController();
+  const invocation: Extract<WorkerInvocation, { kind: "task" }> = {
+    protocolVersion: 1, kind: "task", operationId: randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1,
+    callbackCapability: "c".repeat(64), payload: { conversationId: randomUUID(), prompt: "run it" },
+  };
+  let cancelled = false;
+  const piAdapter: PiSessionAdapter = {
+    async create(input) {
+      const handle = await base.create(input);
+      handle.subscribe((event) => {
+        if (cancelled || !cancelOn(event as Event)) return;
+        cancelled = true;
+        void cancellation.cancel(invocation.operationId);
+      });
+      return handle;
+    },
+  };
+  const workerEvents: WorkerEvent[] = [];
+  const started = performance.now();
+  const failure = await runTaskInvocation(invocation, {
+    rootPath: await workspaceRoot(), model: FAUX_MODEL, piAdapter, cancellationController: cancellation,
+    eventSink: async (batch) => { workerEvents.push(...batch); }, artifactSink: async () => undefined,
+  }).then(() => undefined, (error: unknown) => error);
+  return { failure, elapsed: performance.now() - started, factoryCalls, workerEvents };
+}
+
+/** What the worker reports for a cancelled task, besides its progress stream. */
+function cancelledReport(run: Awaited<ReturnType<typeof cancelDuringTool>>) {
+  const assistantEnds = run.workerEvents.flatMap((event) => {
+    const payload = event.payload as Event;
+    return event.type === "progress" && payload.type === "message_end" && payload.message?.role === "assistant" ? [payload.message] : [];
+  });
+  return {
+    types: run.workerEvents.filter((event) => event.type !== "progress").map((event) => event.type),
+    lifecycle: run.workerEvents.filter((event) => event.type === "lifecycle").map((event) => (event.payload as { status: string }).status),
+    toolEnd: run.workerEvents.filter((event) => event.type === "tool_end").map((event) => event.payload),
+    usageOutcome: run.workerEvents.filter((event) => event.type === "usage").map((event) => (event.payload as { outcome: string }).outcome),
+    lastAssistant: assistantEnds.map((message) => ({ stopReason: message.stopReason, errorMessage: message.errorMessage })).at(-1),
+  };
+}
+
+describe("cancelling a worker task during a tool call on Pi 0.85.1", () => {
+  // Guards finishTurn (0.99): a cancel during a tool must abort the tool, end the task CANCELLED with no
+  // result, and never call the model again. F3 (the loop calling the model after an aborted tool) is refuted on 0.85.1.
+  it("aborts a running bash call, ends the task CANCELLED, and never calls the model again", async () => {
+    // protects packages/worker/src/run-task.ts (cancellation outcome) and cancel.ts (cancel -> session.abort)
+    const run = await cancelDuringTool("echo started; sleep 5", (event) =>
+      event.type === "tool_execution_update" && JSON.stringify(event.partialResult).includes("started"));
+    expect(run.failure).toBeInstanceOf(WorkerOperationCancelledError);
+    expect(cancelledReport(run)).toEqual({
+      types: ["lifecycle", "tool_start", "tool_end", "lifecycle", "usage"],
+      lifecycle: ["RUNNING", "CANCELLED"],
+      toolEnd: [{ type: "tool_execution_end", toolCallId: "call-cancel-1", toolName: "bash", isError: true,
+        result: { content: [{ type: "text", text: "started\n\n\nCommand aborted" }], details: {} } }],
+      usageOutcome: ["CANCELLED"],
+      // Pi starts the next turn, but its model call fails before the scripted model is asked.
+      lastAssistant: { stopReason: "error", errorMessage: "This operation was aborted" },
+    });
+    expect(run.factoryCalls).toBe(1);
+    // The 5 s sleep was killed, not waited out.
+    expect(run.elapsed).toBeLessThan(3_000);
+  });
+
+  it("ends a bash call cancelled as it starts with \"Operation aborted\", and the task CANCELLED", async () => {
+    // protects packages/worker/src/run-task.ts (cancellation outcome) and cancel.ts (cancel -> session.abort)
+    const run = await cancelDuringTool("true", (event) => event.type === "tool_execution_start");
+    expect(run.failure).toBeInstanceOf(WorkerOperationCancelledError);
+    expect(cancelledReport(run)).toEqual({
+      types: ["lifecycle", "tool_start", "tool_end", "lifecycle", "usage"],
+      lifecycle: ["RUNNING", "CANCELLED"],
+      toolEnd: [{ type: "tool_execution_end", toolCallId: "call-cancel-1", toolName: "bash", isError: true,
+        result: { content: [{ type: "text", text: "Operation aborted" }], details: {} } }],
+      usageOutcome: ["CANCELLED"],
+      lastAssistant: { stopReason: "error", errorMessage: "This operation was aborted" },
+    });
+    expect(run.factoryCalls).toBe(1);
   });
 });
