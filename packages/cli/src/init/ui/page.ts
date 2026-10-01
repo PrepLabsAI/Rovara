@@ -4,6 +4,9 @@
 //
 // The page has no inline script and no inline style, so the strict CSP below holds. It builds every
 // node with `textContent`, so a question, a log line or a plan is text, never markup.
+//
+// Every same-origin asset this page links to must carry the session token in its URL: the server
+// refuses any request without it (tests/contract/local-page-assets.test.ts).
 import { WIZARD_TOKEN_HEADER, WIZARD_TOKEN_QUERY } from "./protocol.js";
 
 export const WIZARD_CSP = [
@@ -16,10 +19,13 @@ export const WIZARD_CSP = [
   "frame-ancestors 'none'",
 ].join("; ");
 
-/** The module is loaded with the session token in its own URL, so the page needs no inline script
- * to hand it over and the token is never written into the document. */
+/** The stylesheet and the module each carry the session token in their own URL, because the server
+ * refuses every request without it; the module reads it back from `import.meta.url`, so the page
+ * needs no inline script to hand it over. */
 export function wizardHtml(token: string): string {
-  const script = `/app.js?${WIZARD_TOKEN_QUERY}=${encodeURIComponent(token)}`;
+  const query = `${WIZARD_TOKEN_QUERY}=${encodeURIComponent(token)}`;
+  const stylesheet = `/app.css?${query}`;
+  const script = `/app.js?${query}`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -27,7 +33,7 @@ export function wizardHtml(token: string): string {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="referrer" content="same-origin">
 <title>Install AgentX</title>
-<link rel="stylesheet" href="/app.css">
+<link rel="stylesheet" href="${stylesheet}">
 </head>
 <body>
 <header><h1>Install AgentX</h1><p id="subtitle">Connecting to the installer&hellip;</p></header>
