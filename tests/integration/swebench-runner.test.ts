@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import type { SwebenchRunnerConfig, SwebenchRunResult } from "@agentx/contracts";
-import type { PiSessionAdapter, PiSessionHandle } from "../../packages/worker/src/pi-session.js";
+import type { PiSessionAdapter, PiSessionHandle, WorkspaceModelConfiguration } from "../../packages/worker/src/pi-session.js";
 import { runSwebenchAgent } from "../../packages/worker/src/swebench/agent.js";
 import { startTaskContainer, type DockerCli } from "../../packages/worker/src/swebench/containers.js";
 import { offlineSettings } from "../../packages/worker/src/swebench/offline.js";
@@ -182,6 +182,11 @@ interface FakeTurn {
   edit?: () => Promise<void>;
 }
 
+/** The adapter's sessions with some handle members replaced. */
+function withHandle(adapter: PiSessionAdapter, overrides: Partial<PiSessionHandle>): PiSessionAdapter {
+  return { async create(input) { return { ...(await adapter.create(input)), ...overrides }; } };
+}
+
 /** A Pi session that emits a scripted turn's events, then ends the prompt. */
 function fakeAdapter(turn: FakeTurn, observed: { aborted: boolean; steered: string[]; prompt?: string }): PiSessionAdapter {
   return {
@@ -346,7 +351,11 @@ function recordingReporter(): { reporter: RunReporter; steps: string[]; artifact
 }
 
 describe("one SWE-bench run (spec 043 FR-008 to FR-015)", () => {
-  async function fixture(turn: (testbed: string) => FakeTurn) {
+  async function fixture(
+    turn: (testbed: string) => FakeTurn,
+    model: WorkspaceModelConfiguration = { provider: "amazon-bedrock", modelId: "fixture-model" },
+    handleOverrides: Partial<PiSessionHandle> = {},
+  ) {
     const repository = await taskRepository();
     const rootPath = await mkdtemp(join(tmpdir(), "agentx-swebench-root-"));
     const testbed = join(rootPath, RUN_ID, "testbed");
@@ -361,12 +370,12 @@ describe("one SWE-bench run (spec 043 FR-008 to FR-015)", () => {
     const observed = { aborted: false, steered: [] as string[] };
     const result = await runSwebench(config(), {
       rootPath,
-      model: { provider: "amazon-bedrock", modelId: "fixture-model" },
+      model,
       docker,
       reporter: recorded.reporter,
       log: () => undefined,
       dataset: { fetch: async () => new Response(JSON.stringify({ rows: [{ row: instance }] })) },
-      piAdapter: fakeAdapter(turn(testbed), observed),
+      piAdapter: withHandle(fakeAdapter(turn(testbed), observed), handleOverrides),
       grade: async ({ patch, directory }) => {
         graded.push(patch);
         await writeFile(join(rootPath, "report.json"), "{\"graded\":true}");
@@ -402,6 +411,39 @@ describe("one SWE-bench run (spec 043 FR-008 to FR-015)", () => {
     expect(started).toEqual(expect.arrayContaining(["--network", "none", "--platform", "linux/amd64", "--name", container]));
     expect(started.join(" ")).toContain(":/testbed");
     expect(calls.at(-1)).toEqual(["rm", "--force", container]);
+  });
+
+  it("reports the level in the callback's usage only when the run config carried one, and always in result.json (spec 053)", async () => {
+    const turn = (testbed: string) => ({
+      events: [assistantEnd()],
+      edit: () => writeFile(join(testbed, "validators.py"), "PATTERN = r'^[\\w.@+-]+\\Z'\n"),
+    });
+    // No level in the config: the control plane may predate the field, and its usage schema is strict.
+    const unleveled = await fixture(turn);
+    expect(unleveled.results[0]!.usage).toBeDefined();
+    expect(unleveled.results[0]!.usage).not.toHaveProperty("thinkingLevel");
+    const unleveledArtifact = JSON.parse(unleveled.artifacts.get("result.json")!) as { thinkingLevel?: string; usage?: Record<string, unknown> };
+    expect(unleveledArtifact.thinkingLevel).toBe("medium");
+    expect(unleveledArtifact.usage).toMatchObject({ provider: "amazon-bedrock", thinkingLevel: "medium" });
+    // A level in the config proves a control plane that parses it.
+    const leveled = await fixture(turn, { provider: "amazon-bedrock", modelId: "fixture-model", thinkingLevel: "medium" });
+    expect(leveled.results[0]!.usage).toMatchObject({ provider: "amazon-bedrock", thinkingLevel: "medium" });
+    expect(JSON.parse(leveled.artifacts.get("result.json")!)).toMatchObject({ usage: { thinkingLevel: "medium" } });
+  });
+
+  it("records in result.json a level Pi resolved outside AgentX's six, and keeps it out of the callback (spec 053 M-5)", async () => {
+    const turn = (testbed: string) => ({
+      events: [assistantEnd()],
+      edit: () => writeFile(join(testbed, "validators.py"), "PATTERN = r'^[\\w.@+-]+\\Z'\n"),
+    });
+    const { results, artifacts } = await fixture(turn, { provider: "amazon-bedrock", modelId: "fixture-model", thinkingLevel: "high" }, {
+      getModel: () => ({ provider: "amazon-bedrock", modelId: "fixture-model" }),
+      piThinkingLevel: () => "max",
+    });
+    expect(JSON.parse(artifacts.get("result.json")!)).toMatchObject({ thinkingLevel: "max" });
+    expect(results[0]!.usage).toBeDefined();
+    expect(results[0]!.usage).not.toHaveProperty("thinkingLevel");
+    expect(JSON.stringify(results[0])).not.toContain("max");
   });
 
   it("reports an empty patch as unresolved without running the harness", async () => {

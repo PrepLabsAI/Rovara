@@ -12,6 +12,7 @@ import {
 } from "@agentx/contracts";
 import { containerBashOperations } from "../devcontainer.js";
 import { redactCredentials } from "../events.js";
+import { usageForControlPlane } from "../usage.js";
 import type { PiSessionAdapter, WorkspaceModelConfiguration } from "../pi-session.js";
 import { runSwebenchAgent, type AgentRun } from "./agent.js";
 import { copyTestbed, findRepository, pullTaskImage, removeContainer, startTaskContainer, taskContainerExec, TESTBED, type DockerCli } from "./containers.js";
@@ -181,8 +182,9 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
     await rm(resolve(dirname(root), ".pro-tasks", config.runId), { recursive: true, force: true }).catch(() => undefined);
     await rm(secbenchGrade, { recursive: true, force: true }).catch(() => undefined);
   }
-  // The level the session actually ran with, read before the session is disposed; never the requested one.
-  const thinkingLevel = agent?.session.getModel().thinkingLevel;
+  // The level the session actually ran with, read before the session is disposed; never the requested
+  // one. result.json is not parsed by the broker, so it records even a level outside AgentX's six.
+  const thinkingLevel = agent?.session.piThinkingLevel?.() ?? agent?.session.getModel().thinkingLevel;
   if (agent !== undefined) {
     const transcript = await readFile(agent.session.sessionFile).catch(() => undefined);
     if (transcript !== undefined) await save("transcript.jsonl", transcript, "application/x-ndjson");
@@ -208,8 +210,10 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
     }),
     artifacts: [...saved].sort(),
   }, null, 2), "application/json");
-  await reporter.result(result);
-  return result;
+  // result.json above keeps the level in usage; the callback carries it only when the config did.
+  const reported = result.usage === undefined ? result : { ...result, usage: usageForControlPlane(result.usage, dependencies.model) };
+  await reporter.result(reported);
+  return reported;
 }
 
 function sessionUsage(agent: AgentRun, model: WorkspaceModelConfiguration, outcome: TaskUsageOutcome): TaskUsageTelemetry {

@@ -12,10 +12,10 @@ import {
   DefaultResourceLoader,
   type BashOperations,
   type BashSpawnContext,
+  type ModelRuntime,
   type ToolDefinition,
   SessionManager,
   SettingsManager,
-  type ModelRuntime,
   type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
@@ -50,6 +50,8 @@ export interface PiSessionHandle {
   abort(): Promise<void>;
   /** The model and the thinking level the session actually runs with, read back after creation. */
   getModel(): { provider: string; modelId: string; thinkingLevel?: PiThinkingLevel };
+  /** Pi's own resolved level, even one outside AgentX's six (Pi's "max"); for artifacts only, never telemetry. */
+  piThinkingLevel?(): string | undefined;
   getSessionStats(): SessionStats;
   subscribe(listener: (event: unknown) => void): () => void;
   dispose(): void;
@@ -236,10 +238,11 @@ async function createDefaultSession(
       getModel: () => ({
         provider: session.model?.provider ?? resolved.model.provider,
         modelId: session.model?.id ?? resolved.model.modelId,
-        // Pi also knows "max", which AgentX does not offer: a level outside ours is deliberately left unrecorded
-        // (the key is omitted, never guessed). Only an explicit AgentX level can be requested, so this does not occur today.
+        // Pi also knows "max", which AgentX does not offer: a level outside ours is left out of telemetry
+        // (the key is omitted, never guessed); piThinkingLevel reports it for artifacts.
         ...(ThinkingLevelSchema.safeParse(session.thinkingLevel).success ? { thinkingLevel: session.thinkingLevel as PiThinkingLevel } : {}),
       }),
+      piThinkingLevel: () => session.thinkingLevel,
       getSessionStats: () => session.getSessionStats(),
       subscribe: (listener) => session.subscribe((event) => listener(event)),
       dispose: () => session.dispose(),

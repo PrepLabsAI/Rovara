@@ -19,7 +19,11 @@ async function open(runtimeModel: { reasoning?: boolean }, model: { provider?: s
 describe("the worker resolves the thinking level once (spec 053)", () => {
   it("uses the level it is given and reports it back", async () => {
     const session = await open({ reasoning: true }, { thinkingLevel: "high" });
-    try { expect(session.getModel().thinkingLevel).toBe("high"); } finally { session.dispose(); }
+    try {
+      expect(session.getModel().thinkingLevel).toBe("high");
+      // Pi's own level, unfiltered, for result.json (which records even a level outside AgentX's six).
+      expect(session.piThinkingLevel?.()).toBe("high");
+    } finally { session.dispose(); }
   });
 
   it("defaults a reasoning model to medium", async () => {

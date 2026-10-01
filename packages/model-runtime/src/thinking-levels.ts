@@ -1,13 +1,14 @@
 import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
-import type { ModelIdentifier, ModelRef, ProjectModels, ThinkingLevel } from "@agentx/contracts";
+import { ThinkingLevelSchema, type ModelIdentifier, type ModelRef, type ProjectModels, type ThinkingLevel } from "@agentx/contracts";
 
 /**
  * Spec 053 FR-003: whether the model can run at an admin's thinking level. Pi clamps an unsupported
  * level to a supported one (pi-ai `clampThinkingLevel`), so an admin's "medium" on GLM 5.3 would
  * silently run at "high"; checking at save time refuses it instead. The catalogs are the ones the
  * runtime resolves models from. A model neither catalog knows passes here and is checked at first use.
+ * The supported list names only levels AgentX can set: Pi's own "max" is left out.
  */
 export type ThinkingLevelSupport = { ok: true } | { ok: false; supported: string[] };
 
@@ -24,8 +25,15 @@ function catalogModel(model: ModelIdentifier): Model<Api> | undefined {
 export function thinkingLevelSupport(model: ModelIdentifier, level: ThinkingLevel): ThinkingLevelSupport {
   const known = catalogModel(model);
   if (known === undefined) return { ok: true };
-  const supported: string[] = getSupportedThinkingLevels(known);
+  const settable: readonly string[] = ThinkingLevelSchema.options;
+  const supported = getSupportedThinkingLevels(known).filter((entry: string) => settable.includes(entry));
   return supported.includes(level) ? { ok: true } : { ok: false, supported };
+}
+
+/** The save-time refusal for one model whose level is unsupported. */
+export function thinkingLevelRefusal(label: string, level: ThinkingLevel, supported: readonly string[]): string {
+  const choices = supported.length === 0 ? "it supports no thinking level AgentX can set" : `supported: ${supported.join(", ")}`;
+  return `${label} does not support thinking level "${level}"; ${choices}`;
 }
 
 /** One refusal per distinct unsupported level among the default and the approved models. */
@@ -36,7 +44,7 @@ export function unsupportedThinkingLevels(models: ProjectModels): string[] {
     const support = thinkingLevelSupport(entry, entry.thinkingLevel);
     if (support.ok) continue;
     const label = labelOf(entry, models.approved);
-    problems.add(`${label} does not support thinking level "${entry.thinkingLevel}"; supported: ${support.supported.join(", ")}`);
+    problems.add(thinkingLevelRefusal(label, entry.thinkingLevel, support.supported));
   }
   return [...problems];
 }

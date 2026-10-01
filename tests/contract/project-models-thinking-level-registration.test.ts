@@ -39,7 +39,7 @@ describe("registering a project's models", () => {
     expect(refused.status).toBe(400);
     expect(refused.body.error).toEqual({
       code: "CONFIG_INVALID",
-      message: 'GLM 5.3 (z-ai/glm-5.3) does not support thinking level "medium"; supported: low, high, max',
+      message: 'GLM 5.3 (z-ai/glm-5.3) does not support thinking level "medium"; supported: low, high',
     });
     expect(db.get("PROJECT#payments", "REV#000000000001")).toBeUndefined();
   });
@@ -47,7 +47,7 @@ describe("registering a project's models", () => {
   it("refuses off on a model that always reasons", async () => {
     const { handler } = await createAdminBroker({});
     const refused = await register(handler, { default: glm("off"), approved: [glm("off")] });
-    expect(refused.body.error).toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining('does not support thinking level "off"; supported: low, high, max') as unknown });
+    expect(refused.body.error).toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining('does not support thinking level "off"; supported: low, high') as unknown });
   });
 
   it("accepts supported levels, unset levels and models the catalog does not know", async () => {
@@ -63,7 +63,7 @@ describe("planning a project revision", () => {
   it("refuses an unsupported level before the change is stored", async () => {
     const broker = await createAdminChangeBroker();
     const refused = await broker.propose({ kind: "register_project_revision", definition: definition({ default: sonnet, approved: [sonnet, glm("medium")] }, 2) });
-    expect(refused.body.error).toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining('GLM 5.3 (z-ai/glm-5.3) does not support thinking level "medium"; supported: low, high, max') as unknown });
+    expect(refused.body.error).toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining('GLM 5.3 (z-ai/glm-5.3) does not support thinking level "medium"; supported: low, high') as unknown });
     expect(broker.db.find((item) => item.entityType === "ADMIN_CHANGE")).toEqual([]);
   });
 
