@@ -3,7 +3,10 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
+import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import {
+  ADMIN_CHANGE_CANCEL_ACTION,
+  ADMIN_CHANGE_CONFIRM_ACTION,
   CONFIRM_APPROVE_ACTION,
   CONFIRM_CANCEL_ACTION,
   SlackChannelIdSchema,
@@ -17,6 +20,7 @@ import {
   pendingConfirmationFromItem,
   queuedBehindAttributes,
   slackThreadSubject,
+  type AdminChangePressEvent,
   type PendingConfirmation,
   type SlackRequestMessage,
   type SlackThread,
@@ -71,7 +75,24 @@ export interface SlackInteractivityDependencies {
   respondEphemeral?: (responseUrl: string, text: string) => Promise<void>;
   now?: () => number;
   log?: SlackIngressLog;
+  /**
+   * Spec 025 E14: an admin change's Confirm and Cancel buttons. Wired only in named environments
+   * (D14); without it every button, these two included, keeps the thread-based parsing below.
+   */
+  adminChange?: {
+    /** Hands the press to the broker, which decides (asynchronously); resolves once it is handed over. */
+    press(input: { changeId: string; click: "confirm" | "cancel"; slackUserId: string; teamId?: string }): Promise<void>;
+    /** The change's trace ID, for the log line only. */
+    traceOf?(changeId: string): Promise<string | undefined>;
+  };
 }
+
+/** What an admin hears, privately, once a Confirm press is handed to the broker (spec 025 E14). */
+export const ADMIN_CHANGE_RECEIVED_TEXT = "Received. AgentX is applying the change; the message above will show how it went.";
+/** What an admin hears, privately, once a Cancel press is handed to the broker (spec 025 E14). */
+export const ADMIN_CHANGE_CANCEL_RECEIVED_TEXT = "Received. AgentX is dropping the change.";
+const ADMIN_CHANGE_PRESS_FAILED_TEXT = "I couldn't take that press. Press the button again.";
+const CHANGE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 /** What a member hears, privately, for a button this release does not know. */
 export const UNKNOWN_BUTTON_TEXT = "This button is no longer available.";
@@ -121,6 +142,32 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
       log("interaction.ignored", { reason: "not_block_actions" });
       return respond(200, { ok: true });
     }
+    // Spec 025 E14: an admin change's buttons live in a direct message (a D... channel), which the
+    // thread-based parsing below refuses; they are read here, and only these two action IDs.
+    const adminChange = dependencies.adminChange;
+    const press = adminChange === undefined ? undefined : adminChangePress(payload);
+    if (press !== undefined && adminChange !== undefined) {
+      const answer = async (text: string): Promise<void> => {
+        try {
+          await dependencies.respondEphemeral?.(press.responseUrl, text);
+        } catch (error) {
+          log("interaction.respond_failed", { errorName: errorName(error) });
+        }
+      };
+      const traceId = await adminChange.traceOf?.(press.changeId).catch(() => undefined);
+      log("admin_change.press_received", { changeId: press.changeId, ...(traceId === undefined ? {} : { traceId }), click: press.click });
+      try {
+        await adminChange.press({ changeId: press.changeId, click: press.click, slackUserId: press.slackUserId, ...(press.teamId === undefined ? {} : { teamId: press.teamId }) });
+      } catch (error) {
+        log("admin_change.press_failed", { changeId: press.changeId, ...(traceId === undefined ? {} : { traceId }), errorName: errorName(error) });
+        await answer(ADMIN_CHANGE_PRESS_FAILED_TEXT);
+        return respond(200, { ok: true });
+      }
+      // The broker records the outcome and edits the message; an `unavailable` outcome leaves the
+      // change pending with its buttons, so the admin can press again.
+      await answer(press.click === "confirm" ? ADMIN_CHANGE_RECEIVED_TEXT : ADMIN_CHANGE_CANCEL_RECEIVED_TEXT);
+      return respond(200, { ok: true });
+    }
     const actions = parseBlockActions(payload, requestStartedAt);
     if ("reason" in actions) {
       log("interaction.ignored", { reason: actions.reason });
@@ -163,6 +210,26 @@ function isSlackResponseUrl(value: unknown): value is string {
   } catch {
     return false;
   }
+}
+
+interface AdminChangePress { changeId: string; click: "confirm" | "cancel"; slackUserId: string; teamId?: string; responseUrl: string }
+
+/**
+ * A Confirm or Cancel press on an admin change (spec 025 E14), or undefined for every other button
+ * and for a press whose value is not a change ID, whose presser is unreadable, or whose response URL
+ * is not Slack's. The broker checks that the presser is the change's admin.
+ */
+function adminChangePress(payload: Record<string, unknown>): AdminChangePress | undefined {
+  const [action] = Array.isArray(payload.actions) ? payload.actions.map(asRecord) : [];
+  if (action === undefined || (action.action_id !== ADMIN_CHANGE_CONFIRM_ACTION && action.action_id !== ADMIN_CHANGE_CANCEL_ACTION)) return undefined;
+  const user = asRecord(payload.user);
+  const userId = SlackUserIdSchema.safeParse(user.id);
+  const team = SlackTeamIdSchema.safeParse(asRecord(payload.team).id ?? user.team_id);
+  if (typeof action.value !== "string" || !CHANGE_ID.test(action.value) || !userId.success || !isSlackResponseUrl(payload.response_url)) return undefined;
+  return {
+    changeId: action.value, click: action.action_id === ADMIN_CHANGE_CONFIRM_ACTION ? "confirm" : "cancel", slackUserId: userId.data,
+    ...(team.success ? { teamId: team.data } : {}), responseUrl: payload.response_url,
+  };
 }
 
 const ENTERPRISE_ID = /^E[A-Z0-9]{2,31}$/;
@@ -363,9 +430,13 @@ export function createAwsSlackInteractivityHandler() {
   };
   const log: SlackIngressLog = (event, fields) => console.log(JSON.stringify({ component: "slack-interactivity", event, ...fields }));
   if (!turnRecordsTableName) log("interaction.details_not_configured", { variable: "TURN_RECORDS_TABLE_NAME" });
+  // Spec 025 E14 (C14): named environments only (D14). The legacy deployment sets no ADMIN_CHANGES,
+  // so its interactivity handling, and every variable and grant it reads, is unchanged.
+  const adminChange = process.env.ADMIN_CHANGES === "enabled" ? awsAdminChangePress(clientConfiguration, documentClient) : undefined;
   return createSlackInteractivityHandler({
     secrets,
     log,
+    ...(adminChange === undefined ? {} : { adminChange }),
     // The module's own respondEphemeral, for a button no handler knows.
     respondEphemeral,
     handlers: [confirmationActionHandler({
@@ -414,6 +485,44 @@ export function createAwsSlackInteractivityHandler() {
       log,
     })],
   });
+}
+
+/** The broker's press event (E14), exactly what `isAdminChangePressEvent` accepts. */
+export function adminChangePressEvent(press: Parameters<NonNullable<SlackInteractivityDependencies["adminChange"]>["press"]>[0]): AdminChangePressEvent {
+  return {
+    source: "agentx.slack-ingress", action: "admin-change-press", changeId: press.changeId, click: press.click, slackUserId: press.slackUserId,
+    ...(press.teamId === undefined ? {} : { teamId: press.teamId }),
+  };
+}
+
+/**
+ * The press hand-over for the ingress Lambda: an asynchronous invoke of the broker, so Slack's
+ * 3-second answer never waits on an apply (the broker records the outcome), and a by-key read of
+ * the change's keys and trace ID only, for the log line.
+ */
+function awsAdminChangePress(
+  clientConfiguration: { region?: string }, documentClient: DynamoDBDocumentClient,
+): NonNullable<SlackInteractivityDependencies["adminChange"]> {
+  const lambda = new LambdaClient(clientConfiguration);
+  const brokerFunctionName = requiredEnvironment("BROKER_FUNCTION_NAME");
+  const stateTableName = requiredEnvironment("STATE_TABLE_NAME");
+  return {
+    async press(press) {
+      const response = await lambda.send(new InvokeCommand({
+        FunctionName: brokerFunctionName, InvocationType: "Event",
+        Payload: Buffer.from(JSON.stringify(adminChangePressEvent(press))),
+      }));
+      // An asynchronous invoke that Lambda accepted answers 202.
+      if (response.StatusCode !== 202) throw Object.assign(new Error("broker invoke was not accepted"), { name: "BrokerInvokeNotAccepted" });
+    },
+    async traceOf(changeId) {
+      const response = await documentClient.send(new GetCommand({
+        TableName: stateTableName, Key: { pk: `ADMIN_CHANGE#${changeId}`, sk: "META" }, ProjectionExpression: "pk, sk, traceId",
+      }));
+      const traceId = (response.Item as { traceId?: unknown } | undefined)?.traceId;
+      return typeof traceId === "string" ? traceId : undefined;
+    },
+  };
 }
 
 /** The Details reader when TURN_RECORDS_TABLE_NAME is unset: every click hears DETAILS_UNAVAILABLE. */

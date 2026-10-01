@@ -220,7 +220,7 @@ export class CredentialRegistry {
     const parsed = CredentialRegistrationSchema.safeParse(body);
     if (!parsed.success) throw agentXError("CONFIG_INVALID", "invalid credential registration");
     const registration = parsed.data;
-    const prefix = this.options.connectorSecretPrefix ?? CONNECTOR_SECRET_PREFIX;
+    const prefix = this.connectorSecretPrefix;
     if (!registration.secretName.startsWith(prefix)) {
       throw agentXError("CONFIG_INVALID", `secret name must be ${prefix}<name> in this deployment`);
     }
@@ -280,6 +280,27 @@ export class CredentialRegistry {
   async typeOf(ref: string): Promise<CredentialType | undefined> {
     if (ref === this.options.githubApp.ref) return "github-app";
     return (await this.readRecord(ref))?.type;
+  }
+
+  /** Spec 025 E7: the registration under a reference, if a valid one exists. */
+  async registration(ref: string): Promise<CredentialRecord | undefined> {
+    return this.readRecord(ref);
+  }
+
+  /** Spec 025 E7: whether the secret exists and reads as the type, without keeping or returning it. */
+  async checkSecret(registration: CredentialRegistration): Promise<"reads" | "missing" | "wrong_type" | "unavailable"> {
+    const found = await this.classifySecret(registration);
+    return found.status === "denied" || found.status === "unreachable" ? "unavailable" : found.status;
+  }
+
+  /** This deployment's connector secret prefix, the one register() enforces (spec 025 C5). */
+  get connectorSecretPrefix(): string {
+    return this.options.connectorSecretPrefix ?? CONNECTOR_SECRET_PREFIX;
+  }
+
+  /** The built-in GitHub App's reference, which register() refuses. */
+  get builtInRef(): string {
+    return this.options.githubApp.ref;
   }
 
   /** Phase 5 entry point: a provider that resolves the record on each issue, so re-registration takes effect. */
@@ -342,20 +363,34 @@ export class CredentialRegistry {
    * its token endpoint belongs to the connector type, so registration never mints or refreshes.
    */
   private async validateSecret(registration: CredentialRegistration): Promise<void> {
+    const found = await this.classifySecret(registration);
+    if (found.status === "reads") return;
+    // A throttle, service or network failure says nothing about the administrator's input, and
+    // its message is AWS's, so only the secret's name is reported.
+    if (found.status === "unreachable") throw agentXError("RUNTIME_UNAVAILABLE", `could not read secret ${registration.secretName} from Secrets Manager; try again`);
+    throw agentXError("CONFIG_INVALID", found.message);
+  }
+
+  /**
+   * The one classifier registration and a change plan share (spec 025 C3): whether the secret
+   * reads as the type. Never keeps or returns the secret; a message names only the secret.
+   */
+  private async classifySecret(registration: CredentialRegistration): Promise<
+    { status: "reads" } | { status: "missing" | "wrong_type" | "denied"; message: string } | { status: "unreachable" }
+  > {
     const { ref, type, secretName } = registration;
     let raw: string | undefined;
     try {
       raw = await this.options.secrets.read(secretName);
     } catch (error) {
-      if (error instanceof CredentialUnavailable) throw agentXError("CONFIG_INVALID", error.message);
-      // A throttle, service or network failure says nothing about the administrator's input, and
-      // its message is AWS's, so only the secret's name is reported.
-      throw agentXError("RUNTIME_UNAVAILABLE", `could not read secret ${secretName} from Secrets Manager; try again`);
+      if (error instanceof CredentialUnavailable) return { status: "denied", message: error.message };
+      return { status: "unreachable" };
     }
     try {
       parseConnectorSecret(type, raw, ref, secretName);
+      return { status: "reads" };
     } catch (error) {
-      if (error instanceof CredentialUnavailable) throw agentXError("CONFIG_INVALID", error.message);
+      if (error instanceof CredentialUnavailable) return { status: raw === undefined ? "missing" : "wrong_type", message: error.message };
       throw error;
     }
   }

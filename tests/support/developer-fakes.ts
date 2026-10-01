@@ -110,7 +110,8 @@ const form = (init: RequestInit | undefined) => new URLSearchParams(typeof init?
 export interface FakeSlackUser { userId: string; teamId?: string; name: string; email?: string; emailVerified?: boolean; deleted?: boolean; isBot?: boolean; enterpriseTeams?: string[] }
 
 /** Slack's OpenID Connect and Web API, as far as the sign-in uses them. */
-/** `channelInfo`: what conversations.info answers per channel ID (no `isPrivate` leaves is_private out); any other ID is channel_not_found. */
+/** `channelInfo`: what conversations.info answers per channel ID (no `isPrivate` leaves is_private out); any other ID is channel_not_found.
+ * conversations.list lists the same channels in one page, each with is_private (false when `isPrivate` is left out). */
 export function fakeSlack(options: { users: FakeSlackUser[]; channels?: Record<string, string[]>; channelInfo?: Record<string, { name: string; isPrivate?: boolean }>; scopes?: string[]; now?: () => number }) {
   const issuedAt = () => Math.floor((options.now ?? Date.now)() / 1000);
   const signer = signingKey();
@@ -162,6 +163,10 @@ export function fakeSlack(options: { users: FakeSlackUser[]; channels?: Record<s
       const page = members.slice(start, start + 2);
       const next = start + 2 < members.length ? String(start + 2) : "";
       return Response.json({ ok: true, members: page, response_metadata: { next_cursor: next } });
+    }
+    if (url.pathname === "/api/conversations.list") {
+      const channels = Object.entries(options.channelInfo ?? {}).map(([id, info]) => ({ id, name: info.name, is_private: info.isPrivate === true }));
+      return Response.json({ ok: true, channels, response_metadata: { next_cursor: "" } });
     }
     if (url.pathname === "/api/conversations.info") {
       const id = url.searchParams.get("channel") ?? "";

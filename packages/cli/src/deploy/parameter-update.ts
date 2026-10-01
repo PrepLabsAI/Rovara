@@ -3,6 +3,7 @@
 // sent again. It shows the parameter changes and the resource changes, and asks first.
 import { CreateChangeSetCommand, DeleteChangeSetCommand, DescribeChangeSetCommand, DescribeStacksCommand, ExecuteChangeSetCommand, type Change, type Stack } from "@aws-sdk/client-cloudformation";
 import { agentXError } from "@agentx/contracts";
+import { ADOPTED_STACK_NAMES } from "../environments/adopt.js";
 import { SIGN_IN_SINCE_PARAMETER_NAMES } from "../signin/settings.js";
 import type { ChangeSetChange } from "./deployer.js";
 
@@ -15,6 +16,10 @@ export interface ParameterUpdateInput {
   /** Which command is changing the stack: names the change set and the messages. Default "sign-in". */
   label?: "sign-in" | "config";
 }
+
+/** Parameters only named environments' templates declare (spec 025 E16): the legacy deployment never has them, so no upgrade adds them. */
+const NAMED_ENVIRONMENT_ONLY_PARAMETERS: ReadonlySet<string> = new Set(["McpConfirmElicitation"]);
+const LEGACY_STACK_NAMES: ReadonlySet<string> = new Set(Object.values(ADOPTED_STACK_NAMES));
 
 const NO_CHANGES = ["didn't contain changes", "No updates are to be performed"];
 const ENDED = new Set(["EXECUTE_COMPLETE", "EXECUTE_FAILED", "OBSOLETE"]);
@@ -50,6 +55,9 @@ export async function updateStackParameters(input: ParameterUpdateInput): Promis
   if (status.endsWith("_FAILED") || status === "ROLLBACK_COMPLETE") throw agentXError("CONFIG_INVALID", `stack ${stackName} is ${status}; fix it in the CloudFormation console first`);
   const current = new Map((stack.Parameters ?? []).map((parameter) => [parameter.ParameterKey ?? "", parameter.ParameterValue ?? ""]));
   const missing = Object.keys(input.changes).filter((name) => !current.has(name));
+  if (missing.length > 0 && LEGACY_STACK_NAMES.has(stackName) && missing.every((name) => NAMED_ENVIRONMENT_ONLY_PARAMETERS.has(name))) {
+    throw agentXError("CONFIG_INVALID", `stack ${stackName} has no ${missing.join(", ")} parameter; that setting exists only in environments installed with agentx init, not in the legacy deployment; nothing changed`);
+  }
   if (missing.length > 0 && label === "config") {
     throw agentXError("CONFIG_INVALID", `stack ${stackName} has no ${missing.join(", ")} parameter; it runs an older AgentX release, so upgrade it with agentx upgrade, then run this again`);
   }

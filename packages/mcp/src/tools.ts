@@ -25,6 +25,14 @@ export interface ToolContext {
   newRequestId(): string;
   /** Spec 025 A14: the admin sign-in's client; absent when the server has none. */
   admin?: AdminControlPlaneClient;
+  /** Spec 025 FR-051: the MCP client's own version, as it reported it. */
+  clientVersion?: string;
+  /**
+   * Spec 025 FR-041: the confirmation methods the environment allows and the signed-in admin can
+   * use (Slack needs their Slack link). The server adds the client's own: the pop-up needs a
+   * client that declared form elicitation. Absent, no change can be confirmed.
+   */
+  confirmation?(): Promise<{ elicitation: boolean; slack: boolean }>;
 }
 export interface ToolCall {
   signal: AbortSignal;
@@ -32,6 +40,11 @@ export interface ToolCall {
   /** The server's memory of request IDs made for calls that left request_id out. */
   requestIds?: RequestIdMemory;
   log?(entry: Record<string, unknown>): void;
+  /**
+   * Spec 025 FR-041: the client's own pop-up, asking yes or no; absent when the client declared no
+   * form elicitation. "failed" when it could not be shown or answered in time.
+   */
+  elicit?(message: string, timeoutMs: number, signal: AbortSignal): Promise<"accept" | "decline" | "cancel" | "failed">;
 }
 export interface ToolResult { structured: Record<string, unknown>; text: string }
 export interface ToolDefinition {
@@ -157,7 +170,7 @@ function instructions(value: unknown): string {
  * The caller's request_id, else one remembered for this call's content for 15 minutes, so an
  * unchanged retry (after the AI tool's own timeout, say) reaches AgentX as the same request.
  */
-function requestIdFor(context: ToolContext, call: ToolCall, input: Record<string, unknown>, content: readonly unknown[], group?: string): string {
+export function requestIdFor(context: ToolContext, call: ToolCall, input: Record<string, unknown>, content: readonly unknown[], group?: string): string {
   const given = input.request_id as string | undefined;
   if (given !== undefined) return given;
   return call.requestIds === undefined ? context.newRequestId() : call.requestIds.idFor(content, context.now(), () => context.newRequestId(), group);

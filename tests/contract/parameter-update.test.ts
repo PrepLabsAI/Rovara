@@ -119,4 +119,22 @@ describe("parameter-only stack updates (R6)", () => {
     const result = await updateStackParameters({ cloudFormation: flaky, stackName: STACK, roleArn: ROLE, changes: { SlackTeamId: "T0TEAM1" }, confirm: async () => true, write: () => undefined, sleep: async () => undefined, pollMs: 1 });
     expect(result).toEqual({ changed: true });
   });
+
+  // Spec 025 E16: McpConfirmElicitation is declared only by named environments' templates, so the
+  // legacy deployment is told the setting is not there, not to upgrade.
+  it("says a named-environment-only setting does not exist on the legacy deployment", async () => {
+    const cf = fakeCloudFormation({ parameters: { CallbackSigningKey: "****" } });
+    const legacy = (changes: Record<string, string>) =>
+      updateStackParameters({ cloudFormation: cf, stackName: "AgentXControlPlane", roleArn: ROLE, changes, label: "config", confirm: async () => true, write: () => undefined, sleep: async () => undefined, pollMs: 1 });
+    await expect(legacy({ McpConfirmElicitation: "disabled" })).rejects.toThrow("stack AgentXControlPlane has no McpConfirmElicitation parameter; that setting exists only in environments installed with agentx init, not in the legacy deployment; nothing changed");
+    expect(cf.calls.map((call) => call.name)).toEqual(["DescribeStacksCommand"]);
+    // Any other missing parameter on the legacy stack keeps the upgrade advice.
+    await expect(legacy({ BudgetScope: "tag" })).rejects.toThrow("stack AgentXControlPlane has no BudgetScope parameter; it runs an older AgentX release, so upgrade it with agentx upgrade, then run this again");
+  });
+
+  it("still asks a named environment on an older release to upgrade for McpConfirmElicitation", async () => {
+    const cf = fakeCloudFormation({ parameters: { CallbackSigningKey: "****" } });
+    await expect(updateStackParameters({ cloudFormation: cf, stackName: STACK, roleArn: ROLE, changes: { McpConfirmElicitation: "disabled" }, label: "config", confirm: async () => true, write: () => undefined, sleep: async () => undefined, pollMs: 1 }))
+      .rejects.toThrow(`stack ${STACK} has no McpConfirmElicitation parameter; it runs an older AgentX release, so upgrade it with agentx upgrade, then run this again`);
+  });
 });

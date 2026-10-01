@@ -22,6 +22,7 @@ import {
 import {
   AgentXError,
   CHANNEL_TURN_REQUEST_MAX,
+  CONNECTOR_SECRET_PREFIX,
   ChannelTurnSchema,
   DEVELOPER_TASK_OWNER_ISSUER,
   SharedTaskRecordSchema,
@@ -88,11 +89,18 @@ import {
   type ProjectModelOptions,
   projectCatalogKey,
   type ChannelMembersRequest,
+  isAdminChangePressEvent,
+  type AdminChangeOutcome,
+  type AdminChangePressEvent,
   INDEX_EXPIRY_ATTRIBUTE,
   indexExpiresAt,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
-import { queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
+import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
+import { outcomeMetric } from "./admin-change-audit.js";
+import { pressAdminChange, routeAdminChange, type AdminChangeDependencies } from "./admin-changes.js";
+import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans.js";
+import { ZodError } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
@@ -104,10 +112,10 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
-import { completedTurn, developerFooter, inertName, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
+import { aiToolTurn, completedTurn, developerFooter, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { hashJson, isConditional, isTemporaryAwsError, workerPrompt } from "./broker-shared.js";
-import { channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration } from "./developer-routes.js";
+import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, finishTaskClose } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
@@ -290,6 +298,8 @@ interface AwsBrokerDependencies {
   slackThreadsTableName?: string;
   /** Spec 025 phase 25d: the admin read routes' injected probes and clock; the defaults serve production. */
   adminReads?: Partial<Pick<AdminReadDependencies, "me" | "health" | "now" | "log">>;
+  /** Spec 025 phase 25e: the admin changes' method switch, clock and metric; the defaults serve production. */
+  adminChanges?: { confirm?: { elicitation: boolean; slack: boolean }; now?: () => number; metric?: (outcome: AdminChangeOutcome) => void };
   /** Spec 043: SWE-bench runs; absent in a harness that does not exercise them. */
   swebench?: Pick<SwebenchDependencies, "deployment" | "startExecution" | "now">;
 }
@@ -357,6 +367,96 @@ function adminReadDependencies(dependencies: AwsBrokerDependencies): AdminReadDe
     now: Date.now,
     log: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
     ...dependencies.adminReads,
+  };
+}
+
+/** Spec 025 phase 25e: the existing admin handlers a confirmed change applies through (FR-040). */
+function adminChangeHandlers(dependencies: AwsBrokerDependencies): AdminChangeHandlers {
+  return {
+    requireAdministrator: (identity, project) => requireAdministrator(dependencies, identity, project),
+    bindChannel: async (identity, teamId, channelId, project) => putSlackBinding(dependencies, identity, teamId, channelId, { projectName: project }),
+    unbindChannel: async (identity, teamId, channelId) => deleteSlackBinding(dependencies, identity, teamId, channelId),
+    checkRevision: async (identity, definitionValue, runtimeBindingValue, options) => {
+      if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+      let definition: ProjectDefinition;
+      try {
+        ({ definition } = parseRegistrationInput({ definition: definitionValue, runtimeBinding: runtimeBindingValue }));
+      } catch (error) {
+        // registerProject answers a schema failure as the route does; a plan names the first problem.
+        if (!(error instanceof ZodError)) throw error;
+        const issue = error.issues[0];
+        throw agentXError("CONFIG_INVALID", `the project definition is invalid: ${issue?.path.join(".") || "definition"}: ${issue?.message ?? "invalid"}; fix it and plan again`);
+      }
+      if (await getItem(dependencies, projectKey(definition.name, definition.revision)) !== undefined) {
+        throw agentXError("CONFIG_INVALID", `revision ${definition.revision} of ${definition.name} is already registered; use a newer revision number`);
+      }
+      // C8: the vendor preflight runs here, at planning, and never again at apply: neither in the
+      // apply's re-plan (preflight: false, final review M1) nor in its registration.
+      const preflight = await registrationChecks(dependencies, identity, definition, options?.preflight !== false);
+      return { definition, warnings: registrationWarnings(toolBudget(approvedToolCount(definition)).warning, preflight) };
+    },
+    registerRevision: async (identity, definition, runtimeBinding) => {
+      // E6, FR-015: the applier must still administer the project; registerProject itself checks only the claim.
+      await requireAdministrator(dependencies, identity, definition.name);
+      return registerProject(dependencies, identity, { definition, runtimeBinding, preflight: false });
+    },
+    registerCredential: async (identity, registration) => {
+      if (!dependencies.credentialRegistry) throw agentXError("RUNTIME_UNAVAILABLE", "connector credentials are not configured in this deployment; ask whoever deploys AgentX to set them up");
+      return dependencies.credentialRegistry.register(identity, registration);
+    },
+    cancelWorkspaceTask: async (identity, workspaceId) => cancelWorkspaceTask(dependencies, identity, workspaceId),
+  };
+}
+
+/** Spec 025 phase 25e: what change plans read and apply through; tests build it the same way. */
+export function createPlanDependencies(input: AwsBrokerInput): PlanDependencies {
+  return planDependencies(brokerDependencies(input));
+}
+
+function planDependencies(dependencies: AwsBrokerDependencies): PlanDependencies {
+  const developer = dependencies.developer;
+  const registry = dependencies.credentialRegistry;
+  return {
+    reads: adminReadDependencies(dependencies),
+    actions: {
+      documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+      ...(developer === undefined ? {} : { signInTableName: developer.signInTableName }),
+      ...(developer?.slackTeamId === undefined ? {} : { slackTeamId: developer.slackTeamId }),
+      limitDefaults: { member: dependencies.slack?.memberWorkspaceLimit ?? 3, organization: dependencies.slack?.organizationWorkspaceLimit ?? 20 },
+      ...(developer?.endDeveloperSessions === undefined ? {} : { endDeveloperSessions: developer.endDeveloperSessions }),
+      now: Date.now,
+    },
+    handlers: adminChangeHandlers(dependencies),
+    ...(developer?.channelByName === undefined ? {} : { channelByName: developer.channelByName }),
+    ...(registry === undefined ? {} : { credentials: registry, builtInCredentialRef: registry.builtInRef }),
+    // C5: the prefix the registry itself enforces.
+    connectorSecretPrefix: registry?.connectorSecretPrefix ?? CONNECTOR_SECRET_PREFIX,
+  };
+}
+
+/** Spec 025 phase 25e: admin changes exist only with developer sign-in and a TurnRecords table (D14). */
+function adminChangeDependencies(dependencies: AwsBrokerDependencies, reads: AdminReadDependencies): AdminChangeDependencies | undefined {
+  const developer = dependencies.developer;
+  if (developer === undefined || dependencies.turnRecordsTableName === undefined) return undefined;
+  const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "broker", ...entry }));
+  const reader = adminReader(reads);
+  const now = dependencies.adminChanges?.now ?? Date.now;
+  return {
+    documentClient: dependencies.documentClient,
+    tableName: dependencies.tableName,
+    audit: {
+      documentClient: dependencies.documentClient, tableName: dependencies.turnRecordsTableName, log,
+      metric: dependencies.adminChanges?.metric ?? outcomeMetric(process.env.AGENTX_METRICS_NAMESPACE || "AgentX"),
+    },
+    plans: planDependencies(dependencies),
+    ...(reader === undefined ? {} : { identity: reader }),
+    ...(developer.slackTeamId === undefined ? {} : { slackTeamId: developer.slackTeamId }),
+    // E16: the environment's pop-up switch. R5: Slack is a method wherever a Slack team is set up,
+    // whatever Slack sign-in says; each change still needs the admin's own linked Slack user (FR-041).
+    confirm: dependencies.adminChanges?.confirm ?? { elicitation: process.env.MCP_CONFIRM_ELICITATION !== "disabled", slack: developer.slackTeamId !== undefined },
+    now,
+    newId: randomUUID,
+    log,
   };
 }
 
@@ -479,7 +579,18 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   // Spec 025: the broker actions the developer task routes call, built once per handler.
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  const adminChanges = adminChangeDependencies(dependencies, adminReads);
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | AdminChangePressEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+    // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
+    if (isAdminChangePressEvent(event)) {
+      if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
+      try {
+        return json(await pressAdminChange(adminChanges, event), "slack-ingress");
+      } catch (error) {
+        console.log(JSON.stringify({ component: "broker", event: "admin_change.press_failed", changeId: event.changeId, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
+        return json({ outcome: "failed", changeId: event.changeId }, "slack-ingress", 500);
+      }
+    }
     if (isSlackStopTaskEvent(event)) {
       try {
         return json(await stopSlackThreadTask(dependencies, event), "slack-ingress");
@@ -574,6 +685,9 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         adminValues: dependencies.adminValues,
       });
       const body = parseBody(request.body);
+      // Spec 025 phase 25e: admin changes (FR-039 to FR-041, FR-052).
+      const changed = await routeAdminChange(adminChanges, identity, { method: request.method, headers: request.headers, body }, url);
+      if (changed !== undefined) return json(changed.body, request.requestId, changed.status);
       // Spec 025 phase 25d: the admin read routes (FR-038), each behind the admin claim (A2).
       const adminRead = await routeAdminRead(adminReads, identity, request, url);
       if (adminRead !== undefined) return json(adminRead, request.requestId);
@@ -835,13 +949,8 @@ function gitHubContext(identity: AuthenticatedIdentity, workspace: WorkspaceInst
   };
 }
 
-async function registerProject(
-  dependencies: AwsBrokerDependencies,
-  identity: AuthenticatedIdentity,
-  value: unknown,
-  checked?: { report?: RegistrationPreflight },
-): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean; warnings?: string[]; preflight?: RegistrationPreflight }> {
-  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+/** The registration request's parse, shared by registerProject and a change plan (spec 025 C4). */
+function parseRegistrationInput(value: unknown): { definition: ProjectDefinition; runtimeBinding: ReturnType<typeof parseRuntimeBinding>; wantsPreflight: boolean } {
   const input = object(value, "project registration");
   const retired = legacyProjectFields(input.definition);
   if (retired.length > 0) {
@@ -850,7 +959,36 @@ async function registerProject(
   const definition = ProjectDefinitionSchema.parse(input.definition);
   const runtimeBinding = parseRuntimeBinding(input.runtimeBinding);
   // Preflight contacts the vendor, so it runs only when the caller asks; older clients never do.
-  const wantsPreflight = input.preflight === true;
+  return { definition, runtimeBinding, wantsPreflight: input.preflight === true };
+}
+
+/** Registration's refusals and preflight, for a new revision; registerProject and a change plan share them. */
+async function registrationChecks(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, definition: ProjectDefinition, wantsPreflight: boolean): Promise<RegistrationPreflight | undefined> {
+  const budget = toolBudget(approvedToolCount(definition));
+  const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
+  const nameProblems = presentedNameProblems(definition);
+  if (nameProblems.length > 0) throw agentXError("CONFIG_INVALID", nameProblems.join("; "));
+  if (budget.refusal) throw agentXError("CONFIG_INVALID", budget.refusal);
+  const credentialProblems = await credentialRefusals(connectors(), dependencies.credentialRegistry);
+  if (credentialProblems.length > 0) throw agentXError("CONFIG_INVALID", credentialProblems.join("; "));
+  // A repository the GitHub App cannot reach would otherwise fail only at prepare (#123).
+  for (const repository of definition.repositories) {
+    await dependencies.checkRepositoryAccess?.(repository);
+  }
+  if (!wantsPreflight) return undefined;
+  const result = await preflightConnectors(connectors(), definition, identity.ownerKey);
+  if (result.refusals.length > 0) throw agentXError("CONFIG_INVALID", result.refusals.join("; "));
+  return result.report;
+}
+
+async function registerProject(
+  dependencies: AwsBrokerDependencies,
+  identity: AuthenticatedIdentity,
+  value: unknown,
+  checked?: { report?: RegistrationPreflight },
+): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean; warnings?: string[]; preflight?: RegistrationPreflight }> {
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+  const { definition, runtimeBinding, wantsPreflight } = parseRegistrationInput(value);
   const budget = toolBudget(approvedToolCount(definition));
   const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
   const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: RegistrationPreflight | undefined) => {
@@ -875,21 +1013,7 @@ async function registerProject(
       ?? (wantsPreflight ? (await preflightConnectors(connectors(), definition, identity.ownerKey)).report : undefined);
     return respond(withoutKeys(existing), true, preflight);
   }
-  const nameProblems = presentedNameProblems(definition);
-  if (nameProblems.length > 0) throw agentXError("CONFIG_INVALID", nameProblems.join("; "));
-  if (budget.refusal) throw agentXError("CONFIG_INVALID", budget.refusal);
-  const credentialProblems = await credentialRefusals(connectors(), dependencies.credentialRegistry);
-  if (credentialProblems.length > 0) throw agentXError("CONFIG_INVALID", credentialProblems.join("; "));
-  // A repository the GitHub App cannot reach would otherwise fail only at prepare (#123).
-  for (const repository of definition.repositories) {
-    await dependencies.checkRepositoryAccess?.(repository);
-  }
-  let preflight: RegistrationPreflight | undefined;
-  if (wantsPreflight) {
-    const result = await preflightConnectors(connectors(), definition, identity.ownerKey);
-    if (result.refusals.length > 0) throw agentXError("CONFIG_INVALID", result.refusals.join("; "));
-    preflight = result.report;
-  }
+  const preflight = await registrationChecks(dependencies, identity, definition, wantsPreflight);
   const now = new Date().toISOString();
   const record: RegisteredProjectRecord = {
     ...key,
@@ -3705,6 +3829,31 @@ async function completedTurnItems(
       ended = { operation: target, status: cancelledTargetStatus(terminalStatus) };
     }
   }
+  // E20 (25c C22): a close that did not close gets its completed record in the preflight result's
+  // transaction: refused for unpublished work, or the check's own outcome when it did not finish.
+  // A safe preflight's record is finishTaskClose's, which writes it with the close.
+  if (operation.kind === "close") {
+    const requester = operation.requestedBy;
+    const preflight = terminalStatus === "SUCCEEDED" ? WorkspaceClosePreflightResultSchema.safeParse(outcome.result) : undefined;
+    const refusal = preflight?.success === true && !preflight.data.safeToClose
+      ? `Not closed: unpublished work in ${preflight.data.repositories.map((repository) => `${repository.name} (${repository.reasons.join(", ")})`).join("; ")}`
+      : undefined;
+    const unfinished = terminalStatus !== "SUCCEEDED";
+    if ((refusal !== undefined || unfinished) && requester !== undefined && "kind" in requester && requester.kind === "developer") {
+      const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+      if (task === undefined) {
+        // The pointer and the task are written in one transaction, so this is not expected.
+        console.log(JSON.stringify({ component: "broker", event: "developer.task_record_missing", taskId: pointer.taskId, operationId: operation.id }));
+        return [];
+      }
+      return [{ Put: { TableName: table, Item: aiToolTurn({
+        party: partyOfTask(task), turnId: operation.id, operationId: operation.id, action: "close", phase: "completed",
+        outcome: refusal !== undefined ? "refused" : OUTCOME[terminalStatus] ?? "failed",
+        receivedAt: operation.createdAt, finishedAt: now, request: "close",
+        response: refusal ?? "Not closed: the check for unpublished work did not finish",
+      }), ConditionExpression: "attribute_not_exists(pk)" } }];
+    }
+  }
   if (ended === undefined) return [];
   // F3: a teammate's operation from a continue thread gets an ordinary Slack turn record (FR-037,
   // FR-054), never an AI-tool record under the developer's name.
@@ -3861,7 +4010,7 @@ async function recordTerminalResult(
     }
     throw agentXError("STALE_FENCE", "terminal callback no longer owns the workspace");
   }
-  if (closePreflight?.safeToClose === true && taskPointer !== undefined) await finishDeveloperClose(dependencies, taskPointer, operation.id);
+  if (closePreflight?.safeToClose === true && taskPointer !== undefined) await finishDeveloperClose(dependencies, taskPointer, operation.id, operation.createdAt);
   if (recordedStatus !== terminalStatus) return { ...operation, status: recordedStatus, updatedAt: now, error: FIRST_TASK_QUEUE_FAILED };
   return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
 }
@@ -3872,14 +4021,14 @@ async function recordTerminalResult(
  * close); the worker's callback never fails because of it. A Slack workspace has no pointer and
  * keeps its own completion flow.
  */
-async function finishDeveloperClose(dependencies: AwsBrokerDependencies, pointer: DeveloperTaskPointerRecord, operationId: string): Promise<void> {
+async function finishDeveloperClose(dependencies: AwsBrokerDependencies, pointer: DeveloperTaskPointerRecord, operationId: string, requestedAt: string): Promise<void> {
   try {
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
     if (task === undefined) {
       console.log(JSON.stringify({ component: "broker", event: "developer.task_record_missing", taskId: pointer.taskId, operationId }));
       return;
     }
-    await finishTaskClose({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies), documentClient: dependencies.documentClient }, task, operationId);
+    await finishTaskClose({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies), documentClient: dependencies.documentClient }, task, operationId, [], requestedAt);
   } catch (error) {
     console.log(JSON.stringify({ component: "broker", event: "developer.task_close_failed", taskId: pointer.taskId, operationId, error: error instanceof Error ? error.name : "unknown" }));
   }
@@ -4704,6 +4853,8 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
     channelInfo: channelInfoThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     slackUserByEmail: slackUserByEmailThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     slackAuthCheck: slackAuthCheckThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    endDeveloperSessions: endDeveloperSessionsThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
+    channelByName: channelByNameThroughLambda((payload) => lambdaClient.send(new InvokeCommand({ FunctionName: functionName, Payload: payload }))),
     // D17: kept for the Lambda's lifetime; an unknown kid refetches at most once a minute.
     verifyAccessToken: developerTokenVerifier({
       issuer,

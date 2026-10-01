@@ -67,7 +67,7 @@ export const OPERATOR_PARAMETERS: Readonly<Record<DeployPart, readonly string[]>
   foundation: [],
   identity: [],
   runtime: [],
-  "control-plane": ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit"],
+  "control-plane": ["BudgetMonthlyUsd", "BudgetScope", "SlackAppPostedMessages", "SlackThreadTurnsPerMinute", "SlackMemberWorkspaceLimit", "SlackOrganizationWorkspaceLimit", "McpConfirmElicitation"],
   slack: ["SlowTurnMinutes"],
 };
 

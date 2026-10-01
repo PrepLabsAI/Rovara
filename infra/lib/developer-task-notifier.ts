@@ -84,6 +84,12 @@ export class DeveloperTaskNotifier extends Construct {
       resources: [props.state.tableArn],
       conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SHARED_TASK#*"] } },
     }));
+    // Spec 025 E13: the notifier reads a change and records its message (dm, dmClaimedAt), by key.
+    this.function.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["dynamodb:GetItem", "dynamodb:UpdateItem"],
+      resources: [props.state.tableArn],
+      conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ADMIN_CHANGE#*"] } },
+    }));
     // C7: the State table's stream has two readers, the outbox publisher (control-plane.ts,
     // OutboxStreamMapping) and this notifier: the per-shard maximum AWS recommends. Later phases
     // (such as 25e's Slack Confirm DMs) add filters to an existing trigger, never a third reader.
@@ -104,6 +110,8 @@ export class DeveloperTaskNotifier extends Construct {
           requestedBy: { M: { kind: { S: equals("developer") } } },
           status: { S: oneOf(TERMINAL) },
         } } }),
+        // Spec 025 E13: admin changes whose Slack step started, and changes with a message that ended.
+        lambda.FilterCriteria.filter({ dynamodb: { NewImage: { entityType: { S: equals("ADMIN_CHANGE") } } } }),
       ],
     });
     new lambda.EventSourceMapping(this, "NoticeQueueMapping", {

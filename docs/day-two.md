@@ -162,14 +162,15 @@ place:
 | `models.orchestrator` | stack parameter ModelId on agentx-<env>-slack, and the settings | from init | tested with one call first |
 | `models.classifier` | stack parameter GateClassifierModelId on agentx-<env>-slack, and the settings | from init | tested with one call first |
 | `models.worker` | stack parameter ModelId on agentx-<env>-runtime, and the settings | from init | tested with one call first |
-| `limits.workspacesPerMember` | control-plane setting WORKSPACE_LIMITS.perPerson (install-time default SlackMemberWorkspaceLimit) | 3 | changed with spec 025 phase 25e's admin tool |
-| `limits.workspacesPerOrg` | control-plane setting WORKSPACE_LIMITS.perOrganization (install-time default SlackOrganizationWorkspaceLimit) | 20 | changed with spec 025 phase 25e's admin tool |
+| `limits.workspacesPerMember` | control-plane setting WORKSPACE_LIMITS.perPerson (install-time default SlackMemberWorkspaceLimit) | 3 | 1 to 50; changes through the admin change path, with the admin sign-in (`agentx --env <env> login --admin`) |
+| `limits.workspacesPerOrg` | control-plane setting WORKSPACE_LIMITS.perOrganization (install-time default SlackOrganizationWorkspaceLimit) | 20 | 1 to 1000; changes through the admin change path, with the admin sign-in |
 | `limits.threadTurnsPerMinute` | stack parameter SlackThreadTurnsPerMinute on agentx-<env>-control-plane | 6 | 1 to 60 |
 | `slack.appPostedMessages` | stack parameter SlackAppPostedMessages on agentx-<env>-control-plane | accept | accept or ignore |
 | `alerts.address` | SSM /agentx/<env>/settings (alertAddress) | none | a webhook comes from --value-file or --value-env |
 | `alerts.slowTurnMinutes` | stack parameter SlowTurnMinutes on agentx-<env>-slack | 5 | 1 to 60 |
 | `budget.monthlyUsd` | stack parameter BudgetMonthlyUsd on agentx-<env>-control-plane | 0 | 0 for none |
 | `budget.scope` | stack parameter BudgetScope on agentx-<env>-control-plane | tag | tag or account |
+| `mcp.confirmElicitation` | stack parameter McpConfirmElicitation on agentx-<env>-control-plane | enabled | enabled or disabled; disabled leaves only the Slack Confirm button or the CLI to confirm an admin change |
 
 - **Models.** A new model must answer a one-token call before anything changes. `set` then
   updates the stack, the settings and the install answers, so `upgrade` and `init --resume` keep

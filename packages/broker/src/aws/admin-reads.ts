@@ -212,22 +212,31 @@ export function adminReader(deps: AdminReadDependencies): ReturnType<typeof admi
   return reader;
 }
 
+/**
+ * A11 (Q7): which of the private channels a Slack user is a member of. Any failed answer names
+ * none, so a private channel stays ID only. 25e's change plans ask it for the planning admin.
+ */
+export async function privateChannelsFor(deps: Pick<AdminReadDependencies, "channelMembers">, slackUserId: string, privateIds: readonly string[]): Promise<ReadonlySet<string>> {
+  const members = deps.channelMembers;
+  if (members === undefined) return new Set();
+  const memberOf = new Set<string>();
+  for (let start = 0; start < privateIds.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
+    const answer = await members({ kind: "channel-members", slackUserId, channelIds: privateIds.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) });
+    if (!answer.ok) return new Set();
+    for (const channelId of answer.memberOf) memberOf.add(channelId);
+  }
+  return memberOf;
+}
+
 /** A11 (Q7): which of the private channels the admin's linked Slack user (A12) is a member of. */
 function memberReveal(deps: AdminReadDependencies, identity: AuthenticatedIdentity, authorization: string | undefined): ((privateIds: string[]) => Promise<ReadonlySet<string>>) | undefined {
   const reader = adminReader(deps);
-  const members = deps.channelMembers;
-  if (reader === undefined || members === undefined) return undefined;
+  if (reader === undefined || deps.channelMembers === undefined) return undefined;
   // Asked only when a private channel is bound, so a list of public channels needs no userinfo call.
   return async (privateIds) => {
     const slackUserId = (await reader.me(identity, authorization)).slack.userId;
     if (slackUserId === undefined) return new Set();
-    const memberOf = new Set<string>();
-    for (let start = 0; start < privateIds.length; start += CHANNEL_MEMBERS_MAX_CHANNELS) {
-      const answer = await members({ kind: "channel-members", slackUserId, channelIds: privateIds.slice(start, start + CHANNEL_MEMBERS_MAX_CHANNELS) });
-      if (!answer.ok) return new Set();
-      for (const channelId of answer.memberOf) memberOf.add(channelId);
-    }
-    return memberOf;
+    return privateChannelsFor(deps, slackUserId, privateIds);
   };
 }
 
