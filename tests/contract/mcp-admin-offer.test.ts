@@ -7,7 +7,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ToolListChangedNotificationSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { DEVELOPER_TOOLS, ToolError, ToolOffer, createAgentXMcpServer, guardTransport, type AdminOffer, type ToolContext, type ToolDefinition } from "../../packages/mcp/src/index.js";
+import { DEVELOPER_TOOLS, FIRST_LIST_WAIT_MS, ToolError, ToolOffer, createAgentXMcpServer, guardTransport, type AdminOffer, type ToolContext, type ToolDefinition } from "../../packages/mcp/src/index.js";
 import { toolError } from "../support/mcp-tool-error.js";
 
 const probe: ToolDefinition = {
@@ -278,5 +278,153 @@ describe("the hidden-tool guard (A15)", () => {
     guarded.onerror = (error) => errors.push(error.message);
     inner.onmessage?.({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "agentx_admin_probe" } });
     await vi.waitFor(() => expect(errors).toEqual(["pipe broken"]));
+  });
+});
+
+/** A test tool with the given name, in any group. */
+const testTool = (name: string): ToolDefinition => ({ ...probe, name });
+const ADMIN_GROUP = ["agentx_admin_probe", "agentx_admin_probe_2", "agentx_admin_probe_3"].map(testTool);
+const AUDIT_GROUP = [testTool("agentx_admin_audit_probe")];
+const CHANGE_GROUP = ["agentx_admin_change_probe", "agentx_admin_change_probe_2"].map(testTool);
+const ALL_ADMIN = [...ADMIN_GROUP, ...AUDIT_GROUP, ...CHANGE_GROUP].map((tool) => tool.name);
+const allOffered: AdminOffer = { admin: undefined, audit: undefined, changes: undefined };
+
+/**
+ * Issue 203: a client spoken to with raw JSON-RPC, the way Codex speaks: initialize with no
+ * capabilities, notifications/initialized, then tools/list at once. Every message the server sends
+ * is kept, so the test can count list_changed exactly.
+ */
+async function rawClient(options: { adminOffer: () => Promise<AdminOffer>; recheckMs?: number; firstListWaitMs?: number }) {
+  const context = (): ToolContext => ({
+    client: {} as never, clientName: "codex", serverVersion: "0.5.0", adminSignedIn: async () => true,
+    compatibility: async () => ({ env: "staging", apiVersion: "1.2", adminApiVersion: "1.1" }), now: () => 0, sleep: async () => undefined, newRequestId: () => "33333333-3333-4333-8333-333333333333",
+  });
+  const server = createAgentXMcpServer({
+    version: "0.5.0", context, adminTools: ADMIN_GROUP, auditTools: AUDIT_GROUP, changeTools: CHANGE_GROUP, adminOffer: options.adminOffer, recheckMs: options.recheckMs ?? 60_000,
+    ...(options.firstListWaitMs === undefined ? {} : { firstListWaitMs: options.firstListWaitMs }),
+  });
+  const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+  const received: JSONRPCMessage[] = [];
+  const waiting = new Map<number, (message: JSONRPCMessage) => void>();
+  clientSide.onmessage = (message) => {
+    received.push(message);
+    if ("id" in message && typeof message.id === "number" && ("result" in message || "error" in message)) waiting.get(message.id)?.(message);
+  };
+  await server.connect(serverSide);
+  await clientSide.start();
+  let nextId = 1;
+  const request = (method: string, params?: Record<string, unknown>): Promise<JSONRPCMessage> => {
+    const id = nextId;
+    nextId += 1;
+    const answered = new Promise<JSONRPCMessage>((resolve) => { waiting.set(id, resolve); });
+    void clientSide.send({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) });
+    return answered;
+  };
+  const listNames = async (): Promise<string[]> => {
+    const answer = await request("tools/list");
+    return ((answer as unknown as { result: { tools: Array<{ name: string }> } }).result.tools).map((tool) => tool.name);
+  };
+  const listChanged = () => received.filter((message) => "method" in message && message.method === "notifications/tools/list_changed").length;
+  await request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "codex", version: "0.1.0" } });
+  await clientSide.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+  return { server, request, listNames, listChanged };
+}
+const settle = () => new Promise<void>((resolve) => { setTimeout(resolve, 50); });
+
+describe("the first tools/list and list_changed (issue 203)", () => {
+  it("answers a client that lists once, right after initialize, with the admin tools the sign-in allows", async () => {
+    const { server, listNames } = await rawClient({ adminOffer: async () => { await new Promise((resolve) => { setTimeout(resolve, 100); }); return allOffered; } });
+    expect(await listNames()).toEqual([...DEVELOPER_TOOLS.map((tool) => tool.name), ...ALL_ADMIN]);
+    await server.close();
+  });
+
+  it("sends exactly one list_changed when one refresh adds many tools", async () => {
+    const offer = { current: signedOut as AdminOffer };
+    const { server, request, listNames, listChanged } = await rawClient({ adminOffer: async () => offer.current });
+    expect(await listNames()).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));
+    await settle();
+    expect(listChanged()).toBe(0);
+    offer.current = allOffered;
+    // A15: any tool call rechecks.
+    await request("tools/call", { name: "agentx_whoami", arguments: {} });
+    await vi.waitFor(async () => expect(await listNames()).toEqual([...DEVELOPER_TOOLS.map((tool) => tool.name), ...ALL_ADMIN]));
+    await settle();
+    expect(listChanged()).toBe(1);
+    await server.close();
+  });
+
+  it("sends exactly one list_changed when the sign-in expires and the timer removes every admin tool", async () => {
+    const offer = { current: allOffered };
+    const { server, listNames, listChanged } = await rawClient({ adminOffer: async () => offer.current, recheckMs: 25 });
+    expect(await listNames()).toEqual([...DEVELOPER_TOOLS.map((tool) => tool.name), ...ALL_ADMIN]);
+    await settle();
+    const before = listChanged();
+    offer.current = signedOut;
+    await vi.waitFor(async () => expect(await listNames()).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name)));
+    // Several more timer rechecks, none of which changes anything.
+    await new Promise((resolve) => { setTimeout(resolve, 150); });
+    expect(listChanged() - before).toBe(1);
+    await server.close();
+  });
+
+  it("answers the first tools/list with the developer tools within the bound when the check hangs, then announces the admin tools once", async () => {
+    let release: (offer: AdminOffer) => void = () => undefined;
+    const { server, listNames, listChanged } = await rawClient({ adminOffer: () => new Promise<AdminOffer>((resolve) => { release = resolve; }), firstListWaitMs: 200 });
+    const started = Date.now();
+    expect(await listNames()).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));
+    expect(Date.now() - started).toBeLessThan(2_000);
+    release(allOffered);
+    await vi.waitFor(() => expect(listChanged()).toBe(1));
+    expect(await listNames()).toEqual([...DEVELOPER_TOOLS.map((tool) => tool.name), ...ALL_ADMIN]);
+    await server.close();
+  });
+
+  it("answers the first tools/list with the developer tools at once when the check fails", async () => {
+    const { server, listNames } = await rawClient({ adminOffer: async () => { throw new Error("keychain locked"); }, firstListWaitMs: 10_000 });
+    const started = Date.now();
+    expect(await listNames()).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));
+    expect(Date.now() - started).toBeLessThan(2_000);
+    await server.close();
+  });
+
+  it("waits a few seconds by default for the first check, never longer", () => {
+    expect(FIRST_LIST_WAIT_MS).toBe(5_000);
+  });
+});
+
+describe("the guard's hold on the first tools/list (issue 203)", () => {
+  it("holds the first tools/list and everything after it until the check settles, then delivers them in order; later lists pass at once", async () => {
+    const { inner } = fakeTransport();
+    let release: () => void = () => undefined;
+    const ready = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
+    const guarded = guardTransport(inner, () => undefined, answer, ready);
+    const seen: JSONRPCMessage[] = [];
+    guarded.onmessage = (message) => { seen.push(message); };
+    const before: JSONRPCMessage = { jsonrpc: "2.0", method: "notifications/initialized" };
+    const list: JSONRPCMessage = { jsonrpc: "2.0", id: 2, method: "tools/list" };
+    const after: JSONRPCMessage = { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "agentx_whoami", arguments: {} } };
+    inner.onmessage?.(before);
+    inner.onmessage?.(list);
+    inner.onmessage?.(after);
+    expect(seen).toEqual([before]);
+    release();
+    await vi.waitFor(() => expect(seen).toEqual([before, list, after]));
+    const again: JSONRPCMessage = { jsonrpc: "2.0", id: 4, method: "tools/list" };
+    inner.onmessage?.(again);
+    expect(seen).toEqual([before, list, after, again]);
+    expect(ready).toHaveBeenCalledTimes(1);
+  });
+
+  it("delivers nothing held once the connection closes", async () => {
+    const { inner } = fakeTransport();
+    let release: () => void = () => undefined;
+    const guarded = guardTransport(inner, () => undefined, answer, () => new Promise<void>((resolve) => { release = resolve; }));
+    const seen: JSONRPCMessage[] = [];
+    guarded.onmessage = (message) => { seen.push(message); };
+    inner.onmessage?.({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+    await guarded.close();
+    release();
+    await new Promise((resolve) => { setTimeout(resolve, 10); });
+    expect(seen).toEqual([]);
   });
 });
