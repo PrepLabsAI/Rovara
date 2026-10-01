@@ -5,7 +5,7 @@
 // parameter at its digest. The broker reads that parameter per run, so no other release is needed.
 // A production write: run it yourself, after the eval stack is deployed (docs/swebench-eval.md).
 import { environmentSettingsPrefix, SWEBENCH_SETTING_PARAMETERS } from "@agentx/contracts";
-import { Runner, assertDigestImage, buildAndPushImage, parseReleaseArgs, verifyRepositoryImage } from "./release-common.js";
+import { Runner, assertDigestImage, buildAndPushImage, parseReleaseArgs, splitEnvFlag, verifyRepositoryImage } from "./release-common.js";
 
 const LEGACY_SETTINGS_PREFIX = "/agentx/production/";
 
@@ -14,10 +14,8 @@ if (argv.includes("--help")) {
   process.stdout.write("Usage: npm run swebench:runner-image -- [--env <name>] [--region <region>] [--repository <name>] [--profile <profile>] [--allow-dirty] [--dry-run]\n");
   process.exit(0);
 }
-const envIndex = argv.indexOf("--env");
-const env = envIndex < 0 ? undefined : argv[envIndex + 1];
-if (envIndex >= 0 && (env === undefined || env.startsWith("--"))) throw new Error("--env requires a value");
-const options = parseReleaseArgs(argv.filter((_, index) => index !== envIndex && index !== envIndex + 1));
+const { env, rest } = splitEnvFlag(argv);
+const options = parseReleaseArgs(rest);
 const parameterName = `${env === undefined ? LEGACY_SETTINGS_PREFIX : environmentSettingsPrefix(env)}${SWEBENCH_SETTING_PARAMETERS.runnerImage}`;
 
 const runner = new Runner(options);

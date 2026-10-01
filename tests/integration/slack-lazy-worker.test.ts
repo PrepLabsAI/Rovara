@@ -120,7 +120,7 @@ describe("the lazy worker", () => {
     const h = lazyHarness(started, "FAILED", { wait: async () => ({ status: "FAILED", error }) });
     await h.worker.ensureReady();
     expect(h.posts).toEqual([SETTING_UP, [
-      "AgentX could not set up this thread's workspace (FAILED). Ask an administrator to fix the project's setup commands, then mention me again in this thread to retry.",
+      "AgentX could not set up this thread's workspace (FAILED). The workspace was released, so it no longer counts toward the workspace limit. Ask an administrator to fix the project's setup commands, then mention me again in this thread to start fresh.",
       "Reason: setup step 0 (npm ci in repo/app) exited 1 Last lines: npm ERR! 401 token [REDACTED] &lt;!here&gt;",
     ].join("\n")]);
     expect(JSON.stringify(h.posts)).not.toContain(token.slice(0, 12));
@@ -132,7 +132,7 @@ describe("the lazy worker", () => {
     const h = lazyHarness(started, "FAILED", { wait: async () => ({ status: "FAILED", error: "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request" }) });
     await h.worker.ensureReady();
     expect(h.posts).toEqual([SETTING_UP, [
-      "AgentX could not set up this thread's workspace (FAILED). Mention me again in this thread to retry.",
+      "AgentX could not set up this thread's workspace (FAILED). The workspace was released, so it no longer counts toward the workspace limit. Mention me again in this thread to start fresh.",
       "Reason: RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request",
     ].join("\n")]);
   });
@@ -166,7 +166,7 @@ describe("the lazy worker", () => {
   it("reports a failed setup in the thread and refuses the worker for the rest of the turn", async () => {
     const h = lazyHarness(started, "FAILED");
     expect(await h.worker.ensureReady()).toEqual(unavailableRefusal("workspace setup failed"));
-    expect(h.posts).toEqual([SETTING_UP, "AgentX could not set up this thread's workspace (FAILED). Mention me again in this thread to retry."]);
+    expect(h.posts).toEqual([SETTING_UP, "AgentX could not set up this thread's workspace (FAILED). The workspace was released, so it no longer counts toward the workspace limit. Mention me again in this thread to start fresh."]);
     expect(await h.worker.ensureReady()).toEqual(unavailableRefusal("workspace setup failed"));
     expect(h.prepareWorkspace).toHaveBeenCalledOnce();
     expect(h.logs).toEqual(["workspace.preparation_failed"]);
@@ -393,7 +393,7 @@ describe("Slack formatting of the lazy worker's thread notices (spec 014 FR-022)
   it("escapes a mid-turn setup failure's status, so it cannot notify the channel", async () => {
     const h = lazyHarness(started, HERE);
     await h.worker.ensureReady();
-    expect(h.posts).toEqual([SETTING_UP, `AgentX could not set up this thread's workspace (${ESCAPED}). Mention me again in this thread to retry.`]);
+    expect(h.posts).toEqual([SETTING_UP, `AgentX could not set up this thread's workspace (${ESCAPED}). The workspace was released, so it no longer counts toward the workspace limit. Mention me again in this thread to start fresh.`]);
   });
 
   it("escapes a starter thread's link target in the member limit notice", async () => {
@@ -410,7 +410,7 @@ describe("Slack formatting of the lazy worker's thread notices (spec 014 FR-022)
     failed.waitForOperation.mockResolvedValueOnce({ status: "FAILED", error: "readiness check 1 (npm test in repo/app) exited 1 (and 1 more)" });
     await processSlackRequest(message(), failed.dependencies, { finalAttempt: false });
     expect(failed.posts).toEqual([SETTING_UP, [
-      "AgentX could not set up this thread's workspace (FAILED). Ask an administrator to fix the project's setup commands, then mention me again in this thread to retry.",
+      "AgentX could not set up this thread's workspace (FAILED). The workspace was released, so it no longer counts toward the workspace limit. Ask an administrator to fix the project's setup commands, then mention me again in this thread to start fresh.",
       "Reason: readiness check 1 (npm test in repo/app) exited 1 (and 1 more)",
     ].join("\n")]);
   });
@@ -419,7 +419,7 @@ describe("Slack formatting of the lazy worker's thread notices (spec 014 FR-022)
     const failed = processorHarness(workspaceResult({ status: "PREPARING", operationId, created: true }), async () => "done");
     failed.waitForOperation.mockResolvedValueOnce({ status: HERE });
     await processSlackRequest(message(), failed.dependencies, { finalAttempt: false });
-    expect(failed.posts).toEqual([SETTING_UP, `AgentX could not set up this thread's workspace (${ESCAPED}). Mention me again in this thread to retry.`]);
+    expect(failed.posts).toEqual([SETTING_UP, `AgentX could not set up this thread's workspace (${ESCAPED}). The workspace was released, so it no longer counts toward the workspace limit. Mention me again in this thread to start fresh.`]);
 
     const unavailable = processorHarness(workspaceResult({ status: HERE }), async () => "done");
     await processSlackRequest(message(), unavailable.dependencies, { finalAttempt: false });

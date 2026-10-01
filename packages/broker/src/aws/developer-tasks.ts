@@ -660,7 +660,8 @@ async function taskEvents(deps: DeveloperTaskRouteDependencies, caller: Develope
 }
 
 const CLOSED_TASK = "this task is closed; start a new one with agentx_start_task";
-const NEVER_STARTED = "this task never started; close it with agentx_close_task and start a new one";
+// #213: a failed setup gives its slot back at once; the close only tidies the task away.
+const NEVER_STARTED = "this task never started and its workspace was released, so it no longer counts toward your workspace limit; start a new task with agentx_start_task, and close this one with agentx_close_task";
 const CLOSING_TASK = "this task is closing; check it with agentx_get_task, and if the close is refused for unpublished work you can continue it";
 
 /**

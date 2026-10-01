@@ -1,11 +1,13 @@
 import { GetCommand, TransactWriteCommand, type DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { releaseFailedPreparation } from "./failed-preparation.js";
 import type { DurableOutboxRecord } from "./lambda.js";
 
 /**
  * Fails an outbox record's operation for good: the operation becomes FAILED, the workspace is
  * released (PREPARATION_FAILED after a prepare, READY otherwise; a cancel holds no workspace), and
  * the outbox record becomes FAILED, all in one transaction fenced on the invocation's fence.
- * `whileOutbox` adds a condition on the outbox record's current status.
+ * `whileOutbox` adds a condition on the outbox record's current status. A failed prepare's
+ * workspace then stops counting toward the workspace limits (#213).
  */
 export async function failOutboxOperation(
   documentClient: Pick<DynamoDBDocumentClient, "send">,
@@ -67,12 +69,14 @@ export async function failOutboxOperation(
       } },
     ],
   }));
+  if (record.invocation.kind === "prepare") await releaseFailedPreparation(documentClient, tableName, record.workspaceId);
 }
 
 /**
  * Fails the workspace's active operation, whatever stage it reached, and releases the workspace:
  * for the reconciler when a worker's compute is lost mid-operation (#86). Fenced on the operation's
- * fence, so an operation that finished or was replaced meanwhile is left alone. Returns the failed
+ * fence, so an operation that finished or was replaced meanwhile is left alone. A lost prepare's
+ * workspace stops counting toward the workspace limits (#213). Returns the failed
  * operation's ID, or undefined when there was none to fail.
  */
 export async function failActiveOperation(
@@ -115,6 +119,7 @@ export async function failActiveOperation(
         ExpressionAttributeValues: { ":released": released, ":now": now, ":operation": operationId, ":fence": operation.fence },
       } },
     ] }));
+    if (released === "PREPARATION_FAILED") await releaseFailedPreparation(documentClient, tableName, workspaceId);
     return operationId;
   } catch (failure) {
     if (failure instanceof Error && failure.name === "TransactionCanceledException") return undefined;

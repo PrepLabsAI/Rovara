@@ -21,7 +21,7 @@ async function finished(options: { memberLimit?: number } = {}) {
   return { ...harness, taskId, task, active, close, member };
 }
 
-/** A task whose setup failed: its workspace is PREPARATION_FAILED and it still holds its slot. */
+/** A task whose setup failed: its workspace is PREPARATION_FAILED, and its slot was released (#213). */
 async function setupFailed() {
   const harness = await createDeveloperTaskBroker();
   const response = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "x" });
@@ -241,7 +241,9 @@ describe("closing a task: repeats, races and audit records (R12, R15)", () => {
 
   it("refuses a setup-failed close that fails for another reason with a clear message, and keeps the task", async () => {
     const { db, close, taskId } = await setupFailed();
-    // The organization counter lost this task's charge: not a race, not already released.
+    // A task whose setup failed before #213 still holds its charge, and here the organization
+    // counter lost it: not a race, not already released.
+    Object.assign(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${MAYA.slackUserId}`) as Record<string, unknown>, { count: 1, tasks: new Set([taskId]) });
     (organization(db) as Record<string, unknown>).count = 0;
     const refused = await close();
     expect(refused.body.error).toEqual({ code: "WORKSPACE_BUSY", message: "AgentX could not close this task just now; try agentx_close_task again, and ask an admin if it keeps failing" });

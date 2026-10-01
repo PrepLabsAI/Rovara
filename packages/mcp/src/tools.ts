@@ -129,9 +129,9 @@ function nextFor(task: DeveloperTaskView): string {
       return "Its workspace is released.";
     default:
       // #154: a failure during setup (setup_failed, or compute lost before setup finished) leaves
-      // nothing to continue.
+      // nothing to continue. #213: its workspace was released when setup failed.
       return task.failure?.category === "setup_failed" || task.failure?.stage === "setup"
-        ? "It never started: close it with agentx_close_task and start a new one."
+        ? "It never started, and its workspace was released, so it no longer counts toward your workspace limit. Start a new task with agentx_start_task, and close this one with agentx_close_task."
         : "Send new instructions with agentx_continue_task, or close it with agentx_close_task.";
   }
 }

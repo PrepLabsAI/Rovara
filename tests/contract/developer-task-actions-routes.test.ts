@@ -80,7 +80,7 @@ describe("continue (US1 scenario 5, FR-019)", () => {
     const { workspaceId } = harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string };
     await harness.finish(workspaceId, String((harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { activeOperationId: string }).activeOperationId), "FAILED", { error: "npm ci exited 1" });
     const refused = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/continue`, { requestId: randomUUID(), instructions: "retry" });
-    expect(refused.body.error).toEqual({ code: "CONFIG_INVALID", message: "this task never started; close it with agentx_close_task and start a new one" });
+    expect(refused.body.error).toEqual({ code: "CONFIG_INVALID", message: "this task never started and its workspace was released, so it no longer counts toward your workspace limit; start a new task with agentx_start_task, and close this one with agentx_close_task" });
   });
 
   it("refuses a task whose setup failed for want of a worker too (R17), not as TASK_BUSY", async () => {
@@ -91,7 +91,7 @@ describe("continue (US1 scenario 5, FR-019)", () => {
     await harness.finish(workspaceId, String((harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { activeOperationId: string }).activeOperationId), "FAILED", { error: "RUNTIME_UNAVAILABLE: no capacity" });
     for (const [route, body] of [["continue", { requestId: randomUUID(), instructions: "retry" }], ["pull-requests", { requestId: randomUUID(), title: "x" }]] as const) {
       const refused = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/${route}`, body);
-      expect(refused.body.error).toEqual({ code: "CONFIG_INVALID", message: "this task never started; close it with agentx_close_task and start a new one" });
+      expect(refused.body.error).toEqual({ code: "CONFIG_INVALID", message: "this task never started and its workspace was released, so it no longer counts toward your workspace limit; start a new task with agentx_start_task, and close this one with agentx_close_task" });
     }
   });
 

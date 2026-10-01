@@ -537,7 +537,7 @@ describe("the next step after a failure during setup (#154)", () => {
   it("says to start a new task, not to continue it, when compute was lost during setup", async () => {
     const lost = view("FAILED", { failure: { category: "worker_unavailable", stage: "setup", message: "workspace compute was lost during setup; close this task and start a new one" } });
     const result = await (await connect({ getTask: async () => lost })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
-    expect(text(result)).toContain("It never started: close it with agentx_close_task and start a new one.");
+    expect(text(result)).toContain("It never started, and its workspace was released, so it no longer counts toward your workspace limit. Start a new task with agentx_start_task, and close this one with agentx_close_task.");
     expect(text(result)).not.toContain("agentx_continue_task");
     expect(result.structuredContent).toMatchObject({ failure: { category: "worker_unavailable", stage: "setup" } });
   });
