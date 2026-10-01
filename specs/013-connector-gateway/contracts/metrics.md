@@ -65,3 +65,9 @@ that stays red is telling you something specific, not a false positive to silenc
 `AgentXSlackDeadLetters`; reconnect the credential named in the broker's connector logs, or disable
 that connector on the project, to clear `AgentXConnectorNotConnected` or a persistent
 `AgentXConnectorBroken`.
+
+Installed (named) environments also have `agentx-<env>-DispatchDeadLetters` (issue #46): the
+`DispatchDeadLetterQueue`'s `ApproximateNumberOfMessagesVisible` (Maximum) `>= 1` in 5 minutes,
+missing data not breaching, sending to `agentx-<env>-alerts`. The legacy `AgentXControlPlane`
+template does not have it. Clear it by finding the job's operation ID in the dispatcher logs,
+then redriving or purging the `DispatchDeadLetterQueueUrl` queue.

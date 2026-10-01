@@ -365,10 +365,10 @@ the existing GitHub App installation with repository-scoped **Issues** permissio
 in the control plane. Existing projects remain disabled until an administrator registers an
 opt-in revision. Arbitrary endpoints, personal OAuth, and other GitHub permission families are
 not included. Existing AgentX coding and validated PR-publication tools remain unchanged.
-The hosted Slack service discovers tools from the thread workspace's registered project revision.
-Calls use its IAM service identity and carry the requesting Slack user; tokens remain in the broker.
-Use a new thread after binding the channel to an enabled revision. Existing threads retain their
-workspace revision.
+The hosted Slack service discovers tools from the project's latest registered revision on each
+mention. Calls use its IAM service identity and carry the requesting Slack user; tokens remain in
+the broker. Only a prepared thread's checkout (repositories, setup, environment) stays on the
+revision it was prepared from.
 
 #### Connector credentials
 
@@ -490,13 +490,16 @@ Finally, bind the channel to the project. Binding requires an administrator logi
 agentx --project project-a admin slack bind --team T0123456789 --channel C0123456789
 ```
 
-A channel is bound to one project, not to a revision. Each new thread uses the project's latest
-registered revision at the moment its workspace is created, so registering a revision publishes it
-to every bound channel without binding again. `admin slack unbind` removes the binding, so new
-mentions in that channel are ignored, but it keeps existing thread workspaces.
+A channel is bound to one project, not to a revision. A thread's workspace is built from the
+project's latest registered revision at the moment its compute is first prepared, which is the
+first request that needs the worker, so registering a revision publishes it to every bound channel
+without binding again. A thread that has only answered connector questions so far has no disk
+yet, so it picks up a revision registered after its first message. `admin slack unbind` removes
+the binding, so new mentions in that channel are ignored, but it keeps existing thread workspaces.
 
-An existing thread's checkout stays on the revision it was prepared with: `repositories`, `setup`
-and `environment` do not change under a running thread. Everything else follows the project's
+Once prepared, a thread's checkout stays on the revision it was prepared with: `repositories`,
+`setup` and `environment` do not change under a running thread, and a failed preparation is
+retried from that same revision. Everything else follows the project's
 latest registered revision from the next mention onwards: the GitHub MCP policy and the
 repositories it may address, `orchestratorInstructions`, `readiness` and each repository's
 `codeBuildGates`. So enabling a tool, correcting a test command or withdrawing a write tool takes
@@ -584,6 +587,9 @@ To release a thread workspace, mention AgentX in that thread with an explicit cl
 ```text
 @AgentX close this workspace
 ```
+
+`close the workspace`, `please close this workspace` and `can you close the workspace?` work too; only
+the whole message counts, so `@AgentX close the modal` is an ordinary request.
 
 A thread that never needed the worker has no workspace. A close request there says so and changes
 nothing.
@@ -841,7 +847,10 @@ installed environment); see
 names below are the maintainers' deployment's. An installed environment has the same alarms named
 `agentx-<env>-<Name>` (for example `agentx-<env>-ConnectorBroken`) on the topic
 `agentx-<env>-alerts`, plus Slack service, session and shared-task notice alarms (such as
-`agentx-<env>-TurnErrors` and `agentx-<env>-DeveloperNoticeDeadLetters`); `agentx init` subscribes
+`agentx-<env>-TurnErrors` and `agentx-<env>-DeveloperNoticeDeadLetters`), and
+`agentx-<env>-DispatchDeadLetters`. That last one fires when a worker dispatch job exhausts its
+receives and lands in the dispatch dead-letter queue. To clear it, find the job's operation ID in
+the dispatcher logs, then redrive or purge the `DispatchDeadLetterQueueUrl` queue. `agentx init` subscribes
 your alert address and sends a test alarm, and `agentx alerts test` sends another. Five
 alarms ship in `AgentXControlPlane`: `AgentXConnectorBroken` (a connector's discovery failed or a
 vendor changed an approved tool's schema), `AgentXConnectorNotConnected` (a connector's vendor

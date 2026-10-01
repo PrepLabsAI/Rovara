@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProjectModelOptions, SlackRequestMessage, SwebenchRun } from "../../packages/contracts/src/index.js";
-import { HANDOFF_FINAL_TEXT, HANDOFF_TEXT, TurnHandedOffError } from "../../packages/slack-service/src/interrupted-turn.js";
+import { HANDOFF_FINAL_IDLE_TEXT, HANDOFF_TEXT, TurnHandedOffError } from "../../packages/slack-service/src/interrupted-turn.js";
 import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
 import { resultMessage } from "../../packages/slack-service/src/swebench-command.js";
 
@@ -128,7 +128,8 @@ describe("the eval swebench command in the Slack service (spec 043)", () => {
     const handoff = new AbortController();
     h.sleep.mockImplementationOnce(() => new Promise<undefined>(() => { handoff.abort(); }));
     await processSlackRequest(message("eval swebench verified django__django-11099"), h.dependencies, { finalAttempt: true, handoff: handoff.signal });
-    expect(h.posts.at(-1)).toBe(HANDOFF_FINAL_TEXT);
+    // Issue 167: the wait started no worker task, so there is none to cancel.
+    expect(h.posts.at(-1)).toBe(HANDOFF_FINAL_IDLE_TEXT);
     expect(h.finish).toHaveBeenCalledOnce();
   });
 

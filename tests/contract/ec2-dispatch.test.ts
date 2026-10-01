@@ -155,3 +155,17 @@ describe("ec2-ebs delivery through the real session manager", () => {
     }).ok).toBe(true);
   });
 });
+
+describe("the runtime binding a session is started with", () => {
+  it("reads the workspace record strongly consistently, because preparation may have just moved its revision (#12)", async () => {
+    const send = vi.fn(async (command: { input: Record<string, unknown> }) => {
+      const key = command.input.Key as { pk: string };
+      if (key.pk.startsWith("WORKSPACE#")) return { Item: { deploymentMode: "ec2-ebs", projectName: "payments", projectRevision: 2 } };
+      return { Item: { runtimeBinding: binding } };
+    });
+    const workspaceId = randomUUID();
+    await expect(workspaceBinding({ send } as never, "state", workspaceId)).resolves.toEqual(binding);
+    expect(send.mock.calls[0]?.[0].input).toMatchObject({ Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" }, ConsistentRead: true });
+    expect(send.mock.calls[1]?.[0].input).toMatchObject({ Key: { pk: "PROJECT#payments", sk: `REV#${"2".padStart(12, "0")}` } });
+  });
+});

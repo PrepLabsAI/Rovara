@@ -495,6 +495,22 @@ export class ControlPlaneStack extends Stack {
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(notifyOperator);
+    // Issue #46, named environments only: a dispatch job that exhausts its receives lands here and
+    // nothing else reports it. The legacy AgentXControlPlane template stays as it is.
+    if (naming.env !== undefined) {
+      new cloudwatch.Alarm(this, "DispatchDeadLettersAlarm", {
+        alarmName: naming.alarmName("DispatchDeadLetters"),
+        alarmDescription: "A worker dispatch job exhausted its receives and is in the dispatch dead-letter queue. Check the dispatcher logs for its operation ID, then redrive or purge the queue.",
+        metric: deadLetterQueue.metricApproximateNumberOfMessagesVisible({
+          statistic: "Maximum",
+          period: Duration.minutes(5),
+        }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }).addAlarmAction(notifyOperator);
+    }
 
     broker.addEnvironment("SLACK_ORCHESTRATOR_ROLE_ARN", slackOrchestratorRole.roleArn);
     broker.addEnvironment("SLACK_MEMBER_WORKSPACE_LIMIT", memberWorkspaceLimit.valueAsString);
