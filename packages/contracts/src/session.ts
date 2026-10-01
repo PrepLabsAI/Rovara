@@ -217,8 +217,9 @@ export function workerInvokeToken(payload: string, signature: Uint8Array): strin
 const SHELL_SAFE = /^[A-Za-z0-9._:/@+=-]+$/;
 
 /**
- * What an EC2 worker boots with. The provisioner renders it into user data with
- * `ec2WorkerUserData` (the script itself is `ec2WorkerBootScript`); `packages/worker/ec2/boot.sh` reads each field from the variable named here.
+ * What an EC2 worker boots with. The provisioner renders it into user data with `ec2WorkerUserData`
+ * (uncompressed, `ec2WorkerBootScript`); `packages/worker/ec2/boot.sh` reads each field from the
+ * variable named here.
  */
 export const Ec2WorkerBootConfigSchema = z
   .object({
@@ -242,8 +243,8 @@ export const Ec2WorkerBootConfigSchema = z
     modelProvider: z.string().min(1).max(128).regex(SHELL_SAFE, "model provider has unsafe characters"),
     /** AGENTX_MODEL_ID */
     modelId: z.string().min(1).max(256).regex(SHELL_SAFE, "model ID has unsafe characters"),
-    openRouterSecretArn: z.string().regex(/^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+$/).optional(),
-    openRouterProviders: z.string().regex(/^[a-z0-9][a-z0-9_/-]{0,79}(?:,[a-z0-9][a-z0-9_/-]{0,79})*$/).optional(),
+    openRouterSecretArn: z.string().max(2_048).regex(/^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+$/).optional(),
+    openRouterProviders: z.string().max(512).regex(/^[a-z0-9][a-z0-9_/-]{0,79}(?:,[a-z0-9][a-z0-9_/-]{0,79})*$/).optional(),
     /** PI_CACHE_RETENTION */
     promptCacheRetention: z.enum(["short", "long"]),
     /** AGENTX_LOG_GROUP: the CloudWatch Logs group the worker container writes to. */

@@ -2,7 +2,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { beforeAll, describe, expect, it } from "vitest";
-import { ec2WorkerBootScript, type Ec2WorkerBootConfig } from "../../packages/contracts/src/session.js";
+import { ec2WorkerUserData, type Ec2WorkerBootConfig } from "../../packages/contracts/src/session.js";
 
 // Runs the EC2 boot script for real in a privileged Amazon Linux 2023 container on arm64: a loop
 // device stands in for the EBS volume, and mkfs, blkid and mount are the real tools. Only the AWS,
@@ -105,7 +105,8 @@ chmod +x /shims/*
 touch /tmp/calls.log /etc/fstab
 # Stands in for the socket the Docker daemon creates; the worker unit reads its group.
 mkdir -p /var/run && touch /var/run/docker.sock
-echo "$USER_DATA_B64" | base64 -d > /tmp/user-data.sh
+# The real user data is gzip (#229); cloud-init unpacks it, so the harness does too and runs the script.
+echo "$USER_DATA_B64" | base64 -d | python3 -c 'import gzip, sys; sys.stdout.buffer.write(gzip.decompress(sys.stdin.buffer.read()))' > /tmp/user-data.sh
 # The container is privileged, so AGENTX_HOST_ROOT must stay: without it the script would rescan the
 # real PCI bus. The rescan test fails if it goes, since it reads the rescan file under /tmp/host.
 PATH=/shims:$PATH AGENTX_HOST_ROOT=/tmp/host bash /tmp/user-data.sh
@@ -173,8 +174,8 @@ interface Faults {
 
 async function boot(bootConfig: Ec2WorkerBootConfig, volumeState: "blank" | "existing" | "foreign", faults: Faults = {}) {
   const script = await readFile(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
-  // The script cloud-init runs once it unpacks the gzip user data (#229).
-  const userData = Buffer.from(ec2WorkerBootScript(bootConfig, script), "utf8").toString("base64");
+  // Already base64 gzip, exactly what RunInstances receives (#229).
+  const userData = ec2WorkerUserData(bootConfig, script);
   const result = spawnSync("docker", [
     "run", "--rm", "--privileged", "--platform", "linux/arm64",
     "--env", `VOLUME_STATE=${volumeState}`,

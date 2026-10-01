@@ -58,20 +58,30 @@ describe("EC2 worker user data", () => {
     expect(gunzipSync(raw).toString("utf8")).toBe(ec2WorkerBootScript(config, bootScript));
   });
 
-  it("leaves real headroom under EC2's 16 KB user data limit with every optional value set (#223, #229)", () => {
-    const worstCase: Ec2WorkerBootConfig = {
-      ...config,
-      generation: 99_999,
-      invokePublicKey: "A".repeat(1_024),
-      controlPlaneUrl: `https://${"a".repeat(504)}`,
-      modelProvider: "p".repeat(128),
-      modelId: "m".repeat(256),
-      openRouterSecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/production/openrouter-AbCdEf",
-      openRouterProviders: "anthropic,openai,google",
-      logGroupName: `/${"l".repeat(511)}`,
+  it("leaves real headroom under EC2's 16 KB user data limit with every value at its maximum (#223, #229)", () => {
+    // Random letters and digits barely compress, so this is the largest user data the schema admits.
+    const noise = (length: number) => {
+      const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+      return [...randomBytes(length)].map((byte) => alphabet[byte % alphabet.length]).join("");
     };
-    // EC2 measures user data before base64 encoding; the worst case stays under half its limit.
-    expect(Buffer.from(ec2WorkerUserData(worstCase, bootScript), "base64").length).toBeLessThan(8_192);
+    const lower = (length: number) => noise(length).toLowerCase();
+    const secretPrefix = "arn:aws:secretsmanager:us-east-1:123456789012:secret:";
+    const worstCase = Ec2WorkerBootConfigSchema.parse({
+      ...config,
+      generation: Number.MAX_SAFE_INTEGER,
+      invokePublicKey: noise(1_024),
+      controlPlaneUrl: `https://${lower(63)}.${lower(63)}.${lower(63)}.${lower(63)}.${lower(63)}.${lower(63)}.${lower(63)}.${lower(56)}`,
+      modelProvider: noise(128),
+      modelId: noise(256),
+      openRouterSecretArn: `${secretPrefix}${noise(2_048 - secretPrefix.length)}`,
+      openRouterProviders: [...Array.from({ length: 6 }, () => lower(80)), lower(26)].join(","),
+      logGroupName: `/${noise(511)}`,
+    });
+    expect(worstCase.controlPlaneUrl).toHaveLength(512);
+    expect(worstCase.openRouterProviders).toHaveLength(512);
+    const compressed = Buffer.from(ec2WorkerUserData(worstCase, bootScript), "base64").length;
+    // EC2 measures user data before base64 encoding; at least 4 KB of it stays free for boot changes.
+    expect(compressed).toBeLessThanOrEqual(EC2_USER_DATA_MAX_BYTES - 4_096);
   });
 
   it("measures the limit on the compressed user data, not the script (#229)", () => {
