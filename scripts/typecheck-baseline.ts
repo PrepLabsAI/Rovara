@@ -63,6 +63,9 @@ export function parseTscOutput(text: string): ParsedOutput {
 /** Turns a tsc run into per-file counts, or a reason the run cannot be trusted. */
 export function interpretTscRun(run: TscRun): RunResult {
   if (run.error !== undefined) return { ok: false, reason: `tsc could not run: ${run.error.message}` };
+  if (run.signal === "SIGABRT") {
+    return { ok: false, reason: `tsc was stopped by SIGABRT. It may have run out of memory: Node aborts when its heap is full. The heap limit is set by --max-old-space-size in tscArguments (scripts/typecheck-baseline.ts).` };
+  }
   if (run.signal !== null) return { ok: false, reason: `tsc was stopped by ${run.signal}` };
   if (run.status === null) return { ok: false, reason: "tsc exited without an exit code" };
   if (run.stderr.trim() !== "") return { ok: false, reason: `tsc wrote to stderr:\n${run.stderr.trim()}` };
@@ -201,8 +204,14 @@ export function runRatchet(mode: "check" | "update", deps: RatchetDeps): Ratchet
 const LINT_CONFIG = "tsconfig.lint.json";
 const require = createRequire(import.meta.url);
 
+/** Node's arguments for the tsc run. The lint project covers every test file, which outgrows Node's
+ * default heap on a CI runner, so it gets the same 6 GB that `npm run lint` gives ESLint. */
+export function tscArguments(tscPath: string, heapMb = 6144): string[] {
+  return [`--max-old-space-size=${heapMb}`, tscPath, "-p", LINT_CONFIG, "--noEmit", "--pretty", "false"];
+}
+
 function runTsc(): TscRun {
-  const result = spawnSync(process.execPath, [require.resolve("typescript/bin/tsc"), "-p", LINT_CONFIG, "--noEmit", "--pretty", "false"], {
+  const result = spawnSync(process.execPath, tscArguments(require.resolve("typescript/bin/tsc")), {
     encoding: "utf8",
     maxBuffer: 256 * 1024 * 1024,
     timeout: 15 * 60 * 1000,

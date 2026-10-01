@@ -10,6 +10,7 @@ import {
   parseBaseline,
   parseTscOutput,
   runRatchet,
+  tscArguments,
   uncheckedBaselineFiles,
   type RatchetDeps,
   type TscRun,
@@ -105,6 +106,33 @@ describe("judging a tsc run, so a crash or config error never passes as zero err
     const run = interpretTscRun({ ...ok, status: null, signal: "SIGTERM", error: Object.assign(new Error("spawnSync node ETIMEDOUT"), { code: "ETIMEDOUT" }) });
     expect(run.ok).toBe(false);
     if (!run.ok) expect(run.reason).toContain("ETIMEDOUT");
+  });
+
+  it("hints that tsc may have run out of memory when it was stopped by SIGABRT", () => {
+    const run = interpretTscRun({ ...ok, status: null, signal: "SIGABRT" });
+    expect(run.ok).toBe(false);
+    if (!run.ok) {
+      expect(run.reason).toContain("tsc was stopped by SIGABRT");
+      expect(run.reason).toMatch(/out of memory.*max-old-space-size/);
+    }
+  });
+
+  it("does not give the memory hint for other signals", () => {
+    const run = interpretTscRun({ ...ok, status: null, signal: "SIGKILL" });
+    expect(run.ok).toBe(false);
+    if (!run.ok) expect(run.reason).not.toMatch(/out of memory/);
+  });
+
+  it("runs tsc with a 6 GB heap, the same limit npm run lint gives ESLint, so the whole lint project fits", () => {
+    expect(tscArguments("/repo/node_modules/typescript/bin/tsc")).toEqual([
+      "--max-old-space-size=6144",
+      "/repo/node_modules/typescript/bin/tsc",
+      "-p",
+      "tsconfig.lint.json",
+      "--noEmit",
+      "--pretty",
+      "false",
+    ]);
   });
 
   it("fails a run with no exit code, no signal and no error", () => {
