@@ -52,12 +52,6 @@ export function changeError(change: AdminChangeViewWire): ToolError {
 const iso = (ms: number) => new Date(ms).toISOString();
 const waiting = (change: AdminChangeViewWire) => change.status === "pending" || change.status === "applying";
 
-/** R4: the planning admin's view may name a private channel they are a member of. */
-function shownEffect(change: AdminChangeViewWire): string {
-  const planner = (change as { confirmationEffect?: unknown }).confirmationEffect;
-  return typeof planner === "string" && planner !== "" ? planner : change.effect;
-}
-
 async function waitForSlack(run: ConfirmationRun, note: string): Promise<ConfirmationOutcome> {
   let change = await run.admin.startSlackConfirmation(run.change.changeId, run.traceId);
   const started = run.now();
@@ -90,9 +84,9 @@ async function waitForSlack(run: ConfirmationRun, note: string): Promise<Confirm
 }
 
 /** Declines after a pop-up that ended without an answer; a failed decline is logged, since nothing applied either way and the change expires on its own. */
-async function declineQuietly(run: ConfirmationRun, reason: "cancelled" | "failed", answeredAt: string): Promise<void> {
+async function declineQuietly(run: ConfirmationRun, reason: "cancelled" | "failed", requestedAt: string, answeredAt: string): Promise<void> {
   try {
-    await run.admin.declineChange(run.change.changeId, { method: "elicitation", reason, answeredAt }, run.traceId);
+    await run.admin.declineChange(run.change.changeId, { method: "elicitation", reason, requestedAt, answeredAt }, run.traceId);
   } catch (error) {
     run.log?.({ event: "change.decline_failed", changeId: run.change.changeId, code: error instanceof ToolError ? error.code : "unknown" });
   }
@@ -108,13 +102,14 @@ export async function confirmChange(run: ConfirmationRun): Promise<ConfirmationO
     const reserve = ELICITATION_MARGIN_MS + (slack ? SLACK_FALLBACK_MIN_MS : 0);
     const timeout = Math.max(1_000, Math.min(ELICITATION_MAX_MS, Date.parse(run.change.expiresAt) - run.now() - reserve));
     const asked = run.now();
-    const answer = await run.elicit(`${shownEffect(run.change)}\n\nApply this change? It expires at ${run.change.expiresAt}.`, timeout, run.signal);
+    // R4: the broker already gives the planning admin the effect that names their private channel (viewOf).
+    const answer = await run.elicit(`${run.change.effect}\n\nApply this change? It expires at ${run.change.expiresAt}.`, timeout, run.signal);
     const answeredAt = iso(run.now());
     // Fix round 1 (controller ruling): a tool call cancelled while the pop-up was open is the
     // admin's cancel. Nothing applies, and no new confirmation path (the Slack message) opens.
     if (run.signal.aborted) {
       run.log?.({ event: "change.confirmation_cancelled", changeId: run.change.changeId });
-      await declineQuietly(run, "cancelled", answeredAt);
+      await declineQuietly(run, "cancelled", requestedAt, answeredAt);
       throw new ToolError("CONFIRMATION_DECLINED", `change ${run.change.changeId}: the tool call was cancelled while the confirmation pop-up was open, so nothing changed`);
     }
     if (answer === "accept") {
@@ -123,7 +118,7 @@ export async function confirmChange(run: ConfirmationRun): Promise<ConfirmationO
       throw changeError(applied);
     }
     if (answer === "decline" || answer === "cancel") {
-      const declined = await run.admin.declineChange(run.change.changeId, { method: "elicitation", reason: answer === "decline" ? "declined" : "cancelled", answeredAt }, run.traceId);
+      const declined = await run.admin.declineChange(run.change.changeId, { method: "elicitation", reason: answer === "decline" ? "declined" : "cancelled", requestedAt, answeredAt }, run.traceId);
       throw changeError(declined);
     }
     // Review Focus 3: the pop-up failed, by an error or by its timeout (at most 9 minutes, and
@@ -134,12 +129,12 @@ export async function confirmChange(run: ConfirmationRun): Promise<ConfirmationO
     run.log?.({ event: "change.elicitation_failed", changeId: run.change.changeId, failure });
     const why = failure === "timeout" ? "went unanswered" : "could not be shown";
     if (!slack) {
-      await declineQuietly(run, "failed", answeredAt);
+      await declineQuietly(run, "failed", requestedAt, answeredAt);
       throw new ToolError("CONFIRMATION_DECLINED", `change ${run.change.changeId}: the confirmation pop-up ${why}, so nothing changed`);
     }
     // Fix round 1 (b): too close to the change's expiry, a Slack message could not be answered in time.
     if (Date.parse(run.change.expiresAt) - run.now() < SLACK_FALLBACK_MIN_MS) {
-      await declineQuietly(run, "failed", answeredAt);
+      await declineQuietly(run, "failed", requestedAt, answeredAt);
       throw new ToolError("CONFIRMATION_DECLINED", `change ${run.change.changeId}: the confirmation pop-up ${why}, and too little time is left to confirm in Slack before it expires at ${run.change.expiresAt}, so nothing changed`);
     }
     return waitForSlack(run, `the pop-up ${why}, so confirm in Slack instead. `);

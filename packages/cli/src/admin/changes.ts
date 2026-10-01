@@ -97,9 +97,11 @@ export async function runCliChange(input: CliChangeInput, fetchImplementation: t
   const effect = plain(planned.effect);
   input.write(effect);
 
+  const requestedAt = new Date().toISOString();
   const decline = async (reason: "declined" | "cancelled"): Promise<AdminChangeViewWire> => {
     try {
-      const declined = viewOf(await send(input, traceId, "POST", `${path}/decline`, { method: "cli", reason, answeredAt: new Date().toISOString() }, fetchImplementation, "decline", changeId), `AgentX's answer to declining change ${changeId} could not be read`);
+      // Final review M3: a no records when the prompt was shown, as a yes does.
+      const declined = viewOf(await send(input, traceId, "POST", `${path}/decline`, { method: "cli", reason, requestedAt, answeredAt: new Date().toISOString() }, fetchImplementation, "decline", changeId), `AgentX's answer to declining change ${changeId} could not be read`);
       input.write(declined.status === "declined" ? "Nothing changed." : `Nothing was applied by this command; ${CHECK_STEP}.`);
       return declined;
     } catch {
@@ -109,7 +111,6 @@ export async function runCliChange(input: CliChangeInput, fetchImplementation: t
     }
   };
 
-  const requestedAt = new Date().toISOString();
   let yes: boolean;
   try {
     yes = await input.confirm(effect);

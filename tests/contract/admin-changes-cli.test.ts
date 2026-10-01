@@ -50,7 +50,7 @@ describe("runCliChange (E17, Q6)", () => {
     const result = await runCliChange({ controlPlaneUrl: URL, accessToken: "admin-token", change: { kind: "revoke_project_access", project: "payments", developer: "U0NEW00001" }, cliVersion: "0.0.7", confirm: async () => false, write: () => undefined }, fetch);
     expect(result.outcome).toBe("declined");
     expect(calls.map((call) => call.path)).toEqual(["/v1/admin/changes", `/v1/admin/changes/${CHANGE}/decline`]);
-    expect(calls[1]?.body).toEqual({ method: "cli", reason: "declined", answeredAt: expect.any(String) as unknown });
+    expect(calls[1]?.body).toEqual({ method: "cli", reason: "declined", requestedAt: expect.any(String) as unknown, answeredAt: expect.any(String) as unknown });
   });
 
   it("keeps AgentX's own refusal code", async () => {
@@ -337,12 +337,35 @@ describe("the commands (E17)", () => {
     const tty = process.stdin.isTTY;
     Object.defineProperty(process.stdin, "isTTY", { value: undefined, configurable: true });
     try {
-      expect(await executeCli([...session.globals, "admin", "project", "grant", "--project", "payments", "--developer", "U0NEW00001"], session.io(fetch))).toBe(2);
+      expect(await executeCli([...session.globals, "admin", "project", "grant", "--project", "payments", "--developer", "U0NEW00001"], session.io(fetch))).toBe(7);
     } finally {
       Object.defineProperty(process.stdin, "isTTY", { value: tty, configurable: true });
     }
+    expect(session.stderr()).toContain("[CONFIRMATION_UNAVAILABLE]");
     expect(session.stderr()).toContain("pass --yes");
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("asks through the command's own stdin and stderr, and refuses a stdin that is no terminal (final review M11)", async () => {
+    const session = await signedIn();
+    const { fetch, calls } = control({ "POST /v1/admin/changes": { change: view("pending") }, [`POST /v1/admin/changes/${CHANGE}/apply`]: { change: view("applied") } });
+    const tty = process.stdin.isTTY;
+    // Whatever the process's own stdin is, the injected one decides.
+    Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+    try {
+      const pipe = new PassThrough();
+      expect(await executeCli([...session.globals, "admin", "project", "grant", "--project", "payments", "--developer", "U0NEW00001"], session.io(fetch, { stdin: pipe }))).toBe(7);
+      expect(session.stderr()).toContain("[CONFIRMATION_UNAVAILABLE]");
+      expect(calls).toHaveLength(0);
+      const terminal: PassThrough & { isTTY?: boolean } = new PassThrough();
+      terminal.isTTY = true;
+      terminal.write("y\r");
+      expect(await executeCli([...session.globals, "admin", "project", "grant", "--project", "payments", "--developer", "U0NEW00001"], session.io(fetch, { stdin: terminal }))).toBe(0);
+    } finally {
+      Object.defineProperty(process.stdin, "isTTY", { value: tty, configurable: true });
+    }
+    expect(session.stderr()).toContain("Apply this change? [y/N]");
+    expect(calls[1]).toMatchObject({ path: `/v1/admin/changes/${CHANGE}/apply`, body: { method: "cli" } });
   });
 
   it("admin changes writes JSON Lines to stdout with --json, and the count to stderr", async () => {

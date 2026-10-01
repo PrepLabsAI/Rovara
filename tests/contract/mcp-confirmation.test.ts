@@ -6,7 +6,7 @@ import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { ElicitRequestSchema, type ElicitResult } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { ADMIN_SIGN_IN_STEP, SLACK_POLL_MS, ToolError, changeError, confirmChange, createAgentXMcpServer, httpAdminClient, httpControlPlaneClient, type AdminControlPlaneClient, type ToolContext, type ToolDefinition } from "../../packages/mcp/src/index.js";
+import { ADMIN_SIGN_IN_STEP, APPLY_UNKNOWN_STEP, CHANGE_PENDING_STEP, SLACK_POLL_MS, ToolError, changeError, confirmChange, createAgentXMcpServer, httpAdminClient, httpControlPlaneClient, type AdminControlPlaneClient, type ToolContext, type ToolDefinition } from "../../packages/mcp/src/index.js";
 import type { AdminChangeView } from "../../packages/contracts/src/index.js";
 
 const CHANGE = "55555555-5555-4555-8555-555555555555";
@@ -39,7 +39,14 @@ describe("the confirmation driver (FR-041)", () => {
       const { run: r } = run({ declineChange }, { elicit: async () => answer });
       await expect(confirmChange(r)).rejects.toMatchObject({ code: "CONFIRMATION_DECLINED", message: expect.stringContaining(CHANGE) as unknown });
       expect(declineChange).toHaveBeenCalledWith(CHANGE, expect.objectContaining({ method: "elicitation", reason: answer === "decline" ? "declined" : "cancelled" }), "trace-9");
+      // Final review M3: a declined pop-up says when it was shown, as an accepted one does.
+      expect(declineChange).toHaveBeenCalledWith(CHANGE, { method: "elicitation", reason: answer === "decline" ? "declined" : "cancelled", requestedAt: "2026-10-02T09:00:01.000Z", answeredAt: expect.any(String) as unknown }, "trace-9");
     }
+    // A pop-up that failed, declined quietly, says so too.
+    const declineChange = vi.fn(async () => view({ status: "declined" }));
+    const { run: failed } = run({ declineChange }, { elicit: async () => "failed" as const, change: view({ methodsOffered: ["elicitation"] }) });
+    await expect(confirmChange(failed)).rejects.toMatchObject({ code: "CONFIRMATION_DECLINED" });
+    expect(declineChange).toHaveBeenCalledWith(CHANGE, { method: "elicitation", reason: "failed", requestedAt: "2026-10-02T09:00:01.000Z", answeredAt: expect.any(String) as unknown }, "trace-9");
   });
 
   it("falls back to Slack when the pop-up fails, and declines when there is no Slack", async () => {
@@ -71,12 +78,14 @@ describe("the confirmation driver (FR-041)", () => {
 });
 
 describe("the confirmation driver's edges (FR-041, FR-052, R1)", () => {
-  it("shows the planning admin's confirmationEffect in the pop-up when the view carries one", async () => {
+  it("shows the view's effect in the pop-up, which the broker already makes the planning admin's, and no other field (final review M8)", async () => {
     const elicit = vi.fn(async () => "accept" as const);
-    const change = { ...view({ effect: "Bind channel C0SECRET01 to project ledger." }), confirmationEffect: "Bind private channel #payroll (C0SECRET01) to project ledger." };
+    // The broker puts the member planner's text in effect itself (viewOf); a confirmationEffect field is never read.
+    const change = { ...view({ effect: "Bind channel #payroll (C0SECRET01, a private channel) to project ledger." }), confirmationEffect: "Some other text a newer control plane sent." };
     const { run: r } = run({ applyChange: async () => view({ status: "applied" }) }, { elicit, change });
     await confirmChange(r);
-    expect(elicit.mock.calls[0]?.[0]).toContain("#payroll");
+    expect(elicit.mock.calls[0]?.[0]).toContain("Bind channel #payroll (C0SECRET01, a private channel) to project ledger.");
+    expect(elicit.mock.calls[0]?.[0]).not.toContain("Some other text");
   });
 
   it("gives the pop-up at most 9 minutes, and always ends it before the change expires", async () => {
@@ -262,6 +271,43 @@ describe("the admin client's change calls (E4, FR-052, R1)", () => {
     // 25d's mappings still hold.
     await expect(httpAdminClient({ session, fetch: answering(401, {}) }).getChange(CHANGE, "t")).rejects.toMatchObject({ code: "ADMIN_REQUIRED", nextStep: ADMIN_SIGN_IN_STEP });
     await expect(httpAdminClient({ session, fetch: answering(403, { error: { code: "FORBIDDEN", message: "administrator claim is required" } }) }).getChange(CHANGE, "t")).rejects.toMatchObject({ code: "ADMIN_REQUIRED", nextStep: ADMIN_SIGN_IN_STEP });
+  });
+
+  it("says an apply with no answer, or a gateway's 5xx, may or may not have applied (final review I1)", async () => {
+    const thrown = vi.fn(async () => { throw new TypeError("fetch failed"); });
+    const lost = await httpAdminClient({ session, fetch: thrown }).applyChange(CHANGE, { method: "elicitation" }, "t").catch((error: unknown) => error);
+    expect(lost).toBeInstanceOf(ToolError);
+    expect(lost).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE", nextStep: APPLY_UNKNOWN_STEP });
+    expect(APPLY_UNKNOWN_STEP).toBe("it may or may not have applied; check it with agentx_admin_changes before asking again");
+    expect(thrown).toHaveBeenCalledTimes(1);
+    for (const status of [502, 504]) {
+      const gateway = await httpAdminClient({ session, fetch: answering(status, { message: "Endpoint request timed out" }) }).applyChange(CHANGE, { method: "elicitation" }, "t").catch((error: unknown) => error);
+      expect(gateway).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE", nextStep: APPLY_UNKNOWN_STEP, message: expect.stringContaining(`HTTP ${status}`) as unknown });
+    }
+    // The broker's own answer still says nothing applied; a Slack step or a decline that is lost says what it did before.
+    const coded = await httpAdminClient({ session, fetch: answering(503, { error: { code: "RUNTIME_UNAVAILABLE", message: "try again" } }) }).applyChange(CHANGE, { method: "elicitation" }, "t").catch((error: unknown) => error);
+    expect(coded).toMatchObject({ nextStep: CHANGE_PENDING_STEP });
+    const slack = await httpAdminClient({ session, fetch: thrown }).startSlackConfirmation(CHANGE, "t").catch((error: unknown) => error);
+    expect((slack as ToolError).nextStep).not.toBe(APPLY_UNKNOWN_STEP);
+    const decline = await httpAdminClient({ session, fetch: answering(502, {}) }).declineChange(CHANGE, { method: "elicitation", reason: "declined" }, "t").catch((error: unknown) => error);
+    expect((decline as ToolError).nextStep).not.toBe(APPLY_UNKNOWN_STEP);
+  });
+
+  it("never retries a proposal the control plane answered with its own unavailable refusal: it is already audited (final review M4)", async () => {
+    for (const code of ["RUNTIME_UNAVAILABLE", "SLACK_UNAVAILABLE"]) {
+      const fetch = answering(503, { error: { code, message: "could not be planned; try again" } });
+      await expect(httpAdminClient({ session, fetch, sleep: async () => undefined }).proposeChange(request, "t")).rejects.toBeInstanceOf(ToolError);
+      expect(fetch).toHaveBeenCalledTimes(1);
+    }
+    // A 5xx without AgentX's own refusal is still tried again: the request ID makes it the same request.
+    const gateway = vi.fn().mockResolvedValueOnce(reply(502, { message: "Bad Gateway" })).mockResolvedValue(reply(200, { change: view() }));
+    await httpAdminClient({ session, fetch: gateway as never, sleep: async () => undefined }).proposeChange(request, "t");
+    expect(gateway).toHaveBeenCalledTimes(2);
+  });
+
+  it("says to use a new request_id when the one sent was used for another change (final review I2)", async () => {
+    const failure = await httpAdminClient({ session, fetch: answering(409, { error: { code: "IDEMPOTENCY_CONFLICT", message: `request ID ${request.requestId} was already used for a different change; use a new request_id or leave it out` } }) }).proposeChange(request, "t").catch((error: unknown) => error);
+    expect(failure).toMatchObject({ code: "INVALID_REQUEST", nextStep: "use a new request_id or leave it out" });
   });
 
   it("never repeats the token in a change call's error, even when the answer quotes it", async () => {

@@ -57,6 +57,16 @@ export const PROJECT_ADMIN_STEP = "ask an AgentX admin who administers that proj
 export const CHANGE_PENDING_STEP = "nothing was applied and the change is still pending until it expires; ask for the change again to confirm it";
 /** A decline that failed transiently: nothing to do, since an unconfirmed change never applies. */
 export const CHANGE_DECLINE_PENDING_STEP = "nothing to do: nothing was applied, and the change expires on its own";
+/**
+ * Final review I1: an apply sent with no answer back (the connection dropped, or a gateway's 5xx
+ * without AgentX's own refusal) may have committed, so asking again could apply a second change.
+ * runChange keeps the request ID on this step, so an unchanged retry answers that same change.
+ */
+export const APPLY_UNKNOWN_STEP = "it may or may not have applied; check it with agentx_admin_changes before asking again";
+/** I2: the request ID was used for another change. */
+export const NEW_REQUEST_ID_STEP = "use a new request_id or leave it out";
+/** M4: a proposal the control plane refused with these was already audited as failed; a retry would audit it again. */
+const AUDITED_UNAVAILABLE = new Set(["RUNTIME_UNAVAILABLE", "SLACK_UNAVAILABLE"]);
 
 /** The broker's catch-all refusal for a path it does not serve: a control plane from before 25d. */
 const NOT_AN_ADMIN_ROUTE = "this endpoint serves administration only";
@@ -64,7 +74,13 @@ const REQUEST_TIMEOUT_MS = 30_000;
 /** No call, retries included, takes longer than this (the developer client's DEADLINE_MS). */
 const DEADLINE_MS = 45_000;
 
-function refusal(status: number, value: unknown, secret: string, pending?: "confirm" | "decline"): ToolError {
+type Pending = "confirm" | "decline" | "apply";
+const codeOf = (value: unknown): string | undefined => {
+  const error = typeof value === "object" && value !== null ? (value as { error?: { code?: unknown } }).error : undefined;
+  return typeof error?.code === "string" ? error.code : undefined;
+};
+
+function refusal(status: number, value: unknown, secret: string, pending?: Pending): ToolError {
   const error = typeof value === "object" && value !== null ? (value as { error?: { code?: unknown; message?: unknown } }).error : undefined;
   const code = typeof error?.code === "string" ? error.code : undefined;
   const message = plainText(error?.message, `AgentX answered HTTP ${status}`, [secret]);
@@ -75,11 +91,14 @@ function refusal(status: number, value: unknown, secret: string, pending?: "conf
   // FR-015: the admin may change only projects they administer.
   if (code === "FORBIDDEN" && message.includes("membership")) return new ToolError("ADMIN_REQUIRED", message, PROJECT_ADMIN_STEP);
   // A NOT_FOUND from requireMembership reads "project not found" for a project the admin does not administer.
+  if (code === "IDEMPOTENCY_CONFLICT") return new ToolError("INVALID_REQUEST", message, NEW_REQUEST_ID_STEP);
   if (code !== undefined && CHANGE_INVALID.has(code)) return new ToolError("INVALID_REQUEST", message);
   if (code === "FORBIDDEN") return new ToolError("ADMIN_REQUIRED", `AgentX refused: ${message}`, ADMIN_SIGN_IN_STEP);
   if (code === "CONFIG_INVALID") return new ToolError("INVALID_REQUEST", message);
   // The broker answers RUNTIME_UNAVAILABLE only when nothing applied and the change is still pending.
   if (pending !== undefined && code === "RUNTIME_UNAVAILABLE") return new ToolError("CONTROL_PLANE_UNAVAILABLE", message, pending === "decline" ? CHANGE_DECLINE_PENDING_STEP : CHANGE_PENDING_STEP);
+  // I1: a 5xx that is not AgentX's own refusal (API Gateway's 30-second timeout, say) says nothing about the apply.
+  if (pending === "apply" && code === undefined && status >= 500) return new ToolError("CONTROL_PLANE_UNAVAILABLE", `AgentX answered HTTP ${status} while applying the change`, APPLY_UNKNOWN_STEP);
   return new ToolError("CONTROL_PLANE_UNAVAILABLE", message, status >= 500 ? NEXT_STEPS.CONTROL_PLANE_UNAVAILABLE : UNEXPECTED_ANSWER_STEP);
 }
 
@@ -98,7 +117,7 @@ export function httpAdminClient(options: { session(): Promise<AdminSession>; fet
   const now = (): number => (options.now ? options.now() : Date.now());
   const deadlineMs = options.deadlineMs ?? DEADLINE_MS;
   const sleep = (ms: number): Promise<void> => (options.sleep ? options.sleep(ms) : new Promise<void>((resolve) => setTimeout(resolve, ms)));
-  async function send<T>(schema: z.ZodType<T>, method: "GET" | "POST", path: string, body: unknown, traceId: string | undefined, attempts: number, extra: { signal?: AbortSignal; pending?: "confirm" | "decline" } = {}): Promise<T> {
+  async function send<T>(schema: z.ZodType<T>, method: "GET" | "POST", path: string, body: unknown, traceId: string | undefined, attempts: number, extra: { signal?: AbortSignal; pending?: Pending; audited?: boolean } = {}): Promise<T> {
     // A ToolError from the session (ADMIN_REQUIRED: no admin sign-in held, Task 16) passes through.
     const session = await options.session();
     const where = plainText(session.baseUrl, "its URL", [session.accessToken]);
@@ -129,14 +148,17 @@ export function httpAdminClient(options: { session(): Promise<AdminSession>; fet
       } catch {
         // The fetch error's own words are never shown: they can quote the request.
         if (await again(attempt)) continue;
-        throw new ToolError("CONTROL_PLANE_UNAVAILABLE", `could not reach AgentX at ${where}${attempt > 1 ? ` after ${attempt} tries` : ""}`);
+        // I1: an apply that was sent may have committed though no answer came back.
+        throw new ToolError("CONTROL_PLANE_UNAVAILABLE", `could not reach AgentX at ${where}${attempt > 1 ? ` after ${attempt} tries` : ""}`, extra.pending === "apply" ? APPLY_UNKNOWN_STEP : NEXT_STEPS.CONTROL_PLANE_UNAVAILABLE);
       }
       let value: unknown;
       try { value = JSON.parse(text) as unknown; } catch { value = undefined; }
-      if (response.status >= 500 && await again(attempt)) continue;
+      // M4: a proposal refused with AgentX's own unavailable code was audited; trying again would audit it again.
+      const audited = extra.audited === true && AUDITED_UNAVAILABLE.has(codeOf(value) ?? "");
+      if (response.status >= 500 && !audited && await again(attempt)) continue;
       if (!response.ok) throw refusal(response.status, value, session.accessToken, extra.pending);
       const parsed = schema.safeParse(value);
-      if (!parsed.success) throw new ToolError("CONTROL_PLANE_UNAVAILABLE", "AgentX answered with something this version of the CLI cannot read; upgrade it", NEXT_STEPS.UPGRADE_REQUIRED);
+      if (!parsed.success) throw new ToolError("CONTROL_PLANE_UNAVAILABLE", "AgentX answered with something this version of the CLI cannot read; upgrade it", extra.pending === "apply" ? APPLY_UNKNOWN_STEP : NEXT_STEPS.UPGRADE_REQUIRED);
       return parsed.data;
     }
   }
@@ -153,10 +175,10 @@ export function httpAdminClient(options: { session(): Promise<AdminSession>; fet
     workspaces: (query) => get(AdminWorkspacesResponseSchema, `/v1/admin/workspaces${search({ project: query.project, status: query.status, limit: query.limit })}`),
     // Only the proposal is retried: its requestId makes a repeat the same request. An apply, a
     // decline or a Slack step is sent once. changeId is a UUID the control plane made.
-    proposeChange: (request, traceId) => send(ChangeView, "POST", "/v1/admin/changes", request, traceId, tries),
+    proposeChange: (request, traceId) => send(ChangeView, "POST", "/v1/admin/changes", request, traceId, tries, { audited: true }),
     getChange: (changeId, traceId, poll) => send(ChangeView, "GET", `/v1/admin/changes/${encodeURIComponent(changeId)}`, undefined, traceId, Math.max(1, poll?.tries ?? tries), poll?.signal === undefined ? {} : { signal: poll.signal }),
     startSlackConfirmation: (changeId, traceId) => send(ChangeView, "POST", `/v1/admin/changes/${encodeURIComponent(changeId)}/slack`, {}, traceId, 1, { pending: "confirm" }),
-    applyChange: (changeId, body, traceId) => send(ChangeView, "POST", `/v1/admin/changes/${encodeURIComponent(changeId)}/apply`, body, traceId, 1, { pending: "confirm" }),
+    applyChange: (changeId, body, traceId) => send(ChangeView, "POST", `/v1/admin/changes/${encodeURIComponent(changeId)}/apply`, body, traceId, 1, { pending: "apply" }),
     declineChange: (changeId, body, traceId) => send(ChangeView, "POST", `/v1/admin/changes/${encodeURIComponent(changeId)}/decline`, body, traceId, 1, { pending: "decline" }),
     changes: (query) => send(AdminChangesResponseWireSchema, "GET", `/v1/admin/changes${search({ since: query.since, until: query.until, admin: query.admin, outcome: query.outcome, limit: query.limit, cursor: query.cursor })}`, undefined, undefined, tries),
   };

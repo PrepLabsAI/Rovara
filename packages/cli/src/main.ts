@@ -3,7 +3,7 @@ import { realpathSync } from "node:fs";
 import { open, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
-import type { Readable, Writable } from "node:stream";
+import { Writable as NodeWritable, type Readable, type Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import {
   AgentXError,
@@ -417,11 +417,15 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
 
   // Spec 025 E17 (Q6): a person typing the command is the confirmation; --yes answers for them.
   // Without --yes the prompt needs a terminal, checked before anything is planned.
+  // Final review M11: as config set limits.* does, the prompt reads the command's own stdin and
+  // writes through its own stderr, and no terminal is CONFIRMATION_UNAVAILABLE.
   const changeConfirmer = (yes: boolean): ((question: string) => Promise<boolean>) => {
     if (yes) return async () => true;
     if (dependencies.confirm !== undefined) return (question) => dependencies.confirm!(question);
-    if (process.stdin.isTTY !== true) throw agentXError("CONFIG_INVALID", "this change needs a yes: run the command in a terminal to answer its prompt, or pass --yes");
-    return (question) => askToApply(question, { input: process.stdin, output: process.stderr, signals: process });
+    const stdin: NodeJS.ReadableStream & { isTTY?: boolean } = dependencies.stdin ?? process.stdin;
+    if (stdin.isTTY !== true) throw agentXError("CONFIRMATION_UNAVAILABLE", "this change needs a yes: run the command in a terminal to answer its prompt, or pass --yes; nothing changed");
+    const output = new NodeWritable({ write(chunk: Buffer | string, _encoding, done) { services.stderr.write(chunk.toString()); done(); } });
+    return (question) => askToApply(question, { input: stdin, output, signals: process });
   };
   for (const action of ["grant", "revoke"] as const) {
     adminProject

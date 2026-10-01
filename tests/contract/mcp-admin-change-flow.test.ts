@@ -330,9 +330,12 @@ describe("a planted secret, end to end (SC-004, ruling R3)", () => {
     expect(slack.updates).toHaveLength(1);
     expect((await popUp.tool("agentx_admin_register_project_revision", REVISION(`Also ${PLANTED}.`))).error).toMatchObject({ code: "CONFIRMATION_DECLINED" });
     expect(popUp.asked).toHaveLength(1);
-    // R3: the pending change keeps the raw definition it would apply (with its 30-day TTL), so the
-    // planted value did reach AgentX; the sweep below proves it went nowhere else.
-    expect(JSON.stringify(broker.db.find((item) => item.entityType === "ADMIN_CHANGE" && item.kind === "register_project_revision"))).toContain(PLANTED);
+    // R3 mitigation (controller ruling): a pending change keeps the raw definition only while it can
+    // still apply; both changes were declined, so neither keeps its input or the planted value.
+    const revisions = broker.db.find((item) => item.entityType === "ADMIN_CHANGE" && item.kind === "register_project_revision");
+    expect(revisions.map((item) => item.status)).toEqual(["declined", "declined"]);
+    for (const item of revisions) expect(item).not.toHaveProperty("input");
+    expect(JSON.stringify(revisions)).not.toContain(PLANTED);
     // The credential tool's planted input is refused at planning, before any change is stored.
     const credential = await popUp.tool("agentx_admin_register_credential", { ref: "linear", type: "static-secret", secret_name: `agentx/connectors/${PLANTED}` });
     expect(credential.error).toMatchObject({ code: "INVALID_REQUEST" });

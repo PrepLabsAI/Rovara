@@ -8,6 +8,7 @@ import { ADMIN_LIST_MAX, AdminChangeOutcomeSchema, type AdminChangeInput } from 
 import { z } from "zod";
 import { adminOf } from "./admin-tools.js";
 import { confirmChange, changeError, type ConfirmationOutcome } from "./confirmation.js";
+import { APPLY_UNKNOWN_STEP } from "./admin-client.js";
 import { ToolError } from "./errors.js";
 import { requestIdFor, type ToolCall, type ToolContext, type ToolDefinition, type ToolResult } from "./tools.js";
 
@@ -32,7 +33,10 @@ async function runChange(context: ToolContext, call: ToolCall, input: Record<str
   const content = contentOf(change);
   const requestId = requestIdFor(context, call, input, content);
   let settled: ConfirmationOutcome | undefined;
-  /** A change AgentX is applying has not ended either: a retry learns its outcome (review fix 1). */
+  /**
+   * A change AgentX is applying has not ended either: a retry learns its outcome (review fix 1).
+   * Nor has one whose apply was sent with no answer back (final review I1): it may have applied.
+   */
   let applying = false;
   try {
     const planned = await admin.proposeChange({
@@ -57,10 +61,14 @@ async function runChange(context: ToolContext, call: ToolCall, input: Record<str
     } else {
       throw changeError(planned);
     }
+  } catch (error) {
+    if (error instanceof ToolError && error.nextStep === APPLY_UNKNOWN_STEP) applying = true;
+    throw error;
   } finally {
     // B3, FR-049: a change that ended (applied, declined, expired, stale, refused or failed) is
     // forgotten, so asking for it again plans a new change. Only one still waiting for its Slack
-    // Confirm, or one AgentX is applying, keeps its request ID, so an unchanged retry is that same change.
+    // Confirm, one AgentX is applying, or one whose apply's outcome is unknown, keeps its request
+    // ID, so an unchanged retry is that same change.
     if (settled?.outcome !== "awaiting_confirmation" && !applying) call.requestIds?.forget(content);
   }
   const view = settled.change;
@@ -99,7 +107,7 @@ export const ADMIN_CHANGE_TOOLS: readonly ToolDefinition[] = [
     (input) => ({ kind: "unbind_channel", channel: text(input.channel) })),
   tool("agentx_admin_register_credential", "Register an AgentX connector credential",
     "Registers a connector credential by reference, type and secret name. Never pass a secret's value: AgentX refuses any input that looks like one. The confirmation shows whether the secret exists and reads as that type, and which projects name the reference.",
-    { ref: z.string().min(1).max(63).describe("the credential reference connectors name"), type: z.string().min(1).max(64).describe("static-secret, oauth-client-credentials or oauth-refresh-token"), secret_name: z.string().min(1).max(512).describe("the secret's name under agentx/connectors/, never its value") },
+    { ref: z.string().min(1).max(63).describe("the credential reference connectors name"), type: z.string().min(1).max(64).describe("static-secret, oauth-client-credentials or oauth-refresh-token"), secret_name: z.string().min(1).max(512).describe("the secret's name under the connector secret prefix, never its value") },
     (input) => ({ kind: "register_credential", ref: text(input.ref), type: text(input.type), secretName: text(input.secret_name) })),
   tool("agentx_admin_stop_workspace", "Stop a workspace's running task",
     "Cancels the task running in a workspace; its compute stops on its own when idle. The confirmation shows the workspace, its project, owner and status, and the task that will be cancelled.",

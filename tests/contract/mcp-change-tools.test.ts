@@ -8,7 +8,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
-import { ADMIN_AUDIT_TOOLS, ADMIN_CHANGE_TOOLS, ADMIN_READ_TOOLS, DEVELOPER_TOOLS, REQUIRED_CHANGE_ADMIN_MINOR, ToolError, adminApiFits, createAgentXMcpServer, type AdminControlPlaneClient, type AdminOffer, type ToolContext } from "../../packages/mcp/src/index.js";
+import { ADMIN_AUDIT_TOOLS, ADMIN_CHANGE_TOOLS, APPLY_UNKNOWN_STEP, ADMIN_READ_TOOLS, DEVELOPER_TOOLS, REQUIRED_CHANGE_ADMIN_MINOR, ToolError, adminApiFits, createAgentXMcpServer, type AdminControlPlaneClient, type AdminOffer, type ToolContext } from "../../packages/mcp/src/index.js";
 import { agentxMcpServer } from "../../packages/cli/src/mcp/serve.js";
 import { saveDeveloperEnvironment, developerTokenKey } from "../../packages/cli/src/developer/config.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
@@ -139,6 +139,29 @@ describe("a change tool's confirmation (FR-041, SC-005)", () => {
     await client.callTool(call);
     const ids = proposeChange.mock.calls.map((entry) => (entry as unknown as [{ requestId: string }])[0].requestId);
     expect(new Set(ids).size).toBe(3);
+  });
+
+  it("keeps the request ID of an apply whose outcome is unknown, and says to check before asking again (final review I1)", async () => {
+    let next = 0;
+    const newRequestId = () => `00000000-0000-4000-8000-${String(++next).padStart(12, "0")}`;
+    const proposeChange = vi.fn(async () => pending);
+    const applyChange = vi.fn()
+      .mockRejectedValueOnce(new ToolError("CONTROL_PLANE_UNAVAILABLE", "could not reach AgentX at its URL", APPLY_UNKNOWN_STEP))
+      .mockResolvedValue({ ...pending, status: "applied" as const, methodUsed: "elicitation" as const });
+    const { client } = await connect({ admin: { proposeChange, applyChange }, newRequestId });
+    await offered(client, "agentx_admin_set_workspace_limits");
+    const call = { name: "agentx_admin_set_workspace_limits", arguments: { per_person: 4 } };
+    expect(toolError(await client.callTool(call))).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE", next_step: "it may or may not have applied; check it with agentx_admin_changes before asking again" });
+    await client.callTool(call);
+    const ids = proposeChange.mock.calls.map((entry) => (entry as unknown as [{ requestId: string }])[0].requestId);
+    expect(ids[1]).toBe(ids[0]);
+  });
+
+  it("names the connector secret prefix, not one deployment's, in the credential tool (final review M10)", () => {
+    const credential = ADMIN_CHANGE_TOOLS.find((tool) => tool.name === "agentx_admin_register_credential")!;
+    const words = JSON.stringify([credential.description, Object.values(credential.inputSchema).map((field) => (field as { description?: string }).description)]);
+    expect(words).not.toContain("agentx/connectors/");
+    expect(words).toContain("the connector secret prefix");
   });
 
   it("keeps the request ID of a change still waiting for its Slack Confirm, so an unchanged retry is the same change", async () => {
