@@ -713,7 +713,7 @@ describe("stopping the task nobody waits on any more (issue 167)", () => {
     it(`logs a cancel that ${failure}, says the task may still finish, and still finishes the hand-off and the error`, async () => {
       const cancel = failure === "throws"
         ? async () => { throw Object.assign(new Error("secret-bearing detail"), { name: "AgentXError" }); }
-        : () => new Promise<void>(() => undefined);
+        : () => new Promise<CancelOutcome>(() => undefined);
       const handoff = new AbortController();
       const handedOff = harness(blockedTurn(() => handoff.abort()), { cancelOperation: cancel });
       handedOff.dependencies.cancelTaskMilliseconds = 20;
@@ -749,7 +749,11 @@ describe("stopping the task nobody waits on any more (issue 167)", () => {
     const handoff = new AbortController();
     const { posts, logs, dependencies } = harness(blockedTurn(() => handoff.abort()));
     const api = dependencies.api;
-    dependencies.api = (message) => ({ ...api(message), cancelOperation: undefined });
+    dependencies.api = (message) => {
+      const withoutCancel = { ...api(message) };
+      delete withoutCancel.cancelOperation;
+      return withoutCancel;
+    };
     await processSlackRequest(slackMessage("EvWORK000063", "fix the bug"), dependencies, { finalAttempt: true, handoff: handoff.signal });
     expect(logs).toContainEqual({ event: "turn.task_cancel_failed", fields: { eventId: "EvWORK000063", workspaceId, operationId: OPERATION, errorName: "CancelUnavailable" } });
     expect(posts.at(-1)).toBe(HANDOFF_FINAL_CANCEL_FAILED_TEXT);
