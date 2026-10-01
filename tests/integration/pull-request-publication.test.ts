@@ -504,7 +504,7 @@ describe("publication check results (#170)", () => {
     const checks = await runReadinessChecks(fixture.root, withReadiness(fixture, [
       { cwd: "repo/demo", executable: "sh", args: ["-c", 'test "$CHECK_MODE" = strict'], timeoutSeconds: 10, env: { CHECK_MODE: "strict" } },
       { cwd: "repo/demo", executable: "sh", args: ["-c", 'test -z "${CHECK_MODE-}"'], timeoutSeconds: 10 },
-    ]));
+    ]), await manifestOf(fixture));
     expect(checks.map((check) => check.outcome)).toEqual(["passed", "passed"]);
   }, 30_000);
 
