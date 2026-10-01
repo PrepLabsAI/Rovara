@@ -64,11 +64,14 @@ export type ProposeAdminChangeRequest = z.infer<typeof ProposeAdminChangeRequest
 /** E4: a Slack press applies through its own path, never this route. */
 export const ApplyAdminChangeRequestSchema = z.object({ method: z.enum(["elicitation", "cli"]), requestedAt: Time.optional(), answeredAt: Time.optional() }).strict();
 export type ApplyAdminChangeRequest = z.infer<typeof ApplyAdminChangeRequestSchema>;
-export const DeclineAdminChangeRequestSchema = z.object({ method: z.enum(["elicitation", "cli"]), reason: z.enum(["declined", "cancelled", "failed"]), answeredAt: Time.optional() }).strict();
+/** `requestedAt`: when the pop-up or prompt was shown, so a declined confirmation records it too (final review M3). */
+export const DeclineAdminChangeRequestSchema = z.object({ method: z.enum(["elicitation", "cli"]), reason: z.enum(["declined", "cancelled", "failed"]), requestedAt: Time.optional(), answeredAt: Time.optional() }).strict();
 export type DeclineAdminChangeRequest = z.infer<typeof DeclineAdminChangeRequestSchema>;
 
 export const AdminChangeStatusSchema = z.enum(["pending", "applying", "applied", "declined", "expired", "failed"]);
 export type AdminChangeStatus = z.infer<typeof AdminChangeStatusSchema>;
+/** The statuses a change ends in; a pending change item drops its raw input on reaching one (R3). */
+export const ADMIN_CHANGE_ENDED: ReadonlySet<AdminChangeStatus> = new Set(["applied", "declined", "expired", "failed"]);
 export const AdminChangeOutcomeSchema = z.enum(["confirmed", "declined", "expired", "failed"]);
 export type AdminChangeOutcome = z.infer<typeof AdminChangeOutcomeSchema>;
 export function outcomeOfStatus(status: AdminChangeStatus): AdminChangeOutcome | undefined {
@@ -200,7 +203,12 @@ export const AdminChangePendingRecordSchema = z.object({
   entityType: z.literal("ADMIN_CHANGE"),
   changeId: Uuid,
   kind: AdminChangeKindSchema,
-  input: AdminChangeInputSchema,
+  /**
+   * The raw input the apply re-plans from (R3). Removed in the transition that ends the change
+   * (applied, declined, expired, failed), so a pending or applying change always has it and an
+   * ended one never keeps it.
+   */
+  input: AdminChangeInputSchema.optional(),
   effect: z.string().max(ADMIN_CHANGE_EFFECT_MAX),
   /** R4 (B4): the effect naming a private channel to a member planning admin; shown only to them, never audited. */
   confirmationEffect: z.string().max(ADMIN_CHANGE_EFFECT_MAX).optional(),
@@ -227,7 +235,10 @@ export const AdminChangePendingRecordSchema = z.object({
   result: z.record(z.string(), z.unknown()).optional(),
   error: ChangeError.optional(),
   [INDEX_EXPIRY_ATTRIBUTE]: z.number().int().positive(),
-}).strict().refine((record) => record.input.kind === record.kind && record.pk === adminChangeKey(record.changeId).pk, { message: "the pending change's key, kind and input disagree" }); // The refine pins pk exactly.
+}).strict().refine(
+  (record) => (record.input === undefined ? ADMIN_CHANGE_ENDED.has(record.status) : record.input.kind === record.kind) && record.pk === adminChangeKey(record.changeId).pk,
+  { message: "the pending change's key, kind and input disagree, or a change not yet ended has no input" },
+); // The refine pins pk exactly.
 export type AdminChangePendingRecord = z.infer<typeof AdminChangePendingRecordSchema>;
 /** The broker's and notifier's name for a stored pending change (Tasks 7, 8, 9). */
 export type PendingChange = AdminChangePendingRecord;
@@ -238,6 +249,8 @@ export const AdminChangeRequestRecordSchema = z.object({
   sk: Uuid,
   entityType: z.literal("ADMIN_CHANGE_REQUEST"),
   changeId: Uuid,
+  /** A hash of the change asked for, so the same request ID with another change is refused (final review I2); absent on older items. */
+  changeHash: z.string().min(1).max(128).optional(),
   [INDEX_EXPIRY_ATTRIBUTE]: z.number().int().positive(),
 }).strict();
 export type AdminChangeRequestRecord = z.infer<typeof AdminChangeRequestRecordSchema>;

@@ -358,7 +358,7 @@ function adminChangeHandlers(dependencies: AwsBrokerDependencies): AdminChangeHa
     requireAdministrator: (identity, project) => requireAdministrator(dependencies, identity, project),
     bindChannel: async (identity, teamId, channelId, project) => putSlackBinding(dependencies, identity, teamId, channelId, { projectName: project }),
     unbindChannel: async (identity, teamId, channelId) => deleteSlackBinding(dependencies, identity, teamId, channelId),
-    checkRevision: async (identity, definitionValue, runtimeBindingValue) => {
+    checkRevision: async (identity, definitionValue, runtimeBindingValue, options) => {
       if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
       let definition: ProjectDefinition;
       try {
@@ -372,8 +372,9 @@ function adminChangeHandlers(dependencies: AwsBrokerDependencies): AdminChangeHa
       if (await getItem(dependencies, projectKey(definition.name, definition.revision)) !== undefined) {
         throw agentXError("CONFIG_INVALID", `revision ${definition.revision} of ${definition.name} is already registered; use a newer revision number`);
       }
-      // C8: the vendor preflight runs here, at planning, and never again at apply.
-      const preflight = await registrationChecks(dependencies, identity, definition, true);
+      // C8: the vendor preflight runs here, at planning, and never again at apply: neither in the
+      // apply's re-plan (preflight: false, final review M1) nor in its registration.
+      const preflight = await registrationChecks(dependencies, identity, definition, options?.preflight !== false);
       return { definition, warnings: registrationWarnings(toolBudget(approvedToolCount(definition)).warning, preflight) };
     },
     registerRevision: async (identity, definition, runtimeBinding) => {
@@ -426,7 +427,7 @@ function adminChangeDependencies(dependencies: AwsBrokerDependencies, reads: Adm
     documentClient: dependencies.documentClient,
     tableName: dependencies.tableName,
     audit: {
-      documentClient: dependencies.documentClient, tableName: dependencies.turnRecordsTableName, now, log,
+      documentClient: dependencies.documentClient, tableName: dependencies.turnRecordsTableName, log,
       metric: dependencies.adminChanges?.metric ?? outcomeMetric(process.env.AGENTX_METRICS_NAMESPACE || "AgentX"),
     },
     plans: planDependencies(dependencies),

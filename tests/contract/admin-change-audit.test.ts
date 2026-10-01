@@ -2,8 +2,9 @@
 // Spec 025 E3, FR-051, FR-052: one audit record per change request, written once and then only
 // stepped forward; its outcome is set once and counted once.
 import { describe, expect, it, vi } from "vitest";
-import { listAudit, logChangeStep, outcomeMetric, readAudit, recordAuditStep, recordRefusedAttempt, writeProposal, type AuditStore } from "../../packages/broker/src/aws/admin-change-audit.js";
-import type { AdminChangeAuditRecord } from "../../packages/contracts/src/index.js";
+import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { auditStepItem, listAudit, logChangeStep, outcomeMetric, readAudit, recordRefusedAttempt, writeProposal, type AuditStep, type AuditStore } from "../../packages/broker/src/aws/admin-change-audit.js";
+import { outcomeOfStatus, type AdminChangeAuditRecord } from "../../packages/contracts/src/index.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const CHANGE = "55555555-5555-4555-8555-555555555555";
@@ -20,7 +21,22 @@ function store(): AuditStore & { db: FakeDynamoDb; metrics: string[]; logs: Arra
   const db = new FakeDynamoDb();
   const metrics: string[] = [];
   const logs: Array<Record<string, unknown>> = [];
-  return { db, metrics, logs, documentClient: db, tableName: "turns", now: () => Date.parse("2026-10-02T09:05:00.000Z"), log: (entry) => logs.push(entry), metric: (outcome) => metrics.push(outcome) };
+  return { db, metrics, logs, documentClient: db, tableName: "turns", log: (entry) => logs.push(entry), metric: (outcome) => metrics.push(outcome) };
+}
+
+/**
+ * One audit step as the broker's transition writes it (final review M9 dropped recordAuditStep):
+ * auditStepItem in a transaction, a refused condition ignored, and the outcome counted on commit.
+ */
+async function step(audit: AuditStore, changeId: string, forward: AuditStep): Promise<void> {
+  try {
+    await audit.documentClient.send(new TransactWriteCommand({ TransactItems: [auditStepItem(audit.tableName, changeId, forward)] }));
+  } catch (error) {
+    if (error instanceof Error && (error.name === "ConditionalCheckFailedException" || error.name === "TransactionCanceledException")) return;
+    throw error;
+  }
+  const outcome = forward.status === undefined ? undefined : outcomeOfStatus(forward.status);
+  if (outcome !== undefined) audit.metric(outcome);
 }
 
 describe("the audit record (E3)", () => {
@@ -40,9 +56,9 @@ describe("the audit record (E3)", () => {
   it("steps forward, sets the outcome once, and counts it once", async () => {
     const audit = store();
     await writeProposal(audit, record());
-    await recordAuditStep(audit, CHANGE, PROPOSED, { confirmationRequestedAt: "2026-10-02T09:00:01.000Z" });
-    await recordAuditStep(audit, CHANGE, PROPOSED, { status: "applied", methodUsed: "elicitation", answeredAt: "2026-10-02T09:01:00.000Z", appliedAt: "2026-10-02T09:01:00.500Z", result: { ok: true } });
-    await recordAuditStep(audit, CHANGE, PROPOSED, { status: "failed", failedAt: "2026-10-02T09:02:00.000Z" });
+    await step(audit, CHANGE, { confirmationRequestedAt: "2026-10-02T09:00:01.000Z" });
+    await step(audit, CHANGE, { status: "applied", methodUsed: "elicitation", answeredAt: "2026-10-02T09:01:00.000Z", appliedAt: "2026-10-02T09:01:00.500Z", result: { ok: true } });
+    await step(audit, CHANGE, { status: "failed", failedAt: "2026-10-02T09:02:00.000Z" });
     expect(await readAudit(audit, CHANGE)).toMatchObject({ status: "applied", outcome: "confirmed", methodUsed: "elicitation", confirmationRequestedAt: "2026-10-02T09:00:01.000Z" });
     expect(audit.metrics).toEqual(["confirmed"]);
   });
@@ -70,7 +86,7 @@ describe("the audit record (E3)", () => {
   it("lists newest first, filters by admin and outcome, and pages with a cursor", async () => {
     const audit = store();
     for (let n = 0; n < 3; n += 1) await writeProposal(audit, record(`5555555${n}-5555-4555-8555-555555555555`, `2026-10-02T09:0${n}:00.000Z`));
-    await recordAuditStep(audit, "55555551-5555-4555-8555-555555555555", "2026-10-02T09:01:00.000Z", { status: "declined", answeredAt: "2026-10-02T09:01:30.000Z" });
+    await step(audit, "55555551-5555-4555-8555-555555555555", { status: "declined", answeredAt: "2026-10-02T09:01:30.000Z" });
     const first = await listAudit(audit, { since: "2026-10-01T00:00:00.000Z", limit: 2 });
     expect(first.changes.map((change) => change.proposedAt)).toEqual(["2026-10-02T09:02:00.000Z", "2026-10-02T09:01:00.000Z"]);
     const rest = await listAudit(audit, { since: "2026-10-01T00:00:00.000Z", limit: 2, cursor: first.cursor! });
@@ -83,14 +99,14 @@ describe("the audit record (E3)", () => {
   it("redacts a step's result and error, and refuses a step or attempt the record could not read back", async () => {
     const audit = store();
     await writeProposal(audit, record(CHANGE, PROPOSED, { effect: `Bind with ${PLANTED}.` }));
-    await recordAuditStep(audit, CHANGE, PROPOSED, { status: "failed", failedAt: "2026-10-02T09:02:00.000Z", error: { code: "INTERNAL", message: `the token ${PLANTED} was refused` }, result: { token: PLANTED } });
+    await step(audit, CHANGE, { status: "failed", failedAt: "2026-10-02T09:02:00.000Z", error: { code: "INTERNAL", message: `the token ${PLANTED} was refused` }, result: { token: PLANTED } });
     const stored = audit.db.get(`CHANGE#${CHANGE}`, "AUDIT")!;
     expect(JSON.stringify(stored)).not.toContain(PLANTED);
     expect(await readAudit(audit, CHANGE)).toMatchObject({ status: "failed", outcome: "failed" });
     expect(audit.metrics).toEqual(["failed"]);
     const other = store();
     await writeProposal(other, record());
-    await expect(recordAuditStep(other, CHANGE, PROPOSED, { pressedBy: "not-a-slack-user" })).rejects.toThrow();
+    await expect(step(other, CHANGE, { pressedBy: "not-a-slack-user" })).rejects.toThrow();
     await expect(recordRefusedAttempt(other, CHANGE, { at: "2026-10-02T09:00:30.000Z", reason: "another_person", slackUserId: "not-a-slack-user" })).rejects.toThrow();
     expect(await readAudit(other, CHANGE)).toMatchObject({ status: "pending" });
     expect((await readAudit(other, CHANGE))?.refusedAttempts).toBeUndefined();

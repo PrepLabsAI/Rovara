@@ -70,7 +70,7 @@ describe("binding and unbinding (E7, E12)", () => {
     const plan = await planChange(deps, identity, { kind: "bind_channel", channel: "C0PRIVATE01", project: "payments" });
     expect(plan.effect).toContain("Bind channel C0PRIVATE01 (a private channel) to project payments.");
     expect(JSON.stringify(plan)).not.toContain("secret-launch");
-    await expect(planChange(deps, identity, { kind: "bind_channel", channel: "#secret-launch", project: "payments" })).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: no public channel named #secret-launch in this Slack workspace; give a private channel by its ID" });
+    await expect(planChange(deps, identity, { kind: "bind_channel", channel: "#secret-launch", project: "payments" })).rejects.toMatchObject({ code: "NOT_FOUND", message: "NOT_FOUND: no public channel with that name in this Slack workspace; give a private channel by its ID" });
   });
 
   it("names a private channel to a member admin in the confirmation only; the stored effect, details and hash keep the ID (B4, R4)", async () => {

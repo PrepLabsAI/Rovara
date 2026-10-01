@@ -77,6 +77,9 @@ describe("change requests (E1)", () => {
     expect(DeclineAdminChangeRequestSchema.safeParse({ method: "cli" }).success).toBe(false);
     expect(DeclineAdminChangeRequestSchema.safeParse({ method: "cli", reason: "bored" }).success).toBe(false);
     expect(DeclineAdminChangeRequestSchema.safeParse({ method: "cli", reason: "declined", extra: 1 }).success).toBe(false);
+    // Final review M3: a declined pop-up or prompt says when it was shown.
+    expect(DeclineAdminChangeRequestSchema.parse({ method: "cli", reason: "declined", requestedAt: PROPOSED })).toEqual({ method: "cli", reason: "declined", requestedAt: PROPOSED });
+    expect(DeclineAdminChangeRequestSchema.safeParse({ method: "cli", reason: "declined", requestedAt: "soon" }).success).toBe(false);
   });
 
   it("reports the environment's confirmation methods as two booleans (E16)", () => {
@@ -142,6 +145,9 @@ describe("records (E2, E3)", () => {
     // E13 (Task 8): the notifier's claim and edit times stay readable by the broker.
     expect(AdminChangePendingRecordSchema.parse({ ...pendingRecord, dmClaimedAt: PROPOSED, dm: { channel: "D0123456789", ts: "1.2", postedAt: PROPOSED }, dmEditedAt: PROPOSED })).toMatchObject({ dmClaimedAt: PROPOSED, dmEditedAt: PROPOSED });
     expect(AdminChangePendingRecordSchema.safeParse({ ...pendingRecord, dmEditedAt: "yesterday" }).success).toBe(false);
+    // R3 mitigation: an ended change keeps no input; one that can still apply must have it.
+    for (const status of ["applied", "declined", "expired", "failed"] as const) expect(AdminChangePendingRecordSchema.safeParse({ ...omit(pendingRecord, "input"), status }).success).toBe(true);
+    for (const status of ["pending", "applying"] as const) expect(AdminChangePendingRecordSchema.safeParse({ ...omit(pendingRecord, "input"), status }).success).toBe(false);
   });
 
   it("reads a stored request ID's item strictly, with its TTL", () => {

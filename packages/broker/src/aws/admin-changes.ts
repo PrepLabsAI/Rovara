@@ -6,17 +6,18 @@
 // Log lines carry event names, change IDs, trace IDs, kinds, outcomes and error codes only: never
 // the input, the effect, a token or an error's own text.
 import { randomUUID } from "node:crypto";
-import { GetCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  ADMIN_CHANGE_APPLYING_STALE_MS, ADMIN_CHANGE_EFFECT_MAX, ADMIN_LIST_MAX, ADMIN_CHANGE_TTL_MS, AdminChangeOutcomeSchema, AdminChangePendingRecordSchema, AgentXError, AgentXErrorCodeSchema,
+  ADMIN_CHANGE_APPLYING_STALE_MS, ADMIN_CHANGE_EFFECT_MAX, ADMIN_CHANGE_ENDED, SlackChannelIdSchema, ADMIN_LIST_MAX, ADMIN_CHANGE_TTL_MS, AdminChangeOutcomeSchema, AdminChangePendingRecordSchema, AgentXError, AgentXErrorCodeSchema,
   ApplyAdminChangeRequestSchema, DeclineAdminChangeRequestSchema, INDEX_EXPIRY_ATTRIBUTE, ProposeAdminChangeRequestSchema, SlackUserIdSchema,
   adminChangeItemExpiresAt, adminChangeKey, adminChangeRequestKey, agentXError, outcomeOfStatus, redactSecrets, redactText,
-  type AdminChangeAuditRecord, type AdminChangePressEvent, type AdminChangeStatus, type AdminChangeView, type AdminMeResponse, type ConfirmationMethod,
+  type AdminChangeAuditRecord, type AdminChangeInput, type AdminChangePressEvent, type AdminChangeStatus, type AdminChangeView, type AdminMeResponse, type ConfirmationMethod,
   type PendingChange, type RefusedAttemptReason,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { auditStepItem, listAudit, logChangeStep, proposalItem, readAudit, recordRefusedAttempt, writeProposal, type AuditStep, type AuditStore, type TransactItem } from "./admin-change-audit.js";
 import { planChange, stateHash, type ChangePlan, type PlanDependencies } from "./admin-change-plans.js";
+import { hashJson } from "./broker-shared.js";
 import { listLimitParam, validTime } from "./turns.js";
 
 export interface AdminChangeDependencies {
@@ -129,9 +130,13 @@ async function transition(deps: AdminChangeDependencies, change: PendingChange, 
     values[`:g${index}`] = value;
     return `#g${index} = :g${index}`;
   })];
+  // R3 (controller ruling): a change that ends drops its raw input in the same write, so a secret
+  // the admin pasted into it is kept no longer than the change can still apply.
+  const ended = ADMIN_CHANGE_ENDED.has(to);
+  if (ended) names["#input"] = "input";
   try {
     await transact(deps, [
-      { Update: { TableName: deps.tableName, Key: adminChangeKey(change.changeId), UpdateExpression: `SET ${assignments.join(", ")}`, ConditionExpression: "#status = :from", ExpressionAttributeNames: names, ExpressionAttributeValues: values } },
+      { Update: { TableName: deps.tableName, Key: adminChangeKey(change.changeId), UpdateExpression: `SET ${assignments.join(", ")}${ended ? " REMOVE #input" : ""}`, ConditionExpression: "#status = :from", ExpressionAttributeNames: names, ExpressionAttributeValues: values } },
       auditStepItem(deps.audit.tableName, change.changeId, { ...step, status: to }),
     ]);
   } catch (error) {
@@ -209,32 +214,62 @@ async function requirePending(deps: AdminChangeDependencies, change: PendingChan
   throw refusalFor(change);
 }
 
-/** B4: the admin's linked Slack user and display name; a failed lookup links nothing. */
-async function whoIsPlanning(deps: AdminChangeDependencies, identity: AuthenticatedIdentity, authorization: string | undefined, traceId: string): Promise<{ displayName?: string; slackUserId?: string }> {
+/**
+ * B4: the admin's linked Slack user and display name; a failed lookup links nothing, and says so
+ * (`lookupFailed`), so a refusal never claims the admin has no Slack user (final review M7).
+ */
+async function whoIsPlanning(deps: AdminChangeDependencies, identity: AuthenticatedIdentity, authorization: string | undefined, traceId: string): Promise<{ displayName?: string; slackUserId?: string; lookupFailed?: true }> {
   if (deps.identity === undefined) return {};
   let me: AdminMeResponse;
   try {
     me = await deps.identity.me(identity, authorization);
   } catch (error) {
     deps.log({ event: "admin_change.identity_unavailable", traceId, error: errorName(error) });
-    return {};
+    return { lookupFailed: true };
   }
   const name = typeof me.name === "string" && me.name.trim() !== "" ? cap(me.name.trim(), 200) : undefined;
   const slackUserId = me.slack.linked && SlackUserIdSchema.safeParse(me.slack.userId).success ? me.slack.userId : undefined;
-  return { ...(name === undefined ? {} : { displayName: name }), ...(slackUserId === undefined ? {} : { slackUserId }) };
+  const lookupFailed = !me.slack.linked && me.slack.reason === "slack_unavailable";
+  return { ...(name === undefined ? {} : { displayName: name }), ...(slackUserId === undefined ? {} : { slackUserId }), ...(lookupFailed ? { lookupFailed: true as const } : {}) };
 }
 
 /** FR-041: why no method is left, in the order the caller asked for them. */
-function unavailableMessage(deps: AdminChangeDependencies, methods: readonly ConfirmationMethod[]): string {
+function unavailableMessage(deps: AdminChangeDependencies, methods: readonly ConfirmationMethod[], lookupFailed: boolean): string {
   const reasons: string[] = [];
   if (methods.includes("elicitation") && !deps.confirm.elicitation) reasons.push("the environment does not allow the pop-up");
-  if (methods.includes("slack")) reasons.push(deps.confirm.slack && deps.identity !== undefined ? "your admin sign-in matches no Slack user" : "Slack confirmation is not set up in this environment");
-  return `no confirmation method is available: ${reasons.join(", and ")}; use agentx admin commands instead`;
+  const slackSetUp = deps.confirm.slack && deps.identity !== undefined;
+  const checkFailed = methods.includes("slack") && slackSetUp && lookupFailed;
+  if (methods.includes("slack")) reasons.push(!slackSetUp ? "Slack confirmation is not set up in this environment" : lookupFailed ? "AgentX could not check your Slack link just now" : "your admin sign-in matches no Slack user");
+  return `no confirmation method is available: ${reasons.join(", and ")}; ${checkFailed ? "try again, or use" : "use"} agentx admin commands instead`;
 }
 
-async function answerExisting(deps: AdminChangeDependencies, identity: AuthenticatedIdentity, requestId: string): Promise<Answer | undefined> {
-  const pointer = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: adminChangeRequestKey(identity.ownerKey, requestId), ConsistentRead: true })) as { Item?: { changeId?: unknown } };
+/**
+ * Final review M6: the audit keeps a channel only as an ID, the one typed or the one it resolved
+ * to, else the words "a channel name": a name the admin typed may be a private channel's. The
+ * pending item keeps the input as typed, since the apply re-plans from it (until R3 drops it).
+ */
+function auditedInput(input: AdminChangeInput, details?: Record<string, unknown>): Record<string, unknown> {
+  if (input.kind !== "bind_channel" && input.kind !== "unbind_channel") return { ...input };
+  const typed = input.channel.trim().replace(/^#/, "");
+  const resolved = typeof details?.channelId === "string" && SlackChannelIdSchema.safeParse(details.channelId).success ? details.channelId : undefined;
+  return { ...input, channel: SlackChannelIdSchema.safeParse(typed).success ? typed : resolved ?? "a channel name" };
+}
+
+/** Final review M2: a client's own time counts only between the proposal and now; otherwise the server's time is recorded. */
+function clientTime(value: string | undefined, proposedAt: string, now: number): string {
+  const at = value === undefined ? Number.NaN : Date.parse(value);
+  return Number.isFinite(at) && at >= Date.parse(proposedAt) && at <= now ? iso(at) : iso(now);
+}
+
+/** I2: what makes a repeated request ID the same request: the change it asks for. */
+const changeHashOf = (change: AdminChangeInput): string => hashJson(change);
+
+/** The change a repeated request ID made; "conflict" when the ID was used for another change (final review I2). */
+async function answerExisting(deps: AdminChangeDependencies, identity: AuthenticatedIdentity, requestId: string, changeHash: string): Promise<Answer | "conflict" | undefined> {
+  const pointer = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: adminChangeRequestKey(identity.ownerKey, requestId), ConsistentRead: true })) as { Item?: { changeId?: unknown; changeHash?: unknown } };
   if (typeof pointer.Item?.changeId !== "string") return undefined;
+  // A pointer written before the hash existed answers its change, as it did then.
+  if (typeof pointer.Item.changeHash === "string" && pointer.Item.changeHash !== changeHash) return "conflict";
   const existing = await getPending(deps, pointer.Item.changeId);
   if (existing === undefined) return undefined;
   return { status: 200, body: { change: viewOf(deps, await settle(deps, existing), isPlanner(existing, identity)) } };
@@ -249,17 +284,27 @@ async function propose(deps: AdminChangeDependencies, identity: AuthenticatedIde
     throw agentXError("CONFIG_INVALID", `invalid change request: ${issue?.path.join(".") || "request"}: ${issue?.message ?? "invalid"}; fix it and send it again`);
   }
   const request = parsed.data;
-  const repeated = await answerExisting(deps, identity, request.requestId);
-  if (repeated !== undefined) return repeated;
-
+  const changeHash = changeHashOf(request.change);
   const now = deps.now();
-  const changeId = deps.newId();
   const proposedAt = iso(now);
   const kind = request.change.kind;
+  const client = { cliVersion: request.client.cliVersion, ...(request.client.mcpClient === undefined ? {} : { mcpClientName: request.client.mcpClient.name, ...(request.client.mcpClient.version === undefined ? {} : { mcpClientVersion: request.client.mcpClient.version }) }) };
+  /** I2: the request ID was used for another change: audited as its own failed request, and refused. */
+  const conflict = async (): Promise<never> => {
+    const refusedId = deps.newId();
+    const error = { code: "IDEMPOTENCY_CONFLICT", message: `request ID ${request.requestId} was already used for a different change; use a new request_id or leave it out` };
+    await writeProposal(deps.audit, { changeId: refusedId, kind, traceId, admin: { issuer: identity.issuer, subject: identity.subject }, client, proposedAt, change: auditedInput(request.change), effect: "", methodsOffered: [], status: "failed", failedAt: proposedAt, error });
+    logChangeStep(deps.log, "request_conflict", { changeId: refusedId, traceId, kind, outcome: "failed", error: error.code });
+    throw agentXError("IDEMPOTENCY_CONFLICT", error.message);
+  };
+  const repeated = await answerExisting(deps, identity, request.requestId, changeHash);
+  if (repeated === "conflict") return conflict();
+  if (repeated !== undefined) return repeated;
+
+  const changeId = deps.newId();
   // B4: who is planning, before the plan, so a private channel is named only to a member admin.
   const who = await whoIsPlanning(deps, identity, authorization, traceId);
   const admin = { issuer: identity.issuer, subject: identity.subject, ...(who.displayName === undefined ? {} : { displayName: who.displayName }) };
-  const client = { cliVersion: request.client.cliVersion, ...(request.client.mcpClient === undefined ? {} : { mcpClientName: request.client.mcpClient.name, ...(request.client.mcpClient.version === undefined ? {} : { mcpClientVersion: request.client.mcpClient.version }) }) };
   const base = { changeId, kind, traceId, admin, client, proposedAt };
   let plan: ChangePlan;
   try {
@@ -267,14 +312,14 @@ async function propose(deps: AdminChangeDependencies, identity: AuthenticatedIde
   } catch (error) {
     // FR-051: every request has its audit record, whatever its outcome.
     const failure = errorOf(error, NOT_PLANNED);
-    await writeProposal(deps.audit, { ...base, change: request.change, effect: "", methodsOffered: [], status: "failed", failedAt: proposedAt, error: failure });
+    await writeProposal(deps.audit, { ...base, change: auditedInput(request.change), effect: "", methodsOffered: [], status: "failed", failedAt: proposedAt, error: failure });
     logChangeStep(deps.log, "plan_refused", { changeId, traceId, kind, outcome: "failed", error: failure.code });
     throw error instanceof AgentXError ? error : agentXError("RUNTIME_UNAVAILABLE", `change ${changeId}: ${NOT_PLANNED}`);
   }
   const effect = cap(redactText(plan.effect), ADMIN_CHANGE_EFFECT_MAX);
   const confirmationEffect = plan.confirmationEffect === undefined ? undefined : cap(redactText(plan.confirmationEffect), ADMIN_CHANGE_EFFECT_MAX);
   // R4: the audit keeps the ID-only effect and the details, never the member admin's confirmation text.
-  const change = redactSecrets({ ...request.change, details: plan.details }) as Record<string, unknown>;
+  const change = redactSecrets({ ...auditedInput(request.change, plan.details), details: plan.details }) as Record<string, unknown>;
   const offered: ConfirmationMethod[] = [];
   for (const method of request.methods) {
     if (offered.includes(method)) continue;
@@ -284,12 +329,13 @@ async function propose(deps: AdminChangeDependencies, identity: AuthenticatedIde
     if (method === "slack" && deps.confirm.slack && who.slackUserId !== undefined) offered.push("slack");
   }
   if (offered.length === 0) {
-    const error = { code: "CONFIRMATION_UNAVAILABLE", message: unavailableMessage(deps, request.methods) };
+    const error = { code: "CONFIRMATION_UNAVAILABLE", message: unavailableMessage(deps, request.methods, who.lookupFailed === true) };
     await writeProposal(deps.audit, { ...base, change, effect, methodsOffered: [], status: "failed", failedAt: proposedAt, error });
     logChangeStep(deps.log, "unconfirmable", { changeId, traceId, kind, outcome: "failed", error: error.code });
     throw agentXError("CONFIRMATION_UNAVAILABLE", error.message);
   }
-  // R2: both State items carry the table's TTL; R3: the raw input stays here, as apply needs it.
+  // R2: both State items carry the table's TTL; R3: the raw input stays here while the change can
+  // still apply, and the transition that ends it removes it.
   const stored = AdminChangePendingRecordSchema.safeParse({
     ...adminChangeKey(changeId), entityType: "ADMIN_CHANGE", changeId, kind, input: request.change, effect,
     ...(confirmationEffect === undefined || confirmationEffect === effect ? {} : { confirmationEffect }),
@@ -309,13 +355,26 @@ async function propose(deps: AdminChangeDependencies, identity: AuthenticatedIde
   try {
     await transact(deps, [
       { Put: { TableName: deps.tableName, Item: pending, ConditionExpression: "attribute_not_exists(pk)" } },
-      { Put: { TableName: deps.tableName, Item: { ...adminChangeRequestKey(identity.ownerKey, request.requestId), entityType: "ADMIN_CHANGE_REQUEST", changeId, [INDEX_EXPIRY_ATTRIBUTE]: adminChangeItemExpiresAt(proposedAt) }, ConditionExpression: "attribute_not_exists(pk)" } },
+      { Put: { TableName: deps.tableName, Item: { ...adminChangeRequestKey(identity.ownerKey, request.requestId), entityType: "ADMIN_CHANGE_REQUEST", changeId, changeHash, [INDEX_EXPIRY_ATTRIBUTE]: adminChangeItemExpiresAt(proposedAt) }, ConditionExpression: "attribute_not_exists(pk)" } },
       proposalItem(deps.audit.tableName, { ...base, change, effect, methodsOffered: offered, status: "pending" }),
     ]);
   } catch (error) {
-    if (!conditional(error)) throw error;
+    if (!conditional(error)) {
+      // Final review M5: a throttle or an unknown answer is still audited, best effort (a write
+      // that did commit leaves its own record, which this put then cannot replace), and the
+      // admin is told to try again; the same request ID answers the change if it was stored.
+      const failure = { code: "RUNTIME_UNAVAILABLE", message: NOT_PLANNED };
+      logChangeStep(deps.log, "propose_unavailable", { changeId, traceId, kind, error: errorName(error) });
+      try {
+        await writeProposal(deps.audit, { ...base, change, effect, methodsOffered: [], status: "failed", failedAt: proposedAt, error: failure });
+      } catch (auditError) {
+        deps.log({ event: "admin_change.audit_unwritten", changeId, traceId, error: errorName(auditError) });
+      }
+      throw agentXError("RUNTIME_UNAVAILABLE", `change ${changeId}: ${NOT_PLANNED}`);
+    }
     // The same request ID raced this one; answer the change it made.
-    const raced = await answerExisting(deps, identity, request.requestId);
+    const raced = await answerExisting(deps, identity, request.requestId, changeHash);
+    if (raced === "conflict") return conflict();
     if (raced === undefined) throw error;
     return raced;
   }
@@ -341,15 +400,19 @@ async function refuseAsItIs(deps: AdminChangeDependencies, change: PendingChange
 async function applyOnce(deps: AdminChangeDependencies, change: PendingChange, applier: AuthenticatedIdentity, how: Confirmation): Promise<PendingChange> {
   const now = deps.now();
   const answered: AuditStep = {
-    answeredAt: how.answeredAt ?? iso(now), methodUsed: how.method,
+    answeredAt: clientTime(how.answeredAt, change.proposedAt, now), methodUsed: how.method,
     ...(how.pressedBy === undefined ? {} : { pressedBy: how.pressedBy }),
-    ...(how.requestedAt === undefined || change.slackRequestedAt !== undefined ? {} : { confirmationRequestedAt: how.requestedAt }),
+    ...(how.requestedAt === undefined || change.slackRequestedAt !== undefined ? {} : { confirmationRequestedAt: clientTime(how.requestedAt, change.proposedAt, now) }),
   };
+  const input = change.input;
+  // The stored schema refuses a pending change without its input (R3), so this never happens.
+  if (input === undefined) throw agentXError("RUNTIME_UNAVAILABLE", `change ${change.changeId} could not be read; ask for the change again`);
   const who = { methodUsed: how.method, ...(how.pressedBy === undefined ? {} : { pressedBy: how.pressedBy }) };
   // B4: the stored Slack user, so the re-plan reads what the planning read (a press has no token).
   let fresh: ChangePlan | AgentXError;
   try {
-    fresh = await planChange(deps.plans, applier, change.input, change.slackUserId === undefined ? {} : { slackUserId: change.slackUserId });
+    // M1: the re-plan never contacts a revision's vendors again; their findings are not in the hash.
+    fresh = await planChange(deps.plans, applier, input, { replan: true, ...(change.slackUserId === undefined ? {} : { slackUserId: change.slackUserId }) });
   } catch (error) {
     if (!(error instanceof AgentXError) || TRANSIENT.has(error.code)) {
       // A throttle, a failed lookup or an unreachable Slack says nothing about the state: never
@@ -450,8 +513,11 @@ async function decline(deps: AdminChangeDependencies, identity: AuthenticatedIde
     logChangeStep(deps.log, "refused", { ...traced(change), error: "method_not_offered" });
     throw agentXError("CONFIRMATION_UNAVAILABLE", `${METHOD_NAMES[body.data.method].decline} was not offered for change ${changeId}; decline it with ${methodsNamed(change.methodsOffered, "decline")}, or let it expire`);
   }
-  const answeredAt = body.data.answeredAt ?? iso(deps.now());
-  if (!(await transition(deps, change, "pending", "declined", { answeredAt, methodUsed: body.data.method }, { methodUsed: body.data.method }))) throw await refuseAsItIs(deps, change);
+  const now = deps.now();
+  const answeredAt = clientTime(body.data.answeredAt, change.proposedAt, now);
+  // M3: a declined pop-up or prompt records when it was shown, as a confirmed one does.
+  const requested = body.data.requestedAt === undefined || change.slackRequestedAt !== undefined ? {} : { confirmationRequestedAt: clientTime(body.data.requestedAt, change.proposedAt, now) };
+  if (!(await transition(deps, change, "pending", "declined", { answeredAt, methodUsed: body.data.method, ...requested }, { methodUsed: body.data.method }))) throw await refuseAsItIs(deps, change);
   logChangeStep(deps.log, "declined", { ...traced(change), outcome: "declined" });
   return { status: 200, body: { change: viewOf(deps, { ...change, status: "declined", methodUsed: body.data.method }, true) } };
 }
@@ -537,11 +603,30 @@ export async function pressAdminChange(deps: AdminChangeDependencies, event: Adm
 
 /** E3: every read after its expiry shows a change expired (and one stuck applying failed), recording it on the way. */
 async function settleRecord(deps: AdminChangeDependencies, record: AdminChangeAuditRecord, now: number): Promise<AdminChangeAuditRecord> {
-  const unsettled = (record.status === "pending" && now >= Date.parse(record.proposedAt) + ADMIN_CHANGE_TTL_MS) || record.status === "applying";
+  const lapsed = record.status === "pending" && now >= Date.parse(record.proposedAt) + ADMIN_CHANGE_TTL_MS;
+  const unsettled = lapsed || record.status === "applying";
   const pending = unsettled ? await getPending(deps, record.changeId) : undefined;
-  if (pending === undefined) return record;
+  if (pending === undefined) return lapsed ? expireOrphan(deps, record, now) : record;
   const settled = await settle(deps, pending);
   return settled.status === pending.status ? record : (await readAudit(deps.audit, record.changeId)) ?? record;
+}
+
+/**
+ * Final review T7: a pending audit record whose change item is gone (its TTL, say) is past its 10
+ * minutes, so it can never be confirmed: it is recorded expired, and reads so, not pending forever.
+ */
+async function expireOrphan(deps: AdminChangeDependencies, record: AdminChangeAuditRecord, now: number): Promise<AdminChangeAuditRecord> {
+  const expired: AdminChangeAuditRecord = { ...record, status: "expired", outcome: "expired", expiredAt: iso(now) };
+  try {
+    await deps.audit.documentClient.send(new UpdateCommand(auditStepItem(deps.audit.tableName, record.changeId, { status: "expired", expiredAt: expired.expiredAt }).Update));
+  } catch (error) {
+    // Another read recorded it first, or the write failed: either way it reads expired.
+    if (!conditional(error)) deps.log({ event: "admin_change.expire_unrecorded", changeId: record.changeId, traceId: record.traceId, error: errorName(error) });
+    return (conditional(error) ? await readAudit(deps.audit, record.changeId) : undefined) ?? expired;
+  }
+  deps.audit.metric("expired");
+  logChangeStep(deps.log, "expired", { changeId: record.changeId, traceId: record.traceId, kind: record.kind, outcome: "expired" });
+  return (await readAudit(deps.audit, record.changeId)) ?? expired;
 }
 
 /** Settles every change still `statuses` in the window, a bounded number of pages at a time. */

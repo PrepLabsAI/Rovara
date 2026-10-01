@@ -6,6 +6,7 @@ import { AdminChangePendingRecordSchema, type ChannelInfoRequest, type ChannelMe
 import { ADMIN_SLACK, ADMIN_TOKEN, TRACE, createAdminChangeBroker } from "../support/admin-change-broker.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 import { bindChannel, unbindChannel } from "../support/developer-task-broker.js";
+import { LINEAR_CONNECTOR } from "../support/linear-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
 const BIND = { kind: "bind_channel" as const, channel: "#ledger-dev", project: "payments" };
@@ -517,5 +518,162 @@ describe("the legacy deployment", () => {
     expect((await adminCall(handler, { method: "GET", path: "/v1/admin/changes" })).body.error).toEqual({ code: "NOT_FOUND", message: "admin changes are not set up in this deployment" });
     const press = await handler({ source: "agentx.slack-ingress", action: "admin-change-press", changeId: "77777777-7777-4777-8777-777777777777", click: "confirm", slackUserId: ADMIN_SLACK, teamId: SLACK_TEAM });
     expect(JSON.parse(press.body)).toMatchObject({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } });
+  });
+});
+
+describe("the final review's fixes (phase 25e)", () => {
+  const REQUEST = "77777777-7777-4777-8777-777777777777";
+  const UNBIND = { kind: "unbind_channel" as const, channel: SLACK_CHANNEL };
+  const audits = (broker: { db: { find(match: (item: Record<string, unknown>) => boolean): Array<Record<string, unknown>> } }) => broker.db.find((item) => item.entityType === "ADMIN_CHANGE_AUDIT");
+
+  it("refuses a reused request ID with a different change, audits the refusal, and still answers the first change (I2)", async () => {
+    const broker = await createAdminChangeBroker();
+    const first = await broker.propose(BIND, ["elicitation"], REQUEST);
+    const other = await broker.propose(UNBIND, ["elicitation"], REQUEST);
+    expect(other.body.error).toEqual({ code: "IDEMPOTENCY_CONFLICT", message: `request ID ${REQUEST} was already used for a different change; use a new request_id or leave it out` });
+    expect(broker.db.find((item) => item.entityType === "ADMIN_CHANGE")).toHaveLength(1);
+    expect(audits(broker)).toEqual(expect.arrayContaining([expect.objectContaining({ kind: "unbind_channel", status: "failed", outcome: "failed", error: expect.objectContaining({ code: "IDEMPOTENCY_CONFLICT" }) as unknown })]));
+    expect(logged("admin_change.request_conflict")).toEqual([expect.objectContaining({ traceId: TRACE, kind: "unbind_channel" })]);
+    expect(changeId(await broker.propose(BIND, ["elicitation"], REQUEST))).toBe(changeId(first));
+    // A pointer written before the hash existed still answers its change.
+    const pointer = broker.db.find((item) => item.entityType === "ADMIN_CHANGE_REQUEST")[0]!;
+    const { changeHash: _hash, ...older } = pointer;
+    expect(typeof _hash).toBe("string");
+    broker.db.set(older);
+    expect(changeId(await broker.propose(UNBIND, ["elicitation"], REQUEST))).toBe(changeId(first));
+  });
+
+  it("runs a revision's vendor preflight once across the plan and the apply (M1)", async () => {
+    const definition = vi.fn(async () => ({ notConnected: "the probe is not connected" }));
+    const linear = { type: "linear", resolve: (config: { name: string }) => ({
+      name: config.name, type: "linear", label: "Linear issues", vendor: "Linear", scopeNoun: "team", scopes: [], policy: {}, approvals: [], attribution: false,
+      ledger: { prefix: "LINEAR", entityType: "LINEAR_CALL" }, configured: async () => true, definition,
+    }) };
+    const broker = await createAdminChangeBroker({ connectorTypes: { linear } });
+    const revision = {
+      name: "payments", revision: 2,
+      repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }],
+      setup: [], readiness: [], orchestratorInstructions: "Delegate work.", integrations: { connectors: [LINEAR_CONNECTOR] },
+    };
+    const proposed = await broker.propose({ kind: "register_project_revision", definition: revision });
+    expect(proposed.status).toBe(201);
+    expect(definition).toHaveBeenCalledTimes(1);
+    expect((await broker.apply(changeId(proposed))).body.change).toMatchObject({ status: "applied" });
+    expect(definition).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a client's confirmation times only between the proposal and now, else records the server's time (M2)", async () => {
+    const broker = await createAdminChangeBroker();
+    const id = changeId(await broker.propose(BIND));
+    const proposedAt = String(broker.audit(id)?.proposedAt);
+    broker.clock.advance(5_000);
+    const now = new Date(broker.clock.now()).toISOString();
+    await broker.admin("POST", `/v1/admin/changes/${id}/apply`, { headers: { "x-agentx-trace-id": TRACE }, body: { method: "elicitation", requestedAt: "2000-01-01T00:00:00.000Z", answeredAt: "2999-01-01T00:00:00.000Z" } });
+    expect(broker.audit(id)).toMatchObject({ status: "applied", confirmationRequestedAt: now, answeredAt: now });
+    const kept = changeId(await broker.propose(UNBIND));
+    const inside = new Date(broker.clock.now()).toISOString();
+    broker.clock.advance(5_000);
+    await broker.admin("POST", `/v1/admin/changes/${kept}/apply`, { headers: { "x-agentx-trace-id": TRACE }, body: { method: "elicitation", requestedAt: inside, answeredAt: inside } });
+    expect(broker.audit(kept)).toMatchObject({ status: "applied", confirmationRequestedAt: inside, answeredAt: inside });
+    expect(Date.parse(proposedAt)).toBeLessThanOrEqual(Date.parse(now));
+  });
+
+  it("records when a declined confirmation was asked, clamped like an apply's (M3)", async () => {
+    const broker = await createAdminChangeBroker();
+    const id = changeId(await broker.propose(BIND));
+    const asked = new Date(broker.clock.now()).toISOString();
+    broker.clock.advance(3_000);
+    await broker.admin("POST", `/v1/admin/changes/${id}/decline`, { headers: { "x-agentx-trace-id": TRACE }, body: { method: "elicitation", reason: "declined", requestedAt: asked, answeredAt: new Date(broker.clock.now()).toISOString() } });
+    expect(broker.audit(id)).toMatchObject({ status: "declined", confirmationRequestedAt: asked });
+    const late = changeId(await broker.propose(UNBIND));
+    const now = new Date(broker.clock.now()).toISOString();
+    await broker.admin("POST", `/v1/admin/changes/${late}/decline`, { headers: { "x-agentx-trace-id": TRACE }, body: { method: "elicitation", reason: "cancelled", requestedAt: "2999-01-01T00:00:00.000Z", answeredAt: "1999-01-01T00:00:00.000Z" } });
+    expect(broker.audit(late)).toMatchObject({ status: "declined", confirmationRequestedAt: now, answeredAt: now });
+  });
+
+  it("audits a proposal whose final write failed, and answers try again (M5)", async () => {
+    const broker = await createAdminChangeBroker();
+    const send = broker.db.send;
+    broker.db.send = async (command) => {
+      if (command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("ADMIN_CHANGE_REQUEST#")) throw Object.assign(new Error(`internal detail ${PLANTED}`), { name: "InternalServerError" });
+      return send(command);
+    };
+    const answer = await broker.propose(BIND);
+    broker.db.send = send;
+    expect(answer.body.error).toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringMatching(/the change could not be planned; try again$/) as unknown });
+    expect(broker.db.find((item) => item.entityType === "ADMIN_CHANGE")).toEqual([]);
+    expect(audits(broker)).toEqual([expect.objectContaining({ status: "failed", outcome: "failed", error: { code: "RUNTIME_UNAVAILABLE", message: "the change could not be planned; try again" } })]);
+    expect(broker.metrics).toEqual(["failed"]);
+    expect(logged("admin_change.propose_unavailable")).toEqual([expect.objectContaining({ traceId: TRACE, error: "InternalServerError" })]);
+    expect(lines.join("\n")).not.toContain(PLANTED);
+  });
+
+  it("never keeps a channel name the admin typed in the audit or a plan's refusal; the resolved ID instead (M6)", async () => {
+    const broker = await createAdminChangeBroker();
+    const refused = await broker.propose({ kind: "bind_channel", channel: "#hush-hush", project: "payments" });
+    expect(refused.body.error).toEqual({ code: "NOT_FOUND", message: "no public channel with that name in this Slack workspace; give a private channel by its ID" });
+    const id = changeId(await broker.propose(BIND));
+    const byId = changeId(await broker.propose({ kind: "unbind_channel", channel: SLACK_CHANNEL }));
+    const unconfirmable = await createAdminChangeBroker({ elicitation: false, slackLinked: false });
+    await unconfirmable.propose(BIND, ["elicitation"]);
+    const records = [...audits(broker), ...audits(unconfirmable)];
+    expect(JSON.stringify([refused.body, records, lines])).not.toContain("hush-hush");
+    // A public channel's resolved name may be in the effect; the change keeps only its ID.
+    expect(JSON.stringify(records.map((record) => record.change))).not.toContain("ledger-dev");
+    expect(records.find((record) => record.kind === "bind_channel" && record.status === "failed" && (record.error as { code: string }).code === "NOT_FOUND")).toMatchObject({ change: { channel: "a channel name" } });
+    expect(broker.audit(id)).toMatchObject({ change: { channel: "C0LEDGER01" } });
+    expect(broker.audit(byId)).toMatchObject({ change: { channel: SLACK_CHANNEL } });
+    expect(audits(unconfirmable)).toEqual([expect.objectContaining({ change: expect.objectContaining({ channel: "C0LEDGER01" }) as unknown })]);
+    // The pending item keeps what the admin typed: the apply re-plans from it.
+    expect(broker.pending(id)).toMatchObject({ input: { channel: "#ledger-dev" } });
+  });
+
+  it("says AgentX could not check the Slack link, not that none matches, when the lookup failed (M7)", async () => {
+    const broker = await createAdminChangeBroker({ elicitation: false, slackLookupDown: true });
+    expect((await broker.propose(BIND, ["slack"])).body.error).toEqual({ code: "CONFIRMATION_UNAVAILABLE", message: "no confirmation method is available: AgentX could not check your Slack link just now; try again, or use agentx admin commands instead" });
+  });
+
+  it("reads a pending audit record whose change item is gone, past its 10 minutes, as expired (T7)", async () => {
+    const broker = await createAdminChangeBroker();
+    const id = changeId(await broker.propose(BIND));
+    broker.db.delete(`ADMIN_CHANGE#${id}`, "META");
+    broker.clock.advance(10 * 60_000 + 1);
+    const since = encodeURIComponent(new Date(broker.clock.now() - 3_600_000).toISOString());
+    expect((await broker.list(`?since=${since}`)).body.changes).toEqual([expect.objectContaining({ changeId: id, status: "expired", outcome: "expired" })]);
+    expect(broker.audit(id)).toMatchObject({ status: "expired", outcome: "expired", expiredAt: expect.any(String) as unknown });
+    expect(broker.metrics).toEqual(["expired"]);
+  });
+
+  it("removes the raw input from a change once it ends, so a planted secret is gone after a decline (R3)", async () => {
+    const broker = await createAdminChangeBroker();
+    const definition = {
+      name: "payments", revision: 2,
+      repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }],
+      setup: [], readiness: [], orchestratorInstructions: `Delegate work; the token is ${PLANTED}.`,
+    };
+    const declined = changeId(await broker.propose({ kind: "register_project_revision", definition }));
+    expect(JSON.stringify(broker.pending(declined))).toContain(PLANTED);
+    await broker.decline(declined);
+    expect(broker.pending(declined)).not.toHaveProperty("input");
+    expect(JSON.stringify(broker.db.find(() => true))).not.toContain(PLANTED);
+    expect(AdminChangePendingRecordSchema.safeParse(broker.pending(declined)).success).toBe(true);
+    // Applied, expired and failed changes lose it too.
+    const applied = changeId(await broker.propose(BIND));
+    await broker.apply(applied);
+    const stale = changeId(await broker.propose(UNBIND));
+    await unbindChannel(broker.handler, SLACK_CHANNEL);
+    await broker.apply(stale);
+    const expired = changeId(await broker.propose({ kind: "unbind_channel", channel: "C0LEDGER01" }));
+    broker.clock.advance(10 * 60_000 + 1);
+    await broker.get(expired);
+    for (const id of [applied, stale, expired]) {
+      expect(broker.pending(id)).not.toHaveProperty("input");
+      expect(AdminChangePendingRecordSchema.safeParse(broker.pending(id)).success).toBe(true);
+    }
+    expect(broker.pending(applied)).toMatchObject({ status: "applied" });
+    expect(broker.pending(stale)).toMatchObject({ status: "failed" });
+    expect(broker.pending(expired)).toMatchObject({ status: "expired" });
+    // A pending change without its input is unreadable, so it can never apply.
+    expect(AdminChangePendingRecordSchema.safeParse({ ...broker.pending(applied), status: "pending" }).success).toBe(false);
   });
 });

@@ -14,7 +14,6 @@ export type TransactItem = NonNullable<TransactWriteCommandInput["TransactItems"
 export interface AuditStore {
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
-  now(): number;
   log(entry: Record<string, unknown>): void;
   metric(outcome: AdminChangeOutcome): void;
 }
@@ -73,21 +72,6 @@ export function auditStepItem(tableName: string, changeId: string, step: AuditSt
 export async function writeProposal(store: AuditStore, record: AdminChangeAuditRecord): Promise<void> {
   await store.documentClient.send(new PutCommand(proposalItem(store.tableName, record).Put));
   const outcome = outcomeOfStatus(record.status);
-  if (outcome !== undefined) store.metric(outcome);
-}
-
-export async function recordAuditStep(store: AuditStore, changeId: string, proposedAt: string, step: AuditStep): Promise<void> {
-  if (Object.values(step).every((value) => value === undefined)) return;
-  try {
-    await store.documentClient.send(new UpdateCommand(auditStepItem(store.tableName, changeId, step).Update));
-  } catch (error) {
-    if (error instanceof Error && error.name === "ConditionalCheckFailedException") {
-      store.log({ event: "admin_change.audit_step_ignored", changeId, proposedAt });
-      return;
-    }
-    throw error;
-  }
-  const outcome = step.status === undefined ? undefined : outcomeOfStatus(step.status);
   if (outcome !== undefined) store.metric(outcome);
 }
 

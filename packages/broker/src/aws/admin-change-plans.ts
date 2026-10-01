@@ -21,8 +21,12 @@ export interface AdminChangeHandlers {
   requireAdministrator(identity: AuthenticatedIdentity, project: string): Promise<void>;
   bindChannel(identity: AuthenticatedIdentity, teamId: string, channelId: string, project: string): Promise<Record<string, unknown>>;
   unbindChannel(identity: AuthenticatedIdentity, teamId: string, channelId: string): Promise<Record<string, unknown>>;
-  /** Registration's parse, refusals and vendor preflight for a new revision; stores nothing. */
-  checkRevision(identity: AuthenticatedIdentity, definition: unknown, runtimeBinding: unknown): Promise<{ definition: ProjectDefinition; warnings: string[] }>;
+  /**
+   * Registration's parse, refusals and vendor preflight for a new revision; stores nothing.
+   * `preflight: false` (the re-plan at apply) skips the vendor preflight: its findings are
+   * warnings, which are not in the hash, so it runs once, at planning (C8, final review M1).
+   */
+  checkRevision(identity: AuthenticatedIdentity, definition: unknown, runtimeBinding: unknown, options?: { preflight?: boolean }): Promise<{ definition: ProjectDefinition; warnings: string[] }>;
   /** Registers a checked revision without running the vendor preflight again (C8). */
   registerRevision(identity: AuthenticatedIdentity, definition: ProjectDefinition, runtimeBinding: unknown): Promise<Record<string, unknown>>;
   registerCredential(identity: AuthenticatedIdentity, registration: { ref: string; type: string; secretName: string }): Promise<Record<string, unknown>>;
@@ -48,8 +52,11 @@ export interface ChangePlan {
   snapshot: unknown;
   apply(identity: AuthenticatedIdentity): Promise<Record<string, unknown>>;
 }
-/** B4: who is planning; their linked Slack user decides whether a private channel is named to them. */
-export interface PlanOptions { slackUserId?: string }
+/**
+ * B4: who is planning; their linked Slack user decides whether a private channel is named to them.
+ * `replan`: this is the apply's re-plan, which never contacts a revision's vendors again (M1).
+ */
+export interface PlanOptions { slackUserId?: string; replan?: boolean }
 export type Planner = (deps: PlanDependencies, identity: AuthenticatedIdentity, input: AdminChangeInput, options: PlanOptions) => Promise<ChangePlan>;
 
 export const stateHash = (snapshot: unknown): string => hashJson(snapshot);
@@ -122,7 +129,8 @@ export async function resolveChannel(deps: PlanDependencies, teamId: string, val
   }
   const found = deps.channelByName === undefined ? undefined : await deps.channelByName({ kind: "channel-by-name", name: text });
   if (found !== undefined && !found.ok) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to find that channel; try again, or give the channel's ID");
-  if (found?.channel === undefined) throw agentXError("NOT_FOUND", `no public channel named #${text} in this Slack workspace; give a private channel by its ID`);
+  // Final review M6: the name the admin typed is never echoed; it may name a private channel.
+  if (found?.channel === undefined) throw agentXError("NOT_FOUND", "no public channel with that name in this Slack workspace; give a private channel by its ID");
   const label = `#${text} (${found.channel.channelId})`;
   return { channelId: found.channel.channelId, label, confirmationLabel: label };
 }
@@ -198,7 +206,7 @@ const planUnbind: Planner = async (deps, identity, input, options) => {
 const EFFECT_CHANGES_MAX = 10;
 const DETAIL_CHANGES_MAX = 50;
 
-const planRevision: Planner = async (deps, identity, input) => {
+const planRevision: Planner = async (deps, identity, input, options) => {
   if (input.kind !== "register_project_revision") throw new Error("wrong planner");
   const name = input.definition.name;
   if (typeof name !== "string" || !AgentXNameSchema.safeParse(name).success) throw agentXError("CONFIG_INVALID", "the definition needs the project's name, such as \"payments\"");
@@ -210,7 +218,7 @@ const planRevision: Planner = async (deps, identity, input) => {
   // Before the vendor preflight, so a revision that can never register contacts no vendor.
   const asked = input.definition.revision;
   if (typeof asked === "number" && asked <= latestRevision) throw agentXError("CONFIG_INVALID", `revision ${asked} is not newer than the latest, ${latestRevision}; use ${latestRevision + 1}`);
-  const { definition, warnings } = await deps.handlers.checkRevision(identity, input.definition, latest.runtimeBinding);
+  const { definition, warnings } = await deps.handlers.checkRevision(identity, input.definition, latest.runtimeBinding, { preflight: options.replan !== true });
   const changes = fieldDiff(latest.definition, definition).filter((change) => change.field !== "revision");
   const listed = changes.slice(0, EFFECT_CHANGES_MAX).map((change) => `${change.field}: ${change.from ?? "(none)"} -> ${change.to ?? "(removed)"}`);
   const more = changes.length > EFFECT_CHANGES_MAX ? `; and ${changes.length - EFFECT_CHANGES_MAX} more` : "";
@@ -402,14 +410,16 @@ const planLimits: Planner = async (deps, identity, input) => {
   const over = members
     .filter((item) => counterCount(item) >= next.perPerson)
     .map((item) => `Slack member ${String(item.sk).slice("MEMBER#".length)} (${counterCount(item)} open)`);
-  const organizationCount = (team === undefined ? 0 : counterCount(await getStateItem(deps.reads, { pk: `SLACK_LIMIT#${team}`, sk: "ORGANIZATION" })))
-    + counterCount(await getStateItem(deps.reads, { pk: "DEVELOPER_LIMIT#ORGANIZATION", sk: "ORGANIZATION" }));
+  const aiToolOnlyCount = counterCount(await getStateItem(deps.reads, { pk: "DEVELOPER_LIMIT#ORGANIZATION", sk: "ORGANIZATION" }));
+  const organizationCount = (team === undefined ? 0 : counterCount(await getStateItem(deps.reads, { pk: `SLACK_LIMIT#${team}`, sk: "ORGANIZATION" }))) + aiToolOnlyCount;
   const change = (value: number, was: number) => (value === was ? "(unchanged)" : `(now ${was})`);
   const named = over.slice(0, EFFECT_PEOPLE_MAX).join(", ");
   const more = over.length > EFFECT_PEOPLE_MAX ? `, and ${over.length - EFFECT_PEOPLE_MAX} more` : "";
   const people = over.length === 0 ? "" : ` At or over ${next.perPerson} per person: ${named}${more}.`;
+  // Final review T6: their workspaces are in the total, so say why nobody is named for them.
+  const aiToolOnly = aiToolOnlyCount > 0 ? " People who use only an AI tool count in the total but are not named." : "";
   const orgNote = organizationCount >= next.perOrganization ? " The organization is at or over its new limit." : "";
-  const effect = `Set the workspace limits to ${next.perPerson} per person ${change(next.perPerson, current.member)} and ${next.perOrganization} for the organization ${change(next.perOrganization, current.organization)}. Open workspaces: ${organizationCount} of ${next.perOrganization}.${people}${orgNote} Existing workspaces keep running; a new one is refused while its person or the organization is at the limit.`;
+  const effect = `Set the workspace limits to ${next.perPerson} per person ${change(next.perPerson, current.member)} and ${next.perOrganization} for the organization ${change(next.perOrganization, current.organization)}. Open workspaces: ${organizationCount} of ${next.perOrganization}.${people}${aiToolOnly}${orgNote} Existing workspaces keep running; a new one is refused while its person or the organization is at the limit.`;
   return {
     effect: effect.length > ADMIN_CHANGE_EFFECT_MAX ? `${effect.slice(0, ADMIN_CHANGE_EFFECT_MAX - 3)}...` : effect,
     details: { current: { perPerson: current.member, perOrganization: current.organization, source: current.source }, next, organizationCount, over: over.length },

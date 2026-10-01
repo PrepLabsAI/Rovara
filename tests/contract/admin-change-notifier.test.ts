@@ -115,6 +115,18 @@ describe("the Slack Confirm message (E13)", () => {
     expect(updates[0]?.text).toContain("Applied, confirmed by <@U0ADA00001>.");
     expect(JSON.stringify(updates[0]?.blocks)).not.toContain("agentx_admin_change_confirm");
   });
+
+  it("edits the message of an ended change that no longer keeps its input (R3 mitigation)", async () => {
+    const db = new FakeDynamoDb();
+    const ended: Record<string, unknown> = pending({ status: "declined", dm: DM });
+    delete ended.input;
+    db.set(ended);
+    const { updates, deliver } = notifier(db);
+    await deliver(outcomeNotice);
+    expect(updates).toHaveLength(1);
+    expect(updates[0]).toMatchObject({ channel: "D0ADMINDM1", ts: "1696237200.000100" });
+    expect(AdminChangePendingRecordSchema.safeParse(db.get(`ADMIN_CHANGE#${CHANGE}`, "META")).success).toBe(true);
+  });
 });
 
 describe("the message's content (E13, R4, FR-051)", () => {

@@ -206,6 +206,16 @@ describe("the workspace limits (E19, FR-053)", () => {
     expect(db.get("SETTINGS", "WORKSPACE_LIMITS")).toMatchObject({ perPerson: 3, perOrganization: 40 });
   });
 
+  it("says that people who use only an AI tool count in the total but are not named, when there are some (final review T6)", async () => {
+    const { deps, identity, db } = await harness();
+    db.set({ pk: "SLACK_LIMIT#T0BSHLLUGBD", sk: "ORGANIZATION", count: 2 });
+    const without = await planChange(deps, identity, { kind: "set_workspace_limits", perPerson: 5 });
+    expect(without.effect).not.toContain("only an AI tool");
+    db.set({ pk: "DEVELOPER_LIMIT#ORGANIZATION", sk: "ORGANIZATION", count: 3 });
+    const plan = await planChange(deps, identity, { kind: "set_workspace_limits", perPerson: 5 });
+    expect(plan.effect).toContain("Open workspaces: 5 of 20. People who use only an AI tool count in the total but are not named. Existing workspaces keep running;");
+  });
+
   it("says when the organization is already at or over its new limit, and caps the named people", async () => {
     const { deps, identity, db } = await harness();
     for (let index = 0; index < 14; index += 1) db.set({ pk: "SLACK_LIMIT#T0BSHLLUGBD", sk: `MEMBER#U0PERSON${String(index).padStart(2, "0")}`, count: 2 });

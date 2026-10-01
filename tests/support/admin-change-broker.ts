@@ -17,6 +17,10 @@ export async function createAdminChangeBroker(options: {
   slackLinked?: boolean;
   channelInfo?: (request: ChannelInfoRequest) => Promise<ChannelInfoResponse>;
   channelMembers?: (request: ChannelMembersRequest) => Promise<ChannelMembersResponse>;
+  /** The broker's connector types, so a revision's vendor preflight can be counted. */
+  connectorTypes?: Record<string, unknown>;
+  /** The admin's Slack link lookup answers that Slack could not be reached. */
+  slackLookupDown?: boolean;
 } = {}) {
   let now = Date.now();
   const clock = { now: () => now, advance: (ms: number) => { now += ms; } };
@@ -29,7 +33,7 @@ export async function createAdminChangeBroker(options: {
   const channelLookup = { down: false };
   /** Every DeveloperIdentity call to end a developer's sessions: the only effect of revoke_signin outside the table. */
   const endedSessions: EndDeveloperSessionsRequest[] = [];
-  const slackUserByEmail = async () => (options.slackLinked === false ? { ok: true as const } : { ok: true as const, userId: ADMIN_SLACK });
+  const slackUserByEmail = async () => (options.slackLookupDown === true ? { ok: false as const, error: "slack_unavailable" as const } : options.slackLinked === false ? { ok: true as const } : { ok: true as const, userId: ADMIN_SLACK });
   const harness = await createAdminReadBroker({
     ...(options.channelInfo === undefined ? {} : { channelInfo: options.channelInfo }),
     ...(options.channelMembers === undefined ? {} : { channelMembers: options.channelMembers }),
@@ -39,6 +43,7 @@ export async function createAdminChangeBroker(options: {
       channelByName: async ({ name }) => (channelLookup.down ? { ok: false, error: "slack_unavailable" } : name === "ledger-dev" ? { ok: true, channel: { channelId: "C0LEDGER01", name } } : { ok: true }),
     },
     brokerExtra: {
+      ...(options.connectorTypes === undefined ? {} : { connectorTypes: options.connectorTypes }),
       // A test's own `me` replaces the production default whole, so it names the lookup too.
       adminReads: { me: { issuer, fetch, slackUserByEmail } },
       // A credential registry, so agentx_admin_register_credential can plan; its secret reads as nothing useful.
