@@ -1,4 +1,4 @@
-import { GuardRejection, type Binder, type ConnectorDefinition, type CredentialProvider, type Guard, type GuardInput } from "./types.js";
+import { GuardRejection, type Binder, type ConnectorDefinition, type CredentialProvider, type Guard, type GuardedItemTools, type GuardInput } from "./types.js";
 import { isObject, resultText } from "./util.js";
 
 /** A Linear team a connector may address, by the alias the model sees and the team's UUID. */
@@ -18,6 +18,14 @@ export const linearBinder: Binder<LinearTeamScope> = {
 
 /** The argument naming the issue each issue-addressed tool acts on. */
 const ISSUE_ARGUMENT: Readonly<Record<string, string>> = { get_issue: "id", save_issue: "id", list_comments: "issueId", save_comment: "issueId" };
+/**
+ * Issue #49: the tools issueInTeamGuard checks, and the arguments a Linear tool names an issue or a
+ * comment through. Registration's preflight warns about an approved tool outside the set that has one.
+ */
+export const LINEAR_GUARDED_ITEM_TOOLS: GuardedItemTools = Object.freeze({
+  tools: Object.freeze(Object.keys(ISSUE_ARGUMENT)),
+  targetArguments: Object.freeze(["id", "issueId", "commentId"]),
+});
 /** Comment targets whose team cannot be proven with a Linear tool. */
 const UNVERIFIABLE_COMMENT_TARGETS = ["id", "parentId", "projectId", "initiativeId", "documentId", "milestoneId", "statusUpdateId", "statusUpdateType"] as const;
 /** Other issues save_issue can point at, one per field (null removes the link). */
@@ -118,5 +126,6 @@ export function linearConnector(credentials: CredentialProvider<LinearTeamScope>
     attributionKeys: ["description", "body"],
     // save_issue and save_comment update the item named by id, and create one without it.
     itemArguments: ["id"],
+    guardedItemTools: LINEAR_GUARDED_ITEM_TOOLS,
   };
 }
