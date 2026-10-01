@@ -1,7 +1,7 @@
 // Spec 043: SWE-bench runs started from Slack. One run scores the coding agent on one SWE-bench
 // task instance, on its own x86 instance, outside any workspace.
 import { z } from "zod";
-import { ModelIdentifierSchema } from "./models.js";
+import { ModelSelectionSchema } from "./models.js";
 import { SlackRequesterSchema, SlackThreadSchema, SlackChannelIdSchema, SlackTeamIdSchema } from "./slack.js";
 import { TaskUsageTelemetrySchema } from "./usage.js";
 
@@ -134,14 +134,14 @@ export const SwebenchStartRequestSchema = z.object({
   requestId: z.string().uuid(),
   dataset: SwebenchDatasetSchema,
   instanceId: SwebenchInstanceIdSchema,
-  model: ModelIdentifierSchema.optional(),
+  model: ModelSelectionSchema.optional(),
 }).strict();
 
 export const SwebenchRunSchema = z.object({
   runId: z.string().uuid(),
   dataset: SwebenchDatasetSchema,
   instanceId: SwebenchInstanceIdSchema,
-  model: ModelIdentifierSchema,
+  model: ModelSelectionSchema,
   maxCostUsd: SwebenchCostCeilingSchema,
   thread: SlackThreadSchema,
   requestedBy: SlackRequesterSchema,
@@ -166,7 +166,7 @@ export const SwebenchRunnerConfigSchema = z.object({
   runId: z.string().uuid(),
   dataset: SwebenchDatasetSchema,
   instanceId: SwebenchInstanceIdSchema,
-  model: ModelIdentifierSchema,
+  model: ModelSelectionSchema,
   maxCostUsd: SwebenchCostCeilingSchema,
   controlPlaneUrl: z.string().url().startsWith("https://"),
   capability: z.string().min(1).max(2_048),

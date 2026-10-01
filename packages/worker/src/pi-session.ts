@@ -19,7 +19,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
 import { createModelRuntimeWithFallback } from "@agentx/model-runtime";
-import { agentXError } from "@agentx/contracts";
+import { agentXError, type ThinkingLevel } from "@agentx/contracts";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import {
@@ -31,7 +31,7 @@ import {
 } from "./repository-context.js";
 import type { PiCacheRetention } from "./usage.js";
 
-export type PiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type PiThinkingLevel = ThinkingLevel;
 
 export interface WorkspaceModelConfiguration {
   provider: string;
