@@ -23,6 +23,9 @@ change yet.
 - **A failure is a screen.** `runInitSteps` gains an `onStepFailure` hook. On the page, a deploy
   step's failure shows a three-part failure screen with "Try this step again" and "Stop for now";
   any other failure shows the screen with "Stop for now". Without a page nothing changes.
+- **One design system** (`packages/cli/src/init/ui/design.ts`, new): the type scale, spacing,
+  color tokens for light and dark, and the component classes every screen uses, as one stylesheet
+  served from 127.0.0.1. No external font, script or image. See "Visual Design" below.
 - **Quiet terminal, full log file.** With the page, the terminal prints three start lines and one
   line per step; everything else goes to `~/.agentx/logs/init-<env>.log` (never the page's
   token) and to the page's technical log.
@@ -34,7 +37,8 @@ The page stays plain HTML, CSS and an ES module held as text in `page.ts` (spec 
 row 1: FR-001 to FR-004, FR-005 (tab title only), FR-006, FR-008, FR-010 to FR-012, FR-016,
 FR-017, FR-023, FR-024, FR-026, FR-027, FR-037, FR-058 to FR-060, FR-070, FR-071, FR-080 to
 FR-082, and the image check of FR-065. Owner approval of the spec, with all five open choices
-accepted: PR #231 comment of 2026-10-01.
+accepted: PR #231 comment of 2026-10-01. Owner review of this plan (PR #233, 2026-10-01): the app
+name ruling and subagent-driven execution approved; the visual design (Task 3) added at the owner's request.
 
 **Branch:** `feat/048a-page-shell`, cut from `origin/mainline` after this plan merges. One PR
 against `mainline` (no stacking).
@@ -54,9 +58,13 @@ against `mainline` (no stacking).
   `WizardFailure`, `failureScreen`, `plainReason`, `askFailureAction`, `operatorStop`,
   `isOperatorStop`, `estimateMonthlyCost`, `suggestedBudgetUsd`, `modelPriceLabel`,
   `defaultAppName`, `releaseImageChecks`, `initLogPath`, `openInitLog`, `currentCliInvocation`,
-  `cliCommandLine`, `READY_HOLD_MS = 30 * 60_000`, the hub methods `setStage`, `setPlace`,
+  `cliCommandLine`, `COLOR_TOKENS`, `BASE_TOKENS`, `PAGE_CLASSES`, `WIZARD_CSS` (now in `design.ts`), `READY_HOLD_MS = 30 * 60_000`, the hub methods `setStage`, `setPlace`,
   `showFailure`, `clearFailure`, `requestClose`, `closeRequested`, and the server route
   `POST /close`.
+- **Look:** every screen uses the design system's classes and tokens (Task 3); no inline style
+  (the CSP is `style-src 'self'`), no external font, image or CDN, light and dark from
+  `prefers-color-scheme`, text contrast at least 4.5:1 and field borders and focus rings at least
+  3:1 in both, and a layout that works down to a 20rem-wide window.
 - **Copy:** plain words from the glossary (FR-080); Slack's own labels kept as Slack writes them
   (Signing Secret, Bot User OAuth Token, Client ID, Client Secret, OAuth & Permissions). No em
   dashes in any page text, terminal line, doc, test name or fixture.
@@ -80,17 +88,17 @@ against `mainline` (no stacking).
    never reads zero or negative; the header says "Taking longer than usual". Pinned in Task 1
    ("an overdue step says taking longer than usual, never zero or negative").
 2. **The page reloads while the failure screen is up.** Expected: the reconnecting page gets the
-   failure screen, its actions and the Stopped status in its first snapshot. Pinned in Task 12
+   failure screen, its actions and the Stopped status in its first snapshot. Pinned in Task 13
    ("a page that reconnects during a failure gets the failure screen back").
 3. **A form where one field is refused and another holds a secret.** Expected: the valid plain
    values stay filled, the secret field comes back empty, and the secret is in no state the page
-   can read. Pinned in Task 5 ("a refused form keeps valid plain values and never echoes a secret").
+   can read. Pinned in Task 6 ("a refused form keeps valid plain values and never echoes a secret").
 4. **The longest names:** a 20-character install name and a 39-character GitHub owner.
    Expected: the GitHub and Slack default names are equal, at most 34 characters, and still name
-   the install. Pinned in Task 10 ("the longest owner and install name still fit, and both apps match").
+   the install. Pinned in Task 11 ("the longest owner and install name still fit, and both apps match").
 5. **A model with no price on file** (a custom Bedrock id). Expected: the plan shows "not priced",
    the total says what it leaves out, and the budget default is the priced lines plus 20% with a
-   note. Pinned in Task 9 ("an unpriced model is named, left out of the total, and noted in the budget help").
+   note. Pinned in Task 10 ("an unpriced model is named, left out of the total, and noted in the budget help").
 
 ---
 
@@ -105,7 +113,8 @@ against `mainline` (no stacking).
 | `packages/cli/src/init/ui/prompter.ts` | Attaches help, hints, verb buttons, the `actions` and `form` kinds |
 | `packages/cli/src/init/ui/failure.ts` (new) | The failure screen's content, `plainReason`, the action question |
 | `packages/cli/src/init/ui/cards.ts` | Plain-word cards, technical details, names not IDs, ready card |
-| `packages/cli/src/init/ui/page.ts` | The page shell: header, rail, one panel, details for plan and log, a11y |
+| `packages/cli/src/init/ui/design.ts` (new) | The design system: tokens, light and dark, component classes, `WIZARD_CSS` |
+| `packages/cli/src/init/ui/page.ts` | The page shell: header, rail, one panel, details for plan and log, a11y (its stylesheet comes from `design.ts`) |
 | `packages/cli/src/init/ui/server.ts` | `POST /close`; the GitHub return tab that closes itself |
 | `packages/cli/src/init/ui/index.ts` | Wizard wiring: start lines, log file, new hub methods |
 | `packages/cli/src/init/cost.ts` (new) | Prices, the estimate, `modelPriceLabel`, `suggestedBudgetUsd` (moved out of plan.ts) |
@@ -117,7 +126,7 @@ against `mainline` (no stacking).
 | `packages/cli/src/init/answers.ts`, `plan.ts`, `prerequisites.ts`, `aws-account.ts`, `install-state.ts`, `slack-app.ts`, `github-app.ts`, `finish-steps.ts`, `signin-step.ts`, `deploy-steps.ts`, `prompts.ts`, `context.ts` | Copy, defaults, root warning, image check, bot name, help option |
 | `packages/cli/src/main.ts` | Prints nothing more after a page-mode run (the terminal already has its lines) |
 | `tests/support/copy-lint.ts` (new) | The copy-lint rules and the state flattener |
-| `tests/contract/init-ui-journey.test.ts`, `init-ui-copy-lint.test.ts`, `init-ui-question-copy.test.ts`, `init-ui-form.test.ts`, `init-ui-failure.test.ts`, `init-ui-page.test.ts`, `init-log-file.test.ts`, `init-cli-command.test.ts`, `init-cost.test.ts` (new) | Tests for the new modules |
+| `tests/contract/init-ui-design.test.ts`, `tests/contract/init-ui-journey.test.ts`, `init-ui-copy-lint.test.ts`, `init-ui-question-copy.test.ts`, `init-ui-form.test.ts`, `init-ui-failure.test.ts`, `init-ui-page.test.ts`, `init-log-file.test.ts`, `init-cli-command.test.ts`, `init-cost.test.ts` (new) | Tests for the new modules |
 | `docs/install.md` | The install page section: the progress rail, the log file |
 
 ## Interfaces Later Phases Rely On
@@ -131,6 +140,92 @@ against `mainline` (no stacking).
   `showFailure`, `cliCommandLine` for "Stop for now", and the log file.
 - **Phase 4 (pickers and progress):** replaces `usualSeconds` in `STEP_PLAN` with measured values,
   fills FR-007 rows from `WizardStep.startedAt`, and adds the notification beside `pageTitle`.
+
+---
+
+## Visual Design
+
+Owner request (PR #233 review, 2026-10-01): the page must look good, not only read well. Until now
+the page was never styled for a user (the stylesheet request failed its token check; a separate
+fix makes `/app.css` load and lands before this phase). This section is the installer's small design
+system; Task 3 builds it, and every later task that adds a screen uses its classes.
+
+**Direction.** Calm, modern and trustworthy: a quiet neutral page, white cards (deep slate in dark
+mode) with soft shadows, one blue accent for the next action, and status shown by a word in a
+colored chip, never by color alone. Generous spacing, one clear primary button per screen, no
+decoration that does not carry meaning.
+
+**Mockup.** A static, self-contained mockup of the key screens, with the real phase 1 copy, light
+and dark, is at
+`/private/tmp/claude-501/-Users-abhishekgarg-web/ffaf1996-7c19-4dcc-8463-6c9e6e330dfc/scratchpad/ux/install-mockup.html`
+(not committed: it is a review aid, and its Settings, Plan and Slack screens preview phase 2's
+layout with this design). Its stylesheet is exactly Task 3's `WIZARD_CSS`, plus layout helpers
+for the preview-only screens.
+
+**Constraints.** The page is served from 127.0.0.1 under `default-src 'none'; style-src 'self'`: one
+stylesheet from the server, no inline `style` attributes, no external fonts, images or CDNs. Icons
+are text (the rail's numbers and check mark are CSS `content`).
+
+**Type.** System fonts only: `ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif`; code in
+`ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace`. Scale: 13, 14, 16 (body, line height 1.55), 18 (card titles), 22 (the
+question), 28px, as `--text-xs` to `--text-2xl`. Question text is large and in plain case (FR-008).
+
+**Spacing and shape.** A 4px-based scale, `--space-1` to `--space-7` (4, 8, 12, 16, 24, 32, 48px).
+Radius 6px (inputs, buttons), 10px (choices, rail items), 14px (cards). Touch targets at least
+44px tall (buttons, inputs).
+
+**Color tokens.** Light values apply by default; dark values under `prefers-color-scheme: dark`.
+Every text pair meets 4.5:1 and every field border and focus ring 3:1, in both modes (Task 3 tests
+this).
+
+| Token | Light | Dark | Used for |
+|---|---|---|---|
+| `--shadow` | `0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .08)` | `0 1px 2px rgba(0, 0, 0, .4)` | card shadow |
+| `--bg` | `#f5f6f8` | `#0e1318` | page background |
+| `--surface` | `#ffffff` | `#151b23` | cards, header, inputs |
+| `--surface-2` | `#f0f2f5` | `#1c242f` | quiet fills: commands, code, coming-up chips |
+| `--border` | `#dde2e8` | `#2a3441` | card and divider lines |
+| `--border-strong` | `#c3cad4` | `#3a4656` | rail circles, question card |
+| `--field-border` | `#7b8594` | `#6f7b8c` | inputs, secondary buttons, choices (3:1) |
+| `--text` | `#18212c` | `#e6eaf0` | body text |
+| `--text-2` | `#4b5666` | `#a9b3c1` | secondary text, hints |
+| `--accent` | `#2b55c9` | `#86a8ff` | primary buttons, links, current phase |
+| `--accent-hover` | `#2348ad` | `#a3bdff` | primary hover |
+| `--accent-soft` | `#e8eefc` | `#1b2744` | Now chip, Recommended box, leave-now banner |
+| `--on-accent` | `#ffffff` | `#0b1220` | text on primary buttons |
+| `--ok` | `#1d7044` | `#63cf92` | Done |
+| `--ok-bg` | `#e5f3ea` | `#11301f` | Done chip |
+| `--wait` | `#8a4f00` | `#f2b65e` | Waiting for you |
+| `--wait-bg` | `#fdf0d9` | `#33250d` | Waiting chip |
+| `--bad` | `#b42318` | `#ff8f85` | Stopped, errors |
+| `--bad-bg` | `#fdecea` | `#3b1613` | failure panel |
+| `--focus` | `#2b55c9` | `#86a8ff` | focus ring |
+
+**Components.**
+- **Header** (`.top`): the title, "Install name: production, AWS account ..., us-east-1", and the
+  time left as a soft accent pill (`.time-left`).
+- **Progress rail** (`.rail`, `li.phase` with a status class): five numbered circles; Done turns
+  green with a check, Now and Waiting for you are blue and raised on a card, Stopped is red with
+  "!". Each phase shows its title, a status chip (`.phase-status`) and its time. The current phase
+  lists its steps; a done phase folds its steps and cards under "Details". On a window narrower
+  than 52rem the rail becomes a row of compact phase chips above the panel.
+- **Current-step panel** (`main#panel`): "Step N of 5: <phase>" (`.step-of`), then the one card
+  that needs attention, then the question.
+- **Cards** (`.card`, `.card.status.<status>`): white, rounded, a 4px left edge in the status color;
+  a failed card is tinted red.
+- **Buttons**: primary (`button.primary`, `a.button.primary`: solid accent, verb label) and
+  secondary (outlined); link buttons look the same and say they open a new tab.
+- **Inputs and pickers**: 44px fields with a 3:1 border; `aria-invalid` turns the border red; radio
+  choices (`.choices label`) are full-width tiles, the chosen one tinted accent.
+- **Status chips** (`.chip.<status>`, `.phase-status`): Done green, Now blue, Waiting for you amber,
+  Stopped red, Coming up grey; the word is always there.
+- **Failure panel** (`#failure`, a failed card): "The install stopped", What happened, What to do,
+  the actions, then Technical details folded.
+- **Ready screen** (the ready card): "Try it" with an Open #channel button, the developer sign-in
+  command and the day-two commands as copy rows (`.command`), and Close installer.
+- **Focus and motion**: a 3px accent `:focus-visible` ring on everything focusable; hover and
+  selection transitions only under `prefers-reduced-motion: no-preference`.
+- **Narrow windows**: below 30rem the page padding shrinks and button rows stack full width.
 
 ---
 
@@ -452,7 +547,7 @@ git commit -m "feat(init): the guided install's five phases, plain step names an
 
 **Files:**
 - Create: `tests/support/copy-lint.ts`
-- Test: `tests/contract/init-ui-copy-lint.test.ts` (new; Task 16 adds the whole-journey test to it)
+- Test: `tests/contract/init-ui-copy-lint.test.ts` (new; Task 17 adds the whole-journey test to it)
 
 **Interfaces:**
 - Consumes: nothing.
@@ -468,7 +563,7 @@ git commit -m "feat(init): the guided install's five phases, plain step names an
 ```ts
 // tests/contract/init-ui-copy-lint.test.ts
 // Spec 048 FR-081 and SC-011: the copy-lint rules. Each rule is proven by a seeded example that
-// must fail it, and good copy must pass every rule. Task 16 runs the rules over the whole journey.
+// must fail it, and good copy must pass every rule. Task 17 runs the rules over the whole journey.
 import { describe, expect, it } from "vitest";
 import { COPY_RULES, lintCopy, quotedStrings, type CopyContext } from "../support/copy-lint.js";
 
@@ -616,7 +711,333 @@ git commit -m "test(init): copy-lint rules for the install page, each proven by 
 
 ---
 
-### Task 3: The hub knows where the install is (journey, header, tab title, close request)
+### Task 3: The installer's design system (owner request, FR-001, FR-008)
+
+**Files:**
+- Create: `packages/cli/src/init/ui/design.ts`
+- Modify: `packages/cli/src/init/ui/page.ts:50-89` (`WIZARD_CSS` now comes from `design.ts`)
+- Test: `tests/contract/init-ui-design.test.ts` (new)
+
+This assumes the separate fix that serves `/app.css` with the session token has merged (the page
+was never styled before it). If it has not, stop and say so: this task's look cannot be checked
+without it.
+
+**Interfaces:**
+- Consumes: nothing.
+- Produces (Task 16's page shell and every later screen use these):
+  - `type ColorToken = "shadow" | "bg" | "surface" | "surface-2" | "border" | "border-strong" | "field-border" | "text" | "text-2" | "accent" | "accent-hover" | "accent-soft" | "on-accent" | "ok" | "ok-bg" | "wait" | "wait-bg" | "bad" | "bad-bg" | "focus"`
+  - `COLOR_TOKENS: { light: Record<ColorToken, string>; dark: Record<ColorToken, string> }`
+  - `BASE_TOKENS: Record<string, string>` (fonts, type scale, spacing, radii)
+  - `PAGE_CLASSES: readonly string[]`: every class the page's HTML and module may use
+  - `WIZARD_CSS: string` (moved here; `page.ts` re-exports it, so the server's import is unchanged)
+
+- [ ] **Step 1: Write the failing test**
+
+```ts
+// tests/contract/init-ui-design.test.ts
+// Owner request of 2026-10-01 and spec 048 FR-001 and FR-008: the installer's design system. One
+// stylesheet from 127.0.0.1 with no external asset, light and dark, readable contrast, visible
+// focus, and every class the page uses defined.
+import { describe, expect, it } from "vitest";
+import { BASE_TOKENS, COLOR_TOKENS, PAGE_CLASSES, WIZARD_CSS, type ColorToken } from "../../packages/cli/src/init/ui/design.js";
+import { WIZARD_CSS as SERVED_CSS } from "../../packages/cli/src/init/ui/page.js";
+
+/** WCAG 2.2 relative luminance of a #rrggbb color. */
+function luminance(hex: string): number {
+  const channel = (offset: number) => {
+    const value = Number.parseInt(hex.slice(offset, offset + 2), 16) / 255;
+    return value <= 0.03928 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+  };
+  return 0.2126 * channel(1) + 0.7152 * channel(3) + 0.0722 * channel(5);
+}
+const contrast = (a: string, b: string) => {
+  const [light, dark] = [luminance(a), luminance(b)].sort((x, y) => y - x) as [number, number];
+  return (light + 0.05) / (dark + 0.05);
+};
+
+/** Text on a background: at least 4.5:1 (WCAG AA). */
+const TEXT_PAIRS: Array<[ColorToken, ColorToken]> = [
+  ["text", "surface"], ["text", "bg"], ["text", "accent-soft"], ["text", "bad-bg"],
+  ["text-2", "surface"], ["text-2", "surface-2"], ["text-2", "bg"],
+  ["accent", "surface"], ["accent", "surface-2"], ["accent", "accent-soft"], ["on-accent", "accent"], ["on-accent", "accent-hover"],
+  ["ok", "ok-bg"], ["ok", "surface"], ["wait", "wait-bg"], ["wait", "surface"], ["bad", "bad-bg"], ["bad", "surface"],
+];
+/** A field's border and the focus ring: at least 3:1 (WCAG non-text contrast). */
+const UI_PAIRS: Array<[ColorToken, ColorToken]> = [["field-border", "surface"], ["field-border", "surface-2"], ["focus", "surface"], ["focus", "bg"]];
+
+describe("the installer's design system", () => {
+  for (const mode of ["light", "dark"] as const) {
+    it(`${mode}: every text color is readable on its background`, () => {
+      for (const [text, background] of TEXT_PAIRS) {
+        expect({ mode, text, background, ratio: Number(contrast(COLOR_TOKENS[mode][text], COLOR_TOKENS[mode][background]).toFixed(2)) })
+          .toMatchObject({ ratio: expect.any(Number) });
+        expect(contrast(COLOR_TOKENS[mode][text], COLOR_TOKENS[mode][background])).toBeGreaterThanOrEqual(4.5);
+      }
+    });
+    it(`${mode}: field borders and the focus ring stand out`, () => {
+      for (const [line, background] of UI_PAIRS) expect(contrast(COLOR_TOKENS[mode][line], COLOR_TOKENS[mode][background])).toBeGreaterThanOrEqual(3);
+    });
+  }
+
+  it("has the same tokens in both modes, all of them in the stylesheet", () => {
+    expect(Object.keys(COLOR_TOKENS.dark).sort()).toEqual(Object.keys(COLOR_TOKENS.light).sort());
+    for (const name of [...Object.keys(COLOR_TOKENS.light), ...Object.keys(BASE_TOKENS)]) expect(WIZARD_CSS).toContain(`--${name}: `);
+    expect(WIZARD_CSS).toContain("@media (prefers-color-scheme: dark)");
+  });
+
+  it("loads nothing from anywhere: no web font, no image, no import", () => {
+    expect(WIZARD_CSS).not.toMatch(/url\(|@import|@font-face|https?:/);
+    expect(BASE_TOKENS.font).toMatch(/^ui-sans-serif, system-ui/);
+  });
+
+  it("FR-008: shows focus, respects reduced motion, and keeps touch targets 44px tall", () => {
+    expect(WIZARD_CSS).toMatch(/:focus-visible \{[^}]*outline: 3px solid var\(--focus\)/);
+    expect(WIZARD_CSS).toContain("@media (prefers-reduced-motion: no-preference)");
+    expect(WIZARD_CSS).toMatch(/button, a\.button \{[^}]*min-height: 2\.75rem/);
+    expect(WIZARD_CSS).toMatch(/input\[type=text\], input\[type=password\], textarea \{[^}]*min-height: 2\.75rem/);
+    expect(WIZARD_CSS).toMatch(/\.question h2 \{[^}]*font-size: var\(--text-xl\)/);
+    expect(WIZARD_CSS).not.toMatch(/text-transform:\s*uppercase/);
+  });
+
+  it("works in a narrow window: the rail becomes a row and button rows stack", () => {
+    expect(WIZARD_CSS).toContain("@media (max-width: 51.99rem)");
+    expect(WIZARD_CSS).toContain("@media (max-width: 30rem)");
+    expect(WIZARD_CSS).toContain(".layout > * { min-width: 0; }");
+  });
+
+  it("defines every class the page may use", () => {
+    for (const name of PAGE_CLASSES) expect({ name, defined: new RegExp(`\\.${name}(?![a-z0-9-])`).test(WIZARD_CSS) }).toEqual({ name, defined: true });
+  });
+
+  it("is the stylesheet the server sends", () => {
+    expect(SERVED_CSS).toBe(WIZARD_CSS);
+  });
+});
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `npx vitest run tests/contract/init-ui-design.test.ts`
+Expected: FAIL with "Failed to load url ../../packages/cli/src/init/ui/design.js".
+
+- [ ] **Step 3: Write minimal implementation**
+
+```ts
+// packages/cli/src/init/ui/design.ts
+// The install page's design system (owner request of 2026-10-01; spec 048 FR-001 and FR-008): the
+// type scale, spacing, color tokens for light and dark, and the component classes every screen
+// uses. One stylesheet, served from 127.0.0.1 under style-src 'self': no web font, image or CDN.
+// Text pairs meet WCAG AA (4.5:1) and field borders and focus 3:1, in both modes
+// (tests/contract/init-ui-design.test.ts).
+
+export const BASE_TOKENS: Readonly<Record<string, string>> = {
+  "font": "ui-sans-serif, system-ui, -apple-system, \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif",
+  "mono": "ui-monospace, SFMono-Regular, Menlo, Consolas, \"Liberation Mono\", monospace",
+  "text-xs": ".8125rem",
+  "text-sm": ".875rem",
+  "text-md": "1rem",
+  "text-lg": "1.125rem",
+  "text-xl": "1.375rem",
+  "text-2xl": "1.75rem",
+  "space-1": ".25rem",
+  "space-2": ".5rem",
+  "space-3": ".75rem",
+  "space-4": "1rem",
+  "space-5": "1.5rem",
+  "space-6": "2rem",
+  "space-7": "3rem",
+  "radius-sm": "6px",
+  "radius": "10px",
+  "radius-lg": "14px",
+};
+
+export type ColorToken =
+  "shadow" | "bg" | "surface" | "surface-2" | "border" | "border-strong" | "field-border" | "text" | "text-2" | "accent" | "accent-hover" | "accent-soft" | "on-accent" | "ok" | "ok-bg" | "wait" | "wait-bg" | "bad" | "bad-bg" | "focus";
+
+export const COLOR_TOKENS: { readonly light: Readonly<Record<ColorToken, string>>; readonly dark: Readonly<Record<ColorToken, string>> } = {
+  light: {
+    "shadow": "0 1px 2px rgba(16, 24, 40, .06), 0 1px 3px rgba(16, 24, 40, .08)",
+    "bg": "#f5f6f8",
+    "surface": "#ffffff",
+    "surface-2": "#f0f2f5",
+    "border": "#dde2e8",
+    "border-strong": "#c3cad4",
+    "field-border": "#7b8594",
+    "text": "#18212c",
+    "text-2": "#4b5666",
+    "accent": "#2b55c9",
+    "accent-hover": "#2348ad",
+    "accent-soft": "#e8eefc",
+    "on-accent": "#ffffff",
+    "ok": "#1d7044",
+    "ok-bg": "#e5f3ea",
+    "wait": "#8a4f00",
+    "wait-bg": "#fdf0d9",
+    "bad": "#b42318",
+    "bad-bg": "#fdecea",
+    "focus": "#2b55c9",
+  },
+  dark: {
+    "shadow": "0 1px 2px rgba(0, 0, 0, .4)",
+    "bg": "#0e1318",
+    "surface": "#151b23",
+    "surface-2": "#1c242f",
+    "border": "#2a3441",
+    "border-strong": "#3a4656",
+    "field-border": "#6f7b8c",
+    "text": "#e6eaf0",
+    "text-2": "#a9b3c1",
+    "accent": "#86a8ff",
+    "accent-hover": "#a3bdff",
+    "accent-soft": "#1b2744",
+    "on-accent": "#0b1220",
+    "ok": "#63cf92",
+    "ok-bg": "#11301f",
+    "wait": "#f2b65e",
+    "wait-bg": "#33250d",
+    "bad": "#ff8f85",
+    "bad-bg": "#3b1613",
+    "focus": "#86a8ff",
+  },
+};
+
+/** Every class the page's HTML and module may use; Task 16's test holds them to this list. */
+export const PAGE_CLASSES = [
+  "top", "time-left", "layout", "rail", "phase", "phase-title", "phase-status", "phase-time", "steps", "step", "elapsed", "step-of",
+  "card", "status", "question", "why", "hint", "note", "error", "field", "field-label", "choices", "buttons", "button", "primary",
+  "command", "checks", "chip", "hidden",
+  "done", "now", "waiting", "coming", "stopped", "running", "ok", "failed", "info", "pending", "skipped",
+] as const;
+
+const block = (tokens: Readonly<Record<string, string>>, indent: string): string =>
+  Object.entries(tokens).map(([name, value]) => `${indent}--${name}: ${value};`).join("\n");
+
+const COMPONENTS = `* { box-sizing: border-box; }
+body { background: var(--bg); color: var(--text); font: var(--text-md)/1.55 var(--font); margin: 0; }
+.hidden { display: none !important; }
+.sr-only { clip: rect(0 0 0 0); height: 1px; overflow: hidden; position: absolute; white-space: nowrap; width: 1px; }
+.top { align-items: center; background: var(--surface); border-bottom: 1px solid var(--border); display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-5); justify-content: space-between; padding: var(--space-3) var(--space-5); }
+.top h1 { font-size: var(--text-lg); font-weight: 650; letter-spacing: -.01em; margin: 0; }
+.top p { color: var(--text-2); font-size: var(--text-sm); margin: 0; }
+.time-left { background: var(--accent-soft); border-radius: 999px; color: var(--text) !important; font-weight: 600; padding: var(--space-1) var(--space-3); }
+.layout > * { min-width: 0; }
+.layout { display: grid; gap: var(--space-5); grid-template-columns: 1fr; margin: 0 auto; max-width: 70rem; padding: var(--space-5); }
+@media (min-width: 52rem) { .layout { gap: var(--space-6); grid-template-columns: 16rem minmax(0, 1fr); } .rail { position: sticky; top: var(--space-5); align-self: start; } }
+.rail ol { counter-reset: phase; list-style: none; margin: 0; padding: 0; }
+.rail li.phase { border-radius: var(--radius); counter-increment: phase; margin-bottom: var(--space-1); padding: var(--space-3) var(--space-3) var(--space-3) 3rem; position: relative; }
+.rail li.phase::before { align-items: center; background: var(--surface); border: 2px solid var(--border-strong); border-radius: 50%; color: var(--text-2); content: counter(phase); display: flex; font-size: var(--text-sm); font-weight: 650; height: 1.75rem; justify-content: center; left: var(--space-3); position: absolute; top: var(--space-3); width: 1.75rem; }
+.rail li.phase.done::before { background: var(--ok); border-color: var(--ok); color: var(--surface); content: "\\2713"; }
+.rail li.phase.now, .rail li.phase.waiting, .rail li.phase.stopped { background: var(--surface); box-shadow: var(--shadow); }
+.rail li.phase.now::before, .rail li.phase.waiting::before { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.rail li.phase.stopped::before { background: var(--bad); border-color: var(--bad); color: var(--surface); content: "!"; }
+.phase-title { display: block; font-weight: 600; }
+.phase-time { color: var(--text-2); display: block; font-size: var(--text-xs); }
+.chip, .phase-status { border-radius: 999px; display: inline-block; font-size: var(--text-xs); font-weight: 600; line-height: 1.4; margin-top: var(--space-1); padding: .1rem var(--space-2); }
+.phase.done .phase-status, .chip.ok { background: var(--ok-bg); color: var(--ok); }
+.phase.now .phase-status, .chip.now { background: var(--accent-soft); color: var(--accent); }
+.phase.waiting .phase-status, .chip.waiting { background: var(--wait-bg); color: var(--wait); }
+.phase.stopped .phase-status, .chip.failed { background: var(--bad-bg); color: var(--bad); }
+.phase.coming .phase-status, .chip.coming { background: var(--surface-2); color: var(--text-2); }
+.rail ul.steps { font-size: var(--text-sm); list-style: none; margin: var(--space-2) 0 0; padding: 0; }
+.rail ul.steps li { color: var(--text-2); padding: .15rem 0; }
+.rail ul.steps li.running, .rail ul.steps li.waiting { color: var(--text); font-weight: 600; }
+.rail ul.steps li.failed { color: var(--bad); font-weight: 600; }
+.rail .step.pending, .rail .step.done, .rail .step.skipped { color: var(--text-2); }
+.elapsed { color: var(--text-2); font-weight: 400; }
+.rail details { color: var(--text-2); font-size: var(--text-sm); margin-top: var(--space-1); }
+.step-of { color: var(--text-2); font-size: var(--text-sm); font-weight: 600; letter-spacing: .02em; margin: 0 0 var(--space-3); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-lg); box-shadow: var(--shadow); margin-bottom: var(--space-4); padding: var(--space-5); }
+.card h2 { font-size: var(--text-lg); font-weight: 650; margin: 0 0 var(--space-2); }
+.card h3 { color: var(--text-2); font-size: var(--text-sm); font-weight: 650; margin: var(--space-4) 0 var(--space-1); }
+.card p { margin: 0 0 var(--space-2); }
+.card.status { border-left-width: 4px; }
+.card.status.ok { border-left-color: var(--ok); }
+.card.status.waiting { border-left-color: var(--wait); }
+.card.status.running, .card.status.info { border-left-color: var(--accent); }
+.card.status.failed { background: var(--bad-bg); border-color: var(--bad); border-left-color: var(--bad); }
+.question { border-color: var(--border-strong); }
+.question h2 { font-size: var(--text-xl); font-weight: 650; letter-spacing: -.01em; line-height: 1.3; }
+.why { color: var(--text-2); margin: 0 0 var(--space-3); }
+.hint, .note { color: var(--text-2); font-size: var(--text-sm); margin: var(--space-1) 0 0; }
+.error { color: var(--bad); font-size: var(--text-sm); font-weight: 600; margin: var(--space-2) 0 0; }
+.field { margin-bottom: var(--space-4); }
+.field-label { display: block; font-weight: 600; margin-bottom: var(--space-1); }
+input[type=text], input[type=password], textarea { background: var(--surface); border: 1px solid var(--field-border); border-radius: var(--radius-sm); color: var(--text); font: inherit; min-height: 2.75rem; padding: var(--space-2) var(--space-3); width: 100%; }
+input[aria-invalid=true] { border-color: var(--bad); }
+textarea { font-family: var(--mono); font-size: var(--text-sm); min-height: 8rem; }
+.choices { display: grid; gap: var(--space-2); margin-bottom: var(--space-3); }
+.choices label { align-items: flex-start; border: 1px solid var(--field-border); border-radius: var(--radius); cursor: pointer; display: flex; gap: var(--space-3); padding: var(--space-3); }
+.choices label:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); }
+.choices input { accent-color: var(--accent); margin-top: .3rem; }
+.buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); }
+button, a.button { align-items: center; background: var(--surface); border: 1px solid var(--field-border); border-radius: var(--radius-sm); color: var(--text); cursor: pointer; display: inline-flex; font: inherit; font-weight: 600; gap: var(--space-2); min-height: 2.75rem; padding: var(--space-2) var(--space-4); text-decoration: none; }
+button:hover, a.button:hover { background: var(--surface-2); }
+button.primary, a.button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+button.primary:hover, a.button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
+button[disabled] { cursor: progress; opacity: .6; }
+a { color: var(--accent); }
+:focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+details > summary { color: var(--accent); cursor: pointer; font-weight: 600; }
+pre { background: var(--surface-2); border-radius: var(--radius-sm); font: var(--text-xs)/1.5 var(--mono); margin: var(--space-2) 0 0; max-height: 26rem; overflow: auto; padding: var(--space-3); white-space: pre-wrap; word-break: break-word; }
+ul.checks { list-style: none; margin: var(--space-3) 0 0; padding: 0; }
+ul.checks li { border-top: 1px solid var(--border); padding: var(--space-2) 0; }
+ul.checks li.ok::first-letter { color: var(--ok); }
+ul.checks li.failed { color: var(--bad); font-weight: 600; }
+.command { align-items: center; background: var(--surface-2); border-radius: var(--radius-sm); display: flex; flex-wrap: wrap; gap: var(--space-2); margin: var(--space-2) 0; padding: var(--space-2) var(--space-3); }
+.command span { font-size: var(--text-sm); font-weight: 600; }
+.command code { flex: 1 1 16rem; font: var(--text-sm) var(--mono); word-break: break-all; }
+.command button { min-height: 2.25rem; padding: var(--space-1) var(--space-3); }
+@media (prefers-reduced-motion: no-preference) { button, a.button, .choices label { transition: background-color .15s, border-color .15s; } }
+@media (max-width: 51.99rem) {
+  .rail ol { display: flex; gap: var(--space-2); overflow-x: auto; padding-bottom: var(--space-1); }
+  .rail li.phase { flex: 0 0 auto; margin: 0; min-width: 9.5rem; }
+  .rail .phase-time, .rail ul.steps, .rail details { display: none; }
+}
+.top p { overflow-wrap: anywhere; }
+@media (max-width: 30rem) { .top { padding: var(--space-3); } .layout { padding: var(--space-3); } .card { padding: var(--space-4); } .buttons > * { flex: 1 1 100%; justify-content: center; } }
+`;
+
+export const WIZARD_CSS = `:root {
+  color-scheme: light dark;
+${block(BASE_TOKENS, "  ")}
+${block(COLOR_TOKENS.light, "  ")}
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+${block(COLOR_TOKENS.dark, "    ")}
+  }
+}
+${COMPONENTS}`;
+```
+
+In `page.ts`, delete the old `WIZARD_CSS` constant and re-export the design's, so `server.ts` keeps
+its import: `export { WIZARD_CSS } from "./design.js";`.
+
+(The rail's check mark is the CSS escape `\\2713` inside the template literal, which the stylesheet
+receives as `\2713`; an unescaped `\2` would be an octal escape, which a template literal refuses.)
+
+- [ ] **Step 4: Run tests to verify they pass, then the wizard suites**
+
+Run: `npx vitest run tests/contract/init-ui-design.test.ts tests/contract/init-ui-server.test.ts tests/contract/init-ui-cards.test.ts`
+Expected: PASS. An existing test that asserted an old CSS rule (for example the old `li.waiting`
+color) is replaced by the matching rule of the new stylesheet, asserted just as exactly.
+
+- [ ] **Step 5: Look at it**
+
+Open the mockup above in a browser, light and dark (its Theme button), at about 1280 and about
+400 pixels wide, and compare it with the real page once Task 16 lands: the same colors, type and
+spacing. Commit nothing from the mockup.
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add packages/cli/src/init/ui/design.ts packages/cli/src/init/ui/page.ts tests/contract/init-ui-design.test.ts tests/contract
+git commit -m "feat(init): the install page's design system, light and dark, one stylesheet from 127.0.0.1 (048)"
+```
+
+---
+
+### Task 4: The hub knows where the install is (journey, header, tab title, close request)
 
 **Files:**
 - Modify: `packages/cli/src/init/ui/protocol.ts` (whole `WizardStep`, `WizardLink`, `WizardCard`, `WizardState` blocks)
@@ -1002,7 +1423,7 @@ git commit -m "feat(init): the install hub tracks phase, timing, tab title and a
 ```
 
 ---
-### Task 4: Help text and verb buttons on every question (FR-010, FR-011)
+### Task 5: Help text and verb buttons on every question (FR-010, FR-011)
 
 **Files:**
 - Modify: `packages/cli/src/init/prompts.ts:9-20` (the `Prompter` interface; new `QuestionHelp`)
@@ -1013,11 +1434,11 @@ git commit -m "feat(init): the install hub tracks phase, timing, tab title and a
 - Test: `tests/contract/init-ui-question-copy.test.ts` (new)
 
 **Interfaces:**
-- Consumes: Task 3's hub (`ask`, `NewQuestion`).
+- Consumes: Task 4's hub (`ask`, `NewQuestion`).
 - Produces:
   - `interface QuestionHelp { label?: string; why?: string; example?: string; learnMoreUrl?: string; defaultText?: string; hint?: string; yesLabel?: string; noLabel?: string; buttons?: boolean; choiceLabels?: Readonly<Record<string, string>> }` (exported from `prompts.ts`)
   - Every `Prompter` method's options gain `help?: QuestionHelp`; terminal and unattended prompters ignore it.
-  - `QuestionKind` gains `"actions"` (one button per choice, the first primary) and, in Task 5, `"form"`.
+  - `QuestionKind` gains `"actions"` (one button per choice, the first primary) and, in Task 6, `"form"`.
   - `interface WizardButton { value: string; label: string; primary: boolean }`; `WizardQuestion` gains `label?, why?, example?, learnMoreUrl?, hint?: string; buttons?: WizardButton[]`.
   - `questionHelp(input: { kind: QuestionKind; text: string; flag?: string; given?: QuestionHelp }): QuestionHelp`
   - `pageHint(defaultValue: string | undefined, help: QuestionHelp): string | undefined`
@@ -1438,7 +1859,7 @@ git commit -m "feat(init): every page question has a label, a why line, a hint a
 
 ---
 
-### Task 5: Several values on one form (FR-012)
+### Task 6: Several values on one form (FR-012)
 
 **Files:**
 - Modify: `packages/cli/src/init/prompts.ts` (new `FormField`, `Prompter.form?`, `askForm`)
@@ -1448,7 +1869,7 @@ git commit -m "feat(init): every page question has a label, a why line, a hint a
 - Test: `tests/contract/init-ui-form.test.ts` (new)
 
 **Interfaces:**
-- Consumes: Task 4's `questionHelp`, `pageHint`, `pageFields`, `askCheck`, `secretCheck`.
+- Consumes: Task 5's `questionHelp`, `pageHint`, `pageFields`, `askCheck`, `secretCheck`.
 - Produces (phase 2's settings screen and Slack form are built on these):
   - `interface FormField { name: string; question: string; flag: string; defaultValue?: string; secret?: boolean; validate?: (value: string) => string | undefined; help?: QuestionHelp }`
   - `Prompter.form?(title: string, fields: readonly FormField[], options: { help?: QuestionHelp }): Promise<Record<string, string>>`
@@ -1655,7 +2076,7 @@ git commit -m "feat(init): a page question can be a form of several fields, chec
 
 ---
 
-### Task 6: Plain step names everywhere (FR-027, FR-080)
+### Task 7: Plain step names everywhere (FR-027, FR-080)
 
 **Files:**
 - Modify: `packages/cli/src/init/commands.ts:130-160` (`accessStep`, `initSteps`)
@@ -1761,10 +2182,10 @@ git commit -m "feat(init): name every install step in plain words, from one list
 
 ---
 
-### Task 7: Plain-word cards, names not IDs, and link buttons that say where they go (FR-027, FR-037, FR-080)
+### Task 8: Plain-word cards, names not IDs, and link buttons that say where they go (FR-027, FR-037, FR-080)
 
 **Files:**
-- Modify: `packages/cli/src/init/ui/cards.ts` (every builder except `readyCard`, which is Task 14's)
+- Modify: `packages/cli/src/init/ui/cards.ts` (every builder except `readyCard`, which is Task 15's)
 - Modify: `packages/cli/src/init/install-state.ts:81` (`slack` progress gains `botName`, `teamName`)
 - Modify: `packages/cli/src/init/slack-app.ts:314,319,343-345,377` (store the names; new card inputs)
 - Modify: `packages/cli/src/init/github-app.ts:328,348,355` (the app's name on every card)
@@ -1773,7 +2194,7 @@ git commit -m "feat(init): name every install step in plain words, from one list
 - Test: `tests/contract/init-ui-cards.test.ts`, `tests/contract/init-ui-finish.test.ts`, `tests/contract/init-ui-server.test.ts`
 
 **Interfaces:**
-- Consumes: Task 2's `lintCopy`; Task 3's `WizardCard.details`, `WizardCard.commands`, `NEW_TAB_NOTE`.
+- Consumes: Task 2's `lintCopy`; Task 4's `WizardCard.details`, `WizardCard.commands`, `NEW_TAB_NOTE`.
 - Produces:
   - `signedInAs(arn: string): string`
   - `GitHubCardInput` stages `install`, `repositories` and `done` gain `appName: string`
@@ -1908,7 +2329,7 @@ In `packages/cli/src/init/install-state.ts`, the Slack progress (old records sti
 ```
 
 In `packages/cli/src/init/ui/cards.ts`, replace the builders (keep `linkLabel`, `onPageProblem`,
-`slackChannelLink`, `readyCard`). `DEDICATED_ACCOUNT_NOTE` is reworded in Task 8; import it as now.
+`slackChannelLink`, `readyCard`). `DEDICATED_ACCOUNT_NOTE` is reworded in Task 9; import it as now.
 
 ```ts
 /** FR-027: who is signed in, in words. The ARN itself goes to the card's details. */
@@ -2160,7 +2581,7 @@ export function replyCard(input: ReplyCardInput): WizardCard {
 }
 ```
 
-`PrerequisiteCheck` gains `technical?: string` in `prerequisites.ts` (Task 11 fills it). The
+`PrerequisiteCheck` gains `technical?: string` in `prerequisites.ts` (Task 12 fills it). The
 `SlackUrlsCardInput`, `AdminCardInput` and `AlertsCardInput` types stay as they are.
 
 In `slack-app.ts`: `export function botNameOf(progress: InstallProgress, appName: string): string { return progress.slack?.botName ?? slackBotDisplayName(appName); }`;
@@ -2226,7 +2647,7 @@ git commit -m "feat(init): cards in plain words, names instead of IDs, details c
 ```
 
 ---
-### Task 8: The root user warning and a plain account tip (FR-016, FR-017)
+### Task 9: The root user warning and a plain account tip (FR-016, FR-017)
 
 **Files:**
 - Create: `packages/cli/src/init/stop.ts`
@@ -2238,7 +2659,7 @@ git commit -m "feat(init): cards in plain words, names instead of IDs, details c
 - Test: `tests/contract/init-aws-account.test.ts`
 
 **Interfaces:**
-- Consumes: Task 4's `buttons` help (the `--continue-as-root` catalog entry), Task 7's `awsCard`.
+- Consumes: Task 5's `buttons` help (the `--continue-as-root` catalog entry), Task 8's `awsCard`.
 - Produces:
   - `operatorStop(message: string): Error`, `markOperatorStop<T>(error: T): T`, `isOperatorStop(error: unknown): boolean` (in `stop.ts`)
   - `ROOT_WARNING`, `ADMIN_USER_GUIDE_URL`, `isRootUser(arn: string): boolean` (in `prerequisites.ts`)
@@ -2413,7 +2834,7 @@ git commit -m "feat(init): warn a root user and let them continue; a plain one-t
 
 ---
 
-### Task 9: Every model priced, the budget from the estimate, and a plan in plain words (FR-023, FR-024, FR-082)
+### Task 10: Every model priced, the budget from the estimate, and a plan in plain words (FR-023, FR-024, FR-082)
 
 **Files:**
 - Create: `packages/cli/src/init/cost.ts` (prices and `estimateMonthlyCost` move here from `plan.ts:14-90`)
@@ -2422,7 +2843,7 @@ git commit -m "feat(init): warn a root user and let them continue; a plain one-t
 - Test: `tests/contract/init-cost.test.ts` (new), `tests/contract/init-plan.test.ts`, `tests/contract/init-answers.test.ts`
 
 **Interfaces:**
-- Consumes: `ModelRole` (type) from `prerequisites.ts`, `QuestionHelp` (Task 4).
+- Consumes: `ModelRole` (type) from `prerequisites.ts`, `QuestionHelp` (Task 5).
 - Produces:
   - `estimateMonthlyCost(models, usage?): CostEstimate` (same signature; `plan.ts` re-exports it, so every existing import keeps working)
   - `PRICE_NOT_ON_FILE = "price not on file"`, `modelName(id): string`, `modelPriceLabel(role: ModelRole, id: string, provider?: string): string`
@@ -2694,14 +3115,14 @@ git commit -m "feat(init): price every model, suggest a budget of the estimate p
 
 ---
 
-### Task 10: One name for both apps, with the install name in it (FR-026)
+### Task 11: One name for both apps, with the install name in it (FR-026)
 
 **Files:**
 - Modify: `packages/cli/src/init/answers.ts:220-226` (the two app name defaults; new `defaultAppName`)
 - Test: `tests/contract/init-answers.test.ts`, `tests/contract/init-slack-app.test.ts`
 
 **Interfaces:**
-- Consumes: Task 7's `botNameOf`.
+- Consumes: Task 8's `botNameOf`.
 - Produces: `GITHUB_APP_NAME_LIMIT = 34`, `defaultAppName(input: { owner: string; env: string }): string`.
 
 Before Step 3, check GitHub's "Registering a GitHub App" documentation for the characters an app
@@ -2801,7 +3222,7 @@ git commit -m "feat(init): one default name for the GitHub and Slack apps, with 
 
 ---
 
-### Task 11: The release's images are checked before anything is created, in page words (FR-065 image check, SC-009)
+### Task 12: The release's images are checked before anything is created, in page words (FR-065 image check, SC-009)
 
 **Files:**
 - Modify: `packages/cli/src/init/prerequisites.ts` (`PrerequisiteCheck.technical`; new `releaseImageChecks`; `checkPrerequisites` gains `images` and `audience`)
@@ -2809,7 +3230,7 @@ git commit -m "feat(init): one default name for the GitHub and Slack apps, with 
 - Test: `tests/contract/init-prerequisites.test.ts`, `tests/contract/init-ui-cli.test.ts`
 
 **Interfaces:**
-- Consumes: Task 7's `prerequisitesCard` (shows `technical` in its details).
+- Consumes: Task 8's `prerequisitesCard` (shows `technical` in its details).
 - Produces:
   - `PrerequisiteCheck` gains `technical?: string`
   - `type CheckAudience = "page" | "terminal"`, `interface ReleaseImages { worker?: string; slack?: string }`
@@ -2986,7 +3407,7 @@ git commit -m "feat(init): check the release's images before anything is created
 ```
 
 ---
-### Task 12: A failure is a screen, with "Try this step again" for deploy steps (FR-060)
+### Task 13: A failure is a screen, with "Try this step again" for deploy steps (FR-060)
 
 **Files:**
 - Create: `packages/cli/src/init/ui/failure.ts`
@@ -2998,7 +3419,7 @@ git commit -m "feat(init): check the release's images before anything is created
 - Test: `tests/contract/init-ui-failure.test.ts` (new), `tests/contract/init-cli-command.test.ts` (new), `tests/contract/init-steps.test.ts`, `tests/contract/init-ui-cli.test.ts`
 
 **Interfaces:**
-- Consumes: Task 3's `showFailure`, `clearFailure`, `finish(outcome, phase, commands)`, `step-failed`; Task 4's `buttons` help; Task 8's `isOperatorStop`, `markOperatorStop`.
+- Consumes: Task 4's `showFailure`, `clearFailure`, `finish(outcome, phase, commands)`, `step-failed`; Task 5's `buttons` help; Task 9's `isOperatorStop`, `markOperatorStop`.
 - Produces:
   - `runInitSteps` input `onStepFailure?: (failure: { id: InitStepId; title: string; error: unknown }) => Promise<"retry" | "stop">`; it emits `step-failed` before asking, and `step-started` again on a retry
   - `type FailureAction = "retry" | "stop"`, `FAILURE_TITLE = "The install stopped"`, `isRetryableStep(id): boolean`
@@ -3310,7 +3731,7 @@ In `ui/index.ts`, `InstallWizard` exposes the hub's new methods and the token:
 `setStage: (stage) => hub.setStage(stage)`, `setPlace: (place) => hub.setPlace(place)`,
 `showFailure: (failure) => hub.showFailure(failure)`, `clearFailure: () => hub.clearFailure()`,
 `closeRequested: () => hub.closeRequested()`, `token: server.token`, and `logPath` from a new
-optional `startInstallWizard` input `logPath?: string` (Task 13 passes it; it is also given to
+optional `startInstallWizard` input `logPath?: string` (Task 14 passes it; it is also given to
 `createWizardHub(input.env, { logPath })`).
 
 In `commands.ts`: `InitCliDependencies` gains `cliInvocation?: CliInvocation`; `InitSession` gains
@@ -3383,7 +3804,7 @@ git commit -m "feat(init): a failure is a screen on the page; Try this step agai
 
 ---
 
-### Task 13: A quiet terminal and a log file (FR-070, FR-071)
+### Task 14: A quiet terminal and a log file (FR-070, FR-071)
 
 **Files:**
 - Create: `packages/cli/src/init/log-file.ts`
@@ -3394,7 +3815,7 @@ git commit -m "feat(init): a failure is a screen on the page; Try this step agai
 - Test: `tests/contract/init-log-file.test.ts` (new), `tests/contract/init-ui-cli.test.ts`, `tests/contract/install-docs.test.ts`
 
 **Interfaces:**
-- Consumes: Task 1's `terminalStepLine`, `stageLine`, `stoppedLine`, `READY_LINE`, `totalMinutes`, `minutesText`; Task 12's session and `plainReason`.
+- Consumes: Task 1's `terminalStepLine`, `stageLine`, `stoppedLine`, `READY_LINE`, `totalMinutes`, `minutesText`; Task 13's session and `plainReason`.
 - Produces:
   - `initLogPath(home: string, env: string): string` (`<home>/.agentx/logs/init-<env>.log`)
   - `interface InitLog { path: string; write(text: string): void; hide(value: string): void; close(): Promise<void> }`, `openInitLog(path: string): Promise<InitLog>`
@@ -3577,7 +3998,7 @@ and, in `init()`:
 - next to `setStage("your-choices")` on a first run: `session.say(stageLine("your-choices"))`;
 - `confirmInstallPlan({ ..., write: (text) => { session.output.write(text); session.wizard?.plan(text); } })`;
 - `prepareDeployment({ ..., stderr: session.output })`;
-- `onEvent`: as in Task 3, plus `if (session.wizard !== undefined && event.kind === "step-started") session.say(terminalStepLine(event.id));`;
+- `onEvent`: as in Task 4, plus `if (session.wizard !== undefined && event.kind === "step-started") session.say(terminalStepLine(event.id));`;
 - the result carries `...(session.wizard === undefined ? {} : { pageMode: true as const })`.
 
 In `runInit`: on success with the page, write `result.ready` to the log; in the catch, with the
@@ -3586,7 +4007,7 @@ as its message (same code, the original as `cause`), so `main.ts` prints that li
 
 ```ts
     if (wizard !== undefined) {
-      // ... the failure screen and finish, from Task 12 ...
+      // ... the failure screen and finish, from Task 13 ...
       session.log?.write(`${mapped instanceof Error ? mapped.message : String(mapped)}\n`);
       const what = wizard.hub.state().failure?.what ?? plainReason(error) ?? "The install could not go on.";
       const line = stoppedLine({ phase: wizard.hub.state().journey.current, problem: what, logPath: session.log?.path ?? "the log" });
@@ -3635,7 +4056,7 @@ carry on, or press Ctrl-C and run `init` again later (it continues where it stop
 the old start lines. A run whose fake browser opened now prints "The AgentX installer is open in
 your browser: <url>"; one with `--no-browser` still prints "The AgentX installer is at <url>" and the
 SSH line. Replace each expectation with the new exact line. The old FR-052 test's
-`expect(h.out.join("")).toContain("  Developers sign in with: ...")` moves to the log file (Task 14
+`expect(h.out.join("")).toContain("  Developers sign in with: ...")` moves to the log file (Task 15
 changes that line's command).
 
 - [ ] **Step 5: Run the suites**
@@ -3652,7 +4073,7 @@ git commit -m "feat(init): with the page open, the terminal prints one line per 
 
 ---
 
-### Task 14: The ready screen that stays, and commands that work as shown (FR-058, FR-059, #222)
+### Task 15: The ready screen that stays, and commands that work as shown (FR-058, FR-059, #222)
 
 **Files:**
 - Modify: `packages/cli/src/init/ui/cards.ts` (`readyCard`)
@@ -3663,7 +4084,7 @@ git commit -m "feat(init): with the page open, the terminal prints one line per 
 - Test: `tests/contract/init-ui-cards.test.ts`, `tests/contract/init-ui-cli.test.ts`, `tests/contract/init-finish-steps.test.ts`, `tests/contract/init-cli.test.ts`
 
 **Interfaces:**
-- Consumes: Task 12's `cliCommandLine`, `CliInvocation`; Task 7's `botNameOf`; Task 8's `isRootUser`; Task 3's `closeRequested`, `POST /close`.
+- Consumes: Task 13's `cliCommandLine`, `CliInvocation`; Task 8's `botNameOf`; Task 9's `isRootUser`; Task 4's `closeRequested`, `POST /close`.
 - Produces:
   - `readyCard(input: { env: string; controlPlaneUrl: string; progress: InstallProgress; botName: string; invocation: CliInvocation; root: boolean; alertsOn: boolean; created: string[]; logPath?: string }): WizardCard`
   - `readyText(input: { env: string; controlPlaneUrl: string; progress: InstallProgress; botName: string; invocation: CliInvocation }): string`
@@ -3890,7 +4311,7 @@ For a waiting run, also `session.say(stoppedLine(...))` with the waiting message
 
 `grep -rn "Developers sign in with\|mention <@\|is still readyText\|member ID" tests` lists them. In
 `init-cli.test.ts` (terminal) the summary lines change to the new `readyText` lines (pin the
-harness's `cliInvocation` as in Task 12). In `init-ui-cli.test.ts`, the outcome assertions become
+harness's `cliInvocation` as in Task 13). In `init-ui-cli.test.ts`, the outcome assertions become
 `expect(last?.outcome).toBe(READY_OUTCOME)` plus the ready card's exact lines and commands; the old
 test titled "...and the outcome is still readyText" is renamed "...and the outcome does not repeat it
 (spec 048 FR-058)".
@@ -3909,15 +4330,15 @@ git commit -m "feat(init): a ready screen that stays, names the bot, and gives c
 
 ---
 
-### Task 15: The page shell: header, progress rail, one panel (FR-001, FR-003, FR-004, FR-006, FR-008, FR-011)
+### Task 16: The page shell: header, progress rail, one panel (FR-001, FR-003, FR-004, FR-006, FR-008, FR-011)
 
 **Files:**
-- Modify: `packages/cli/src/init/ui/page.ts` (whole file: `wizardHtml`, `WIZARD_CSS`, `WIZARD_JS`)
+- Modify: `packages/cli/src/init/ui/page.ts` (`wizardHtml` and `WIZARD_JS`; the stylesheet stays Task 3's)
 - Modify: `packages/cli/src/init/ui/journey.ts` (export `CARD_PHASES`, `STEP_STATUS_WORDS`)
 - Test: `tests/contract/init-ui-page.test.ts` (new)
 
 **Interfaces:**
-- Consumes: every state field from Tasks 3, 4, 5, 7, 12 and 14 (`journey`, `header`, `pageTitle`,
+- Consumes: Task 3's `PAGE_CLASSES` and `WIZARD_CSS`; every state field from Tasks 4, 5, 6, 8, 13 and 15 (`journey`, `header`, `pageTitle`,
   `welcome`, `failure`, `commands`, `logPath`, question `label`/`why`/`example`/`hint`/`buttons`/`fields`,
   card `details`/`commands`/link `note`), and `POST /close`.
 - Produces: `CARD_PHASES: Readonly<Record<CardId, JourneyPhaseId>>`, `STEP_STATUS_WORDS: Readonly<Record<StepStatus, string>>`.
@@ -3934,6 +4355,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
+import { PAGE_CLASSES } from "../../packages/cli/src/init/ui/design.js";
 import { WIZARD_CSS, WIZARD_JS, wizardHtml } from "../../packages/cli/src/init/ui/page.js";
 import { lintCopy, quotedStrings } from "../support/copy-lint.js";
 
@@ -3965,7 +4387,7 @@ describe("the page shell", () => {
     expect(WIZARD_JS).toContain("htmlFor");
     expect(WIZARD_JS).toContain('setAttribute("aria-labelledby", "question-text")');
     expect(WIZARD_CSS).not.toMatch(/text-transform:\s*uppercase/);
-    expect(WIZARD_CSS).toMatch(/\.question h2 \{[^}]*font-size: 1\.35rem/);
+    expect(WIZARD_CSS).toMatch(/\.question h2 \{[^}]*font-size: var\(--text-xl\)/);
   });
 
   it("FR-005 and FR-011: takes the tab title, buttons and hints from state, and asks to close on Close installer", () => {
@@ -3975,6 +4397,15 @@ describe("the page shell", () => {
     expect(WIZARD_JS).toContain('"/close"');
     expect(WIZARD_JS).not.toContain("defaultConfirm");
     expect(WIZARD_JS).not.toContain("Leave empty for");
+  });
+
+  it("uses only the design system's classes, on every element it builds", () => {
+    const used = new Set<string>();
+    for (const match of html.matchAll(/class="([^"]+)"/g)) for (const name of (match[1] ?? "").split(" ")) used.add(name);
+    for (const match of WIZARD_JS.matchAll(/el\("[a-z0-9]+", "([^"]*)"/g)) for (const name of (match[1] ?? "").split(" ")) if (name !== "") used.add(name);
+    for (const match of WIZARD_JS.matchAll(/"((?:card status|phase|step) )" \+/g)) for (const name of (match[1] ?? "").trim().split(" ")) used.add(name);
+    expect([...used].filter((name) => !(PAGE_CLASSES as readonly string[]).includes(name))).toEqual([]);
+    expect(used.size).toBeGreaterThan(20);
   });
 
   it("keeps spec 040's rules: no inline handler or style, and no markup built from text", () => {
@@ -4069,53 +4500,8 @@ export function wizardHtml(token: string): string {
 `;
 }
 
-export const WIZARD_CSS = `:root { color-scheme: light dark; --line: rgba(128,128,128,.35); --accent: #1a56db; --ok: #2e7d32; --wait: #b06000; --bad: #c62828; }
-body { font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0 auto; max-width: 72rem; padding: 0 1rem 4rem; }
-.top { align-items: baseline; border-bottom: 1px solid var(--line); display: flex; flex-wrap: wrap; gap: .5rem 1.5rem; justify-content: space-between; padding: 1rem 0; }
-h1 { font-size: 1.3rem; margin: 0; }
-.top p { margin: 0; opacity: .85; }
-.time-left { font-weight: 600; }
-.layout { display: grid; gap: 1.5rem; grid-template-columns: 1fr; padding-top: 1rem; }
-@media (min-width: 48rem) { .layout { grid-template-columns: 15rem 1fr; } }
-.rail ol { list-style: none; margin: 0; padding: 0; }
-.rail li.phase { border-left: 3px solid var(--line); margin-bottom: .75rem; padding: .25rem 0 .25rem .75rem; }
-.rail li.phase.now, .rail li.phase.waiting { border-color: var(--accent); }
-.rail li.phase.done { border-color: var(--ok); }
-.rail li.phase.stopped { border-color: var(--bad); }
-.phase-title { display: block; font-weight: 600; }
-.phase-status, .phase-time { display: block; font-size: .85rem; opacity: .85; }
-.rail ul.steps { font-size: .85rem; list-style: none; margin: .35rem 0 0; padding: 0; }
-.rail details { font-size: .85rem; margin-top: .25rem; }
-.step-of { font-size: .85rem; margin: 0 0 .5rem; opacity: .85; }
-.card { border: 1px solid var(--line); border-radius: .5rem; margin-bottom: 1rem; padding: 1rem; }
-.card h2 { font-size: 1.05rem; margin: 0 0 .5rem; }
-.card h3 { font-size: .9rem; margin: .75rem 0 .25rem; }
-.card p { margin: 0 0 .35rem; }
-.question h2 { font-size: 1.35rem; font-weight: 600; }
-.why { margin: 0 0 .5rem; }
-.hidden { display: none; }
-pre { font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin: .5rem 0 0; max-height: 26rem; overflow: auto; white-space: pre-wrap; word-break: break-word; }
-summary { cursor: pointer; }
-.field { margin-bottom: 1rem; }
-.field-label { display: block; font-weight: 600; margin-bottom: .25rem; }
-input[type=text], input[type=password], textarea { border: 1px solid rgba(128,128,128,.5); border-radius: .35rem; box-sizing: border-box; font: inherit; padding: .45rem .6rem; width: 100%; }
-textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-height: 8rem; }
-.choices { display: grid; gap: .35rem; margin-bottom: .75rem; }
-.choices label { align-items: baseline; display: flex; gap: .5rem; margin: 0; }
-.buttons { display: flex; flex-wrap: wrap; gap: .5rem; margin-top: .75rem; }
-button, a.button { border: 1px solid rgba(128,128,128,.5); border-radius: .35rem; cursor: pointer; display: inline-block; font: inherit; padding: .45rem 1rem; text-decoration: none; }
-button.primary, a.button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-button[disabled] { cursor: progress; opacity: .6; }
-.error { color: var(--bad); margin: .6rem 0 0; }
-.hint, .note { font-size: .85rem; margin: .35rem 0 0; opacity: .8; }
-.card.status.ok { border-color: var(--ok); }
-.card.status.waiting { border-color: var(--wait); }
-.card.status.failed { border-color: var(--bad); }
-ul.checks { list-style: none; margin: .5rem 0 0; padding: 0; }
-ul.checks li { padding: .15rem 0; }
-.command { align-items: center; display: flex; flex-wrap: wrap; gap: .5rem; margin: .35rem 0; }
-.command code { background: rgba(128,128,128,.12); border-radius: .25rem; padding: .2rem .4rem; word-break: break-all; }
-`;
+// WIZARD_CSS is the design system's (Task 3): page.ts keeps `export { WIZARD_CSS } from "./design.js";`.
+
 
 export const WIZARD_JS = `// AgentX install wizard. Served from 127.0.0.1 by the AgentX installer; loopback only.
 const token = new URL(import.meta.url).searchParams.get(${JSON.stringify(WIZARD_TOKEN_QUERY)}) ?? "";
@@ -4503,8 +4889,9 @@ Run `npm run build`, then a scratch script (in the session's scratch directory, 
 calls `startInstallWizard({ env: "staging", write: console.log })` from
 `packages/cli/dist/init/ui/index.js`, feeds its hub a few states (`setSteps`, a question, a card, a
 failure, a ready card), and keeps running; open the printed address. Check, at about 1280 and about 400 pixels wide:
-the rail is on the left (on top when narrow), one panel, the tab title changes, and the plan and log
-are collapsed. Fix layout bugs in `WIZARD_CSS` only. Do not commit the scratch script.
+the rail is on the left (a row of chips on top when narrow), one panel, the tab title changes, and
+the plan and log are collapsed; it matches the mockup's look in light and dark. Fix layout bugs in
+`design.ts`, keeping Task 3's tests green. Do not commit the scratch script.
 
 - [ ] **Step 6: Commit**
 
@@ -4515,7 +4902,7 @@ git commit -m "feat(init): the install page shell, a progress rail and one curre
 
 ---
 
-### Task 16: The whole journey passes the copy-lint, every question has its help, then the gate (FR-010, FR-081, SC-001, SC-011)
+### Task 17: The whole journey passes the copy-lint, every question has its help, then the gate (FR-010, FR-081, SC-001, SC-011)
 
 **Files:**
 - Modify: `tests/support/copy-lint.ts` (new `stateEntries`)
@@ -4696,28 +5083,29 @@ git commit -m "test(init): the whole install passes the copy-lint, and every que
 
 | Requirement | Task |
 |---|---|
-| FR-001 rail, statuses in words, slim header | 1, 3, 15 |
-| FR-002 estimates stored with the steps, elapsed time, "taking longer than usual" (first estimates; measured numbers are phase 4) | 1, 3, 15 |
-| FR-003 one current-step panel; finished steps collapse with Details | 15 |
-| FR-004 plan and log behind links | 15 |
-| FR-005 tab title (the notification is phase 4) | 3, 15 |
-| FR-006 welcome screen | 1, 3, 15 |
-| FR-008 aria-live, labels, errors tied to fields, large plain-case question | 15 |
-| FR-010 label, why, example, default, Learn more | 4, 16 |
-| FR-011 verb buttons; forward action primary | 4, 15 |
-| FR-012 forms with per-field checks | 5 |
-| FR-016 root warning, Continue as root, ready screen names day-two limits | 8, 14 |
-| FR-017 plain one-time account tip | 8 |
-| FR-023 budget default, whole account, estimate beside it, tag scope's sentence | 9 (the tag scope is still offered with the question, as today; moving it under Advanced is phase 2's FR-021) |
-| FR-024, FR-082 every model priced or "price not on file", total names what it leaves out | 9 |
-| FR-026 one name pattern, assigned handle used from then on | 7, 10 |
-| FR-027 one name per thing, names not IDs | 6, 7, 14 |
-| FR-037 link buttons that say they open a new tab; GitHub tab closes itself | 3, 7 |
-| FR-058, FR-059 ready screen once, stays up to 30 minutes, commands with `--env`, log has the summary, #222 | 13, 14 |
-| FR-060 failure screen in three parts, Stopped in the rail, no "Finished", codes only in details | 12, 15, 16 |
-| FR-070, FR-071 quiet terminal, log file without the token | 13 |
-| FR-080, FR-081 glossary words, copy-lint over every source of page text | 2, 6, 7, 9, 11, 16 |
-| FR-065 (image check only) and SC-009 for it | 11 |
+| FR-001 rail, statuses in words, slim header | 1, 3, 4, 16 |
+| FR-002 estimates stored with the steps, elapsed time, "taking longer than usual" (first estimates; measured numbers are phase 4) | 1, 4, 16 |
+| FR-003 one current-step panel; finished steps collapse with Details | 16 |
+| FR-004 plan and log behind links | 16 |
+| FR-005 tab title (the notification is phase 4) | 4, 16 |
+| FR-006 welcome screen | 1, 4, 16 |
+| FR-008 aria-live, labels, errors tied to fields, large plain-case question, contrast and focus | 3, 16 |
+| FR-010 label, why, example, default, Learn more | 5, 17 |
+| FR-011 verb buttons; forward action primary | 5, 16 |
+| FR-012 forms with per-field checks | 6 |
+| FR-016 root warning, Continue as root, ready screen names day-two limits | 9, 15 |
+| FR-017 plain one-time account tip | 9 |
+| FR-023 budget default, whole account, estimate beside it, tag scope's sentence | 10 (the tag scope is still offered with the question, as today; moving it under Advanced is phase 2's FR-021) |
+| FR-024, FR-082 every model priced or "price not on file", total names what it leaves out | 10 |
+| FR-026 one name pattern, assigned handle used from then on | 8, 11 |
+| FR-027 one name per thing, names not IDs | 7, 8, 15 |
+| FR-037 link buttons that say they open a new tab; GitHub tab closes itself | 4, 8 |
+| FR-058, FR-059 ready screen once, stays up to 30 minutes, commands with `--env`, log has the summary, #222 | 14, 15 |
+| FR-060 failure screen in three parts, Stopped in the rail, no "Finished", codes only in details | 13, 16, 17 |
+| FR-070, FR-071 quiet terminal, log file without the token | 14 |
+| FR-080, FR-081 glossary words, copy-lint over every source of page text | 2, 7, 8, 10, 12, 17 |
+| FR-065 (image check only) and SC-009 for it | 12 |
+| Owner request of 2026-10-01: a calm, styled page (design system, light and dark, narrow windows) | 3, 16 |
 
 Not in this phase, by the spec's table: FR-007 (real build rows), FR-009 (download on the page),
 FR-015, FR-018, FR-020 to FR-022, FR-025, FR-028 to FR-036, FR-038, FR-050 to FR-057, FR-061 to
@@ -4726,22 +5114,22 @@ action (User Story 4, scenario 1) is FR-061's, phase 3; this phase reports the i
 anything is created, in plain words, which is the FR-065 part phase 1 owns.
 
 **2. Placeholder scan:** no "TBD" or "similar to Task N"; every code step has its code. Two steps
-are verification, not code: Task 10's GitHub name-character check and Task 15's look in a browser.
+are verification, not code: Task 11's GitHub name-character check and Task 16's look in a browser.
 
 **3. Type consistency:** `STEP_PLAN`, `journeyOf`, `WizardFailure`, `CliInvocation`,
 `cliCommandLine`, `botNameOf`, `readyCard`'s input and `askFailureAction` are used with the
 signatures their producing tasks define. `ModelRole` comes from `prerequisites.ts` everywhere.
-`StepStatus` gains `"failed"` in Task 3 before Task 15's `STEP_STATUS_WORDS` uses it.
+`StepStatus` gains `"failed"` in Task 4 before Task 16's `STEP_STATUS_WORDS` uses it.
 
-**4. Review Focus:** each of the five lines has its pinned test in the named task (Tasks 1, 12, 5,
-10, 9).
+**4. Review Focus:** each of the five lines has its pinned test in the named task (Tasks 1, 13, 6,
+11, 10).
 
 ## Rulings On Spec Ambiguities
 
 1. **The GitHub app name includes the owner.** FR-026's example is "AgentX (<install name>)", but
    GitHub app names are unique across GitHub, so that name would clash for the second team to use
    it. The default is "AgentX <owner> (<install name>)", dropping the owner when it does not fit in
-   34 characters; both apps share it. Task 10 also checks that GitHub accepts parentheses.
+   34 characters; both apps share it. Task 11 also checks that GitHub accepts parentheses.
 2. **The welcome screen has no Start button.** FR-006 lists what it says, not a button; the welcome
    shows above the first question, which saves a page action toward SC-007.
 3. **The ready hold is a page button, not a question.** "Close installer" posts to `POST /close`,
@@ -4771,7 +5159,7 @@ the plan. Which execution approach would you prefer?
 - **Native:** one session implements every task, then one fresh reviewer on the most capable model
   checks the whole branch. Cheapest and fastest; no independent review until the end.
 
-**Recommendation: subagent-driven**, because the 16 tasks share protocol types that later tasks
+**Recommendation: subagent-driven**, because the 17 tasks share protocol types that later tasks
 consume (the page shell renders fields from six earlier tasks), and several tasks rewrite existing
 test expectations, where a per-task reviewer is the cheapest way to catch a weakened assertion
 before it ships.
