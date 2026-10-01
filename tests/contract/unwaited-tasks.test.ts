@@ -347,11 +347,27 @@ describe("the backstop: review hardening (#173)", () => {
     expect(threadReads[0]).toMatchObject({ ProjectionExpression: "activeTurn" });
   });
 
-  it("logs why it leaves a workspace alone when its Slack thread record is missing or points elsewhere", async () => {
-    const missing = await runningTask();
-    delete missing.db.find((item) => item.entityType === "SLACK_THREAD")[0]!.thread;
-    await missing.sweep();
-    expect(missing.logs).toContainEqual({ event: "unwaited_task.skipped", workspaceId: missing.workspaceId, reason: "not-a-slack-thread" });
+  it("logs why it leaves a workspace alone when its Slack thread record is unreadable or points elsewhere", async () => {
+    const unreadable = await runningTask();
+    delete unreadable.db.find((item) => item.entityType === "SLACK_THREAD")[0]!.thread;
+    await unreadable.sweep();
+    expect(unreadable.logs).toContainEqual({ event: "unwaited_task.skipped", workspaceId: unreadable.workspaceId, reason: "thread-record-unreadable" });
+    expect(unreadable.current().status).toBe("RUNNING");
+
+    const rebound = await runningTask();
+    rebound.db.find((item) => item.entityType === "SLACK_THREAD")[0]!.workspaceId = randomUUID();
+    await rebound.sweep();
+    expect(rebound.logs).toContainEqual({ event: "unwaited_task.skipped", workspaceId: rebound.workspaceId, reason: "thread-rebound" });
+    expect(rebound.current().status).toBe("RUNNING");
+  });
+
+  it("leaves a workspace with no Slack thread at all (an API or CLI workspace) alone, quietly", async () => {
+    const { db, sweep, logs, current } = await runningTask();
+    const record = db.find((item) => item.entityType === "SLACK_THREAD")[0]!;
+    db.delete(String(record.pk), String(record.sk));
+    await sweep();
+    expect(current().status).toBe("RUNNING");
+    expect(logs).toEqual([]);
   });
 
   it("says when its configuration is only partly present, so a half-wired environment is visible", async () => {

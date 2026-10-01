@@ -16,7 +16,7 @@ import { failActiveOperation } from "./outbox-failure.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
 import { expireIndexDays, indexSweepWanted } from "./index-expiry.js";
 import { sweepStuckSetups } from "./stuck-setup.js";
-import { slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopConfiguration, unwaitedTaskBackstopWanted, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
+import { slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopConfiguration, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
 import { cachedSlackPoster } from "./developer-task-notifier.js";
 
 /** A just-launched instance or just-created volume is not judged until its session has recorded it. */
@@ -440,7 +440,7 @@ export const handler = createReconcilerHandler({
   },
   binding: (workspaceId) => workspaceBinding(documentClient, tableName, workspaceId),
   sweepStuckSetups: (now) => sweepStuckSetups(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))),
-  ...(unwaitedTaskBackstopWanted(process.env) ? { sweepUnwaitedTasks: unwaitedTaskSweep() } : {}),
+  ...(backstop.state === "on" ? { sweepUnwaitedTasks: unwaitedTaskSweep() } : {}),
   ...(indexSweepWanted(process.env) ? { expireIndexDays: (now: Date) => expireIndexDays(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))) } : {}),
   emit(metrics) {
     console.log(JSON.stringify({

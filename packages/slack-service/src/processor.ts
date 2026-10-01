@@ -353,7 +353,8 @@ export async function processSlackRequest(
   };
   /** The task this attempt started or resumed, cancelled once the last delivery gives up on it; undefined when there was none. */
   const cancelAbandonedTask = async (): Promise<"requested" | "finished" | "failed" | undefined> => {
-    const target = accepted ?? remembered;
+    // Issue 173: also a re-attached operation whose stamp failed, which this turn still waited on.
+    const target = accepted ?? remembered ?? waitingOn;
     return target === undefined ? undefined : cancelTask(target);
   };
   try {

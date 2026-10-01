@@ -948,5 +948,15 @@ describe("showing the turn is alive (#173)", () => {
     expect(posts.at(-1)).toBe(HANDOFF_FINAL_TEXT);
     expect(meta).not.toHaveProperty("activeTurn");
   });
+
+  it("asks a re-attached operation to stop at the last give-up even when its stamp failed (re-review)", async () => {
+    const ATTACHED = "66666666-6666-4666-8666-666666666666";
+    const handoff = new AbortController();
+    const { cancelOperation, stampActiveTurn, posts, dependencies } = harness(attachedTurn(ATTACHED, () => handoff.abort()));
+    stampActiveTurn.mockRejectedValueOnce(Object.assign(new Error("throttled"), { name: "ProvisionedThroughputExceededException" }));
+    await processSlackRequest(slackMessage("EvLIVE000010", "is it done?"), dependencies, { finalAttempt: true, handoff: handoff.signal });
+    expect(cancelOperation).toHaveBeenCalledExactlyOnceWith(workspaceId, ATTACHED);
+    expect(posts.at(-1)).toBe(HANDOFF_FINAL_TEXT);
+  });
 });
 

@@ -12,7 +12,8 @@
 // alone is not enough: the broker refreshes it only when the task starts running, not per event.
 // The event's timestamp is the worker's clock: one running ahead is capped at now, and one running
 // behind makes the task look idle for longer by that much (workers keep NTP time). The cancel is
-// written only while no new event has landed since the idle check.
+// written only while no new event has landed since the idle check; a status change alone in that
+// window (a task that sat 24 hours before it ran) is not checked.
 //
 // Waiting: the thread's activeTurn names the task and its seenAt is under 15 minutes old. The
 // Slack service stamps seenAt when it saves the turn and on every SQS heartbeat (5 minutes) while
@@ -108,11 +109,14 @@ async function candidate(
   if (idle <= UNWAITED_TASK_IDLE_LIMIT_MS) return undefined;
   const pointer = taskPointerKey(workspaceId);
   if (await state(pointer.pk, pointer.sk) !== undefined) return undefined;
-  // Logged, so a mis-wired thread is visible: an API or CLI workspace has no thread record either.
-  if (typeof workspace.ownerKey !== "string") return { skip: "not-a-slack-thread" };
+  if (typeof workspace.ownerKey !== "string") return undefined;
   const record = await state(`SLACK_THREAD#${workspace.ownerKey}`, "META");
-  const parts = typeof record?.thread === "string" ? record.thread.split("/") : [];
-  if (record?.workspaceId !== workspaceId || parts.length !== 3 || parts.some((part) => part.length === 0)) return { skip: "not-a-slack-thread" };
+  // An API or CLI workspace has no thread record: left alone quietly, as on every run. A record that
+  // is unreadable or names another workspace is logged, so a mis-wired thread is visible.
+  if (record === undefined) return undefined;
+  if (record.workspaceId !== workspaceId) return { skip: "thread-rebound" };
+  const parts = typeof record.thread === "string" ? record.thread.split("/") : [];
+  if (parts.length !== 3 || parts.some((part) => part.length === 0)) return { skip: "thread-record-unreadable" };
   const [teamId, channelId, threadTs] = parts as [string, string, string];
   // The activeTurn alone: never the thread's other fields, such as a turn note with the member's words.
   const meta = await get(dependencies.threadsTableName, `THREAD#${record.thread as string}`, "META", "activeTurn");

@@ -195,7 +195,7 @@ export async function requestCancellation(
   targetOperationId: string,
   requester: { requestedBy?: OperationRequester },
   extra: ExtraItems = () => [],
-  options: { onlyLive?: boolean; eventSequence?: number } = {},
+  options: { onlyLive?: false; eventSequence?: never } | { onlyLive: true; eventSequence?: number } = {},
 ): Promise<{ operation: Operation; duplicate: boolean; alreadyCancelling?: true; activeAgain?: true }> {
   const workspaceId = workspace.id;
   const target = await requireOperation(dependencies, workspaceId, targetOperationId);
