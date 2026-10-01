@@ -365,10 +365,10 @@ the existing GitHub App installation with repository-scoped **Issues** permissio
 in the control plane. Existing projects remain disabled until an administrator registers an
 opt-in revision. Arbitrary endpoints, personal OAuth, and other GitHub permission families are
 not included. Existing AgentX coding and validated PR-publication tools remain unchanged.
-The hosted Slack service discovers tools from the thread workspace's registered project revision.
-Calls use its IAM service identity and carry the requesting Slack user; tokens remain in the broker.
-Use a new thread after binding the channel to an enabled revision. Threads whose workspace is
-already prepared retain their workspace revision.
+The hosted Slack service discovers tools from the project's latest registered revision on each
+mention. Calls use its IAM service identity and carry the requesting Slack user; tokens remain in
+the broker. Only a prepared thread's checkout (repositories, setup, environment) stays on the
+revision it was prepared from.
 
 #### Connector credentials
 
@@ -493,9 +493,9 @@ agentx --project project-a admin slack bind --team T0123456789 --channel C012345
 A channel is bound to one project, not to a revision. A thread's workspace is built from the
 project's latest registered revision at the moment its compute is first prepared, which is the
 first request that needs the worker, so registering a revision publishes it to every bound channel
-without binding again. A thread that has only answered connector questions so far has no disk yet,
-so it picks up a revision registered after its first message. `admin slack unbind` removes the binding, so new
-mentions in that channel are ignored, but it keeps existing thread workspaces.
+without binding again. A thread that has only answered connector questions so far has no disk
+yet, so it picks up a revision registered after its first message. `admin slack unbind` removes
+the binding, so new mentions in that channel are ignored, but it keeps existing thread workspaces.
 
 Once prepared, a thread's checkout stays on the revision it was prepared with: `repositories`,
 `setup` and `environment` do not change under a running thread, and a failed preparation is

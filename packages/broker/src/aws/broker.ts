@@ -1905,6 +1905,8 @@ async function startThreadPreparation(
       repositoryGrant: issueRepositoryGrant(dependencies, latest, identity.ownerKey, workspace.id, operationId),
     },
   };
+  // The runtime fields stay the workspace's own (only deploymentMode today); outboxRecord refuses a
+  // latest revision whose runtime does not match, before anything is written.
   const updated = WorkspaceInstanceSchema.parse({ ...workspace, projectRevision, status: "PREPARING", activeOperationId: operationId, fence, updatedAt: now });
   const outbox = outboxRecord(updated, invocation, latest.runtimeBinding);
   const { teamId, userId } = slack.requester;
@@ -2057,8 +2059,9 @@ async function existingThreadWorkspace(
   includeSettingsRevision: boolean,
 ): Promise<SlackThreadWorkspaceResult> {
   await recordThreadRequester(dependencies, identity, workspace.id, false);
-  // Preparation rebuilds the workspace's disk, so it keeps the revision the workspace was created
-  // with. Everything the model is told comes from the project's latest registered revision.
+  // Preparation rebuilds the workspace's disk, so it keeps the revision recorded on the workspace
+  // (for a Slack thread, the latest revision when its compute was first prepared). Everything the
+  // model is told comes from the project's latest registered revision.
   const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
   const settings = await requireLatestProject(dependencies, workspace.projectName);
   const applied = {
