@@ -310,6 +310,23 @@ describe("the admin client's change calls (E4, FR-052, R1)", () => {
     expect(failure).toMatchObject({ code: "INVALID_REQUEST", nextStep: "use a new request_id or leave it out" });
   });
 
+  it("says a change whose apply failed has failed, not that it is still pending (25e re-review)", async () => {
+    const failed = await httpAdminClient({ session, fetch: answering(503, { error: { code: "RUNTIME_UNAVAILABLE", message: `change ${CHANGE} failed: the change could not be applied; check the state, then ask again` } }) }).applyChange(CHANGE, { method: "elicitation" }, "t").catch((error: unknown) => error);
+    expect(failed).toBeInstanceOf(ToolError);
+    expect(failed).toMatchObject({
+      code: "CONTROL_PLANE_UNAVAILABLE",
+      message: `change ${CHANGE} failed: the change could not be applied; check the state, then ask again`,
+      nextStep: "the change failed and is no longer pending; check it with agentx_admin_changes, fix what the message names, then ask for the change again",
+    });
+    expect((failed as ToolError).nextStep).not.toBe(CHANGE_PENDING_STEP);
+  });
+
+  it("says an apply AgentX met an unexpected error on may or may not have applied (25e re-review)", async () => {
+    const message = "AgentX met an unexpected error on this change request, so it may or may not have taken effect; check the change records before asking again";
+    const unknown = await httpAdminClient({ session, fetch: answering(503, { error: { code: "RUNTIME_UNAVAILABLE", message } }) }).applyChange(CHANGE, { method: "elicitation" }, "t").catch((error: unknown) => error);
+    expect(unknown).toMatchObject({ code: "CONTROL_PLANE_UNAVAILABLE", message, nextStep: APPLY_UNKNOWN_STEP });
+  });
+
   it("never repeats the token in a change call's error, even when the answer quotes it", async () => {
     const everywhere = (failure: unknown) => JSON.stringify({ failure, message: (failure as Error).message, nextStep: (failure as ToolError).nextStep, stack: (failure as Error).stack });
     for (const code of ["CONFIRMATION_DECLINED", "CHANGE_STALE", "SLACK_UNAVAILABLE", "NOT_FOUND", "CONFIRMATION_UNAVAILABLE"]) {

@@ -3,7 +3,7 @@
 // FR-049's codes. The token is never part of an error, a log line or a result.
 import { randomUUID } from "node:crypto";
 import {
-  AdminBindingsResponseSchema, AdminFailuresResponseSchema, AdminHealthResponseSchema, AdminMeResponseSchema, AdminProjectsResponseSchema,
+  ADMIN_CHANGE_FAILED_PATTERN, ADMIN_CHANGE_UNEXPECTED_MESSAGE, AdminBindingsResponseSchema, AdminFailuresResponseSchema, AdminHealthResponseSchema, AdminMeResponseSchema, AdminProjectsResponseSchema,
   AdminChangeResponseWireSchema, AdminChangesResponseWireSchema, AdminUsageResponseSchema, AdminWorkspacesResponseSchema,
   type AdminBindingsResponse, type AdminChangeOutcome, type AdminChangeViewWire, type AdminChangesResponseWire,
   type ApplyAdminChangeRequest, type DeclineAdminChangeRequest, type ProposeAdminChangeRequest, type AdminFailuresResponse, type AdminHealthResponse, type AdminMeResponse, type AdminProjectsResponse,
@@ -63,6 +63,8 @@ export const CHANGE_DECLINE_PENDING_STEP = "nothing to do: nothing was applied, 
  * runChange keeps the request ID on this step, so an unchanged retry answers that same change.
  */
 export const APPLY_UNKNOWN_STEP = "it may or may not have applied; check it with agentx_admin_changes before asking again";
+/** 25e re-review: a change whose handler failed ended failed; it is not pending, so asking to confirm it again is wrong. */
+export const CHANGE_FAILED_STEP = "the change failed and is no longer pending; check it with agentx_admin_changes, fix what the message names, then ask for the change again";
 /** I2: the request ID was used for another change. */
 export const NEW_REQUEST_ID_STEP = "use a new request_id or leave it out";
 /** M4: a proposal the control plane refused with these was already audited as failed; a retry would audit it again. */
@@ -95,7 +97,12 @@ function refusal(status: number, value: unknown, secret: string, pending?: Pendi
   if (code !== undefined && CHANGE_INVALID.has(code)) return new ToolError("INVALID_REQUEST", message);
   if (code === "FORBIDDEN") return new ToolError("ADMIN_REQUIRED", `AgentX refused: ${message}`, ADMIN_SIGN_IN_STEP);
   if (code === "CONFIG_INVALID") return new ToolError("INVALID_REQUEST", message);
-  // The broker answers RUNTIME_UNAVAILABLE only when nothing applied and the change is still pending.
+  if (pending === "apply" && code === "RUNTIME_UNAVAILABLE") {
+    // 25e re-review: an unexpected error may have let the apply commit, and a failed handler ended the change.
+    if (message === ADMIN_CHANGE_UNEXPECTED_MESSAGE) return new ToolError("CONTROL_PLANE_UNAVAILABLE", message, APPLY_UNKNOWN_STEP);
+    if (ADMIN_CHANGE_FAILED_PATTERN.test(message)) return new ToolError("CONTROL_PLANE_UNAVAILABLE", message, CHANGE_FAILED_STEP);
+  }
+  // Otherwise the broker answers RUNTIME_UNAVAILABLE only when nothing applied and the change is still pending.
   if (pending !== undefined && code === "RUNTIME_UNAVAILABLE") return new ToolError("CONTROL_PLANE_UNAVAILABLE", message, pending === "decline" ? CHANGE_DECLINE_PENDING_STEP : CHANGE_PENDING_STEP);
   // I1: a 5xx that is not AgentX's own refusal (API Gateway's 30-second timeout, say) says nothing about the apply.
   if (pending === "apply" && code === undefined && status >= 500) return new ToolError("CONTROL_PLANE_UNAVAILABLE", `AgentX answered HTTP ${status} while applying the change`, APPLY_UNKNOWN_STEP);

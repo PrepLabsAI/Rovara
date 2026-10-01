@@ -14,6 +14,14 @@ export const ADMIN_CHANGE_TTL_MS = 10 * 60_000;
 export const ADMIN_CHANGE_SLACK_WAIT_MS = 5 * 60_000;
 export const ADMIN_CHANGE_PROGRESS_MS = 15_000;
 export const ADMIN_CHANGE_APPLYING_STALE_MS = 2 * 60_000;
+/**
+ * 25e re-review: the change routes' answer to an error AgentX did not expect. Fixed words, never the
+ * error's own: the request may or may not have taken effect, so a client says to check first.
+ */
+export const ADMIN_CHANGE_UNEXPECTED_MESSAGE = "AgentX met an unexpected error on this change request, so it may or may not have taken effect; check the change records before asking again";
+/** A change whose handler failed: it ended failed, so it is no longer pending. */
+export const adminChangeFailedMessage = (changeId: string, message: string): string => `change ${changeId} failed: ${message}`;
+export const ADMIN_CHANGE_FAILED_PATTERN = /^change [0-9a-f-]{36} failed: /;
 export const ADMIN_CHANGE_RETENTION_DAYS = 30;
 export const ADMIN_CHANGES_PARTITION = "CHANGES";
 export const ADMIN_CHANGE_REFUSED_ATTEMPTS_MAX = 20;

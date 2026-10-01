@@ -8,7 +8,7 @@
 import { randomUUID } from "node:crypto";
 import { GetCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
-  ADMIN_CHANGE_APPLYING_STALE_MS, ADMIN_CHANGE_EFFECT_MAX, ADMIN_CHANGE_ENDED, SlackChannelIdSchema, ADMIN_LIST_MAX, ADMIN_CHANGE_TTL_MS, AdminChangeOutcomeSchema, AdminChangePendingRecordSchema, AgentXError, AgentXErrorCodeSchema,
+  ADMIN_CHANGE_APPLYING_STALE_MS, ADMIN_CHANGE_EFFECT_MAX, ADMIN_CHANGE_ENDED, ADMIN_CHANGE_UNEXPECTED_MESSAGE, adminChangeFailedMessage, SlackChannelIdSchema, ADMIN_LIST_MAX, ADMIN_CHANGE_TTL_MS, AdminChangeOutcomeSchema, AdminChangePendingRecordSchema, AgentXError, AgentXErrorCodeSchema,
   ApplyAdminChangeRequestSchema, DeclineAdminChangeRequestSchema, INDEX_EXPIRY_ATTRIBUTE, ProposeAdminChangeRequestSchema, SlackUserIdSchema,
   adminChangeItemExpiresAt, adminChangeKey, adminChangeRequestKey, agentXError, outcomeOfStatus, redactSecrets, redactText,
   type AdminChangeAuditRecord, type AdminChangeInput, type AdminChangePressEvent, type AdminChangeStatus, type AdminChangeView, type AdminMeResponse, type ConfirmationMethod,
@@ -468,9 +468,18 @@ async function applyOnce(deps: AdminChangeDependencies, change: PendingChange, a
     await transition(deps, applying, "applying", "failed", { failedAt: iso(deps.now()), error: failure }, { error: failure });
     logChangeStep(deps.log, "failed", { ...traced(change), outcome: "failed", error: failure.code });
     const code = AgentXErrorCodeSchema.safeParse(failure.code);
-    throw agentXError(code.success ? code.data : "RUNTIME_UNAVAILABLE", `change ${change.changeId} failed: ${failure.message}`);
+    throw agentXError(code.success ? code.data : "RUNTIME_UNAVAILABLE", adminChangeFailedMessage(change.changeId, failure.message));
   }
-  if (!(await transition(deps, applying, "applying", "applied", { appliedAt: iso(deps.now()), result }, { result }))) {
+  let recorded: boolean;
+  try {
+    recorded = await transition(deps, applying, "applying", "applied", { appliedAt: iso(deps.now()), result }, { result });
+  } catch (error) {
+    // 25e re-review: the handler ran, so the change applied; a failed record must never read as a
+    // refusal the admin would answer by asking again. The change reads failed after 2 minutes.
+    logChangeStep(deps.log, "applied_unrecorded", { ...traced(change), outcome: "confirmed", error: errorName(error) });
+    recorded = true;
+  }
+  if (!recorded) {
     // Only a read that found it applying for over 2 minutes moves it on meanwhile; it did apply.
     logChangeStep(deps.log, "applied_unrecorded", { ...traced(change), outcome: "confirmed" });
   }
@@ -682,6 +691,18 @@ export async function routeAdminChange(deps: AdminChangeDependencies | undefined
   // FR-052: the MCP server sends one trace ID per change tool call; a change's steps log with its own.
   const given = request.headers["x-agentx-trace-id"];
   const traceId = given !== undefined && TRACE.test(given) ? given : randomUUID();
+  try {
+    return await routeChange(deps, identity, request, url, traceId);
+  } catch (error) {
+    if (error instanceof AgentXError) throw error;
+    // 25e re-review: the broker's catch-all would echo the error's own words as CONFIG_INVALID, which
+    // a client reads as a refusal and asks again. Fixed words instead, and its name in the log.
+    deps.log({ event: "admin_change.route_failed", traceId, method: request.method, error: errorName(error) });
+    throw agentXError("RUNTIME_UNAVAILABLE", ADMIN_CHANGE_UNEXPECTED_MESSAGE);
+  }
+}
+
+async function routeChange(deps: AdminChangeDependencies, identity: AuthenticatedIdentity, request: { method: string; headers: Record<string, string | undefined>; body: unknown }, url: URL, traceId: string): Promise<Answer> {
   if (url.pathname === "/v1/admin/changes") {
     if (request.method === "POST") return propose(deps, identity, request.headers.authorization, request.body, traceId);
     if (request.method === "GET") return list(deps, url);

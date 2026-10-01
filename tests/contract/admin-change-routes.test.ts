@@ -677,3 +677,51 @@ describe("the final review's fixes (phase 25e)", () => {
     expect(AdminChangePendingRecordSchema.safeParse({ ...broker.pending(applied), status: "pending" }).success).toBe(false);
   });
 });
+
+describe("the scoped re-review's fixes (phase 25e)", () => {
+  const unexpected = () => Object.assign(new Error(`internal detail ${PLANTED}`), { name: "InternalServerError" });
+  const writesBinding = (command: { constructor: { name: string }; input?: unknown }) => command.constructor.name !== "GetCommand" && command.constructor.name !== "QueryCommand" && JSON.stringify(command.input).includes("SLACK_BINDING#");
+
+  it("answers applied when the change applied but its applied record could not be written, and a retry applies nothing again", async () => {
+    const broker = await createAdminChangeBroker();
+    const requestId = "99999999-9999-4999-8999-999999999999";
+    const id = changeId(await broker.propose(BIND, ["elicitation"], requestId));
+    const send = broker.db.send;
+    let bindingWrites = 0;
+    broker.db.send = async (command) => {
+      if (writesBinding(command)) bindingWrites += 1;
+      if (command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes('":to":"applied"')) throw unexpected();
+      return send(command);
+    };
+    const applied = await broker.apply(id);
+    expect(applied.status).toBe(200);
+    expect(applied.body.change).toMatchObject({ changeId: id, status: "applied", methodUsed: "elicitation" });
+    expect(binding(broker.db)).toMatchObject({ projectName: "payments" });
+    expect(bindingWrites).toBe(1);
+    expect(logged("admin_change.applied_unrecorded")).toEqual([expect.objectContaining({ changeId: id, traceId: TRACE, error: "InternalServerError" })]);
+    // A retry of the same apply, or of the same request, makes no second change.
+    expect((await broker.apply(id)).body.error).toMatchObject({ code: expect.any(String) as unknown });
+    const again = await broker.propose(BIND, ["elicitation"], requestId);
+    expect(changeId(again)).toBe(id);
+    broker.db.send = send;
+    expect(bindingWrites).toBe(1);
+    expect(JSON.stringify([applied.body, lines])).not.toContain(PLANTED);
+  });
+
+  it("never echoes an unexpected error's own words from a change route: fixed words, and its name in the log", async () => {
+    const broker = await createAdminChangeBroker();
+    const id = changeId(await broker.propose(BIND));
+    const send = broker.db.send;
+    broker.db.send = async (command) => {
+      if (command.constructor.name === "GetCommand" && JSON.stringify(command.input).includes(`ADMIN_CHANGE#${id}`)) throw unexpected();
+      return send(command);
+    };
+    const answer = await broker.apply(id);
+    broker.db.send = send;
+    expect(answer.status).toBe(503);
+    expect(answer.body.error).toEqual({ code: "RUNTIME_UNAVAILABLE", message: "AgentX met an unexpected error on this change request, so it may or may not have taken effect; check the change records before asking again" });
+    expect(logged("admin_change.route_failed")).toEqual([expect.objectContaining({ traceId: TRACE, error: "InternalServerError" })]);
+    expect(JSON.stringify([answer.body, lines])).not.toContain(PLANTED);
+    expect(binding(broker.db)).toBeUndefined();
+  });
+});

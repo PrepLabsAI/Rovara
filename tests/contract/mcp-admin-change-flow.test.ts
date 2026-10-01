@@ -352,3 +352,58 @@ describe("a planted secret, end to end (SC-004, ruling R3)", () => {
     for (const [where, value] of Object.entries(shown)) expect(JSON.stringify(value), where).not.toContain(PLANTED);
   });
 });
+
+describe("an apply's own failures and a reused request ID, through the tools (25e re-review)", () => {
+  const unexpected = () => Object.assign(new Error(`internal detail ${PLANTED}`), { name: "InternalServerError" });
+
+  it("answers applied when the change applied but its applied record could not be written", async () => {
+    const broker = await createAdminChangeBroker();
+    const mcp = await adminSignedInClient(broker, { elicitation: "accept", clock: broker.clock, config: CONFIG });
+    await expect.poll(async () => (await mcp.names()).includes("agentx_admin_bind_channel")).toBe(true);
+    const send = broker.db.send;
+    broker.db.send = async (command) => {
+      if (command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes('":to":"applied"')) throw unexpected();
+      return send(command);
+    };
+    const bound = await mcp.tool("agentx_admin_bind_channel", { channel: "C0LEDGER01", project: "payments" });
+    broker.db.send = send;
+    expect(bound.value).toMatchObject({ outcome: "applied" });
+    expect(broker.db.get(`SLACK_BINDING#${SLACK_TEAM}`, "CHANNEL#C0LEDGER01")).toMatchObject({ projectName: "payments" });
+    expect(mcp.answers.join("\n")).not.toContain(PLANTED);
+  });
+
+  it("says a change whose apply failed has failed, and what to do", async () => {
+    const broker = await createAdminChangeBroker();
+    const mcp = await adminSignedInClient(broker, { elicitation: "accept", clock: broker.clock, config: CONFIG });
+    await expect.poll(async () => (await mcp.names()).includes("agentx_admin_bind_channel")).toBe(true);
+    const send = broker.db.send;
+    broker.db.send = async (command) => {
+      if (command.constructor.name !== "GetCommand" && command.constructor.name !== "QueryCommand" && JSON.stringify(command.input).includes("SLACK_BINDING#")) throw unexpected();
+      return send(command);
+    };
+    const failed = await mcp.tool("agentx_admin_bind_channel", { channel: "C0LEDGER01", project: "payments" });
+    broker.db.send = send;
+    const changeId = String((broker.db.find((item) => item.entityType === "ADMIN_CHANGE")[0] as { changeId: string }).changeId);
+    expect(broker.pending(changeId)).toMatchObject({ status: "failed" });
+    expect(failed.error).toMatchObject({
+      code: "CONTROL_PLANE_UNAVAILABLE",
+      message: `change ${changeId} failed: the change could not be applied; check the state, then ask again`,
+      next_step: "the change failed and is no longer pending; check it with agentx_admin_changes, fix what the message names, then ask for the change again",
+    });
+    expect(mcp.answers.join("\n")).not.toContain(PLANTED);
+  });
+
+  it("refuses a request_id reused for a different change, and says to use a new one (final review I2)", async () => {
+    const broker = await createAdminChangeBroker();
+    const mcp = await adminSignedInClient(broker, { elicitation: "accept", clock: broker.clock, config: CONFIG });
+    await expect.poll(async () => (await mcp.names()).includes("agentx_admin_unbind_channel")).toBe(true);
+    const requestId = "12121212-1212-4121-8121-121212121212";
+    const bound = await mcp.tool("agentx_admin_bind_channel", { channel: "C0LEDGER01", project: "payments", request_id: requestId });
+    expect(bound.value).toMatchObject({ outcome: "applied", request_id: requestId });
+    const reused = await mcp.tool("agentx_admin_unbind_channel", { channel: "C0LEDGER01", request_id: requestId });
+    expect(reused.error).toMatchObject({ code: "INVALID_REQUEST", next_step: "use a new request_id or leave it out" });
+    expect(String(reused.error?.message)).toContain(requestId);
+    expect(broker.db.get(`SLACK_BINDING#${SLACK_TEAM}`, "CHANNEL#C0LEDGER01")).toMatchObject({ projectName: "payments" });
+    expect(broker.db.find((item) => item.entityType === "ADMIN_CHANGE")).toHaveLength(1);
+  });
+});
