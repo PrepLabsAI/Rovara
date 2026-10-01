@@ -74,6 +74,43 @@ describe("AgentX administration workflow", () => {
     expect(JSON.parse(output)).toEqual({ ok: true, data: { outcome: "NOTHING_RUNNING", workspaceId } });
   });
 
+  it("admin workspace cancel says plainly that the task already finished, with its final status (#196)", async () => {
+    const context = await administratorContext("agentx-cli-cancel-");
+    const workspaceId = randomUUID();
+    const answer = { outcome: "NOTHING_RUNNING", workspaceId, finishedStatus: "FAILED" };
+    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json(answer, { status: 202 }));
+    const run = async (json: boolean) => {
+      let output = "";
+      const exitCode = await executeCli([...context.globals, ...(json ? ["--json"] : []), "admin", "workspace", "cancel", "--workspace", workspaceId], {
+        fetchImplementation,
+        tokenStore: context.tokens,
+        stdout: { write(text) { output += text; } },
+        stderr: { write(text) { throw new Error(text); } },
+      });
+      return { exitCode, output };
+    };
+    expect(await run(false)).toEqual({ exitCode: 0, output: "The task had already finished as FAILED, so nothing was cancelled.\n" });
+    // The JSON answer stays the broker's, field for field.
+    const json = await run(true);
+    expect(json.exitCode).toBe(0);
+    expect(JSON.parse(json.output)).toEqual({ ok: true, data: answer });
+  });
+
+  it("admin workspace cancel says a task already cancelled was already cancelled (#196 review)", async () => {
+    const context = await administratorContext("agentx-cli-cancel-");
+    const workspaceId = randomUUID();
+    const fetchImplementation = vi.fn<typeof fetch>(async () => Response.json({ outcome: "NOTHING_RUNNING", workspaceId, finishedStatus: "CANCELLED" }, { status: 202 }));
+    let output = "";
+    const exitCode = await executeCli([...context.globals, "admin", "workspace", "cancel", "--workspace", workspaceId], {
+      fetchImplementation,
+      tokenStore: context.tokens,
+      stdout: { write(text) { output += text; } },
+      stderr: { write(text) { throw new Error(text); } },
+    });
+    expect(exitCode).toBe(0);
+    expect(output).toBe("The task was already cancelled.\n");
+  });
+
   it("binds a Slack channel to the selected project", async () => {
     const context = await administratorContext("agentx-cli-bind-");
     const fetchImplementation = vi.fn<typeof fetch>(async (input, init) => {
