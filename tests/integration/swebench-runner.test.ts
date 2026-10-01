@@ -96,30 +96,52 @@ describe("loading an instance from Hugging Face", () => {
   const answer = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status });
   const noSleep = async () => undefined;
 
-  it("reads the row from the filter endpoint, waiting while its index loads", async () => {
-    const urls: string[] = [];
-    let calls = 0;
+  /** A datasets server holding `total` rows, the instance at `at`, each page answered by `answer`. */
+  function pages(total: number, at: number, fail: (offset: number, attempt: number) => boolean = () => false) {
+    const requested: string[] = [];
+    const attempts = new Map<number, number>();
     const fetchImplementation = (async (url: string) => {
-      urls.push(url);
-      calls += 1;
-      return calls === 1 ? answer({ error: "the dataset index is loading, this can take a minute" }, 500) : answer({ rows: [{ row }], num_rows_total: 1 });
+      requested.push(url);
+      if (!url.includes("/rows?")) return answer({ error: "only pages here" }, 500);
+      const offset = Number(new URL(url).searchParams.get("offset"));
+      const attempt = (attempts.get(offset) ?? 0) + 1;
+      attempts.set(offset, attempt);
+      if (fail(offset, attempt)) return answer({ error: "temporarily unavailable" }, 500);
+      const rows = Array.from({ length: Math.max(0, Math.min(100, total - offset)) }, (_, index) => ({
+        row: offset + index === at ? row : { ...row, instance_id: `other__other-${offset + index}` },
+      }));
+      return answer({ rows, num_rows_total: total });
     }) as typeof fetch;
+    return { fetchImplementation, requested };
+  }
+
+  it("reads the test split's pages, never the slow filter endpoint", async () => {
+    const { fetchImplementation, requested } = pages(500, 437);
     await expect(loadSwebenchInstance("verified", "django__django-11099", { fetch: fetchImplementation, sleep: noSleep })).resolves.toMatchObject(row);
-    expect(urls[0]).toContain("dataset=SWE-bench%2FSWE-bench_Verified");
-    expect(decodeURIComponent(urls[0]!)).toContain("\"instance_id\"='django__django-11099'");
+    expect(requested.every((url) => url.includes("/rows?"))).toBe(true);
+    expect(requested[0]).toContain("dataset=SWE-bench%2FSWE-bench_Verified");
+    expect(requested).toHaveLength(5);
   });
 
-  it("scans the split when the filter index never loads, and refuses an unknown instance", async () => {
-    const fetchImplementation = (async (url: string) => {
-      if (url.includes("/filter?")) return answer({ error: "the dataset index is loading" }, 500);
-      const offset = Number(new URL(url).searchParams.get("offset"));
-      const rows = offset === 0
-        ? Array.from({ length: 100 }, (_, index) => ({ row: { ...row, instance_id: `other__other-${index}` } }))
-        : [{ row }];
-      return answer({ rows, num_rows_total: 101 });
-    }) as typeof fetch;
-    await expect(loadSwebenchInstance("verified", "django__django-11099", { fetch: fetchImplementation, sleep: noSleep })).resolves.toMatchObject({ image: row.image });
+  it("stops at the first page that holds the instance", async () => {
+    const { fetchImplementation, requested } = pages(500, 12);
+    await expect(loadSwebenchInstance("verified", "django__django-11099", { fetch: fetchImplementation, sleep: noSleep })).resolves.toMatchObject({ instance_id: "django__django-11099" });
+    expect(requested).toHaveLength(1);
+  });
+
+  it("retries a page that fails, and gives up after three tries", async () => {
+    const flaky = pages(500, 437, (offset, attempt) => offset === 400 && attempt < 3);
+    await expect(loadSwebenchInstance("verified", "django__django-11099", { fetch: flaky.fetchImplementation, sleep: noSleep })).resolves.toMatchObject({ image: row.image });
+    const down = pages(500, 437, (offset) => offset === 400);
+    await expect(loadSwebenchInstance("verified", "django__django-11099", { fetch: down.fetchImplementation, sleep: noSleep })).rejects.toThrow("could not read SWE-bench/SWE-bench_Verified");
+  });
+
+  it("refuses an instance the dataset does not hold, and reads Pro's config", async () => {
+    const { fetchImplementation } = pages(500, -1);
     await expect(loadSwebenchInstance("verified", "django__django-99999", { fetch: fetchImplementation, sleep: noSleep })).rejects.toThrow("django__django-99999 is not in SWE-bench/SWE-bench_Verified");
+    const pro = pages(51, -1);
+    await expect(loadSwebenchInstance("pro-hard", "django__django-99999", { fetch: pro.fetchImplementation, sleep: noSleep })).rejects.toThrow("is not in ScaleAI/SWE-bench_Pro");
+    expect(pro.requested[0]).toContain("config=hard");
   });
 
   it("refuses a row without the image SWE-bench's own datasets carry", async () => {

@@ -16,9 +16,9 @@ export interface SwebenchInstance {
 
 const DATASETS_SERVER = "https://datasets-server.huggingface.co";
 const PAGE_LENGTH = 100;
-/** The filter endpoint answers "the dataset index is loading" while it warms up. */
-const FILTER_ATTEMPTS = 6;
-const FILTER_RETRY_MS = 10_000;
+/** Pages read at once; the whole of Verified is five pages. */
+const PAGE_CONCURRENCY = 6;
+const PAGE_ATTEMPTS = 3;
 
 export interface DatasetOptions {
   fetch?: typeof fetch;
@@ -26,37 +26,41 @@ export interface DatasetOptions {
 }
 
 /**
- * One instance's row from Hugging Face's datasets server: the filter endpoint first, then a scan of
- * the test split's pages when the filter's index stays unavailable. Throws when the instance is not
- * in the dataset.
+ * One instance's row from Hugging Face's datasets server, by reading the test split's pages, several
+ * at once. Its filter endpoint is not used: while its search index warms up it answers HTTP 500 after
+ * up to 90 seconds, which cost runs 4 to 7 minutes on 2026-10-01, while a page answers in under a
+ * second. Throws when the instance is not in the dataset.
  */
 export async function loadSwebenchInstance(dataset: SwebenchDataset, instanceId: string, options: DatasetOptions = {}): Promise<SwebenchInstance> {
   const fetchImplementation = options.fetch ?? fetch;
   const sleep = options.sleep ?? ((ms: number) => new Promise((resolve) => setTimeout(resolve, ms)));
   const { name, config, family } = SWEBENCH_DATASETS[dataset];
-  const where = `"instance_id"='${instanceId.replace(/'/g, "''")}'`;
-  const filterUrl = `${DATASETS_SERVER}/filter?${new URLSearchParams({ dataset: name, config, split: "test", where, offset: "0", length: "1" }).toString()}`;
-  const instanceRow = (row: Record<string, unknown>, id: string) => normalizedRow(family === "pro" && row.image === undefined ? { ...row, image: row.docker_image } : row, id);
-  for (let attempt = 1; attempt <= FILTER_ATTEMPTS; attempt += 1) {
-    const page = await readPage(fetchImplementation, filterUrl);
-    if (page.rows !== undefined) {
-      const row = page.rows[0];
-      if (row === undefined) throw new Error(`${instanceId} is not in ${name}`);
-      return instanceRow(row, instanceId);
-    }
-    if (attempt < FILTER_ATTEMPTS) await sleep(FILTER_RETRY_MS);
-  }
-  // The filter index never became available: scan the split instead.
-  for (let offset = 0; ; offset += PAGE_LENGTH) {
+  const instanceRow = (row: Record<string, unknown>) => normalizedRow(family === "pro" && row.image === undefined ? { ...row, image: row.docker_image } : row, instanceId);
+  const page = async (offset: number) => {
     const url = `${DATASETS_SERVER}/rows?${new URLSearchParams({ dataset: name, config, split: "test", offset: String(offset), length: String(PAGE_LENGTH) }).toString()}`;
-    const page = await readPage(fetchImplementation, url);
-    if (page.rows === undefined) throw new Error(`could not read ${name} from the Hugging Face datasets server: ${page.error ?? "no rows"}`);
-    const row = page.rows.find((candidate) => candidate.instance_id === instanceId);
-    if (row !== undefined) return instanceRow(row, instanceId);
-    if (page.rows.length < PAGE_LENGTH || (page.total !== undefined && offset + PAGE_LENGTH >= page.total)) {
-      throw new Error(`${instanceId} is not in ${name}`);
+    let read = await readPage(fetchImplementation, url);
+    for (let attempt = 2; read.rows === undefined && attempt <= PAGE_ATTEMPTS; attempt += 1) {
+      await sleep(2_000 * attempt);
+      read = await readPage(fetchImplementation, url);
+    }
+    if (read.rows === undefined) throw new Error(`could not read ${name} from the Hugging Face datasets server: ${read.error ?? "no rows"}`);
+    return read;
+  };
+  const first = await page(0);
+  const found = first.rows!.find((candidate) => candidate.instance_id === instanceId);
+  if (found !== undefined) return instanceRow(found);
+  const total = first.total ?? (first.rows!.length < PAGE_LENGTH ? first.rows!.length : undefined);
+  if (total === undefined) throw new Error(`the Hugging Face datasets server did not say how many rows ${name} has`);
+  const offsets: number[] = [];
+  for (let offset = PAGE_LENGTH; offset < total; offset += PAGE_LENGTH) offsets.push(offset);
+  for (let index = 0; index < offsets.length; index += PAGE_CONCURRENCY) {
+    const pages = await Promise.all(offsets.slice(index, index + PAGE_CONCURRENCY).map(page));
+    for (const read of pages) {
+      const row = read.rows!.find((candidate) => candidate.instance_id === instanceId);
+      if (row !== undefined) return instanceRow(row);
     }
   }
+  throw new Error(`${instanceId} is not in ${name}`);
 }
 
 async function readPage(fetchImplementation: typeof fetch, url: string): Promise<{ rows?: Array<Record<string, unknown>>; total?: number; error?: string }> {
