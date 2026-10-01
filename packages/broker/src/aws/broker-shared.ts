@@ -27,6 +27,14 @@ export function isTemporaryAwsError(error: unknown): error is Error {
   return TEMPORARY_AWS_ERRORS.has(error.name) || (typeof status === "number" && status >= 500);
 }
 
+/** Issue #48: the words a caller gets for a temporary AWS error, which it can try again. */
+export const AWS_TEMPORARY_MESSAGE = "AgentX could not reach AWS just now; try again in a moment";
+/**
+ * Issue #48: the words a caller gets for any other error that is not an AgentXError. Its own words
+ * can name AWS resources or internals, so only its name is logged (as 25e does for admin changes).
+ */
+export const UNEXPECTED_REQUEST_MESSAGE = "AgentX could not handle this request; check it and try again, or ask an admin to check the broker logs";
+
 /**
  * 25c live-check note 1 (owner answer, 2026-09-30): a shared task's channel turns and AI-tool turns
  * each resume their own session, so each remembers the files as they were at its last turn. Every

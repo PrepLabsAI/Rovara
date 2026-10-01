@@ -104,6 +104,18 @@ export interface ConnectorDefinition<Scope> {
    * none of them as a create. Connector data, so the gate itself names no vendor.
    */
   itemArguments?: readonly string[];
+  /**
+   * Issue #49: the tools a guard confirms the item of, and the arguments through which a tool names
+   * an item. Registration's preflight warns about an approved tool outside `tools` whose input has
+   * one of `targetArguments`, since nothing checks the item it names.
+   */
+  guardedItemTools?: GuardedItemTools;
+}
+
+/** The tools a connector's guard covers, and the argument names that address an item (issue #49). */
+export interface GuardedItemTools {
+  tools: readonly string[];
+  targetArguments: readonly string[];
 }
 
 export interface ConnectorContext<Scope> {

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
-import { SwebenchLaunchSchema, type SwebenchLaunch } from "@agentx/contracts";
+import { AgentXError, SwebenchLaunchSchema, type SwebenchLaunch } from "@agentx/contracts";
 import type { SwebenchDeployment } from "../../packages/broker/src/aws/swebench.js";
 import { swebenchDeploymentFromParameters } from "../../packages/broker/src/aws/swebench-settings.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, registerSlackProject, serviceCall } from "../support/slack-broker.js";
@@ -252,5 +252,24 @@ describe("reading the eval settings from SSM (spec 043 FR-016)", () => {
     await expect(swebenchDeploymentFromParameters(prefix, values(withoutImage))).resolves.toBeUndefined();
     await expect(swebenchDeploymentFromParameters(prefix, values({ ...complete, "eval/runner-image": "none" }))).resolves.toBeUndefined();
     await expect(swebenchDeploymentFromParameters(prefix, values({ ...complete, "eval/runner-image": "agentx-worker:latest" }))).rejects.toThrow("pinned by digest");
+  });
+
+  it("answers a malformed setting as RUNTIME_UNAVAILABLE naming the parameter, so the broker's catch-all keeps the words (#48 review)", async () => {
+    const refusal = (entries: Record<string, string>) => swebenchDeploymentFromParameters(prefix, values(entries)).then(() => undefined, (error: unknown) => error);
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
+    const { "worker-model-id": _model, ...withoutModel } = complete;
+    const cases: Array<[Record<string, string>, string]> = [
+      [{ ...complete, "eval/runner-image": "agentx-worker:latest" }, `${prefix}eval/runner-image must be an ECR image pinned by digest`],
+      [withoutModel, `${prefix}worker-model-provider and ${prefix}worker-model-id are required for SWE-bench runs`],
+      [{ ...complete, "eval/settings": "{not json" }, `${prefix}eval/settings is not valid SWE-bench settings JSON`],
+      [{ ...complete, "eval/settings": JSON.stringify({ unexpected: true }) }, `${prefix}eval/settings is not valid SWE-bench settings JSON`],
+    ];
+    for (const [entries, message] of cases) {
+      const error = await refusal(entries);
+      expect(error).toBeInstanceOf(AgentXError);
+      expect(error).toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+      expect((error as Error).message).toContain(message);
+      expect((error as Error).message).not.toContain("not json");
+    }
   });
 });

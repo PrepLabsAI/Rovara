@@ -7,10 +7,30 @@ import {
   type StoredProjectDefinition,
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
-import { runCollected } from "./collected-process.js";
+import { runCollected, TIMEOUT_KILL_GRACE_MS } from "./collected-process.js";
 import type { CommandResult } from "./readiness.js";
 
 const UP_TIMEOUT_MS = 20 * 60_000;
+/** How long one exec that signals a command's process group in the container may take (#174). */
+const KILL_EXEC_TIMEOUT_MS = 10_000;
+/**
+ * How much longer than a command's own timeout its local client may run: the grace period before
+ * KILL, then this. A safety net for a client that the stop sequence did not end (#174).
+ */
+const CLIENT_TIMEOUT_MARGIN_MS = 10_000;
+/** What a container without bash says when an exec asks for it (Docker, then Podman/crun) (#174). */
+const NO_BASH = /exec: "bash": executable file not found|executable file `bash` not found/;
+const NO_BASH_MESSAGE = "the container has no bash, which AgentX needs to run commands in it; add bash to its image";
+/**
+ * Sends SIGTERM to the command's process group. It waits up to 5 s for the group file, which the
+ * wrapper writes only once the command has started, and keeps the group ID in "$1.stop": the wrapper
+ * removes the group file as soon as the group leader exits, and the KILL step still needs the ID.
+ * Only "No such process" counts as a group already gone; any other kill error (such as "Operation
+ * not permitted" for a group running as root) is printed and fails the exec.
+ */
+const TERM_SCRIPT = 'for _ in {1..50}; do [ -s "$1" ] && break; sleep 0.1; done; p=$(cat "$1" 2>/dev/null) || exit 0; case "$p" in ""|*[!0-9]*) exit 0;; esac; echo "$p" > "$1.stop"; out=$(kill -TERM -- "-$p" 2>&1) && exit 0; case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1';
+/** Sends SIGKILL to what is left of the process group, if anything, and removes both files. */
+const KILL_SCRIPT = 'p=$(cat "$1.stop" 2>/dev/null || cat "$1" 2>/dev/null); rm -f "$1" "$1.stop"; case "$p" in ""|*[!0-9]*) exit 0;; esac; out=$(kill -KILL -- "-$p" 2>&1) && exit 0; case "$out" in *"No such process"*) exit 0;; esac; echo "$out"; exit 1';
 
 /**
  * Where a project's devcontainer runs (#121). The whole workspace is mounted into the container at
@@ -140,25 +160,40 @@ export async function ensureDevcontainer(cli: DevcontainerCli, target: Devcontai
   throw new Error(`devcontainer did not start${reason ? `: ${reason}` : ` (exit ${String(result.exitCode)})`}`);
 }
 
-/** A project command (`setup` or `readiness`) run in the devcontainer, in its workspace directory. */
+/**
+ * A project command (`setup` or `readiness`) run in the devcontainer, in its workspace directory. It
+ * runs in its own process group in the container, so its timeout stops it there too (#174).
+ */
 export async function runDevcontainerCommand(
   cli: DevcontainerCli,
   target: DevcontainerTarget,
   command: ProjectCommand,
 ): Promise<CommandResult> {
   const cwd = contained(target.rootPath, command.cwd);
-  const result = await cli.run([
-    "exec", ...targetArgs(target),
-    ...remoteEnvArgs(command.env),
-    "sh", "-c", 'cd -- "$1" && shift && exec "$@"', "sh", cwd, command.executable, ...command.args,
-  ], { timeoutMs: command.timeoutSeconds * 1_000 });
+  const run = await runInContainerGroup(devcontainerExec(cli, target), {
+    groupFilePrefix: "agentx-command",
+    // The executable and its arguments stay positional parameters: no shell reads them again.
+    body: 'exec "$@"',
+    cwd,
+    args: [command.executable, ...command.args],
+    timeoutMs: command.timeoutSeconds * 1_000,
+    // The command's own variables (#54) reach the command only, never the TERM and KILL execs.
+    ...(command.env !== undefined ? { env: { ...command.env } } : {}),
+  });
+  const { result } = run;
   return {
     exitCode: result.exitCode ?? -1,
     stdout: result.stdout,
-    stderr: result.stderr,
+    stderr: withStopFailures(result.stderr, run.stopFailures),
     ...(result.signal !== undefined ? { signal: result.signal } : {}),
-    ...(result.timedOut === true ? { timedOut: true } : {}),
+    ...(run.timedOut || result.timedOut === true ? { timedOut: true } : {}),
   };
+}
+
+/** The command's stderr, then a line for each step of the stop sequence that failed. */
+function withStopFailures(stderr: string, failures: readonly string[]): string {
+  if (failures.length === 0) return stderr;
+  return [...(stderr === "" ? [] : [stderr.replace(/\n$/, "")]), ...failures].join("\n");
 }
 
 /**
@@ -167,11 +202,7 @@ export async function runDevcontainerCommand(
  * `devcontainer exec` client alone would leave it running there.
  */
 export function devcontainerBashOperations(cli: DevcontainerCli, target: DevcontainerTarget): BashOperations {
-  return containerBashOperations((command, options) => cli.run([
-    "exec", ...targetArgs(target),
-    ...Object.entries(options.env ?? {}).flatMap(([name, value]) => ["--remote-env", `${name}=${value}`]),
-    ...command,
-  ], options));
+  return containerBashOperations(devcontainerExec(cli, target));
 }
 
 /**
@@ -180,46 +211,149 @@ export function devcontainerBashOperations(cli: DevcontainerCli, target: Devcont
  */
 export type ContainerExec = (
   command: readonly string[],
-  options: { env?: Record<string, string>; signal?: AbortSignal; onStdout?: (data: Buffer) => void; onStderr?: (data: Buffer) => void },
+  options: {
+    env?: Record<string, string>;
+    /** A local safety net: how long the exec client may run. */
+    timeoutMs?: number;
+    signal?: AbortSignal;
+    onStdout?: (data: Buffer) => void;
+    onStderr?: (data: Buffer) => void;
+  },
 ) => Promise<DevcontainerProcess>;
 
-/** The agent's shell in a container, each command in its own process group (see devcontainerBashOperations). */
+/**
+ * The agent's shell in a container, each command in its own process group (see devcontainerBashOperations).
+ * A timeout reports back after the stop sequence: the TERM exec, the 5 s grace period, then the KILL
+ * exec (each exec bounded at 10 s); an abort reports back at once.
+ */
 export function containerBashOperations(exec: ContainerExec): BashOperations {
   return {
     async exec(command, cwd, { onData, signal, timeout, env }) {
       if (signal?.aborted) throw new Error("aborted");
-      const groupFile = `/tmp/agentx-shell-${randomUUID()}.pgid`;
-      let stopping: Promise<unknown> | undefined;
-      // bash, not sh: dash's kill does not take a negative process group ID.
-      const stop = () => {
-        stopping ??= exec(["bash", "-c", 'kill -TERM -- "-$(cat "$1")" 2>/dev/null; rm -f "$1"', "bash", groupFile], {})
-          .catch(() => undefined);
-      };
-      const controller = new AbortController();
-      let timedOut = false;
-      const timer = timeout !== undefined && timeout > 0
-        ? setTimeout(() => { timedOut = true; stop(); controller.abort(); }, timeout * 1_000)
-        : undefined;
-      const onAbort = () => { stop(); controller.abort(); };
-      signal?.addEventListener("abort", onAbort, { once: true });
-      try {
-        const result = await exec([
-          "bash", "-c",
-          // Job control only while starting the command, which puts it in its own process group;
-          // left on, bash would also print a "Done" line into the output.
-          'set -m; (cd -- "$1" && eval "$2") & child=$!; set +m; echo "$child" > "$3"; wait "$child"; status=$?; rm -f "$3"; exit "$status"',
-          "bash", cwd, command, groupFile,
-        ], { env: sessionEnvironment(env), signal: controller.signal, onStdout: onData, onStderr: onData });
-        await stopping;
-        if (signal?.aborted) throw new Error("aborted");
-        if (timedOut) throw new Error(`timeout:${String(timeout)}`);
-        return { exitCode: result.exitCode };
-      } finally {
-        if (timer !== undefined) clearTimeout(timer);
-        signal?.removeEventListener("abort", onAbort);
-      }
+      const run = await runInContainerGroup(exec, {
+        groupFilePrefix: "agentx-shell",
+        // The agent's command is shell text, so this shell reads it.
+        body: 'eval "$1"',
+        cwd,
+        args: [command],
+        ...(timeout !== undefined && timeout > 0 ? { timeoutMs: timeout * 1_000 } : {}),
+        env: sessionEnvironment(env),
+        ...(signal !== undefined ? { signal } : {}),
+        onStdout: onData,
+        onStderr: onData,
+      });
+      if (run.aborted) throw new Error("aborted");
+      for (const failure of run.stopFailures) onData(Buffer.from(`\n${failure}\n`));
+      if (run.timedOut) throw new Error(`timeout:${String(timeout)}`);
+      return { exitCode: run.result.exitCode };
     },
   };
+}
+
+interface ContainerGroupCommand {
+  /** The group file's name in the container's /tmp, before a random suffix. */
+  groupFilePrefix: string;
+  /** Shell code run in the command's directory, with the command's `args` as its positional parameters. */
+  body: string;
+  cwd: string;
+  args: readonly string[];
+  timeoutMs?: number;
+  env?: Record<string, string>;
+  signal?: AbortSignal;
+  onStdout?: (data: Buffer) => void;
+  onStderr?: (data: Buffer) => void;
+}
+
+/**
+ * Runs a command in a container in its own process group, whose ID goes to a file in the container's
+ * /tmp. A timeout or an abort stops the group there, not just the local exec client (#174): one exec
+ * sends the group SIGTERM, and TIMEOUT_KILL_GRACE_MS after it answers another sends SIGKILL to any
+ * member still running (one that ignores SIGTERM, even once the group leader has exited) and removes
+ * the files. Then the local client is aborted, if it is still running. Each kill exec may take
+ * KILL_EXEC_TIMEOUT_MS. A timeout waits for the whole sequence and reports each step that failed in
+ * `stopFailures`; an abort ends the local client at once and does not wait. bash, not sh: dash's kill
+ * does not take a negative process group ID, so a container without bash fails with an error that says so.
+ */
+async function runInContainerGroup(
+  exec: ContainerExec,
+  command: ContainerGroupCommand,
+): Promise<{ result: DevcontainerProcess; timedOut: boolean; aborted: boolean; stopFailures: string[] }> {
+  const groupFile = `/tmp/${command.groupFilePrefix}-${randomUUID()}.pgid`;
+  const controller = new AbortController();
+  const stopFailures: string[] = [];
+  const signalGroup = async (step: "TERM" | "KILL", script: string): Promise<void> => {
+    let timer: NodeJS.Timeout | undefined;
+    const failure = await Promise.race([
+      exec(["bash", "-c", script, "bash", groupFile], { timeoutMs: KILL_EXEC_TIMEOUT_MS }).then(
+        (result) => result.exitCode === 0 ? undefined : stopFailureReason(result),
+        (error: unknown) => error instanceof Error ? error.message : "the exec could not run",
+      ),
+      new Promise<string>((resolveTimer) => {
+        timer = setTimeout(() => resolveTimer(`no answer within ${KILL_EXEC_TIMEOUT_MS / 1_000} s`), KILL_EXEC_TIMEOUT_MS).unref();
+      }),
+    ]);
+    clearTimeout(timer);
+    if (failure !== undefined) stopFailures.push(`AgentX could not stop the command in the container (${step}): ${failure}`);
+  };
+  let stopping: Promise<void> | undefined;
+  const stop = () => {
+    stopping ??= (async () => {
+      await signalGroup("TERM", TERM_SCRIPT);
+      // unref'd: after an abort the sequence finishes in the background and does not keep the worker running.
+      await new Promise((resolveGrace) => setTimeout(resolveGrace, TIMEOUT_KILL_GRACE_MS).unref());
+      await signalGroup("KILL", KILL_SCRIPT);
+      controller.abort();
+    })();
+  };
+  let timedOut = false;
+  let aborted = false;
+  const timer = command.timeoutMs !== undefined
+    ? setTimeout(() => { timedOut = true; stop(); }, command.timeoutMs)
+    : undefined;
+  const onAbort = () => { aborted = true; stop(); controller.abort(); };
+  command.signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    const result = await exec([
+      "bash", "-c",
+      // Job control only while starting the command, which puts it in its own process group; left
+      // on, bash would also print a "Done" line into the output.
+      `set -m; (cd -- "$1" && shift 2 && ${command.body}) & child=$!; set +m; echo "$child" > "$2"; wait "$child"; status=$?; rm -f "$2"; exit "$status"`,
+      "bash", command.cwd, groupFile, ...command.args,
+    ], {
+      ...(command.env !== undefined ? { env: command.env } : {}),
+      ...(command.timeoutMs !== undefined ? { timeoutMs: command.timeoutMs + TIMEOUT_KILL_GRACE_MS + CLIENT_TIMEOUT_MARGIN_MS } : {}),
+      signal: controller.signal,
+      ...(command.onStdout !== undefined ? { onStdout: command.onStdout } : {}),
+      ...(command.onStderr !== undefined ? { onStderr: command.onStderr } : {}),
+    });
+    const wasAborted = aborted || command.signal?.aborted === true;
+    // A timeout waits for the stop sequence, so the result says whether it worked.
+    if (timedOut && !wasAborted) await stopping;
+    // bash never started when the container has none, so there is no output.
+    if (!timedOut && !wasAborted && result.exitCode !== 0 && result.stdout === "" && NO_BASH.test(result.stderr)) {
+      throw new Error(NO_BASH_MESSAGE);
+    }
+    return { result, timedOut, aborted: wasAborted, stopFailures: [...stopFailures] };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    command.signal?.removeEventListener("abort", onAbort);
+  }
+}
+
+/** Why a kill exec failed: the last line it printed, or its exit status. */
+function stopFailureReason(result: DevcontainerProcess): string {
+  const last = `${result.stdout}\n${result.stderr}`.trim().split("\n").at(-1)?.trim() ?? "";
+  if (last !== "") return last.slice(0, 300);
+  return result.timedOut === true ? "timed out" : `exit ${String(result.exitCode)}`;
+}
+
+/** `devcontainer exec` in the target's devcontainer, with the given variables set there. */
+function devcontainerExec(cli: DevcontainerCli, target: DevcontainerTarget): ContainerExec {
+  return (command, { env, ...options }) => cli.run([
+    "exec", ...targetArgs(target),
+    ...remoteEnvArgs(env),
+    ...command,
+  ], options);
 }
 
 /** The `devcontainer` CLI bundled with the worker, run with this Node. */
@@ -233,7 +367,7 @@ export function createDevcontainerCli(): DevcontainerCli {
   };
 }
 
-/** A project command's own variables (#54), set in the devcontainer for that command only. */
+/** Variables set in the devcontainer for one exec only: a project command's `env` (#54), pi's PI_* variables. */
 function remoteEnvArgs(env: Readonly<Record<string, string>> | undefined): string[] {
   return Object.entries(env ?? {}).flatMap(([name, value]) => ["--remote-env", `${name}=${value}`]);
 }

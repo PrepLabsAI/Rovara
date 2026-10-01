@@ -104,7 +104,7 @@ import { ZodError } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
-import { CatalogCache } from "@agentx/gateway";
+import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
 import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
 import { observeConnectorRoute } from "./connector-metrics.js";
@@ -114,11 +114,11 @@ import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConf
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { aiToolTurn, completedTurn, developerFooter, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
-import { hashJson, isConditional, isTemporaryAwsError, workerPrompt } from "./broker-shared.js";
+import { AWS_TEMPORARY_MESSAGE, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, workerPrompt } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, finishTaskClose } from "./developer-tasks.js";
-import { credentialRefusals, preflightConnectors, registrationWarnings } from "./registration-preflight.js";
+import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
 import { RepositoryGrantService } from "../repository-access.js";
@@ -598,7 +598,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (error instanceof AgentXError) {
           return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
         }
-        return json({ error: { code: "CONFIG_INVALID", message: error instanceof Error ? error.message : "invalid request" } }, "slack-ingress", 400);
+        return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
     const request = adaptHttpApiEvent(event);
@@ -746,10 +746,44 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       if (error instanceof AgentXError) {
         return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, request.requestId, error.statusCode);
       }
-      const message = error instanceof Error ? error.message : "invalid request";
-      return json({ error: { code: "CONFIG_INVALID", message } }, request.requestId, 400);
+      return unexpectedErrorAnswer(error, request.requestId);
     }
   };
+}
+
+/**
+ * Where an error was thrown: its stack's first frame, a location that carries no data. Read only
+ * after the stack's header, so a message that spans lines can never be mistaken for a frame.
+ */
+function thrownAt(error: unknown): string | undefined {
+  if (!(error instanceof Error) || typeof error.stack !== "string") return undefined;
+  // Node writes the bare name when the message is empty.
+  const header = error.message === "" ? error.name : `${error.name}: ${error.message}`;
+  if (!error.stack.startsWith(header)) return undefined;
+  return error.stack.slice(header.length).split("\n").map((line) => line.trim()).find((line) => line.startsWith("at "));
+}
+
+/**
+ * Issue #48: the answer to an error that is not an AgentXError. A temporary AWS error answers 503
+ * RUNTIME_UNAVAILABLE, so the caller tries again; any other keeps CONFIG_INVALID. Apart from a
+ * schema refusal or a CredentialUnavailable, no answer carries the error's own words, and the log
+ * carries only its name and, for an unexpected one, where it was thrown.
+ */
+function unexpectedErrorAnswer(error: unknown, requestId: string): { statusCode: number; headers: Record<string, string>; body: string } {
+  // A schema refusal is AgentX's own words: zod 4 never quotes the raw input, though a refinement
+  // may name the admin's own values, such as a repository name. A CredentialUnavailable is too: it
+  // names only credential references and secret names, never a secret.
+  if (error instanceof ZodError || error instanceof CredentialUnavailable) {
+    return json({ error: { code: "CONFIG_INVALID", message: error.message } }, requestId, 400);
+  }
+  const name = error instanceof Error ? error.name : "unknown";
+  if (isTemporaryAwsError(error)) {
+    console.log(JSON.stringify({ component: "broker", event: "aws.temporary_error", requestId, name }));
+    return json({ error: { code: "RUNTIME_UNAVAILABLE", message: AWS_TEMPORARY_MESSAGE } }, requestId, 503);
+  }
+  const at = thrownAt(error);
+  console.log(JSON.stringify({ component: "broker", event: "request.unexpected_error", requestId, name, ...(at === undefined ? {} : { at }) }));
+  return json({ error: { code: "CONFIG_INVALID", message: UNEXPECTED_REQUEST_MESSAGE } }, requestId, 400);
 }
 
 async function routeWorkspaceRequest(
@@ -963,7 +997,7 @@ function parseRegistrationInput(value: unknown): { definition: ProjectDefinition
 }
 
 /** Registration's refusals and preflight, for a new revision; registerProject and a change plan share them. */
-async function registrationChecks(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, definition: ProjectDefinition, wantsPreflight: boolean): Promise<RegistrationPreflight | undefined> {
+async function registrationChecks(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, definition: ProjectDefinition, wantsPreflight: boolean): Promise<PreflightOutcome | undefined> {
   const budget = toolBudget(approvedToolCount(definition));
   const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
   const nameProblems = presentedNameProblems(definition);
@@ -978,25 +1012,25 @@ async function registrationChecks(dependencies: AwsBrokerDependencies, identity:
   if (!wantsPreflight) return undefined;
   const result = await preflightConnectors(connectors(), definition, identity.ownerKey);
   if (result.refusals.length > 0) throw agentXError("CONFIG_INVALID", result.refusals.join("; "));
-  return result.report;
+  return { report: result.report, warnings: result.warnings };
 }
 
 async function registerProject(
   dependencies: AwsBrokerDependencies,
   identity: AuthenticatedIdentity,
   value: unknown,
-  checked?: { report?: RegistrationPreflight },
+  checked?: { preflight?: PreflightOutcome },
 ): Promise<{ project: Omit<RegisteredProjectRecord, "pk" | "sk">; duplicate: boolean; warnings?: string[]; preflight?: RegistrationPreflight }> {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   const { definition, runtimeBinding, wantsPreflight } = parseRegistrationInput(value);
   const budget = toolBudget(approvedToolCount(definition));
   const connectors = () => resolveConnectors(definition, connectorTypeContext(dependencies), dependencies.connectorTypes);
-  const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: RegistrationPreflight | undefined) => {
+  const respond = (project: Omit<RegisteredProjectRecord, "pk" | "sk">, duplicate: boolean, preflight: PreflightOutcome | undefined) => {
     const warnings = registrationWarnings(budget.warning, preflight);
     return {
       project, duplicate,
       tools: { maximum: budget.maximum, warnAbove: TOOL_WARNING_THRESHOLD, limit: TOOL_LIMIT },
-      ...(warnings.length ? { warnings } : {}), ...(preflight ? { preflight } : {}),
+      ...(warnings.length ? { warnings } : {}), ...(preflight ? { preflight: preflight.report } : {}),
     };
   };
   const key = projectKey(definition.name, definition.revision);
@@ -1009,8 +1043,8 @@ async function registerProject(
       throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
     }
     // A revision stored before the static checks existed stays idempotent: report, never refuse.
-    const preflight = checked?.report
-      ?? (wantsPreflight ? (await preflightConnectors(connectors(), definition, identity.ownerKey)).report : undefined);
+    const preflight = checked?.preflight
+      ?? (wantsPreflight ? await preflightConnectors(connectors(), definition, identity.ownerKey) : undefined);
     return respond(withoutKeys(existing), true, preflight);
   }
   const preflight = await registrationChecks(dependencies, identity, definition, wantsPreflight);
@@ -1039,7 +1073,7 @@ async function registerProject(
     ] }));
   } catch (error) {
     // A concurrent registration won; answer as a duplicate without contacting the vendor again.
-    if (isConditional(error)) return registerProject(dependencies, identity, value, preflight ? { report: preflight } : {});
+    if (isConditional(error)) return registerProject(dependencies, identity, value, preflight ? { preflight } : {});
     throw error;
   }
   return respond(withoutKeys(record), false, preflight);
@@ -1787,7 +1821,10 @@ async function createUnpreparedThreadWorkspace(
   };
 }
 
-/** A workspace record pinned to the thread's starting revision and runtime, with fence 0 and no operation. */
+/**
+ * A workspace record naming the thread's starting revision and runtime, with fence 0 and no
+ * operation. startThreadPreparation replaces the revision with the latest one when it prepares.
+ */
 function unpreparedWorkspace(project: RegisteredProjectRecord, ownerKey: string): WorkspaceInstance {
   const now = new Date().toISOString();
   return WorkspaceInstanceSchema.parse({
@@ -1849,9 +1886,12 @@ async function prepareThreadWorkspace(
  * Moves an UNPREPARED thread workspace to PREPARING. The same transaction writes the prepare
  * operation and outbox item, charges the requesting member and the organization, and records that
  * member as the thread's starter, whose charge closing releases. So a limit counts only prepared
- * threads. The disk is built from the revision the thread started with, as
- * retryWorkspacePreparation does. Any other status is answered as it stands: a racing request
- * prepared it already.
+ * threads. An UNPREPARED workspace has no disk yet, so it is built from the project's latest
+ * registered revision (#12), not the one the thread started with. The same transaction writes
+ * that revision onto the workspace record, so the record, the operation's payload hash, the
+ * invocation and the outbox routing all name one revision. From then on the workspace stays on
+ * it, as retryWorkspacePreparation does. Any other status is answered as it stands: a racing
+ * request prepared it already.
  */
 async function startThreadPreparation(
   dependencies: AwsBrokerDependencies,
@@ -1867,7 +1907,10 @@ async function startThreadPreparation(
     return { outcome: "WORKSPACE", workspaceId: workspace.id, status: workspace.status, operationId: workspace.activeOperationId, created: false };
   }
   const effective = await effectiveSlackLimits(dependencies, limits);
-  const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+  // One read of the latest revision feeds every field below, so a revision registered meanwhile
+  // cannot mix in. The fence condition refuses the write if the workspace changed since it was read.
+  const latest = await requireLatestProject(dependencies, workspace.projectName);
+  const projectRevision = latest.definition.revision;
   const now = new Date().toISOString();
   const operationId = randomUUID();
   const fence = workspace.fence + 1;
@@ -1876,7 +1919,7 @@ async function startThreadPreparation(
     workspaceId: workspace.id,
     kind: "prepare",
     requestId,
-    payloadHash: hashJson({ projectName: workspace.projectName, projectRevision: workspace.projectRevision, targetOwnerKey: identity.ownerKey }),
+    payloadHash: hashJson({ projectName: workspace.projectName, projectRevision, targetOwnerKey: identity.ownerKey }),
     status: "ACCEPTED",
     fence,
     createdAt: now,
@@ -1889,27 +1932,30 @@ async function startThreadPreparation(
     operationId,
     workspaceId: workspace.id,
     fence,
-    projectRevision: workspace.projectRevision,
+    projectRevision,
     callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence),
     payload: {
-      project: pinned.definition,
-      repositoryGrant: issueRepositoryGrant(dependencies, pinned, identity.ownerKey, workspace.id, operationId),
+      project: latest.definition,
+      repositoryGrant: issueRepositoryGrant(dependencies, latest, identity.ownerKey, workspace.id, operationId),
     },
   };
-  const updated = WorkspaceInstanceSchema.parse({ ...workspace, status: "PREPARING", activeOperationId: operationId, fence, updatedAt: now });
-  const outbox = outboxRecord(updated, invocation, pinned.runtimeBinding);
+  // The runtime fields stay the workspace's own (only deploymentMode today); outboxRecord refuses a
+  // latest revision whose runtime does not match, before anything is written.
+  const updated = WorkspaceInstanceSchema.parse({ ...workspace, projectRevision, status: "PREPARING", activeOperationId: operationId, fence, updatedAt: now });
+  const outbox = outboxRecord(updated, invocation, latest.runtimeBinding);
   const { teamId, userId } = slack.requester;
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Update: {
         TableName: dependencies.tableName,
         Key: workspaceKey(workspace.id),
-        UpdateExpression: "SET #status = :preparing, activeOperationId = :operation, fence = :nextFence, updatedAt = :now",
+        UpdateExpression: "SET #status = :preparing, projectRevision = :revision, activeOperationId = :operation, fence = :nextFence, updatedAt = :now",
         ConditionExpression: "ownerKey = :owner AND #status = :unprepared AND fence = :currentFence",
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: {
           ":owner": identity.ownerKey,
           ":preparing": "PREPARING",
+          ":revision": projectRevision,
           ":unprepared": "UNPREPARED",
           ":operation": operationId,
           ":nextFence": fence,
@@ -2047,8 +2093,9 @@ async function existingThreadWorkspace(
   includeSettingsRevision: boolean,
 ): Promise<SlackThreadWorkspaceResult> {
   await recordThreadRequester(dependencies, identity, workspace.id, false);
-  // Preparation rebuilds the workspace's disk, so it keeps the revision the workspace was created
-  // with. Everything the model is told comes from the project's latest registered revision.
+  // Preparation rebuilds the workspace's disk, so it keeps the revision recorded on the workspace
+  // (for a Slack thread, the latest revision when its compute was first prepared). Everything the
+  // model is told comes from the project's latest registered revision.
   const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
   const settings = await requireLatestProject(dependencies, workspace.projectName);
   const applied = {
@@ -4690,7 +4737,13 @@ function object(value: unknown, label: string): Record<string, unknown> {
 }
 
 function parseBody(body: string | undefined): unknown {
-  return body ? JSON.parse(body) as unknown : {};
+  if (!body) return {};
+  try {
+    return JSON.parse(body) as unknown;
+  } catch {
+    // Issue #48: the parser's own words quote the body, so fixed words instead.
+    throw agentXError("CONFIG_INVALID", "the request body is not valid JSON");
+  }
 }
 
 function uuid(value: unknown, label: string): string {
