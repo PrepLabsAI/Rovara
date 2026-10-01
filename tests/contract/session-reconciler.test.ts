@@ -306,16 +306,23 @@ describe("reconciler: stuck setups (spec 025 FR-055)", () => {
 
 describe("reconciler: unwaited Slack tasks (#173)", () => {
   it("hands the sweep every live session's workspace, reports what it cancelled and counts it", async () => {
-    const readyWorkspace = seedSession(new FakeDynamoDb(), "READY");
+    const worker = ready();
     const sweep = vi.fn(async () => ({ cancelled: ["op-1"], failed: ["op-2"], noteFailures: 0 }));
-    const { db, reconcile, emit } = setup({ sweepUnwaitedTasks: sweep });
+    const { db, reconcile, emit } = setup({
+      sweepUnwaitedTasks: sweep,
+      instances: [{ instanceId: worker.instanceId, state: "running", launchedAt: worker.launchedAt }],
+    });
+    const readyWorkspace = seedSession(db, "READY", worker);
+    db.get(`WORKSPACE#${readyWorkspace}`, "SESSION")!.instanceId = worker.instanceId;
     const live = seedSession(db, "STOPPED", { volumeId: `vol-${hex()}` });
     const provisioning = seedSession(db, "PROVISIONING", { executionArn: "arn:aws:states:us-east-1:111122223333:execution:provisioner:x" });
+    const deleted = seedSession(db, "DELETED");
     const report = await reconcile();
     expect(sweep).toHaveBeenCalledOnce();
     const [workspaceIds, at] = sweep.mock.calls[0]! as unknown as [Iterable<string>, Date];
-    expect([...workspaceIds].sort()).toEqual([live, provisioning].sort());
-    expect([...workspaceIds]).not.toContain(readyWorkspace);
+    // READY, the state of a running task, is the main one; a DELETED session holds no worker.
+    expect([...workspaceIds].sort()).toEqual([readyWorkspace, live, provisioning].sort());
+    expect([...workspaceIds]).not.toContain(deleted);
     expect(at).toEqual(NOW);
     expect(report.unwaitedTasks).toEqual({ cancelled: ["op-1"], failed: ["op-2"], noteFailures: 0 });
     expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerUnwaitedTasksCancelled: 1, ReconcilerUnwaitedTaskFailures: 1 }));

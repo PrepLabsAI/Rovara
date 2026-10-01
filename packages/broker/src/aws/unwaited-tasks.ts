@@ -52,7 +52,10 @@ export interface UnwaitedTaskSweepDependencies {
 export interface UnwaitedTaskSweepResult {
   /** Operation IDs the broker queued a cancel for this run. */
   cancelled: string[];
-  /** Operation IDs whose cancel failed; they are still live, so the next run tries again. */
+  /**
+   * Operation IDs whose cancel failed, or workspace IDs whose reads failed. Nothing changed for them,
+   * so the next run tries again.
+   */
   failed: string[];
   /** Notes that could not be posted. Never retried: the task is already cancelled, so the next run skips it. */
   noteFailures: number;
@@ -60,7 +63,31 @@ export interface UnwaitedTaskSweepResult {
 
 const errorName = (error: unknown) => error instanceof Error ? error.name : "unknown";
 
-/** Looks at the active operation of each given workspace (the reconciler's live sessions). */
+/**
+ * The workspace's active operation ID when it is a candidate: an old live coding task, not from an
+ * AI tool, in a workspace a Slack thread owns. The last check is the broker's too; doing it here
+ * keeps an API or CLI workspace's long task from invoking the broker on every run.
+ */
+async function candidateOperation(
+  get: (pk: string, sk: string) => Promise<Record<string, unknown> | undefined>,
+  workspaceId: string,
+  now: Date,
+): Promise<string | undefined> {
+  const workspace = await get(`WORKSPACE#${workspaceId}`, "META");
+  const operationId = workspace?.activeOperationId;
+  if (typeof operationId !== "string" || operationId.length === 0) return undefined;
+  if (!isUnwaitedTaskCandidate(await get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`), now)) return undefined;
+  const pointer = taskPointerKey(workspaceId);
+  if (await get(pointer.pk, pointer.sk) !== undefined) return undefined;
+  if (typeof workspace?.ownerKey !== "string") return undefined;
+  const thread = await get(`SLACK_THREAD#${workspace.ownerKey}`, "META");
+  return thread?.workspaceId === workspaceId && typeof thread.thread === "string" ? operationId : undefined;
+}
+
+/**
+ * Looks at the active operation of each given workspace: the reconciler's live sessions. A task in
+ * a workspace with no live session holds no worker, so none is missed that keeps a worker running.
+ */
 export async function sweepUnwaitedTasks(
   dependencies: UnwaitedTaskSweepDependencies,
   workspaceIds: Iterable<string>,
@@ -71,12 +98,16 @@ export async function sweepUnwaitedTasks(
     TableName: dependencies.tableName, Key: { pk, sk }, ConsistentRead: true,
   }))) as { Item?: Record<string, unknown> }).Item;
   for (const workspaceId of workspaceIds) {
-    const workspace = await get(`WORKSPACE#${workspaceId}`, "META");
-    const operationId = workspace?.activeOperationId;
-    if (typeof operationId !== "string" || operationId.length === 0) continue;
-    if (!isUnwaitedTaskCandidate(await get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`), now)) continue;
-    const pointer = taskPointerKey(workspaceId);
-    if (await get(pointer.pk, pointer.sk) !== undefined) continue;
+    let operationId: string | undefined;
+    try {
+      operationId = await candidateOperation(get, workspaceId, now);
+    } catch (error) {
+      // One workspace's failed read never stops the others; its name only, and the next run reads it again.
+      result.failed.push(workspaceId);
+      dependencies.log({ event: "unwaited_task.read_failed", workspaceId, errorName: errorName(error) });
+      continue;
+    }
+    if (operationId === undefined) continue;
     const fields = { workspaceId, operationId };
     let answer: UnwaitedTaskStop;
     try {

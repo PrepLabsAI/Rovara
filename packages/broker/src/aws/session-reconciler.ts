@@ -19,6 +19,7 @@ import { expireIndexDays, indexSweepWanted } from "./index-expiry.js";
 import { sweepStuckSetups } from "./stuck-setup.js";
 import { createBrokerTaskStopper, sweepUnwaitedTasks, unwaitedTaskBackstopWanted, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
 import { cachedSlackPoster } from "./developer-task-notifier.js";
+import { parseSlackSecrets } from "./slack-ingress.js";
 
 /** A just-launched instance or just-created volume is not judged until its session has recorded it. */
 export const GRACE_MS = 15 * 60_000;
@@ -333,13 +334,9 @@ function unwaitedTaskSweep(): NonNullable<ReconcilerDependencies["sweepUnwaitedT
   const stopTask = createBrokerTaskStopper((payload) => lambda.send(new InvokeCommand({
     FunctionName: brokerFunctionName, InvocationType: "RequestResponse", Payload: Buffer.from(payload),
   })));
-  const post = cachedSlackPoster(async () => {
-    const secret = await secrets.send(new GetSecretValueCommand({ SecretId: slackSecretArn }));
-    const botToken = (JSON.parse(secret.SecretString ?? "{}") as { botToken?: unknown }).botToken;
-    // Never the secret's text in an error: it is logged by name only anyway.
-    if (typeof botToken !== "string" || !botToken.startsWith("xoxb-")) throw Object.assign(new Error("the Slack secret has no bot token"), { name: "SlackSecretInvalid" });
-    return botToken;
-  });
+  // The same parsing as the notifier: its errors name what is missing, never the secret's text.
+  const post = cachedSlackPoster(() => secrets.send(new GetSecretValueCommand({ SecretId: slackSecretArn }))
+    .then((secret) => parseSlackSecrets(secret.SecretString ?? "").botToken));
   const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }));
   return (workspaceIds, now) => sweepUnwaitedTasks({
     client: documentClient,

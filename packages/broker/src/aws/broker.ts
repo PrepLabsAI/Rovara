@@ -2997,9 +2997,14 @@ async function requestCancellation(
         TableName: dependencies.tableName,
         Key: operationKey(workspaceId, targetOperationId),
         UpdateExpression: "SET #status = :cancel, updatedAt = :now",
-        ConditionExpression: "fence = :fence",
+        // Issue 173 review I3: only a target still live and not yet asked to cancel. A result that
+        // lands first stands, and of two cancels racing (a member's stop and the backstop) one wins.
+        ConditionExpression: "fence = :fence AND (#status = :accepted OR #status = :dispatching OR #status = :running)",
         ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: { ":cancel": "CANCEL_REQUESTED", ":now": now, ":fence": workspace.fence },
+        ExpressionAttributeValues: {
+          ":cancel": "CANCEL_REQUESTED", ":now": now, ":fence": workspace.fence,
+          ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":running": "RUNNING",
+        },
       } },
       { Put: { TableName: dependencies.tableName, Item: operation } },
       { Put: { TableName: dependencies.tableName, Item: outbox } },

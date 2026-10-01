@@ -1,7 +1,7 @@
 // Issue 173: the reconciler backstop. A Slack thread's coding task still live 4 hours after it
 // started, with nobody waiting on it, is cancelled through the broker's cancel path, and the thread
 // gets one short note. This file covers the reconciler's side: which operations it hands to the
-// broker, and what it does with the answer. The broker's own checks are in cancel-task.test.ts.
+// broker, and what it does with the answer. The broker's own checks are in unwaited-task-broker.test.ts.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
@@ -17,7 +17,9 @@ const THREAD = { channelId: "C0123456789", threadTs: "1695500000.000001" };
 function seed(db: FakeDynamoDb, operation: Record<string, unknown> = {}) {
   const workspaceId = randomUUID();
   const operationId = randomUUID();
-  db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "META", entityType: "WORKSPACE", status: "BUSY", activeOperationId: operationId, fence: 3 });
+  const ownerKey = `owner-${workspaceId}`;
+  db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "META", entityType: "WORKSPACE", status: "BUSY", activeOperationId: operationId, fence: 3, ownerKey });
+  db.set({ pk: `SLACK_THREAD#${ownerKey}`, sk: "META", entityType: "SLACK_THREAD", thread: "T0123456789/C0123456789/1695500000.000001", workspaceId });
   db.set({
     pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}`, entityType: "OPERATION", id: operationId, workspaceId,
     kind: "task", status: "RUNNING", fence: 3, createdAt: ago(UNWAITED_TASK_LIMIT_MS + 60_000), updatedAt: ago(60_000), ...operation,
@@ -184,3 +186,34 @@ describe("the unwaited task backstop: invoking the broker (#173)", () => {
     expect(unwaitedTaskBackstopWanted({ BROKER_FUNCTION_NAME: "broker", SLACK_SECRET_ARN: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/staging/slack-AbCdEf" })).toBe(true);
   });
 });
+
+describe("the unwaited task backstop: cheap pre-checks and isolation (#173 review)", () => {
+  it("never invokes the broker for a workspace no Slack thread owns (an API or CLI workspace)", async () => {
+    const { db, sweep, stopTask } = harness();
+    const api = seed(db);
+    const ownerKey = String(db.get(`WORKSPACE#${api.workspaceId}`, "META")!.ownerKey);
+    db.delete(`SLACK_THREAD#${ownerKey}`, "META");
+    const elsewhere = seed(db);
+    const otherOwner = String(db.get(`WORKSPACE#${elsewhere.workspaceId}`, "META")!.ownerKey);
+    db.get(`SLACK_THREAD#${otherOwner}`, "META")!.workspaceId = randomUUID();
+    await sweep([api.workspaceId, elsewhere.workspaceId]);
+    expect(stopTask).not.toHaveBeenCalled();
+  });
+
+  it("logs a failed read for one workspace by its error name, counts it, and goes on to the next", async () => {
+    const { db, sweep, stopTask, logs } = harness();
+    const broken = seed(db);
+    const fine = seed(db);
+    const original = db.send;
+    db.send = async (command) => {
+      if (JSON.stringify(command.input).includes(`WORKSPACE#${broken.workspaceId}`)) throw Object.assign(new Error("PLANTED-READ"), { name: "ProvisionedThroughputExceededException" });
+      return original(command);
+    };
+    const result = await sweep([broken.workspaceId, fine.workspaceId]);
+    expect(stopTask).toHaveBeenCalledExactlyOnceWith(fine.workspaceId, fine.operationId);
+    expect(result).toMatchObject({ cancelled: [fine.operationId], failed: [broken.workspaceId] });
+    expect(logs).toContainEqual({ event: "unwaited_task.read_failed", workspaceId: broken.workspaceId, errorName: "ProvisionedThroughputExceededException" });
+    expect(JSON.stringify(logs)).not.toContain("PLANTED");
+  });
+});
+

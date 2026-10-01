@@ -145,4 +145,30 @@ describe("the broker's unwaited task stop (#173)", () => {
     expect(response.statusCode).not.toBe(200);
     expect(operation.status).toBe("RUNNING");
   });
+
+  it("never overwrites a task that finished while the cancel was being written, and queues no cancel (review I3)", async () => {
+    const { db, handler, workspaceId, operationId, operation } = await runningTask();
+    const original = db.send;
+    db.send = async (command) => {
+      // The task's own result lands just before the cancel's transaction.
+      if (command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("\"CANCEL_REQUESTED\"")) operation.status = "SUCCEEDED";
+      return original(command);
+    };
+    expect((await stopUnwaited(handler, workspaceId, operationId)).body).toMatchObject({ outcome: "SKIPPED", reason: "finished" });
+    expect(operation.status).toBe("SUCCEEDED");
+    expect(cancels(db, workspaceId)).toHaveLength(0);
+  });
+
+  it("queues one cancel when a member's stop lands between the check and the cancel, and names no thread to note (review I3)", async () => {
+    const { db, handler, workspaceId, operationId, operation } = await runningTask();
+    const original = db.send;
+    db.send = async (command) => {
+      if (command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("\"CANCEL_REQUESTED\"")) operation.status = "CANCEL_REQUESTED";
+      return original(command);
+    };
+    const answer = await stopUnwaited(handler, workspaceId, operationId);
+    expect(answer.body).not.toMatchObject({ outcome: "CANCEL_REQUESTED" });
+    expect(cancels(db, workspaceId)).toHaveLength(0);
+  });
 });
+

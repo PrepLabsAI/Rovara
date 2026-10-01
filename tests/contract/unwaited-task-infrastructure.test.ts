@@ -10,7 +10,7 @@ import { environmentNaming } from "../../infra/lib/naming.js";
 type Statement = { Sid?: string; Effect: string; Action: string | string[]; Resource: unknown; Condition?: unknown };
 type Policy = { Properties: { PolicyDocument: { Statement: Statement[] }; Roles: Array<{ Ref?: string }> } };
 type LambdaFunction = { Properties: { Role: { "Fn::GetAtt": [string, string] }; Environment?: { Variables?: Record<string, unknown> } } };
-type Alarm = { Properties: { AlarmName?: unknown; MetricName?: string; Namespace?: string; EvaluationPeriods?: number; Threshold?: number; AlarmActions?: unknown[] } };
+type Alarm = { Properties: { AlarmName?: unknown; Period?: number; Statistic?: string; ComparisonOperator?: string; TreatMissingData?: string; MetricName?: string; Namespace?: string; EvaluationPeriods?: number; Threshold?: number; AlarmActions?: unknown[] } };
 
 function reconciler(template: Template) {
   const functions = Object.entries(template.findResources("AWS::Lambda::Function") as Record<string, LambdaFunction>);
@@ -53,7 +53,10 @@ describe("the unwaited task backstop's infrastructure (#173)", () => {
   it("alarms the operator when cancels keep failing on two runs in a row", () => {
     const alarms = backstopAlarms(named);
     expect(alarms).toHaveLength(1);
-    expect(alarms[0]!.Properties).toMatchObject({ AlarmName: "agentx-staging-UnwaitedTaskFailures", Namespace: "AgentX/staging", EvaluationPeriods: 2, Threshold: 1 });
+    expect(alarms[0]!.Properties).toMatchObject({
+      AlarmName: "agentx-staging-UnwaitedTaskFailures", Namespace: "AgentX/staging", EvaluationPeriods: 2, Threshold: 1,
+      Period: 600, Statistic: "Maximum", ComparisonOperator: "GreaterThanOrEqualToThreshold", TreatMissingData: "notBreaching",
+    });
     expect(alarms[0]!.Properties.AlarmActions).toHaveLength(1);
   });
 
