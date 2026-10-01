@@ -164,3 +164,15 @@ describe("the cancel routes when the cancel races its target (final review I2)",
     expect(busy.body).toMatchObject({ error: { code: "WORKSPACE_BUSY" } });
   });
 });
+
+describe("a repeated owner cancel (#173 review: the shared cancel path is unchanged for its callers)", () => {
+  it("still queues a fresh cancel for a target already CANCEL_REQUESTED, so a cancel whose dispatch was lost can be sent again", async () => {
+    const { db, handler, workspaceId, taskOperationId } = await runningTask();
+    const path = `/v1/service/workspaces/${workspaceId}/operations/${taskOperationId}/cancel`;
+    expect((await serviceCall(handler, thread, pratik, "POST", path)).status).toBe(202);
+    const again = await serviceCall(handler, thread, pratik, "POST", path);
+    expect(again).toMatchObject({ status: 202, body: { duplicate: false, operation: { kind: "cancel" } } });
+    expect(cancelOperations(db, workspaceId)).toHaveLength(2);
+  });
+});
+

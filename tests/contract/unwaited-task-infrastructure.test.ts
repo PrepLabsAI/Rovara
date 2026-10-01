@@ -10,7 +10,7 @@ import { environmentNaming } from "../../infra/lib/naming.js";
 type Statement = { Sid?: string; Effect: string; Action: string | string[]; Resource: unknown; Condition?: unknown };
 type Policy = { Properties: { PolicyDocument: { Statement: Statement[] }; Roles: Array<{ Ref?: string }> } };
 type LambdaFunction = { Properties: { Role: { "Fn::GetAtt": [string, string] }; Environment?: { Variables?: Record<string, unknown> } } };
-type Alarm = { Properties: { AlarmName?: unknown; Period?: number; Statistic?: string; ComparisonOperator?: string; TreatMissingData?: string; MetricName?: string; Namespace?: string; EvaluationPeriods?: number; Threshold?: number; AlarmActions?: unknown[] } };
+type Alarm = { Properties: { Metrics?: Array<{ Id: string; Expression?: string; MetricStat?: { Metric: { MetricName: string; Namespace: string }; Period: number; Stat: string } }>; AlarmName?: unknown; Period?: number; Statistic?: string; ComparisonOperator?: string; TreatMissingData?: string; MetricName?: string; Namespace?: string; EvaluationPeriods?: number; Threshold?: number; AlarmActions?: unknown[] } };
 
 function reconciler(template: Template) {
   const functions = Object.entries(template.findResources("AWS::Lambda::Function") as Record<string, LambdaFunction>);
@@ -25,7 +25,7 @@ const brokerId = (template: Template) => Object.keys(template.findResources("AWS
 const slackSecretId = (template: Template) => Object.keys(template.findResources("AWS::SecretsManager::Secret")).find((id) => id.startsWith("SlackSecret"))!;
 const actionsOf = (statements: Statement[]) => statements.flatMap((statement) => [statement.Action].flat());
 const backstopAlarms = (template: Template) => (Object.values(template.findResources("AWS::CloudWatch::Alarm")) as Alarm[])
-  .filter((alarm) => alarm.Properties.MetricName === "ReconcilerUnwaitedTaskFailures");
+  .filter((alarm) => alarm.Properties.AlarmName === "agentx-staging-UnwaitedTaskFailures" || JSON.stringify(alarm.Properties).includes("ReconcilerUnwaitedTask"));
 
 describe("the unwaited task backstop's infrastructure (#173)", () => {
   const named = Template.fromStack(new ControlPlaneStack(new App(), "UnwaitedControlPlane", { naming: environmentNaming("staging") }));
@@ -50,14 +50,20 @@ describe("the unwaited task backstop's infrastructure (#173)", () => {
     });
   });
 
-  it("alarms the operator when cancels keep failing on two runs in a row", () => {
+  it("alarms the operator when cancels or the backstop's reads keep failing on two runs in a row", () => {
     const alarms = backstopAlarms(named);
     expect(alarms).toHaveLength(1);
-    expect(alarms[0]!.Properties).toMatchObject({
-      AlarmName: "agentx-staging-UnwaitedTaskFailures", Namespace: "AgentX/staging", EvaluationPeriods: 2, Threshold: 1,
-      Period: 600, Statistic: "Maximum", ComparisonOperator: "GreaterThanOrEqualToThreshold", TreatMissingData: "notBreaching",
+    const alarm = alarms[0]!.Properties;
+    expect(alarm).toMatchObject({
+      AlarmName: "agentx-staging-UnwaitedTaskFailures", EvaluationPeriods: 2, Threshold: 1,
+      ComparisonOperator: "GreaterThanOrEqualToThreshold", TreatMissingData: "notBreaching",
     });
-    expect(alarms[0]!.Properties.AlarmActions).toHaveLength(1);
+    expect(alarm.AlarmActions).toHaveLength(1);
+    const stats = (alarm.Metrics ?? []).filter((metric) => metric.MetricStat !== undefined).map((metric) => metric.MetricStat!);
+    expect(stats.map((stat) => stat.Metric.MetricName).sort()).toEqual(["ReconcilerUnwaitedTaskFailures", "ReconcilerUnwaitedTaskReadFailures"]);
+    for (const stat of stats) expect(stat).toMatchObject({ Metric: { Namespace: "AgentX/staging" }, Period: 600, Stat: "Maximum" });
+    const expression = (alarm.Metrics ?? []).find((metric) => metric.Expression !== undefined)?.Expression;
+    expect(expression).toMatch(/^FILL\(\w+, ?0\) \+ FILL\(\w+, ?0\)$/);
   });
 
   it("adds none of it to the legacy deployment", () => {

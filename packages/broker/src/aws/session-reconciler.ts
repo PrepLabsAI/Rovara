@@ -17,9 +17,8 @@ import { failActiveOperation } from "./outbox-failure.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
 import { expireIndexDays, indexSweepWanted } from "./index-expiry.js";
 import { sweepStuckSetups } from "./stuck-setup.js";
-import { createBrokerTaskStopper, sweepUnwaitedTasks, unwaitedTaskBackstopWanted, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
+import { createBrokerTaskStopper, slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopWanted, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
 import { cachedSlackPoster } from "./developer-task-notifier.js";
-import { parseSlackSecrets } from "./slack-ingress.js";
 
 /** A just-launched instance or just-created volume is not judged until its session has recorded it. */
 export const GRACE_MS = 15 * 60_000;
@@ -176,10 +175,15 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
     if (dependencies.sweepUnwaitedTasks !== undefined) {
       try {
         report.unwaitedTasks = await dependencies.sweepUnwaitedTasks(sessions.keys(), new Date(now));
-        unwaitedMetrics = { ReconcilerUnwaitedTasksCancelled: report.unwaitedTasks.cancelled.length, ReconcilerUnwaitedTaskFailures: report.unwaitedTasks.failed.length };
+        unwaitedMetrics = {
+          ReconcilerUnwaitedTasksCancelled: report.unwaitedTasks.cancelled.length,
+          ReconcilerUnwaitedTaskFailures: report.unwaitedTasks.failed.length,
+          ReconcilerUnwaitedTaskReadFailures: report.unwaitedTasks.readFailures.length,
+        };
       } catch (error) {
         log({ event: "reconciler.unwaited_task_sweep_failed", errorName: error instanceof Error ? error.name : "unknown" });
-        unwaitedMetrics = { ReconcilerUnwaitedTasksCancelled: 0, ReconcilerUnwaitedTaskFailures: 1 };
+        // Nothing was cancelled or tried: the sweep's own reads failed.
+        unwaitedMetrics = { ReconcilerUnwaitedTasksCancelled: 0, ReconcilerUnwaitedTaskFailures: 0, ReconcilerUnwaitedTaskReadFailures: 1 };
       }
     }
 
@@ -334,9 +338,9 @@ function unwaitedTaskSweep(): NonNullable<ReconcilerDependencies["sweepUnwaitedT
   const stopTask = createBrokerTaskStopper((payload) => lambda.send(new InvokeCommand({
     FunctionName: brokerFunctionName, InvocationType: "RequestResponse", Payload: Buffer.from(payload),
   })));
-  // The same parsing as the notifier: its errors name what is missing, never the secret's text.
+  // A bad secret fails the note as SlackSecretInvalid, the name the sweep logs; never the secret's text.
   const post = cachedSlackPoster(() => secrets.send(new GetSecretValueCommand({ SecretId: slackSecretArn }))
-    .then((secret) => parseSlackSecrets(secret.SecretString ?? "").botToken));
+    .then((secret) => slackBotTokenFrom(secret.SecretString)));
   const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }));
   return (workspaceIds, now) => sweepUnwaitedTasks({
     client: documentClient,

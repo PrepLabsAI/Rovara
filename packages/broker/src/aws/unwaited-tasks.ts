@@ -10,6 +10,7 @@
 // picks the candidates and acts on the broker's answer; the broker decides.
 import { GetCommand } from "@aws-sdk/lib-dynamodb";
 import { taskPointerKey } from "../developer/task-records.js";
+import { parseSlackSecrets } from "./slack-ingress.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 
@@ -52,11 +53,10 @@ export interface UnwaitedTaskSweepDependencies {
 export interface UnwaitedTaskSweepResult {
   /** Operation IDs the broker queued a cancel for this run. */
   cancelled: string[];
-  /**
-   * Operation IDs whose cancel failed, or workspace IDs whose reads failed. Nothing changed for them,
-   * so the next run tries again.
-   */
+  /** Operation IDs whose cancel failed; they are still live, so the next run tries again. */
   failed: string[];
+  /** Workspace IDs whose reads failed; nothing changed for them, so the next run reads them again. */
+  readFailures: string[];
   /** Notes that could not be posted. Never retried: the task is already cancelled, so the next run skips it. */
   noteFailures: number;
 }
@@ -93,7 +93,7 @@ export async function sweepUnwaitedTasks(
   workspaceIds: Iterable<string>,
   now: Date,
 ): Promise<UnwaitedTaskSweepResult> {
-  const result: UnwaitedTaskSweepResult = { cancelled: [], failed: [], noteFailures: 0 };
+  const result: UnwaitedTaskSweepResult = { cancelled: [], failed: [], readFailures: [], noteFailures: 0 };
   const get = async (pk: string, sk: string) => ((await dependencies.client.send(new GetCommand({
     TableName: dependencies.tableName, Key: { pk, sk }, ConsistentRead: true,
   }))) as { Item?: Record<string, unknown> }).Item;
@@ -103,7 +103,7 @@ export async function sweepUnwaitedTasks(
       operationId = await candidateOperation(get, workspaceId, now);
     } catch (error) {
       // One workspace's failed read never stops the others; its name only, and the next run reads it again.
-      result.failed.push(workspaceId);
+      result.readFailures.push(workspaceId);
       dependencies.log({ event: "unwaited_task.read_failed", workspaceId, errorName: errorName(error) });
       continue;
     }
@@ -172,4 +172,16 @@ export function createBrokerTaskStopper(
     }
     throw brokerFailure("BrokerAnswerUnreadable");
   };
+}
+
+/**
+ * The bot token from the Slack secret's text, parsed as the notifier and the ingress parse it. Any
+ * problem is one error named SlackSecretInvalid, whose message never carries the secret's text.
+ */
+export function slackBotTokenFrom(secretString: string | undefined): string {
+  try {
+    return parseSlackSecrets(secretString ?? "").botToken;
+  } catch {
+    throw Object.assign(new Error("the Slack secret has no usable bot token"), { name: "SlackSecretInvalid" });
+  }
 }

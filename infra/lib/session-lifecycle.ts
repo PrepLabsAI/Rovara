@@ -289,11 +289,17 @@ export class SessionLifecycle extends Construct {
     this.reconciler.addEnvironment("SLACK_SECRET_ARN", slackSecret.secretArn);
     this.reconciler.addToRolePolicy(new iam.PolicyStatement({ sid: "StopUnwaitedTasks", actions: ["lambda:InvokeFunction"], resources: [broker.functionArn] }));
     this.reconciler.addToRolePolicy(new iam.PolicyStatement({ sid: "PostUnwaitedTaskNote", actions: ["secretsmanager:GetSecretValue"], resources: [slackSecret.secretArn] }));
-    // A failed cancel is retried on the next run; failures on two runs in a row mean it is not recovering.
+    // A failed cancel or read is retried on the next run; failures on two runs in a row mean it is not recovering.
+    const failures = (metricName: string) => new cloudwatch.Metric({ namespace: this.naming.metricsNamespace, metricName, statistic: "Maximum", period: Duration.minutes(10) });
     new cloudwatch.Alarm(this, "UnwaitedTaskFailuresAlarm", {
       alarmName: this.naming.alarmName("UnwaitedTaskFailures"),
-      alarmDescription: "The reconciler could not cancel a Slack task left running over 4 hours with nobody waiting, on two runs in a row. Check the reconciler's logs for unwaited_task.cancel_failed.",
-      metric: new cloudwatch.Metric({ namespace: this.naming.metricsNamespace, metricName: "ReconcilerUnwaitedTaskFailures", statistic: "Maximum", period: Duration.minutes(10) }),
+      alarmDescription: "The reconciler could not check or cancel Slack tasks left running over 4 hours with nobody waiting, on two runs in a row. Check the reconciler's logs for unwaited_task.cancel_failed, unwaited_task.read_failed and reconciler.unwaited_task_sweep_failed.",
+      metric: new cloudwatch.MathExpression({
+        expression: "FILL(cancels, 0) + FILL(reads, 0)",
+        usingMetrics: { cancels: failures("ReconcilerUnwaitedTaskFailures"), reads: failures("ReconcilerUnwaitedTaskReadFailures") },
+        period: Duration.minutes(10),
+        label: "Unwaited task cancel and read failures",
+      }),
       threshold: 1,
       evaluationPeriods: 2,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,

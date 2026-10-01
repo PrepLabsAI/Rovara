@@ -32,7 +32,9 @@ async function runningTask(options: { age?: number; threadsTable?: boolean } = {
   const operation = broker.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)!;
   operation.status = "RUNNING";
   operation.createdAt = new Date(Date.now() - (options.age ?? UNWAITED_TASK_LIMIT_MS + 60_000)).toISOString();
-  return { ...broker, workspaceId, operationId, operation };
+  /** The operation as stored now: a write replaces the item, so it is read again each time. */
+  const current = () => broker.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)!;
+  return { ...broker, workspaceId, operationId, operation, current };
 }
 
 async function stopUnwaited(handler: ReturnType<typeof createBroker>["handler"], workspaceId: string, operationId: string) {
@@ -61,23 +63,23 @@ describe("the broker's unwaited task stop (#173)", () => {
   it("cancels a task left alone only after the limit, never before", async () => {
     const young = await runningTask({ age: UNWAITED_TASK_LIMIT_MS - 60_000 });
     expect((await stopUnwaited(young.handler, young.workspaceId, young.operationId)).body).toMatchObject({ outcome: "SKIPPED" });
-    expect(young.operation.status).toBe("RUNNING");
+    expect(young.current().status).toBe("RUNNING");
     expect(cancels(young.db, young.workspaceId)).toHaveLength(0);
   });
 
   it("never cancels a task a turn is waiting on (the thread's activeTurn names it)", async () => {
-    const { db, handler, workspaceId, operationId, operation } = await runningTask();
+    const { db, handler, workspaceId, operationId, current } = await runningTask();
     db.set({ pk: `THREAD#${subject}`, sk: "META", workspaceId, activeTurn: { eventId: "Ev0123", workspaceId, operationId } });
     expect((await stopUnwaited(handler, workspaceId, operationId)).body).toMatchObject({ outcome: "SKIPPED", reason: "waited-on" });
-    expect(operation.status).toBe("RUNNING");
+    expect(current().status).toBe("RUNNING");
     expect(cancels(db, workspaceId)).toHaveLength(0);
   });
 
   it("never cancels when the thread's activeTurn cannot be read, in case it names the task", async () => {
-    const { db, handler, workspaceId, operationId, operation } = await runningTask();
+    const { db, handler, workspaceId, operationId, current } = await runningTask();
     db.set({ pk: `THREAD#${subject}`, sk: "META", workspaceId, activeTurn: { eventId: "Ev0123" } });
     expect((await stopUnwaited(handler, workspaceId, operationId)).body).toMatchObject({ outcome: "SKIPPED" });
-    expect(operation.status).toBe("RUNNING");
+    expect(current().status).toBe("RUNNING");
   });
 
   it("cancels when the thread's activeTurn names another operation", async () => {
@@ -90,12 +92,12 @@ describe("the broker's unwaited task stop (#173)", () => {
     const pointed = await runningTask();
     pointed.db.set({ pk: `WORKSPACE#${pointed.workspaceId}`, sk: "DEVELOPER_TASK", entityType: "DEVELOPER_TASK_POINTER", taskId: randomUUID() });
     expect((await stopUnwaited(pointed.handler, pointed.workspaceId, pointed.operationId)).body).toMatchObject({ outcome: "SKIPPED", reason: "developer-task" });
-    expect(pointed.operation.status).toBe("RUNNING");
+    expect(pointed.current().status).toBe("RUNNING");
 
     const requested = await runningTask();
     requested.operation.requestedBy = { kind: "developer", developerId: "a".repeat(64), provider: "slack" };
     expect((await stopUnwaited(requested.handler, requested.workspaceId, requested.operationId)).body).toMatchObject({ outcome: "SKIPPED" });
-    expect(requested.operation.status).toBe("RUNNING");
+    expect(requested.current().status).toBe("RUNNING");
   });
 
   it("never touches a task already asked to cancel, so a second stop queues nothing more", async () => {
@@ -113,62 +115,70 @@ describe("the broker's unwaited task stop (#173)", () => {
     const publish = await runningTask();
     publish.operation.kind = "publish";
     expect((await stopUnwaited(publish.handler, publish.workspaceId, publish.operationId)).body).toMatchObject({ outcome: "SKIPPED" });
-    expect(publish.operation.status).toBe("RUNNING");
+    expect(publish.current().status).toBe("RUNNING");
 
     const released = await runningTask();
     released.db.get(`WORKSPACE#${released.workspaceId}`, "META")!.activeOperationId = randomUUID();
     expect((await stopUnwaited(released.handler, released.workspaceId, released.operationId)).body).toMatchObject({ outcome: "SKIPPED" });
-    expect(released.operation.status).toBe("RUNNING");
+    expect(released.current().status).toBe("RUNNING");
   });
 
   it("never cancels a workspace no Slack thread owns", async () => {
-    const { db, handler, workspaceId, operationId, operation } = await runningTask();
+    const { db, handler, workspaceId, operationId, current } = await runningTask();
     const thread = db.find((item) => item.entityType === "SLACK_THREAD")[0]!;
     delete thread.thread;
     expect((await stopUnwaited(handler, workspaceId, operationId)).body).toMatchObject({ outcome: "SKIPPED", reason: "not-a-slack-thread" });
-    expect(operation.status).toBe("RUNNING");
+    expect(current().status).toBe("RUNNING");
   });
 
   it("refuses where the broker cannot read the Slack threads table (the legacy deployment)", async () => {
-    const { handler, workspaceId, operationId, operation } = await runningTask({ threadsTable: false });
+    const { handler, workspaceId, operationId, current } = await runningTask({ threadsTable: false });
     const refused = await stopUnwaited(handler, workspaceId, operationId);
     expect(refused.status).toBe(404);
-    expect(operation.status).toBe("RUNNING");
+    expect(current().status).toBe("RUNNING");
   });
 
   it("never takes the internal path for a request that came through API Gateway", async () => {
-    const { handler, workspaceId, operationId, operation } = await runningTask();
+    const { handler, workspaceId, operationId, current } = await runningTask();
     const response = await handler({
       source: "agentx.session-reconciler", action: "stop-unwaited-task", workspaceId, operationId,
       version: "2.0", rawPath: "/v1/anything", headers: {}, requestContext: { requestId: "r", http: { method: "POST" } },
     });
     expect(response.statusCode).not.toBe(200);
-    expect(operation.status).toBe("RUNNING");
+    expect(current().status).toBe("RUNNING");
   });
 
   it("never overwrites a task that finished while the cancel was being written, and queues no cancel (review I3)", async () => {
-    const { db, handler, workspaceId, operationId, operation } = await runningTask();
+    const { db, handler, workspaceId, operationId, current } = await runningTask();
     const original = db.send;
     db.send = async (command) => {
       // The task's own result lands just before the cancel's transaction.
-      if (command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("\"CANCEL_REQUESTED\"")) operation.status = "SUCCEEDED";
+      if (command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("\"CANCEL_REQUESTED\"")) current().status = "SUCCEEDED";
       return original(command);
     };
     expect((await stopUnwaited(handler, workspaceId, operationId)).body).toMatchObject({ outcome: "SKIPPED", reason: "finished" });
-    expect(operation.status).toBe("SUCCEEDED");
+    expect(current().status).toBe("SUCCEEDED");
     expect(cancels(db, workspaceId)).toHaveLength(0);
   });
 
-  it("queues one cancel when a member's stop lands between the check and the cancel, and names no thread to note (review I3)", async () => {
-    const { db, handler, workspaceId, operationId, operation } = await runningTask();
+  it("loses quietly to a member's stop that lands between the check and the cancel: one cancel, no note (review I3)", async () => {
+    const { db, handler, workspaceId, operationId, current } = await runningTask();
     const original = db.send;
+    let raced = false;
     db.send = async (command) => {
-      if (command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("\"CANCEL_REQUESTED\"")) operation.status = "CANCEL_REQUESTED";
+      if (!raced && command.constructor.name === "TransactWriteCommand" && JSON.stringify(command.input).includes("\"CANCEL_REQUESTED\"")) {
+        raced = true;
+        // The member's real stop is written first.
+        const stop = await handler({ source: "agentx.slack-ingress", action: "stop-task", thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs }, userId: "U0456789012" });
+        expect(JSON.parse(stop.body)).toMatchObject({ outcome: "CANCEL_REQUESTED" });
+      }
       return original(command);
     };
     const answer = await stopUnwaited(handler, workspaceId, operationId);
-    expect(answer.body).not.toMatchObject({ outcome: "CANCEL_REQUESTED" });
-    expect(cancels(db, workspaceId)).toHaveLength(0);
+    expect(raced).toBe(true);
+    expect(answer).toMatchObject({ status: 200, body: { outcome: "SKIPPED", reason: "already-cancelling" } });
+    expect(current().status).toBe("CANCEL_REQUESTED");
+    expect(cancels(db, workspaceId)).toHaveLength(1);
+    expect(cancels(db, workspaceId)[0]).toMatchObject({ requestedBy: { userId: "U0456789012" } });
   });
 });
-

@@ -39,7 +39,8 @@ function withoutUnwaitedTaskBackstop(template: unknown): unknown {
   ]);
   const alarms = Object.keys(resources).filter((id) => id.startsWith("SessionsUnwaitedTaskFailuresAlarm"));
   expect(alarms).toHaveLength(1);
-  expect(resources[alarms[0]!]!.Properties).toMatchObject({ MetricName: "ReconcilerUnwaitedTaskFailures", AlarmName: "agentx-staging-UnwaitedTaskFailures" });
+  expect(resources[alarms[0]!]!.Properties).toMatchObject({ AlarmName: "agentx-staging-UnwaitedTaskFailures" });
+  expect(JSON.stringify(resources[alarms[0]!]!.Properties.Metrics)).toContain("ReconcilerUnwaitedTaskReadFailures");
   delete resources[alarms[0]!];
   return template;
 }

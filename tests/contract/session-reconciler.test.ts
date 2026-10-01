@@ -307,7 +307,7 @@ describe("reconciler: stuck setups (spec 025 FR-055)", () => {
 describe("reconciler: unwaited Slack tasks (#173)", () => {
   it("hands the sweep every live session's workspace, reports what it cancelled and counts it", async () => {
     const worker = ready();
-    const sweep = vi.fn(async () => ({ cancelled: ["op-1"], failed: ["op-2"], noteFailures: 0 }));
+    const sweep = vi.fn(async () => ({ cancelled: ["op-1"], failed: ["op-2"], readFailures: [], noteFailures: 0 }));
     const { db, reconcile, emit } = setup({
       sweepUnwaitedTasks: sweep,
       instances: [{ instanceId: worker.instanceId, state: "running", launchedAt: worker.launchedAt }],
@@ -324,8 +324,8 @@ describe("reconciler: unwaited Slack tasks (#173)", () => {
     expect([...workspaceIds].sort()).toEqual([readyWorkspace, live, provisioning].sort());
     expect([...workspaceIds]).not.toContain(deleted);
     expect(at).toEqual(NOW);
-    expect(report.unwaitedTasks).toEqual({ cancelled: ["op-1"], failed: ["op-2"], noteFailures: 0 });
-    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerUnwaitedTasksCancelled: 1, ReconcilerUnwaitedTaskFailures: 1 }));
+    expect(report.unwaitedTasks).toEqual({ cancelled: ["op-1"], failed: ["op-2"], readFailures: [], noteFailures: 0 });
+    expect(emit).toHaveBeenCalledWith(expect.objectContaining({ ReconcilerUnwaitedTasksCancelled: 1, ReconcilerUnwaitedTaskFailures: 1, ReconcilerUnwaitedTaskReadFailures: 0 }));
   });
 
   it("logs a sweep that throws by its error name, counts it, and still finishes the run", async () => {
@@ -337,7 +337,7 @@ describe("reconciler: unwaited Slack tasks (#173)", () => {
     await expect(reconcile()).resolves.toBeDefined();
     expect(terminate).toHaveBeenCalledWith(orphan.instanceId);
     expect(expireIndexDays).toHaveBeenCalledOnce();
-    expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ReconcilerOrphanInstances: 1, ReconcilerUnwaitedTasksCancelled: 0, ReconcilerUnwaitedTaskFailures: 1 }));
+    expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ReconcilerOrphanInstances: 1, ReconcilerUnwaitedTasksCancelled: 0, ReconcilerUnwaitedTaskFailures: 0, ReconcilerUnwaitedTaskReadFailures: 1 }));
     expect(logs).toContainEqual({ event: "reconciler.unwaited_task_sweep_failed", errorName: "ProvisionedThroughputExceededException" });
     expect(JSON.stringify(logs)).not.toContain("PLANTED-UNWAITED-MESSAGE");
   });

@@ -2961,7 +2961,8 @@ async function requestCancellation(
   targetOperationId: string,
   requester: { requestedBy?: OperationRequester },
   extra: ExtraItems = () => [],
-) {
+  options: { onlyLive?: boolean } = {},
+): Promise<{ operation: Operation; duplicate: boolean; alreadyCancelling?: true }> {
   const workspaceId = workspace.id;
   const target = await requireOperation(dependencies, workspaceId, targetOperationId);
   if (TERMINAL.has(target.status)) return { operation: publicOperation(target), duplicate: true };
@@ -2997,13 +2998,14 @@ async function requestCancellation(
         TableName: dependencies.tableName,
         Key: operationKey(workspaceId, targetOperationId),
         UpdateExpression: "SET #status = :cancel, updatedAt = :now",
-        // Issue 173 review I3: only a target still live and not yet asked to cancel. A result that
-        // lands first stands, and of two cancels racing (a member's stop and the backstop) one wins.
-        ConditionExpression: "fence = :fence AND (#status = :accepted OR #status = :dispatching OR #status = :running)",
+        // Issue 173: the backstop cancels only a target still live and not yet asked to cancel, so a
+        // result that lands first stands and a member's stop that lands first wins (one cancel, no
+        // note). Every other caller keeps the fence-only condition: a repeated cancel queues again.
+        ConditionExpression: options.onlyLive ? "fence = :fence AND (#status = :accepted OR #status = :dispatching OR #status = :running)" : "fence = :fence",
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: {
           ":cancel": "CANCEL_REQUESTED", ":now": now, ":fence": workspace.fence,
-          ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":running": "RUNNING",
+          ...(options.onlyLive ? { ":accepted": "ACCEPTED", ":dispatching": "DISPATCHING", ":running": "RUNNING" } : {}),
         },
       } },
       { Put: { TableName: dependencies.tableName, Item: operation } },
@@ -3015,6 +3017,8 @@ async function requestCancellation(
     // The target finished while the cancel was being written: answer as for a finished target.
     const current = await requireOperation(dependencies, workspaceId, targetOperationId);
     if (TERMINAL.has(current.status)) return { operation: publicOperation(current), duplicate: true };
+    // Only an onlyLive cancel can fail this way: another cancel was recorded first.
+    if (options.onlyLive && current.status === "CANCEL_REQUESTED") return { operation: publicOperation(current), duplicate: true, alreadyCancelling: true };
     throw agentXError("WORKSPACE_BUSY", "the workspace changed while the cancel was being recorded; try again");
   }
   return { operation: publicOperation(operation), duplicate: false };
@@ -3170,9 +3174,9 @@ async function stopUnwaitedTask(dependencies: AwsBrokerDependencies, event: Unwa
     if (typeof named !== "string" || named.length === 0) return skipped("waiter-unreadable");
     if (named === operationId) return skipped("waited-on");
   }
-  const result = await requestCancellation(dependencies, workspace, operationId, {});
-  // A duplicate means the task finished before the cancel was recorded.
-  if (result.duplicate) return skipped("finished");
+  const result = await requestCancellation(dependencies, workspace, operationId, {}, () => [], { onlyLive: true });
+  // A duplicate means the task finished, or another cancel was recorded, before this one.
+  if (result.duplicate) return skipped(result.alreadyCancelling ? "already-cancelling" : "finished");
   return { outcome: "CANCEL_REQUESTED", cancelOperationId: result.operation.id, thread: { channelId: thread.data.channelId, threadTs: thread.data.threadTs } };
 }
 

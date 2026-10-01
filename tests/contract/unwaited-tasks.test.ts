@@ -5,7 +5,7 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
-  UNWAITED_TASK_LIMIT_MS, UNWAITED_TASK_NOTE, createBrokerTaskStopper, sweepUnwaitedTasks, unwaitedTaskBackstopWanted, type UnwaitedTaskStop,
+  UNWAITED_TASK_LIMIT_MS, UNWAITED_TASK_NOTE, createBrokerTaskStopper, slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopWanted, type UnwaitedTaskStop,
 } from "../../packages/broker/src/aws/unwaited-tasks.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
@@ -211,9 +211,29 @@ describe("the unwaited task backstop: cheap pre-checks and isolation (#173 revie
     };
     const result = await sweep([broken.workspaceId, fine.workspaceId]);
     expect(stopTask).toHaveBeenCalledExactlyOnceWith(fine.workspaceId, fine.operationId);
-    expect(result).toMatchObject({ cancelled: [fine.operationId], failed: [broken.workspaceId] });
+    // A read failure is not a failed cancel: it is counted apart, so the cancel alarm means what it says.
+    expect(result).toMatchObject({ cancelled: [fine.operationId], failed: [], readFailures: [broken.workspaceId] });
     expect(logs).toContainEqual({ event: "unwaited_task.read_failed", workspaceId: broken.workspaceId, errorName: "ProvisionedThroughputExceededException" });
     expect(JSON.stringify(logs)).not.toContain("PLANTED");
+  });
+});
+
+describe("the unwaited task backstop: the bot token (#173 review)", () => {
+  it("reads the bot token from the Slack secret", () => {
+    expect(slackBotTokenFrom(JSON.stringify({ signingSecret: "s".repeat(32), botToken: "xoxb-1-2-3" }))).toBe("xoxb-1-2-3");
+  });
+
+  it("names a missing or unreadable secret SlackSecretInvalid, never carrying its text", () => {
+    for (const text of [undefined, "", "not json PLANTED-SECRET", JSON.stringify({ botToken: "PLANTED-SECRET" })]) {
+      let thrown: unknown;
+      try {
+        slackBotTokenFrom(text);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toMatchObject({ name: "SlackSecretInvalid" });
+      expect(String((thrown as Error).message)).not.toContain("PLANTED");
+    }
   });
 });
 
