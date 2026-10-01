@@ -168,6 +168,53 @@ describe("workspace preparation", () => {
     await expect(prepareWorkspace({ rootPath: root, project })).rejects.toThrow();
   });
 
+  // #54: a command's env reaches that command only, over the worker's own environment.
+  it("gives a setup step and a readiness check their own env, and not the next step's", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const source = await createGitFixture("env");
+    const record = 'printf "%s|%s|%s" "${STEP_VALUE-unset}" "${GIT_CONFIG_COUNT-unset}" "$(command -v git >/dev/null && echo path-kept)" > "$1"';
+    const project = {
+      ...fixtureProject([{ name: "env", commit: source.commit }]),
+      setup: [
+        { cwd: "repo/env", executable: "sh", args: ["-c", record, "sh", "../../step-zero.txt"], timeoutSeconds: 10, env: { STEP_VALUE: "zero value" } },
+        { cwd: "repo/env", executable: "sh", args: ["-c", record, "sh", "../../step-one.txt"], timeoutSeconds: 10 },
+      ],
+      readiness: [
+        { cwd: "repo/env", executable: "sh", args: ["-c", 'test "$READY_FLAG" = "yes, ready"'], timeoutSeconds: 10, env: { READY_FLAG: "yes, ready" } },
+      ],
+    } satisfies ProjectDefinition;
+    const manifest = await prepareWorkspace({
+      rootPath: root,
+      project,
+      materializer: async (_repository, destination) => {
+        await run("git", ["clone", "--quiet", source.directory, destination]);
+      },
+    });
+
+    expect(manifest.complete).toBe(true);
+    await expect(readFile(join(root, "step-zero.txt"), "utf8")).resolves.toBe("zero value|1|path-kept");
+    await expect(readFile(join(root, "step-one.txt"), "utf8")).resolves.toBe("unset|1|path-kept");
+  });
+
+  it("never shows a step's env value when the step fails (#54)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const source = await createGitFixture("env-failure");
+    const value = "env-value-that-must-not-be-shown";
+    const project = {
+      ...fixtureProject([{ name: "env-failure", commit: source.commit }]),
+      setup: [{ cwd: "repo/env-failure", executable: "sh", args: ["-c", "exit 3"], timeoutSeconds: 10, env: { SOME_SETTING: value } }],
+    } satisfies ProjectDefinition;
+    const failure = await prepareWorkspace({
+      rootPath: root,
+      project,
+      materializer: async (_repository, destination) => {
+        await run("git", ["clone", "--quiet", source.directory, destination]);
+      },
+    }).then(() => { throw new Error("preparation unexpectedly succeeded"); }, (error: unknown) => error as Error);
+    expect(failure.message).toBe("setup step 0 (sh -c exit 3 in repo/env-failure) exited 3");
+    expect(await readFile(join(root, ".agentx/preparation-manifest.json"), "utf8")).not.toContain(value);
+  });
+
   it("does not permit coding until every configured readiness check succeeds", async () => {
     await expect(
       evaluateReadiness(

@@ -92,6 +92,18 @@ describe("the devcontainer CLI seam", () => {
     await expect(runDevcontainerCommand(cli, target, { cwd: "../outside", executable: "true", args: [], timeoutSeconds: 1 })).rejects.toThrow(/escapes/);
   });
 
+  it("passes a project command's env into the devcontainer as --remote-env (#54)", async () => {
+    const { cli, calls } = fakeCli();
+    await runDevcontainerCommand(cli, target, {
+      cwd: "repo/sample", executable: "npm", args: ["ci"], timeoutSeconds: 60, env: { NODE_ENV: "test", JAVA_OPTS: "-Xmx2g -Da=b=c" },
+    });
+    expect(calls[0]).toEqual([
+      "exec", "--workspace-folder", target.workspaceFolder, "--config", target.configPath,
+      "--remote-env", "NODE_ENV=test", "--remote-env", "JAVA_OPTS=-Xmx2g -Da=b=c",
+      "sh", "-c", 'cd -- "$1" && shift && exec "$@"', "sh", "/mnt/workspace/repo/sample", "npm", "ci",
+    ]);
+  });
+
   it("reports a project command its timeout stopped, and the signal that ended it (#154)", async () => {
     const { cli } = fakeCli(() => ({ exitCode: null, signal: "SIGTERM", timedOut: true, stdout: "", stderr: "" }));
     const result = await runDevcontainerCommand(cli, target, { cwd: "repo/sample", executable: "sleep", args: ["4200"], timeoutSeconds: 1000 });
@@ -141,6 +153,21 @@ describe("preparing a workspace with a devcontainer", () => {
     expect(calls.map((args) => args[0])).toEqual(["up", "exec", "exec"]);
     expect(calls[1]).toEqual(expect.arrayContaining(["npm", "ci"]));
     expect(calls[2]).toEqual(expect.arrayContaining([join(canonical, "repo/sample"), "npm", "run", "typecheck"]));
+  });
+
+  it("runs setup and readiness in the devcontainer with their own env (#54)", async () => {
+    const { root, project, materializer } = await fixture();
+    const withEnv = {
+      ...project,
+      setup: [{ ...project.setup[0]!, env: { SETUP_ONLY: "1" } }],
+      readiness: [{ ...project.readiness[0]!, env: { CHECK_ONLY: "2" } }],
+    };
+    const { cli, calls } = fakeCli();
+    await expect(prepareWorkspace({ rootPath: root, project: withEnv, materializer, devcontainerCli: cli })).resolves.toMatchObject({ complete: true });
+    expect(calls[1]).toEqual(expect.arrayContaining(["--remote-env", "SETUP_ONLY=1"]));
+    expect(calls[1]).not.toContain("CHECK_ONLY=2");
+    expect(calls[2]).toEqual(expect.arrayContaining(["--remote-env", "CHECK_ONLY=2"]));
+    expect(calls[2]).not.toContain("SETUP_ONLY=1");
   });
 
   it("starts the devcontainer again when a failed preparation resumes", async () => {

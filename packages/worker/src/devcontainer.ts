@@ -149,6 +149,7 @@ export async function runDevcontainerCommand(
   const cwd = contained(target.rootPath, command.cwd);
   const result = await cli.run([
     "exec", ...targetArgs(target),
+    ...remoteEnvArgs(command.env),
     "sh", "-c", 'cd -- "$1" && shift && exec "$@"', "sh", cwd, command.executable, ...command.args,
   ], { timeoutMs: command.timeoutSeconds * 1_000 });
   return {
@@ -230,6 +231,11 @@ export function createDevcontainerCli(): DevcontainerCli {
       return runCollected(process.execPath, [script, ...args], options);
     },
   };
+}
+
+/** A project command's own variables (#54), set in the devcontainer for that command only. */
+function remoteEnvArgs(env: Readonly<Record<string, string>> | undefined): string[] {
+  return Object.entries(env ?? {}).flatMap(([name, value]) => ["--remote-env", `${name}=${value}`]);
 }
 
 function targetArgs(target: DevcontainerTarget): string[] {

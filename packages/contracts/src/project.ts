@@ -63,12 +63,79 @@ const HttpsOrLoopbackUrlSchema = z.string().url().superRefine((value, context) =
   }
 });
 
+export const PROJECT_COMMAND_ENV_MAX_ENTRIES = 64;
+export const PROJECT_COMMAND_ENV_VALUE_MAX = 4_096;
+export const PROJECT_COMMAND_ENV_TOTAL_MAX_BYTES = 32_768;
+
+/**
+ * Names a command's `env` may not set (#54), compared in upper case. The worker sets or relies on
+ * them (Git's safe directory, AWS access, the agent shell's PI_* variables), or they change how a
+ * process is found, loaded or started. PATH is refused too: put tools at a full path, or set PATH
+ * in the devcontainer's own configuration.
+ */
+const RESERVED_ENV_NAMES = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "OLDPWD", "IFS", "ENV", "BASH_ENV"]);
+const RESERVED_ENV_PREFIXES = ["AGENTX_", "AWS_", "GIT_", "LD_", "DYLD_", "PI_"];
+/** Words that mark a credential. A secret belongs in a credential reference, never in env. */
+const CREDENTIAL_ENV_WORDS = new Set(["TOKEN", "TOKENS", "SECRET", "SECRETS", "PASSWORD", "PASSWD", "CREDENTIAL", "CREDENTIALS", "APIKEY", "PAT"]);
+const CREDENTIAL_ENV_PAIRS = ["API_KEY", "PRIVATE_KEY", "ACCESS_KEY", "SECRET_KEY"];
+const CREDENTIAL_ENV_SUFFIXES = ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "APIKEY"];
+
+function reservedEnvName(name: string): boolean {
+  const upper = name.toUpperCase();
+  return RESERVED_ENV_NAMES.has(upper) || RESERVED_ENV_PREFIXES.some((prefix) => upper.startsWith(prefix));
+}
+
+function credentialEnvName(name: string): boolean {
+  const upper = name.toUpperCase();
+  const words = upper.split("_");
+  return words.some((word) => CREDENTIAL_ENV_WORDS.has(word))
+    || words.some((_, index) => CREDENTIAL_ENV_PAIRS.includes(`${words[index]}_${words[index + 1] ?? ""}`))
+    || CREDENTIAL_ENV_SUFFIXES.some((suffix) => upper.endsWith(suffix));
+}
+
+/**
+ * Environment variables for one project command (#54). Values are plain configuration, not
+ * secrets: a revision is stored and shown in full, so a secret belongs in a credential reference.
+ * Messages here name a variable, never its value.
+ */
+export const ProjectCommandEnvSchema = z
+  .record(
+    z.string().max(128).regex(/^[A-Za-z_][A-Za-z0-9_]*$/, "env names must be POSIX environment variable names"),
+    z.string()
+      .max(PROJECT_COMMAND_ENV_VALUE_MAX, `env values must be at most ${PROJECT_COMMAND_ENV_VALUE_MAX.toLocaleString("en-US")} characters`)
+      .refine((value) => !value.includes("\u0000"), "env values cannot contain a NUL byte"),
+  )
+  .superRefine((env, context) => {
+    const names = Object.keys(env);
+    if (names.length > PROJECT_COMMAND_ENV_MAX_ENTRIES) {
+      context.addIssue({ code: "custom", message: `env may have at most ${PROJECT_COMMAND_ENV_MAX_ENTRIES} entries` });
+    }
+    let bytes = 0;
+    for (const name of names) {
+      if (reservedEnvName(name)) {
+        context.addIssue({ code: "custom", path: [name], message: `env name ${name} is reserved for AgentX, the worker or the system` });
+      } else if (credentialEnvName(name)) {
+        context.addIssue({
+          code: "custom",
+          path: [name],
+          message: `env name ${name} looks like a credential; env is not for secrets, use a credential reference`,
+        });
+      }
+      bytes += Buffer.byteLength(name, "utf8") + Buffer.byteLength(env[name] ?? "", "utf8") + 2;
+    }
+    if (bytes > PROJECT_COMMAND_ENV_TOTAL_MAX_BYTES) {
+      context.addIssue({ code: "custom", message: `env is larger than ${PROJECT_COMMAND_ENV_TOTAL_MAX_BYTES.toLocaleString("en-US")} bytes` });
+    }
+  });
+
 export const ProjectCommandSchema = z
   .object({
     cwd: RelativeWorkspacePathSchema,
     executable: z.string().min(1).max(256),
     args: z.array(z.string().max(8_192)).max(256),
     timeoutSeconds: z.number().int().positive().max(86_400),
+    /** Variables for this command only (#54). Not for secrets; see ProjectCommandEnvSchema. */
+    env: ProjectCommandEnvSchema.optional(),
   })
   .strict();
 

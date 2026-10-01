@@ -73,6 +73,40 @@ worker image.
 Each `setup` and `readiness` entry has `cwd` (relative to the workspace), `executable`, `args` (up
 to 256 strings) and `timeoutSeconds` (up to 86,400).
 
+An entry may also have `env`: environment variables for that command only. The next command does
+not see them. On the worker they are added to the worker's own environment; with a dev container
+they are set inside the container (`devcontainer exec --remote-env`).
+
+```yaml
+setup:
+  - cwd: repo/payments-api
+    executable: npm
+    args: [ci]
+    timeoutSeconds: 600
+    env:
+      NODE_ENV: test
+      npm_config_fund: "false"
+```
+
+- Names follow POSIX rules: a letter or `_`, then letters, digits or `_`, at most 128 characters.
+- Values are strings (quote `"false"` and numbers in YAML), at most 4,096 characters each, with no
+  NUL byte.
+- At most 64 entries and 32,768 bytes per command.
+- AgentX refuses names it or the system relies on, in any letter case: `PATH`, `HOME`, `USER`,
+  `LOGNAME`, `SHELL`, `PWD`, `OLDPWD`, `IFS`, `ENV`, `BASH_ENV`, and any name starting with
+  `AGENTX_`, `AWS_`, `GIT_`, `LD_`, `DYLD_` or `PI_`. To use a tool that is not on the worker's
+  `PATH`, give its full path as `executable`, or set `PATH` in the dev container's own
+  configuration.
+
+**`env` is not for secrets.** A registered revision is stored and shown in full, and with a dev
+container the values are on the `devcontainer exec` command line while a command runs. AgentX refuses names that look like
+credentials (for example `GITHUB_TOKEN`, `NPM_TOKEN`, `DB_PASSWORD`, `STRIPE_SECRET_KEY`,
+`OPENAI_API_KEY`). That check is a guard, not a guarantee: keep every secret in a credential
+reference, never in `env`. AgentX error messages name a variable, never its value.
+
+A worker that predates `env` refuses a revision that uses it. Roll out the new worker image before
+registering such a revision.
+
 ### Dev container
 
 ```yaml
