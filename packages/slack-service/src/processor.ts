@@ -31,6 +31,11 @@ import { NEW_WORKSPACE_MESSAGE, STILL_PREPARING_MESSAGE, limitMessage, preparati
 import { escapeText, slackReplyText } from "./slack-format.js";
 import { buildTurnRecord, emitTurnMetrics, type TurnDraft, type TurnRecordSink } from "./turn-records.js";
 import { matchApprovedModel, modelName, modelOptionsMessage, parseModelCommand } from "./model-command.js";
+import {
+  ABANDONED_TASK_CANCEL_FAILED_TEXT, ABANDONED_TASK_FINISHED_TEXT, ABANDONED_TASK_TEXT, HANDOFF_APPROVED_TEXT, HANDOFF_FINAL_CANCEL_FAILED_TEXT,
+  HANDOFF_FINAL_FINISHED_TEXT, HANDOFF_FINAL_IDLE_TEXT, HANDOFF_FINAL_TEXT, HANDOFF_TASK_TEXT, HANDOFF_TEXT, RESUME_NOT_FOUND_TEXT, TurnHandedOffError, resumedResultText, turnNoteText,
+  type ActiveTurn, type TurnNote,
+} from "./interrupted-turn.js";
 import { runSwebenchCommand, type SwebenchApi } from "./swebench-command.js";
 import { SHARED_CLOSE_REFUSED_MESSAGE, SHARED_SETUP_FAILED_MESSAGE, TASK_STILL_BUSY_MESSAGE, taskBusy, waitForIdleTask } from "./shared-task.js";
 
@@ -41,6 +46,13 @@ export interface ThreadServiceApi {
   startClose(requestId: string): Promise<SlackWorkspaceCloseStartResult>;
   completeClose(requestId: string, operationId: string): Promise<SlackWorkspaceCloseCompleteResult>;
   waitForOperation(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; error?: string | undefined; result?: unknown }>;
+  /** Issue 157: waits for a worker task and returns its final response; without it, a resumed turn posts the status alone. */
+  taskResult?(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; response?: string | undefined; error?: string | undefined }>;
+  /**
+   * Issue 167: asks the worker to cancel a task (a finished one is left as it is). Called only when
+   * a Slack turn gives up for good, so nobody will ever read the task's result.
+   */
+  cancelOperation?(workspaceId: string, operationId: string): Promise<CancelOutcome>;
   createConversation(workspaceId: string): Promise<string>;
   listProjectModels?(): Promise<ProjectModelOptions>;
   selectProjectModel?(model: ModelIdentifier): Promise<ProjectModelOptions>;
@@ -48,6 +60,9 @@ export interface ThreadServiceApi {
   startSwebenchRun?: SwebenchApi["startSwebenchRun"];
   getSwebenchRun?: SwebenchApi["getSwebenchRun"];
 }
+
+/** Issue 167: a cancel was queued for a task still running, or the task had already finished. */
+export type CancelOutcome = { outcome: "requested" } | { outcome: "finished"; status: string };
 
 export interface ThreadState {
   workspaceId?: string;
@@ -57,6 +72,10 @@ export interface ThreadState {
   closedAt?: string;
   /** Connectors whose last turn failed with schema_changed; the next discovery asks for a refresh. */
   refreshConnectors?: string[];
+  /** Issue 157: the worker operation a turn was waiting on, so its redelivery can resume it. */
+  activeTurn?: ActiveTurn;
+  /** Issue 157: what a resumed turn did, for the next turn's model. */
+  turnNote?: TurnNote;
 }
 
 export interface ThreadStore {
@@ -72,6 +91,12 @@ export interface ThreadStore {
    * post it. Absent: the notice is posted every time a view-only or closed thread's message is processed.
    */
   claimSharedNotice?(subject: string, nowSeconds: number, kind: "view" | "closed"): Promise<boolean>;
+  /** Issue 157: remembers the worker operation this event's turn waits on. Absent: a redelivery runs the turn again, as before. */
+  saveActiveTurn?(subject: string, turn: ActiveTurn): Promise<void>;
+  /** Issue 157: forgets the remembered operation, only if it is still this event's. */
+  clearActiveTurn?(subject: string, eventId: string): Promise<void>;
+  /** Issue 157: keeps (or, with undefined, forgets) the note the next turn's model reads. */
+  saveTurnNote?(subject: string, note: TurnNote | undefined): Promise<void>;
 }
 
 export interface TurnInput {
@@ -95,6 +120,12 @@ export interface TurnInput {
   recorder?: TurnRecorder;
   /** Connectors whose discovery this turn should bypass the broker's catalog cache. */
   refreshConnectors?: string[];
+  /** Issue 157: told each accepted worker task or follow-up operation, so the thread can remember it. Never throws. */
+  onOperationAccepted?: (operationId: string) => Promise<void>;
+  /** Issue 157: aborted when the turn is handed off to a new task; the host then stops the model. */
+  signal?: AbortSignal;
+  /** Issue 157: what a resumed earlier turn in this thread did, for the model to read this turn only. */
+  turnNote?: string;
 }
 
 export type ServiceLog = (event: string, fields: Readonly<Record<string, string | number | boolean>>) => void;
@@ -119,9 +150,19 @@ export interface ProcessorDependencies {
   postWithBlocks?: (thread: SlackThread, text: string, blocks: unknown[]) => Promise<void>;
   /** C13: a Slack member's display name, for a continue-mode turn's record. */
   userName?: (userId: string) => Promise<string | undefined>;
+  /** Issue 157: how long the hand-off notice may take before the message is released anyway. Default 10 seconds. */
+  handoffNoticeMilliseconds?: number;
+  /** Issue 167: how long cancelling an abandoned task may take before the turn finishes anyway. Default 5 seconds. */
+  cancelTaskMilliseconds?: number;
   /** Waits between polls of a SWE-bench run (spec 043); a timer when absent. */
   sleep?: (ms: number) => Promise<void>;
 }
+
+/** Issue 157: a save already in flight at the hand-off gets this long to land. */
+const PENDING_SAVE_MILLISECONDS = 5_000;
+
+/** Issue 167: cancelling an abandoned task gets this long, well inside the time left before SIGKILL. */
+const CANCEL_TASK_MILLISECONDS = 5_000;
 
 /** Where a reply's Details button points, and how to post it. */
 interface ReplyDetails {
@@ -140,6 +181,8 @@ export async function processSlackRequest(
     queuedBehind?: number;
     /** Set when SQS's ApproximateReceiveCount shows this attempt was redelivered after an earlier one threw. */
     redelivered?: boolean;
+    /** Issue 157: aborted at the hand-off deadline after SIGTERM; a turn still running is then handed off. */
+    handoff?: AbortSignal;
   },
 ): Promise<void> {
   const subject = slackThreadSubject(message.thread);
@@ -152,8 +195,15 @@ export async function processSlackRequest(
     : new TurnRecorder();
   const draft: TurnDraft = { disposition: "abandoned" };
   let lastPosted = "";
+  // Issue 157: set the moment this attempt is handed off. From then on the new task owns the
+  // thread, so the old turn (a lazy worker still waiting, say) posts nothing more and saves nothing.
+  let handedOff = false;
   // Remembers only what reached Slack, so the record never claims a message the member did not see.
   const post = async (text: string) => {
+    if (handedOff) {
+      log("turn.post_after_handoff", { eventId: message.eventId });
+      return;
+    }
     await dependencies.post(message.thread, text);
     lastPosted = text;
   };
@@ -175,14 +225,118 @@ export async function processSlackRequest(
   };
   const api = dependencies.api(message);
   let finished = false;
+  const forgetActiveTurn = async (): Promise<void> => {
+    try {
+      await dependencies.threads.clearActiveTurn?.(subject, message.eventId);
+    } catch (error) {
+      log("turn.active_clear_failed", { eventId: message.eventId, errorName: errorName(error) });
+    }
+  };
+  const resumeTurn = async (active: ActiveTurn): Promise<void> => {
+    log("turn.resuming", { eventId: message.eventId, workspaceId: active.workspaceId, operationId: active.operationId });
+    const waitStop = new AbortController();
+    const waiting = api.taskResult === undefined
+      ? api.waitForOperation(active.workspaceId, active.operationId, waitStop.signal)
+      : api.taskResult(active.workspaceId, active.operationId, waitStop.signal);
+    let result: { status: string; response?: string | undefined; error?: string | undefined };
+    try {
+      result = await untilHandoff(waiting, options.handoff);
+    } catch (error) {
+      if (error instanceof TurnHandedOffError) {
+        handedOff = true;
+        reportAfterHandoff(waiting);
+        waitStop.abort();
+        throw error;
+      }
+      // A task that no longer exists never will: say so once, rather than retrying for an hour.
+      if ((error as { code?: unknown } | null)?.code !== "NOT_FOUND") throw error;
+      log("turn.resume_not_found", { eventId: message.eventId, workspaceId: active.workspaceId, operationId: active.operationId });
+      draft.disposition = "failed";
+      draft.responseText = RESUME_NOT_FOUND_TEXT;
+      await post(RESUME_NOT_FOUND_TEXT);
+      await forgetActiveTurn();
+      return;
+    }
+    log("turn.resumed", { eventId: message.eventId, workspaceId: active.workspaceId, operationId: active.operationId, status: result.status });
+    draft.disposition = result.status === "SUCCEEDED" ? "answered" : "failed";
+    const text = slackReplyText(resumedResultText({
+      status: result.status,
+      ...(typeof result.response === "string" ? { response: result.response } : {}),
+      ...(result.error === undefined ? {} : { error: result.error }),
+    }));
+    draft.responseText = text;
+    for (const chunk of splitSlackMessage(text)) await post(chunk);
+    // The interrupted turn's session was not saved: the next turn's model reads this instead.
+    if (dependencies.threads.saveTurnNote !== undefined) {
+      try {
+        await dependencies.threads.saveTurnNote(subject, { eventId: message.eventId, text: turnNoteText(message.text, active, text) });
+      } catch (error) {
+        log("turn.note_save_failed", { eventId: message.eventId, errorName: errorName(error) });
+      }
+    }
+    await forgetActiveTurn();
+  };
+  // The old work goes on until its model or poll stops; how it ended is logged, never posted.
+  const reportAfterHandoff = (work: Promise<unknown>) => {
+    work.then(
+      () => log("turn.after_handoff", { eventId: message.eventId, outcome: "finished" }),
+      (error: unknown) => log("turn.after_handoff", { eventId: message.eventId, outcome: "failed", errorName: errorName(error) }),
+    );
+  };
   // Set when this turn waited for workspace setup up front, which the member was told about.
   let waitedForSetup = false;
+  // Issue 157: the worker operation this attempt is waiting on, once the thread has saved it.
+  let remembered: ActiveTurn | undefined;
+  // Issue 157: a save of it still in flight, and whether this attempt claimed a confirmation.
+  let pendingSave: Promise<void> | undefined;
+  let claimed = false;
+  // Issue 167: the task this attempt last started, saved or not, so a turn that gives up for good can cancel it.
+  let accepted: { workspaceId: string; operationId: string } | undefined;
+  /**
+   * Issue 167: cancels a task nobody will wait on any more, so it stops holding the workspace (and
+   * its compute). Bounded, and never throws: the turn must still finish before SIGKILL.
+   */
+  const cancelTask = async (target: { workspaceId: string; operationId: string }): Promise<"requested" | "finished" | "failed"> => {
+    const fields = { eventId: message.eventId, workspaceId: target.workspaceId, operationId: target.operationId };
+    try {
+      if (api.cancelOperation === undefined) throw Object.assign(new Error("the thread API cannot cancel tasks"), { name: "CancelUnavailable" });
+      const answer = await withinMilliseconds(api.cancelOperation(target.workspaceId, target.operationId), dependencies.cancelTaskMilliseconds ?? CANCEL_TASK_MILLISECONDS);
+      if (answer.outcome === "finished") {
+        log("turn.task_cancel_skipped", { ...fields, status: answer.status });
+        return "finished";
+      }
+      log("turn.task_cancelled", fields);
+      return "requested";
+    } catch (error) {
+      log("turn.task_cancel_failed", { ...fields, errorName: errorName(error) });
+      return "failed";
+    }
+  };
+  /** The task this attempt started or resumed, cancelled once the last delivery gives up on it; undefined when there was none. */
+  const cancelAbandonedTask = async (): Promise<"requested" | "finished" | "failed" | undefined> => {
+    const target = accepted ?? remembered;
+    return target === undefined ? undefined : cancelTask(target);
+  };
   try {
+    // Issue 157: a redelivery of an attempt that ended while the thread still remembered its worker
+    // operation (a hand-off, or a crash before the reply was posted) re-attaches to that operation. It runs no model, gate or new work, so an approved call never runs twice.
+    if (options.redelivered === true && dependencies.threads.saveActiveTurn !== undefined) {
+      const active = (await dependencies.threads.load(subject)).activeTurn;
+      if (active?.eventId === message.eventId) {
+        remembered = active;
+        draft.workspaceId = active.workspaceId;
+        await resumeTurn(active);
+        finished = true;
+        return;
+      }
+    }
     const swebenchCommand = parseSwebenchCommand(message.text);
     if (swebenchCommand !== undefined) {
       draft.disposition = "swebench_run";
       if (api.startSwebenchRun === undefined || api.getSwebenchRun === undefined) throw new Error("SWE-bench runs are unavailable in this deployment");
-      await runSwebenchCommand(swebenchCommand, {
+      if (options.handoff?.aborted === true) throw new TurnHandedOffError();
+      // Issue 157: the wait is handed off at the deadline like a turn; the redelivery resumes the same run.
+      const swebenchRun = runSwebenchCommand(swebenchCommand, {
         startSwebenchRun: (request) => api.startSwebenchRun!(request),
         getSwebenchRun: (runId) => api.getSwebenchRun!(runId),
         ...(api.listProjectModels === undefined ? {} : { listProjectModels: () => api.listProjectModels!() }),
@@ -194,6 +348,15 @@ export async function processSlackRequest(
         announce: options.redelivered !== true,
         ...(dependencies.sleep === undefined ? {} : { sleep: dependencies.sleep }),
       });
+      try {
+        await untilHandoff(swebenchRun, options.handoff);
+      } catch (error) {
+        if (error instanceof TurnHandedOffError) {
+          handedOff = true;
+          reportAfterHandoff(swebenchRun);
+        }
+        throw error;
+      }
       finished = true;
       return;
     }
@@ -384,6 +547,9 @@ export async function processSlackRequest(
     const worker = workspace.status === "UNPREPARED"
       ? createLazyWorker({ api, post, log, eventId: message.eventId })
       : undefined;
+    // Issue 157: past the hand-off deadline nothing new starts, and nothing is claimed, so the
+    // redelivery runs this request as if it were the first attempt.
+    if (options.handoff?.aborted === true) throw new TurnHandedOffError();
     // Spec 014 C5: claim the confirmation only now, after every early return above, so a turn that
     // never ran leaves it pending for the next "yes". A refused claim (used by another event, or
     // expired since the check) is always told to the member; nothing runs.
@@ -397,6 +563,7 @@ export async function processSlackRequest(
       finished = true;
       return;
     }
+    if (confirmation?.claim) claimed = true;
     // Spec 014 FR-026: the ingress has already said "I'm on it". Say work has started only when the
     // member was told to wait, behind earlier requests, for setup, or because SQS redelivered this
     // request after an earlier attempt threw: that attempt's own "Working on it now" is 15 minutes
@@ -406,8 +573,34 @@ export async function processSlackRequest(
     if (announceStart) await post("Working on it now. I'll post the result in this thread when it's done.");
     log("task.started", { eventId: message.eventId });
     let response: string;
+    const turnStop = new AbortController();
+    const workspaceForTurn = workspace.workspaceId;
+    const saveActiveTurn = dependencies.threads.saveActiveTurn?.bind(dependencies.threads);
+    const onOperationAccepted = async (operationId: string): Promise<void> => {
+      // After the hand-off the redelivery owns the thread; a late acceptance must not move it.
+      if (saveActiveTurn === undefined) return;
+      if (handedOff) {
+        // Issue 167: a task the broker accepted only after the last delivery gave up has no waiter at all.
+        if (options.finalAttempt) await cancelTask({ workspaceId: workspaceForTurn, operationId });
+        return;
+      }
+      accepted = { workspaceId: workspaceForTurn, operationId };
+      // An approval's own text is only "yes": the note names what was approved instead.
+      const approved = claimed ? confirmation?.session.approvals.map((approval) => approval.summary).join("; ") : undefined;
+      const active: ActiveTurn = { eventId: message.eventId, workspaceId: workspaceForTurn, operationId, ...(approved ? { request: `the member approved: ${approved}` } : {}) };
+      const saving = (async () => {
+        try {
+          await saveActiveTurn(subject, active);
+          remembered = active;
+        } catch (error) {
+          log("turn.active_save_failed", { eventId: message.eventId, errorName: errorName(error) });
+        }
+      })();
+      pendingSave = saving;
+      await saving;
+    };
     try {
-      response = await dependencies.runTurn({
+      const turn = dependencies.runTurn({
         message,
         subject,
         workspaceId: workspace.workspaceId,
@@ -424,10 +617,25 @@ export async function processSlackRequest(
         requestId: requestIdSequence(message.eventId),
         ...(recorder === undefined ? {} : { recorder }),
         ...(state.refreshConnectors?.length ? { refreshConnectors: state.refreshConnectors } : {}),
+        // A service that cannot remember operations, or is never stopped mid-turn, runs the turn as before.
+        ...(dependencies.threads.saveActiveTurn === undefined ? {} : { onOperationAccepted }),
+        ...(options.handoff === undefined ? {} : { signal: turnStop.signal }),
+        ...(state.turnNote === undefined ? {} : { turnNote: state.turnNote.text }),
       });
+      try {
+        response = await untilHandoff(turn, options.handoff);
+      } catch (error) {
+        if (!(error instanceof TurnHandedOffError)) throw error;
+        handedOff = true;
+        // The old turn keeps running until the model stops; its answer is no longer anyone's.
+        reportAfterHandoff(turn);
+        turnStop.abort();
+        throw error;
+      }
       draft.disposition = "answered";
       log("task.completed", { eventId: message.eventId, responseLength: response.length });
     } catch (error) {
+      if (error instanceof TurnHandedOffError) throw error;
       draft.disposition = "failed";
       draft.error = errorSummary(error);
       log("task.failed", { eventId: message.eventId, errorName: errorName(error) });
@@ -476,8 +684,54 @@ export async function processSlackRequest(
       }
     }
     if (recorder !== undefined) await rememberRefresh(dependencies, log, subject, message.eventId, state.refreshConnectors ?? [], recorder);
+    // Only once the member has the reply: a failed post before this is redelivered and resumes.
+    if (remembered !== undefined) await forgetActiveTurn();
+    // The model has read the note from a resumed turn, and a turn that answered saved its session,
+    // so later turns have it there. A failed turn saved nothing, so the note stays for the next.
+    // Only the latest resume's note is kept: a second resume replaces it.
+    if (state.turnNote !== undefined && draft.disposition === "answered") {
+      try {
+        await dependencies.threads.saveTurnNote?.(subject, undefined);
+      } catch (error) {
+        log("turn.note_clear_failed", { eventId: message.eventId, errorName: errorName(error) });
+      }
+    }
     finished = true;
   } catch (error) {
+    if (error instanceof TurnHandedOffError) {
+      handedOff = true;
+      // A save already in flight names the task in the notice and the log (and the redelivery reads it).
+      if (pendingSave !== undefined) await withinMilliseconds(pendingSave, PENDING_SAVE_MILLISECONDS).catch(() => undefined);
+      log("turn.interrupted", {
+        eventId: message.eventId,
+        ...(draft.workspaceId === undefined ? {} : { workspaceId: draft.workspaceId }),
+        ...(remembered === undefined ? {} : { operationId: remembered.operationId }),
+      });
+      // The notice is best effort and bounded: the release must happen before SIGKILL whatever Slack does.
+      const notice = async (text: string) => {
+        try {
+          await withinMilliseconds(dependencies.post(message.thread, text), dependencies.handoffNoticeMilliseconds ?? 10_000);
+          lastPosted = text;
+        } catch (postError) {
+          log("turn.interrupted_notice_failed", { eventId: message.eventId, errorName: errorName(postError) });
+        }
+      };
+      if (!options.finalAttempt) {
+        await notice(remembered !== undefined ? HANDOFF_TASK_TEXT : claimed ? HANDOFF_APPROVED_TEXT : HANDOFF_TEXT);
+        throw error;
+      }
+      // The last allowed delivery: a release would only send the message to the dead-letter queue.
+      draft.disposition = "abandoned";
+      delete draft.responseText;
+      // Issue 167: nobody will wait on the task any more, so it is stopped before the thread forgets it.
+      const cancelled = await cancelAbandonedTask();
+      await notice({
+        none: HANDOFF_FINAL_IDLE_TEXT, requested: HANDOFF_FINAL_TEXT, finished: HANDOFF_FINAL_FINISHED_TEXT, failed: HANDOFF_FINAL_CANCEL_FAILED_TEXT,
+      }[cancelled ?? "none"]);
+      if (remembered !== undefined) await forgetActiveTurn();
+      finished = true;
+      return;
+    }
     // Redelivery resumes the same operations because every request ID derives from the Slack event ID.
     if (!options.finalAttempt) throw error;
     draft.disposition = "abandoned";
@@ -485,7 +739,16 @@ export async function processSlackRequest(
     // The member sees the abandonment notice, so the record keeps that rather than an unposted answer.
     delete draft.responseText;
     log("request.abandoned", { eventId: message.eventId, errorName: errorName(error) });
-    await post(`AgentX could not process this request: ${escapeText(safeMessage(error))}`).catch(() => undefined);
+    // Issue 167: as at a final hand-off, the task this attempt started is stopped before it is forgotten.
+    const cancelled = await cancelAbandonedTask();
+    const abandoned = `AgentX could not process this request: ${escapeText(safeMessage(error))}`;
+    const after = cancelled === undefined
+      ? undefined
+      : { requested: ABANDONED_TASK_TEXT, finished: ABANDONED_TASK_FINISHED_TEXT, failed: ABANDONED_TASK_CANCEL_FAILED_TEXT }[cancelled];
+    await post(after === undefined ? abandoned : `${abandoned}\n\n${after}`).catch((postError: unknown) => {
+      log("request.abandoned_notice_failed", { eventId: message.eventId, errorName: errorName(postError) });
+    });
+    if (remembered !== undefined) await forgetActiveTurn();
     finished = true;
   } finally {
     if (finished) {
@@ -497,6 +760,30 @@ export async function processSlackRequest(
       await dependencies.threads.finish(subject);
     }
   }
+}
+
+/** Issue 157: the work's outcome, or a TimeoutError once `milliseconds` pass first. */
+function withinMilliseconds<T>(work: Promise<T>, milliseconds: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => reject(Object.assign(new Error("timed out"), { name: "TimeoutError" })), milliseconds);
+    timer.unref?.();
+  });
+  return Promise.race([work, deadline]).finally(() => clearTimeout(timer));
+}
+
+/**
+ * Issue 157: the work's own outcome, or a TurnHandedOffError once the hand-off deadline passes
+ * first (at once when it already has). The work itself is left to the caller to stop.
+ */
+function untilHandoff<T>(work: Promise<T>, handoff: AbortSignal | undefined): Promise<T> {
+  if (handoff === undefined) return work;
+  if (handoff.aborted) return Promise.reject(new TurnHandedOffError());
+  return new Promise<T>((resolve, reject) => {
+    const onHandoff = () => reject(new TurnHandedOffError());
+    handoff.addEventListener("abort", onHandoff, { once: true });
+    work.then(resolve, reject).finally(() => handoff.removeEventListener("abort", onHandoff));
+  });
 }
 
 /**
