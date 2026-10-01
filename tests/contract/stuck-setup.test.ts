@@ -53,8 +53,9 @@ describe("the sweep (FR-055)", () => {
     expect(db.get(`WORKSPACE#${workspaceId}`, "DEVELOPER_TASK")).not.toHaveProperty("pendingPrompt");
     expect(watches()).toEqual([]);
     expect((await dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`)).body.task).toMatchObject({ status: "FAILED", failure: { category: "setup_failed", message: STUCK_SETUP_MESSAGE } });
-    // F20: the sweep does not release the slot; closing the task frees it (FR-020), as for any failed setup.
-    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${MAYA.slackUserId}`)).toMatchObject({ count: 1 });
+    // #213 (replacing ruling F20): the failed setup releases the slot at once, as any failed setup
+    // does, and the close that follows does not release it again.
+    expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${MAYA.slackUserId}`)).toMatchObject({ count: 0 });
     expect((await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() })).body).toMatchObject({ closed: true });
     expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${MAYA.slackUserId}`)).toMatchObject({ count: 0 });
   });

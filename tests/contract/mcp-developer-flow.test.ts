@@ -105,7 +105,9 @@ describe("busy answers name the right next step (final review M1)", () => {
     const taskId = String((await tool("agentx_start_task", { project: "payments", instructions: "x" })).value.task_id);
     const workspaceId = workspaceOf(harness, taskId);
     await harness.finish(workspaceId, activeOf(harness, workspaceId), "FAILED", { error: "npm ci exited 1" });
-    // The organization counter lost this task's charge: not a race, not already released.
+    // A task whose setup failed before #213 still holds its charge, and here the organization
+    // counter lost it: not a race, not already released.
+    Object.assign(harness.db.get("SLACK_LIMIT#T0BSHLLUGBD", `MEMBER#${MAYA.slackUserId}`) as Record<string, unknown>, { count: 1, tasks: new Set([taskId]) });
     (harness.db.get("SLACK_LIMIT#T0BSHLLUGBD", "ORGANIZATION") as Record<string, unknown>).count = 0;
     const answer = await tool("agentx_close_task", { task_id: taskId });
     expect(answer.error).toEqual({

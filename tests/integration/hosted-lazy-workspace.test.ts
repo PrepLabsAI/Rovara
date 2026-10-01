@@ -169,17 +169,18 @@ describe("workspace only when needed, end to end", () => {
     expect(s.db.get(`WORKSPACE#${String(threadTwo?.workspaceId)}`, "META")).toMatchObject({ status: "UNPREPARED" });
   });
 
-  it("fails only the worker part when preparation fails mid-turn, and retries it as today on the next message", async () => {
+  it("fails only the worker part when preparation fails mid-turn, releases the slot, and prepares again, charged afresh, on the next message (#213)", async () => {
     const s = scenario();
     await registerSlackProject(s.handler, { connectors: GITHUB_LIST_ISSUES });
     s.prepareOutcome = "FAILED";
     await turnIn(s, 1, "list the files in the repository", { coding: true });
     expect(postsIn(s, 1)).toEqual([
       // #154: the thread is also told the worker's (redacted) reason.
-      WORKING, SETTING_UP, "AgentX could not set up this thread's workspace (FAILED). Mention me again in this thread to retry.\nReason: clone failed", CODING_ANSWER,
+      WORKING, SETTING_UP, "AgentX could not set up this thread's workspace (FAILED). The workspace was released, so it no longer counts toward the workspace limit. Mention me again in this thread to start fresh.\nReason: clone failed", CODING_ANSWER,
     ]);
     expect(s.toolResults.at(-1)).toBe(JSON.stringify(unavailableRefusal("workspace setup failed")));
-    expect(s.db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${pratik}`)).toMatchObject({ count: 1 });
+    // #213: the failed workspace no longer counts toward the limit.
+    expect(s.db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${pratik}`)).toMatchObject({ count: 0, threads: [] });
 
     s.prepareOutcome = "SUCCEEDED";
     await turnIn(s, 1, "what's open?", { coding: false });

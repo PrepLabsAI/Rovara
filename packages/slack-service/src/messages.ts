@@ -20,18 +20,20 @@ const COMMAND_FAILURE = /^(?:setup step|readiness check) \d+ \(/;
 
 /**
  * The thread's setup failure notice. With the worker's error (#154), it adds the reason, redacted
- * and capped, and asks an administrator to fix a failed setup or readiness command.
+ * and capped, and asks an administrator to fix a failed setup or readiness command. A failed
+ * preparation gives its workspace's slot back at once (#213), so the notice says so, and a new
+ * message in the thread prepares the workspace again, charged afresh.
  */
 export function preparationFailedMessage(status: string, error?: string): string {
-  const head = `AgentX could not set up this thread's workspace (${escapeText(status)}).`;
+  const head = `AgentX could not set up this thread's workspace (${escapeText(status)}). The workspace was released, so it no longer counts toward the workspace limit.`;
   // Redacted before its lines are joined, since some redaction rules work line by line; the
   // redaction reads a bounded amount (redactAndCap), far more than the notice shows.
   const redacted = redactAndCap(error ?? "", PREPARATION_FAILURE_REASON_MAX * 4);
   const reason = redacted.text.replace(/\s+/g, " ").trim();
-  if (reason === "") return `${head} Mention me again in this thread to retry.`;
+  if (reason === "") return `${head} Mention me again in this thread to start fresh.`;
   const next = COMMAND_FAILURE.test(reason)
-    ? "Ask an administrator to fix the project's setup commands, then mention me again in this thread to retry."
-    : "Mention me again in this thread to retry.";
+    ? "Ask an administrator to fix the project's setup commands, then mention me again in this thread to start fresh."
+    : "Mention me again in this thread to start fresh.";
   return `${head} ${next}\nReason: ${fitEscapedReason(escapeText(reason), redacted.truncated)}`;
 }
 

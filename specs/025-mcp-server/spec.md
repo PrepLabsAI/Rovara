@@ -506,8 +506,9 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   limit. A task stores the counters it charged, and its close releases those (owner decision,
   2026-09-28). An environment with no Slack team ID counts developer tasks on
   `DEVELOPER_LIMIT#ORGANIZATION`, with the same limit (owner decision, 2026-09-28). A prepare that
-  fails MUST NOT release the charge; only closing the task releases it, and closing MUST release it
-  exactly once (build ruling, 2026-09-28).
+  fails MUST release the charge at once, and a later close MUST NOT release it again; whichever
+  comes first releases it, exactly once (issue #213, 2026-10-01, which replaced the build ruling of
+  2026-09-28 that kept the charge until the close).
 - **FR-021**: The task routes MUST reuse the existing handlers for operations, events, artifacts,
   pull requests, pull-request actions and cancellation, reached with the task's owner key. The
   broker's refusal message for other JWT routes (FR-006 of spec 008) MUST stay for everything that
@@ -1014,8 +1015,8 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   any prepare still running 50 minutes after it started (owner decision, 2026-09-29, raised from 15
   minutes because the provisioner allows 45), whatever the instance's health, with a fixed message
   that setup did not finish ("setup did not finish within 50 minutes; close this task and start a
-  new one"); the workspace then reads `setup_failed`, and closing the task frees its slot (FR-020),
-  as with any other failed setup (build ruling F20, 2026-09-29). Only developer-task prepares are
+  new one"); the workspace then reads `setup_failed`, and its slot is released at once (FR-020),
+  as with any other failed setup (issue #213, 2026-10-01, which replaced build ruling F20). Only developer-task prepares are
   watched; the sweep runs in the session reconciler, every 10 minutes, so a stuck setup is failed
   between 50 and 60 minutes after it started (owner decisions, 2026-09-29; Q4, Q5, C17). The sweep
   also runs in the legacy deployment's reconciler, where it reads one empty partition per run and

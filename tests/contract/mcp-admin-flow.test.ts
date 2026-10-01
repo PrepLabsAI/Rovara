@@ -59,7 +59,8 @@ describe("an admin looks at AgentX from an AI tool (US5)", () => {
     expect(normalized((await mcp.tool("agentx_admin_list_channels")).value)).toEqual({ bindings: [{ channel_id: "C0123456789", channel_name: "`payments-dev`", private: false, project: "payments", updated_at: "<time>" }], notices: [] });
     expect(normalized((await mcp.tool("agentx_admin_list_workspaces")).value)).toEqual({
       workspaces: [{ id: "<uuid>", project: "payments", origin: "ai_tool", owner: { task_id: "<uuid>", developer: "`Maya Chen`" }, status: "PREPARATION_FAILED", busy: false, last_activity_at: "<time>" }],
-      limits: { per_person: 3, per_organization: 20, source: "parameters" }, counts: { organization: 1 }, truncated: false,
+      // #213: a workspace whose setup failed no longer counts toward the limits.
+      limits: { per_person: 3, per_organization: 20, source: "parameters" }, counts: { organization: 0 }, truncated: false,
     });
     expect((await mcp.tool("agentx_admin_usage", { group_by: "origin" })).value).toMatchObject({ group_by: "origin", truncated: false });
     expect((await mcp.tool("agentx_admin_health")).value).toMatchObject({ version: { developer_api: "1.2", admin_api: "1.1" }, worker_modes: [{ mode: "ec2-ebs", configured: true }] });
