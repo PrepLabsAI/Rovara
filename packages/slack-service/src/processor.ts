@@ -293,7 +293,9 @@ export async function processSlackRequest(
     if (swebenchCommand !== undefined) {
       draft.disposition = "swebench_run";
       if (api.startSwebenchRun === undefined || api.getSwebenchRun === undefined) throw new Error("SWE-bench runs are unavailable in this deployment");
-      await runSwebenchCommand(swebenchCommand, {
+      if (options.handoff?.aborted === true) throw new TurnHandedOffError();
+      // Issue 157: the wait is handed off at the deadline like a turn; the redelivery resumes the same run.
+      const swebenchRun = runSwebenchCommand(swebenchCommand, {
         startSwebenchRun: (request) => api.startSwebenchRun!(request),
         getSwebenchRun: (runId) => api.getSwebenchRun!(runId),
         ...(api.listProjectModels === undefined ? {} : { listProjectModels: () => api.listProjectModels!() }),
@@ -305,6 +307,15 @@ export async function processSlackRequest(
         announce: options.redelivered !== true,
         ...(dependencies.sleep === undefined ? {} : { sleep: dependencies.sleep }),
       });
+      try {
+        await untilHandoff(swebenchRun, options.handoff);
+      } catch (error) {
+        if (error instanceof TurnHandedOffError) {
+          handedOff = true;
+          reportAfterHandoff(swebenchRun);
+        }
+        throw error;
+      }
       finished = true;
       return;
     }

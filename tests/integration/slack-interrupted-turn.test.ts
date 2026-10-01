@@ -265,6 +265,20 @@ describe("resuming a redelivered turn", () => {
     ]);
   });
 
+  it("redacts a secret in the failure reason, as the setup failure notice does (#154)", async () => {
+    const token = `ghp_${"a1B2c3D4e5".repeat(4)}`;
+    const { posts, dependencies, meta } = harness(async () => "unused", {
+      taskResult: async () => ({ status: "FAILED", error: `git push failed: remote: token ${token} is not valid` }),
+    });
+    meta.activeTurn = remembered("EvWORK000029");
+    await processSlackRequest(slackMessage("EvWORK000029", "fix the bug"), dependencies, { finalAttempt: false, redelivered: true });
+    expect(posts).toHaveLength(1);
+    expect(posts[0]).not.toContain(token);
+    expect(posts[0]).toContain("[REDACTED]");
+    expect(posts[0]!.startsWith("The task that was running when AgentX restarted ended as failed: git push failed: remote: token ")).toBe(true);
+    expect(meta.turnNote?.text ?? "").not.toContain(token);
+  });
+
   it("resumes a redelivered approval instead of refusing it, so the approved call never runs twice", async () => {
     const { posts, turns, confirmations, meta, dependencies } = harness(async () => "unused");
     await confirmations.save(subject, pendingClose());
@@ -346,7 +360,9 @@ describe("after the hand-off (review fixes)", () => {
       await ready;
       return "unused";
     }, { status: "UNPREPARED" });
-    waitForOperation.mockImplementationOnce(() => new Promise((resolve) => { finishSetup = (status) => resolve({ status }); }));
+    // With #154's reason, which the setup failure notice would quote.
+    const setupError = "setup step 0 (npm ci in repo/site) exited 1";
+    waitForOperation.mockImplementationOnce(() => new Promise((resolve) => { finishSetup = (status) => resolve({ status, error: setupError }); }));
     await expect(processSlackRequest(slackMessage("EvWORK000031", "fix the bug"), dependencies, { finalAttempt: false, handoff: handoff.signal }))
       .rejects.toBeInstanceOf(TurnHandedOffError);
     const before = [...posts];
@@ -355,6 +371,7 @@ describe("after the hand-off (review fixes)", () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(posts).toEqual(before);
     expect(posts).not.toContain(preparationFailedMessage("FAILED"));
+    expect(posts).not.toContain(preparationFailedMessage("FAILED", setupError));
     expect(logs).toContainEqual({ event: "turn.post_after_handoff", fields: { eventId: "EvWORK000031" } });
   });
 

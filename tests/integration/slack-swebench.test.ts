@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProjectModelOptions, SlackRequestMessage, SwebenchRun } from "../../packages/contracts/src/index.js";
+import { HANDOFF_FINAL_TEXT, HANDOFF_TEXT, TurnHandedOffError } from "../../packages/slack-service/src/interrupted-turn.js";
 import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
 import { resultMessage } from "../../packages/slack-service/src/swebench-command.js";
 
@@ -50,6 +51,7 @@ function harness(polls: SwebenchRun[] = [run({ status: "RUNNING" }), graded], st
   const sleep = vi.fn(async () => undefined);
   const runTurn = vi.fn();
   const ensureWorkspace = vi.fn();
+  const finish = vi.fn(async () => undefined);
   const dependencies: ProcessorDependencies = {
     api: () => ({
       ensureWorkspace,
@@ -58,12 +60,12 @@ function harness(polls: SwebenchRun[] = [run({ status: "RUNNING" }), graded], st
       startSwebenchRun: startSwebenchRun as never,
       getSwebenchRun,
     }),
-    threads: { load: vi.fn(), saveConversation: vi.fn(), saveSettingsRevision: vi.fn(), close: vi.fn(), finish: vi.fn(async () => undefined) },
+    threads: { load: vi.fn(), saveConversation: vi.fn(), saveSettingsRevision: vi.fn(), close: vi.fn(), finish },
     runTurn,
     post: async (_thread, text) => { posts.push(text); },
     sleep,
   };
-  return { dependencies, posts, startSwebenchRun, getSwebenchRun, sleep, runTurn, ensureWorkspace };
+  return { dependencies, posts, startSwebenchRun, getSwebenchRun, sleep, runTurn, ensureWorkspace, finish };
 }
 
 describe("the eval swebench command in the Slack service (spec 043)", () => {
@@ -88,6 +90,46 @@ describe("the eval swebench command in the Slack service (spec 043)", () => {
     expect(again.startSwebenchRun.mock.calls[0]).toEqual(first.startSwebenchRun.mock.calls[0]);
     // It resumes waiting without announcing the run a second time.
     expect(again.posts).toEqual([resultMessage(graded)]);
+  });
+
+  it("hands its wait off at the hand-off deadline (#157), so the redelivery resumes the same run, and posts nothing more", async () => {
+    const h = harness();
+    const handoff = new AbortController();
+    let wake: () => void = () => undefined;
+    // The service stops during the first wait between polls.
+    h.sleep.mockImplementationOnce(() => new Promise<undefined>((resolve) => {
+      wake = () => resolve(undefined);
+      handoff.abort();
+    }));
+    const attempt = processSlackRequest(message("eval swebench verified django__django-11099"), h.dependencies, { finalAttempt: false, handoff: handoff.signal });
+    await expect(attempt).rejects.toBeInstanceOf(TurnHandedOffError);
+    expect(h.posts).toHaveLength(2);
+    expect(h.posts[1]).toBe(HANDOFF_TEXT);
+    // The old wait goes on until the task stops, but its result is the redelivery's to post.
+    wake();
+    await vi.waitFor(() => expect(h.getSwebenchRun).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(h.posts).toHaveLength(2);
+    expect(h.finish).not.toHaveBeenCalled();
+  });
+
+  it("starts no run when the hand-off deadline already passed", async () => {
+    const h = harness();
+    const handoff = new AbortController();
+    handoff.abort();
+    await expect(processSlackRequest(message("eval swebench verified django__django-11099"), h.dependencies, { finalAttempt: false, handoff: handoff.signal }))
+      .rejects.toBeInstanceOf(TurnHandedOffError);
+    expect(h.startSwebenchRun).not.toHaveBeenCalled();
+    expect(h.posts).toEqual([HANDOFF_TEXT]);
+  });
+
+  it("finishes with the final notice when the last allowed delivery is handed off", async () => {
+    const h = harness();
+    const handoff = new AbortController();
+    h.sleep.mockImplementationOnce(() => new Promise<undefined>(() => { handoff.abort(); }));
+    await processSlackRequest(message("eval swebench verified django__django-11099"), h.dependencies, { finalAttempt: true, handoff: handoff.signal });
+    expect(h.posts.at(-1)).toBe(HANDOFF_FINAL_TEXT);
+    expect(h.finish).toHaveBeenCalledOnce();
   });
 
   it("resolves a model by its approved label, and lists the choices for an unknown one", async () => {
