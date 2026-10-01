@@ -13,6 +13,11 @@ export interface ActiveTurn {
   operationId: string;
   /** What the member asked for, when the event's own text does not say (an approval's "yes"). */
   request?: string;
+  /**
+   * Issue 173: when the turn last showed it is alive (ISO time), stamped on save and on each SQS
+   * heartbeat. The reconciler's backstop counts the turn as a waiter only while this is recent.
+   */
+  seenAt?: string;
 }
 
 /**
@@ -112,9 +117,13 @@ export function resumedResultText(result: { status: string; response?: string | 
 /** The META row's activeTurn, or undefined when it is missing or unreadable. */
 export function activeTurnFromItem(value: unknown): ActiveTurn | undefined {
   if (!value || typeof value !== "object") return undefined;
-  const { eventId, workspaceId, operationId, request } = value as Record<string, unknown>;
+  const { eventId, workspaceId, operationId, request, seenAt } = value as Record<string, unknown>;
   return typeof eventId === "string" && typeof workspaceId === "string" && typeof operationId === "string"
     && eventId.length > 0 && workspaceId.length > 0 && operationId.length > 0
-    ? { eventId, workspaceId, operationId, ...(typeof request === "string" && request.length > 0 ? { request } : {}) }
+    ? {
+      eventId, workspaceId, operationId,
+      ...(typeof request === "string" && request.length > 0 ? { request } : {}),
+      ...(typeof seenAt === "string" && seenAt.length > 0 ? { seenAt } : {}),
+    }
     : undefined;
 }

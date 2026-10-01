@@ -146,3 +146,35 @@ describe("stopping the consumer", () => {
     expect(visibility).toEqual([["receipt-Ev000000A1", 0]]);
   });
 });
+
+describe("the heartbeat hook (#173)", () => {
+  it("tells the turn each SQS heartbeat while it runs, and never after its message is done", async () => {
+    const { queue, visibility } = fakeQueue(async () => []);
+    let beats = 0;
+    let listener: (() => void) | undefined;
+    await processGroup(queue, async (_message, context) => {
+      context.onHeartbeat!(() => { beats += 1; });
+      listener = () => undefined;
+      await pause(35);
+    }, [queueMessage("Ev000000A1", "thread-a")], { ...groupOptions, heartbeatMilliseconds: 10 }, () => undefined);
+    expect(listener).toBeDefined();
+    expect(beats).toBeGreaterThanOrEqual(2);
+    // Each beat came with a visibility extension: they share the heartbeat.
+    expect(visibility.length).toBe(beats);
+    const after = beats;
+    await pause(30);
+    expect(beats).toBe(after);
+  });
+
+  it("keeps the heartbeat going when a listener throws, and logs it by name", async () => {
+    const { queue, visibility } = fakeQueue(async () => []);
+    const logs: Array<[string, unknown]> = [];
+    await processGroup(queue, async (_message, context) => {
+      context.onHeartbeat!(() => { throw Object.assign(new Error("PLANTED"), { name: "StampFailed" }); });
+      await pause(25);
+    }, [queueMessage("Ev000000A1", "thread-a")], { ...groupOptions, heartbeatMilliseconds: 10 }, (event, fields) => logs.push([event, fields]));
+    expect(visibility.length).toBeGreaterThanOrEqual(2);
+    expect(logs).toContainEqual(["queue.heartbeat_listener_failed", { errorName: "StampFailed" }]);
+    expect(JSON.stringify(logs)).not.toContain("PLANTED");
+  });
+});

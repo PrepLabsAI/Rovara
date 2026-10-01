@@ -35,6 +35,8 @@ export type RequestHandler = (message: SlackRequestMessage, context: {
   redelivered?: boolean;
   /** Issue 157: aborted at the hand-off deadline after the stop. */
   handoff?: AbortSignal;
+  /** Issue 173: calls the listener on each SQS heartbeat while this message runs, so the turn can show it is alive. */
+  onHeartbeat?: (listener: () => void) => void;
 }) => Promise<void>;
 
 type GroupOptions = Pick<ConsumerOptions, "maxReceiveCount" | "visibilitySeconds" | "heartbeatMilliseconds"> & {
@@ -102,10 +104,18 @@ export async function processGroup(
       return;
     }
     let beat: Promise<void> | undefined;
+    const listeners: Array<() => void> = [];
     const heartbeat = setInterval(() => {
       beat = queue.extendVisibility(entry.receiptHandle, options.visibilitySeconds).catch((error: unknown) => {
         log("queue.heartbeat_failed", { errorName: error instanceof Error ? error.name : "unknown" });
       });
+      for (const listener of listeners) {
+        try {
+          listener();
+        } catch (error) {
+          log("queue.heartbeat_listener_failed", { errorName: error instanceof Error ? error.name : "unknown" });
+        }
+      }
     }, options.heartbeatMilliseconds);
     try {
       const parsed = SlackRequestMessageSchema.safeParse(parseJson(entry.body));
@@ -120,6 +130,7 @@ export async function processGroup(
           // than restarting silently.
           ...(entry.receiveCount > 1 ? { redelivered: true } : {}),
           ...(options.handoff === undefined ? {} : { handoff: options.handoff }),
+          onHeartbeat: (listener) => { listeners.push(listener); },
         });
       }
       await queue.delete(entry.receiptHandle);

@@ -54,6 +54,9 @@ function queueEntry(extra: Partial<QueueMessage> = {}): QueueMessage {
 const queue: QueueClient = { receive: async () => [], delete: async () => undefined, extendVisibility: async () => undefined };
 const groupOptions = { maxReceiveCount: 5, visibilitySeconds: 900, heartbeatMilliseconds: 60_000 };
 
+/** Issue 173: the heartbeat hook every message gets, whatever function it is. */
+const anyHook: unknown = expect.any(Function);
+
 describe("the start notice today (characterization)", () => {
   it.each(["READY", "UNPREPARED"] as const)("posts it before the reply in a %s thread when the request carries no queue count", async (status) => {
     const h = harness(workspace({ status }));
@@ -72,7 +75,8 @@ describe("the start notice today (characterization)", () => {
     await processGroup(queue, async (_message, context) => {
       contexts.push(context);
     }, [queueEntry()], groupOptions, () => undefined);
-    expect(contexts).toEqual([{ finalAttempt: false }]);
+    // Issue 173: every message also gets the heartbeat hook.
+    expect(contexts).toEqual([{ finalAttempt: false, onHeartbeat: anyHook }]);
   });
 });
 
@@ -122,8 +126,8 @@ describe("the start notice only when the member was told to wait", () => {
       contexts.push(context);
     }, [queueEntry({ queuedBehind: 0 }), queueEntry({ receiptHandle: "receipt-2", queuedBehind: 3, receiveCount: 5 })], groupOptions, () => undefined);
     expect(contexts).toEqual([
-      { finalAttempt: false, queuedBehind: 0 },
-      { finalAttempt: true, queuedBehind: 3, redelivered: true },
+      { finalAttempt: false, queuedBehind: 0, onHeartbeat: anyHook },
+      { finalAttempt: true, queuedBehind: 3, redelivered: true, onHeartbeat: anyHook },
     ]);
   });
 
@@ -136,8 +140,8 @@ describe("the start notice only when the member was told to wait", () => {
       queueEntry({ receiptHandle: "receipt-2", queuedBehind: 0, receiveCount: 2 }),
     ], groupOptions, () => undefined);
     expect(contexts).toEqual([
-      { finalAttempt: false, queuedBehind: 0 },
-      { finalAttempt: false, queuedBehind: 0, redelivered: true },
+      { finalAttempt: false, queuedBehind: 0, onHeartbeat: anyHook },
+      { finalAttempt: false, queuedBehind: 0, redelivered: true, onHeartbeat: anyHook },
     ]);
   });
 });

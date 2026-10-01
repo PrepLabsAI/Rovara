@@ -15,7 +15,7 @@ const view = (status: DeveloperTaskView["status"], extra: Partial<DeveloperTaskV
   taskId: TASK, title: "Fix the flaky retry test", project: "payments", status, startingRevision: 7, client: "Claude Code", shared: false,
   createdAt: "2026-09-27T12:00:00.000Z", updatedAt: "2026-09-27T12:00:00.000Z", events: [], ...extra,
 });
-const text = (result: { content?: unknown }) => (result.content as Array<{ text: string }>)[0]?.text ?? "";
+const text = (result: unknown) => (result as { content?: Array<{ text: string }> }).content?.[0]?.text ?? "";
 
 async function connect(client: Partial<ControlPlaneClient>, overrides: Partial<ToolContext> = {}, clientName = "claude-code", log?: (entry: Record<string, unknown>) => void) {
   let now = 0;

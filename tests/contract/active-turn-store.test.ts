@@ -50,6 +50,35 @@ describe("the active turn on the thread META row", () => {
   });
 });
 
+describe("the active turn's liveness stamp (#173)", () => {
+  const seenAt = "2026-10-01T12:00:00.000Z";
+
+  it("saves and reads back seenAt with the turn", async () => {
+    const { db, store } = seeded();
+    await store.saveActiveTurn(subject, { ...active, seenAt });
+    expect(db.get(`THREAD#${subject}`, "META")?.activeTurn).toEqual({ ...active, seenAt });
+    expect(activeTurnFromItem(db.get(`THREAD#${subject}`, "META")?.activeTurn)).toEqual({ ...active, seenAt });
+    expect(activeTurnFromItem({ ...active, seenAt: 7 })).toEqual(active);
+  });
+
+  it("stamps the turn again, or writes it when none is saved, and answers true", async () => {
+    const { db, store } = seeded();
+    expect(await store.stampActiveTurn(subject, { ...active, seenAt })).toBe(true);
+    expect(db.get(`THREAD#${subject}`, "META")).toMatchObject({ pendingRequests: 1, activeTurn: { ...active, seenAt } });
+    const later = "2026-10-01T12:05:00.000Z";
+    expect(await store.stampActiveTurn(subject, { ...active, seenAt: later })).toBe(true);
+    expect(db.get(`THREAD#${subject}`, "META")?.activeTurn).toEqual({ ...active, seenAt: later });
+  });
+
+  it("never stamps over another event's turn, and answers false", async () => {
+    const { db, store } = seeded();
+    const other = { eventId: "EvOTHER00001", workspaceId: active.workspaceId, operationId: "66666666-6666-4666-8666-666666666666", seenAt };
+    await store.saveActiveTurn(subject, other);
+    expect(await store.stampActiveTurn(subject, { ...active, seenAt: "2026-10-01T12:05:00.000Z" })).toBe(false);
+    expect(db.get(`THREAD#${subject}`, "META")?.activeTurn).toEqual(other);
+  });
+});
+
 describe("the turn note on the thread META row", () => {
   it("saves the note beside the thread's other fields, reads it back, and forgets it", async () => {
     const { db, store } = seeded();
