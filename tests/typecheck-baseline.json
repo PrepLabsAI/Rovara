@@ -43,7 +43,7 @@
     "tests/contract/preflight.test.ts": 1,
     "tests/contract/pull-request-tools.test.ts": 3,
     "tests/contract/repository-credentials.test.ts": 6,
-    "tests/contract/session-steps.test.ts": 3,
+    "tests/contract/session-steps.test.ts": 2,
     "tests/contract/slack-contracts.test.ts": 1,
     "tests/contract/slack-control-plane.test.ts": 1,
     "tests/contract/swebench-broker.test.ts": 1,
