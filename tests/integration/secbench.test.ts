@@ -1,7 +1,15 @@
+import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import { datasetRevision, loadSwebenchInstance } from "../../packages/worker/src/swebench/dataset.js";
 import { SECBENCH_PATCH_TEMPLATE, SECBENCH_PATCH_TEMPLATE_SHA256, secbenchPatchPrompt } from "../../packages/worker/src/swebench/secbench-prompt.js";
+import { createGitRunner, predictionPatch, SECBENCH_SOURCE_EXTENSIONS, untrackedFiles } from "../../packages/worker/src/swebench/history.js";
+
+const exec = promisify(execFile);
 
 /** A SEC-bench row; the hidden fields hold markers that must never reach the agent. */
 const SECBENCH_ROW = {
@@ -84,5 +92,36 @@ describe("the SEC-bench patch prompt (spec 045 FR-005)", () => {
   it("does not expand template syntax that appears in the row's text", () => {
     const prompt = secbenchPatchPrompt({ ...SECBENCH_ROW, bug_description: "parser fails on {{ work_dir }}" }, "/h");
     expect(prompt).toContain("parser fails on {{ work_dir }}");
+  });
+});
+
+describe("the SEC-bench prediction (spec 045 FR-007)", () => {
+  it("keeps changed and new C and C++ sources, and leaves build outputs out", async () => {
+    const path = await mkdtemp(join(tmpdir(), "agentx-secbench-"));
+    const git = (...args: string[]) => exec("git", args, { cwd: path }).then((result) => result.stdout.trim());
+    await git("init", "--quiet");
+    await git("config", "user.email", "t@example.com");
+    await git("config", "user.name", "Test");
+    await mkdir(join(path, "src"));
+    await writeFile(join(path, "src/vm.c"), "int f(void) { return 0; }\n");
+    await writeFile(join(path, "Makefile"), "all:\n");
+    await writeFile(join(path, ".gitignore"), "gen/\n");
+    await git("add", ".");
+    await git("commit", "--quiet", "-m", "base");
+    const head = await git("rev-parse", "HEAD");
+    const runner = createGitRunner(path);
+    const before = await untrackedFiles(runner);
+    await writeFile(join(path, "src/vm.c"), "int f(void) { return 1; }\n");
+    await writeFile(join(path, "src/guard.h"), "#define GUARD 1\n");
+    await writeFile(join(path, "Makefile"), "all: changed\n");
+    await mkdir(join(path, "build"));
+    await writeFile(join(path, "build/vm.o"), "object");
+    await writeFile(join(path, "config.log"), "log");
+    await mkdir(join(path, "gen"));
+    await writeFile(join(path, "gen/parser.c"), "generated");
+    const patch = await predictionPatch(runner, head, before, SECBENCH_SOURCE_EXTENSIONS);
+    expect(patch).toContain("src/vm.c");
+    expect(patch).toContain("src/guard.h");
+    for (const excluded of ["Makefile", "build/vm.o", "config.log", "gen/parser.c"]) expect(patch).not.toContain(excluded);
   });
 });
