@@ -209,8 +209,21 @@ describe("grading with SEC-bench's evaluator (spec 045 FR-008, FR-008a, FR-009)"
   });
 
   it("fails when the evaluator could not start the grading container", async () => {
-    const { report } = await grade({ logs: "", exitCode: -1, success: ALL(false), reason: "Failed to pull image hwiwonlee/secb.eval.x86_64.njs.cve-2022-32414:patch" });
+    const { report } = await grade({ logs: "Failed to pull image hwiwonlee/secb.eval.x86_64.njs.cve-2022-32414:patch: 404", exitCode: -1, success: ALL(false), reason: "Patch evaluation failed: exit code -1." });
     await expect(report).rejects.toThrow(/could not grade.*Failed to pull/);
+  });
+
+  it("reads a sanitizer report only when the evaluator's rule does (start line, then ABORTING or a stack frame)", async () => {
+    const start = "Step 3: Run PoC\n==12==ERROR: AddressSanitizer: SEGV on unknown address\nRun PoC exit code: 1\n";
+    const cases: Array<[string, boolean]> = [
+      [start, false],
+      [`${start}    #0 0x55bc7958543b in f\n`, true],
+      [STEP_LOGS.stillReported, true],
+    ];
+    for (const [logs, expected] of cases) {
+      const { report } = await grade({ logs, exitCode: 1, success: ALL(false) });
+      expect((await report).secbench.sanitizerReport).toBe(expected);
+    }
   });
 
   it("fails when a report is missing or the evaluator exits non-zero", async () => {

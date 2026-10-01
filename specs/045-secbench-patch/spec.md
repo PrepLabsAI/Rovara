@@ -93,8 +93,8 @@ every place a SEC-bench number is shown (thread, site, deck) MUST say "sanitizer
   grading container sees an empty `/tmp` and every patch fails to apply.
 - **FR-008a**: Two evaluator failures look like an unresolved patch and MUST instead fail the run: a dataset that did
   not load (the evaluator logs and continues with no rows, which silently turns `medium` into `strict`; the runner
-  requires its `Loaded 300 instances` log line), and a container that could not be created or pulled (exit code `-1`
-  with a `Failed to` reason). A missing `report_medium.jsonl` or one without the instance also fails the run.
+  requires its `Loaded 300 instances` log line), and a container that could not be created or pulled (exit code `-1`,
+  with a `Failed to` message in its logs). A missing `report_medium.jsonl` or one without the instance also fails the run.
 - **FR-009**: The run is resolved when the evaluator's `medium` report says success, which is the published default.
   The result MUST also record the `strict` and `generous` verdicts, the step that failed (apply, build, PoC), the PoC's
   exit code, and whether a sanitizer report or a timeout was seen. An empty prediction is reported unresolved without

@@ -69,9 +69,12 @@ export async function gradeSecbenchPrediction(
 
   const reports = {} as Record<Mode, SecbenchReportLine>;
   for (const mode of MODES) reports[mode] = await reportLine(resolve(outputDirectory, `report_${mode}.jsonl`), instanceId);
-  if (reports.medium.exit_code === -1) throw new Error(`SEC-bench's evaluator could not grade the patch: ${reports.medium.reason.slice(0, 300)}`);
   const containerLog = resolve(directory, "container.log");
   await writeFile(containerLog, reports.medium.logs);
+  if (reports.medium.exit_code === -1) {
+    const cause = reports.medium.logs.trim() === "" ? reports.medium.reason : reports.medium.logs.trim();
+    throw new Error(`SEC-bench's evaluator could not grade the patch: ${cause.slice(-300)}`);
+  }
   return {
     resolved: reports.medium.success,
     secbench: secbenchVerdict(reports),
@@ -95,7 +98,7 @@ export function secbenchVerdict(reports: Record<Mode, SecbenchReportLine>): Secb
     generous: reports.generous.success,
     ...(failedStep === undefined ? {} : { failedStep }),
     ...(poc === null ? {} : { pocExitCode: Number(poc[1]) }),
-    sanitizerReport: /==\d+==(?:ERROR|WARNING): \w+Sanitizer:/.test(logs),
+    sanitizerReport: sanitizerReported(logs),
     timedOut: [124, 137].includes(reports.medium.exit_code) || /^Run PoC exit code: (?:124|137)$/m.test(logs),
   };
 }
@@ -115,4 +118,12 @@ async function required(result: Promise<CollectedProcess>, what: string): Promis
     throw new Error(`could not ${what}: ${(completed.stderr || completed.stdout).trim().split("\n").slice(-5).join(" ").slice(0, 800)}`);
   }
   return completed;
+}
+
+/** The evaluator's own rule: a sanitizer start line, then either an ABORTING line or a stack frame after it. */
+function sanitizerReported(logs: string): boolean {
+  const start = /==\d+==(?:ERROR|WARNING): \w+Sanitizer:/.exec(logs);
+  if (start === null) return false;
+  const rest = logs.slice(start.index + start[0].length);
+  return /==\d+==ABORTING/.test(rest) || /\s+#\d+ 0x[0-9a-f]+/.test(rest);
 }
