@@ -32,6 +32,7 @@ export interface SwebenchCommandOptions {
 const DATASET_NAMES: Record<SwebenchDataset, string> = {
   verified: "SWE-bench Verified", lite: "SWE-bench Lite", full: "SWE-bench",
   pro: "SWE-Bench Pro", "pro-hard": "SWE-Bench Pro HARD-51",
+  "secbench-patch": "SEC-bench patch task",
 };
 /** The broker's state machine ends every run within its ceiling; the wait allows for the last poll. */
 const WAIT_LIMIT_MS = (SWEBENCH_RUN_TIME_LIMIT_SECONDS + 15 * 60) * 1_000;
