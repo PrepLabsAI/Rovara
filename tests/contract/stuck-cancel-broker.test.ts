@@ -99,7 +99,7 @@ describe("the stuck-cancel retry, in the broker (issue 195)", () => {
 
 describe("the retried cancel's result (issue 195)", () => {
   it("never turns a task the first cancel already ended into INTERRUPTED", async () => {
-    const { db, handler, workspaceId, taskOperationId, firstCancelId, operation, retry } = await stuckCancel();
+    const { db, handler, workspaceId, firstCancelId, operation, retry } = await stuckCancel();
     const secondCancelId = (await retry()).body.cancelOperationId as string;
     await finishOperation(handler, db, workspaceId, firstCancelId, "SUCCEEDED");
     expect(operation()).toMatchObject({ status: "CANCELLED" });
@@ -109,7 +109,6 @@ describe("the retried cancel's result (issue 195)", () => {
     expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${secondCancelId}`)).toMatchObject({ status: "FAILED" });
     expect(operation()).toMatchObject({ status: "CANCELLED" });
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "READY" });
-    expect(taskOperationId).toBeDefined();
   });
 
   it("frees the workspace when the retried cancel fails and leaves the task INTERRUPTED but holding it", async () => {

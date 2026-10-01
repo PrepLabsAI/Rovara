@@ -210,6 +210,41 @@ describe("a stuck cancel whose compute is alive", () => {
   });
 });
 
+describe("a retried cancel that failed", () => {
+  it("frees the workspace its INTERRUPTED task still holds, only after the retry limit", async () => {
+    const { db, sweep, logs } = setup();
+    const task = seedTask(db, "INTERRUPTED", 1, { cancelRetriedAt: minutesAgo(10) });
+    const candidate = [{ workspaceId: task.workspaceId, compute: "alive" as const }];
+    expect(await sweep(candidate)).toEqual(empty);
+    expect(task.meta()).toMatchObject({ status: "BUSY", activeOperationId: task.operationId });
+    expect(await sweep(candidate, minutesLater(31))).toEqual({ ...empty, interrupted: [task.operationId] });
+    expect(task.operation()).toMatchObject({ status: "INTERRUPTED" });
+    expect(task.meta()).toMatchObject({ status: "READY" });
+    expect(task.meta()).not.toHaveProperty("activeOperationId");
+    expect(logs).toEqual([{ event: "stuck_cancel.released", workspaceId: task.workspaceId, operationId: task.operationId }]);
+  });
+
+  it("never frees one the sweep did not retry", async () => {
+    const { db, sweep } = setup();
+    const task = seedTask(db, "INTERRUPTED", 600);
+    expect(await sweep([{ workspaceId: task.workspaceId, compute: "alive" }, { workspaceId: task.workspaceId, compute: "gone" }])).toEqual(empty);
+    expect(task.meta()).toMatchObject({ status: "BUSY", activeOperationId: task.operationId });
+  });
+
+  it("logs a release that lost a race, and does not count it", async () => {
+    const { db, logs } = setup();
+    const task = seedTask(db, "INTERRUPTED", 40, { cancelRetriedAt: minutesAgo(40) });
+    const send = db.send;
+    const racing = { ...db, send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+      if (command.constructor.name === "TransactWriteCommand") db.set({ ...task.meta(), activeOperationId: randomUUID() });
+      return send(command);
+    } } as unknown as FakeDynamoDb;
+    const result = await sweepStuckCancels({ client: racing, tableName: "state", log: (entry) => { logs.push(entry); } }, [{ workspaceId: task.workspaceId, compute: "alive" }], NOW);
+    expect(result).toEqual(empty);
+    expect(logs).toEqual([{ event: "stuck_cancel.skipped", workspaceId: task.workspaceId, operationId: task.operationId, reason: "changed" }]);
+  });
+});
+
 describe("what the sweep never touches", () => {
   it("a cancel still within the limit, whatever the compute", async () => {
     const { db, sweep, retryCancel } = setup();

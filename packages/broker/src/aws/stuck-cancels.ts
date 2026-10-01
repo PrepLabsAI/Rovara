@@ -16,8 +16,9 @@
 // tool started (a developer task) keeps today's lost-compute rule only: ended when its compute is
 // gone, never retried or interrupted while its compute is alive.
 //
-// Every write is conditioned on the operation still being CANCEL_REQUESTED under the fence read,
-// and on the workspace still being held by it, so a cancel result that lands first stands.
+// Every write is conditioned on the operation still being in the state read (CANCEL_REQUESTED, or
+// for a release INTERRUPTED with the sweep's retry recorded) under the fence read, and on the
+// workspace still being held by it, so a cancel result that lands first stands.
 import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { taskPointerKey } from "../developer/task-records.js";
 
@@ -100,8 +101,10 @@ async function settle(
   const operation = await get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` }) as StuckOperation | undefined;
   // The retried cancel failed (the worker no longer knew the task): the result marked the task
   // INTERRUPTED but, as for any failed cancel, left it holding the workspace. Only an operation
-  // this sweep retried is freed so; nothing more can finish it.
+  // this sweep retried is freed so, and only after the retry limit, as a stuck retry would be.
   if (operation?.status === "INTERRUPTED" && typeof operation.cancelRetriedAt === "string" && typeof operation.fence === "number") {
+    const changedAt = Math.max(Date.parse(operation.cancelRetriedAt), typeof operation.updatedAt === "string" ? Date.parse(operation.updatedAt) : 0);
+    if (!(at.getTime() - changedAt > STUCK_CANCEL_RETRY_MS)) return;
     if (await release(dependencies, { workspaceId, operationId }, operation, at)) {
       result.interrupted.push(operationId);
       log({ event: "stuck_cancel.released", workspaceId, operationId });
