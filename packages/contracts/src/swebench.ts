@@ -38,7 +38,7 @@ const INSTANCE_IDS: Record<SwebenchFamily, RegExp> = { swebench: SWEBENCH_INSTAN
 
 export const SwebenchInstanceIdSchema = z.string().max(200).refine(
   (value) => Object.values(INSTANCE_IDS).some((pattern) => pattern.test(value)),
-  "not a SWE-bench instance ID",
+  "not an eval instance ID",
 );
 
 /** Whether an instance ID is written as the dataset's family writes them. */
