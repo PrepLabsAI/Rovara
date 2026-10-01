@@ -1,4 +1,5 @@
 import { SlackRequestMessageSchema, type SlackRequestMessage } from "@agentx/contracts";
+import { HANDOFF_MILLISECONDS, TurnHandedOffError } from "./interrupted-turn.js";
 import type { ServiceLog } from "./processor.js";
 
 export interface QueueMessage {
@@ -21,16 +22,43 @@ export interface ConsumerOptions {
   maxReceiveCount: number;
   visibilitySeconds: number;
   heartbeatMilliseconds: number;
+  /** Stops the consumer: no new receive or message starts, and running turns get until the hand-off deadline. */
   signal: AbortSignal;
+  /** Issue 157: how long after the stop a running turn may finish before it is handed off. */
+  handoffMilliseconds?: number;
   log?: ServiceLog;
 }
 
-export type RequestHandler = (message: SlackRequestMessage, context: { finalAttempt: boolean; queuedBehind?: number; redelivered?: boolean }) => Promise<void>;
+export type RequestHandler = (message: SlackRequestMessage, context: {
+  finalAttempt: boolean;
+  queuedBehind?: number;
+  redelivered?: boolean;
+  /** Issue 157: aborted at the hand-off deadline after the stop. */
+  handoff?: AbortSignal;
+}) => Promise<void>;
+
+type GroupOptions = Pick<ConsumerOptions, "maxReceiveCount" | "visibilitySeconds" | "heartbeatMilliseconds"> & {
+  /** Once aborted, a later message of the group is released rather than started. */
+  stop?: AbortSignal;
+  handoff?: AbortSignal;
+  /** How long a release waits for a heartbeat already sent. Default 5 seconds. */
+  beatWaitMilliseconds?: number;
+};
 
 // Each Slack thread is one FIFO message group: its messages run one at a time, and different threads run in parallel.
 export async function runConsumer(queue: QueueClient, handle: RequestHandler, options: ConsumerOptions): Promise<void> {
   const log: ServiceLog = options.log ?? (() => undefined);
   const active = new Set<Promise<void>>();
+  // Issue 157: the hand-off deadline starts with the stop, and sits under Fargate's 120-second stopTimeout.
+  const handoff = new AbortController();
+  let handoffTimer: ReturnType<typeof setTimeout> | undefined;
+  const startHandoffClock = () => {
+    handoffTimer = setTimeout(() => handoff.abort(), options.handoffMilliseconds ?? HANDOFF_MILLISECONDS);
+    handoffTimer.unref?.();
+  };
+  if (options.signal.aborted) startHandoffClock();
+  else options.signal.addEventListener("abort", startHandoffClock, { once: true });
+  const groupOptions: GroupOptions = { ...options, stop: options.signal, handoff: handoff.signal };
   while (!options.signal.aborted) {
     if (active.size >= options.concurrency) {
       await Promise.race(active);
@@ -44,24 +72,38 @@ export async function runConsumer(queue: QueueClient, handle: RequestHandler, op
       await delay(5_000, options.signal);
       continue;
     }
+    // The receive is never aborted: SQS may already have taken the messages, and an aborted
+    // request would leave them hidden for the whole visibility timeout. What it returns after the
+    // stop is released instead.
+    if (options.signal.aborted) {
+      await release(queue, messages, "stopping", log);
+      break;
+    }
     for (const group of groupMessages(messages)) {
-      const task: Promise<void> = processGroup(queue, handle, group, options, log).finally(() => active.delete(task));
+      const task: Promise<void> = processGroup(queue, handle, group, groupOptions, log).finally(() => active.delete(task));
       active.add(task);
     }
   }
   await Promise.allSettled(active);
+  clearTimeout(handoffTimer);
+  options.signal.removeEventListener("abort", startHandoffClock);
 }
 
 export async function processGroup(
   queue: QueueClient,
   handle: RequestHandler,
   group: readonly QueueMessage[],
-  options: Pick<ConsumerOptions, "maxReceiveCount" | "visibilitySeconds" | "heartbeatMilliseconds">,
+  options: GroupOptions,
   log: ServiceLog,
 ): Promise<void> {
-  for (const entry of group) {
+  for (const [index, entry] of group.entries()) {
+    if (options.stop?.aborted === true) {
+      await release(queue, group.slice(index), "stopping", log);
+      return;
+    }
+    let beat: Promise<void> | undefined;
     const heartbeat = setInterval(() => {
-      queue.extendVisibility(entry.receiptHandle, options.visibilitySeconds).catch((error: unknown) => {
+      beat = queue.extendVisibility(entry.receiptHandle, options.visibilitySeconds).catch((error: unknown) => {
         log("queue.heartbeat_failed", { errorName: error instanceof Error ? error.name : "unknown" });
       });
     }, options.heartbeatMilliseconds);
@@ -77,10 +119,19 @@ export async function processGroup(
           // member was told "Working on it now" for that attempt, so a fresh one says so again rather
           // than restarting silently.
           ...(entry.receiveCount > 1 ? { redelivered: true } : {}),
+          ...(options.handoff === undefined ? {} : { handoff: options.handoff }),
         });
       }
       await queue.delete(entry.receiptHandle);
     } catch (error) {
+      if (error instanceof TurnHandedOffError) {
+        // Issue 157: the new task takes this and the rest of the thread now, in order. The heartbeat
+        // stops first, and one already sent lands first, so none can hide a released message again.
+        clearInterval(heartbeat);
+        if (beat !== undefined) await Promise.race([beat, pause(options.beatWaitMilliseconds ?? 5_000)]);
+        await release(queue, group.slice(index), "handed_off", log);
+        return;
+      }
       // Leave this and later messages of the thread in flight; SQS redelivers them in order after the visibility timeout.
       log("message.retry_scheduled", {
         receiveCount: entry.receiveCount,
@@ -91,6 +142,19 @@ export async function processGroup(
       clearInterval(heartbeat);
     }
   }
+}
+
+/** Makes the messages visible again at once, so another task receives them; one failure does not stop the rest. */
+async function release(queue: QueueClient, messages: readonly QueueMessage[], reason: "stopping" | "handed_off", log: ServiceLog): Promise<void> {
+  if (messages.length === 0) return;
+  for (const message of messages) {
+    try {
+      await queue.extendVisibility(message.receiptHandle, 0);
+    } catch (error) {
+      log("message.release_failed", { errorName: error instanceof Error ? error.name : "unknown" });
+    }
+  }
+  log("message.released", { reason, count: messages.length });
 }
 
 function groupMessages(messages: readonly QueueMessage[]): QueueMessage[][] {
@@ -109,6 +173,12 @@ function parseJson(value: string): unknown {
   } catch {
     return undefined;
   }
+}
+
+function pause(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, milliseconds).unref?.();
+  });
 }
 
 function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
