@@ -74,6 +74,11 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
         ...(result.error === undefined ? {} : { error: result.error }),
       };
     },
+    async cancelOperation(workspaceId, operationId) {
+      const answer = await client(workspaceId).cancelOperation({ workspaceId, operationId });
+      // A duplicate names the target, which had already finished; otherwise a cancel was queued.
+      return answer.duplicate ? { outcome: "finished", status: answer.status } : { outcome: "requested" };
+    },
     async createConversation(workspaceId) {
       return (await client(workspaceId).createConversation()).id;
     },

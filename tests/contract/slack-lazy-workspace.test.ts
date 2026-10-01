@@ -124,7 +124,7 @@ function members(db: ReturnType<typeof createBroker>["db"]) {
 }
 
 describe("preparing a thread's compute on first use", () => {
-  it("prepares once, charges the member who asked, and pins the revision the thread started with", async () => {
+  it("prepares once, charges the member who asked, and builds from the latest revision (#12)", async () => {
     const { db, handler } = createBroker();
     await registerSlackProject(handler);
     const workspaceId = (await lazyEnsureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
@@ -136,12 +136,12 @@ describe("preparing a thread's compute on first use", () => {
     const result = SlackThreadPrepareResultSchema.parse(prepared.body);
     expect(result).toEqual({ outcome: "WORKSPACE", workspaceId, status: "PREPARING", operationId: expect.any(String) as string, created: true });
     const operationId = (result as { operationId: string }).operationId;
-    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARING", activeOperationId: operationId, fence: 1, projectRevision: 1 });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARING", activeOperationId: operationId, fence: 1, projectRevision: 2 });
     expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)).toMatchObject({
       kind: "prepare", status: "ACCEPTED", fence: 1, requestedBy: { teamId: SLACK_TEAM, userId: bob },
     });
     const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === operationId)[0];
-    expect((outbox?.invocation as { payload: { project: { revision: number } } }).payload.project.revision).toBe(1);
+    expect(outbox?.invocation).toMatchObject({ projectRevision: 2, payload: { project: { revision: 2 } } });
     expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${bob}`)).toMatchObject({ count: 1, threads: [threadOne] });
     expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${pratik}`)).toBeUndefined();
     expect(db.get(`SLACK_LIMIT#${SLACK_TEAM}`, "ORGANIZATION")).toMatchObject({ count: 1 });
@@ -378,6 +378,59 @@ describe("preparing a thread: authorization and the thread record", () => {
     expect(refused.status).toBe(409);
     expect(refused.body.error).toEqual({ code: "WORKSPACE_BUSY", message: "thread workspace preparation conflicted with another request; retry" });
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "UNPREPARED", fence: 0 });
+    expect(db.find((item) => item.entityType === "OPERATION")).toHaveLength(0);
+    expect(db.find((item) => item.entityType === "OUTBOX")).toHaveLength(0);
+    expect(db.find((item) => item.entityType === "SLACK_LIMIT")).toHaveLength(0);
+  });
+});
+
+describe("the revision a thread's first preparation uses (#12, first slice)", () => {
+  function prepareInvocations(db: ReturnType<typeof createBroker>["db"]) {
+    return db.find((item) => item.entityType === "OUTBOX")
+      .map((item) => item.invocation as { kind: string; projectRevision: number; payload: { project: { revision: number } } })
+      .filter((invocation) => invocation.kind === "prepare")
+      .map((invocation) => [invocation.projectRevision, invocation.payload.project.revision]);
+  }
+
+  it("retries a failed preparation from the revision it first prepared, not a newer one", async () => {
+    const { db, handler } = createBroker();
+    await registerSlackProject(handler);
+    const workspaceId = (await lazyEnsureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+    await registerSlackProject(handler, { revision: 2, bind: false });
+    const prepared = await prepareThread(handler, threadOne, pratik);
+    await finishOperation(handler, db, workspaceId, prepared.body.operationId as string, "FAILED");
+    await registerSlackProject(handler, { revision: 3, bind: false });
+
+    const retried = await lazyEnsureWorkspace(handler, threadOne, pratik);
+    expect(retried.body).toMatchObject({ workspaceId, status: "PREPARING", created: false, settingsRevision: 3 });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARING", projectRevision: 2 });
+    expect(prepareInvocations(db)).toEqual([[2, 2], [2, 2]]);
+  });
+
+  it("prepares from the latest revision when an older service reaches the thread", async () => {
+    const { db, handler } = createBroker();
+    await registerSlackProject(handler);
+    const workspaceId = (await lazyEnsureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+    await registerSlackProject(handler, { revision: 2, bind: false });
+    const older = await ensureWorkspace(handler, threadOne, bob);
+    expect(older.body).toMatchObject({ workspaceId, status: "PREPARING", created: true, orchestratorInstructions: "Delegate work (revision 2)." });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARING", projectRevision: 2 });
+    expect(prepareInvocations(db)).toEqual([[2, 2]]);
+  });
+
+  it("leaves the thread unprepared and uncharged when the latest revision cannot be built", async () => {
+    const { db, handler } = createBroker();
+    await registerSlackProject(handler);
+    const workspaceId = (await lazyEnsureWorkspace(handler, threadOne, pratik)).body.workspaceId as string;
+    await registerSlackProject(handler, { revision: 2, bind: false });
+    // A stored revision whose runtime no longer matches the workspace's.
+    const latest = db.get("PROJECT#payments", `REV#${"2".padStart(12, "0")}`)!;
+    latest.runtimeBinding = { ...(latest.runtimeBinding as Record<string, unknown>), deploymentMode: "demo-microvm" };
+
+    const refused = await prepareThread(handler, threadOne, pratik);
+    expect(refused.status).toBe(400);
+    expect(refused.body.error).toMatchObject({ code: "CONFIG_INVALID" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "UNPREPARED", fence: 0, projectRevision: 1, activeOperationId: null });
     expect(db.find((item) => item.entityType === "OPERATION")).toHaveLength(0);
     expect(db.find((item) => item.entityType === "OUTBOX")).toHaveLength(0);
     expect(db.find((item) => item.entityType === "SLACK_LIMIT")).toHaveLength(0);

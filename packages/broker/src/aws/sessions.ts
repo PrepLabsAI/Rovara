@@ -548,7 +548,11 @@ export async function workspaceBinding(
   tableName: string,
   workspaceId: string,
 ): Promise<Ec2RuntimeBinding | undefined> {
-  const workspace = (await documentClient.send(new GetCommand({ TableName: tableName, Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" } }))).Item;
+  // Strongly consistent: a lazy Slack thread's first preparation moves the record to the latest
+  // revision (#12) just before this runs, and a stale read would size and place compute from the old one.
+  const workspace = (await documentClient.send(new GetCommand({
+    TableName: tableName, Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" }, ConsistentRead: true,
+  }))).Item;
   if (workspace?.deploymentMode !== "ec2-ebs" || typeof workspace.projectName !== "string" || typeof workspace.projectRevision !== "number") return undefined;
   const project = (await documentClient.send(new GetCommand({
     TableName: tableName,

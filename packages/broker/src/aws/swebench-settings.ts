@@ -1,4 +1,5 @@
 import {
+  agentXError,
   SWEBENCH_SETTING_PARAMETERS,
   SwebenchSettingsSchema,
   WORKER_SETTING_PARAMETERS,
@@ -31,11 +32,12 @@ export async function swebenchDeploymentFromParameters(
   const settingsValue = values.get(names.settings);
   const runnerImage = values.get(names.runnerImage);
   if (settingsValue === undefined || runnerImage === undefined || runnerImage === "none") return undefined;
-  if (!ECR_DIGEST_IMAGE.test(runnerImage)) throw new Error(`${names.runnerImage} must be an ECR image pinned by digest`);
-  const settings = SwebenchSettingsSchema.parse(JSON.parse(settingsValue));
+  // #48 review: AgentXErrors, so the broker's catch-all passes these operator fixes on in its answer.
+  if (!ECR_DIGEST_IMAGE.test(runnerImage)) throw agentXError("RUNTIME_UNAVAILABLE", `${names.runnerImage} must be an ECR image pinned by digest`);
+  const settings = parseSettings(settingsValue, names.settings);
   const provider = values.get(names.modelProvider);
   const modelId = values.get(names.modelId);
-  if (!provider || !modelId) throw new Error(`${names.modelProvider} and ${names.modelId} are required for SWE-bench runs`);
+  if (!provider || !modelId) throw agentXError("RUNTIME_UNAVAILABLE", `${names.modelProvider} and ${names.modelId} are required for SWE-bench runs`);
   const environment: SwebenchLaunch["environment"] = {};
   const retention = values.get(names.promptCacheRetention);
   if (retention === "short" || retention === "long") environment.PI_CACHE_RETENTION = retention;
@@ -44,4 +46,13 @@ export async function swebenchDeploymentFromParameters(
   const providers = values.get(names.openRouterProviders);
   if (providers && providers !== "none") environment.AGENTX_OPENROUTER_PROVIDERS = providers;
   return { settings, runnerImage, defaultModel: { provider, modelId }, environment };
+}
+
+/** The stored settings, or a refusal naming the parameter; the parser's own words would quote it. */
+function parseSettings(value: string, parameter: string): SwebenchDeployment["settings"] {
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { parsed = undefined; }
+  const settings = SwebenchSettingsSchema.safeParse(parsed);
+  if (!settings.success) throw agentXError("RUNTIME_UNAVAILABLE", `${parameter} is not valid SWE-bench settings JSON; install the eval stack again`);
+  return settings.data;
 }
