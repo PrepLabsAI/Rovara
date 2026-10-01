@@ -288,6 +288,12 @@ describe("the agent's limits (spec 043 FR-013)", () => {
     expect(observed.aborted).toBe(true);
   });
 
+  it("does not call a run a model error when a failed call was retried and the agent went on to finish", async () => {
+    const { outcome } = await agent({ events: [assistantEnd("error", "OpenRouter request failed; rate limited; wait before retrying"), assistantEnd()] });
+    expect(outcome.stopReason).toBe("finished");
+    expect(outcome.detail).toBeUndefined();
+  });
+
   it("reports a failed model call", async () => {
     const { outcome } = await agent({ events: [assistantEnd("error", "throttled by Bedrock")] });
     expect(outcome).toMatchObject({ stopReason: "model_error", detail: "throttled by Bedrock" });
