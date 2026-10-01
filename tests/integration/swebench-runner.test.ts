@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { cp, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -7,7 +7,8 @@ import { describe, expect, it } from "vitest";
 import type { SwebenchRunnerConfig, SwebenchRunResult } from "@agentx/contracts";
 import type { PiSessionAdapter, PiSessionHandle } from "../../packages/worker/src/pi-session.js";
 import { runSwebenchAgent } from "../../packages/worker/src/swebench/agent.js";
-import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import { startTaskContainer, type DockerCli } from "../../packages/worker/src/swebench/containers.js";
+import { offlineSettings } from "../../packages/worker/src/swebench/offline.js";
 import { loadSwebenchInstance, type SwebenchInstance } from "../../packages/worker/src/swebench/dataset.js";
 import { parseHarnessReport } from "../../packages/worker/src/swebench/grade.js";
 import { createGitRunner, predictionPatch, stripHistory, untrackedFiles } from "../../packages/worker/src/swebench/history.js";
@@ -364,7 +365,9 @@ describe("one SWE-bench run (spec 043 FR-008 to FR-015)", () => {
     expect(steps).toEqual(["started", "result"]);
     expect(graded[0]).toContain("\\Z");
     expect([...artifacts.keys()].sort()).toEqual(["harness/report.json", "patch.diff", "result.json", "transcript.jsonl"]);
-    expect(JSON.parse(artifacts.get("result.json")!)).toMatchObject({ resolved: true, artifacts: ["harness/report.json", "patch.diff", "transcript.jsonl"] });
+    expect(JSON.parse(artifacts.get("result.json")!)).toMatchObject({
+      resolved: true, offlineSettings: ["astropy-iers-offline"], artifacts: ["harness/report.json", "patch.diff", "transcript.jsonl"],
+    });
     const container = `agentx-swebench-${RUN_ID}`;
     const started = calls.find((call) => call[0] === "run")!;
     expect(started).toEqual(expect.arrayContaining(["--network", "none", "--platform", "linux/amd64", "--name", container]));
@@ -397,3 +400,34 @@ describe("one SWE-bench run (spec 043 FR-008 to FR-015)", () => {
     expect(await readFile(join(rootPath, RUN_ID, ".agentx", "swebench-shell.sh"), "utf8").catch(() => "absent")).toBe("absent");
   });
 });
+
+describe("the offline data settings (spec 043 FR-018)", () => {
+  it("puts a pytest plugin on every shell command's path, outside the repository", async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), "agentx-swebench-offline-"));
+    await mkdir(join(rootPath, ".agentx"), { recursive: true });
+    const { docker, calls } = fakeDocker(rootPath);
+    await startTaskContainer(docker, { image: "swebench/x:latest", name: "task", rootPath, testbedHost: join(rootPath, "testbed") });
+    const shell = await readFile(join(rootPath, ".agentx", "swebench-shell.sh"), "utf8");
+    const plugin = join(rootPath, ".agentx", "python");
+    expect(shell).toContain(`export PYTHONPATH="${plugin}\${PYTHONPATH:+:$PYTHONPATH}"`);
+    expect(shell).toContain('export PYTEST_ADDOPTS="-p agentx_offline${PYTEST_ADDOPTS:+ $PYTEST_ADDOPTS}"');
+    // After conda's activation, which would otherwise be the last word on the environment.
+    expect(shell.indexOf("PYTEST_ADDOPTS")).toBeGreaterThan(shell.indexOf("conda activate testbed"));
+    const source = await readFile(join(plugin, "agentx_offline.py"), "utf8");
+    expect(source).toContain("def pytest_configure(config):");
+    expect(source).toContain("iers.conf.auto_download = False");
+    expect(source).toContain("iers.conf.auto_max_age = None");
+    expect(calls).toHaveLength(1);
+  });
+
+  it("does nothing where astropy is not installed", async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), "agentx-swebench-offline-"));
+    await offlineSettings(rootPath);
+    const plugin = join(rootPath, ".agentx", "python");
+    const result = await run("python3", ["-c", "import agentx_offline; agentx_offline.pytest_configure(None); print('ok')"], {
+      env: { ...process.env, PYTHONPATH: plugin, PYTHONNOUSERSITE: "1" },
+    }).catch((error: unknown) => error as { stdout: string });
+    expect(result.stdout.trim()).toBe("ok");
+  });
+});
+

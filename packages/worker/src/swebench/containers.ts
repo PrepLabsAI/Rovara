@@ -3,6 +3,7 @@ import { writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import { runCollected, type CollectedProcess, type CollectedProcessOptions } from "../collected-process.js";
 import type { ContainerExec } from "../devcontainer.js";
+import { offlineSettings } from "./offline.js";
 
 /** SWE-bench publishes x86 images only (spec 043). */
 export const TASK_PLATFORM = "linux/amd64";
@@ -43,19 +44,22 @@ export async function copyTestbed(docker: DockerCli, image: string, hostFolder: 
  * Starts the task container the agent's shell runs in (FR-009, FR-011): no network, the host copy of
  * /testbed mounted back at /testbed so the image's editable install sees the agent's edits, and the
  * run's root mounted at its own path so the shell's working directory exists in the container.
- * Every shell command starts in the image's `testbed` conda environment, through BASH_ENV.
+ * Every shell command starts in the image's `testbed` conda environment, with the offline data
+ * settings (offline.ts), through BASH_ENV.
  */
 export async function startTaskContainer(
   docker: DockerCli,
   input: { image: string; name: string; rootPath: string; testbedHost: string },
 ): Promise<void> {
   const environmentFile = resolve(input.rootPath, ".agentx", "swebench-shell.sh");
+  const offline = await offlineSettings(input.rootPath);
   await writeFile(environmentFile, [
     "# Sourced by every non-interactive bash in the SWE-bench task container (spec 043).",
     "# In a function, so conda's activate does not read the command's own positional arguments.",
     "__agentx_testbed() { . /opt/miniconda3/bin/activate && conda activate testbed; }",
     "if [ -f /opt/miniconda3/bin/activate ]; then __agentx_testbed; fi",
     "unset -f __agentx_testbed",
+    ...offline,
     "",
   ].join("\n"), { mode: 0o644 });
   await checked(docker, [

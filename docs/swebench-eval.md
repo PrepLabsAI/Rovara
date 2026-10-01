@@ -42,7 +42,9 @@ flowchart LR
 4. The runner loads the instance's row from Hugging Face (`SWE-bench/SWE-bench_Verified` and siblings,
    which name each task's image), pulls the task image, copies its `/testbed` out, removes every ref,
    remote, tag and unreachable object, and starts the task container with no network and the copy
-   mounted back at `/testbed`. The agent works through `docker exec` in the task's conda environment.
+   mounted back at `/testbed`. The agent works through `docker exec` in the task's conda environment, with
+   offline data settings: a pytest plugin stops astropy refreshing its leap-second and IERS tables from the
+   internet, which would otherwise fail untouched tests offline (`offlineSettings` in `result.json`).
 5. The agent stops when it finishes, after 60 minutes, at the channel's cost ceiling, when its cost
    cannot be measured, or at the tool-loop guard. Its diff against the image's HEAD is graded by the
    official harness (`swebench` 5.0.2, installed with uv) in a fresh task container.
