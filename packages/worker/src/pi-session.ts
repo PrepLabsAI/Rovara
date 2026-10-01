@@ -11,6 +11,7 @@ import {
   createWriteToolDefinition,
   DefaultResourceLoader,
   type BashOperations,
+  type BashSpawnContext,
   type ToolDefinition,
   SessionManager,
   type SessionStats,
@@ -19,6 +20,7 @@ import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-be
 import { createModelRuntimeWithFallback } from "@agentx/model-runtime";
 import { agentXError } from "@agentx/contracts";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
+import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import {
   appendRepositoryContextFiles,
   loadRepositoryContextFiles,
@@ -195,10 +197,7 @@ async function createDefaultSession(
       tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
       // A custom tool with a built-in's name replaces it.
       customTools: [
-        // The typed definitions' render callbacks are narrower than customTools' generic slot.
-        ...(input.bashOperations === undefined
-          ? []
-          : [createBashToolDefinition(input.cwd, { operations: input.bashOperations }) as unknown as ToolDefinition]),
+        agentShellTool(input.cwd, input.bashOperations),
         ...(input.devcontainerPaths === undefined ? [] : devcontainerFileTools(input.cwd, input.devcontainerPaths)),
       ],
       resourceLoader,
@@ -220,6 +219,23 @@ async function createDefaultSession(
       subscribe: (listener) => session.subscribe((event) => listener(event)),
       dispose: () => session.dispose(),
     };
+}
+
+/**
+ * The agent's shell: pi's bash tool, in the project's devcontainer when `operations` says so (#121),
+ * with AgentX's git identity in its environment so a commit there works without the agent writing
+ * an identity into the repository (#208).
+ */
+export function agentShellTool(cwd: string, operations?: BashOperations): ToolDefinition {
+  // The typed definition's render callbacks are narrower than customTools' generic slot.
+  return createBashToolDefinition(cwd, {
+    ...(operations === undefined ? {} : { operations }),
+    spawnHook: withAgentXGitIdentity,
+  }) as unknown as ToolDefinition;
+}
+
+function withAgentXGitIdentity(context: BashSpawnContext): BashSpawnContext {
+  return { ...context, env: { ...context.env, ...AGENTX_GIT_IDENTITY_ENVIRONMENT } };
 }
 
 export function executionRoleBedrockProvider(): ReturnType<typeof amazonBedrockProvider> {
