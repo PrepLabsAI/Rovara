@@ -30,16 +30,22 @@ cat > /shims/lsblk <<EOF
 #!/bin/bash
 echo "$name vol0123456789abcdef0"
 EOF
+# The metadata token call fails CURL_FAILURES times before it succeeds.
 cat > /shims/curl <<'EOF'
 #!/bin/bash
 case "$*" in
-  *api/token*) echo token ;;
+  *api/token*)
+    count=$(( $(cat /tmp/curl.count 2>/dev/null || echo 0) + 1 )); echo "$count" > /tmp/curl.count
+    echo "curl token" >> /tmp/calls.log
+    (( count > CURL_FAILURES )) || exit 7
+    echo token ;;
   *placement/region*) echo us-east-1 ;;
   *instance-id*) echo i-0123456789abcdef0 ;;
   *) exit 22 ;;
 esac
 EOF
-printf '#!/bin/bash\necho password\n' > /shims/aws
+# The registry password call fails every time when AWS_FAILS is set.
+printf '#!/bin/bash\necho "aws $*" >> /tmp/calls.log\n[[ -z "$AWS_FAILS" ]] || exit 255\necho password\n' > /shims/aws
 # Docker pull fails DOCKER_PULL_FAILURES times before it succeeds.
 cat > /tmp/docker-shim <<'EOF'
 #!/bin/bash
@@ -124,7 +130,14 @@ function config(overrides: Partial<Ec2WorkerBootConfig> = {}): Ec2WorkerBootConf
   };
 }
 
-interface Faults { dnfFailures?: number | "always"; pullFailures?: number; systemctlFails?: string }
+interface Faults {
+  dnfFailures?: number | "always";
+  pullFailures?: number;
+  curlFailures?: number;
+  awsFails?: boolean;
+  systemctlFails?: string;
+  deadlineSeconds?: number;
+}
 
 async function boot(bootConfig: Ec2WorkerBootConfig, volumeState: "blank" | "existing" | "foreign", faults: Faults = {}) {
   const script = await readFile(new URL("../../packages/worker/ec2/boot.sh", import.meta.url), "utf8");
@@ -135,6 +148,9 @@ async function boot(bootConfig: Ec2WorkerBootConfig, volumeState: "blank" | "exi
     "--env", `DNF_FAILURES=${faults.dnfFailures ?? ""}`,
     "--env", `DOCKER_PULL_FAILURES=${faults.pullFailures ?? 0}`,
     "--env", `SYSTEMCTL_FAILS=${faults.systemctlFails ?? ""}`,
+    "--env", `CURL_FAILURES=${faults.curlFailures ?? 0}`,
+    "--env", `AWS_FAILS=${faults.awsFails ? "1" : ""}`,
+    "--env", `AGENTX_BOOT_DEADLINE_SECONDS=${faults.deadlineSeconds ?? ""}`,
     "--env", `USER_DATA_B64=${userData}`,
     IMAGE, "bash", "-c", HARNESS,
   ], { encoding: "utf8", timeout: 120_000 });
@@ -223,8 +239,37 @@ describe.skipIf(!ENABLED)("EC2 boot script on arm64", () => {
     expect(result.log).toContain("agentx-boot: FAILED: could not install Docker: package download failed after 5 tries");
     expect(result.calls).not.toContain("docker pull");
     expect(result.unit).toBe("");
-    expect(result.count("systemd-run --unit=agentx-boot-failure --collect")).toBe(1);
+    expect(result.count("systemd-run --unit=agentx-boot-failure --collect --property=Type=notify")).toBe(1);
     expect(result.ping).toBe(bootFailedPing("could not install Docker: package download failed after 5 tries"));
+  }, 180_000);
+
+  it("stops retrying at the boot deadline and reports it", async () => {
+    // The first wait (2 or 3 seconds) would pass a 2 second deadline, so the boot fails at once.
+    const result = await boot(config(), "blank", { dnfFailures: "always", deadlineSeconds: 2 });
+    expect(result.exit).not.toBe(0);
+    expect(result.count("dnf install -y docker")).toBe(1);
+    expect(result.sleeps).toEqual([]);
+    expect(result.ping).toBe(bootFailedPing("could not install Docker: package download failed after 1 try, out of time"));
+  }, 180_000);
+
+  it("retries a failing instance metadata read and boots once it succeeds", async () => {
+    const result = await boot(config(), "blank", { curlFailures: 1 });
+    expect(result.exit, result.log).toBe(0);
+    expect(result.count("curl token")).toBe(3);
+    expectBackoff(result.sleeps, 1);
+    expect(result.log).toMatch(/could not read the instance's placement\/region from instance metadata \(try 1 of 5\); retrying in [23]s/);
+    expect(result.env).toContain("AWS_REGION=us-east-1\n");
+    expect(result.unit).toContain("awslogs-stream=");
+  }, 180_000);
+
+  it("gives up on the registry login after 5 tries and reports why on /ping", async () => {
+    const result = await boot(config(), "blank", { awsFails: true });
+    expect(result.exit).not.toBe(0);
+    expect(result.count("aws ecr get-login-password --region us-east-1")).toBe(5);
+    expectBackoff(result.sleeps, 4);
+    expect(result.calls).not.toContain("docker pull");
+    expect(result.log).not.toContain("password\n");
+    expect(result.ping).toBe(bootFailedPing("could not log in to the worker image registry after 5 tries"));
   }, 180_000);
 
   it("retries a failing image pull and boots once it succeeds", async () => {
@@ -285,7 +330,7 @@ describe.skipIf(!ENABLED)("EC2 boot script on arm64", () => {
     expect(result.exit).not.toBe(0);
     expect(result.log).toMatch(/was not attached within 4s/);
     // Reported once, although fail ran in a command substitution's subshell.
-    expect(result.count("systemd-run --unit=agentx-boot-failure --collect")).toBe(1);
+    expect(result.count("systemd-run --unit=agentx-boot-failure --collect --property=Type=notify")).toBe(1);
     expect(result.ping).toBe(bootFailedPing("volume vol-0fffffffffffffff0 was not attached within 4s"));
   }, 180_000);
 });

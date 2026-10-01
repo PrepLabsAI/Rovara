@@ -74,17 +74,25 @@ function bootFailureReason(reason: unknown): string {
 
 /**
  * What MarkFailed receives for a reported boot failure is ProbePing's Catch text: the Lambda error's
- * type, then its whole payload as JSON, stack trace included. This keeps only the reason.
+ * type, then its payload as JSON. This keeps only the reason, and never passes the payload on, even
+ * when MarkFailed's 4000 character cut leaves it incomplete.
  */
 function plainFailure(error: string): string {
   const prefix = `${BOOT_FAILED_ERROR}: `;
   if (!error.startsWith(prefix)) return error;
+  const cause = error.slice(prefix.length);
+  let message: unknown;
   try {
-    const cause = JSON.parse(error.slice(prefix.length)) as { errorMessage?: unknown };
-    return typeof cause.errorMessage === "string" ? `worker boot failed: ${bootFailureReason(cause.errorMessage)}` : error;
+    message = (JSON.parse(cause) as { errorMessage?: unknown }).errorMessage;
   } catch {
-    return error;
+    const quoted = /"errorMessage":("(?:[^"\\]|\\.)*")/.exec(cause)?.[1];
+    try {
+      message = quoted === undefined ? undefined : JSON.parse(quoted);
+    } catch {
+      message = undefined;
+    }
   }
+  return typeof message === "string" ? `worker boot failed: ${bootFailureReason(message)}` : "worker boot failed (no reason recorded)";
 }
 
 /** GET on a worker's /ping. Any HTTP status: a failed boot answers 503 with its reason. */
@@ -139,6 +147,8 @@ export function createSessionStepsHandler(dependencies: SessionStepsDependencies
           // window would only make the user wait for the same failure.
           const failure = new Error(bootFailureReason(ping?.reason));
           failure.name = BOOT_FAILED_ERROR;
+          // The stack says nothing useful here and would only fill the Catch text.
+          failure.stack = `${BOOT_FAILED_ERROR}: ${failure.message}`;
           throw failure;
         }
         return { healthy: status === "Healthy" || status === "HealthyBusy", status: status ?? "Unreachable" };

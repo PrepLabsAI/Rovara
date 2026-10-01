@@ -24,8 +24,11 @@ function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "
       modelProvider: "amazon-bedrock",
       modelId: "amazon.nova-pro-v1:0",
       promptCacheRetention: "long",
+      openRouterSecretArn: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/openrouter-AbCdEf",
+      openRouterProviders: "anthropic,amazon-bedrock",
     }),
-    invokePublicKey: async () => "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE",
+    // Full length, as KMS returns a P-256 public key, so the user data size check is realistic.
+    invokePublicKey: async () => `MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE${"A".repeat(88)}`,
     bootScript: () => bootScript,
     controlPlaneUrl: "https://abc.execute-api.us-east-1.amazonaws.com",
     logGroupName: "/agentx/production/worker",
@@ -81,12 +84,12 @@ describe("session steps", () => {
     const { handler } = setup(async () => ({ status: "BootFailed", reason: "could not install Docker: package download failed after 5 tries" }));
     const probe = handler({ action: "probePing", privateIp: "10.42.128.10" });
     await expect(probe).rejects.toThrow("could not install Docker: package download failed after 5 tries");
-    await expect(probe).rejects.toMatchObject({ name: "WorkerBootFailed" });
+    await expect(probe).rejects.toMatchObject({ name: "WorkerBootFailed", stack: "WorkerBootFailed: could not install Docker: package download failed after 5 tries" });
   });
 
   it("keeps a reported boot failure reason to one short line of plain text", async () => {
     const { handler } = setup(async () => ({ status: "BootFailed", reason: `bad\u0000\nline\t${"x".repeat(1_000)}` }));
-    const error = await handler({ action: "probePing", privateIp: "10.42.128.10" }).catch((failure: unknown) => failure as Error);
+    const error: Error = await handler({ action: "probePing", privateIp: "10.42.128.10" }).then(() => new Error("the probe did not fail"), (failure: unknown) => failure as Error);
     expect(error).toMatchObject({ name: "WorkerBootFailed" });
     expect(error.message.startsWith("bad line x")).toBe(true);
     expect(error.message).toHaveLength(300);
@@ -103,8 +106,11 @@ describe("session steps", () => {
     // Any other failure text is passed on as it is.
     await handler({ action: "markFailed", workspaceId, generation: 1, error: "worker did not answer /ping within 10 minutes" });
     expect(sessions.markFailed).toHaveBeenLastCalledWith(workspaceId, 1, "worker did not answer /ping within 10 minutes");
+    // MarkFailed cuts its input at 4000 characters, which can leave the payload incomplete.
+    await handler({ action: "markFailed", workspaceId, generation: 1, error: `WorkerBootFailed: ${cause.slice(0, 120)}` });
+    expect(sessions.markFailed).toHaveBeenLastCalledWith(workspaceId, 1, "worker boot failed: could not install Docker: package download failed after 5 tries");
     await handler({ action: "markFailed", workspaceId, generation: 1, error: "WorkerBootFailed: not json" });
-    expect(sessions.markFailed).toHaveBeenLastCalledWith(workspaceId, 1, "WorkerBootFailed: not json");
+    expect(sessions.markFailed).toHaveBeenLastCalledWith(workspaceId, 1, "worker boot failed (no reason recorded)");
   });
 
   it("reads the worker's status, and a failed boot's reason, from /ping whatever the HTTP status", async () => {
