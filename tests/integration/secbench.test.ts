@@ -1,5 +1,7 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { datasetRevision, loadSwebenchInstance } from "../../packages/worker/src/swebench/dataset.js";
+import { SECBENCH_PATCH_TEMPLATE, SECBENCH_PATCH_TEMPLATE_SHA256, secbenchPatchPrompt } from "../../packages/worker/src/swebench/secbench-prompt.js";
 
 /** A SEC-bench row; the hidden fields hold markers that must never reach the agent. */
 const SECBENCH_ROW = {
@@ -57,5 +59,30 @@ describe("loading a SEC-bench instance (spec 045 FR-003)", () => {
     const down = (async () => new Response("", { status: 503 })) as unknown as typeof fetch;
     expect(await datasetRevision("SEC-bench/SEC-bench", { fetch: ok })).toBe("11422e774857272b8f5460c699dca7a64046308b");
     expect(await datasetRevision("SEC-bench/SEC-bench", { fetch: down })).toBeUndefined();
+  });
+});
+
+describe("the SEC-bench patch prompt (spec 045 FR-005)", () => {
+  it("bundles SEC-bench's template byte for byte", () => {
+    expect(SECBENCH_PATCH_TEMPLATE_SHA256).toBe("0ec4ffc90183fce6e5497b052146d8893b3bed90b8f311351dbd1cc70b766bab");
+    expect(createHash("sha256").update(SECBENCH_PATCH_TEMPLATE, "utf8").digest("hex")).toBe(SECBENCH_PATCH_TEMPLATE_SHA256);
+  });
+
+  it("puts the bug description and sanitizer report after AgentX's preamble", () => {
+    const prompt = secbenchPatchPrompt(SECBENCH_ROW, "/mnt/eval/r1/testbed");
+    expect(prompt.startsWith("You are working in the repository at /mnt/eval/r1/testbed (also /src/njs in the shell).")).toBe(true);
+    expect(prompt).toContain("no network access");
+    expect(prompt).toContain(`<issue_description>\n${SECBENCH_ROW.bug_description}\n---\n${SECBENCH_ROW.sanitizer_report}\n</issue_description>`);
+    expect(prompt).not.toMatch(/\{\{|\}\}/);
+  });
+
+  it("never passes the gold patch, the bug report or the expected exit code", () => {
+    const prompt = secbenchPatchPrompt(SECBENCH_ROW, "/mnt/eval/r1/testbed");
+    for (const hidden of ["MARKER-GOLD-PATCH", "MARKER-BUG-REPORT", "987654"]) expect(prompt).not.toContain(hidden);
+  });
+
+  it("does not expand template syntax that appears in the row's text", () => {
+    const prompt = secbenchPatchPrompt({ ...SECBENCH_ROW, bug_description: "parser fails on {{ work_dir }}" }, "/h");
+    expect(prompt).toContain("parser fails on {{ work_dir }}");
   });
 });
