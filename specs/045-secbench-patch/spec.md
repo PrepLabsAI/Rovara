@@ -83,10 +83,18 @@ every place a SEC-bench number is shown (thread, site, deck) MUST say "sanitizer
   `SEC-bench/SEC-bench` at a pinned commit, `31eb43485a3de47da260be0f978528b1f2314415` when written), installed with
   uv into a virtualenv, with only the packages the evaluator imports, pinned (`datasets`, `docker`, `jinja2`,
   `loguru`, `rich`, `pydantic`), not the repository's `requirements.txt`, which pulls `smolagents@main` unpinned.
+  The repository is not a Python package, so the runner fetches it at the pinned commit (git) and runs it from there.
   The runner writes the prediction as SWE-agent's `preds.json` (`{"<id>": {"model_patch": "<diff>"}}`) and runs
   `python -m secb.evaluator.eval_instances --type patch --agent swea --mode all --split eval --input-dir … --output-dir …`.
   The evaluator starts its own fresh container from the `:patch` image (with Docker's default network, as
-  published), applies the patch, builds, and runs the PoC with a 10-second limit.
+  published), applies the patch, builds, and runs the PoC with a 10-second limit. It bind-mounts a Python temporary
+  directory into that container, and the host's Docker resolves the path, so the runner MUST set `TMPDIR` to a folder
+  under the run's root, which the runner container mounts at its own path (spec 043's arrangement); otherwise the
+  grading container sees an empty `/tmp` and every patch fails to apply.
+- **FR-008a**: Two evaluator failures look like an unresolved patch and MUST instead fail the run: a dataset that did
+  not load (the evaluator logs and continues with no rows, which silently turns `medium` into `strict`; the runner
+  requires its `Loaded 300 instances` log line), and a container that could not be created or pulled (exit code `-1`
+  with a `Failed to` reason). A missing `report_medium.jsonl` or one without the instance also fails the run.
 - **FR-009**: The run is resolved when the evaluator's `medium` report says success, which is the published default.
   The result MUST also record the `strict` and `generous` verdicts, the step that failed (apply, build, PoC), the PoC's
   exit code, and whether a sanitizer report or a timeout was seen. An empty prediction is reported unresolved without
@@ -102,7 +110,7 @@ every place a SEC-bench number is shown (thread, site, deck) MUST say "sanitizer
 ### Limits and infrastructure
 
 - **FR-012**: No new infrastructure. Images are 1 to 1.7 GB compressed, about 4 GB on disk, so one per run fits the
-  150 GiB root volume; the runner removes the task image after grading. Docker Hub is already reachable over HTTPS.
+  150 GiB root volume (each run has its own instance). Docker Hub is already reachable over HTTPS.
   The run fits the two-hour ceiling: setup, the agent's 60 minutes, and grading capped by the evaluator at 10 minutes.
 
 ## Out of Scope
