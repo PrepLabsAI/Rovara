@@ -95,11 +95,11 @@ describe("the devcontainer CLI seam", () => {
   it("passes a project command's env into the devcontainer as --remote-env (#54)", async () => {
     const { cli, calls } = fakeCli();
     await runDevcontainerCommand(cli, target, {
-      cwd: "repo/sample", executable: "npm", args: ["ci"], timeoutSeconds: 60, env: { NODE_ENV: "test", JAVA_OPTS: "-Xmx2g -Da=b=c" },
+      cwd: "repo/sample", executable: "npm", args: ["ci"], timeoutSeconds: 60, env: { NODE_ENV: "test", JAVA_OPTS: "-Xmx2g -Da=b=c", EMPTY_OK: "" },
     });
     expect(calls[0]).toEqual([
       "exec", "--workspace-folder", target.workspaceFolder, "--config", target.configPath,
-      "--remote-env", "NODE_ENV=test", "--remote-env", "JAVA_OPTS=-Xmx2g -Da=b=c",
+      "--remote-env", "NODE_ENV=test", "--remote-env", "JAVA_OPTS=-Xmx2g -Da=b=c", "--remote-env", "EMPTY_OK=",
       "sh", "-c", 'cd -- "$1" && shift && exec "$@"', "sh", "/mnt/workspace/repo/sample", "npm", "ci",
     ]);
   });

@@ -97,15 +97,26 @@ setup:
   `AGENTX_`, `AWS_`, `GIT_`, `LD_`, `DYLD_` or `PI_`. To use a tool that is not on the worker's
   `PATH`, give its full path as `executable`, or set `PATH` in the dev container's own
   configuration.
+- Other names are allowed, including ones the worker image sets, such as `NODE_ENV` and `PORT`,
+  and ones like `NODE_OPTIONS` or `HTTPS_PROXY`. They apply to that one command only.
 
 **`env` is not for secrets.** A registered revision is stored and shown in full, and with a dev
-container the values are on the `devcontainer exec` command line while a command runs. AgentX refuses names that look like
-credentials (for example `GITHUB_TOKEN`, `NPM_TOKEN`, `DB_PASSWORD`, `STRIPE_SECRET_KEY`,
-`OPENAI_API_KEY`). That check is a guard, not a guarantee: keep every secret in a credential
-reference, never in `env`. AgentX error messages name a variable, never its value.
+container the values are on the `devcontainer exec` command line while a command runs. At
+registration AgentX refuses:
 
-A worker that predates `env` refuses a revision that uses it. Roll out the new worker image before
-registering such a revision.
+- names whose last word marks a credential (`TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASS`,
+  `PWD`, `CREDENTIALS`, `CREDS`, `APIKEY`), names ending in `TOKEN`, `SECRET` or `PASSWORD` (such as
+  `PGPASSWORD`), and names with `API_KEY`, `PRIVATE_KEY`, `ACCESS_KEY` or `SECRET_KEY` in them;
+- values that hold a URL with a password (`postgres://user:password@host`) or look like a token.
+
+A name that only mentions such a word earlier, such as `SECRET_NAME` or `SKIP_TOKEN_CHECK`, is
+allowed. These checks are a guard, not a guarantee: keep every secret in a credential reference,
+never in `env`. AgentX error messages name a variable, never its value.
+
+A worker that predates `env` refuses a revision that uses it. Readiness at publish comes from the
+latest revision, even for a workspace prepared from an older one, so a running workspace on an
+old worker image cannot publish once such a revision is registered. Make sure every running
+workspace runs the new worker image before registering a revision that uses `env`.
 
 ### Dev container
 
