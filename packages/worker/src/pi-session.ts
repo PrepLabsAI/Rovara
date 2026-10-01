@@ -147,44 +147,56 @@ export async function openRegisteredWorkspacePiSession(
   return handle;
 }
 
-/** The real session adapter. `modelRuntime` is a test seam: an offline runtime (the faux model) replaces the provider lookup. */
-export function createDefaultPiSessionAdapter(options: { modelRuntime?: ModelRuntime } = {}): PiSessionAdapter {
+/** Resolves the session's model runtime; tests supply an offline one, the worker uses the default. */
+export type PiModelRuntimeResolver = (
+  model: WorkspaceModelConfiguration,
+) => Promise<{ runtime: ModelRuntime; model: WorkspaceModelConfiguration }>;
+
+/** The worker's Pi session adapter. Without `modelRuntime` it resolves the configured model as the worker always has. */
+export function createDefaultPiSessionAdapter(options: { modelRuntime?: PiModelRuntimeResolver } = {}): PiSessionAdapter {
+  const resolveModelRuntime = options.modelRuntime ?? workerModelRuntime;
   return {
     async create(input) {
       return createDefaultSession(
         input,
         SessionManager.create(input.cwd, input.sessionDirectory),
+        resolveModelRuntime,
         input.conversationId,
-        options.modelRuntime,
       );
     },
     async open(input) {
       return createDefaultSession(
         input,
         SessionManager.open(input.sessionFile, input.sessionDirectory, input.cwd),
+        resolveModelRuntime,
         input.conversationId,
-        options.modelRuntime,
       );
     },
   };
 }
 
-const defaultPiSessionAdapter: PiSessionAdapter = createDefaultPiSessionAdapter();
+export const defaultPiSessionAdapter: PiSessionAdapter = createDefaultPiSessionAdapter();
+
+async function workerModelRuntime(
+  configured: WorkspaceModelConfiguration,
+): Promise<{ runtime: ModelRuntime; model: WorkspaceModelConfiguration }> {
+  const resolved = await createModelRuntimeWithFallback(configured, "worker");
+  const modelRuntime = resolved.runtime;
+  if (resolved.model.provider === "amazon-bedrock") {
+    modelRuntime.registerNativeProvider(executionRoleBedrockProvider());
+    await modelRuntime.refresh({ allowNetwork: false, providers: ["amazon-bedrock"] });
+  }
+  return { runtime: modelRuntime, model: resolved.model };
+}
 
 async function createDefaultSession(
   input: PiSessionInput,
   manager: SessionManager,
+  resolveModelRuntime: PiModelRuntimeResolver,
   conversationId?: string,
-  suppliedRuntime?: ModelRuntime,
 ): Promise<PiSessionHandle> {
-    const resolved = suppliedRuntime === undefined
-      ? await createModelRuntimeWithFallback(input.model, "worker")
-      : { runtime: suppliedRuntime, model: input.model };
+    const resolved = await resolveModelRuntime(input.model);
     const modelRuntime = resolved.runtime;
-    if (resolved.model.provider === "amazon-bedrock") {
-      modelRuntime.registerNativeProvider(executionRoleBedrockProvider());
-      await modelRuntime.refresh({ allowNetwork: false, providers: ["amazon-bedrock"] });
-    }
     const model = modelRuntime.getModel(resolved.model.provider, resolved.model.modelId);
     if (!model) {
       throw agentXError(
@@ -194,7 +206,7 @@ async function createDefaultSession(
     }
     const requestedLevel = input.model.thinkingLevel;
     if (!model.reasoning && requestedLevel !== undefined && requestedLevel !== "off") {
-      throw agentXError("CONFIG_INVALID", "the selected OpenRouter model does not support reasoning; set thinkingLevel to off");
+      throw agentXError("CONFIG_INVALID", "the selected model does not support reasoning; set thinkingLevel to off");
     }
     const { resourceLoader, settingsManager } = await createWorkerResources(input);
     const { session } = await createAgentSession({
@@ -224,7 +236,8 @@ async function createDefaultSession(
       getModel: () => ({
         provider: session.model?.provider ?? resolved.model.provider,
         modelId: session.model?.id ?? resolved.model.modelId,
-        // Pi also knows "max", which AgentX does not offer, so a level outside ours is left unrecorded.
+        // Pi also knows "max", which AgentX does not offer: a level outside ours is deliberately left unrecorded
+        // (the key is omitted, never guessed). Only an explicit AgentX level can be requested, so this does not occur today.
         ...(ThinkingLevelSchema.safeParse(session.thinkingLevel).success ? { thinkingLevel: session.thinkingLevel as PiThinkingLevel } : {}),
       }),
       getSessionStats: () => session.getSessionStats(),

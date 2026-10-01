@@ -1,8 +1,6 @@
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxProvider } from "@earendil-works/pi-ai";
-import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { createDefaultPiSessionAdapter, createWorkspacePiSession } from "../../packages/worker/src/pi-session.js";
 import { resolveTaskModel } from "../../packages/worker/src/task-model.js";
@@ -14,7 +12,7 @@ async function open(runtimeModel: { reasoning?: boolean }, model: { provider?: s
   const rootPath = await mkdtemp(join(tmpdir(), "agentx-thinking-"));
   return createWorkspacePiSession(
     { rootPath, model: { provider: FAUX_MODEL.provider, modelId: FAUX_MODEL.modelId, ...model } },
-    createDefaultPiSessionAdapter({ modelRuntime }),
+    createDefaultPiSessionAdapter({ modelRuntime: async (m) => ({ runtime: modelRuntime, model: m }) }),
   );
 }
 
@@ -35,23 +33,23 @@ describe("the worker resolves the thinking level once (spec 053)", () => {
   });
 
   it("refuses a non-off level on a non-reasoning model", async () => {
-    await expect(open({ reasoning: false }, { thinkingLevel: "high" })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    await expect(open({ reasoning: false }, { thinkingLevel: "high" })).rejects.toMatchObject({
+      code: "CONFIG_INVALID", message: "CONFIG_INVALID: the selected model does not support reasoning; set thinkingLevel to off",
+    });
     const session = await open({ reasoning: false }, { thinkingLevel: "off" });
     session.dispose();
   });
 
-  it("gives an OpenRouter selection without a level medium, where Pi's own default was high", async () => {
-    const faux = fauxProvider({ provider: "openrouter", models: [{ id: "qwen/qwen3-coder", reasoning: true }] });
-    const modelRuntime = await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null });
-    modelRuntime.registerNativeProvider(faux.provider);
-    const resolved = resolveTaskModel({ provider: "openrouter", modelId: "qwen/qwen3-coder" }, {});
+  it("resolves a non-OpenRouter, non-reasoning model with no level to off, through resolveTaskModel (the old task-model forced medium)", async () => {
+    const resolved = resolveTaskModel({ provider: FAUX_MODEL.provider, modelId: FAUX_MODEL.modelId }, {});
     expect(resolved).not.toHaveProperty("thinkingLevel");
+    const { modelRuntime } = await fauxModelRuntime({ reasoning: false });
     const rootPath = await mkdtemp(join(tmpdir(), "agentx-thinking-"));
-    const session = await createWorkspacePiSession({ rootPath, model: resolved }, createDefaultPiSessionAdapter({ modelRuntime }));
-    try { expect(session.getModel().thinkingLevel).toBe("medium"); } finally { session.dispose(); }
+    const session = await createWorkspacePiSession({ rootPath, model: resolved }, createDefaultPiSessionAdapter({ modelRuntime: async (m) => ({ runtime: modelRuntime, model: m }) }));
+    try { expect(session.getModel().thinkingLevel).toBe("off"); } finally { session.dispose(); }
   });
 
-  it("records the level the session used in usage telemetry", async () => {
+  it("carries the session-reported level into createTaskUsageTelemetry", async () => {
     const session = await open({ reasoning: true }, {});
     try {
       const usage = createTaskUsageTelemetry(session.getSessionStats(), { ...session.getModel() }, "SUCCEEDED");
