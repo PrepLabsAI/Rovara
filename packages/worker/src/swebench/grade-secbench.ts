@@ -54,17 +54,29 @@ export async function gradeSecbenchPrediction(
   await required(run("uv", ["pip", "install", "--quiet", "--python", resolve(venv, "bin/python"), ...SECBENCH_EVALUATOR_PACKAGES], { timeoutMs: 10 * 60_000 }), "install the evaluator's packages");
 
   await writeFile(resolve(inputDirectory, "preds.json"), JSON.stringify({ [instanceId]: { model_patch: input.patch } }));
+  // The Loaded line is read as the output streams, not from the kept tail: the evaluator then logs
+  // the grading container's whole output, which can push it out of the last 1 MiB (FR-008a).
+  const loaded = loadedLineWatcher();
   const evaluation = await run(resolve(venv, "bin/python"), [
     "-m", "secb.evaluator.eval_instances",
     "--type", "patch", "--agent", "swea", "--mode", "all", "--split", "eval",
     "--input-dir", inputDirectory, "--output-dir", outputDirectory,
-  ], { cwd: evaluator, env: { ...process.env, TMPDIR: temporary, PYTHONPATH: evaluator }, timeoutMs: EVALUATOR_TIMEOUT_MS });
+  ], {
+    cwd: evaluator,
+    // INFO rather than loguru's default DEBUG keeps the evaluator's log to its steps.
+    env: { ...process.env, TMPDIR: temporary, PYTHONPATH: evaluator, LOGURU_LEVEL: "INFO" },
+    timeoutMs: EVALUATOR_TIMEOUT_MS,
+    onStdout: (data) => loaded.add("stdout", data),
+    onStderr: (data) => loaded.add("stderr", data),
+  });
   const evaluatorLog = resolve(directory, "evaluator.log");
   await writeFile(evaluatorLog, `${evaluation.stdout}\n${evaluation.stderr}`);
-  if (evaluation.exitCode !== 0) throw new Error(`SEC-bench's evaluator exited ${String(evaluation.exitCode)}${evaluation.timedOut === true ? " (timed out)" : ""}`);
-  const loaded = /Loaded (\d+) instances/.exec(`${evaluation.stdout}\n${evaluation.stderr}`);
-  if (loaded === null || Number(loaded[1]) === 0) {
-    throw new Error("SEC-bench's evaluator did not load the dataset, so its medium verdict would be strict's");
+  if (evaluation.exitCode !== 0) {
+    throw new Error(`SEC-bench's evaluator exited ${String(evaluation.exitCode)}${evaluation.timedOut === true ? " (timed out)" : ""}: ${lastLines(evaluation)}`);
+  }
+  const count = loaded.count();
+  if (count === undefined || count === 0) {
+    throw new Error(`SEC-bench's evaluator did not load the dataset, so its medium verdict would be strict's: ${lastLines(evaluation)}`);
   }
 
   const reports = {} as Record<Mode, SecbenchReportLine>;
@@ -104,26 +116,84 @@ export function secbenchVerdict(reports: Record<Mode, SecbenchReportLine>): Secb
 }
 
 async function reportLine(path: string, instanceId: string): Promise<SecbenchReportLine> {
-  const text = await readFile(path, "utf8").catch(() => {
-    throw new Error(`SEC-bench's evaluator wrote no ${path.split("/").pop()!}`);
+  const file = path.split("/").pop()!;
+  const text = await readFile(path, "utf8").catch((error: unknown) => {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new Error(`SEC-bench's evaluator wrote no ${file}`);
+    throw new Error(`could not read SEC-bench's ${file}: ${error instanceof Error ? error.message : String(error)}`);
   });
-  const line = text.split("\n").filter((entry) => entry.trim().length > 0).map((entry) => JSON.parse(entry) as SecbenchReportLine).find((entry) => entry.instance_id === instanceId);
-  if (line === undefined) throw new Error(`SEC-bench's evaluator reported nothing for ${instanceId} in ${path.split("/").pop()!}`);
+  const entries = text.split("\n").filter((entry) => entry.trim().length > 0).map((entry) => {
+    try {
+      return JSON.parse(entry) as SecbenchReportLine;
+    } catch {
+      throw new Error(`SEC-bench's evaluator wrote unreadable JSON in ${file}`);
+    }
+  });
+  const line = entries.find((entry) => entry.instance_id === instanceId);
+  if (line === undefined) throw new Error(`SEC-bench's evaluator reported nothing for ${instanceId} in ${file}`);
   return line;
 }
 
 async function required(result: Promise<CollectedProcess>, what: string): Promise<CollectedProcess> {
   const completed = await result;
-  if (completed.exitCode !== 0) {
-    throw new Error(`could not ${what}: ${(completed.stderr || completed.stdout).trim().split("\n").slice(-5).join(" ").slice(0, 800)}`);
-  }
+  if (completed.exitCode !== 0) throw new Error(`could not ${what}: ${lastLines(completed)}`);
   return completed;
 }
 
-/** The evaluator's own rule: a sanitizer start line, then either an ABORTING line or a stack frame after it. */
+/** The last few non-empty lines of a process's stderr, or of its stdout when stderr is empty. */
+function lastLines(completed: CollectedProcess): string {
+  const text = completed.stderr.trim() === "" ? completed.stdout : completed.stderr;
+  return text.split("\n").map((line) => line.trim()).filter((line) => line.length > 0).slice(-5).join(" ").slice(0, 800);
+}
+
+/**
+ * Finds the evaluator's "Loaded N instances" line as its output streams in. Each stream carries its
+ * unfinished last line into the next chunk, so a line split across chunks is still found.
+ */
+function loadedLineWatcher(): { add(stream: "stdout" | "stderr", data: Buffer): void; count(): number | undefined } {
+  const pending = { stdout: "", stderr: "" };
+  let found: number | undefined;
+  const scan = (text: string) => {
+    if (found !== undefined) return;
+    const match = /Loaded (\d+) instances/.exec(text);
+    if (match !== null) found = Number(match[1]);
+  };
+  return {
+    add(stream, data) {
+      if (found !== undefined) return;
+      const text = pending[stream] + data.toString("utf8");
+      scan(text);
+      // A runaway line without a break is kept to its last 4 KiB, more than any Loaded line needs.
+      pending[stream] = text.slice(text.lastIndexOf("\n") + 1).slice(-4_096);
+    },
+    count() {
+      return found;
+    },
+  };
+}
+
+/**
+ * SEC-bench's sanitizer-error strings, copied from SANITIZER_ERROR_PATTERNS in
+ * secb/evaluator/utils.py at SECBENCH_EVALUATOR_COMMIT. Any of them anywhere in the log counts.
+ */
+export const SECBENCH_SANITIZER_ERROR_PATTERNS = [
+  "ERROR: AddressSanitizer:",
+  "ERROR: MemorySanitizer:",
+  "WARNING: MemorySanitizer:",
+  "UndefinedBehaviorSanitizer:DEADLYSIGNAL",
+  "ERROR: LeakSanitizer:",
+  "SUMMARY: UndefinedBehaviorSanitizer: undefined-behavior",
+] as const;
+
+/**
+ * The evaluator's extract_sanitizer_report (utils.py), as a yes or no: a start line with the first
+ * ABORTING line after it; or, with no ABORTING line anywhere, a start line with a stack frame after
+ * it; or else any of its sanitizer-error strings anywhere.
+ */
 function sanitizerReported(logs: string): boolean {
-  const start = /==\d+==(?:ERROR|WARNING): \w+Sanitizer:/.exec(logs);
-  if (start === null) return false;
-  const rest = logs.slice(start.index + start[0].length);
-  return /==\d+==ABORTING/.test(rest) || /\s+#\d+ 0x[0-9a-f]+/.test(rest);
+  if (logs === "") return false;
+  const start = /==\d+==(?:ERROR|WARNING): (\w+)Sanitizer:/.exec(logs);
+  const end = /==\d+==ABORTING/.exec(logs);
+  if (start !== null && end !== null && end.index + end[0].length > start.index) return true;
+  if (start !== null && end === null && /\s+#\d+ 0x[0-9a-f]+/.test(logs.slice(start.index))) return true;
+  return SECBENCH_SANITIZER_ERROR_PATTERNS.some((pattern) => logs.includes(pattern));
 }

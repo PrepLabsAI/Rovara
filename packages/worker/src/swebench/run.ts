@@ -163,6 +163,12 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
     };
   } catch (error) {
     log("run.failed", { error: message(error) });
+    // What SEC-bench's evaluator logged before it failed, kept before its folder is removed (FR-011).
+    for (const name of ["evaluator.log", "container.log"]) {
+      if (saved.has(`harness/${name}`)) continue;
+      const body = await readFile(resolve(secbenchGrade, name)).catch(() => undefined);
+      if (body !== undefined) await save(`harness/${name}`, body, "text/plain");
+    }
     if (agent !== undefined) usage ??= sessionUsage(agent, dependencies.model, "FAILED");
     result = {
       outcome: "FAILED",

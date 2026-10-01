@@ -15,6 +15,7 @@ import { resultMessage } from "../../packages/slack-service/src/swebench-command
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
 import { runSwebench, type RunReporter } from "../../packages/worker/src/swebench/run.js";
 import type { PiSessionAdapter, PiSessionHandle } from "../../packages/worker/src/pi-session.js";
+import { MAX_COMMAND_OUTPUT_BYTES, tailCollector } from "../../packages/worker/src/collected-process.js";
 
 const exec = promisify(execFile);
 
@@ -77,6 +78,15 @@ describe("loading a SEC-bench instance (spec 045 FR-003)", () => {
     expect(await datasetRevision("SEC-bench/SEC-bench", { fetch: ok })).toBe("11422e774857272b8f5460c699dca7a64046308b");
     expect(await datasetRevision("SEC-bench/SEC-bench", { fetch: down })).toBeUndefined();
   });
+
+  it("reads no dataset revision when the request throws or the sha is not a commit", async () => {
+    const throws = (async () => { throw new TypeError("fetch failed"); }) as unknown as typeof fetch;
+    const notACommit = (async () => new Response(JSON.stringify({ sha: "main" }))) as unknown as typeof fetch;
+    const shortSha = (async () => new Response(JSON.stringify({ sha: "11422e7" }))) as unknown as typeof fetch;
+    expect(await datasetRevision("SEC-bench/SEC-bench", { fetch: throws })).toBeUndefined();
+    expect(await datasetRevision("SEC-bench/SEC-bench", { fetch: notACommit })).toBeUndefined();
+    expect(await datasetRevision("SEC-bench/SEC-bench", { fetch: shortSha })).toBeUndefined();
+  });
 });
 
 describe("the SEC-bench patch prompt (spec 045 FR-005)", () => {
@@ -105,22 +115,32 @@ describe("the SEC-bench patch prompt (spec 045 FR-005)", () => {
 });
 
 describe("the SEC-bench prediction (spec 045 FR-007)", () => {
-  it("keeps changed and new C and C++ sources, and leaves build outputs out", async () => {
+  const repositories: string[] = [];
+  afterEach(async () => {
+    for (const path of repositories.splice(0)) await rm(path, { recursive: true, force: true });
+  });
+
+  it("keeps changed, new and deleted C and C++ sources, and leaves build outputs and earlier untracked files out", async () => {
     const path = await mkdtemp(join(tmpdir(), "agentx-secbench-"));
+    repositories.push(path);
     const git = (...args: string[]) => exec("git", args, { cwd: path }).then((result) => result.stdout.trim());
     await git("init", "--quiet");
     await git("config", "user.email", "t@example.com");
     await git("config", "user.name", "Test");
     await mkdir(join(path, "src"));
     await writeFile(join(path, "src/vm.c"), "int f(void) { return 0; }\n");
+    await writeFile(join(path, "src/unused.c"), "int unused(void) { return 0; }\n");
     await writeFile(join(path, "Makefile"), "all:\n");
     await writeFile(join(path, ".gitignore"), "gen/\n");
     await git("add", ".");
     await git("commit", "--quiet", "-m", "base");
     const head = await git("rev-parse", "HEAD");
+    // Untracked before the agent started, as the image left it: not the agent's change.
+    await writeFile(join(path, "src/image_only.c"), "int image_only(void) { return 0; }\n");
     const runner = createGitRunner(path);
     const before = await untrackedFiles(runner);
     await writeFile(join(path, "src/vm.c"), "int f(void) { return 1; }\n");
+    await rm(join(path, "src/unused.c"));
     await writeFile(join(path, "src/guard.h"), "#define GUARD 1\n");
     await writeFile(join(path, "Makefile"), "all: changed\n");
     await mkdir(join(path, "build"));
@@ -131,7 +151,9 @@ describe("the SEC-bench prediction (spec 045 FR-007)", () => {
     const patch = await predictionPatch(runner, head, before, SECBENCH_SOURCE_EXTENSIONS);
     expect(patch).toContain("src/vm.c");
     expect(patch).toContain("src/guard.h");
-    for (const excluded of ["Makefile", "build/vm.o", "config.log", "gen/parser.c"]) expect(patch).not.toContain(excluded);
+    expect(patch).toContain("deleted file mode 100644");
+    expect(patch).toContain("--- a/src/unused.c");
+    for (const excluded of ["Makefile", "build/vm.o", "config.log", "gen/parser.c", "src/image_only.c"]) expect(patch).not.toContain(excluded);
   });
 });
 
@@ -146,7 +168,7 @@ const STEP_LOGS = {
 type Outcome = { logs: string; exitCode: number; success: Record<"strict" | "medium" | "generous", boolean>; reason?: string };
 
 /** Answers git, uv and the evaluator as the real ones do, writing the three reports the evaluator writes. */
-function fakeEvaluator(outcome: Outcome | undefined, options: { loaded?: string; evaluatorExit?: number } = {}) {
+function fakeEvaluator(outcome: Outcome | undefined, options: { loaded?: string; evaluatorExit?: number; stdout?: string; afterLoaded?: string } = {}) {
   const calls: Array<{ executable: string; args: readonly string[]; env?: NodeJS.ProcessEnv; cwd?: string }> = [];
   const run: ProcessRunner = async (executable, args, processOptions) => {
     calls.push({ executable, args, ...(processOptions?.env === undefined ? {} : { env: processOptions.env }), ...(processOptions?.cwd === undefined ? {} : { cwd: processOptions.cwd }) });
@@ -160,7 +182,19 @@ function fakeEvaluator(outcome: Outcome | undefined, options: { loaded?: string;
         await writeFile(join(args[output + 1]!, `report_${mode}.jsonl`), `${JSON.stringify(line)}\n`);
       }
     }
-    return { exitCode: options.evaluatorExit ?? 0, stdout: "", stderr: options.loaded ?? "INFO | Loaded 300 instances from SEC-bench/SEC-bench\n" };
+    // Streams its output to the callbacks and keeps only the tail, as runCollected does.
+    const stdout = tailCollector();
+    const stderr = tailCollector();
+    const emit = (collector: ReturnType<typeof tailCollector>, callback: ((data: Buffer) => void) | undefined, text: string) => {
+      for (let at = 0; at < text.length; at += 65_536) {
+        const chunk = Buffer.from(text.slice(at, at + 65_536));
+        collector.add(chunk);
+        callback?.(chunk);
+      }
+    };
+    emit(stdout, processOptions?.onStdout, options.stdout ?? "");
+    emit(stderr, processOptions?.onStderr, `${options.loaded ?? "INFO | Loaded 300 instances from SEC-bench/SEC-bench\n"}${options.afterLoaded ?? ""}`);
+    return { exitCode: options.evaluatorExit ?? 0, stdout: stdout.text(), stderr: stderr.text() };
   };
   return { run, calls };
 }
@@ -192,6 +226,14 @@ describe("grading with SEC-bench's evaluator (spec 045 FR-008, FR-008a, FR-009)"
     const evaluator = calls.find((call) => call.args.includes("secb.evaluator.eval_instances"));
     expect(evaluator?.args).toEqual(expect.arrayContaining(["--type", "patch", "--agent", "swea", "--mode", "all", "--split", "eval"]));
     expect(evaluator?.env?.TMPDIR?.startsWith(`${directory}/`)).toBe(true);
+    expect(evaluator?.env?.LOGURU_LEVEL).toBe("INFO");
+  });
+
+  it("finds the Loaded line as the output streams, though more than 1 MiB of log follows it", async () => {
+    const container = "DEBUG | container output line that the evaluator logs in full\n".repeat(Math.ceil((2 * MAX_COMMAND_OUTPUT_BYTES) / 60));
+    const { report, calls } = await grade({ logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) }, { afterLoaded: container });
+    expect(await report).toMatchObject({ resolved: true });
+    expect(calls.some((call) => call.args.includes("secb.evaluator.eval_instances"))).toBe(true);
   });
 
   it.each([
@@ -211,8 +253,8 @@ describe("grading with SEC-bench's evaluator (spec 045 FR-008, FR-008a, FR-009)"
   });
 
   it("fails, rather than reporting unresolved, when the dataset did not load", async () => {
-    const { report } = await grade({ logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) }, { loaded: "ERROR | Failed to load dataset SEC-bench/SEC-bench\n" });
-    await expect(report).rejects.toThrow(/did not load the dataset/);
+    const { report } = await grade({ logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) }, { loaded: "ERROR | Failed to load dataset SEC-bench/SEC-bench\n\n" });
+    await expect(report).rejects.toThrow(/did not load the dataset.*: ERROR \| Failed to load dataset SEC-bench\/SEC-bench$/);
   });
 
   it("fails when the evaluator could not start the grading container", async () => {
@@ -220,12 +262,17 @@ describe("grading with SEC-bench's evaluator (spec 045 FR-008, FR-008a, FR-009)"
     await expect(report).rejects.toThrow(/could not grade.*Failed to pull/);
   });
 
-  it("reads a sanitizer report only when the evaluator's rule does (start line, then ABORTING or a stack frame)", async () => {
+  it("reads a sanitizer report only when the evaluator's extract_sanitizer_report does", async () => {
     const start = "Step 3: Run PoC\n==12==ERROR: AddressSanitizer: SEGV on unknown address\nRun PoC exit code: 1\n";
     const cases: Array<[string, boolean]> = [
-      [start, false],
+      // The start line alone holds one of utils.py's SANITIZER_ERROR_PATTERNS.
+      [start, true],
       [`${start}    #0 0x55bc7958543b in f\n`, true],
       [STEP_LOGS.stillReported, true],
+      ["Step 3: Run PoC\nfoo.c:12:3: runtime error: signed integer overflow\nSUMMARY: UndefinedBehaviorSanitizer: undefined-behavior foo.c:12:3\nRun PoC exit code: 1\n", true],
+      ["Step 3: Run PoC\n==7==WARNING: ThreadSanitizer: data race\n    #0 0x55bc7958543b in f\n", true],
+      ["Step 3: Run PoC\n==7==WARNING: ThreadSanitizer: data race\nRun PoC exit code: 1\n", false],
+      ["Step 3: Run PoC\nRun PoC exit code: 1\nTENTATIVE: Run PoC; exit code=1\n", false],
     ];
     for (const [logs, expected] of cases) {
       const { report } = await grade({ logs, exitCode: 1, success: ALL(false) });
@@ -235,7 +282,31 @@ describe("grading with SEC-bench's evaluator (spec 045 FR-008, FR-008a, FR-009)"
 
   it("fails when a report is missing or the evaluator exits non-zero", async () => {
     await expect((await grade(undefined)).report).rejects.toThrow(/report_strict.jsonl/);
-    await expect((await grade({ logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) }, { evaluatorExit: 1 })).report).rejects.toThrow(/exited 1/);
+    await expect((await grade({ logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) }, { evaluatorExit: 1, loaded: "INFO | Loaded 300 instances\nTraceback (most recent call last):\nModuleNotFoundError: No module named 'secb'\n\n" })).report)
+      .rejects.toThrow(/exited 1: INFO \| Loaded 300 instances Traceback \(most recent call last\): ModuleNotFoundError: No module named 'secb'$/);
+  });
+
+  it("says which report it could not read, and why", async () => {
+    const unreadable = await grade({ logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) }, {});
+    await unreadable.report;
+    await writeFile(join(unreadable.directory, "output/report_medium.jsonl"), "{not json\n");
+    const again = gradeSecbenchPrediction({ directory: unreadable.directory, instanceId: "njs.cve-2022-32414", patch: "p" }, async (executable, args, options) => {
+      if (executable === "git" && args.includes("rev-parse")) return { exitCode: 0, stdout: `${SECBENCH_EVALUATOR_COMMIT}\n`, stderr: "" };
+      options?.onStderr?.(Buffer.from("INFO | Loaded 300 instances\n"));
+      return { exitCode: 0, stdout: "", stderr: "INFO | Loaded 300 instances\n" };
+    });
+    await expect(again).rejects.toThrow("SEC-bench's evaluator wrote unreadable JSON in report_medium.jsonl");
+
+    const folder = await grade({ logs: STEP_LOGS.fixed, exitCode: 0, success: ALL(true) }, {});
+    await folder.report;
+    await rm(join(folder.directory, "output/report_strict.jsonl"));
+    await mkdir(join(folder.directory, "output/report_strict.jsonl"));
+    const misread = gradeSecbenchPrediction({ directory: folder.directory, instanceId: "njs.cve-2022-32414", patch: "p" }, async (executable, args, options) => {
+      if (executable === "git" && args.includes("rev-parse")) return { exitCode: 0, stdout: `${SECBENCH_EVALUATOR_COMMIT}\n`, stderr: "" };
+      options?.onStderr?.(Buffer.from("INFO | Loaded 300 instances\n"));
+      return { exitCode: 0, stdout: "", stderr: "" };
+    });
+    await expect(misread).rejects.toThrow(/^could not read SEC-bench's report_strict\.jsonl: EISDIR/);
   });
 
   it("keeps the reports, the evaluator's log and the container log for the artifacts (FR-011)", async () => {
@@ -401,8 +472,44 @@ describe("a SEC-bench run (spec 045 FR-004 to FR-011)", () => {
     expect(result).toMatchObject({ outcome: "GRADED", resolved: false, patchBytes: 0 });
     expect(result).not.toHaveProperty("secbench");
   });
-});
 
+  it("keeps the evaluator's log when grading fails, and fails the run with its cause (FR-008a, FR-011)", async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), "agentx-secbench-run-"));
+    const template = await templateRepository();
+    cleanup.push(rootPath, template.path);
+    const artifacts = new Map<string, { body: string; contentType: string }>();
+    const row = { ...SECBENCH_ROW, base_commit: template.head };
+    const fetchImplementation = (async (url: string) => url.includes("/api/datasets/")
+      ? new Response(JSON.stringify({ sha: "11422e774857272b8f5460c699dca7a64046308b" }))
+      : new Response(JSON.stringify({ rows: [{ row }], num_rows_total: 1 }))) as unknown as typeof fetch;
+    let gradeDirectory = "";
+    const result = await runSwebench({
+      runId: RUN_ID, dataset: "secbench-patch", instanceId: "njs.cve-2022-32414",
+      model: { provider: "amazon-bedrock", modelId: "fixture-model" }, maxCostUsd: 10,
+      controlPlaneUrl: "https://control.example.com", capability: "cap", artifactBucket: "bucket",
+      artifactsPrefix: `evals/${RUN_ID}/`,
+    }, {
+      rootPath,
+      model: { provider: "amazon-bedrock", modelId: "fixture-model" },
+      docker: fakeDocker(template.path, []),
+      reporter: { async started() {}, async artifact(name, body, contentType) { artifacts.set(name, { body: body.toString(), contentType }); }, async result() {} },
+      log: () => {},
+      dataset: { fetch: fetchImplementation },
+      piAdapter: editingAdapter(join(rootPath, RUN_ID, "testbed"), {}),
+      gradeSecbench: async (input) => {
+        gradeDirectory = input.directory;
+        await mkdir(input.directory, { recursive: true });
+        await writeFile(join(input.directory, "evaluator.log"), "INFO | Loaded 0 instances\n");
+        throw new Error("SEC-bench's evaluator did not load the dataset, so its medium verdict would be strict's: INFO | Loaded 0 instances");
+      },
+    });
+    expect(result).toMatchObject({ outcome: "FAILED", error: expect.stringContaining("did not load the dataset") as unknown });
+    expect(artifacts.get("harness/evaluator.log")).toEqual({ body: "INFO | Loaded 0 instances\n", contentType: "text/plain" });
+    expect(artifacts.has("harness/container.log")).toBe(false);
+    expect(JSON.parse(artifacts.get("result.json")!.body)).toMatchObject({ artifacts: expect.arrayContaining(["harness/evaluator.log", "patch.diff"]) as unknown });
+    await expect(access(gradeDirectory)).rejects.toThrow();
+  });
+});
 
 describe("the SEC-bench result in the thread (spec 045 FR-010)", () => {
   const run = (secbench: SecbenchVerdict | undefined, resolved: boolean): SwebenchRun => ({
