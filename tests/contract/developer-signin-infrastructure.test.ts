@@ -151,10 +151,11 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(aliases.find((alias) => alias.AliasName === "alias/agentx/staging/developer-tokens")).toMatchObject({ TargetKeyId: { "Fn::GetAtt": [keyId, "Arn"] } });
   });
 
-  it("lets only the ingress, the orchestrator task role, DeveloperIdentity and the task notifier read the Slack secret (R2, FR-034)", () => {
+  // Issue 173: the reconciler reads it too, for the unwaited task note's bot token (named environments only).
+  it("lets only the ingress, the orchestrator task role, DeveloperIdentity, the task notifier and the reconciler read the Slack secret (R2, FR-034, #173)", () => {
     const [secretId] = ofType(named, "AWS::SecretsManager::Secret").find(([, resource]) => resource.Properties.Name === "agentx/staging/slack")!;
     const readers = rolesThatMay(named, "secretsmanager:GetSecretValue", secretId, SAMPLE_SLACK_SECRET_ARN);
-    expect(readers).toEqual(["DeveloperSignInFunctionServiceRole", "DeveloperTaskNotifierFunctionServiceRole", "SlackIngressServiceRole", "SlackOrchestratorTaskRole"]);
+    expect(readers).toEqual(["DeveloperSignInFunctionServiceRole", "DeveloperTaskNotifierFunctionServiceRole", "SessionsReconcilerServiceRole", "SlackIngressServiceRole", "SlackOrchestratorTaskRole"]);
   });
 
   it("lets DeveloperIdentity read only its own company sign-in secret besides the Slack secret", () => {
