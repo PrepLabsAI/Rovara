@@ -367,8 +367,8 @@ opt-in revision. Arbitrary endpoints, personal OAuth, and other GitHub permissio
 not included. Existing AgentX coding and validated PR-publication tools remain unchanged.
 The hosted Slack service discovers tools from the thread workspace's registered project revision.
 Calls use its IAM service identity and carry the requesting Slack user; tokens remain in the broker.
-Use a new thread after binding the channel to an enabled revision. Existing threads retain their
-workspace revision.
+Use a new thread after binding the channel to an enabled revision. Threads whose workspace is
+already prepared retain their workspace revision.
 
 #### Connector credentials
 
@@ -490,13 +490,16 @@ Finally, bind the channel to the project. Binding requires an administrator logi
 agentx --project project-a admin slack bind --team T0123456789 --channel C0123456789
 ```
 
-A channel is bound to one project, not to a revision. Each new thread uses the project's latest
-registered revision at the moment its workspace is created, so registering a revision publishes it
-to every bound channel without binding again. `admin slack unbind` removes the binding, so new
+A channel is bound to one project, not to a revision. A thread's workspace is built from the
+project's latest registered revision at the moment its compute is first prepared, which is the
+first request that needs the worker, so registering a revision publishes it to every bound channel
+without binding again. A thread that has only answered connector questions so far has no disk yet,
+so it picks up a revision registered after its first message. `admin slack unbind` removes the binding, so new
 mentions in that channel are ignored, but it keeps existing thread workspaces.
 
-An existing thread's checkout stays on the revision it was prepared with: `repositories`, `setup`
-and `environment` do not change under a running thread. Everything else follows the project's
+Once prepared, a thread's checkout stays on the revision it was prepared with: `repositories`,
+`setup` and `environment` do not change under a running thread, and a failed preparation is
+retried from that same revision. Everything else follows the project's
 latest registered revision from the next mention onwards: the GitHub MCP policy and the
 repositories it may address, `orchestratorInstructions`, `readiness` and each repository's
 `codeBuildGates`. So enabling a tool, correcting a test command or withdrawing a write tool takes

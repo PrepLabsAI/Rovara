@@ -9,6 +9,7 @@ import { processSlackRequest, type ThreadState, type ThreadStore } from "../../p
 import { createHostedSlackRuntime } from "../../packages/slack-service/src/runtime.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
 import { createThreadApi } from "../../packages/slack-service/src/thread-api.js";
+import { hashJson } from "../../packages/broker/src/aws/broker-shared.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { brokerFetch } from "../support/broker-fetch.js";
 import {
@@ -53,6 +54,8 @@ function scenario(options: { memberLimit?: number } = {}) {
   const broker = createBroker({ githubMcp, ...(options.memberLimit === undefined ? {} : { memberLimit: options.memberLimit }) });
   return {
     ...broker, invoke, threads: memoryThreads(), prepareOutcome: "SUCCEEDED" as "SUCCEEDED" | "FAILED",
+    // Runs while a preparation is pending, before the worker reports it.
+    whilePreparing: undefined as (() => Promise<void>) | undefined,
     posts: [] as Array<{ threadTs: string; text: string }>, toolResults: [] as string[],
   };
 }
@@ -119,6 +122,7 @@ async function turnIn(s: Scenario, n: number, text: string, work: { coding: bool
       s.posts.push({ threadTs: message.thread.threadTs, text: posted });
       // Plays the worker: a preparation the thread was just told about finishes now.
       if (posted === SETTING_UP || posted === STILL) {
+        await s.whilePreparing?.();
         const pending = s.db.find((item) => item.entityType === "OPERATION" && item.kind === "prepare" && item.status === "ACCEPTED");
         for (const operation of pending) await finishOperation(s.handler, s.db, operation.workspaceId as string, operation.id as string, s.prepareOutcome);
       }
@@ -194,5 +198,75 @@ describe("workspace only when needed, end to end", () => {
     expect(postsIn(s, 1).at(-1)).toBe(CONNECTOR_ANSWER);
     expect(s.db.find((item) => item.entityType === "WORKSPACE")[0]).toMatchObject({ status: "UNPREPARED" });
     expect(s.db.find((item) => item.entityType === "SLACK_LIMIT")).toHaveLength(0);
+  });
+});
+
+const BILLING = { name: "billing", url: "https://github.com/example/billing.git", path: "repo/billing", defaultBranch: "main", credentialRef: "github-app" };
+
+interface Invocation { kind: string; projectRevision: number; payload: { project?: { revision: number; repositories: Array<{ name: string }> } } }
+
+function invocationsOf(s: Scenario, kind: string): Invocation[] {
+  return s.db.find((item) => item.entityType === "OUTBOX")
+    .map((item) => item.invocation as Invocation)
+    .filter((invocation) => invocation.kind === kind);
+}
+
+function threadWorkspace(s: Scenario, n: number): Record<string, unknown> | undefined {
+  const thread = s.db.find((item) => item.entityType === "SLACK_THREAD" && item.thread === subject(n))[0];
+  return s.db.get(`WORKSPACE#${String(thread?.workspaceId)}`, "META");
+}
+
+describe("which project revision a thread's workspace is built from (#12, first slice)", () => {
+  it("builds an unprepared thread's workspace from the latest revision registered since the thread started", async () => {
+    const s = scenario();
+    await registerSlackProject(s.handler, { connectors: GITHUB_LIST_ISSUES });
+    await turnIn(s, 1, "what's open in GitHub issues?", { coding: false });
+    expect(threadWorkspace(s, 1)).toMatchObject({ status: "UNPREPARED", projectRevision: 1 });
+    await registerSlackProject(s.handler, { revision: 2, connectors: GITHUB_LIST_ISSUES, extraRepositories: [BILLING], bind: false });
+
+    await turnIn(s, 1, "list the files in the repository", { coding: true });
+    expect(postsIn(s, 1).slice(-3)).toEqual([WORKING, SETTING_UP, CODING_ANSWER]);
+    const workspace = threadWorkspace(s, 1);
+    expect(workspace).toMatchObject({ projectRevision: 2 });
+    const [prepare] = invocationsOf(s, "prepare");
+    expect(prepare).toMatchObject({ projectRevision: 2, payload: { project: { revision: 2 } } });
+    expect(prepare?.payload.project?.repositories.map((repository) => repository.name)).toEqual(["demo", "billing"]);
+    const operation = s.db.find((item) => item.entityType === "OPERATION" && item.kind === "prepare")[0];
+    expect(operation?.payloadHash).toBe(hashJson({ projectName: "payments", projectRevision: 2, targetOwnerKey: workspace?.ownerKey }));
+    // The task that follows works on the disk it was built for.
+    expect(invocationsOf(s, "task").map((invocation) => invocation.projectRevision)).toEqual([2]);
+  });
+
+  it("keeps a prepared thread's workspace on the revision its disk was built from", async () => {
+    const s = scenario();
+    await registerSlackProject(s.handler, { connectors: GITHUB_LIST_ISSUES });
+    await turnIn(s, 1, "list the files in the repository", { coding: true });
+    const firstTask = s.db.find((item) => item.entityType === "OPERATION" && item.kind === "task")[0];
+    await finishOperation(s.handler, s.db, firstTask?.workspaceId as string, firstTask?.id as string, "SUCCEEDED");
+    await registerSlackProject(s.handler, { revision: 2, connectors: GITHUB_LIST_ISSUES, extraRepositories: [BILLING], bind: false });
+
+    await turnIn(s, 1, "list the files again", { coding: true });
+    expect(threadWorkspace(s, 1)).toMatchObject({ projectRevision: 1 });
+    expect(invocationsOf(s, "prepare").map((invocation) => invocation.projectRevision)).toEqual([1]);
+    expect(invocationsOf(s, "task").map((invocation) => invocation.projectRevision)).toEqual([1, 1]);
+  });
+
+  it("does not move a preparing workspace onto a revision registered while it prepares", async () => {
+    const s = scenario();
+    await registerSlackProject(s.handler, { connectors: GITHUB_LIST_ISSUES });
+    await turnIn(s, 1, "what's open?", { coding: false });
+    await registerSlackProject(s.handler, { revision: 2, connectors: GITHUB_LIST_ISSUES, bind: false });
+    // The worker is slow: revision 3 lands before the preparation from revision 2 finishes.
+    let registered = false;
+    s.whilePreparing = async () => {
+      if (registered) return;
+      registered = true;
+      await registerSlackProject(s.handler, { revision: 3, connectors: GITHUB_LIST_ISSUES, extraRepositories: [BILLING], bind: false });
+    };
+    await turnIn(s, 1, "list the files in the repository", { coding: true });
+    expect(registered).toBe(true);
+    expect(threadWorkspace(s, 1)).toMatchObject({ projectRevision: 2 });
+    expect(invocationsOf(s, "prepare").map((invocation) => [invocation.projectRevision, invocation.payload.project?.revision])).toEqual([[2, 2]]);
+    expect(invocationsOf(s, "task").map((invocation) => invocation.projectRevision)).toEqual([2]);
   });
 });
