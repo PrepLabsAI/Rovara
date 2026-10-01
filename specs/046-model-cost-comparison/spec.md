@@ -35,11 +35,11 @@ The result informs two decisions, which this experiment does not make by itself:
 
 ## Dependencies
 
-- **D-A: Batch runs (not yet specified).** Today the runner allows one run per deployment, started by hand from
+- **D-A: Batch runs (spec 052, not yet written).** Today the runner allows one run per deployment, started by hand from
   Slack. This experiment needs a batch of (task, model, repeat) runs, with several running at once, each recorded
-  with its result. The batch spec is a separate piece of work, and the SWE-bench learnings session recommended it.
+  with its result. The batch spec (052) is a separate piece of work, and the SWE-bench learnings session recommended it.
   This experiment is written against what that spec must provide (Requirements, R-1 to R-4).
-- **D-B: Agent verification fix (recommended first).** In the pilot, the agent claimed success it did not have in
+- **D-B: Agent verification fix (spec 051, recommended first).** In the pilot, the agent claimed success it did not have in
   3 of 5 failed runs. Comparing models before fixing that compares how well each model can talk itself into a false
   success. Run this experiment on the agent customers will get.
 - **D-C: Model access.** Each model must be approved for the eval project, and its cost must be measurable: an
@@ -104,7 +104,7 @@ Opus 5 is out until its Bedrock agreement is accepted.
 - **Failure review.** Read the transcripts of every failed run for one task per model. Classify each failure as
   wrong fix, false claim of success, ran out of time or calls, or tool trouble.
 
-## Requirements (what the batch feature must provide)
+## Requirements (what the batch feature, spec 052, must provide)
 
 - **R-1:** Start a batch of (task, model, repeat) runs from one command or file, with a total cost ceiling for the
   batch that stops starting new runs once reached.
