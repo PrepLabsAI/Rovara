@@ -1364,6 +1364,12 @@ async function startThreadWorkspaceClose(
   if (!workspace) return { outcome: "NOT_FOUND" };
   // Spec 014: a thread that never needed the worker has no compute, so there is nothing to close.
   if (workspace.status === "UNPREPARED") return { outcome: "NOT_FOUND" };
+  // #213: a failed preparation that was released holds no slot and has nothing to check, and a
+  // lazy turn was told it has no compute; answered as an UNPREPARED thread is.
+  if (workspace.status === "PREPARATION_FAILED" && !workspace.activeOperationId) {
+    const thread = await getItem<{ starterUserId?: unknown }>(dependencies, slackThreadKey(identity.ownerKey));
+    if (typeof thread?.starterUserId !== "string") return { outcome: "NOT_FOUND" };
+  }
   if (workspace.status === "CLOSED" && workspace.closedAt) {
     return { outcome: "CLOSED", workspaceId: workspace.id, closedAt: workspace.closedAt };
   }

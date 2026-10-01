@@ -342,6 +342,17 @@ describe("a Slack thread whose workspace failed preparation (#213)", () => {
     expect(organization(db)).toMatchObject({ count: 1 });
   });
 
+  it("tells a close in a released thread there is no workspace to close, and charges nothing", async () => {
+    const { db, handler } = createBroker();
+    await registerSlackProject(handler);
+    const { workspaceId, operationId } = await preparingThread(db, handler, threadOne, pratik);
+    await finishOperation(handler, db, workspaceId, operationId, "FAILED");
+    const started = await serviceCall(handler, threadOne, pratik, "POST", "/v1/service/threads/workspace/close", { requestId: randomUUID() });
+    expect(started.body).toMatchObject({ outcome: "NOT_FOUND" });
+    expect(member(db, pratik)).toMatchObject({ count: 0, threads: [] });
+    expect(organization(db)).toMatchObject({ count: 0 });
+  });
+
   it("logs the release by IDs only", async () => {
     const { db, handler } = createBroker();
     await registerSlackProject(handler);
