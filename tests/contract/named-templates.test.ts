@@ -114,35 +114,15 @@ function withoutUnwaitedTaskBackstop(template: unknown): unknown {
 }
 
 /**
- * Issue 195 adds the stuck-cancel retry to a named control plane, and nothing else: the broker's
- * name in the reconciler's environment, one statement letting it invoke the broker, and the
- * StuckCancels alarm. They are checked here to be exactly these, then taken out, so the rest of the
- * template must still match the recorded snapshot.
+ * Issue 195 adds the StuckCancels alarm to a named control plane, and nothing else: its retry runs in
+ * the reconciler's own process with #173's signing key, so no grant and no environment variable. The
+ * alarm is checked here to be exactly this, then taken out, so the rest of the template must still
+ * match the recorded snapshot.
  */
-function withoutStuckCancelRetry(template: unknown): unknown {
+function withoutStuckCancelAlarm(template: unknown): unknown {
   const resources = (template as { Resources: Record<string, Resource> }).Resources;
-  const reconcilers = Object.entries(resources).filter(([id, resource]) => id.startsWith("SessionsReconciler") && resource.Type === "AWS::Lambda::Function");
-  expect(reconcilers).toHaveLength(1);
-  const reconciler = reconcilers[0]![1];
-  const brokerId = Object.keys(resources).find((id) => /^Broker[0-9A-F]{8}$/.test(id) && resources[id]!.Type === "AWS::Lambda::Function");
   const topicId = Object.keys(resources).find((id) => id.startsWith("OperatorAlerts") && resources[id]!.Type === "AWS::SNS::Topic");
-  expect(brokerId).toBeDefined();
   expect(topicId).toBeDefined();
-  const variables = (reconciler.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
-  expect(variables.BROKER_FUNCTION_NAME).toStrictEqual({ Ref: brokerId });
-  delete variables.BROKER_FUNCTION_NAME;
-  const roleId = (reconciler.Properties.Role as { "Fn::GetAtt": [string, string] })["Fn::GetAtt"][0];
-  const policies = Object.values(resources).filter((resource) => resource.Type === "AWS::IAM::Policy"
-    && (resource.Properties.Roles as Array<{ Ref?: string }>).some((role) => role.Ref === roleId));
-  const removed: Array<{ Sid?: string }> = [];
-  for (const policy of policies) {
-    const document = policy.Properties.PolicyDocument as { Statement: Array<{ Sid?: string }> };
-    removed.push(...document.Statement.filter((statement) => statement.Sid === "RetryStuckCancels"));
-    document.Statement = document.Statement.filter((statement) => statement.Sid !== "RetryStuckCancels");
-  }
-  expect(removed).toStrictEqual([
-    { Action: "lambda:InvokeFunction", Effect: "Allow", Resource: { "Fn::GetAtt": [brokerId, "Arn"] }, Sid: "RetryStuckCancels" },
-  ]);
   const alarms = Object.keys(resources).filter((id) => id.startsWith("SessionsStuckCancelsAlarm"));
   expect(alarms).toHaveLength(1);
   const stat = (id: string, metricName: string) => ({
@@ -181,7 +161,7 @@ describe("named environment templates", () => {
   for (const stack of stacks) {
     it(`${stack.stackName} is unchanged`, () => {
       const template = normalizedTemplate(stack);
-      expect(stack.stackName === "agentx-staging-control-plane" ? withoutStuckCancelRetry(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(template))) : template).toMatchSnapshot();
+      expect(stack.stackName === "agentx-staging-control-plane" ? withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(template))) : template).toMatchSnapshot();
     }, 120_000);
   }
 });

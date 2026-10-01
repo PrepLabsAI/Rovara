@@ -1,6 +1,7 @@
-// Issue 195: the stuck-cancel retry's grant is exact (invoke the broker, nothing else), and it, the
-// broker's name and the StuckCancels alarm exist only in named environments. The legacy templates
-// are proven byte-identical by legacy-templates.test.ts.
+// Issue 195: the stuck-cancel retry runs in the reconciler's own process (through #173's shared
+// cancel code and signing key), so it adds no grant and no environment variable: only the
+// StuckCancels alarm, in named environments only. The legacy templates are proven byte-identical by
+// legacy-templates.test.ts.
 import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
@@ -21,7 +22,6 @@ function reconciler(template: Template) {
     .flatMap((policy) => policy.Properties.PolicyDocument.Statement);
   return { environment: fn.Properties.Environment?.Variables ?? {}, statements };
 }
-const brokerId = (template: Template) => Object.keys(template.findResources("AWS::Lambda::Function")).find((id) => /^Broker[0-9A-F]{8}$/.test(id))!;
 const topicId = (template: Template) => Object.keys(template.findResources("AWS::SNS::Topic")).find((id) => id.startsWith("OperatorAlerts"))!;
 const actionsOf = (statements: Statement[]) => statements.flatMap((statement) => [statement.Action].flat());
 const stuckCancelAlarms = (template: Template) => Object.entries(template.findResources("AWS::CloudWatch::Alarm") as Record<string, Alarm>)
@@ -31,15 +31,16 @@ describe("the stuck-cancel retry's infrastructure (#195)", () => {
   const named = Template.fromStack(new ControlPlaneStack(new App(), "StuckCancelControlPlane", { naming: environmentNaming("staging") }));
   const legacy = Template.fromStack(new ControlPlaneStack(new App(), "StuckCancelLegacyControlPlane"));
 
-  it("lets the named reconciler invoke the broker function alone, and nothing else new", () => {
+  it("never lets the named reconciler invoke the broker, or any function", () => {
     const { statements } = reconciler(named);
-    expect(statements.filter((statement) => actionsOf([statement]).some((action) => action.startsWith("lambda:")))).toEqual([
-      { Sid: "RetryStuckCancels", Effect: "Allow", Action: "lambda:InvokeFunction", Resource: { "Fn::GetAtt": [brokerId(named), "Arn"] } },
-    ]);
+    expect(actionsOf(statements).filter((action) => action.startsWith("lambda:"))).toEqual([]);
+    expect(statements.map((statement) => statement.Sid)).not.toContain("RetryStuckCancels");
   });
 
-  it("names the broker to the named reconciler", () => {
-    expect(reconciler(named).environment).toMatchObject({ BROKER_FUNCTION_NAME: { Ref: brokerId(named) } });
+  it("never names the broker to the named reconciler, and signs the retried cancel with #173's key", () => {
+    const { environment } = reconciler(named);
+    expect(environment).not.toHaveProperty("BROKER_FUNCTION_NAME");
+    expect(environment).toMatchObject({ CALLBACK_SIGNING_KEY: { Ref: "CallbackSigningKey" } });
   });
 
   it("alarms the operator on any stuck cancel retried or ended, or any failure to do so", () => {
@@ -76,6 +77,7 @@ describe("the stuck-cancel retry's infrastructure (#195)", () => {
   it("adds none of it to the legacy deployment", () => {
     const { environment, statements } = reconciler(legacy);
     expect(environment).not.toHaveProperty("BROKER_FUNCTION_NAME");
+    expect(environment).not.toHaveProperty("CALLBACK_SIGNING_KEY");
     expect(actionsOf(statements).filter((action) => action.startsWith("lambda:"))).toEqual([]);
     expect(stuckCancelAlarms(legacy)).toEqual([]);
   });

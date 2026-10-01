@@ -130,6 +130,13 @@ flowchart LR
   named reconciler holds the callback signing key, which also derives the repository-grant signing
   key, and it can read the whole Slack secret, not just the bot token. Both were held before only by
   the broker (the key) and the Slack-facing functions (the secret).
+- **Stuck cancels.** Each run, the session reconciler also checks for a task left CANCEL_REQUESTED
+  for over 30 minutes (issue 195). If its compute is gone, the task is ended and its workspace
+  freed. If its compute is alive, the reconciler queues the cancel again once, in its own process,
+  through the cancel route's own code, signed with the same callback signing key. Still stuck 30
+  minutes later, the task is ended INTERRUPTED and its workspace freed. The legacy reconciler has no
+  signing key, so there it only logs and counts a stuck cancel on a live worker. Narrowing the key
+  to a cancel-only one is tracked in issue 201.
 
 `AgentXControlPlane` owns the ingress, queue, thread storage, Slack secret, and orchestrator task
 role, because the broker must know that role before the service exists. `AgentXSlackOrchestrator`

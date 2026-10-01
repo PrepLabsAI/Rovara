@@ -8,8 +8,7 @@ import {
   STUCK_CANCEL_LOST_MESSAGE,
   STUCK_CANCEL_MS,
   STUCK_CANCEL_RETRY_MS,
-  createBrokerCancelRetrier,
-  stuckCancelBrokerFunction,
+  stuckCancelSigningKey,
   sweepStuckCancels,
   type StuckCancelCandidate,
   type StuckCancelDependencies,
@@ -142,7 +141,7 @@ describe("a stuck cancel whose compute is alive", () => {
     expect(task.operation()).toMatchObject({ status: "CANCEL_REQUESTED" });
   });
 
-  it("logs and counts a retry the broker could not queue, and never retries it again", async () => {
+  it("logs and counts a retry that could not be queued, and never retries it again", async () => {
     const failure = Object.assign(new Error("secret-bearing message"), { name: "StuckCancelRetryFailed" });
     const { db, sweep, logs, retryCancel } = setup({ retry: async () => { throw failure; } });
     const task = seedTask(db, "CANCEL_REQUESTED", 31);
@@ -156,7 +155,7 @@ describe("a stuck cancel whose compute is alive", () => {
     expect((await sweep(candidate, minutesLater(31))).interrupted).toEqual([task.operationId]);
   });
 
-  it("logs a retry the broker skipped, and still ends it after the retry limit", async () => {
+  it("logs a retry that was skipped, and still ends it after the retry limit", async () => {
     const { db, sweep, logs } = setup({ retry: async () => ({ outcome: "SKIPPED", reason: "not-active" }) });
     const task = seedTask(db, "CANCEL_REQUESTED", 31);
     const candidate = [{ workspaceId: task.workspaceId, compute: "alive" as const }];
@@ -334,44 +333,12 @@ describe("failures", () => {
   });
 });
 
-describe("asking the broker to retry", () => {
-  const answer = (statusCode: number, body: unknown, functionError?: string) => ({
-    StatusCode: 200,
-    ...(functionError === undefined ? {} : { FunctionError: functionError }),
-    Payload: new TextEncoder().encode(JSON.stringify({ statusCode, headers: {}, body: JSON.stringify(body) })),
-  });
-
-  it("invokes the broker with the retry event and returns its answer", async () => {
-    const invoke = vi.fn<(payload: string) => Promise<ReturnType<typeof answer>>>(async () => answer(200, { outcome: "REQUEUED", cancelOperationId: "cancel-2", requestId: "session-reconciler" }));
-    const retry = createBrokerCancelRetrier(invoke);
-    expect(await retry("workspace-1", "operation-1")).toEqual({ outcome: "REQUEUED", cancelOperationId: "cancel-2" });
-    expect(JSON.parse(invoke.mock.calls[0]![0])).toEqual({ source: "agentx.session-reconciler", action: "retry-stuck-cancel", workspaceId: "workspace-1", operationId: "operation-1" });
-    const skipped = createBrokerCancelRetrier(async () => answer(200, { outcome: "SKIPPED", reason: "not-active", requestId: "session-reconciler" }));
-    expect(await skipped("workspace-1", "operation-1")).toEqual({ outcome: "SKIPPED", reason: "not-active" });
-  });
-
-  it("fails by a fixed name, never the broker's message, on an error answer, a function error or an unreadable answer", async () => {
-    const cases = [
-      answer(500, { error: { code: "INTERNAL", message: "PLANTED-BROKER-MESSAGE" } }),
-      answer(200, { outcome: "REQUEUED" }, "Unhandled"),
-      answer(200, { outcome: "SOMETHING-ELSE" }),
-      { StatusCode: 200, Payload: new TextEncoder().encode("not json") },
-      { StatusCode: 200 },
-    ];
-    for (const response of cases) {
-      const retry = createBrokerCancelRetrier(async () => response);
-      const failure = await retry("workspace-1", "operation-1").then(() => undefined, (error: unknown) => error);
-      expect(failure).toBeInstanceOf(Error);
-      expect((failure as Error).name).toBe("StuckCancelRetryFailed");
-      expect((failure as Error).message).not.toContain("PLANTED-BROKER-MESSAGE");
-    }
-  });
-});
-
 describe("where the retry is wired", () => {
-  it("only where the reconciler is told the broker's name (named environments)", () => {
-    expect(stuckCancelBrokerFunction({ BROKER_FUNCTION_NAME: "agentx-staging-broker" })).toBe("agentx-staging-broker");
-    expect(stuckCancelBrokerFunction({})).toBeUndefined();
-    expect(stuckCancelBrokerFunction({ BROKER_FUNCTION_NAME: "" })).toBeUndefined();
+  it("only where the reconciler holds the callback signing key (named environments), as #173's backstop", () => {
+    expect(stuckCancelSigningKey({ CALLBACK_SIGNING_KEY: "k".repeat(64) })).toBe("k".repeat(64));
+    expect(stuckCancelSigningKey({})).toBeUndefined();
+    expect(stuckCancelSigningKey({ CALLBACK_SIGNING_KEY: "" })).toBeUndefined();
+    // The broker's name no longer turns the retry on: the reconciler never invokes the broker.
+    expect(stuckCancelSigningKey({ BROKER_FUNCTION_NAME: "agentx-staging-broker" })).toBeUndefined();
   });
 });

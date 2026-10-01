@@ -8,7 +8,6 @@ import {
 } from "@aws-sdk/client-ec2";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DescribeExecutionCommand, SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
-import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { Ec2RuntimeBinding, WorkspaceSession, WorkspaceSessionState } from "@agentx/contracts";
@@ -17,7 +16,7 @@ import { failActiveOperation } from "./outbox-failure.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
 import { expireIndexDays, indexSweepWanted } from "./index-expiry.js";
 import { sweepStuckSetups } from "./stuck-setup.js";
-import { createBrokerCancelRetrier, stuckCancelBrokerFunction, sweepStuckCancels, type StuckCancelCandidate, type StuckCancelCompute, type StuckCancelSweepResult } from "./stuck-cancels.js";
+import { createCancelRetrier, stuckCancelSigningKey, sweepStuckCancels, type StuckCancelCandidate, type StuckCancelCompute, type StuckCancelSweepResult } from "./stuck-cancels.js";
 import { slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopConfiguration, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
 import { cachedSlackPoster } from "./developer-task-notifier.js";
 
@@ -389,15 +388,13 @@ const tag = (tags: Array<{ Key?: string | undefined; Value?: string | undefined 
 
 /**
  * Issue 195: the stuck-cancel sweep runs in every reconciler, using the State table it already
- * reads and writes. Only a named environment's reconciler may invoke the broker, so only there is
- * a stuck cancel on a live worker queued again; the legacy one logs and counts it.
+ * reads and writes. A stuck cancel on a live worker is queued again in this process, through the
+ * cancel route's own code, and its callbacks are signed with the callback signing key. Only a named
+ * environment's reconciler holds that key (#173), so the legacy one logs and counts it instead.
  */
 function stuckCancelSweep(): NonNullable<ReconcilerDependencies["sweepStuckCancels"]> {
-  const brokerFunctionName = stuckCancelBrokerFunction(process.env);
-  const lambda = brokerFunctionName === undefined ? undefined : new LambdaClient(awsClientConfiguration);
-  const retryCancel = lambda === undefined ? undefined : createBrokerCancelRetrier((payload) => lambda.send(new InvokeCommand({
-    FunctionName: brokerFunctionName, InvocationType: "RequestResponse", Payload: Buffer.from(payload),
-  })));
+  const callbackSigningKey = stuckCancelSigningKey(process.env);
+  const retryCancel = callbackSigningKey === undefined ? undefined : createCancelRetrier({ client: documentClient, tableName, callbackSigningKey });
   const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }));
   return (candidates, now) => sweepStuckCancels({ client: documentClient, tableName, ...(retryCancel === undefined ? {} : { retryCancel }), log }, candidates, now);
 }

@@ -4,8 +4,9 @@
 // busy. Each reconciler run checks the workspaces it already lists:
 // - a task CANCEL_REQUESTED over STUCK_CANCEL_MS whose compute is gone is ended as the lost-compute
 //   path ends work, and its workspace freed;
-// - one whose compute is alive has its cancel queued again, once: the retry is recorded on the
-//   operation first (cancelRetriedAt), so a crash or a failed retry can never retry it twice;
+// - one whose compute is alive has its cancel queued again, once, in the reconciler's own process
+//   through the cancel route's requestCancellation: the retry is recorded on the operation first
+//   (cancelRetriedAt), so a crash or a failed retry can never retry it twice;
 // - a retried one still CANCEL_REQUESTED STUCK_CANCEL_RETRY_MS later is ended INTERRUPTED, and its
 //   workspace freed.
 // - a retried one whose cancel failed (the result marks it INTERRUPTED but leaves it holding the
@@ -20,7 +21,9 @@
 // for a release INTERRUPTED with the sweep's retry recorded) under the fence read, and on the
 // workspace still being held by it, so a cancel result that lands first stands.
 import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { WorkspaceInstanceSchema, workspaceRecordFields } from "@agentx/contracts";
 import { taskPointerKey } from "../developer/task-records.js";
+import { getItem, requestCancellation, type CancellationDependencies } from "./cancellation.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 
@@ -42,7 +45,7 @@ export type StuckCancelRetry =
 export interface StuckCancelDependencies {
   client: Client;
   tableName: string;
-  /** Asks the broker to queue the cancel again. Absent where the reconciler may not invoke the broker (legacy). */
+  /** Queues the cancel again (createCancelRetrier). Absent where the reconciler has no signing key (legacy). */
   retryCancel?: (workspaceId: string, operationId: string) => Promise<StuckCancelRetry>;
   log?: (entry: Record<string, unknown>) => void;
 }
@@ -301,55 +304,39 @@ async function end(
 }
 
 /**
- * The reconciler's request to the broker to queue a stuck cancel again. Invoked by the reconciler
- * Lambda only, never through API Gateway, and only in named environments (the legacy reconciler
- * has no grant to invoke the broker).
+ * The production retryCancel: queues the cancel again in the reconciler's own process, through
+ * requestCancellation, the cancel route's own path (#173 moved it to cancellation.ts), with its
+ * default condition, which allows a repeat cancel of a CANCEL_REQUESTED task. It checks everything
+ * again first, so it can never queue more than this allows: the operation still holds the workspace,
+ * is still CANCEL_REQUESTED under the workspace's fence, the sweep recorded its one retry on it first
+ * (so it never loops), and it is not an AI tool's developer task. The cancel's worker callbacks are
+ * signed with the callback signing key, as the broker signs them.
  */
-export interface StuckCancelRetryEvent {
-  source: "agentx.session-reconciler";
-  action: "retry-stuck-cancel";
-  workspaceId: string;
-  operationId: string;
-}
-
-export function isStuckCancelRetryEvent(event: unknown): event is StuckCancelRetryEvent {
-  if (!event || typeof event !== "object") return false;
-  const value = event as Record<string, unknown>;
-  // API Gateway always sets requestContext, so a request from outside can never take this path.
-  return value.source === "agentx.session-reconciler" && value.action === "retry-stuck-cancel" && value.requestContext === undefined;
-}
-
-/** The part of a Lambda Invoke answer the retrier reads. */
-interface InvokeAnswer { StatusCode?: number | undefined; FunctionError?: string | undefined; Payload?: Uint8Array | undefined }
-
-/**
- * The production retryCancel: invokes the broker with the retry event and reads its answer. Any
- * answer but a readable REQUEUED or SKIPPED fails as StuckCancelRetryFailed, with the status only:
- * never the broker's message, which could carry stored data.
- */
-export function createBrokerCancelRetrier(invoke: (payload: string) => Promise<InvokeAnswer>): NonNullable<StuckCancelDependencies["retryCancel"]> {
-  const failed = (detail: string) => Object.assign(new Error(`the broker did not queue the cancel again (${detail})`), { name: "StuckCancelRetryFailed" });
+export function createCancelRetrier(dependencies: { client: Client; tableName: string; callbackSigningKey: string }): NonNullable<StuckCancelDependencies["retryCancel"]> {
+  const state = { documentClient: dependencies.client as CancellationDependencies["documentClient"], tableName: dependencies.tableName };
   return async (workspaceId, operationId) => {
-    const event: StuckCancelRetryEvent = { source: "agentx.session-reconciler", action: "retry-stuck-cancel", workspaceId, operationId };
-    const response = await invoke(JSON.stringify(event));
-    if (response.FunctionError !== undefined) throw failed("function error");
-    let answer: { statusCode?: unknown; body?: unknown };
-    let body: { outcome?: unknown; cancelOperationId?: unknown; reason?: unknown };
-    try {
-      answer = JSON.parse(new TextDecoder().decode(response.Payload)) as typeof answer;
-      body = typeof answer.body === "string" ? JSON.parse(answer.body) as typeof body : {};
-    } catch {
-      throw failed("unreadable answer");
-    }
-    if (answer.statusCode !== 200) throw failed(`status ${typeof answer.statusCode === "number" ? answer.statusCode : "unknown"}`);
-    if (body.outcome === "REQUEUED" && typeof body.cancelOperationId === "string") return { outcome: "REQUEUED", cancelOperationId: body.cancelOperationId };
-    if (body.outcome === "SKIPPED" && typeof body.reason === "string") return { outcome: "SKIPPED", reason: body.reason };
-    throw failed("unexpected answer");
+    const skipped = (reason: string): StuckCancelRetry => ({ outcome: "SKIPPED", reason });
+    const record = await getItem<Record<string, unknown>>(state, { pk: `WORKSPACE#${workspaceId}`, sk: "META" });
+    if (record?.activeOperationId !== operationId) return skipped("not-active");
+    const target = await getItem<StuckOperation>(state, { pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` });
+    if (target?.status !== "CANCEL_REQUESTED") return skipped("not-cancel-requested");
+    if (typeof target.cancelRetriedAt !== "string") return skipped("not-claimed");
+    if (target.fence !== record.fence) return skipped("fence-changed");
+    if (await getItem(state, taskPointerKey(workspaceId)) !== undefined) return skipped("developer-task");
+    const workspace = WorkspaceInstanceSchema.parse(workspaceRecordFields(record));
+    const result = await requestCancellation({ ...state, callbackSigningKey: dependencies.callbackSigningKey }, workspace, operationId, {});
+    // A duplicate means the task finished before the cancel was recorded.
+    if (result.duplicate) return skipped("finished");
+    return { outcome: "REQUEUED", cancelOperationId: result.operation.id };
   };
 }
 
-/** The broker function the reconciler may invoke; set in named environments only, so legacy never retries. */
-export function stuckCancelBrokerFunction(environment: Record<string, string | undefined>): string | undefined {
-  const name = environment.BROKER_FUNCTION_NAME;
-  return name === undefined || name.length === 0 ? undefined : name;
+/**
+ * The key the retried cancel's callbacks are signed with. The reconciler holds it in named
+ * environments only (#173), so only there is a stuck cancel on a live worker queued again; the
+ * legacy reconciler has none, and only logs and counts it.
+ */
+export function stuckCancelSigningKey(environment: Record<string, string | undefined>): string | undefined {
+  const key = environment.CALLBACK_SIGNING_KEY;
+  return key === undefined || key.length === 0 ? undefined : key;
 }

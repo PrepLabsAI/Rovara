@@ -1,12 +1,15 @@
-// tests/contract/stuck-cancel-broker.test.ts
-// Issue 195: the reconciler asks the broker to queue a stuck cancel again, once. The broker checks
-// everything again and queues it through the cancel route's own path.
-import { randomUUID } from "node:crypto";
+// tests/contract/stuck-cancel-retry.test.ts
+// Issue 195: the reconciler queues a stuck cancel again, once, in its own process. It checks
+// everything again and queues it through requestCancellation, the cancel route's own path (moved to
+// cancellation.ts by #173). It never asks the broker.
+import { createHmac, randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
   SLACK_CHANNEL, SLACK_TEAM, createBroker, ensureWorkspace, finishOperation, loadSlackBroker, markReady, registerSlackProject, serviceCall,
 } from "../support/slack-broker.js";
-import { STUCK_CANCEL_RETRY_MS, sweepStuckCancels } from "../../packages/broker/src/aws/stuck-cancels.js";
+import { STUCK_CANCEL_RETRY_MS, createCancelRetrier, sweepStuckCancels } from "../../packages/broker/src/aws/stuck-cancels.js";
+
+const SIGNING_KEY = "c".repeat(64);
 
 const thread = `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000001`;
 const pratik = "U0123456789";
@@ -32,19 +35,16 @@ async function stuckCancel(options: { claimed?: boolean } = {}) {
   const operation = () => broker.db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${taskOperationId}`)!;
   if (options.claimed !== false) broker.db.set({ ...operation(), cancelRetriedAt: new Date().toISOString() });
   const cancels = () => broker.db.find((item) => item.entityType === "OPERATION" && item.kind === "cancel" && item.targetOperationId === taskOperationId);
-  const retry = async (fields: Record<string, unknown> = {}) => {
-    const response = await broker.handler({ source: "agentx.session-reconciler", action: "retry-stuck-cancel", workspaceId, operationId: taskOperationId, ...fields });
-    return { status: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
-  };
+  const retry = () => createCancelRetrier({ client: broker.db, tableName: "state", callbackSigningKey: SIGNING_KEY })(workspaceId, taskOperationId);
   return { ...broker, workspaceId, taskOperationId, firstCancelId, operation, cancels, retry };
 }
 
-describe("the stuck-cancel retry, in the broker (issue 195)", () => {
+describe("the stuck-cancel retry, in the reconciler (issue 195)", () => {
   it("queues a fresh cancel for the task through the cancel path", async () => {
     const { db, workspaceId, taskOperationId, firstCancelId, operation, cancels, retry } = await stuckCancel();
     const retried = await retry();
-    expect(retried).toMatchObject({ status: 200, body: { outcome: "REQUEUED" } });
-    const cancelId = retried.body.cancelOperationId as string;
+    expect(retried).toMatchObject({ outcome: "REQUEUED" });
+    const cancelId = (retried as { cancelOperationId: string }).cancelOperationId;
     expect(cancelId).not.toBe(firstCancelId);
     expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${cancelId}`)).toMatchObject({ kind: "cancel", status: "ACCEPTED", targetOperationId: taskOperationId });
     const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === cancelId);
@@ -56,43 +56,77 @@ describe("the stuck-cancel retry, in the broker (issue 195)", () => {
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "BUSY", activeOperationId: taskOperationId });
   });
 
+  it("signs the cancel's worker callbacks with the callback signing key, as the broker does", async () => {
+    const { db, retry } = await stuckCancel();
+    const cancelId = (await retry() as { cancelOperationId: string }).cancelOperationId;
+    const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === cancelId)[0]!;
+    const capability = (outbox.invocation as { callbackCapability: string }).callbackCapability;
+    const [body, signature] = capability.split(".");
+    expect(signature).toBe(createHmac("sha256", SIGNING_KEY).update(body!).digest("base64url"));
+    expect(JSON.parse(Buffer.from(body!, "base64url").toString())).toMatchObject({ operationId: cancelId, actions: ["artifacts", "events", "result"] });
+  });
+
   it("queues nothing unless the reconciler recorded the retry first", async () => {
     const { cancels, retry } = await stuckCancel({ claimed: false });
-    expect(await retry()).toMatchObject({ status: 200, body: { outcome: "SKIPPED", reason: "not-claimed" } });
+    expect(await retry()).toEqual({ outcome: "SKIPPED", reason: "not-claimed" });
     expect(cancels()).toHaveLength(1);
   });
 
   it("queues nothing for a task that is no longer CANCEL_REQUESTED", async () => {
     const { db, operation, cancels, retry } = await stuckCancel();
     db.set({ ...operation(), status: "CANCELLED" });
-    expect(await retry()).toMatchObject({ status: 200, body: { outcome: "SKIPPED", reason: "not-cancel-requested" } });
+    expect(await retry()).toEqual({ outcome: "SKIPPED", reason: "not-cancel-requested" });
     expect(cancels()).toHaveLength(1);
   });
 
   it("queues nothing for an operation that no longer holds the workspace", async () => {
     const { db, workspaceId, cancels, retry } = await stuckCancel();
     db.set({ ...db.get(`WORKSPACE#${workspaceId}`, "META")!, activeOperationId: randomUUID() });
-    expect(await retry()).toMatchObject({ status: 200, body: { outcome: "SKIPPED", reason: "not-active" } });
+    expect(await retry()).toEqual({ outcome: "SKIPPED", reason: "not-active" });
     expect(cancels()).toHaveLength(1);
   });
 
   it("never retries an AI tool's developer task", async () => {
     const { db, workspaceId, cancels, retry } = await stuckCancel();
     db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK", entityType: "DEVELOPER_TASK_POINTER", taskId: randomUUID() });
-    expect(await retry()).toMatchObject({ status: 200, body: { outcome: "SKIPPED", reason: "developer-task" } });
+    expect(await retry()).toEqual({ outcome: "SKIPPED", reason: "developer-task" });
     expect(cancels()).toHaveLength(1);
   });
 
-  it("refuses IDs that are not UUIDs", async () => {
-    const { cancels, retry } = await stuckCancel();
-    expect(await retry({ operationId: "../x" })).toMatchObject({ status: 400, body: { error: { code: "CONFIG_INVALID" } } });
+  it("queues nothing for a workspace that is gone", async () => {
+    const { db, workspaceId, cancels, retry } = await stuckCancel();
+    db.delete(`WORKSPACE#${workspaceId}`, "META");
+    expect(await retry()).toEqual({ outcome: "SKIPPED", reason: "not-active" });
     expect(cancels()).toHaveLength(1);
   });
 
-  it("never takes the internal path for a request that came through API Gateway", async () => {
-    const { cancels, retry } = await stuckCancel();
-    const response = await retry({ version: "2.0", rawPath: "/v1/anything", headers: {}, requestContext: { requestId: "r", http: { method: "POST" } } });
-    expect(response.status).not.toBe(200);
+  it("queues nothing when the task's fence is no longer the workspace's", async () => {
+    const { db, workspaceId, operation, cancels, retry } = await stuckCancel();
+    const meta = db.get(`WORKSPACE#${workspaceId}`, "META")!;
+    db.set({ ...meta, fence: (operation().fence as number) + 1 });
+    expect(await retry()).toEqual({ outcome: "SKIPPED", reason: "fence-changed" });
+    expect(cancels()).toHaveLength(1);
+  });
+
+  it("answers finished, and queues nothing, for a task that ended while the cancel was being written", async () => {
+    const { db, workspaceId, taskOperationId, operation, cancels } = await stuckCancel();
+    const racing = {
+      async send(command: unknown) {
+        // The task's result lands between the retrier's reads and its write.
+        if ((command as { constructor: { name: string } }).constructor.name === "TransactWriteCommand") db.set({ ...operation(), status: "CANCELLED" });
+        return db.send(command as never);
+      },
+    };
+    expect(await createCancelRetrier({ client: racing, tableName: "state", callbackSigningKey: SIGNING_KEY })(workspaceId, taskOperationId)).toEqual({ outcome: "SKIPPED", reason: "finished" });
+    expect(cancels()).toHaveLength(1);
+  });
+});
+
+describe("the broker (issue 195)", () => {
+  it("no longer takes a retry request from the reconciler: it queues nothing", async () => {
+    const { handler, workspaceId, taskOperationId, cancels } = await stuckCancel();
+    const response = await handler({ source: "agentx.session-reconciler", action: "retry-stuck-cancel", workspaceId, operationId: taskOperationId });
+    expect(JSON.parse(response.body)).not.toHaveProperty("outcome");
     expect(cancels()).toHaveLength(1);
   });
 });
@@ -100,7 +134,7 @@ describe("the stuck-cancel retry, in the broker (issue 195)", () => {
 describe("the retried cancel's result (issue 195)", () => {
   it("never turns a task the first cancel already ended into INTERRUPTED", async () => {
     const { db, handler, workspaceId, firstCancelId, operation, retry } = await stuckCancel();
-    const secondCancelId = (await retry()).body.cancelOperationId as string;
+    const secondCancelId = (await retry() as { cancelOperationId: string }).cancelOperationId;
     await finishOperation(handler, db, workspaceId, firstCancelId, "SUCCEEDED");
     expect(operation()).toMatchObject({ status: "CANCELLED" });
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
@@ -113,7 +147,7 @@ describe("the retried cancel's result (issue 195)", () => {
 
   it("frees the workspace when the retried cancel fails and leaves the task INTERRUPTED but holding it", async () => {
     const { db, handler, workspaceId, operation, retry } = await stuckCancel();
-    const secondCancelId = (await retry()).body.cancelOperationId as string;
+    const secondCancelId = (await retry() as { cancelOperationId: string }).cancelOperationId;
     await finishOperation(handler, db, workspaceId, secondCancelId, "FAILED");
     // As today, a failed cancel marks the task INTERRUPTED without freeing the workspace.
     expect(operation()).toMatchObject({ status: "INTERRUPTED" });

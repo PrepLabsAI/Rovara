@@ -279,13 +279,11 @@ export class SessionLifecycle extends Construct {
   }
 
   /**
-   * Issue 195, named environments only: the reconciler queues a stuck cancel again, once, by asking
-   * the broker (which checks again and uses the cancel route's own path), so it may invoke the
-   * broker function alone. The alarm reports every stuck cancel retried or ended, and any failure.
+   * Issue 195, named environments only: the reconciler queues a stuck cancel again, once, in its own
+   * process through the shared cancel code, signed with the key connectUnwaitedTaskBackstop gives it,
+   * so it needs no grant. The alarm reports every stuck cancel retried or ended, and any failure.
    */
-  connectStuckCancelRetry(broker: lambda.IFunction): void {
-    this.reconciler.addEnvironment("BROKER_FUNCTION_NAME", broker.functionName);
-    this.reconciler.addToRolePolicy(new iam.PolicyStatement({ sid: "RetryStuckCancels", actions: ["lambda:InvokeFunction"], resources: [broker.functionArn] }));
+  connectStuckCancelAlarm(): void {
     const counted = (metricName: string) => new cloudwatch.Metric({ namespace: this.naming.metricsNamespace, metricName, statistic: "Maximum", period: Duration.minutes(15) });
     new cloudwatch.Alarm(this, "StuckCancelsAlarm", {
       alarmName: this.naming.alarmName("StuckCancels"),
