@@ -115,6 +115,7 @@ import { developerTokenVerifier } from "../developer/verify-token.js";
 import { aiToolTurn, completedTurn, developerFooter, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { AWS_TEMPORARY_MESSAGE, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, workerPrompt } from "./broker-shared.js";
+import { isStuckCancelRetryEvent, type StuckCancelRetry, type StuckCancelRetryEvent } from "./stuck-cancels.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
 import { adminShareMode, finishTaskClose } from "./developer-tasks.js";
@@ -580,7 +581,18 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent | AdminChangePressEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | AdminChangePressEvent | StuckCancelRetryEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+    // Issue 195: the reconciler queues a stuck cancel again, once (never through API Gateway).
+    if (isStuckCancelRetryEvent(event)) {
+      try {
+        return json(await retryStuckCancel(dependencies, event), "session-reconciler");
+      } catch (error) {
+        if (error instanceof AgentXError) {
+          return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "session-reconciler", error.statusCode);
+        }
+        return unexpectedErrorAnswer(error, "session-reconciler");
+      }
+    }
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
@@ -3060,6 +3072,28 @@ async function stopWorkspace(
     throw agentXError("WORKSPACE_BUSY", "cancel or finish active work before stopping compute");
   }
   throw agentXError("RUNTIME_UNAVAILABLE", "manual compute stop is not supported; idle sessions stop automatically");
+}
+
+/**
+ * Issue 195: queues the cancel of a task stuck CANCEL_REQUESTED again, through requestCancellation
+ * as the cancel route does. Checks everything again, so the reconciler can never queue more than
+ * this allows: the operation still holds the workspace, is still CANCEL_REQUESTED, the reconciler
+ * recorded its one retry on it first (so it never loops), and it is not an AI tool's developer task.
+ */
+async function retryStuckCancel(dependencies: AwsBrokerDependencies, event: StuckCancelRetryEvent): Promise<StuckCancelRetry> {
+  const workspaceId = uuid(event.workspaceId, "workspaceId");
+  const operationId = uuid(event.operationId, "operationId");
+  const skipped = (reason: string): StuckCancelRetry => ({ outcome: "SKIPPED", reason });
+  const workspace = await requireWorkspace(dependencies, workspaceId);
+  if (workspace.activeOperationId !== operationId) return skipped("not-active");
+  const target = await requireOperation(dependencies, workspaceId, operationId);
+  if (target.status !== "CANCEL_REQUESTED") return skipped("not-cancel-requested");
+  if (typeof (target as { cancelRetriedAt?: unknown }).cancelRetriedAt !== "string") return skipped("not-claimed");
+  if (await getItem(dependencies, taskPointerKey(workspaceId)) !== undefined) return skipped("developer-task");
+  const result = await requestCancellation(dependencies, workspace, operationId, {});
+  // A duplicate means the task finished before the cancel was recorded.
+  if (result.duplicate) return skipped("finished");
+  return { outcome: "REQUEUED", cancelOperationId: result.operation.id };
 }
 
 /** Only a coding task is cancelled: stopping a prepare or a publish midway could leave half a clone or push. */

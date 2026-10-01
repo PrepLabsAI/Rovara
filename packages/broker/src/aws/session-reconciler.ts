@@ -8,6 +8,7 @@ import {
 } from "@aws-sdk/client-ec2";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DescribeExecutionCommand, SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
+import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import { DynamoDBDocumentClient, GetCommand } from "@aws-sdk/lib-dynamodb";
 import type { Ec2RuntimeBinding, WorkspaceSession, WorkspaceSessionState } from "@agentx/contracts";
 import { requiredEnvironment } from "./lambda.js";
@@ -15,6 +16,7 @@ import { failActiveOperation } from "./outbox-failure.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
 import { expireIndexDays, indexSweepWanted } from "./index-expiry.js";
 import { sweepStuckSetups } from "./stuck-setup.js";
+import { createBrokerCancelRetrier, stuckCancelBrokerFunction, sweepStuckCancels, type StuckCancelCandidate, type StuckCancelCompute, type StuckCancelSweepResult } from "./stuck-cancels.js";
 
 /** A just-launched instance or just-created volume is not judged until its session has recorded it. */
 export const GRACE_MS = 15 * 60_000;
@@ -42,6 +44,8 @@ export interface ReconcilerReport {
   quarantinedVolumes: string[];
   /** Spec 025 FR-055: workspaces whose developer-task setup the sweep failed this run. */
   stuckSetups: string[];
+  /** Issue 195: tasks left CANCEL_REQUESTED that this run retried or ended; absent when no sweep is wired. */
+  stuckCancels?: StuckCancelSweepResult;
 }
 
 export interface ReconcilerDependencies {
@@ -63,6 +67,8 @@ export interface ReconcilerDependencies {
   emit: (metrics: Record<string, number>) => void;
   /** Spec 025 FR-055: fails developer-task prepares 50 minutes old; absent in tests that do not need it. */
   sweepStuckSetups?: (now: Date) => Promise<{ failed: string[] }>;
+  /** Issue 195: retries once, or ends, tasks stuck CANCEL_REQUESTED among the listed workspaces; absent in tests that do not need it. */
+  sweepStuckCancels?: (candidates: StuckCancelCandidate[], now: Date) => Promise<StuckCancelSweepResult>;
   /** Spec 025 A6: deletes failure and usage index days older than 30 days; absent in tests that do not need it. */
   expireIndexDays?: (now: Date) => Promise<{ deleted: number }>;
   now?: () => Date;
@@ -121,6 +127,10 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
       }
     }
 
+    // Issue 195: after the session repairs above (a lost READY worker's operation is already failed),
+    // and in its own try, so a failure here never stops the repairs that follow.
+    const stuckCancelMetrics = await reconcileStuckCancels(dependencies, sessions, instanceById, now, report, log);
+
     // Volumes no session claims.
     for (const volume of await dependencies.volumes()) {
       if (volume.quarantined) {
@@ -178,9 +188,57 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
       ReconcilerQuarantinedVolumes: report.quarantinedVolumes.length,
       ReconcilerStuckSetups: report.stuckSetups.length,
       ReconcilerStuckSetupErrors: sweepError === undefined ? 0 : 1,
+      ...stuckCancelMetrics,
     });
     if (sweepError !== undefined) throw sweepError;
     return report;
+  };
+}
+
+/** What is known of each listed workspace's compute, from this run's session and instance reads. */
+function computeOf(session: WorkspaceSession, instances: Map<string, InstanceView>): StuckCancelCompute {
+  switch (session.state) {
+    case "READY":
+      return instances.get(session.instanceId!)?.state === "running" ? "alive" : "gone";
+    case "STOPPED":
+    case "FAILED":
+    case "DELETING":
+      return "gone";
+    default:
+      // PROVISIONING or STOPPING: the next run sees where it settled.
+      return "unknown";
+  }
+}
+
+/**
+ * Issue 195: runs the stuck-cancel sweep over the listed workspaces. Each action is logged by the
+ * sweep and counted here; a sweep that throws is logged by its error name and counted as a failure
+ * for the StuckCancels alarm (named environments), and the run goes on.
+ */
+async function reconcileStuckCancels(
+  dependencies: ReconcilerDependencies,
+  sessions: Map<string, WorkspaceSession>,
+  instances: Map<string, InstanceView>,
+  now: number,
+  report: ReconcilerReport,
+  log: (entry: Record<string, unknown>) => void,
+): Promise<Record<string, number>> {
+  if (dependencies.sweepStuckCancels === undefined) return {};
+  const candidates = [...sessions.values()].map((session) => ({ workspaceId: session.workspaceId, compute: computeOf(session, instances) }));
+  let sweepFailed = 0;
+  try {
+    report.stuckCancels = await dependencies.sweepStuckCancels(candidates, new Date(now));
+  } catch (error) {
+    sweepFailed = 1;
+    log({ event: "reconciler.stuck_cancel_sweep_failed", errorName: error instanceof Error ? error.name : "unknown" });
+  }
+  const swept = report.stuckCancels;
+  return {
+    ReconcilerStuckCancelRetries: swept?.retried.length ?? 0,
+    ReconcilerStuckCancelsEnded: swept?.ended.length ?? 0,
+    ReconcilerStuckCancelsInterrupted: swept?.interrupted.length ?? 0,
+    ReconcilerStuckCancelsUnretried: swept?.unretried.length ?? 0,
+    ReconcilerStuckCancelFailures: (swept?.failed.length ?? 0) + sweepFailed,
   };
 }
 
@@ -295,6 +353,21 @@ const ownFilters = () => [
 ];
 const tag = (tags: Array<{ Key?: string | undefined; Value?: string | undefined }> | undefined, key: string) => tags?.find((candidate) => candidate.Key === key)?.Value;
 
+/**
+ * Issue 195: the stuck-cancel sweep runs in every reconciler, using the State table it already
+ * reads and writes. Only a named environment's reconciler may invoke the broker, so only there is
+ * a stuck cancel on a live worker queued again; the legacy one logs and counts it.
+ */
+function stuckCancelSweep(): NonNullable<ReconcilerDependencies["sweepStuckCancels"]> {
+  const brokerFunctionName = stuckCancelBrokerFunction(process.env);
+  const lambda = brokerFunctionName === undefined ? undefined : new LambdaClient(awsClientConfiguration);
+  const retryCancel = lambda === undefined ? undefined : createBrokerCancelRetrier((payload) => lambda.send(new InvokeCommand({
+    FunctionName: brokerFunctionName, InvocationType: "RequestResponse", Payload: Buffer.from(payload),
+  })));
+  const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }));
+  return (candidates, now) => sweepStuckCancels({ client: documentClient, tableName, ...(retryCancel === undefined ? {} : { retryCancel }), log }, candidates, now);
+}
+
 export const handler = createReconcilerHandler({
   sessions: new SessionManager({
     documentClient,
@@ -378,6 +451,7 @@ export const handler = createReconcilerHandler({
     return item?.status === "CLOSED" ? item.closedAt : undefined;
   },
   binding: (workspaceId) => workspaceBinding(documentClient, tableName, workspaceId),
+  sweepStuckCancels: stuckCancelSweep(),
   sweepStuckSetups: (now) => sweepStuckSetups(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))),
   ...(indexSweepWanted(process.env) ? { expireIndexDays: (now: Date) => expireIndexDays(documentClient, tableName, now, (entry) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }))) } : {}),
   emit(metrics) {
