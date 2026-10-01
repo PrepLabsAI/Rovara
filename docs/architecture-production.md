@@ -51,6 +51,8 @@ on any other deployment mode. On an EC2 worker:
 - Preparation starts the devcontainer after cloning and runs `setup` and `readiness` in it. Every
   task starts it again first, since a resumed instance has its containers stopped, and the agent's
   shell runs in it.
+- Publishing or updating a pull request starts it again too and runs `readiness` in it, the same
+  way preparation does.
 - Docker's data root is `/mnt/workspace/.docker`, so images, containers and named volumes (a
   database, for example) survive an idle stop.
 

@@ -3,6 +3,7 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
+  AgentXError,
   PullRequestLifecycleResultSchema,
   agentXError,
   type WorkerInvocation,
@@ -16,6 +17,7 @@ import type { RepositoryCredentialProvider } from "./repository-credentials.js";
 import { runReadinessChecks } from "./publish.js";
 import { storedCommandOutput } from "./command-failure.js";
 import type { PreparationManifest } from "./prepare.js";
+import type { DevcontainerCli } from "./devcontainer.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT = 1_048_576;
@@ -27,8 +29,12 @@ export async function maintainPullRequest(options: {
   credentialProvider: RepositoryCredentialProvider;
   pullRequestUpdateSink: PullRequestUpdateSink;
   codeBuildSink?: CodeBuildSink;
+  /** The `devcontainer` CLI, as a seam for tests. */
+  devcontainerCli?: DevcontainerCli;
 }): Promise<PullRequestLifecycleResult> {
   const { invocation } = options;
+  // In the devcontainer preparation recorded, as at publication (#183).
+  const readinessOptions = options.devcontainerCli !== undefined ? { devcontainerCli: options.devcontainerCli } : {};
   const rootPath = await realpath(resolve(options.rootPath));
   const manifest = await loadManifest(rootPath, invocation);
   const repository = invocation.payload.project.repositories.find(
@@ -72,7 +78,7 @@ export async function maintainPullRequest(options: {
     if (currentHead === remoteHead && !status.trim()) {
       throw agentXError("CONFIG_INVALID", "repository has no new changes to append");
     }
-    const checks = await runReadinessChecks(rootPath, invocation);
+    const checks = await runReadinessChecks(rootPath, invocation, manifest, readinessOptions);
     if (checks.some((check) => check.outcome !== "passed")) {
       throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
     }
@@ -134,10 +140,16 @@ export async function maintainPullRequest(options: {
     }
     commit = (await git(repositoryPath, ["rev-parse", "HEAD"])).trim();
   }
-  const checks = await runReadinessChecks(rootPath, invocation);
+  let checks: Awaited<ReturnType<typeof runReadinessChecks>>;
+  try {
+    checks = await runReadinessChecks(rootPath, invocation, manifest, readinessOptions);
+  } catch (error) {
+    // For example, the devcontainer did not start: the merge is not kept either.
+    throw reconciled ? error : await undoMerge(repositoryPath, remoteHead, error);
+  }
   if (checks.some((check) => check.outcome !== "passed")) {
-    if (!reconciled) await git(repositoryPath, ["reset", "--hard", remoteHead]);
-    throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
+    const failure = agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
+    throw reconciled ? failure : await undoMerge(repositoryPath, remoteHead, failure);
   }
   const codeBuildChecks = reconciled
     ? []
@@ -215,6 +227,21 @@ async function isAncestor(directory: string, ancestor: string, descendant: strin
     const exitCode = (error as { code?: unknown }).code;
     if (exitCode === 1) return false;
     throw agentXError("CONFIG_INVALID", "Git could not compare pull request history");
+  }
+}
+
+/**
+ * Resets a sync's merge after its checks failed or could not run, and returns the error to throw: the
+ * original one, which also says when the reset failed, so a failed reset never hides why.
+ */
+async function undoMerge(repositoryPath: string, remoteHead: string, error: unknown): Promise<unknown> {
+  try {
+    await git(repositoryPath, ["reset", "--hard", remoteHead]);
+    return error;
+  } catch (resetError) {
+    const reason = `the merge could not be undone: ${resetError instanceof AgentXError ? resetError.message.replace(/^[A-Z_]+: /u, "") : "Git reset failed"}`;
+    if (error instanceof AgentXError) return agentXError(error.code, `${error.message.replace(`${error.code}: `, "")}; ${reason}`);
+    return new Error(`${error instanceof Error ? error.message : "readiness checks could not run"}; ${reason}`);
   }
 }
 
