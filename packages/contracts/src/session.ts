@@ -1,4 +1,5 @@
 import { Buffer } from "node:buffer";
+import { gzipSync } from "node:zlib";
 import { z } from "zod";
 
 // Contracts for ec2-ebs workspaces, whose compute the Session Manager provisions on self-managed
@@ -216,8 +217,9 @@ export function workerInvokeToken(payload: string, signature: Uint8Array): strin
 const SHELL_SAFE = /^[A-Za-z0-9._:/@+=-]+$/;
 
 /**
- * What an EC2 worker boots with. The provisioner renders it into user data with
- * `ec2WorkerUserData`; `packages/worker/ec2/boot.sh` reads each field from the variable named here.
+ * What an EC2 worker boots with. The provisioner renders it into user data with `ec2WorkerUserData`
+ * (uncompressed, `ec2WorkerBootScript`); `packages/worker/ec2/boot.sh` reads each field from the
+ * variable named here.
  */
 export const Ec2WorkerBootConfigSchema = z
   .object({
@@ -241,8 +243,8 @@ export const Ec2WorkerBootConfigSchema = z
     modelProvider: z.string().min(1).max(128).regex(SHELL_SAFE, "model provider has unsafe characters"),
     /** AGENTX_MODEL_ID */
     modelId: z.string().min(1).max(256).regex(SHELL_SAFE, "model ID has unsafe characters"),
-    openRouterSecretArn: z.string().regex(/^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+$/).optional(),
-    openRouterProviders: z.string().regex(/^[a-z0-9][a-z0-9_/-]{0,79}(?:,[a-z0-9][a-z0-9_/-]{0,79})*$/).optional(),
+    openRouterSecretArn: z.string().max(2_048).regex(/^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+$/).optional(),
+    openRouterProviders: z.string().max(512).regex(/^[a-z0-9][a-z0-9_/-]{0,79}(?:,[a-z0-9][a-z0-9_/-]{0,79})*$/).optional(),
     /** PI_CACHE_RETENTION */
     promptCacheRetention: z.enum(["short", "long"]),
     /** AGENTX_LOG_GROUP: the CloudWatch Logs group the worker container writes to. */
@@ -250,8 +252,11 @@ export const Ec2WorkerBootConfigSchema = z
   })
   .strict();
 
-/** The boot script's user data: a validated configuration block, then the script itself. */
-export function ec2WorkerUserData(config: Ec2WorkerBootConfig, bootScript: string): string {
+/**
+ * The script cloud-init runs on a worker: a validated configuration block, then the boot script.
+ * `ec2WorkerUserData` sends it compressed; the boot-script harness runs it as is.
+ */
+export function ec2WorkerBootScript(config: Ec2WorkerBootConfig, bootScript: string): string {
   const parsed = Ec2WorkerBootConfigSchema.parse(config);
   const variables: Array<[string, string]> = [
     ["AGENTX_WORKSPACE_ID", parsed.workspaceId],
@@ -269,18 +274,26 @@ export function ec2WorkerUserData(config: Ec2WorkerBootConfig, bootScript: strin
   if (parsed.openRouterSecretArn) variables.push(["AGENTX_OPENROUTER_SECRET_ARN", parsed.openRouterSecretArn]);
   if (parsed.openRouterProviders) variables.push(["AGENTX_OPENROUTER_PROVIDERS", parsed.openRouterProviders]);
   const body = bootScript.replace(/^#!.*\n/, "");
-  const userData = [
+  return [
     "#!/bin/bash",
-    "# Rendered by ec2WorkerUserData (@agentx/contracts).",
+    "# Rendered by ec2WorkerBootScript (@agentx/contracts).",
     ...variables.map(([name, value]) => `export ${name}='${value}'`),
     body,
   ].join("\n");
+}
+
+/**
+ * The worker's RunInstances UserData: the boot script gzip-compressed, then base64 encoded once,
+ * as RunInstances takes it. cloud-init recognizes gzip user data and decompresses it before
+ * running the script (#229). Pass the result to EC2 as is; encoding it again breaks the boot.
+ */
+export function ec2WorkerUserData(config: Ec2WorkerBootConfig, bootScript: string): string {
+  const compressed = gzipSync(Buffer.from(ec2WorkerBootScript(config, bootScript), "utf8"), { level: 9 });
   // EC2 rejects larger user data with an error that does not say which part grew (#223).
-  const size = Buffer.byteLength(userData, "utf8");
-  if (size >= EC2_USER_DATA_MAX_BYTES) {
-    throw new Error(`worker user data is ${size} bytes; EC2 allows less than ${EC2_USER_DATA_MAX_BYTES}`);
+  if (compressed.length >= EC2_USER_DATA_MAX_BYTES) {
+    throw new Error(`worker user data is ${compressed.length} bytes compressed; EC2 allows less than ${EC2_USER_DATA_MAX_BYTES}`);
   }
-  return userData;
+  return compressed.toString("base64");
 }
 
 /** EC2's limit on user data before base64 encoding. */
