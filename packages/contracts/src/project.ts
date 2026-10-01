@@ -6,6 +6,7 @@ import { ConnectorsSchema, StoredConnectorsSchema } from "./connectors.js";
 import type { GitHubConnectorConfig } from "./connectors.js";
 import type { GitHubMcpPolicy } from "./github-mcp.js";
 import { ProjectModelsSchema } from "./models.js";
+import { redactText } from "./redaction.js";
 
 import { AGENTX_NAME_PATTERN } from "./names.js";
 
@@ -63,12 +64,113 @@ const HttpsOrLoopbackUrlSchema = z.string().url().superRefine((value, context) =
   }
 });
 
+export const PROJECT_COMMAND_ENV_MAX_ENTRIES = 64;
+export const PROJECT_COMMAND_ENV_VALUE_MAX = 4_096;
+export const PROJECT_COMMAND_ENV_TOTAL_MAX_BYTES = 32_768;
+
+/**
+ * Names a registration may not put in a command's `env` (#54), compared in upper case. The worker
+ * sets or relies on them (Git's safe directory, AWS access, the agent shell's PI_* variables), or
+ * they change how a process is found, loaded or started. PATH is refused too: put tools at a full
+ * path, or set PATH in the devcontainer's own configuration.
+ */
+const RESERVED_ENV_NAMES = new Set(["PATH", "HOME", "USER", "LOGNAME", "SHELL", "PWD", "OLDPWD", "IFS", "ENV", "BASH_ENV"]);
+const RESERVED_ENV_PREFIXES = ["AGENTX_", "AWS_", "GIT_", "LD_", "DYLD_", "PI_"];
+/** A name whose last word is one of these looks like a credential. */
+const CREDENTIAL_ENV_LAST_WORDS = new Set([
+  "TOKEN", "TOKENS", "SECRET", "SECRETS", "PASSWORD", "PASSWD", "PASS", "PWD",
+  "CREDENTIAL", "CREDENTIALS", "CREDS", "APIKEY",
+]);
+/** So does a name with one of these word pairs anywhere, or ending in one of these words. */
+const CREDENTIAL_ENV_PAIRS = ["API_KEY", "PRIVATE_KEY", "ACCESS_KEY", "SECRET_KEY"];
+const CREDENTIAL_ENV_SUFFIXES = ["TOKEN", "SECRET", "PASSWORD", "PASSWD", "APIKEY"];
+/** A URL with a user and password in it, such as postgres://user:password@host. */
+const URL_WITH_PASSWORD = /[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^/\s@]*@/i;
+const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function reservedEnvName(name: string): boolean {
+  const upper = name.toUpperCase();
+  return RESERVED_ENV_NAMES.has(upper) || RESERVED_ENV_PREFIXES.some((prefix) => upper.startsWith(prefix));
+}
+
+function credentialEnvName(name: string): boolean {
+  const upper = name.toUpperCase();
+  const words = upper.split("_");
+  return CREDENTIAL_ENV_LAST_WORDS.has(words.at(-1) ?? "")
+    || CREDENTIAL_ENV_PAIRS.some((pair) => `_${upper}_`.includes(`_${pair}_`))
+    || CREDENTIAL_ENV_SUFFIXES.some((suffix) => upper.endsWith(suffix));
+}
+
+function secretEnvValue(value: string): boolean {
+  return URL_WITH_PASSWORD.test(value) || redactText(value) !== value;
+}
+
+/**
+ * What registration refuses in a command's `env` (#54): names AgentX, the worker or the system rely
+ * on, and names or values that look like credentials. Only `ProjectDefinitionSchema` applies it, so
+ * a later, stricter rule never stops a stored revision from being read. Messages name a variable,
+ * never its value.
+ */
+export function projectCommandEnvProblems(env: Readonly<Record<string, string>>): Array<{ name: string; message: string }> {
+  const problems: Array<{ name: string; message: string }> = [];
+  for (const [name, value] of Object.entries(env)) {
+    if (reservedEnvName(name)) {
+      problems.push({ name, message: `env name ${name} is reserved for AgentX, the worker or the system` });
+    } else if (credentialEnvName(name)) {
+      problems.push({ name, message: `env name ${name} looks like a credential; env is not for secrets, use a credential reference` });
+    } else if (secretEnvValue(value)) {
+      problems.push({ name, message: `env value of ${name} looks like a secret; env is not for secrets, use a credential reference` });
+    }
+  }
+  return problems;
+}
+
+/**
+ * Environment variables for one project command (#54): the structure only, which stored revisions
+ * and worker payloads are held to as well. Values are plain configuration, not secrets: a revision
+ * is stored and shown in full, so a secret belongs in a credential reference. Messages here name a
+ * variable, never its value.
+ */
+export const ProjectCommandEnvSchema = z
+  .unknown()
+  // zod drops a __proto__ key from a record without an error; refuse it instead.
+  .superRefine((raw, context) => {
+    if (raw !== null && typeof raw === "object" && Object.hasOwn(raw, "__proto__")) {
+      context.addIssue({ code: "custom", path: ["__proto__"], message: "env names must be POSIX environment variable names" });
+    }
+  })
+  .pipe(z
+    .record(
+      z.string(),
+      z.string()
+        .max(PROJECT_COMMAND_ENV_VALUE_MAX, `env values must be at most ${PROJECT_COMMAND_ENV_VALUE_MAX.toLocaleString("en-US")} characters`)
+        .refine((value) => !value.includes("\u0000"), "env values cannot contain a NUL byte"),
+    )
+    .superRefine((env, context) => {
+      const names = Object.keys(env);
+      if (names.length > PROJECT_COMMAND_ENV_MAX_ENTRIES) {
+        context.addIssue({ code: "custom", message: `env may have at most ${PROJECT_COMMAND_ENV_MAX_ENTRIES} entries` });
+      }
+      let bytes = 0;
+      for (const name of names) {
+        if (name.length > 128 || !ENV_NAME_PATTERN.test(name)) {
+          context.addIssue({ code: "custom", path: [name], message: "env names must be POSIX environment variable names" });
+        }
+        bytes += Buffer.byteLength(name, "utf8") + Buffer.byteLength(env[name] ?? "", "utf8") + 2;
+      }
+      if (bytes > PROJECT_COMMAND_ENV_TOTAL_MAX_BYTES) {
+        context.addIssue({ code: "custom", message: `env is larger than ${PROJECT_COMMAND_ENV_TOTAL_MAX_BYTES.toLocaleString("en-US")} bytes` });
+      }
+    }));
+
 export const ProjectCommandSchema = z
   .object({
     cwd: RelativeWorkspacePathSchema,
     executable: z.string().min(1).max(256),
     args: z.array(z.string().max(8_192)).max(256),
     timeoutSeconds: z.number().int().positive().max(86_400),
+    /** Variables for this command only (#54). Not for secrets; see ProjectCommandEnvSchema. */
+    env: ProjectCommandEnvSchema.optional(),
   })
   .strict();
 
@@ -262,6 +364,16 @@ export const ProjectDefinitionSchema = projectDefinitionObject(ConnectorsSchema)
   // StoredProjectDefinitionSchema, which does not re-check.
   .superRefine((project, context) => {
     for (const message of actionPolicyProblems(project)) context.addIssue({ code: "custom", path: ["actionPolicy"], message });
+  })
+  // Registration only (#54): a stored revision is read without these name and value rules.
+  .superRefine((project, context) => {
+    for (const stage of ["setup", "readiness"] as const) {
+      for (const [index, command] of project[stage].entries()) {
+        for (const { name, message } of projectCommandEnvProblems(command.env ?? {})) {
+          context.addIssue({ code: "custom", path: [stage, index, "env", name], message });
+        }
+      }
+    }
   });
 
 /**

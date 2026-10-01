@@ -498,8 +498,8 @@ yet, so it picks up a revision registered after its first message. `admin slack 
 the binding, so new mentions in that channel are ignored, but it keeps existing thread workspaces.
 
 Once prepared, a thread's checkout stays on the revision it was prepared with: `repositories`,
-`setup` and `environment` do not change under a running thread, and a failed preparation is
-retried from that same revision. Everything else follows the project's
+`setup`, `devcontainer` and `environment` do not change under a running thread, and a failed
+preparation is retried from that same revision. Everything else follows the project's
 latest registered revision from the next mention onwards: the GitHub MCP policy and the
 repositories it may address, `orchestratorInstructions`, `readiness` and each repository's
 `codeBuildGates`. So enabling a tool, correcting a test command or withdrawing a write tool takes
@@ -886,7 +886,7 @@ Delete any leftover `~/.agentx/state` directory and, if your OS credential store
 
 Pull-request creation is explicit; AgentX never publishes automatically after a coding task. The
 registered project's `readiness` commands run inside the EC2 workspace before a candidate is
-pushed. Optional repository `codeBuildGates` then run remotely against that exact pushed commit.
+pushed, inside the dev container when the workspace was prepared with one. Optional repository `codeBuildGates` then run remotely against that exact pushed commit.
 AgentX rejects an empty diff, merge conflicts, or any failed/timed-out check before creating a PR.
 
 Ask for it in the thread, naming the repository by its project YAML `name`, for example:

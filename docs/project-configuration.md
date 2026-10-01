@@ -73,6 +73,51 @@ worker image.
 Each `setup` and `readiness` entry has `cwd` (relative to the workspace), `executable`, `args` (up
 to 256 strings) and `timeoutSeconds` (up to 86,400).
 
+An entry may also have `env`: environment variables for that command only. The next command does
+not see them. On the worker they are added to the worker's own environment; with a dev container
+they are set inside the container (`devcontainer exec --remote-env`).
+
+```yaml
+setup:
+  - cwd: repo/payments-api
+    executable: npm
+    args: [ci]
+    timeoutSeconds: 600
+    env:
+      NODE_ENV: test
+      npm_config_fund: "false"
+```
+
+- Names follow POSIX rules: a letter or `_`, then letters, digits or `_`, at most 128 characters.
+- Values are strings (quote `"false"` and numbers in YAML), at most 4,096 characters each, with no
+  NUL byte.
+- At most 64 entries and 32,768 bytes per command.
+- AgentX refuses names it or the system relies on, in any letter case: `PATH`, `HOME`, `USER`,
+  `LOGNAME`, `SHELL`, `PWD`, `OLDPWD`, `IFS`, `ENV`, `BASH_ENV`, and any name starting with
+  `AGENTX_`, `AWS_`, `GIT_`, `LD_`, `DYLD_` or `PI_`. To use a tool that is not on the worker's
+  `PATH`, give its full path as `executable`, or set `PATH` in the dev container's own
+  configuration.
+- Other names are allowed, including ones the worker image sets, such as `NODE_ENV` and `PORT`,
+  and ones like `NODE_OPTIONS` or `HTTPS_PROXY`. They apply to that one command only.
+
+**`env` is not for secrets.** A registered revision is stored and shown in full, and with a dev
+container the values are on the `devcontainer exec` command line while a command runs. At
+registration AgentX refuses:
+
+- names whose last word marks a credential (`TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASS`,
+  `PWD`, `CREDENTIALS`, `CREDS`, `APIKEY`), names ending in `TOKEN`, `SECRET` or `PASSWORD` (such as
+  `PGPASSWORD`), and names with `API_KEY`, `PRIVATE_KEY`, `ACCESS_KEY` or `SECRET_KEY` in them;
+- values that hold a URL with a password (`postgres://user:password@host`) or look like a token.
+
+A name that only mentions such a word earlier, such as `SECRET_NAME` or `SKIP_TOKEN_CHECK`, is
+allowed. These checks are a guard, not a guarantee: keep every secret in a credential reference,
+never in `env`. AgentX error messages name a variable, never its value.
+
+A worker that predates `env` refuses a revision that uses it. Readiness at publish comes from the
+latest revision, even for a workspace prepared from an older one, so a running workspace on an
+old worker image cannot publish once such a revision is registered. Make sure every running
+workspace runs the new worker image before registering a revision that uses `env`.
+
 ### Dev container
 
 ```yaml
@@ -82,6 +127,13 @@ devcontainer:
 ```
 
 `repository` must name a registered repository. Dev containers run on EC2 workers.
+
+`readiness` runs when the workspace is prepared and again before each pull request is published
+or updated, each time inside the dev container when the workspace was prepared with one. A
+workspace prepared without one runs its commands on the worker; adding a dev container in a later
+revision does not move an existing workspace's checks into it. Before the checks run at publication
+or a pull request update, AgentX starts the dev container (this does nothing when it is already
+running). If it does not start, nothing is pushed.
 
 ### Models
 
