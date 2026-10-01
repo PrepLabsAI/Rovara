@@ -4,8 +4,9 @@
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
-  SLACK_CHANNEL, SLACK_TEAM, createBroker, ensureWorkspace, loadSlackBroker, markReady, registerSlackProject, serviceCall,
+  SLACK_CHANNEL, SLACK_TEAM, createBroker, ensureWorkspace, finishOperation, loadSlackBroker, markReady, registerSlackProject, serviceCall,
 } from "../support/slack-broker.js";
+import { STUCK_CANCEL_RETRY_MS, sweepStuckCancels } from "../../packages/broker/src/aws/stuck-cancels.js";
 
 const thread = `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000001`;
 const pratik = "U0123456789";
@@ -93,5 +94,38 @@ describe("the stuck-cancel retry, in the broker (issue 195)", () => {
     const response = await retry({ version: "2.0", rawPath: "/v1/anything", headers: {}, requestContext: { requestId: "r", http: { method: "POST" } } });
     expect(response.status).not.toBe(200);
     expect(cancels()).toHaveLength(1);
+  });
+});
+
+describe("the retried cancel's result (issue 195)", () => {
+  it("never turns a task the first cancel already ended into INTERRUPTED", async () => {
+    const { db, handler, workspaceId, taskOperationId, firstCancelId, operation, retry } = await stuckCancel();
+    const secondCancelId = (await retry()).body.cancelOperationId as string;
+    await finishOperation(handler, db, workspaceId, firstCancelId, "SUCCEEDED");
+    expect(operation()).toMatchObject({ status: "CANCELLED" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
+    // The worker no longer knows the task, so the retried cancel fails.
+    await finishOperation(handler, db, workspaceId, secondCancelId, "FAILED");
+    expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${secondCancelId}`)).toMatchObject({ status: "FAILED" });
+    expect(operation()).toMatchObject({ status: "CANCELLED" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "READY" });
+    expect(taskOperationId).toBeDefined();
+  });
+
+  it("frees the workspace when the retried cancel fails and leaves the task INTERRUPTED but holding it", async () => {
+    const { db, handler, workspaceId, operation, retry } = await stuckCancel();
+    const secondCancelId = (await retry()).body.cancelOperationId as string;
+    await finishOperation(handler, db, workspaceId, secondCancelId, "FAILED");
+    // As today, a failed cancel marks the task INTERRUPTED without freeing the workspace.
+    expect(operation()).toMatchObject({ status: "INTERRUPTED" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ activeOperationId: operation().id });
+    const logs: Array<Record<string, unknown>> = [];
+    const later = new Date(Date.now() + STUCK_CANCEL_RETRY_MS + 60_000);
+    const result = await sweepStuckCancels({ client: db, tableName: "state", log: (entry) => { logs.push(entry); } }, [{ workspaceId, compute: "alive" }], later);
+    expect(result.interrupted).toEqual([operation().id]);
+    expect(operation()).toMatchObject({ status: "INTERRUPTED" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "READY" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
+    expect(logs).toEqual([{ event: "stuck_cancel.released", workspaceId, operationId: operation().id }]);
   });
 });

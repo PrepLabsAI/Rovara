@@ -314,7 +314,7 @@ describe("reconciler: stuck cancels (issue 195)", () => {
     return { workspaceId, operationId, operation: () => db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)! };
   }
 
-  it("hands the sweep every listed workspace with what is known of its compute, after the EC2 repairs", async () => {
+  it("hands the sweep every listed workspace with what is known of its compute", async () => {
     const sweep = vi.fn<NonNullable<ReconcilerDependencies["sweepStuckCancels"]>>(async () => ({ retried: [], ended: [], interrupted: [], unretried: [], failed: [] }));
     const { db, state, reconcile } = setup({ sweepStuckCancels: sweep });
     const alive = ready();

@@ -8,13 +8,17 @@
 //   operation first (cancelRetriedAt), so a crash or a failed retry can never retry it twice;
 // - a retried one still CANCEL_REQUESTED STUCK_CANCEL_RETRY_MS later is ended INTERRUPTED, and its
 //   workspace freed.
+// - a retried one whose cancel failed (the result marks it INTERRUPTED but leaves it holding the
+//   workspace) has its workspace freed.
+// A cancel operation for the task that is still live and changed within STUCK_CANCEL_MS counts as
+// progressing, so a live worker's task is neither retried nor interrupted while it moves.
 // Operations not CANCEL_REQUESTED, and cancels within their limit, are never touched. A task an AI
 // tool started (a developer task) keeps today's lost-compute rule only: ended when its compute is
 // gone, never retried or interrupted while its compute is alive.
 //
 // Every write is conditioned on the operation still being CANCEL_REQUESTED under the fence read,
 // and on the workspace still being held by it, so a cancel result that lands first stands.
-import { GetCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { taskPointerKey } from "../developer/task-records.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
@@ -94,6 +98,18 @@ async function settle(
   const operationId = workspace?.activeOperationId;
   if (typeof operationId !== "string") return;
   const operation = await get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` }) as StuckOperation | undefined;
+  // The retried cancel failed (the worker no longer knew the task): the result marked the task
+  // INTERRUPTED but, as for any failed cancel, left it holding the workspace. Only an operation
+  // this sweep retried is freed so; nothing more can finish it.
+  if (operation?.status === "INTERRUPTED" && typeof operation.cancelRetriedAt === "string" && typeof operation.fence === "number") {
+    if (await release(dependencies, { workspaceId, operationId }, operation, at)) {
+      result.interrupted.push(operationId);
+      log({ event: "stuck_cancel.released", workspaceId, operationId });
+    } else {
+      log({ event: "stuck_cancel.skipped", workspaceId, operationId, reason: "changed" });
+    }
+    return;
+  }
   if (operation?.status !== "CANCEL_REQUESTED" || typeof operation.fence !== "number" || typeof operation.updatedAt !== "string") return;
   const now = at.getTime();
   const requestedAt = Date.parse(operation.updatedAt);
@@ -105,17 +121,23 @@ async function settle(
     if (await end(dependencies, ids, operation, at, "FAILED", STUCK_CANCEL_LOST_MESSAGE)) {
       result.ended.push(operationId);
       log({ event: "stuck_cancel.ended", ...ids, reason: "compute-gone" });
+    } else {
+      log({ event: "stuck_cancel.skipped", ...ids, reason: "changed" });
     }
     return;
   }
   // Compute is alive. A developer task keeps today's rule: only lost compute ends it.
   if (await get(taskPointerKey(workspaceId)) !== undefined) return;
+  // A cancel operation for it that moved within the limit is still progressing.
+  if (await cancelProgressing(dependencies, ids, now)) return;
   if (retriedAt !== undefined) {
     // Timed from the retry, or from a newer cancel request made after it.
     if (!(now - Math.max(retriedAt, requestedAt) > STUCK_CANCEL_RETRY_MS)) return;
     if (await end(dependencies, ids, operation, at, "INTERRUPTED", STUCK_CANCEL_INTERRUPTED_MESSAGE)) {
       result.interrupted.push(operationId);
       log({ event: "stuck_cancel.interrupted", ...ids });
+    } else {
+      log({ event: "stuck_cancel.skipped", ...ids, reason: "changed" });
     }
     return;
   }
@@ -124,7 +146,11 @@ async function settle(
     log({ event: "stuck_cancel.retry_unavailable", ...ids });
     return;
   }
-  if (!(await claimRetry(dependencies, ids, operation, at))) return;
+  if (!(await claimRetry(dependencies, ids, operation, at))) {
+    // Asked again, or finished, since it was read: the next run looks again.
+    log({ event: "stuck_cancel.skipped", ...ids, reason: "changed" });
+    return;
+  }
   let retry: StuckCancelRetry;
   try {
     retry = await dependencies.retryCancel(workspaceId, operationId);
@@ -140,6 +166,32 @@ async function settle(
   } else {
     log({ event: "stuck_cancel.retry_skipped", ...ids, reason: retry.reason });
   }
+}
+
+const LIVE_CANCEL = new Set(["ACCEPTED", "DISPATCHING", "RUNNING"]);
+
+/** Whether any cancel operation of this target is still live and changed within STUCK_CANCEL_MS. */
+async function cancelProgressing(
+  { client, tableName }: StuckCancelDependencies,
+  { workspaceId, operationId }: { workspaceId: string; operationId: string },
+  now: number,
+): Promise<boolean> {
+  let exclusiveStartKey: Record<string, unknown> | undefined;
+  do {
+    const page = await client.send(new QueryCommand({
+      TableName: tableName,
+      KeyConditionExpression: "pk = :pk AND begins_with(sk, :operation)",
+      FilterExpression: "kind = :cancel AND targetOperationId = :target",
+      ExpressionAttributeValues: { ":pk": `WORKSPACE#${workspaceId}`, ":operation": "OPERATION#", ":cancel": "cancel", ":target": operationId },
+      ConsistentRead: true,
+      ...(exclusiveStartKey === undefined ? {} : { ExclusiveStartKey: exclusiveStartKey }),
+    })) as { Items?: Array<{ status?: unknown; updatedAt?: unknown }>; LastEvaluatedKey?: Record<string, unknown> };
+    for (const cancel of page.Items ?? []) {
+      if (LIVE_CANCEL.has(String(cancel.status)) && typeof cancel.updatedAt === "string" && !(now - Date.parse(cancel.updatedAt) > STUCK_CANCEL_MS)) return true;
+    }
+    exclusiveStartKey = page.LastEvaluatedKey;
+  } while (exclusiveStartKey !== undefined);
+  return false;
 }
 
 /** Records the one retry on the operation, only if nothing changed since it was read. */
@@ -165,6 +217,45 @@ async function claimRetry(
   }
 }
 
+/** The released status, as failActiveOperation picks it for lost compute. */
+function releasedStatus(operation: StuckOperation): string {
+  return operation.kind === "prepare"
+    ? "PREPARATION_FAILED"
+    : operation.kind === "close" && typeof operation.closePreviousStatus === "string" ? operation.closePreviousStatus : "READY";
+}
+
+/** Frees the workspace an INTERRUPTED, retried operation still holds. False when something moved first. */
+async function release(
+  { client, tableName }: StuckCancelDependencies,
+  { workspaceId, operationId }: { workspaceId: string; operationId: string },
+  operation: StuckOperation,
+  at: Date,
+): Promise<boolean> {
+  try {
+    await client.send(new TransactWriteCommand({ TransactItems: [
+      { ConditionCheck: {
+        TableName: tableName,
+        Key: { pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` },
+        ConditionExpression: "#status = :interrupted AND fence = :fence AND attribute_exists(cancelRetriedAt)",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":interrupted": "INTERRUPTED", ":fence": operation.fence },
+      } },
+      { Update: {
+        TableName: tableName,
+        Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" },
+        UpdateExpression: "SET #status = :released, updatedAt = :now REMOVE activeOperationId",
+        ConditionExpression: "activeOperationId = :operation AND fence = :fence",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":released": releasedStatus(operation), ":now": at.toISOString(), ":operation": operationId, ":fence": operation.fence },
+      } },
+    ] }));
+    return true;
+  } catch (failure) {
+    if (failure instanceof Error && failure.name === "TransactionCanceledException") return false;
+    throw failure;
+  }
+}
+
 /**
  * Ends the operation and frees its workspace in one transaction, as failActiveOperation does for
  * lost compute (the same released status), but only for this operation while it is still
@@ -178,9 +269,7 @@ async function end(
   status: "FAILED" | "INTERRUPTED",
   error: string,
 ): Promise<boolean> {
-  const released = operation.kind === "prepare"
-    ? "PREPARATION_FAILED"
-    : operation.kind === "close" && typeof operation.closePreviousStatus === "string" ? operation.closePreviousStatus : "READY";
+  const released = releasedStatus(operation);
   const now = at.toISOString();
   try {
     await client.send(new TransactWriteCommand({ TransactItems: [

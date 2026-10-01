@@ -224,6 +224,8 @@ async function reconcileStuckCancels(
   log: (entry: Record<string, unknown>) => void,
 ): Promise<Record<string, number>> {
   if (dependencies.sweepStuckCancels === undefined) return {};
+  // Only workspaces with a listed session: a task runs only on a session's compute, so a stuck
+  // cancel on a workspace with none (or a DELETED one) is not looked for here.
   const candidates = [...sessions.values()].map((session) => ({ workspaceId: session.workspaceId, compute: computeOf(session, instances) }));
   let sweepFailed = 0;
   try {

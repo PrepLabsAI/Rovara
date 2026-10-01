@@ -165,6 +165,29 @@ describe("a stuck cancel whose compute is alive", () => {
     expect((await sweep(candidate, minutesLater(31))).interrupted).toEqual([task.operationId]);
   });
 
+  it("leaves it alone while its cancel operation is still progressing, and retries once that goes quiet", async () => {
+    const { db, sweep, retryCancel } = setup();
+    const task = seedTask(db, "CANCEL_REQUESTED", 40);
+    const cancelId = randomUUID();
+    const cancel = (status: string, minutes: number) => db.set({ pk: `WORKSPACE#${task.workspaceId}`, sk: `OPERATION#${cancelId}`, entityType: "OPERATION", id: cancelId, workspaceId: task.workspaceId, kind: "cancel", targetOperationId: task.operationId, status, fence: 3, updatedAt: minutesAgo(minutes) });
+    const candidate = [{ workspaceId: task.workspaceId, compute: "alive" as const }];
+    cancel("RUNNING", 5);
+    expect(await sweep(candidate)).toEqual(empty);
+    expect(task.operation()).not.toHaveProperty("cancelRetriedAt");
+    cancel("RUNNING", 31);
+    expect((await sweep(candidate)).retried).toEqual([task.operationId]);
+    expect(retryCancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("retries at once when its cancel operation failed, and ignores other operations' cancels", async () => {
+    const { db, sweep } = setup();
+    const task = seedTask(db, "CANCEL_REQUESTED", 31);
+    const other = randomUUID();
+    db.set({ pk: `WORKSPACE#${task.workspaceId}`, sk: `OPERATION#${randomUUID()}`, kind: "cancel", targetOperationId: task.operationId, status: "FAILED", fence: 3, updatedAt: minutesAgo(2) });
+    db.set({ pk: `WORKSPACE#${task.workspaceId}`, sk: `OPERATION#${randomUUID()}`, kind: "cancel", targetOperationId: other, status: "RUNNING", fence: 2, updatedAt: minutesAgo(2) });
+    expect((await sweep([{ workspaceId: task.workspaceId, compute: "alive" }])).retried).toEqual([task.operationId]);
+  });
+
   it("leaves an AI tool's developer task alone, as today", async () => {
     const { db, sweep, retryCancel } = setup();
     const task = seedTask(db, "CANCEL_REQUESTED", 31);
@@ -233,8 +256,26 @@ describe("what the sweep never touches", () => {
     } } as unknown as FakeDynamoDb;
     const result = await sweepStuckCancels({ client: racing, tableName: "state", log: (entry) => { logs.push(entry); } }, [{ workspaceId: task.workspaceId, compute: "gone" }], NOW);
     expect(result).toEqual(empty);
+    expect(logs).toEqual([{ event: "stuck_cancel.skipped", workspaceId: task.workspaceId, operationId: task.operationId, reason: "changed" }]);
     expect(task.operation()).toMatchObject({ status: "CANCELLED" });
     expect(task.meta()).toMatchObject({ status: "READY" });
+  });
+});
+
+describe("races", () => {
+  it("does not retry when the cancel was asked again between the read and the claim", async () => {
+    const { db, logs, retryCancel } = setup();
+    const task = seedTask(db, "CANCEL_REQUESTED", 31);
+    const send = db.send;
+    const racing = { ...db, send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+      if (command.constructor.name === "UpdateCommand") db.set({ ...task.operation(), updatedAt: NOW.toISOString() });
+      return send(command);
+    } } as unknown as FakeDynamoDb;
+    const result = await sweepStuckCancels({ client: racing, tableName: "state", retryCancel, log: (entry) => { logs.push(entry); } }, [{ workspaceId: task.workspaceId, compute: "alive" }], NOW);
+    expect(result).toEqual(empty);
+    expect(retryCancel).not.toHaveBeenCalled();
+    expect(task.operation()).not.toHaveProperty("cancelRetriedAt");
+    expect(logs).toEqual([{ event: "stuck_cancel.skipped", workspaceId: task.workspaceId, operationId: task.operationId, reason: "changed" }]);
   });
 });
 
