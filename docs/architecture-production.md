@@ -162,6 +162,27 @@ The session provisioner reads them when it boots a worker, so a release reaches 
 next time its compute starts; a worker already running keeps its image until the idle reaper stops
 it. Normal AgentX releases do not require registration or workspace preparation again.
 
+Worker payloads are parsed strictly, so a newer control plane must not send a field that a worker
+still running an older image cannot parse. Each worker lists the optional invocation fields it
+parses on `GET /ping` (`invocationFeatures`), and the dispatcher asks before it sends one. The first
+such field is a model's thinking level (spec 053):
+
+- A running session keeps its old image after a release and gets no level until the idle reaper
+  stops it and its next task starts it again. The dispatcher logs `dispatch.thinking_level_omitted`
+  with the reason (`worker-lacks-feature` or `no-probe`) and the requested level, and the worker runs
+  at its own default level.
+- A `/ping` that does not answer fails the delivery attempt (`RUNTIME_UNAVAILABLE`, retried). The
+  attempt does not drop the level, because the worker journals a hash of the whole invocation and a
+  retry must send the same payload.
+- The worker can journal a different payload, and so answer a retry with an idempotency conflict,
+  only when its image changes between two attempts of one delivery. That failure is loud.
+- The Slack service and the dispatcher also parse strictly, and they deploy just after or alongside
+  the control plane. That is harmless: no project stored before this release has a level, and an
+  administrator would have to set one within those minutes.
+
+Eval runs use a separately released runner image (`docs/swebench-eval.md`). The broker sends that
+image a level only when `eval/runner-features` names it.
+
 ## Deployment safety
 
 Both production stacks have CloudFormation termination protection. The KMS key and flow-log group

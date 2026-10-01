@@ -1,7 +1,7 @@
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import type { Ec2RuntimeBinding, WorkerInvocation } from "../../packages/contracts/src/index.js";
-import { createDispatcherHandler } from "../../packages/broker/src/aws/dispatcher.js";
+import { createDispatcherHandler, workerPingFeatures } from "../../packages/broker/src/aws/dispatcher.js";
 import { STARTING_COMPUTE_MESSAGE, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
 import type { Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
 import { appendOperationEvent } from "../../packages/broker/src/aws/operation-events.js";
@@ -85,27 +85,51 @@ describe("ec2-ebs delivery", () => {
       expect(posted(post)).toEqual(leveled);
     });
 
-    it("drops only the level for a worker that lists no features, or cannot be asked, and keeps the token valid", async () => {
-      for (const workerFeatures of [async () => [], async () => { throw new Error("timeout"); }]) {
-        const { deliver, post } = delivery({ workerFeatures });
-        const record = taskRecord(leveled);
-        expect(await deliver(record, record.invocation)).toBe("DELIVERED");
-        const model = posted(post);
-        expect(model).toEqual({ provider: "amazon-bedrock", modelId: "fast" });
-        expect(Object.keys(model)).not.toContain("thinkingLevel");
-        const body = JSON.parse(post.mock.calls[0]![1].body) as WorkerInvocation;
-        const verified = verifyInvokeAuthorization(post.mock.calls[0]![1].authorization, {
-          publicKey: keys.publicKey, workspaceId: record.workspaceId, generation: 3, now: () => Math.floor(NOW / 1_000),
-        });
-        expect(verified.ok && invocationMatchesClaims(body, verified.claims)).toBe(true);
-      }
+    it("drops only the level for a worker whose /ping lists no features, and keeps the token valid", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const { deliver, post } = delivery({ workerFeatures: async () => [] });
+      const record = taskRecord(leveled);
+      expect(await deliver(record, record.invocation)).toBe("DELIVERED");
+      const model = posted(post);
+      expect(model).toEqual({ provider: "amazon-bedrock", modelId: "fast" });
+      expect(Object.keys(model)).not.toContain("thinkingLevel");
+      const body = JSON.parse(post.mock.calls[0]![1].body) as WorkerInvocation;
+      const verified = verifyInvokeAuthorization(post.mock.calls[0]![1].authorization, {
+        publicKey: keys.publicKey, workspaceId: record.workspaceId, generation: 3, now: () => Math.floor(NOW / 1_000),
+      });
+      expect(verified.ok && invocationMatchesClaims(body, verified.claims)).toBe(true);
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        event: "dispatch.thinking_level_omitted", reason: "worker-lacks-feature", requestedThinkingLevel: "low", operationId: record.operationId,
+      }));
+      log.mockRestore();
+    });
+
+    it("fails the attempt, posting nothing, when the worker's /ping does not answer", async () => {
+      // The worker journals the whole invocation's hash: a retry must send what this attempt would have.
+      const { deliver, post } = delivery({ workerFeatures: async () => { throw new Error("timeout"); } });
+      const record = taskRecord(leveled);
+      await expect(deliver(record, record.invocation)).rejects.toThrow(/RUNTIME_UNAVAILABLE: could not ask the EC2 worker .*timeout/);
+      expect(post).not.toHaveBeenCalled();
     });
 
     it("drops the level when the dispatcher has no way to ask the worker", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
       const { deliver, post } = delivery();
       const record = taskRecord(leveled);
       await deliver(record, record.invocation);
       expect(posted(post)).toEqual({ provider: "amazon-bedrock", modelId: "fast" });
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({ reason: "no-probe", requestedThinkingLevel: "low" }));
+      log.mockRestore();
+    });
+
+    it("reads the features from the worker's /ping body: none from a worker built before them, or a malformed field", async () => {
+      const ping = (body: unknown) => vi.fn(async () => new Response(JSON.stringify(body), { status: 200 })) as unknown as typeof fetch;
+      await expect(workerPingFeatures("http://10.42.128.10:8080/ping", ping({ status: "Healthy", activeOperations: 0 }))).resolves.toEqual([]);
+      await expect(workerPingFeatures("http://w/ping", ping({ status: "Healthy", invocationFeatures: "model.thinkingLevel" }))).resolves.toEqual([]);
+      await expect(workerPingFeatures("http://w/ping", ping({ status: "Healthy", invocationFeatures: ["model.thinkingLevel", 7] }))).resolves.toEqual(["model.thinkingLevel"]);
+      await expect(workerPingFeatures("http://w/ping", ping(null))).resolves.toEqual([]);
+      const unreachable = vi.fn(async () => { throw new TypeError("fetch failed"); }) as unknown as typeof fetch;
+      await expect(workerPingFeatures("http://w/ping", unreachable)).rejects.toThrow("fetch failed");
     });
 
     it("does not ask the worker when the invocation carries no level", async () => {

@@ -121,6 +121,17 @@ const WORKER_POST_TIMEOUT_MS = 10_000;
 /** Asking a worker what it parses (spec 053); one that does not answer gets no optional field. */
 const WORKER_PING_TIMEOUT_MS = 3_000;
 
+/**
+ * Spec 053: the invocation features a worker reports on GET /ping; none for a worker built before
+ * them, whose /ping has no such field. A worker that does not answer rejects, failing the attempt.
+ */
+export async function workerPingFeatures(url: string, fetchPing: typeof fetch = fetch): Promise<string[]> {
+  const response = await fetchPing(url, { signal: AbortSignal.timeout(WORKER_PING_TIMEOUT_MS) });
+  const body: unknown = await response.json();
+  const features = typeof body === "object" && body !== null ? (body as Record<string, unknown>)[WORKER_PING_FEATURES_FIELD] : undefined;
+  return Array.isArray(features) ? features.filter((feature): feature is string => typeof feature === "string") : [];
+}
+
 const deliverEc2 = createEc2Delivery({
   sessions: new SessionManager({
     documentClient,
@@ -152,11 +163,7 @@ const deliverEc2 = createEc2Delivery({
     });
     return { status: response.status, body: await response.text() };
   },
-  async workerFeatures(url) {
-    const response = await fetch(url, { signal: AbortSignal.timeout(WORKER_PING_TIMEOUT_MS) });
-    const features = (await response.json() as Record<string, unknown>)[WORKER_PING_FEATURES_FIELD];
-    return Array.isArray(features) ? features.filter((feature): feature is string => typeof feature === "string") : [];
-  },
+  workerFeatures: (url) => workerPingFeatures(url),
   async progress(record, message) {
     await appendOperationEvent(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), {
       workspaceId: record.workspaceId,
