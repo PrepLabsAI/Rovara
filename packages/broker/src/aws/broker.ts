@@ -106,6 +106,7 @@ import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKe
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
+import { unsupportedThinkingLevels } from "@agentx/model-runtime/thinking-levels";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
 import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
 import { observeConnectorRoute } from "./connector-metrics.js";
@@ -962,6 +963,9 @@ async function registrationChecks(dependencies: AwsBrokerDependencies, identity:
   const nameProblems = presentedNameProblems(definition);
   if (nameProblems.length > 0) throw agentXError("CONFIG_INVALID", nameProblems.join("; "));
   if (budget.refusal) throw agentXError("CONFIG_INVALID", budget.refusal);
+  // Spec 053 FR-003: Pi would clamp an unsupported level to another one; refuse the admin's choice instead.
+  const levelProblems = definition.models === undefined ? [] : unsupportedThinkingLevels(definition.models);
+  if (levelProblems.length > 0) throw agentXError("CONFIG_INVALID", levelProblems.join("; "));
   const credentialProblems = await credentialRefusals(connectors(), dependencies.credentialRegistry);
   if (credentialProblems.length > 0) throw agentXError("CONFIG_INVALID", credentialProblems.join("; "));
   // A repository the GitHub App cannot reach would otherwise fail only at prepare (#123).
