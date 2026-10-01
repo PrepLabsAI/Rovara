@@ -10,6 +10,7 @@ import {
   type ReconcilerDependencies,
   type VolumeView,
 } from "../../packages/broker/src/aws/session-reconciler.js";
+import { STUCK_CANCEL_LOST_MESSAGE, sweepStuckCancels, type StuckCancelDependencies } from "../../packages/broker/src/aws/stuck-cancels.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const NOW = new Date("2026-09-27T12:00:00.000Z");
@@ -25,7 +26,7 @@ const hex = () => randomUUID().replaceAll("-", "").slice(0, 17);
 
 type Start = (input: { stateMachineArn: string; name: string; input: string }) => Promise<string>;
 
-function setup(options: { instances?: InstanceView[]; volumes?: VolumeView[]; executions?: Record<string, ExecutionStatus>; ping?: ReconcilerDependencies["ping"]; sweepStuckSetups?: ReconcilerDependencies["sweepStuckSetups"]; expireIndexDays?: ReconcilerDependencies["expireIndexDays"]; sweepUnwaitedTasks?: ReconcilerDependencies["sweepUnwaitedTasks"]; log?: ReconcilerDependencies["log"] } = {}) {
+function setup(options: { instances?: InstanceView[]; volumes?: VolumeView[]; executions?: Record<string, ExecutionStatus>; ping?: ReconcilerDependencies["ping"]; sweepStuckSetups?: ReconcilerDependencies["sweepStuckSetups"]; sweepStuckCancels?: ReconcilerDependencies["sweepStuckCancels"]; expireIndexDays?: ReconcilerDependencies["expireIndexDays"]; sweepUnwaitedTasks?: ReconcilerDependencies["sweepUnwaitedTasks"]; log?: ReconcilerDependencies["log"] } = {}) {
   const db = new FakeDynamoDb();
   const start = vi.fn<Start>(async ({ name }) => `arn:aws:states:us-east-1:111122223333:execution:provisioner:${name}`);
   const sessions = new SessionManager({
@@ -55,6 +56,7 @@ function setup(options: { instances?: InstanceView[]; volumes?: VolumeView[]; ex
     now: () => NOW,
     log: options.log ?? (() => undefined),
     ...(options.sweepStuckSetups === undefined ? {} : { sweepStuckSetups: options.sweepStuckSetups }),
+    ...(options.sweepStuckCancels === undefined ? {} : { sweepStuckCancels: options.sweepStuckCancels }),
     ...(options.expireIndexDays === undefined ? {} : { expireIndexDays: options.expireIndexDays }),
     ...(options.sweepUnwaitedTasks === undefined ? {} : { sweepUnwaitedTasks: options.sweepUnwaitedTasks }),
   });
@@ -301,6 +303,77 @@ describe("reconciler: stuck setups (spec 025 FR-055)", () => {
     const baseline = setup();
     await baseline.reconcile();
     expect(Object.keys(emit.mock.calls[0]![0])).toEqual(Object.keys(baseline.emit.mock.calls[0]![0]));
+  });
+});
+
+describe("reconciler: stuck cancels (issue 195)", () => {
+  /** A workspace whose task has been CANCEL_REQUESTED for 31 minutes, on a session in `state`. */
+  function seedStuckCancel(db: FakeDynamoDb, state: string, fields: Record<string, unknown> = {}) {
+    const operationId = randomUUID();
+    const workspaceId = seedSession(db, state, fields, { status: "BUSY", activeOperationId: operationId, fence: 2 });
+    db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}`, kind: "task", status: "CANCEL_REQUESTED", fence: 2, updatedAt: minutesAgo(31) });
+    return { workspaceId, operationId, operation: () => db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)! };
+  }
+
+  it("hands the sweep every listed workspace with what is known of its compute", async () => {
+    const sweep = vi.fn<NonNullable<ReconcilerDependencies["sweepStuckCancels"]>>(async () => ({ retried: [], ended: [], interrupted: [], unretried: [], failed: [] }));
+    const { db, state, reconcile } = setup({ sweepStuckCancels: sweep });
+    const alive = ready();
+    const aliveWorkspace = seedSession(db, "READY", alive);
+    const lost = ready();
+    const lostWorkspace = seedSession(db, "READY", lost);
+    const stopped = seedSession(db, "STOPPED", { volumeId: `vol-${hex()}` });
+    const failed = seedSession(db, "FAILED");
+    const provisioning = seedSession(db, "PROVISIONING", { executionArn: "arn:aws:states:us-east-1:111122223333:execution:provisioner:run" });
+    const stopping = seedSession(db, "STOPPING", { volumeId: `vol-${hex()}`, instanceId: `i-${hex()}` });
+    state.instances = [
+      { instanceId: alive.instanceId, state: "running", workspaceId: aliveWorkspace, launchedAt: minutesAgo(60) },
+      { instanceId: lost.instanceId, state: "stopped", workspaceId: lostWorkspace, launchedAt: minutesAgo(60) },
+    ];
+    state.executions = { "arn:aws:states:us-east-1:111122223333:execution:provisioner:run": "RUNNING" };
+    await reconcile();
+    expect(sweep).toHaveBeenCalledTimes(1);
+    const [candidates, at] = sweep.mock.calls[0]!;
+    expect(at).toEqual(NOW);
+    expect([...candidates].sort((a, b) => a.workspaceId.localeCompare(b.workspaceId))).toEqual([
+      { workspaceId: aliveWorkspace, compute: "alive" },
+      { workspaceId: lostWorkspace, compute: "gone" },
+      { workspaceId: stopped, compute: "gone" },
+      { workspaceId: failed, compute: "gone" },
+      { workspaceId: provisioning, compute: "unknown" },
+      { workspaceId: stopping, compute: "unknown" },
+    ].sort((a, b) => a.workspaceId.localeCompare(b.workspaceId)));
+  });
+
+  it("ends a stuck cancel on a stopped session, re-queues one on a live worker, and counts each", async () => {
+    const retryCancel = vi.fn<NonNullable<StuckCancelDependencies["retryCancel"]>>(async () => ({ outcome: "REQUEUED", cancelOperationId: randomUUID() }));
+    const table: { db?: FakeDynamoDb } = {};
+    const { db, state, reconcile, emit } = setup({ sweepStuckCancels: (candidates, now) => sweepStuckCancels({ client: table.db!, tableName: "state", retryCancel }, candidates, now) });
+    table.db = db;
+    const stopped = seedStuckCancel(db, "STOPPED", { volumeId: `vol-${hex()}` });
+    const worker = ready();
+    const live = seedStuckCancel(db, "READY", worker);
+    state.instances = [{ instanceId: worker.instanceId, state: "running", workspaceId: live.workspaceId, launchedAt: minutesAgo(60) }];
+    const report = await reconcile();
+    expect(report.stuckCancels).toEqual({ retried: [live.operationId], ended: [stopped.operationId], interrupted: [], unretried: [], failed: [] });
+    expect(stopped.operation()).toMatchObject({ status: "FAILED", error: STUCK_CANCEL_LOST_MESSAGE });
+    expect(db.get(`WORKSPACE#${stopped.workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
+    expect(retryCancel).toHaveBeenCalledExactlyOnceWith(live.workspaceId, live.operationId);
+    expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
+      ReconcilerStuckCancelRetries: 1, ReconcilerStuckCancelsEnded: 1, ReconcilerStuckCancelsInterrupted: 0, ReconcilerStuckCancelsUnretried: 0, ReconcilerStuckCancelFailures: 0,
+    }));
+  });
+
+  it("logs and counts a sweep that throws, and the run goes on", async () => {
+    const logs: Array<Record<string, unknown>> = [];
+    const failure = Object.assign(new Error("PLANTED-CANCEL-MESSAGE"), { name: "ThrottlingException" });
+    const orphan: InstanceView = { instanceId: `i-${hex()}`, state: "running", launchedAt: minutesAgo(30) };
+    const { reconcile, emit, terminate } = setup({ instances: [orphan], sweepStuckCancels: async () => { throw failure; }, log: (entry) => { logs.push(entry); } });
+    await expect(reconcile()).resolves.toBeDefined();
+    expect(terminate).toHaveBeenCalledWith(orphan.instanceId);
+    expect(logs).toContainEqual({ event: "reconciler.stuck_cancel_sweep_failed", errorName: "ThrottlingException" });
+    expect(JSON.stringify(logs)).not.toContain("PLANTED-CANCEL-MESSAGE");
+    expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ReconcilerOrphanInstances: 1, ReconcilerStuckCancelRetries: 0, ReconcilerStuckCancelFailures: 1 }));
   });
 });
 

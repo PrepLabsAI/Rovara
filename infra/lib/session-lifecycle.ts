@@ -279,6 +279,37 @@ export class SessionLifecycle extends Construct {
   }
 
   /**
+   * Issue 195, named environments only: the reconciler queues a stuck cancel again, once, in its own
+   * process through the shared cancel code, signed with the key connectUnwaitedTaskBackstop gives it,
+   * so it needs no grant. The alarm reports every stuck cancel retried or ended, and any failure.
+   */
+  connectStuckCancelAlarm(): void {
+    const counted = (metricName: string) => new cloudwatch.Metric({ namespace: this.naming.metricsNamespace, metricName, statistic: "Maximum", period: Duration.minutes(15) });
+    new cloudwatch.Alarm(this, "StuckCancelsAlarm", {
+      alarmName: this.naming.alarmName("StuckCancels"),
+      alarmDescription: "The reconciler found a task whose cancel never reached its worker, and queued the cancel again or ended the task (or failed to). Check the reconciler's logs for stuck_cancel events: a retried cancel that finishes, or an ended task, needs no action; repeated ones point at a dispatch or worker fault.",
+      metric: new cloudwatch.MathExpression({
+        // unretried stays 0 where the reconciler holds the signing key; it alarms if a named
+        // environment ever loses it, so live workers' stuck cancels are never left unseen.
+        expression: "FILL(retries, 0) + FILL(ended, 0) + FILL(interrupted, 0) + FILL(failures, 0) + FILL(unretried, 0)",
+        usingMetrics: {
+          retries: counted("ReconcilerStuckCancelRetries"),
+          ended: counted("ReconcilerStuckCancelsEnded"),
+          interrupted: counted("ReconcilerStuckCancelsInterrupted"),
+          failures: counted("ReconcilerStuckCancelFailures"),
+          unretried: counted("ReconcilerStuckCancelsUnretried"),
+        },
+        period: Duration.minutes(15),
+        label: "Stuck cancels retried, ended, failed or unretried",
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(this.notifyOperator);
+  }
+
+  /**
    * Issue 173, named environments only: the reconciler stops a Slack thread's task idle over 24
    * hours with nobody waiting. It cancels through the shared cancel code, which writes the State
    * table (already granted; the outbox publisher dispatches the cancel) and signs the cancel's worker

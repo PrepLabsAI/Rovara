@@ -3877,8 +3877,15 @@ async function recordTerminalResult(
       TableName: dependencies.tableName,
       Key: terminalTarget,
       UpdateExpression: "SET #status = :status, updatedAt = :now",
+      // Issue 195: a cancel that did not succeed (a duplicate the worker no longer knows, say)
+      // never turns a target that already ended into INTERRUPTED. A failed condition falls back
+      // below to recording the cancel's own result only.
+      ...(terminalStatus === "SUCCEEDED" ? {} : { ConditionExpression: "#status = :cancelRequested" }),
       ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":status": cancelledTargetStatus(terminalStatus), ":now": now },
+      ExpressionAttributeValues: {
+        ":status": cancelledTargetStatus(terminalStatus), ":now": now,
+        ...(terminalStatus === "SUCCEEDED" ? {} : { ":cancelRequested": "CANCEL_REQUESTED" }),
+      },
     } });
   }
   const workspaceUpdate: TransactItems[number] = { Update: {

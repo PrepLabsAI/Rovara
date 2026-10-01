@@ -713,6 +713,10 @@ export class ControlPlaneStack extends Stack {
     const sessions = new SessionLifecycle(this, "Sessions", { naming, state, invokeSigningKey, notifyOperator });
     // A6: where the State table expires index items itself, the reconciler's legacy sweep is off.
     if (naming.env !== undefined) sessions.reconciler.addEnvironment("INDEX_EXPIRY", "ttl");
+    // Issue 195: the alarm for stuck cancels. Named environments only: the legacy template is
+    // unchanged. A stuck cancel on a live worker is queued again with the signing key the backstop
+    // below gives the reconciler; the legacy reconciler has none, and only logs and counts it.
+    if (naming.env !== undefined) sessions.connectStuckCancelAlarm();
     // Issue 173: the backstop for idle Slack tasks nobody waits on. Named environments only: the
     // legacy template is unchanged.
     if (naming.env !== undefined) sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKey.valueAsString);

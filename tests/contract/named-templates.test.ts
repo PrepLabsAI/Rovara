@@ -113,16 +113,56 @@ function withoutUnwaitedTaskBackstop(template: unknown): unknown {
   return template;
 }
 
+/**
+ * Issue 195 adds the StuckCancels alarm to a named control plane, and nothing else: its retry runs in
+ * the reconciler's own process with #173's signing key, so no grant and no environment variable. The
+ * alarm is checked here to be exactly this, then taken out, so the rest of the template must still
+ * match the recorded snapshot.
+ */
+function withoutStuckCancelAlarm(template: unknown): unknown {
+  const resources = (template as { Resources: Record<string, Resource> }).Resources;
+  const topicId = Object.keys(resources).find((id) => id.startsWith("OperatorAlerts") && resources[id]!.Type === "AWS::SNS::Topic");
+  expect(topicId).toBeDefined();
+  const alarms = Object.keys(resources).filter((id) => id.startsWith("SessionsStuckCancelsAlarm"));
+  expect(alarms).toHaveLength(1);
+  const stat = (id: string, metricName: string) => ({
+    Id: id, MetricStat: { Metric: { MetricName: metricName, Namespace: "AgentX/staging" }, Period: 900, Stat: "Maximum" }, ReturnData: false,
+  });
+  expect(resources[alarms[0]!]).toStrictEqual({
+    Type: "AWS::CloudWatch::Alarm",
+    Properties: {
+      AlarmActions: [{ Ref: topicId }],
+      AlarmDescription: "The reconciler found a task whose cancel never reached its worker, and queued the cancel again or ended the task (or failed to). Check the reconciler's logs for stuck_cancel events: a retried cancel that finishes, or an ended task, needs no action; repeated ones point at a dispatch or worker fault.",
+      AlarmName: "agentx-staging-StuckCancels",
+      ComparisonOperator: "GreaterThanOrEqualToThreshold",
+      EvaluationPeriods: 1,
+      Metrics: [
+        { Expression: "FILL(retries, 0) + FILL(ended, 0) + FILL(interrupted, 0) + FILL(failures, 0) + FILL(unretried, 0)", Id: "expr_1", Label: "Stuck cancels retried, ended, failed or unretried", ReturnData: true },
+        stat("retries", "ReconcilerStuckCancelRetries"),
+        stat("ended", "ReconcilerStuckCancelsEnded"),
+        stat("interrupted", "ReconcilerStuckCancelsInterrupted"),
+        stat("failures", "ReconcilerStuckCancelFailures"),
+        stat("unretried", "ReconcilerStuckCancelsUnretried"),
+      ],
+      Tags: [{ Key: "agentx:env", Value: "staging" }],
+      Threshold: 1,
+      TreatMissingData: "notBreaching",
+    },
+  });
+  delete resources[alarms[0]!];
+  return template;
+}
+
 // Issue 157 changes the Slack service's code only. These snapshots were recorded from mainline
 // 4a605fd (re-recorded there when mainline merged in), so a named environment's templates must stay
-// as they were, apart from issue 46's dispatch dead-letter alarm and issue 173's reconciler backstop,
-// each checked and taken out above.
+// as they were, apart from issue 46's dispatch dead-letter alarm, issue 173's reconciler backstop and
+// issue 195's stuck-cancel alarm, each checked and taken out above.
 describe("named environment templates", () => {
   const stacks = buildAgentXApp({ agentxEnv: "staging" }).node.children.filter((child): child is Stack => Stack.isStack(child));
   for (const stack of stacks) {
     it(`${stack.stackName} is unchanged`, () => {
       const template = normalizedTemplate(stack);
-      expect(stack.stackName === "agentx-staging-control-plane" ? withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(template)) : template).toMatchSnapshot();
+      expect(stack.stackName === "agentx-staging-control-plane" ? withoutStuckCancelAlarm(withoutUnwaitedTaskBackstop(withoutDispatchDeadLettersAlarm(template))) : template).toMatchSnapshot();
     }, 120_000);
   }
 });

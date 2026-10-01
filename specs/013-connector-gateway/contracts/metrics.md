@@ -71,3 +71,16 @@ Installed (named) environments also have `agentx-<env>-DispatchDeadLetters` (iss
 missing data not breaching, sending to `agentx-<env>-alerts`. The legacy `AgentXControlPlane`
 template does not have it. Clear it by finding the job's operation ID in the dispatcher logs,
 then redriving or purging the `DispatchDeadLetterQueueUrl` queue.
+
+Installed (named) environments also have `agentx-<env>-StuckCancels` (issue #195). The session
+reconciler counts each task it finds CANCEL_REQUESTED over 30 minutes whose cancel never finished:
+`ReconcilerStuckCancelRetries` (the cancel was queued again, once), `ReconcilerStuckCancelsEnded`
+(the compute was gone, so the task was ended and its workspace freed),
+`ReconcilerStuckCancelsInterrupted` (a retried cancel was still stuck 30 minutes later, so the task
+was ended INTERRUPTED and its workspace freed; or a retried cancel failed, leaving the task
+INTERRUPTED but holding its workspace, and the sweep freed it), `ReconcilerStuckCancelFailures` (a
+check, a retry or the whole sweep failed, or a retry was skipped for a reason that should never
+happen) and `ReconcilerStuckCancelsUnretried` (a live worker, but no way to queue the cancel again;
+only the legacy deployment, so 0 in a named one). The alarm is the sum of all five, each the Maximum
+over 15 minutes with missing data as 0, `>= 1`, sending to `agentx-<env>-alerts`. The legacy
+`AgentXControlPlane` template does not have it. Each action is logged as a `stuck_cancel` event.
