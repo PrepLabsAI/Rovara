@@ -19,8 +19,8 @@ const project = {
 };
 
 /** Everything a caller could show from a failed parse: messages, nested issues and the error text. */
-function shown(result: { success: false; error: { issues: unknown[] } }): string {
-  return [JSON.stringify(result.error.issues), String(result.error)].join("\n");
+function shown(result: { success: false; error: { issues: unknown[]; message: string } }): string {
+  return [JSON.stringify(result.error.issues), result.error.message].join("\n");
 }
 
 /** The first issue's message, which callers such as registration show to users. */
