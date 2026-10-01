@@ -43,7 +43,7 @@ import { listAwsProfiles, pickAwsProfile, resolveCaller } from "./aws-account.js
 import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallProgress, type InitAnswers, type InitStepId } from "./install-state.js";
 import { confirmInstallPlan } from "./plan.js";
 import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
-import { processPrompter, secretFromSource, unattendedPrompter, type Prompter } from "./prompts.js";
+import { processPrompter, secretFromSource, unattendedPrompter, type Prompter, type QuestionHelp } from "./prompts.js";
 import { fetchRelease, sourceRelease } from "./release-fetch.js";
 import { problemText, retryOnPage } from "./retry.js";
 import { developerSignInStep } from "./signin-step.js";
@@ -278,7 +278,7 @@ function answeringSlackInstall(inner: Prompter, answer: "installed" | "approval"
     ask: (question, options) => inner.ask(question, options),
     confirm: (question, options) => inner.confirm(question, options),
     secret: (question, options) => inner.secret(question, options),
-    async choose<T extends string>(question: string, choices: ReadonlyArray<{ value: T; label: string }>, options: { flag: string; defaultValue: T; unattendedRefusal?: string }): Promise<T> {
+    async choose<T extends string>(question: string, choices: ReadonlyArray<{ value: T; label: string }>, options: { flag: string; defaultValue: T; unattendedRefusal?: string; help?: QuestionHelp }): Promise<T> {
       const match = options.flag === "--slack-install" ? choices.find((choice) => choice.value === answer) : undefined;
       return match === undefined ? inner.choose(question, choices, options) : match.value;
     },

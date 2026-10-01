@@ -12,20 +12,31 @@ import type { JourneyPhaseId, JourneyView } from "./journey.js";
 export const WIZARD_TOKEN_HEADER = "x-agentx-wizard-token";
 export const WIZARD_TOKEN_QUERY = "t";
 
-export type QuestionKind = "ask" | "choose" | "confirm" | "secret";
+export type QuestionKind = "ask" | "choose" | "confirm" | "secret" | "actions";
 
 export interface WizardChoice { value: string; label: string }
+
+/** A button on the page. A confirm has two; an actions question one per choice. */
+export interface WizardButton { value: string; label: string; primary: boolean }
 
 export interface WizardQuestion {
   /** Fresh per question, and again after an inline rejection, so a stale page cannot answer twice. */
   id: string;
   kind: QuestionKind;
+  /** The terminal's text for the question; the page shows `label` when there is one. */
   text: string;
+  label?: string;
+  why?: string;
+  example?: string;
+  learnMoreUrl?: string;
+  /** What an empty field means (FR-010). */
+  hint?: string;
   /** ask and choose: the answer an empty field means. */
   defaultValue?: string;
   /** confirm: which button is the default. */
   defaultConfirm?: boolean;
   choices?: WizardChoice[];
+  buttons?: WizardButton[];
   /** secret: the field is masked and its value is never sent back to the page. */
   masked?: boolean;
   multiline?: boolean;
