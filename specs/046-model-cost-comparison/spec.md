@@ -50,7 +50,8 @@ The result informs two decisions, which this experiment does not make by itself:
 ### Tasks
 
 - **Benchmark:** SEC-bench patch task (spec 045). One family, so the grader is the same for every run.
-- **Phase 1:** 10 instances. **Phase 2:** 20 more, only if Phase 1 shows a difference worth confirming.
+- **Phase 1 (screen):** 8 instances. **Phase 2 (confirm):** more tasks and repeats for the one or two models Phase 1
+  picks out, budgeted separately.
 - **Selection:** stratified across projects (no more than 2 per project) and sanitizer types, drawn once with a
   fixed seed from the 300 `eval` IDs, and committed as `specs/046-model-cost-comparison/tasks.txt` before any run.
   Include `njs.cve-2022-32414` as a known-solvable control.
@@ -76,8 +77,9 @@ Opus 5 is out until its Bedrock agreement is accepted.
 - Thinking level set **explicitly per model** and recorded. The pilot's comparison was confounded by GLM at "high"
   and Sonnet at "medium". Use each model's recommended agentic setting, and record it.
 - OpenRouter provider pinned per model. The pilot's GLM runs were spread over 4 providers, with gaps of up to 396 s.
-- **Repeats:** 3 per (task, model) in Phase 1. Runs are not deterministic, and a single run per cell cannot separate
-  luck from ability.
+- **Repeats (Phase 1, to fit a $200 cap):** one run per (task, model) for all six models, plus a second run on the
+  three cheapest (DeepSeek V4 Pro, MiniMax M3, Kimi K2.6), where a repeat costs a few dollars. Runs are not
+  deterministic, so a single run can be luck either way. Phase 1 therefore only screens; Phase 2 confirms.
 
 ### Measures (per run, from `result.json` and the run record)
 
@@ -96,8 +98,9 @@ Opus 5 is out until its Bedrock agreement is accepted.
 - **Cost per solved task** per model: total spend divided by tasks solved. This is the headline number.
 - **Paired comparison.** Per task, compare each model against Sonnet on the share of repeats solved. Report where
   models disagree, not only the totals.
-- **Honesty about power.** With 10 tasks x 3 repeats per model, only large differences (roughly 25 points or more in resolve
-  rate) will be clear. Smaller gaps are reported as "not distinguishable", not as wins.
+- **Honesty about power.** With 8 tasks and one or two runs per model, only large differences will show (for
+  example 6 of 8 solved against 2 of 8). Phase 1 answers "which models are clearly worse, and which are close enough
+  to Sonnet to test properly", not "which is best". Smaller gaps are reported as "not distinguishable", not as wins.
 - **Failure review.** Read the transcripts of every failed run for one task per model. Classify each failure as
   wrong fix, false claim of success, ran out of time or calls, or tool trouble.
 
@@ -111,18 +114,20 @@ Opus 5 is out until its Bedrock agreement is accepted.
 
 ## Budget
 
-Estimated from the measured SEC-bench run and the pilot. Real costs depend on turns.
+**Phase 1 is capped at $200**, enforced by the batch's cost ceiling (R-1): no new run starts once spend reaches it.
+Estimated at the measured SEC-bench token mix ($ per run): Sonnet 4.6 7.23, GLM 5.3 3.38, Qwen3 Coder Plus 2.67,
+Kimi K2.6 1.49, MiniMax M3 1.19, DeepSeek V4 Pro 0.37.
 
-| Phase | Runs | Model spend (estimate) | EC2 (m7i.xlarge) |
-|---|---|---|---|
-| 1: 10 tasks x 6 models x 3 repeats | 180 | about $400-700 | about $25 |
-| 2: 20 more tasks | 360 | about $800-1,400 | about $50 |
+| Phase 1 part | Runs | Estimate |
+|---|---|---|
+| 8 tasks x 6 models x 1 run | 48 | about $131 (Sonnet $58 of it) |
+| Second run on DeepSeek, MiniMax, Kimi | 24 | about $24 |
+| **Total** | **72** | **about $155, cap $200** (headroom for turn-count differences) |
+| EC2 (m7i.xlarge, about 0.5 h per run) | | about $8 |
 
-Phase 1 at the measured token mix, per model for 30 runs: Sonnet 4.6 about $220, GLM 5.3 about $100, Qwen3
-Coder Plus about $80, Kimi K2.6 about $45, MiniMax M3 about $35, DeepSeek V4 Pro about $10. That is about $490
-before turn-count differences, which the pilot showed can double a model's cost.
-
-Stop rule: if Phase 1 spend passes $750, stop and review before continuing.
+The pilot showed one model can take several times another's turns on the same task, which can double its cost. The
+cap absorbs that; runs are ordered cheapest model first, so if the cap is hit, the missing runs are Sonnet's, whose
+baseline matters least to re-measure. Phase 2 is planned and budgeted after Phase 1, for the models it picks out.
 
 ## Out of Scope
 
@@ -135,13 +140,13 @@ Stop rule: if Phase 1 spend passes $750, stop and review before continuing.
 ## Open Questions
 
 - **Q-1** (answered 2026-10-01): six models, including Qwen3 Coder Plus and MiniMax M3.
-- **Q-2:** Confirm the Phase 1 budget and the $750 stop rule.
+- **Q-2** (answered 2026-10-01): Phase 1 capped at $200.
 - **Q-3:** Run before or after the agent verification fix (D-B)? Recommended: after.
 
 ## Success Criteria
 
 - **SC-001:** `tasks.txt` and the model, thinking-level and provider settings are committed before the first run.
-- **SC-002:** All 180 Phase 1 runs are recorded, and failed or cancelled runs are listed separately.
+- **SC-002:** All 72 Phase 1 runs (or every run started before the cap) are recorded, and failed or cancelled runs are listed separately.
 - **SC-003:** A short report goes in this folder, with the resolve rate and interval, cost per solved task, the
   paired comparison and the failure review per model, and a recommendation for the two decisions above that says
   how confident it is.
