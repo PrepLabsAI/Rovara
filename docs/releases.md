@@ -44,7 +44,8 @@ directly for that environment name would have produced (FR-012).
 
 1. Tag a commit on mainline `vX.Y.Z` (for example `v1.2.3`) and push the tag.
 2. That triggers the `Release` GitHub Actions workflow (`.github/workflows/release.yml`). It always
-   runs the test job first: typecheck, lint, build, the full test suite, and `infra:synth`.
+   runs the test job first: typecheck, the stricter type check (`typecheck:all`), lint, build, the
+   full test suite, and `infra:synth`.
 3. Nothing else happens unless the repository variable `AGENTX_PUBLISH_ENABLED` is exactly `true`.
    That is the default today; see "One-time owner setup" below.
 4. When publishing is enabled, three more jobs run in order:
