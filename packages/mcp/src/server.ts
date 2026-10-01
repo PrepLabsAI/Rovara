@@ -144,11 +144,12 @@ export function createAgentXMcpServer(options: {
       adminRegistered.set(tool.name, { tool: registered, group });
     }
   }
-  // A15: checked when the client initializes, then on a timer, and after every call (above).
+  // A15: checked when the client initializes, then on a timer, and after every call (above). The
+  // first tools/list may have started that check already (issue 203 review); one read serves both.
   const initialized = server.server.oninitialized;
   server.server.oninitialized = () => {
     initialized?.();
-    void offer.refresh();
+    offer.begin();
     offer.start(options.recheckMs ?? 30_000);
   };
   // The timer ends with the connection, however it ends.

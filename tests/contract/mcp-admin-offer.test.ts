@@ -7,7 +7,7 @@ import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { ToolListChangedNotificationSchema, type JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
-import { DEVELOPER_TOOLS, FIRST_LIST_WAIT_MS, ToolError, ToolOffer, createAgentXMcpServer, guardTransport, type AdminOffer, type ToolContext, type ToolDefinition } from "../../packages/mcp/src/index.js";
+import { DEVELOPER_TOOLS, FIRST_LIST_WAIT_MS, OFFER_READ_TIMEOUT_MS, ToolError, ToolOffer, createAgentXMcpServer, guardTransport, type AdminOffer, type ToolContext, type ToolDefinition } from "../../packages/mcp/src/index.js";
 import { toolError } from "../support/mcp-tool-error.js";
 
 const probe: ToolDefinition = {
@@ -294,7 +294,7 @@ const allOffered: AdminOffer = { admin: undefined, audit: undefined, changes: un
  * capabilities, notifications/initialized, then tools/list at once. Every message the server sends
  * is kept, so the test can count list_changed exactly.
  */
-async function rawClient(options: { adminOffer: () => Promise<AdminOffer>; recheckMs?: number; firstListWaitMs?: number }) {
+async function rawClient(options: { adminOffer: (client: { elicitation: boolean }) => Promise<AdminOffer>; recheckMs?: number; firstListWaitMs?: number; capabilities?: Record<string, unknown>; log?: (entry: Record<string, unknown>) => void }) {
   const context = (): ToolContext => ({
     client: {} as never, clientName: "codex", serverVersion: "0.5.0", adminSignedIn: async () => true,
     compatibility: async () => ({ env: "staging", apiVersion: "1.2", adminApiVersion: "1.1" }), now: () => 0, sleep: async () => undefined, newRequestId: () => "33333333-3333-4333-8333-333333333333",
@@ -302,6 +302,7 @@ async function rawClient(options: { adminOffer: () => Promise<AdminOffer>; reche
   const server = createAgentXMcpServer({
     version: "0.5.0", context, adminTools: ADMIN_GROUP, auditTools: AUDIT_GROUP, changeTools: CHANGE_GROUP, adminOffer: options.adminOffer, recheckMs: options.recheckMs ?? 60_000,
     ...(options.firstListWaitMs === undefined ? {} : { firstListWaitMs: options.firstListWaitMs }),
+    ...(options.log === undefined ? {} : { log: options.log }),
   });
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
   const received: JSONRPCMessage[] = [];
@@ -325,7 +326,7 @@ async function rawClient(options: { adminOffer: () => Promise<AdminOffer>; reche
     return ((answer as unknown as { result: { tools: Array<{ name: string }> } }).result.tools).map((tool) => tool.name);
   };
   const listChanged = () => received.filter((message) => "method" in message && message.method === "notifications/tools/list_changed").length;
-  await request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "codex", version: "0.1.0" } });
+  await request("initialize", { protocolVersion: "2025-06-18", capabilities: options.capabilities ?? {}, clientInfo: { name: "codex", version: "0.1.0" } });
   await clientSide.send({ jsonrpc: "2.0", method: "notifications/initialized" });
   return { server, request, listNames, listChanged };
 }
@@ -387,6 +388,37 @@ describe("the first tools/list and list_changed (issue 203)", () => {
     await server.close();
   });
 
+  it("lists the change tools first time for a client that declared form elicitation, and reads the offer once at start", async () => {
+    const reads: Array<{ elicitation: boolean }> = [];
+    const adminOffer = async (client: { elicitation: boolean }): Promise<AdminOffer> => {
+      reads.push(client);
+      return { admin: undefined, audit: undefined, changes: client.elicitation ? undefined : new ToolError("CONFIRMATION_UNAVAILABLE", "no confirmation method is available in this session") };
+    };
+    const { server, listNames } = await rawClient({ adminOffer, capabilities: { elicitation: { form: {} } } });
+    expect(await listNames()).toEqual([...DEVELOPER_TOOLS.map((tool) => tool.name), ...ALL_ADMIN]);
+    await settle();
+    // Review fix: the first tools/list and notifications/initialized share one read.
+    expect(reads).toEqual([{ elicitation: true }]);
+    await server.close();
+  });
+
+  it("hides the change tools in the first list for a client without elicitation when Slack is not available (CONFIRMATION_UNAVAILABLE)", async () => {
+    const adminOffer = async (client: { elicitation: boolean }): Promise<AdminOffer> => ({ admin: undefined, audit: undefined, changes: client.elicitation ? undefined : new ToolError("CONFIRMATION_UNAVAILABLE", "no confirmation method is available in this session") });
+    const { server, listNames, request } = await rawClient({ adminOffer });
+    expect(await listNames()).toEqual([...DEVELOPER_TOOLS, ...ADMIN_GROUP, ...AUDIT_GROUP].map((tool) => tool.name));
+    const refused = await request("tools/call", { name: "agentx_admin_change_probe", arguments: {} });
+    expect(toolError((refused as unknown as { result: Parameters<typeof toolError>[0] }).result)).toMatchObject({ code: "CONFIRMATION_UNAVAILABLE" });
+    await server.close();
+  });
+
+  it("logs when the first tools/list is answered before the check, by event and wait only", async () => {
+    const log = vi.fn();
+    const { server, listNames } = await rawClient({ adminOffer: () => new Promise<AdminOffer>(() => undefined), firstListWaitMs: 50, log });
+    expect(await listNames()).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));
+    expect(log).toHaveBeenCalledWith({ event: "offer.first_list_timeout", waitMs: 50 });
+    await server.close();
+  });
+
   it("waits a few seconds by default for the first check, never longer", () => {
     expect(FIRST_LIST_WAIT_MS).toBe(5_000);
   });
@@ -415,6 +447,33 @@ describe("the guard's hold on the first tools/list (issue 203)", () => {
     expect(ready).toHaveBeenCalledTimes(1);
   });
 
+  it("still delivers what it held when the check's promise rejects", async () => {
+    const { inner } = fakeTransport();
+    const guarded = guardTransport(inner, () => undefined, answer, () => Promise.reject(new Error("no")));
+    const seen: JSONRPCMessage[] = [];
+    guarded.onmessage = (message) => { seen.push(message); };
+    const list: JSONRPCMessage = { jsonrpc: "2.0", id: 2, method: "tools/list" };
+    inner.onmessage?.(list);
+    await vi.waitFor(() => expect(seen).toEqual([list]));
+  });
+
+  it("reports a throw while delivering held messages through onerror, and still delivers the rest", async () => {
+    const { inner } = fakeTransport();
+    const guarded = guardTransport(inner, () => undefined, answer, async () => undefined);
+    const seen: JSONRPCMessage[] = [];
+    const errors: string[] = [];
+    guarded.onerror = (error) => errors.push(error.message);
+    guarded.onmessage = (message) => {
+      if ("id" in message && message.id === 2) throw new Error("handler broke");
+      seen.push(message);
+    };
+    const after: JSONRPCMessage = { jsonrpc: "2.0", id: 3, method: "tools/list" };
+    inner.onmessage?.({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+    inner.onmessage?.(after);
+    await vi.waitFor(() => expect(seen).toEqual([after]));
+    expect(errors).toEqual(["handler broke"]);
+  });
+
   it("delivers nothing held once the connection closes", async () => {
     const { inner } = fakeTransport();
     let release: () => void = () => undefined;
@@ -426,5 +485,28 @@ describe("the guard's hold on the first tools/list (issue 203)", () => {
     release();
     await new Promise((resolve) => { setTimeout(resolve, 10); });
     expect(seen).toEqual([]);
+  });
+});
+
+describe("an offer read that never answers (issue 203 review)", () => {
+  it("counts as a failed check after the read timeout, so later rechecks still run", async () => {
+    vi.useFakeTimers();
+    try {
+      expect(OFFER_READ_TIMEOUT_MS).toBe(15_000);
+      const tool = { enabled: false, enable: () => { tool.enabled = true; }, disable: () => { tool.enabled = false; } };
+      const read = vi.fn((): Promise<AdminOffer> => new Promise<AdminOffer>(() => undefined));
+      const log = vi.fn();
+      const offer = new ToolOffer({ tools: new Map([["t", tool]]), read, log });
+      const first = offer.refresh();
+      await vi.advanceTimersByTimeAsync(OFFER_READ_TIMEOUT_MS);
+      await first;
+      expect(log).toHaveBeenCalledWith({ event: "offer.check_failed", error: "TimeoutError" });
+      read.mockResolvedValue({ admin: undefined });
+      await offer.refresh();
+      expect(read).toHaveBeenCalledTimes(2);
+      expect(tool.enabled).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

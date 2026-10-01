@@ -27,6 +27,11 @@ const entryOf = (entry: OfferedTool): { tool: Switchable; group: AdminToolGroup 
  * announced with list_changed when it lands.
  */
 export const FIRST_LIST_WAIT_MS = 5_000;
+/**
+ * Issue 203 review: the longest one offer read may take. A read that never settled kept every later
+ * recheck from running; one past this counts as a failed check, and the next recheck tries again.
+ */
+export const OFFER_READ_TIMEOUT_MS = 15_000;
 
 /** Why the admin tools are hidden before any check has answered, or when none can be made. */
 export const NOT_OFFERED = new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for AgentX", ADMIN_SIGN_IN_STEP);
@@ -51,7 +56,7 @@ export class ToolOffer {
   private firstReadDone = false;
   private markFirstRead: () => void = () => undefined;
 
-  constructor(private readonly options: { tools: Map<string, OfferedTool>; read(): Promise<AdminOffer>; log?(entry: Record<string, unknown>): void }) {
+  constructor(private readonly options: { tools: Map<string, OfferedTool>; read(): Promise<AdminOffer>; log?(entry: Record<string, unknown>): void; readTimeoutMs?: number }) {
     this.firstRead = new Promise<void>((resolve) => {
       this.markFirstRead = () => {
         this.firstReadDone = true;
@@ -66,13 +71,25 @@ export class ToolOffer {
    */
   ready(waitMs: number): Promise<void> {
     if (this.firstReadDone) return Promise.resolve();
-    if (this.running === undefined) void this.refresh();
+    this.begin();
     let timer: ReturnType<typeof setTimeout> | undefined;
     const bound = new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, waitMs);
+      timer = setTimeout(() => {
+        // Said, so a client that then sees no admin tools leaves a trace in the log.
+        this.options.log?.({ event: "offer.first_list_timeout", waitMs });
+        resolve();
+      }, waitMs);
       timer.unref?.();
     });
     return Promise.race([this.firstRead, bound]).finally(() => clearTimeout(timer));
+  }
+
+  /**
+   * Starts the first read unless one has started or answered: the first tools/list (through ready)
+   * and the client's initialized notification both ask, and one read serves both.
+   */
+  begin(): void {
+    if (!this.firstReadDone && this.running === undefined) void this.refresh();
   }
 
   /**
@@ -103,14 +120,15 @@ export class ToolOffer {
   private async readOnce(): Promise<void> {
     try {
       try {
-        this.current = await this.options.read();
+        this.current = await this.readBounded();
       } catch (error) {
         // The error's name only: its message could hold anything.
         this.options.log?.({ event: "offer.check_failed", error: error instanceof Error ? error.name : "unknown" });
         return;
       }
       // Kept synchronous: the SDK's debounce coalesces the list_changed of every switch made in one
-      // tick into one notification (issue 203).
+      // tick into one notification (issue 203). When the first read switches tools, that one
+      // notification goes out just before the held first tools/list is answered; harmless.
       for (const entry of this.options.tools.values()) {
         const { tool, group } = entryOf(entry);
         const offered = refusalOf(this.current, group) === undefined;
@@ -119,6 +137,24 @@ export class ToolOffer {
       }
     } finally {
       this.markFirstRead();
+    }
+  }
+
+  /** One read, or a TimeoutError once it takes longer than readTimeoutMs; a late answer is dropped. */
+  private async readBounded(): Promise<AdminOffer> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new Error("the admin offer check took too long");
+        error.name = "TimeoutError";
+        reject(error);
+      }, this.options.readTimeoutMs ?? OFFER_READ_TIMEOUT_MS);
+      timer.unref?.();
+    });
+    try {
+      return await Promise.race([this.options.read(), timeout]);
+    } finally {
+      clearTimeout(timer);
     }
   }
 
@@ -212,7 +248,14 @@ export function guardTransport(
         // A close meanwhile dropped the queue.
         if (held !== queue) return;
         held = undefined;
-        for (const [next, nextExtra] of queue) deliver(next, nextExtra);
+        for (const [next, nextExtra] of queue) {
+          // A throw here would otherwise be an unhandled rejection and lose the rest of the queue.
+          try {
+            deliver(next, nextExtra);
+          } catch (error) {
+            guarded.onerror?.(error instanceof Error ? error : new Error("delivery failed"));
+          }
+        }
       };
       beforeFirstList().then(release, release);
       return;
