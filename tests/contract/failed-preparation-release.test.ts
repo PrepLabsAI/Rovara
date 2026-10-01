@@ -11,7 +11,7 @@ import { preparationFailedMessage } from "../../packages/slack-service/src/messa
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import {
-  SLACK_CHANNEL, SLACK_TEAM, createBroker, finishOperation, lazyEnsureWorkspace, loadSlackBroker, prepareThread, registerSlackProject, serviceCall,
+  SLACK_CHANNEL, SLACK_TEAM, createBroker, ensureWorkspace, finishOperation, lazyEnsureWorkspace, loadSlackBroker, prepareThread, registerSlackProject, serviceCall,
 } from "../support/slack-broker.js";
 
 const threadOne = `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000001`;
@@ -36,6 +36,27 @@ async function preparingThread(db: FakeDynamoDb, handler: Parameters<typeof lazy
   const operationId = prepared.body.operationId as string;
   expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARING" });
   return { workspaceId, operationId };
+}
+
+/** As a failed workspace stored before #213 is: still charged to `userId`, its starter still recorded. */
+function chargeAsBefore(db: FakeDynamoDb, subject: string, userId: string, organizationCount = 1) {
+  Object.assign(member(db, userId)!, { count: 1, threads: [subject] });
+  Object.assign(organization(db)!, { count: organizationCount });
+  Object.assign(threadRecord(db, subject)!, { starterUserId: userId });
+}
+
+/** Runs `competitor` once, just before the next transaction `db` is sent, with the table as it is then. */
+function beforeNextTransaction(db: FakeDynamoDb, competitor: () => Promise<unknown>) {
+  const original = db.send;
+  let armed = true;
+  db.send = async (command) => {
+    if (armed && command.constructor.name === "TransactWriteCommand") {
+      armed = false;
+      db.send = original;
+      await competitor();
+    }
+    return original(command);
+  };
 }
 
 /** Runs `run` with console.log captured; answers the parsed JSON lines it logged. */
@@ -132,14 +153,14 @@ describe("a Slack thread whose workspace failed preparation (#213)", () => {
     expect(threadRecord(db, threadOne)).toMatchObject({ starterUserId: bob });
   });
 
-  it("refuses the fresh start at the limit, and leaves the failed workspace uncharged", async () => {
+  it("refuses an older service's fresh start at the limit, and leaves the failed workspace uncharged", async () => {
     const { db, handler } = createBroker({ memberLimit: 1 });
     await registerSlackProject(handler);
     const { workspaceId, operationId } = await preparingThread(db, handler, threadOne, pratik);
     await finishOperation(handler, db, workspaceId, operationId, "FAILED");
     await preparingThread(db, handler, threadTwo, pratik);
 
-    const refused = await lazyEnsureWorkspace(handler, threadOne, pratik);
+    const refused = await ensureWorkspace(handler, threadOne, pratik);
     expect(refused.body).toMatchObject({
       outcome: "LIMIT_REACHED", limit: "MEMBER", maximum: 1,
       starterThreads: [{ teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000002" }],
@@ -229,6 +250,98 @@ describe("a Slack thread whose workspace failed preparation (#213)", () => {
     expect(organization(db)).toMatchObject({ count: 1 });
   });
 
+  it("answers a lazy turn at the limit with no compute, instead of refusing it, and refuses only when a tool needs the worker", async () => {
+    const { db, handler } = createBroker({ memberLimit: 1 });
+    await registerSlackProject(handler);
+    const { workspaceId, operationId } = await preparingThread(db, handler, threadOne, pratik);
+    await finishOperation(handler, db, workspaceId, operationId, "FAILED");
+    await preparingThread(db, handler, threadTwo, pratik);
+
+    // A connector-only turn in the released thread is answered, as a new thread's would be.
+    expect((await lazyEnsureWorkspace(handler, threadOne, pratik)).body).toMatchObject({ outcome: "WORKSPACE", workspaceId, status: "UNPREPARED", operationId: null });
+    expect(member(db, pratik)).toMatchObject({ count: 1, threads: [threadTwo] });
+    // The tool that needs the worker is refused at the limit, and nothing is charged.
+    expect((await prepareThread(handler, threadOne, pratik)).body).toMatchObject({ outcome: "LIMIT_REACHED", limit: "MEMBER", maximum: 1 });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARATION_FAILED" });
+    expect(member(db, pratik)).toMatchObject({ count: 1, threads: [threadTwo] });
+  });
+
+  it("prepares a released workspace through the prepare route, charged afresh, once a slot is free", async () => {
+    const { db, handler } = createBroker();
+    await registerSlackProject(handler);
+    const { workspaceId, operationId } = await preparingThread(db, handler, threadOne, pratik);
+    await finishOperation(handler, db, workspaceId, operationId, "FAILED");
+
+    const prepared = await prepareThread(handler, threadOne, bob);
+    expect(prepared.body).toMatchObject({ outcome: "WORKSPACE", workspaceId, status: "PREPARING" });
+    expect(prepared.body.operationId).not.toBe(operationId);
+    expect(member(db, bob)).toMatchObject({ count: 1, threads: [threadOne] });
+    expect(organization(db)).toMatchObject({ count: 1 });
+  });
+
+  it("releases on a repeated failure result, when the first result's release did not land", async () => {
+    const { db, handler } = createBroker();
+    await registerSlackProject(handler);
+    const { workspaceId, operationId } = await preparingThread(db, handler, threadOne, pratik);
+    await finishOperation(handler, db, workspaceId, operationId, "FAILED");
+    chargeAsBefore(db, threadOne, pratik);
+
+    await finishOperation(handler, db, workspaceId, operationId, "FAILED");
+
+    expect(member(db, pratik)).toMatchObject({ count: 0, threads: [] });
+    expect(organization(db)).toMatchObject({ count: 0 });
+  });
+
+  it("charges a retry that a release overtook, so the workspace never prepares uncharged", async () => {
+    const { db, handler } = createBroker();
+    await registerSlackProject(handler);
+    const { workspaceId, operationId } = await preparingThread(db, handler, threadOne, pratik);
+    await finishOperation(handler, db, workspaceId, operationId, "FAILED");
+    chargeAsBefore(db, threadOne, pratik);
+    // The retry read the thread as still charged; the release commits before the retry's write.
+    let overtaken: unknown;
+    beforeNextTransaction(db, async () => { overtaken = await releaseFailedPreparation(db, "state", workspaceId); });
+
+    const next = await lazyEnsureWorkspace(handler, threadOne, pratik);
+
+    expect(overtaken).toBe("released");
+    expect(next.body).toMatchObject({ outcome: "WORKSPACE", workspaceId, status: "PREPARING" });
+    expect(member(db, pratik)).toMatchObject({ count: 1, threads: [threadOne] });
+    expect(organization(db)).toMatchObject({ count: 1 });
+    expect(threadRecord(db, threadOne)).toMatchObject({ starterUserId: pratik });
+  });
+
+  it("releases nothing when a retry overtakes the release, so the preparing workspace keeps its charge", async () => {
+    const { db, handler } = createBroker();
+    await registerSlackProject(handler);
+    const { workspaceId, operationId } = await preparingThread(db, handler, threadOne, pratik);
+    await finishOperation(handler, db, workspaceId, operationId, "FAILED");
+    chargeAsBefore(db, threadOne, pratik);
+    // The release read the workspace as failed; the thread's retry commits before the release's write.
+    beforeNextTransaction(db, () => lazyEnsureWorkspace(handler, threadOne, pratik));
+
+    expect(await releaseFailedPreparation(db, "state", workspaceId)).toBe("not_failed");
+
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "PREPARING" });
+    expect(member(db, pratik)).toMatchObject({ count: 1, threads: [threadOne] });
+    expect(organization(db)).toMatchObject({ count: 1 });
+  });
+
+  it("reads the member counter again when another charge lands during the release", async () => {
+    const { db, handler } = createBroker();
+    await registerSlackProject(handler);
+    const { workspaceId, operationId } = await preparingThread(db, handler, threadOne, pratik);
+    await finishOperation(handler, db, workspaceId, operationId, "FAILED");
+    chargeAsBefore(db, threadOne, pratik);
+    await lazyEnsureWorkspace(handler, threadTwo, pratik);
+    beforeNextTransaction(db, () => prepareThread(handler, threadTwo, pratik));
+
+    expect(await releaseFailedPreparation(db, "state", workspaceId)).toBe("released");
+
+    expect(member(db, pratik)).toMatchObject({ count: 1, threads: [threadTwo] });
+    expect(organization(db)).toMatchObject({ count: 1 });
+  });
+
   it("logs the release by IDs only", async () => {
     const { db, handler } = createBroker();
     await registerSlackProject(handler);
@@ -266,10 +379,13 @@ describe("a developer task whose setup failed (#213)", () => {
 
   it("closes the task afterwards without giving the slot back a second time", async () => {
     const { db, dev, taskId } = await setupFailed();
+    // Another task holds a slot, so a second release would show in both counters.
+    expect((await dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "other" })).status).toBe(200);
+    expect(member(db, MAYA.slackUserId!)).toMatchObject({ count: 1 });
     const closed = await dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() });
     expect(closed.body).toMatchObject({ closed: true, task: { status: "CLOSED" } });
-    expect(member(db, MAYA.slackUserId!)).toMatchObject({ count: 0 });
-    expect(organization(db)).toMatchObject({ count: 0 });
+    expect(member(db, MAYA.slackUserId!)).toMatchObject({ count: 1 });
+    expect(organization(db)).toMatchObject({ count: 1 });
   });
 
   it("says the workspace was released when the developer tries to continue", async () => {

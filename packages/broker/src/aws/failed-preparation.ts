@@ -13,7 +13,8 @@ import { taskKey, taskPointerKey, type DeveloperTaskRecord, type DeveloperTaskPo
 type Client = { send(command: unknown): Promise<unknown> };
 type Log = (entry: Record<string, unknown>) => void;
 
-export type FailedPreparationRelease = "released" | "not_charged" | "not_failed";
+/** "failed": the release could not land, and the slot stays held (logged). */
+export type FailedPreparationRelease = "released" | "not_charged" | "not_failed" | "failed";
 
 /** Fresh reads and one transaction per attempt; a counter another request moved meanwhile is read again. */
 const RELEASE_ATTEMPTS = 4;
@@ -38,7 +39,7 @@ export async function releaseFailedPreparation(client: Client, tableName: string
     for (let attempt = 0; attempt < RELEASE_ATTEMPTS; attempt += 1) {
       const outcome = await attemptRelease(client, tableName, workspaceId);
       if (outcome === "retry") continue;
-      if (outcome !== "not_failed" && outcome !== "not_charged") {
+      if (outcome === "slack_thread" || outcome === "developer_task") {
         log({ event: "workspace.preparation_failed_released", workspaceId, owner: outcome });
         return "released";
       }
@@ -48,10 +49,10 @@ export async function releaseFailedPreparation(client: Client, tableName: string
   } catch (error) {
     log({ event: "workspace.preparation_failed_release_failed", workspaceId, error: error instanceof Error ? error.name : "unknown" });
   }
-  return "not_charged";
+  return "failed";
 }
 
-async function attemptRelease(client: Client, tableName: string, workspaceId: string): Promise<"slack_thread" | "developer_task" | FailedPreparationRelease | "retry"> {
+async function attemptRelease(client: Client, tableName: string, workspaceId: string): Promise<"slack_thread" | "developer_task" | "not_charged" | "not_failed" | "retry"> {
   const get = async <T>(key: { pk: string; sk: string }) =>
     ((await client.send(new GetCommand({ TableName: tableName, Key: key, ConsistentRead: true }))) as { Item?: T }).Item;
   const workspace = await get<FailedWorkspace>({ pk: `WORKSPACE#${workspaceId}`, sk: "META" });
@@ -69,10 +70,10 @@ async function attemptRelease(client: Client, tableName: string, workspaceId: st
   } };
 
   const thread = await get<ThreadRecord>(slackThreadKey(workspace.ownerKey));
-  if (thread !== undefined) {
-    if (typeof thread.starterUserId !== "string" || thread.closedAt !== undefined || typeof thread.thread !== "string") return "not_charged";
+  if (thread !== undefined && typeof thread.starterUserId === "string" && thread.closedAt === undefined && typeof thread.thread === "string") {
     return releaseThreadCharge(client, tableName, get, { subject: thread.thread, starterUserId: thread.starterUserId, ownerKey: workspace.ownerKey }, stillFailed);
   }
+  // A Slack thread with no charge left falls through: it has no task pointer, so it ends "not_charged".
 
   const pointer = await get<DeveloperTaskPointerRecord>(taskPointerKey(workspaceId));
   if (pointer === undefined) return "not_charged";

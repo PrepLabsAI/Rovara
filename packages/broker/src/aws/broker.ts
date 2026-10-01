@@ -1657,7 +1657,7 @@ async function ensureThreadWorkspace(
       const result = await existingThreadWorkspace(dependencies, identity, requestId, current, include, includeSettingsRevision, input.includeOpenTaskCount === true);
       return result.outcome === "WORKSPACE" ? { ...result, created: prepared.created } : result;
     }
-    return existingThreadWorkspace(dependencies, identity, requestId, existing, include, includeSettingsRevision, input.includeOpenTaskCount === true);
+    return existingThreadWorkspace(dependencies, identity, requestId, existing, include, includeSettingsRevision, input.includeOpenTaskCount === true, lazyPreparation);
   }
 
   // New threads use the latest revision; an existing thread keeps the revision its workspace was prepared with.
@@ -1676,35 +1676,14 @@ async function ensureThreadWorkspace(
         Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#THREAD`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", operationId: preparation.operationId, workspaceId: preparation.workspace.id },
         ConditionExpression: "attribute_not_exists(pk)",
       } },
-      { Update: {
-        TableName: dependencies.tableName,
-        Key: slackOrganizationLimitKey(teamId),
-        UpdateExpression: "SET #count = if_not_exists(#count, :zero) + :one, entityType = :entity",
-        ConditionExpression: "attribute_not_exists(#count) OR #count < :limit",
-        ExpressionAttributeNames: { "#count": "count" },
-        ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":limit": effective.organizationWorkspaceLimit, ":entity": "SLACK_LIMIT" },
-      } },
-      { Update: {
-        TableName: dependencies.tableName,
-        Key: slackMemberLimitKey(teamId, userId),
-        UpdateExpression: "SET #count = if_not_exists(#count, :zero) + :one, #threads = list_append(if_not_exists(#threads, :none), :thread), entityType = :entity",
-        ConditionExpression: "attribute_not_exists(#count) OR #count < :limit",
-        ExpressionAttributeNames: { "#count": "count", "#threads": "threads" },
-        ExpressionAttributeValues: {
-          ":zero": 0,
-          ":one": 1,
-          ":limit": effective.memberWorkspaceLimit,
-          ":none": [],
-          ":thread": [identity.subject],
-          ":entity": "SLACK_LIMIT",
-        },
-      } },
+      // #213: the starter is recorded with the charge, so a failed preparation can always find it.
+      ...threadChargeItems(dependencies, identity, effective, preparation.workspace.id),
     ] }));
   } catch (error) {
     if (!isConditional(error)) throw error;
     const concurrent = await getDefaultWorkspace(dependencies, identity.ownerKey, slack.binding.projectName);
     if (concurrent) {
-      return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision);
+      return existingThreadWorkspace(dependencies, identity, requestId, concurrent, include, includeSettingsRevision, input.includeOpenTaskCount === true);
     }
     return threadWorkspaceLimitRefusal(dependencies, teamId, userId, effective, input.includeOpenTaskCount === true);
   }
@@ -1861,6 +1840,16 @@ async function startThreadPreparation(
   const slack = identity.slack;
   const limits = dependencies.slack;
   if (!slack || !limits) throw agentXError("FORBIDDEN", "a Slack thread identity is required");
+  if (workspace.status === "PREPARATION_FAILED" && !workspace.activeOperationId) {
+    // #213: a released failed workspace a lazy turn was told is UNPREPARED; prepared again, charged afresh.
+    const pinned = await requireProject(dependencies, workspace.projectName, workspace.projectRevision);
+    const retried = await retryThreadPreparation(dependencies, identity, requestId, pinned, workspace, includeOpenTaskCount);
+    if ("outcome" in retried) {
+      if (retried.outcome === "LIMIT_REACHED") return retried;
+      throw agentXError("WORKSPACE_BUSY", "thread workspace preparation conflicted with another request; retry");
+    }
+    return { outcome: "WORKSPACE", workspaceId: workspace.id, status: retried.status, operationId: retried.operationId, created: false };
+  }
   if (workspace.status !== "UNPREPARED") {
     return { outcome: "WORKSPACE", workspaceId: workspace.id, status: workspace.status, operationId: workspace.activeOperationId, created: false };
   }
@@ -2069,6 +2058,7 @@ async function existingThreadWorkspace(
   include: IntegrationInclude,
   includeSettingsRevision: boolean,
   includeOpenTaskCount = false,
+  lazyPreparation = false,
 ): Promise<SlackThreadWorkspaceResult> {
   await recordThreadRequester(dependencies, identity, workspace.id, false);
   // Preparation rebuilds the workspace's disk, so it keeps the revision recorded on the workspace
@@ -2085,6 +2075,12 @@ async function existingThreadWorkspace(
   };
   if (workspace.status === "PREPARATION_FAILED" && !workspace.activeOperationId) {
     const retried = await retryThreadPreparation(dependencies, identity, requestId, pinned, workspace, includeOpenTaskCount);
+    // #213: a lazy service's turn is never refused for a slot it may not need. Its released
+    // workspace has no compute and no charge, as a new thread's has, so it is answered UNPREPARED,
+    // and the prepare route retries it (and refuses at the limit) when a tool needs the worker.
+    if ("outcome" in retried && retried.outcome === "LIMIT_REACHED" && lazyPreparation) {
+      return { outcome: "WORKSPACE", workspaceId: workspace.id, status: "UNPREPARED", operationId: null, created: false, ...applied };
+    }
     if ("outcome" in retried) return retried;
     return {
       outcome: "WORKSPACE",
@@ -3904,6 +3900,9 @@ async function recordTerminalResult(
   if (!TERMINAL.has(status as OperationStatus)) throw agentXError("CONFIG_INVALID", "terminal status is invalid");
   if (TERMINAL.has(operation.status)) {
     if (operation.status !== status && !isQueueFailedPrepare(operation, status) && !isSweptPrepare(operation)) throw agentXError("IDEMPOTENCY_CONFLICT", "terminal result is immutable");
+    // #213: a repeated result releases a failed prepare's slot too, in case the first one's release
+    // did not land (the release is idempotent, and does nothing to a workspace that moved on).
+    if (operation.kind === "prepare" && operation.status !== "SUCCEEDED") await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, operation.workspaceId);
     return operation;
   }
   const workspace = await requireWorkspace(dependencies, operation.workspaceId);
@@ -4009,7 +4008,10 @@ async function recordTerminalResult(
   } catch (transactionError) {
     if (!isConditional(transactionError)) throw transactionError;
     const existing = await requireOperation(dependencies, operation.workspaceId, operation.id);
-    if (existing.status === terminalStatus || isQueueFailedPrepare(existing, terminalStatus) || isSweptPrepare(existing)) return existing;
+    if (existing.status === terminalStatus || isQueueFailedPrepare(existing, terminalStatus) || isSweptPrepare(existing)) {
+      if (existing.kind === "prepare" && existing.status !== "SUCCEEDED") await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, existing.workspaceId);
+      return existing;
+    }
     // A cancel whose target finished first (its own result, and for a developer task its
     // completed record, committed meanwhile): decided again once, from a fresh read, the cancel
     // records only its own result. The target, the workspace and the audit record stay as the
