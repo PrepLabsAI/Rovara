@@ -159,12 +159,13 @@ export function initSteps(input: { github: GitHubApi; slack: SlackApi }): InitSt
   ];
 }
 
-function eventLine(event: InitEvent): string {
+function eventLine(event: InitEvent): string | undefined {
   switch (event.kind) {
     case "step-skipped": return `already done: ${event.title}`;
     case "step-started": return `==> ${event.title}`;
     case "step-done": return `done: ${event.title}`;
     case "step-waiting": return `waiting: ${event.title}`;
+    case "step-failed": return undefined;
   }
 }
 
@@ -659,7 +660,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
       env, region, store, holder: caller.arn, context, now,
       steps: runSteps,
       beforeSteps: saveAnswers,
-      onEvent: (event) => { write(eventLine(event)); session.wizard?.event(event); },
+      onEvent: (event) => { const line = eventLine(event); if (line !== undefined) write(line); session.wizard?.event(event); },
       // A takeover is never behind --yes, which answers every confirm with yes.
       ...(options.yes ? {} : {
         confirmTakeover: (held: LockRecord) => activePrompter.confirm(

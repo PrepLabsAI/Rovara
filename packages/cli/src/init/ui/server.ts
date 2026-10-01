@@ -188,6 +188,10 @@ export async function startWizardServer(input: { hub: WizardHub; port?: number; 
     }
     if (request.method === "GET" && url.pathname === "/events") return openStream(response);
     if (request.method === "POST" && url.pathname === "/answer") return answer(request, response);
+    if (request.method === "POST" && url.pathname === "/close") {
+      input.hub.requestClose();
+      return send(response, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true } satisfies AnswerReply));
+    }
     return send(response, 404, "text/plain; charset=utf-8", "not found\n");
   };
 

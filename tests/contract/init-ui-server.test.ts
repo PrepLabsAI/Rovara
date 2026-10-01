@@ -219,4 +219,17 @@ describe("the install wizard's server", () => {
     await server.close();
     await expect(request(origin, "/state")).rejects.toThrow();
   });
+
+  it("POST /close tells the hub the page asked to close, behind the same checks as every route", async () => {
+    const { hub, origin } = await wizard();
+    let asked = false;
+    void hub.closeRequested().then(() => { asked = true; });
+    const refused = await fetch(`${origin}/close`, { method: "POST" });
+    expect(refused.status).toBe(401);
+    const accepted = await fetch(`${origin}/close`, { method: "POST", headers: { [WIZARD_TOKEN_HEADER]: TOKEN } });
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toEqual({ ok: true });
+    await hub.closeRequested();
+    expect(asked).toBe(true);
+  });
 });

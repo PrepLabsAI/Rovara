@@ -6,6 +6,7 @@
 // one POST and goes straight to the `Prompter` caller. A secret in particular is never part of any
 // state the page can read back (FR-012).
 import type { InitStepId } from "../install-state.js";
+import type { JourneyPhaseId, JourneyView } from "./journey.js";
 
 /** The header a request may carry its session token in; `?t=` carries it for a page load. */
 export const WIZARD_TOKEN_HEADER = "x-agentx-wizard-token";
@@ -32,7 +33,7 @@ export interface WizardQuestion {
   error?: string;
 }
 
-export type StepStatus = "pending" | "skipped" | "running" | "done" | "waiting";
+export type StepStatus = "pending" | "skipped" | "running" | "done" | "waiting" | "failed";
 
 export interface WizardStep {
   id: InitStepId;
@@ -40,6 +41,14 @@ export interface WizardStep {
   status: StepStatus;
   /** A waiting step's message: what the operator has to do before the install goes on. */
   message?: string;
+  /** Spec 048 FR-001 and FR-002: which phase the step belongs to and how long it usually takes. */
+  phase: JourneyPhaseId;
+  usualSeconds: number;
+  usualText: string;
+  /** When the step last started (ISO time), so the page can tick its elapsed time. */
+  startedAt?: string;
+  /** How long a finished step took, in whole seconds. */
+  tookSeconds?: number;
 }
 
 /** FR-006: what `readInstallProgress` already recorded for a part-finished install. */
@@ -59,8 +68,12 @@ export type CardId =
 export type CardStatus = "info" | "running" | "waiting" | "ok" | "failed";
 
 /** An address the operator opens from the page, in a new tab. Only an `https://` address or this
- * machine's `http://127.0.0.1:<port>/` is ever shown (state.ts's isShowableLink). */
-export interface WizardLink { url: string; label: string }
+ * machine's `http://127.0.0.1:<port>/` is ever shown (state.ts's isShowableLink). `note` says it
+ * opens in a new tab and to come back (FR-037). */
+export interface WizardLink { url: string; label: string; note?: string }
+
+/** A command shown with a copy button: only on the ready screen and after Stop for now (FR-061). */
+export interface WizardCommand { label: string; command: string }
 
 /** One line of a checklist card, such as one prerequisite. */
 export interface WizardCheck { label: string; ok: boolean; detail: string }
@@ -74,7 +87,16 @@ export interface WizardCard {
   lines: string[];
   checks?: WizardCheck[];
   link?: WizardLink;
+  /** Technical details, shown collapsed: raw messages, IDs, ARNs (FR-027, FR-060). */
+  details?: string[];
+  commands?: WizardCommand[];
 }
+
+/** FR-001: the slim header. */
+export interface WizardHeader { installName: string; account?: string; region?: string }
+
+/** FR-060: a failure in three parts. The actions are the question asked with it. */
+export interface WizardFailure { title: string; what: string; next: string; details: string[]; link?: WizardLink }
 
 export type WizardPhase = "running" | "finished" | "failed";
 
@@ -82,6 +104,14 @@ export interface WizardState {
   env: string;
   phase: WizardPhase;
   steps: WizardStep[];
+  header: WizardHeader;
+  journey: JourneyView;
+  /** FR-005: the browser tab's title. */
+  pageTitle: string;
+  /** A question, a link, a waiting card or a failure: the run waits on the user. */
+  waitingOnYou: boolean;
+  /** FR-006: the welcome text, while the install is in Get started. */
+  welcome?: string[];
   question?: WizardQuestion;
   /** `confirmInstallPlan`'s priced plan, shown as the review screen (FR-005). */
   plan?: string;
@@ -90,8 +120,13 @@ export interface WizardState {
   cards?: WizardCard[];
   /** The one address the run is waiting on the operator to open, when no card offers it. */
   link?: WizardLink;
+  failure?: WizardFailure;
   /** How the run ended, once it has. */
   outcome?: string;
+  /** The command to continue later, after Stop for now. */
+  commands?: WizardCommand[];
+  /** Where the full log is (FR-059, FR-070). */
+  logPath?: string;
 }
 
 /** A full state plus the log pane's backlog: the first thing a page (or a reconnecting one) gets. */

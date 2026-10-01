@@ -28,7 +28,9 @@ export type InitEvent =
   | { kind: "step-skipped"; id: InitStepId; title: string }
   | { kind: "step-started"; id: InitStepId; title: string }
   | { kind: "step-done"; id: InitStepId; title: string }
-  | { kind: "step-waiting"; id: InitStepId; title: string; message: string };
+  | { kind: "step-waiting"; id: InitStepId; title: string; message: string }
+  /** Spec 048 FR-060: the step threw. The run may still retry it (onStepFailure). */
+  | { kind: "step-failed"; id: InitStepId; title: string; message: string };
 
 export type InitRunResult =
   | { status: "complete"; ran: InitStepId[]; skipped: InitStepId[] }

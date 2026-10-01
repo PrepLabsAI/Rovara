@@ -6,7 +6,7 @@ import { adminCard, alertsCard, channelCard, connectorsCard, githubCard, onPageP
 import { startInstallWizard } from "../../packages/cli/src/init/ui/index.js";
 import { WIZARD_JS, wizardHtml } from "../../packages/cli/src/init/ui/page.js";
 import type { WizardCard, WizardState } from "../../packages/cli/src/init/ui/protocol.js";
-import { createWizardHub, isShowableLink, LINK_REFUSED } from "../../packages/cli/src/init/ui/state.js";
+import { createWizardHub, isShowableLink, LINK_REFUSED, NEW_TAB_NOTE } from "../../packages/cli/src/init/ui/state.js";
 
 const card = (overrides: Partial<WizardCard> = {}): WizardCard => ({ id: "github", title: "GitHub App", status: "waiting", lines: ["one"], ...overrides });
 
@@ -55,7 +55,7 @@ describe("links", () => {
       expect(await wizard.openLink("http://example.com/")).toBe(false);
       expect(wizard.hub.state().link).toBeUndefined();
       expect(await wizard.openLink("https://github.com/apps/agentx-acme-staging/installations/new")).toBe(true);
-      expect(wizard.hub.state().link).toEqual({ url: "https://github.com/apps/agentx-acme-staging/installations/new", label: "Open github.com" });
+      expect(wizard.hub.state().link).toEqual({ url: "https://github.com/apps/agentx-acme-staging/installations/new", label: "Open github.com", note: NEW_TAB_NOTE });
     } finally {
       await wizard.close();
     }
@@ -95,6 +95,19 @@ describe("links", () => {
     expect(hub.snapshot().log).toEqual([LINK_REFUSED, LINK_REFUSED]);
   });
 
+  it("keeps a card's details and commands when its link is refused", () => {
+    const hub = createWizardHub("staging");
+    hub.showCard(card({
+      link: { url: "javascript:alert(1)", label: "Create" },
+      details: ["raw error ARN"],
+      commands: [{ label: "Continue later with", command: "agentx --env staging init" }],
+    }));
+    const shown = hub.state().cards?.[0];
+    expect(shown).not.toHaveProperty("link");
+    expect(shown?.details).toEqual(["raw error ARN"]);
+    expect(shown?.commands).toEqual([{ label: "Continue later with", command: "agentx --env staging init" }]);
+  });
+
   it("clearLink drops the run's link, and does nothing when there is none", () => {
     const hub = createWizardHub("staging");
     const states: WizardState[] = [];
@@ -112,7 +125,7 @@ describe("links", () => {
     const hub = createWizardHub("staging");
     hub.setSteps([{ id: "github-app", title: "Create and install the GitHub App" }, { id: "control-plane", title: "Deploy the control plane and runtime" }]);
     hub.showLink({ url: "https://github.com/apps/agentx-acme-staging/installations/new", label: "Open github.com" });
-    expect(hub.state().link).toEqual({ url: "https://github.com/apps/agentx-acme-staging/installations/new", label: "Open github.com" });
+    expect(hub.state().link).toEqual({ url: "https://github.com/apps/agentx-acme-staging/installations/new", label: "Open github.com", note: NEW_TAB_NOTE });
     hub.applyEvent({ kind: "step-done", id: "github-app", title: "Create and install the GitHub App" });
     expect(hub.state().link).toBeUndefined();
     hub.showLink({ url: "https://api.slack.com/apps", label: "Open api.slack.com" });

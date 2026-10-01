@@ -152,7 +152,8 @@ describe("browserPrompter", () => {
 
 describe("the wizard's state", () => {
   it("builds the checklist from the InitEvent stream", () => {
-    const hub = createWizardHub("staging");
+    // A fixed clock, so the step's recorded startedAt and tookSeconds are exact values below.
+    const hub = createWizardHub("staging", { now: () => 0 });
     hub.setSteps([
       { id: "prerequisites", title: "Check prerequisites" },
       { id: "access", title: "Deploy the access stack" },
@@ -164,9 +165,9 @@ describe("the wizard's state", () => {
     hub.applyEvent({ kind: "step-done", id: "access", title: "Deploy the access stack" });
     hub.applyEvent({ kind: "step-waiting", id: "github-app", title: "Create and install the GitHub App", message: "install it on acme" });
     expect(hub.state().steps).toEqual([
-      { id: "prerequisites", title: "Check prerequisites", status: "skipped" },
-      { id: "access", title: "Deploy the access stack", status: "done" },
-      { id: "github-app", title: "Create and install the GitHub App", status: "waiting", message: "install it on acme" },
+      { id: "prerequisites", title: "Check prerequisites", status: "skipped", phase: "your-choices", usualSeconds: 30, usualText: "usually under a minute" },
+      { id: "access", title: "Deploy the access stack", status: "done", phase: "build", usualSeconds: 60, usualText: "usually 1 minute", startedAt: "1970-01-01T00:00:00.000Z", tookSeconds: 0 },
+      { id: "github-app", title: "Create and install the GitHub App", status: "waiting", message: "install it on acme", phase: "build", usualSeconds: 120, usualText: "usually 2 minutes" },
     ]);
   });
 
