@@ -772,6 +772,71 @@ describe("an upgrade keeps what the operator set (OPERATOR_PARAMETERS)", () => {
   });
 });
 
+// Issue 152: the cdk engine reads which parameters each stack declares from its own synth of the
+// source, not from the release's published templates (which a source-built release does not have).
+describe("the cdk engine's declared parameters come from its synth (issue 152)", () => {
+  async function installedWithCdk(): Promise<{ store: MemoryParameterStore; secrets: ReturnType<typeof memorySecrets> }> {
+    const store = new MemoryParameterStore();
+    const secrets = memorySecrets();
+    const install = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({ mode: "install", engine: "cdk", answers: baseAnswers(), release: fakeRelease(), deployer: install.deployer, store, secrets, holder: HOLDER });
+    return { store, secrets };
+  }
+  const synthDeclares = (names: Partial<Record<DeployPart, string[]>>) => (part: DeployPart): ReadonlySet<string> => new Set(names[part] ?? []);
+
+  it("keeps a parameter the synth declares although the release's template does not", async () => {
+    const { store, secrets } = await installedWithCdk();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    const result = await deployEnvironment({
+      mode: "upgrade", engine: "cdk", answers: baseAnswers(), release: fakeReleaseWithControlPlaneParameters([]), deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      declaredParameters: synthDeclares({ "control-plane": ["BudgetMonthlyUsd"] }),
+      deployedParameters: async (name) => (name === stackName("control-plane") ? { BudgetMonthlyUsd: "250" } : undefined),
+    });
+    expect(upgrade.requests.find((request) => request.part === "control-plane")!.parameters.BudgetMonthlyUsd).toBe("250");
+    expect(result.droppedParameters).toEqual([]);
+  });
+
+  it("reports as dropped a parameter the synth no longer declares, although the release's template still does", async () => {
+    const { store, secrets } = await installedWithCdk();
+    const upgrade = fakeDeployer(scriptedOutputs());
+    const result = await deployEnvironment({
+      mode: "upgrade", engine: "cdk", answers: baseAnswers(), release: fakeReleaseWithControlPlaneParameters(["BudgetMonthlyUsd", "SlackThreadTurnsPerMinute"]), deployer: upgrade.deployer, store, secrets, holder: HOLDER,
+      declaredParameters: synthDeclares({ "control-plane": ["BudgetMonthlyUsd"] }),
+      deployedParameters: async (name) => (name === stackName("control-plane") ? { BudgetMonthlyUsd: "250", SlackThreadTurnsPerMinute: "12" } : undefined),
+    });
+    const controlPlane = upgrade.requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlane.parameters).not.toHaveProperty("SlackThreadTurnsPerMinute");
+    expect(controlPlane.parameters.BudgetMonthlyUsd).toBe("250");
+    expect(result.droppedParameters).toEqual([{ stackName: stackName("control-plane"), parameter: "SlackThreadTurnsPerMinute", value: "12" }]);
+  });
+
+  it("filters the stored sign-in keys by the synth's set, not the release's template", async () => {
+    const store = new MemoryParameterStore();
+    await store.put("/agentx/staging/slack/teamId", "T0TEAM1");
+    await store.put("/agentx/staging/signin", JSON.stringify({ schemaVersion: 1, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: HOLDER }));
+    const { deployer, requests } = fakeDeployer(scriptedOutputs());
+    await deployEnvironment({
+      mode: "install", engine: "cdk", answers: baseAnswers(), release: fakeReleaseWithControlPlaneParameters([]), deployer, store, secrets: memorySecrets(), holder: HOLDER,
+      declaredParameters: synthDeclares({ "control-plane": ["SlackTeamId", "DeveloperSignInSlack"] }),
+    });
+    const controlPlane = requests.find((request) => request.part === "control-plane")!;
+    expect(controlPlane.parameters).toMatchObject({ SlackTeamId: "T0TEAM1", DeveloperSignInSlack: "enabled" });
+    for (const name of SIGN_IN_PARAMETER_NAMES.filter((key) => key !== "SlackTeamId" && key !== "DeveloperSignInSlack")) expect(controlPlane.parameters).not.toHaveProperty(name);
+  });
+
+  it("never reads the release's templates when the synth's set is given", async () => {
+    const store = new MemoryParameterStore();
+    await store.put("/agentx/staging/slack/teamId", "T0TEAM1");
+    await store.put("/agentx/staging/signin", JSON.stringify({ schemaVersion: 1, env: "staging", slack: true, updatedAt: "2026-09-27T00:00:00.000Z", updatedBy: HOLDER }));
+    const release = { ...fakeRelease(), template: () => { throw new Error("the release's template must not be read"); } };
+    const { deployer } = fakeDeployer(scriptedOutputs());
+    await expect(deployEnvironment({
+      mode: "install", engine: "cdk", answers: baseAnswers(), release, deployer, store, secrets: memorySecrets(), holder: HOLDER,
+      declaredParameters: synthDeclares({ "control-plane": [...SIGN_IN_PARAMETER_NAMES] }),
+    })).resolves.toMatchObject({ settingsWritten: true });
+  });
+});
+
 describe("keptOperatorParameters", () => {
   it("keeps only listed parameters the answers did not set and the template declares", () => {
     expect(keptOperatorParameters({

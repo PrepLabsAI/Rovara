@@ -1,16 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { runConfigGet, runConfigList, runConfigSet, type ConfigServices } from "../../packages/cli/src/config/commands.js";
+import { runConfigGet, runConfigList, runConfigSet } from "../../packages/cli/src/config/commands.js";
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import { readEnvironmentSettings, settingsParameterName, writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
-import type { StackDescription } from "../../packages/cli/src/environments/adopt.js";
 import { fakeCloudFormation } from "../support/fake-cloudformation.js";
 import { installAnswersParameterName, readInstallAnswers, writeInstallAnswers } from "../../packages/cli/src/init/install-state.js";
 import { memoryInitSecrets, passingChecks, sampleAnswers, scriptedPrompter, T0 } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { fakeAlerts, STAGING_SETTINGS } from "../support/setup-fakes.js";
+import { ROLE, seeded, services, stacks } from "../support/config-services.js";
 
 const ENV = "staging";
-const ROLE = "arn:aws:iam::123456789012:role/agentx-staging-cloudformation";
 const WEBHOOK = "https://events.pagerduty.com/integration/SECRETkey0123456789/enqueue";
 const OLD_WEBHOOK = "https://events.pagerduty.com/integration/OLDkey0123456789/enqueue";
 
@@ -30,45 +29,6 @@ class PutFailsOnce extends MemoryParameterStore {
 
 const lockOps = (store: MemoryParameterStore) => store.calls.filter((call) => call.name === lockParameterName(ENV)).map((call) => call.op);
 
-async function seeded(region = STAGING_SETTINGS.region): Promise<MemoryParameterStore> {
-  const store = new MemoryParameterStore();
-  await writeEnvironmentSettings(store, {
-    ...STAGING_SETTINGS,
-    region,
-    access: { artifactBucket: "b", cloudFormationRoleArn: ROLE, operatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator", pullThroughPrefix: "agentx-staging" },
-  });
-  return store;
-}
-
-function stacks(parameters: Record<string, Record<string, string>>): ConfigServices["stacks"] {
-  return {
-    async describe(name): Promise<StackDescription | undefined> {
-      const values = parameters[name];
-      return values === undefined ? undefined : { status: "UPDATE_COMPLETE", outputs: { OperatorAlertsTopicArn: "arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts" }, parameters: values };
-    },
-  };
-}
-
-function services(overrides: Partial<ConfigServices> & { store: MemoryParameterStore }): ConfigServices & { lines: string[] } {
-  const lines: string[] = [];
-  return {
-    lines,
-    secrets: memoryInitSecrets(),
-    cloudFormation: fakeCloudFormation({ parameters: { SlackThreadTurnsPerMinute: "6", BudgetMonthlyUsd: "100", ModelId: "amazon.nova-pro-v1:0" } }),
-    stacks: stacks({ "agentx-staging-control-plane": { SlackThreadTurnsPerMinute: "6", BudgetMonthlyUsd: "100", BudgetScope: "tag", SlackAppPostedMessages: "accept", SlackMemberWorkspaceLimit: "3", SlackOrganizationWorkspaceLimit: "20" }, "agentx-staging-slack": { ModelId: "us.anthropic.claude-sonnet-4-6", GateClassifierModelId: "amazon.nova-lite-v1:0", SlowTurnMinutes: "5" }, "agentx-staging-runtime": { ModelId: "amazon.nova-pro-v1:0" } }),
-    identity: { get: async () => ({ account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/agentx-staging-operator/alice" }) },
-    checks: () => passingChecks(),
-    alerts: fakeAlerts({ confirmAfterPolls: 0 }),
-    prompter: scriptedPrompter([]),
-    processEnv: {},
-    write: (line) => lines.push(line),
-    now: () => T0,
-    sleep: async () => undefined,
-    pollMs: 0,
-    ...overrides,
-  };
-}
-
 describe("agentx config list and get", () => {
   it("lists every key with its value and where it lives", async () => {
     const rows = await runConfigList(services({ store: await seeded() }), ENV);
@@ -76,7 +36,7 @@ describe("agentx config list and get", () => {
     expect(rows.find((row) => row.key === "models.orchestrator")?.value).toBe("us.anthropic.claude-sonnet-4-6");
     expect(rows.find((row) => row.key === "alerts.address")?.value).toBe("none");
     expect(rows.find((row) => row.key === "limits.workspacesPerMember")?.value).toBe("3 (install-time default; the control plane may hold a newer setting)");
-    expect(rows).toHaveLength(11);
+    expect(rows).toHaveLength(12);
   });
 
   it("never shows the alert address itself, only that it is set", async () => {
@@ -256,9 +216,9 @@ describe("agentx config set", () => {
     expect(store.calls.some((call) => call.name === lockParameterName(ENV))).toBe(false);
   });
 
-  it("refuses the workspace limits until the control plane's change tool exists (question 4)", async () => {
-    await expect(runConfigSet(services({ store: await seeded() }), ENV, { key: "limits.workspacesPerMember", value: "5", yes: true }))
-      .rejects.toThrow("limits.workspacesPerMember is the control plane's workspace limits setting; AgentX changes it with the admin change tool from spec 025 phase 25e, which this release does not have yet");
+  it("needs the admin sign-in for the workspace limits, which change through the admin change path (spec 025 phase 25e)", async () => {
+    await expect(runConfigSet(services({ store: await seeded(), adminSession: async () => undefined }), ENV, { key: "limits.workspacesPerMember", value: "5", yes: true }))
+      .rejects.toThrow(`limits.workspacesPerMember changes through AgentX's admin change path, which needs this computer's admin sign-in; run agentx --env ${ENV} login --admin, then try again`);
   });
 
   it("asks before applying without --yes, and applies nothing on no", async () => {

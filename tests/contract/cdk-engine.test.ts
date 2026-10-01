@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { AgentXError } from "@agentx/contracts";
 import { CDK_CONSTRUCT_IDS, assertCdkBootstrapped, assertSourceAtRelease, buildSource, cdkDeployer, type CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
+import { sourceReleaseVersion, synthDeclaredParameters } from "../../packages/cli/src/deploy/cdk-source.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
@@ -362,5 +363,135 @@ describe("cdk engine", () => {
       expect((error as Error).message).toMatch(/cdk deploy wrote an unreadable outputs file at .*control-plane\.json/);
       expect((error as Error).cause).toBeDefined();
     });
+  });
+});
+
+// Issue 152: a source-built CLI takes the version from the checkout's tag, and every cdk run reads
+// the parameters each stack declares from a real `cdk synth` of that checkout.
+describe("the cdk source (issue 152)", () => {
+  /** A runner answering the three git calls sourceReleaseVersion makes. */
+  function tagRunner(input: { status?: string; tags?: string; head?: string }): CommandRunner & { calls: string[] } {
+    const calls: string[] = [];
+    return {
+      calls,
+      async run(command, args) {
+        calls.push([command, ...args].join(" "));
+        if (args[0] === "status") return { stdout: input.status ?? "" };
+        if (args[0] === "rev-parse") return { stdout: `${input.head ?? "c".repeat(40)}\n` };
+        return { stdout: input.tags ?? "" };
+      },
+    };
+  }
+
+  it("takes the version from the one release tag at HEAD of a clean checkout", async () => {
+    const runner = tagRunner({ tags: "latest\nv1.4.0\n", head: "d".repeat(40) });
+    await expect(sourceReleaseVersion({ runner, source: "/src" })).resolves.toEqual({ version: "1.4.0", gitCommit: "d".repeat(40) });
+  });
+
+  it("refuses a checkout at no release tag, naming the tags it found", async () => {
+    await expect(sourceReleaseVersion({ runner: tagRunner({ tags: "" }), source: "/src" }))
+      .rejects.toThrow("the cdk engine takes the release version from the tag of --source, but /src is at no release tag; check out a release tag (vX.Y.Z) cleanly");
+    await expect(sourceReleaseVersion({ runner: tagRunner({ tags: "latest\n" }), source: "/src" }))
+      .rejects.toThrow("but /src is at latest, not a release tag");
+  });
+
+  it("refuses a checkout whose HEAD carries several release tags", async () => {
+    await expect(sourceReleaseVersion({ runner: tagRunner({ tags: "v1.4.0\nv1.4.1\n" }), source: "/src" }))
+      .rejects.toThrow("/src is at several release tags (v1.4.0, v1.4.1); check out a commit with one release tag, or pass --release <dir> for the one you mean");
+  });
+
+  it("takes the final tag when an rc was promoted on the same commit (review I1)", async () => {
+    await expect(sourceReleaseVersion({ runner: tagRunner({ tags: "v1.4.0-rc.2\nv1.4.0\n" }), source: "/src" })).resolves.toMatchObject({ version: "1.4.0" });
+    // With no final tag, the one prerelease tag is the version; init and upgrade then refuse a prerelease.
+    await expect(sourceReleaseVersion({ runner: tagRunner({ tags: "v1.4.0-rc.2\n" }), source: "/src" })).resolves.toMatchObject({ version: "1.4.0-rc.2" });
+    await expect(sourceReleaseVersion({ runner: tagRunner({ tags: "v1.4.0-rc.1\nv1.4.0-rc.2\n" }), source: "/src" })).rejects.toThrow("several release tags (v1.4.0-rc.1, v1.4.0-rc.2)");
+  });
+
+  it("names a source that is not a git checkout (review M8)", async () => {
+    const notGit: CommandRunner = { async run() { throw new Error("git status --porcelain exited with code 128:\nfatal: not a git repository"); } };
+    const error = await sourceReleaseVersion({ runner: notGit, source: "/src" }).catch((caught: unknown) => caught);
+    expect(error).toBeInstanceOf(AgentXError);
+    expect((error as Error).message).toContain("/src is not a git checkout (git status --porcelain exited with code 128:); check out a release tag (vX.Y.Z) cleanly");
+    expect((error as Error).cause).toBeDefined();
+  });
+
+  it("refuses a dirty checkout before reading its tags", async () => {
+    const runner = tagRunner({ status: " M infra/lib/app.ts\n", tags: "v1.4.0\n" });
+    await expect(sourceReleaseVersion({ runner, source: "/src" })).rejects.toThrow("source at /src has uncommitted changes; check out a release tag (vX.Y.Z) cleanly");
+    expect(runner.calls).toEqual(["git status --porcelain"]);
+  });
+
+  it("refuses with CONFIG_INVALID", async () => {
+    await expect(sourceReleaseVersion({ runner: tagRunner({ tags: "" }), source: "/src" })).rejects.toBeInstanceOf(AgentXError);
+  });
+
+  /** A runner whose `cdk synth -o <dir>` writes a cloud assembly the way CDK 2 does (manifest.json
+   * version 54: artifacts keyed by construct id, type aws:cloudformation:stack, properties.templateFile
+   * and properties.stackName), with `declared` as each stack's Parameters. */
+  function synthRunner(declared: Partial<Record<string, string[]>>, options: { stackNames?: Record<string, string>; omit?: string[] } = {}): CommandRunner & { calls: Array<{ args: string[]; cwd: string; quiet: boolean | undefined; outDir: string }> } {
+    const calls: Array<{ args: string[]; cwd: string; quiet: boolean | undefined; outDir: string }> = [];
+    return {
+      calls,
+      async run(_command, args, runOptions) {
+        const outDir = args[args.indexOf("-o") + 1]!;
+        calls.push({ args, cwd: runOptions.cwd, quiet: runOptions.quiet, outDir });
+        const artifacts: Record<string, unknown> = { Tree: { type: "cdk:tree", properties: { file: "tree.json" } } };
+        for (const [part, id] of Object.entries(CDK_CONSTRUCT_IDS)) {
+          if (options.omit?.includes(id)) continue;
+          const templateFile = `${id}.template.json`;
+          await writeFile(join(outDir, templateFile), JSON.stringify({ Parameters: Object.fromEntries((declared[part] ?? []).map((name) => [name, { Type: "String" }])), Resources: {} }));
+          artifacts[`${id}.assets`] = { type: "cdk:asset-manifest", properties: { file: `${id}.assets.json` } };
+          artifacts[id] = { type: "aws:cloudformation:stack", environment: "aws://unknown-account/us-east-1", properties: { templateFile, stackName: options.stackNames?.[id] ?? `agentx-staging-${part}` }, displayName: id };
+        }
+        await writeFile(join(outDir, "manifest.json"), JSON.stringify({ version: "54.0.0", artifacts, minimumCliVersion: "2.1000.0" }));
+        return { stdout: "" };
+      },
+    };
+  }
+
+  it("reads each stack's declared parameters from the synthesized assembly's manifest", async () => {
+    const runner = synthRunner({ "control-plane": ["BudgetMonthlyUsd", "McpConfirmElicitation"], slack: ["SlackThreadTurnsPerMinute"] });
+    const declared = await synthDeclaredParameters({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito" });
+    expect([...declared("control-plane")]).toEqual(["BudgetMonthlyUsd", "McpConfirmElicitation"]);
+    expect([...declared("slack")]).toEqual(["SlackThreadTurnsPerMinute"]);
+    expect([...declared("access")]).toEqual([]);
+  });
+
+  it("synthesizes once, from the source, into a directory it removes, with the app and context it shares with the deploy (cdkAppArguments)", async () => {
+    const runner = synthRunner({});
+    await synthDeclaredParameters({ runner, source: "/src", env: "staging", region: "eu-west-1", identityMode: "oidc" });
+    expect(runner.calls).toHaveLength(1);
+    const [call] = runner.calls;
+    expect(call!.cwd).toBe("/src");
+    expect(call!.quiet).toBe(true);
+    expect(call!.args).toEqual(["--no-install", "cdk", "synth", "--quiet", "-o", call!.outDir, "--app", "node infra/dist/bin/agentx.js", "-c", "agentxEnv=staging", "-c", "agentxRegion=eu-west-1", "-c", "agentxIdentity=oidc"]);
+    await expect(readFile(join(call!.outDir, "manifest.json"))).rejects.toThrow();
+
+    // The deploy's own context flags, for the same input: the synth must read what the deploy deploys.
+    const deployRunner = recordingRunner(await mkdtemp(join(tmpdir(), "agentx-cdk-")), { "agentx-staging-slack": {} });
+    const dir = await mkdtemp(join(tmpdir(), "agentx-cdk-"));
+    await cdkDeployer({ runner: deployRunner, source: "/src", env: "staging", region: "eu-west-1", identityMode: "oidc", outputsDir: dir, outputs: async () => undefined })
+      .deploy({ part: "slack", stackName: "agentx-staging-slack", parameters: {}, roleArn: "arn:aws:iam::1:role/r", terminationProtection: false });
+    const deployArgs = deployRunner.calls[0]!.args;
+    const context = (args: string[]) => args.slice(args.indexOf("--app"), args.indexOf("--app") + 8);
+    expect(context(call!.args)).toEqual(context(deployArgs));
+  });
+
+  it("refuses when the assembly has no stack for a part, naming it", async () => {
+    const declared = await synthDeclaredParameters({ runner: synthRunner({}, { omit: ["AgentXSlackOrchestrator"] }), source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito" });
+    expect(() => declared("slack")).toThrow("cdk synth of /src made no stack AgentXSlackOrchestrator (agentx-staging-slack); check the checkout builds");
+  });
+
+  it("refuses a stack the assembly names differently from the one the deploy targets", async () => {
+    const declared = await synthDeclaredParameters({ runner: synthRunner({}, { stackNames: { AgentXControlPlane: "agentx-other-control-plane" } }), source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito" });
+    expect(() => declared("control-plane")).toThrow("cdk synth of /src made stack AgentXControlPlane as agentx-other-control-plane, not agentx-staging-control-plane");
+  });
+
+  it("refuses an assembly with no readable manifest, and still removes its directory", async () => {
+    let outDir = "";
+    const runner: CommandRunner = { async run(_command, args) { outDir = args[args.indexOf("-o") + 1]!; return { stdout: "" }; } };
+    await expect(synthDeclaredParameters({ runner, source: "/src", env: "staging", region: "us-east-1", identityMode: "cognito" }))
+      .rejects.toThrow(/cdk synth of \/src wrote no readable manifest\.json \(/);
+    await expect(readFile(join(outDir, "manifest.json"))).rejects.toThrow();
   });
 });

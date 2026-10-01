@@ -462,7 +462,10 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
 - **FR-015**: Admin tools MUST need an admin token from the admin issuer (today's Cognito or OIDC)
   whose admin claim matches, as today. A Slack or company developer sign-in MUST never grant admin
   rights. Admin change tools on a project MUST also need the admin's `administrator` membership, as
-  today.
+  today, checked when the change is planned and again inside the handler when it applies. A change
+  that is not about one project (a connector credential, ending a developer's sign-in, the
+  workspace limits) needs the admin claim only, as `agentx admin credential register` does (owner
+  decision, 2026-09-30; 25e Q7).
 
 **Developer task API (US1, US2)**
 
@@ -539,7 +542,9 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   `notifications/tools/list_changed` when this changes during a session (for example after
   `agentx login --admin`). The admin tools are offered only while the control plane also reports a
   fitting admin API version (`adminApiVersion` in `/v1/auth/.well-known/agentx-configuration`,
-  `1.0` from phase 25d); against a control plane without one, the developer tools keep working and
+  `1.0` from phase 25d, `1.1` from phase 25e, which adds the change tools and
+  `agentx_admin_changes`; a 25e server offers only the admin read tools against a `1.0` control
+  plane); against a control plane without one, the developer tools keep working and
   `agentx_whoami` says an AgentX upgrade adds the admin tools. A direct call to a hidden admin tool
   answers `ADMIN_REQUIRED`, or `UPGRADE_REQUIRED` when AgentX is the older side (owner decision,
   2026-09-30; Q1, D28). The server does not renew an expired admin sign-in; the admin tools then
@@ -585,7 +590,8 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   C25). The admin path changes the mode only: it cannot make the first share or change the channel,
   it refuses a closed task, and it answers only `{ taskId, share }` (the mode, channel and thread
   link), never the task's title or results (D22; build ruling F5, 2026-09-29). There is no MCP
-  admin tool for it until phases 25d and 25e.
+  admin tool for it: phase 25e adds none, and the CLI command covers it (owner decision,
+  2026-09-30; 25e Q10).
 
   **Admin read tools** (no confirmation)
 
@@ -607,17 +613,46 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   | Tool | Inputs | What the plan shows |
   |---|---|---|
   | `agentx_admin_register_project_revision` | `definition` (the project definition as an object) | the new revision number and a field-by-field difference from the latest revision, registration preflight findings (spec 013 FR-014) |
-  | `agentx_admin_bind_channel` | `channel` (ID or name); `project` | the channel, its current binding, the new project and the revision new threads will use |
+  | `agentx_admin_bind_channel` | `channel` (a channel ID, or a public channel's name with or without `#`); `project` | the channel, its current binding, the new project and the revision new threads will use |
   | `agentx_admin_unbind_channel` | `channel` | the channel, its project, and that new messages there will get no reply |
   | `agentx_admin_register_credential` | `ref`; `type`; `secret_name` (under `agentx/connectors/`) | the reference, type and secret name, whether the secret exists, and which projects name the reference. It MUST refuse any input that looks like a secret value. |
-  | `agentx_admin_stop_workspace` | `workspace_id` | the workspace, its project, owner, status and any running operation that will be interrupted |
-  | `agentx_admin_grant_project_access` | `project`; `developer` (developer ID, email or Slack user) | the developer, the project and their current access |
+  | `agentx_admin_stop_workspace` | `workspace_id` | the workspace, its project, owner and status, and the running task that will be cancelled; its compute then stops on its own when idle |
+  | `agentx_admin_grant_project_access` | `project`; `developer` (developer ID, an email they signed in with, or Slack user ID) | the developer (or that they have not signed in yet), the project and their current access |
   | `agentx_admin_revoke_project_access` | `project`; `developer` | the developer, the project, and that running tasks keep running |
-  | `agentx_admin_revoke_signin` | `developer` | the developer and their open sign-in sessions, which end at once |
+  | `agentx_admin_revoke_signin` | `developer` | the developer, and that every sign-in session they have now ends at once; they may sign in again |
   | `agentx_admin_set_workspace_limits` | `per_person` (optional, 1 to 50); `per_organization` (optional, 1 to 1,000) | the current and new limits, the current counts, and which people or the organization are already at or over the new limit |
 
-  Every change tool returns the change ID, the outcome (`applied`, `declined`, `expired`, `failed`
-  or `awaiting_confirmation` when a Slack wait ended first) and the result.
+  Every change tool returns the change ID, the outcome (`applied`, or `awaiting_confirmation` when a
+  Slack wait ended first), the effect and the handler's result. A declined, expired or stale change
+  is not a result but FR-049's error (`CONFIRMATION_DECLINED`, `CONFIRMATION_EXPIRED`,
+  `CHANGE_STALE`), and its message names the change ID, so the AI tool sees that nothing changed; a
+  handler's own refusal keeps its own code and names the change ID too (owner decision,
+  2026-09-30; 25e Q9).
+
+  Notes on the change tools (phase 25e):
+  - **A new revision** keeps its project's runtime binding (launch template, subnets, disk) from
+    the latest revision, unchanged. A project with no revision yet is refused: its first revision
+    needs `agentx admin project register` with its flags (owner decision, 2026-09-30; 25e Q5).
+  - **Stopping a workspace** cancels the task running in it, through the existing admin cancel, and
+    its compute then stops on its own when idle; there is no manual compute stop. A workspace with
+    nothing running is refused at planning: "nothing is running in workspace <id>; its compute
+    stops on its own when idle" (owner decision, 2026-09-30; 25e Q2).
+  - **Revoking a sign-in** ends every session the developer has at once (the broker refuses any
+    session that started before the admin's end time, and the token endpoint revokes it at its next
+    refresh). It does not set the permanent `revoked` block, so the person may sign in again (owner
+    decision, 2026-09-30; 25e Q3).
+  - **Naming a developer:** a 64-hex developer ID as it is; a Slack user ID (`U...`) as the
+    developer ID Slack sign-in gives it (FR-008), so a grant can come before their first sign-in; an
+    email only once that person has signed in with it, through an email index that sign-in writes
+    from this release on (owner decision, 2026-09-30; 25e Q4). A plan never shows the email.
+  - **Naming a channel:** a channel ID as it is; a public channel's name (with or without `#`) is
+    looked up in the environment's Slack workspace; a private channel must be given by its ID and is
+    never found by name (owner decision, 2026-09-30; 25e Q8).
+  - **A private channel in a confirmation** (the pop-up, the tool result and the Slack DM) is named
+    only when the planning admin's linked Slack user is a member of it, else by its ID, as
+    `agentx_admin_list_channels` does. The audit record, and any other admin's read of the change,
+    always name a private channel by its ID, since every admin can read the audit (controller
+    ruling, 2026-09-30, extending the owner's 25d Q7 answer).
 
 - **FR-031**: Sharing: when `share_to_channel` is true or the project's `share` is `required`, the
   task MUST be shared. A shared task needs a bound channel: the named `channel`, or the only bound
@@ -720,8 +755,10 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   the instructions redacted and capped as
   request text and the result summary as response text, and appear in `GET /v1/admin/turns` and
   `agentx_admin_turns`. Teammates' turns in continue mode are ordinary Slack turn records that also carry
-  `taskId`. A close's outcome gets its `completed` record in phase 25e (C22); until then a close has
-  its `accepted` record only.
+  `taskId`. A close's outcome gets its `completed` record (outcome `succeeded`, or `refused` with
+  the repositories), phase 25e. A close whose check for unpublished work ends failed, interrupted
+  or cancelled also gets its `completed` record, `refused`, with "Not closed: the check for
+  unpublished work did not finish" (controller ruling, 2026-09-30).
 - **FR-038**: The control plane MUST index each operation that ends `FAILED` or `INTERRUPTED`
   (`FAILURE#{yyyy-mm-dd}` / `{endedAt}#{operationId}`, 30-day expiry) for `agentx_admin_failed_tasks`.
   It MUST also serve `GET /v1/admin/projects`, `GET /v1/admin/slack/bindings`,
@@ -745,17 +782,45 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   the effect, a hash of the state it was planned against, the confirmation methods offered, and an
   expiry 10 minutes later. It MUST write the change's audit record at the same time. Nothing changes
   until the change is confirmed.
+
+  The pending change is `ADMIN_CHANGE#<changeId>` / `META` in the State table: the kind, the input,
+  the effect, the plan's details, the state hash, the planning admin (issuer, subject, owner key,
+  display name) and their linked Slack user if any, the methods offered, the status (`pending`,
+  `applying`, `applied`, `declined`, `expired` or `failed`), the times, and the trace ID. A request
+  carries a `requestId`; a repeated `requestId` from the same admin answers the change it already
+  made (`ADMIN_CHANGE_REQUEST#<ownerKey>` / `<requestId>`), so a retried tool call plans nothing
+  twice; the same `requestId` with a different change is refused with `IDEMPOTENCY_CONFLICT`.
+  Both items expire by the State table's TTL 30 days after the proposal. The pending change keeps
+  the raw input only while it can still apply, since the apply needs it, and the step that ends
+  the change (applied, declined, expired or failed) removes it; no log line, DM, tool result or
+  audit record carries that input except through `redactSecrets` (FR-051, SC-004), and the audit
+  record names a channel only by its ID, never by a name the admin typed (controller rulings,
+  2026-09-30).
 - **FR-040**: A confirmed change MUST be applied in one transaction that checks that the change is
   pending, unexpired, planned by the same admin, confirmed by an offered method, and that the state
   hash still matches; it MUST then apply the change through the existing admin handler and mark it
-  used. A change MUST apply at most once. A declined change (the elicitation declined or cancelled,
+  used (see D32: the claim and its audit step commit in one transaction; the handler's write
+  follows). A change MUST apply at most once. A declined change (the elicitation declined or cancelled,
   or the Slack Cancel button) MUST be marked declined through `POST /v1/admin/changes/{id}/decline`
   or the interactivity route.
+
+  "Applied at most once" is built this way (D32): an apply (`POST /v1/admin/changes/{id}/apply`)
+  or a Confirm press first re-plans the change and compares the new state hash; then one
+  conditional update moves the change from `pending` to `applying`, only while it is unexpired,
+  planned by the same admin, and confirmed by an offered method; only then does the existing handler
+  run, and a last update records `applied` or `failed`. A change stuck in `applying` for over 2
+  minutes (the apply did not finish) reads as `failed`. A re-plan that finds the state moved, or
+  that the planner now refuses, fails the change as `CHANGE_STALE`. A transient failure (the state
+  could not be read, or Slack could not be reached) applies nothing and leaves the change pending,
+  with "try again"; a press then answers `unavailable` (controller ruling, 2026-09-30). The honest
+  limit: the state can still change between the hash check and the handler's own write, a window of
+  milliseconds that the handlers' own conditions (such as registration's immutable revisions)
+  narrow further.
 - **FR-041**: The confirmation methods, in order of preference:
   1. **MCP elicitation** (the client's pop-up), when the client declared the `elicitation`
-     capability and the environment allows it (`mcp.confirm.elicitation`, default on). The server
-     MUST send `elicitation/create` with the effect text and one boolean field, and call
-     `POST /v1/admin/changes/{id}/apply` only on `accept` with the field true.
+     capability and the environment allows it (`mcp.confirm.elicitation`, default on; see the notes
+     below). The server MUST send `elicitation/create` with the effect text and one boolean field,
+     and call `POST /v1/admin/changes/{id}/apply` only on `accept` with the field true.
   2. **Slack Confirm button**, when the admin's verified email claim matches one Slack user of the
      environment's team (the lookup of FR-012). The notifier MUST send that user a direct message
      with the effect and Confirm and Cancel buttons. The Slack interactivity route MUST accept a
@@ -768,8 +833,41 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   `GET /v1/admin/me`; the MCP server combines them with the client's capabilities. When neither
   method is available, the change tools MUST not be listed, only the admin read tools, and a direct
   call MUST return `CONFIRMATION_UNAVAILABLE`.
+
+  Notes on the confirmation methods (phase 25e):
+  - **The elicitation switch.** `mcp.confirm.elicitation` is the control-plane stack parameter
+    `McpConfirmElicitation` (`enabled` by default, or `disabled`), named environments only, changed
+    with `agentx config set mcp.confirmElicitation enabled|disabled` like the other `agentx config`
+    keys and kept across upgrades. When it is `disabled`, the broker neither offers nor accepts the
+    pop-up, and `agentx-configuration` reports `confirm.elicitation` false (owner decision,
+    2026-09-30; 25e Q1).
+  - **Slack.** `confirm.slack` is true wherever the environment has a Slack team set up, whatever
+    Slack sign-in says; the per-admin match of the verified email to one Slack user still decides,
+    change by change, whether the Slack method is offered (controller ruling, 2026-09-30).
+  - **The pop-up comes first.** A tool call cancelled while its pop-up is open declines the change
+    (reason cancelled) and never starts the Slack step. When Slack is also offered, the pop-up
+    closes at least 90 seconds before the change expires, so a pop-up that goes unanswered still
+    leaves the Slack button its time (controller ruling, 2026-09-30).
+  - **The Slack step** (D34). The MCP server starts it with `POST /v1/admin/changes/{id}/slack`
+    only when the pop-up is not offered or did not work. The notifier's DM, with Confirm and
+    Cancel buttons (action IDs `agentx_admin_change_confirm` and `agentx_admin_change_cancel`),
+    comes from the state table's stream through a filter added to D23's trigger, never a third
+    reader, and the notifier edits the DM to say how the change ended. The tool call waits up to 5
+    minutes, with a progress notification every 15 seconds. A press reaches the ingress (the
+    existing interactivity route), which checks the Slack signature, answers the presser at once
+    ("Received. AgentX is applying the change; ..." or "Received. AgentX is dropping the change.")
+    and hands the press to the broker asynchronously. The broker accepts it only from the change's
+    own Slack user in the environment's team; any other press is refused, recorded as a refused
+    attempt, and the change stays pending. A press after the tool stopped waiting still applies
+    within the 10 minutes. The ingress takes these two buttons only where `ADMIN_CHANGES=enabled`
+    (named environments, D14) (controller ruling, 2026-09-30).
+  - **A typed `agentx` command** is the `cli` method: the CLI shows the effect, asks "Apply this
+    change?" (or takes `--yes`), and applies with method `cli`, which the broker always accepts
+    from the planning admin, as D12 accepts any command a person types (owner decision, 2026-09-30;
+    25e Q6; D35). No AI tool can offer it.
 - **FR-042**: The CLI's existing `agentx admin ...` commands MUST keep working unchanged, without
-  this confirmation, because a person types them.
+  this confirmation, because a person types them. The new `agentx admin project grant|revoke` and `agentx config set limits.*`
+  go through the change path with the `cli` method and its audit (owner requirement, 2026-09-29).
 - **FR-051**: Every admin change request MUST have one audit record, whatever its outcome, holding:
   - who asked: the admin's issuer, subject and display name;
   - the client: the AgentX CLI version running the MCP server, and the MCP client's
@@ -786,12 +884,23 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   An expired change MUST be recorded `expired` the next time it is touched, and every read after its
   expiry MUST show it as expired. Audit records MUST be kept for the turn records' retention (30
   days) and MUST NOT be changeable through any route.
+
+  The audit record is `CHANGE#<changeId>` / `AUDIT` in the TurnRecords table, which already keeps
+  records 30 days by TTL. It is listed newest first through the table's time index under its own
+  export partition, `CHANGES`, apart from the turn export's `TURNS`, so the two never mix. At most
+  20 refused attempts are recorded per change; later ones are not recorded one by one, and the
+  change still refuses them (controller ruling, 2026-09-30). Only the broker writes it: one
+  conditional put, then updates that only step it forward and never clear an outcome once set
+  (D33). It holds the change's input and details only through `redactSecrets`, and names a private
+  channel by its ID (FR-030's notes).
 - **FR-052**: Admin change handling MUST be traceable end to end. The MCP server MUST send a trace
   ID (`x-agentx-trace-id`) with every control-plane call; the control plane, the notifier, the Slack
   interactivity route and the apply step MUST write it, with the change ID, in a structured log line
   at each step; and the control plane MUST emit a metric per outcome. Admins MUST be able to read
   the records through `GET /v1/admin/changes`, the `agentx_admin_changes` tool, and
-  `agentx admin changes --since <time> [--json]`, which exports them like `agentx admin turns`.
+  `agentx admin changes --since <duration> [--json]` (a duration such as `30m`, `12h` or `7d`, at
+  most `30d`), which exports them like `agentx admin turns`: text lines, or JSON Lines of the
+  records as stored with `--json`, and the count on stderr.
 - **FR-053**: The per-person and per-organization workspace limits MUST be changeable without a
   CloudFormation change. The control plane MUST store them as a setting in its state table
   (`SETTINGS` / `WORKSPACE_LIMITS`, with the admin and time of the last change). Its fields are
@@ -803,9 +912,19 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   and `SlackOrganizationWorkspaceLimit` (defaults 3 and 20), which stay as the install-time
   defaults. The per-person limit MUST NOT exceed the per-organization limit. Lowering a limit MUST
   NOT stop existing workspaces. The admin change tool `agentx_admin_set_workspace_limits` changes the
-  setting with confirmation and audit (FR-039 to FR-052); spec 015 phase 15e's
-  `agentx config set limits.workspacesPerMember|limits.workspacesPerOrg` covers the same setting from
-  the CLI (spec 015 FR-048).
+  setting with confirmation and audit (FR-039 to FR-052). From phase 25e, spec 015 phase 15e's
+  `agentx config set limits.workspacesPerMember|limits.workspacesPerOrg` changes the same setting
+  through the same change path, no longer refused "until 25e": it needs the admin sign-in
+  (`agentx login --admin`), shows the effect (who is at or over the new limit), asks "Apply this
+  change?" and is audited with the `cli` method (owner requirement, 2026-09-29; D35). The change
+  writes `perPerson` and `perOrganization`, keeps an omitted value as it is, records the admin and
+  the time (`updatedBy`, `updatedAt`), and refuses a per-person limit above the per-organization
+  one with `CONFIG_INVALID`; the next workspace creation uses it (SC-013). It needs a person's
+  yes: without a terminal to answer the prompt it refuses with `CONFIRMATION_UNAVAILABLE` unless
+  `--yes` is given; in the legacy deployment, which has no change routes, it refuses and names the
+  `AgentXControlPlane` stack parameter to change instead (`SlackMemberWorkspaceLimit` or
+  `SlackOrganizationWorkspaceLimit`). Other `agentx config set` keys are unchanged (controller
+  ruling, 2026-09-30).
 
 **Install and setup (US7)**
 
@@ -845,7 +964,9 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   share route; an MCP server from 25c refuses a 25b control plane with `UPGRADE_REQUIRED` and "ask
   your AgentX admin to upgrade AgentX" (owner decision, 2026-09-29; Q7).
   `/v1/auth/.well-known/agentx-configuration` also reports `adminApiVersion` (`1.0` from phase
-  25d; FR-028, D28).
+  25d; FR-028, D28). `ADMIN_API_VERSION` moves to `1.1` in phase 25e, which adds the change routes
+  and `GET /v1/admin/changes`; `DEVELOPER_API_VERSION` stays `1.2` (owner decision, 2026-09-30;
+  25e Q11).
 
 **Errors**
 
@@ -866,7 +987,7 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
   | `TASK_BUSY` | continue or open a PR while the task runs, including a channel turn in continue mode | names who is driving it and the queued channel messages; wait, cancel, or switch to view only |
   | `SLACK_UNAVAILABLE` | Slack could not be reached for a membership check or sign-in | try again; explicit grants still work |
   | `CONFIRMATION_UNAVAILABLE` | no confirmation method in this session | use a client with elicitation, link a Slack user, or use the CLI |
-  | `CONFIRMATION_DECLINED`, `CONFIRMATION_EXPIRED`, `CHANGE_STALE` | the change was declined, timed out, or state moved | ask for the change again |
+  | `CONFIRMATION_DECLINED`, `CONFIRMATION_EXPIRED`, `CHANGE_STALE` | the change was declined, timed out, or state moved; the message names the change ID (25e Q9) | ask for the change again |
   | `INVALID_REQUEST` | the control plane refuses the input (a reused request ID, instructions over 65,536 bytes, a malformed ID) | fix the input the message names |
   | `UPGRADE_REQUIRED` | the client's major version differs from the control plane's, or the control plane's minor version is older than the tools need (FR-048) | run the install command again for the latest CLI; if the control plane is the older side, ask your AgentX admin to upgrade AgentX instead |
   | `CONTROL_PLANE_UNAVAILABLE` | network or 5xx after 3 tries | check the connection; `agentx_admin_health` for admins |
@@ -920,9 +1041,10 @@ guide for Claude Code, Codex and Cursor, then ask the tool to list AgentX projec
 - **Shared task thread**: the Slack thread a shared task posts to, and its record (task, owner key,
   mode) for the ingress and the broker.
 - **Pending admin change**: a planned change, its effect, state hash, offered methods, expiry and
-  confirmation state.
+  confirmation state (`ADMIN_CHANGE#<changeId>` in the State table, FR-039).
 - **Admin change audit record**: one per change request: who asked, the client, the exact change,
-  the method, the outcome with timestamps, the result and a trace ID (FR-051).
+  the method, the outcome with timestamps, the result and a trace ID (`CHANGE#<changeId>` in the
+  TurnRecords table, FR-051).
 - **Workspace limits setting**: the per-person and per-organization limits, when an admin has
   changed them from the stack parameters' defaults.
 - **AI-tool turn record**: a turn record with `origin: ai_tool`.
@@ -1099,6 +1221,30 @@ live check.
    unknown costs counted apart.
 7. **Private channel names for admins (FR-030). Changed.** Shown only when the admin's linked Slack
    user is a member of the channel; otherwise the ID.
+
+Owner decisions on the phase 25e plan (binding, 2026-09-30). Planning phase 25e (admin changes
+with confirmation and audit) raised eleven questions (plans/phase-25e-questions.md); the owner
+accepted all eleven as recommended. A controller ruling of the same day applies the 25d Q7 rule to
+change confirmations (FR-030's notes).
+
+1. **Turning the pop-up off (FR-041). Accepted.** The stack parameter `McpConfirmElicitation`,
+   changed with `agentx config set mcp.confirmElicitation`.
+2. **Stopping a workspace (FR-030). Accepted.** Cancel the running task; its compute stops when
+   idle.
+3. **Revoking a sign-in (FR-030). Accepted.** End every session; the person may sign in again.
+4. **Naming a developer (FR-030). Accepted.** By Slack user ID before their first sign-in, by an
+   email they signed in with, or by developer ID.
+5. **A new revision's worker setup (FR-030). Accepted.** Copied from the latest revision; a first
+   revision goes through `agentx admin project register`.
+6. **How the CLI confirms (FR-041, FR-042). Accepted.** The CLI shows the effect and asks "Apply
+   this change?" (or `--yes`), audited as `cli`; `agentx config set limits.*` needs the admin
+   sign-in (D35).
+7. **Changes not about one project (FR-015). Accepted.** Any AgentX admin.
+8. **Naming a channel (FR-030). Accepted.** A channel ID, or a public channel's name.
+9. **Declined, expired and stale changes (FR-030, FR-049). Accepted.** Errors naming the change;
+   `applied` and `awaiting_confirmation` are results.
+10. **A share-mode change tool (FR-030). Accepted.** None in this phase; the CLI command covers it.
+11. **The admin API version (FR-028, FR-048). Accepted.** It moves to `1.1`.
 
 Decisions made in this spec, all owner-confirmed on 2026-09-27:
 
@@ -1290,7 +1436,8 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
   tools are not offered, `agentx_whoami` says an AgentX upgrade adds them, and a direct call answers
   `UPGRADE_REQUIRED`. Why not move `DEVELOPER_API_VERSION` to `1.3`: FR-048 then makes a new CLI
   refuse every tool, the developer ones included, until the admin upgrades AgentX, although the
-  developer tools did not change. 25e moves only the admin version. FR-028 and FR-048 carry this.
+  developer tools did not change. 25e moves only the admin version, to `1.1` (owner decision,
+  2026-09-30; 25e Q11). FR-028 and FR-048 carry this.
 - **D29. The failure and usage indexes are written by the outbox publisher, and expire by TTL
   where the table allows it** (owner decision, changed, 2026-09-30; Q5). The outbox publisher
   already reads every record of the state table's stream, the legacy deployment's included, and
@@ -1326,6 +1473,51 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
   mistyped link would send Confirm buttons to the wrong person). An issuer without `userinfo`
   leaves the admin with no Slack link, and the pop-up confirmation still works. FR-038 carries
   this.
+- **D32. A change applies at most once through a claim, not one transaction around the handler**
+  (build ruling E5, 2026-09-30). An apply or a Confirm press re-plans the change and compares the
+  state hash (`CHANGE_STALE` otherwise, and the change fails); then one conditional update moves
+  it from `pending` to `applying` only while it is unexpired, planned by the same admin and
+  confirmed by an offered method; only then does the existing admin handler run, and a last update
+  records `applied` or `failed`. A change left in `applying` for over 2 minutes reads as `failed`
+  ("the apply did not finish; check the state, then ask again"). A transient failure leaves the
+  change pending to try again (controller ruling, 2026-09-30). Why not one DynamoDB transaction
+  holding the claim and the change: the existing handlers (registration, binding, grants, cancel,
+  sessions) each write in their own way, some outside the State table or through
+  DeveloperIdentity, and rewriting every one as transaction items would change handlers that already
+  work and are tested. The claim makes a second apply impossible; the honest limit is the window of
+  milliseconds between the hash check and the handler's own write, which the handlers' own
+  conditions (such as registration's immutable revisions) narrow further. FR-040 carries this.
+- **D33. The audit record lives in the TurnRecords table and only steps forward** (build ruling
+  E3, 2026-09-30). `CHANGE#<changeId>` / `AUDIT`, under its own export partition `CHANGES`, listed
+  newest first through the table's time index, and kept 30 days by the table's TTL like the turn
+  records (FR-051's retention). Only the broker writes it: one conditional put when the change is
+  planned, then updates that move it forward (confirmation requested, answered, applied, failed or
+  expired) and never clear an outcome once set; no route changes it. At most 20 refused attempts are
+  kept per change. Why this table: it already has the retention, the time index and the admin
+  export that `agentx admin changes` reuses; its own partition keeps the turn export (`TURNS`)
+  unchanged. FR-051 carries this.
+- **D34. The Slack step is started by the MCP server, the DM comes from the stream, and a press
+  applies asynchronously** (build rulings E13 and E14, 2026-09-30). The MCP server calls
+  `POST /v1/admin/changes/{id}/slack` only when the pop-up is not offered or did not work; the
+  broker records the request, and the notifier, reading the state table's stream through a filter
+  added to D23's trigger (never a third reader), sends the admin's Slack user the DM with Confirm
+  and Cancel, and edits it when the change ends. A press reaches the ingress, which checks the
+  Slack signature, answers the presser at once and invokes the broker asynchronously; the broker
+  accepts it only from the change's own Slack user in the environment's team. Why asynchronous:
+  Slack wants an answer within 3 seconds, and an apply can take longer. Honest limit (controller
+  ruling, 2026-09-30): a press applies under the planning admin's stored identity, because a press
+  carries no admin token; removal of that admin's admin claim within the 10 minutes is not checked
+  again at press time, while project `administrator` membership is checked again inside the
+  handler at apply. FR-041 carries this.
+- **D35. A typed `agentx` command confirms with the `cli` method** (owner decision, 2026-09-30;
+  25e Q6). `agentx admin project grant|revoke` and `agentx config set limits.*` plan through
+  `POST /v1/admin/changes` with `methods: ["cli"]`, print the effect, ask "Apply this change?"
+  (unless `--yes`), and apply with method `cli` or decline; the audit records `cli`. The broker
+  always accepts `cli` from the planning admin, as D12 accepts any `agentx admin` command a person
+  types. Why: the person typing the command is the confirmation, and a Slack press for a typed
+  command would make an admin with no Slack link unable to use it. Honest limit: a model with shell
+  access and the admin's sign-in could run `--yes`, as it can run any `agentx admin` command
+  today. Every existing `agentx admin` command is unchanged. FR-042 and FR-053 carry this.
 
 ## Assumptions and Scope
 
@@ -1344,6 +1536,8 @@ Decisions made in this spec, all owner-confirmed on 2026-09-27:
   - Rolling back to a release before 25b needs a project revision without `developerTasks` first,
     since an older control plane's strict schema cannot read it; the release notes say so (owner
     decision, 2026-09-28).
+  - Carried forward from 25d, not built in 25e: the health route's state reads have no time bound
+    and read every project at once (a deferred minor finding; 25e did not touch the health route).
 - **In scope:** everything in the requirements above, delivered in the phases of
   [plans/README.md](plans/README.md).
 - **Out of scope:**

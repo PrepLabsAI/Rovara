@@ -1,12 +1,13 @@
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import type { WorkerInvocation } from "@agentx/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { publishWorkspace } from "../../packages/worker/src/publish.js";
+import { publishWorkspace, runReadinessChecks } from "../../packages/worker/src/publish.js";
+import { storedCommandOutput } from "../../packages/worker/src/command-failure.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories: string[] = [];
@@ -401,10 +402,123 @@ describe("pull request publication", () => {
   });
 });
 
-async function createFixture(checkPasses: boolean | "timeout" = true) {
+// #170: a check's output is stored redacted, its last lines kept, and its outcome says what happened.
+describe("publication check results (#170)", () => {
+  const TOKEN = `ghp_${"Z9y8X7w6V5".repeat(4)}`;
+
+  function withReadiness(
+    fixture: Awaited<ReturnType<typeof createFixture>>,
+    readiness: Array<Record<string, unknown>>,
+  ): typeof fixture.invocation {
+    const invocation = structuredClone(fixture.invocation) as typeof fixture.invocation & {
+      payload: { project: { readiness: Array<Record<string, unknown>> } };
+    };
+    invocation.payload.project.readiness = readiness;
+    return invocation;
+  }
+
+  it("stores a token a check prints redacted, never raw in the operation result, the workspace files or the logs", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+    const script = `console.log("using ${TOKEN} for the registry"); console.error("auth with ${TOKEN} ok")`;
+    const invocation = withReadiness(fixture, [{ cwd: "repo/demo", executable: process.execPath, args: ["-e", script], timeoutSeconds: 10 }]);
+    const logged: string[] = [];
+    const capture = (...args: unknown[]) => { logged.push(args.map(String).join(" ")); };
+    const spies = [
+      vi.spyOn(console, "log").mockImplementation(capture),
+      vi.spyOn(console, "info").mockImplementation(capture),
+      vi.spyOn(console, "warn").mockImplementation(capture),
+      vi.spyOn(console, "error").mockImplementation(capture),
+      vi.spyOn(process.stdout, "write").mockImplementation((chunk: unknown) => { logged.push(String(chunk)); return true; }),
+      vi.spyOn(process.stderr, "write").mockImplementation((chunk: unknown) => { logged.push(String(chunk)); return true; }),
+    ];
+    let result: Awaited<ReturnType<typeof publishWorkspace>>;
+    try {
+      // The worker sends this result, unchanged, as the operation's terminal result (server.ts).
+      result = await publishWorkspace({
+        rootPath: fixture.root,
+        invocation,
+        credentialProvider: async () => ({}),
+        pullRequestSink: async () => ({ number: 7, url: "https://github.com/example/demo/pull/7", reconciled: false }),
+      });
+    } finally {
+      for (const spy of spies) spy.mockRestore();
+    }
+
+    expect(result.checks[0]).toMatchObject({
+      outcome: "passed",
+      stdout: "using [REDACTED] for the registry\n",
+      stderr: "auth with [REDACTED] ok\n",
+    });
+    expect(JSON.stringify(result)).not.toContain(TOKEN);
+    for (const file of await filesUnder(join(fixture.root, ".agentx"))) {
+      expect(await readFile(file, "utf8")).not.toContain(TOKEN);
+    }
+    expect(logged.join("\n")).not.toContain(TOKEN);
+  }, 30_000);
+
+  it("keeps the last lines of more than 1 MiB of output, redacted before the cut", async () => {
+    const fixture = await createFixture();
+    const script = `process.stdout.write("line of output\\n".repeat(200000)); console.log("last line ${TOKEN}")`;
+    const [check] = await runReadinessChecks(fixture.root, withReadiness(fixture, [
+      { cwd: "repo/demo", executable: process.execPath, args: ["-e", script], timeoutSeconds: 20 },
+    ]));
+    expect(check!.stdout.length).toBeLessThanOrEqual(1_048_576);
+    expect(check!.stdout.endsWith("last line [REDACTED]\n")).toBe(true);
+    expect(check!.stdout.startsWith("line of output\n")).toBe(true);
+    expect(check!.stdout).not.toContain(TOKEN);
+  }, 30_000);
+
+  it("redacts stored output before cutting it, and starts a cut output at a whole line", () => {
+    // Cut first, the last 30 characters would keep the token's end, which no pattern matches.
+    expect(storedCommandOutput(`${"x".repeat(10)}${TOKEN}\nlast\n`, 30)).toBe(`${"x".repeat(10)}[REDACTED]\nlast\n`);
+    expect(storedCommandOutput(`${"a".repeat(50)}\nsecond ${TOKEN}\nthird\n`, 40)).toBe("second [REDACTED]\nthird\n");
+    // A Git error cut to its last 16 KiB, with a token across the cut.
+    // Cut first, the last 16 KiB would start 20 characters into the token.
+    const gitError = `${TOKEN}\n${"r".repeat(16_384 + 20 - TOKEN.length - 16)}\nfatal: failed\n`;
+    const shownError = storedCommandOutput(gitError, 16_384);
+    expect(shownError).not.toContain(TOKEN.slice(-10));
+    expect(shownError.endsWith("fatal: failed\n")).toBe(true);
+  });
+
+  it("redacts a Git error before it is cut (#170 review)", async () => {
+    // Git names the missing remote, whose path holds a token, in its error.
+    const fixture = await createFixture(true, `remote-${TOKEN}.git`);
+    await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+    await rm(fixture.bare, { recursive: true, force: true });
+    const failure = await publishWorkspace({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: async () => ({}),
+      pullRequestSink: vi.fn(),
+    }).then(() => undefined, (error: unknown) => error as Error);
+    expect(failure?.message).toContain("[REDACTED]");
+    expect(failure?.message).not.toContain(TOKEN.slice(4));
+  });
+
+  it("says timed_out only when the timer fired: a signal or a failed start is a failure", async () => {
+    const fixture = await createFixture();
+    const checks = await runReadinessChecks(fixture.root, withReadiness(fixture, [
+      { cwd: "repo/demo", executable: process.execPath, args: ["-e", "process.kill(process.pid, 'SIGKILL')"], timeoutSeconds: 10 },
+      { cwd: "repo/demo", executable: "agentx-no-such-check-170", args: [], timeoutSeconds: 10 },
+      { cwd: "repo/demo", executable: process.execPath, args: ["-e", "setInterval(() => undefined, 1000)"], timeoutSeconds: 1 },
+    ]));
+    expect(checks.map((check) => [check.exitCode, check.outcome])).toEqual([[-1, "failed"], [-1, "failed"], [-1, "timed_out"]]);
+    expect(checks[0]!.stderr).toContain("readiness command 0 was killed by SIGKILL");
+    expect(checks[1]!.stderr).toContain("ENOENT");
+    expect(checks[2]!.stderr).toContain("readiness command 2 timed out after 1 s");
+  }, 30_000);
+});
+
+async function filesUnder(directory: string): Promise<string[]> {
+  const entries = await readdir(directory, { withFileTypes: true, recursive: true });
+  return entries.filter((entry) => entry.isFile()).map((entry) => join(entry.parentPath, entry.name));
+}
+
+async function createFixture(checkPasses: boolean | "timeout" = true, remoteName = "remote.git") {
   const root = await mkdtemp(join(tmpdir(), "agentx-publish-test-"));
   temporaryDirectories.push(root);
-  const bare = join(root, "remote.git");
+  const bare = join(root, remoteName);
   const seed = join(root, "seed");
   const checkout = join(root, "repo", "demo");
   await git(root, ["init", "--bare", "--initial-branch=main", bare]);

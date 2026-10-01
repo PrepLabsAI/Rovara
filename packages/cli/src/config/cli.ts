@@ -7,34 +7,45 @@ import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SNSClient } from "@aws-sdk/client-sns";
 import { STSClient } from "@aws-sdk/client-sts";
+import { Writable } from "node:stream";
 import type { Command } from "commander";
+import { askToApply } from "../admin/changes.js";
 import { realCommandRunner } from "../deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity } from "../environments/adopt.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { secretsManagerInitSecrets } from "../init/context.js";
 import { awsPrerequisiteChecks } from "../init/prerequisites.js";
-import { processPrompter, unattendedPrompter, type TextWriter } from "../init/prompts.js";
+import { processPrompter, unattendedPrompter, type Prompter, type TextWriter } from "../init/prompts.js";
 import { formatSuccess } from "../output.js";
 import { awsAlertsApi } from "../setup/alerts.js";
 import { secretSource } from "../signin/cli.js";
 import { runConfigGet, runConfigList, runConfigSet, type ConfigRow, type ConfigServices } from "./commands.js";
+import { CONFIG_KEYS } from "./keys.js";
 
 export interface ConfigCommandContext {
   overrides?: Partial<ConfigServices>;
   parameterStore: (region?: string) => ParameterStore;
   fetch: typeof fetch;
+  /** Spec 025 FR-053: this computer's unexpired admin sign-in for an environment (the workspace limits change through the admin change path). */
+  adminSession?: ConfigServices["adminSession"];
+  /** Where a workspace limits change's prompt reads its answer; process.stdin by default. */
+  stdin?: NodeJS.ReadableStream & { isTTY?: boolean };
   stdout: TextWriter;
   stderr: TextWriter;
 }
+
+/** The keys that change through the admin change path (spec 025 FR-053), not a stack update. */
+const CONFIG_KEYS_BY_CHANGE_PATH = new Set(CONFIG_KEYS.filter((entry) => entry.target.kind === "control-plane-setting").map((entry) => entry.key));
 
 const rowText = (rows: ConfigRow[]) => rows.map((row) => `${row.key.padEnd(28)} ${row.value}\n${" ".repeat(29)}${row.where}`).join("\n");
 
 export function registerConfigCommands(program: Command, context: ConfigCommandContext): void {
   const config = program.command("config").description("list, read and change an environment's settings: models, limits, Slack, alerts and the budget (operator role)");
-  const services = (region: string | undefined, yes: boolean): ConfigServices => {
+  const services = (region: string | undefined, yes: boolean, change?: { prompter?: Prompter; canAsk: boolean }): ConfigServices => {
     const overrides = context.overrides ?? {};
     const aws = region === undefined ? {} : { region };
     const store = overrides.store ?? context.parameterStore(region);
+    const adminSession = overrides.adminSession ?? context.adminSession;
     return {
       store,
       secrets: overrides.secrets ?? secretsManagerInitSecrets(new SecretsManagerClient(aws)),
@@ -45,13 +56,31 @@ export function registerConfigCommands(program: Command, context: ConfigCommandC
       // are used; the account is not needed for them.
       checks: overrides.checks ?? ((environmentRegion) => awsPrerequisiteChecks({ region: environmentRegion, account: "000000000000", store, runner: realCommandRunner(context.stderr), fetch: context.fetch })),
       alerts: overrides.alerts ?? awsAlertsApi({ sns: new SNSClient(aws), cloudWatch: new CloudWatchClient(aws), budgets: new BudgetsClient({ region: "us-east-1" }) }),
-      prompter: overrides.prompter ?? (yes || process.stdin.isTTY !== true ? unattendedPrompter() : processPrompter(context.stderr)),
+      prompter: overrides.prompter ?? change?.prompter ?? (yes || process.stdin.isTTY !== true ? unattendedPrompter() : processPrompter(context.stderr)),
       processEnv: overrides.processEnv ?? process.env,
       write: overrides.write ?? ((line) => { context.stderr.write(`${line}\n`); }),
       now: overrides.now ?? Date.now,
       sleep: overrides.sleep ?? ((ms) => new Promise((resolve) => { setTimeout(resolve, ms); })),
       ...(overrides.pollMs === undefined ? {} : { pollMs: overrides.pollMs }),
+      ...(adminSession === undefined ? {} : { adminSession }),
+      fetch: overrides.fetch ?? context.fetch,
+      ...(change === undefined ? {} : { canAsk: overrides.canAsk ?? change.canAsk }),
     };
+  };
+  /**
+   * Spec 025 E17 (SC-005): a workspace limits change applies only on a yes. Without --yes it needs a
+   * terminal (runConfigSet checks canAsk before anything is planned), and the prompt treats Ctrl-C or
+   * the end of input as no answer, so the change is declined as cancelled. Every other key keeps its
+   * prompter.
+   */
+  const limitsChange = (key: string, yes: boolean): { prompter?: Prompter; canAsk: boolean } | undefined => {
+    if (!CONFIG_KEYS_BY_CHANGE_PATH.has(key)) return undefined;
+    if (yes || context.overrides?.prompter !== undefined) return { canAsk: true };
+    const stdin = context.stdin ?? process.stdin;
+    if (stdin.isTTY !== true) return { canAsk: false };
+    // The prompt writes through the command's own stderr.
+    const output = new Writable({ write(chunk: Buffer | string, _encoding, done) { context.stderr.write(chunk.toString()); done(); } });
+    return { canAsk: true, prompter: { ...processPrompter(context.stderr), confirm: (question) => askToApply(question, { input: stdin, output, signals: process }) } };
   };
   const globals = (command: Command) => command.optsWithGlobals<{ env: string; json: boolean }>();
   const regionOption = ["--region <region>", "AWS region of the environment; defaults to your AWS configuration"] as const;
@@ -77,9 +106,10 @@ export function registerConfigCommands(program: Command, context: ConfigCommandC
         throw agentXError("CONFIG_INVALID", "give the value once: on the command line, or with --value-file or --value-env");
       }
       const source = secretSource(options.valueFile, options.valueEnv);
-      const result = await runConfigSet(services(options.region, options.yes), globals(command).env, {
+      const change = limitsChange(key, options.yes);
+      const result = await runConfigSet(services(options.region, options.yes, change), globals(command).env, {
         key, yes: options.yes, ...(value === undefined ? {} : { value }), ...(source === undefined ? {} : { valueSource: source }),
       });
-      context.stdout.write(globals(command).json ? formatSuccess(result, true) : result.changed ? `${key} changed.\n` : "Nothing to change.\n");
+      context.stdout.write(globals(command).json ? formatSuccess(result, true) : result.changed ? `${key} changed.\n` : change === undefined ? "Nothing to change.\n" : "Nothing changed.\n");
     });
 }

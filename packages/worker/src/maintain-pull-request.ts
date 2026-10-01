@@ -14,6 +14,7 @@ import type { PullRequestUpdateSink } from "./callback-client.js";
 import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
 import type { RepositoryCredentialProvider } from "./repository-credentials.js";
 import { runReadinessChecks } from "./publish.js";
+import { storedCommandOutput } from "./command-failure.js";
 import type { PreparationManifest } from "./prepare.js";
 
 const execFileAsync = promisify(execFile);
@@ -258,5 +259,6 @@ function assertContained(rootPath: string, candidate: string): void {
 }
 
 function sanitize(value: string): string {
-  return value.replace(/https:\/\/[^@\s/]+@/giu, "https://[redacted]@").slice(0, 16_384) || "Git command failed";
+  // Redacted before it is cut to its last 16 KiB, where Git says what failed (#170).
+  return storedCommandOutput(value.replace(/https:\/\/[^@\s/]+@/giu, "https://[redacted]@"), 16_384) || "Git command failed";
 }

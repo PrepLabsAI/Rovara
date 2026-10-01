@@ -6,6 +6,11 @@ export const REPEAT_WARNING_AT = 3;
 export const REPEAT_LIMIT = 5;
 /** A backstop against any other runaway: tool calls one task may start. */
 export const TOOL_CALL_LIMIT = 200;
+/**
+ * Look-only tools. Their success does not end a failure streak, so reading a file between two
+ * identical failing edits is still a loop (#158).
+ */
+const LOOKUP_TOOLS: ReadonlySet<string> = new Set(["read", "grep", "find", "ls"]);
 
 export type ToolLoopAction =
   | { kind: "none" }
@@ -16,9 +21,13 @@ export type ToolLoopAction =
  * Watches one task's pi events for a model repeating the same failing tool call, and for too many
  * tool calls. A call counts as a repeat when the tool, its arguments and its error all match the
  * previous failing call, ignoring digits in the error (timestamps, durations, process IDs). Any
- * successful call ends the streak, so editing and rerunning a failing test is never a loop.
+ * successful call other than a lookup (read, grep, find, ls) ends the streak, so editing and
+ * rerunning a failing test is never a loop.
  */
 export class ToolLoopGuard {
+  /** The tool-call backstop; SWE-Bench Pro runs raise it for their long-horizon tasks (spec 044 FR-005). */
+  constructor(private readonly toolCallLimit: number = TOOL_CALL_LIMIT) {}
+
   private readonly started = new Map<string, string>();
   private calls = 0;
   private streakSignature: string | undefined;
@@ -32,8 +41,8 @@ export class ToolLoopGuard {
     if (value.type === "tool_execution_start") {
       this.calls += 1;
       if (callId !== undefined) this.started.set(callId, `${String(value.toolName)}\u0000${stableJson(value.args)}`);
-      if (this.calls > TOOL_CALL_LIMIT) {
-        return { kind: "stop", error: agentXError("OPERATION_INTERRUPTED", `the agent used more than ${TOOL_CALL_LIMIT} tool calls in one task; stopped it. Split the request into smaller tasks.`) };
+      if (this.calls > this.toolCallLimit) {
+        return { kind: "stop", error: agentXError("OPERATION_INTERRUPTED", `the agent used more than ${this.toolCallLimit} tool calls in one task; stopped it. Split the request into smaller tasks.`) };
       }
       return { kind: "none" };
     }
@@ -41,6 +50,7 @@ export class ToolLoopGuard {
     const call = callId === undefined ? undefined : this.started.get(callId);
     if (callId !== undefined) this.started.delete(callId);
     if (value.isError !== true || call === undefined) {
+      if (value.isError !== true && call !== undefined && LOOKUP_TOOLS.has(String(value.toolName))) return { kind: "none" };
       this.streakSignature = undefined;
       this.streak = 0;
       return { kind: "none" };

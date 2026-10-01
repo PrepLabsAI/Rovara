@@ -4,9 +4,10 @@ import { randomUUID } from "node:crypto";
 import type { Readable, Writable } from "node:stream";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import type { AdminMeResponse } from "@agentx/contracts";
 import {
-  ADMIN_READ_TOOLS, NEXT_STEPS, NOT_OFFERED, UPGRADE_AGENTX_STEP, ToolError, adminApiFits, compatibilityChecker, createAgentXMcpServer, httpAdminClient,
-  httpControlPlaneClient, type AdminOffer, type AdminSession, type ControlPlaneClient,
+  ADMIN_AUDIT_TOOLS, ADMIN_CHANGE_TOOLS, ADMIN_READ_TOOLS, NEXT_STEPS, NOT_OFFERED, REQUIRED_CHANGE_ADMIN_MINOR, UPGRADE_AGENTX_STEP, ToolError, adminApiFits,
+  compatibilityChecker, createAgentXMcpServer, httpAdminClient, httpControlPlaneClient, type AdminOffer, type AdminSession, type Compatibility, type ControlPlaneClient,
 } from "@agentx/mcp";
 import { developerAccessToken, type DeveloperSessionDeps } from "../developer/session.js";
 import { CLI_VERSION } from "../version.js";
@@ -72,30 +73,61 @@ export function agentxMcpServer(deps: McpServeDeps): McpServer {
       return session;
     },
   });
-  // A15 and A1: offered with an unexpired admin sign-in and an admin API that fits. The checker's
-  // 10-minute cache holds, so the 30-second check does not read the configuration each time.
-  const adminOffer = async (): Promise<AdminOffer> => {
-    if ((await deps.adminSession(deps.env)) === undefined) return { admin: NOT_OFFERED };
-    let adminApiVersion: string | undefined;
+  // A15 and A1: the admin read tools are offered with an unexpired admin sign-in and an admin API
+  // that fits: the compatibility it read, or why not. The checker's 10-minute cache holds, so the
+  // 30-second check does not read the configuration each time.
+  const readsOffer = async (): Promise<{ refusal: ToolError } | { refusal: undefined; compatibility: Compatibility }> => {
+    if ((await deps.adminSession(deps.env)) === undefined) return { refusal: NOT_OFFERED };
+    let read: Compatibility;
     try {
-      ({ adminApiVersion } = await compatibility());
+      read = await compatibility();
     } catch (error) {
       // The check needs the developer sign-in: its own answer (SIGN_IN_REQUIRED) says what to do.
-      if (error instanceof ToolError) return { admin: error };
+      if (error instanceof ToolError) return { refusal: error };
       throw error;
     }
-    const fit = adminApiFits(adminApiVersion);
-    if (fit !== "fits") return { admin: new ToolError("UPGRADE_REQUIRED", "this AgentX has no admin tools for this CLI yet", fit === "incompatible" ? NEXT_STEPS.UPGRADE_REQUIRED : UPGRADE_AGENTX_STEP) };
-    return { admin: undefined };
+    const fit = adminApiFits(read.adminApiVersion);
+    if (fit !== "fits") return { refusal: new ToolError("UPGRADE_REQUIRED", "this AgentX has no admin tools for this CLI yet", fit === "incompatible" ? NEXT_STEPS.UPGRADE_REQUIRED : UPGRADE_AGENTX_STEP) };
+    return { refusal: undefined, compatibility: read };
+  };
+  let me: { at: number; value: Promise<AdminMeResponse | undefined> } | undefined;
+  /** The admin's Slack link, read at most once a minute (FR-041's "whether the signed-in admin has a Slack link"). */
+  const adminMe = (): Promise<AdminMeResponse | undefined> => {
+    if (me === undefined || now() - me.at > 60_000) me = { at: now(), value: admin.me().catch(() => undefined) };
+    return me.value;
+  };
+  /** FR-041: the methods the environment allows and this admin can use; the server adds the client's pop-up. */
+  const methodsOf = async (read: Compatibility): Promise<{ elicitation: boolean; slack: boolean }> => {
+    const confirm = read.confirm ?? { elicitation: false, slack: false };
+    return { elicitation: confirm.elicitation, slack: confirm.slack && (await adminMe())?.slack.linked === true };
+  };
+  const confirmation = async (): Promise<{ elicitation: boolean; slack: boolean }> => methodsOf(await compatibility());
+  // Spec 025 FR-028, FR-041, Q11: agentx_admin_changes needs admin API 1.1; the change tools also
+  // need a confirmation method this session has.
+  const adminOffer = async (client: { elicitation: boolean }): Promise<AdminOffer> => {
+    const reads = await readsOffer();
+    if (reads.refusal !== undefined) return { admin: reads.refusal, audit: reads.refusal, changes: reads.refusal };
+    // Review fix 3: the compatibility readsOffer already read, not a second, unguarded read.
+    if (adminApiFits(reads.compatibility.adminApiVersion, REQUIRED_CHANGE_ADMIN_MINOR) !== "fits") {
+      const upgrade = new ToolError("UPGRADE_REQUIRED", "this AgentX has no admin change tools yet", UPGRADE_AGENTX_STEP);
+      return { admin: undefined, audit: upgrade, changes: upgrade };
+    }
+    const methods = await methodsOf(reads.compatibility);
+    const any = (client.elicitation && methods.elicitation) || methods.slack;
+    return { admin: undefined, audit: undefined, changes: any ? undefined : new ToolError("CONFIRMATION_UNAVAILABLE", "no confirmation method is available in this session") };
   };
   return createAgentXMcpServer({
     version: CLI_VERSION,
     log,
     adminTools: ADMIN_READ_TOOLS,
+    auditTools: ADMIN_AUDIT_TOOLS,
+    changeTools: ADMIN_CHANGE_TOOLS,
     adminOffer,
-    context: (clientName) => ({
+    context: (clientName, clientVersion) => ({
       client,
       clientName,
+      ...(clientVersion === undefined ? {} : { clientVersion }),
+      confirmation,
       serverVersion: CLI_VERSION,
       adminSignedIn: () => deps.adminSignedIn(deps.env),
       compatibility,

@@ -28,11 +28,12 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { INDEX_EXPIRY_ATTRIBUTE, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, WORKER_SETTING_PARAMETERS, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
+import { swebenchNames } from "./swebench-eval.js";
 
 const MAX_DISPATCH_ATTEMPTS = 5;
 // Matches MAX_RECEIVE_COUNT in packages/slack-service, which reports the final attempt in the thread.
@@ -97,8 +98,10 @@ export class ControlPlaneStack extends Stack {
       // Retained: workspace and operation records must outlive a stack deletion.
       removalPolicy: RemovalPolicy.RETAIN,
       // Spec 025 A6 (Q5, owner answer 2026-09-30): failure and usage index items expire by TTL in
-      // named environments. Adding a TTL to an existing table is an in-place update, and no other
-      // State item carries indexExpiresAt (a test pins it). The legacy table stays as it is.
+      // named environments. Adding a TTL to an existing table is an in-place update. 25c note 2: the
+      // sharing items, NOTICE and CHANNEL_OPERATION, expire on it too; they exist only in named
+      // environments (D14). No other State item carries indexExpiresAt (a test pins the files that
+      // name it). The legacy table stays as it is.
       ...(naming.env === undefined ? {} : { timeToLiveAttribute: INDEX_EXPIRY_ATTRIBUTE }),
     });
 
@@ -153,6 +156,22 @@ export class ControlPlaneStack extends Stack {
       resources: [this.formatArn({ service: "codebuild", resource: "project", resourceName: "agentx-*" })],
     }));
     if (naming.env !== undefined) broker.addEnvironment("CONNECTOR_SECRET_PREFIX", naming.connectorSecretPrefix);
+    // Spec 043: SWE-bench runs. The broker reads the optional eval stack's settings, the runner image
+    // and the worker model per request, and starts the eval state machine by its fixed name; both
+    // exist only once the eval stack is deployed, and until then a run is refused as not installed.
+    broker.addEnvironment("SWEBENCH_SETTINGS_PREFIX", naming.ec2.workerSettingsPrefix);
+    broker.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["ssm:GetParameters"],
+      resources: [
+        swebenchNames(naming).settingsParameterName,
+        swebenchNames(naming).runnerImageParameterName,
+        ...Object.values(WORKER_SETTING_PARAMETERS).map((name) => `${naming.ec2.workerSettingsPrefix}${name}`),
+      ].map((name) => `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${name}`),
+    }));
+    broker.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["states:StartExecution"],
+      resources: [this.formatArn({ service: "states", resource: "stateMachine", resourceName: swebenchNames(naming).stateMachineName, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
+    }));
 
     const outboxPublisher = packagedFunction(
       this,
@@ -649,6 +668,22 @@ export class ControlPlaneStack extends Stack {
         actions: ["dynamodb:GetItem"],
         resources: [state.tableArn],
         conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SHARED_TASK#*"] } },
+      }));
+      // Spec 025 E14 (C14): the interactivity route hands Slack Confirm and Cancel presses to the broker.
+      slackIngress.addEnvironment("ADMIN_CHANGES", "enabled");
+      // Spec 025 E14, FR-052: the interactivity route logs a press with its change's trace ID; it may
+      // read only that attribute and the keys, by key.
+      slackIngress.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["dynamodb:GetItem"],
+        resources: [state.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["ADMIN_CHANGE#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "traceId"] },
+          StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+          // ForAllValues passes when dynamodb:Attributes is absent, and GetItem has no Select, so a read
+          // without a ProjectionExpression (which returns every attribute) must be refused outright.
+          Null: { "dynamodb:Attributes": "false" },
+        },
       }));
       // C14: TASK_BUSY counts the shared thread's waiting messages.
       broker.addEnvironment("SLACK_THREADS_TABLE_NAME", slackThreads.tableName);

@@ -135,6 +135,17 @@ export const ENDED_TASK_STATUSES: ReadonlySet<DeveloperTaskStatus> = new Set(["S
 
 export const DeveloperTaskFailureCategorySchema = z.enum(["setup_failed", "worker_unavailable", "task_failed", "timed_out", "interrupted", "publication_failed"]);
 export type DeveloperTaskFailureCategory = z.infer<typeof DeveloperTaskFailureCategorySchema>;
+/** #154: where a failure happened. "setup" means the workspace was never set up, so the task
+ * cannot be continued. Optional (a control plane that predates it sends none), and a stage this
+ * release does not know is dropped rather than refusing the view. */
+export const DeveloperTaskFailureStageSchema = z.enum(["setup"]);
+export type DeveloperTaskFailureStage = z.infer<typeof DeveloperTaskFailureStageSchema>;
+export const DeveloperTaskFailureSchema = z.object({
+  category: DeveloperTaskFailureCategorySchema,
+  stage: DeveloperTaskFailureStageSchema.optional().catch(undefined),
+  message: z.string().max(DEVELOPER_FAILURE_MESSAGE_MAX),
+});
+export type DeveloperTaskFailure = z.infer<typeof DeveloperTaskFailureSchema>;
 
 export const DeveloperInstructionsSchema = z
   .string()
@@ -202,7 +213,7 @@ export const DeveloperTaskViewSchema = z.object({
   title: z.string(),
   project: z.string(),
   status: DeveloperTaskStatusSchema,
-  failure: z.object({ category: DeveloperTaskFailureCategorySchema, message: z.string().max(DEVELOPER_FAILURE_MESSAGE_MAX) }).optional(),
+  failure: DeveloperTaskFailureSchema.optional(),
   startingRevision: z.number().int().positive(),
   client: z.string(),
   shared: z.boolean(),

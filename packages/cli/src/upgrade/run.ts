@@ -31,6 +31,10 @@ export interface UpgradeDependencies {
   cloudFormation: { send(command: unknown): Promise<unknown> };
   identity: CallerIdentity;
   loadRelease(input: { releaseDir?: string; version?: string }): Promise<LoadedRelease>;
+  /** Issue 152: a source-built CLI's cdk upgrade with no --release or --to builds its release from
+   * the --source checkout (release-fetch.ts's sourceRelease): the tag's version, the images from the
+   * image flags or the tag's published release.json. */
+  sourceRelease(input: { source: string; images?: { worker?: string; slack?: string } }): Promise<LoadedRelease>;
   notes(version: string): Promise<ReleaseNotes | undefined>;
   prepare(input: { settings: EnvironmentSettings; release: LoadedRelease; source?: string }): Promise<PreparedDeployment>;
   cdkDiff(request: DeployRequest, settings: EnvironmentSettings, source: string): Promise<string>;
@@ -77,13 +81,15 @@ export async function accessChanged(input: { cloudFormation: { send(command: unk
 
 /** The spec's edge case "A release that removes a config key an environment has set": each operator
  * parameter a deployed stack holds that the target release's template no longer declares. Ruling
- * F10: keptOperatorParameters owns that test; this only names each one by its config key. */
-export async function droppedConfigKeys(input: { release: LoadedRelease; env: string; parts: DeployPart[]; stacks: StackReader }): Promise<Array<{ key: string; value: string }>> {
+ * F10: keptOperatorParameters owns that test; this only names each one by its config key.
+ * `declared` is what the deploy itself filters by: the cdk engine's synth (issue 152), or the
+ * release's templates. */
+export async function droppedConfigKeys(input: { declared: (part: DeployPart) => ReadonlySet<string> | undefined; env: string; parts: DeployPart[]; stacks: StackReader }): Promise<Array<{ key: string; value: string }>> {
   const dropped: Array<{ key: string; value: string }> = [];
   for (const part of input.parts) {
     const deployed = (await input.stacks.describe(environmentStackName(input.env, part)))?.parameters;
     if (deployed === undefined) continue;
-    const found = keptOperatorParameters({ part, computed: {}, deployed, declared: templateParameterNames(input.release, part, input.env) }).dropped;
+    const found = keptOperatorParameters({ part, computed: {}, deployed, declared: input.declared(part) }).dropped;
     for (const { parameter, value } of found) {
       const key = CONFIG_KEYS.find((entry) => entry.target.kind === "stack-parameter" && entry.target.part === part && entry.target.parameter === parameter)?.key ?? parameter;
       dropped.push({ key, value });
@@ -115,7 +121,7 @@ async function exportUpgrade(input: { options: UpgradeOptions; deps: UpgradeDepe
   const accessStack = settings.stacks.access ?? environmentStackName(env, "access");
   const includeAccess = await accessChanged({ cloudFormation: deps.cloudFormation, stackName: accessStack, release, region: settings.region, env });
   const parts = order.filter((part) => part !== "access" || includeAccess);
-  for (const entry of await droppedConfigKeys({ release, env, parts, stacks })) {
+  for (const entry of await droppedConfigKeys({ declared: (part) => templateParameterNames(release, part, env), env, parts, stacks })) {
     deps.write(`config key ${entry.key} (${entry.value}) is not in release ${target}, so the upgrade drops it; nothing replaces it`);
   }
   const outputs: Partial<Record<DeployPart, Record<string, string>>> = {};
@@ -157,13 +163,16 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
   }
 
   const version = options.releaseDir === undefined ? options.to ?? deps.cliVersion : undefined;
-  if (options.releaseDir === undefined && version === undefined) {
-    // Live check L7: --source replaces the templates, not the release's images and notes.
-    throw agentXError("CONFIG_INVALID", first.engine === "cdk"
-      ? "this agentx was built from source, so it has no release of its own; the cdk engine builds the stacks from --source, but still reads the release's images and notes from --release <dir> (npm run release:build builds one), or pass --to <version>"
-      : "this agentx was built from source, so it has no release of its own; pass --to <version> or --release <dir>");
+  // Issue 152: a source-built CLI's cdk upgrade needs no release: the version is the source's tag.
+  // With --to or --release, that release is loaded as before, and prepare refuses one that is not
+  // the source's tag before anything deploys.
+  const source = first.engine === "cdk" && options.releaseDir === undefined && version === undefined ? options.source : undefined;
+  if (options.releaseDir === undefined && version === undefined && source === undefined) {
+    throw agentXError("CONFIG_INVALID", "this agentx was built from source, so it has no release of its own; pass --to <version> or --release <dir>");
   }
-  const release = await deps.loadRelease({ ...(options.releaseDir === undefined ? {} : { releaseDir: options.releaseDir }), ...(version === undefined ? {} : { version }) });
+  const release = source !== undefined
+    ? await deps.sourceRelease({ source, ...(options.images === undefined ? {} : { images: options.images }) })
+    : await deps.loadRelease({ ...(options.releaseDir === undefined ? {} : { releaseDir: options.releaseDir }), ...(version === undefined ? {} : { version }) });
   const target = release.manifest.version;
   refusePrereleaseTarget(target);
   if (options.to !== undefined && options.releaseDir !== undefined && options.to !== target) {
@@ -203,14 +212,18 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
       }
     }
 
-    for (const entry of await droppedConfigKeys({ release, env, parts, stacks: deps.stacks })) {
-      deps.write(`config key ${entry.key} (${entry.value}) is not in release ${target}, so the upgrade drops it; nothing replaces it`);
-    }
-
     const allowReplace = new Set(options.allowReplace);
     const review = upgradeConfirm({ write: deps.write, ask: deps.ask, yes: options.yes, allowReplace });
+    // Prepared before the dropped keys are named: the cdk engine's synth of the source (issue 152)
+    // says which parameters the deploy can send, and so which it drops.
     const prepared = await deps.prepare({ settings, release, ...(options.source === undefined ? {} : { source: options.source }) });
     try {
+      const declaredBy = prepared.declaredParameters;
+      const declared = (part: DeployPart) => (declaredBy === undefined ? templateParameterNames(release, part, env) : declaredBy(part));
+      for (const entry of await droppedConfigKeys({ declared, env, parts, stacks: deps.stacks })) {
+        deps.write(`config key ${entry.key} (${entry.value}) is not in release ${target}, so the upgrade drops it; nothing replaces it`);
+      }
+
       const deployer = settings.engine === "templates" ? prepared.deployer : cdkReviewedDeployer(prepared.deployer, async (request) => {
         const risks = cdkDiffRisks(await deps.cdkDiff(request, settings, options.source ?? ""));
         if (risks.iam) deps.write(`${request.stackName} changes IAM; the changes are in the diff above.`);
@@ -228,6 +241,7 @@ export async function runUpgrade(options: UpgradeOptions, deps: UpgradeDependenc
           onEvent: (event) => deps.write(progressLine(event)),
           ...(settings.engine === "templates" ? { confirm: review.confirm } : {}),
           deployedParameters: async (stackName) => (await deps.stacks.describe(stackName))?.parameters,
+          ...(declaredBy === undefined ? {} : { declaredParameters: declaredBy }),
           now: deps.now,
         });
       } catch (error) {

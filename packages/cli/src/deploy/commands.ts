@@ -21,6 +21,7 @@ import { ssmParameterStore, type ParameterStore } from "../environments/paramete
 import { settingsParameterName } from "../environments/settings.js";
 import { ACCOUNT_PATTERN, BudgetAnswersSchema, IdentityAnswersSchema, ImagesAnswersSchema, ModelsAnswersSchema, REGION_PATTERN } from "./answer-schemas.js";
 import { assertCdkBootstrapped, assertSourceAtRelease, buildSource, cdkDeployer, type CommandRunner } from "./cdk-engine.js";
+import { synthDeclaredParameters } from "./cdk-source.js";
 import type { ChangeSetChange, DeployEvent, StackDeployer, StackOutputs } from "./deployer.js";
 import { deployEnvironment, type DeployAnswers, type DeployEnvironmentResult } from "./deploy-environment.js";
 import { writeExportBundle } from "./export-bundle.js";
@@ -599,6 +600,7 @@ async function deployCommand(options: DeployCommandOptions, deps: DeployCliDepen
       holder: prepared.holder,
       ...(parts === undefined ? {} : { parts }),
       deployedParameters: deps.stackParameters ?? cloudFormationParametersReader(new CloudFormationClient({ region: answers.region })),
+      ...(prepared.declaredParameters === undefined ? {} : { declaredParameters: prepared.declaredParameters }),
       onEvent,
       ...(confirm === undefined ? {} : { confirm }),
       ...(deps.now === undefined ? {} : { now: deps.now }),
@@ -625,6 +627,10 @@ export interface PreparedDeployment {
   /** The caller's own ARN: the environment lock's holder. */
   holder: string;
   partition: string;
+  /** The cdk engine's synth of its source: the parameter names each part's template declares
+   * (issue 152), for deployEnvironment's declaredParameters. Undefined for the templates engine, which
+   * reads them from the release's own templates, and when a test overrides the whole deployer. */
+  declaredParameters?: (part: DeployPart) => ReadonlySet<string>;
   /** Removes the cdk engine's outputs directory; a no-op for templates. */
   cleanup(): Promise<void>;
 }
@@ -673,6 +679,7 @@ export async function prepareDeployment(input: {
 
   let deployer: StackDeployer;
   let cdkOutputsDir: string | undefined;
+  let declaredParameters: PreparedDeployment["declaredParameters"];
   if (deps.deployer !== undefined) {
     deployer = deps.deployer;
   } else if (input.engine === "cdk") {
@@ -684,6 +691,9 @@ export async function prepareDeployment(input: {
     // After the cheap checks, before any cdk deploy: infra/dist is gitignored, so only a fresh
     // install and build guarantees `cdk deploy` synthesizes the tagged source.
     await buildSource({ runner, source });
+    // Issue 152: one synth of the built source, with the deploy's own app and context, says which
+    // parameters each stack declares; the release's templates may not exist (a source-built agentx).
+    declaredParameters = await synthDeclaredParameters({ runner, source, env: input.env, region, identityMode: input.identityMode });
     cdkOutputsDir = await mkdtemp(join(tmpdir(), "agentx-cdk-outputs-"));
     deployer = cdkDeployer({
       runner,
@@ -706,6 +716,7 @@ export async function prepareDeployment(input: {
     secrets,
     holder,
     partition,
+    ...(declaredParameters === undefined ? {} : { declaredParameters }),
     async cleanup() {
       if (outputsDir !== undefined) await rm(outputsDir, { recursive: true, force: true });
     },

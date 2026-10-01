@@ -1,23 +1,31 @@
 // packages/broker/src/developer/server.ts
 // Spec 025 FR-001 to FR-008: the control plane as the developers' sign-in server. Behind
 // ANY /v1/auth/{proxy+} with no authorizer, plus direct-invoke operations for the broker
-// (channel members, channel names for R10, and 25d's email lookup and bot token check).
+// (channel members, channel names for R10, 25d's email lookup and bot token check, and 25e's
+// admin-ended sessions and channel by name).
 // Nothing here logs or echoes a secret, a code, a token or a caught error's message.
 import { randomBytes } from "node:crypto";
 import {
   AGENTX_CLI_CLIENT_ID,
   ChannelInfoRequestSchema,
+  ChannelByNameRequestSchema,
   ChannelMembersRequestSchema,
   ADMIN_API_VERSION,
   DEVELOPER_API_VERSION,
+  EndDeveloperSessionsRequestSchema,
   SlackAuthCheckRequestSchema,
   SlackUserByEmailRequestSchema,
   isLoopbackRedirectUri,
+  type AgentXConfigurationConfirm,
+  type ChannelByNameRequest,
+  type ChannelByNameResponse,
   type ChannelInfoRequest,
   type ChannelInfoResponse,
   type ChannelMembersRequest,
   type ChannelMembersResponse,
   type DeveloperSignInMethod,
+  type EndDeveloperSessionsRequest,
+  type EndDeveloperSessionsResponse,
   type SlackAuthCheckRequest,
   type SlackAuthCheckResponse,
   type SlackUserByEmailRequest,
@@ -26,12 +34,12 @@ import {
 import { adaptHttpApiEvent, ownerKeyForSubject, type HttpApiV2Event } from "../aws/lambda.js";
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
-import { startedBeforeMethodOn, type AuthRequestRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
+import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
 import { issueAccessToken, type TokenSigner } from "./tokens.js";
 
 /** `since` (epoch seconds, FR-045): when the method was last turned on. A session started before it
  * was ended by the disable in between, so it never comes back when the method is on again. */
-export interface DeveloperIdentityConfig { env: string; issuer: string; slack: { enabled: boolean; teamId?: string; since?: number }; oidc?: { displayName: string; since?: number } }
+export interface DeveloperIdentityConfig { env: string; issuer: string; slack: { enabled: boolean; teamId?: string; since?: number }; oidc?: { displayName: string; since?: number }; confirmElicitation?: boolean }
 export interface DeveloperIdentityDependencies {
   config: DeveloperIdentityConfig;
   store: DeveloperSignInStore;
@@ -285,6 +293,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       await revoke(session.sessionId, "developer_revoked");
       return ended;
     }
+    if (endedByAdmin(session.startedAt, developer.sessionsEndedAt)) {
+      await revoke(session.sessionId, "ended_by_admin");
+      return oauthError(400, "invalid_grant", "an AgentX admin ended your sign-in; sign in again with agentx login");
+    }
     if (session.amr === "slack" && session.slackUserId !== undefined) {
       const status = await deps.directory.userStatus(session.slackUserId);
       if (status === "unavailable") return oauthError(503, "temporarily_unavailable", "Slack could not be reached to check your account; your sign-in is kept, try again in a few minutes");
@@ -351,6 +363,9 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       revocationEndpoint: endpoint("/revoke"),
       clientId: AGENTX_CLI_CLIENT_ID,
       methods: { slack: methods.includes("slack"), oidc: methods.includes("oidc") && config.oidc !== undefined ? { displayName: config.oidc.displayName } : null },
+      // FR-041, E16: the methods this environment allows; the MCP server adds the client's and the admin's own.
+      // Slack needs the team set up, not Slack sign-in (controller ruling R5): each change checks the admin's own link.
+      confirm: { elicitation: config.confirmElicitation !== false, slack: config.slack.teamId !== undefined } satisfies AgentXConfigurationConfirm,
     };
   };
 
@@ -386,9 +401,21 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
   const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname.startsWith("/v1/auth/callback/");
 
   return async (
-    event: HttpApiV2Event | ChannelMembersRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest,
-  ): Promise<HttpResult | ChannelMembersResult | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse> => {
+    event: HttpApiV2Event | ChannelMembersRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest,
+  ): Promise<HttpResult | ChannelMembersResult | ChannelInfoResponse | SlackUserByEmailResponse | SlackAuthCheckResponse | EndDeveloperSessionsResponse | ChannelByNameResponse> => {
     if ("kind" in event) {
+      if (event.kind === "end-developer-sessions") {
+        const parsed = EndDeveloperSessionsRequestSchema.safeParse(event);
+        if (!parsed.success) return { ok: false, error: "invalid_request" };
+        const result = await store.endSessions(parsed.data.developerId, parsed.data.at);
+        deps.log({ event: "signin.sessions_ended_by_admin", developerId: parsed.data.developerId, result });
+        return result === "ended" ? { ok: true } : { ok: false, error: "not_found" };
+      }
+      if (event.kind === "channel-by-name") {
+        const parsed = ChannelByNameRequestSchema.safeParse(event);
+        if (!parsed.success) return { ok: false, error: "invalid_request" };
+        return deps.directory.channelByName(parsed.data.name);
+      }
       if (event.kind === "slack-user-by-email") {
         const parsed = SlackUserByEmailRequestSchema.safeParse(event);
         if (!parsed.success) return { ok: false, error: "invalid_request" };

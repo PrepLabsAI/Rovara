@@ -64,9 +64,10 @@ RUN set -eu; \
 FROM public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5
 
 # Python 3, pip and venv (Debian bookworm) so a Python repository's tests run; a project's
-# devcontainer (#121) is the route for anything else.
+# devcontainer (#121) is the route for anything else. tini, pinned, runs as PID 1 and reaps the
+# processes a command leaves behind: commands run in their own process group (#170).
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates git openssh-client python3 python3-pip python3-venv \
+    && apt-get install --yes --no-install-recommends ca-certificates git openssh-client python3 python3-pip python3-venv tini=0.19.0-1+b3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=tools /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=tools /usr/local/lib/docker/cli-plugins/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
@@ -83,4 +84,5 @@ ENV AGENTX_WORKSPACE_ROOT=/mnt/workspace \
     PORT=8080
 EXPOSE 8080
 USER node
+ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "packages/worker/dist/main.js"]

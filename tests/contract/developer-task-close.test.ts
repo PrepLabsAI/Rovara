@@ -34,6 +34,9 @@ async function setupFailed() {
 
 const SAFE = { result: { safeToClose: true, repositories: [] } };
 const organization = (db: FakeDynamoDb) => db.get(`SLACK_LIMIT#${SLACK_TEAM}`, "ORGANIZATION");
+/** A task's close records as `phase:outcome`, sorted, so a count also says which records they are. */
+const closePhases = (db: FakeDynamoDb, taskId: string) =>
+  db.find((item) => item.pk === `TASK#${taskId}` && item.action === "close").map((item) => `${String(item.phase)}:${String(item.outcome)}`).sort();
 
 describe("closing a task (R15)", () => {
   it("runs the preflight, then finishes the close itself: compute deleted, workspace CLOSED, counters released", async () => {
@@ -53,7 +56,8 @@ describe("closing a task (R15)", () => {
     expect(db.get(`DEVELOPER#${MAYA.developerId}`, `TASK#${task.createdAt}#${taskId}`)).toMatchObject({ status: "CLOSED" });
     expect((await close(requestId)).body).toMatchObject({ closed: true, task: { status: "CLOSED" } });
     expect((await dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`)).body.task).toMatchObject({ status: "CLOSED" });
-    expect(db.find((item) => item.pk === `TASK#${taskId}` && item.action === "close")).toHaveLength(1);
+    // E20 (25c C22): the close's completed record is appended to its accepted one.
+    expect(closePhases(db, taskId)).toEqual(["accepted:accepted", "completed:succeeded"]);
   });
 
   it("keeps the task when the preflight finds unpublished work, and says which", async () => {
@@ -138,7 +142,8 @@ describe("closing a task: repeats, races and audit records (R12, R15)", () => {
     await close(randomUUID());
     await finish(task.workspaceId, active(), "SUCCEEDED", { result: { safeToClose: true, repositories: [] } });
     expect((await close(randomUUID())).body).toMatchObject({ closed: true, task: { status: "CLOSED" } });
-    expect(db.find((item) => item.pk === `TASK#${taskId}` && item.action === "close")).toHaveLength(1);
+    // E20 (25c C22): the close's completed record is appended to its accepted one.
+    expect(closePhases(db, taskId)).toEqual(["accepted:accepted", "completed:succeeded"]);
     expect(member()).toMatchObject({ count: 0 });
   });
 
@@ -153,7 +158,8 @@ describe("closing a task: repeats, races and audit records (R12, R15)", () => {
     await finish(task.workspaceId, active(), "SUCCEEDED", { result: { safeToClose: true, repositories: [] } });
     expect(db.get(`WORKSPACE#${task.workspaceId}`, "META")).toMatchObject({ status: "CLOSED" });
     expect(member()).toMatchObject({ count: 0 });
-    expect(db.find((item) => item.pk === `TASK#${taskId}` && item.action === "close")).toHaveLength(2);
+    // E20 (25c C22): each close gets its completed record, the refused one and the one that closed.
+    expect(closePhases(db, taskId)).toEqual(["accepted:accepted", "accepted:accepted", "completed:refused", "completed:succeeded"]);
   });
 
   it("answers continue and pull requests on a closing task with the closing message, not TASK_BUSY", async () => {
@@ -182,9 +188,12 @@ describe("closing a task: repeats, races and audit records (R12, R15)", () => {
     await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId });
     await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId });
     await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId: randomUUID() });
-    const records = harness.db.find((item) => item.pk === `TASK#${taskId}` && item.action === "close");
-    expect(records).toHaveLength(1);
+    const records = harness.db.find((item) => item.pk === `TASK#${taskId}` && item.action === "close")
+      .sort((left, right) => String(left.phase).localeCompare(String(right.phase)));
+    // E20 (25c C22): the close's completed record is appended to its one accepted record.
+    expect(records).toHaveLength(2);
     expect(records[0]).toMatchObject({ phase: "accepted", outcome: "accepted" });
+    expect(records[1]).toMatchObject({ phase: "completed", outcome: "succeeded" });
     expect(harness.db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "CLOSED" });
     expect(harness.db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${MAYA.slackUserId}`)).toMatchObject({ count: 0 });
     expect(organization(harness.db)).toMatchObject({ count: 0 });

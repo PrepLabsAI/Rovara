@@ -150,12 +150,19 @@ function redactSecrets(text: string, parameters: Record<string, string>): string
   return redacted;
 }
 
+/** The app and context every cdk command runs with (deploy, diff, and cdk-source.ts's synth), so
+ * the synth that reads the declared parameters synthesizes exactly what the deploy deploys. */
+export function cdkAppArguments(input: { env: string; region: string; identityMode: "cognito" | "oidc" }): string[] {
+  const args = ["--app", "node infra/dist/bin/agentx.js", "-c", `agentxEnv=${input.env}`, "-c", `agentxRegion=${input.region}`];
+  if (input.identityMode === "oidc") args.push("-c", "agentxIdentity=oidc");
+  return args;
+}
+
 /** The cdk command's arguments for one stack (deploy or diff); a deploy passes each parameter by physical stack name. */
 function cdkArguments(input: { env: string; region: string; identityMode: "cognito" | "oidc" }, request: DeployRequest, command: "deploy" | "diff"): string[] {
   // --no-install: only the CDK CLI `npm ci` installed from the release's own lockfile, never one npx
   // would otherwise download on the fly.
-  const args = ["--no-install", "cdk", command, CDK_CONSTRUCT_IDS[request.part], "--exclusively", "--app", "node infra/dist/bin/agentx.js", "-c", `agentxEnv=${input.env}`, "-c", `agentxRegion=${input.region}`];
-  if (input.identityMode === "oidc") args.push("-c", "agentxIdentity=oidc");
+  const args = ["--no-install", "cdk", command, CDK_CONSTRUCT_IDS[request.part], "--exclusively", ...cdkAppArguments(input)];
   // cdk diff ignores --parameters (CDK 2.1142 warns that they apply only to deploy).
   if (command === "diff") return args;
   // The CDK CLI looks `--parameters` up by the physical stack name (parameterMap[stack.stackName]),

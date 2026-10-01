@@ -224,6 +224,13 @@ export interface ImageBuild {
   dockerfile: string;
   localName: string;
   smokeTest: (runner: Runner, image: string) => Promise<void>;
+  /** linux/arm64 unless given: the EC2 workers and the Slack service run on Graviton. */
+  platform?: "linux/arm64" | "linux/amd64";
+  /**
+   * Replaces the tag's `release-` prefix. The repository keeps only the newest twenty `release-`
+   * images, so an image that is not a release (spec 043's SWE-bench runner) must not use it.
+   */
+  tagPrefix?: string;
 }
 
 export async function buildAndPushWorker(
@@ -247,14 +254,15 @@ export async function buildAndPushImage(
   image: ImageBuild,
   revision: string,
 ): Promise<string> {
-  const tag = releaseTag(new Date(), revision);
+  const release = releaseTag(new Date(), revision);
+  const tag = image.tagPrefix === undefined ? release : `${image.tagPrefix}${release.slice("release-".length)}`;
   const localImage = `${image.localName}:${tag}`;
   const remoteImage = `${image.repositoryUri}:${tag}`;
   runner.run("docker", [
     "buildx",
     "build",
     "--platform",
-    "linux/arm64",
+    image.platform ?? "linux/arm64",
     "--load",
     "--tag",
     localImage,

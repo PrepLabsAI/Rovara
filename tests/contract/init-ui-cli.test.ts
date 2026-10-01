@@ -2,6 +2,7 @@
 // the terminal after the command. The wizard server and the GitHub manifest listener are both
 // real, on 127.0.0.1; every AWS, GitHub, Slack and clock dependency is injected, so nothing here
 // reaches AWS, GitHub or Slack.
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -405,7 +406,14 @@ describe("agentx init --ui", () => {
     const checks = passingChecks({ cdkBootstrapped: async () => false, runCdkBootstrap: async () => { throw new Error("CDKToolkit stack creation was rolled back"); } });
     // --engine cdk skips the engine question; then yes to "Run cdk bootstrap ... now?", and no to checking again.
     const operator = fakeWizardOperator([...FIRST_RUN.slice(1, -1), true, false]);
-    expect(await h.run(["--ui", "--engine", "cdk", "--source", await tmp("agentx-init-ui-source-")], { openBrowser: operator.open, checks })).not.toBe(0);
+    // Issue 152: init checks --source is a clean checkout of the release's tag before the
+    // prerequisites, so the source is one: an empty commit tagged v1.2.3, the harness release's version.
+    const source = await tmp("agentx-init-ui-source-");
+    const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", ...args], { cwd: source, stdio: "ignore" });
+    git("init", "-q");
+    git("commit", "-q", "--allow-empty", "-m", "release");
+    git("tag", "v1.2.3");
+    expect(await h.run(["--ui", "--engine", "cdk", "--source", source], { openBrowser: operator.open, checks })).not.toBe(0);
     await operator.settled();
     expect(operator.asked).toContain("Check the prerequisites again?");
     const failed = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "prerequisites" && card.status === "failed") ?? []).at(-1);

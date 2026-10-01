@@ -4,14 +4,31 @@
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import type { JSONRPCMessage } from "@modelcontextprotocol/sdk/types.js";
 import { ADMIN_SIGN_IN_STEP } from "./admin-client.js";
-import { ToolError } from "./errors.js";
+import { ToolError, UPGRADE_AGENTX_STEP } from "./errors.js";
 
-/** `admin` is undefined when the admin tools are offered, else why they are not. */
-export interface AdminOffer { admin: ToolError | undefined }
+/**
+ * `admin` is undefined when the admin read tools are offered, else why they are not. Spec 025
+ * FR-028, FR-041: `audit` (agentx_admin_changes) and `changes` (the change tools) are offered only
+ * when named and undefined, so an offer that names only `admin` (25d's) offers neither.
+ */
+export interface AdminOffer { admin: ToolError | undefined; audit?: ToolError | undefined; changes?: ToolError | undefined }
+export type AdminToolGroup = "admin" | "audit" | "changes";
 interface Switchable { enable(): void; disable(): void; enabled: boolean }
+/** A tool the offer switches; a bare one is in the admin group. */
+type OfferedTool = Switchable | { tool: Switchable; group: AdminToolGroup };
+const entryOf = (entry: OfferedTool): { tool: Switchable; group: AdminToolGroup } => ("group" in entry ? entry : { tool: entry, group: "admin" });
 
 /** Why the admin tools are hidden before any check has answered, or when none can be made. */
 export const NOT_OFFERED = new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for AgentX", ADMIN_SIGN_IN_STEP);
+/** Why agentx_admin_changes and the change tools are hidden when the offer does not name their group. */
+const NO_CHANGE_TOOLS = new ToolError("UPGRADE_REQUIRED", "this AgentX has no admin change tools yet", UPGRADE_AGENTX_STEP);
+
+/** A group is offered only when named and undefined; while the admin group is refused, all are, for its reason. */
+function refusalOf(offer: AdminOffer, group: AdminToolGroup): ToolError | undefined {
+  if (offer.admin !== undefined) return offer.admin;
+  if (group === "admin") return undefined;
+  return group in offer ? offer[group] : NO_CHANGE_TOOLS;
+}
 
 export class ToolOffer {
   private current: AdminOffer = { admin: NOT_OFFERED };
@@ -20,7 +37,7 @@ export class ToolOffer {
   private again = false;
   private timer: ReturnType<typeof setInterval> | undefined;
 
-  constructor(private readonly options: { tools: Map<string, Switchable>; read(): Promise<AdminOffer>; log?(entry: Record<string, unknown>): void }) {}
+  constructor(private readonly options: { tools: Map<string, OfferedTool>; read(): Promise<AdminOffer>; log?(entry: Record<string, unknown>): void }) {}
 
   /**
    * Reads the offer and switches the tools; one read at a time, and a failed read changes nothing.
@@ -55,8 +72,9 @@ export class ToolOffer {
       this.options.log?.({ event: "offer.check_failed", error: error instanceof Error ? error.name : "unknown" });
       return;
     }
-    const offered = this.current.admin === undefined;
-    for (const tool of this.options.tools.values()) {
+    for (const entry of this.options.tools.values()) {
+      const { tool, group } = entryOf(entry);
+      const offered = refusalOf(this.current, group) === undefined;
       if (offered && !tool.enabled) tool.enable();
       if (!offered && tool.enabled) tool.disable();
     }
@@ -64,11 +82,13 @@ export class ToolOffer {
 
   /** Why a hidden admin tool is refused, or undefined for any other tool. */
   refusal(name: string): ToolError | undefined {
-    const tool = this.options.tools.get(name);
-    if (tool === undefined || tool.enabled) return undefined;
+    const entry = this.options.tools.get(name);
+    if (entry === undefined) return undefined;
+    const { tool, group } = entryOf(entry);
+    if (tool.enabled) return undefined;
     // A refused call is also a good moment to look again.
     void this.refresh();
-    return this.current.admin ?? NOT_OFFERED;
+    return refusalOf(this.current, group) ?? NOT_OFFERED;
   }
 
   start(intervalMs: number): void {

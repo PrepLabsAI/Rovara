@@ -7,7 +7,7 @@ import { KMSClient } from "@aws-sdk/client-kms";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import { createRemoteJWKSet, type JWTVerifyGetKey } from "jose";
-import type { ChannelInfoRequest, ChannelMembersRequest, DeveloperSignInMethod, SlackAuthCheckRequest, SlackUserByEmailRequest } from "@agentx/contracts";
+import type { ChannelByNameRequest, ChannelInfoRequest, ChannelMembersRequest, DeveloperSignInMethod, EndDeveloperSessionsRequest, SlackAuthCheckRequest, SlackUserByEmailRequest } from "@agentx/contracts";
 import { ProviderNotConfiguredError, oidcSignInProvider, slackSignInProvider, type SignInProvider } from "../developer/providers.js";
 import { createDeveloperIdentityHandler, type DeveloperIdentityConfig } from "../developer/server.js";
 import { slackDirectory } from "../developer/slack-directory.js";
@@ -56,6 +56,8 @@ export function developerIdentityConfigFromEnvironment(env: NodeJS.ProcessEnv): 
     env: required(env, "AGENTX_ENV"),
     issuer: required(env, "DEVELOPER_TOKEN_ISSUER"),
     slack: { enabled: env.DEVELOPER_SIGNIN_SLACK === "enabled", ...(teamId === "" ? {} : { teamId }), ...sinceFrom(env.DEVELOPER_SIGNIN_SLACK_SINCE) },
+    // Spec 025 E16: absent means the pop-up is allowed; only named environments set it.
+    ...(env.MCP_CONFIRM_ELICITATION === "disabled" ? { confirmElicitation: false } : {}),
   };
   if (issuer === "") return config;
   const withOidc = { ...config, oidc: { displayName: env.DEVELOPER_OIDC_DISPLAY_NAME || "Company sign-in", ...sinceFrom(env.DEVELOPER_OIDC_SINCE) } };
@@ -179,7 +181,7 @@ function build(env: NodeJS.ProcessEnv): ReturnType<typeof createDeveloperIdentit
   });
 }
 
-export const handler = async (event: HttpApiV2Event | ChannelMembersRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest) => {
+export const handler = async (event: HttpApiV2Event | ChannelMembersRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest) => {
   built ??= build(process.env);
   return built(event);
 };

@@ -35,6 +35,9 @@ export const OperationStatusSchema = z.enum([
   "INTERRUPTED",
 ]);
 
+/** A task request's prompt limit, in UTF-8 bytes. */
+export const OPERATION_PROMPT_MAX_BYTES = 65_536;
+
 export const OperationRequestSchema = z
   .object({
     requestId: z.string().uuid(),
@@ -42,7 +45,7 @@ export const OperationRequestSchema = z
     prompt: z
       .string()
       .min(1)
-      .refine((value) => Buffer.byteLength(value, "utf8") <= 65_536, "prompt exceeds 65536 UTF-8 bytes"),
+      .refine((value) => Buffer.byteLength(value, "utf8") <= OPERATION_PROMPT_MAX_BYTES, `prompt exceeds ${OPERATION_PROMPT_MAX_BYTES} UTF-8 bytes`),
   })
   .strict();
 

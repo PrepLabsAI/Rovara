@@ -1,9 +1,14 @@
 import { agentXError, type ProjectCommand, type WorkspaceStatus } from "@agentx/contracts";
+import { storedCommandOutput } from "./command-failure.js";
 
 export interface CommandResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /** The signal that ended the command, when one did (#154). */
+  signal?: string;
+  /** True when the command's own timeoutSeconds ended it (#154). */
+  timedOut?: boolean;
 }
 
 export type ReadinessCommandRunner = (
@@ -25,14 +30,22 @@ export async function evaluateReadiness(
   for (const [index, command] of input.commands.entries()) {
     try {
       const result = await runner(command, index, input.rootPath);
-      results.push({ ...result, index, ready: result.exitCode === 0 });
+      // The preparation manifest stores these: redacted, then cut to the last lines (#170).
+      results.push({
+        ...result,
+        stdout: storedCommandOutput(result.stdout),
+        stderr: storedCommandOutput(result.stderr),
+        index,
+        // A check that its timeout stopped is not ready, even when it exited 0 on SIGTERM (#170).
+        ready: result.exitCode === 0 && result.timedOut !== true,
+      });
     } catch (error) {
       results.push({
         index,
         ready: false,
         exitCode: -1,
         stdout: "",
-        stderr: error instanceof Error ? error.message : "readiness command failed",
+        stderr: storedCommandOutput(error instanceof Error ? error.message : "readiness command failed"),
       });
     }
   }

@@ -3,7 +3,7 @@ import { realpathSync } from "node:fs";
 import { open, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
-import type { Readable, Writable } from "node:stream";
+import { Writable as NodeWritable, type Readable, type Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import {
   AgentXError,
@@ -27,6 +27,8 @@ import { bindSlackChannel, unbindSlackChannel } from "./admin/slack.js";
 import { stopWorkspace } from "./admin/stop.js";
 import { setTaskShareMode } from "./admin/task-share-mode.js";
 import { cancelWorkspaceTask } from "./admin/cancel.js";
+import { askToApply, exportChanges, runCliChange } from "./admin/changes.js";
+import { disableEvalChannel, enableEvalChannel, parseMaxCostUsd, showEvalChannel } from "./admin/eval.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
@@ -138,6 +140,8 @@ export interface CliDependencies {
   /** `agentx project add` and the other setup commands (phase 15d2), for tests: never touch AWS,
    * GitHub, Slack or the control plane. */
   setup?: SetupCommandContext;
+  /** Answers the admin change commands' "Apply this change?" prompt, for tests (spec 025 Q6). */
+  confirm?(question: string): Promise<boolean>;
 }
 
 interface AuthenticatedDeployment {
@@ -214,6 +218,17 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     const tokens = await tokenStore.get(tokenStoreKey(settings.auth));
     if (!tokens || tokens.expiresAt <= Date.now()) throw agentXError("AUTH_REQUIRED", "run agentx login");
     return { settings, accessToken: tokens.accessToken };
+  }
+
+  /** This computer's unexpired admin sign-in (agentx --env <name> login --admin) for an environment by name. Never refreshed (Q4). */
+  async function adminSessionFor(name: string): Promise<AdminSession | undefined> {
+    try {
+      const settings = await deploymentSettings({ ...globalOptions(program), env: name });
+      const tokens = await services.tokenStore.get(tokenStoreKey(settings.auth));
+      return tokens !== undefined && tokens.expiresAt > Date.now() ? { baseUrl: settings.controlPlaneUrl.replace(/\/$/, ""), accessToken: tokens.accessToken } : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /** The developer sign-in's session dependencies: this computer's home and token store. */
@@ -342,7 +357,15 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     ...(dependencies.signin === undefined ? {} : { overrides: dependencies.signin }),
     parameterStore, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr,
   });
-  registerConfigCommands(program, { ...(dependencies.config === undefined ? {} : { overrides: dependencies.config }), parameterStore, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr });
+  registerConfigCommands(program, {
+    ...(dependencies.config === undefined ? {} : { overrides: dependencies.config }), parameterStore, fetch: services.fetchImplementation, stdout: services.stdout, stderr: services.stderr,
+    stdin: dependencies.stdin ?? process.stdin,
+    // Spec 025 FR-053: the workspace limits change with the admin sign-in of the environment --env names.
+    adminSession: async (env: string) => {
+      const session = await adminSessionFor(env);
+      return session === undefined ? undefined : { controlPlaneUrl: session.baseUrl, accessToken: session.accessToken };
+    },
+  });
 
   registerDoctorCommand(program, {
     ...(dependencies.doctor?.store === undefined ? {} : { store: dependencies.doctor.store }),
@@ -392,6 +415,59 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       services.stdout.write(formatSuccess(result, globals.json));
       for (const warning of registrationWarnings(result, definition)) services.stderr.write(`Warning: ${warning}\n`);
     });
+
+  // Spec 025 E17 (Q6): a person typing the command is the confirmation; --yes answers for them.
+  // Without --yes the prompt needs a terminal, checked before anything is planned.
+  // Final review M11: as config set limits.* does, the prompt reads the command's own stdin and
+  // writes through its own stderr, and no terminal is CONFIRMATION_UNAVAILABLE.
+  const changeConfirmer = (yes: boolean): ((question: string) => Promise<boolean>) => {
+    if (yes) return async () => true;
+    if (dependencies.confirm !== undefined) return (question) => dependencies.confirm!(question);
+    const stdin: NodeJS.ReadableStream & { isTTY?: boolean } = dependencies.stdin ?? process.stdin;
+    if (stdin.isTTY !== true) throw agentXError("CONFIRMATION_UNAVAILABLE", "this change needs a yes: run the command in a terminal to answer its prompt, or pass --yes; nothing changed");
+    const output = new NodeWritable({ write(chunk: Buffer | string, _encoding, done) { services.stderr.write(chunk.toString()); done(); } });
+    return (question) => askToApply(question, { input: stdin, output, signals: process });
+  };
+  for (const action of ["grant", "revoke"] as const) {
+    adminProject
+      .command(action)
+      .description(action === "grant"
+        ? "let a developer hand tasks to a project from an AI tool: shows the change and asks first"
+        : "remove a developer's granted access to a project: shows the change and asks first")
+      .option("--project <name>", "the project's name (required)")
+      .option("--developer <who>", "a Slack user ID such as U0123456789, the email they signed in with, or a developer ID (required)")
+      .option("--yes", "apply without asking; the change is still printed", false)
+      .action(async (options: { project?: string; developer?: string; yes: boolean }, command: Command) => {
+        // Checked here, not by commander, so the refusal is AgentX's own and names what to do.
+        // The program's own --project can take the value first, as it does for admin slack bind.
+        const globals = globalOptions(command);
+        // The global --project takes the value when given (as for admin slack bind), so read both.
+        const projectName = options.project ?? globals.project;
+        if (projectName === undefined) throw agentXError("CONFIG_INVALID", `--project is required: name the project, such as agentx admin project ${action} --project payments --developer U0123456789`);
+        const project = AgentXNameSchema.safeParse(projectName);
+        if (!project.success) throw agentXError("CONFIG_INVALID", "--project must be a project name: a lowercase letter, then up to 62 lowercase letters, digits or hyphens");
+        // The developer reference is never echoed: it may be an email.
+        const developer = options.developer?.trim();
+        if (developer === undefined || developer === "") {
+          throw agentXError("CONFIG_INVALID", "--developer is required: a Slack user ID such as U0123456789, the email they signed in to AgentX with, or a developer ID");
+        }
+        if (developer.length > 254) {
+          throw agentXError("CONFIG_INVALID", "--developer must be at most 254 characters; name them by Slack user ID, the email they signed in with, or developer ID");
+        }
+        const confirm = changeConfirmer(options.yes);
+        const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+        const result = await runCliChange({
+          controlPlaneUrl: settings.controlPlaneUrl,
+          accessToken,
+          cliVersion: CLI_VERSION,
+          change: { kind: action === "grant" ? "grant_project_access" : "revoke_project_access", project: project.data, developer },
+          // The effect is already printed above the prompt.
+          confirm: () => confirm("Apply this change?"),
+          write: (line) => { services.stderr.write(`${line}\n`); },
+        }, services.fetchImplementation);
+        services.stdout.write(formatSuccess({ outcome: result.outcome, changeId: result.change.changeId }, globals.json));
+      });
+  }
 
   const adminWorkspace = admin.command("workspace").description("administer AgentX workspaces");
   adminWorkspace
@@ -456,6 +532,46 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         channelId: options.channel,
       }, services.fetchImplementation);
       services.stdout.write(formatSuccess(result, globals.json));
+    });
+
+  const adminEval = admin.command("eval").description("SWE-bench runs from Slack (spec 043): `@agentx eval swebench <dataset> <instance>` in an enabled channel");
+  const evalChannel = (options: { team: string; channel: string }, settings: { controlPlaneUrl: string }, accessToken: string) => ({
+    controlPlaneUrl: settings.controlPlaneUrl, accessToken, teamId: options.team, channelId: options.channel,
+  });
+  adminEval
+    .command("enable")
+    .description("let any member of a bound channel start SWE-bench runs, each capped at a cost ceiling")
+    .requiredOption("--team <team-id>", "Slack team ID, for example T0123456789")
+    .requiredOption("--channel <channel-id>", "Slack channel ID, for example C0123456789")
+    .option("--max-cost-usd <usd>", "per-run cost ceiling in US dollars, from 1 to 100 (default 10)", parseMaxCostUsd)
+    .action(async (options: { team: string; channel: string; maxCostUsd?: number }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await enableEvalChannel({
+        ...evalChannel(options, settings, accessToken),
+        ...(options.maxCostUsd === undefined ? {} : { maxCostUsd: options.maxCostUsd }),
+      }, services.fetchImplementation);
+      services.stdout.write(formatSuccess(result, globals.json));
+    });
+  adminEval
+    .command("show")
+    .description("show whether a channel may start SWE-bench runs, and its cost ceiling")
+    .requiredOption("--team <team-id>", "Slack team ID")
+    .requiredOption("--channel <channel-id>", "Slack channel ID")
+    .action(async (options: { team: string; channel: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      services.stdout.write(formatSuccess(await showEvalChannel(evalChannel(options, settings, accessToken), services.fetchImplementation), globals.json));
+    });
+  adminEval
+    .command("disable")
+    .description("stop a channel from starting SWE-bench runs; a run in progress finishes")
+    .requiredOption("--team <team-id>", "Slack team ID")
+    .requiredOption("--channel <channel-id>", "Slack channel ID")
+    .action(async (options: { team: string; channel: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      services.stdout.write(formatSuccess(await disableEvalChannel(evalChannel(options, settings, accessToken), services.fetchImplementation), globals.json));
     });
 
   const adminCredential = admin.command("credential").description("register connector credentials stored in Secrets Manager under agentx/connectors/ or agentx/<env>/connectors/");
@@ -594,6 +710,26 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       services.stdout.write(formatSuccess(result, globals.json));
     });
 
+  // Spec 025 FR-052: registered after the existing admin commands, so their order is unchanged.
+  admin
+    .command("changes")
+    .description("list admin change records (kept 30 days): who asked, the change, how it was confirmed and how it ended; --json writes JSON Lines")
+    .requiredOption("--since <duration>", "how far back, such as 30m, 12h or 7d (at most 30d)")
+    .action(async (options: { since: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const since = parseSince(options.since, Date.now(), "change records");
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await exportChanges({
+        controlPlaneUrl: settings.controlPlaneUrl,
+        accessToken,
+        since,
+        json: globals.json,
+        write: (line) => { services.stdout.write(line); },
+      }, services.fetchImplementation);
+      // stdout carries only the records, so the count goes to stderr.
+      services.stderr.write(`${result.exported} change record${result.exported === 1 ? "" : "s"} since ${result.since}\n`);
+    });
+
   registerSetupCommands(program, dependencies.setup ?? realSetupContext({
     parameterStore, fetch: services.fetchImplementation, tokenStore: services.tokenStore, stdout: services.stdout, stderr: services.stderr,
   }));
@@ -705,9 +841,9 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--export <dir>", "write a self-contained bundle a platform team deploys to create the access stack")
     .option("--region <region>", "AWS region to deploy into")
     .option("--account <account>", "AWS account id; defaults to the caller's own account (sts GetCallerIdentity, read-only)")
-    .option("--release <dir>", "release directory (agentx release build output); default: download the release matching this agentx")
+    .option("--release <dir>", "release directory (agentx release build output); default: download the release matching this agentx. An agentx built from source needs none with --engine cdk --source")
     .addOption(new Option("--engine <engine>", "deploy engine: published CloudFormation templates, or cdk from a source checkout").choices(["templates", "cdk"]))
-    .option("--source <dir>", "git checkout of the release's source tag; required for --engine cdk")
+    .option("--source <dir>", "clean git checkout of a release tag; required for --engine cdk. An agentx built from source takes the version from its tag")
     .option("--resume", "only continue an install already under way; never start a new one", false)
     .option("--from-bundle <dir>", "with --resume: continue an install whose access stack a platform team deployed from this export bundle")
     .option("--yes", "answer every question with its default or its flag, without asking; the plan is still printed. Confirmations such as the Slack bot and workspace check and \"Request URL Verified?\" are answered yes, so check the printed summary afterwards", false)
@@ -753,8 +889,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--slack-bot-token-env <NAME>", "environment variable holding the Slack Bot User OAuth Token")
     .option("--slack-signing-secret-file <path>", "file holding the Slack signing secret")
     .option("--slack-signing-secret-env <NAME>", "environment variable holding the Slack signing secret")
-    .option("--worker-image <digest-ref>", "worker image by digest (testing only)")
-    .option("--slack-image <digest-ref>", "Slack service image by digest (testing only)")
+    .option("--worker-image <digest-ref>", "worker image by digest; an agentx built from source needs it with --engine cdk when the tag has no published release.json")
+    .option("--slack-image <digest-ref>", "Slack service image by digest; an agentx built from source needs it with --engine cdk when the tag has no published release.json")
     .option("--admin-email <email>", "Cognito: your email, for the AgentX admin user")
     .option("--repository <owner/name>", "the first project's repository")
     .option("--project-name <name>", "the first project's name (default: the repository's)")
@@ -847,14 +983,13 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
 
   /** R24 and spec 025 A14: this computer's unexpired admin sign-in for the developer's environment. Never refreshed (Q4). */
   const adminSession = async (env: string | undefined): Promise<AdminSession | undefined> => {
+    let name: string;
     try {
-      const name = (await resolveDeveloperEnvironment(home, env)).env;
-      const settings = await deploymentSettings({ ...globalOptions(program), env: name });
-      const tokens = await services.tokenStore.get(tokenStoreKey(settings.auth));
-      return tokens !== undefined && tokens.expiresAt > Date.now() ? { baseUrl: settings.controlPlaneUrl.replace(/\/$/, ""), accessToken: tokens.accessToken } : undefined;
+      name = (await resolveDeveloperEnvironment(home, env)).env;
     } catch {
       return undefined;
     }
+    return adminSessionFor(name);
   };
   const adminSignedIn = async (env: string | undefined): Promise<boolean> => (await adminSession(env)) !== undefined;
 
