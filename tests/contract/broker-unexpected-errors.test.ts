@@ -1,6 +1,7 @@
 // Issue #48: an error that is not an AgentXError reaches the broker's catch-all blocks. A temporary
 // AWS error answers 503 RUNTIME_UNAVAILABLE so the caller tries again; no error's own words reach
 // the caller, only its name reaches the log.
+import { CredentialUnavailable } from "@agentx/gateway";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AWS_TEMPORARY_MESSAGE, UNEXPECTED_REQUEST_MESSAGE } from "../../packages/broker/src/aws/broker-shared.js";
 import { adminCall, adminIssuer, createAdminBroker, type AdminHandler } from "../support/admin-broker.js";
@@ -87,6 +88,24 @@ describe("the OIDC route catch-all (#48)", () => {
     const logged = lines.map((line) => JSON.parse(line) as Record<string, unknown>).filter((line) => line.event === "request.unexpected_error");
     expect(logged).toEqual([expect.objectContaining({ component: "broker", name: "AccessDeniedException" })]);
     expect(lines.join("\n")).not.toContain(AWS_TEXT);
+  });
+
+  it("logs where an unexpected error was thrown, never its words", async () => {
+    const { handler, db } = await createAdminBroker({});
+    failing(db, new TypeError(`Cannot read properties of undefined (reading '${AWS_TEXT}')`));
+    const answer = await register(handler);
+    expect(answer.body.error).toEqual({ code: "CONFIG_INVALID", message: UNEXPECTED_REQUEST_MESSAGE });
+    const logged = lines.map((line) => JSON.parse(line) as Record<string, unknown>).filter((line) => line.event === "request.unexpected_error");
+    expect(logged).toEqual([expect.objectContaining({ name: "TypeError", at: expect.stringMatching(/^at .*broker-unexpected-errors\.test\.ts:\d+:\d+/) as unknown })]);
+    expect(lines.join("\n")).not.toContain(AWS_TEXT);
+  });
+
+  it("keeps a CredentialUnavailable's own words, which AgentX wrote and which name no secret", async () => {
+    const { handler, db } = await createAdminBroker({});
+    failing(db, new CredentialUnavailable("credential linear-key is not registered"));
+    const answer = await register(handler);
+    expect(answer.status).toBe(400);
+    expect(answer.body.error).toEqual({ code: "CONFIG_INVALID", message: "credential linear-key is not registered" });
   });
 
   it("answers a body that is not JSON with fixed words, never the parser's quote of it", async () => {

@@ -26,7 +26,7 @@ const project = (revision: number, connectors: unknown[]) => ({
 });
 
 /** The production linear type over a registered key, whose vendor answers with the recorded Linear tools. */
-function linearOverFixture(options: { keepCredential: boolean }): ConnectorType {
+function linearOverFixture(options: { keepCredential: boolean; tools?: typeof LINEAR_FIXTURE_TOOLS }): ConnectorType {
   const db = new FakeDynamoDb();
   db.set({ pk: "CREDENTIALS", sk: "REF#linear-key", entityType: "CREDENTIAL", ref: "linear-key", type: "static-secret", secretName: "agentx/connectors/linear-key", registeredBy: "admin", registeredAt: "2026-09-24T00:00:00.000Z" });
   const credentialRegistry = new CredentialRegistry({
@@ -34,7 +34,7 @@ function linearOverFixture(options: { keepCredential: boolean }): ConnectorType 
     githubApp: { ref: "github-app", secretName: "agentx/connectors/github-app" },
     documentClient: db as never, tableName: "state",
   });
-  const connect = vi.fn(async () => ({ tools: LINEAR_FIXTURE_TOOLS, call: vi.fn(), close: async () => undefined }));
+  const connect = vi.fn(async () => ({ tools: options.tools ?? LINEAR_FIXTURE_TOOLS, call: vi.fn(), close: async () => undefined }));
   return {
     type: "linear",
     resolve: (config, definition) => {
@@ -72,6 +72,19 @@ describe("registration preflight for a Linear tool outside the guarded set (#49)
     expect(result.report.connectors).toEqual([{ name: "linear", status: "connected", offered: ["linear__list_issues", "linear__get_issue", "linear__save_comment", "linear__list_teams", "linear__delete_comment"], skipped: [] }]);
   });
 
+  it("gives no second warning for a tool the presentation already skips", async () => {
+    // A vendor schema with its own `target` argument is skipped before the model sees it.
+    const tools = LINEAR_FIXTURE_TOOLS.map((tool) => tool.name === "delete_comment"
+      ? { ...tool, inputSchema: { ...tool.inputSchema, properties: { ...(tool.inputSchema.properties as Record<string, unknown>), target: { type: "string" } } } }
+      : tool);
+    const definition = ProjectDefinitionSchema.parse(project(1, [linear(["list_issues", "delete_comment"])]));
+    const connector = linearOverFixture({ keepCredential: true, tools }).resolve(definition.integrations!.connectors![0]!, definition, {});
+    if ("unusable" in connector) throw new Error(connector.unusable);
+    const result = await preflightConnectors([connector], definition, "owner-key");
+    expect(result.report.connectors[0]!.skipped.map((entry) => entry.tool)).toEqual(["delete_comment"]);
+    expect(result.warnings).toEqual([]);
+  });
+
   it("gives no warning when every approved tool is guarded or names no item", async () => {
     const definition = ProjectDefinitionSchema.parse(project(1, [linear(["list_issues", "list_teams", "save_issue"])]));
     const connector = linearOverFixture({ keepCredential: true }).resolve(definition.integrations!.connectors![0]!, definition, {});
@@ -96,6 +109,25 @@ describe("registering and planning a revision that approves such a tool (#49)", 
     expect(duplicate.body).toMatchObject({ duplicate: true, warnings: [DELETE_COMMENT_WARNING] });
     const withoutPreflight = await broker.admin("POST", "/v1/admin/projects", { body });
     expect(withoutPreflight.body.warnings).toBeUndefined();
+  });
+
+  it("keeps the warning when the registration lost the write race and answers as a duplicate", async () => {
+    const broker = await createAdminChangeBroker({ connectorTypes: { linear: linearOverFixture({ keepCredential: false }) } });
+    const body = { definition: project(1, [linear(["list_issues", "delete_comment"])]), runtimeBinding, preflight: true };
+    const send = broker.db.send;
+    let raced = false;
+    // Another writer stores the same revision between this request's read and its conditional write.
+    broker.db.send = async (command) => {
+      if (!raced && command.constructor.name === "TransactWriteCommand" && JSON.stringify(command).includes("PROJECT#ledger")) {
+        raced = true;
+        await send(command);
+        throw Object.assign(new Error("transaction cancelled"), { name: "TransactionCanceledException" });
+      }
+      return send(command);
+    };
+    const registered = await broker.admin("POST", "/v1/admin/projects", { body });
+    expect(raced).toBe(true);
+    expect(registered.body).toMatchObject({ duplicate: true, warnings: [DELETE_COMMENT_WARNING] });
   });
 
   it("lists the warning in a revision change's plan", async () => {

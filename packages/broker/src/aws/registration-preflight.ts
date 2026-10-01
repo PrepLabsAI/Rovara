@@ -85,7 +85,9 @@ async function preflightConnector(
     ? presented.skipped.filter((entry) => entry.reason === TARGET_CONFLICT_REASON)
       .map((entry) => `connector ${connector.name} tool ${entry.tool} already has a target argument and the connector has several scopes; remove its approval`)
     : [];
-  const warnings = unguardedItemTools(connector, resolved.label, resolved.guardedItemTools, discoveries.flatMap((discovery) => discovery.tools));
+  // Only tools the model is shown: a tool the presentation skips already has its own warning.
+  const shown = new Set(presented.tools.map((tool) => tool.upstreamName));
+  const warnings = unguardedItemTools(connector, resolved.label, resolved.guardedItemTools, discoveries.flatMap((discovery) => discovery.tools).filter((tool) => shown.has(tool.name)));
   return { entry: { name: connector.name, status: "connected", offered: presented.tools.map((tool) => tool.name), skipped }, refusals, warnings };
 }
 

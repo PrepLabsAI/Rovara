@@ -104,7 +104,7 @@ import { ZodError } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
-import { CatalogCache } from "@agentx/gateway";
+import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
 import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
 import { observeConnectorRoute } from "./connector-metrics.js";
@@ -752,19 +752,35 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
 }
 
 /**
+ * Where an error was thrown: its stack's first frame, a location that carries no data. Read only
+ * after the stack's header, so a message that spans lines can never be mistaken for a frame.
+ */
+function thrownAt(error: unknown): string | undefined {
+  if (!(error instanceof Error) || typeof error.stack !== "string") return undefined;
+  const header = `${error.name}: ${error.message}`;
+  if (!error.stack.startsWith(header)) return undefined;
+  return error.stack.slice(header.length).split("\n").map((line) => line.trim()).find((line) => line.startsWith("at "));
+}
+
+/**
  * Issue #48: the answer to an error that is not an AgentXError. A temporary AWS error answers 503
  * RUNTIME_UNAVAILABLE, so the caller tries again; any other keeps CONFIG_INVALID. Apart from a
  * schema refusal, no answer carries the error's own words, and the log carries only its name.
  */
 function unexpectedErrorAnswer(error: unknown, requestId: string): { statusCode: number; headers: Record<string, string>; body: string } {
-  // A schema refusal of the request is AgentX's own words (zod 4 names the field, never its value).
-  if (error instanceof ZodError) return json({ error: { code: "CONFIG_INVALID", message: error.message } }, requestId, 400);
+  // A schema refusal is AgentX's own words: zod 4 never quotes the raw input, though a refinement
+  // may name the admin's own values, such as a repository name. A CredentialUnavailable is too: it
+  // names only credential references and secret names, never a secret.
+  if (error instanceof ZodError || error instanceof CredentialUnavailable) {
+    return json({ error: { code: "CONFIG_INVALID", message: error.message } }, requestId, 400);
+  }
   const name = error instanceof Error ? error.name : "unknown";
   if (isTemporaryAwsError(error)) {
     console.log(JSON.stringify({ component: "broker", event: "aws.temporary_error", requestId, name }));
     return json({ error: { code: "RUNTIME_UNAVAILABLE", message: AWS_TEMPORARY_MESSAGE } }, requestId, 503);
   }
-  console.log(JSON.stringify({ component: "broker", event: "request.unexpected_error", requestId, name }));
+  const at = thrownAt(error);
+  console.log(JSON.stringify({ component: "broker", event: "request.unexpected_error", requestId, name, ...(at === undefined ? {} : { at }) }));
   return json({ error: { code: "CONFIG_INVALID", message: UNEXPECTED_REQUEST_MESSAGE } }, requestId, 400);
 }
 
