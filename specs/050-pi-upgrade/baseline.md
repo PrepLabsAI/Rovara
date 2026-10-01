@@ -10,3 +10,5 @@ Runner image `swebench-20261001T182913Z-a4b862f53023` (Pi 0.85.1). One run per r
 | 4 | SEC-bench `gpac.cve-2023-5586` | Sonnet 4.6 | yes (medium, generous; strict fail) | no sanitizer report | 2m 25s | $0.14 | 0eb4d29e |
 | 5 | SWE-bench Verified `django__django-15957` | GLM 5.3 | yes | F2P 4/4, P2P 89/89 | 18m 51s | $1.80 (5.1M tokens) | 4c89e1c6 |
 | 6 | SWE-bench Verified `sympy__sympy-13878` | GLM 5.3 | yes | F2P 1/1, P2P 19/19 | 11m 36s | $0.71 | 29471952 |
+| 7 | SEC-bench `njs.cve-2022-32414` | GLM 5.3 | **no** (stopped at the 60-minute limit) | — | 60m 00s | $2.28 | e7456407 |
+| 8 | SEC-bench `gpac.cve-2023-5586` | GLM 5.3 | not run (paid regression runs dropped, FR-004) | | | | |
