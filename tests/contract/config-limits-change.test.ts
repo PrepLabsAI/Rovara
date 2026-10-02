@@ -146,7 +146,10 @@ describe("agentx config set limits.* (FR-053, owner requirement)", () => {
       const tokens = new InMemoryTokenStore();
       if (options.signedIn) await tokens.set(tokenStoreKey(deployment.auth), { accessToken: TOKEN, expiresAt: Date.now() + 60_000 });
       // The config services' AWS clients are faked; the admin sign-in is main.ts's own.
+      // The admin sign-in and the fetch are main.ts's own here, not the services' test defaults.
       const { prompter, lines, ...config } = await configServicesFor();
+      delete config.adminSession;
+      delete config.fetch;
       let fetched = 0;
       const fetch = brokerFetch(harness);
       let stdout = "";

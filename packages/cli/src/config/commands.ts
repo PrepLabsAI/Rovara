@@ -2,8 +2,9 @@
 // with a parameter-only stack update (spec 025 R6's updateStackParameters); the alert address is an
 // SSM value; the workspace limits are the control plane's setting (spec 025 FR-053). list and get
 // never print the alert address, which can be a webhook secret: only whether it is set.
-import { agentXError, environmentStackName } from "@agentx/contracts";
-import { runCliChange } from "../admin/changes.js";
+import { randomUUID } from "node:crypto";
+import { AgentXError, SECRET_CONFIG_ERROR_MESSAGE, SECRET_CONFIG_KEYS, agentXError, environmentStackName, type ConfigChangeOutcomeRequest } from "@agentx/contracts";
+import { recordConfigChange, recordConfigOutcome, runCliChange } from "../admin/changes.js";
 import type { CallerIdentity, StackReader } from "../environments/adopt.js";
 import { withEnvironmentLock } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
@@ -33,8 +34,8 @@ export interface ConfigServices {
   now: () => number;
   sleep: (ms: number) => Promise<void>;
   pollMs?: number;
-  /** Spec 025 FR-053: this computer's unexpired admin sign-in for the environment, for the workspace limits' change path. */
-  adminSession?(env: string): Promise<{ controlPlaneUrl: string; accessToken: string } | undefined>;
+  /** Spec 025 FR-053: this computer's unexpired admin sign-in for the environment, for the workspace limits' change path and (issue #205) every other change's record. `expiresAt` is epoch milliseconds. */
+  adminSession?(env: string): Promise<{ controlPlaneUrl: string; accessToken: string; expiresAt?: number } | undefined>;
   /** How the workspace limits' change path reaches the control plane; the global fetch when absent. */
   fetch?: typeof fetch;
   /** False when nobody can answer a prompt (no terminal): a workspace limits change then needs --yes. */
@@ -152,6 +153,101 @@ async function modelRecorded(services: ConfigServices, env: string, settings: En
   return answers === undefined || answers.models[role] === modelId;
 }
 
+type AdminSession = { controlPlaneUrl: string; accessToken: string; expiresAt?: number };
+/** Issue #205: a config set change recorded in the admin change history, waiting for its outcome. */
+interface Recording { session: AdminSession; changeId: string; traceId: string }
+
+const iso = (ms: number) => new Date(ms).toISOString();
+const withoutCode = (error: AgentXError) => (error.message.startsWith(`${error.code}: `) ? error.message.slice(error.code.length + 2) : error.message);
+const capped = (text: string, max: number) => (text.length > max ? `${text.slice(0, max - 3)}...` : text);
+/** The record schema's limit on a before or after value. */
+const VALUE_MAX = 300;
+/** A stack update may take up to 30 minutes (updateStackParameters' deadline); the sign-in must outlast it, so its outcome is recorded too. */
+const STACK_SIGN_IN_MS = 35 * 60_000;
+const ALERT_SIGN_IN_MS = 10 * 60_000;
+
+/**
+ * Issue #205: the admin sign-in a config set change is recorded with. The operator role alone may
+ * still change a setting (installer SC-005), so without a sign-in the change goes ahead unrecorded
+ * and the command says so first. A sign-in that would end before the change could finish is
+ * refused, since its outcome could then not be recorded.
+ */
+async function recordingSession(services: ConfigServices, env: string, entry: ConfigKey, needMs: number, yes: boolean): Promise<AdminSession | undefined> {
+  const session = await services.adminSession?.(env);
+  if (session === undefined) {
+    services.write(yes
+      ? `Warning: this change to ${entry.key} will not be recorded in the admin change history, because this computer has no admin sign-in for ${env}; it goes ahead now. To record config changes, run agentx --env ${env} login --admin before config set.`
+      : `Warning: this change to ${entry.key} will not be recorded in the admin change history, because this computer has no admin sign-in for ${env}. To record it, answer no, run agentx --env ${env} login --admin, then run this again.`);
+    return undefined;
+  }
+  checkSignInLeft(services, env, entry, session, needMs);
+  return session;
+}
+
+/** Refuses a sign-in that would end before the change could finish and its outcome be recorded (a reminder to sign in again; the operator role alone can always skip recording). */
+function checkSignInLeft(services: ConfigServices, env: string, entry: ConfigKey, session: AdminSession, needMs: number): void {
+  if (session.expiresAt === undefined || session.expiresAt - services.now() >= needMs) return;
+  throw agentXError("AUTH_REQUIRED", `this computer's admin sign-in for ${env} ends in ${Math.max(0, Math.floor((session.expiresAt - services.now()) / 60_000))} minutes, too soon to record how this ${entry.key} change ends; run agentx --env ${env} login --admin again, then try again; nothing changed`);
+}
+
+/**
+ * Issue #205: records the change after the yes and before it applies, asking once more (with the
+ * same request ID, so never twice) if AgentX could not be reached. With a sign-in, a change that
+ * cannot be recorded is not made.
+ */
+async function startRecording(services: ConfigServices, env: string, session: AdminSession | undefined, entry: ConfigKey, needMs: number, values: { before: string; after: string } | undefined, requestedAt: string | undefined): Promise<Recording | undefined> {
+  if (session === undefined) return undefined;
+  // Checked again after the prompt, which may have stayed open a while.
+  checkSignInLeft(services, env, entry, session, needMs);
+  const hidden = SECRET_CONFIG_KEYS.has(entry.key) || values === undefined;
+  const change = { kind: "set_config" as const, key: entry.key, target: whereText(entry.target, env), ...(hidden ? { valueHidden: true as const } : { before: capped(values.before, VALUE_MAX), after: capped(values.after, VALUE_MAX) }) };
+  const requestId = randomUUID();
+  const record = () => recordConfigChange({ ...session, cliVersion: CLI_VERSION, requestId, change, ...(requestedAt === undefined ? {} : { requestedAt }), answeredAt: iso(services.now()) }, services.fetch ?? fetch);
+  try {
+    let recorded: Awaited<ReturnType<typeof recordConfigChange>>;
+    try {
+      recorded = await record();
+    } catch (error) {
+      if (!(error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE")) throw error;
+      recorded = await record();
+    }
+    return { session, ...recorded };
+  } catch (error) {
+    const reason = error instanceof AgentXError ? withoutCode(error) : "an unexpected error";
+    if (error instanceof AgentXError && error.code === "NOT_FOUND") {
+      throw agentXError("RUNTIME_UNAVAILABLE", `${entry.key} was not changed: this environment's control plane cannot record config changes yet; upgrade it with agentx --env ${env} upgrade, then try again; nothing changed`);
+    }
+    if (error instanceof AgentXError && (error.code === "AUTH_REQUIRED" || error.code === "FORBIDDEN")) {
+      throw agentXError(error.code, `${entry.key} was not changed: AgentX would not record the change with this computer's admin sign-in (${reason}); run agentx --env ${env} login --admin, then try again; nothing changed`);
+    }
+    throw agentXError(error instanceof AgentXError ? error.code : "RUNTIME_UNAVAILABLE", `${entry.key} was not changed: AgentX could not record the change in the admin change history (${reason}); nothing changed, try again`);
+  }
+}
+
+/** The failure as the record keeps it: a secret-bearing key's by fixed words only. */
+function failureOf(entry: ConfigKey, error: unknown): ConfigChangeOutcomeRequest {
+  const code = error instanceof AgentXError ? error.code : "RUNTIME_UNAVAILABLE";
+  if (SECRET_CONFIG_KEYS.has(entry.key)) return { outcome: "failed", error: { code, message: SECRET_CONFIG_ERROR_MESSAGE } };
+  const message = error instanceof AgentXError ? withoutCode(error) : "the change did not finish";
+  return { outcome: "failed", error: { code, message: capped(message === "" ? "the change did not finish" : message, 1_000) } };
+}
+
+/**
+ * Issue #205: how the change ended. The change has already happened (or failed), so a record that
+ * cannot be stepped forward never fails the command: it warns, and the record stays applying, which
+ * agentx admin changes shows, rather than claiming an outcome nobody recorded.
+ */
+async function finishRecording(services: ConfigServices, entry: ConfigKey, recording: Recording | undefined, outcome: ConfigChangeOutcomeRequest): Promise<void> {
+  if (recording === undefined) return;
+  try {
+    await recordConfigOutcome({ ...recording.session, changeId: recording.changeId, traceId: recording.traceId, outcome }, services.fetch ?? fetch);
+  } catch {
+    services.write(outcome.outcome === "applied"
+      ? `Warning: ${entry.key} changed, but AgentX could not record that it applied, so agentx admin changes shows change ${recording.changeId} as applying.`
+      : `Warning: AgentX could not record that the ${entry.key} change failed, so agentx admin changes shows change ${recording.changeId} as applying.`);
+  }
+}
+
 export async function runConfigSet(services: ConfigServices, env: string, input: { key: string; value?: string; valueSource?: SecretSource; yes: boolean }): Promise<{ changed: boolean }> {
   const entry = configKey(input.key);
   const { target } = entry;
@@ -174,21 +270,46 @@ export async function runConfigSet(services: ConfigServices, env: string, input:
       return { changed: true };
     });
   }
+  const session = await recordingSession(services, env, entry, STACK_SIGN_IN_MS, input.yes);
   if (role !== undefined) await checkModel(services, env, settings, role, value);
   const roleArn = settings.access?.cloudFormationRoleArn;
   if (roleArn === undefined) throw agentXError("CONFIG_INVALID", `environment ${env}'s settings name no CloudFormation role; run agentx env use --env ${env}, or agentx init --resume`);
   const holder = (await services.identity.get()).arn;
   return withEnvironmentLock({ store: services.store, env, holder, command: `config set ${entry.key}`, now: services.now }, async () => {
     const stackName = environmentStackName(env, target.part);
-    const result = await updateStackParameters({
-      cloudFormation: services.cloudFormation, stackName, roleArn, changes: { [target.parameter]: value }, label: "config",
-      confirm: async ({ parameters, changes }) => {
-        for (const change of parameters) services.write(`${entry.key}: ${change.name} ${change.from} -> ${change.to} on ${stackName}`);
-        for (const change of changes) services.write(`  ${change.action} ${change.logicalId} (${change.type})${change.replacement === "True" ? " [replacement]" : ""}`);
-        return input.yes || services.prompter.confirm(`Apply this change to ${stackName}?`, { defaultValue: false });
-      },
-      write: services.write, now: services.now, sleep: services.sleep, ...(services.pollMs === undefined ? {} : { pollMs: services.pollMs }),
-    });
+    // Issue #205: recorded after the yes, before the change set runs; a failed record runs nothing.
+    let recording: Recording | undefined;
+    let unrecorded: Error | undefined;
+    let result: { changed: boolean };
+    try {
+      result = await updateStackParameters({
+        cloudFormation: services.cloudFormation, stackName, roleArn, changes: { [target.parameter]: value }, label: "config",
+        confirm: async ({ parameters, changes }) => {
+          for (const change of parameters) services.write(`${entry.key}: ${change.name} ${change.from} -> ${change.to} on ${stackName}`);
+          for (const change of changes) services.write(`  ${change.action} ${change.logicalId} (${change.type})${change.replacement === "True" ? " [replacement]" : ""}`);
+          const requestedAt = input.yes ? undefined : iso(services.now());
+          if (!(input.yes || await services.prompter.confirm(`Apply this change to ${stackName}?`, { defaultValue: false }))) return false;
+          const parameter = parameters.find((change) => change.name === target.parameter);
+          try {
+            recording = await startRecording(services, env, session, entry, STACK_SIGN_IN_MS, { before: parameter?.from ?? "", after: parameter?.to ?? value }, requestedAt);
+          } catch (error) {
+            unrecorded = error instanceof Error ? error : agentXError("RUNTIME_UNAVAILABLE", `${entry.key} was not changed; nothing changed, try again`);
+            return false;
+          }
+          return true;
+        },
+        write: services.write, now: services.now, sleep: services.sleep, ...(services.pollMs === undefined ? {} : { pollMs: services.pollMs }),
+      });
+    } catch (error) {
+      if (unrecorded !== undefined) throw unrecorded;
+      // Only a stack that ended (rolled back, or gone) is a failure for certain. A deadline, a
+      // throttled poll or a lost answer may still be applying: the record is left applying.
+      if (error instanceof AgentXError && error.code === "CONFIG_INVALID") await finishRecording(services, entry, recording, failureOf(entry, error));
+      else if (recording !== undefined) services.write(`Warning: the ${entry.key} change may still be applying, so agentx admin changes shows change ${recording.changeId} as applying; check ${stackName} in the CloudFormation console.`);
+      throw error;
+    }
+    // After a yes, updateStackParameters either changed the stack or threw.
+    if (result.changed) await finishRecording(services, entry, recording, { outcome: "applied" });
     if (result.changed && role !== undefined) {
       try {
         await recordModel(services, env, role, value);
@@ -275,35 +396,55 @@ async function setAlertAddress(services: ConfigServices, env: string, input: { v
     services.write("alerts.address is already set; nothing to change");
     return { changed: false };
   }
+  const entry = configKey("alerts.address");
+  const session = await recordingSession(services, env, entry, ALERT_SIGN_IN_MS, input.yes);
   services.write(`alerts.address: ${(await recordedAlertAddress(services, env, settings)) ?? "none"} -> ${shown}`);
+  const requestedAt = input.yes ? undefined : iso(services.now());
   if (!input.yes && !(await services.prompter.confirm("Apply this change?", { defaultValue: false }))) {
     throw agentXError("CONFIG_INVALID", "the alerts.address change was not applied; nothing changed");
   }
   const holder = (await services.identity.get()).arn;
   return withEnvironmentLock({ store: services.store, env, holder, command: "config set alerts.address", now: services.now }, async () => {
-    const topicArn = await alertsTopicArn({ stackOutputs: async (name) => (await services.stacks.describe(name))?.outputs, stackName: settings.stacks["control-plane"], next: "upgrade the environment with agentx upgrade" });
-    const before = await services.alerts.subscriptions(topicArn);
-    const state = await ensureSubscribed({ api: services.alerts, topicArn, target, write: services.write, sleep: services.sleep, now: services.now });
-    // Only once the new address is subscribed: until then the secret keeps the old one.
-    if (target.kind === "webhook") await storeAlertWebhook(services.secrets, secretName, target.endpoint);
-    const current = await installed(services, env);
-    await writeEnvironmentSettings(services.store, { ...current, alertAddress: shown, updatedAt: new Date(services.now()).toISOString() });
-    const answers = await readInstallAnswers(services.store, env);
-    if (answers !== undefined) {
-      await writeInstallAnswers(services.store, { ...answers, alert: target.kind === "email" ? { kind: "email", address: target.address } : { kind: "webhook", display: target.display, secretName } });
+    // Issue #205: recorded under the lock, before anything changes; the record names the key only.
+    const recording = await startRecording(services, env, session, entry, ALERT_SIGN_IN_MS, undefined, requestedAt);
+    try {
+      const result = await changeAlertAddress(services, env, settings, target, shown, secretName);
+      await finishRecording(services, entry, recording, { outcome: "applied" });
+      return result;
+    } catch (error) {
+      await finishRecording(services, entry, recording, failureOf(entry, error));
+      throw error;
     }
-    const newEndpoint = target.kind === "email" ? target.address.toLowerCase() : target.endpoint;
-    for (const old of before) {
-      const endpoint = old.protocol === "email" ? old.endpoint.toLowerCase() : old.endpoint;
-      if (endpoint === newEndpoint || !old.arn.startsWith("arn:")) continue;
-      const oldShown = old.protocol === "email" ? old.endpoint : `${old.protocol}://${safeHost(old.endpoint)}/...`;
-      services.write(`${oldShown} is still subscribed. To stop sending it alarms, an admin runs: aws sns unsubscribe --subscription-arn ${old.arn} --region ${settings.region}`);
-    }
-    services.write(state === "pending"
-      ? `Alerts will go to ${shown} once the subscription is confirmed; then run agentx --env ${env} alerts test.`
-      : `Alerts now go to ${shown}. Send a test alarm with agentx --env ${env} alerts test.`);
-    return { changed: true };
   });
+}
+
+/** The alert address change itself, under the environment lock. */
+async function changeAlertAddress(
+  services: ConfigServices, env: string, settings: EnvironmentSettings,
+  target: { kind: "email"; address: string } | { kind: "webhook"; endpoint: string; display: string }, shown: string, secretName: string,
+): Promise<{ changed: boolean }> {
+  const topicArn = await alertsTopicArn({ stackOutputs: async (name) => (await services.stacks.describe(name))?.outputs, stackName: settings.stacks["control-plane"], next: "upgrade the environment with agentx upgrade" });
+  const before = await services.alerts.subscriptions(topicArn);
+  const state = await ensureSubscribed({ api: services.alerts, topicArn, target, write: services.write, sleep: services.sleep, now: services.now });
+  // Only once the new address is subscribed: until then the secret keeps the old one.
+  if (target.kind === "webhook") await storeAlertWebhook(services.secrets, secretName, target.endpoint);
+  const current = await installed(services, env);
+  await writeEnvironmentSettings(services.store, { ...current, alertAddress: shown, updatedAt: new Date(services.now()).toISOString() });
+  const answers = await readInstallAnswers(services.store, env);
+  if (answers !== undefined) {
+    await writeInstallAnswers(services.store, { ...answers, alert: target.kind === "email" ? { kind: "email", address: target.address } : { kind: "webhook", display: target.display, secretName } });
+  }
+  const newEndpoint = target.kind === "email" ? target.address.toLowerCase() : target.endpoint;
+  for (const old of before) {
+    const endpoint = old.protocol === "email" ? old.endpoint.toLowerCase() : old.endpoint;
+    if (endpoint === newEndpoint || !old.arn.startsWith("arn:")) continue;
+    const oldShown = old.protocol === "email" ? old.endpoint : `${old.protocol}://${safeHost(old.endpoint)}/...`;
+    services.write(`${oldShown} is still subscribed. To stop sending it alarms, an admin runs: aws sns unsubscribe --subscription-arn ${old.arn} --region ${settings.region}`);
+  }
+  services.write(state === "pending"
+    ? `Alerts will go to ${shown} once the subscription is confirmed; then run agentx --env ${env} alerts test.`
+    : `Alerts now go to ${shown}. Send a test alarm with agentx --env ${env} alerts test.`);
+  return { changed: true };
 }
 
 /** The settings already record this address: an email compared without case, or a webhook whose

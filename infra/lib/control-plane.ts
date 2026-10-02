@@ -28,7 +28,7 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { INDEX_EXPIRY_ATTRIBUTE, WORKER_SETTING_PARAMETERS, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, WORKER_SETTING_PARAMETERS, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
@@ -51,6 +51,23 @@ export const TURN_DETAILS_READ_ATTRIBUTES = [
 
 export interface ControlPlaneStackProps extends StackProps {
   naming?: AgentXNaming;
+}
+
+/**
+ * Issue 206: the alarms in this app the health probe would not read: each must be named
+ * `<prefix><suffix>` with a suffix from HEALTH_ALARM_SUFFIXES. Every stack of a named app is the
+ * same environment, and alarm names are plain strings (naming.alarmName).
+ */
+function unlistedAlarms(scope: Construct, prefix: string): string[] {
+  const listed = new Set<string>(HEALTH_ALARM_SUFFIXES.map((suffix) => `${prefix}${suffix}`));
+  return scope.node.root.node.findAll().flatMap((construct) => {
+    // CloudWatch returns a composite alarm only to a DescribeAlarms grant on *, which the broker has not.
+    if (construct instanceof cloudwatch.CfnCompositeAlarm) return [`the health probe cannot read composite alarm ${construct.node.path}`];
+    if (!(construct instanceof cloudwatch.CfnAlarm)) return [];
+    const name = construct.alarmName;
+    if (name !== undefined && !Token.isUnresolved(name) && listed.has(name)) return [];
+    return [`the health probe does not read alarm ${construct.node.path} (${String(name)}): name it ${prefix}<suffix> and add the suffix to HEALTH_ALARM_SUFFIXES`];
+  });
 }
 
 export class ControlPlaneStack extends Stack {
@@ -665,10 +682,17 @@ export class ControlPlaneStack extends Stack {
       });
       // Spec 025 phase 25c: sharing, named environments only (D14).
       const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, state, slackSecret, notifyOperator });
-      // Spec 025 A13: the admin health route reads the environment's alarms, by name prefix, and
+      // Spec 025 A13: the admin health route reads the environment's alarms, by name, and
       // the depths of its dead-letter queues. Read-only, and on exactly these resources.
       const alarmPrefix = naming.alarmName("");
       broker.addEnvironment("AGENTX_ALARM_PREFIX", alarmPrefix);
+      // Issue 206: the probe reads them by exact name (HEALTH_ALARM_SUFFIXES), since a prefix listing
+      // is authorized against * while a call naming its alarms is authorized against each alarm's
+      // ARN, which this grant covers. A CDK alarm missing from that list would go unreported, so the
+      // app refuses to synthesize one. This holds when an environment's stacks deploy from one
+      // revision, as a release does: a stack deployed alone from a newer revision could add an
+      // alarm this broker does not list.
+      this.node.addValidation({ validate: () => unlistedAlarms(this, alarmPrefix) });
       broker.addToRolePolicy(new iam.PolicyStatement({
         actions: ["cloudwatch:DescribeAlarms"],
         resources: [`arn:${this.partition}:cloudwatch:${this.region}:${this.account}:alarm:${alarmPrefix}*`],

@@ -1,4 +1,4 @@
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, getCurrentSystemPrompt } from "@earendil-works/pi-ai";
 import { beforeAll, describe, expect, it } from "vitest";
 import { orchestratorSystemPrompt } from "../../packages/orchestrator/src/orchestrator.js";
 import { EvalCaseSchema, loadCases, type EvalCase } from "../eval/case.js";
@@ -100,7 +100,8 @@ describe("command-only action evaluation (#104)", () => {
       model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1,
       beforeRun: (entry) => {
         faux.setResponses([(context) => {
-          prompts.push(context.systemPrompt ?? "");
+          // Pi 0.86+ carries the prompt in the leading system message (TranscriptContext).
+          prompts.push(getCurrentSystemPrompt(context.messages));
           return fauxAssistantMessage(entry.id.includes("close-workspace") ? closeGuidance : modelGuidance);
         }]);
       },
