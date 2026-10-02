@@ -221,11 +221,11 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   }
 
   /** This computer's unexpired admin sign-in (agentx --env <name> login --admin) for an environment by name. Never refreshed (Q4). */
-  async function adminSessionFor(name: string): Promise<AdminSession | undefined> {
+  async function adminSessionFor(name: string): Promise<(AdminSession & { expiresAt: number }) | undefined> {
     try {
       const settings = await deploymentSettings({ ...globalOptions(program), env: name });
       const tokens = await services.tokenStore.get(tokenStoreKey(settings.auth));
-      return tokens !== undefined && tokens.expiresAt > Date.now() ? { baseUrl: settings.controlPlaneUrl.replace(/\/$/, ""), accessToken: tokens.accessToken } : undefined;
+      return tokens !== undefined && tokens.expiresAt > Date.now() ? { baseUrl: settings.controlPlaneUrl.replace(/\/$/, ""), accessToken: tokens.accessToken, expiresAt: tokens.expiresAt } : undefined;
     } catch {
       return undefined;
     }
@@ -363,7 +363,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     // Spec 025 FR-053: the workspace limits change with the admin sign-in of the environment --env names.
     adminSession: async (env: string) => {
       const session = await adminSessionFor(env);
-      return session === undefined ? undefined : { controlPlaneUrl: session.baseUrl, accessToken: session.accessToken };
+      return session === undefined ? undefined : { controlPlaneUrl: session.baseUrl, accessToken: session.accessToken, expiresAt: session.expiresAt };
     },
   });
 

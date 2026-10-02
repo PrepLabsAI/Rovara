@@ -35,6 +35,8 @@ const Time = z.string().datetime();
 export const AdminChangeKindSchema = z.enum([
   "register_project_revision", "bind_channel", "unbind_channel", "register_credential", "stop_workspace",
   "grant_project_access", "revoke_project_access", "revoke_signin", "set_workspace_limits",
+  // Issue #205: an agentx config set change the CLI applies itself (a stack update) and records.
+  "set_config",
 ]);
 export type AdminChangeKind = z.infer<typeof AdminChangeKindSchema>;
 export const ConfirmationMethodSchema = z.enum(["elicitation", "slack", "cli"]);
@@ -75,6 +77,55 @@ export type ApplyAdminChangeRequest = z.infer<typeof ApplyAdminChangeRequestSche
 /** `requestedAt`: when the pop-up or prompt was shown, so a declined confirmation records it too (final review M3). */
 export const DeclineAdminChangeRequestSchema = z.object({ method: z.enum(["elicitation", "cli"]), reason: z.enum(["declined", "cancelled", "failed"]), requestedAt: Time.optional(), answeredAt: Time.optional() }).strict();
 export type DeclineAdminChangeRequest = z.infer<typeof DeclineAdminChangeRequestSchema>;
+
+/**
+ * Issue #205: agentx config set's keys whose value can be a secret (a webhook alert address). Their
+ * change records name the key only: never a before or after value.
+ */
+export const SECRET_CONFIG_KEYS: ReadonlySet<string> = new Set(["alerts.address"]);
+const ConfigText = z.string().max(300);
+/** Issue #205: what a recorded config change holds: the key, where it lives, and before and after (or `valueHidden`). */
+export const ConfigChangeSchema = z.object({
+  kind: z.literal("set_config"),
+  key: z.string().min(3).max(64).regex(/^[a-z][A-Za-z0-9]*(?:\.[a-z][A-Za-z0-9]*)+$/),
+  target: ConfigText.min(1),
+  before: ConfigText.optional(),
+  after: ConfigText.optional(),
+  /** A secret-bearing key: the value is never recorded, only that it changed. */
+  valueHidden: z.literal(true).optional(),
+}).strict().superRefine((change, context) => {
+  const values = change.before !== undefined || change.after !== undefined;
+  // A key this control plane does not know may still be hidden by a newer CLI; one it knows is secret never carries a value.
+  if (SECRET_CONFIG_KEYS.has(change.key) && (values || change.valueHidden !== true)) {
+    context.addIssue({ code: "custom", message: `${change.key} can hold a secret: record it with valueHidden true and no before or after value` });
+  }
+  if (change.valueHidden === true ? values : change.before === undefined || change.after === undefined) {
+    context.addIssue({ code: "custom", message: `${change.key} is recorded with its before and after values, or with valueHidden true and neither` });
+  }
+});
+export type ConfigChange = z.infer<typeof ConfigChangeSchema>;
+/** A secret-bearing key's failure is recorded by these words only: its error may quote the value. */
+export const SECRET_CONFIG_ERROR_MESSAGE = "the change did not finish; its error is not recorded, since this setting is secret";
+/**
+ * Issue #205: POST /v1/admin/changes/config. The CLI asked and got a yes (the cli method), and is
+ * about to apply the change itself; the record starts applying. `requestedAt` and `answeredAt` are
+ * when the prompt was shown and answered.
+ */
+export const RecordConfigChangeRequestSchema = z.object({
+  /** Makes a repeated record request answer the record it made, so the CLI can ask again safely. */
+  requestId: Uuid.optional(),
+  change: ConfigChangeSchema,
+  client: AdminChangeClientSchema,
+  requestedAt: Time.optional(),
+  answeredAt: Time.optional(),
+}).strict();
+export type RecordConfigChangeRequest = z.infer<typeof RecordConfigChangeRequestSchema>;
+/** Issue #205: POST /v1/admin/changes/<id>/outcome: how a recorded config change ended, once. */
+export const ConfigChangeOutcomeRequestSchema = z.discriminatedUnion("outcome", [
+  z.object({ outcome: z.literal("applied") }).strict(),
+  z.object({ outcome: z.literal("failed"), error: z.object({ code: z.string().min(1).max(64), message: z.string().min(1).max(1_000) }).strict() }).strict(),
+]);
+export type ConfigChangeOutcomeRequest = z.infer<typeof ConfigChangeOutcomeRequestSchema>;
 
 export const AdminChangeStatusSchema = z.enum(["pending", "applying", "applied", "declined", "expired", "failed"]);
 export type AdminChangeStatus = z.infer<typeof AdminChangeStatusSchema>;
@@ -144,6 +195,9 @@ export const AdminChangeAuditRecordSchema = z.object({
 export type AdminChangeAuditRecord = z.infer<typeof AdminChangeAuditRecordSchema>;
 export const AdminChangesResponseSchema = z.object({ changes: z.array(AdminChangeAuditRecordSchema), cursor: z.string().optional() }).strict();
 export type AdminChangesResponse = z.infer<typeof AdminChangesResponseSchema>;
+/** Issue #205: the recorded config change routes answer with the audit record itself. */
+export const RecordedChangeResponseSchema = z.object({ change: AdminChangeAuditRecordSchema }).strict();
+export type RecordedChangeResponse = z.infer<typeof RecordedChangeResponseSchema>;
 
 // The wire variants (R1, R23): the same fields, with the closed sets as plain strings and every
 // object loose, so a newer control plane's value or field never fails an older client's read.
@@ -178,6 +232,8 @@ export const AdminChangeAuditRecordWireSchema = looseCopy(AdminChangeAuditRecord
 export type AdminChangeAuditRecordWire = z.infer<typeof AdminChangeAuditRecordWireSchema>;
 export const AdminChangesResponseWireSchema = z.object({ changes: z.array(AdminChangeAuditRecordWireSchema), cursor: z.string().optional() }).passthrough();
 export type AdminChangesResponseWire = z.infer<typeof AdminChangesResponseWireSchema>;
+export const RecordedChangeResponseWireSchema = z.object({ change: AdminChangeAuditRecordWireSchema }).passthrough();
+export type RecordedChangeResponseWire = z.infer<typeof RecordedChangeResponseWireSchema>;
 
 export function adminChangeKey(changeId: string): { pk: string; sk: "META" } {
   return { pk: `ADMIN_CHANGE#${changeId}`, sk: "META" };

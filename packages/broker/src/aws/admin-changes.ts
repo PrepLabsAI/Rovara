@@ -9,7 +9,7 @@ import { randomUUID } from "node:crypto";
 import { GetCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
   ADMIN_CHANGE_APPLYING_STALE_MS, ADMIN_CHANGE_EFFECT_MAX, ADMIN_CHANGE_ENDED, ADMIN_CHANGE_UNEXPECTED_MESSAGE, adminChangeFailedMessage, SlackChannelIdSchema, ADMIN_LIST_MAX, ADMIN_CHANGE_TTL_MS, AdminChangeOutcomeSchema, AdminChangePendingRecordSchema, AgentXError, AgentXErrorCodeSchema,
-  ApplyAdminChangeRequestSchema, DeclineAdminChangeRequestSchema, INDEX_EXPIRY_ATTRIBUTE, ProposeAdminChangeRequestSchema, SlackUserIdSchema,
+  ApplyAdminChangeRequestSchema, ConfigChangeOutcomeRequestSchema, DeclineAdminChangeRequestSchema, RecordConfigChangeRequestSchema, SECRET_CONFIG_ERROR_MESSAGE, SECRET_CONFIG_KEYS, INDEX_EXPIRY_ATTRIBUTE, ProposeAdminChangeRequestSchema, SlackUserIdSchema,
   adminChangeItemExpiresAt, adminChangeKey, adminChangeRequestKey, agentXError, outcomeOfStatus, redactSecrets, redactText,
   type AdminChangeAuditRecord, type AdminChangeInput, type AdminChangePressEvent, type AdminChangeStatus, type AdminChangeView, type AdminMeResponse, type ConfirmationMethod,
   type PendingChange, type RefusedAttemptReason,
@@ -46,7 +46,7 @@ type Confirmation = { method: ConfirmationMethod; pressedBy?: string; requestedA
 
 const iso = (ms: number) => new Date(ms).toISOString();
 const TRACE = /^[A-Za-z0-9._-]{1,128}$/;
-const CHANGE_PATH = /^\/v1\/admin\/changes\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/(slack|apply|decline))?$/;
+const CHANGE_PATH = /^\/v1\/admin\/changes\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(?:\/(slack|apply|decline|outcome))?$/;
 const LIST_DEFAULT_DAYS = 7;
 const LIST_DEFAULT_LIMIT = 25;
 const SETTLE_PAGES_MAX = 10;
@@ -683,6 +683,109 @@ async function list(deps: AdminChangeDependencies, url: URL): Promise<Answer> {
   return { status: 200, body: { changes, ...(page.cursor === undefined ? {} : { cursor: page.cursor }) } };
 }
 
+/**
+ * Issue #205: agentx config set applies a stack-parameter (or alert address) change from the
+ * operator's computer, not through a handler here, so the CLI records it: after the admin's yes and
+ * before the change, a record that starts applying (the cli method), then its outcome once. There
+ * is no pending item, so the confirmation routes never find it and the 2-minute stale rule (which
+ * reads the pending item) never marks a long stack update failed. A secret-bearing key's record
+ * names the key only (the request schema refuses a value for one).
+ */
+async function recordConfigChange(deps: AdminChangeDependencies, identity: AuthenticatedIdentity, authorization: string | undefined, value: unknown, traceId: string): Promise<Answer> {
+  const parsed = RecordConfigChangeRequestSchema.safeParse(value);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    deps.log({ event: "admin_change.request_invalid", traceId, error: "CONFIG_INVALID" });
+    throw agentXError("CONFIG_INVALID", `invalid config change record: ${issue?.path.join(".") || "request"}: ${issue?.message ?? "invalid"}; fix it and send it again`);
+  }
+  const request = parsed.data;
+  const now = deps.now();
+  // The prompt was shown before this record; a client time counts only within the last 10 minutes.
+  const recent = (at: string | undefined, earliest: number): string => {
+    const ms = at === undefined ? Number.NaN : Date.parse(at);
+    return Number.isFinite(ms) && ms >= earliest && ms <= now ? iso(ms) : iso(now);
+  };
+  const proposedAt = recent(request.requestedAt, now - ADMIN_CHANGE_TTL_MS);
+  const answeredAt = recent(request.answeredAt, Date.parse(proposedAt));
+  const { change } = request;
+  const changeHash = hashJson(change);
+  // A repeated request ID answers the record it made (the CLI asks again once if an answer is lost).
+  const existing = async (): Promise<Answer | undefined> => {
+    if (request.requestId === undefined) return undefined;
+    const pointer = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: adminChangeRequestKey(identity.ownerKey, request.requestId), ConsistentRead: true })) as { Item?: { changeId?: unknown; changeHash?: unknown } };
+    if (typeof pointer.Item?.changeId !== "string") return undefined;
+    if (pointer.Item.changeHash !== changeHash) throw agentXError("IDEMPOTENCY_CONFLICT", `request ID ${request.requestId} was already used for a different change; use a new one`);
+    const found = await readAudit(deps.audit, pointer.Item.changeId);
+    // The ID is taken, so a new record could never be written under it: start over with a new one.
+    if (found === undefined) throw agentXError("IDEMPOTENCY_CONFLICT", `the record for request ID ${request.requestId} could not be read; run the command again`);
+    return { status: 200, body: { change: found } };
+  };
+  const repeated = await existing();
+  if (repeated !== undefined) return repeated;
+  const who = await whoIsPlanning(deps, identity, authorization, traceId);
+  const hidden = change.valueHidden === true || SECRET_CONFIG_KEYS.has(change.key);
+  const effect = cap(redactText(hidden ? `${change.key} changed; the value is secret, so it is not recorded` : `${change.key}: ${change.before ?? ""} -> ${change.after ?? ""} (${change.target})`), ADMIN_CHANGE_EFFECT_MAX);
+  const record: AdminChangeAuditRecord = {
+    changeId: deps.newId(), kind: "set_config", traceId,
+    admin: { issuer: identity.issuer, subject: identity.subject, ...(who.displayName === undefined ? {} : { displayName: who.displayName }) },
+    client: { cliVersion: request.client.cliVersion },
+    change: redactSecrets(change) as Record<string, unknown>, effect,
+    methodsOffered: ["cli"], methodUsed: "cli", status: "applying", proposedAt,
+    ...(request.requestedAt === undefined ? {} : { confirmationRequestedAt: proposedAt }),
+    answeredAt,
+  };
+  if (request.requestId === undefined) {
+    await writeProposal(deps.audit, record);
+  } else {
+    try {
+      await transact(deps, [
+        proposalItem(deps.audit.tableName, record),
+        { Put: { TableName: deps.tableName, Item: { ...adminChangeRequestKey(identity.ownerKey, request.requestId), entityType: "ADMIN_CHANGE_REQUEST", changeId: record.changeId, changeHash, [INDEX_EXPIRY_ATTRIBUTE]: adminChangeItemExpiresAt(proposedAt) }, ConditionExpression: "attribute_not_exists(pk)" } },
+      ]);
+    } catch (error) {
+      // The same request ID raced this one: answer the record it made.
+      const raced = conditional(error) ? await existing() : undefined;
+      if (raced === undefined) throw error;
+      return raced;
+    }
+  }
+  logChangeStep(deps.log, "config_recorded", { changeId: record.changeId, traceId, kind: record.kind });
+  return { status: 201, body: { change: record } };
+}
+
+/** Issue #205: how a recorded config change ended, once, by the admin who recorded it. */
+async function recordConfigOutcome(deps: AdminChangeDependencies, identity: AuthenticatedIdentity, changeId: string, value: unknown): Promise<Answer> {
+  const record = await readAudit(deps.audit, changeId);
+  if (record === undefined) throw agentXError("NOT_FOUND", `no change ${changeId}; list the changes with agentx admin changes`);
+  if (record.kind !== "set_config" || (await getPending(deps, changeId)) !== undefined) {
+    throw agentXError("CONFIG_INVALID", `change ${changeId} is not a recorded config change; confirm or decline it instead`);
+  }
+  if (record.admin.issuer !== identity.issuer || record.admin.subject !== identity.subject) {
+    await refuseAttempt(deps, changeId, "another_admin");
+    logChangeStep(deps.log, "refused", { changeId, traceId: record.traceId, kind: record.kind, error: "another_admin" });
+    throw agentXError("FORBIDDEN", "only the admin who recorded this change can record how it ended");
+  }
+  const body = ConfigChangeOutcomeRequestSchema.safeParse(value);
+  if (!body.success) throw agentXError("CONFIG_INVALID", "outcome must be applied, or failed with an error code and message");
+  const ended = () => agentXError("CONFIG_INVALID", `change ${changeId} already ended ${record.status}; its outcome is recorded once`);
+  if (record.status !== "applying") throw ended();
+  const at = iso(deps.now());
+  const secret = record.change.valueHidden === true || (typeof record.change.key === "string" && SECRET_CONFIG_KEYS.has(record.change.key));
+  const step: AuditStep = body.data.outcome === "applied"
+    ? { status: "applied", appliedAt: at }
+    : { status: "failed", failedAt: at, error: { code: body.data.error.code, message: secret ? SECRET_CONFIG_ERROR_MESSAGE : cap(redactText(body.data.error.message), ERROR_MESSAGE_MAX) } };
+  try {
+    await deps.audit.documentClient.send(new UpdateCommand(auditStepItem(deps.audit.tableName, changeId, step).Update));
+  } catch (error) {
+    if (conditional(error)) throw ended();
+    throw error;
+  }
+  const outcome = outcomeOfStatus(step.status!);
+  if (outcome !== undefined) deps.audit.metric(outcome);
+  logChangeStep(deps.log, body.data.outcome === "applied" ? "applied" : "failed", { changeId, traceId: record.traceId, kind: record.kind, ...(outcome === undefined ? {} : { outcome }), ...(step.error === undefined ? {} : { error: step.error.code }) });
+  return { status: 200, body: { change: (await readAudit(deps.audit, changeId)) ?? { ...record, ...step, ...(outcome === undefined ? {} : { outcome }) } } };
+}
+
 /** E4: the change routes, or undefined when the request is not one. */
 export async function routeAdminChange(deps: AdminChangeDependencies | undefined, identity: AuthenticatedIdentity, request: { method: string; headers: Record<string, string | undefined>; body: unknown }, url: URL): Promise<Answer | undefined> {
   if (url.pathname !== "/v1/admin/changes" && !url.pathname.startsWith("/v1/admin/changes/")) return undefined;
@@ -707,6 +810,7 @@ async function routeChange(deps: AdminChangeDependencies, identity: Authenticate
     if (request.method === "POST") return propose(deps, identity, request.headers.authorization, request.body, traceId);
     if (request.method === "GET") return list(deps, url);
   }
+  if (url.pathname === "/v1/admin/changes/config" && request.method === "POST") return recordConfigChange(deps, identity, request.headers.authorization, request.body, traceId);
   const match = CHANGE_PATH.exec(url.pathname);
   const changeId = match?.[1];
   if (changeId !== undefined) {
@@ -718,6 +822,7 @@ async function routeChange(deps: AdminChangeDependencies, identity: Authenticate
     if (request.method === "POST" && match?.[2] === "slack") return startSlack(deps, identity, changeId);
     if (request.method === "POST" && match?.[2] === "apply") return apply(deps, identity, changeId, request.body);
     if (request.method === "POST" && match?.[2] === "decline") return decline(deps, identity, changeId, request.body);
+    if (request.method === "POST" && match?.[2] === "outcome") return recordConfigOutcome(deps, identity, changeId, request.body);
   }
   throw agentXError("NOT_FOUND", "route not found");
 }
