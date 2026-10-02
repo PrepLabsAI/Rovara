@@ -423,6 +423,9 @@ export async function handleSwebenchCallback(
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: { ":now": now(dependencies).toISOString(), ":cancel": "CANCEL_REQUESTED" },
       })).catch((failure: unknown) => { if (!isConditionFailure(failure)) throw failure; });
+      // The run may have ended between the read above and these writes: its start is refused too.
+      const current = await readRun(dependencies, runId);
+      if (current !== undefined && SWEBENCH_TERMINAL_STATUSES.has(current.status)) throw agentXError("OPERATION_INTERRUPTED", "this eval run has already ended; do not start it");
     }
     return { run: (await readRun(dependencies, runId)) ?? run };
   }
@@ -660,7 +663,16 @@ async function endDeadRun(dependencies: SwebenchDependencies, runId: string): Pr
     : `the run could not start: ${how} before the runner started`;
   // Ruling 16: its instance first, so a runner still alive cannot spend once the run is charged. A
   // failure leaves the run to the next tick.
-  if (typeof item.ec2InstanceId === "string" && dependencies.terminateInstance !== undefined) await dependencies.terminateInstance(item.ec2InstanceId);
+  if (typeof item.ec2InstanceId === "string" && dependencies.terminateInstance !== undefined) {
+    try {
+      await dependencies.terminateInstance(item.ec2InstanceId);
+    } catch (error) {
+      // An ID EC2 cannot parse names no instance: treated as missing, so it cannot fail every tick.
+      // The run is still ended, and a runner still alive is stopped by the 409 to its start.
+      if (!(error instanceof Error) || error.name !== "InvalidInstanceID.Malformed") throw error;
+      console.log(JSON.stringify({ component: "broker", event: "eval_slots.instance_not_terminated", level: "warning", runId, instanceId: item.ec2InstanceId, error: error.message }));
+    }
+  }
   await finishRun(dependencies, runId, { status: "FAILED", error });
   // EndRun may have ended it first: then its own end stands, and this changed nothing.
   return (await readRun(dependencies, runId))?.error === error ? { executionStatus, runnerStarted } : undefined;

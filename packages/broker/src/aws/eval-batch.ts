@@ -548,7 +548,7 @@ function chargeOf(run: SwebenchRun, ceiling: number): Charge {
   const usedNoTokens = (run.status === "CANCELLED" && run.runnerStartedAt === undefined)
     || (run.status === "FAILED" && NO_TOKEN_FAILURES.some((pattern) => pattern.test(run.error ?? "")));
   if (usedNoTokens) return { costUsd: 0, chargedUsd: 0, costEstimated: false };
-  return { costUsd: null, chargedUsd: ceiling, costEstimated: true };
+  return { costUsd: null, chargedUsd: roundUsd(ceiling), costEstimated: true };
 }
 
 function measureOf(batchId: string, run: SwebenchRun, end: RecordedEnd): EvalRunMeasure {

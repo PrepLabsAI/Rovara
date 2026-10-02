@@ -723,6 +723,37 @@ describe("a dead run's runner that is still alive (spec 052 Ruling 16)", () => {
     expect(h.db.get(`SWEBENCH_RUN#${RUN_B}`, "META")).toMatchObject({ status: "FAILED" });
   });
 
+  it("ends a run whose recorded instance ID is malformed, with a warning naming it, and still refuses its late start", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const h = await harness();
+    await singleRun(h, RUN_A);
+    h.db.set({ ...h.db.get(`SWEBENCH_RUN#${RUN_A}`, "META")!, ec2InstanceId: "not-an-instance" });
+    h.executions.set(executionArn(RUN_A), "ABORTED");
+    h.terminateInstance.mockRejectedValue(Object.assign(new Error("Invalid id"), { name: "InvalidInstanceID.Malformed" }));
+    h.advance(GRACE_MS + 1);
+    await reconcileSwebenchSlots(h.dependencies);
+    expect(h.db.get(`SWEBENCH_RUN#${RUN_A}`, "META")).toMatchObject({ status: "FAILED" });
+    const lines = vi.mocked(console.log).mock.calls.map(([line]) => String(line));
+    expect(lines.some((line) => line.includes("eval_slots.instance_not_terminated") && line.includes(RUN_A) && line.includes("not-an-instance"))).toBe(true);
+    await expect(runnerStarted(h, RUN_A)).rejects.toMatchObject({ statusCode: 409 });
+  });
+
+  it("refuses a start when the run ends between the callback's read and its write", async () => {
+    const h = await harness();
+    await singleRun(h, RUN_A);
+    const send = h.db.send;
+    h.db.send = async (command) => {
+      if (command.constructor.name === "UpdateCommand" && (command.input.Key as { pk?: string }).pk === `SWEBENCH_RUN#${RUN_A}`) {
+        h.db.send = send;
+        await endByStateMachine(h, RUN_A, "CANCELLED", "cancelled from Slack");
+      }
+      return send(command);
+    };
+    await expect(runnerStarted(h, RUN_A)).rejects.toMatchObject({ statusCode: 409 });
+    h.db.send = send;
+    expect(h.db.get(`SWEBENCH_RUN#${RUN_A}`, "META")!.runnerStartedAt).toBeUndefined();
+  });
+
   it("leaves the run to the next tick when its instance cannot be terminated", async () => {
     const h = await harness();
     await singleRun(h, RUN_A);
@@ -738,6 +769,18 @@ describe("a dead run's runner that is still alive (spec 052 Ruling 16)", () => {
 });
 
 describe("charges that sum exactly to the spend (spec 052 Ruling 17)", () => {
+  it("rounds an estimated ceiling charge as spend is rounded", async () => {
+    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10.123_456_7 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    await topUpBatches(h.dependencies);
+    const runId = evalBatchRunId(batch.batchId, 0, 1);
+    await runnerStarted(h, runId);
+    await endByStateMachine(h, runId, "FAILED", "the run did not finish within its 2-hour limit");
+    expect(await runEvalBatchTick(h.dependencies)).toMatchObject({ finalized: [batch.batchId] });
+    expect(row(h, batch.batchId, runId)).toMatchObject({ chargedUsd: 10.123457, costEstimated: true });
+    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ spentUsd: 10.123457 });
+  });
+
   it("rounds each reported cost once, so 200 runs at unrounded costs still finalize", async () => {
     const h = await harness({ maxConcurrentEvals: 6, maxCostUsd: 10 });
     const ids = Array.from({ length: 100 }, (_, index) => `django__django-${10000 + index}`);
