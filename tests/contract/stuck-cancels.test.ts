@@ -149,8 +149,8 @@ describe("a stuck cancel whose compute is alive", () => {
     expect(task.operation()).toMatchObject({ status: "CANCEL_REQUESTED" });
     expect(task.meta()).toMatchObject({ status: "BUSY", activeOperationId: task.operationId });
     expect(logs).toEqual([
-      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId },
-      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId },
+      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId, status: "CANCEL_REQUESTED" },
+      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId, status: "CANCEL_REQUESTED" },
     ]);
   });
 
@@ -160,6 +160,22 @@ describe("a stuck cancel whose compute is alive", () => {
     expect(await sweep([{ workspaceId: task.workspaceId, compute: "alive" }])).toEqual(empty);
     expect(task.operation()).toMatchObject({ status: "CANCEL_REQUESTED" });
     expect(task.meta()).toMatchObject({ status: "BUSY", activeOperationId: task.operationId });
+    expect(logs).toEqual([]);
+  });
+
+  it("PR 255 owner decision 1: a busy worker whose cancel is still progressing is neither ended nor counted", async () => {
+    const { db, sweep, logs } = setup();
+    const task = seedTask(db, "CANCEL_REQUESTED", 31, { cancelRetriedAt: minutesAgo(31) });
+    db.set({ pk: `WORKSPACE#${task.workspaceId}`, sk: `OPERATION#${randomUUID()}`, kind: "cancel", targetOperationId: task.operationId, status: "RUNNING", fence: 3, updatedAt: minutesAgo(2) });
+    expect(await sweep([{ workspaceId: task.workspaceId, compute: "alive", worker: "busy" }])).toEqual(empty);
+    expect(logs).toEqual([]);
+  });
+
+  it("PR 255 owner decision 1: an AI tool's developer task on a busy worker keeps today's rule: never ended nor counted while compute is alive", async () => {
+    const { db, sweep, logs } = setup();
+    const task = seedTask(db, "CANCEL_REQUESTED", 600, { cancelRetriedAt: minutesAgo(600) });
+    db.set({ pk: `WORKSPACE#${task.workspaceId}`, sk: "DEVELOPER_TASK", entityType: "DEVELOPER_TASK_POINTER", taskId: randomUUID() });
+    expect(await sweep([{ workspaceId: task.workspaceId, compute: "alive", worker: "busy" }])).toEqual(empty);
     expect(logs).toEqual([]);
   });
 
@@ -285,8 +301,8 @@ describe("a retried cancel that failed", () => {
     expect(task.meta()).toMatchObject({ status: "BUSY", activeOperationId: task.operationId });
     expect(task.operation()).not.toHaveProperty("workspaceReleasedAt");
     expect(logs).toEqual([
-      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId },
-      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId },
+      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId, status: "INTERRUPTED" },
+      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId, status: "INTERRUPTED" },
     ]);
   });
 
@@ -367,8 +383,8 @@ describe("a failed first cancel (issue 202)", () => {
     expect(task.operation()).not.toHaveProperty("workspaceReleasedAt");
     expect(task.operation()).not.toHaveProperty("error");
     expect(logs).toEqual([
-      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId },
-      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId },
+      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId, status: "INTERRUPTED" },
+      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId, status: "INTERRUPTED" },
     ]);
   });
 

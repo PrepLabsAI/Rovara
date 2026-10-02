@@ -46,7 +46,7 @@ type Client = { send(command: unknown): Promise<unknown> };
 
 /** Owner decision, 2026-10-01: a cancel normally finishes in seconds. */
 export const STUCK_CANCEL_MS = 30 * 60_000;
-/** How long a re-queued cancel gets before the task is ended as interrupted. */
+/** How long a re-queued cancel gets before the task is ended as interrupted, if its worker answers idle. */
 export const STUCK_CANCEL_RETRY_MS = 30 * 60_000;
 export const STUCK_CANCEL_LOST_MESSAGE = "RUNTIME_UNAVAILABLE: workspace compute was lost before the cancel finished; the task was stopped";
 export const STUCK_CANCEL_INTERRUPTED_MESSAGE = "the cancel did not reach the worker, even after a retry; the task was stopped and its workspace freed";
@@ -145,7 +145,7 @@ async function settle(
       // the worker, and a later run finds its compute gone.
       if (worker === "busy" && waited > STUCK_CANCEL_RETRY_MS) {
         result.failed.push(operationId);
-        log({ event: "stuck_cancel.held_busy", workspaceId, operationId });
+        log({ event: "stuck_cancel.held_busy", workspaceId, operationId, status: "INTERRUPTED" });
       }
       return;
     }
@@ -187,7 +187,7 @@ async function settle(
     if (worker !== "idle") {
       if (worker === "busy") {
         result.failed.push(operationId);
-        log({ event: "stuck_cancel.held_busy", ...ids });
+        log({ event: "stuck_cancel.held_busy", ...ids, status: "CANCEL_REQUESTED" });
       }
       return;
     }
