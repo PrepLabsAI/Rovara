@@ -119,11 +119,16 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
   enforces, and its row is marked estimated (`costUsd` null, `chargedUsd` the ceiling, `costEstimated`). Ends that
   provably used no tokens are charged nothing: the instance could not be launched or recorded, the run could not start,
   or it was cancelled before its runner started. A FAILED result's usage is kept on the run record, so its reported cost
-  survives whichever path records the end. The rows' charges sum to the batch's spend.
+  survives whichever path records the end. The rows' charges sum to the batch's spend. A runner that reports `started`
+  after a stop is charged its ceiling. A `started` that arrives after the run has ended is ignored: the run keeps the
+  charge it already has, and the few seconds the runner keeps working until its instance is terminated are not charged.
 - **D-6 (2026-10-02, Ruling 5):** The runner halts only after a turn crosses its ceiling, so each run in flight, and the
   next start, reserves its ceiling plus 10%: a start fits while `spent + (inFlight + 1) × ceiling × 1.1 ≤ costCapUsd`.
 - **D-7 (2026-10-02, Ruling 6):** A batch's models are checked against the project's approved list when the batch is
   created, not again at each start; the batch runs what it recorded.
+- **D-8 (2026-10-02, Ruling 7):** A retry that the cap or a stop keeps from starting still ends its task's attempt chain
+  with a FAILED row, charged $0, whose error names the cap or the stop. Every task in the batch therefore ends in a
+  terminal row.
 
 ## Success Criteria
 
