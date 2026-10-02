@@ -62,7 +62,7 @@ describe("forms", () => {
     expect(shown(hub)).toMatchObject({ kind: "form", text: "Paste the Slack values" });
     hub.answer(shown(hub).id, JSON.stringify({ clientId: "1111.2222", botToken: TEST_BOT_TOKEN, appName: "" }));
     await expect(answer).resolves.toEqual({ clientId: "1111.2222", botToken: TEST_BOT_TOKEN, appName: "AgentX acme (staging)" });
-    expect(answeringSlackInstall(scriptedPrompter([]), "installed").form).toBeUndefined();
+    expect(Object.hasOwn(answeringSlackInstall(scriptedPrompter([]), "installed"), "form")).toBe(false);
   });
 
   it("refuses a body that is not a form", () => {

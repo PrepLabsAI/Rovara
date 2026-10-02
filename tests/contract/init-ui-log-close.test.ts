@@ -2,12 +2,14 @@
 // the run, even when the wizard itself never starts; a log that stops working says so in the
 // terminal once.
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type * as LogFile from "../../packages/cli/src/init/log-file.js";
 import type { InitLog, OpenInitLogOptions } from "../../packages/cli/src/init/log-file.js";
+import type * as WizardUi from "../../packages/cli/src/init/ui/index.js";
 
 const opened: Array<{ log: InitLog; options: OpenInitLogOptions | undefined; closed: number }> = [];
 
 vi.mock("../../packages/cli/src/init/log-file.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../packages/cli/src/init/log-file.js")>();
+  const actual = await importOriginal<typeof LogFile>();
   return {
     ...actual,
     openInitLog: async (path: string, options?: OpenInitLogOptions) => {
@@ -20,7 +22,7 @@ vi.mock("../../packages/cli/src/init/log-file.js", async (importOriginal) => {
 });
 
 vi.mock("../../packages/cli/src/init/ui/index.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../packages/cli/src/init/ui/index.js")>();
+  const actual = await importOriginal<typeof WizardUi>();
   return { ...actual, startInstallWizard: async () => { throw new Error("listen EADDRINUSE: address already in use 127.0.0.1"); } };
 });
 

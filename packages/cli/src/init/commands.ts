@@ -46,7 +46,7 @@ import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallPro
 import { initLogPath, openInitLog, type InitLog } from "./log-file.js";
 import { confirmInstallPlan } from "./plan.js";
 import { awsPrerequisiteChecks, checkPrerequisites, isRootUser, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
-import { processPrompter, secretFromSource, unattendedPrompter, type FormField, type Prompter, type QuestionHelp } from "./prompts.js";
+import { askForm, processPrompter, secretFromSource, unattendedPrompter, type FormField, type Prompter, type QuestionHelp } from "./prompts.js";
 import { fetchRelease, sourceRelease } from "./release-fetch.js";
 import { problemText, retryOnPage } from "./retry.js";
 import { developerSignInStep } from "./signin-step.js";
@@ -399,9 +399,9 @@ async function resumeScreen(store: ParameterStore, env: string, steps: ReadonlyA
 /** Answers "is the Slack app installed?" from --slack-install; every other question goes to `inner`,
  * the page's form included when `inner` has one. Exported for its test. */
 export function answeringSlackInstall(inner: Prompter, answer: "installed" | "approval"): Prompter {
-  const form = inner.form;
   return {
-    ...(form === undefined ? {} : { form: (title: string, fields: readonly FormField[], options: { help?: QuestionHelp }) => form.call(inner, title, fields, options) }),
+    // askForm asks through inner's own form, which is there whenever this key is.
+    ...(inner.form === undefined ? {} : { form: (title: string, fields: readonly FormField[], options: { help?: QuestionHelp }) => askForm(inner, title, fields, options) }),
     ask: (question, options) => inner.ask(question, options),
     confirm: (question, options) => inner.confirm(question, options),
     secret: (question, options) => inner.secret(question, options),
