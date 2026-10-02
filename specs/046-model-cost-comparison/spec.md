@@ -65,11 +65,11 @@ The result informs two decisions, which this experiment does not make by itself:
 ### Tasks
 
 - **SEC-bench (patch task, spec 045):** as below.
-- **SWE-bench:** the dataset and slice are open (Q-4). The recommendation is a SWE-Bench Pro slice, harder and newer,
-  with a small Verified slice so the results can be compared with public numbers. It uses the same models,
-  controls and analysis as SEC-bench, with its own budget line (Q-5).
+- **SWE-bench (decided 2026-10-02):** 5 SWE-Bench Pro tasks (harder, newer, multi-language) plus 3 SWE-bench Verified
+  tasks (so the results can be compared with the public leaderboards), with the same models, controls and analysis
+  as SEC-bench.
 - **SEC-bench task selection:**
-- **Phase 1 (screen):** 8 instances. **Phase 2 (confirm):** more tasks and repeats for the one or two models Phase 1
+- **Phase 1 (screen):** 6 SEC-bench instances (reduced from 8 to fit the $250 total). **Phase 2 (confirm):** more tasks and repeats for the one or two models Phase 1
   picks out, budgeted separately.
 - **Selection:** stratified across projects (no more than 2 per project) and sanitizer types, drawn once with a
   fixed seed from the 300 `eval` IDs, and committed as `specs/046-model-cost-comparison/tasks.txt` before any run.
@@ -139,20 +139,23 @@ means the runs it affects are run again, so every model is compared on the same 
 
 ## Budget
 
-**Phase 1 is capped at $200**, enforced by the batch's cost ceiling (R-1): no new run starts once spend reaches it.
-Estimated at the measured SEC-bench token mix ($ per run): Sonnet 4.6 7.23, GLM 5.3 3.38, Qwen3 Coder Plus 2.67,
-Kimi K2.6 1.49, MiniMax M3 1.19, DeepSeek V4 Pro 0.37.
+**The whole campaign is capped at $250 (decided 2026-10-02),** split into two batch caps enforced by spec 052's cost
+ceiling: SEC-bench $120, SWE-bench $130. No new run starts once a cap is reached. One run per (task, model): no repeats
+at this budget. The shakedown slice comes out of the same caps.
 
-| Phase 1 part | Runs | Estimate |
-|---|---|---|
-| 8 tasks x 6 models x 1 run | 48 | about $131 (Sonnet $58 of it) |
-| Second run on DeepSeek, MiniMax, Kimi | 24 | about $24 |
-| **Total** | **72** | **about $155, cap $200** (headroom for turn-count differences) |
-| EC2 (m7i.xlarge, about 0.5 h per run) | | about $8 |
+| Part | Runs | Estimate | Cap |
+|---|---|---|---|
+| SEC-bench: 6 tasks x 6 models | 36 | about $97 (Sonnet about $43) | $120 |
+| SWE-Bench Pro: 5 tasks x 6 models | 30 | about $45 (least certain; Pro per-task cost is unmeasured) | |
+| SWE-bench Verified: 3 tasks x 6 models | 18 | about $9 | |
+| SWE-bench subtotal | 48 | about $54 | $130 |
+| **Total** | **84** | **about $150** | **$250** |
+| EC2 (m7i.xlarge, about 0.5 h per run) | | about $10 | |
 
-The pilot showed one model can take several times another's turns on the same task, which can double its cost. The
-cap absorbs that; runs are ordered cheapest model first, so if the cap is hit, the missing runs are Sonnet's, whose
-baseline matters least to re-measure. Phase 2 is planned and budgeted after Phase 1, for the models it picks out.
+Estimates use the measured per-run costs of 2026-10-01 (SEC-bench: Sonnet $7.23 / $0.14, GLM $2.28; Verified: $0.64-1.80).
+Runs are ordered cheapest model first, so if a cap is hit, the missing runs are Sonnet's. With one run per cell, only
+large gaps show (for example 5 of 6 solved against 1 of 6); the campaign picks which models deserve more spend, and a
+later confirm phase is budgeted separately.
 
 ## Out of Scope
 
@@ -167,15 +170,13 @@ baseline matters least to re-measure. Phase 2 is planned and budgeted after Phas
 - **Q-1** (answered 2026-10-01): six models, including Qwen3 Coder Plus and MiniMax M3.
 - **Q-2** (answered 2026-10-01): Phase 1 capped at $200.
 - **Q-3** (answered 2026-10-01): after the verification fix, as part of the final campaign.
-- **Q-4:** Which SWE-bench: a Pro slice plus a small Verified slice (recommended), Verified only, or Pro only? And how
-  many tasks?
-- **Q-5:** The total campaign budget. SEC-bench Phase 1 is capped at $200. Adding a similar-sized SWE-bench part
-  brings the total to roughly $300-450.
+- **Q-4** (answered 2026-10-02): 5 SWE-Bench Pro tasks plus 3 Verified tasks.
+- **Q-5** (answered 2026-10-02): $250 total (SEC-bench $120, SWE-bench $130).
 
 ## Success Criteria
 
 - **SC-001:** `tasks.txt` and the model, thinking-level and provider settings are committed before the first run.
-- **SC-002:** All 72 Phase 1 runs (or every run started before the cap) are recorded, and failed or cancelled runs are listed separately.
+- **SC-002:** All 84 campaign runs (or every run started before the cap) are recorded, and failed or cancelled runs are listed separately.
 - **SC-003:** A short report goes in this folder, with the resolve rate and interval, cost per solved task, the
   paired comparison and the failure review per model, and a recommendation for the two decisions above that says
   how confident it is.
