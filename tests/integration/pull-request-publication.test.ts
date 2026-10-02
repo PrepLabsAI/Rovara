@@ -11,6 +11,8 @@ import { storedCommandOutput } from "../../packages/worker/src/command-failure.j
 import { TIMEOUT_KILL_GRACE_MS } from "../../packages/worker/src/collected-process.js";
 import type { DevcontainerCli, DevcontainerProcess } from "../../packages/worker/src/devcontainer.js";
 import type { PreparationManifest } from "../../packages/worker/src/prepare.js";
+import type { PullRequestSink } from "../../packages/worker/src/callback-client.js";
+import { projectCheckKey, recordProjectOutcomes } from "../../packages/worker/src/verification/check-history.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories: string[] = [];
@@ -750,6 +752,82 @@ describe("publication checks in a devcontainer (#183)", () => {
       "`readiness` runs when the workspace is prepared and again before each pull request is published\n"
       + "or updated, each time inside the dev container when the workspace was prepared with one.",
     );
+  });
+});
+
+describe("publication with a failing check reports it (spec 051, P-2)", () => {
+  /** The fixture as a broker that opens a draft on a failing check sends it. */
+  function reporting(fixture: Awaited<ReturnType<typeof createFixture>>) {
+    return { ...fixture.invocation, payload: { ...fixture.invocation.payload, reportChecks: true as const } };
+  }
+  async function markPrepared(fixture: Awaited<ReturnType<typeof createFixture>>): Promise<void> {
+    const manifest = await manifestOf(fixture);
+    manifest.readinessCommandKeys = fixture.invocation.payload.project.readiness.map(projectCheckKey);
+    await writeFile(join(fixture.root, ".agentx", "preparation-manifest.json"), JSON.stringify(manifest), "utf8");
+  }
+  const sink = () => vi.fn<PullRequestSink>(async () => ({ number: 21, url: "https://github.com/example/demo/pull/21", reconciled: false }));
+
+  // P-2 (approved): a failing readiness check no longer refuses the publication; the broker opens a draft instead.
+  it("publishes despite a check that passed at preparation and fails now, and reports it as a regression", async () => {
+    const fixture = await createFixture(false);
+    await markPrepared(fixture);
+    await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+    const pullRequestSink = sink();
+    const result = await publishWorkspace({ rootPath: fixture.root, invocation: reporting(fixture), credentialProvider: async () => ({}), pullRequestSink });
+    expect(result).toMatchObject({ number: 21, checks: [{ index: 0, outcome: "failed", exitCode: 9 }] });
+    const sent = pullRequestSink.mock.calls[0]![0];
+    expect(sent.checks).toEqual([expect.objectContaining({
+      id: "readiness:0", source: "project", before: "passed", after: "failed", class: "regression",
+      label: `${process.execPath} -e process.exit(9) (in repo/demo)`,
+    })]);
+    expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.invocation.payload.headBranch}`])).toMatch(/^[a-f0-9]{40}\n$/);
+  });
+
+  it("judges a check's before by the outcome the last task recorded: one already failing is not a regression", async () => {
+    const fixture = await createFixture(false);
+    await markPrepared(fixture);
+    // Publish runs after the task, which restored the history (Ruling O), so this is AgentX's own record.
+    await recordProjectOutcomes(fixture.root, { source: "project", readiness: fixture.invocation.payload.project.readiness }, [{
+      id: "readiness:0", label: "x", source: "project", before: "passed", after: "failed", class: "regression", output: "", durationMs: 1,
+    }]);
+    await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+    const pullRequestSink = sink();
+    await publishWorkspace({ rootPath: fixture.root, invocation: reporting(fixture), credentialProvider: async () => ({}), pullRequestSink });
+    expect(pullRequestSink.mock.calls[0]![0].checks).toEqual([expect.objectContaining({ before: "failed", after: "failed", class: "already_failing" })]);
+  });
+
+  it("gives a check preparation did not run, with no recorded outcome, no before result (Ruling C)", async () => {
+    const fixture = await createFixture("timeout");
+    await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+    const pullRequestSink = sink();
+    await publishWorkspace({ rootPath: fixture.root, invocation: reporting(fixture), credentialProvider: async () => ({}), pullRequestSink });
+    const [check] = pullRequestSink.mock.calls[0]![0].checks!;
+    expect(check).toMatchObject({ before: "unknown", after: "timed_out", class: "failing_no_before" });
+    expect(check!.output).toContain("timed out");
+  });
+
+  it("reports passing checks too", async () => {
+    const fixture = await createFixture();
+    await markPrepared(fixture);
+    await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+    const pullRequestSink = sink();
+    await publishWorkspace({ rootPath: fixture.root, invocation: reporting(fixture), credentialProvider: async () => ({}), pullRequestSink });
+    expect(pullRequestSink.mock.calls[0]![0].checks).toEqual([expect.objectContaining({ before: "passed", after: "passed", class: "passing" })]);
+  });
+
+  // Review Focus 5: a broker built before P-2 would open a normal pull request, so its publication still refuses.
+  it("still refuses a failing check, and reports nothing, for a broker that did not ask for the checks", async () => {
+    const fixture = await createFixture(false);
+    await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+    const pullRequestSink = sink();
+    await expect(publishWorkspace({ rootPath: fixture.root, invocation: fixture.invocation, credentialProvider: async () => ({}), pullRequestSink }))
+      .rejects.toThrow(/readiness checks failed/i);
+    expect(pullRequestSink).not.toHaveBeenCalled();
+
+    const passing = await createFixture();
+    await writeFile(join(passing.checkout, "README.md"), "changed\n", "utf8");
+    await publishWorkspace({ rootPath: passing.root, invocation: passing.invocation, credentialProvider: async () => ({}), pullRequestSink });
+    expect(pullRequestSink.mock.calls[0]![0]).not.toHaveProperty("checks");
   });
 });
 

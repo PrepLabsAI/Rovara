@@ -22,6 +22,14 @@ import {
 import {
   AgentXError,
   CHANNEL_TURN_REQUEST_MAX,
+  CheckReportSchema,
+  PULL_REQUEST_BODY_MAX_CHARS,
+  checksForSection,
+  checksMakeDraft,
+  checksSection,
+  taskResultChecks,
+  type CheckEntry,
+  type CheckReport,
   CONNECTOR_SECRET_PREFIX,
   ChannelTurnSchema,
   DEVELOPER_TASK_OWNER_ISSUER,
@@ -2742,6 +2750,8 @@ async function acceptPullRequest(
         "push",
         repository.name,
       ),
+      // Spec 051 P-2: a failing check opens a draft (reconcilePullRequest) rather than refusing the publication.
+      reportChecks: true,
     },
   };
   const outbox = outboxRecord(workspace, invocation);
@@ -2957,6 +2967,8 @@ async function acceptPullRequestLifecycle(
         ),
         targetPullRequestNumber: record.number,
         ...(remote.mergeCommit === undefined ? {} : { revertCommit: remote.mergeCommit }),
+        // Spec 051 P-2, as for a new pull request.
+        reportChecks: true,
       },
     };
     const outbox = outboxRecord(workspace, invocation);
@@ -3434,7 +3446,7 @@ async function reconcilePullRequest(
   }
   const input = object(value, "pull request callback");
   const expected = operation.publication;
-  const allowed = new Set(["repository", "repositoryUrl", "headBranch", "baseBranch", "commit", "title", "body"]);
+  const allowed = new Set(["repository", "repositoryUrl", "headBranch", "baseBranch", "commit", "title", "body", "checks"]);
   if (Object.keys(input).some((key) => !allowed.has(key))) {
     throw agentXError("CONFIG_INVALID", "pull request callback contains unknown fields");
   }
@@ -3450,14 +3462,18 @@ async function reconcilePullRequest(
   if (typeof input.commit !== "string" || !/^[a-f0-9]{40,64}$/.test(input.commit)) {
     throw agentXError("CONFIG_INVALID", "published commit is invalid");
   }
+  const publishChecks = publicationChecks(input.checks);
   await assertCodeBuildGatesPassed(dependencies, operation, input.commit);
+  // A revert undoes a merged pull request, so the workspace's own task work is not what it publishes.
+  const latestChecks = expected.mode === "revert" ? undefined : await latestWorkspaceChecks(dependencies, operation.workspaceId);
+  const { body, draft } = checkedPullRequest(expected.body, expected.draft, publishChecks, latestChecks);
   const pullRequest = await dependencies.githubPullRequests.reconcilePullRequest({
     repositoryUrl: expected.repositoryUrl,
     headBranch: expected.headBranch,
     baseBranch: expected.baseBranch,
     title: expected.title,
-    ...(expected.body === undefined ? {} : { body: expected.body }),
-    ...(expected.draft === undefined ? {} : { draft: expected.draft }),
+    ...(body === undefined ? {} : { body }),
+    ...(draft === undefined ? {} : { draft }),
   });
   const record: PullRequestRecord = {
     ...pullRequestKey(operation.workspaceId, expected.repository, pullRequest.number),
@@ -3472,7 +3488,7 @@ async function reconcilePullRequest(
     baseBranch: expected.baseBranch,
     expectedHeadCommit: input.commit,
     title: expected.title,
-    body: expected.body ?? "",
+    body: body ?? "",
     createdByOperationId: operation.id,
     ...(expected.mode === "replace" && expected.targetPullRequestNumber !== undefined
       ? { replacementFor: expected.targetPullRequestNumber }
@@ -3508,6 +3524,41 @@ async function reconcilePullRequest(
     }));
   }
   return pullRequest;
+}
+
+/** Spec 051 (D-7): the checks the worker ran at publish, judged against their befores; none from an older worker. */
+function publicationChecks(value: unknown): CheckEntry[] | undefined {
+  if (value === undefined) return undefined;
+  const parsed = CheckReportSchema.shape.checks.safeParse(value);
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", "pull request callback checks are invalid");
+  return parsed.data;
+}
+
+/** The workspace's latest task check report (recordLatestChecks), or undefined: none yet, or one that does not parse. */
+async function latestWorkspaceChecks(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<CheckReport | undefined> {
+  const workspace = await getItem<{ latestChecks?: { report?: unknown } }>(dependencies, workspaceKey(workspaceId));
+  const parsed = CheckReportSchema.safeParse(workspace?.latestChecks?.report);
+  return parsed.success ? parsed.data : undefined;
+}
+
+/**
+ * Spec 051 FR-008 (D-2): the pull request's description and draft flag, given the checks. A draft when a check that
+ * passed before fails now, whatever was asked; otherwise the draft flag stays as asked (the developer API asks for a
+ * draft by default). The checks section goes after the description, cut so the whole stays within GitHub's limit.
+ * With nothing to report, both are exactly as asked (Review Focus 5).
+ */
+function checkedPullRequest(
+  body: string | undefined,
+  draft: boolean | undefined,
+  publishChecks: readonly CheckEntry[] | undefined,
+  latestChecks: CheckReport | undefined,
+): { body: string | undefined; draft: boolean | undefined } {
+  const separator = body === undefined || body === "" ? "" : "\n\n";
+  const section = checksSection(publishChecks, latestChecks, PULL_REQUEST_BODY_MAX_CHARS - (body?.length ?? 0) - separator.length);
+  return {
+    body: section === "" ? body : `${body ?? ""}${separator}${section}`,
+    draft: checksMakeDraft(publishChecks, latestChecks) ? true : draft,
+  };
 }
 
 async function assertCodeBuildGatesPassed(
@@ -3958,6 +4009,8 @@ async function recordTerminalResult(
     // #213: a repeated result releases a failed prepare's slot too, in case the first one's release
     // did not land (the release is idempotent, and does nothing to a workspace that moved on).
     if (operation.kind === "prepare" && operation.status !== "SUCCEEDED") await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, operation.workspaceId);
+    // Spec 051: a repeated result writes the latest checks too, in case the first write did not land.
+    await recordLatestChecks(dependencies, operation, operation.status, operation.result, operation.updatedAt);
     return operation;
   }
   const workspace = await requireWorkspace(dependencies, operation.workspaceId);
@@ -4065,6 +4118,7 @@ async function recordTerminalResult(
     const existing = await requireOperation(dependencies, operation.workspaceId, operation.id);
     if (existing.status === terminalStatus || isQueueFailedPrepare(existing, terminalStatus) || isSweptPrepare(existing)) {
       if (existing.kind === "prepare" && existing.status !== "SUCCEEDED") await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, existing.workspaceId);
+      await recordLatestChecks(dependencies, existing, existing.status, existing.result, existing.updatedAt);
       return existing;
     }
     // A cancel whose target finished first (its own result, and for a developer task its
@@ -4094,7 +4148,41 @@ async function recordTerminalResult(
     await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, workspace.id);
   }
   if (recordedStatus !== terminalStatus) return { ...operation, status: recordedStatus, updatedAt: now, error: FIRST_TASK_QUEUE_FAILED };
+  await recordLatestChecks(dependencies, operation, terminalStatus, result, now);
   return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
+}
+
+/**
+ * Spec 051 (D-7): the workspace keeps the check report of its latest successful task, which publish reads. The write
+ * is conditional on the operation's fence, which grows with each operation on the workspace, so a late or repeated
+ * result from an older task never replaces a newer one's. A result without a report (a worker built before spec 051)
+ * writes nothing. The outputs are cut to what the pull request's checks section shows.
+ */
+async function recordLatestChecks(
+  dependencies: AwsBrokerDependencies,
+  operation: Pick<OperationRecord, "id" | "kind" | "workspaceId" | "fence">,
+  status: OperationStatus,
+  result: unknown,
+  completedAt: string,
+): Promise<void> {
+  if (operation.kind !== "task" || status !== "SUCCEEDED") return;
+  const report = taskResultChecks(result);
+  if (report === undefined) return;
+  try {
+    await dependencies.documentClient.send(new UpdateCommand({
+      TableName: dependencies.tableName,
+      Key: workspaceKey(operation.workspaceId),
+      UpdateExpression: "SET latestChecks = :latest",
+      ConditionExpression: "attribute_exists(pk) AND (attribute_not_exists(latestChecks) OR latestChecks.fence < :fence)",
+      ExpressionAttributeValues: {
+        ":latest": { report: checksForSection(report), operationId: operation.id, completedAt, fence: operation.fence },
+        ":fence": operation.fence,
+      },
+    }));
+  } catch (error) {
+    // A newer task's report is already there (or the workspace is gone): nothing to do.
+    if (!isConditional(error)) throw error;
+  }
 }
 
 /**

@@ -11,7 +11,7 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "publish.reportChecks"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number];
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
@@ -75,6 +75,13 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         mode: z.enum(["create", "replace", "revert"]).default("create"),
         targetPullRequestNumber: z.number().int().positive().optional(),
         revertCommit: z.string().regex(/^[a-f0-9]{40,64}$/).optional(),
+        /**
+         * Spec 051 (D-7, P-2): the broker opens a draft pull request with a checks section when a check fails, so the
+         * worker publishes despite a failing readiness check and reports its checks with the pull request callback.
+         * Without it (a broker built before it), a failing check still refuses the publication, as before. Sent only
+         * to a worker whose /ping lists "publish.reportChecks".
+         */
+        reportChecks: z.literal(true).optional(),
       })
       .strict()
       .superRefine((value, context) => {

@@ -1,6 +1,7 @@
 import {
   CodeBuildCheckResultSchema,
   agentXError,
+  type CheckEntry,
   type WorkerInvocation,
 } from "@agentx/contracts";
 import type { ArtifactSink } from "./artifacts.js";
@@ -18,6 +19,11 @@ export interface PullRequestCallbackInput {
   commit: string;
   title: string;
   body?: string;
+  /**
+   * Spec 051 (D-7): publish's readiness checks, each judged against its before. Sent only when the publish payload
+   * asks for them (reportChecks), so a broker built before it never sees the field.
+   */
+  checks?: CheckEntry[];
 }
 
 export interface PullRequestCallbackResult {

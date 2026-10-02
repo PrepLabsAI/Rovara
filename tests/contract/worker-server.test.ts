@@ -46,9 +46,10 @@ describe("worker HTTP contract", () => {
     });
     const healthy = await handleWorkerRequest(new Request("http://worker/ping"), state);
     await expect(healthy.json()).resolves.toMatchObject({ status: "Healthy", activeOperations: 0 });
-    // Spec 053: what this build parses, so the dispatcher sends the thinking level only to it; spec 051 adds readiness.
+    // Spec 053: what this build parses, so the dispatcher sends the thinking level only to it; spec 051 adds readiness,
+    // and publish's reportChecks (P-2), so only this build is asked to publish despite a failing check.
     await expect((await handleWorkerRequest(new Request("http://worker/ping"), state)).json())
-      .resolves.toMatchObject({ invocationFeatures: ["model.thinkingLevel", "task.readiness"] });
+      .resolves.toMatchObject({ invocationFeatures: ["model.thinkingLevel", "task.readiness", "publish.reportChecks"] });
   });
 
   it("reports the persisted terminal state after background execution", async () => {

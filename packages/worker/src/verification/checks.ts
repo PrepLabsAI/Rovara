@@ -4,6 +4,7 @@
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
+  checkOutputTail,
   classifyCheck,
   matchTestCommand,
   redactSecrets,
@@ -11,6 +12,7 @@ import {
   type CheckEntry,
   type CheckOutcome,
   type ProjectCommand,
+  type PublicationCheckResult,
 } from "@agentx/contracts";
 import { createLocalBashOperations, type BashOperations } from "@earendil-works/pi-coding-agent";
 import { MAX_COMMAND_OUTPUT_BYTES, redactedTail, tailCollector } from "../collected-process.js";
@@ -81,6 +83,36 @@ export function planChecks(
   }
   const agentRuns = recorder.firstRuns().slice(0, MAX_CHECKS);
   return agentRuns.length > 0 ? { source: "agent_commands", agentRuns } : { source: "none" };
+}
+
+/** A label sent with the pull request callback: its start, as the compact task report keeps it. */
+const PUBLICATION_LABEL_MAX = 1_024;
+
+/**
+ * Spec 051 (D-7): publish's readiness results as check entries, each judged against its before in `plan` (planChecks
+ * with the workspace's history), as a task's final round is. The output is cut to the tail the pull request's checks
+ * section shows, so 64 checks stay small in the callback.
+ */
+export function publicationCheckEntries(plan: CheckPlan, results: readonly PublicationCheckResult[]): CheckEntry[] {
+  if (plan.source !== "project") return [];
+  const entries: CheckEntry[] = [];
+  for (const result of results.slice(0, MAX_CHECKS)) {
+    const command = plan.readiness?.[result.index];
+    if (command === undefined) continue;
+    const before = plan.projectBefore?.[result.index] ?? "unknown";
+    const durationMs = Date.parse(result.completedAt) - Date.parse(result.startedAt);
+    entries.push({
+      id: `readiness:${result.index}`,
+      label: cut(projectLabel(command), PUBLICATION_LABEL_MAX),
+      source: "project",
+      before,
+      after: result.outcome,
+      class: classifyCheck(before, result.outcome),
+      output: checkOutputTail(storedCheckOutput(joinedStreams(result.stdout, result.stderr))),
+      durationMs: Number.isFinite(durationMs) ? Math.max(0, Math.round(durationMs)) : 0,
+    });
+  }
+  return entries;
 }
 
 interface PlannedCheck {

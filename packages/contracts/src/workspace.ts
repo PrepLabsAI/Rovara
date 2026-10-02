@@ -51,6 +51,8 @@ const WORKSPACE_STORAGE_KEYS: ReadonlySet<string> = new Set([
   "entityType",
   WORKSPACE_PROJECT_INDEX.partitionKey,
   WORKSPACE_PROJECT_INDEX.sortKey,
+  // Spec 051: the latest task check report, which the broker reads and writes on its own (recordLatestChecks).
+  "latestChecks",
 ]);
 
 /** A stored workspace item without its storage keys, ready for `WorkspaceInstanceSchema`. */

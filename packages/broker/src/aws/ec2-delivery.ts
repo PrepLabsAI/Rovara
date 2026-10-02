@@ -75,7 +75,8 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
  * default level. Prepare, publish and maintain carry the whole stored project definition, whose
  * models carry levels the worker does not use there, so those are stripped. Spec 051: a task's
  * readiness goes only to a worker whose /ping lists "task.readiness"; one built before it checks the
- * agent's own test commands instead. The invoke token signs the operation, not the payload, so
+ * agent's own test commands instead, and a publication's reportChecks goes only to one whose /ping lists
+ * "publish.reportChecks". The invoke token signs the operation, not the payload, so
  * dropping a field leaves it valid. A ping that fails fails the attempt: the worker journals a hash of
  * the whole invocation, so a retry must send what the first attempt would have, and a blip must not
  * run a capable worker at the default level.
@@ -87,7 +88,8 @@ async function forWorker(
 ): Promise<WorkerInvocation> {
   const requestedThinkingLevel = carriedThinkingLevel(invocation);
   const carriesReadiness = invocation.kind === "task" && invocation.payload.readiness !== undefined;
-  if (requestedThinkingLevel === undefined && !carriesReadiness) return invocation;
+  const carriesReportChecks = invocation.kind === "publish" && invocation.payload.reportChecks !== undefined;
+  if (requestedThinkingLevel === undefined && !carriesReadiness && !carriesReportChecks) return invocation;
   let features: readonly string[] = [];
   if (workerFeatures !== undefined) {
     try {
@@ -108,8 +110,8 @@ async function forWorker(
       workspaceId: invocation.workspaceId,
     }));
   }
-  const sent = withoutReadiness(leveled, features);
-  if (sent !== leveled) {
+  const checked = withoutReadiness(leveled, features);
+  if (checked !== leveled) {
     console.log(JSON.stringify({
       component: "dispatcher",
       event: "dispatch.readiness_omitted",
@@ -118,7 +120,28 @@ async function forWorker(
       workspaceId: invocation.workspaceId,
     }));
   }
+  const sent = withoutReportChecks(checked, features);
+  if (sent !== checked) {
+    console.log(JSON.stringify({
+      component: "dispatcher",
+      event: "dispatch.report_checks_omitted",
+      reason,
+      operationId: invocation.operationId,
+      workspaceId: invocation.workspaceId,
+    }));
+  }
   return sent;
+}
+
+/**
+ * A publication without reportChecks, for a worker that does not parse it (spec 051, D-7). Such a worker refuses a
+ * failing readiness check, as before, and reports no checks, so the broker opens the pull request as it did.
+ */
+function withoutReportChecks(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind !== "publish" || invocation.payload.reportChecks === undefined || features.includes("publish.reportChecks")) return invocation;
+  const payload = { ...invocation.payload };
+  delete payload.reportChecks;
+  return { ...invocation, payload };
 }
 
 /** A task without its readiness, for a worker that does not parse it (spec 051). */

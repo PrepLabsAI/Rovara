@@ -30,3 +30,4 @@ export * from "./swebench.js";
 export * from "./eval-batch.js";
 export * from "./eval-stats.js";
 export * from "./checks.js";
+export * from "./checks-section.js";

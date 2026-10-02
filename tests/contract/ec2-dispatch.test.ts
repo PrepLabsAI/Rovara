@@ -1,6 +1,6 @@
 import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import type { Ec2RuntimeBinding, WorkerInvocation } from "../../packages/contracts/src/index.js";
+import { WorkerInvocationSchema, type Ec2RuntimeBinding, type WorkerInvocation } from "../../packages/contracts/src/index.js";
 import { createDispatcherHandler, workerPingFeatures } from "../../packages/broker/src/aws/dispatcher.js";
 import { STARTING_COMPUTE_MESSAGE, createEc2Delivery, type Ec2Delivery, type Ec2DeliveryDependencies } from "../../packages/broker/src/aws/ec2-delivery.js";
 import type { Ec2OutboxRecord } from "../../packages/broker/src/aws/lambda.js";
@@ -120,6 +120,56 @@ describe("ec2-ebs delivery", () => {
       const workerFeatures = vi.fn<NonNullable<Ec2DeliveryDependencies["workerFeatures"]>>(async () => []);
       const { deliver, post } = delivery({ workerFeatures });
       const record = taskRecord({});
+      await deliver(record, record.invocation);
+      expect(workerFeatures).not.toHaveBeenCalled();
+      expect(post.mock.calls[0]![1].body).toBe(JSON.stringify(record.invocation));
+    });
+  });
+
+  describe("publish's reportChecks and workers built before it (spec 051, D-7)", () => {
+    function publishRecord(payload: Record<string, unknown>): Ec2OutboxRecord {
+      const record = recordFor();
+      const operationId = record.invocation.operationId;
+      const invocation = {
+        ...record.invocation,
+        kind: "publish",
+        payload: {
+          mode: "create",
+          project: {
+            name: "demo", revision: 1, setup: [], readiness: [], orchestratorInstructions: "x",
+            repositories: [{ name: "demo", url: "https://github.com/example/demo.git", path: "repo/demo", defaultBranch: "main", credentialRef: "github-app" }],
+          },
+          repository: "demo", title: "t", headBranch: `agentx/${operationId}`, repositoryGrant: "g", ...payload,
+        },
+      } as WorkerInvocation;
+      return { ...record, invocation };
+    }
+    const postedPayload = (post: ReturnType<typeof delivery>["post"]) => (JSON.parse(post.mock.calls[0]![1].body) as { payload: Record<string, unknown> }).payload;
+
+    it("keeps reportChecks for a worker whose /ping lists it", async () => {
+      const { deliver, post } = delivery({ workerFeatures: async () => ["publish.reportChecks"] });
+      const record = publishRecord({ reportChecks: true });
+      await deliver(record, record.invocation);
+      expect(postedPayload(post).reportChecks).toBe(true);
+    });
+
+    it("drops reportChecks for a worker built before it, which then refuses a failing check as before", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const { deliver, post } = delivery({ workerFeatures: async () => ["model.thinkingLevel", "task.readiness"] });
+      const record = publishRecord({ reportChecks: true });
+      await deliver(record, record.invocation);
+      expect(postedPayload(post)).not.toHaveProperty("reportChecks");
+      expect(WorkerInvocationSchema.safeParse({ ...record.invocation, payload: postedPayload(post) }).success).toBe(true);
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        event: "dispatch.report_checks_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
+      }));
+      log.mockRestore();
+    });
+
+    it("does not ask the worker when the publication does not carry it", async () => {
+      const workerFeatures = vi.fn<NonNullable<Ec2DeliveryDependencies["workerFeatures"]>>(async () => []);
+      const { deliver, post } = delivery({ workerFeatures });
+      const record = publishRecord({});
       await deliver(record, record.invocation);
       expect(workerFeatures).not.toHaveBeenCalled();
       expect(post.mock.calls[0]![1].body).toBe(JSON.stringify(record.invocation));
