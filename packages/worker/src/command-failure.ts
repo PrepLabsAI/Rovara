@@ -13,7 +13,7 @@ export type CommandStage = "setup step" | "readiness check";
 /**
  * Says which setup step or readiness check failed, and why (#154): its command (redacted and
  * capped), its directory, whether it timed out, was killed or exited, and the last lines of its
- * error output. Everything shown is redacted first and cut afterward, so a secret that straddles a
+ * output (#225: its printed output's too, before its error output's). Everything shown is redacted first and cut afterward, so a secret that straddles a
  * cut cannot leave a fragment that no longer matches its pattern. The message fits the developer
  * task view's failure message (DEVELOPER_FAILURE_MESSAGE_MAX), so that cap never cuts the tail.
  */
@@ -32,7 +32,7 @@ export function describeCommandFailure(
         ? `exited ${result.exitCode}`
         : "could not run";
   const head = `${stage} ${index} (${shownCommand(command)} in ${cut(redactText(command.cwd), CWD_SHOWN_MAX)}) ${how}${suffix}`;
-  const tail = lastLines(redactText(result.stderr), DEVELOPER_FAILURE_MESSAGE_MAX - head.length - TAIL_HEADING.length);
+  const tail = lastLines(redactText(result.stdout), redactText(result.stderr), DEVELOPER_FAILURE_MESSAGE_MAX - head.length - TAIL_HEADING.length);
   return tail === "" ? head : `${head}${TAIL_HEADING}${tail}`;
 }
 
@@ -47,11 +47,19 @@ function cut(text: string, limit: number): string {
   return `${withoutSplitPair(text.slice(0, limit - 3), "end")}...`;
 }
 
-/** The last TAIL_LINES non-blank lines, then at most `limit` characters from their end. */
-function lastLines(text: string, limit: number): string {
+const nonBlankLines = (text: string): string[] => text.split(/\r?\n/).map((line) => line.trimEnd()).filter((line) => line !== "");
+
+/**
+ * The last TAIL_LINES non-blank lines of the error output, preceded by as many of the printed
+ * output's last lines as still fit in TAIL_LINES (#225: a step such as `echo npm ci failed; exit 1`
+ * says why only on stdout), then at most `limit` characters from their end.
+ */
+function lastLines(stdout: string, stderr: string, limit: number): string {
   if (limit <= 0) return "";
-  const lines = text.split(/\r?\n/).map((line) => line.trimEnd()).filter((line) => line !== "").slice(-TAIL_LINES);
-  const joined = lines.join("\n");
+  const errors = nonBlankLines(stderr).slice(-TAIL_LINES);
+  const room = TAIL_LINES - errors.length;
+  const printed = room === 0 ? [] : nonBlankLines(stdout).slice(-room);
+  const joined = [...printed, ...errors].join("\n");
   if (joined.length <= limit) return joined;
   return withoutSplitPair(joined.slice(joined.length - limit), "start");
 }

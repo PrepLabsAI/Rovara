@@ -273,11 +273,13 @@ export async function taskView(
     closedAt: task.closedAt,
     workspaceStatus: workspace.status,
     pointer,
-    operations: operations.map((operation) => ({ id: operation.id, kind: operation.kind, status: operation.status, error: operation.error, createdAt: operation.createdAt, fence: operation.fence })),
+    operations: operations.map((operation) => ({ id: operation.id, kind: operation.kind, status: operation.status, error: operation.error, createdAt: operation.createdAt, updatedAt: operation.updatedAt, fence: operation.fence })),
   });
-  const events = derived.current === undefined || options.events === 0
+  // #225: a task whose setup failed shows its prepare's events (the failure the broker recorded).
+  const eventsOf = derived.current ?? derived.failedPrepare;
+  const events = eventsOf === undefined || options.events === 0
     ? []
-    : recentTaskEvents(await deps.actions.eventsNewestFirst(derived.current.id, 200), options.events);
+    : recentTaskEvents(await deps.actions.eventsNewestFirst(eventsOf.id, 200), options.events);
   const details = options.details && derived.status !== "STARTING" && derived.status !== "RUNNING" ? await taskDetails(deps, task, operations) : {};
   // C15: only the full read shows channel turns, and a storage problem never breaks it.
   let channelTurns: DeveloperTaskView["channelTurns"];
@@ -306,7 +308,8 @@ export async function taskView(
     ...(task.share === undefined ? {} : { share: shareView(task.share) }),
     ...(derived.closing ? { closing: true } : {}),
     createdAt: task.createdAt,
-    updatedAt: derived.current?.createdAt ?? task.updatedAt,
+    // #225: a failed setup's task changed when its prepare ended, not when it was made.
+    updatedAt: derived.failedPrepare?.updatedAt !== undefined && derived.failedPrepare.updatedAt > task.updatedAt ? derived.failedPrepare.updatedAt : derived.current?.createdAt ?? task.updatedAt,
     events,
     ...details,
     ...(channelTurns === undefined ? {} : { channelTurns }),

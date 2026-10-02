@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ProjectDefinition } from "@agentx/contracts";
 import { inventoryParameterName } from "../../packages/cli/src/destroy/inventory.js";
 import { runDestroy, type DestroyDependencies } from "../../packages/cli/src/destroy/run.js";
+import { developerTokenKey, readDeveloperConfig, saveDeveloperEnvironment } from "../../packages/cli/src/developer/config.js";
 import { environmentCachePath } from "../../packages/cli/src/environments/cache.js";
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import { settingsParameterName, writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
@@ -214,6 +215,44 @@ describe("agentx destroy (FR-055, item 3)", () => {
     expect(h.lines).toContain(`Could not read ${installAnswersParameterName("staging")}, so agentx destroy goes on without the install answers: it may ask for the account id, and the steps printed at the end name no GitHub App of this environment.`);
     expect(h.lines).toContain(`Could not read ${installProgressParameterName("staging")}, so agentx destroy goes on without the install progress: the steps printed at the end name no app of this environment.`);
     expect(h.lines.join("\n")).not.toContain("SECRET");
+  });
+
+  it("removes the environment's developer sign-in and moves the default to a remaining environment (#221)", async () => {
+    const h = await harness();
+    const entry = (name: string) => ({ url: `https://${name}.example.test`, issuer: `https://${name}.example.test/v1/auth`, tokenEndpoint: `https://${name}.example.test/v1/auth/token`, revocationEndpoint: `https://${name}.example.test/v1/auth/revoke` });
+    await saveDeveloperEnvironment(h.home, "other", entry("other"));
+    await saveDeveloperEnvironment(h.home, "staging", entry("staging"));
+    const tokens = h.deps.tokenStore as ReturnType<typeof memoryTokenStore>;
+    await tokens.set(developerTokenKey(entry("staging").issuer), { accessToken: "staging-developer", expiresAt: 1 });
+    await tokens.set(developerTokenKey(entry("other").issuer), { accessToken: "other-developer", expiresAt: 1 });
+    const result = await runDestroy({ env: "staging", keepData: false }, h.deps);
+    expect(result.removed).toBe(true);
+    const config = await readDeveloperConfig(h.home);
+    expect(Object.keys(config.environments)).toEqual(["other"]);
+    expect(config.default).toBe("other");
+    expect(tokens.values.has(developerTokenKey(entry("staging").issuer))).toBe(false);
+    expect(tokens.values.has(developerTokenKey(entry("other").issuer))).toBe(true);
+    expect(await access(environmentCachePath(h.home, "staging")).then(() => true, () => false)).toBe(false);
+    expect(h.lines).toContain("Removed this computer's developer sign-in for staging; the default developer environment is now other.");
+  });
+
+  it("clears the default developer environment when the destroyed one was the only one (#221)", async () => {
+    const h = await harness();
+    await saveDeveloperEnvironment(h.home, "staging", { url: "https://staging.example.test", issuer: "https://staging.example.test/v1/auth", tokenEndpoint: "https://staging.example.test/v1/auth/token", revocationEndpoint: "https://staging.example.test/v1/auth/revoke" });
+    await runDestroy({ env: "staging", keepData: false }, h.deps);
+    expect(await readDeveloperConfig(h.home)).toEqual({ environments: {} });
+    expect(h.lines).toContain("Removed this computer's developer sign-in for staging; no developer environment is the default now.");
+  });
+
+  it("leaves the developer sign-ins alone when the environment was not removed (#221)", async () => {
+    const empty: FakeAccount = { stacks: new Map(), instances: [], volumes: [], tags: new Map(), secrets: [], aliases: [], calls: [] };
+    const h = await harness({ account: empty, installed: false });
+    await rm(environmentCachePath(h.home, "staging"));
+    await rm(join(h.configDir, "payments.yaml"));
+    await saveDeveloperEnvironment(h.home, "staging", { url: "https://staging.example.test", issuer: "https://staging.example.test/v1/auth", tokenEndpoint: "https://staging.example.test/v1/auth/token", revocationEndpoint: "https://staging.example.test/v1/auth/revoke" });
+    const result = await runDestroy({ env: "staging", keepData: false }, h.deps);
+    expect(result.removed).toBe(false);
+    expect(Object.keys((await readDeveloperConfig(h.home)).environments)).toEqual(["staging"]);
   });
 
   it("says so, and asks nothing, when there is nothing to remove", async () => {

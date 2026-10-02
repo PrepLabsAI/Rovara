@@ -6,6 +6,7 @@ import { AGENTX_CLI_CLIENT_ID, DEVELOPER_TOKEN_AUDIENCE, EnvironmentNameSchema, 
 import YAML from "yaml";
 import { z } from "zod";
 import { tokenStoreKey } from "../auth.js";
+import type { TokenStore } from "../token-store.js";
 
 const EntrySchema = z.object({ url: z.string().url(), issuer: z.string().url(), tokenEndpoint: z.string().url(), revocationEndpoint: z.string().url() }).strict();
 const ConfigSchema = z.object({ schemaVersion: z.literal(1), default: EnvironmentNameSchema.optional(), environments: z.record(EnvironmentNameSchema, EntrySchema) }).strict();
@@ -61,12 +62,26 @@ export async function saveDeveloperEnvironment(home: string, env: string, entry:
   await write(home, { default: env, environments: { ...config.environments, [env]: EntrySchema.parse(entry) } });
 }
 
-export async function removeDeveloperEnvironment(home: string, env: string): Promise<void> {
+/** Drops an environment's entry; a default it was moves to the first remaining one, or is cleared. Returns the default after. */
+export async function removeDeveloperEnvironment(home: string, env: string): Promise<string | undefined> {
   const config = await readDeveloperConfig(home);
   // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
   const { [env]: _removed, ...rest } = config.environments;
   const nextDefault = config.default === env ? Object.keys(rest).sort()[0] : config.default;
   await write(home, { ...(nextDefault === undefined ? {} : { default: nextDefault }), environments: rest });
+  return nextDefault;
+}
+
+/**
+ * Issue #221: forgets this computer's developer sign-in for an environment that no longer exists
+ * (agentx destroy): its token and its entry, moving the default as removeDeveloperEnvironment does.
+ * Undefined when there was no entry for it; otherwise the default after.
+ */
+export async function forgetDeveloperSignIn(home: string, env: string, tokenStore: Pick<TokenStore, "delete">): Promise<{ default: string | undefined } | undefined> {
+  const entry = (await readDeveloperConfig(home)).environments[env];
+  if (entry === undefined) return undefined;
+  await tokenStore.delete(developerTokenKey(entry.issuer));
+  return { default: await removeDeveloperEnvironment(home, env) };
 }
 
 /** The environment named, or the default one agentx login set. */
