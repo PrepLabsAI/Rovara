@@ -30,6 +30,11 @@ export function adminSignInExpiringText(env: string, expiresAt: number, now: num
   return `Your admin sign-in for ${env} expires at ${localClockTime(expiresAt, now)}; run ${adminSignInCommand(env)} to sign in again.`;
 }
 
+/** True for adminSignInNotice's text when the sign-in has expired, not merely about to. */
+export function isExpiredNotice(notice: string | undefined): boolean {
+  return notice !== undefined && notice.startsWith("Your admin sign-in for ") && / expired at /.test(notice);
+}
+
 /** ADMIN_REQUIRED for an admin sign-in that expired, with its time and the exact command. */
 export function adminSignInExpiredError(env: string, expiresAt: number, now: number): ToolError {
   return new ToolError("ADMIN_REQUIRED", `Your admin sign-in for ${env} expired at ${localClockTime(expiresAt, now)}`, `run ${adminSignInCommand(env)}`);

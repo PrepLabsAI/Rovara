@@ -8,6 +8,7 @@ import {
 import { z } from "zod";
 import type { AdminControlPlaneClient } from "./admin-client.js";
 import type { ControlPlaneClient } from "./client.js";
+import { isExpiredNotice } from "./admin-expiry.js";
 import { adminApiFits, type Compatibility } from "./compatibility.js";
 import { ToolError, plainText } from "./errors.js";
 import type { RequestIdMemory } from "./request-ids.js";
@@ -221,7 +222,7 @@ async function afterAction(context: ToolContext, call: ToolCall, tool: string, t
 /** Whoami's sentence on the admin sign-in: held or not, with #218's expiry notice when there is one. */
 function adminSentence(admin: boolean, notice: string | undefined): string {
   // Only the expired notice replaces "holds no": one about to expire raced the held check.
-  if (!admin) return notice?.includes(" expired at ") === true ? notice : "This computer holds no admin sign-in.";
+  if (!admin) return isExpiredNotice(notice) ? notice : "This computer holds no admin sign-in.";
   return `This computer also holds an unexpired admin sign-in.${notice === undefined ? "" : ` ${notice}`}`;
 }
 

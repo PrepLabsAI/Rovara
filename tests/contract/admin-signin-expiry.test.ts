@@ -17,7 +17,7 @@ import { cacheFromSettings, writeEnvironmentCache } from "../../packages/cli/src
 import { agentxMcpServer } from "../../packages/cli/src/mcp/serve.js";
 import { saveDeveloperEnvironment, developerTokenKey } from "../../packages/cli/src/developer/config.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
-import { ADMIN_EXPIRY_WARNING_MS, adminSignInExpiredText, adminSignInExpiringText, localClockTime } from "../../packages/mcp/src/admin-expiry.js";
+import { ADMIN_EXPIRY_WARNING_MS, adminSignInExpiredText, adminSignInExpiringText, isExpiredNotice, localClockTime } from "../../packages/mcp/src/admin-expiry.js";
 import { stagingSettings } from "../support/environment-fixtures.js";
 import { toolError } from "../support/mcp-tool-error.js";
 
@@ -35,6 +35,8 @@ describe("the admin sign-in's expiry, in words (#218)", () => {
   it("says it expired, when, and the exact command", () => {
     const now = new Date(2026, 9, 1, 13, 0).getTime();
     expect(adminSignInExpiredText("livefinal", new Date(2026, 9, 1, 12, 31).getTime(), now)).toBe("Your admin sign-in for livefinal expired at 12:31. Run agentx --env livefinal login --admin.");
+    expect(isExpiredNotice(adminSignInExpiredText("livefinal", 0, now))).toBe(true);
+    expect(isExpiredNotice(adminSignInExpiringText("livefinal", now + 60_000, now))).toBe(false);
     expect(adminSignInExpiringText("livefinal", new Date(2026, 9, 1, 13, 4).getTime(), now)).toBe("Your admin sign-in for livefinal expires at 13:04; run agentx --env livefinal login --admin to sign in again.");
   });
 });

@@ -4124,7 +4124,13 @@ async function recordTerminalResult(
  * first result's best-effort write may have missed; the event's once-key keeps it to one.
  */
 async function repeatPrepareFailureEvent(dependencies: AwsBrokerDependencies, operation: OperationRecord): Promise<void> {
-  if ((await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId))) === undefined) return;
+  try {
+    if ((await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId))) === undefined) return;
+  } catch (error) {
+    // Best effort, as the event itself: a failed read never fails the result callback.
+    console.log(JSON.stringify({ component: "broker", event: "developer.prepare_failure_event_failed", operationId: operation.id, error: error instanceof Error ? error.name : "unknown" }));
+    return;
+  }
   await recordPrepareFailureEvent(dependencies.documentClient, dependencies.tableName, {
     workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, status: operation.status, error: operation.error, at: operation.updatedAt,
     ...(operation.error === FIRST_TASK_QUEUE_FAILED ? { lead: "The task could not start" } : {}),
