@@ -112,6 +112,7 @@ import { pressAdminChange, routeAdminChange, type AdminChangeDependencies } from
 import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans.js";
 import { ZodError } from "zod";
 import { healthProbes } from "./health-probes.js";
+import { recordPrepareFailureEvent } from "./operation-events.js";
 import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js";
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
@@ -4037,7 +4038,11 @@ async function recordTerminalResult(
     if (operation.status !== status && !isQueueFailedPrepare(operation, status) && !isSweptPrepare(operation)) throw agentXError("IDEMPOTENCY_CONFLICT", "terminal result is immutable");
     // #213: a repeated result releases a failed prepare's slot too, in case the first one's release
     // did not land (the release is idempotent, and does nothing to a workspace that moved on).
-    if (operation.kind === "prepare" && operation.status !== "SUCCEEDED") await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, operation.workspaceId);
+    if (operation.kind === "prepare" && operation.status !== "SUCCEEDED") {
+      await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, operation.workspaceId);
+      // #225 review: and records its failure event, in case the first one's did not land (once per prepare).
+      await repeatPrepareFailureEvent(dependencies, operation);
+    }
     return operation;
   }
   const workspace = await requireWorkspace(dependencies, operation.workspaceId);
@@ -4150,7 +4155,10 @@ async function recordTerminalResult(
     if (!isConditional(transactionError)) throw transactionError;
     const existing = await requireOperation(dependencies, operation.workspaceId, operation.id);
     if (existing.status === terminalStatus || isQueueFailedPrepare(existing, terminalStatus) || isSweptPrepare(existing)) {
-      if (existing.kind === "prepare" && existing.status !== "SUCCEEDED") await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, existing.workspaceId);
+      if (existing.kind === "prepare" && existing.status !== "SUCCEEDED") {
+        await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, existing.workspaceId);
+        await repeatPrepareFailureEvent(dependencies, existing);
+      }
       return existing;
     }
     // A cancel whose target finished first (its own result, and for a developer task its
@@ -4178,6 +4186,15 @@ async function recordTerminalResult(
   // counting toward the workspace limits now; the release logs, and never fails the callback.
   if (operation.kind === "prepare" && recordedStatus !== "SUCCEEDED") {
     await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, workspace.id);
+    // #225: a developer task's failed setup is an event of its own, so the task shows when it failed.
+    if (taskPointer !== undefined) {
+      await recordPrepareFailureEvent(dependencies.documentClient, dependencies.tableName, {
+        workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, status: recordedStatus,
+        error: recordedStatus !== terminalStatus ? FIRST_TASK_QUEUE_FAILED : error, at: now,
+        // The setup itself finished; it was the task's start that failed.
+        ...(recordedStatus !== terminalStatus ? { lead: "The task could not start" } : {}),
+      });
+    }
   }
   if (recordedStatus !== terminalStatus) return { ...operation, status: recordedStatus, updatedAt: now, error: FIRST_TASK_QUEUE_FAILED };
   return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
@@ -4209,6 +4226,24 @@ async function terminalLatestChecks(
     if (target?.kind === "task") return latestChecksItem({ status: "not_verified", reason: "cancelled" }, target.id, operation.fence, now);
   }
   return undefined;
+}
+
+/**
+ * #225 review: a repeated result of a developer task's failed prepare records the failure event the
+ * first result's best-effort write may have missed; the event's once-key keeps it to one.
+ */
+async function repeatPrepareFailureEvent(dependencies: AwsBrokerDependencies, operation: OperationRecord): Promise<void> {
+  try {
+    if ((await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId))) === undefined) return;
+  } catch (error) {
+    // Best effort, as the event itself: a failed read never fails the result callback.
+    console.log(JSON.stringify({ component: "broker", event: "developer.prepare_failure_event_failed", operationId: operation.id, error: error instanceof Error ? error.name : "unknown" }));
+    return;
+  }
+  await recordPrepareFailureEvent(dependencies.documentClient, dependencies.tableName, {
+    workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, status: operation.status, error: operation.error, at: operation.updatedAt,
+    ...(operation.error === FIRST_TASK_QUEUE_FAILED ? { lead: "The task could not start" } : {}),
+  });
 }
 
 /**

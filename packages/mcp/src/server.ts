@@ -84,7 +84,8 @@ export function createAgentXMcpServer(options: {
     read: readOffer === undefined ? async () => ({ admin: NOT_OFFERED }) : () => readOffer({ elicitation: clientElicits() }),
     ...(options.log === undefined ? {} : { log: (entry: Record<string, unknown>) => options.log?.(entry) }),
   });
-  const register = (tool: ToolDefinition): RegisteredTool => server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema }, async (input: Record<string, unknown>, extra) => {
+  // Issue #218: an admin tool's result also says when the admin sign-in is about to expire.
+  const register = (tool: ToolDefinition, admin = false): RegisteredTool => server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.inputSchema, outputSchema: tool.outputSchema }, async (input: Record<string, unknown>, extra) => {
     try {
       const client = server.server.getClientVersion();
       const context = options.context(client?.name, client?.version);
@@ -122,7 +123,10 @@ export function createAgentXMcpServer(options: {
       try {
         await context.compatibility();
         const result = await tool.handler(context, input, call);
-        return { content: [{ type: "text" as const, text: safeText(result.text, LONGEST_TEXT) }], structuredContent: safeStructured(result.structured) };
+        const notice = admin ? await context.adminSignInNotice?.() : undefined;
+        // First, so the length cap never cuts it off a long result.
+        const text = notice === undefined ? result.text : `${notice} ${result.text}`;
+        return { content: [{ type: "text" as const, text: safeText(text, LONGEST_TEXT) }], structuredContent: safeStructured(result.structured) };
       } catch (error) {
         const failure = error instanceof ToolError ? error : new ToolError("CONTROL_PLANE_UNAVAILABLE", "the AgentX MCP server hit an unexpected problem");
         // The code and tool only: never the message, which can quote the developer's text.
@@ -139,7 +143,7 @@ export function createAgentXMcpServer(options: {
   const groups: Array<[AdminToolGroup, readonly ToolDefinition[]]> = [["admin", options.adminTools ?? []], ["audit", options.auditTools ?? []], ["changes", options.changeTools ?? []]];
   for (const [group, tools] of groups) {
     for (const tool of tools) {
-      const registered = register(tool);
+      const registered = register(tool, true);
       registered.disable();
       adminRegistered.set(tool.name, { tool: registered, group });
     }

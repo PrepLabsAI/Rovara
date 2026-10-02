@@ -70,6 +70,15 @@ describe("the sweep (FR-055)", () => {
     expect(updatedAt > before).toBe(true);
   });
 
+  it("shows the task as changed when the sweep failed it, with the failure as an event (#225)", async () => {
+    const { sweepAt, minutesLater, dev, taskId } = await starting();
+    const at = minutesLater(51);
+    await sweepAt(at);
+    const task = (await dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`)).body.task as { updatedAt: string; events: unknown[] };
+    expect(task.updatedAt).toBe(at.toISOString());
+    expect(task.events).toEqual([{ at: at.toISOString(), kind: "error", text: `Workspace setup failed: ${STUCK_SETUP_MESSAGE}` }]);
+  });
+
   it("gives a shared task's thread the setup-failed notice, stamped with the sweep's time (F7)", async () => {
     const { db, sweepAt, minutesLater, workspaceId, prepareId } = await starting({ shareToChannel: true });
     const stream = recordStream(db);

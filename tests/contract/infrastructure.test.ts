@@ -15,6 +15,9 @@ import {
   ReleasePipelineStack,
 } from "../../infra/lib/release-pipeline.js";
 import { SlackOrchestratorStack } from "../../infra/lib/slack-orchestrator.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 interface PolicyStatement {
   Sid?: string;

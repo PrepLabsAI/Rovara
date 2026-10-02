@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { WorkerInvocation } from "@agentx/contracts";
 import {
+  type JournalStatus,
   OperationJournal,
   createWorkerServerState,
   handleWorkerRequest,
@@ -41,15 +42,51 @@ describe("worker HTTP contract", () => {
     expect(executions).toBe(1);
 
     releaseExecution();
+    // Wait on the ping, not the journal: the journal reads SUCCEEDED a moment before the operation
+    // leaves the active set (see the test below).
     await vi.waitFor(async () => {
-      expect((await journal.get(invocation.operationId))?.status).toBe("SUCCEEDED");
+      const healthy = await handleWorkerRequest(new Request("http://worker/ping"), state);
+      await expect(healthy.json()).resolves.toMatchObject({ status: "Healthy", activeOperations: 0 });
     });
-    const healthy = await handleWorkerRequest(new Request("http://worker/ping"), state);
-    await expect(healthy.json()).resolves.toMatchObject({ status: "Healthy", activeOperations: 0 });
+    expect((await journal.get(invocation.operationId))?.status).toBe("SUCCEEDED");
     // Spec 053: what this build parses, so the dispatcher sends the thinking level only to it; spec 051 adds readiness,
     // and publish's reportChecks (P-2), so only this build is asked to publish despite a failing check.
     await expect((await handleWorkerRequest(new Request("http://worker/ping"), state)).json())
       .resolves.toMatchObject({ invocationFeatures: ["model.thinkingLevel", "task.readiness", "publish.reportChecks"] });
+  });
+
+  // The journal reads SUCCEEDED a moment before the operation leaves the active set: the write lands,
+  // then transition() returns, then executeInBackground clears it. The worker stays busy until the
+  // operation is fully recorded, so a caller that saw SUCCEEDED in the journal must wait on /ping.
+  it("reports HealthyBusy until a finished operation is fully recorded, though the journal already reads SUCCEEDED", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-recorded-"));
+    let releaseRecord!: () => void;
+    const recordGate = new Promise<void>((resolve) => {
+      releaseRecord = resolve;
+    });
+    class HeldJournal extends OperationJournal {
+      override async transition(operationId: string, status: JournalStatus, error?: string) {
+        const record = await super.transition(operationId, status, error);
+        if (status === "SUCCEEDED") await recordGate;
+        return record;
+      }
+    }
+    const journal = new HeldJournal(root);
+    const state = createWorkerServerState(journal, { execute: async () => undefined });
+    const invocation = taskInvocation();
+
+    await handleWorkerRequest(invocationRequest(invocation), state);
+    await vi.waitFor(async () => {
+      expect((await journal.get(invocation.operationId))?.status).toBe("SUCCEEDED");
+    });
+    const busy = await handleWorkerRequest(new Request("http://worker/ping"), state);
+    await expect(busy.json()).resolves.toMatchObject({ status: "HealthyBusy", activeOperations: 1 });
+
+    releaseRecord();
+    await vi.waitFor(async () => {
+      const ping = await handleWorkerRequest(new Request("http://worker/ping"), state);
+      await expect(ping.json()).resolves.toMatchObject({ status: "Healthy", activeOperations: 0 });
+    });
   });
 
   it("reports the persisted terminal state after background execution", async () => {
