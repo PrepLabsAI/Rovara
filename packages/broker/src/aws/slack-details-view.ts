@@ -37,6 +37,7 @@ const DISPOSITIONS: Record<TurnDetails["disposition"], string> = {
   model_list: "model list",
   model_switch: "model selection",
   swebench_run: "SWE-bench run",
+  eval_batch: "eval batch",
 };
 
 /** Slack's three control characters; after this, record text cannot form a link, mention or alert. */

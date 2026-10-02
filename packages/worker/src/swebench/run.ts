@@ -158,6 +158,7 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
       patchBytes: Buffer.byteLength(patch),
       ...(grade === undefined ? {} : "secbench" in grade ? { secbench: grade.secbench } : { failToPass: grade.failToPass, passToPass: grade.passToPass }),
       agentSeconds: agent.agentSeconds,
+      toolCalls: agent.toolCalls,
       imageDigest,
       usage,
       artifactsPrefix: config.artifactsPrefix,

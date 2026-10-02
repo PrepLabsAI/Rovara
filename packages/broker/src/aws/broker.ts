@@ -151,9 +151,11 @@ import {
   putSwebenchChannel,
   startSwebenchRun,
   stopSwebenchRun,
-  type SwebenchDependencies,
   type SwebenchSlackContext,
 } from "./swebench.js";
+import { withEvalBatches, type EvalBatchDependencies } from "./eval-batch.js";
+import { dropWatchedBatch, listWatchedBatches, recordWatchedBatchThread, startSlackBatch, updateWatchedBatch } from "./eval-batch-service.js";
+import { batchResults, parseStartBody, requireBatchProject, showBatch, startBatch, stopBatchById } from "./eval-batch-admin.js";
 import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
 
 const MAX_ARTIFACT_BYTES = 5_000_000;
@@ -261,7 +263,7 @@ interface AwsBrokerDependencies {
   /** Spec 025 phase 25e: the admin changes' method switch, clock and metric; the defaults serve production. */
   adminChanges?: { confirm?: { elicitation: boolean; slack: boolean }; now?: () => number; metric?: (outcome: AdminChangeOutcome) => void };
   /** Spec 043: SWE-bench runs; absent in a harness that does not exercise them. */
-  swebench?: Pick<SwebenchDependencies, "deployment" | "startExecution" | "now">;
+  swebench?: Pick<EvalBatchDependencies, "deployment" | "startExecution" | "stopBatchForThread" | "onRunEnded" | "now" | "estimateRunCostUsd">;
 }
 
 /**
@@ -600,8 +602,14 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
 
       // The hosted Slack orchestrator authenticates with its IAM role and acts only as a Slack thread owner.
       if (url.pathname.startsWith("/v1/service/")) {
-        const identity = await slackServiceIdentity(dependencies, request);
         const serviceUrl = new URL(`/v1${url.pathname.slice("/v1/service".length)}${url.search}`, "https://agentx.invalid");
+        // Spec 052 Task 6: the batch watcher's list is the whole Slack service's, not one thread's.
+        if (request.method === "GET" && serviceUrl.pathname === "/v1/evals/batches/active") {
+          requireSlackServiceRole(dependencies, request);
+          if (dependencies.swebench === undefined) return json({ batches: [], dropped: [] }, request.requestId);
+          return json(await listWatchedBatches(swebenchDependencies(dependencies), async (teamId, channelId) => (await getSlackBinding(dependencies, teamId, channelId))?.projectName), request.requestId);
+        }
+        const identity = await slackServiceIdentity(dependencies, request);
         if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace") {
           return json(await ensureThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
         }
@@ -622,6 +630,22 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         }
         if (request.method === "POST" && serviceUrl.pathname === "/v1/evals/swebench") {
           return json(await startSwebenchRun(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId);
+        }
+        // Spec 052 FR-002 and Task 6: the Slack batch form, and the watcher's thread and posts for one batch.
+        if (request.method === "POST" && serviceUrl.pathname === "/v1/evals/batches") {
+          return json(await startSlackBatch(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId);
+        }
+        const watchedBatch = /^\/v1\/evals\/batches\/([0-9a-f-]{36})\/(thread|watch|drop)$/.exec(serviceUrl.pathname);
+        if (request.method === "POST" && watchedBatch?.[1] && watchedBatch[2]) {
+          const slack = identity.slack;
+          if (!slack) throw agentXError("FORBIDDEN", "Slack thread context is required");
+          const scope = { thread: slack.thread, projectName: slack.binding.projectName };
+          const swebench = swebenchDependencies(dependencies);
+          const body = parseBody(request.body);
+          const answer = watchedBatch[2] === "thread" ? await recordWatchedBatchThread(swebench, scope, watchedBatch[1], body)
+            : watchedBatch[2] === "drop" ? await dropWatchedBatch(swebench, scope, watchedBatch[1], body)
+            : await updateWatchedBatch(swebench, scope, watchedBatch[1], body);
+          return json(answer, request.requestId);
         }
         const evalRun = /^\/v1\/evals\/swebench\/([0-9a-f-]{36})$/.exec(serviceUrl.pathname);
         if (request.method === "GET" && evalRun?.[1]) {
@@ -676,6 +700,18 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       }
       if (slackBinding?.[1] && slackBinding[2] && request.method === "DELETE") {
         return json(await deleteSlackBinding(dependencies, identity, slackBinding[1], slackBinding[2]), request.requestId);
+      }
+      // Spec 052: batches of eval runs, started, shown, stopped and read by an administrator of the channel's project.
+      if (url.pathname === "/v1/admin/evals/batches" && request.method === "POST") {
+        return json(await routeStartEvalBatch(dependencies, identity, body), request.requestId);
+      }
+      const evalBatch = /^\/v1\/admin\/evals\/batches\/([0-9a-f-]{36})(?:\/(stop|results))?$/.exec(url.pathname);
+      if (evalBatch?.[1]) {
+        const action = evalBatch[2];
+        if ((action === undefined || action === "results") && request.method === "GET") {
+          return json(await routeEvalBatch(dependencies, identity, evalBatch[1], action ?? "show"), request.requestId);
+        }
+        if (action === "stop" && request.method === "POST") return json(await routeEvalBatch(dependencies, identity, evalBatch[1], "stop"), request.requestId);
       }
       const evalChannel = /^\/v1\/admin\/evals\/channels\/([^/]+)\/([^/]+)$/.exec(url.pathname);
       if (evalChannel?.[1] && evalChannel[2] && (request.method === "PUT" || request.method === "DELETE" || request.method === "GET")) {
@@ -1176,15 +1212,20 @@ async function newWorkspacePreparation(
   };
 }
 
-async function slackServiceIdentity(
-  dependencies: AwsBrokerDependencies,
-  request: AdaptedHttpRequest,
-): Promise<AuthenticatedIdentity> {
+/** The service routes' caller must be the Slack orchestrator's role. */
+function requireSlackServiceRole(dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest): void {
   const configuration = dependencies.slack;
   if (!configuration) throw agentXError("NOT_FOUND", "route not found");
   if (!request.iamPrincipalArn || !isAssumedRoleOf(request.iamPrincipalArn, configuration.orchestratorRoleArn)) {
     throw agentXError("FORBIDDEN", "only the Slack orchestrator role may call service routes");
   }
+}
+
+async function slackServiceIdentity(
+  dependencies: AwsBrokerDependencies,
+  request: AdaptedHttpRequest,
+): Promise<AuthenticatedIdentity> {
+  requireSlackServiceRole(dependencies, request);
   const context = parseSlackHeaders(request.headers);
   const binding = await getSlackBinding(dependencies, context.thread.teamId, context.thread.channelId);
   if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
@@ -4403,28 +4444,30 @@ async function requireAdministrator(
   if (membership.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
 }
 
-/** Spec 043: the SWE-bench module's dependencies, from the broker's. */
-function swebenchDependencies(dependencies: AwsBrokerDependencies): SwebenchDependencies {
+/** Spec 043: the SWE-bench module's dependencies, from the broker's; spec 052 wires its batches into them. */
+function swebenchDependencies(dependencies: AwsBrokerDependencies): EvalBatchDependencies {
   const swebench = dependencies.swebench;
   if (swebench === undefined) throw agentXError("NOT_FOUND", "SWE-bench runs are not available in this deployment");
-  return {
+  return withEvalBatches({
     documentClient: dependencies.documentClient,
     s3: dependencies.s3,
     tableName: dependencies.tableName,
     artifactBucketName: dependencies.artifactBucketName,
     callbackSigningKey: dependencies.callbackSigningKey,
     ...swebench,
-  };
+  });
 }
 
 /** The thread, requester and project model a SWE-bench run takes from the Slack service identity. */
 function swebenchSlackContext(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity): SwebenchSlackContext {
   const slack = identity.slack;
   if (!slack) throw agentXError("FORBIDDEN", "Slack thread context is required");
-  const projectName = slack.binding.projectName;
+  return { thread: slack.thread, requester: slack.requester, ...swebenchProjectContext(dependencies, slack.binding.projectName) };
+}
+
+/** The project and its approved models, for a run or batch whose thread and requester the caller supplies. */
+function swebenchProjectContext(dependencies: AwsBrokerDependencies, projectName: string): Pick<SwebenchSlackContext, "projectName" | "projectModel"> {
   return {
-    thread: slack.thread,
-    requester: slack.requester,
     projectName,
     projectModel: async (requested) => {
       const project = await requireLatestProject(dependencies, projectName);
@@ -4437,6 +4480,26 @@ function swebenchSlackContext(dependencies: AwsBrokerDependencies, identity: Aut
       return (await resolveProjectModel(dependencies, project)).model;
     },
   };
+}
+
+/** Spec 052 FR-001: an administrator of the channel's project starts a batch from a file. */
+async function routeStartEvalBatch(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, value: unknown): Promise<unknown> {
+  const body = parseStartBody(value);
+  const binding = await getSlackBinding(dependencies, body.teamId, body.channelId);
+  if (!binding) throw agentXError("NOT_FOUND", "Slack channel binding not found; bind the channel to a project first");
+  await requireAdministrator(dependencies, identity, binding.projectName);
+  return startBatch(swebenchDependencies(dependencies), swebenchProjectContext(dependencies, binding.projectName), body);
+}
+
+/** Spec 052 FR-009, FR-010: show, stop or read the results of a batch, for an administrator of its channel's project. */
+async function routeEvalBatch(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, batchId: string, action: "show" | "stop" | "results"): Promise<unknown> {
+  // The admin claim first, so a non-administrator learns nothing about which batch IDs exist.
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+  const swebench = swebenchDependencies(dependencies);
+  // The project stored on the batch, not the channel's current binding: a rebound channel does not hand over old batches.
+  await requireAdministrator(dependencies, identity, await requireBatchProject(swebench, batchId));
+  if (action === "stop") return stopBatchById(swebench, batchId);
+  return action === "results" ? batchResults(swebench, batchId) : showBatch(swebench, batchId);
 }
 
 /** Spec 043 FR-002: an administrator of the channel's project enables, reads or disables SWE-bench runs there. */
@@ -4875,7 +4938,9 @@ export const handler = createAwsBrokerHandler({
             return new Map((response.Parameters ?? []).flatMap((parameter) => parameter.Name && parameter.Value ? [[parameter.Name, parameter.Value] as const] : []));
           }),
           async startExecution(input) {
-            await stepFunctions.send(new StartExecutionCommand(input));
+            const response = await stepFunctions.send(new StartExecutionCommand(input));
+            // Spec 052 Ruling 13: recorded on the run, so the batch tick can find a dead execution.
+            return { executionArn: response.executionArn };
           },
         },
       }

@@ -19,6 +19,7 @@ import {
   type TurnRecord,
   type ModelIdentifier,
   type ProjectModelOptions,
+  parseEvalBatchCommand,
   parseSwebenchCommand,
 } from "@agentx/contracts";
 import type { WorkerAccess } from "@agentx/orchestrator";
@@ -37,6 +38,7 @@ import {
   type ActiveTurn, type TurnNote,
 } from "./interrupted-turn.js";
 import { runSwebenchCommand, type SwebenchApi } from "./swebench-command.js";
+import { runEvalBatchCommand, type EvalBatchStartApi } from "./eval-batch-command.js";
 import { SHARED_CLOSE_REFUSED_MESSAGE, SHARED_SETUP_FAILED_MESSAGE, TASK_STILL_BUSY_MESSAGE, taskBusy, waitForIdleTask } from "./shared-task.js";
 
 export interface ThreadServiceApi {
@@ -59,6 +61,9 @@ export interface ThreadServiceApi {
   /** Spec 043: absent where the control plane has no SWE-bench routes. */
   startSwebenchRun?: SwebenchApi["startSwebenchRun"];
   getSwebenchRun?: SwebenchApi["getSwebenchRun"];
+  /** Spec 052 FR-002: absent where the control plane has no batch routes. */
+  startEvalBatch?: EvalBatchStartApi["startEvalBatch"];
+  updateEvalBatchWatch?: NonNullable<EvalBatchStartApi["updateEvalBatchWatch"]>;
 }
 
 /** Issue 167: a cancel was queued for a task still running, or the task had already finished. */
@@ -369,6 +374,19 @@ export async function processSlackRequest(
         finished = true;
         return;
       }
+    }
+    // Spec 052 FR-002: a batch is recorded and announced here; the batch watcher posts the rest.
+    const batchCommand = parseEvalBatchCommand(message.text);
+    if (batchCommand !== undefined) {
+      draft.disposition = "eval_batch";
+      if (api.startEvalBatch === undefined) throw new Error("eval batches are unavailable in this deployment");
+      await runEvalBatchCommand(batchCommand, {
+        startEvalBatch: (request) => api.startEvalBatch!(request),
+        ...(api.listProjectModels === undefined ? {} : { listProjectModels: () => api.listProjectModels!() }),
+        ...(api.updateEvalBatchWatch === undefined ? {} : { updateEvalBatchWatch: (batchId, revision, change) => api.updateEvalBatchWatch!(batchId, revision, change) }),
+      }, { post, redelivered: options.redelivered === true, ...(dependencies.now === undefined ? {} : { now: dependencies.now }), log });
+      finished = true;
+      return;
     }
     const swebenchCommand = parseSwebenchCommand(message.text);
     if (swebenchCommand !== undefined) {
