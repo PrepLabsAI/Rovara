@@ -26,6 +26,12 @@ describe("the page shell", () => {
     expect(html).toContain('aria-label="Install progress"');
   });
 
+  it("FR-006: shows the welcome text from state while the install is in Get started", () => {
+    expect(html).toContain('id="welcome"');
+    expect(html).toContain('id="welcome-body"');
+    expect(WIZARD_JS).toContain("state.welcome");
+  });
+
   it("FR-004: the plan and the technical log are behind links", () => {
     expect(html).toMatch(/<details id="plan"[^>]*><summary>View the plan<\/summary>/);
     expect(html).toMatch(/<details id="log-box"[^>]*><summary>Show technical log<\/summary>/);
@@ -39,6 +45,17 @@ describe("the page shell", () => {
     expect(WIZARD_JS).toContain('setAttribute("aria-labelledby", "question-text")');
     expect(WIZARD_CSS).not.toMatch(/text-transform:\s*uppercase/);
     expect(WIZARD_CSS).toMatch(/\.question h2 \{[^}]*font-size: var\(--text-xl\)/);
+  });
+
+  it("Q4: a form field is never filled with a masked value, even if the server sent one", () => {
+    expect(WIZARD_JS).toContain("if (field.value && !field.masked) input.value = field.value;");
+  });
+
+  it("never repeats a link as the bottom Open this button, even one a collapsed card gave", () => {
+    // offered is built from every card's link, in its own loop, before the loop that skips a
+    // collapsed (status ok, not the current phase) card from being rendered: a link does not have
+    // to be shown on screen to count as already offered.
+    expect(WIZARD_JS).toContain("for (const card of state.cards ?? []) if (card.link) offered.add(card.link.url);");
   });
 
   it("FR-005 and FR-011: takes the tab title, buttons and hints from state, and asks to close on Close installer", () => {

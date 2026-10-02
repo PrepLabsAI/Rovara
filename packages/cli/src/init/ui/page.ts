@@ -216,11 +216,15 @@ function renderPanelCards(state) {
   const holder = byId("cards");
   holder.replaceChildren();
   const offered = new Set();
+  // Every card's link counts as offered, not only a rendered one's: a card collapsed into its
+  // phase's Details (status ok, not the current phase) could in principle still carry the run's
+  // own link (state.ts only clears it when a replacing card's link actually differs), and the
+  // bottom "Open this" button must not repeat a link a card already gave, shown or not.
+  for (const card of state.cards ?? []) if (card.link) offered.add(card.link.url);
   for (const card of state.cards ?? []) {
     const current = CARD_PHASES[card.id] === state.journey.current;
     if (card.status === "ok" && !current && card.id !== "ready") continue;
     holder.append(renderCard(card));
-    if (card.link) offered.add(card.link.url);
   }
   const next = state.link && !offered.has(state.link.url) ? state.link : null;
   show("next", Boolean(next));
@@ -289,7 +293,7 @@ function buildForm(question, body) {
     input.id = id;
     input.type = field.masked ? "password" : "text";
     if (field.masked) hideFromPasswordManagers(input);
-    if (field.value) input.value = field.value;
+    if (field.value && !field.masked) input.value = field.value;
     const notes = [];
     for (const [suffix, text, className] of [["why", field.why, "hint"], ["example", field.example ? "For example: " + field.example : undefined, "hint"], ["hint", field.hint, "hint"], ["error", field.error, "error"]]) {
       if (!text) continue;
