@@ -130,7 +130,8 @@ Every step writes to the AWS account; an administrator runs them.
 - **Compute:** an `m7i.xlarge` for the run's duration, usually 15 to 60 minutes, and a 150 GiB gp3
   root volume that is deleted with the instance.
 - **Time:** the agent has 60 minutes; the instance lives at most two hours.
-- **One run at a time** per deployment. A batch of instances is a follow-up.
+- **Concurrent runs:** at most 4 per deployment by default (`maxConcurrentEvals` in the eval settings, 1 to 6).
+  A run that finds every slot taken is refused: "N eval runs are in progress; try again shortly."
 
 ## Artifacts
 

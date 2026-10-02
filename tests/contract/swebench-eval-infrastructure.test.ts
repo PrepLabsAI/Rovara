@@ -81,7 +81,11 @@ describe("the SWE-bench eval stack (spec 043 FR-016, FR-017)", () => {
 
 describe("the eval state machine (spec 043 FR-006)", () => {
   const definition = swebenchEvalDefinition({ launchTemplateId: "lt-1", stateTableName: "state", environmentTag: "production", resourcePrefix: "agentx-production" }) as {
-    StartAt: string; States: Record<string, { Type: string; Next?: string; Default?: string; Choices?: Array<{ Next: string }>; Catch?: Array<{ Next: string }> }>;
+    StartAt: string; States: Record<string, { Type: string; Next?: string; Default?: string; Choices?: Array<{ Condition: string; Next: string }>; Catch?: Array<{ ErrorEquals: string[]; Next: string }>; Arguments?: Record<string, unknown> }>;
+  };
+  const exits = (name: string) => {
+    const state = definition.States[name]!;
+    return [state.Next, state.Default, ...(state.Choices ?? []).map((c) => c.Next), ...(state.Catch ?? []).map((c) => c.Next)].filter((next): next is string => next !== undefined);
   };
 
   it("reaches every state, and every path ends through the terminate step", () => {
@@ -89,21 +93,51 @@ describe("the eval state machine (spec 043 FR-006)", () => {
     const visit = (name: string) => {
       if (reachable.has(name)) return;
       reachable.add(name);
-      const state = definition.States[name]!;
-      for (const next of [state.Next, state.Default, ...(state.Choices ?? []).map((c) => c.Next), ...(state.Catch ?? []).map((c) => c.Next)]) {
-        if (next !== undefined) visit(next);
-      }
+      for (const next of exits(name)) visit(next);
     };
     visit(definition.StartAt);
     expect([...reachable].sort()).toEqual(Object.keys(definition.States).sort());
     const ends = Object.entries(definition.States).filter(([, state]) => state.Type === "Succeed" || state.Type === "Fail").map(([name]) => name);
-    expect(ends).toEqual(["Done"]);
+    expect(ends.sort()).toEqual(["Done", "SlotReleaseFailed"]);
+    // Spec 052: a release that fails still terminates the instance, then fails the execution.
+    const intoFailure = Object.keys(definition.States).filter((name) => exits(name).includes("SlotReleaseFailed"));
+    expect(intoFailure.sort()).toEqual(["ReleaseFailed", "TerminateBeforeFailing"]);
+    expect(definition.States.ReleaseFailed!.Choices).toEqual([{ Condition: "{% $instanceId = null %}", Next: "SlotReleaseFailed" }]);
+    expect(definition.States.ReleaseFailed!.Default).toBe("TerminateBeforeFailing");
   });
 
   it("launches once per run and marks a run it ends only while the run is active", () => {
     const text = JSON.stringify(definition);
     expect(text).toContain("\"ClientToken\":\"{% $runId %}\"");
     expect(text).toContain("#status = :active0 OR #status = :active1 OR #status = :active2");
-    expect(text).toContain("attribute_not_exists(pk) OR runId = :runId");
+  });
+
+  it("releases the run's slot and the shared counter with the run's end, exactly once (spec 052 FR-005)", () => {
+    const items = definition.States.EndRun!.Arguments!.TransactItems as Array<Record<string, Record<string, unknown>>>;
+    expect(items.map((item) => Object.keys(item)[0])).toEqual(["Update", "Delete", "Update"]);
+    expect(items[1]!.Delete).toMatchObject({ Key: { pk: { S: "SWEBENCH#SLOT" }, sk: { S: "{% 'RUN#' & $runId %}" } }, ConditionExpression: "attribute_exists(pk)" });
+    expect(items[2]!.Update).toMatchObject({
+      Key: { pk: { S: "SWEBENCH#SLOTS" }, sk: { S: "COUNTER" } },
+      UpdateExpression: "SET #count = #count - :one",
+      ConditionExpression: "#count > :zero",
+      ExpressionAttributeNames: { "#count": "count" },
+      ExpressionAttributeValues: { ":one": { N: "1" }, ":zero": { N: "0" } },
+    });
+    expect(JSON.stringify(definition)).not.toContain("SWEBENCH#ACTIVE");
+  });
+
+  it("goes straight to terminate only for a cancelled release; any other error fails the execution after terminating", () => {
+    expect(definition.States.EndRun!.Catch).toEqual([
+      expect.objectContaining({ ErrorEquals: ["DynamoDb.TransactionCanceledException"], Next: "ReadEnded" }),
+      expect.objectContaining({ ErrorEquals: ["States.ALL"], Next: "ReleaseFailed" }),
+    ]);
+    // A cancelled release is read back: a run already terminal was released by the broker; a run
+    // with no slot item began under the one-run lock; a held slot is tried again, then fails.
+    expect(exits("ReadEnded").sort()).toEqual(["ReleaseFailed", "Released"]);
+    expect(definition.States.Released!.Choices!.map((choice) => choice.Next)).toEqual(["Terminate", "EndRunWithoutSlot", "EndRunAgain"]);
+    expect(definition.States.Released!.Default).toBe("ReleaseFailed");
+    expect(exits("EndRunAgain")).toEqual(["EndRun"]);
+    expect(definition.States.EndRunWithoutSlot!.Catch!.map((c) => c.Next)).toEqual(["Terminate", "ReleaseFailed"]);
+    expect(definition.States.EndRunWithoutSlot!.Catch![0]!.ErrorEquals).toContain("DynamoDb.ConditionalCheckFailedException");
   });
 });

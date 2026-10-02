@@ -261,7 +261,7 @@ interface AwsBrokerDependencies {
   /** Spec 025 phase 25e: the admin changes' method switch, clock and metric; the defaults serve production. */
   adminChanges?: { confirm?: { elicitation: boolean; slack: boolean }; now?: () => number; metric?: (outcome: AdminChangeOutcome) => void };
   /** Spec 043: SWE-bench runs; absent in a harness that does not exercise them. */
-  swebench?: Pick<SwebenchDependencies, "deployment" | "startExecution" | "now">;
+  swebench?: Pick<SwebenchDependencies, "deployment" | "startExecution" | "stopBatchForThread" | "now">;
 }
 
 /**

@@ -1,7 +1,10 @@
 import { randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it, vi } from "vitest";
+import { TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { unmarshall } from "@aws-sdk/util-dynamodb";
 import { AgentXError, SwebenchLaunchSchema, type SwebenchLaunch } from "@agentx/contracts";
-import type { SwebenchDeployment } from "../../packages/broker/src/aws/swebench.js";
+import { swebenchEvalDefinition } from "../../infra/lib/swebench-eval-definition.js";
+import { stopSwebenchRun, type SwebenchDependencies, type SwebenchDeployment } from "../../packages/broker/src/aws/swebench.js";
 import { swebenchDeploymentFromParameters } from "../../packages/broker/src/aws/swebench-settings.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, registerSlackProject, serviceCall } from "../support/slack-broker.js";
 
@@ -32,7 +35,7 @@ beforeAll(async () => {
 });
 
 /** A broker with SWE-bench runs installed, a bound channel, and the launch files it writes. */
-async function evalBroker(options: { installed?: boolean; models?: unknown; startExecution?: () => Promise<void>; runnerFeatures?: string[] } = {}) {
+async function evalBroker(options: { installed?: boolean; models?: unknown; startExecution?: () => Promise<void>; runnerFeatures?: string[]; maxConcurrentEvals?: number } = {}) {
   const launches = new Map<string, SwebenchLaunch>();
   const s3 = {
     send: vi.fn(async (command: { input: { Key?: string; Body?: string } }) => {
@@ -45,7 +48,11 @@ async function evalBroker(options: { installed?: boolean; models?: unknown; star
     s3,
     extra: {
       swebench: {
-        deployment: async () => (options.installed === false ? undefined : { ...deployment, runnerFeatures: options.runnerFeatures ?? deployment.runnerFeatures }),
+        deployment: async () => (options.installed === false ? undefined : {
+          ...deployment,
+          settings: { ...deployment.settings, maxConcurrentEvals: options.maxConcurrentEvals ?? deployment.settings.maxConcurrentEvals },
+          runnerFeatures: options.runnerFeatures ?? deployment.runnerFeatures,
+        }),
         startExecution,
       },
     },
@@ -88,7 +95,7 @@ describe("enabling SWE-bench runs in a channel (spec 043 FR-002)", () => {
 });
 
 describe("starting a run (spec 043 FR-001 to FR-006)", () => {
-  it("records the run, takes the deployment's lock, writes the launch file and starts the state machine", async () => {
+  it("records the run, takes a slot, writes the launch file and starts the state machine", async () => {
     const { handler, db, launches, startExecution } = await evalBroker();
     await enable(handler, { maxCostUsd: 12 });
     const started = await start(handler);
@@ -98,7 +105,8 @@ describe("starting a run (spec 043 FR-001 to FR-006)", () => {
     } } });
     const runId = (started.body.run as { runId: string }).runId;
     expect(db.get(`SWEBENCH_RUN#${runId}`, "META")).toMatchObject({ entityType: "SWEBENCH_RUN", projectName: "payments", status: "STARTING" });
-    expect(db.get("SWEBENCH#ACTIVE", "LOCK")).toMatchObject({ runId, threadSubject: thread });
+    expect(db.get("SWEBENCH#SLOT", `RUN#${runId}`)).toMatchObject({ runId, threadSubject: thread });
+    expect(db.get("SWEBENCH#SLOTS", "COUNTER")).toMatchObject({ count: 1 });
     const launch = launches.get(`evals/${runId}/launch.json`);
     expect(launch).toMatchObject({
       runnerImage, logGroupName: "/agentx/production/swebench", environment: { PI_CACHE_RETENTION: "long" },
@@ -112,14 +120,14 @@ describe("starting a run (spec 043 FR-001 to FR-006)", () => {
   });
 
   it("answers a repeated request with the run it started, and refuses a second run while one is active", async () => {
-    const { handler, startExecution } = await evalBroker();
+    const { handler, startExecution } = await evalBroker({ maxConcurrentEvals: 1 });
     await enable(handler);
     const requestId = randomUUID();
     const first = await start(handler, { requestId });
     const again = await start(handler, { requestId });
     expect(again.body.run).toEqual(first.body.run);
     expect(startExecution).toHaveBeenCalledTimes(1);
-    expect((await start(handler, {}, otherThread)).body).toMatchObject({ outcome: "REFUSED", reason: "RUN_ACTIVE", message: expect.stringMatching(/^Another eval run is in progress/) as unknown });
+    expect((await start(handler, {}, otherThread)).body).toMatchObject({ outcome: "REFUSED", reason: "RUN_ACTIVE", message: "1 eval run is in progress; try again shortly." });
   });
 
   it("refuses a run where eval is not installed or the channel is not enabled", async () => {
@@ -195,13 +203,14 @@ describe("starting a run (spec 043 FR-001 to FR-006)", () => {
     expect(broker.launches.get(`evals/${runId}/launch.json`)!.run.model).toEqual(model);
   });
 
-  it("fails the run and releases the lock when the state machine cannot start", async () => {
+  it("fails the run and releases its slot when the state machine cannot start", async () => {
     const { handler, db } = await evalBroker({ startExecution: async () => { throw new Error("ExecutionLimitExceeded"); } });
     await enable(handler);
     const requestId = randomUUID();
     expect((await start(handler, { requestId })).status).toBeGreaterThanOrEqual(400);
     expect(db.get(`SWEBENCH_RUN#${requestId}`, "META")).toMatchObject({ status: "FAILED", error: expect.stringContaining("ExecutionLimitExceeded") as unknown });
-    expect(db.get("SWEBENCH#ACTIVE", "LOCK")).toBeUndefined();
+    expect(db.get("SWEBENCH#SLOT", `RUN#${requestId}`)).toBeUndefined();
+    expect(db.get("SWEBENCH#SLOTS", "COUNTER")).toMatchObject({ count: 0 });
   });
 
   it("shows a run only to the thread that started it", async () => {
@@ -235,12 +244,13 @@ describe("the runner's callbacks and the stop command (spec 043 FR-005, FR-007)"
     return { ...broker, runId, capability, callback };
   }
 
-  it("moves the run to RUNNING, then applies the graded result and releases the lock", async () => {
+  it("moves the run to RUNNING, then applies the graded result and releases the slot", async () => {
     const { db, runId, callback, handler } = await runningRun();
     expect(await callback("started")).toMatchObject({ status: 200, body: { run: { status: "RUNNING" } } });
     const finished = await callback("result", { ...graded, artifactsPrefix: `evals/${runId}/` });
     expect(finished).toMatchObject({ status: 200, body: { run: { status: "SUCCEEDED", result: { resolved: true, failToPass: { passed: 3, total: 3 } } } } });
-    expect(db.get("SWEBENCH#ACTIVE", "LOCK")).toBeUndefined();
+    expect(db.get("SWEBENCH#SLOT", `RUN#${runId}`)).toBeUndefined();
+    expect(db.get("SWEBENCH#SLOTS", "COUNTER")).toMatchObject({ count: 0 });
     // A repeated result changes nothing, and the next run may start.
     expect(await callback("result", { outcome: "FAILED", error: "late" })).toMatchObject({ status: 200, body: { run: { status: "SUCCEEDED" } } });
     expect((await start(handler, {}, otherThread)).body).toMatchObject({ outcome: "STARTED" });
@@ -273,6 +283,161 @@ describe("the runner's callbacks and the stop command (spec 043 FR-005, FR-007)"
     const stopped = await handler({ source: "agentx.slack-ingress", action: "stop-task", thread: slackThread, userId: member });
     expect(JSON.parse(stopped.body)).toMatchObject({ outcome: "CANCEL_REQUESTED", targetOperationId: runId });
     expect(db.get(`SWEBENCH_RUN#${runId}`, "META")).toMatchObject({ status: "CANCEL_REQUESTED", cancelRequestedBy: { teamId: SLACK_TEAM, userId: member } });
+  });
+});
+
+describe("the shared limit on concurrent runs (spec 052 FR-005)", () => {
+  const counter = (db: { get: (pk: string, sk: string) => Record<string, unknown> | undefined }) => db.get("SWEBENCH#SLOTS", "COUNTER")?.count;
+  const runIdOf = (response: { body: Record<string, unknown> }) => (response.body.run as { runId: string }).runId;
+  const definition = swebenchEvalDefinition({ launchTemplateId: "lt-1", stateTableName: "state", environmentTag: "production", resourcePrefix: "agentx-production" }) as {
+    States: Record<string, { Resource?: string; Arguments?: Record<string, unknown> }>;
+  };
+
+  /**
+   * A write step of the eval state machine, sent to the fake table as Step Functions would send it
+   * for this run: its JSONata values filled in and its wire-format values unmarshalled.
+   */
+  async function stateMachineWrite(db: { send: (command: never) => Promise<unknown> }, state: string, runId: string) {
+    const expressions: Record<string, string> = {
+      "{% 'SWEBENCH_RUN#' & $runId %}": `SWEBENCH_RUN#${runId}`,
+      "{% 'RUN#' & $runId %}": `RUN#${runId}`,
+      "{% $runId %}": runId,
+      "{% $endStatus %}": "CANCELLED",
+      "{% $failure %}": "cancelled from Slack",
+      "{% $now() %}": new Date().toISOString(),
+    };
+    const fill = (value: unknown): unknown => {
+      if (typeof value === "string" && value.startsWith("{%")) {
+        if (!(value in expressions)) throw new Error(`no value for ${value}`);
+        return expressions[value];
+      }
+      if (Array.isArray(value)) return value.map(fill);
+      if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, fill(entry)]));
+      return value;
+    };
+    const plain = (action: Record<string, unknown>) => ({
+      ...action,
+      Key: unmarshall(action.Key as never),
+      ...(action.ExpressionAttributeValues === undefined ? {} : { ExpressionAttributeValues: unmarshall(action.ExpressionAttributeValues as never) }),
+    });
+    const step = definition.States[state]!;
+    const args = fill(step.Arguments) as Record<string, unknown>;
+    if (step.Resource!.endsWith(":transactWriteItems")) {
+      const items = (args.TransactItems as Array<Record<string, Record<string, unknown>>>).map((entry) =>
+        Object.fromEntries(Object.entries(entry).map(([kind, action]) => [kind, plain(action)])));
+      return db.send(new TransactWriteCommand({ TransactItems: items }) as never);
+    }
+    if (step.Resource!.endsWith(":updateItem")) return db.send(new UpdateCommand(plain(args) as never) as never);
+    throw new Error(`${state} is not a write step`);
+  }
+
+  async function brokerWithResult(options: { maxConcurrentEvals?: number } = {}) {
+    const broker = await evalBroker(options);
+    await enable(broker.handler);
+    const result = (runId: string, body: unknown = { outcome: "FAILED", error: "could not pull the image" }) => call(broker.handler, {
+      method: "POST", path: `/v1/internal/evals/${runId}/result`,
+      headers: { "x-agentx-callback-capability": broker.launches.get(`evals/${runId}/launch.json`)!.run.capability }, body,
+    });
+    return { ...broker, result };
+  }
+
+  it("starts two runs and refuses a third when the limit is 2", async () => {
+    const { handler, db, startExecution } = await brokerWithResult({ maxConcurrentEvals: 2 });
+    const first = runIdOf(await start(handler));
+    const second = runIdOf(await start(handler, {}, otherThread));
+    expect(counter(db)).toBe(2);
+    expect(db.get("SWEBENCH#SLOT", `RUN#${first}`)).toMatchObject({ threadSubject: thread });
+    expect(db.get("SWEBENCH#SLOT", `RUN#${second}`)).toMatchObject({ threadSubject: otherThread });
+    const third = await start(handler, {}, `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000003`);
+    expect(third.body).toMatchObject({ outcome: "REFUSED", reason: "RUN_ACTIVE", message: "2 eval runs are in progress; try again shortly." });
+    expect(counter(db)).toBe(2);
+    expect(startExecution).toHaveBeenCalledTimes(2);
+  });
+
+  it("frees a slot when a run finishes", async () => {
+    const { handler, db, result } = await brokerWithResult({ maxConcurrentEvals: 1 });
+    const runId = runIdOf(await start(handler));
+    expect((await start(handler, {}, otherThread)).body).toMatchObject({ outcome: "REFUSED", reason: "RUN_ACTIVE" });
+    expect(await result(runId)).toMatchObject({ status: 200, body: { run: { status: "FAILED" } } });
+    expect(counter(db)).toBe(0);
+    expect(db.get("SWEBENCH#SLOT", `RUN#${runId}`)).toBeUndefined();
+    expect((await start(handler, {}, otherThread)).body).toMatchObject({ outcome: "STARTED" });
+  });
+
+  it("releases a slot once when the broker and the state machine both end the run, in either order", async () => {
+    const { handler, db, result } = await brokerWithResult({ maxConcurrentEvals: 3 });
+    const [brokerFirst, machineFirst, other] = [runIdOf(await start(handler)), runIdOf(await start(handler)), runIdOf(await start(handler))];
+    expect(counter(db)).toBe(3);
+
+    // The runner's result arrives twice, then the state machine ends the same run.
+    await result(brokerFirst);
+    expect(await result(brokerFirst)).toMatchObject({ status: 200, body: { run: { status: "FAILED" } } });
+    await expect(stateMachineWrite(db, "EndRun", brokerFirst)).rejects.toMatchObject({ name: "TransactionCanceledException" });
+    expect(counter(db)).toBe(2);
+
+    // The state machine ends the run, then a late result changes nothing.
+    await stateMachineWrite(db, "EndRun", machineFirst);
+    expect(db.get(`SWEBENCH_RUN#${machineFirst}`, "META")).toMatchObject({ status: "CANCELLED" });
+    expect(db.get("SWEBENCH#SLOT", `RUN#${machineFirst}`)).toBeUndefined();
+    await expect(stateMachineWrite(db, "EndRun", machineFirst)).rejects.toMatchObject({ name: "TransactionCanceledException" });
+    expect(await result(machineFirst)).toMatchObject({ status: 200, body: { run: { status: "CANCELLED" } } });
+    expect(counter(db)).toBe(1);
+    expect(db.get("SWEBENCH#SLOT", `RUN#${other}`)).toBeDefined();
+  });
+
+  it("ends a run started under the one-run lock without taking a slot it never held (migration)", async () => {
+    const { handler, db, result } = await brokerWithResult({ maxConcurrentEvals: 2 });
+    // Two runs from before the deploy: their records exist, but no slot item, and the counter does not count them.
+    const [reported, ended] = [runIdOf(await start(handler)), runIdOf(await start(handler, {}, otherThread))];
+    for (const runId of [reported, ended]) db.delete("SWEBENCH#SLOT", `RUN#${runId}`);
+    db.set({ pk: "SWEBENCH#ACTIVE", sk: "LOCK", entityType: "SWEBENCH_ACTIVE", runId: reported, threadSubject: thread });
+    db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: 1 });
+    const running = runIdOf(await start(handler, {}, `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000003`));
+    expect(counter(db)).toBe(2);
+
+    expect(await result(reported)).toMatchObject({ status: 200, body: { run: { status: "FAILED" } } });
+    expect(counter(db)).toBe(2);
+
+    // The state machine's release is refused for want of a slot, and its fallback ends the run only.
+    await expect(stateMachineWrite(db, "EndRun", ended)).rejects.toMatchObject({ name: "TransactionCanceledException" });
+    await stateMachineWrite(db, "EndRunWithoutSlot", ended);
+    expect(db.get(`SWEBENCH_RUN#${ended}`, "META")).toMatchObject({ status: "CANCELLED" });
+    await expect(stateMachineWrite(db, "EndRunWithoutSlot", ended)).rejects.toMatchObject({ name: "ConditionalCheckFailedException" });
+    expect(counter(db)).toBe(2);
+    expect(db.get("SWEBENCH#SLOT", `RUN#${running}`)).toBeDefined();
+  });
+
+  it("stops every active run in the thread, and only that thread's (FR-009)", async () => {
+    const { handler, db } = await brokerWithResult({ maxConcurrentEvals: 3 });
+    const [one, two, elsewhere] = [runIdOf(await start(handler)), runIdOf(await start(handler)), runIdOf(await start(handler, {}, otherThread))];
+    const stopped = await handler({ source: "agentx.slack-ingress", action: "stop-task", thread: slackThread, userId: member });
+    expect(JSON.parse(stopped.body)).toMatchObject({ outcome: "CANCEL_REQUESTED" });
+    for (const runId of [one, two]) expect(db.get(`SWEBENCH_RUN#${runId}`, "META")).toMatchObject({ status: "CANCEL_REQUESTED", cancelRequestedBy: { teamId: SLACK_TEAM, userId: member } });
+    expect(db.get(`SWEBENCH_RUN#${elsewhere}`, "META")).toMatchObject({ status: "STARTING" });
+    // Stopping asks for cancellation; the slots stay held until the state machine ends the runs.
+    expect(counter(db)).toBe(3);
+  });
+
+  it("asks the batch hook to stop the thread's batch, and still stops a run started under the one-run lock", async () => {
+    const { handler, db } = await brokerWithResult();
+    const runId = runIdOf(await start(handler));
+    db.delete("SWEBENCH#SLOT", `RUN#${runId}`);
+    db.set({ pk: "SWEBENCH#ACTIVE", sk: "LOCK", entityType: "SWEBENCH_ACTIVE", runId, threadSubject: thread });
+    const stopBatchForThread = vi.fn(async () => undefined);
+    const dependencies: SwebenchDependencies = {
+      documentClient: db as never, s3: { send: vi.fn() } as never, tableName: "state", artifactBucketName: "artifacts", callbackSigningKey: "c".repeat(64),
+      deployment: async () => deployment, startExecution: vi.fn(), stopBatchForThread,
+    };
+    const requester = { teamId: SLACK_TEAM, userId: member };
+    expect(await stopSwebenchRun(dependencies, slackThread, requester)).toBe(runId);
+    expect(stopBatchForThread).toHaveBeenCalledWith(slackThread, requester);
+    expect(db.get(`SWEBENCH_RUN#${runId}`, "META")).toMatchObject({ status: "CANCEL_REQUESTED" });
+    // A thread with nothing running stops nothing, unless the hook stopped its batch.
+    const otherSlackThread = { ...slackThread, threadTs: "1695500000.000002" };
+    expect(await stopSwebenchRun(dependencies, otherSlackThread, requester)).toBeUndefined();
+    const batchId = randomUUID();
+    stopBatchForThread.mockResolvedValueOnce(batchId as never);
+    expect(await stopSwebenchRun(dependencies, otherSlackThread, requester)).toBe(batchId);
   });
 });
 
