@@ -36,9 +36,12 @@ export async function createConfiguredModelRuntime(selected: ModelIdentifier & {
   const key = await readOpenRouterKey(environment.AGENTX_OPENROUTER_SECRET_ARN ?? "", options.readSecret);
   runtime.registerProvider("openrouter", {
     baseUrl: "https://openrouter.ai/api/v1", api: "openai-completions",
-    // Pi 0.86 sends Pi's session ID to OpenRouter as x-session-id; AgentX keeps the 0.85.1 request, which has no such header.
+    // AgentX keeps the 0.85.1 request on Pi 1.0. Pi 0.86 sends Pi's session ID to OpenRouter as x-session-id; the 0.85.1
+    // request had no such header. Pi 0.86 also records prompt changes as mid-conversation system messages, which some
+    // models (openai/gpt-5.x) would receive after the old prompt; without them Pi collapses the transcript into one
+    // leading, current prompt, as 0.85.1 sent (a resumed Slack turn changes the orchestrator's cwd every turn).
     models: runtime.getModels("openrouter").map((entry) => ({ ...entry, api: "openai-completions", baseUrl: "https://openrouter.ai/api/v1",
-      compat: { ...(entry.compat as OpenAICompletionsCompat | undefined), sendSessionAffinityHeaders: false } })),
+      compat: { ...(entry.compat as OpenAICompletionsCompat | undefined), sendSessionAffinityHeaders: false, supportsMidConvoSystemMessages: false } })),
     streamSimple: (entry, context, streamOptions) => safeOpenRouterStream(entry as Model<"openai-completions">, context, streamOptions, routing, options.fetch, options.onUsage),
   });
   try { await runtime.setRuntimeApiKey("openrouter", key); }

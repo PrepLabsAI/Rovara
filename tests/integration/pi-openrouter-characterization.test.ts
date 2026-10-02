@@ -4,7 +4,8 @@
 // record, and the fixed failure messages. The real provider from packages/model-runtime/src/index.ts,
 // with only its fetch replaced by a recording transport. Offline.
 // Characterization: every expected value below was observed on 0.85.1, then pinned exactly.
-import { rm } from "node:fs/promises";
+import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Type } from "typebox";
 import { createConfiguredModelRuntime } from "../../packages/model-runtime/src/index.js";
@@ -161,5 +162,65 @@ describe("OpenRouter custom provider on Pi 0.85.1", () => {
     expect(midStream.captured).toHaveLength(1);
     expect({ stopReason: aborted.stopReason, errorMessage: aborted.errorMessage, content: aborted.content }).toEqual({"stopReason":"aborted","errorMessage":"OpenRouter request cancelled","content":[{"type":"text","text":"Done"}]});
     expect(b.onUsage.mock.calls).toEqual([[{"event":"model_request_usage","provider":"openrouter","requestedModel":"anthropic/claude-sonnet-4","returnedModel":"anthropic/claude-sonnet-4-20250514","returnedProvider":"Anthropic","tokens":{"input":0,"output":0,"cacheRead":0,"cacheWrite":0},"costUsd":null,"costSource":"unknown","outcome":"aborted"}]]);
+  });
+});
+
+// Spec 050 phase 2 fix round 1: on 0.85.1 every request carried one leading prompt, the current one. Pi 1.0 records the
+// prompt as transcript system messages and, on resume with a changed prompt (Slack moves the orchestrator's cwd every
+// turn), appends a delta; models whose compat allows mid-conversation system messages (openai/gpt-5.x on OpenRouter)
+// would then get the old prompt first and an "updated" developer message mid-conversation.
+describe("OpenRouter resume keeps one leading, current prompt", () => {
+  const model = { provider: "openrouter", modelId: "openai/gpt-5.5" };
+  /** Each request's messages as [role, text]; the system prompt is the developer (or system) role. */
+  const shape = (body: unknown) => (body as { messages: Array<{ role: string; content: string | Array<{ text?: string }> }> }).messages
+    .map((message) => [message.role, typeof message.content === "string" ? message.content : message.content.map((block) => block.text ?? "").join("")] as const);
+  const promptRoles = new Set(["developer", "system"]);
+
+  async function resumeTwice(rewrite?: (lines: Array<Record<string, unknown>>) => Array<Record<string, unknown>>) {
+    const { captured, transport } = capturing(() => sse(textChunks));
+    const runtime = await createConfiguredModelRuntime(model, { environment, readSecret: async () => secret, fetch: transport, onUsage: vi.fn() });
+    const first = await createFixtureDirectory("agentx-char-resume-a-");
+    const second = await createFixtureDirectory("agentx-char-resume-b-");
+    try {
+      const a = await createPiSessionRuntime({ stateDirectory: first, modelRuntime: runtime, model, systemPrompt: "You are a test agent.", extensions: [], customTools: [] });
+      const firstCwd = a.session.sessionManager.getCwd();
+      try { await runOrchestratorTurn(a, "hello"); } finally { await a.dispose(); }
+      // The resumed turn runs in another folder, as a Slack thread's next turn does.
+      await mkdir(join(second, "sessions"), { recursive: true });
+      const file = join(second, "sessions", "thread.jsonl");
+      await copyFile(a.session.sessionFile!, file);
+      if (rewrite) {
+        const lines = (await readFile(file, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+        await writeFile(file, rewrite(lines).map((line) => JSON.stringify(line)).join("\n") + "\n");
+      }
+      const b = await createPiSessionRuntime({ stateDirectory: second, modelRuntime: runtime, model, systemPrompt: "You are a test agent.", extensions: [], customTools: [], sessionFile: file });
+      const secondCwd = b.session.sessionManager.getCwd();
+      try { await runOrchestratorTurn(b, "again"); } finally { await b.dispose(); }
+      expect(captured).toHaveLength(2);
+      return { request: shape(captured[1]!.body), firstCwd, secondCwd };
+    } finally { await rm(first, { recursive: true, force: true }); await rm(second, { recursive: true, force: true }); }
+  }
+
+  function expectOneCurrentPrompt({ request, firstCwd, secondCwd }: Awaited<ReturnType<typeof resumeTwice>>) {
+    expect(firstCwd).not.toBe(secondCwd);
+    expect(request.map(([role]) => role)).toEqual(["developer", "user", "assistant", "user"]);
+    expect(request.filter(([role]) => promptRoles.has(role))).toHaveLength(1);
+    expect(request[0]![1]).toContain(secondCwd);
+    expect(request[0]![1]).not.toContain(firstCwd);
+    expect(request[0]![1].startsWith("You are a test agent.")).toBe(true);
+  }
+
+  it("resumed with a changed working directory, the second request has one leading developer prompt with the new cwd", async () => {
+    // protects packages/model-runtime/src/index.ts (OpenRouter compat: supportsMidConvoSystemMessages false)
+    expectOneCurrentPrompt(await resumeTwice());
+  });
+
+  it("resumed from a 0.85.1 session file (no system entry), the second request still has one leading prompt", async () => {
+    // protects packages/model-runtime/src/index.ts; guards sessions saved before the upgrade
+    expectOneCurrentPrompt(await resumeTwice((lines) => {
+      const system = lines.filter((line) => line.type === "message" && (line.message as { role?: string }).role === "system");
+      const ids = new Map(system.map((line) => [line.id, line.parentId]));
+      return lines.filter((line) => !system.includes(line)).map((line) => ids.has(line.parentId) ? { ...line, parentId: ids.get(line.parentId) } : line);
+    }));
   });
 });

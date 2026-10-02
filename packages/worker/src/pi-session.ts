@@ -294,6 +294,9 @@ export async function createWorkerResources(
   input: Pick<PiSessionInput, "cwd" | "agentDirectory" | "contextFiles">,
 ): Promise<{ resourceLoader: DefaultResourceLoader; settingsManager: SettingsManager }> {
   const settingsManager = SettingsManager.create(input.cwd, input.agentDirectory, { projectTrusted: false });
+  // Pi 0.86+ warms prompt caches with extra paid requests during long tool runs by default ("streaming"); 0.85.1 made
+  // none. The mode is a global-only setting, so it is written to AgentX's own agent directory.
+  settingsManager.setCacheWarmingMode("off");
   const resourceLoader = new DefaultResourceLoader({
     cwd: input.cwd,
     agentDir: input.agentDirectory,

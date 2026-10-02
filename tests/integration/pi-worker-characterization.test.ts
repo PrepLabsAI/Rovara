@@ -122,7 +122,9 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
       for (const value of Object.values(stats.tokens)) expect(Number.isSafeInteger(value) && value >= 0).toBe(true);
       expect(stats.tokens.total).toBeGreaterThan(0);
       // Ruling D (Pi 0.86+): the prompt and tools are persisted as a leading system message entry, so one more "message".
-      expect((await sessionEntries(handle.sessionFile)).map((entry) => entry.type)).toEqual(["session", "model_change", "thinking_level_change", "message", "message", "message"]);
+      expect((await sessionEntries(handle.sessionFile)).map((entry) => [entry.type, (entry.message as { role?: string } | undefined)?.role])).toEqual([
+        ["session", undefined], ["model_change", undefined], ["thinking_level_change", undefined], ["message", "system"], ["message", "user"], ["message", "assistant"],
+      ]);
       // Exactly Pi's seven built-in tools, bash being AgentX's shell: no MCP, codemode or tool_search tool is offered.
       expect(views).toHaveLength(1);
       expect([...views[0]!.tools].sort()).toEqual(["bash", "edit", "find", "grep", "ls", "read", "write"]);
