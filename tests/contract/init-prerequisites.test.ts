@@ -562,6 +562,11 @@ describe("spec 048 FR-065: the release's images", () => {
     expect(overridden).toMatchObject({ ok: true, detail: "uses the image address you gave" });
   });
 
+  it("refuses a release with no image at all, in page words", () => {
+    const [missing] = releaseImageChecks({ version: "1.2.3", images: { slack: SLACK }, audience: "page" });
+    expect(missing).toEqual({ label: "The coding image", ok: false, detail: "This release has no coding image. Use a published AgentX release." });
+  });
+
   it("SC-009: checkPrerequisites reports a private image with every other problem, before anything is created", async () => {
     const found: PrerequisiteCheck[] = [];
     await expect(checkPrerequisites({
@@ -579,5 +584,49 @@ describe("spec 048 FR-065: the release's images", () => {
     }).catch((caught: unknown) => caught)) as Error;
     expect(error.message).not.toMatch(/--[a-z]/);
     expect(error.message).toContain("or choose another with the model question");
+  });
+});
+
+// Fix round 1 (review item 1): the Elastic IP, OIDC and CDK-bootstrap page branches had no test
+// exercising audience: "page" through checkPrerequisites. One of these (Elastic IPs) also checks
+// the terminal keeps its own, unchanged wording for the identical input; the other two's terminal
+// wording is already covered above ("refuses up front when the region has too few Elastic IPs
+// left...", "checks your own OIDC provider's discovery document...", and the cdk bootstrap "no" case
+// in "for the cdk engine, needs Node 22.19 or later...").
+describe("spec 048 FR-027, FR-080: prerequisite problems in page words", () => {
+  it("an Elastic IP shortfall reads in page words with the aws command as technical; the terminal keeps its own wording", async () => {
+    const checks = passingChecks({ elasticIps: async () => ({ quota: 5, allocated: 4 }) });
+    const found: PrerequisiteCheck[] = [];
+    const pageDetail = "this install needs 2 Elastic IPs for its network, but 4 of the 5 allowed in us-east-1 are already in use. Release addresses you no longer use, or ask AWS for more EC2-VPC Elastic IPs in Service Quotas.";
+    await expect(checkPrerequisites({
+      answers: sampleAnswers(), release: fakeRelease(), caller, checks, prompter: scriptedPrompter([]), write: () => undefined,
+      audience: "page", onCheck: (check) => found.push(check),
+    })).rejects.toThrow(pageDetail);
+    expect(found.find((check) => check.label === "Elastic IPs")).toEqual({
+      label: "Elastic IPs", ok: false, detail: pageDetail,
+      technical: "aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-0263D0A3 --desired-value 6 --region us-east-1",
+    });
+    await expect(checkPrerequisites({
+      answers: sampleAnswers(), release: fakeRelease(), caller, checks, prompter: scriptedPrompter([]), write: () => undefined,
+    })).rejects.toThrow(
+      "this environment needs 2 Elastic IPs for its NAT gateways, but 4 of the 5 allowed in us-east-1 are already allocated. Release addresses you no longer use, or raise the EC2-VPC Elastic IPs quota (L-0263D0A3) in Service Quotas: aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-0263D0A3 --desired-value 6 --region us-east-1",
+    );
+  });
+
+  it("an OIDC discovery mismatch replaces the terminal's --oidc-issuer flag with the page's own words", async () => {
+    const oidc = sampleAnswers({ identity: { mode: "oidc", issuer: "https://id.example.com", audience: "a", clientId: "c", adminClaim: "groups", adminValues: ["x"] } });
+    await expect(checkPrerequisites({
+      answers: oidc, release: fakeRelease(), caller, checks: passingChecks({ oidcDiscovery: async () => ({ issuer: "https://other.example.com" }) }),
+      prompter: scriptedPrompter([]), write: () => undefined, audience: "page",
+    })).rejects.toThrow(
+      "the OIDC discovery document at https://id.example.com/.well-known/openid-configuration names issuer https://other.example.com, not https://id.example.com; check the sign-in issuer address",
+    );
+  });
+
+  it("a declined CDK bootstrap reads in page words, naming no terminal command", async () => {
+    const checks = passingChecks({ cdkBootstrapped: async () => false });
+    await expect(checkPrerequisites({
+      answers: sampleAnswers({ engine: "cdk" }), release: fakeRelease(), caller, checks, prompter: scriptedPrompter([false]), write: () => undefined, audience: "page",
+    })).rejects.toThrow("This region is not prepared for deploying from source code. Prepare it, or deploy with published templates, which need no preparation.");
   });
 });

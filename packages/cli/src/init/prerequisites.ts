@@ -65,8 +65,13 @@ export function releaseImageChecks(input: { version: string; images: ReleaseImag
     const override = input.overrides?.[which];
     if (override !== undefined) return { label, ok: true, detail: "uses the image address you gave", technical: override };
     const ref = input.images[which];
-    const problem = ref === undefined ? "missing" : !ref.startsWith("public.ecr.aws/") ? "not-public" : !/@sha256:[a-f0-9]{64}$/.test(ref) ? "not-pinned" : undefined;
-    if (problem === undefined) return { label, ok: true, detail: "AWS can pull it", ...(ref === undefined ? {} : { technical: ref }) };
+    // Narrowed here (rather than computed as a fourth, "no problem" branch below) so the ok
+    // return can write `technical: ref` directly: once ref passes every check it is never
+    // undefined, so a conditional spread for it on this path was dead code.
+    if (ref !== undefined && ref.startsWith("public.ecr.aws/") && /@sha256:[a-f0-9]{64}$/.test(ref)) {
+      return { label, ok: true, detail: "AWS can pull it", technical: ref };
+    }
+    const problem = ref === undefined ? "missing" : !ref.startsWith("public.ecr.aws/") ? "not-public" : "not-pinned";
     const words = IMAGE_WORDS[which];
     const flag = `${IMAGE_FLAGS[which]} <repository@sha256:...>`;
     const detail = input.audience === "page"
