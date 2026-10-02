@@ -2,7 +2,7 @@
 // Offline: FakeDynamoDb, a vi.fn state machine and S3, and a fake clock.
 import { describe, expect, it, vi, type Mock } from "vitest";
 import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
-import { SwebenchLaunchSchema, agentXError, type ModelIdentifier, type SwebenchLaunch } from "@agentx/contracts";
+import { SwebenchLaunchSchema, agentXError, summarize, type ModelIdentifier, type SwebenchLaunch } from "@agentx/contracts";
 import {
   EVAL_BATCH_REFERENCE_TOKENS,
   createBatch,
@@ -709,6 +709,53 @@ describe("run ends and the single infrastructure retry (spec 052 FR-008, FR-010)
     expect(await listBatchMeasures(h.dependencies, batch.batchId)).toHaveLength(2);
     expect(measures.find((measure) => measure.runId === dearRun)).toMatchObject({ outcome: "FAILED", error: "the SWE-bench harness wrote no report (exit 1): boom" });
     await expectChargesMatchSpend(h, batch.batchId);
+  });
+
+  it("records a model error as a failure of model access, retries it once, charges its reported cost and keeps it out of the rate (Ruling 27)", async () => {
+    const h = await harness({ maxConcurrentEvals: 2 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    await topUpBatches(h.dependencies);
+    const first = evalBatchRunId(batch.batchId, 0, 1);
+    const modelError = (costUsd: number) => ({ ...graded(costUsd, false), stopReason: "model_error", stopDetail: "AccessDeniedException: You don't have access to the model", patchBytes: 0 });
+    await finish(h, first, modelError(0.02));
+    // The single-run record keeps what the runner reported; the batch reads it as the infrastructure's.
+    expect(h.db.get(`SWEBENCH_RUN#${first}`, "META")).toMatchObject({ status: "SUCCEEDED" });
+    const retried = (await getBatch(h.dependencies, batch.batchId))!;
+    const second = evalBatchRunId(batch.batchId, 0, 2);
+    expect(retried.queue[0]).toMatchObject({ state: "RUNNING", attempt: 2, runId: second });
+    expect(retried.spentUsd).toBeCloseTo(0.02, 9);
+    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({
+      runId: first, attempt: 1, outcome: "RETRIED", stopReason: "model_error", costUsd: 0.02, chargedUsd: 0.02,
+      error: "the model could not be used (model_error): AccessDeniedException: You don't have access to the model",
+    })]);
+    // The second model error is final: FAILED, never graded.
+    await finish(h, second, modelError(0.01));
+    const failed = (await getBatch(h.dependencies, batch.batchId))!;
+    expect(failed).toMatchObject({ status: "DONE", counts: { failed: 1, done: 0 } });
+    expect(failed.spentUsd).toBeCloseTo(0.03, 9);
+    const measures = await listBatchMeasures(h.dependencies, batch.batchId);
+    const final = measures.find((measure) => measure.runId === second)!;
+    expect(final).toMatchObject({ outcome: "FAILED", stopReason: "model_error", chargedUsd: 0.01 });
+    expect(final.resolved).toBeUndefined();
+    expect(h.startExecution).toHaveBeenCalledTimes(2);
+    await expectChargesMatchSpend(h, batch.batchId);
+    // The summary counts it failed, outside the rate's runs.
+    expect(summarize(measures)).toEqual([expect.objectContaining({ runs: 0, failed: 1, retried: 1, resolved: 0, rate: null })]);
+  });
+
+  it("never retries a graded run that stopped for any reason but a model error (Ruling 27)", async () => {
+    const h = await harness({ maxConcurrentEvals: 3 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]] }));
+    await topUpBatches(h.dependencies);
+    const [cheapRun, dearRun] = await runIds(h, batch.batchId);
+    await finish(h, cheapRun!, { ...graded(10, false), stopReason: "cost_ceiling", stopDetail: "the run reached its cost ceiling of 10.00 USD" });
+    await finish(h, dearRun!, { ...graded(1, true), stopReason: "time_limit", stopDetail: "the agent reached its 60-minute limit" });
+    const done = (await getBatch(h.dependencies, batch.batchId))!;
+    expect(done).toMatchObject({ status: "DONE", counts: { done: 2, failed: 0 } });
+    expect(done.queue.map((entry) => entry.attempt)).toEqual([1, 1]);
+    const measures = await listBatchMeasures(h.dependencies, batch.batchId);
+    expect(measures.map((measure) => [measure.outcome, measure.stopReason]).sort()).toEqual([["GRADED", "cost_ceiling"], ["GRADED", "time_limit"]]);
+    expect(summarize(measures).map((model) => model.runs)).toEqual([1, 1]);
   });
 
   it("records the runner's count of tool calls in the row, and leaves it empty for an older runner's result (Ruling 28)", async () => {

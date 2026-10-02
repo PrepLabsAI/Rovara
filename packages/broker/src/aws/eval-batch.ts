@@ -79,6 +79,8 @@ export const EVAL_BATCH_INFRASTRUCTURE_FAILURES: readonly RegExp[] = [
   /\bdon't have access to the model\b/i,
   /\bmodel access\b/i,
   /\bOpenRouter credentials? could not be (?:loaded|initialized)\b/,
+  // Ruling 27: a graded run whose agent stopped on a model error (batchEndOf).
+  /^the model could not be used \(model_error\)/,
 ];
 
 const ACTIVE_PK = "EVAL_BATCHES#ACTIVE";
@@ -130,6 +132,20 @@ export function evalBatchRunId(batchId: string, index: number, attempt: number):
 
 export function isInfrastructureFailure(error: string | undefined): boolean {
   return error !== undefined && EVAL_BATCH_INFRASTRUCTURE_FAILURES.some((pattern) => pattern.test(error));
+}
+
+/**
+ * Ruling 27: how a batch records a run's end. A graded run whose agent stopped on a model error
+ * (model access, the provider) is the infrastructure's, not the model's answer: the batch records it
+ * FAILED, retries it once (FR-008) and keeps it out of the resolve rate. Read here, from the result
+ * the runner reported, so every runner image's results are read the same way; the run record keeps
+ * what the runner said, and a single run's thread is unchanged.
+ */
+export function batchEndOf(run: SwebenchRun): { status: SwebenchRun["status"]; error?: string } {
+  if (run.status === "SUCCEEDED" && run.result?.stopReason === "model_error") {
+    return { status: "FAILED", error: `the model could not be used (model_error): ${run.result.stopDetail ?? "the model call failed"}` };
+  }
+  return { status: run.status, ...(run.error === undefined ? {} : { error: run.error }) };
 }
 
 /**
@@ -642,6 +658,7 @@ async function recoverStaleClaims(dependencies: EvalBatchDependencies, stored: S
 export async function recordBatchRunEnd(dependencies: EvalBatchDependencies, run: SwebenchRun): Promise<void> {
   if (run.batchId === undefined || !SWEBENCH_TERMINAL_STATUSES.has(run.status)) return;
   const batchId = run.batchId;
+  const end = batchEndOf(run);
   const ended = await mutate<RecordedEnd | undefined>(dependencies, batchId, (draft) => {
     const entry = draft.queue.find((candidate) => IN_FLIGHT.has(candidate.state) && evalBatchRunId(batchId, candidate.index, candidate.attempt) === run.runId);
     const charge = chargeOf(run, draft.perRunCeilingUsd ?? draft.file.costCapUsd);
@@ -649,20 +666,20 @@ export async function recordBatchRunEnd(dependencies: EvalBatchDependencies, run
     draft.spentUsd = roundUsd(draft.spentUsd + charge.chargedUsd);
     delete entry.claimedAt;
     const attempt = entry.attempt;
-    if (run.status === "FAILED" && attempt === 1 && draft.status === "RUNNING" && isInfrastructureFailure(run.error)) {
+    if (end.status === "FAILED" && attempt === 1 && draft.status === "RUNNING" && isInfrastructureFailure(end.error)) {
       const snapshot = structuredClone(entry);
       entry.state = "QUEUED";
       entry.attempt = 2;
       delete entry.runId;
       return { value: { entry: snapshot, attempt, outcome: "RETRIED", charge }, write: true };
     }
-    entry.state = run.status === "SUCCEEDED" ? "DONE" : run.status === "FAILED" ? "FAILED" : "CANCELLED";
+    entry.state = end.status === "SUCCEEDED" ? "DONE" : end.status === "FAILED" ? "FAILED" : "CANCELLED";
     entry.runId = run.runId;
     return { value: { entry: structuredClone(entry), attempt, outcome: outcomeOf(run), charge }, write: true };
   });
-  const end = ended?.value;
-  if (end === undefined) return;
-  await putMeasure(dependencies, measureOf(batchId, run, end));
+  const recorded = ended?.value;
+  if (recorded === undefined) return;
+  await putMeasure(dependencies, measureOf(batchId, run, recorded));
 }
 
 type MeasureOutcome = EvalRunMeasure["outcome"];
@@ -670,7 +687,8 @@ interface Charge { costUsd: number | null; chargedUsd: number; costEstimated: bo
 interface RecordedEnd { entry: EvalBatchEntry; attempt: number; outcome: MeasureOutcome; charge: Charge }
 
 function outcomeOf(run: SwebenchRun): MeasureOutcome {
-  return run.status === "SUCCEEDED" ? "GRADED" : run.status === "FAILED" ? "FAILED" : "CANCELLED";
+  const { status } = batchEndOf(run);
+  return status === "SUCCEEDED" ? "GRADED" : status === "FAILED" ? "FAILED" : "CANCELLED";
 }
 
 /** A run end already recorded, so its row can be written again: an earlier attempt was RETRIED. */
@@ -699,7 +717,9 @@ function chargeOf(run: SwebenchRun, ceiling: number): Charge {
 
 function measureOf(batchId: string, run: SwebenchRun, end: RecordedEnd): EvalRunMeasure {
   const { entry, charge } = end;
+  // A model error's result is kept for its usage and stop reason; its row is FAILED, not graded.
   const result = run.status === "SUCCEEDED" ? run.result : undefined;
+  const error = batchEndOf(run).error;
   const tokens = result?.usage.tokens ?? run.usage?.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
   return EvalRunMeasureSchema.parse({
     batchId,
@@ -713,7 +733,7 @@ function measureOf(batchId: string, run: SwebenchRun, end: RecordedEnd): EvalRun
     attempt: end.attempt,
     outcome: end.outcome,
     ...(end.outcome === "GRADED" && result !== undefined ? { resolved: result.resolved } : {}),
-    ...(end.outcome !== "GRADED" && run.error !== undefined ? { error: run.error } : {}),
+    ...(end.outcome !== "GRADED" && error !== undefined ? { error } : {}),
     ...(result?.secbench === undefined ? {} : { secbench: result.secbench }),
     ...(result?.failToPass === undefined ? {} : { failToPass: result.failToPass }),
     ...(result?.passToPass === undefined ? {} : { passToPass: result.passToPass }),
