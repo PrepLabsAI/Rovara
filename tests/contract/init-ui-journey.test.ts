@@ -96,6 +96,29 @@ describe("the journey", () => {
     expect(done.timeLeftText).toBe("Done");
   });
 
+  it("owner decision 2026-10-02: a stopped run's header says Stopped, with no time-left estimate, and the estimate returns once a retry resumes it", () => {
+    const steps = withStatus({ prerequisites: { id: "prerequisites", status: "done" }, access: { id: "access", status: "failed" } });
+    const input = { stage: "your-choices" as const, steps, waitingOnYou: true, finished: false, nowMs: T };
+    const stopped = journeyOf({ ...input, stopped: true });
+    expect(stopped.timeLeftText).toBe("Stopped");
+    expect(stopped.timeLeftText).not.toMatch(/left/);
+    // A resumed retry (the same steps, no longer stopped) shows the usual estimate again.
+    // access (60) + core (240) + github-app (120) + control-plane (780), then Connect Slack
+    // (540) and Finish (420): 2160 seconds.
+    const resumed = journeyOf({ ...input, stopped: false });
+    expect(resumed.timeLeftText).toBe("About 36 minutes left");
+  });
+
+  it("a step overdue when the run stops says Stopped, not Taking longer than usual", () => {
+    const steps = withStatus({
+      prerequisites: { id: "prerequisites", status: "done" }, access: { id: "access", status: "done" },
+      core: { id: "core", status: "running", startedAtMs: T - 3_600_000 },
+    });
+    const view = journeyOf({ stage: "your-choices", steps, waitingOnYou: true, stopped: true, finished: false, nowMs: T });
+    expect(view.overdue).toBe(true);
+    expect(view.timeLeftText).toBe("Stopped");
+  });
+
   it("welcomes the user with the phases, the total, the time needed, and what to keep open", () => {
     expect(welcomeLines()).toEqual([
       "AgentX installs into your AWS account and connects to GitHub and Slack, in five parts:",

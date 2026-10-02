@@ -267,6 +267,13 @@ describe("agentx init --ui", () => {
     expect(operator.remaining()).toBe(0);
     expect(h.deployer.requests.filter((request) => request.part === "control-plane")).toHaveLength(2);
     expect(operator.states.at(-1)?.failure).toBeUndefined();
+    // Owner decision, 2026-10-02: the header says "Stopped" while the run is stopped on a
+    // failure, not a time estimate; once "Try this step again" resumes it, the estimate is back.
+    const failing = operator.states.find((state) => state.failure !== undefined);
+    expect(failing?.journey.timeLeftText).toBe("Stopped");
+    const failingIndex = operator.states.indexOf(failing!);
+    const resumed = operator.states.find((state, index) => index > failingIndex && state.failure === undefined && state.phase !== "finished");
+    expect(resumed?.journey.timeLeftText).toMatch(/left$/);
   });
 
   it("spec 048 FR-060: a deployment that failed to prepare (npm ci, build or synth) is prepared again on Try this step again", async () => {
@@ -305,7 +312,8 @@ describe("agentx init --ui", () => {
     expect(`${last?.outcome ?? ""} ${last?.failure?.what ?? ""}`).not.toMatch(/Finished|INTERNAL_ERROR|CONFIG_INVALID/);
     expect(last?.journey.current).toBe("build");
     expect(last?.journey.phases.map((phase) => phase.statusWord)).toEqual(["Done", "Done", "Stopped", "Coming up", "Coming up"]);
-    expect(last?.journey.timeLeftText).toBe("About 29 minutes left");
+    // Owner decision, 2026-10-02: a stopped run's header says "Stopped", not a time estimate.
+    expect(last?.journey.timeLeftText).toBe("Stopped");
   });
 
   it("spec 048 FR-060: a failure outside a step still shows the screen, with Stop for now only", async () => {
