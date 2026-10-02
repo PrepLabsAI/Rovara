@@ -2,7 +2,7 @@ import { MissingOpenRouterSecret, defaultBedrockModel, type ModelRole } from "./
 import { readOpenRouterKey, openRouterRouting, openRouterModel } from "./config.js";
 export { readOpenRouterKey, openRouterRouting, openRouterModel } from "./config.js";
 import { agentXError, type ModelIdentifier } from "@agentx/contracts";
-import { InMemoryCredentialStore, createAssistantMessageEventStream, type Model, type SimpleStreamOptions, type Context, type AssistantMessage } from "@earendil-works/pi-ai";
+import { InMemoryCredentialStore, createAssistantMessageEventStream, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage } from "@earendil-works/pi-ai";
 import { streamSimple } from "@earendil-works/pi-ai/api/openai-completions";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
@@ -44,7 +44,7 @@ export async function createConfiguredModelRuntime(selected: ModelIdentifier & {
   return runtime;
 }
 
-function safeOpenRouterStream(model: Model<"openai-completions">, context: Context, options: SimpleStreamOptions | undefined, routing: Record<string, unknown>, transport: typeof fetch = fetch, onUsage = (record: Record<string, unknown>) => console.info(JSON.stringify(record))) {
+function safeOpenRouterStream(model: Model<"openai-completions">, context: TranscriptContext, options: SimpleStreamOptions | undefined, routing: Record<string, unknown>, transport: typeof fetch = fetch, onUsage = (record: Record<string, unknown>) => console.info(JSON.stringify(record))) {
   const output = createAssistantMessageEventStream();
   let failureStatus: number | undefined;
   let returnedModel: string | undefined;

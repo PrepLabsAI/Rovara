@@ -233,7 +233,8 @@ async function createDefaultSession(
       conversationId: conversationId ?? session.sessionId,
       sessionFile,
       prompt: async (text) => session.prompt(text, { expandPromptTemplates: false }),
-      steer: async (text) => session.steer(text),
+      // Pi 0.99 returns a disposition ("handled" | "queued"); the adapter's contract stays Promise<void>.
+      steer: async (text) => { await session.steer(text); },
       abort: async () => session.abort(),
       getModel: () => ({
         provider: session.model?.provider ?? resolved.model.provider,
