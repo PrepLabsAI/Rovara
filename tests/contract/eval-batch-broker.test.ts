@@ -213,6 +213,14 @@ describe("creating a batch (spec 052 FR-001, FR-003, FR-004)", () => {
     expect(h.db.find((item) => String(item.pk).startsWith("EVAL_BATCH#"))).toEqual([]);
   });
 
+  it("refuses an OpenRouter model whose providers are not pinned (FR-001)", async () => {
+    const h = await harness();
+    const { routing: _routing, ...unpinned } = cheap;
+    await expect(createBatch(h.dependencies, h.context, file({ models: [unpinned] }))).rejects.toThrow(/openrouter\/vendor\/cheap-v1: an OpenRouter model must pin its providers with `routing.only`/);
+    await expect(createBatch(h.dependencies, h.context, file({ models: [{ ...cheap, routing: { only: [] } }] }))).rejects.toThrow();
+    expect(h.db.find((item) => String(item.pk).startsWith("EVAL_BATCH"))).toEqual([]);
+  });
+
   it("refuses a sample until sampling is available: the campaign lists its tasks (Ruling 29, D-13)", async () => {
     const h = await harness();
     const sample = { count: 6, seed: 46 };

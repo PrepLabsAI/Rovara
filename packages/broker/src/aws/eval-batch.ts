@@ -252,6 +252,10 @@ export async function createBatch(
     await context.projectModel({ provider: model.provider, modelId: model.modelId });
     const support = thinkingLevelSupport(model, model.thinkingLevel);
     if (!support.ok) throw agentXError("CONFIG_INVALID", thinkingLevelRefusal(name, model.thinkingLevel, support.supported));
+    // FR-001: an OpenRouter model pins its providers, so every run is served the same way and its row says by whom.
+    if (model.provider === "openrouter" && (model.routing === undefined || model.routing.only.length === 0)) {
+      throw agentXError("CONFIG_INVALID", `${name}: an OpenRouter model must pin its providers with \`routing.only\`, such as \`[fireworks]\`, so every run is served the same way; the Slack form pins the deployment's OpenRouter providers when it has some`);
+    }
     if (model.routing !== undefined) {
       if (model.provider !== "openrouter") throw agentXError("CONFIG_INVALID", `${name}: a provider pin applies to OpenRouter models only`);
       if (!model.routing.only.every((slug) => PROVIDER_SLUG.test(slug))) throw agentXError("CONFIG_INVALID", `${name}: OpenRouter providers must be provider slugs, such as \`fireworks\``);
