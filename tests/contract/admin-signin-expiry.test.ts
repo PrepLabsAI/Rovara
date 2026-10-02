@@ -86,8 +86,8 @@ function streamTransport(toServer: PassThrough, fromServer: PassThrough): Transp
   return transport;
 }
 
-const controlPlane = () => vi.fn(async (input: string | URL) => {
-  const url = new URL(String(input));
+const controlPlane = () => vi.fn<typeof fetch>(async (input) => {
+  const url = new URL(typeof input === "string" || input instanceof URL ? input : input.url);
   if (url.pathname === "/v1/auth/.well-known/agentx-configuration") return Response.json({ env: "staging", apiVersion: "1.2", adminApiVersion: "1.0" });
   if (url.pathname === "/v1/admin/projects") return Response.json({ projects: [] });
   return Response.json({ developer: { id: "d".repeat(64), name: "Ada", provider: "slack" }, projects: [], notices: [] });
@@ -116,7 +116,8 @@ describe("agentx mcp with an expired admin sign-in (#218)", () => {
     const time = `${pad(at.getHours())}:${pad(at.getMinutes())}`;
     const whoami = await client.callTool({ name: "agentx_whoami", arguments: {} });
     // A direct call to the hidden tool is answered with the offer's refusal, once its first check has answered.
-    await expect.poll(async () => toolError(await client.callTool({ name: "agentx_admin_list_projects", arguments: {} }))).toEqual({
+    const refusal = async () => toolError((await client.callTool({ name: "agentx_admin_list_projects", arguments: {} })) as Parameters<typeof toolError>[0]);
+    await expect.poll(refusal).toEqual({
       code: "ADMIN_REQUIRED", message: `Your admin sign-in for staging expired at ${time}`, next_step: "run agentx --env staging login --admin",
     });
     expect(whoami.structuredContent).toMatchObject({ admin: false });
