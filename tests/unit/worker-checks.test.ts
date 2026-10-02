@@ -1,6 +1,6 @@
 // Spec 051 Task 3: AgentX reruns the project's readiness commands, or the agent's own test commands, within a budget.
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, realpath, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -12,6 +12,7 @@ import {
   runChecks,
   type CheckRunners,
 } from "../../packages/worker/src/verification/checks.js";
+import { projectCheckKey, readCheckHistory, recordProjectOutcomes, type CheckHistory } from "../../packages/worker/src/verification/check-history.js";
 import type { RecordedCommand } from "../../packages/worker/src/verification/recorder.js";
 import { devcontainerBashOperations, type DevcontainerCli } from "../../packages/worker/src/devcontainer.js";
 
@@ -42,12 +43,18 @@ function fakeRunners(overrides: Partial<CheckRunners> = {}): CheckRunners & { pr
   };
 }
 
+/** History for a workspace whose preparation ran exactly these readiness commands, and no task has checked them yet. */
+const prepared = (commands: ProjectCommand[]): CheckHistory => ({ lastOutcomes: {}, preparedKeys: commands.map(projectCheckKey) });
+const planProject = (commands: ProjectCommand[]) => planChecks(commands, recorderOf([]), prepared(commands));
+
 const budget = (signal = new AbortController().signal) => ({ budgetMs: 30 * MINUTE, signal });
 
 describe("planChecks", () => {
   it("uses the project's readiness when there is some, else the agent's commands, else none (FR-002, FR-003)", () => {
     const runs = [recorded("pytest", 0)];
-    expect(planChecks([command("npm", ["test"])], recorderOf(runs))).toEqual({ source: "project", readiness: [command("npm", ["test"])] });
+    expect(planChecks([command("npm", ["test"])], recorderOf(runs), prepared([command("npm", ["test"])]))).toEqual({
+      source: "project", readiness: [command("npm", ["test"])], projectBefore: ["passed"],
+    });
     // An old broker sends no readiness; a project without readiness sends none (Review Focus 5).
     expect(planChecks(undefined, recorderOf(runs))).toEqual({ source: "agent_commands", agentRuns: runs });
     expect(planChecks([], recorderOf(runs))).toEqual({ source: "agent_commands", agentRuns: runs });
@@ -61,6 +68,87 @@ describe("planChecks", () => {
   });
 });
 
+describe("the before of a project check (Ruling J)", () => {
+  const lint = command("npm", ["run", "lint"]);
+  const tests = command("npm", ["test"]);
+  const failing = fakeRunners({ runProjectCommand: async () => ({ exitCode: 1, timedOut: false, stdout: "", stderr: "lint failed" }) });
+
+  it("a check added after preparation that already fails has no before: failing_no_before, not a regression", async () => {
+    const { entries } = await runChecks(planChecks([tests, lint], recorderOf([]), prepared([tests])), failing, budget());
+    expect(entries.map(({ before, class: kind }) => ({ before, kind }))).toEqual([
+      { before: "passed", kind: "regression" },
+      { before: "unknown", kind: "failing_no_before" },
+    ]);
+  });
+
+  it("without any history, a project check has no before", async () => {
+    expect(planChecks([lint], recorderOf([])).projectBefore).toEqual(["unknown"]);
+  });
+
+  it("the key is the command's cwd, executable, args and env, not its timeout or the env's order", () => {
+    expect(projectCheckKey({ ...lint, timeoutSeconds: 1 })).toBe(projectCheckKey(lint));
+    expect(projectCheckKey({ ...lint, env: { A: "1", B: "2" } })).toBe(projectCheckKey({ ...lint, env: { B: "2", A: "1" } }));
+    expect(projectCheckKey({ ...lint, env: { A: "1" } })).not.toBe(projectCheckKey(lint));
+    expect(projectCheckKey({ ...lint, cwd: "repo/demo" })).not.toBe(projectCheckKey(lint));
+    expect(projectCheckKey(command("npm", ["run lint"]))).not.toBe(projectCheckKey(lint));
+    expect(projectCheckKey(lint)).toMatch(/^[0-9a-f]{64}$/);
+  });
+
+  async function workspace(preparedCommands: ProjectCommand[]) {
+    const root = await mkdtemp(join(tmpdir(), "agentx-check-history-"));
+    await mkdir(join(root, ".agentx"));
+    const manifest = { readinessCommandKeys: preparedCommands.map(projectCheckKey) };
+    return { root, manifest };
+  }
+
+  it("task 1 breaks a check; task 2 that still fails it finds it already failing", async () => {
+    const { root, manifest } = await workspace([lint]);
+    const first = planChecks([lint], recorderOf([]), await readCheckHistory(root, manifest));
+    const round1 = await runChecks(first, failing, budget());
+    expect(round1.entries[0]).toMatchObject({ before: "passed", class: "regression" });
+    await recordProjectOutcomes(root, first, round1.entries);
+
+    const second = planChecks([lint], recorderOf([]), await readCheckHistory(root, manifest));
+    const round2 = await runChecks(second, failing, budget());
+    expect(round2.entries[0]).toMatchObject({ before: "failed", after: "failed", class: "already_failing" });
+  });
+
+  it("task 1 fixed a check; task 2 finds it passed before", async () => {
+    const { root, manifest } = await workspace([]);
+    const first = planChecks([lint], recorderOf([]), await readCheckHistory(root, manifest));
+    const round1 = await runChecks(first, fakeRunners(), budget());
+    expect(round1.entries[0]).toMatchObject({ before: "unknown", after: "passed", class: "passing" });
+    await recordProjectOutcomes(root, first, round1.entries);
+    const second = planChecks([lint], recorderOf([]), await readCheckHistory(root, manifest));
+    expect(second.projectBefore).toEqual(["passed"]);
+    const round2 = await runChecks(second, failing, budget());
+    expect(round2.entries[0]).toMatchObject({ class: "regression" });
+  });
+
+  it("a check not run keeps its last known outcome; only project checks are recorded; the file is written atomically", async () => {
+    const { root, manifest } = await workspace([lint, tests]);
+    const plan = planChecks([lint, tests], recorderOf([]), await readCheckHistory(root, manifest));
+    const first = await runChecks(plan, failing, budget());
+    await recordProjectOutcomes(root, plan, first.entries);
+    const notRun = await runChecks(plan, fakeRunners(), { budgetMs: 0, signal: new AbortController().signal });
+    await recordProjectOutcomes(root, plan, notRun.entries);
+    // Agent-command plans record nothing.
+    await recordProjectOutcomes(root, planChecks(undefined, recorderOf([recorded("pytest", 0)])), first.entries);
+    const history = await readCheckHistory(root, manifest);
+    expect(history.lastOutcomes).toEqual({ [projectCheckKey(lint)]: "failed", [projectCheckKey(tests)]: "failed" });
+    expect((await readdir(join(root, ".agentx"))).sort()).toEqual(["last-checks.json"]);
+  });
+
+  it("a missing or malformed history file is no history", async () => {
+    const { root, manifest } = await workspace([lint]);
+    await expect(readCheckHistory(root, manifest)).resolves.toEqual({ lastOutcomes: {}, preparedKeys: [projectCheckKey(lint)] });
+    await writeFile(join(root, ".agentx", "last-checks.json"), "{not json");
+    await expect(readCheckHistory(root, manifest)).resolves.toEqual({ lastOutcomes: {}, preparedKeys: [projectCheckKey(lint)] });
+    // A workspace prepared before the keys were recorded: nothing counts as prepared.
+    await expect(readCheckHistory(root, {})).resolves.toEqual({ lastOutcomes: {}, preparedKeys: [] });
+  });
+});
+
 describe("runChecks", () => {
   it("reports a failing project check as a regression, its output redacted and cut to 64 KiB (FR-002, FR-005)", async () => {
     const long = `${"x".repeat(200)}\n`.repeat(1_000);
@@ -69,8 +157,8 @@ describe("runChecks", () => {
         ? { exitCode: 0, timedOut: false, stdout: "clean", stderr: "" }
         : { exitCode: 1, timedOut: false, stdout: long, stderr: `token ${SECRET}\nFAILED 1 test\n` },
     });
-    const entries = await runChecks(
-      planChecks([command("lint"), { ...command("npm", ["test"], 120), cwd: "repo/demo" }], recorderOf([])),
+    const { entries } = await runChecks(
+      planProject([command("lint"), { ...command("npm", ["test"], 120), cwd: "repo/demo" }]),
       runners,
       budget(),
     );
@@ -89,7 +177,7 @@ describe("runChecks", () => {
 
   it("an agent command that failed before the first edit and passes now is fixed (FR-003, FR-004)", async () => {
     const runners = fakeRunners();
-    const entries = await runChecks(planChecks(undefined, recorderOf([recorded("cd pkg && npm test -- -t foo", 1)])), runners, budget());
+    const { entries } = await runChecks(planChecks(undefined, recorderOf([recorded("cd pkg && npm test -- -t foo", 1)])), runners, budget());
     expect(entries).toEqual([expect.objectContaining({
       id: "agent:0", label: "cd pkg && npm test -- -t foo", source: "agent_commands", before: "failed", after: "passed", class: "fixed", output: "ok",
     })]);
@@ -99,7 +187,7 @@ describe("runChecks", () => {
 
   it("an agent command first run after an edit that fails now has no before result (FR-003, FR-004)", async () => {
     const runners = fakeRunners({ runAgentCommand: async () => ({ exitCode: 2, timedOut: false, output: `FAILED ${SECRET}` }) });
-    const entries = await runChecks(
+    const { entries } = await runChecks(
       planChecks(undefined, recorderOf([recorded("pytest", 0, true), recorded("go test ./...", undefined, false, 1)])),
       runners,
       budget(),
@@ -111,10 +199,25 @@ describe("runChecks", () => {
     expect(entries[0]!.output).toBe("FAILED [REDACTED]");
   });
 
+  it("a round that ran to the end is not stopped, even when the budget left checks unrun", async () => {
+    const { stopped } = await runChecks(planProject([command("a")]), fakeRunners(), { budgetMs: 0, signal: new AbortController().signal });
+    expect(stopped).toBe(false);
+  });
+
+  it("keeps a tail of both streams, so a long stderr cannot push stdout out (M-7)", async () => {
+    const runners = fakeRunners({
+      runProjectCommand: async () => ({ exitCode: 1, timedOut: false, stdout: "first line\nSTDOUT SUMMARY: 3 failed\n", stderr: `${"warning: noisy\n".repeat(20_000)}STDERR END\n` }),
+    });
+    const { entries } = await runChecks(planProject([command("npm", ["test"])]), runners, budget());
+    expect(entries[0]!.output).toContain("STDOUT SUMMARY: 3 failed");
+    expect(entries[0]!.output).toMatch(/STDERR END\n?$/);
+    expect(Buffer.byteLength(entries[0]!.output)).toBeLessThanOrEqual(65_536);
+  });
+
   it("no readiness and no agent commands: source none, and no entries", async () => {
     const plan = planChecks(undefined, recorderOf([]));
     expect(plan.source).toBe("none");
-    await expect(runChecks(plan, fakeRunners(), budget())).resolves.toEqual([]);
+    await expect(runChecks(plan, fakeRunners(), budget())).resolves.toEqual({ entries: [], stopped: false });
   });
 
   it("caps each check at the budget left, and a check the budget cannot start is not run (P-3)", async () => {
@@ -129,8 +232,8 @@ describe("runChecks", () => {
           : { exitCode: 0, timedOut: false, stdout: "ok", stderr: "" };
       },
     });
-    const entries = await runChecks(
-      planChecks([command("a", [], 1_800), command("b", [], 1_800), command("c", [], 1_800)], recorderOf([])),
+    const { entries } = await runChecks(
+      planProject([command("a", [], 1_800), command("b", [], 1_800), command("c", [], 1_800)]),
       runners,
       { ...budget(), now: () => clock },
     );
@@ -146,13 +249,13 @@ describe("runChecks", () => {
 
   it("a check that its own timeout stops timed out", async () => {
     const runners = fakeRunners({ runAgentCommand: async () => ({ exitCode: null, timedOut: true, output: "slow" }) });
-    const entries = await runChecks(planChecks(undefined, recorderOf([recorded("pytest", 0)])), runners, budget());
+    const { entries } = await runChecks(planChecks(undefined, recorderOf([recorded("pytest", 0)])), runners, budget());
     expect(entries[0]).toMatchObject({ before: "passed", after: "timed_out", class: "regression" });
   });
 
   it("a check that cannot run fails, with the reason as its output", async () => {
     const runners = fakeRunners({ runProjectCommand: async () => { throw new Error(`directory does not exist in this workspace: repo/${SECRET}`); } });
-    const entries = await runChecks(planChecks([command("npm", ["test"])], recorderOf([])), runners, budget());
+    const { entries } = await runChecks(planProject([command("npm", ["test"])]), runners, budget());
     expect(entries[0]).toMatchObject({ after: "failed", class: "regression", output: "directory does not exist in this workspace: repo/[REDACTED]" });
   });
 
@@ -167,11 +270,13 @@ describe("runChecks", () => {
     });
     const startedAt = Date.now();
     setTimeout(() => controller.abort(), 20);
-    const entries = await runChecks(
+    const { entries, stopped } = await runChecks(
       planChecks(undefined, recorderOf([recorded("pytest", 0), recorded("go test ./...", 0, false, 1)])),
       runners,
       budget(controller.signal),
     );
+    // A stopped round says so, so the report is not_verified/stopped rather than no_checks (P-4).
+    expect(stopped).toBe(true);
     expect(Date.now() - startedAt).toBeLessThan(120);
     expect(rejectedAt - startedAt).toBeLessThan(120);
     expect(entries.map((entry) => entry.after)).toEqual(["not_run", "not_run"]);
@@ -183,7 +288,7 @@ describe("runChecks", () => {
     const runners = fakeRunners({ runProjectCommand: () => new Promise(() => undefined) });
     const startedAt = Date.now();
     setTimeout(() => controller.abort(), 20);
-    const entries = await runChecks(planChecks([command("a"), command("b")], recorderOf([])), runners, budget(controller.signal));
+    const { entries } = await runChecks(planChecks([command("a"), command("b")], recorderOf([])), runners, budget(controller.signal));
     expect(Date.now() - startedAt).toBeLessThan(120);
     expect(entries.map((entry) => entry.after)).toEqual(["not_run", "not_run"]);
   });
@@ -192,7 +297,8 @@ describe("runChecks", () => {
     const controller = new AbortController();
     controller.abort();
     const runners = fakeRunners();
-    const entries = await runChecks(planChecks([command("a")], recorderOf([])), runners, budget(controller.signal));
+    const { entries, stopped } = await runChecks(planChecks([command("a")], recorderOf([])), runners, budget(controller.signal));
+    expect(stopped).toBe(true);
     expect(entries.map((entry) => entry.after)).toEqual(["not_run"]);
     expect(runners.project).toHaveLength(0);
   });
@@ -226,7 +332,7 @@ describe("createCheckRunners on the host", () => {
   it("refuses to replay a cd through a symlink that leaves the workspace, and records it as not run (Ruling D)", async () => {
     const { root } = await repository();
     const runners = createCheckRunners({ rootPath: root });
-    const entries = await runChecks(planChecks(undefined, recorderOf([recorded("cd link && make test", 0)])), runners, budget());
+    const { entries } = await runChecks(planChecks(undefined, recorderOf([recorded("cd link && make test", 0)])), runners, budget());
     expect(entries[0]).toMatchObject({ after: "not_run", class: "not_rerun" });
     expect(entries[0]!.output).toMatch(/outside the workspace/);
     expect(entries[0]!.output).not.toContain("escaped");
@@ -235,7 +341,7 @@ describe("createCheckRunners on the host", () => {
   it("refuses a replay that is not a simple test command", async () => {
     const { root } = await repository();
     const runners = createCheckRunners({ rootPath: root });
-    const entries = await runChecks(planChecks(undefined, recorderOf([recorded("make test; rm -rf pkg", 0)])), runners, budget());
+    const { entries } = await runChecks(planChecks(undefined, recorderOf([recorded("make test; rm -rf pkg", 0)])), runners, budget());
     expect(entries[0]).toMatchObject({ after: "not_run" });
   });
 
@@ -245,7 +351,7 @@ describe("createCheckRunners on the host", () => {
     const controller = new AbortController();
     const startedAt = Date.now();
     setTimeout(() => controller.abort(), 200);
-    const entries = await runChecks(
+    const { entries } = await runChecks(
       planChecks([{ cwd: "pkg", executable: "make", args: ["slow"], timeoutSeconds: 60 }, command("true")], recorderOf([])),
       runners,
       budget(controller.signal),
@@ -269,6 +375,22 @@ describe("createCheckRunners on the host", () => {
     setTimeout(() => controller.abort(), 200);
     await expect(runners.runAgentCommand("make test", 60_000, controller.signal)).rejects.toThrow(/aborted/);
     expect(Date.now() - startedAt).toBeLessThan(2_000);
+  });
+
+  it("keeps the worker's absolute path out of a failure message (M-4)", async () => {
+    const { root } = await repository();
+    const runners = createCheckRunners({ rootPath: root });
+    const { entries } = await runChecks(
+      planChecks([{ cwd: "pkg", executable: "no-such-tool-agentx", args: [], timeoutSeconds: 5 }], recorderOf([]), prepared([])),
+      runners,
+      budget(),
+    );
+    const missing = await runChecks(planChecks(undefined, recorderOf([recorded("cd pkg/Makefile && make test", 0)])), runners, budget());
+    for (const entry of [...entries, ...missing.entries]) {
+      expect(entry.after).toBe("failed");
+      expect(entry.output).not.toContain(root);
+    }
+    expect(missing.entries[0]!.output).toMatch(/not a directory/);
   });
 
   it("reports an agent command that its timeout stopped", async () => {
@@ -310,6 +432,35 @@ describe("createCheckRunners with a devcontainer", () => {
     // The TERM exec went to the container's process group.
     await new Promise((resolveWait) => setTimeout(resolveWait, 50));
     expect(calls.some((args) => args.some((arg) => arg.includes("kill -TERM")))).toBe(true);
+  });
+
+  it("replays the agent's command in the devcontainer by default, never on the host (Ruling K)", async () => {
+    const { root } = await repository();
+    const target = { rootPath: root, workspaceFolder: join(root, "pkg"), configPath: join(root, "pkg", ".devcontainer", "devcontainer.json") };
+    const calls: string[][] = [];
+    const cli: DevcontainerCli = {
+      run: (args) => {
+        calls.push([...args]);
+        return Promise.resolve({ exitCode: 0, stdout: "", stderr: "" });
+      },
+    };
+    const runners = createCheckRunners({ rootPath: root, devcontainer: { cli, target } });
+    // On the host, this Makefile exits 3 and prints the directory; through the fake CLI it passes silently.
+    await expect(runners.runAgentCommand("cd pkg && make test", 60_000, new AbortController().signal))
+      .resolves.toEqual({ exitCode: 0, timedOut: false, output: "" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.slice(0, 5)).toEqual(["exec", "--workspace-folder", target.workspaceFolder, "--config", target.configPath]);
+    expect(calls[0]!.at(-1)).toBe("make test");
+  });
+
+  it("a cd the host cannot resolve in a devcontainer session is not run, not failed: the link may be valid in the container", async () => {
+    const { root } = await repository();
+    await symlink("/workspaces/demo/build", join(root, "container-link"));
+    const target = { rootPath: root, workspaceFolder: join(root, "pkg"), configPath: join(root, "pkg", ".devcontainer", "devcontainer.json") };
+    const cli: DevcontainerCli = { run: () => Promise.resolve({ exitCode: 0, stdout: "", stderr: "" }) };
+    const runners = createCheckRunners({ rootPath: root, devcontainer: { cli, target } });
+    const { entries } = await runChecks(planChecks(undefined, recorderOf([recorded("cd container-link && make test", 0)])), runners, budget());
+    expect(entries[0]).toMatchObject({ after: "not_run", class: "not_rerun" });
   });
 
   it("replays the agent's command through the session's bash operations, from the resolved directory", async () => {

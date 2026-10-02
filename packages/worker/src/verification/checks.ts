@@ -1,7 +1,7 @@
 // Spec 051 (FR-002 to FR-005): AgentX reruns the checks itself when the agent finishes. The project's readiness
 // commands when it has some, else the simple test commands the agent ran, each with its own timeout, within one
 // round's budget, and stopped at once by the round's signal.
-import { realpath } from "node:fs/promises";
+import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import {
   classifyCheck,
@@ -14,9 +14,10 @@ import {
 } from "@agentx/contracts";
 import { createLocalBashOperations, type BashOperations } from "@earendil-works/pi-coding-agent";
 import { MAX_COMMAND_OUTPUT_BYTES, redactedTail, tailCollector } from "../collected-process.js";
-import { runDevcontainerCommand, type DevcontainerCli, type DevcontainerTarget } from "../devcontainer.js";
+import { devcontainerBashOperations, runDevcontainerCommand, type DevcontainerCli, type DevcontainerTarget } from "../devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "../git.js";
 import { runProjectCommand } from "../prepare.js";
+import { projectBefore, type CheckHistory } from "./check-history.js";
 import type { CommandRecorder, RecordedCommand } from "./recorder.js";
 
 /** An agent command's own timeout (FR-005). */
@@ -31,7 +32,10 @@ const MAX_CHECKS = 64;
 const MIN_CHECK_START_MS = 1_000;
 
 export interface CheckRunners {
-  /** A readiness command, as preparation ran it (devcontainer or host). Rejects when `signal` stops it. */
+  /**
+   * A readiness command, as preparation ran it (devcontainer or host). Rejects when `signal` stops it, even when the
+   * command finished just before the abort: a check round discards that result anyway.
+   */
   runProjectCommand(command: ProjectCommand, signal: AbortSignal): Promise<{ exitCode: number | null; timedOut: boolean; stdout: string; stderr: string }>;
   /**
    * A replayed agent command, through the agent's own bash operations and cwd. Rejects when `signal` stops it, and
@@ -43,7 +47,15 @@ export interface CheckRunners {
 export interface CheckPlan {
   source: "project" | "agent_commands" | "none";
   readiness?: ProjectCommand[];
+  /** Per readiness command, its before (Ruling J): last known outcome, else passed at preparation, else unknown. */
+  projectBefore?: CheckOutcome[];
   agentRuns?: RecordedCommand[];
+}
+
+export interface CheckRound {
+  entries: CheckEntry[];
+  /** True when the signal stopped the round: the report is not_verified/stopped (P-4), whatever the entries say. */
+  stopped: boolean;
 }
 
 /** AgentX refused to run the check, so it has no after result (for example, a `cd` that leaves the workspace). */
@@ -54,9 +66,19 @@ export class CheckNotRunError extends Error {
   }
 }
 
-/** The project's readiness when it has some (FR-002), else the agent's recorded commands (FR-003), else none. */
-export function planChecks(readiness: ProjectCommand[] | undefined, recorder: Pick<CommandRecorder, "firstRuns">): CheckPlan {
-  if (readiness !== undefined && readiness.length > 0) return { source: "project", readiness: readiness.slice(0, MAX_CHECKS) };
+/**
+ * The project's readiness when it has some (FR-002), else the agent's recorded commands (FR-003), else none. `history`
+ * (readCheckHistory) gives each project check its before; without it, every project check's before is unknown.
+ */
+export function planChecks(
+  readiness: ProjectCommand[] | undefined,
+  recorder: Pick<CommandRecorder, "firstRuns">,
+  history?: CheckHistory,
+): CheckPlan {
+  if (readiness !== undefined && readiness.length > 0) {
+    const commands = readiness.slice(0, MAX_CHECKS);
+    return { source: "project", readiness: commands, projectBefore: projectBefore(commands, history) };
+  }
   const agentRuns = recorder.firstRuns().slice(0, MAX_CHECKS);
   return agentRuns.length > 0 ? { source: "agent_commands", agentRuns } : { source: "none" };
 }
@@ -80,7 +102,7 @@ export async function runChecks(
   plan: CheckPlan,
   runners: CheckRunners,
   options: { budgetMs: number; signal: AbortSignal; now?: () => number },
-): Promise<CheckEntry[]> {
+): Promise<CheckRound> {
   const now = options.now ?? Date.now;
   const { signal } = options;
   const startedAt = now();
@@ -127,7 +149,7 @@ export async function runChecks(
       else entries.push(entry("failed", message, duration));
     }
   }
-  return entries;
+  return { entries, stopped: signal.aborted };
 }
 
 function plannedChecks(plan: CheckPlan, runners: CheckRunners): PlannedCheck[] {
@@ -136,8 +158,8 @@ function plannedChecks(plan: CheckPlan, runners: CheckRunners): PlannedCheck[] {
       id: `readiness:${index}`,
       label: projectLabel(command),
       source: "project",
-      // P-1: a workspace is READY only when every readiness check passed at preparation.
-      before: "passed",
+      // Ruling J: the plan's before; a plan built without one has none.
+      before: plan.projectBefore?.[index] ?? "unknown",
       ownTimeoutMs: command.timeoutSeconds * 1_000,
       run: async (timeoutMs, signal) => {
         const timeoutSeconds = Math.max(1, Math.floor(timeoutMs / 1_000));
@@ -145,7 +167,7 @@ function plannedChecks(plan: CheckPlan, runners: CheckRunners): PlannedCheck[] {
           timeoutSeconds === command.timeoutSeconds ? command : { ...command, timeoutSeconds },
           signal,
         );
-        return { exitCode: result.exitCode, timedOut: result.timedOut, output: [result.stdout, result.stderr].filter((part) => part !== "").join("\n") };
+        return { exitCode: result.exitCode, timedOut: result.timedOut, output: joinedStreams(result.stdout, result.stderr) };
       },
     }));
   }
@@ -181,6 +203,21 @@ function untilAborted<T>(running: Promise<T>, signal: AbortSignal): Promise<T> {
   });
 }
 
+/**
+ * Both streams' tails within the report's limit (M-7): each gets half, and one that needs less gives the rest to the
+ * other, so a long stderr cannot push stdout's summary out.
+ */
+function joinedStreams(stdout: string, stderr: string): string {
+  const parts = [stdout, stderr].map((part) => redactedTail(part, MAX_COMMAND_OUTPUT_BYTES)).filter((part) => part !== "");
+  if (parts.length < 2) return parts[0] ?? "";
+  const room = CHECK_OUTPUT_MAX_BYTES - 1;
+  const [first, second] = parts.map((part) => Buffer.byteLength(part)) as [number, number];
+  const half = Math.floor(room / 2);
+  const firstLimit = first <= half ? first : second <= half ? room - second : half;
+  const secondLimit = room - Math.min(first, firstLimit);
+  return `${redactedTail(parts[0]!, firstLimit)}\n${redactedTail(parts[1]!, secondLimit)}`;
+}
+
 /** Stored as readiness output is (redacted, then cut to MAX_COMMAND_OUTPUT_BYTES), then cut to the report's 64 KiB. */
 function storedCheckOutput(text: string): string {
   return redactedTail(redactedTail(text, MAX_COMMAND_OUTPUT_BYTES), CHECK_OUTPUT_MAX_BYTES);
@@ -200,27 +237,37 @@ function cut(text: string, limit: number): string {
 export interface CheckRunnerOptions {
   /** The workspace root: the agent's shell starts here, and a replayed `cd` may not leave it. */
   rootPath: string;
-  /** The project's devcontainer, where preparation ran readiness. */
+  /** The project's devcontainer, where preparation ran readiness and the agent's shell ran (Ruling K). */
   devcontainer?: { cli: DevcontainerCli; target: DevcontainerTarget };
-  /** The session's shell operations (the devcontainer's), else the host's bash. */
+  /**
+   * The session's shell operations, for a container the devcontainer target does not describe (a SWE-bench task
+   * container). Defaults to the devcontainer's shell when there is one, and to the host's bash only when there is none.
+   */
   bashOperations?: BashOperations;
 }
 
 /** The real runners: readiness as preparation runs it, and agent commands as the agent's own shell runs them. */
 export function createCheckRunners(options: CheckRunnerOptions): CheckRunners {
-  const operations = options.bashOperations ?? createLocalBashOperations();
+  const devcontainer = options.devcontainer;
+  // Ruling K: a devcontainer session's replays run in the devcontainer, never on the host.
+  const operations = options.bashOperations
+    ?? (devcontainer === undefined ? createLocalBashOperations() : devcontainerBashOperations(devcontainer.cli, devcontainer.target));
+  const inContainer = devcontainer !== undefined || options.bashOperations !== undefined;
   const canonicalRoot = realpath(resolve(options.rootPath));
   canonicalRoot.catch(() => undefined);
   return {
     async runProjectCommand(command, signal) {
       if (signal.aborted) throw new Error("aborted");
       const root = await canonicalRoot;
-      const devcontainer = options.devcontainer;
-      const result = devcontainer === undefined
-        ? await runProjectCommand(command, 0, root, signal)
-        : await runDevcontainerCommand(devcontainer.cli, devcontainer.target, command, signal);
-      if (signal.aborted) throw new Error("aborted");
-      return { exitCode: result.exitCode, timedOut: result.timedOut === true, stdout: result.stdout, stderr: result.stderr };
+      try {
+        const result = devcontainer === undefined
+          ? await runProjectCommand(command, 0, root, signal)
+          : await runDevcontainerCommand(devcontainer.cli, devcontainer.target, command, signal);
+        if (signal.aborted) throw new Error("aborted");
+        return { exitCode: result.exitCode, timedOut: result.timedOut === true, stdout: result.stdout, stderr: result.stderr };
+      } catch (error) {
+        throw withoutRootError(error, root);
+      }
     },
 
     async runAgentCommand(replay, timeoutMs, signal) {
@@ -230,7 +277,7 @@ export function createCheckRunners(options: CheckRunnerOptions): CheckRunners {
       const root = await canonicalRoot;
       const cd = /^cd (\S+) && (.+)$/s.exec(replay);
       const command = cd === null ? replay : cd[2]!;
-      const cwd = cd === null ? root : await containedDirectory(root, cd[1]!);
+      const cwd = cd === null ? root : await containedDirectory(root, cd[1]!, inContainer);
       const output = tailCollector();
       try {
         const { exitCode } = await operations.exec(command, cwd, {
@@ -244,7 +291,7 @@ export function createCheckRunners(options: CheckRunnerOptions): CheckRunners {
       } catch (error) {
         if (signal.aborted) throw new Error("aborted", { cause: error });
         if (error instanceof Error && error.message.startsWith("timeout:")) return { exitCode: null, timedOut: true, output: output.text() };
-        throw error;
+        throw withoutRootError(error, root);
       }
     },
   };
@@ -254,16 +301,32 @@ export function createCheckRunners(options: CheckRunnerOptions): CheckRunners {
  * The directory a replayed `cd` names, resolved with realpath, so a symlink cannot lead out of the workspace (Ruling D).
  * The command then runs there directly rather than through the shell's own `cd`, which would follow the link again.
  */
-async function containedDirectory(root: string, path: string): Promise<string> {
+async function containedDirectory(root: string, path: string, inContainer: boolean): Promise<string> {
   let target: string;
   try {
     target = await realpath(resolve(root, path));
   } catch {
+    // In a container, a link the host cannot follow may be valid there (M-3): no result rather than a false failure.
+    if (inContainer) throw new CheckNotRunError(`AgentX did not replay this command: the worker could not resolve ${path}.`);
     throw new Error(`cd: ${path}: no such directory in this workspace`);
   }
+  if (!(await stat(target)).isDirectory()) throw new Error(`cd: ${path}: not a directory`);
   const fromRoot = relative(root, target);
   if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
     throw new CheckNotRunError(`AgentX did not replay this command: ${path} leads outside the workspace.`);
   }
   return target;
+}
+
+/**
+ * The worker's absolute workspace path, as "the workspace", in an error the worker or Pi raised (M-4, as #154 does for
+ * readiness errors). A command's own output is stored as readiness output is, paths and all.
+ */
+function withoutRoot(text: string, root: string): string {
+  return text.split(root).join("<workspace>");
+}
+
+function withoutRootError(error: unknown, root: string): unknown {
+  if (!(error instanceof Error) || error instanceof CheckNotRunError || !error.message.includes(root)) return error;
+  return new Error(withoutRoot(error.message, root), { cause: error });
 }

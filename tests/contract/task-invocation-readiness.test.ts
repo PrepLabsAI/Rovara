@@ -37,6 +37,8 @@ describe("the task invocation's readiness (spec 051)", () => {
     expect(WorkerInvocationSchema.parse(invocation)).toMatchObject({ payload: { readiness: [check(["test"])] } });
   });
 
+  // Ruling J: the latest revision's checks, which publication gates on. The worker gives a check that preparation did
+  // not run, and no task has run since, no before result, so one that already fails is never the agent's regression.
   it("carries the latest revision's readiness, as publication does, for a workspace pinned to an older one", async () => {
     const invocation = await taskInvocation([
       { revision: 1, readiness: [check(["test"])] },

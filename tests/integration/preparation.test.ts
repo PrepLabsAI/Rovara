@@ -7,6 +7,7 @@ import type { ProjectDefinition, StoredProjectDefinition } from "@agentx/contrac
 import { describe, expect, it } from "vitest";
 import { prepareWorkspace, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
 import { assertWorkspaceReady, evaluateReadiness } from "../../packages/worker/src/readiness.js";
+import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 
 const run = promisify(execFile);
 describe("workspace preparation", () => {
@@ -105,6 +106,25 @@ describe("workspace preparation", () => {
     expect(JSON.parse(await readFile(join(root, ".agentx/preparation-manifest.json"), "utf8"))).toEqual(
       manifest,
     );
+  });
+
+  it("records the keys of the readiness commands it ran, so a task knows which checks passed at preparation (spec 051 Ruling J)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const source = await createGitFixture("ready");
+    const readiness = [
+      { cwd: "repo/ready", executable: "fixture-check", args: ["a"], timeoutSeconds: 2 },
+      { cwd: "repo/ready", executable: "fixture-check", args: ["b"], timeoutSeconds: 2, env: { CI: "1" } },
+    ];
+    const project = { ...fixtureProject([{ name: "ready", commit: source.commit }]), readiness } satisfies ProjectDefinition;
+    const manifest = await prepareWorkspace({
+      rootPath: root,
+      project,
+      materializer: async (_repository, destination) => {
+        await run("git", ["clone", "--quiet", source.directory, destination]);
+      },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    });
+    expect(manifest.readinessCommandKeys).toEqual(readiness.map(projectCheckKey));
   });
 
   it("ignores an inaccessible filesystem-owned lost+found directory at the workspace root", async () => {

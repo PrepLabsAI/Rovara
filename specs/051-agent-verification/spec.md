@@ -127,10 +127,14 @@ These may come later (spec 053 or after).
 - **D-5 (2026-10-01):** No paid validation runs during development (pre-launch; see spec 046). The pilot's failure tasks
   (astropy-13398, sphinx-7590) and the final campaign measure the effect. Development is verified by tests that run
   on the scripted model.
-- **D-6 (2026-10-02):** The "before" for project checks is always "passed at preparation": readiness runs once at
-  workspace preparation, and a workspace becomes READY only if every check passes. The task payload did not carry the
-  readiness commands, so the broker adds an optional `readiness` list (`ProjectCommand[]`) to the task invocation
-  payload, and the worker reruns those commands.
+- **D-6 (2026-10-02, amended by Ruling J):** The task payload did not carry the readiness commands, so the broker adds
+  an optional `readiness` list (`ProjectCommand[]`, the latest revision's, as publication gates on) to the task
+  invocation payload, and the worker reruns those commands. The "before" for a project check is the last known outcome
+  of that exact command in this workspace: each task's final round records its project-check outcomes in
+  `.agentx/last-checks.json`, keyed by a hash of the command's cwd, executable, args and env. With no recorded outcome,
+  a command that preparation ran (recorded in the preparation manifest) is "passed", since a workspace becomes READY
+  only if every check passes; any other command, such as one added in a later revision, is "unknown", so a failure is
+  "failing (no before result)" and never the agent's regression. A check that was not run keeps its earlier outcome.
 - **D-7 (2026-10-02):** A remaining regression publishes as a draft PR. Publish no longer refuses on a failing readiness
   check: it opens the PR as a draft with the failing checks listed in a deterministic checks section, and it also reads
   the workspace's latest task check report for agent-command checks. CodeBuild gates are unchanged. This relaxes an

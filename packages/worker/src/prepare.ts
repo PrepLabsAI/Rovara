@@ -30,6 +30,7 @@ import { runCollected, type CollectedProcess } from "./collected-process.js";
 import { describeCommandFailure } from "./command-failure.js";
 import { evaluateReadiness, type CommandResult } from "./readiness.js";
 import { gitSafeEnvironment } from "./git.js";
+import { projectCheckKey } from "./verification/check-history.js";
 import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
 import type {
   RepositoryCloneCredential,
@@ -76,6 +77,11 @@ export interface PreparationManifest {
     stdout: string;
     stderr: string;
   }>;
+  /**
+   * Spec 051 Ruling J: projectCheckKey of each readiness command this preparation ran, so a task's check knows which
+   * commands passed at preparation. Absent from manifests written before it.
+   */
+  readinessCommandKeys?: string[];
   creationIdentity: string;
   complete: boolean;
   updatedAt: string;
@@ -207,6 +213,7 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
     const readinessManifest: PreparationManifest = {
       ...manifest,
       readinessResults: readiness.results,
+      readinessCommandKeys: project.readiness.map(projectCheckKey),
       complete: readiness.ready,
       ...(readinessFailure !== undefined ? { failure: readinessFailure } : {}),
     };

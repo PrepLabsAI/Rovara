@@ -109,6 +109,13 @@ describe("ec2-ebs delivery", () => {
       log.mockRestore();
     });
 
+    it("fails the attempt, posting nothing, when the worker's /ping does not answer for a task carrying only readiness", async () => {
+      const { deliver, post } = delivery({ workerFeatures: async () => { throw new Error("timeout"); } });
+      const record = taskRecord({ readiness });
+      await expect(deliver(record, record.invocation)).rejects.toThrow(/RUNTIME_UNAVAILABLE: could not ask the EC2 worker .*timeout/);
+      expect(post).not.toHaveBeenCalled();
+    });
+
     it("does not ask the worker when the task carries no readiness", async () => {
       const workerFeatures = vi.fn<NonNullable<Ec2DeliveryDependencies["workerFeatures"]>>(async () => []);
       const { deliver, post } = delivery({ workerFeatures });
