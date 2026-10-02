@@ -2,7 +2,7 @@
 
 **Feature Branch**: `docs/052-eval-batches` (spec), then `feat/052-eval-batches`  
 **Created**: 2026-10-01  
-**Status**: Draft  
+**Status**: Implemented; awaiting release  
 **Input**: Spec 046's final campaign needs dozens of (task, model, repeat) runs. Today each run is one Slack command,
 and one run at a time is allowed per deployment.
 
@@ -43,7 +43,7 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
     record, is **deferred** (D-13): the file schema accepts it, and the broker refuses it with "sampling is not
     available yet; list the instance IDs";
   - `models`: each a project-approved model, with an explicit `thinkingLevel` and, for OpenRouter, a pinned
-    `provider`;
+    `provider` (`routing.only`); an OpenRouter model without one is refused with the reason;
   - `repeats`;
   - `order`: `cheapest-first` (default, by an estimated cost per run) or `as-listed`;
   - `concurrency`;
@@ -77,8 +77,9 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
   (D-6). Runs in flight finish, so the overshoot is bounded by the per-run reservations. The thread says when the cap stopped the batch, and
   how many runs did not start.
 - **FR-008 (failures):** A run that ends `FAILED` for an infrastructure reason (instance lost, image pull, model access)
-  is retried **once**, in its batch. A graded result is never retried. A run that fails twice is recorded as failed,
-  and spec 046 counts it separately (R-4).
+  is retried **once**, in its batch. A graded result is never retried, except one whose agent stopped on
+  `model_error`, which the batch records as a model-access failure (D-15). A run that fails twice is recorded as
+  failed, and spec 046 counts it separately (R-4).
 
 ### Control and results
 
@@ -87,7 +88,7 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
 - **FR-010:** Each finished run's measures are appended to the batch's results. The measures are:
   - instance, model, provider, thinking level, repeat;
   - outcome, resolved, and the SEC-bench verdict or the test counts;
-  - stop reason, agent seconds, tool calls;
+  - stop reason, agent seconds, tool calls (counted by the runner; empty for an older runner image, D-16);
   - tokens by kind, cost;
   - image digest;
   - spec 051's claim-and-check fields when present.
@@ -191,6 +192,16 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
   batches leave one more free, so a second single run can start too. A batch's `concurrency` is clamped to the same
   limit. A deployment with `maxConcurrentEvals` 1 has no slot for batches: a batch is refused at create with the reason,
   and a running batch whose deployment was lowered to 1 makes the tick fail, so its alarm fires.
+
+- **D-15 (2026-10-02, Ruling 27):** A graded result whose agent stopped on `model_error` (model access, a model not
+  enabled, a provider failure) is the infrastructure's, not the model's answer. The broker's batch path records it
+  FAILED, with the error "the model could not be used (model_error): <the runner's stop detail>": it is retried once
+  under FR-008, charged its reported cost, left out of the resolve rate, and counted as failed. It is classified in
+  the broker, from the result the runner reported, so every runner image's results are read the same way. A single
+  run is unchanged: its record and its thread keep the graded result with its stop reason.
+- **D-16 (2026-10-02, Ruling 28):** The runner's graded result carries an optional `toolCalls`, the tool calls the
+  agent started, counted by its tool-loop guard. The broker copies it into the run's measure and `results.csv`. A
+  runner image older than this change leaves it empty; the image is rebuilt before the campaign.
 
 ## Success Criteria
 
