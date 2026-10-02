@@ -176,7 +176,9 @@ describe("workspace preparation", () => {
     expect(diagnostics[0]).not.toContain(awsKey);
   });
 
-  it("fails preparation when the check history can neither be written nor removed (Ruling N)", async () => {
+  it("fails preparation when the check history can neither be written nor removed (Ruling N)", async (context) => {
+    // chmod does not stop root (M-9).
+    if (process.getuid?.() === 0) context.skip();
     const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
     const source = await createGitFixture("history-stuck");
     const readiness = [{ cwd: "repo/history-stuck", executable: "fixture-check", args: ["a"], timeoutSeconds: 2 }];

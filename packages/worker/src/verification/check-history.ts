@@ -87,8 +87,8 @@ export async function readCheckHistory(rootPath: string, manifest: { readinessCo
 /**
  * Records a final round's project-check outcomes, merged over the earlier ones. A check that was not run (or not
  * rerun) keeps its last known outcome. Written to a temporary file and renamed, so a crash never leaves half a file.
- * Task 4 calls this after the final round only, with `base` the snapshot read before the session started: the agent
- * may have rewritten the file since, and a merge over the file would keep what it wrote (Ruling L).
+ * `base` is the snapshot read before the session started: the agent may have rewritten the file since, and a merge
+ * over the file would keep what it wrote (Ruling L).
  */
 export async function recordProjectOutcomes(
   rootPath: string,
@@ -96,16 +96,56 @@ export async function recordProjectOutcomes(
   entries: readonly CheckEntry[],
   base?: Pick<CheckHistory, "lastOutcomes">,
 ): Promise<void> {
-  if (plan.source !== "project" || plan.readiness === undefined) return;
+  const updates = projectUpdates(plan, entries);
+  if (Object.keys(updates).length === 0) return;
+  await writeOutcomes(rootPath, base ?? await readCheckHistory(rootPath, {}), updates);
+}
+
+/**
+ * Spec 051 Ruling O: at the end of every task, the history is the pre-session snapshot, plus the final round's project
+ * outcomes when a final round ran. Whatever the agent left at the path (a forged file, garbage, a directory) is
+ * removed first. When the write fails, the path is removed, so nothing the agent left survives: "removed" is returned
+ * with the error. When that removal fails too, this rejects.
+ */
+export async function restoreCheckHistory(
+  rootPath: string,
+  base: Pick<CheckHistory, "lastOutcomes">,
+  final?: { plan: { source: string; readiness?: readonly ProjectCommand[] }; entries: readonly CheckEntry[] },
+): Promise<{ outcome: "restored" } | { outcome: "removed"; error: unknown }> {
+  const path = resolve(rootPath, HISTORY_PATH);
+  try {
+    // Recursive: the agent may have left a directory. rm removes a symbolic link itself, never its target.
+    await rm(path, { recursive: true, force: true });
+    await writeOutcomes(rootPath, base, final === undefined ? {} : projectUpdates(final.plan, final.entries));
+    return { outcome: "restored" };
+  } catch (error) {
+    try {
+      await rm(path, { recursive: true, force: true });
+    } catch (removalError) {
+      throw new Error(`AgentX could neither restore nor remove the workspace's check history (${HISTORY_PATH}): ${message(removalError)}`, { cause: removalError });
+    }
+    return { outcome: "removed", error };
+  }
+}
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/** The known outcomes of a project round's entries, keyed by the planned command. */
+function projectUpdates(
+  plan: { source: string; readiness?: readonly ProjectCommand[] },
+  entries: readonly CheckEntry[],
+): Record<string, KnownOutcome> {
   const updates: Record<string, KnownOutcome> = {};
+  if (plan.source !== "project" || plan.readiness === undefined) return updates;
   for (const entry of entries) {
     const match = /^readiness:(\d+)$/.exec(entry.id);
     const command = match === null ? undefined : plan.readiness[Number(match[1])];
     if (command === undefined || entry.source !== "project" || !isKnown(entry.after)) continue;
     updates[projectCheckKey(command)] = entry.after;
   }
-  if (Object.keys(updates).length === 0) return;
-  await writeOutcomes(rootPath, base ?? await readCheckHistory(rootPath, {}), updates);
+  return updates;
 }
 
 /**

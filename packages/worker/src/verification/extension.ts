@@ -72,6 +72,8 @@ export function verificationExtension(options: VerificationOptions): InlineExten
     factory: (pi) => {
       const { recorder } = options;
       let extraTry: CheckReport["extraTry"] = "not_needed";
+      // The round that gave the extra try: its regressions stand until a later round reruns them (I-2, M-2).
+      let firstRound: { source: CheckReport["source"]; entries: CheckEntry[] } | undefined;
       // Only the last assistant message counts: after the extra try, the extra turn's own message (Review Focus 4).
       let finalText: string | undefined;
 
@@ -91,7 +93,12 @@ export function verificationExtension(options: VerificationOptions): InlineExten
         };
         try {
           // Review Focus 3: a model error is no finish to check; Pi skips this hook on an abort, but not on every one.
-          if (event.outcome === "error") return report(notVerifiedReport("error", { extraTry, agentClaim: claim }));
+          if (event.outcome === "error") {
+            return report(notVerifiedReport("error", {
+              extraTry, agentClaim: claim,
+              ...(firstRound === undefined ? {} : { source: firstRound.source, checks: firstRound.entries }),
+            }));
+          }
           if (event.outcome !== "completed" || options.signal.aborted) return report(notVerifiedReport("stopped", { extraTry, agentClaim: claim }));
           await recorder.settled();
           const plan = options.plan();
@@ -100,24 +107,26 @@ export function verificationExtension(options: VerificationOptions): InlineExten
           if (round.stopped || options.signal.aborted) {
             return report(notVerifiedReport("stopped", { source: plan.source, checks: round.entries, extraTry, agentClaim: claim }));
           }
-          const status = reportStatus(round.entries);
+          const entries = firstRound === undefined ? round.entries : withStandingRegressions(round.entries, firstRound.entries);
+          const status = reportStatus(entries);
           const roundReport = (): CheckReport => ({
             status,
             ...(status === "not_verified" ? { notVerifiedReason: "no_checks" as const } : {}),
             source: plan.source,
             preambleVersion: AGENTX_PREAMBLE_VERSION,
             preambleSha256: agentxPreambleSha256(),
-            checks: round.entries,
+            checks: entries,
             extraTry,
             agentClaim: claim,
           });
           if (status === "regression" && extraTry === "not_needed") {
             extraTry = "given";
+            firstRound = { source: plan.source, entries };
             options.onExtraTry?.(roundReport());
             const message: CustomMessageEntryDraft = {
               type: "custom_message",
               customType: CHECKS_MESSAGE_TYPE,
-              content: checksFeedback(round.entries),
+              content: checksFeedback(entries),
               display: false,
             };
             // A custom message reaches the model as a user message, so Pi can run the extra turn (canContinue).
@@ -133,6 +142,17 @@ export function verificationExtension(options: VerificationOptions): InlineExten
       });
     },
   };
+}
+
+/**
+ * Ruling O (I-2): a check that was a regression in the round that gave the extra try, and that this round did not rerun
+ * (the budget, or a refusal), keeps that round's entry. AgentX saw it regress and never saw it fixed.
+ */
+function withStandingRegressions(entries: readonly CheckEntry[], earlier: readonly CheckEntry[]): CheckEntry[] {
+  return entries.map((entry) => {
+    if (entry.class !== "not_rerun") return entry;
+    return earlier.find((before) => before.id === entry.id && before.label === entry.label && before.class === "regression") ?? entry;
+  });
 }
 
 /** Each failing check's output in the agent's message: its last lines, at most this many bytes. */
@@ -165,11 +185,12 @@ export function checksFeedback(entries: readonly CheckEntry[]): string {
 
 /** The report's total output in the task result and the result event, which are stored as DynamoDB items. */
 const COMPACT_OUTPUT_TOTAL_BYTES = 65_536;
-const COMPACT_LABEL_CHARS = 1_024;
+const COMPACT_LABEL_BYTES = 1_024;
 
 /**
  * The report as the task result and the result event carry it: the same report, with each check's label and output
- * cut so that 64 checks stay well under DynamoDB's 400 KB item limit. checks.json keeps the full report.
+ * cut so that 64 checks stay well under DynamoDB's 400 KB item limit (about 130 KB at most). Sizes are counted as the
+ * JSON is stored, escaping included, so control characters cannot grow the item. checks.json keeps the full report.
  */
 export function compactCheckReport(report: CheckReport): CheckReport {
   if (report.checks.length === 0) return report;
@@ -178,8 +199,37 @@ export function compactCheckReport(report: CheckReport): CheckReport {
     ...report,
     checks: report.checks.map((entry) => ({
       ...entry,
-      label: entry.label.length <= COMPACT_LABEL_CHARS ? entry.label : entry.label.slice(0, COMPACT_LABEL_CHARS).replace(/[\uD800-\uDBFF]$/, ""),
-      output: Buffer.byteLength(entry.output) <= perCheck ? entry.output : redactedTail(entry.output, perCheck),
+      label: headBytes(entry.label, COMPACT_LABEL_BYTES),
+      output: tailWithinJson(entry.output, perCheck),
     })),
   };
+}
+
+/** The text's start, within `limit` UTF-8 bytes as stored in JSON. */
+function headBytes(text: string, limit: number): string {
+  if (jsonBytes(text) <= limit) return text;
+  let kept = Buffer.from(text, "utf8").subarray(0, limit).toString("utf8").replace(/\uFFFD$/, "");
+  while (kept.length > 0 && jsonBytes(kept) > limit) kept = kept.slice(0, Math.floor(kept.length * 0.9)).replace(/[\uD800-\uDBFF]$/, "");
+  return kept;
+}
+
+/** The text's tail, within `limit` bytes as stored in JSON, cut at a line as readiness output is. */
+function tailWithinJson(text: string, limit: number): string {
+  let kept = Buffer.byteLength(text) <= limit ? text : redactedTail(text, limit);
+  for (let attempt = 0; attempt < 8 && kept.length > 0 && jsonBytes(kept) > limit; attempt += 1) {
+    kept = redactedTail(kept, Math.floor(Buffer.byteLength(kept) * limit / jsonBytes(kept) * 0.9));
+  }
+  return jsonBytes(kept) > limit ? "" : kept;
+}
+
+function jsonBytes(text: string): number {
+  return Buffer.byteLength(JSON.stringify(text)) - 2;
+}
+
+/** The checks.json artifact stays well below the broker's 5 MB limit: past 4 MB, the compact report is stored (M-4). */
+const CHECKS_ARTIFACT_MAX_BYTES = 4_000_000;
+
+export function checksArtifactContent(report: CheckReport): string {
+  const full = JSON.stringify(report, null, 2);
+  return Buffer.byteLength(full) <= CHECKS_ARTIFACT_MAX_BYTES ? full : JSON.stringify(compactCheckReport(report), null, 2);
 }

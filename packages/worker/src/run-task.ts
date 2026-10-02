@@ -24,9 +24,9 @@ import {
 } from "./pi-session.js";
 import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
-import { readCheckHistory, recordProjectOutcomes } from "./verification/check-history.js";
+import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
-import { assistantText, compactCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
+import { assistantText, checksArtifactContent, compactCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
   createTaskUsageTelemetry,
@@ -55,6 +55,8 @@ export async function runTaskInvocation(
     devcontainerCli?: DevcontainerCli;
     /** The runners AgentX's checks use; tests supply fakes. Default: as preparation and the agent's shell run. */
     checkRunners?: CheckRunners;
+    /** Each check round's budget; tests supply short ones. Default: CHECK_ROUND_BUDGET_MS (P-3). */
+    checkBudgetMs?: () => number;
   },
 ): Promise<TaskInvocationResult> {
   const invocation = WorkerInvocationSchema.parse(untrustedInvocation);
@@ -135,11 +137,12 @@ export async function runTaskInvocation(
       rootPath: canonicalRoot,
       ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
     }),
-    budgetMs: () => CHECK_ROUND_BUDGET_MS,
+    budgetMs: dependencies.checkBudgetMs ?? (() => CHECK_ROUND_BUDGET_MS),
     signal: verificationStop.signal,
     recorder,
     onReport: (report) => { reportedChecks = report; },
-    onExtraTry: (firstRound) => { firstRoundChecks = firstRound; },
+    // I-3: an earlier settle's report is stale once the agent has a regression to fix.
+    onExtraTry: (firstRound) => { firstRoundChecks = firstRound; reportedChecks = undefined; },
     onDiagnostic,
   });
 
@@ -239,17 +242,23 @@ export async function runTaskInvocation(
       await dependencies.artifactSink({
         name: "checks.json",
         mediaType: "application/json",
-        content: JSON.stringify(finalChecks(), null, 2),
+        content: checksArtifactContent(finalChecks()),
       });
     };
-    // Ruling M: the final round's project outcomes become the next task's before. A failed write never fails the task.
-    const recordOutcomes = async (): Promise<void> => {
+    // Ruling O (I-1): on every ending, the history is the snapshot plus the final round's project outcomes (Ruling M),
+    // whatever the agent left at the path. A failed write removes the path; neither ever fails the task.
+    const restoreHistory = async (): Promise<void> => {
       const report = reportedChecks;
-      if (report === undefined || report.source !== "project" || report.status === "not_verified" || checkPlan === undefined) return;
+      const final = report !== undefined && report.source === "project" && report.status !== "not_verified" && checkPlan !== undefined
+        ? { plan: checkPlan, entries: report.checks }
+        : undefined;
       try {
-        await recordProjectOutcomes(canonicalRoot, checkPlan, report.checks, checkHistory);
+        const restored = await restoreCheckHistory(canonicalRoot, checkHistory, final);
+        if (restored.outcome === "removed") {
+          onDiagnostic(`AgentX could not save this task's check results for the next task, so it removed them: ${errorText(restored.error)}`);
+        }
       } catch (error) {
-        onDiagnostic(`AgentX could not save this task's check results for the next task: ${error instanceof Error ? error.message : String(error)}`);
+        onDiagnostic(errorText(error));
       }
     };
     const publishEvidence = async (): Promise<void> => {
@@ -279,14 +288,13 @@ export async function runTaskInvocation(
       }
       try {
         await session.prompt(invocation.payload.prompt);
-        await recordOutcomes();
       } finally {
         await flushDiagnostics().catch(() => undefined);
       }
       // An abort can end the prompt without an error; the guard's reason is the task's outcome.
       if (loopStop !== undefined) throw loopStop;
       // A cancel during AgentX's checks ends the prompt normally, after the agent's last turn completed.
-      if (reportedChecks?.notVerifiedReason === "stopped" && dependencies.cancellationController?.isCancelled(invocation.operationId)) {
+      if (verificationStop.signal.aborted && dependencies.cancellationController?.isCancelled(invocation.operationId)) {
         throw new WorkerOperationCancelledError(invocation.operationId);
       }
       const modelFailure = failedTurn(lastAssistant);
@@ -365,6 +373,9 @@ export async function runTaskInvocation(
         }
       }
     }
+
+    await restoreHistory();
+    await flushDiagnostics().catch(() => undefined);
 
     let telemetryFailure = evidenceFailure;
     try {
@@ -520,6 +531,10 @@ function failedTurn(outcome: AssistantOutcome | undefined): Error | undefined {
   // The caller reports it as CANCELLED when a cancellation was requested, and as FAILED otherwise.
   if (outcome?.stopReason === "aborted") return agentXError("OPERATION_INTERRUPTED", "the model call was aborted");
   return undefined;
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function asError(value: unknown): Error {

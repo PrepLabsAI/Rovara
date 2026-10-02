@@ -3,7 +3,7 @@
 // real Pi session (createDefaultPiSessionAdapter) on the faux model, so the real extension and Pi's real
 // agent_before_settle hook run. Only the check runners are fakes, except where a test says otherwise. Offline.
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
 import type { BashOperations, InlineExtension } from "@earendil-works/pi-coding-agent";
@@ -24,7 +24,7 @@ import { createDefaultPiSessionAdapter, type PiSessionAdapter } from "../../pack
 import { runTaskInvocation, type TaskInvocationResult } from "../../packages/worker/src/run-task.js";
 import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 import { createCheckRunners, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
-import { CHECKS_MESSAGE_TYPE, compactCheckReport } from "../../packages/worker/src/verification/extension.js";
+import { CHECKS_MESSAGE_TYPE, checksArtifactContent, compactCheckReport } from "../../packages/worker/src/verification/extension.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
@@ -83,6 +83,11 @@ function fakeRunners(options: { agent?: AgentResult[]; project?: ProjectResult[]
   return { runners, agentCalls, projectCalls };
 }
 
+function budgetSequence(budgets: number[]): () => number {
+  let round = 0;
+  return () => budgets[Math.min(round++, budgets.length - 1)]!;
+}
+
 /** One model request: the conversation the model was given, without the system message. */
 type Request = Array<{ role: string; content: unknown }>;
 
@@ -97,6 +102,10 @@ async function runTask(options: {
   rootPath?: string;
   /** Extensions loaded after AgentX's own, as a later handler on the same hook. */
   extraExtensions?: InlineExtension[];
+  /** Each round's check budget, in order; the last repeats. Default: production's. */
+  budgets?: number[];
+  /** An artifact name whose upload fails, so the task throws after the agent finished. */
+  failArtifact?: string;
 }) {
   const { modelRuntime, faux } = await fauxModelRuntime();
   const requests: Request[] = [];
@@ -125,9 +134,13 @@ async function runTask(options: {
     result = await runTaskInvocation(invocation, {
       rootPath, model: FAUX_MODEL, piAdapter,
       ...(options.runners === undefined ? {} : { checkRunners: options.runners }),
+      ...(options.budgets === undefined ? {} : { checkBudgetMs: budgetSequence(options.budgets) }),
       ...(options.cancellation === undefined ? {} : { cancellationController: options.cancellation }),
       eventSink: async (batch) => { events.push(...batch); },
-      artifactSink: async (artifact) => { artifacts.push(artifact); },
+      artifactSink: async (artifact) => {
+        if (artifact.name === options.failArtifact) throw new Error(`upload of ${artifact.name} failed`);
+        artifacts.push(artifact);
+      },
     });
   } catch (error) {
     failure = error;
@@ -359,25 +372,36 @@ describe("the check history across tasks (spec 051 Rulings L and M)", () => {
     expect(third.report!.checks[0]).toMatchObject({ before: "failed", after: "failed", class: "already_failing" });
   });
 
-  it("M: a failed history write is reported as a redacted diagnostic and never fails the task", async () => {
+  it("M: a history the worker can neither restore nor remove is a redacted diagnostic, and never fails the task (Ruling O)", async (context) => {
+    // chmod does not stop root.
+    if (process.getuid?.() === 0) context.skip();
     const awsKey = "AKIAIOSFODNN7EXAMPLE";
     const rootPath = await workspaceRoot([lint]);
-    // The agent puts a non-empty directory where the history goes (after the snapshot), so the rename fails.
-    const blocker = join(rootPath, ".agentx/last-checks.json", awsKey);
-    const shell = scriptedShell({}, async (command) => { if (command === "block") await mkdir(blocker, { recursive: true }); });
-    const run = await runTask({
-      steps: [bash("block", "c1"), fauxAssistantMessage("Done.")], readiness: [lint], rootPath, shell,
-      runners: fakeRunners().runners,
+    // The agent leaves a directory the worker cannot empty where the history goes (after the snapshot).
+    const locked = join(rootPath, ".agentx/last-checks.json", awsKey);
+    const shell = scriptedShell({}, async (command) => {
+      if (command !== "block") return;
+      await mkdir(locked, { recursive: true });
+      await writeFile(join(locked, "stale"), "x");
+      await chmod(locked, 0o500);
     });
-    expect(run.failure).toBeUndefined();
-    expect(run.report).toMatchObject({ status: "verified" });
-    const progress = run.events.flatMap((event) => {
-      const message = event.type === "progress" ? (event.payload as { message?: unknown }).message : undefined;
-      return typeof message === "string" ? [message] : [];
-    });
-    const diagnostic = progress.find((message) => message.includes("could not save this task's check results"));
-    expect(diagnostic).toBeDefined();
-    expect(diagnostic).not.toContain(awsKey);
+    try {
+      const run = await runTask({
+        steps: [bash("block", "c1"), fauxAssistantMessage("Done.")], readiness: [lint], rootPath, shell,
+        runners: fakeRunners().runners,
+      });
+      expect(run.failure).toBeUndefined();
+      expect(run.report).toMatchObject({ status: "verified" });
+      const progress = run.events.flatMap((event) => {
+        const message = event.type === "progress" ? (event.payload as { message?: unknown }).message : undefined;
+        return typeof message === "string" ? [message] : [];
+      });
+      const diagnostic = progress.find((message) => message.includes("could neither restore nor remove"));
+      expect(diagnostic).toBeDefined();
+      expect(diagnostic).not.toContain(awsKey);
+    } finally {
+      await chmod(locked, 0o700);
+    }
   });
 });
 
@@ -429,5 +453,170 @@ describe("an extra try with no second settle (Ruling N)", () => {
     expect(run.failure).toBeInstanceOf(WorkerOperationCancelledError);
     expect(fake.agentCalls).toEqual(["pytest"]);
     expect(run.report).toMatchObject({ status: "not_verified", notVerifiedReason: "stopped", extraTry: "given" });
+  });
+});
+
+/** The history file as the next task reads it, parsed; undefined when it is not a usable file. */
+async function historyOutcomes(rootPath: string): Promise<Record<string, unknown> | undefined> {
+  try {
+    return (JSON.parse(await readFile(join(rootPath, ".agentx/last-checks.json"), "utf8")) as { outcomes: Record<string, unknown> }).outcomes;
+  } catch {
+    return undefined;
+  }
+}
+
+describe("AgentX restores the check history on every ending (Ruling O, I-1)", () => {
+  const key = projectCheckKey(lint);
+  const other = "e".repeat(64);
+  const seeded = { [key]: "passed", [other]: "failed" };
+  const fail: ProjectResult = { exitCode: 1, timedOut: false, stdout: "", stderr: "lint failed" };
+
+  /** A prepared workspace whose history the agent replaces with a non-empty directory when it runs `tamper`. */
+  async function tamperedWorkspace(cancel?: () => void) {
+    const rootPath = await workspaceRoot([lint]);
+    const path = join(rootPath, ".agentx/last-checks.json");
+    await writeFile(path, JSON.stringify({ schemaVersion: 1, outcomes: seeded }));
+    const shell = scriptedShell({}, async (command) => {
+      if (command !== "tamper") return;
+      await rm(path, { force: true });
+      await mkdir(join(path, "planted"), { recursive: true });
+      cancel?.();
+      if (cancel !== undefined) await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    return { rootPath, shell };
+  }
+
+  it.each([
+    ["verified", { readiness: [lint], runs: undefined, final: fauxAssistantMessage("Done."), expected: { [key]: "passed", [other]: "failed" } }],
+    ["regression", { readiness: [lint], runs: [fail], final: fauxAssistantMessage("Done."), expected: { [key]: "failed", [other]: "failed" } }],
+    ["not_verified, an old broker with no readiness", { readiness: undefined, runs: undefined, final: fauxAssistantMessage("Done."), expected: seeded }],
+    ["a model error", { readiness: [lint], runs: undefined, final: fauxAssistantMessage("", { stopReason: "error", errorMessage: "model down" }), expected: seeded }],
+  ] as const)("restores it after %s", async (_name, scenario) => {
+    const { rootPath, shell } = await tamperedWorkspace();
+    await runTask({
+      steps: [bash("tamper", "c1"), scenario.final, fauxAssistantMessage("Still done.")],
+      ...(scenario.readiness === undefined ? {} : { readiness: [...scenario.readiness] }),
+      rootPath, shell, runners: fakeRunners(scenario.runs === undefined ? {} : { project: [...scenario.runs] }).runners,
+    });
+    expect(await historyOutcomes(rootPath)).toEqual(scenario.expected);
+  });
+
+  it("restores it after a cancel", async () => {
+    const cancellation = new WorkerCancellationController();
+    const operationId = randomUUID();
+    const { rootPath, shell } = await tamperedWorkspace(() => { void cancellation.cancel(operationId); });
+    const run = await runTask({ steps: [bash("tamper", "c1"), fauxAssistantMessage("Done.")], readiness: [lint], rootPath, shell, cancellation, operationId, runners: fakeRunners().runners });
+    expect(run.failure).toBeInstanceOf(WorkerOperationCancelledError);
+    expect(await historyOutcomes(rootPath)).toEqual(seeded);
+  });
+
+  it("restores it, with the final round's outcomes, when the task throws after the agent finished", async () => {
+    const { rootPath, shell } = await tamperedWorkspace();
+    const run = await runTask({
+      steps: [bash("tamper", "c1"), fauxAssistantMessage("Done."), fauxAssistantMessage("Done again.")], readiness: [lint], rootPath, shell,
+      runners: fakeRunners({ project: [fail] }).runners, failArtifact: "workspace.diff",
+    });
+    expect(String(run.failure)).toContain("upload of workspace.diff failed");
+    expect(await historyOutcomes(rootPath)).toEqual({ [key]: "failed", [other]: "failed" });
+  });
+
+  it("keeps the next task's regression a regression after the agent planted a directory in a task that ended in a model error", async () => {
+    const { rootPath, shell } = await tamperedWorkspace();
+    await runTask({ steps: [bash("tamper", "c1"), fauxAssistantMessage("", { stopReason: "error", errorMessage: "model down" })], readiness: [lint], rootPath, shell, runners: fakeRunners().runners });
+    const next = await runTask({ steps: [fauxAssistantMessage("Done."), fauxAssistantMessage("Done again.")], readiness: [lint], rootPath, runners: fakeRunners({ project: [fail] }).runners });
+    expect(next.report).toMatchObject({ status: "regression" });
+    expect(next.report!.checks[0]).toMatchObject({ before: "passed", after: "failed", class: "regression" });
+  });
+
+  it("keeps the next task's regression a regression after the agent wrote garbage in a task with no checks", async () => {
+    const rootPath = await workspaceRoot([lint]);
+    await runTask({ steps: [write(".agentx/last-checks.json", "not json", "c1"), fauxAssistantMessage("Done.")], rootPath, runners: fakeRunners().runners });
+    const next = await runTask({ steps: [fauxAssistantMessage("Done."), fauxAssistantMessage("Done again.")], readiness: [lint], rootPath, runners: fakeRunners({ project: [fail] }).runners });
+    expect(next.report).toMatchObject({ status: "regression" });
+  });
+});
+
+describe("the round after the extra try (Ruling O)", () => {
+  it("I-2: a round-1 regression that round 2's budget leaves unrun stays a regression", async () => {
+    const quick: ProjectCommand = { cwd: "app", executable: "npm", args: ["test"], timeoutSeconds: 60 };
+    let quickRuns = 0;
+    let lintRuns = 0;
+    const runners: CheckRunners = {
+      runAgentCommand: () => Promise.reject(new Error("not used")),
+      async runProjectCommand(command) {
+        if (command.args[0] === "test") {
+          quickRuns += 1;
+          // Round 2's budget is 1.5 s: after this, too little is left to start the lint check.
+          if (quickRuns === 2) await new Promise((resolve) => setTimeout(resolve, 1_100));
+          return { exitCode: 0, timedOut: false, stdout: "ok", stderr: "" };
+        }
+        lintRuns += 1;
+        return { exitCode: 1, timedOut: false, stdout: "", stderr: "lint failed" };
+      },
+    };
+    const run = await runTask({
+      steps: [fauxAssistantMessage("Done."), fauxAssistantMessage("Done again.")], readiness: [quick, lint], runners, budgets: [60_000, 1_500],
+    });
+    expect(lintRuns).toBe(1);
+    expect(run.report).toMatchObject({ status: "regression", extraTry: "given" });
+    expect(run.report!.checks).toEqual([
+      expect.objectContaining({ id: "readiness:0", class: "passing" }),
+      expect.objectContaining({ id: "readiness:1", before: "passed", after: "failed", class: "regression" }),
+    ]);
+  });
+
+  it("I-3: a verified settle, a continuation queued by another extension, then a regression with no second settle, reports the regression", async () => {
+    let settles = 0;
+    const stub: InlineExtension = {
+      name: "agentx-test-stub",
+      factory: (pi) => {
+        pi.on("agent_before_settle", (event) => {
+          settles += 1;
+          // First settle: another extension asks for one more turn. Second: it drops AgentX's message (unrunnable).
+          if (settles === 1) return { entries: [...event.entries, { type: "custom_message", customType: "agentx_test", content: "One more thing.", display: false }], continue: true };
+          return { entries: [] };
+        });
+      },
+    };
+    const fake = fakeRunners({ agent: [passedRun, failedRun("1 failed")] });
+    const run = await runTask({
+      steps: [bash("pytest", "c1"), write("src.py", "x\n", "c2"), fauxAssistantMessage("Done."), fauxAssistantMessage("Also done.")],
+      runners: fake.runners, shell: scriptedShell({ pytest: { exitCode: 0, output: "3 passed\n" } }), extraExtensions: [stub],
+    });
+    expect(fake.agentCalls).toHaveLength(2);
+    expect(run.report).toMatchObject({ status: "regression", extraTry: "given" });
+  });
+
+  it("M-2: a model error on the extra turn keeps the first round's checks, with not_verified/error", async () => {
+    const fake = fakeRunners({ agent: [failedRun("1 failed")] });
+    const run = await runTask({
+      steps: [bash("pytest", "c1"), write("src.py", "x\n", "c2"), fauxAssistantMessage("Done."), fauxAssistantMessage("", { stopReason: "error", errorMessage: "model down" })],
+      runners: fake.runners, shell: scriptedShell({ pytest: { exitCode: 0, output: "3 passed\n" } }),
+    });
+    expect(fake.agentCalls).toHaveLength(1);
+    expect(run.report).toMatchObject({ status: "not_verified", notVerifiedReason: "error", extraTry: "given", source: "agent_commands" });
+    expect(run.report!.checks).toEqual([expect.objectContaining({ class: "regression" })]);
+  });
+});
+
+describe("the report's size limits (M-4, M-5)", () => {
+  const entry = { id: "agent:0", label: "x", source: "agent_commands", before: "passed", after: "failed", class: "regression", output: "", durationMs: 1 } as const;
+  const report = (label: string, output: string): CheckReport => ({
+    status: "regression", source: "agent_commands", preambleVersion: AGENTX_PREAMBLE_VERSION, preambleSha256: agentxPreambleSha256(),
+    checks: Array.from({ length: 64 }, (_, index) => ({ ...entry, id: `agent:${index}`, label, output })), extraTry: "given", agentClaim: "success",
+  });
+
+  it("cuts labels by bytes: 64 checks of three-byte labels stay below 160 KB in the task result", () => {
+    const compact = compactCheckReport(report("\u20ac".repeat(8_192), "\u20ac".repeat(20_000)));
+    expect(CheckReportSchema.parse(compact).checks).toHaveLength(64);
+    expect(Buffer.byteLength(JSON.stringify(compact))).toBeLessThan(160 * 1024);
+  });
+
+  it("keeps checks.json below the 5 MB artifact limit, even when escaping grows the output", () => {
+    const content = checksArtifactContent(report("x".repeat(8_192), "\u001b".repeat(65_536)));
+    expect(Buffer.byteLength(content)).toBeLessThan(4_500_000);
+    expect(CheckReportSchema.parse(JSON.parse(content)).checks).toHaveLength(64);
+    const small = report("pytest", "1 failed");
+    expect(JSON.parse(checksArtifactContent(small))).toEqual(small);
   });
 });
