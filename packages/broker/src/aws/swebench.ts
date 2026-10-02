@@ -79,10 +79,12 @@ export interface SwebenchSlackContext {
  */
 const SLOT_COUNTER_KEY = { pk: "SWEBENCH#SLOTS", sk: "COUNTER" } as const;
 const SLOT_PK = "SWEBENCH#SLOT";
-/** The one-run lock before spec 052: read only to stop a run that started under it. */
+/** The one-run lock before spec 052: a run that started under it is stopped by it, and deletes it as it ends. */
 const LEGACY_LOCK_KEY = { pk: "SWEBENCH#ACTIVE", sk: "LOCK" } as const;
 /** A release refused while the run is active and its slot held (a conflict on the counter) is tried this many times. */
 const RELEASE_ATTEMPTS = 3;
+/** The pause before a release is tried again: this much, times the attempt, plus up to as much again at random. */
+const RELEASE_BACKOFF_MS = 25;
 const CAPABILITY_CONTEXT = "agentx swebench capability v1";
 /** The capability outlives the run's two-hour ceiling, so a late result is still accepted once. */
 const CAPABILITY_SECONDS = SWEBENCH_RUN_TIME_LIMIT_SECONDS + 60 * 60;
@@ -205,7 +207,7 @@ export async function startSwebenchRun(
     const raced = await readRun(dependencies, runId);
     if (raced !== undefined) return { outcome: "STARTED", run: raced };
     const counter = await get(dependencies, SLOT_COUNTER_KEY);
-    return refusedActive(Math.max(typeof counter?.count === "number" ? counter.count : 0, deployment.settings.maxConcurrentEvals));
+    return refusedActive(typeof counter?.count === "number" ? counter.count : 0);
   }
   const artifactsPrefix = `evals/${runId}/`;
   try {
@@ -254,9 +256,31 @@ export async function getSwebenchRunForThread(dependencies: SwebenchDependencies
 /**
  * FR-005: a thread's stop cancels its active runs; the state machine terminates their instances.
  * Spec 052: the thread's runs are those holding a slot for it, and its batch, if any, stops too.
- * Returns the first run it cancelled, else the batch it stopped.
+ * The runs are cancelled first, so a failing batch hook cannot keep them running; the slots are read
+ * again after the hook, so a run the batch started meanwhile is cancelled too. Returns the first run
+ * it cancelled, else the batch it stopped.
  */
 export async function stopSwebenchRun(dependencies: SwebenchDependencies, thread: SlackThread, requester: SlackRequester): Promise<string | undefined> {
+  const runIds = await threadRunIds(dependencies, thread);
+  for (const runId of runIds) await requestCancel(dependencies, runId, requester);
+  let batchId: string | undefined;
+  if (dependencies.stopBatchForThread !== undefined) {
+    try {
+      batchId = await dependencies.stopBatchForThread(thread, requester);
+    } catch (error) {
+      console.log(JSON.stringify({ component: "broker", event: "swebench.stop_batch_failed", error: error instanceof Error ? error.message : String(error) }));
+    }
+    for (const runId of await threadRunIds(dependencies, thread)) {
+      if (runIds.includes(runId)) continue;
+      runIds.push(runId);
+      await requestCancel(dependencies, runId, requester);
+    }
+  }
+  return runIds[0] ?? batchId;
+}
+
+/** The thread's runs that hold a slot, and a still-active run that holds the one-run lock. */
+async function threadRunIds(dependencies: SwebenchDependencies, thread: SlackThread): Promise<string[]> {
   const subject = slackThreadSubject(thread);
   // At most maxConcurrentEvals (6) slot items exist, so a filtered read of the partition is cheap.
   const slots = await dependencies.documentClient.send(new QueryCommand({
@@ -267,12 +291,13 @@ export async function stopSwebenchRun(dependencies: SwebenchDependencies, thread
     ConsistentRead: true,
   }));
   const runIds = (slots.Items ?? []).map((item): unknown => item.runId).filter((runId): runId is string => typeof runId === "string");
-  // A run that started under the one-run lock holds no slot.
   const legacy = await get(dependencies, LEGACY_LOCK_KEY);
-  if (typeof legacy?.runId === "string" && legacy.threadSubject === subject && !runIds.includes(legacy.runId)) runIds.push(legacy.runId);
-  const batchId = await dependencies.stopBatchForThread?.(thread, requester);
-  for (const runId of runIds) await requestCancel(dependencies, runId, requester);
-  return runIds[0] ?? batchId;
+  if (typeof legacy?.runId === "string" && legacy.threadSubject === subject && !runIds.includes(legacy.runId)) {
+    // A lock can outlive its run (one ended before its release deleted it): only an active run counts.
+    const run = await readRun(dependencies, legacy.runId);
+    if (run !== undefined && (ACTIVE_STATUSES as readonly string[]).includes(run.status)) runIds.push(legacy.runId);
+  }
+  return runIds;
 }
 
 async function requestCancel(dependencies: SwebenchDependencies, runId: string, requester: SlackRequester): Promise<void> {
@@ -384,16 +409,32 @@ async function finishRun(
       const current = await readRun(dependencies, runId);
       if (current === undefined) throw agentXError("NOT_FOUND", "SWE-bench run not found");
       if (SWEBENCH_TERMINAL_STATUSES.has(current.status)) return;
-      if (await get(dependencies, swebenchSlotKey(runId)) === undefined) return endRunWithoutSlot(dependencies, runId, endRun.Update);
+      if (await get(dependencies, swebenchSlotKey(runId)) === undefined) return endRunWithoutSlot(dependencies, runId, endRun);
       if (attempt >= RELEASE_ATTEMPTS) throw error;
+      await new Promise((resolve) => setTimeout(resolve, RELEASE_BACKOFF_MS * attempt * (1 + Math.random())));
     }
   }
 }
 
-/** The migration case: a run that holds no slot is ended alone, and the counter is left as it is. */
-async function endRunWithoutSlot(dependencies: SwebenchDependencies, runId: string, update: ConstructorParameters<typeof UpdateCommand>[0]): Promise<void> {
+/**
+ * The migration case: a run that holds no slot started under the one-run lock. It is ended with that
+ * lock deleted, as before spec 052, and the counter is left as it is.
+ */
+async function endRunWithoutSlot(dependencies: SwebenchDependencies, runId: string, endRun: { Update: Record<string, unknown> }): Promise<void> {
   try {
-    await dependencies.documentClient.send(new UpdateCommand(update));
+    await dependencies.documentClient.send(new TransactWriteCommand({
+      TransactItems: [
+        endRun as never,
+        {
+          Delete: {
+            TableName: dependencies.tableName,
+            Key: LEGACY_LOCK_KEY,
+            ConditionExpression: "attribute_not_exists(pk) OR runId = :runId",
+            ExpressionAttributeValues: { ":runId": runId },
+          },
+        },
+      ],
+    }));
   } catch (error) {
     if (!isConditionFailure(error)) throw error;
     const current = await readRun(dependencies, runId);
@@ -445,10 +486,12 @@ function withoutKeys(item: Record<string, unknown>, keys: readonly string[]): Re
   return Object.fromEntries(Object.entries(item).filter(([key]) => !keys.includes(key)));
 }
 
-/** Spec 052 FR-005: every slot is taken. */
+/** Spec 052 FR-005: no slot was free; the count is the counter's when it can be read. */
 function refusedActive(inProgress: number): SwebenchStartResult {
-  const runs = inProgress === 1 ? "1 eval run is" : `${inProgress} eval runs are`;
-  return { outcome: "REFUSED", reason: "RUN_ACTIVE", message: `${runs} in progress; try again shortly.` };
+  const message = inProgress <= 0
+    ? "The eval run limit is reached; try again shortly."
+    : `${inProgress === 1 ? "1 eval run is" : `${inProgress} eval runs are`} in progress; try again shortly.`;
+  return { outcome: "REFUSED", reason: "RUN_ACTIVE", message };
 }
 
 function isTransactionCancelled(error: unknown): boolean {

@@ -35,7 +35,8 @@ const COUNTER_KEY = { pk: { S: "SWEBENCH#SLOTS" }, sk: { S: "COUNTER" } };
 const ACTIVE = ["STARTING", "RUNNING", "CANCEL_REQUESTED"];
 /** A release refused while the run is active and its slot held (a conflict on the counter) is tried this many times. */
 const RELEASE_ATTEMPTS = 3;
-const DYNAMODB_RETRY = [{ ErrorEquals: ["DynamoDb.TransactionConflictException", "DynamoDb.ProvisionedThroughputExceededException", "DynamoDb.InternalServerErrorException"], IntervalSeconds: 2, MaxAttempts: 3, BackoffRate: 2 }];
+// A transaction's conflicts arrive as TransactionCanceledException, which the release reads back and retries.
+const DYNAMODB_RETRY = [{ ErrorEquals: ["DynamoDb.ProvisionedThroughputExceededException", "DynamoDb.InternalServerErrorException"], IntervalSeconds: 2, MaxAttempts: 3, BackoffRate: 2 }];
 
 export function swebenchEvalDefinition(props: SwebenchEvalDefinitionProps): State {
   const tags = (name: string) => [
@@ -208,7 +209,10 @@ export function swebenchEvalDefinition(props: SwebenchEvalDefinitionProps): Stat
           // The runner's result arrived first: the broker ended the run and released its slot.
           { Condition: "{% $endedStatus in ['SUCCEEDED', 'FAILED', 'CANCELLED'] %}", Next: "Terminate" },
           // The run started under the one-run lock, before spec 052, and holds no slot.
-          { Condition: "{% $endedStatus in ['STARTING', 'RUNNING', 'CANCEL_REQUESTED'] and $not($slotHeld) %}", Next: "EndRunWithoutSlot" },
+          {
+            Condition: `{% $endedStatus in ['STARTING', 'RUNNING', 'CANCEL_REQUESTED'] and $not($slotHeld) and $releaseAttempts <= ${RELEASE_ATTEMPTS} %}`,
+            Next: "EndRunWithoutSlot",
+          },
           // Active and holding its slot: a conflict on the counter, tried again.
           {
             Condition: `{% $endedStatus in ['STARTING', 'RUNNING', 'CANCEL_REQUESTED'] and $releaseAttempts < ${RELEASE_ATTEMPTS} %}`,
@@ -219,15 +223,31 @@ export function swebenchEvalDefinition(props: SwebenchEvalDefinitionProps): Stat
         Default: "ReleaseFailed",
       },
       EndRunAgain: { Type: "Wait", Seconds: 2, Next: "EndRun" },
-      // The migration case: the run is ended alone, and the counter is left as it is.
+      // The migration case: the run is ended with the one-run lock it held, and the counter is left as it is.
       EndRunWithoutSlot: {
         Type: "Task",
-        Resource: "arn:aws:states:::aws-sdk:dynamodb:updateItem",
-        Arguments: endRun,
+        Resource: "arn:aws:states:::aws-sdk:dynamodb:transactWriteItems",
+        Arguments: {
+          TransactItems: [
+            { Update: endRun },
+            {
+              Delete: {
+                TableName: props.stateTableName,
+                Key: { pk: { S: "SWEBENCH#ACTIVE" }, sk: { S: "LOCK" } },
+                ConditionExpression: "attribute_not_exists(pk) OR runId = :runId",
+                ExpressionAttributeValues: { ":runId": { S: "{% $runId %}" } },
+              },
+            },
+          ],
+        },
         Retry: DYNAMODB_RETRY,
         Catch: [
-          // The runner's result arrived since the read: the run is terminal.
-          { ErrorEquals: ["DynamoDb.ConditionalCheckFailedException", "DynamoDB.ConditionalCheckFailedException"], Next: "Terminate" },
+          // Read back again: the runner's result may have arrived since; the attempts are counted.
+          {
+            ErrorEquals: ["DynamoDb.TransactionCanceledException"],
+            Next: "ReadEnded",
+            Assign: { releaseError: "{% $states.errorOutput %}", releaseAttempts: "{% $releaseAttempts + 1 %}" },
+          },
           toReleaseFailed,
         ],
         Next: "Terminate",

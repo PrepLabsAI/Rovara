@@ -397,12 +397,13 @@ describe("the shared limit on concurrent runs (spec 052 FR-005)", () => {
 
     expect(await result(reported)).toMatchObject({ status: 200, body: { run: { status: "FAILED" } } });
     expect(counter(db)).toBe(2);
+    expect(db.get("SWEBENCH#ACTIVE", "LOCK")).toBeUndefined();
 
     // The state machine's release is refused for want of a slot, and its fallback ends the run only.
     await expect(stateMachineWrite(db, "EndRun", ended)).rejects.toMatchObject({ name: "TransactionCanceledException" });
     await stateMachineWrite(db, "EndRunWithoutSlot", ended);
     expect(db.get(`SWEBENCH_RUN#${ended}`, "META")).toMatchObject({ status: "CANCELLED" });
-    await expect(stateMachineWrite(db, "EndRunWithoutSlot", ended)).rejects.toMatchObject({ name: "ConditionalCheckFailedException" });
+    await expect(stateMachineWrite(db, "EndRunWithoutSlot", ended)).rejects.toMatchObject({ name: "TransactionCanceledException" });
     expect(counter(db)).toBe(2);
     expect(db.get("SWEBENCH#SLOT", `RUN#${running}`)).toBeDefined();
   });
@@ -416,6 +417,90 @@ describe("the shared limit on concurrent runs (spec 052 FR-005)", () => {
     expect(db.get(`SWEBENCH_RUN#${elsewhere}`, "META")).toMatchObject({ status: "STARTING" });
     // Stopping asks for cancellation; the slots stay held until the state machine ends the runs.
     expect(counter(db)).toBe(3);
+  });
+
+  /** A run from before the deploy, holding the one-run lock rather than a slot. */
+  function underTheLock(db: { delete: (pk: string, sk: string) => void; set: (item: Record<string, unknown>) => void; get: (pk: string, sk: string) => Record<string, unknown> | undefined }, runId: string, threadSubject: string) {
+    db.delete("SWEBENCH#SLOT", `RUN#${runId}`);
+    db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: (counter(db) as number) - 1 });
+    db.set({ pk: "SWEBENCH#ACTIVE", sk: "LOCK", entityType: "SWEBENCH_ACTIVE", runId, threadSubject });
+  }
+  const stopThread = async (handler: (event: unknown) => Promise<{ body: string }>, threadValue = slackThread) =>
+    JSON.parse((await handler({ source: "agentx.slack-ingress", action: "stop-task", thread: threadValue, userId: member })).body) as Record<string, unknown>;
+
+  it("retires the one-run lock with its run, at either release site, so a later stop in the thread stops nothing", async () => {
+    const { handler, db, result } = await brokerWithResult();
+    const reported = runIdOf(await start(handler));
+    underTheLock(db, reported, thread);
+    await result(reported);
+    expect(db.get("SWEBENCH#ACTIVE", "LOCK")).toBeUndefined();
+    expect(await stopThread(handler)).toMatchObject({ outcome: "NOTHING_RUNNING" });
+
+    const ended = runIdOf(await start(handler));
+    underTheLock(db, ended, thread);
+    await expect(stateMachineWrite(db, "EndRun", ended)).rejects.toMatchObject({ name: "TransactionCanceledException" });
+    await stateMachineWrite(db, "EndRunWithoutSlot", ended);
+    expect(db.get("SWEBENCH#ACTIVE", "LOCK")).toBeUndefined();
+    expect(await stopThread(handler)).toMatchObject({ outcome: "NOTHING_RUNNING" });
+    expect(counter(db)).toBe(0);
+  });
+
+  it("ignores a one-run lock left by a run that is no longer active", async () => {
+    const { handler, db, result } = await brokerWithResult();
+    const runId = runIdOf(await start(handler));
+    await result(runId);
+    db.set({ pk: "SWEBENCH#ACTIVE", sk: "LOCK", entityType: "SWEBENCH_ACTIVE", runId, threadSubject: thread });
+    expect(await stopThread(handler)).toMatchObject({ outcome: "NOTHING_RUNNING" });
+    expect(db.get(`SWEBENCH_RUN#${runId}`, "META")).toMatchObject({ status: "FAILED" });
+  });
+
+  it("cancels the thread's runs before the batch hook, survives a failing hook, and cancels a run the batch started meanwhile", async () => {
+    const { handler, db } = await brokerWithResult();
+    const first = runIdOf(await start(handler));
+    let toppedUp: string | undefined;
+    const stopBatchForThread = vi.fn(async () => {
+      expect(db.get(`SWEBENCH_RUN#${first}`, "META")).toMatchObject({ status: "CANCEL_REQUESTED" });
+      // A top-up that took a slot between the stop's read and the hook.
+      toppedUp = runIdOf(await start(handler));
+      return undefined;
+    });
+    const dependencies: SwebenchDependencies = {
+      documentClient: db as never, s3: { send: vi.fn() } as never, tableName: "state", artifactBucketName: "artifacts", callbackSigningKey: "c".repeat(64),
+      deployment: async () => deployment, startExecution: vi.fn(), stopBatchForThread,
+    };
+    const requester = { teamId: SLACK_TEAM, userId: member };
+    expect(await stopSwebenchRun(dependencies, slackThread, requester)).toBe(first);
+    expect(db.get(`SWEBENCH_RUN#${toppedUp!}`, "META")).toMatchObject({ status: "CANCEL_REQUESTED" });
+
+    const second = runIdOf(await start(handler, {}, otherThread));
+    stopBatchForThread.mockRejectedValueOnce(new Error("batch record unreadable"));
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const otherSlackThread = { ...slackThread, threadTs: "1695500000.000002" };
+    expect(await stopSwebenchRun(dependencies, otherSlackThread, requester)).toBe(second);
+    expect(db.get(`SWEBENCH_RUN#${second}`, "META")).toMatchObject({ status: "CANCEL_REQUESTED" });
+    expect(log).toHaveBeenCalledWith(expect.stringContaining("swebench.stop_batch_failed"));
+    log.mockRestore();
+  });
+
+  it("gives up a release after three refused attempts while the run holds its slot, leaving the run active", async () => {
+    const { handler, db, result } = await brokerWithResult();
+    const runId = runIdOf(await start(handler));
+    // Drift: the counter says no slot is held, so its decrement is refused on every attempt.
+    db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: 0 });
+    const before = db.commandNames().filter((name) => name === "TransactWriteCommand").length;
+    // The broker's catch-all answers the error; the runner's result is not recorded.
+    expect(await result(runId)).toMatchObject({ status: 400, body: { error: { code: "CONFIG_INVALID" } } });
+    expect(db.commandNames().filter((name) => name === "TransactWriteCommand").length - before).toBe(3);
+    expect(db.get(`SWEBENCH_RUN#${runId}`, "META")).toMatchObject({ status: "STARTING" });
+    expect(db.get("SWEBENCH#SLOT", `RUN#${runId}`)).toBeDefined();
+  });
+
+  it("says the limit is reached, without a count, when it cannot say how many runs hold slots", async () => {
+    const { handler, db } = await brokerWithResult({ maxConcurrentEvals: 2 });
+    const requestId = randomUUID();
+    // A slot item with no run record: the start is refused though the counter is below the limit.
+    db.set({ pk: "SWEBENCH#SLOT", sk: `RUN#${requestId}`, runId: requestId, threadSubject: thread });
+    expect((await start(handler, { requestId })).body).toMatchObject({ outcome: "REFUSED", reason: "RUN_ACTIVE", message: "The eval run limit is reached; try again shortly." });
   });
 
   it("asks the batch hook to stop the thread's batch, and still stops a run started under the one-run lock", async () => {

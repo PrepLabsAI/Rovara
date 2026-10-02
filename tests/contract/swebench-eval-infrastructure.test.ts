@@ -123,7 +123,16 @@ describe("the eval state machine (spec 043 FR-006)", () => {
       ExpressionAttributeNames: { "#count": "count" },
       ExpressionAttributeValues: { ":one": { N: "1" }, ":zero": { N: "0" } },
     });
-    expect(JSON.stringify(definition)).not.toContain("SWEBENCH#ACTIVE");
+    expect(JSON.stringify(items)).not.toContain("SWEBENCH#ACTIVE");
+    // A run from before spec 052 holds no slot: it is ended with the one-run lock it held, and no decrement.
+    const legacy = definition.States.EndRunWithoutSlot!.Arguments!.TransactItems as Array<Record<string, Record<string, unknown>>>;
+    expect(legacy.map((item) => Object.keys(item)[0])).toEqual(["Update", "Delete"]);
+    expect(legacy[0]!.Update).toEqual(items[0]!.Update);
+    expect(legacy[1]!.Delete).toMatchObject({
+      Key: { pk: { S: "SWEBENCH#ACTIVE" }, sk: { S: "LOCK" } },
+      ConditionExpression: "attribute_not_exists(pk) OR runId = :runId",
+      ExpressionAttributeValues: { ":runId": { S: "{% $runId %}" } },
+    });
   });
 
   it("goes straight to terminate only for a cancelled release; any other error fails the execution after terminating", () => {
@@ -137,7 +146,13 @@ describe("the eval state machine (spec 043 FR-006)", () => {
     expect(definition.States.Released!.Choices!.map((choice) => choice.Next)).toEqual(["Terminate", "EndRunWithoutSlot", "EndRunAgain"]);
     expect(definition.States.Released!.Default).toBe("ReleaseFailed");
     expect(exits("EndRunAgain")).toEqual(["EndRun"]);
-    expect(definition.States.EndRunWithoutSlot!.Catch!.map((c) => c.Next)).toEqual(["Terminate", "ReleaseFailed"]);
-    expect(definition.States.EndRunWithoutSlot!.Catch![0]!.ErrorEquals).toContain("DynamoDb.ConditionalCheckFailedException");
+    expect(definition.States.EndRunWithoutSlot!.Catch).toEqual([
+      expect.objectContaining({ ErrorEquals: ["DynamoDb.TransactionCanceledException"], Next: "ReadEnded" }),
+      expect.objectContaining({ ErrorEquals: ["States.ALL"], Next: "ReleaseFailed" }),
+    ]);
+    // A transaction's conflicts arrive as TransactionCanceledException, so no retry names TransactionConflictException.
+    const text = JSON.stringify(definition);
+    expect(text).not.toContain("TransactionConflictException");
+    expect(text).not.toContain("DynamoDB.");
   });
 });
