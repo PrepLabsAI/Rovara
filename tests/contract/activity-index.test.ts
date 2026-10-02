@@ -114,8 +114,19 @@ describe("the usage index (A5, A9)", () => {
       indexExpiresAt: Math.floor(Date.parse("2026-09-30T08:10:00.000Z") / 1000) + 30 * 86_400,
       operationId: OPERATION, workspaceId: WORKSPACE, project: "payments", origin: "slack",
       requester: { kind: "slack", teamId: "T0BSHLLUGBD", userId: "U0PRIYA001" }, thread: "T0BSHLLUGBD/C0123456789/1695500000.000100",
-      at: "2026-09-30T08:10:00.000Z", durationMs: 600_000, inputTokens: 1_000, outputTokens: 200, costUsd: 0.42,
+      at: "2026-09-30T08:10:00.000Z", durationMs: 600_000, inputTokens: 1_050, outputTokens: 200, costUsd: 0.42,
     });
+  });
+
+  it.each([
+    { input: 3, cacheRead: 900, cacheWrite: 70, expected: 973 },
+    { input: 0, cacheRead: 900, cacheWrite: 0, expected: 900 },
+    { input: 0, cacheRead: 0, cacheWrite: 70, expected: 70 },
+    { input: 3, cacheRead: 0, cacheWrite: 0, expected: 3 },
+  ])("indexes every worker input category once: $input/$cacheRead/$cacheWrite", async ({ input, cacheRead, cacheWrite, expected }) => {
+    const index = store([...slackWorkspace, operation({})]);
+    await indexActivity([usageEvent({ ...telemetry, tokens: { input, output: 200, cacheRead, cacheWrite, total: expected + 200 } })], index, vi.fn());
+    expect(index.puts[0]).toMatchObject({ inputTokens: expected, outputTokens: 200, costUsd: 0.42 });
   });
 
   it("keeps an unknown cost as null, and skips a usage payload it cannot read, counting it", async () => {

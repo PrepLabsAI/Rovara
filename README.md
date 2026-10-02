@@ -74,6 +74,12 @@ an installed one) exposes `PromptCacheRetention` as a CloudFormation parameter w
 `long` values; it defaults to `long` so Bedrock cache entries can survive normal gaps between
 Slack turns.
 
+Admin usage (`GET /v1/admin/usage` and `agentx_admin_usage`) includes uncached input, cache reads
+and cache writes in its input-token total; output and provider cost stay separate. Existing Slack
+turn records retain those categories and are counted in full. Worker usage index rows written
+before the #220 fix retain their stored uncached-input count: the cache breakdown was discarded,
+so historical worker totals can still undercount. No backfill or token estimate from cost is made.
+
 Both roles currently use `@earendil-works/pi-coding-agent` 1.0.0. GitHub Spec Kit supplies the
 specification workflow and demo repository; it is not the coding-agent runtime.
 
