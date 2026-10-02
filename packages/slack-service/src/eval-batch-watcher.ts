@@ -35,7 +35,6 @@ export const EVAL_BATCH_WATCH_POLL_MS = 30_000;
 export const EVAL_BATCH_PROGRESS_INTERVAL_MS = 5 * 60_000;
 /** An opener or summary claimed this long ago and still not recorded is taken over: its watcher stopped or its post failed. */
 export const EVAL_BATCH_CLAIM_MS = 10 * 60_000;
-export const EVAL_BATCH_SUMMARY_CLAIM_MS = EVAL_BATCH_CLAIM_MS;
 /** Ruling 24: after a failure, a batch's next attempt waits at least this long. */
 export const EVAL_BATCH_FAILURE_BACKOFF_MS = 10 * 60_000;
 
@@ -321,7 +320,7 @@ export function summaryMessage(batch: EvalBatchWatched): string {
     opening,
     ...(models.length === 0 ? ["No run has a result row, so there is no table."] : ["```", ...table, "```"]),
     ...(models.some((model) => model.unpricedRuns > 0) ? ["* includes runs that reported no cost, charged at their ceiling."] : []),
-    `Results: \`evals/batches/${batch.batchId}/results.csv\` in the artifact bucket; \`agentx admin eval batch results ${batch.batchId} --csv\` downloads it.`,
+    `Results: \`evals/batches/${batch.batchId}/results.csv\` in the artifact bucket; \`agentx admin eval batch results ${batch.batchId} --csv <path>\` downloads it.`,
   ].join("\n");
 }
 

@@ -56,7 +56,15 @@ export interface EvalBatchDependencies extends SwebenchDependencies {
  */
 export const EVAL_BATCH_REFERENCE_TOKENS = Object.freeze({ input: 0, output: 101_000, cacheRead: 16_900_000, cacheWrite: 167_000 });
 
-/** A claim (QUEUED to STARTING) that recorded no run within this long was left by a top-up that stopped; it is recovered. */
+/**
+ * A claim (QUEUED to STARTING) that recorded no run within this long was left by a top-up that stopped; it is recovered.
+ *
+ * Invariant (review M-6): every caller that tops up, the broker Lambda (30 s, the runner's result
+ * callback) and the tick Lambda (90 s, infra/lib/control-plane.ts), must have a timeout well below
+ * this cutoff. A claim is then stale only once the top-up that made it is dead, so recovering it can
+ * never race a start still in progress, nor a stop that start would miss. Raising either timeout
+ * towards 5 minutes, or topping up from a longer-lived caller, needs this cutoff raised first.
+ */
 export const EVAL_BATCH_STALE_CLAIM_MS = 5 * 60_000;
 
 /**

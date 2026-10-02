@@ -240,7 +240,7 @@ const SUMMARY_TABLE = [
   "openrouter/minimax/minimax-m3 medium        3       0         0% (0-56%)     1       $8.10*  -",
   "```",
   "* includes runs that reported no cost, charged at their ceiling.",
-  `Results: \`evals/batches/${batchId}/results.csv\` in the artifact bucket; \`agentx admin eval batch results ${batchId} --csv\` downloads it.`,
+  `Results: \`evals/batches/${batchId}/results.csv\` in the artifact bucket; \`agentx admin eval batch results ${batchId} --csv <path>\` downloads it.`,
 ].join("\n");
 
 describe("the batch watcher's thread for a batch started from the CLI (spec 052 Ruling 19)", () => {

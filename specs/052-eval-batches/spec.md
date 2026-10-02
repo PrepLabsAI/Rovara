@@ -94,7 +94,7 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
 
   At the end, the batch writes `evals/batches/<id>/results.csv` and `summary.json` (per model: runs, resolved, resolve
   rate with a 95% Wilson interval, total cost, and cost per solved task), and posts the summary table in the thread.
-  `agentx admin eval batch results <id> --csv` downloads the CSV.
+  `agentx admin eval batch results <id> --csv <path>` downloads the CSV.
 
 ### Infrastructure
 
