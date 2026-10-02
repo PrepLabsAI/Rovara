@@ -14,7 +14,9 @@ import { environmentCachePath } from "../../packages/cli/src/environments/cache.
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL } from "../../packages/cli/src/init/answers.js";
 import type { InitCliDependencies } from "../../packages/cli/src/init/commands.js";
 import { estimateMonthlyCost, suggestedBudgetUsd } from "../../packages/cli/src/init/cost.js";
+import { initLogPath } from "../../packages/cli/src/init/log-file.js";
 import { NO_BROWSER_LINE } from "../../packages/cli/src/init/ui-mode.js";
+import { READY_LINE, stageLine, terminalStepLine } from "../../packages/cli/src/init/ui/journey.js";
 import { INIT_STEP_IDS, installAnswersParameterName, readInstallProgress } from "../../packages/cli/src/init/install-state.js";
 import { readEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import {
@@ -138,6 +140,7 @@ async function harness() {
      * finishing steps wrote. */
     everywhere: async () => [
       out.join(""), err.join(""), ...store.values.values(), await readFile(environmentCachePath(home, "staging"), "utf8").catch(() => ""),
+      await readFile(initLogPath(home, "staging"), "utf8").catch(() => ""),
       ...(await Promise.all((await readdir(projects)).map((name) => readFile(join(projects, name), "utf8")))),
     ].join("\n"),
   };
@@ -168,6 +171,40 @@ describe("agentx init --ui", () => {
     expect(operator.states.some((state) => state.steps.some((step) => step.status === "running"))).toBe(true);
     expect(operator.states.at(-1)?.steps.every((step) => step.status === "done")).toBe(true);
     expect(last?.log.join("\n")).toContain("done: Create the GitHub app");
+  });
+
+  it("spec 048 FR-070: with the page open, the terminal prints three start lines and one line per step", async () => {
+    const h = await harness();
+    const { code } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(code).toBe(0);
+    const lines = h.err.join("").trimEnd().split("\n");
+    expect(lines[0]).toMatch(/^The AgentX installer is open in your browser: http:\/\/127\.0\.0\.1:\d+\/\?t=/);
+    expect(lines.slice(1)).toEqual([
+      "Keep this terminal open and your computer awake (about 44 minutes).",
+      `Full log: ${initLogPath(h.home, "staging")}`,
+      stageLine("get-started"),
+      stageLine("your-choices"),
+      ...INIT_STEP_IDS.map((id) => terminalStepLine(id)),
+      READY_LINE,
+    ]);
+    expect(h.out.join("")).toBe("");
+    // FR-070 and FR-071: the plan, the progress lines and the ready summary are in the log file, the token is not.
+    const log = await readFile(initLogPath(h.home, "staging"), "utf8");
+    expect(log).toContain("Estimated monthly total");
+    expect(log).toContain("done: Start the AgentX service");
+    expect(log).toContain("AgentX environment staging is ready.");
+    const token = new URL(lines[0]?.split(": ").at(-1) ?? "http://x").searchParams.get("t") ?? "missing";
+    expect(token.length).toBeGreaterThan(20);
+    expect(log).not.toContain(token);
+  });
+
+  it("spec 048 FR-070: a failure is one line in the terminal, with the log file named", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    const { code } = await h.runUi([...FIRST_RUN, "stop"]);
+    expect(code).not.toBe(0);
+    expect(h.err.join("")).toContain(`[3/5] Stopped: Start the AgentX service did not finish. Resource limit exceeded. Details in the browser and in ${initLogPath(h.home, "staging")}.`);
+    expect(h.err.join("")).not.toContain("==> ");
   });
 
   it("FR-012: no secret typed on the page reaches the page's state, the log, the terminal, SSM or the cache", async () => {
@@ -282,7 +319,10 @@ describe("agentx init --ui", () => {
     expect(last?.outcome).toContain("AgentX environment staging is ready.");
     expect(last?.outcome).toContain("  Talk to it: mention <@U0BOT> in #payments (project payments-api, revision 1).");
     expect(last?.outcome).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com");
-    expect(h.out.join("")).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com\n");
+    // FR-070: with the page open, nothing more reaches stdout; the full ready summary is in the log file.
+    expect(h.out.join("")).toBe("");
+    const log = await readFile(initLogPath(h.home, "staging"), "utf8");
+    expect(log).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com\n");
   });
 
   it("--from-bundle works through the page: only what the export did not know is asked there, and a bad bundle is refused before the page opens", async () => {

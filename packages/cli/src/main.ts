@@ -930,6 +930,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
           services.stdout.write(formatSuccess(result, true));
           return;
         }
+        if (result.pageMode === true) return;
         if (result.status === "waiting") {
           services.stdout.write(`${result.message}\n`);
           return;

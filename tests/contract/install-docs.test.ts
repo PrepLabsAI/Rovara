@@ -15,7 +15,7 @@ describe("the install docs (FR-061)", () => {
     // The section ends at the next "## " heading, so every word below must be in it.
     const end = guide.indexOf("\n## ", start);
     const section = guide.slice(start, end === -1 ? undefined : end);
-    for (const text of ["127.0.0.1", "--no-ui", "--ui", "ssh -L", "CloudShell", "--yes", "closed", "never shown again"]) expect(section).toContain(text);
+    for (const text of ["127.0.0.1", "--no-ui", "--ui", "ssh -L", "CloudShell", "--yes", "closed", "never shown again", "Action needed", "init-<env>.log", "Try this step again", "Close installer"]) expect(section).toContain(text);
     // The guide quotes the line init prints on a machine with no browser.
     expect(guide).toContain(NO_BROWSER_LINE);
   });

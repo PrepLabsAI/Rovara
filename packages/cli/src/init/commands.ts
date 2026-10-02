@@ -9,7 +9,7 @@ import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SNSClient } from "@aws-sdk/client-sns";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { STSClient } from "@aws-sdk/client-sts";
-import { agentXError, environmentOperatorRoleName, environmentStackName } from "@agentx/contracts";
+import { AgentXError, agentXError, environmentOperatorRoleName, environmentStackName } from "@agentx/contracts";
 import { authorizeCredential, secretsManagerAuthorizeSecrets } from "../admin/authorize.js";
 import { loginWithPkce, openSystemBrowser } from "../auth.js";
 import { cliErrorFor, cloudFormationOutputsReader, prepareDeployment, realCommandRunner, type DeployCliDependencies, type PreparedDeployment, type Writer } from "../deploy/commands.js";
@@ -42,6 +42,7 @@ import { finishSteps, readSettingsOrThrow, readyText } from "./finish-steps.js";
 import { githubAppStep, githubRestApi, type GitHubApi } from "./github-app.js";
 import { listAwsProfiles, pickAwsProfile, resolveCaller } from "./aws-account.js";
 import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallProgress, type InitAnswers, type InitStepId } from "./install-state.js";
+import { initLogPath, openInitLog, type InitLog } from "./log-file.js";
 import { confirmInstallPlan } from "./plan.js";
 import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
 import { processPrompter, secretFromSource, unattendedPrompter, type Prompter, type QuestionHelp } from "./prompts.js";
@@ -55,7 +56,7 @@ import { browserAvailable, NO_BROWSER_LINE, resolveUiMode } from "./ui-mode.js";
 import { prerequisitesCard, readyCard } from "./ui/cards.js";
 import { askFailureAction, failureScreen, isRetryableStep, plainReason, STOPPED_OUTCOME } from "./ui/failure.js";
 import { startInstallWizard, type InstallWizard } from "./ui/index.js";
-import { STEP_PLAN } from "./ui/journey.js";
+import { READY_LINE, stageLine, STEP_PLAN, stoppedLine, terminalStepLine } from "./ui/journey.js";
 import type { WizardResume } from "./ui/protocol.js";
 
 export interface InitCliDependencies {
@@ -119,7 +120,12 @@ export interface InitOptions {
 }
 
 /** `ready` is the message a finished install ends with (readyText). */
-export type InitResult = InitRunResult & { env: string; resumed: boolean; controlPlaneUrl?: string; ready?: string; stoppedAfter?: InitStepId };
+export type InitResult = InitRunResult & {
+  env: string; resumed: boolean; controlPlaneUrl?: string; ready?: string; stoppedAfter?: InitStepId;
+  /** With the page open, the terminal already has every line it needs (FR-070): `main.ts` prints
+   * nothing more for it. */
+  pageMode?: true;
+};
 
 /** True when `callerArn` is a session of this environment's AgentX operator role (FR-019). */
 export function isOperatorRole(callerArn: string, env: string): boolean {
@@ -242,8 +248,18 @@ function neverThrowingBrowser(open: (url: string) => Promise<unknown>, write: (l
  * with the run whichever way it ends (FR-002). */
 interface InitSession {
   wizard?: InstallWizard;
-  /** A property, not a method, so `init` can pass it on as `write` without rebinding it. */
+  /** Task 14: the page-mode log file, opened before the wizard and closed with it. Holds what the
+   * terminal no longer shows, and never a secret or the session token (FR-070, FR-071). */
+  log?: InitLog;
+  /** A property, not a method, so `init` can pass it on as `write` without rebinding it.
+   * A progress line: the terminal without the page; the log file and the page's technical log
+   * with it. */
   write: (line: string) => void;
+  /** The terminal always, and the log: with the page, only the start lines, one line per step,
+   * and the last line. */
+  say: (line: string) => void;
+  /** Child process output and the plan's text: the terminal without the page, the log file with it. */
+  output: Writer;
   /** The prompter in use, once chosen: the catch below asks on it when no step hook already did. */
   prompter?: Prompter;
   /** Once known: names the region in a failure shown before a step runs. */
@@ -258,7 +274,13 @@ interface InitSession {
 export async function runInit(options: InitOptions, deps: InitCliDependencies, services: { stderr: Writer; home: string }): Promise<InitResult> {
   const session: InitSession = {
     invocation: deps.cliInvocation ?? currentCliInvocation(),
-    write: (line) => { services.stderr.write(`${line}\n`); session.wizard?.log(line); },
+    write: (line) => {
+      if (session.wizard === undefined) { services.stderr.write(`${line}\n`); return; }
+      session.log?.write(`${line}\n`);
+      session.wizard.log(line);
+    },
+    say: (line) => { services.stderr.write(`${line}\n`); session.log?.write(`${line}\n`); },
+    output: { write: (text: string) => (session.wizard === undefined ? services.stderr.write(text) : session.log?.write(text)) },
   };
   try {
     const result = await init(options, deps, services, session);
@@ -267,6 +289,13 @@ export async function runInit(options: InitOptions, deps: InitCliDependencies, s
     session.wizard?.finish(result.status !== "complete" ? result.message
       : result.stoppedAfter !== undefined ? `Stopped after the ${result.stoppedAfter} step, as --stop-after asked.`
         : result.ready ?? `AgentX environment ${result.env} is installed.`);
+    if (session.wizard !== undefined) {
+      // FR-070 and FR-071: the full ready summary goes to the log file, never the terminal; the
+      // terminal gets the one fixed line below (Task 15's own finish work says READY_LINE too, per
+      // the controller ruling that moved it here so this task's terminal-lines test passes).
+      if (result.ready !== undefined) session.log?.write(`${result.ready}\n`);
+      if (result.status === "complete" && result.stoppedAfter === undefined) session.say(READY_LINE);
+    }
     return result;
   } catch (error) {
     const mapped = cliErrorFor(error);
@@ -283,10 +312,20 @@ export async function runInit(options: InitOptions, deps: InitCliDependencies, s
       }
       const outcome = isOperatorStop(error) ? (plainReason(error) ?? STOPPED_OUTCOME) : STOPPED_OUTCOME;
       wizard.finish(outcome, "failed", [{ label: "Continue later with", command: cliCommandLine(session.invocation, `--env ${options.env} init --region ${region}`) }]);
+      // FR-070: a real failure (not a stop the operator chose) collapses to one terminal line;
+      // the full error still goes to the log file. An operator stop keeps throwing `mapped` as
+      // before (unchanged for FR-005's declined-plan and FR-023's declined-recheck messages).
+      if (!isOperatorStop(error)) {
+        session.log?.write(`${mapped instanceof Error ? mapped.message : String(mapped)}\n`);
+        const what = wizard.hub.state().failure?.what ?? plainReason(error) ?? "The install could not go on.";
+        const line = stoppedLine({ phase: wizard.hub.state().journey.current, problem: what, logPath: session.log?.path ?? "the log" });
+        throw Object.assign(mapped instanceof AgentXError ? agentXError(mapped.code, line) : new Error(line), { cause: error });
+      }
     }
     throw mapped;
   } finally {
     await session.wizard?.close();
+    await session.log?.close();
   }
 }
 
@@ -383,7 +422,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   if (options.yes && options.region === undefined && bundle === undefined) {
     throw agentXError("CONFIG_INVALID", "agentx init needs to know the AWS region; with --yes, pass --region <region>");
   }
-  const runner = deployDeps.commandRunner ?? realCommandRunner(services.stderr);
+  const runner = deployDeps.commandRunner ?? realCommandRunner(session.output);
 
   // The release comes first: a CLI built from source is told to pass --release before anything else.
   const version = deps.releaseVersion === undefined ? RELEASE_VERSION : deps.releaseVersion ?? undefined;
@@ -422,12 +461,19 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   let prompter: Prompter;
   if (uiMode.mode === "page") {
     if (options.yes) throw agentXError("CONFIG_INVALID", "agentx init --ui asks its questions on a page; --yes answers them without asking. Use one or the other");
+    // Task 14: opened before the wizard, so its address and the log's own path are both ready for
+    // the wizard's start lines (FR-070); the token is hidden from it the moment the server has one.
+    session.log = await openInitLog(initLogPath(services.home, env));
     const wizard = await startInstallWizard({
-      env, write,
+      env,
+      write: (line) => services.stderr.write(`${line}\n`),
+      logPath: session.log.path,
       ...(options.browser ? { openBrowser: neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) } : {}),
     });
+    session.log.hide(wizard.token);
     session.wizard = wizard;
     prompter = deps.prompter ?? wizard.prompter;
+    session.say(stageLine("get-started"));
   } else if (deps.prompter !== undefined) {
     prompter = deps.prompter;
   } else if (options.yes) {
@@ -529,6 +575,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
 
   // Spec 048 FR-001: the questions (a first run) and the resume screen (a resume) are both "Your choices".
   session.wizard?.setStage("your-choices");
+  if (session.wizard !== undefined) session.say(stageLine("your-choices"));
   let collected: CollectedAnswers | undefined;
   let answers: InitAnswers;
   if (stored === undefined) {
@@ -602,7 +649,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     // is the review screen, and its confirm is a button.
     await confirmInstallPlan({
       answers: collected.answers, notes: collected.notes, prompter,
-      write: (text) => { services.stderr.write(text); session.wizard?.plan(text); },
+      write: (text) => { session.output.write(text); session.wizard?.plan(text); },
       extras: { storesOpenRouterKey: collected.openRouterKey !== undefined, ...(collected.openRouterProviders === undefined ? {} : { openRouterProviders: collected.openRouterProviders }) },
     });
   } else {
@@ -681,7 +728,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
         engine: finalAnswers.engine, env, region, account: finalAnswers.account, identityMode: finalAnswers.identity.mode, release,
         ...(options.source === undefined ? {} : { source: options.source }),
         deps: { ...deployDeps, store, secrets, identity: { get: async () => caller } },
-        stderr: services.stderr,
+        stderr: session.output,
       });
       return deployment;
     },
@@ -699,7 +746,14 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
       env, region, store, holder: caller.arn, context, now,
       steps: runSteps,
       beforeSteps: saveAnswers,
-      onEvent: (event) => { const line = eventLine(event); if (line !== undefined) write(line); session.wizard?.event(event); },
+      onEvent: (event) => {
+        const line = eventLine(event);
+        if (line !== undefined) write(line);
+        // FR-070: with the page open, the one line a step gets in the terminal; everything else
+        // this event produced above already went to the log file and the page's technical log.
+        if (session.wizard !== undefined && event.kind === "step-started") session.say(terminalStepLine(event.id));
+        session.wizard?.event(event);
+      },
       // A takeover is never behind --yes, which answers every confirm with yes.
       ...(options.yes ? {} : {
         confirmTakeover: (held: LockRecord) => activePrompter.confirm(
@@ -730,7 +784,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     });
     // A run --stop-after cut short is not installed, so it has no ready text.
     if (options.stopAfter !== undefined && result.status === "complete") {
-      return { ...result, env, resumed: stored !== undefined, stoppedAfter: options.stopAfter };
+      return { ...result, env, resumed: stored !== undefined, stoppedAfter: options.stopAfter, ...(session.wizard === undefined ? {} : { pageMode: true as const }) };
     }
     const settings = result.status === "complete" ? await readEnvironmentSettings(store, env) : undefined;
     const progress = result.status === "complete" ? await readInstallProgress(store, env) : undefined;
@@ -743,6 +797,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
       ...result, env, resumed: stored !== undefined,
       ...(settings === undefined ? {} : { controlPlaneUrl: settings.controlPlaneUrl }),
       ...(settings === undefined || progress === undefined ? {} : { ready: readyText({ env, controlPlaneUrl: settings.controlPlaneUrl, progress }) }),
+      ...(session.wizard === undefined ? {} : { pageMode: true as const }),
     };
   } finally {
     // Whether init succeeded or failed; a deployment that failed to build has nothing to clean up.

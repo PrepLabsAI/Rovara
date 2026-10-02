@@ -10,7 +10,7 @@ import type { Prompter } from "../prompts.js";
 import type { InitEvent } from "../steps.js";
 import type { InitStepId } from "../install-state.js";
 import { linkLabel } from "./cards.js";
-import type { JourneyPhaseId } from "./journey.js";
+import { minutesText, totalMinutes, type JourneyPhaseId } from "./journey.js";
 import { browserPrompter } from "./prompter.js";
 import type { WizardCommand, WizardFailure, WizardPhase, WizardResume } from "./protocol.js";
 import { startWizardServer, type WizardServer } from "./server.js";
@@ -105,12 +105,13 @@ export async function startInstallWizard(input: {
     ...(input.port === undefined ? {} : { port: input.port }),
     ...(input.token === undefined ? {} : { token: input.token }),
   });
-  input.write(`The AgentX installer is at ${server.url}`);
   const opened = input.openBrowser === undefined ? false : await input.openBrowser(server.url);
+  input.write(opened ? `The AgentX installer is open in your browser: ${server.url}` : `The AgentX installer is at ${server.url}`);
   if (!opened) {
-    input.write(`Open that address in a browser on this machine to continue. From another machine, first run: ssh -L ${server.port}:127.0.0.1:${server.port} <this host>`);
+    input.write(`Open that address in a browser on this machine. From another machine, first run: ssh -L ${server.port}:127.0.0.1:${server.port} <this host>`);
   }
-  input.write("Every question agentx init asks is on that page; nothing else needs typing here.");
+  input.write(`Keep this terminal open and your computer awake (${minutesText(totalMinutes())}).`);
+  if (input.logPath !== undefined) input.write(`Full log: ${input.logPath}`);
   const reminder = pageClosedReminder({ hub, url: server.url, write: input.write, now: Date.now });
   const timer = setInterval(() => reminder.check(), REMINDER_CHECK_MS);
   timer.unref();
