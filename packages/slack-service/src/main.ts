@@ -108,6 +108,17 @@ async function postToSlack(channel: string, threadTs: string | undefined, text: 
   return result.ts;
 }
 
+/** Issue 219: edits the bot's own message (a long task's progress note). */
+async function updateInSlack(channel: string, ts: string, text: string): Promise<void> {
+  const response = await fetch("https://slack.com/api/chat.update", {
+    method: "POST",
+    headers: { authorization: `Bearer ${await slackBotToken()}`, "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ channel, ts, text }),
+  });
+  const result = await response.json() as { ok?: boolean; error?: string };
+  if (!response.ok || result.ok !== true) throw new SlackApiError("chat.update", result.error ?? `HTTP ${response.status}`);
+}
+
 /** Spec 052 Ruling 19: removes the bot's own message (a batch thread's opener that lost a race). */
 async function deleteFromSlack(channel: string, ts: string): Promise<void> {
   const response = await fetch("https://slack.com/api/chat.delete", {
@@ -358,6 +369,8 @@ await runConsumer(queue, (message, context) => processSlackRequest(message, {
   confirmations,
   postConfirmation: async (thread, confirmation, text) => { await postToSlack(thread.channelId, thread.threadTs, text, confirmationBlocks(text, confirmation.confirmationId)); },
   postWithBlocks: async (thread, text, blocks) => { await postToSlack(thread.channelId, thread.threadTs, text, blocks); },
+  postProgress: (thread, text) => postToSlack(thread.channelId, thread.threadTs, text),
+  updateMessage: (thread, ts, text) => updateInSlack(thread.channelId, ts, text),
   turnRecords: new DynamoTurnRecordWriter(documentClient, turnRecordsTableName),
   userName: slackUserName,
 }, context), {
