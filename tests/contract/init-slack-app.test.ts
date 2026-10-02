@@ -93,6 +93,12 @@ describe("the bot's display handle (FR-026, FR-027)", () => {
     expect(botNameOf(withoutHandle, "AgentX acme (staging)")).toBe(slackBotDisplayName("AgentX acme (staging)"));
     expect(botNameOf(emptyProgress("staging", T0), "AgentX")).toBe("agentx");
   });
+
+  it("spec 048 FR-026: uses the bot handle Slack assigned from then on", () => {
+    const progress = { ...emptyProgress("staging", 0), slack: { appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT", botName: "agentx-acme-staging2" } };
+    expect(botNameOf(progress, "AgentX acme (staging)")).toBe("agentx-acme-staging2");
+    expect(botNameOf(emptyProgress("staging", 0), "AgentX acme (staging)")).toBe("agentx-acme-staging");
+  });
 });
 
 describe("probing the Slack URLs", () => {

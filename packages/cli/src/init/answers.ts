@@ -11,6 +11,17 @@ import { budgetWhy, estimateMonthlyCost, modelPriceLabel, suggestedBudgetUsd } f
 import { writeInstallAnswers, type InitAnswers } from "./install-state.js";
 import { secretFromSource, type Prompter, type SecretSource } from "./prompts.js";
 
+export const GITHUB_APP_NAME_LIMIT = 34;
+
+/** Spec 048 FR-026: one default name for the GitHub app and the Slack app, with the install name in
+ * it. GitHub app names are unique across GitHub, so the owner is in it too; when that is longer
+ * than GitHub's 34 characters, the owner is dropped at its word boundary. "AgentX (<install name>)"
+ * always fits: install names are at most 20 characters. */
+export function defaultAppName(input: { owner: string; env: string }): string {
+  const full = `AgentX ${input.owner} (${input.env})`;
+  return full.length <= GITHUB_APP_NAME_LIMIT ? full : `AgentX (${input.env})`;
+}
+
 export const DEFAULT_ORCHESTRATOR_MODEL = DEFAULT_BEDROCK_MODELS.orchestrator;
 export const DEFAULT_CLASSIFIER_MODEL = DEFAULT_BEDROCK_MODELS.classifier;
 export const DEFAULT_WORKER_MODEL = DEFAULT_BEDROCK_MODELS.worker;
@@ -222,11 +233,11 @@ export async function collectInitAnswers(input: {
     { value: "user", label: "A personal account" },
   ], { flag: "--github-account-type", defaultValue: "organization" }));
   const appName = flags.githubAppName ?? (await prompter.ask("GitHub App name (must be unique on GitHub)", {
-    flag: "--github-app-name", defaultValue: `AgentX ${githubAccount} ${input.env}`.slice(0, 34),
-    validate: (value) => (value.length <= 34 ? undefined : "must be at most 34 characters"),
+    flag: "--github-app-name", defaultValue: defaultAppName({ owner: githubAccount, env: input.env }),
+    validate: (value) => (value.length <= GITHUB_APP_NAME_LIMIT ? undefined : `must be at most ${GITHUB_APP_NAME_LIMIT} characters`),
   }));
   const slackAppName = flags.slackAppName ?? (await prompter.ask("Slack app name", {
-    flag: "--slack-app-name", defaultValue: "AgentX", validate: (value) => (value.length <= 35 ? undefined : "must be at most 35 characters"),
+    flag: "--slack-app-name", defaultValue: appName, validate: (value) => (value.length <= 35 ? undefined : "must be at most 35 characters"),
   }));
   const appPostedMessages = flags.slackAppPostedMessages ?? (await prompter.choose<"accept" | "ignore">("Answer mentions people post through other apps with their own Slack token?", [
     { value: "accept", label: "Yes (accept)" },

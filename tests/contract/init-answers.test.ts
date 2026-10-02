@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
-  alertWebhookSecretName, assertResumeFlagsMatch, BUDGET_TAG_NOTE, collectInitAnswers, GLM_NOTE, HAIKU_NOTE, persistInitAnswers, type InitFlags,
+  alertWebhookSecretName, assertResumeFlagsMatch, BUDGET_TAG_NOTE, collectInitAnswers, defaultAppName, GITHUB_APP_NAME_LIMIT, GLM_NOTE, HAIKU_NOTE, persistInitAnswers, type InitFlags,
 } from "../../packages/cli/src/init/answers.js";
 import { readInstallAnswers } from "../../packages/cli/src/init/install-state.js";
 import { estimateMonthlyCost, suggestedBudgetUsd } from "../../packages/cli/src/init/cost.js";
@@ -20,8 +20,8 @@ const everyFlag: InitFlags = {
   permissionBoundary: "", operatorPrincipal: "",
   alertEmail: "ops@example.com",
   budget: "0",
-  githubAccount: "acme", githubAccountType: "organization", githubAppName: "AgentX acme staging",
-  slackAppName: "AgentX", slackAppPostedMessages: "accept",
+  githubAccount: "acme", githubAccountType: "organization", githubAppName: "AgentX acme (staging)",
+  slackAppName: "AgentX acme (staging)", slackAppPostedMessages: "accept",
 };
 
 function memoryAlertSecrets() {
@@ -56,8 +56,8 @@ describe("init questions", () => {
       models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "amazon.nova-lite-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
       alert: { kind: "email", address: "ops@example.com" },
       budget: { monthlyUsd: 260, scope: "account" },
-      github: { account: "acme", accountType: "organization", appName: "AgentX acme staging" },
-      slack: { appName: "AgentX", appPostedMessages: "accept" },
+      github: { account: "acme", accountType: "organization", appName: "AgentX acme (staging)" },
+      slack: { appName: "AgentX acme (staging)", appPostedMessages: "accept" },
       createdAt: "2026-09-27T00:00:00.000Z",
     });
   });
@@ -77,7 +77,7 @@ describe("init questions", () => {
 
   it("asks nothing when every flag is given", async () => {
     const { answers } = await collectInitAnswers({ ...base, flags: everyFlag, prompter: scriptedPrompter([]) });
-    expect(answers.github.appName).toBe("AgentX acme staging");
+    expect(answers.github.appName).toBe("AgentX acme (staging)");
   });
 
   it("states GLM 4.7's trade-off and Claude Haiku 4.5's model-access need when chosen", async () => {
@@ -396,5 +396,31 @@ describe("the questions an export bundle already answered (FR-026)", () => {
     // The bundle's OpenRouter secret is the team's own: no key is read or stored.
     expect(collected.openRouterKey).toBeUndefined();
     expect(collected.notes).toContain(GLM_NOTE);
+  });
+});
+
+describe("spec 048 FR-026: app names", () => {
+  it("names both apps AgentX <owner> (<install name>)", () => {
+    expect(defaultAppName({ owner: "acme", env: "staging" })).toBe("AgentX acme (staging)");
+  });
+
+  it("the longest owner and install name still fit, and both apps match", async () => {
+    const owner = "a".repeat(39);
+    const env = "abcdefghij-klmnopqrs";
+    expect(env.length).toBe(20);
+    const name = defaultAppName({ owner, env });
+    expect(name).toBe("AgentX (abcdefghij-klmnopqrs)");
+    expect(name.length).toBeLessThanOrEqual(GITHUB_APP_NAME_LIMIT);
+
+    const prompter = scriptedPrompter(["", "", "", "", "", "", "", "", "", "ops@example.com", "", "", owner, "", "", "", ""]);
+    const collected = await collectInitAnswers({ env, region: "us-east-1", account: "123456789012", releaseVersion: "1.2.3", flags: {}, prompter, processEnv: {}, now: () => 0 });
+    expect(collected.answers.github.appName).toBe(name);
+    expect(collected.answers.slack.appName).toBe(name);
+  });
+
+  it("the Slack name follows a GitHub name the user typed", async () => {
+    const prompter = scriptedPrompter(["", "", "", "", "", "", "", "", "", "ops@example.com", "", "", "acme", "", "Our AgentX", "", ""]);
+    const collected = await collectInitAnswers({ env: "staging", region: "us-east-1", account: "123456789012", releaseVersion: "1.2.3", flags: {}, prompter, processEnv: {}, now: () => 0 });
+    expect(collected.answers.slack.appName).toBe("Our AgentX");
   });
 });

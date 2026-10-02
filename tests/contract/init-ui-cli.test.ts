@@ -434,11 +434,11 @@ describe("agentx init --ui", () => {
     expect(operator.clicked).toContain(`${wizardOrigin}/github/start?t=${new URL(operator.opened[0] ?? "").searchParams.get("t") ?? ""}`);
     expect(h.github.conversions).toEqual(["0123456789abcdef0123"]);
     const stages = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "github").map((card) => card.lines[0]) ?? []);
-    // The app's name is the first run's default ("AgentX <account> <env>"); its slug is GitHub's,
+    // The app's name is the first run's default ("AgentX <account> (<env>)"); its slug is GitHub's,
     // kept in the card's details rather than its words.
-    expect(stages).toContain('Create the GitHub app "AgentX acme staging" for acme.');
-    expect(stages).toContain('Install "AgentX acme staging" on acme. Choose only the repositories AgentX should work on.');
-    expect(stages.at(-1)).toBe('"AgentX acme staging" is installed on acme.');
+    expect(stages).toContain('Create the GitHub app "AgentX acme (staging)" for acme.');
+    expect(stages).toContain('Install "AgentX acme (staging)" on acme. Choose only the repositories AgentX should work on.');
+    expect(stages.at(-1)).toBe('"AgentX acme (staging)" is installed on acme.');
   });
 
   it("FR-040: the Slack app is created from a button, and a wrong token is refused on the field", async () => {
@@ -452,7 +452,7 @@ describe("agentx init --ui", () => {
     expect(JSON.stringify(operator.states)).not.toContain("USERtokenVALUE");
     expect(await h.everywhere()).not.toContain("USERtokenVALUE");
     const slack = operator.states.at(-1)?.cards?.find((card) => card.id === "slack");
-    expect(slack).toMatchObject({ status: "ok", lines: ['"AgentX" is installed in the Acme workspace.'] });
+    expect(slack).toMatchObject({ status: "ok", lines: ['"AgentX acme (staging)" is installed in the Acme workspace.'] });
   });
 
   it("Q8: when Slack refuses a token that looks right, the page asks for both again and saves nothing until one works", async () => {
