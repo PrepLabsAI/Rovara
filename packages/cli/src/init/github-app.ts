@@ -9,6 +9,7 @@ import type { InitContext, ManifestHost, OpenManifestHost } from "./context.js";
 import { checkPrivateKeyPem, secretFromSource } from "./prompts.js";
 import { problemText } from "./retry.js";
 import type { InitStep, ProgressHandle, StepOutcome } from "./steps.js";
+import { operatorStop } from "./stop.js";
 import { githubCard, type GitHubCardInput } from "./ui/cards.js";
 import { STEP_PLAN } from "./ui/journey.js";
 
@@ -317,8 +318,26 @@ async function runGitHubAppStep(context: InitContext, progress: ProgressHandle, 
       context.write(`Found the GitHub App ${recovered.slug} an earlier run created.`);
     }
   }
+  // Spec 048 FR-032: an app GitHub already made but whose key never reached Secrets Manager (a
+  // crash between the two). Offered only on a fresh resume (no --github-app-id of its own):
+  // --github-app-id picks a specific app by id, which the recovery flow has no way to confirm.
+  const pending = progress.current().githubPending;
+  let recovering: "finish" | "replace" | undefined;
+  if (app === undefined && pending !== undefined && preMade === undefined) {
+    const settingsUrl = `${appSettingsUrl({ login: account, type: accountType === "organization" ? "Organization" : "User" }, pending.slug)}/advanced`;
+    show({ stage: "recover", appName, slug: pending.slug, settingsUrl });
+    recovering = await context.prompter.choose<"finish" | "replace">(`Finish with the GitHub app ${pending.slug}, or replace it?`, [
+      { value: "finish", label: "Finish with this app: make a new private key on its GitHub page and paste it" },
+      { value: "replace", label: "Replace it: delete it on GitHub, then make a new one" },
+    ], { flag: "--github-app-recovery", defaultValue: "finish" });
+    if (recovering === "replace" && !(await context.prompter.confirm(`Have you deleted ${pending.slug} on GitHub?`, { defaultValue: true }))) {
+      throw operatorStop(`the GitHub app ${pending.slug} is still there; delete it on GitHub, then continue the install`);
+    }
+  }
   if (app === undefined) {
-    const created = preMade !== undefined ? await usePreMadeApp(context, api, preMade.appId) : await createWithManifest(context, api, show);
+    const created = preMade !== undefined ? await usePreMadeApp(context, api, preMade.appId)
+      : recovering === "finish" && pending !== undefined ? await usePreMadeApp(context, api, pending.appId)
+        : await createWithManifest(context, api, show);
     if (created.owner.login.toLowerCase() !== account.toLowerCase()) {
       // An app made beforehand is the owner's own: point at the flag, never tell them to delete it.
       if (preMade !== undefined) {
@@ -326,6 +345,9 @@ async function runGitHubAppStep(context: InitContext, progress: ProgressHandle, 
       }
       throw agentXError("CONFIG_INVALID", `the GitHub App was created under ${created.owner.login}, not ${account}; nothing was saved. Delete it at ${appSettingsUrl(created.owner, created.slug)}/advanced and run agentx init again`);
     }
+    // FR-032: recorded before the key is stored. GitHub shows the key only once, so a run that stops
+    // between here and the store can still find the app and offer to finish with it or replace it.
+    await progress.update({ githubPending: { account, appId: created.appId, slug: created.slug } });
     try {
       await context.secrets.create(name, JSON.stringify({ appId: created.appId, slug: created.slug, account, privateKey: created.privateKey }));
     } catch (error) {

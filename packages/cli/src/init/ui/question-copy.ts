@@ -59,6 +59,9 @@ export const QUESTION_COPY: readonly QuestionCopyEntry[] = [
   { kind: "ask", flag: "--channel", help: { label: "Which Slack channel?", why: "AgentX answers in this channel for this project.", example: "payments" } },
   { kind: "ask", text: /^Paste that address/, help: { label: "Paste the address GitHub sent you to", why: "Only needed when GitHub could not send you back to this page." } },
   { kind: "secret", flag: "--github-private-key", help: { label: "GitHub app private key", why: "GitHub offers it as a download on the app's page. Paste the whole file." } },
+  // Spec 048 FR-032: an app GitHub made, whose key a crash kept from reaching Secrets Manager, found again on resume.
+  { kind: "choose", flag: "--github-app-recovery", help: { label: "Finish with the GitHub app, or replace it?", why: "The card above says what each choice removes.", buttons: true, choiceLabels: { finish: "Finish with this app", replace: "Replace it" } } },
+  { kind: "confirm", text: /^Have you deleted .+ on GitHub\?$/, help: { label: "Deleted the old app on GitHub?", why: "GitHub app names are unique, so the new app needs the old one gone first.", yesLabel: "It is deleted", noLabel: "Stop for now" } },
   { kind: "confirm", text: /^Create all of this\?$/, help: { label: "Create AgentX with this plan?", why: "Nothing is created until you press Create AgentX.", yesLabel: "Create AgentX", noLabel: "Cancel the install" } },
   // Spec 048 FR-029: on the page, the plan's confirm is these two buttons, not a yes/no (the
   // terminal keeps the confirm above, unchanged).

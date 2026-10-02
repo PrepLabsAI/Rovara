@@ -122,6 +122,10 @@ export type GitHubCardInput =
   | { stage: "install"; appName: string; slug: string; account: string; installUrl: string }
   | { stage: "repositories"; appName: string; slug: string; account: string; settingsUrl: string }
   | { stage: "done"; appName: string; slug: string; account: string }
+  /** Spec 048 FR-032: an app GitHub made, whose key a crash kept from reaching Secrets Manager,
+   * found again on resume. `settingsUrl` is the app's "advanced" page, where its private key is
+   * made (Finish) or the app itself is deleted (Replace). */
+  | { stage: "recover"; appName: string; slug: string; settingsUrl: string }
   /** A wait or check that failed. The page offers no retry, so the problem keeps its own next step. */
   | { stage: "failed"; problem: string };
 
@@ -146,6 +150,15 @@ export function githubCard(input: GitHubCardInput): WizardCard {
       link: { url: input.settingsUrl, label: "Choose repositories" },
     };
     case "done": return { ...base, status: "ok", ...slug(input.slug), lines: [`"${input.appName}" is installed on ${input.account}.`] };
+    case "recover": return {
+      ...base, status: "waiting", ...slug(input.slug),
+      lines: [
+        `GitHub made "${input.appName}", but the install stopped before its private key was stored, and GitHub cannot show that key again.`,
+        "Finish with this app: make a new private key on its GitHub page and paste it here. Nothing is removed.",
+        "Replace it: delete the app on its GitHub page first, then AgentX makes a new one. Only the old GitHub app is removed; nothing in AWS is.",
+      ],
+      link: { url: input.settingsUrl, label: "Open the app on GitHub" },
+    };
     case "failed": return { ...base, status: "failed", lines: ["The GitHub app was not set up."], details: [input.problem] };
   }
 }

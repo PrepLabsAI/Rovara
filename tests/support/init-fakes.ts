@@ -131,12 +131,17 @@ export const HOLDER = "arn:aws:sts::123456789012:assumed-role/Admin/alice";
  * without pinning its own. */
 export const TEST_CLI_INVOCATION: CliInvocation = { published: false, cliPath: "/opt/agentx/dist/main.js" };
 
-export function memoryInitSecrets(initial: Record<string, string> = {}): InitSecrets & { values: Map<string, string> } {
+/** `failCreate`: `create` always throws (spec 048 FR-032 test), as a real `CreateSecret` call that
+ * failed after the app was made on GitHub would. */
+export function memoryInitSecrets(initial: Record<string, string> = {}, options: { failCreate?: boolean } = {}): InitSecrets & { values: Map<string, string> } {
   const values = new Map(Object.entries(initial));
   return {
     values,
     async get(name) { return values.get(name); },
-    async create(name, value) { if (values.has(name)) throw new SecretAlreadyExistsError(name); values.set(name, value); },
+    async create(name, value) {
+      if (options.failCreate === true) throw Object.assign(new Error("test setup: secret creation refused"), { name: "AccessDeniedException" });
+      if (values.has(name)) throw new SecretAlreadyExistsError(name); values.set(name, value);
+    },
     async put(name, value) { if (!values.has(name)) throw Object.assign(new Error(`Secrets Manager can't find ${name}`), { name: "ResourceNotFoundException" }); values.set(name, value); },
     async arn(name) { return values.has(name) ? `arn:aws:secretsmanager:us-east-1:123456789012:secret:${name}-AbCdEf` : undefined; },
   };
