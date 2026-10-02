@@ -510,6 +510,15 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     throw agentXError("CONFIG_INVALID", "agentx init needs to know the AWS region; with --yes, pass --region <region>");
   }
   const runner = deployDeps.commandRunner ?? realCommandRunner(session.output);
+  const version = deps.releaseVersion === undefined ? RELEASE_VERSION : deps.releaseVersion ?? undefined;
+  // Issue 152: a CLI built from source with --engine cdk builds its release from --source. These
+  // argument errors stay before UI selection: an invalid invocation must not open a page or ask a
+  // question before explaining what is missing.
+  const fromSource = options.releaseDir === undefined && version === undefined && options.flags.engine === "cdk";
+  if (fromSource && options.source === undefined) throw agentXError("CONFIG_INVALID", "the cdk engine needs --source <a checkout of a release tag>");
+  if (options.releaseDir === undefined && version === undefined && !fromSource) {
+    throw agentXError("CONFIG_INVALID", "this agentx was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one), or --engine cdk --source <a checkout of a release tag>");
+  }
 
   // FR-001: --ui, --no-ui, or (neither given) the page in an interactive terminal on a machine
   // that can open a browser. --no-browser reads as "no browser here" for the default (Q2).
@@ -549,10 +558,6 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   session.prompter = prompter;
 
   // With a page, the release comes after the page opens so download progress and failures appear there.
-  const version = deps.releaseVersion === undefined ? RELEASE_VERSION : deps.releaseVersion ?? undefined;
-  // Issue 152: a CLI built from source with --engine cdk (on the command line: the engine question
-  // comes after the release) builds its release from the --source checkout instead.
-  const fromSource = options.releaseDir === undefined && version === undefined && options.flags.engine === "cdk";
   let release: LoadedRelease;
   // The regions init offers: the release's, or undefined when nothing lists them (a source release
   // whose images all come from flags, so no release.json was read).
@@ -560,6 +565,8 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   // Why a source release has no images, when it has none; checked once the saved answers are read.
   let imagesProblem: string | undefined;
   if (fromSource) {
+    // The same guard above keeps invalid invocations before UI startup; this local guard also
+    // preserves the type invariant at the sourceRelease call if this branch is edited later.
     if (options.source === undefined) throw agentXError("CONFIG_INVALID", "the cdk engine needs --source <a checkout of a release tag>");
     // "allow": a resume's saved answers may hold both images; they are checked once the answers are known.
     const built = await sourceRelease({ runner, source: options.source, images: { worker: options.flags.workerImage, slack: options.flags.slackImage }, fetch: fetchImplementation, missingReleaseJson: "allow" });

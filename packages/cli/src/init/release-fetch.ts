@@ -26,7 +26,10 @@ export async function readWithProgress(response: Response, onProgress?: (progres
   if (onProgress === undefined || response.body === null) return Buffer.from(await response.arrayBuffer());
   const header = Number(response.headers.get("content-length") ?? "");
   const totalBytes = Number.isFinite(header) && header > 0 ? header : undefined;
-  const reader = response.body.getReader();
+  // Node's fetch stream is a byte stream here, but the mixed DOM/Node declarations used by the
+  // CLI leave getReader() as `any` under the stricter lint project. Fix the boundary once so no
+  // untyped child value reaches the progress calculation.
+  const reader = response.body.getReader() as ReadableStreamDefaultReader<Uint8Array>;
   const chunks: Uint8Array[] = [];
   let receivedBytes = 0;
   for (;;) {

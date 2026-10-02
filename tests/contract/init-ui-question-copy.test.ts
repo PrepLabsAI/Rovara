@@ -59,7 +59,7 @@ const DEFAULT_PATH: Array<[kind: "ask" | "choose" | "confirm" | "secret", flag: 
   ["confirm", undefined, "Connect Linear to payments-api now? (You can add it later with agentx connector add linear)"],
   ["confirm", undefined, "Did a test alarm named agentx-staging-test arrive at ops@example.com?"],
   ["confirm", undefined, "Check the prerequisites again?"],
-  ["confirm", undefined, "Paste the Slack bot token and signing secret again?"],
+  ["confirm", undefined, "Paste the Slack values again?"],
   ["confirm", undefined, "Run the Request URL check again?"],
   ["confirm", undefined, "Sign in again?"],
   ["confirm", undefined, "Watch for the reply again?"],
