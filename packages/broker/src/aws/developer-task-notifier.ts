@@ -401,10 +401,18 @@ async function editExpired(deps: NotifierDependencies, change: PendingChange): P
     deps.log({ event: "admin_change.dm_expired", changeId: change.changeId, traceId: change.traceId });
     return "posted";
   }
-  // Answered while this edit was made (or edited by another delivery): the stored outcome wins.
+  // Answered while this edit was made: the stored outcome wins, even over an outcome edit that
+  // landed between this delivery's read and its expiry edit. Reaching here needs the broker to
+  // accept a claim after this Lambda's expiresAt + grace, so only a clock skew over the grace.
   const current = await readChange(deps, change.changeId);
-  const outcome = current?.dm === undefined || current.dmEditedAt !== undefined ? undefined : adminChangeOutcomeMessage(current);
-  if (current?.dm === undefined || outcome === undefined) return "delivered";
+  if (current?.dm === undefined) return "delivered";
+  if (current.status === "expired") {
+    // A press recorded the expiry meanwhile: the message already says so, so its outcome edits nothing more.
+    await markEdited(deps, current.changeId);
+    return "posted";
+  }
+  const outcome = adminChangeOutcomeMessage(current);
+  if (outcome === undefined) return "delivered";
   await deps.update({ channel: current.dm.channel, ts: current.dm.ts, ...outcome });
   await markEdited(deps, current.changeId);
   deps.log({ event: "admin_change.dm_edited", changeId: current.changeId, traceId: current.traceId, status: current.status });

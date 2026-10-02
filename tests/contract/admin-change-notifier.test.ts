@@ -198,6 +198,34 @@ describe("an expired Confirm message loses its buttons without a press (#217)", 
     }
   });
 
+  it("puts the outcome back when an outcome edit landed between its read and its expiry edit (review)", async () => {
+    const db = new FakeDynamoDb();
+    db.set(pending({ dm: DM }));
+    const h = notifier(db, afterExpiry, {
+      update: vi.fn(async (input: { channel: string; ts: string; text: string; blocks: unknown[] }) => {
+        h.updates.push(input);
+        // The outcome delivery edited and recorded first; this expiry edit then lands over it.
+        if (h.updates.length === 1) db.set({ ...db.get(`ADMIN_CHANGE#${CHANGE}`, "META") as Record<string, unknown>, status: "applied", pressedBy: "U0ADA00001", dmEditedAt: "2026-10-02T09:10:05.500Z" });
+      }),
+    });
+    await h.deliver(expiryNotice);
+    expect(h.updates.at(-1)?.text.split("\n\n").at(-1)).toBe("Applied, confirmed by <@U0ADA00001>.");
+  });
+
+  it("edits once when a press recorded the expiry while it edited (review)", async () => {
+    const db = new FakeDynamoDb();
+    db.set(pending({ dm: DM }));
+    const h = notifier(db, afterExpiry, {
+      update: vi.fn(async (input: { channel: string; ts: string; text: string; blocks: unknown[] }) => {
+        h.updates.push(input);
+        if (h.updates.length === 1) db.set({ ...db.get(`ADMIN_CHANGE#${CHANGE}`, "META") as Record<string, unknown>, status: "expired" });
+      }),
+    });
+    await h.deliver(expiryNotice);
+    expect(h.updates).toHaveLength(1);
+    expect(db.get(`ADMIN_CHANGE#${CHANGE}`, "META")).toHaveProperty("dmEditedAt");
+  });
+
   it("writes the outcome over its expiry edit when the change was answered while it edited", async () => {
     const db = new FakeDynamoDb();
     db.set(pending({ dm: DM }));
