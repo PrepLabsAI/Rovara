@@ -4,6 +4,7 @@
 // and no I/O, so the hub, the page, the terminal lines and the step titles read one source.
 // Phase 2 moves steps between phases here; phase 4 replaces the first estimates with measured ones.
 import { INIT_STEP_IDS, type InitStepId } from "../install-state.js";
+import type { CardId, StepStatus } from "./protocol.js";
 
 export const JOURNEY_PHASE_IDS = ["get-started", "your-choices", "build", "connect-slack", "finish"] as const;
 export type JourneyPhaseId = (typeof JOURNEY_PHASE_IDS)[number];
@@ -16,6 +17,16 @@ export type JourneyStatus = "done" | "now" | "waiting" | "coming" | "stopped";
 /** FR-001: a status word for every phase, so status is never color or a symbol alone. */
 export const STATUS_WORDS: Readonly<Record<JourneyStatus, string>> = {
   done: "Done", now: "Now", waiting: "Waiting for you", coming: "Coming up", stopped: "Stopped",
+};
+
+/** FR-003: which phase each card belongs to, so a finished one collapses into that phase in the rail. */
+export const CARD_PHASES: Readonly<Record<CardId, JourneyPhaseId>> = {
+  aws: "get-started", prerequisites: "your-choices", github: "build", slack: "connect-slack", "slack-urls": "connect-slack",
+  admin: "finish", project: "finish", channel: "finish", connectors: "finish", alerts: "finish", reply: "finish", ready: "finish",
+};
+
+export const STEP_STATUS_WORDS: Readonly<Record<StepStatus, string>> = {
+  pending: "Coming up", running: "Now", done: "Done", skipped: "Done", waiting: "Waiting for you", failed: "Stopped",
 };
 
 export interface StepPlan { phase: JourneyPhaseId; title: string; usualSeconds: number; needsYou: boolean }

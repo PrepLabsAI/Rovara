@@ -228,7 +228,7 @@ describe("the page", () => {
     expect(WIZARD_JS).not.toContain("document.write");
     expect(WIZARD_JS).toContain('anchor.target = "_blank";');
     expect(WIZARD_JS).toContain('anchor.rel = "noopener noreferrer";');
-    expect(WIZARD_JS).toContain("renderCards(state.cards, state.link);");
+    expect(WIZARD_JS).toContain("renderPanelCards(state);");
   });
 
   it("Q4: empties a masked field the moment it is sent, empties the question area once answered, and asks password managers to leave it alone", () => {
