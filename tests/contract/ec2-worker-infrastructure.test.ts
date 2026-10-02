@@ -4,6 +4,9 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { WORKSPACE_SESSION_STATE_INDEX } from "../../packages/contracts/src/session.js";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { EC2_WORKER_AMI_PARAMETER, EC2_WORKER_PORT } from "../../infra/lib/ec2-workers.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 type Resource = { Type: string; Properties: Record<string, unknown>; DeletionPolicy?: string };
 const stacksOf = (app: App) => app.node.children.filter((c): c is Stack => Stack.isStack(c));

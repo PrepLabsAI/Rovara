@@ -10,6 +10,9 @@ import { buildAgentXApp } from "../../infra/lib/app.js";
 import { inventoryParameterName, mergeInventory, retainedResources, writeInventory, type RetainedResource } from "../../packages/cli/src/destroy/inventory.js";
 import { SSM_STANDARD_VALUE_LIMIT } from "../../packages/cli/src/init/install-state.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 const ENV = "abcdefghij-klmnopq12";
 const REGION = "us-east-1";
