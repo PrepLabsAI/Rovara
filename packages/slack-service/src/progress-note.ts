@@ -17,7 +17,9 @@ const SUBJECT_MAX = 120;
  */
 export function progressSubject(memberText: string, approved?: string): string {
   const own = memberText.replace(/<[@#!][^>]*>/gu, " ").replace(/[`\s]+/gu, " ").trim();
-  const flat = own.length > 0 ? escapeText(own) : (approved ?? "").replace(/\s+/gu, " ").trim();
+  // A trailing full stop is dropped, since the note puts its own after the task.
+  const flat = (own.length > 0 ? escapeText(own) : (approved ?? "").replace(/\s+/gu, " ").trim()).replace(/[.\s]+$/u, "");
+  if (flat.length === 0) return "your request";
   return flat.length > SUBJECT_MAX ? `${flat.slice(0, SUBJECT_MAX - 1).replace(/&[a-z]{0,3}$/u, "")}…` : flat;
 }
 
@@ -55,6 +57,8 @@ export function createProgressNote(options: ProgressNoteOptions): ProgressNote {
   let timer: ReturnType<typeof setInterval> | undefined;
   let editing: Promise<void> = Promise.resolve();
   let done = false;
+  /** The last edit asked for before the note's post landed; made once it does. */
+  let lastText: string | undefined;
 
   const edit = (text: string): Promise<void> => {
     const target = ts;
@@ -85,7 +89,12 @@ export function createProgressNote(options: ProgressNoteOptions): ProgressNote {
         options.log("progress.post_failed", { eventId: options.eventId, errorName: errorName(error) });
         return;
       }
-      if (ts === undefined || done) return;
+      if (ts === undefined) return;
+      if (done) {
+        // The turn ended while the note was being posted: it still says how it ended.
+        if (lastText !== undefined) await edit(lastText);
+        return;
+      }
       timer = setInterval(() => {
         if (done) return;
         void edit(`Still working: ${options.what}, ${minutesText(options.now() - startedAt)} so far.`);
@@ -96,9 +105,14 @@ export function createProgressNote(options: ProgressNoteOptions): ProgressNote {
     async finish(outcome) {
       if (done) return;
       dispose();
-      if (ts === undefined) return;
+      if (!started) return;
       const elapsed = minutesText(options.now() - startedAt);
-      await edit(outcome === "finished" ? `Finished: ${options.what}, after ${elapsed}.` : `Stopped: ${options.what}, after ${elapsed}.`);
+      const text = outcome === "finished" ? `Finished: ${options.what}, after ${elapsed}.` : `Stopped: ${options.what}, after ${elapsed}.`;
+      if (ts === undefined) {
+        lastText = text;
+        return;
+      }
+      await edit(text);
     },
     dispose,
   };

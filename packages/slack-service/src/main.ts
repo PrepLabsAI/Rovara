@@ -112,6 +112,8 @@ async function postToSlack(channel: string, threadTs: string | undefined, text: 
 async function updateInSlack(channel: string, ts: string, text: string): Promise<void> {
   const response = await fetch("https://slack.com/api/chat.update", {
     method: "POST",
+    // A progress edit that Slack does not answer is given up, never left waiting.
+    signal: AbortSignal.timeout(10_000),
     headers: { authorization: `Bearer ${await slackBotToken()}`, "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify({ channel, ts, text }),
   });

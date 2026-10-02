@@ -183,6 +183,9 @@ export interface ProcessorDependencies {
 /** Issue 157: a save already in flight at the hand-off gets this long to land. */
 const PENDING_SAVE_MILLISECONDS = 5_000;
 
+/** Issue 219: the progress note's last edit gets this long before the reply is posted anyway. */
+const PROGRESS_FINISH_MILLISECONDS = 5_000;
+
 /** Issue 167: cancelling an abandoned task gets this long, well inside the time left before SIGKILL. */
 const CANCEL_TASK_MILLISECONDS = 5_000;
 
@@ -634,6 +637,9 @@ export async function processSlackRequest(
       return;
     }
     if (confirmation?.claim) claimed = true;
+    // The gate removes each approval as it lets the confirmed call through, before the task is
+    // accepted, so what was approved is read now, once.
+    const approvedSummary = claimed ? confirmation?.session.approvals.map((approval) => approval.summary).join("; ") : undefined;
     // Spec 014 FR-026: the ingress has already said "I'm on it". Say work has started only when the
     // member was told to wait, behind earlier requests, for setup, or because SQS redelivered this
     // request after an earlier attempt threw: that attempt's own "Working on it now" is 15 minutes
@@ -651,15 +657,22 @@ export async function processSlackRequest(
     const updateMessage = dependencies.updateMessage;
     const startProgress = async (): Promise<void> => {
       if (progress !== undefined || postProgress === undefined || updateMessage === undefined || handedOff) return;
-      const approved = claimed ? confirmation?.session.approvals.map((approval) => approval.summary).join("; ") : undefined;
       progress = createProgressNote({
-        what: progressSubject(claimed ? "" : message.text, approved), eventId: message.eventId, log,
+        what: progressSubject(claimed ? "" : message.text, approvedSummary), eventId: message.eventId, log,
         post: (text) => postProgress(message.thread, text),
         update: (ts, text) => updateMessage(message.thread, ts, text),
         now: dependencies.now ?? Date.now,
         ...(dependencies.progressIntervalMs === undefined ? {} : { intervalMs: dependencies.progressIntervalMs }),
       });
-      await progress.start();
+      // Never awaited: a slow Slack post must not hold the task's result back.
+      void progress.start();
+    };
+    /** The last edit gets a few seconds: an edit Slack does not answer never holds the reply back. */
+    const finishProgress = async (outcome: "finished" | "stopped"): Promise<void> => {
+      if (progress === undefined) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([progress.finish(outcome), new Promise<void>((resolve) => { timer = setTimeout(resolve, PROGRESS_FINISH_MILLISECONDS); })]);
+      clearTimeout(timer);
     };
     const onOperationAccepted = async (operationId: string): Promise<void> => {
       await startProgress();
@@ -672,7 +685,7 @@ export async function processSlackRequest(
       }
       accepted = { workspaceId: workspaceForTurn, operationId };
       // An approval's own text is only "yes": the note names what was approved instead.
-      const approved = claimed ? confirmation?.session.approvals.map((approval) => approval.summary).join("; ") : undefined;
+      const approved = approvedSummary;
       const base: ActiveTurn = { eventId: message.eventId, workspaceId: workspaceForTurn, operationId, ...(approved ? { request: `the member approved: ${approved}` } : {}) };
       // Issue 173: shown as waited on from now; if the save fails, the next heartbeat writes it.
       waitingOn = base;
@@ -730,13 +743,13 @@ export async function processSlackRequest(
       }
       draft.disposition = "answered";
       log("task.completed", { eventId: message.eventId, responseLength: response.length });
-      await progress?.finish("finished");
+      await finishProgress("finished");
     } catch (error) {
       if (error instanceof TurnHandedOffError) throw error;
       draft.disposition = "failed";
       draft.error = errorSummary(error);
       log("task.failed", { eventId: message.eventId, errorName: errorName(error) });
-      await progress?.finish("stopped");
+      await finishProgress("stopped");
       response = `AgentX could not complete the request: ${safeMessage(error)}`;
     }
     // Formatted before anything is posted (spec 014 FR-022): the turn record keeps the formatted

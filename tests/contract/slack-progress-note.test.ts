@@ -69,6 +69,17 @@ describe("the progress note (#219)", () => {
     await expect(flaky.progress.finish("finished")).resolves.toBeUndefined();
   });
 
+  it("edits a note whose post landed after the turn ended, so it never promises updates for good (review)", async () => {
+    let land: (ts: string) => void = () => undefined;
+    const late = note({ post: () => new Promise<string>((resolve) => { land = resolve; }) });
+    const starting = late.progress.start();
+    await late.progress.finish("stopped");
+    land("1695500000.000900");
+    await starting;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(late.updates).toEqual([{ ts: "1695500000.000900", text: "Stopped: running sleep 2400, after less than a minute." }]);
+  });
+
   it("dispose stops the edits without a last one, for a turn handed off", async () => {
     const { progress, updates } = note();
     await progress.start();
@@ -80,6 +91,8 @@ describe("the progress note (#219)", () => {
   it("names the task by the member's words or what they approved, Slack-safe and short", () => {
     expect(progressSubject("<@U0BOT00001> run `sleep 2400` & tell me <!channel>")).toBe("run sleep 2400 &amp; tell me");
     expect(progressSubject("  ", 'Start a coding task: "list files"')).toBe('Start a coding task: "list files"');
+    expect(progressSubject("<@U0BOT00001> run the tests.")).toBe("run the tests");
+    expect(progressSubject("<@U0BOT00001>")).toBe("your request");
     const long = progressSubject(`<@U0BOT00001> ${"word ".repeat(60)}`);
     expect(long.length).toBeLessThanOrEqual(120);
     expect(long.endsWith("…")).toBe(true);
@@ -126,6 +139,39 @@ describe("a long Slack task's progress in the processor (#219)", () => {
     expect(h.updates.map((update) => update.text)).toContain("Still working: run sleep 2400, 12 minutes so far.");
     expect(new Set(h.updates.map((update) => update.ts))).toEqual(new Set(["1695500000.000900"]));
     expect(h.updates.at(-1)?.text).toBe("Finished: run sleep 2400, after 13 minutes.");
+    expect(h.posts.at(-1)).toBe("All done.");
+  });
+
+  it("names what the member approved in a turn run on their yes, after the gate used the approval (review)", async () => {
+    const h = harness(1);
+    const approval = { tool: "agentx_submit_task", argumentsHash: "a".repeat(64), summary: 'Start a coding task: "list files"' };
+    const confirmations = {
+      load: async () => undefined, save: async () => undefined, claim: async () => true, open: async () => undefined, retire: async () => undefined,
+      yesToAll: async () => false, grantYesToAll: async () => undefined,
+    };
+    const stored = { confirmationId: "44444444-4444-4444-8444-444444444444", requesterId: "U0123456789", calls: [{ ...approval, kind: "unchecked" as const }], postedAt: "2026-10-02T09:59:00.000Z", expiresAt: "2026-10-03T09:59:00.000Z" };
+    confirmations.load = async () => stored as never;
+    h.dependencies.confirmations = confirmations;
+    h.dependencies.now = Date.now;
+    const run = h.dependencies.runTurn;
+    h.dependencies.runTurn = async (input) => {
+      // The gate removes an approval when it lets the confirmed call through, before the task is accepted.
+      input.gate?.approvals.splice(0, 1);
+      return run(input);
+    };
+    const done = processSlackRequest({ ...message, text: "<@U0BOT00001> yes" }, h.dependencies, { finalAttempt: false });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await done;
+    expect(h.progressPosts).toEqual(['Started on the worker: Start a coding task: "list files". I\'ll update this message while it runs.']);
+  });
+
+  it("never holds the task or its reply on a progress post or edit that does not answer (review)", async () => {
+    const h = harness(1);
+    h.dependencies.postProgress = () => new Promise<string>(() => undefined);
+    h.dependencies.updateMessage = () => new Promise<void>(() => undefined);
+    const done = processSlackRequest(message, h.dependencies, { finalAttempt: false });
+    await vi.advanceTimersByTimeAsync(60_000);
+    await done;
     expect(h.posts.at(-1)).toBe("All done.");
   });
 
