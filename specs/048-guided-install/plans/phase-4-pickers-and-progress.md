@@ -3,29 +3,40 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** The first project is one screen: a repository picker, the project name and commands
-prefilled and editable, the channel question ("Should AgentX create the channel for you?" with its
-Yes and No paths) and the issue trackers as checkboxes with "Skip for now". Building in AWS shows
-real progress (resources done out of expected, and "You can leave now"), with time estimates measured
-from clean runs rather than guessed. The admin sign-in, alerts and test-reply cards reuse what the
+prefilled and editable, the channel's remaining fields (a name and public-or-private on Yes, or the
+picker on No; the Yes/No decision itself is answered earlier, at settings, before the Slack app is
+created: owner decision, 2026-10-02) and the issue trackers as checkboxes with "Skip for now".
+Building in AWS shows real progress (resources done out of expected, combined across every stack a
+step builds: owner decision, 2026-10-02), and "You can leave now", with time estimates measured from
+clean runs rather than guessed. The admin sign-in, alerts and test-reply cards reuse what the
 settings already know. The welcome screen can ask for a browser notification, and it fires once,
 when the run starts waiting on the user after an unattended stretch.
 
 **Architecture:**
-- **The channel decision is a field on the project form, not a separate screen.** FR-050 asks for the
-  whole first project "on one screen"; the channel's own Yes/No branch (FR-051, FR-052) is rendered as
-  grouped fields on that same form, shown or hidden by the answer to "Should AgentX create the channel
-  for you?". This needs one generic capability the page does not have yet: a field whose visibility
-  depends on another field's live value (`showWhen`), built once (Task 2) and used by every
-  conditional group this phase adds. The issue trackers need a second new capability: several boxes
-  checked at once, not one choice from a list (`multiple` on a `choices` field).
+- **The channel's own Yes/No decision is answered at settings, before this screen ever shows
+  (owner decision, 2026-10-02, overruling this plan's first design below).** This plan originally
+  put the create-or-not question on the project form itself, as a live field (`createChannel`) whose
+  answer showed or hid the rest of the channel's fields with `showWhen`. The owner moved that
+  question to the settings screen instead (phase 3's Task 14, built on top of phase 2, since Slack
+  scopes are fixed the moment the Slack app is created and the project form only renders long after
+  that). This phase's project form (Task 3) now reads the already-known answer,
+  `context.answers.settings.createChannel`, and includes only the fields that answer calls for:
+  `channelName`/`channelVisibility` on Yes (Task 4), or `channelPicked`/`channelNotListed` on No
+  (Task 5), never both, and never a live `createChannel` field of its own. FR-050 still asks for the
+  whole first project "on one screen"; it is the channel's own Yes/No branch that moved off of it.
+  Task 2's `showWhen`/`multiple` capability is unaffected: `multiple` still has its real consumer in
+  the trackers field (Task 3), and `showWhen` remains a generic, tested capability this phase does
+  not currently have another consumer for, built once in case a later reviewer finds one.
 - **The channel's backend already exists for the simple case; this phase widens it.**
   `setup/channel-add.ts`'s `SlackChannelApi` already lists and joins a named channel
   (`channels:read`, `groups:read`, `channels:join`, already in the manifest). This phase adds
   `create`, `list` (the same listing `find` already builds, exposed whole for a picker) and the two
-  calls FR-051's invite needs (`users.lookupByEmail`, `conversations.invite`), and the manifest gains
-  `channels:manage` and `groups:write` so creating a channel is possible at all (FR-053). Finding the
-  installer by the settings email reuses `lookupByEmail`; when Slack has no match, the picker reuses
-  `list` as a member search instead of guessing.
+  calls FR-051's invite needs (`users.lookupByEmail`, `conversations.invite`). The manifest's own
+  `channels:manage`/`groups:write` scopes (FR-053) are no longer this phase's concern: phase 3's Task
+  14 (owner decision, 2026-10-02) already makes the Slack app manifest carry them, or not, following
+  the settings answer, before this phase's code ever runs. Finding the installer by the settings
+  email reuses `lookupByEmail`; when Slack has no match, the picker reuses `list` as a member search
+  instead of guessing.
 - **The project form reuses `setup/project-add.ts`'s own logic, not a second copy of it.**
   `chooseRepository`, `proposeCommands` and `addProject`'s existing rules (an unchanged rerun asks
   nothing, a changed rerun is refused with what differs) stay exactly as they are; only how the
@@ -104,13 +115,22 @@ PR has merged into mainline**. One PR against `mainline` (no stacking: never bra
 - **Recorded installs still resume.** `INIT_STEP_IDS` and `INSTALL_STEP_ORDER` keep their order and
   ids; this plan adds no new step id. `InstallProgressSchema`'s `project` field gains optional
   sub-fields only (never a breaking change to `channelId`/`channelName`, which already exist).
-- **The terminal path and `--yes` keep every flag and its meaning**, with one deliberate, listed
-  change (FR-072): the channel's Yes/No decision and its follow-up fields get flags
-  (`--create-channel` / `--no-create-channel`, `--channel-visibility`, plus the existing `--channel`
-  for a name on either path), asked in the same order the page's form would show them when no flag is
-  given; `--yes` with neither flag defaults to "Yes, create it" exactly as a first-time user's default
-  answer on the page would. No existing flag's meaning changes; `--channel` alone (today's only
-  channel flag) still works exactly as it does today on the No path.
+- **The terminal path and `--yes` keep every flag and its meaning**, with deliberate, listed changes
+  (FR-072). The channel's Yes/No decision gets its own flags, `--create-channel`/`--no-create-channel`
+  (owner decision, 2026-10-02: read at settings, phase 3's Task 14, not here); its follow-up fields
+  keep their flags (`--channel-visibility`, plus the existing `--channel` for a name on either path),
+  asked in the same order the page's form would show them when no flag is given. `--yes` with neither
+  `--create-channel` nor `--no-create-channel` defaults to "yes" ("Yes, create it"), exactly as a
+  first-time user's default answer at settings would. **Owner decision, 2026-10-02 (spec Decisions,
+  owner decision 9), resolving what was previously left as "pending owner decision" here:** `--channel
+  <name>` means "use it or create it". Unless `--no-create-channel` is also given, passing `--channel
+  <name>` counts as answering Yes, so the manifest carries the channel-creating scopes and the channel
+  step creates the named channel if it does not exist (inviting the installer) or uses it if it does,
+  resolving a taken name automatically (there is no one to ask, so `SlackNameTakenError`'s "Use that
+  channel" default applies without a prompt), never stopping. `--no-create-channel` drops those scopes
+  and keeps today's plain behavior: use an existing channel named by `--channel`, and if it is not
+  found, stop with a clear message to create it and invite the bot (this is `bindPickedChannel`'s
+  existing find-or-fail behavior, unchanged). No existing flag's meaning changes beyond this.
 - **Exact names (this plan's own contract):** `showWhen` (on `FormField`/`WizardField`), `multiple`
   (on `FormField`/`WizardField`), `PROJECT_FIELD`, `projectFields`, `CHANNEL_DECISION_GROUP`,
   `SlackChannelApi.create`/`.list`/`.lookupByEmail`/`.invite`, `SLACK_BOT_SCOPES` gaining
@@ -198,7 +218,7 @@ PR has merged into mainline**. One PR against `mainline` (no stacking: never bra
 | `packages/cli/src/init/finish-steps.ts` | `firstProjectStep` asks the one form instead of `addProject`'s sequential questions; sets `context.flags.connectors` from the trackers field; `adminUserStep` reads `context.answers.adminEmail` first |
 | `packages/cli/src/setup/project-add.ts` | `addProject` takes already-known values instead of asking them itself where the caller already has them (its own-question fallback stays for every other caller, `agentx project add`) |
 | `packages/cli/src/setup/channel-add.ts` | `SlackChannelApi.create`/`.list`/`.lookupByEmail`/`.invite`; `createAndInviteChannel`, `bindPickedChannel` |
-| `packages/cli/src/init/slack-app.ts` | `SLACK_BOT_SCOPES` gains `channels:manage`, `groups:write` |
+| `packages/cli/src/init/slack-app.ts` | Not touched by this phase; `channels:manage`/`groups:write` are phase 3's Task 14 (owner decision, 2026-10-02) |
 | `packages/cli/src/init/context.ts` | `StackStatusReader.resourcesDone?` |
 | `packages/cli/src/init/deploy-steps.ts` | `expectedResourceCount`, a progress poll beside `deployEnvironment` |
 | `packages/cli/src/init/ui/cards.ts` | `buildProgressCard`; `adminCard`/`channelCard`/`alertsCard` gain `waitUntil`/`waitLabel` via phase 3's fields |
@@ -208,7 +228,7 @@ PR has merged into mainline**. One PR against `mainline` (no stacking: never bra
 | `packages/cli/src/init/ui/question-copy.ts` | Copy for every new question this phase asks |
 | `docs/install.md` | The first-project screen, the channel question, real progress, measured times |
 | `tests/support/init-fakes.ts`, `tests/support/setup-fakes.ts`, `tests/support/init-ui-harness.ts` | `fakeSlackChannels` gains `create`/`list`/`lookupByEmail`/`invite`; a fake `StackStatusReader.resourcesDone`; the harness's `FINISH` script moves to the one-form shape |
-| `tests/contract/init-project-form.test.ts` (new), `init-finish-steps.test.ts`, `init-slack-app.test.ts`, `init-channel-add.test.ts` (new, or add to an existing channel test file if one already exists under another name; check first), `init-deploy-steps.test.ts`, `init-ui-cards.test.ts`, `init-ui-journey.test.ts`, `init-ui-page.test.ts`, `init-ui-prompter.test.ts`, `init-prompts.test.ts`, `init-ui-copy-lint.test.ts`, `init-cli.test.ts`, `init-ui-cli.test.ts` | Tests for every module above |
+| `tests/contract/init-project-form.test.ts` (new), `init-finish-steps.test.ts`, `init-channel-add.test.ts` (new, or add to an existing channel test file if one already exists under another name; check first), `init-deploy-steps.test.ts`, `init-ui-cards.test.ts`, `init-ui-journey.test.ts`, `init-ui-page.test.ts`, `init-ui-prompter.test.ts`, `init-prompts.test.ts`, `init-ui-copy-lint.test.ts`, `init-cli.test.ts`, `init-ui-cli.test.ts` | Tests for every module above |
 
 ## Interfaces Later Phases Rely On
 
@@ -218,18 +238,25 @@ end-to-end check (SC-005 to SC-008, SC-010, SC-013, SC-014, SC-016) and an updat
 
 ---
 
-### Task 1: The Slack manifest gains the channel-creation scopes, and `SlackChannelApi` gains create, list, lookup and invite (FR-051, FR-052, FR-053)
+### Task 1: `SlackChannelApi` gains create, list, lookup and invite (FR-051, FR-052)
+
+**Owner decision, 2026-10-02:** this task no longer touches the Slack manifest's scopes.
+`channels:manage`/`groups:write` move to phase 3's Task 14, which makes the manifest carry them (or
+not) from the up-front settings answer, before the Slack app exists; by the time this task's code
+runs, the manifest has already been built one way or the other. This task is now only the
+`SlackChannelApi` methods the channel step's Yes and No paths (Tasks 4, 5) call once the bot token
+exists.
 
 **Files:**
-- Modify: `packages/cli/src/init/slack-app.ts` (`SLACK_BOT_SCOPES`)
 - Modify: `packages/cli/src/setup/channel-add.ts` (`SlackChannelApi`, `SlackRateLimitedError`'s reused retry helper)
-- Test: `tests/contract/init-slack-app.test.ts`, `tests/contract/init-channel-add.test.ts` (new, or
+- Test: `tests/contract/init-channel-add.test.ts` (new, or
   extend the existing test file for `channel-add.ts` if one already exists; `grep -rln
   "channel-add" tests/contract` first)
 
 **Interfaces:**
-- Consumes: phase 1's `slack-app.ts` manifest builder; phase 1's `SlackChannelApi { find, join }`,
-  `SlackRateLimitedError`, the `call` helper's retry-after handling.
+- Consumes: phase 1's `SlackChannelApi { find, join }`, `SlackRateLimitedError`, the `call` helper's
+  retry-after handling. No longer consumes `slack-app.ts`'s manifest builder (owner decision,
+  2026-10-02): this task does not touch the manifest.
 - Produces:
   ```ts
   export interface SlackChannelApi {
@@ -248,15 +275,6 @@ end-to-end check (SC-005 to SC-008, SC-010, SC-013, SC-014, SC-016) and an updat
   ```
 
 - [ ] **Step 1: Write the failing tests**
-
-```ts
-// tests/contract/init-slack-app.test.ts, added describe block
-describe("spec 048 phase 4: the manifest requests the channel-creation scopes (FR-053)", () => {
-  it("always includes channels:manage and groups:write, whichever way the channel question is answered", () => {
-    expect(SLACK_BOT_SCOPES).toEqual(expect.arrayContaining(["channels:manage", "groups:write"]));
-  });
-});
-```
 
 ```ts
 // tests/contract/init-channel-add.test.ts
@@ -308,19 +326,11 @@ describe("spec 048 phase 4: creating, listing and inviting (FR-051, FR-052, FR-0
 
 - [ ] **Step 2: Run tests to verify they fail**
 
-Run: `npx vitest run tests/contract/init-slack-app.test.ts tests/contract/init-channel-add.test.ts`
-Expected: FAIL: `SLACK_BOT_SCOPES` has no `channels:manage`; `create`/`list`/`lookupByEmail`/`invite`
-are not exported; `SlackNameTakenError` does not exist.
+Run: `npx vitest run tests/contract/init-channel-add.test.ts`
+Expected: FAIL: `create`/`list`/`lookupByEmail`/`invite` are not exported; `SlackNameTakenError` does
+not exist.
 
 - [ ] **Step 3: Write minimal implementation**
-
-In `slack-app.ts`:
-
-```ts
-export const SLACK_BOT_SCOPES: readonly string[] = [
-  "app_mentions:read", "channels:join", "channels:manage", "channels:read", "chat:write", "groups:read", "groups:write", "im:write", "users:read", "users:read.email",
-];
-```
 
 In `channel-add.ts`, beside `SlackRateLimitedError`:
 
@@ -381,14 +391,14 @@ this task is not otherwise testing.)
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `npx vitest run tests/contract/init-slack-app.test.ts tests/contract/init-channel-add.test.ts`
+Run: `npx vitest run tests/contract/init-channel-add.test.ts`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add packages/cli/src/init/slack-app.ts packages/cli/src/setup/channel-add.ts tests/contract/init-slack-app.test.ts tests/contract/init-channel-add.test.ts
-git commit -m "feat(setup): the Slack app can create, list and invite into channels (048 FR-051, FR-052, FR-053)"
+git add packages/cli/src/setup/channel-add.ts tests/contract/init-channel-add.test.ts
+git commit -m "feat(setup): the Slack app can create, list and invite into channels (048 FR-051, FR-052)"
 ```
 
 ---
@@ -780,6 +790,13 @@ git commit -m "feat(init): the first project is one form: repository, name, comm
 
 ### Task 4: The channel question, Yes path: create, join and invite the installer (FR-051)
 
+**Owner decision, 2026-10-02:** the Yes/No decision itself is no longer asked here. It was answered
+earlier, at settings, before the Slack app existed (phase 3's Task 14), specifically so the Slack
+manifest could carry the channel-creating scopes only when the answer is Yes. This task's form fields
+are the Yes path's remaining questions (a name and public-or-private), included only when
+`context.answers.settings.createChannel` already says "yes"; there is no live `createChannel` field
+on this form to show or hide them, so they need no `showWhen` of their own.
+
 **Files:**
 - Modify: `packages/cli/src/init/project-form.ts` (`CHANNEL_DECISION_GROUP`, the channel fields added to `projectFields`)
 - Modify: `packages/cli/src/setup/channel-add.ts` (`createAndInviteChannel`)
@@ -789,10 +806,18 @@ git commit -m "feat(init): the first project is one form: repository, name, comm
 
 **Interfaces:**
 - Consumes: Task 1's `SlackChannelApi.create`/`.lookupByEmail`/`.invite`, `SlackNameTakenError`;
-  Task 2's `showWhen`; phase 2's `answers.adminEmail`.
+  phase 2's `answers.adminEmail`; phase 3 Task 14's `context.answers.settings.createChannel`
+  (`"yes" | "no"`, already decided before this screen shows).
 - Produces:
   ```ts
   export const CHANNEL_DECISION_GROUP = "Project channel";
+  export function projectFields(input: {
+    repositories: readonly { fullName: string }[];
+    proposed: { setup: string; test: string; basis: string[] };
+    connected: ReadonlySet<ConnectorType>;
+    // Owner decision, 2026-10-02: the already-known settings answer, not a field this form asks.
+    channelDecision: "yes" | "no";
+  }): FormField[];
   export async function createAndInviteChannel(input: {
     botToken: string; name: string; isPrivate: boolean; installerEmail: string;
     api: Pick<SlackChannelApi, "create" | "lookupByEmail" | "invite" | "join">;
@@ -804,14 +829,20 @@ git commit -m "feat(init): the first project is one form: repository, name, comm
 
 ```ts
 // tests/contract/init-project-form.test.ts, added case
-it("the channel question and its Yes-path fields are grouped and shown only on Yes (FR-051)", () => {
-  const fields = projectFields({ repositories: [{ fullName: "acme/payments-api" }], proposed: { setup: "", test: "", basis: [] }, connected: new Set() });
-  const decision = fields.find((field) => field.name === "createChannel");
-  expect(decision).toMatchObject({ group: CHANNEL_DECISION_GROUP, choices: [{ value: "yes" }, { value: "no" }], defaultValue: "yes" });
+it("owner decision 2026-10-02: on a Yes decision, the project form shows the channel's name and visibility, grouped, with no createChannel field of its own (FR-051)", () => {
+  const fields = projectFields({ repositories: [{ fullName: "acme/payments-api" }], proposed: { setup: "", test: "", basis: [] }, connected: new Set(), channelDecision: "yes" });
+  expect(fields.find((field) => field.name === "createChannel")).toBeUndefined();
   const name = fields.find((field) => field.name === "channelName");
-  expect(name).toMatchObject({ group: CHANNEL_DECISION_GROUP, showWhen: { field: "createChannel", equals: "yes" }, defaultValue: "payments-api" });
+  expect(name).toMatchObject({ group: CHANNEL_DECISION_GROUP, defaultValue: "payments-api" });
+  expect(name?.showWhen).toBeUndefined();
   const visibility = fields.find((field) => field.name === "channelVisibility");
-  expect(visibility).toMatchObject({ showWhen: { field: "createChannel", equals: "yes" }, choices: [{ value: "public" }, { value: "private" }] });
+  expect(visibility).toMatchObject({ group: CHANNEL_DECISION_GROUP, choices: [{ value: "public" }, { value: "private" }] });
+});
+
+it("owner decision 2026-10-02: on a No decision, the project form has no channelName/channelVisibility fields (Task 5 covers its own picker fields)", () => {
+  const fields = projectFields({ repositories: [{ fullName: "acme/payments-api" }], proposed: { setup: "", test: "", basis: [] }, connected: new Set(), channelDecision: "no" });
+  expect(fields.find((field) => field.name === "channelName")).toBeUndefined();
+  expect(fields.find((field) => field.name === "channelVisibility")).toBeUndefined();
 });
 ```
 
@@ -848,9 +879,11 @@ describe("spec 048 phase 4: creating and inviting on the Yes path (FR-051)", () 
 
 ```ts
 // tests/contract/init-finish-steps.test.ts, added case
-it("spec 048 FR-051: Yes creates the channel and invites the installer", async () => {
+it("spec 048 FR-051: Yes (decided at settings) creates the channel and invites the installer", async () => {
   const { context, progress } = await finishContext({
-    script: [JSON.stringify({ repository: "acme/payments-api", projectName: "payments-api", setupCommand: "", testCommand: "", trackers: "", createChannel: "yes", channelName: "payments-api", channelVisibility: "public" })],
+    script: [JSON.stringify({ repository: "acme/payments-api", projectName: "payments-api", setupCommand: "", testCommand: "", trackers: "", channelName: "payments-api", channelVisibility: "public" })],
+    // Owner decision, 2026-10-02: the Yes/No answer comes from settings, not the form's own script.
+    settings: { createChannel: "yes" },
     slackChannels: fakeSlackChannels([], { lookupByEmail: async () => "U1" }),
   });
   await expect(firstProjectStep().run(context, progress)).resolves.toMatchObject({ status: "done" });
@@ -860,30 +893,45 @@ it("spec 048 FR-051: Yes creates the channel and invites the installer", async (
 
 (`fakeSlackChannels`'s signature gains an optional second argument for `create`/`lookupByEmail`/
 `invite` overrides; check its current shape in `tests/support/setup-fakes.ts` and extend it rather
-than replace it, so every existing caller with one argument is unaffected.)
+than replace it, so every existing caller with one argument is unaffected. `finishContext`'s
+`settings` override must land in `context.answers.settings` exactly the way phase 2's own settings
+fixtures already do; confirm the exact fixture shape against `tests/support/init-fakes.ts` before
+wiring this, since this plan cannot see phase 2's and phase 3's merged state on it.)
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `npx vitest run tests/contract/init-project-form.test.ts tests/contract/init-channel-add.test.ts tests/contract/init-finish-steps.test.ts`
-Expected: FAIL: no `CHANNEL_DECISION_GROUP`/channel fields on the form; `createAndInviteChannel` does
-not exist.
+Expected: FAIL: `projectFields` does not accept `channelDecision`; no `CHANNEL_DECISION_GROUP`/channel
+fields on the form; `createAndInviteChannel` does not exist.
 
 - [ ] **Step 3: Write minimal implementation**
 
 In `project-form.ts`, add to `projectFields`'s returned array, right after `projectName` and before
 the command fields (so the channel's own fields sit together, between the project's name and its
-commands, matching the design mockup's layout):
+commands, matching the design mockup's layout). Owner decision, 2026-10-02: these fields are included
+only when `input.channelDecision === "yes"`, and carry no `showWhen` of their own, since there is no
+live field on this form left to key one on:
 
 ```ts
 export const CHANNEL_DECISION_GROUP = "Project channel";
 // ...inside projectFields, inserted after PROJECT_FIELD.projectName's entry:
-    { name: "createChannel", question: "Should AgentX create the channel for you?", flag: "--create-channel", defaultValue: "yes", group: CHANNEL_DECISION_GROUP, choices: [{ value: "yes", label: "Yes, create it" }, { value: "no", label: "No, let me pick one" }], help: { why: "AgentX answers in this channel for this project." } },
-    { name: "channelName", question: "Channel name", flag: "--channel", defaultValue: projectNameOf(first), group: CHANNEL_DECISION_GROUP, showWhen: { field: "createChannel", equals: "yes" } },
-    { name: "channelVisibility", question: "Public or private?", flag: "--channel-visibility", defaultValue: "public", group: CHANNEL_DECISION_GROUP, showWhen: { field: "createChannel", equals: "yes" }, choices: [{ value: "public", label: "Public" }, { value: "private", label: "Private" }] },
+    ...(input.channelDecision === "yes" ? [
+      { name: "channelName", question: "Channel name", flag: "--channel", defaultValue: projectNameOf(first), group: CHANNEL_DECISION_GROUP, help: { why: "AgentX answers in this channel for this project." } },
+      { name: "channelVisibility", question: "Public or private?", flag: "--channel-visibility", defaultValue: "public", group: CHANNEL_DECISION_GROUP, choices: [{ value: "public", label: "Public" }, { value: "private", label: "Private" }] },
+    ] as FormField[] : []),
 ```
 
-(Task 5 adds the No-path fields, `showWhen: { field: "createChannel", equals: "no" }`, to the same
-array, right after `channelVisibility`.)
+(Task 5 adds the No-path fields the same way, guarded by `input.channelDecision === "no"`, to the
+same array, right after this block.)
+
+This task also updates Task 3's `askForm(context.prompter, "Your first project",
+projectFields({ repositories, proposed, connected }), {})` call (in `firstProjectStep`, before the
+channel branch below) to pass the now-required `channelDecision`:
+`projectFields({ repositories, proposed, connected, channelDecision: context.answers.settings.createChannel === "no" ? "no" : "yes" })`.
+This is the one place the settings-time answer (phase 3's Task 14) reaches the project form; every
+later read of the decision, including the channel branch below, goes through
+`context.answers.settings.createChannel` directly rather than through the form's own answers, since
+the form no longer carries that field.
 
 In `channel-add.ts`:
 
@@ -904,8 +952,9 @@ export async function createAndInviteChannel(input: {
 }
 ```
 
-In `finish-steps.ts`'s `firstProjectStep`, the channel branch (replacing the plain `addChannel` call
-when `answers.createChannel === "yes"`):
+In `finish-steps.ts`'s `firstProjectStep`, the channel branch (replacing the plain `addChannel` call;
+owner decision, 2026-10-02: the branch now reads `context.answers.settings.createChannel`, the
+settings-time answer, not a field this form asked again):
 
 ```ts
       if (project.channelId === undefined) {
@@ -913,7 +962,7 @@ when `answers.createChannel === "yes"`):
         if (slack === undefined) throw agentXError("CONFIG_INVALID", "install progress has no Slack app facts; the Slack app step must finish first, so run agentx init again");
         const botToken = await readSlackBotToken(context.secrets, context.env);
         let bound: { channelId: string; channelName: string };
-        if (formAnswers.createChannel !== "no") {
+        if (context.answers.settings.createChannel !== "no") {
           try {
             const created = await createAndInviteChannel({
               botToken, name: formAnswers.channelName, isPrivate: formAnswers.channelVisibility === "private",
@@ -940,7 +989,14 @@ when `answers.createChannel === "yes"`):
       }
 ```
 
-(`formAnswers` is the same object `askForm` returned in Task 3, held in scope for the whole step;
+(Owner decision, 2026-10-02 (spec Decisions, owner decision 9): `prompter.choose`'s own
+`defaultValue: "use"` above already gives a scripted install exactly the "use it or create it"
+behavior decided for `--channel`: with no one to ask, the choice resolves to "use" by itself, binding
+the existing channel rather than stopping. Confirm `Prompter.choose`'s existing non-interactive
+fallback already returns `defaultValue` with no prompt when there is no surface and no matching flag,
+against the current `prompts.ts`, before relying on it here; if it does not, this task adds that
+fallback rather than inventing a second code path for the scripted case.
+`formAnswers` is the same object `askForm` returned in Task 3, held in scope for the whole step;
 `session` and `botName` helpers are already in scope above this block, unchanged from today's code.
 `bindPickedChannel` is Task 5's; this task may stub it as a thin wrapper over today's `addChannel`
 so this task's own tests pass, and Task 5 replaces the stub with the real picker-and-bind logic.)
@@ -972,7 +1028,9 @@ git commit -m "feat(init): Yes creates the Slack channel, joins it and invites t
 - Test: `tests/contract/init-project-form.test.ts`, `tests/contract/init-channel-add.test.ts`, `tests/contract/init-ui-page.test.ts`, `tests/contract/init-ui-copy-lint.test.ts`
 
 **Interfaces:**
-- Consumes: Task 1's `SlackChannelApi.list`/`.find`/`.join`; Task 2's `showWhen`.
+- Consumes: Task 1's `SlackChannelApi.list`/`.find`/`.join`; Task 4's `projectFields`'s
+  `channelDecision` input. Owner decision, 2026-10-02: no longer consumes Task 2's `showWhen` here,
+  since the No-path fields are included outright rather than shown conditionally.
 - Produces:
   ```ts
   export async function bindPickedChannel(input: {
@@ -991,12 +1049,14 @@ git commit -m "feat(init): Yes creates the Slack channel, joins it and invites t
 
 ```ts
 // tests/contract/init-project-form.test.ts, added case
-it("the No-path picker lists channels and a not-listed name field, shown only on No (FR-052)", () => {
-  const fields = projectFields({ repositories: [{ fullName: "acme/payments-api" }], proposed: { setup: "", test: "", basis: [] }, connected: new Set() });
+it("owner decision 2026-10-02: on a No decision, the project form shows the picker and a not-listed name field, with no createChannel field and no showWhen (FR-052)", () => {
+  const fields = projectFields({ repositories: [{ fullName: "acme/payments-api" }], proposed: { setup: "", test: "", basis: [] }, connected: new Set(), channelDecision: "no" });
   const picked = fields.find((field) => field.name === "channelPicked");
-  expect(picked).toMatchObject({ showWhen: { field: "createChannel", equals: "no" } });
+  expect(picked).toMatchObject({ group: CHANNEL_DECISION_GROUP });
+  expect(picked?.showWhen).toBeUndefined();
   const notListed = fields.find((field) => field.name === "channelNotListed");
-  expect(notListed).toMatchObject({ showWhen: { field: "createChannel", equals: "no" }, help: expect.objectContaining({ hint: expect.stringMatching(/not listed/i) as unknown }) });
+  expect(notListed).toMatchObject({ group: CHANNEL_DECISION_GROUP, help: expect.objectContaining({ hint: expect.stringMatching(/not listed/i) as unknown }) });
+  expect(notListed?.showWhen).toBeUndefined();
 });
 ```
 
@@ -1045,11 +1105,14 @@ Expected: FAIL: no No-path fields; `bindPickedChannel` does not exist; the page 
 
 - [ ] **Step 3: Write minimal implementation**
 
-In `project-form.ts`, after `channelVisibility`'s entry:
+In `project-form.ts`, after Task 4's Yes-path block, add the No-path block, guarded the same way
+(owner decision, 2026-10-02: included outright when `input.channelDecision === "no"`, no `showWhen`):
 
 ```ts
-    { name: "channelPicked", question: "Channel", flag: "--channel", group: CHANNEL_DECISION_GROUP, showWhen: { field: "createChannel", equals: "no" } },
-    { name: "channelNotListed", question: "Not listed? Type a channel name", flag: "--channel", group: CHANNEL_DECISION_GROUP, showWhen: { field: "createChannel", equals: "no" }, defaultValue: "", help: { hint: "Optional. Leave empty to use the one picked above." } },
+    ...(input.channelDecision === "no" ? [
+      { name: "channelPicked", question: "Channel", flag: "--channel", group: CHANNEL_DECISION_GROUP },
+      { name: "channelNotListed", question: "Not listed? Type a channel name", flag: "--channel", group: CHANNEL_DECISION_GROUP, defaultValue: "", help: { hint: "Optional. Leave empty to use the one picked above." } },
+    ] as FormField[] : []),
 ```
 
 (`channelPicked`'s `choices` are filled by the caller, the same way `settingsFields` leaves a
@@ -1144,7 +1207,12 @@ git commit -m "feat(init): No shows a searchable channel picker with the invite 
   // StackStatusReader gains: resourcesDone?(stackName: string): Promise<number | undefined>;
   export function buildProgressCard(input: {
     stepTitle: string; startedAt: string; usualSeconds: number; now: () => number;
+    // Owner decision, 2026-10-02: summed across every part of the step, never only the first.
     resources?: { done: number; expected: number };
+    // One entry per part, in `DEPLOY_STEP_PARTS[input.id]` order, so a two-part step's own two
+    // stacks each have their last-read status available, even though the combined `resources` line
+    // does not break them out.
+    parts?: ReadonlyArray<{ part: string; status?: string }>;
   }): WizardCard;
   ```
 
@@ -1165,14 +1233,52 @@ describe("spec 048 FR-007: expectedResourceCount", () => {
 
 it("a deploy step polls resourcesDone while it runs and shows a progress card, when the reader has it", async () => {
   const cards: WizardCard[] = [];
-  let clock = 0;
   const context = initContext({
     surface: { card: (card) => cards.push(card) },
     stackStatus: { status: async () => "CREATE_IN_PROGRESS", resourcesDone: async () => 2 },
-    sleep: async (ms) => { clock += ms; },
+    sleep: async (ms) => undefined,
+  });
+  await deployStep({ id: "access", title: "Set up AWS permissions" }).run(context, progressHandle());
+  expect(cards.some((card) => card.id === "build-progress" && card.lines.some((line) => /2 of/.test(line)))).toBe(true);
+});
+
+it("owner decision 2026-10-02: a two-part step (core: foundation, identity) reports resources done and expected summed across both stacks", async () => {
+  const cards: WizardCard[] = [];
+  const context = initContext({
+    surface: { card: (card) => cards.push(card) },
+    // foundation's stack already exists and has 2 of its own 2 resources done; identity's stack has
+    // not started yet (CloudFormation deploys core's parts one after another), so it does not exist:
+    // resourcesDone resolves undefined for it, which the poll must count as zero, not as "unknown".
+    stackStatus: {
+      status: async (stackName) => (stackName.endsWith("foundation") ? "CREATE_COMPLETE" : undefined),
+      resourcesDone: async (stackName) => (stackName.endsWith("foundation") ? 2 : undefined),
+    },
+    // foundation's template has 2 resources, identity's has 3: expected is 5, not 2.
+    release: { template: (_region: string, part: string) => JSON.stringify({ Resources: part === "foundation" ? { A: {}, B: {} } : { C: {}, D: {}, E: {} } }) },
+    sleep: async () => undefined,
   });
   await deployStep({ id: "core", title: "Build the network and sign-in" }).run(context, progressHandle());
-  expect(cards.some((card) => card.id === "build-progress" && card.lines.some((line) => /2 of/.test(line)))).toBe(true);
+  const last = cards.filter((card) => card.id === "build-progress").at(-1);
+  expect(last?.lines.some((line) => /2 of 5 resources done/.test(line))).toBe(true);
+  expect(last?.details).toEqual(expect.arrayContaining([expect.stringContaining("foundation"), expect.stringContaining("identity")]));
+});
+
+it("owner decision 2026-10-02: the row finishes only once both of a two-part step's stacks are done, and a failure in the second shows on this step", async () => {
+  const cards: WizardCard[] = [];
+  const context = initContext({
+    surface: { card: (card) => cards.push(card) },
+    stackStatus: {
+      status: async (stackName) => (stackName.endsWith("foundation") ? "CREATE_COMPLETE" : "CREATE_FAILED"),
+      resourcesDone: async (stackName) => (stackName.endsWith("foundation") ? 2 : 0),
+    },
+    release: { template: (_region: string, part: string) => JSON.stringify({ Resources: part === "foundation" ? { A: {}, B: {} } : { C: {}, D: {}, E: {} } }) },
+    sleep: async () => undefined,
+  });
+  context.deployer.fail.set(environmentStackName(context.env, "identity"), new Error("identity stack failed"));
+  await expect(deployStep({ id: "core", title: "Build the network and sign-in" }).run(context, progressHandle())).rejects.toThrow(/identity stack failed/);
+  const last = cards.filter((card) => card.id === "build-progress").at(-1);
+  expect(last?.lines.some((line) => /2 of 5 resources done/.test(line))).toBe(true);
+  expect(last?.details?.some((line) => /identity.*CREATE_FAILED/.test(line))).toBe(true);
 });
 
 it("Review Focus 5: no known resource count shows elapsed time alone, never NaN", () => {
@@ -1182,11 +1288,16 @@ it("Review Focus 5: no known resource count shows elapsed time alone, never NaN"
 });
 ```
 
+(The two new owner-decision tests use `context.deployer`, `context.env` and the `release.template`
+override the way `initContext`'s other callers already do; confirm `scriptedDeployer`'s exact
+`.fail: Map<string, Error>` keying against `tests/support/init-fakes.ts` before wiring the second
+test, since this plan cannot see that file's state after phases 2 and 3 have landed on it.)
+
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `npx vitest run tests/contract/init-deploy-steps.test.ts tests/contract/init-ui-cards.test.ts`
 Expected: FAIL: `expectedResourceCount`/`buildProgressCard` are not exported; `deployStep` shows no
-progress card.
+progress card; `buildProgressCard` has no `parts` input.
 
 - [ ] **Step 3: Write minimal implementation**
 
@@ -1205,18 +1316,37 @@ export function expectedResourceCount(templateJson: string): number | undefined 
 ```
 
 In `deployStep`'s `run`, start a poll beside (not instead of) the existing `deployEnvironment` call,
-stopped the moment it settles:
+stopped the moment it settles. Owner decision, 2026-10-02: the poll reads every part of the step, not
+only `parts[0]`, and combines them:
 
 ```ts
       const startedAt = new Date(context.now()).toISOString();
-      const expected = context.release.template === undefined ? undefined : (() => {
-        try { return expectedResourceCount(context.release.template!(answers.region, parts[0]!)); } catch { return undefined; }
-      })();
+      const expectedByPart = context.release.template === undefined ? undefined : parts.map((part) => {
+        try { return expectedResourceCount(context.release.template!(answers.region, part)); } catch { return undefined; }
+      });
+      // A combined total is only shown once every part's own count is known; a single unreadable
+      // part (such as a part the cdk engine synthesizes rather than reads as a downloaded template)
+      // makes the whole step's total unknown too, same as Review Focus 5 already requires.
+      const expected = expectedByPart?.every((count) => count !== undefined) === true
+        ? expectedByPart.reduce((sum: number, count) => sum + count!, 0)
+        : undefined;
       let stop = false;
       const poll = (async () => {
         while (!stop) {
-          const done = await context.stackStatus.resourcesDone?.(environmentStackName(env, parts[0]!)).catch(() => undefined);
-          context.surface?.card(buildProgressCard({ stepTitle: input.title, startedAt, usualSeconds: STEP_PLAN[input.id].usualSeconds, now: context.now, ...(done === undefined || expected === undefined ? {} : { resources: { done, expected } }) }));
+          const stackNames = parts.map((part) => environmentStackName(env, part));
+          const statuses = await Promise.all(stackNames.map((name) => context.stackStatus.status(name).catch(() => undefined)));
+          // A part not deployed yet (CloudFormation builds a step's parts one after another) has no
+          // stack, so resourcesDone resolves undefined for it; that counts as zero done, not as
+          // "unknown", since its own expected count is already known from its template.
+          const doneByPart = context.stackStatus.resourcesDone === undefined
+            ? undefined
+            : await Promise.all(stackNames.map((name) => context.stackStatus.resourcesDone!(name).catch(() => undefined)));
+          const done = doneByPart === undefined ? undefined : doneByPart.reduce((sum: number, count) => sum + (count ?? 0), 0);
+          context.surface?.card(buildProgressCard({
+            stepTitle: input.title, startedAt, usualSeconds: STEP_PLAN[input.id].usualSeconds, now: context.now,
+            ...(done === undefined || expected === undefined ? {} : { resources: { done, expected } }),
+            parts: parts.map((part, index) => ({ part, status: statuses[index] })),
+          }));
           await context.sleep(5_000);
         }
       })();
@@ -1232,22 +1362,30 @@ stopped the moment it settles:
 
 (Confirm `LoadedRelease`'s real `template(region, part)` signature and whether it throws or returns
 undefined for a part this engine does not template locally, in `deploy/release.ts`, before wiring
-this; the `try`/`catch` above assumes it can throw, which is the safer assumption if unconfirmed.
-`parts[0]` is this step's first deploy part; a step with more than one part, such as `core`
-(foundation and identity), shows the first part's progress only, which Review Focus 5's own test
-already covers as an acceptable simplification; a reviewer unhappy with that may ask for a
-part-by-part set of rows instead, which is a reasonable one-line change to `buildProgressCard`'s
-input shape once this task's basic mechanism lands.)
+this; the `try`/`catch` above assumes it can throw, which is the safer assumption if unconfirmed. A
+one-part step, such as `access`, runs this same loop over its single part and behaves exactly as
+before: `parts.length === 1` makes the combined total and the per-part detail line the same number
+either way.)
 
 In `cards.ts`:
 
 ```ts
-export function buildProgressCard(input: { stepTitle: string; startedAt: string; usualSeconds: number; now: () => number; resources?: { done: number; expected: number } }): WizardCard {
+export function buildProgressCard(input: {
+  stepTitle: string; startedAt: string; usualSeconds: number; now: () => number;
+  resources?: { done: number; expected: number };
+  parts?: ReadonlyArray<{ part: string; status?: string }>;
+}): WizardCard {
   const elapsed = Math.max(0, Math.round((input.now() - Date.parse(input.startedAt)) / 1000));
   const resourceLine = input.resources === undefined ? "Resources starting." : `${input.resources.done} of ${input.resources.expected} resources done.`;
+  // Owner decision, 2026-10-02: each stack's own last-read status stays available even when the
+  // resource line above is the combined one; a one-part step has nothing extra to say here.
+  const details = input.parts === undefined || input.parts.length < 2
+    ? undefined
+    : input.parts.map((part) => `${part.part}: ${part.status ?? "not started yet"}`);
   return {
     id: "build-progress", title: input.stepTitle, status: "running",
     lines: [resourceLine, `Running for ${elapsed} seconds (usually ${Math.round(input.usualSeconds)} seconds). You can leave now; this page tells you when it needs you.`],
+    ...(details === undefined ? {} : { details }),
   };
 }
 ```
@@ -1635,10 +1773,24 @@ git commit -m "feat(init): a browser notification fires once the run starts wait
 - [ ] **Step 1: Write the failing test**
 
 ```ts
-it("spec 048 FR-072: --yes asks the channel decision and its fields in the same order the form would show them", async () => {
+it("spec 048 FR-072: --yes asks the channel's remaining fields in the same order the form would show them (the Yes/No decision itself is settings', phase 3's Task 14)", async () => {
   const h = await harness();
-  const result = await h.run(["--yes", "--admin-email", ADMIN_EMAIL, "--repository", "acme/payments-api", "--create-channel", "--channel", "payments-api", /* ... */]);
+  const result = await h.run(["--yes", "--admin-email", ADMIN_EMAIL, "--repository", "acme/payments-api", "--channel", "payments-api", /* ... */]);
   expect(result).toBe(0);
+});
+
+it("owner decision 2026-10-02: --channel alone (no --no-create-channel) creates the named channel when it does not exist", async () => {
+  const h = await harness({ slackChannels: fakeSlackChannels([] /* no channel named payments-api yet */) });
+  const result = await h.run(["--yes", "--admin-email", ADMIN_EMAIL, "--repository", "acme/payments-api", "--channel", "payments-api", /* ... */]);
+  expect(result).toBe(0);
+  expect(h.createdChannels()).toContain("payments-api");
+});
+
+it("owner decision 2026-10-02: --no-create-channel keeps today's find-or-fail behavior for --channel", async () => {
+  const h = await harness({ slackChannels: fakeSlackChannels([] /* the channel does not exist */) });
+  const result = await h.run(["--yes", "--admin-email", ADMIN_EMAIL, "--repository", "acme/payments-api", "--no-create-channel", "--channel", "does-not-exist", /* ... */]);
+  expect(result).not.toBe(0);
+  expect(h.stderr()).toMatch(/create it.*invite the bot/i);
 });
 
 it("every new string this phase added passes the copy-lint", () => {
@@ -1647,6 +1799,11 @@ it("every new string this phase added passes the copy-lint", () => {
   // of vitest finds something this phase missed.
 });
 ```
+
+(`h.createdChannels()`/`h.stderr()` above are illustrative; confirm `harness()`'s actual shape in
+`tests/contract/init-cli.test.ts` and `tests/support/init-ui-harness.ts` first, and use whatever
+assertion that harness already exposes for "which Slack calls were made" and "what the failed run
+printed", in the same spirit as this plan's other "confirm the exact signature first" notes.)
 
 - [ ] **Step 2: Run tests to verify they pass or fail**
 
@@ -1669,7 +1826,7 @@ npm run typecheck:all && npm run lint && npm run build && npm test && npm run in
 
 ```bash
 git add packages/cli/src/init/finish-steps.ts tests/contract/init-cli.test.ts tests/contract/init-ui-copy-lint.test.ts docs/install.md
-git commit -m "test(init): no-UI parity for the channel decision; copy-lint and docs for phase 4 (048 FR-072, FR-081)"
+git commit -m "test(init): no-UI parity for the channel's remaining fields; --channel's use-it-or-create-it scripted behavior; copy-lint and docs for phase 4 (048 FR-072, FR-081, owner decision 2026-10-02)"
 ```
 
 ---
@@ -1683,9 +1840,9 @@ git commit -m "test(init): no-UI parity for the channel decision; copy-lint and 
 | FR-002 measured time estimates | 8 |
 | FR-007 real build progress | 6, 7 |
 | FR-050 the first project on one screen (repository, name, commands, trackers) | 2, 3 |
-| FR-051 the channel question, Yes: create, join, invite | 2, 4 |
-| FR-052 the channel question, No: picker, up-front invite | 2, 5 |
-| FR-053 the channel scopes always in the manifest | 1 |
+| FR-051 the channel question's Yes path: create, join, invite (the Yes/No decision itself moved to settings: phase 3 Task 14, owner decision 2026-10-02) | 4 |
+| FR-052 the channel question's No path: picker, up-front invite | 5 |
+| FR-053 the channel scopes follow the settings decision (phase 3 Task 14, owner decision 2026-10-02); Task 1 here is only `SlackChannelApi` | 1 |
 | FR-055 admin sign-in reuses the settings email | 9 |
 | FR-056 alerts: detect, test, arrived/did not arrive | 9 |
 | FR-057 test reply: named by handle, linked, timed | 9 |
@@ -1701,36 +1858,63 @@ written before the branch it builds on exists cannot pin a line number from a fi
 change yet. Task 8 is openly not code-first (it measures, then codes), named as such rather than
 disguised as a normal TDD step.
 
-**3. Type consistency:** `FormField.showWhen`/`.multiple` (Task 2) are what `projectFields` (Task 3)
-and the channel fields (Tasks 4, 5) build with. `PROJECT_FIELD`, `CHANNEL_DECISION_GROUP` (Tasks 3, 4)
-are the field names every later task's test reads by. `SlackChannelApi.create`/`.list`/
-`.lookupByEmail`/`.invite` (Task 1) are what `createAndInviteChannel` (Task 4) and `bindPickedChannel`
-(Task 5) consume. `StackStatusReader.resourcesDone` (Tasks 6, 7) and `buildProgressCard` (Task 6) are
-produced and consumed within the same two tasks, with no later task depending on either.
+**3. Type consistency:** `FormField.multiple` (Task 2) is what the trackers field (Task 3) builds
+with; `FormField.showWhen` (Task 2) has no consumer left in this phase, since the channel fields
+(Tasks 4, 5) are now included outright rather than shown conditionally (owner decision, 2026-10-02).
+`PROJECT_FIELD`, `CHANNEL_DECISION_GROUP` (Tasks 3, 4) are the field names every later task's test
+reads by; `projectFields`'s `channelDecision` input (Task 4) is what Tasks 4 and 5 both key their own
+fields' inclusion on, and is itself `context.answers.settings.createChannel` (phase 3's Task 14), read
+once by `finish-steps.ts` before building the form. `SlackChannelApi.create`/`.list`/`.lookupByEmail`/
+`.invite` (Task 1) are what `createAndInviteChannel` (Task 4) and `bindPickedChannel` (Task 5)
+consume. `StackStatusReader.resourcesDone` (Tasks 6, 7) and `buildProgressCard` (Task 6) are produced
+and consumed within the same two tasks, with no later task depending on either.
 
 **4. Review Focus:** each of the five lines has its pinned test in the named task (Tasks 4, 4, 5, 3,
 6).
 
 ## Rulings On Spec Ambiguities
 
-1. **The channel scopes are always in the manifest, never conditional on the Yes/No answer.** The
-   design doc left this open (section 9, question 3); `spec.md` itself already resolved it ("Decided
-   in this spec", the channel scopes paragraph): Slack fixes a bot's scopes at install time, and the
-   channel question comes after the Slack app already exists, so asking for the scopes only on Yes
-   would force a reinstall partway through the run. This plan follows `spec.md`, not the open
-   question.
+1. **The channel create-or-not question is answered at settings, before the Slack app exists, and
+   its manifest scopes follow the answer (owner decision, 2026-10-02, overruling this plan's earlier
+   reading).** The design doc left open whether the extra scopes are requested only on Yes or always
+   (section 9, question 3); this plan originally followed `spec.md`'s own "Decided in this spec"
+   paragraph, which kept the question at the channel step and always requested both scopes, reasoning
+   that Slack fixes a bot's scopes at install time and the channel question came after the Slack app
+   already existed, so asking for the scopes only on Yes would force a reinstall partway through the
+   run. The owner chose the other branch of that same reasoning: move the question earlier instead of
+   requesting the scopes unconditionally. Phase 3's Task 14 now asks "Should AgentX create the channel
+   for you?" at settings, before the Slack app is created, and builds its manifest with
+   `channels:manage`/`groups:write` only when the answer is Yes. This phase's project form (Tasks 3 to
+   5) no longer asks that question at all; it reads the already-known answer from
+   `context.answers.settings.createChannel` and shows only the fields that answer calls for. This also
+   resolves, for a scripted install, what `--channel <name>` alone (no `--create-channel`/
+   `--no-create-channel`) means: since `createChannel` already defaults to "yes" (Decisions, owner
+   decision 9 of 2026-10-02), it is answering Yes, so the channel step creates the named channel if it
+   does not exist (`createAndInviteChannel`), or uses it if it does (`SlackNameTakenError`'s existing
+   fallback to `bindPickedChannel`, which a scripted run resolves to "use" by itself, since
+   `prompter.choose`'s own default is `"use"` and there is no one to ask); `--no-create-channel` drops
+   the scopes and keeps the plain find-or-fail behavior `bindPickedChannel` already has.
 2. **A taken channel name on the Yes path falls back to the No path's own bind, not a second create
    attempt.** Once Slack refuses the create, the channel already exists; finding and binding it is
    exactly what the No path already does, so Task 4 reuses Task 5's `bindPickedChannel` rather than
    writing a second "use the existing one" code path.
-3. **One deploy part's progress stands in for a two-part step's.** `core` (foundation and identity)
-   and `control-plane` (control-plane and runtime) each have two stacks; Task 6 polls only the first
-   part named in `DEPLOY_STEP_PARTS`, because CloudFormation deploys a step's parts one after another,
-   not at once, so the first part is also the one actually in progress for most of the step's time.
-   Splitting the row into two is a natural follow-up, not required by FR-007's own wording ("one row
-   per part being built... with... resources done out of the expected count"), which this plan reads
-   as being satisfied by one row per step, not per stack, matching the rail's own one-row-per-step
-   layout.
+3. **A two-part step's progress tracks both of its stacks, combined (owner decision, 2026-10-02,
+   overruling this plan's earlier reading).** `core` (foundation and identity) and `control-plane`
+   (control-plane and runtime) each have two stacks. This plan originally read FR-007's "one row per
+   part being built... with... resources done out of the expected count" as satisfied by one row per
+   step, not per stack, and had Task 6 poll only the first part named in `DEPLOY_STEP_PARTS[input.id]`
+   since CloudFormation deploys a step's parts one after another, so the first part was also the one
+   actually in progress for most of the step's time. The owner overruled that: the single row a step
+   gets MUST track every part it has, not only the first. Task 6's poll now reads `resourcesDone` and
+   `status` for every part of the step, and the card reports resources done and expected summed across
+   every part (a part whose stack does not exist yet, because it has not started deploying, counts as
+   zero done toward the total, not as unknown, since its expected count is already known from its own
+   template), with each part's own last-read status carried in the card's `details` so a reconnecting
+   page can see which stack is still running or has failed. The time estimate already covered both
+   parts without change: `usualSeconds` is looked up by step id, not by part, so it was never only the
+   first part's budget. The row is combined-complete only once every part's own resources-done reaches
+   its own expected count; a failure thrown by the second part surfaces on this same step, with the
+   last status line this task recorded for that part still showing in `details`.
 4. **The repository picker's proposed commands are not re-fetched when a different repository is
    picked on the same form.** A form has no live round trip mid-fill; re-proposing would need one.
    FR-050 asks only that commands be prefilled, editable and explained, which the first repository's

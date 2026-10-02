@@ -8,7 +8,9 @@ stack), an answer can be changed in place once a step has already run but only w
 depends on it (and a resumed no-UI run follows the same rule for its flags), a stopped install's page
 reopens at the same address when `agentx init` runs again, a wait that reaches its limit asks "Still
 there? Keep waiting" instead of ending the run, and a lost connection says so and offers the command
-to continue.
+to continue. Added by owner decision after this plan's first review (2026-10-02): the channel
+create-or-not question moves to settings, before the Slack app is created, so the Slack app manifest
+can carry the channel-creating scopes only when the answer is Yes.
 
 **Architecture:**
 - **A failure is tagged with its recovery action where it is found.** `checkPrerequisites` and
@@ -51,12 +53,14 @@ page stays plain HTML, CSS and an ES module held as text in `page.ts` (spec 040)
 3: FR-061 to FR-064, FR-066 and FR-067, with SC-004 (every failure recoverable on the page) and the
 resume half of SC-010 (a stopped install resumes in the same tab at the same address; the live timed
 part of SC-010 is checked in the final live end-to-end check after phase 4, not by this plan's tests).
-Owner approval of the spec, with all five open choices accepted: PR #231 comment of 2026-10-01.
-Owner review of phase 2's plan: PR #247. Design proposal: the guided install design, section 5
-("Recovery model") and section 10's decisions; section 5's page actions by kind of failure, the
-changed-answer rule, same-tab resume (port and token saved in the user's own config dir) and the
-countdown behavior are this plan's direct source. Owner decision of 2026-10-02 on the header's
-"Stopped" word during a failure (already merged to mainline, `journey.ts`) is assumed, not redone.
+Task 14 additionally delivers part of FR-051 and FR-053, moved here from phase 4's row by owner
+decision (2026-10-02; see Decisions in the spec, owner decisions 8 and 9). Owner approval of the
+spec, with all five open choices accepted: PR #231 comment of 2026-10-01. Owner review of phase 2's
+plan: PR #247. Design proposal: the guided install design, section 5 ("Recovery model") and section
+10's decisions; section 5's page actions by kind of failure, the changed-answer rule, same-tab
+resume (port and token saved in the user's own config dir) and the countdown behavior are this
+plan's direct source. Owner decision of 2026-10-02 on the header's "Stopped" word during a failure
+(already merged to mainline, `journey.ts`) is assumed, not redone.
 
 **Already covered elsewhere (checked 2026-10-02 against open issues and the two in-flight lanes; do
 not duplicate):** issues #215 (Slack approval message shows tool names/character counts) and #217
@@ -104,7 +108,7 @@ target one).
   `ANSWER_DEPENDS_ON`, `markRecoverableFailure`, `recoverableFailureOf`, `reconcileResumeFlags`,
   `waitWithCheckIn`/`onTimeout` (the shape, not necessarily this exact function name; see Task 8),
   `WizardCard.waitLabel`, `WizardState.continueCommand`, the session file's path function
-  `sessionFilePath(home, env)`.
+  `sessionFilePath(home, env)`, `SETTINGS_FIELD.createChannel`, `CHANNEL_CREATE_SCOPES` (Task 14).
 - **Never print a secret.** The session token is never written to the init log file (FR-071,
   unchanged) and is written to the new session file with the same 0600/0700 permission discipline
   `log-file.ts` already uses; the session file itself is never read aloud in any test assertion that
@@ -186,6 +190,9 @@ target one).
 | `packages/cli/src/init/github-app.ts` | `startManifestListener`'s timer calls `onTimeout` before giving up; `createWithManifest` supplies it only with a surface |
 | `packages/cli/src/init/ui/server.ts` | `mountManifest`'s timer gets the same `onTimeout` treatment |
 | `packages/cli/src/init/slack-app.ts` | `probeSlackUrls` gains `onTimeout`; `verifySlackUrls` supplies it only with a surface |
+| `packages/cli/src/init/settings-form.ts` | (Task 14, owner decision 2026-10-02) `SETTINGS_FIELD`/`settingsFields` gain the `createChannel` question, under Advanced |
+| `packages/cli/src/init/slack-app.ts` | (Task 14) `CHANNEL_CREATE_SCOPES`; `slackAppManifest` and `slackAppStep` take the up-front `createChannel` answer instead of always requesting the scopes |
+| `packages/cli/src/init/answer-dependencies.ts` | (Task 14) `ANSWER_DEPENDS_ON.createChannel: ["slack-app"]` |
 | `packages/cli/src/init/session-file.ts` (new) | `sessionFilePath(home, env)`, `readSession`, `writeSession`, `deleteSession` |
 | `packages/cli/src/init/ui/index.ts` | `startInstallWizard` tries a preferred port and token first, falls back on failure |
 | `packages/cli/src/init/ui/server.ts` | `startWizardServer` takes `preferredPort`/`preferredToken`, catches `EADDRINUSE` and retries on port 0 with a fresh token |
@@ -195,16 +202,19 @@ target one).
 | `packages/cli/src/init/ui/question-copy.ts` | Copy for every new question this phase asks |
 | `packages/cli/src/init/ui/design.ts` | `PAGE_CLASSES`/`WIZARD_CSS` gain the lost-connection banner's class, if any new one is needed |
 | `docs/install.md` | The recovery section: what each failure action does, same-address resume |
-| `tests/contract/init-prerequisites.test.ts`, `init-retry.test.ts`, `init-answer-dependencies.test.ts` (new), `init-answers.test.ts`, `init-ui-failure.test.ts`, `init-cleanup.test.ts` (new), `init-github-app.test.ts`, `init-slack-app.test.ts`, `init-session-file.test.ts` (new), `init-ui-server.test.ts`, `init-ui-index.test.ts`, `init-ui-page.test.ts`, `init-ui-question-copy.test.ts` | Tests for every module above |
+| `tests/contract/init-prerequisites.test.ts`, `init-retry.test.ts`, `init-answer-dependencies.test.ts` (new), `init-answers.test.ts`, `init-ui-failure.test.ts`, `init-cleanup.test.ts` (new), `init-github-app.test.ts`, `init-slack-app.test.ts`, `init-session-file.test.ts` (new), `init-ui-server.test.ts`, `init-ui-index.test.ts`, `init-ui-page.test.ts`, `init-ui-question-copy.test.ts`, `init-settings-form.test.ts` (Task 14) | Tests for every module above |
 
 ## Interfaces Later Phases Rely On
 
 - **Phase 4 (pickers and progress):** reuses the `onTimeout`-with-`surface`-gate pattern from Tasks 8
   and 9 for the three waits FR-064 also names that do not exist yet (admin sign-in, the channel
   invite, the alert confirmation), wiring it in as each of those cards is built or rebuilt. It adds
-  its own rows to `ANSWER_DEPENDS_ON` for the project and channel fields it introduces. It reuses
-  `WizardState.continueCommand` as-is (already correct for the ready screen; this phase only adds the
-  field, phase 4 does not need to touch it).
+  its own rows to `ANSWER_DEPENDS_ON` for the project fields it introduces, but not for the channel
+  decision: Task 14 (owner decision, 2026-10-02) already added `createChannel`'s own row, since that
+  decision now lives in settings, not on phase 4's project form. Phase 4's project form reads the
+  already-known `context.answers.settings.createChannel` to decide which channel fields to show; it
+  does not ask that question again. It reuses `WizardState.continueCommand` as-is (already correct
+  for the ready screen; this phase only adds the field, phase 4 does not need to touch it).
 
 ---
 
@@ -1638,6 +1648,140 @@ git commit -m "test(init): every new recovery string passes the copy-lint; docs 
 
 ---
 
+### Task 14: The channel create-or-not decision moves to settings, and the Slack manifest's scopes follow it (FR-051, FR-053)
+
+**Owner decision, 2026-10-02 (added after this plan's own review):** the channel create-or-not
+question ("Should AgentX create the channel for you?") moves off the channel step and onto the
+settings screen, asked before the Slack app is created, so the Slack app manifest can carry the
+channel-creating scopes (`channels:manage`, `groups:write`) only when the answer is Yes, never
+always. This needs code phase 2 owns (the settings screen, `settings-form.ts`; the Slack manifest
+builder, `slack-app.ts`); phase 2's own branch is already in flight and is not touched by this plan,
+so this task makes the change here, on top of phase 2's merged work, the same way every other task in
+this plan builds on phase 2.
+
+**Files:**
+- Modify: `packages/cli/src/init/settings-form.ts` (phase 2's `SETTINGS_FIELD`, `settingsFields`)
+- Modify: `packages/cli/src/init/slack-app.ts` (`SLACK_BOT_SCOPES` stays exactly as phase 1 left it;
+  a new `CHANNEL_CREATE_SCOPES`; `slackAppManifest` and the one call site that builds the manifest
+  from it, inside `slackAppStep`)
+- Modify: `packages/cli/src/init/answer-dependencies.ts` (Task 4's `ANSWER_DEPENDS_ON` gains a row)
+- Modify: wherever `--create-channel`/`--no-create-channel` are parsed into flags (confirm the exact
+  file against the current flag table in `commands.ts`/`cli.ts` first; phase 4's plan already names
+  these two flags for the project-form field this task is moving off of, so the flag names are fixed,
+  only where they are read changes)
+- Test: `tests/contract/init-settings-form.test.ts`, `tests/contract/init-slack-app.test.ts`,
+  `tests/contract/init-answer-dependencies.test.ts`
+
+**Interfaces:**
+- Consumes: phase 2's `SETTINGS_FIELD`, `SettingsFieldName`, `settingsFields`,
+  `CollectedAnswers.settings`; Task 4's `ANSWER_DEPENDS_ON`, `canChangeAnswer`; phase 1's
+  `SLACK_BOT_SCOPES`, `SLACK_USER_SCOPES`, `slackAppManifest`.
+- Produces:
+  ```ts
+  // settings-form.ts: SETTINGS_FIELD gains createChannel; settingsFields's Advanced section gains:
+  // { name: "createChannel", question: "Should AgentX create the channel for you?",
+  //   flag: "--create-channel", defaultValue: "yes", section: "advanced",
+  //   choices: [{ value: "yes", label: "Yes, create it" }, { value: "no", label: "No, let me pick one" }],
+  //   help: { why: "Slack fixes a bot's scopes when its app is created, so this is asked now, before
+  //   the Slack app exists, rather than later at the channel step." } }
+  // (an Advanced field with a sane default, same as every other Advanced field FR-021 requires; the
+  // default-path's four required fields are unchanged)
+
+  // slack-app.ts
+  export const CHANNEL_CREATE_SCOPES: readonly string[]; // ["channels:manage", "groups:write"]
+  export function slackAppManifest(input: {
+    appName: string; eventsUrl: string; interactivityUrl: string; signInCallbackUrl: string;
+    createChannel: boolean;
+  }): SlackManifest;
+
+  // answer-dependencies.ts: ANSWER_DEPENDS_ON gains createChannel: ["slack-app"], the same lock
+  // appName already has, since both are baked into the manifest the moment the Slack app is created.
+  ```
+
+- [ ] **Step 1: Write the failing tests**
+
+```ts
+// tests/contract/init-settings-form.test.ts, added case
+it("owner decision 2026-10-02: settings asks the channel create-or-not question under Advanced, defaulting to Yes", () => {
+  const fields = settingsFields({ env: "production", flags: {}, fixed: false, budgetWhy: "" });
+  const decision = fields.find((field) => field.name === "createChannel");
+  expect(decision).toMatchObject({ section: "advanced", defaultValue: "yes", choices: [{ value: "yes" }, { value: "no" }] });
+});
+```
+
+```ts
+// tests/contract/init-slack-app.test.ts, added describe block
+describe("spec 048 phase 3, owner decision 2026-10-02: the manifest's channel-creating scopes follow the up-front decision (FR-053)", () => {
+  it("includes channels:manage and groups:write only when the installer answered Yes", () => {
+    const yes = slackAppManifest({ appName: "agentx-production", eventsUrl: "https://x/events", interactivityUrl: "https://x/interactivity", signInCallbackUrl: "https://x/callback", createChannel: true });
+    expect(yes.oauth_config.scopes.bot).toEqual(expect.arrayContaining(["channels:manage", "groups:write"]));
+    const no = slackAppManifest({ appName: "agentx-production", eventsUrl: "https://x/events", interactivityUrl: "https://x/interactivity", signInCallbackUrl: "https://x/callback", createChannel: false });
+    expect(no.oauth_config.scopes.bot).not.toEqual(expect.arrayContaining(["channels:manage"]));
+    expect(no.oauth_config.scopes.bot).not.toEqual(expect.arrayContaining(["groups:write"]));
+  });
+});
+```
+
+```ts
+// tests/contract/init-answer-dependencies.test.ts, added case
+it("owner decision 2026-10-02: locks the channel create-or-not decision once the Slack app step is done", () => {
+  expect(canChangeAnswer("createChannel", new Set(["prerequisites", "github-app", "access", "core"]))).toBe(true);
+  expect(canChangeAnswer("createChannel", new Set(["prerequisites", "github-app", "access", "core", "slack-app"]))).toBe(false);
+});
+```
+
+- [ ] **Step 2: Run tests to verify they fail**
+
+Run: `npx vitest run tests/contract/init-settings-form.test.ts tests/contract/init-slack-app.test.ts tests/contract/init-answer-dependencies.test.ts`
+Expected: FAIL: no `createChannel` settings field; `slackAppManifest` has no `createChannel` input
+and always includes the base scopes only; `ANSWER_DEPENDS_ON` has no `createChannel` row.
+
+- [ ] **Step 3: Write minimal implementation**
+
+In `settings-form.ts`, add `createChannel` to `SETTINGS_FIELD` and to `settingsFields`'s Advanced
+section (placement among the other Advanced fields is not load-bearing; group it near `appName`
+since both describe the Slack app, if the real file's field order makes that easy).
+
+In `slack-app.ts`:
+
+```ts
+export const CHANNEL_CREATE_SCOPES: readonly string[] = ["channels:manage", "groups:write"];
+
+export function slackAppManifest(input: { appName: string; eventsUrl: string; interactivityUrl: string; signInCallbackUrl: string; createChannel: boolean }): SlackManifest {
+  const botScopes = input.createChannel ? [...SLACK_BOT_SCOPES, ...CHANNEL_CREATE_SCOPES] : [...SLACK_BOT_SCOPES];
+  // ...unchanged manifest shape, except:
+  // oauth_config: { redirect_urls: [input.signInCallbackUrl], scopes: { bot: botScopes, user: [...SLACK_USER_SCOPES] } },
+}
+```
+
+Update `slackAppStep`'s one call to `slackAppManifest` to pass
+`createChannel: context.answers.settings.createChannel !== "no"` (confirm `context.answers.settings`
+is the right path to the stored settings-form values by the time `slackAppStep` runs, against
+phase 2's merged `answers.ts`/`context.ts`, before wiring this; the field reads as a plain string,
+same as every other `CollectedAnswers.settings` entry, never a secret).
+
+In `answer-dependencies.ts`, add `createChannel: ["slack-app"]` to `ANSWER_DEPENDS_ON`.
+
+Wherever `--create-channel`/`--no-create-channel` are parsed (confirm the exact file first): both
+flags set the same `createChannel` flag value ("yes"/"no") the settings form reads, the same way a
+boolean pair of flags already works elsewhere in this CLI if one exists, or, if none does yet, the
+same way `askForm`'s terminal path already reads a `choices` field's flag value directly (`--create-channel yes`/`--create-channel no`) with `--no-create-channel` as a plain alias for
+`--create-channel no`.
+
+- [ ] **Step 4: Run tests to verify they pass**
+
+Run: `npx vitest run tests/contract/init-settings-form.test.ts tests/contract/init-slack-app.test.ts tests/contract/init-answer-dependencies.test.ts`
+Expected: PASS.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add packages/cli/src/init/settings-form.ts packages/cli/src/init/slack-app.ts packages/cli/src/init/answer-dependencies.ts tests/contract/init-settings-form.test.ts tests/contract/init-slack-app.test.ts tests/contract/init-answer-dependencies.test.ts
+git commit -m "feat(init): the channel create-or-not question moves to settings, before the Slack app exists, so its manifest scopes can follow the answer (048 FR-051, FR-053, owner decision 2026-10-02)"
+```
+
+---
+
 ## Self-Review
 
 **1. Spec coverage (phase 3 row of the spec's Phases table):**
@@ -1650,6 +1794,7 @@ git commit -m "test(init): every new recovery string passes the copy-lint; docs 
 | FR-064 a wait asks "Still there? Keep waiting" at its deadline instead of ending the run | 8, 9, 10 |
 | FR-066 model and region failures offer Change the model/region; the Anthropic form offers its own three actions | 1, 2, 3 |
 | FR-067 a lost connection tries to reconnect by itself and, after a while, shows the continue command | 12 |
+| FR-051 (the create-or-not question, moved to settings), FR-053 (the manifest's scopes follow it): owner decision, 2026-10-02 | 14 |
 
 **2. Placeholder scan:** every code step has real code; three steps are "find the exact current code
 first" pointers (Task 2 Step 5, Task 7 Step 3's `doneStepIds()`/`singleField()`/`applyChangedAnswer()`
@@ -1663,10 +1808,15 @@ yet). This is reuse-and-adapt, not "add appropriate handling."
 Task 3's Anthropic branch read. `RecoverableFailureKind` (Task 5) is what Task 6's `cleanup` tag and
 Task 7's wiring both produce and consume. `SettingsFieldName` (phase 2) is what `ANSWER_DEPENDS_ON`
 (Task 4), `reconcileResumeFlags` (Task 4) and `askFailureAction`'s `change` label (Task 5) all key on.
-`WizardCard.waitLabel` (Task 10) is what Task 9's GitHub and Slack cards set.
+`WizardCard.waitLabel` (Task 10) is what Task 9's GitHub and Slack cards set. `SETTINGS_FIELD.createChannel`
+(Task 14) is what Task 14's own `ANSWER_DEPENDS_ON` row and `slackAppManifest`'s new `createChannel`
+input both key on, so the one up-front answer, the lock on changing it, and the manifest it shapes
+never drift apart.
 
 **4. Review Focus:** each of the five lines has its pinned test in the named task (Tasks 7, 4, 11, 6,
-9).
+9). Task 14 was added after this plan's own review, by owner decision, so it adds no Review Focus
+line of its own; its three tests (settings asks it, the manifest follows it, the lock holds) stand on
+their own names.
 
 ## Rulings On Spec Ambiguities
 
@@ -1690,6 +1840,11 @@ Task 7's wiring both produce and consume. `SettingsFieldName` (phase 2) is what 
    `anthropic-form`) are chosen, not typed by a person**, exactly like phase 2's `--on-check-failure`
    itself: a copy key for `question-copy.ts`, never documented as a real flag, consistent with phase
    2's own Fix round 1 ruling for the same flag.
+6. **The channel create-or-not decision (Task 14) is an Advanced settings field, not a fifth
+   default-path question.** FR-021 already requires every Advanced setting to have a working default;
+   "Yes, create it" is that default, matching the page's own default-path answer and `--yes`'s
+   existing behavior, so a newcomer who never opens Advanced still gets a created channel exactly as
+   today's default-path user would. Only a person who wants the No path needs to find this field.
 
 ## Execution Handoff
 
