@@ -122,10 +122,10 @@ describe("a stuck cancel whose compute is alive", () => {
     expect(retryCancel).toHaveBeenCalledTimes(1);
   });
 
-  it("ends a retried cancel still stuck after the retry limit as interrupted, and frees the workspace", async () => {
+  it("ends a retried cancel still stuck after the retry limit as interrupted, and frees the workspace, when the worker answers idle", async () => {
     const { db, sweep, logs, retryCancel } = setup();
     const task = seedTask(db, "CANCEL_REQUESTED", 31);
-    const candidate = [{ workspaceId: task.workspaceId, compute: "alive" as const }];
+    const candidate = [{ workspaceId: task.workspaceId, compute: "alive" as const, worker: "idle" as const }];
     await sweep(candidate);
     logs.length = 0;
     expect(await sweep(candidate, minutesLater(29))).toEqual(empty);
@@ -140,6 +140,35 @@ describe("a stuck cancel whose compute is alive", () => {
     expect(await sweep(candidate, minutesLater(60))).toEqual(empty);
   });
 
+  it("PR 255 owner decision 1: never ends a retried cancel while the worker answers busy, however old, and counts it for the alarm", async () => {
+    const { db, sweep, logs } = setup();
+    const task = seedTask(db, "CANCEL_REQUESTED", 31, { cancelRetriedAt: minutesAgo(31) });
+    const candidate = [{ workspaceId: task.workspaceId, compute: "alive" as const, worker: "busy" as const }];
+    expect(await sweep(candidate)).toEqual({ ...empty, failed: [task.operationId] });
+    expect(await sweep(candidate, minutesLater(600))).toEqual({ ...empty, failed: [task.operationId] });
+    expect(task.operation()).toMatchObject({ status: "CANCEL_REQUESTED" });
+    expect(task.meta()).toMatchObject({ status: "BUSY", activeOperationId: task.operationId });
+    expect(logs).toEqual([
+      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId },
+      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId },
+    ]);
+  });
+
+  it("PR 255 owner decision 1: never ends a retried cancel while the worker's answer is unknown (its ping failed)", async () => {
+    const { db, sweep, logs } = setup();
+    const task = seedTask(db, "CANCEL_REQUESTED", 600, { cancelRetriedAt: minutesAgo(600) });
+    expect(await sweep([{ workspaceId: task.workspaceId, compute: "alive" }])).toEqual(empty);
+    expect(task.operation()).toMatchObject({ status: "CANCEL_REQUESTED" });
+    expect(task.meta()).toMatchObject({ status: "BUSY", activeOperationId: task.operationId });
+    expect(logs).toEqual([]);
+  });
+
+  it("PR 255 owner decision 1: a busy worker within the retry limit is neither ended nor counted", async () => {
+    const { db, sweep } = setup();
+    const task = seedTask(db, "CANCEL_REQUESTED", 31, { cancelRetriedAt: minutesAgo(10) });
+    expect(await sweep([{ workspaceId: task.workspaceId, compute: "alive", worker: "busy" }])).toEqual(empty);
+  });
+
   it("times the retry from a newer cancel request, if someone asked again after the retry", async () => {
     const { db, sweep } = setup();
     const task = seedTask(db, "CANCEL_REQUESTED", 5, { cancelRetriedAt: minutesAgo(40) });
@@ -151,7 +180,7 @@ describe("a stuck cancel whose compute is alive", () => {
     const failure = Object.assign(new Error("secret-bearing message"), { name: "StuckCancelRetryFailed" });
     const { db, sweep, logs, retryCancel } = setup({ retry: async () => { throw failure; } });
     const task = seedTask(db, "CANCEL_REQUESTED", 31);
-    const candidate = [{ workspaceId: task.workspaceId, compute: "alive" as const }];
+    const candidate = [{ workspaceId: task.workspaceId, compute: "alive" as const, worker: "idle" as const }];
     expect(await sweep(candidate)).toEqual({ ...empty, failed: [task.operationId] });
     expect(logs).toEqual([{ event: "stuck_cancel.retry_failed", workspaceId: task.workspaceId, operationId: task.operationId, errorName: "StuckCancelRetryFailed" }]);
     expect(JSON.stringify(logs)).not.toContain("secret-bearing");
@@ -181,7 +210,7 @@ describe("a stuck cancel whose compute is alive", () => {
   it("logs a retry that was skipped, and still ends it after the retry limit", async () => {
     const { db, sweep, logs } = setup({ retry: async () => ({ outcome: "SKIPPED", reason: "not-active" }) });
     const task = seedTask(db, "CANCEL_REQUESTED", 31);
-    const candidate = [{ workspaceId: task.workspaceId, compute: "alive" as const }];
+    const candidate = [{ workspaceId: task.workspaceId, compute: "alive" as const, worker: "idle" as const }];
     expect(await sweep(candidate)).toEqual(empty);
     expect(logs).toEqual([{ event: "stuck_cancel.retry_skipped", workspaceId: task.workspaceId, operationId: task.operationId, reason: "not-active" }]);
     expect((await sweep(candidate, minutesLater(31))).interrupted).toEqual([task.operationId]);

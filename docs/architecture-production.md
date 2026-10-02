@@ -134,7 +134,8 @@ flowchart LR
   for over 30 minutes (issue 195). If its compute is gone, the task is ended and its workspace
   freed. If its compute is alive, the reconciler queues the cancel again once, in its own process,
   through the cancel route's own code, signed with the same callback signing key. Still stuck 30
-  minutes later, the task is ended INTERRUPTED and its workspace freed. The legacy reconciler has no
+  minutes later, the task is ended INTERRUPTED and its workspace freed, but only when the worker
+  answers its ping idle; while it answers busy the task is held and counted for the alarm. The legacy reconciler has no
   signing key, so there it only logs and counts a stuck cancel on a live worker. Narrowing the key
   to a cancel-only one is tracked in issue 201.
 - **Failed cancels.** A cancel that reaches the worker and fails (a restarted worker that no longer

@@ -8,7 +8,8 @@
 //   through the cancel route's requestCancellation: the retry is recorded on the operation first
 //   (cancelRetriedAt), so a crash or a failed retry can never retry it twice;
 // - a retried one still CANCEL_REQUESTED STUCK_CANCEL_RETRY_MS later is ended INTERRUPTED, and its
-//   workspace freed.
+//   workspace freed, only when this run's ping found the worker idle (owner decision on PR 255);
+//   one whose worker answers busy is held, and logged and counted for the alarm on every run.
 // - issue 202: a task whose cancel failed, first or retried (the result marks it INTERRUPTED but
 //   leaves it holding the workspace, as the worker may still run it), has its workspace freed only
 //   on evidence that nothing runs there: at once when its compute is gone; when this run's ping
@@ -180,6 +181,16 @@ async function settle(
   if (retriedAt !== undefined) {
     // Timed from the retry, or from a newer cancel request made after it.
     if (!(now - Math.max(retriedAt, requestedAt) > STUCK_CANCEL_RETRY_MS)) return;
+    // Owner decision on PR 255: ended only once the worker says it runs nothing. Busy: held for
+    // good, and counted for the alarm on every run. Unknown (the ping failed): the ping-failure rule
+    // replaces the worker, and a later run finds its compute gone.
+    if (worker !== "idle") {
+      if (worker === "busy") {
+        result.failed.push(operationId);
+        log({ event: "stuck_cancel.held_busy", ...ids });
+      }
+      return;
+    }
     if (await end(dependencies, ids, operation, at, "INTERRUPTED", STUCK_CANCEL_INTERRUPTED_MESSAGE)) {
       result.interrupted.push(operationId);
       log({ event: "stuck_cancel.interrupted", ...ids });
