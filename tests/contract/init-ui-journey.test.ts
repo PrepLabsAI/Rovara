@@ -77,6 +77,17 @@ describe("the journey", () => {
     expect(view.timeLeftText).not.toMatch(/\b0 minutes|-\d/);
   });
 
+  it("says about 1 minute for a minute left, and less than a minute only with none", () => {
+    const lastStep = (startedAtMs: number) => journeyOf({
+      stage: "finish",
+      steps: INIT_STEP_IDS.map((id): JourneyStepView => (id === "e2e" ? { id, status: "running", startedAtMs } : { id, status: "done" })),
+      waitingOnYou: false, stopped: false, finished: false, nowMs: T,
+    });
+    // e2e usually takes 60 seconds: 30 seconds in, half a minute is left; 60 seconds in, none.
+    expect(lastStep(T - 30_000).timeLeftText).toBe("About 1 minute left");
+    expect(lastStep(T - 60_000).timeLeftText).toBe("Less than a minute left");
+  });
+
   it("shows Stopped on the current phase after a failure, and Done everywhere when finished", () => {
     const failed = journeyOf({ stage: "your-choices", steps: withStatus({ prerequisites: { id: "prerequisites", status: "done" }, access: { id: "access", status: "failed" } }), waitingOnYou: true, stopped: true, finished: false, nowMs: T });
     expect(failed.phases[2]).toMatchObject({ id: "build", status: "stopped", statusWord: "Stopped" });

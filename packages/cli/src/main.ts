@@ -927,7 +927,10 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       if (options.export === undefined) {
         const result = await runInit(initOptions(globals, options, command), dependencies.init ?? {}, { stderr: services.stderr, home });
         if (globals.json) {
-          services.stdout.write(formatSuccess(result, true));
+          // pageMode is the CLI's own note that the page already told the person; not part of the result.
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
+          const { pageMode: _pageMode, ...printed } = result;
+          services.stdout.write(formatSuccess(printed, true));
           return;
         }
         if (result.pageMode === true) return;

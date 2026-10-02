@@ -36,7 +36,6 @@ describe("the installer's design system", () => {
         // Labelled so a failure names the pair and mode, and can actually fail (passes is computed
         // from the measured ratio, then checked against the required true).
         expect({ mode, text, background, ratio, passes: ratio >= 4.5 }).toEqual({ mode, text, background, ratio, passes: true });
-        expect(contrast(COLOR_TOKENS[mode][text], COLOR_TOKENS[mode][background])).toBeGreaterThanOrEqual(4.5);
       }
     });
     it(`${mode}: field borders and the focus ring stand out`, () => {

@@ -120,7 +120,7 @@ export function journeyOf(input: { stage: JourneyPhaseId; steps: readonly Journe
   const minutesLeft = toMinutes(remaining);
   const timeLeftText = input.finished ? "Done"
     : overdue ? `Taking longer than usual.${minutesLeft > 0 ? ` About ${minutesLeft} ${minutesLeft === 1 ? "minute" : "minutes"} after this step.` : ""}`
-      : minutesLeft <= 1 ? "Less than a minute left" : `About ${minutesLeft} minutes left`;
+      : minutesLeft === 0 ? "Less than a minute left" : minutesLeft === 1 ? "About 1 minute left" : `About ${minutesLeft} minutes left`;
   const phases = JOURNEY_PHASE_IDS.map((id, index): JourneyPhaseView => {
     const status: JourneyStatus = input.finished || index < at ? "done"
       : index > at ? "coming"

@@ -63,6 +63,8 @@ describe("copy-lint rules", () => {
 
   it("allows a versioned published invocation and does not flag it as unpublished", () => {
     expect(lintCopy([{ where: "details", text: "npx @charterarc/agentx@1.2.3 status --env production", context: "details" as const }])).toEqual([]);
+    // Only the package itself: another package whose name starts the same is not it.
+    expect(lintCopy([{ where: "page", text: "Install @charterarc/agentxtools first.", context: "page" as const }])).toEqual([]);
   });
 
   it("allows a command on Stop for now, the lost connection notice and the ready screen, but never without --env", () => {

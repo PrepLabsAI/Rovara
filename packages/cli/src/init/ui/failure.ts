@@ -21,7 +21,8 @@ export const isRetryableStep = (id: InitStepId): id is DeployStepId => Object.ha
 const TECHNICAL = /arn:aws|\b[A-Z]{2,}_[A-Z_]{2,}\b|AWS::|(?:^|\s)--[a-z]|<[@#!]|\b[A-Z][a-z]+(?:[A-Z][a-z]+)*[0-9A-F]{8}\b/;
 const RESUME_TAIL = /\.? Run agentx init --env \S+ --region \S+ again to continue from this step\..*$/s;
 
-const capitalize = (text: string): string => `${text.charAt(0).toUpperCase()}${text.slice(1)}`;
+/** An address is kept as it is written: "Https://" is not an address. */
+const capitalize = (text: string): string => (/^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `${text.charAt(0).toUpperCase()}${text.slice(1)}`);
 
 /** The error's first line as a plain sentence for "what happened", or undefined when it carries a
  * code, an ARN, a flag or a logical ID: those stay in the technical details. */

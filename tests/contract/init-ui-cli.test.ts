@@ -132,6 +132,8 @@ describe("agentx init --ui", () => {
     expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
     expect(h.printed()).toContain("install declined; nothing was created");
     expect(operator.states.at(-1)).toMatchObject({ phase: "failed" });
+    // A stop with its own words (operatorStop) keeps them as the outcome.
+    expect(operator.states.at(-1)?.outcome).toBe("Install declined; nothing was created.");
   });
 
   it("spec 048 SC-009: a release with a private image is refused on the page before anything is created", async () => {
@@ -435,6 +437,8 @@ describe("agentx init --ui", () => {
     expect(h.printed()).toContain("init cannot start; nothing was created");
     expect(h.deployer.requests).toEqual([]);
     expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
+    // Declining a check-again question is a stop, told in the fixed words, not the raw problem.
+    expect(operator.states.at(-1)?.outcome).toBe("The install stopped. Your progress is saved.");
   });
 
   it("FR-023: a failure no check reports is still on the checklist, in the error's own words", async () => {
@@ -707,6 +711,16 @@ describe("agentx init --ui", () => {
     expect(last?.journey.stepNumber).toBe(5);
     expect(last?.journey.phases.map((phase) => phase.statusWord)).toEqual(["Done", "Done", "Done", "Done", "Waiting for you"]);
     expect(last?.journey.timeLeftText).toBe("About 2 minutes left");
+  });
+
+  it("--json with the page prints the result without the page's own internal flag", async () => {
+    const h = await harness();
+    const { code } = await h.runUi([...FIRST_RUN], ["--stop-after", "prerequisites", "--json"]);
+    expect(code).toBe(0);
+    const printed = JSON.parse(h.out.join("")) as { ok: boolean; data: Record<string, unknown> };
+    expect(printed.ok).toBe(true);
+    expect(printed.data).toMatchObject({ status: "complete", env: "staging", stoppedAfter: "prerequisites" });
+    expect(printed.data).not.toHaveProperty("pageMode");
   });
 
   it("a run stopped with --stop-after shows no ready card", async () => {

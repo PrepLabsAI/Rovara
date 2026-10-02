@@ -14,7 +14,7 @@ export function initLogPath(home: string, env: string): string {
 export interface InitLog {
   path: string;
   write(text: string): void;
-  /** Every later write replaces this value with <hidden>. */
+  /** Every later write replaces this value, and its URL-encoded form, with <hidden>. */
   hide(value: string): void;
   close(): Promise<void>;
 }
@@ -67,7 +67,11 @@ export async function openInitLog(path: string, options: OpenInitLogOptions = {}
       stream.write(safe);
     },
     hide(value) {
-      if (value.length >= 8) hidden.push(value);
+      if (value.length < 8) return;
+      hidden.push(value);
+      // A value in an address (the page's ?t=) may appear encoded.
+      const encoded = encodeURIComponent(value);
+      if (encoded !== value) hidden.push(encoded);
     },
     close: () => new Promise<void>((resolvePromise) => {
       if (broken || stream.destroyed) { resolvePromise(); return; }

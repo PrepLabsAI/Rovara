@@ -26,6 +26,16 @@ describe("the install log file", () => {
     if (process.platform !== "win32") expect((await stat(path)).mode & 0o777).toBe(0o600);
   });
 
+  it("hides a value in its URL-encoded form too", async () => {
+    const home = await mkdtemp(join(tmpdir(), "agentx-log-")); dirs.push(home);
+    const path = initLogPath(home, "staging");
+    const log = await openInitLog(path);
+    log.hide("token+with/slash=");
+    log.write("raw token+with/slash= and encoded token%2Bwith%2Fslash%3D\n");
+    await log.close();
+    expect(await readFile(path, "utf8")).toBe("raw <hidden> and encoded <hidden>\n");
+  });
+
   it("tightens an existing log file and folder to its owner only", async () => {
     const home = await mkdtemp(join(tmpdir(), "agentx-log-")); dirs.push(home);
     const path = initLogPath(home, "staging");

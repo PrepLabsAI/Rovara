@@ -65,6 +65,7 @@ describe("the message init ends with", () => {
       "  Connected: Linear. Add more with node /opt/agentx/dist/main.js --env staging connector add linear|jira|asana --project payments-api.",
       "  More projects: node /opt/agentx/dist/main.js --env staging project add, then node /opt/agentx/dist/main.js --env staging channel add.",
       "  Send a test alarm any time: node /opt/agentx/dist/main.js --env staging alerts test.",
+      "  Remove it: node /opt/agentx/dist/main.js --env staging destroy. It deletes the coding machines' disks too.",
     ].join("\n"));
   });
 

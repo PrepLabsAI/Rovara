@@ -91,7 +91,7 @@ describe("the hub's journey", () => {
     const { hub } = clocked();
     hub.showFailure({ title: "The install stopped", what: "Set up AWS permissions did not finish.", next: "Try this step again.", details: ["bad input"], link: { url: "javascript:alert(1)", label: "Fix it" } });
     expect(hub.state().failure).not.toHaveProperty("link");
-    expect(hub.state().failure).toMatchObject({ title: "The install stopped", what: "Set up AWS permissions did not finish.", next: "Try this step again.", details: ["bad input"] });
+    expect(hub.state().failure).toEqual({ title: "The install stopped", what: "Set up AWS permissions did not finish.", next: "Try this step again.", details: ["bad input"] });
   });
 
   it("FR-037: every link says it opens in a new tab and to come back", () => {

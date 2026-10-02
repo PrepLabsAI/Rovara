@@ -24,6 +24,10 @@ describe("the failure screen", () => {
     expect(plainReason(agentXError("CONFIG_INVALID", "image x is not a public.ecr.aws/ reference"))).toBe("Image x is not a public.ecr.aws/ reference.");
     expect(plainReason(new Error("AccessDenied for arn:aws:iam::123456789012:role/x"))).toBeUndefined();
     expect(plainReason(new Error("--account 1 does not match"))).toBeUndefined();
+    // A sentence that starts with an address keeps the address as it is written.
+    expect(plainReason(new Error("https://abc.example.com/slack/events answered HTTP 500; check the control plane's SlackIngress logs."))).toBe(
+      "https://abc.example.com/slack/events answered HTTP 500; check the control plane's SlackIngress logs.",
+    );
     expect(failureScreen({ env: "staging", region: "us-east-1", error: new Error("--account 1 does not match") })).toMatchObject({
       what: "The install could not go on.", next: "Your progress is saved. Stop for now and continue later.", details: ["--account 1 does not match"],
     });

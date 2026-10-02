@@ -66,7 +66,7 @@ describe("install plan", () => {
       "- Models: main model Claude Sonnet 4.6 (Amazon Bedrock), safety check model Amazon Nova Lite (Amazon Bedrock), coding model Amazon Nova Pro (Amazon Bedrock)",
       "AgentX never answers itself or other bots. Messages other apps post for people: answered.",
       "Estimated monthly total: $152.98 at 1,000 turns, 100 coding sessions and 60 machine-hours a month",
-      "To remove everything later, use the remove command on the ready screen. It deletes the coding machines' disks too.",
+      "To remove everything later, use the remove command in the ready summary. It deletes the coding machines' disks too.",
       "Coding machine disks (30 GiB gp3)",
       "KMS (including the invocation-signing key)",
     ]) expect(text).toContain(expected);

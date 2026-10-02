@@ -349,5 +349,7 @@ export function readyText(input: { env: string; controlPlaneUrl: string; progres
     ...connectors.flatMap((entry) => (entry.warning === undefined ? [] : [`  Warning (${CONNECTOR_LABELS[entry.type]}): ${entry.warning}.`])),
     `  More projects: ${cli("project add")}, then ${cli("channel add")}.`,
     `  Send a test alarm any time: ${cli("alerts test")}.`,
+    // The plan points here for removing everything, on the terminal path (--no-ui, --yes) too.
+    `  Remove it: ${cli("destroy")}. It deletes the coding machines' disks too.`,
   ].join("\n");
 }

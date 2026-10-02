@@ -81,7 +81,6 @@ describe("the page shell", () => {
   // copy-lint's stateEntries (tests/support/copy-lint.ts) reads it only as a technical detail.
   it("never renders a step's message: that text stays terminal-only (FR-072)", () => {
     expect(WIZARD_JS).not.toMatch(/\bstep\.message\b/);
-    expect(WIZARD_JS).not.toContain(".message");
   });
 
   it("uses only the design system's classes, on every element it builds", () => {

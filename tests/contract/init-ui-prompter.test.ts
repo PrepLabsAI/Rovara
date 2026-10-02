@@ -69,18 +69,18 @@ describe("browserPrompter", () => {
     // choices here pass through unrelabelled: this test is about choose's own mechanics.
     const choices = [{ value: "cognito" as const, label: "AgentX signs people in" }, { value: "oidc" as const, label: "Your own provider" }];
     const picked = setup();
-    const chosen = picked.prompter.choose("Sign-in", choices, { flag: "--mechanics-test", defaultValue: "cognito" });
+    const chosen = picked.prompter.choose("Sign-in", choices, { flag: "--not-a-real-flag", defaultValue: "cognito" });
     expect(shown(picked.hub)).toMatchObject({ kind: "choose", defaultValue: "cognito", choices });
     expect(post(picked.hub, "oidc")).toBeUndefined();
     await expect(chosen).resolves.toBe("oidc");
 
     const defaulted = setup();
-    const takesDefault = defaulted.prompter.choose("Sign-in", choices, { flag: "--mechanics-test", defaultValue: "cognito" });
+    const takesDefault = defaulted.prompter.choose("Sign-in", choices, { flag: "--not-a-real-flag", defaultValue: "cognito" });
     expect(post(defaulted.hub, "")).toBeUndefined();
     await expect(takesDefault).resolves.toBe("cognito");
 
     const refused = setup();
-    void refused.prompter.choose("Sign-in", choices, { flag: "--mechanics-test", defaultValue: "cognito" });
+    void refused.prompter.choose("Sign-in", choices, { flag: "--not-a-real-flag", defaultValue: "cognito" });
     expect(post(refused.hub, "saml")).toBe("choose one of the options");
   });
 

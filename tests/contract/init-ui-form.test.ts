@@ -3,6 +3,7 @@
 // keep the valid ones when another is refused. A secret is never sent back to the page.
 import { describe, expect, it } from "vitest";
 import { askForm, checkSlackBotToken, fieldCheck, type FormField } from "../../packages/cli/src/init/prompts.js";
+import { answeringSlackInstall } from "../../packages/cli/src/init/commands.js";
 import { browserPrompter } from "../../packages/cli/src/init/ui/prompter.js";
 import { createWizardHub, type WizardHub } from "../../packages/cli/src/init/ui/state.js";
 import { scriptedPrompter, TEST_BOT_TOKEN } from "../support/init-fakes.js";
@@ -45,6 +46,23 @@ describe("forms", () => {
     expect(JSON.stringify(hub.snapshot())).not.toContain(TEST_BOT_TOKEN);
     hub.answer(again.id, JSON.stringify({ clientId: "1111.2222", botToken: TEST_BOT_TOKEN, appName: "Ours" }));
     await expect(answer).resolves.toEqual({ clientId: "1111.2222", botToken: TEST_BOT_TOKEN, appName: "Ours" });
+  });
+
+  it("names how many fields to check when more than one is refused", async () => {
+    const hub = createWizardHub("staging");
+    void browserPrompter(hub).form?.("Paste the Slack values", FIELDS, {});
+    expect(hub.answer(shown(hub).id, JSON.stringify({ clientId: "not-an-id", botToken: "not-a-token", appName: "Ours" }))).toBe("Check the 2 fields marked below.");
+    expect(shown(hub).error).toBe("Check the 2 fields marked below.");
+  });
+
+  it("--slack-install keeps the page's form, and adds none to a prompter without one", async () => {
+    const hub = createWizardHub("staging");
+    const prompter = answeringSlackInstall(browserPrompter(hub), "installed");
+    const answer = askForm(prompter, "Paste the Slack values", FIELDS);
+    expect(shown(hub)).toMatchObject({ kind: "form", text: "Paste the Slack values" });
+    hub.answer(shown(hub).id, JSON.stringify({ clientId: "1111.2222", botToken: TEST_BOT_TOKEN, appName: "" }));
+    await expect(answer).resolves.toEqual({ clientId: "1111.2222", botToken: TEST_BOT_TOKEN, appName: "AgentX acme (staging)" });
+    expect(answeringSlackInstall(scriptedPrompter([]), "installed").form).toBeUndefined();
   });
 
   it("refuses a body that is not a form", () => {

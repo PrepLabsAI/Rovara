@@ -57,7 +57,7 @@ export function installPlanText(answers: InitAnswers, estimate: CostEstimate, no
     ...estimate.lines.map((line) => `  ${(line.usd === undefined ? "not priced" : money(line.usd)).padStart(10)}  ${line.item} (${line.basis})`),
     `Estimated monthly total: ${money(estimate.totalUsd)} at ${count(STATED_USAGE.turnsPerMonth)} turns, ${count(STATED_USAGE.workerSessionsPerMonth)} coding sessions and ${STATED_USAGE.workerInstanceHoursPerMonth} machine-hours a month (us-east-1 list prices, ${PRICES_CHECKED}; your bill will differ)${notCounted(estimate).length > 0 ? `, not counting ${notCounted(estimate).join(" and ")}, whose price is not on file` : ""}.`,
     "",
-    "To remove everything later, use the remove command on the ready screen. It deletes the coding machines' disks too.",
+    "To remove everything later, use the remove command in the ready summary. It deletes the coding machines' disks too.",
   ];
   return `${lines.join("\n")}\n`;
 }
