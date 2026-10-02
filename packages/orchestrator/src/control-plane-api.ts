@@ -272,8 +272,16 @@ export function completedTaskResult(
     status: operation.status,
     ...(response === undefined ? {} : { response }),
     ...(operation.error === undefined ? {} : { error: operation.error }),
-    ...(checks === undefined ? {} : { checks }),
+    ...(checks === undefined ? {} : { checks: withoutOutputs(checks) }),
   };
+}
+
+/**
+ * The model reads a report's status, labels and classes, never the check outputs, which can be tens of kilobytes on
+ * every coding turn. The reply's verdict (turn-recorder, checksReplyPrefix) needs no output either.
+ */
+function withoutOutputs(report: CheckReport): CheckReport {
+  return { ...report, checks: report.checks.map((check) => ({ ...check, output: "" })) };
 }
 
 export function acceptedOperationId(value: unknown): string {

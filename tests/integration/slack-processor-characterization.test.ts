@@ -114,6 +114,43 @@ describe("the reply leads with AgentX's check result (spec 051)", () => {
     expect(h.posts).toEqual([WORKING, "Not done: npm test passed before and fails now.\n\n*Agent's account:*\nAll good."]);
   });
 
+  // Ruling Z (I-1): a turn that only publishes runs no task, so its verdict comes from the publish result.
+  const prResult = (draft: boolean | undefined) => ({
+    operationId, status: "SUCCEEDED",
+    result: { repository: "demo", number: 7, url: "https://github.com/example/demo/pull/7", ...(draft === undefined ? {} : { draft }) },
+  });
+
+  it("says the pull request opened as a draft in a turn that only publishes", async () => {
+    const h = harness(workspace());
+    h.dependencies.runTurn = async (input) => {
+      taskCall(input, "agentx_create_pull_request", prResult(true), "1");
+      return "Opened https://github.com/example/demo/pull/7.";
+    };
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
+    expect(h.posts).toEqual([WORKING, "Opened as a draft: AgentX's checks found failures.\n\n*Agent's account:*\nOpened <https://github.com/example/demo/pull/7>."]);
+  });
+
+  it.each([[false], [undefined]])("adds no line when the pull request is not a draft (draft: %s)", async (draft) => {
+    const h = harness(workspace());
+    h.dependencies.runTurn = async (input) => {
+      taskCall(input, "agentx_create_pull_request", prResult(draft), "1");
+      return "Opened it.";
+    };
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
+    expect(h.posts).toEqual([WORKING, "Opened it."]);
+  });
+
+  it("leads with the task's verdict and then the draft line when a turn runs a task and publishes", async () => {
+    const h = harness(workspace());
+    h.dependencies.runTurn = async (input) => {
+      taskCall(input, "agentx_submit_task", { operationId, status: "SUCCEEDED", response: "Fixed.", checks: report({ status: "verified", checks: [] }) }, "1");
+      taskCall(input, "agentx_create_pull_request", prResult(true), "2");
+      return "Fixed and opened.";
+    };
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
+    expect(h.posts[1]).toBe("No regression found, but no check passes yet.\nOpened as a draft: AgentX's checks found failures.\n\n*Agent's account:*\nFixed and opened.");
+  });
+
   it("leaves a turn with no check report exactly as before", async () => {
     const h = harness(workspace());
     h.dependencies.runTurn = async (input) => {

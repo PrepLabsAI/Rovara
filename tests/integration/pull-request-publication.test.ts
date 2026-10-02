@@ -11,7 +11,7 @@ import { storedCommandOutput } from "../../packages/worker/src/command-failure.j
 import { TIMEOUT_KILL_GRACE_MS } from "../../packages/worker/src/collected-process.js";
 import type { DevcontainerCli, DevcontainerProcess } from "../../packages/worker/src/devcontainer.js";
 import type { PreparationManifest } from "../../packages/worker/src/prepare.js";
-import type { PullRequestSink } from "../../packages/worker/src/callback-client.js";
+import { createWorkerCallbackSinks, type PullRequestSink } from "../../packages/worker/src/callback-client.js";
 import { projectCheckKey, recordProjectOutcomes } from "../../packages/worker/src/verification/check-history.js";
 
 const execFileAsync = promisify(execFile);
@@ -781,6 +781,29 @@ describe("publication with a failing check reports it (spec 051, P-2)", () => {
       label: `${process.execPath} -e process.exit(9) (in repo/demo)`,
     })]);
     expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.invocation.payload.headBranch}`])).toMatch(/^[a-f0-9]{40}\n$/);
+  });
+
+  // Ruling Z (I-1): the broker says whether the pull request opened as a draft, and the publish result carries it.
+  it("carries the broker's draft flag into the publish result, and none from a broker that sends none", async () => {
+    for (const [reply, expected] of [[{ draft: true }, { draft: true }], [{ draft: false }, { draft: false }], [{}, undefined]] as const) {
+      const fixture = await createFixture();
+      await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+      const pullRequestSink = vi.fn<PullRequestSink>(async () => ({ number: 21, url: "https://github.com/example/demo/pull/21", reconciled: false, ...reply }));
+      const result = await publishWorkspace({ rootPath: fixture.root, invocation: fixture.invocation, credentialProvider: async () => ({}), pullRequestSink });
+      if (expected === undefined) expect(result).not.toHaveProperty("draft");
+      else expect(result).toMatchObject(expected);
+    }
+  });
+
+  it("reads the draft flag from the broker's callback answer, and ignores one that is not a boolean", async () => {
+    const { invocation } = await createFixture();
+    const answer = (extra: Record<string, unknown>) => createWorkerCallbackSinks({
+      controlPlaneUrl: "https://control.example", invocation,
+      fetchImplementation: async () => Response.json({ number: 3, url: "https://github.com/example/demo/pull/3", reconciled: false, ...extra }),
+    }).pullRequestSink({ repository: "demo", repositoryUrl: "https://github.com/example/demo.git", headBranch: "agentx/x", baseBranch: "main", commit: "d".repeat(40), title: "t" });
+    expect(await answer({ draft: true })).toMatchObject({ draft: true });
+    expect(await answer({ draft: "yes" })).not.toHaveProperty("draft");
+    expect(await answer({})).not.toHaveProperty("draft");
   });
 
   // Ruling S (inverts C-1): the pull request is the whole change since preparation, so publish judges against the

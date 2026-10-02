@@ -752,7 +752,7 @@ export async function processSlackRequest(
       const mention = shared === undefined ? "" : `<@${message.userId}> `;
       // Spec 051 FR-009: AgentX's check verdict leads, and the model's text follows as the agent's account.
       // A turn with no report gives "", so its reply is exactly the model's text.
-      const verdict = checksReplyPrefix(recorder.checkReports());
+      const verdict = checksReplyPrefix(recorder.checkReports(), { draftPullRequest: recorder.draftPullRequest() });
       const chunks = splitSlackMessage(`${mention}${verdict}${slackReplyText(response)}`);
       const details = replyDetails(dependencies, recorder, message);
       for (const [index, chunk] of chunks.entries()) {

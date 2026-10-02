@@ -77,6 +77,16 @@ describe("in-house tools before lazy preparation (characterization)", () => {
     expect(api.createPullRequest).toHaveBeenCalledWith({ workspaceId: context.workspaceId, requestId: REQUEST, repository: "demo", title: "Fix", body: "Why" });
   });
 
+  it("describes the pull request as a draft when a check fails, and hands its result on unchanged, draft included (spec 051 Ruling Z)", async () => {
+    const api = fakeApi();
+    const tool = toolNamed(api, "agentx_create_pull_request");
+    expect(tool.description).toContain("AgentX opens it as a draft when a check fails");
+    expect(tool.description).not.toContain("ready-for-review");
+    const published = { operationId: OPERATION, status: "SUCCEEDED", result: { number: 7, draft: true } };
+    api.pullRequestResult.mockResolvedValue(published);
+    expect((await run(tool, { repository: "demo", title: "Fix" })).content).toEqual([{ type: "text", text: JSON.stringify(published) }]);
+  });
+
   it("sends a title and body only with the pull request actions that carry them", async () => {
     for (const action of ["edit", "replace", "revert"]) {
       const api = fakeApi();

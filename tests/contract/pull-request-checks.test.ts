@@ -115,6 +115,29 @@ async function publish(h: Harness, publishChecks?: CheckEntry[], options: { draf
   return { status: callback.status, invocation };
 }
 
+/** The broker's answer to the worker's pull-request callback, which the worker puts in the publish result. */
+async function publishAnswer(h: Harness, publishChecks?: CheckEntry[]): Promise<Record<string, unknown>> {
+  const accepted = await serviceCall(h.handler, thread, user, "POST", `/v1/service/workspaces/${h.workspaceId}/pull-requests`, {
+    requestId: randomUUID(), repository: "demo", title: "Fix the bug",
+  });
+  const operationId = (accepted.body.operation as { id: string }).id;
+  const invocation = h.db.find((item) => item.entityType === "OUTBOX" && item.operationId === operationId)[0]!.invocation as {
+    callbackCapability: string; payload: { headBranch: string };
+  };
+  const callback = await call(h.handler, {
+    method: "POST",
+    path: `/v1/internal/workspaces/${h.workspaceId}/operations/${operationId}/pull-request`,
+    headers: { "x-agentx-callback-capability": invocation.callbackCapability },
+    body: {
+      repository: "demo", repositoryUrl: "https://github.com/example/demo.git", headBranch: invocation.payload.headBranch,
+      baseBranch: "main", commit: "d".repeat(40), title: "Fix the bug",
+      ...(publishChecks === undefined ? {} : { checks: publishChecks }),
+    },
+  });
+  expect(callback.status).toBe(200);
+  return callback.body as Record<string, unknown>;
+}
+
 function sentToGitHub(h: Harness): Record<string, unknown> {
   expect(h.reconcilePullRequest).toHaveBeenCalledOnce();
   return h.reconcilePullRequest.mock.calls[0]![0] as Record<string, unknown>;
@@ -168,6 +191,13 @@ describe("the pull request's checks (spec 051 FR-008)", () => {
     await completeTask(h, latest);
     await publish(h, [entry()], { draft: true });
     expect(sentToGitHub(h)).toMatchObject({ draft: true, body: `${attribution}\n\n${checksSection([entry()], latest)}` });
+  });
+
+  it("tells the worker whether the pull request opened as a draft (Ruling Z)", async () => {
+    const drafted = await harness();
+    expect(await publishAnswer(drafted, [regression])).toMatchObject({ number: 7, draft: true });
+    const normal = await harness();
+    expect(await publishAnswer(normal, [entry()])).toMatchObject({ number: 7, draft: false });
   });
 
   it("forces a draft over an explicit draft: false when a check regressed", async () => {

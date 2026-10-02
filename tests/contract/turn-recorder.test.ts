@@ -226,6 +226,22 @@ describe("turn recorder check reports (spec 051)", () => {
     expect(turn.checkReports()).toEqual([checks]);
   });
 
+  it("knows a pull request that opened as a draft, and only from a successful publish result (Ruling Z)", () => {
+    const pullRequest = (draft: unknown, name = "agentx_create_pull_request", status = "SUCCEEDED") => {
+      const turn = recorder();
+      turn.toolStarted({ toolCallId: "1", toolName: name, args: {} });
+      turn.toolEnded({ toolCallId: "1", toolName: name, isError: false, result: text({ operationId: operation, status, result: { number: 7, ...(draft === undefined ? {} : { draft }) } }) });
+      return turn.draftPullRequest();
+    };
+    expect(pullRequest(true)).toBe(true);
+    expect(pullRequest(false)).toBe(false);
+    expect(pullRequest(undefined)).toBe(false);
+    expect(pullRequest("yes")).toBe(false);
+    expect(pullRequest(true, "agentx_task_result")).toBe(false);
+    expect(pullRequest(true, "agentx_create_pull_request", "FAILED")).toBe(false);
+    expect(recorder().draftPullRequest()).toBe(false);
+  });
+
   it("ignores a report that does not parse", () => {
     const turn = recorder();
     turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: {} });
@@ -236,6 +252,18 @@ describe("turn recorder check reports (spec 051)", () => {
 
 describe("a task result carries the check report (spec 051)", () => {
   const checks = { status: "not_verified", notVerifiedReason: "no_checks", source: "none", preambleVersion: "1", preambleSha256: "a".repeat(64), checks: [], extraTry: "not_needed", agentClaim: "none" };
+  it("leaves check outputs out of what the orchestrator model reads, keeping status, labels and classes (Minor 10)", () => {
+    const entry = { id: "agent:0", label: "pytest -k a", source: "agent_commands", before: "passed", after: "failed", class: "regression", output: "x".repeat(60_000), durationMs: 5 };
+    const full = { ...checks, status: "regression", source: "agent_commands", checks: [entry] };
+    const shown = completedTaskResult({ id: operation, status: "SUCCEEDED", result: { checks: full } }, []);
+    expect(shown.checks).toEqual({ ...full, checks: [{ ...entry, output: "" }] });
+    // The reply's verdict reads only that, so the recorder still builds it.
+    const turn = recorder();
+    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: {} });
+    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text(shown) });
+    expect(turn.checkReports()).toEqual([shown.checks]);
+  });
+
   it("includes checks when the operation result has them, and is unchanged otherwise", () => {
     expect(completedTaskResult({ id: operation, status: "SUCCEEDED", result: { checks } }, [])).toEqual({ operationId: operation, status: "SUCCEEDED", checks });
     expect(completedTaskResult({ id: operation, status: "SUCCEEDED", result: { other: 1 } }, [])).toEqual({ operationId: operation, status: "SUCCEEDED" });
