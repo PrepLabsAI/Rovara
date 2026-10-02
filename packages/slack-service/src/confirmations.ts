@@ -34,6 +34,9 @@ const KIND_NOTES: Readonly<Record<PendingConfirmation["calls"][number]["kind"], 
   classifier: "I'm not sure you asked for this",
   // #215: the classifier could not check it, which says nothing about whether the member asked.
   unchecked: undefined,
+  // Owner decision 2026-10-02: the classifier judged the member did not ask for this at all, a
+  // stronger doubt than the plain "classifier" ask above.
+  deny: "AgentX thinks you did not ask for this. Check it before approving.",
 };
 
 /** The message text: every blocked action and its target, and how to answer with or without the buttons. */

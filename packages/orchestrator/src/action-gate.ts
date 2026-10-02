@@ -12,8 +12,11 @@ import type { WorkerAccess } from "./orchestration-tools.js";
  * `unchecked` (#215): the classifier could not check the call (none configured, it failed, or the
  * turn used its checks), so the member is asked without being told AgentX doubts the request.
  * A decision still records such an ask as `classifier`; only the ask and its confirmation differ.
+ * `deny` (owner decision 2026-10-02): the classifier judged the member did not ask for this at all,
+ * which is a stronger doubt than an ordinary `classifier` ask; the gate still only asks, since only
+ * an administrator's rule can deny a call outright.
  */
-export type AskKind = "classifier" | "unchecked" | "destructive" | "admin" | "bulk" | "hint";
+export type AskKind = "classifier" | "unchecked" | "destructive" | "admin" | "bulk" | "hint" | "deny";
 
 /** A call the requester confirmed with "yes": it runs once, with exactly these arguments. */
 export interface GateApproval { tool: string; argumentsHash: string; summary: string }
@@ -265,11 +268,11 @@ function safeHash(tool: string, args: Record<string, unknown>): string {
 /** Why the gate stopped waiting for the classifier: its own deadline or the turn's cancellation. */
 class GateWaitError extends Error {}
 
-/** A usable verdict: exactly "allow" or "ask", with a reason. Anything else is treated as a failure. */
+/** A usable verdict: exactly "allow", "ask" or "deny", with a reason. Anything else is treated as a failure. */
 function usableVerdict(verdict: unknown): ClassifierVerdict | undefined {
   if (!verdict || typeof verdict !== "object") return undefined;
   const { decision, reason } = verdict as { decision?: unknown; reason?: unknown };
-  if ((decision !== "allow" && decision !== "ask") || typeof reason !== "string") return undefined;
+  if ((decision !== "allow" && decision !== "ask" && decision !== "deny") || typeof reason !== "string") return undefined;
   return verdict as ClassifierVerdict;
 }
 
@@ -316,8 +319,10 @@ export class ActionGate {
     }
     if (decision.outcome === "ask") {
       // #215: the member reads the ask, so it says what will happen in words; the classifier still
-      // reads describeCall. Only a classifier that answered "ask" doubts the request; one that failed,
-      // or answered something other than allow or ask (even "deny"), checked nothing, so it is unchecked.
+      // reads describeCall. A classifier that answered "ask" doubts the request; one that answered
+      // "deny" is sure the member did not ask for it, which reads a stronger note in Slack (owner
+      // decision 2026-10-02); one that failed, or answered anything else, checked nothing, so it is
+      // unchecked.
       const kind = decision.source === "classifier_unavailable" ? "unchecked" : decision.kind as AskKind;
       session.asks.push({ toolCallId: call.toolCallId, tool: call.toolName, argumentsHash: hash, summary: describeAction(call.toolName, call.input), kind });
     }
@@ -389,10 +394,14 @@ export class ActionGate {
       const verdict = usableVerdict(answer);
       if (!verdict) {
         const usage = (answer as { usage?: ClassifierUsage } | undefined)?.usage;
-        return { ...unavailable("the classifier could not decide: its verdict was not allow or ask"), classifierMs: this.now() - started, ...(usage === undefined ? {} : { usage }) };
+        return { ...unavailable("the classifier could not decide: its verdict was not allow, ask or deny"), classifierMs: this.now() - started, ...(usage === undefined ? {} : { usage }) };
       }
+      // A deny verdict still only asks: only an administrator's rule can deny a call outright. Its
+      // kind marks the stronger doubt for the member's confirmation (owner decision 2026-10-02).
+      const outcome: "allow" | "ask" = verdict.decision === "allow" ? "allow" : "ask";
+      const kind: "classifier" | "deny" | undefined = verdict.decision === "ask" ? "classifier" : verdict.decision === "deny" ? "deny" : undefined;
       const result = {
-        outcome: verdict.decision, source: "classifier" as const, ...(verdict.decision === "ask" ? { kind: "classifier" as const } : {}),
+        outcome, source: "classifier" as const, ...(kind === undefined ? {} : { kind }),
         reason: verdict.reason, classifierMs: this.now() - started, ...(verdict.usage === undefined ? {} : { usage: verdict.usage }),
       };
       this.verdicts.set(hash, { outcome: result.outcome, source: result.source, ...(result.kind === undefined ? {} : { kind: result.kind }), reason: result.reason });

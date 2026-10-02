@@ -28,8 +28,12 @@ export const ConfirmationCallSchema = z.object({
   tool: z.string().min(1).max(128),
   argumentsHash: z.string().regex(/^[a-f0-9]{64}$/),
   summary: z.string().min(1).max(400),
-  /** `unchecked` (#215): asked because the classifier could not check the call, not because it doubted it. */
-  kind: z.enum(["classifier", "unchecked", "destructive", "admin", "bulk", "hint"]),
+  /**
+   * `unchecked` (#215): asked because the classifier could not check the call, not because it
+   * doubted it. `deny` (owner decision 2026-10-02): the classifier judged the member did not ask
+   * for this at all, stronger than an ordinary `classifier` doubt.
+   */
+  kind: z.enum(["classifier", "unchecked", "destructive", "admin", "bulk", "hint", "deny"]),
 }).strict();
 
 /**

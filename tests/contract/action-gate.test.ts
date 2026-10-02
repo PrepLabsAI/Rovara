@@ -83,18 +83,28 @@ describe("the action gate's decisions", () => {
     expect(failing.session.decisions[0]?.usage).toEqual({ input: 700, output: 12, cost: 0.00005 });
   });
 
-  it("asks, without caching, when the classifier's verdict is neither allow nor ask", async () => {
-    for (const decision of ["deny", "maybe"]) {
-      const classifier = vi.fn(async () => ({ decision, reason: "odd" }) as unknown as Awaited<ReturnType<ActionClassifier>>);
-      const { gate: g, session } = gate({ classifier });
-      for (let round = 0; round < 2; round += 1) {
-        expect(await g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages }))
-          .toMatchObject({ outcome: "ask", source: "classifier_unavailable", kind: "classifier", reason: "the classifier could not decide: its verdict was not allow or ask" });
-      }
-      expect(classifier).toHaveBeenCalledTimes(2);
-      expect(session.asks).toHaveLength(2);
-      expect(session.asks[0]).toMatchObject({ tool: "tracker__save_item", kind: "unchecked" });
+  it("asks, without caching, when the classifier's verdict is not allow, ask or deny", async () => {
+    const classifier = vi.fn(async () => ({ decision: "maybe", reason: "odd" }) as unknown as Awaited<ReturnType<ActionClassifier>>);
+    const { gate: g, session } = gate({ classifier });
+    for (let round = 0; round < 2; round += 1) {
+      expect(await g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages }))
+        .toMatchObject({ outcome: "ask", source: "classifier_unavailable", kind: "classifier", reason: "the classifier could not decide: its verdict was not allow, ask or deny" });
     }
+    expect(classifier).toHaveBeenCalledTimes(2);
+    expect(session.asks).toHaveLength(2);
+    expect(session.asks[0]).toMatchObject({ tool: "tracker__save_item", kind: "unchecked" });
+  });
+
+  it("treats a deny verdict as a real answer (owner decision 2026-10-02): it asks, caches, and marks the ask deny, not unchecked", async () => {
+    const classifier = vi.fn(async () => ({ decision: "deny" as const, reason: "The messages ask to look at TRK-5, not change it." }));
+    const { gate: g, session } = gate({ classifier });
+    for (let round = 0; round < 2; round += 1) {
+      expect(await g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages }))
+        .toMatchObject({ outcome: "ask", source: "classifier", kind: "deny", reason: "The messages ask to look at TRK-5, not change it." });
+    }
+    expect(classifier).toHaveBeenCalledTimes(1);
+    expect(session.asks).toHaveLength(2);
+    expect(session.asks[0]).toMatchObject({ tool: "tracker__save_item", kind: "deny" });
   });
 
   it("asks when the classifier does not answer within the gate's own deadline", async () => {

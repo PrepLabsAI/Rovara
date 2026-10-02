@@ -391,6 +391,21 @@ describe("settling a turn's confirmations", () => {
     expect(PendingConfirmationSchema.parse({ ...pending, calls })).toBeDefined();
   });
 
+  it("shows a stronger note for a deny verdict, the softer one for ask, and none for unchecked (owner decision 2026-10-02)", () => {
+    const calls = [
+      { tool: "tracker__save_item", argumentsHash: "3".repeat(64), summary: "Use tracker to save item: id TRK-5", kind: "deny" as const },
+      { tool: "tracker__save_item", argumentsHash: "4".repeat(64), summary: "Use tracker to save item: id TRK-6", kind: "classifier" as const },
+      { tool: "agentx_submit_task", argumentsHash: "5".repeat(64), summary: 'Start a coding task: "list files"', kind: "unchecked" as const },
+    ];
+    const text = confirmationMessage({ ...pending, calls });
+    expect(text.split("\n").slice(1, 4)).toEqual([
+      "• Use tracker to save item: id TRK-5 (AgentX thinks you did not ask for this. Check it before approving.)",
+      "• Use tracker to save item: id TRK-6 (I'm not sure you asked for this)",
+      '• Start a coding task: "list files"',
+    ]);
+    expect(PendingConfirmationSchema.parse({ ...pending, calls })).toBeDefined();
+  });
+
   it("escapes a stored summary's Slack control characters once, so it cannot mention or link anyone", () => {
     const raw = { ...pending, calls: [{ ...pending.calls[0]!, summary: "tracker__save_item: title=<!channel> & <https://x.example|y>" }] };
     expect(confirmationMessage(raw)).toContain("• tracker__save_item: title=&lt;!channel&gt; &amp; &lt;https://x.example|y&gt; (destructive)");

@@ -17,7 +17,13 @@ export interface ClassifierInput {
 export interface ClassifierUsage { input: number; output: number; cost: number }
 
 export interface ClassifierVerdict {
-  decision: "allow" | "ask";
+  /**
+   * `deny` (owner decision 2026-10-02): a classifier's own, stronger signal that the member did not
+   * ask for this at all, distinct from the ordinary doubt of `ask`. The gate still only asks on it,
+   * never blocking outright. The model-backed classifier below never answers it: parseVerdict
+   * accepts only `allow` and `ask` from the model.
+   */
+  decision: "allow" | "ask" | "deny";
   reason: string;
   usage?: ClassifierUsage;
 }
