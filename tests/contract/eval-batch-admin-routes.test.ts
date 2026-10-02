@@ -135,9 +135,9 @@ describe("the project's administrator (spec 052 Task 5)", () => {
     const batchId = ((await start(handler)).body.batch as { batchId: string }).batchId;
     const stranger = { subject: "other-project-admin", admin: true };
     for (const [method, path] of [["GET", `${base}/${batchId}`], ["POST", `${base}/${batchId}/stop`], ["GET", `${base}/${batchId}/results`]] as const) {
-      expect([403, 404]).toContain((await call(handler, { method, path, user: stranger })).status);
+      expect(await call(handler, { method, path, user: stranger })).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
     }
-    expect([403, 404]).toContain((await start(handler, batchFile, {}, stranger)).status);
+    expect(await start(handler, batchFile, {}, stranger)).toMatchObject({ status: 404, body: { error: { code: "NOT_FOUND" } } });
     expect(await call(handler, { method: "GET", path: `${base}/${batchId}`, user: administrator })).toMatchObject({ body: { batch: { status: "RUNNING" } } });
   });
 
@@ -149,6 +149,18 @@ describe("the project's administrator (spec 052 Task 5)", () => {
     expect(binding).toBeDefined();
     binding!.projectName = "elsewhere";
     expect((await call(handler, { method: "GET", path: `${base}/${batchId}`, user: administrator })).status).toBe(200);
+  });
+});
+
+describe("a batch record with no project (spec 052, fail closed)", () => {
+  it.each([undefined, ""])("is refused, not authorized against the project %j", async (projectName) => {
+    const { handler, db } = await batchBroker();
+    const batchId = ((await start(handler)).body.batch as { batchId: string }).batchId;
+    const item = db.get(`EVAL_BATCH#${batchId}`, "META")!;
+    if (projectName === undefined) delete item.projectName; else item.projectName = projectName;
+    for (const [method, path] of [["GET", `${base}/${batchId}`], ["POST", `${base}/${batchId}/stop`], ["GET", `${base}/${batchId}/results`]] as const) {
+      expect(await call(handler, { method, path, user: administrator })).toMatchObject({ status: 400, body: { error: { code: "CONFIG_INVALID", message: expect.stringContaining("no project recorded") as unknown } } });
+    }
   });
 });
 

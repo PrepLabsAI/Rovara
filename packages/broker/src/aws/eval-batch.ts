@@ -836,9 +836,13 @@ async function readStored(dependencies: EvalBatchDependencies, batchId: string):
   const response = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName, Key: evalBatchKey(batchId), ConsistentRead: true }));
   const item = response.Item as Record<string, unknown> | undefined;
   if (item === undefined) return undefined;
+  // Fail closed: a batch with no project would be passed to an authorization check as "undefined".
+  if (typeof item.projectName !== "string" || item.projectName.length === 0) {
+    throw agentXError("CONFIG_INVALID", `batch ${batchId} has no project recorded, so it cannot be used; ask an operator to repair its record`);
+  }
   return {
     record: EvalBatchRecordSchema.parse(withoutKeys(item, STORAGE_ONLY)),
-    projectName: String(item.projectName),
+    projectName: item.projectName,
     runnerFeatures: Array.isArray(item.runnerFeatures) ? item.runnerFeatures.filter((feature): feature is string => typeof feature === "string") : [],
   };
 }
