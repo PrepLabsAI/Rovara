@@ -74,7 +74,7 @@ none, the result says "Not verified: no checks ran", and the reply suggests addi
 ### One extra try
 
 - **FR-006:** When the agent tries to finish and a regression exists, AgentX MUST give it the failing checks' output
-  (trimmed) and **one** more turn, using Pi 0.99's `agent_before_settle` hook with `continue: true`. That extra turn
+  (trimmed) and **one** more turn, using Pi 1.0.0's `agent_before_settle` hook with `continue: true`. That extra turn
   counts against the task's time, cost and step limits. After it, AgentX reruns the checks once more and records the
   final result. There is never a third round.
 

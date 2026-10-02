@@ -58,16 +58,22 @@ const TEST_HEADS: readonly (readonly string[])[] = [
   ["python", "-m", "pytest"], ["go", "test"], ["cargo", "test"], ["make", "test"], ["mvn", "test"],
   ["gradle", "test"], ["./gradlew", "test"], ["bundle", "exec", "rspec"], ["phpunit"], ["tox"],
 ];
-const UNSAFE = /[|;&<>`]|\$\(/;
+/** Only a plain space and these characters may appear: no quoting, expansion, globbing, redirection or control characters. */
+const ALLOWED = /^[A-Za-z0-9_@%+=:,./ -]*$/;
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=\S*$/;
+
+/** A cd target must stay inside the workspace: relative, not an option, no `..` segment. */
+function safeCdPath(path: string): boolean {
+  return path.length > 0 && !path.startsWith("-") && !path.startsWith("/") && !path.split("/").includes("..");
+}
 
 /** The command to replay if `command` is a simple test command (P-6), else undefined. */
 export function matchTestCommand(command: string): string | undefined {
-  const trimmed = command.trim();
-  const cd = /^cd\s+(\S+)\s+&&\s+(.+)$/.exec(trimmed);
-  const rest = cd === null ? trimmed : cd[2]!;
-  if (rest.length === 0 || UNSAFE.test(rest) || (cd !== null && UNSAFE.test(cd[1]!))) return undefined;
-  const words = rest.split(/\s+/);
+  const cd = /^ *cd +(\S+) +&& +(.+)$/s.exec(command);
+  const rest = (cd === null ? command : cd[2]!).replace(/^ +| +$/g, "");
+  if (rest.length === 0 || !ALLOWED.test(rest)) return undefined;
+  if (cd !== null && (!ALLOWED.test(cd[1]!) || !safeCdPath(cd[1]!))) return undefined;
+  const words = rest.split(/ +/);
   let index = 0;
   while (index < words.length && ASSIGNMENT.test(words[index]!)) index += 1;
   if (words[index] === "timeout" && /^\d+[smh]?$/.test(words[index + 1] ?? "")) index += 2;
@@ -91,6 +97,9 @@ export function parseAgentClaim(text: string | undefined): "success" | "failure"
   return "none";
 }
 
-export function reportStatus(checks: readonly CheckEntry[]): "verified" | "regression" {
-  return checks.some((check) => check.class === "regression") ? "regression" : "verified";
+/** `not_verified` when nothing was rerun (no entries, or every entry is `not_rerun`). */
+export function reportStatus(checks: readonly CheckEntry[]): "verified" | "regression" | "not_verified" {
+  if (checks.some((check) => check.class === "regression")) return "regression";
+  if (checks.every((check) => check.class === "not_rerun")) return "not_verified";
+  return "verified";
 }
