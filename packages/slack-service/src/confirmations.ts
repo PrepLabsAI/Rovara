@@ -26,12 +26,17 @@ export interface ConfirmationStore {
   grantYesToAll(subject: string, userId: string): Promise<void>;
 }
 
-const KIND_NOTES: Readonly<Record<PendingConfirmation["calls"][number]["kind"], string>> = {
+const KIND_NOTES: Readonly<Record<PendingConfirmation["calls"][number]["kind"], string | undefined>> = {
   destructive: "destructive",
   admin: "an administrator asks for confirmation",
   bulk: "touches many items",
   hint: "the vendor marks it destructive",
   classifier: "I'm not sure you asked for this",
+  // #215: the classifier could not check it, which says nothing about whether the member asked.
+  unchecked: undefined,
+  // Owner decision 2026-10-02: the classifier judged the member did not ask for this at all, a
+  // stronger doubt than the plain "classifier" ask above.
+  deny: "AgentX thinks you did not ask for this. Check it before approving.",
 };
 
 /** The message text: every blocked action and its target, and how to answer with or without the buttons. */
@@ -40,7 +45,10 @@ export function confirmationMessage(confirmation: PendingConfirmation): string {
     `<@${confirmation.requesterId}>, before I go ahead, please confirm:`,
     // The gate's summary is already Slack-safe; escaping again (idempotently) keeps a stored or
     // hand-written summary from mentioning or linking anyone. The classifier's reason is never shown.
-    ...confirmation.calls.map((call) => `• ${escapeText(call.summary)} (${KIND_NOTES[call.kind]})`),
+    ...confirmation.calls.map((call) => {
+      const note = KIND_NOTES[call.kind];
+      return `• ${escapeText(call.summary)}${note === undefined ? "" : ` (${note})`}`;
+    }),
     "Press Approve, or reply `@AgentX yes`, to run exactly these. Press Cancel, or reply `@AgentX cancel`, to drop them. This expires in 24 hours.",
   ].join("\n");
 }

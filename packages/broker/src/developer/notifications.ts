@@ -8,7 +8,7 @@ export interface StreamRecord {
   eventName?: string;
   dynamodb?: { ApproximateCreationDateTime?: number; NewImage?: Record<string, AttributeValue>; OldImage?: Record<string, AttributeValue> };
 }
-export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request" | "admin_change_dm" | "admin_change_outcome";
+export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request" | "admin_change_dm" | "admin_change_outcome" | "admin_change_expiry";
 export interface Notice {
   /** Fixed per change, so a repeated delivery posts once (C9). */
   id: string;
@@ -21,6 +21,8 @@ export interface Notice {
   mode?: "view" | "continue";
   /** Spec 025 E13: the admin change a direct message is about. */
   changeId?: string;
+  /** #217: the queue holds the notice until this time (at most 15 minutes); set only on a notice the notifier schedules itself. */
+  notBefore?: string;
 }
 
 const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);

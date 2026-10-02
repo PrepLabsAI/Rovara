@@ -97,15 +97,29 @@ function slackBotToken(): Promise<string> {
 const slackUserName = createSlackUserNames({ token: slackBotToken });
 
 /** Posts in a thread, or with no thread a new message in the channel; answers the message's timestamp. */
-async function postToSlack(channel: string, threadTs: string | undefined, text: string, blocks?: unknown[]): Promise<string | undefined> {
+async function postToSlack(channel: string, threadTs: string | undefined, text: string, blocks?: unknown[], signal?: AbortSignal): Promise<string | undefined> {
   const response = await fetch("https://slack.com/api/chat.postMessage", {
     method: "POST",
+    ...(signal === undefined ? {} : { signal }),
     headers: { authorization: `Bearer ${await slackBotToken()}`, "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify({ channel, ...(threadTs === undefined ? {} : { thread_ts: threadTs }), text, unfurl_links: false, ...(blocks === undefined ? {} : { blocks }) }),
   });
   const result = await response.json() as { ok?: boolean; error?: string; ts?: string };
   if (!response.ok || result.ok !== true) throw new SlackApiError("chat.postMessage", result.error ?? `HTTP ${response.status}`);
   return result.ts;
+}
+
+/** Issue 219: edits the bot's own message (a long task's progress note). */
+async function updateInSlack(channel: string, ts: string, text: string): Promise<void> {
+  const response = await fetch("https://slack.com/api/chat.update", {
+    method: "POST",
+    // A progress edit that Slack does not answer is given up, never left waiting.
+    signal: AbortSignal.timeout(10_000),
+    headers: { authorization: `Bearer ${await slackBotToken()}`, "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ channel, ts, text }),
+  });
+  const result = await response.json() as { ok?: boolean; error?: string };
+  if (!response.ok || result.ok !== true) throw new SlackApiError("chat.update", result.error ?? `HTTP ${response.status}`);
 }
 
 /** Spec 052 Ruling 19: removes the bot's own message (a batch thread's opener that lost a race). */
@@ -358,6 +372,9 @@ await runConsumer(queue, (message, context) => processSlackRequest(message, {
   confirmations,
   postConfirmation: async (thread, confirmation, text) => { await postToSlack(thread.channelId, thread.threadTs, text, confirmationBlocks(text, confirmation.confirmationId)); },
   postWithBlocks: async (thread, text, blocks) => { await postToSlack(thread.channelId, thread.threadTs, text, blocks); },
+  // Issue 219: a progress post Slack does not answer is given up after ten seconds.
+  postProgress: (thread, text) => postToSlack(thread.channelId, thread.threadTs, text, undefined, AbortSignal.timeout(10_000)),
+  updateMessage: (thread, ts, text) => updateInSlack(thread.channelId, ts, text),
   turnRecords: new DynamoTurnRecordWriter(documentClient, turnRecordsTableName),
   userName: slackUserName,
 }, context), {

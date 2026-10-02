@@ -28,7 +28,7 @@ export const TURN_GATE_REASON_LIMIT = 200;
 export const TurnGateSchema = z.object({
   outcome: z.enum(["allow", "ask", "deny"]),
   source: z.enum(["confirmation", "rule", "default", "yes_to_all", "classifier", "classifier_unavailable", "gate_error"]),
-  kind: z.enum(["classifier", "destructive", "admin", "bulk", "hint", "read", "create", "allowed"]).optional(),
+  kind: z.enum(["classifier", "destructive", "admin", "bulk", "hint", "read", "create", "allowed", "deny"]).optional(),
   rule: z.string().regex(/^[1-9][0-9]{0,2}$/).optional(),
   reason: z.string().max(TURN_GATE_REASON_LIMIT),
 }).strict();

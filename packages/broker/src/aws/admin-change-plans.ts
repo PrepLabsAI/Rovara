@@ -5,7 +5,7 @@
 import {
   ADMIN_CHANGE_EFFECT_MAX, AgentXNameSchema, CredentialRegistrationSchema, SlackChannelIdSchema, WorkspaceInstanceSchema, agentXError, developerTaskPolicy,
   redactSecrets, redactText, workspaceRecordFields,
-  type AdminChangeInput, type AdminChangeKind, type ChannelByNameRequest, type ChannelByNameResponse, type ProjectDefinition,
+  type AdminChangeInput, type AdminChangeKind, type ChannelByNameRequest, type ConfirmationMethod, type ChannelByNameResponse, type ProjectDefinition,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { MAX_PER_ORGANIZATION, MAX_PER_PERSON, isWholeLimit, readWorkspaceLimits, WORKSPACE_LIMITS_KEY } from "../developer/limits.js";
@@ -50,7 +50,14 @@ export interface ChangePlan {
   confirmationEffect?: string;
   details: Record<string, unknown>;
   snapshot: unknown;
-  apply(identity: AuthenticatedIdentity): Promise<Record<string, unknown>>;
+  /** `how`: the method that confirmed the change, which a planner may record with what it writes (#216). */
+  apply(identity: AuthenticatedIdentity, how?: { method: ConfirmationMethod }): Promise<Record<string, unknown>>;
+  /**
+   * #216: when this re-plan's state differs from the one a change was planned against (its stored
+   * `details`), what changed, to what, and how and when when known, in plain words; undefined when
+   * the planner cannot say, and the caller then describes the change as planned again now.
+   */
+  changedSince?(planned: Record<string, unknown>): string | undefined;
 }
 /**
  * B4: who is planning; their linked Slack user decides whether a private channel is named to them.
@@ -393,6 +400,60 @@ const EFFECT_PEOPLE_MAX = 10;
 
 const counterCount = (item: Record<string, unknown> | undefined): number => (typeof item?.count === "number" && item.count >= 0 ? item.count : 0);
 
+/** #216: how a setting was last confirmed, in words. */
+const VIA_WORDS: Readonly<Record<string, string>> = { cli: "from the CLI", slack: "from Slack", elicitation: "from an AI tool" };
+
+/** A stored time as "1:04 PM UTC"; the changes it describes are minutes old, so the day is left out. */
+function clockTime(iso: unknown): string | undefined {
+  if (typeof iso !== "string" || Number.isNaN(Date.parse(iso))) return undefined;
+  const at = new Date(iso);
+  const hours = at.getUTCHours();
+  return `${hours % 12 === 0 ? 12 : hours % 12}:${String(at.getUTCMinutes()).padStart(2, "0")} ${hours < 12 ? "AM" : "PM"} UTC`;
+}
+
+const limitPair = (value: unknown): { perPerson: number; perOrganization: number } | undefined => {
+  const record = value !== null && typeof value === "object" ? value as Record<string, unknown> : undefined;
+  return typeof record?.perPerson === "number" && typeof record.perOrganization === "number" ? { perPerson: record.perPerson, perOrganization: record.perOrganization } : undefined;
+};
+
+const wanted = (input: { perPerson?: number | undefined; perOrganization?: number | undefined }) => [
+  ...(input.perPerson === undefined ? [] : [`${input.perPerson} per person`]),
+  ...(input.perOrganization === undefined ? [] : [`${input.perOrganization} for the organization`]),
+].join(" and ");
+
+/**
+ * #216: what changed in the workspace limits since a change was planned, e.g. "the per-person limit
+ * was changed to 4 (from 1) by another administrator from the CLI at 1:04 PM UTC, after you asked;
+ * ask again if you still want 2 per person". Undefined when the planned details cannot be read.
+ */
+function limitsChangedSince(
+  planned: Record<string, unknown>,
+  now: { perPerson: number; perOrganization: number },
+  source: string,
+  setting: Record<string, unknown> | undefined,
+  identity: AuthenticatedIdentity,
+  input: { perPerson?: number | undefined; perOrganization?: number | undefined },
+): string | undefined {
+  const was = limitPair(planned.current);
+  if (was === undefined) return undefined;
+  const changes: string[] = [];
+  if (now.perPerson !== was.perPerson) changes.push(`the per-person limit was changed to ${now.perPerson} (from ${was.perPerson})`);
+  if (now.perOrganization !== was.perOrganization) {
+    changes.push(changes.length === 0 ? `the organization limit was changed to ${now.perOrganization} (from ${was.perOrganization})` : `the organization limit to ${now.perOrganization} (from ${was.perOrganization})`);
+  }
+  // Nothing it can name changed (a setting written again with the same values, or other defaults
+  // behind a setting): the caller then says what the change would do now.
+  if (changes.length === 0) return undefined;
+  const what = changes.join(" and ");
+  // With no valid setting, the limits are the deployment's defaults: no person, method or time to name.
+  if (source === "parameters") return `${what} in the deployment's default limits, after you asked; ask again if you still want ${wanted(input)}`;
+  const by = setting?.updatedBy !== null && typeof setting?.updatedBy === "object" ? setting.updatedBy as Record<string, unknown> : undefined;
+  const who = by === undefined ? "" : by.issuer === identity.issuer && by.subject === identity.subject ? " by you" : " by another administrator";
+  const via = typeof setting?.via === "string" && VIA_WORDS[setting.via] !== undefined ? ` ${VIA_WORDS[setting.via]}` : "";
+  const time = setting === undefined ? undefined : clockTime(setting.updatedAt);
+  return `${what}${who}${via}${time === undefined ? "" : ` at ${time}`}, after you asked; ask again if you still want ${wanted(input)}`;
+}
+
 const planLimits: Planner = async (deps, identity, input) => {
   if (input.kind !== "set_workspace_limits") throw new Error("wrong planner");
   requireAdminClaim(identity);
@@ -425,7 +486,8 @@ const planLimits: Planner = async (deps, identity, input) => {
     details: { current: { perPerson: current.member, perOrganization: current.organization, source: current.source }, next, organizationCount, over: over.length },
     // The counts are informational and change often, so they are deliberately outside the hash.
     snapshot: { setting: setting === undefined ? null : { perPerson: setting.perPerson ?? null, perOrganization: setting.perOrganization ?? null, updatedAt: setting.updatedAt ?? null }, defaults: deps.reads.limitDefaults },
-    apply: async (applier) => setWorkspaceLimits(deps.actions, { issuer: applier.issuer, subject: applier.subject }, next),
+    apply: async (applier, how) => setWorkspaceLimits(deps.actions, { issuer: applier.issuer, subject: applier.subject }, next, how?.method),
+    changedSince: (planned) => limitsChangedSince(planned, { perPerson: current.member, perOrganization: current.organization }, current.source, setting, identity, input),
   };
 };
 

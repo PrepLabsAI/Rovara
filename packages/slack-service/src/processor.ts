@@ -42,6 +42,7 @@ import {
 import { runSwebenchCommand, type SwebenchApi } from "./swebench-command.js";
 import { runEvalBatchCommand, type EvalBatchStartApi } from "./eval-batch-command.js";
 import { SHARED_CLOSE_REFUSED_MESSAGE, SHARED_SETUP_FAILED_MESSAGE, TASK_STILL_BUSY_MESSAGE, taskBusy, waitForIdleTask } from "./shared-task.js";
+import { createProgressNote, progressSubject, type ProgressNote } from "./progress-note.js";
 
 export interface ThreadServiceApi {
   ensureWorkspace(requestId: string): Promise<SlackThreadWorkspaceResult>;
@@ -170,10 +171,22 @@ export interface ProcessorDependencies {
   cancelTaskMilliseconds?: number;
   /** Waits between polls of a SWE-bench run (spec 043); a timer when absent. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Issue 219: posts a message in the thread and answers its timestamp, for the progress note a
+   * long task edits while it runs. With updateMessage; without both, no progress note is posted.
+   */
+  postProgress?: (thread: SlackThread, text: string) => Promise<string | undefined>;
+  /** Issue 219: edits a message the service posted (chat.update). */
+  updateMessage?: (thread: SlackThread, ts: string, text: string) => Promise<void>;
+  /** Issue 219: how often the progress note is edited; three minutes when absent. */
+  progressIntervalMs?: number;
 }
 
 /** Issue 157: a save already in flight at the hand-off gets this long to land. */
 const PENDING_SAVE_MILLISECONDS = 5_000;
+
+/** Issue 219: the progress note's last edit gets this long before the reply is posted anyway. */
+const PROGRESS_FINISH_MILLISECONDS = 5_000;
 
 /** Issue 167: cancelling an abandoned task gets this long, well inside the time left before SIGKILL. */
 const CANCEL_TASK_MILLISECONDS = 5_000;
@@ -212,6 +225,8 @@ export async function processSlackRequest(
   // Issue 157: set the moment this attempt is handed off. From then on the new task owns the
   // thread, so the old turn (a lazy worker still waiting, say) posts nothing more and saves nothing.
   let handedOff = false;
+  // Issue 219: this attempt's progress note, once the worker accepted a task.
+  let progress: ProgressNote | undefined;
   // Remembers only what reached Slack, so the record never claims a message the member did not see.
   const post = async (text: string) => {
     if (handedOff) {
@@ -628,6 +643,9 @@ export async function processSlackRequest(
       return;
     }
     if (confirmation?.claim) claimed = true;
+    // The gate removes each approval as it lets the confirmed call through, before the task is
+    // accepted, so what was approved is read now, once.
+    const approvedSummary = claimed ? confirmation?.session.approvals.map((approval) => approval.summary).join("; ") : undefined;
     // Spec 014 FR-026: the ingress has already said "I'm on it". Say work has started only when the
     // member was told to wait, behind earlier requests, for setup, or because SQS redelivered this
     // request after an earlier attempt threw: that attempt's own "Working on it now" is 15 minutes
@@ -640,7 +658,30 @@ export async function processSlackRequest(
     const turnStop = new AbortController();
     const workspaceForTurn = workspace.workspaceId;
     const saveActiveTurn = dependencies.threads.saveActiveTurn?.bind(dependencies.threads);
+    // Issue 219: once the worker accepts the turn's first task, one note says so and is edited while it runs.
+    const postProgress = dependencies.postProgress;
+    const updateMessage = dependencies.updateMessage;
+    const startProgress = async (): Promise<void> => {
+      if (progress !== undefined || postProgress === undefined || updateMessage === undefined || handedOff) return;
+      progress = createProgressNote({
+        what: progressSubject(claimed ? "" : message.text, approvedSummary), eventId: message.eventId, log,
+        post: (text) => postProgress(message.thread, text),
+        update: (ts, text) => updateMessage(message.thread, ts, text),
+        now: dependencies.now ?? Date.now,
+        ...(dependencies.progressIntervalMs === undefined ? {} : { intervalMs: dependencies.progressIntervalMs }),
+      });
+      // Never awaited: a slow Slack post must not hold the task's result back.
+      void progress.start();
+    };
+    /** The last edit gets a few seconds: an edit Slack does not answer never holds the reply back. */
+    const finishProgress = async (outcome: "finished" | "stopped"): Promise<void> => {
+      if (progress === undefined) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([progress.finish(outcome), new Promise<void>((resolve) => { timer = setTimeout(resolve, PROGRESS_FINISH_MILLISECONDS); })]);
+      clearTimeout(timer);
+    };
     const onOperationAccepted = async (operationId: string): Promise<void> => {
+      await startProgress();
       // After the hand-off the redelivery owns the thread; a late acceptance must not move it.
       if (saveActiveTurn === undefined) return;
       if (handedOff) {
@@ -650,7 +691,7 @@ export async function processSlackRequest(
       }
       accepted = { workspaceId: workspaceForTurn, operationId };
       // An approval's own text is only "yes": the note names what was approved instead.
-      const approved = claimed ? confirmation?.session.approvals.map((approval) => approval.summary).join("; ") : undefined;
+      const approved = approvedSummary;
       const base: ActiveTurn = { eventId: message.eventId, workspaceId: workspaceForTurn, operationId, ...(approved ? { request: `the member approved: ${approved}` } : {}) };
       // Issue 173: shown as waited on from now; if the save fails, the next heartbeat writes it.
       waitingOn = base;
@@ -691,7 +732,7 @@ export async function processSlackRequest(
         ...(recorder === undefined ? {} : { recorder }),
         ...(state.refreshConnectors?.length ? { refreshConnectors: state.refreshConnectors } : {}),
         // A service that cannot remember operations, or is never stopped mid-turn, runs the turn as before.
-        ...(dependencies.threads.saveActiveTurn === undefined ? {} : { onOperationAccepted }),
+        ...(dependencies.threads.saveActiveTurn === undefined && (postProgress === undefined || updateMessage === undefined) ? {} : { onOperationAccepted }),
         ...(stampActiveTurn === undefined ? {} : { onOperationAttached }),
         ...(options.handoff === undefined ? {} : { signal: turnStop.signal }),
         ...(state.turnNote === undefined ? {} : { turnNote: state.turnNote.text }),
@@ -708,11 +749,13 @@ export async function processSlackRequest(
       }
       draft.disposition = "answered";
       log("task.completed", { eventId: message.eventId, responseLength: response.length });
+      await finishProgress("finished");
     } catch (error) {
       if (error instanceof TurnHandedOffError) throw error;
       draft.disposition = "failed";
       draft.error = errorSummary(error);
       log("task.failed", { eventId: message.eventId, errorName: errorName(error) });
+      await finishProgress("stopped");
       response = `AgentX could not complete the request: ${safeMessage(error)}`;
     }
     // Formatted before anything is posted (spec 014 FR-022): the turn record keeps the formatted
@@ -830,6 +873,8 @@ export async function processSlackRequest(
   } finally {
     // Issue 173: whatever happened, this attempt shows nothing more.
     stamping = false;
+    // Issue 219: and edits its progress note no more.
+    progress?.dispose();
     if (finished) {
       // Only a finished event is recorded: an attempt that throws for redelivery leaves the one
       // record to the attempt that finishes (SC-006).

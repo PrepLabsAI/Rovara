@@ -3,6 +3,7 @@
 // stored and audited, and applies at most once, only after a valid confirmation.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AdminChangePendingRecordSchema, type ChannelInfoRequest, type ChannelMembersRequest } from "@agentx/contracts";
+import { adminChangeOutcomeMessage } from "../../packages/broker/src/developer/change-messages.js";
 import { ADMIN_SLACK, ADMIN_TOKEN, TRACE, createAdminChangeBroker } from "../support/admin-change-broker.js";
 import { adminCall, createAdminBroker } from "../support/admin-broker.js";
 import { bindChannel, unbindChannel } from "../support/developer-task-broker.js";
@@ -154,7 +155,9 @@ describe("confirming by the pop-up (FR-040, SC-005)", () => {
     const id = changeId(await broker.propose(BIND));
     broker.db.set({ pk: `SLACK_BINDING#${SLACK_TEAM}`, sk: "CHANNEL#C0LEDGER01", entityType: "SLACK_BINDING", teamId: SLACK_TEAM, channelId: "C0LEDGER01", projectName: "payments-legacy", updatedAt: new Date().toISOString() });
     const answer = await broker.apply(id);
-    expect(answer.body.error).toMatchObject({ code: "CHANGE_STALE", message: expect.stringContaining(`change ${id}`) as unknown });
+    // #216: a re-plan the planner refuses says why, and names no change ID.
+    expect(answer.body.error).toEqual({ code: "CHANGE_STALE", message: "what this change was planned against has changed since you asked (project not found); ask for the change again" });
+    expect(JSON.stringify(answer.body)).not.toContain(id);
     expect(binding(broker.db)).toMatchObject({ projectName: "payments-legacy" });
     expect(broker.audit(id)).toMatchObject({ status: "failed", outcome: "failed", error: expect.objectContaining({ code: "CHANGE_STALE" }) as unknown, refusedAttempts: [expect.objectContaining({ reason: "stale_state" })] });
   });
@@ -164,10 +167,63 @@ describe("confirming by the pop-up (FR-040, SC-005)", () => {
     const id = changeId(await broker.propose({ kind: "unbind_channel", channel: SLACK_CHANNEL }));
     await unbindChannel(broker.handler, SLACK_CHANNEL);
     const answer = await broker.apply(id);
-    expect(answer.body.error).toMatchObject({ code: "CHANGE_STALE", message: expect.stringMatching(new RegExp(`^what change ${id} was planned against has changed \\(.+\\); ask for the change again$`)) as unknown });
+    expect(answer.body.error).toMatchObject({ code: "CHANGE_STALE", message: expect.stringMatching(/^what this change was planned against has changed since you asked \(.+\); ask for the change again$/u) as unknown });
+    expect(JSON.stringify(answer.body)).not.toContain(id);
     expect(broker.db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)).toBeUndefined();
     expect(broker.audit(id)).toMatchObject({ status: "failed", outcome: "failed", refusedAttempts: [expect.objectContaining({ reason: "stale_state" })] });
     expect(logged("admin_change.claimed")).toEqual([]);
+  });
+
+  it("says what changed in the limits, to what, how and when, in the answer and in the Slack message (#216)", async () => {
+    const broker = await createAdminChangeBroker();
+    broker.db.set({ pk: "SETTINGS", sk: "WORKSPACE_LIMITS", entityType: "SETTING", perPerson: 1, perOrganization: 20, updatedBy: { issuer: "x", subject: "admin-subject" }, updatedAt: "2026-10-02T12:00:00.000Z" });
+    const id = changeId(await broker.propose({ kind: "set_workspace_limits", perPerson: 2 }));
+    broker.db.set({ pk: "SETTINGS", sk: "WORKSPACE_LIMITS", entityType: "SETTING", perPerson: 4, perOrganization: 20, updatedBy: { issuer: "x", subject: "someone-else" }, via: "cli", updatedAt: "2026-10-02T13:04:00.000Z" });
+    const answer = await broker.apply(id);
+    expect(answer.body.error).toEqual({ code: "CHANGE_STALE", message: "the per-person limit was changed to 4 (from 1) by another administrator from the CLI at 1:04 PM UTC, after you asked; ask again if you still want 2 per person" });
+    // The Slack message's edit reads the stored error: what changed, and no change ID.
+    const slack = adminChangeOutcomeMessage(AdminChangePendingRecordSchema.parse({ ...broker.pending(id), dm: { channel: "D0ADA00001", ts: "1.2", postedAt: "2026-10-02T13:05:00.000Z" } }))!;
+    expect(slack.text).toContain("It was not applied: the per-person limit was changed to 4 (from 1) by another administrator from the CLI at 1:04 PM UTC, after you asked; ask again if you still want 2 per person");
+    expect(slack.text).not.toContain(id);
+  });
+
+  it("says what the change would do now when the planner cannot say what changed (#216)", async () => {
+    const broker = await createAdminChangeBroker();
+    const id = changeId(await broker.propose({ kind: "set_workspace_limits", perPerson: 2 }));
+    // An older stored change whose details name no current limits.
+    broker.db.set({ ...broker.pending(id)!, details: {} });
+    broker.db.set({ pk: "SETTINGS", sk: "WORKSPACE_LIMITS", entityType: "SETTING", perPerson: 4, perOrganization: 20, updatedAt: "2026-10-02T13:04:00.000Z" });
+    const message = String(((await broker.apply(id)).body.error as { message: string }).message);
+    expect(message).toMatch(/^what this change was planned against has changed since you asked\. Planned again now: Set the workspace limits to 2 per person \(now 4\) and 20 for the organization \(unchanged\)\..* Ask for the change again if you still want it\.$/u);
+    expect(message).not.toContain(id);
+  });
+
+  it("names the deployment's defaults, not a person, when no setting decides the limits (review)", async () => {
+    const broker = await createAdminChangeBroker();
+    broker.db.set({ pk: "SETTINGS", sk: "WORKSPACE_LIMITS", entityType: "SETTING", perPerson: 1, perOrganization: 20, updatedBy: { issuer: "x", subject: "s" }, via: "cli", updatedAt: "2026-10-02T12:00:00.000Z" });
+    const id = changeId(await broker.propose({ kind: "set_workspace_limits", perPerson: 2 }));
+    broker.db.delete("SETTINGS", "WORKSPACE_LIMITS");
+    const message = String(((await broker.apply(id)).body.error as { message: string }).message);
+    expect(message).toBe("the per-person limit was changed to 3 (from 1) in the deployment's default limits, after you asked; ask again if you still want 2 per person");
+  });
+
+  it("says what the change would do now when the setting was written again with the same values (review)", async () => {
+    const broker = await createAdminChangeBroker();
+    broker.db.set({ pk: "SETTINGS", sk: "WORKSPACE_LIMITS", entityType: "SETTING", perPerson: 1, perOrganization: 20, updatedAt: "2026-10-02T12:00:00.000Z" });
+    const id = changeId(await broker.propose({ kind: "set_workspace_limits", perPerson: 2 }));
+    broker.db.set({ pk: "SETTINGS", sk: "WORKSPACE_LIMITS", entityType: "SETTING", perPerson: 1, perOrganization: 20, updatedAt: "2026-10-02T13:00:00.000Z" });
+    const message = String(((await broker.apply(id)).body.error as { message: string }).message);
+    expect(message).toMatch(/^what this change was planned against has changed since you asked\. Planned again now: Set the workspace limits to 2 per person \(now 1\)/u);
+  });
+
+  it("records how a limits change was confirmed, so a stale one names it (#216)", async () => {
+    const broker = await createAdminChangeBroker();
+    const mine = changeId(await broker.propose({ kind: "set_workspace_limits", perPerson: 2, perOrganization: 30 }));
+    const other = changeId(await broker.propose({ kind: "set_workspace_limits", perPerson: 4, perOrganization: 12 }, ["cli"]));
+    expect((await broker.apply(other, "cli")).status).toBe(200);
+    expect(broker.db.get("SETTINGS", "WORKSPACE_LIMITS")).toMatchObject({ perPerson: 4, perOrganization: 12, via: "cli" });
+    const message = String(((await broker.apply(mine)).body.error as { message: string }).message);
+    expect(message).toMatch(/^the per-person limit was changed to 4 \(from 3\) and the organization limit to 12 \(from 20\) by you from the CLI at \d{1,2}:\d{2} (AM|PM) UTC, after you asked; ask again if you still want 2 per person and 30 for the organization$/u);
   });
 
   it("refuses the pop-up once the environment turned it off, for a change that offered it before the switch", async () => {

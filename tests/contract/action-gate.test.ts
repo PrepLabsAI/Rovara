@@ -7,7 +7,9 @@ import {
   argumentsHash,
   blockReason,
   connectorToolFacts,
+  confirmationNote,
   createGateSession,
+  describeAction,
   describeCall,
   memberMessages,
   type GateDecision,
@@ -46,7 +48,7 @@ describe("the action gate's decisions", () => {
     expect(await g.decide(call("tracker__save_item", { title: "Refund" }), { memberMessages: messages })).toMatchObject({ outcome: "allow", kind: "create", actionClass: "create" });
     expect(await g.decide(call("tracker__close_item", { id: "TRK-9" }), { memberMessages: messages })).toMatchObject({ outcome: "ask", kind: "destructive" });
     expect(classifier).not.toHaveBeenCalled();
-    expect(session.asks).toEqual([{ toolCallId: expect.any(String) as string, tool: "tracker__close_item", argumentsHash: argumentsHash("tracker__close_item", { id: "TRK-9" }), summary: "tracker__close_item: id=TRK-9", kind: "destructive" }]);
+    expect(session.asks).toEqual([{ toolCallId: expect.any(String) as string, tool: "tracker__close_item", argumentsHash: argumentsHash("tracker__close_item", { id: "TRK-9" }), summary: "Use tracker to close item: id TRK-9", kind: "destructive" }]);
   });
 
   it("sends a change to the classifier with the members' messages, the call and the item it names, and follows its verdict", async () => {
@@ -81,18 +83,28 @@ describe("the action gate's decisions", () => {
     expect(failing.session.decisions[0]?.usage).toEqual({ input: 700, output: 12, cost: 0.00005 });
   });
 
-  it("asks, without caching, when the classifier's verdict is neither allow nor ask", async () => {
-    for (const decision of ["deny", "maybe"]) {
-      const classifier = vi.fn(async () => ({ decision, reason: "odd" }) as unknown as Awaited<ReturnType<ActionClassifier>>);
-      const { gate: g, session } = gate({ classifier });
-      for (let round = 0; round < 2; round += 1) {
-        expect(await g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages }))
-          .toMatchObject({ outcome: "ask", source: "classifier_unavailable", kind: "classifier", reason: "the classifier could not decide: its verdict was not allow or ask" });
-      }
-      expect(classifier).toHaveBeenCalledTimes(2);
-      expect(session.asks).toHaveLength(2);
-      expect(session.asks[0]).toMatchObject({ tool: "tracker__save_item", kind: "classifier" });
+  it("asks, without caching, when the classifier's verdict is not allow, ask or deny", async () => {
+    const classifier = vi.fn(async () => ({ decision: "maybe", reason: "odd" }) as unknown as Awaited<ReturnType<ActionClassifier>>);
+    const { gate: g, session } = gate({ classifier });
+    for (let round = 0; round < 2; round += 1) {
+      expect(await g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages }))
+        .toMatchObject({ outcome: "ask", source: "classifier_unavailable", kind: "classifier", reason: "the classifier could not decide: its verdict was not allow, ask or deny" });
     }
+    expect(classifier).toHaveBeenCalledTimes(2);
+    expect(session.asks).toHaveLength(2);
+    expect(session.asks[0]).toMatchObject({ tool: "tracker__save_item", kind: "unchecked" });
+  });
+
+  it("treats a deny verdict as a real answer (owner decision 2026-10-02): it asks, caches, and marks the ask deny, not unchecked", async () => {
+    const classifier = vi.fn(async () => ({ decision: "deny" as const, reason: "The messages ask to look at TRK-5, not change it." }));
+    const { gate: g, session } = gate({ classifier });
+    for (let round = 0; round < 2; round += 1) {
+      expect(await g.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages }))
+        .toMatchObject({ outcome: "ask", source: "classifier", kind: "deny", reason: "The messages ask to look at TRK-5, not change it." });
+    }
+    expect(classifier).toHaveBeenCalledTimes(1);
+    expect(session.asks).toHaveLength(2);
+    expect(session.asks[0]).toMatchObject({ tool: "tracker__save_item", kind: "deny" });
   });
 
   it("asks when the classifier does not answer within the gate's own deadline", async () => {
@@ -261,6 +273,78 @@ describe("the action gate's decisions", () => {
     const failed = g.failed(call("tracker__save_item", {}), new TypeError("boom"));
     expect(failed).toMatchObject({ outcome: "deny", source: "gate_error", reason: "AgentX could not check this action (TypeError)" });
     expect(session.decisions).toHaveLength(2);
+  });
+});
+
+describe("the approval text says what will happen in plain words (#215)", () => {
+  const prompt143 = `replace ZZZ-NOT-THERE with x in README.md, then run the unit tests and tell me which ones fail and why, ${"and keep going ".repeat(4)}ok`;
+  const toolName = /agentx_|tracker__|_task|_pull_request/u;
+
+  it("describes a coding task by its prompt, never by a tool name or a character count", () => {
+    expect(prompt143.length).toBeGreaterThan(80);
+    const text = describeAction("agentx_submit_task", { prompt: prompt143 });
+    expect(text).toBe(`Start a coding task: "${prompt143}"`);
+    expect(text).not.toMatch(toolName);
+    expect(text).not.toMatch(/\(\d+ characters\)/u);
+    expect(describeAction("agentx_submit_task", { prompt: "replace ZZZ-NOT-THERE with x in README.md" })).toBe('Start a coding task: "replace ZZZ-NOT-THERE with x in README.md"');
+    expect(describeAction("agentx_follow_up", { prompt: "now run the tests" })).toBe('Continue the coding task: "now run the tests"');
+  });
+
+  it("shortens a long prompt instead of counting its characters, on one Slack-safe line", () => {
+    const text = describeAction("agentx_submit_task", { prompt: `<!channel> \`go\`\n${"word ".repeat(100)}` });
+    expect(text.startsWith('Start a coding task: "&lt;!channel&gt; go word word')).toBe(true);
+    expect(text.endsWith('…"')).toBe(true);
+    expect(text.length).toBeLessThanOrEqual(300);
+    expect(text).not.toMatch(/characters\)|<!channel>|`|\n/u);
+  });
+
+  it("describes pull request work in words", () => {
+    expect(describeAction("agentx_create_pull_request", { repository: "web", title: "Fix login", body: "b".repeat(500) })).toBe('Open a pull request in web: "Fix login"');
+    expect(describeAction("agentx_manage_pull_request", { repository: "demo", pullRequestNumber: 12, action: "close" })).toBe("Close pull request #12 in demo");
+    expect(describeAction("agentx_manage_pull_request", { repository: "demo", pullRequestNumber: 12, action: "edit", title: "New title" })).toBe('Edit pull request #12 in demo: "New title"');
+    expect(describeAction("agentx_manage_pull_request", { repository: "demo", pullRequestNumber: 3, action: "sync" })).toBe("Update pull request #3 in demo with its base branch");
+  });
+
+  it("describes a connector action by its connector and action in words, with its values shortened, not counted", () => {
+    expect(describeAction("tracker__close_item", { target: "payments", id: "TRK-9" })).toBe("Use tracker to close item in payments: id TRK-9");
+    const saved = describeAction("tracker__save_item", { title: "Refund", body: "b".repeat(200), labels: ["a"], extra: { a: 1 }, priority: 2, done: false });
+    expect(saved).toBe(`Use tracker to save item: title Refund, body ${"b".repeat(79)}…, labels 1 item, extra (details), priority 2, done false`);
+    expect(saved).not.toMatch(toolName);
+    expect(describeAction("linear__createIssue", { teamId: "ENG" })).toBe("Use linear to create issue: team id ENG");
+    expect(describeAction("mystery_tool", {})).toBe("Run mystery tool");
+  });
+
+  it("redacts secrets in the values it shows, and never cuts an escape in two (review)", () => {
+    const token = `ghp_${"A".repeat(36)}`;
+    const shown = describeAction("tracker__save_item", { body: `use ${token} please` });
+    expect(shown).not.toContain(token);
+    expect(describeAction("agentx_submit_task", { prompt: `push with ${token}` })).not.toContain(token);
+    const cut = describeAction("agentx_submit_task", { prompt: "&".repeat(400) });
+    expect(cut).not.toMatch(/&(?:a|am|amp)?…/u);
+    expect(cut.length).toBeLessThanOrEqual(300);
+    expect(describeAction("agentx_new_thing", { a: 1 })).toBe("Run an AgentX action: a 1");
+  });
+
+  it("keeps the classifier's own summary, and puts the plain words in the ask", async () => {
+    const seen: unknown[] = [];
+    const { gate: g, session } = gate({ classifier: async (input) => { seen.push(input.call.summary); return { decision: "ask", reason: "unclear" }; } });
+    await g.decide(call("tracker__save_item", { id: "TRK-5", priority: 2 }), { memberMessages: messages });
+    expect(seen).toEqual(["tracker__save_item: id=TRK-5, priority=2"]);
+    expect(session.asks).toMatchObject([{ tool: "tracker__save_item", summary: "Use tracker to save item: id TRK-5, priority 2", kind: "classifier" }]);
+  });
+
+  it("marks an ask the classifier could not check as unchecked, not as a doubt", async () => {
+    const down = gate({ classifier: async () => { throw new ClassifierError("the classifier did not answer within 8000 ms"); } });
+    expect(await down.gate.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages })).toMatchObject({ outcome: "ask", source: "classifier_unavailable", kind: "classifier" });
+    expect(down.session.asks).toMatchObject([{ kind: "unchecked" }]);
+    const none = gate();
+    await none.gate.decide(call("tracker__save_item", { id: "A" }), { memberMessages: messages });
+    expect(none.session.asks).toMatchObject([{ kind: "unchecked" }]);
+  });
+
+  it("still names the confirmed tool to the model, which must call it again exactly", () => {
+    const session = createGateSession(member, { approvals: [{ tool: "agentx_submit_task", argumentsHash: "a".repeat(64), summary: 'Start a coding task: "list files"' }] });
+    expect(confirmationNote(session)).toContain('1. Start a coding task: "list files" (tool agentx_submit_task)');
   });
 });
 

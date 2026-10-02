@@ -125,7 +125,8 @@ export async function revokeProjectAccess(deps: AdminActionDependencies, project
 }
 
 /** E19, FR-053: the setting the broker reads at each workspace creation. */
-export async function setWorkspaceLimits(deps: AdminActionDependencies, admin: { issuer: string; subject: string }, limits: { perPerson: number; perOrganization: number }): Promise<{ perPerson: number; perOrganization: number; updatedAt: string }> {
+/** `via` (#216): how the change was confirmed, kept so a change planned before it can say how the limits changed. */
+export async function setWorkspaceLimits(deps: AdminActionDependencies, admin: { issuer: string; subject: string }, limits: { perPerson: number; perOrganization: number }, via?: string): Promise<{ perPerson: number; perOrganization: number; updatedAt: string }> {
   // The bounds readWorkspaceLimits accepts, so a written setting is never one the broker ignores.
   if (!isWholeLimit(limits.perPerson, MAX_PER_PERSON)) throw agentXError("CONFIG_INVALID", `the per-person limit must be a whole number from 1 to ${MAX_PER_PERSON}`);
   if (!isWholeLimit(limits.perOrganization, MAX_PER_ORGANIZATION)) throw agentXError("CONFIG_INVALID", `the organization limit must be a whole number from 1 to ${MAX_PER_ORGANIZATION}`);
@@ -133,7 +134,7 @@ export async function setWorkspaceLimits(deps: AdminActionDependencies, admin: {
   const updatedAt = new Date(deps.now()).toISOString();
   await deps.documentClient.send(new PutCommand({
     TableName: deps.tableName,
-    Item: { ...WORKSPACE_LIMITS_KEY, entityType: "SETTING", perPerson: limits.perPerson, perOrganization: limits.perOrganization, updatedBy: admin, updatedAt },
+    Item: { ...WORKSPACE_LIMITS_KEY, entityType: "SETTING", perPerson: limits.perPerson, perOrganization: limits.perOrganization, updatedBy: admin, ...(via === undefined ? {} : { via }), updatedAt },
   }));
   return { perPerson: limits.perPerson, perOrganization: limits.perOrganization, updatedAt };
 }

@@ -192,7 +192,7 @@ describe("orchestrator extensions, as pinned on Pi 0.85.1", () => {
       const reason = "the tool's name says \"close\"; destructive actions always ask";
       expect(session.decisions).toEqual([{ toolCallId: "call-close-1", tool: "tracker__close_item", connector: "tracker", actionClass: "destructive",
         argumentsHash: hash, outcome: "ask", source: "default", kind: "destructive", reason }]);
-      expect(session.asks).toEqual([{ toolCallId: "call-close-1", tool: "tracker__close_item", argumentsHash: hash, summary: "tracker__close_item: id=TRK-9", kind: "destructive" }]);
+      expect(session.asks).toEqual([{ toolCallId: "call-close-1", tool: "tracker__close_item", argumentsHash: hash, summary: "Use tracker to close item: id TRK-9", kind: "destructive" }]);
       expect(session.ran).toBe(0);
       const call = recorder.observation().calls[0]!;
       expect(call).toEqual({ name: "tracker__close_item", connector: "tracker", arguments: "{\"id\":\"TRK-9\"}", argumentsFingerprint: "04c3d818753107d567b2813d3b7f63d4",
