@@ -82,6 +82,53 @@ describe("EvalBatchFileSchema (FR-001, FR-003)", () => {
   });
 });
 
+describe("fix round 1 (053 selection, duplicates, claim state)", () => {
+  it("requires an explicit thinking level per batch model", () => {
+    expect(EvalBatchFileSchema.safeParse({ ...file, models: [{ provider: "anthropic", modelId: "m" }] }).success).toBe(false);
+  });
+  it("refuses duplicate tasks and duplicate models, but allows two pins of one model", () => {
+    expect(EvalBatchFileSchema.safeParse({ ...file, tasks: ["django__django-11099", "django__django-11099"] }).success).toBe(false);
+    expect(EvalBatchFileSchema.safeParse({ ...file, models: [model, { ...model }] }).success).toBe(false);
+    expect(EvalBatchFileSchema.safeParse({ ...file, models: [{ ...model, routing: { only: ["a"] } }, { ...model, routing: { only: ["b"] } }] }).success).toBe(true);
+    expect(EvalBatchFileSchema.safeParse({ ...file, models: [model, { ...model, thinkingLevel: "high" }] }).success).toBe(true);
+  });
+  it("carries claim state: STARTING entries, claimedAt, version, estimates and the per-run ceiling", () => {
+    const base = {
+      batchId: uuid(1), file: EvalBatchFileSchema.parse(file), createdBy: { teamId: "T0123ABCD", userId: "U0123ABCD" },
+      thread: { teamId: "T0123ABCD", channelId: "C0123ABCD", threadTs: "1700000000.000100" }, status: "RUNNING", spentUsd: 0,
+      counts: { queued: 0, starting: 1, running: 0, done: 0, failed: 0, cancelled: 0, notStarted: 0 },
+      createdAt: "2026-10-01T00:00:00.000Z", updatedAt: "2026-10-01T00:00:00.000Z",
+    };
+    const entry = { index: 0, task: "django__django-11099", model, repeat: 1, attempt: 1, state: "STARTING", claimedAt: "2026-10-01T00:00:00.000Z", estimatedCostUsd: 1.2 };
+    const parsed = EvalBatchRecordSchema.parse({ ...base, queue: [entry], perRunCeilingUsd: 10 });
+    expect(parsed.version).toBe(0);
+    expect(parsed.queue[0]).toMatchObject({ state: "STARTING", estimatedCostUsd: 1.2 });
+    expect(EvalBatchRecordSchema.safeParse({ ...base, queue: [entry], version: -1 }).success).toBe(false);
+  });
+  it("summarizes all-failed models with a null rate, counts unpriced runs, and keeps pins apart", () => {
+    const rows = [
+      measure({ runId: uuid(40), modelId: "z", outcome: "FAILED", resolved: false, costUsd: null }),
+      measure({ runId: uuid(41), modelId: "p", routing: { only: ["a"] } }),
+      measure({ runId: uuid(42), modelId: "p", routing: { only: ["b"] }, costUsd: null }),
+    ];
+    const [z, pa, pb] = summarize(rows);
+    expect(z).toMatchObject({ runs: 0, failed: 1, rate: null, wilsonLow: null, wilsonHigh: null, unpricedRuns: 1 });
+    expect(pa).toMatchObject({ routing: { only: ["a"] }, unpricedRuns: 0 });
+    expect(pb).toMatchObject({ routing: { only: ["b"] }, unpricedRuns: 1, totalCostUsd: 0 });
+    expect(EvalBatchSummarySchema.safeParse({ models: [z, pa, pb] }).success).toBe(true);
+  });
+  it("refuses a repeated option in the Slack form", () => {
+    for (const tail of ["repeats 2 repeats 3", "cap 5 cap 6", "repeats 2 cap 5 repeats 3"]) {
+      const r = parseEvalBatchCommand(`eval batch swebench verified django__django-11099 models Fast ${tail}`);
+      expect(r).toMatchObject({ kind: "invalid" });
+      expect((r as { message: string }).message).toMatch(/appears twice/);
+    }
+  });
+  it("lets the Slack form omit the thinking level", () => {
+    expect(parseEvalBatchCommand("eval batch swebench verified django__django-11099 models Fast")).toMatchObject({ kind: "batch" });
+  });
+});
+
 describe("EvalBatchRecordSchema", () => {
   const record = {
     batchId: uuid(1),
@@ -91,7 +138,7 @@ describe("EvalBatchRecordSchema", () => {
     status: "RUNNING",
     queue: [{ index: 0, task: "django__django-11099", model, repeat: 1, attempt: 1, state: "RUNNING", runId: uuid(2) }],
     spentUsd: 1.5,
-    counts: { queued: 0, running: 1, done: 0, failed: 0, cancelled: 0, notStarted: 0 },
+    counts: { queued: 0, starting: 0, running: 1, done: 0, failed: 0, cancelled: 0, notStarted: 0 },
     createdAt: "2026-10-01T00:00:00.000Z",
     updatedAt: "2026-10-01T00:00:00.000Z",
   };

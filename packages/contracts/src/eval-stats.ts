@@ -16,7 +16,7 @@ export function wilsonInterval(successes: number, n: number, z = 1.96): { low: n
 export function summarize(measures: readonly EvalRunMeasure[]): EvalBatchModelSummary[] {
   const groups = new Map<string, EvalRunMeasure[]>();
   for (const measure of measures) {
-    const key = JSON.stringify([measure.provider, measure.modelId, measure.thinkingLevel ?? null]);
+    const key = JSON.stringify([measure.provider, measure.modelId, measure.thinkingLevel ?? null, measure.routing?.only ?? null]);
     groups.set(key, [...(groups.get(key) ?? []), measure]);
   }
   return [...groups.values()].map((group) => {
@@ -29,13 +29,15 @@ export function summarize(measures: readonly EvalRunMeasure[]): EvalBatchModelSu
       provider: first.provider,
       modelId: first.modelId,
       ...(first.thinkingLevel === undefined ? {} : { thinkingLevel: first.thinkingLevel }),
+      ...(first.routing === undefined ? {} : { routing: first.routing }),
       runs: graded.length,
       failed: group.length - graded.length,
       resolved,
-      rate: graded.length === 0 ? 0 : resolved / graded.length,
-      wilsonLow: interval.low,
-      wilsonHigh: interval.high,
+      rate: graded.length === 0 ? null : resolved / graded.length,
+      wilsonLow: graded.length === 0 ? null : interval.low,
+      wilsonHigh: graded.length === 0 ? null : interval.high,
       totalCostUsd,
+      unpricedRuns: group.filter((measure) => measure.costUsd === null).length,
       costPerSolvedUsd: resolved === 0 ? null : totalCostUsd / resolved,
     };
   });
