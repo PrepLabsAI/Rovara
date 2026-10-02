@@ -298,7 +298,11 @@ export async function recordWatchedBatchThread(dependencies: EvalBatchDependenci
 /** Records what the watcher posted in the batch's thread, against the revision it read. */
 export async function updateWatchedBatch(dependencies: EvalBatchDependencies, scope: EvalBatchServiceScope, batchId: string, value: unknown) {
   const { revision, change } = EvalBatchWatchUpdateRequestSchema.parse(value);
-  await requireInScope(dependencies, scope, batchId, "thread");
+  const record = await requireInScope(dependencies, scope, batchId, "thread");
+  // Ruling 26: only an ended batch's watch ends; a batch never leaves its ended status.
+  if ((change.summaryPostedAt !== undefined || change.droppedAt !== undefined) && !TERMINAL.has(record.status)) {
+    throw agentXError("CONFIG_INVALID", `batch ${batchId} has not ended (${record.status}), so its summary or drop cannot be recorded`);
+  }
   const result = await updateBatchWatch(dependencies, batchId, revision, change);
   if (result === undefined) throw agentXError("NOT_FOUND", `batch ${batchId} not found`);
   return result;
@@ -307,7 +311,9 @@ export async function updateWatchedBatch(dependencies: EvalBatchDependencies, sc
 /** Ruling 24: the watcher gave up on the batch's thread; from the batch's own thread. */
 export async function dropWatchedBatch(dependencies: EvalBatchDependencies, scope: EvalBatchServiceScope, batchId: string, value: unknown) {
   const { reason } = EvalBatchWatchDropRequestSchema.parse(value);
-  await requireInScope(dependencies, scope, batchId, "thread");
+  const record = await requireInScope(dependencies, scope, batchId, "thread");
+  // Ruling 26: a batch that has not ended is never dropped.
+  if (!TERMINAL.has(record.status)) throw agentXError("CONFIG_INVALID", `batch ${batchId} has not ended (${record.status}), so it cannot be dropped`);
   const result = await dropBatchWatch(dependencies, batchId, reason);
   if (result === undefined) throw agentXError("NOT_FOUND", `batch ${batchId} not found`);
   logError("eval_batch_watch.dropped", { batchId, reason });

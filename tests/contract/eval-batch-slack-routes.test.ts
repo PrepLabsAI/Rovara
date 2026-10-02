@@ -402,6 +402,8 @@ describe("dropping a watch entry (spec 052 Ruling 24)", () => {
   it("drops a batch the watcher gave up on, from the batch's own thread", async () => {
     const { handler, db } = await slackBatchBroker();
     const batchId = ((await startForm(handler)).body.batch as { batchId: string }).batchId;
+    // Changed by M-A: only an ended batch may be dropped.
+    await handler({ source: "agentx.slack-ingress", action: "stop-task", thread, userId: member });
     const drop = (threadSubject: string) => serviceCall(handler, threadSubject, member, "POST", `${batches}/${batchId}/drop`, { reason: "slack:channel_not_found" });
     expect((await drop(slackThreadSubject({ ...thread, threadTs: "1695500000.000002" }))).status).toBe(404);
     expect(await drop(subject)).toMatchObject({ status: 200, body: { dropped: true } });
@@ -416,5 +418,27 @@ describe("a stopped batch's counts (spec 052 Task 6 M-6)", () => {
     await startForm(handler);
     await handler({ source: "agentx.slack-ingress", action: "stop-task", thread, userId: member });
     expect(await list(handler)).toMatchObject({ body: { batches: [{ status: "STOPPED", finished: 0, models: [{ finished: 0, ended: true }, { finished: 0, ended: true }] }] } });
+  });
+});
+
+describe("ending a watch only for an ended batch (spec 052 Ruling 26, M-A and M-B)", () => {
+  it("refuses to drop, or record a summary or a drop for, a batch that has not ended, and allows it once ended", async () => {
+    const { handler, db } = await slackBatchBroker();
+    const batchId = ((await startForm(handler)).body.batch as { batchId: string }).batchId;
+    const post = (action: string, body: unknown) => serviceCall(handler, subject, member, "POST", `${batches}/${batchId}/${action}`, body);
+    expect(await post("drop", { reason: "slack:channel_not_found" })).toMatchObject({ status: 400, body: { error: { message: expect.stringContaining("has not ended") as unknown } } });
+    expect(await post("watch", { revision: 0, change: { summaryPostedAt: "2026-10-02T12:00:00.000Z" } })).toMatchObject({ status: 400 });
+    expect(await post("watch", { revision: 0, change: { droppedAt: "2026-10-02T12:00:00.000Z" } })).toMatchObject({ status: 400 });
+    expect(db.get(`EVAL_BATCH#${batchId}`, "META")).not.toHaveProperty("watch");
+    expect(db.find((item) => item.entityType === "EVAL_BATCH_WATCH")).toHaveLength(1);
+    await handler({ source: "agentx.slack-ingress", action: "stop-task", thread, userId: member });
+    expect(await post("watch", { revision: 0, change: { summaryPostedAt: "2026-10-02T12:00:00.000Z" } })).toMatchObject({ status: 200, body: { updated: true } });
+  });
+
+  it("drops an ended batch through the drop route", async () => {
+    const { handler } = await slackBatchBroker();
+    const batchId = ((await startForm(handler)).body.batch as { batchId: string }).batchId;
+    await handler({ source: "agentx.slack-ingress", action: "stop-task", thread, userId: member });
+    expect(await serviceCall(handler, subject, member, "POST", `${batches}/${batchId}/drop`, { reason: "slack:channel_not_found" })).toMatchObject({ status: 200, body: { dropped: true } });
   });
 });
