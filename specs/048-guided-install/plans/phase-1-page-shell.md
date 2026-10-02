@@ -5147,6 +5147,12 @@ signatures their producing tasks define. `ModelRole` comes from `prerequisites.t
 9. **Questions off the default path** (your own OIDC, OpenRouter, Linear, Jira, Asana) get their
    page help in phase 2, when they move under Advanced settings; phase 1 covers the default path,
    the retry questions and the Slack questions, which is what the journey test can prove.
+10. **Superseded by owner decision, 2026-10-02:** this phase first read SC-001's "100% of screens
+    show ... the time left" literally, so `journeyOf`'s header text kept showing a time estimate
+    (or "Taking longer than usual") even while the run was stopped on a failure. Seeing the
+    approved mockup's failure screen, the owner overruled that reading: a stopped run's header now
+    says "Stopped" with no estimate, and the estimate returns once a retry resumes the run
+    (`fix/048-stopped-header`, FR-001, SC-001).
 
 ## Execution Handoff
 
