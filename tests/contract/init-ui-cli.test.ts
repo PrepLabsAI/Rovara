@@ -14,7 +14,7 @@ import type { InitCliDependencies } from "../../packages/cli/src/init/commands.j
 import { READY_HOLD_MS, READY_OUTCOME, holdReadyScreen } from "../../packages/cli/src/init/commands.js";
 import { initLogPath } from "../../packages/cli/src/init/log-file.js";
 import { NO_BROWSER_LINE } from "../../packages/cli/src/init/ui-mode.js";
-import { READY_LINE, stageLine, terminalStepLine } from "../../packages/cli/src/init/ui/journey.js";
+import { INSTALL_STEP_ORDER, READY_LINE, stageLine, terminalStepLine } from "../../packages/cli/src/init/ui/journey.js";
 import { INIT_STEP_IDS, installAnswersParameterName, readInstallProgress } from "../../packages/cli/src/init/install-state.js";
 import { readEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import {
@@ -57,7 +57,7 @@ describe("agentx init --ui", () => {
 
     // FR-004: the checklist and the log pane both filled in from the run's own streams.
     const last = operator.states.at(-1);
-    expect(last?.steps.map((step) => step.id)).toEqual([...INIT_STEP_IDS]);
+    expect(last?.steps.map((step) => step.id)).toEqual([...INSTALL_STEP_ORDER]);
     expect(operator.states.some((state) => state.steps.some((step) => step.status === "running"))).toBe(true);
     expect(operator.states.at(-1)?.steps.every((step) => step.status === "done")).toBe(true);
     expect(last?.log.join("\n")).toContain("done: Create the GitHub app");
@@ -74,7 +74,7 @@ describe("agentx init --ui", () => {
       `Full log: ${initLogPath(h.home, "staging")}`,
       stageLine("get-started"),
       stageLine("your-choices"),
-      ...INIT_STEP_IDS.map((id) => terminalStepLine(id)),
+      ...INSTALL_STEP_ORDER.map((id) => terminalStepLine(id)),
       READY_LINE,
     ]);
     expect(h.out.join("")).toBe("");
@@ -159,10 +159,10 @@ describe("agentx init --ui", () => {
     expect(code).toBe(0);
     const resume = operator.states.find((state) => state.resume !== undefined)?.resume;
     expect(resume?.completed).toEqual([
-      "Check your AWS account",
+      "Check your account and choices",
+      "Create the GitHub app",
       "Set up AWS permissions",
       "Build the network and sign-in",
-      "Create the GitHub app",
     ]);
     expect(resume?.continueFrom).toBe("Start the AgentX service");
     // The resumed run reuses the app the first one made, exactly as the terminal path does.

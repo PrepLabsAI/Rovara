@@ -169,7 +169,7 @@ describe("the wizard's state", () => {
     expect(hub.state().steps).toEqual([
       { id: "prerequisites", title: "Check your AWS account", status: "skipped", phase: "your-choices", usualSeconds: 30, usualText: "usually under a minute" },
       { id: "access", title: "Deploy the access stack", status: "done", phase: "build", usualSeconds: 60, usualText: "usually 1 minute", startedAt: "1970-01-01T00:00:00.000Z", tookSeconds: 0 },
-      { id: "github-app", title: "Create the GitHub app", status: "waiting", message: "install it on acme", phase: "build", usualSeconds: 120, usualText: "usually 2 minutes" },
+      { id: "github-app", title: "Create the GitHub app", status: "waiting", message: "install it on acme", phase: "your-choices", usualSeconds: 120, usualText: "usually 2 minutes" },
     ]);
   });
 

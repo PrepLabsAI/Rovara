@@ -4,15 +4,14 @@
 import { describe, expect, it, vi } from "vitest";
 import { agentXError } from "@agentx/contracts";
 import { initSteps } from "../../packages/cli/src/init/commands.js";
-import { installProgressParameterName, INIT_STEP_IDS, readInstallProgress, type InitStepId } from "../../packages/cli/src/init/install-state.js";
+import { emptyProgress, installProgressParameterName, readInstallProgress, writeInstallProgress, type InitStepId } from "../../packages/cli/src/init/install-state.js";
 import { runInitSteps, type InitEvent, type InitStep, type StepOutcome } from "../../packages/cli/src/init/steps.js";
 import { isOperatorStop, markOperatorStop } from "../../packages/cli/src/init/stop.js";
-import { STEP_PLAN } from "../../packages/cli/src/init/ui/journey.js";
-import { fakeGitHubApi, fakeSlackApi } from "../support/init-fakes.js";
+import { INSTALL_STEP_ORDER, STEP_PLAN } from "../../packages/cli/src/init/ui/journey.js";
+import { fakeGitHubApi, fakeSlackApi, HOLDER } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 const ENV = "staging";
-const HOLDER = "arn:aws:sts::123456789012:assumed-role/Admin/alice";
 const T0 = Date.parse("2026-09-27T00:00:00.000Z");
 const LOCK = "/agentx/staging/lock";
 
@@ -204,11 +203,27 @@ describe("init step runner", () => {
     expect(isOperatorStop(thrown)).toBe(true);
     expect(thrown).toMatchObject({ message: expect.stringContaining("said no to continuing") as unknown });
   });
+
+  it("spec 048 phase 2: a resume of the old order runs the GitHub step next and deploys nothing twice", async () => {
+    const store = new MemoryParameterStore();
+    await writeInstallProgress(store, {
+      ...emptyProgress("staging", 0),
+      steps: { prerequisites: { status: "done", at: "2026-10-01T00:00:00.000Z" }, access: { status: "done", at: "2026-10-01T00:00:00.000Z" }, core: { status: "done", at: "2026-10-01T00:00:00.000Z" } },
+    });
+    const ran: string[] = [];
+    const step = (id: InitStepId): InitStep<null> => ({ id, title: id, run: async () => { ran.push(id); return { status: "done" }; } });
+    const result = await runInitSteps({
+      env: "staging", region: "us-east-1", store, holder: HOLDER, context: null, now: () => 1,
+      steps: INSTALL_STEP_ORDER.slice(0, 5).map(step),
+    });
+    expect(ran).toEqual(["github-app", "control-plane"]);
+    expect(result).toMatchObject({ status: "complete", skipped: ["prerequisites", "access", "core"] });
+  });
 });
 
 describe("step names", () => {
   it("spec 048 FR-080: every step is named in plain words, from the journey's one list", () => {
     expect(initSteps({ github: fakeGitHubApi(), slack: fakeSlackApi() }).map((step) => [step.id, step.title]))
-      .toEqual(INIT_STEP_IDS.map((id) => [id, STEP_PLAN[id].title]));
+      .toEqual(INSTALL_STEP_ORDER.map((id) => [id, STEP_PLAN[id].title]));
   });
 });

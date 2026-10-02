@@ -18,6 +18,7 @@ import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MO
 import { initSteps, type InitCliDependencies } from "../../packages/cli/src/init/commands.js";
 import { estimateMonthlyCost, suggestedBudgetUsd } from "../../packages/cli/src/init/cost.js";
 import { markOperatorStop } from "../../packages/cli/src/init/stop.js";
+import { INSTALL_STEP_ORDER } from "../../packages/cli/src/init/ui/journey.js";
 import {
   allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, fakeSlackApi, HOLDER, memoryInitSecrets, passingChecks, scriptedDeployer, scriptedPrompter,
   slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_CLI_INVOCATION, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET,
@@ -165,7 +166,7 @@ const WEBHOOK = "https://events.pagerduty.com/integration/0123SECRETintegrationK
 
 describe("agentx init", () => {
   it("lists its steps in the recorded order", () => {
-    expect(initSteps({ github: fakeGitHubApi(), slack: fakeSlackApi() }).map((step) => step.id)).toEqual([...INIT_STEP_IDS]);
+    expect(initSteps({ github: fakeGitHubApi(), slack: fakeSlackApi() }).map((step) => step.id)).toEqual([...INSTALL_STEP_ORDER]);
   });
 
   it("stops after the step --stop-after names, records it, and says how to finish", async () => {

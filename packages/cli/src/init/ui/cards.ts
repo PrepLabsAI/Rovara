@@ -7,6 +7,7 @@
 import { cliCommandLine, type CliInvocation } from "../cli-command.js";
 import { CONNECTOR_LABELS, type InstallProgress } from "../install-state.js";
 import { ADMIN_USER_GUIDE_URL, DEDICATED_ACCOUNT_NOTE, ROOT_WARNING, type PrerequisiteCheck } from "../prerequisites.js";
+import { STEP_PLAN } from "./journey.js";
 import type { WizardCard } from "./protocol.js";
 
 /** A button's label for an address the run opens: "Open github.com". */
@@ -87,7 +88,7 @@ export function prerequisitesCard(input: { status: "running" | "ok" | "failed"; 
       : ["Nothing has been created. Fix each item marked Not ready, then choose Check again."];
   const technical = input.checks.flatMap((check) => (check.technical === undefined ? [] : [`${check.label}: ${check.technical}`]));
   return {
-    id: "prerequisites", title: "Check your AWS account", status: input.status, lines,
+    id: "prerequisites", title: STEP_PLAN.prerequisites.title, status: input.status, lines,
     checks: input.checks.map((check) => ({ label: check.label, ok: check.ok, detail: check.detail })),
     ...(technical.length === 0 ? {} : { details: technical }),
   };

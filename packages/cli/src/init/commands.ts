@@ -191,9 +191,9 @@ export function initSteps(input: { github: GitHubApi; slack: SlackApi }): InitSt
         return { status: "done" };
       },
     },
+    githubAppStep(input.github),
     accessStep(),
     deployStep({ id: "core", title: STEP_PLAN.core.title }),
-    githubAppStep(input.github),
     deployStep({ id: "control-plane", title: STEP_PLAN["control-plane"].title }),
     slackAppStep(input.slack),
     deployStep({ id: "slack-service", title: STEP_PLAN["slack-service"].title, after: verifySlackUrls }),
