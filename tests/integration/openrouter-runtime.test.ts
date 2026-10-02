@@ -87,7 +87,9 @@ describe("OpenRouter through the installed Pi transport", () => {
     expect((await result.completeSimple(result.getModel(qwen.provider, qwen.modelId)!, context, { reasoning: "off" })).stopReason).toBe("stop");
     expect(requests[0]).toMatchObject({ model: qwen.modelId, provider: { only: ["deepinfra/turbo"] } });
     expect(requests[0]).not.toHaveProperty("reasoning");
-    await expect(createConfiguredModelRuntime({ ...qwen, thinkingLevel: "high" }, { environment })).rejects.toThrow("does not support reasoning");
+    await expect(createConfiguredModelRuntime({ ...qwen, thinkingLevel: "high" }, { environment })).rejects.toMatchObject({
+      code: "CONFIG_INVALID", message: "CONFIG_INVALID: the selected model does not support reasoning; set thinkingLevel to off",
+    });
     await expect(createConfiguredModelRuntime({ ...selected, modelId: "openrouter/auto" }, { environment })).rejects.toThrow("approve a specific model ID");
   });
   it("persists and resumes a real Pi session with tool results, without credential files", async () => {

@@ -85,6 +85,7 @@ import {
   modelKey,
   type ModelIdentifier,
   type ModelRef,
+  type ModelSelection,
   type ProjectModelOptions,
   projectCatalogKey,
   type ChannelMembersRequest,
@@ -105,6 +106,7 @@ import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKe
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
+import { unsupportedThinkingLevels } from "@agentx/model-runtime/thinking-levels";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
 import { DynamoConnectorLedger, GITHUB_LEDGER } from "./connector-ledger.js";
 import { observeConnectorRoute } from "./connector-metrics.js";
@@ -961,6 +963,9 @@ async function registrationChecks(dependencies: AwsBrokerDependencies, identity:
   const nameProblems = presentedNameProblems(definition);
   if (nameProblems.length > 0) throw agentXError("CONFIG_INVALID", nameProblems.join("; "));
   if (budget.refusal) throw agentXError("CONFIG_INVALID", budget.refusal);
+  // Spec 053 FR-003: Pi would clamp an unsupported level to another one; refuse the admin's choice instead.
+  const levelProblems = definition.models === undefined ? [] : unsupportedThinkingLevels(definition.models);
+  if (levelProblems.length > 0) throw agentXError("CONFIG_INVALID", levelProblems.join("; "));
   const credentialProblems = await credentialRefusals(connectors(), dependencies.credentialRegistry);
   if (credentialProblems.length > 0) throw agentXError("CONFIG_INVALID", credentialProblems.join("; "));
   // A repository the GitHub App cannot reach would otherwise fail only at prepare (#123).
@@ -4294,7 +4299,7 @@ async function putProjectModel(
 async function resolveProjectModel(
   dependencies: AwsBrokerDependencies,
   project: RegisteredProjectRecord,
-): Promise<{ model?: ModelIdentifier; diagnostic?: string }> {
+): Promise<{ model?: ModelSelection; diagnostic?: string }> {
   const policy = project.definition.models;
   if (!policy) return {};
   const selection = await getItem<ProjectModelSelectionRecord>(dependencies, projectModelSelectionKey(project.definition.name));
@@ -4303,10 +4308,19 @@ async function resolveProjectModel(
     : policy.approved.find((candidate) => modelKey(candidate) === modelKey(selection.model));
   const effective = selected ?? approvedDefault(policy.default, policy.approved);
   return {
-    model: { provider: effective.provider, modelId: effective.modelId },
+    model: approvedSelection(effective),
     ...(selection !== undefined && selected === undefined
       ? { diagnostic: `The project's selected coding model ${selection.model.provider}/${selection.model.modelId} is no longer approved. This task uses the project default ${effective.provider}/${effective.modelId}.` }
       : {}),
+  };
+}
+
+/** Spec 053: what a task or eval run runs: the approved entry's model and, only when it has one, its level. */
+function approvedSelection(model: ModelRef): ModelSelection {
+  return {
+    provider: model.provider,
+    modelId: model.modelId,
+    ...(model.thinkingLevel === undefined ? {} : { thinkingLevel: model.thinkingLevel }),
   };
 }
 
@@ -4418,7 +4432,7 @@ function swebenchSlackContext(dependencies: AwsBrokerDependencies, identity: Aut
       if (requested !== undefined) {
         const approved = policy?.approved.find((candidate) => modelKey(candidate) === modelKey(requested));
         if (!approved) throw agentXError("CONFIG_INVALID", `model ${requested.provider}/${requested.modelId} is not approved for this project`);
-        return { provider: approved.provider, modelId: approved.modelId };
+        return approvedSelection(approved);
       }
       return (await resolveProjectModel(dependencies, project)).model;
     },

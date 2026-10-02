@@ -165,6 +165,7 @@ export class ControlPlaneStack extends Stack {
       resources: [
         swebenchNames(naming).settingsParameterName,
         swebenchNames(naming).runnerImageParameterName,
+        swebenchNames(naming).runnerFeaturesParameterName,
         ...Object.values(WORKER_SETTING_PARAMETERS).map((name) => `${naming.ec2.workerSettingsPrefix}${name}`),
       ].map((name) => `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${name}`),
     }));

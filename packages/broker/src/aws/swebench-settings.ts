@@ -1,6 +1,7 @@
 import {
   agentXError,
   SWEBENCH_SETTING_PARAMETERS,
+  SwebenchRunnerFeaturesSchema,
   SwebenchSettingsSchema,
   WORKER_SETTING_PARAMETERS,
   type SwebenchLaunch,
@@ -22,6 +23,7 @@ export async function swebenchDeploymentFromParameters(
   const names = {
     settings: name(SWEBENCH_SETTING_PARAMETERS.settings),
     runnerImage: name(SWEBENCH_SETTING_PARAMETERS.runnerImage),
+    runnerFeatures: name(SWEBENCH_SETTING_PARAMETERS.runnerFeatures),
     modelProvider: name(WORKER_SETTING_PARAMETERS.modelProvider),
     modelId: name(WORKER_SETTING_PARAMETERS.modelId),
     promptCacheRetention: name(WORKER_SETTING_PARAMETERS.promptCacheRetention),
@@ -45,7 +47,19 @@ export async function swebenchDeploymentFromParameters(
   if (secret && secret !== "none") environment.AGENTX_OPENROUTER_SECRET_ARN = secret;
   const providers = values.get(names.openRouterProviders);
   if (providers && providers !== "none") environment.AGENTX_OPENROUTER_PROVIDERS = providers;
-  return { settings, runnerImage, defaultModel: { provider, modelId }, environment };
+  return { settings, runnerImage, defaultModel: { provider, modelId }, environment, runnerFeatures: runnerFeatures(values.get(names.runnerFeatures), runnerImage) };
+}
+
+/**
+ * Spec 053: the features recorded for this runner image. Missing, malformed or recorded for another
+ * image means none, so the broker sends only what every runner image parses.
+ */
+function runnerFeatures(value: string | undefined, runnerImage: string): readonly string[] {
+  if (value === undefined) return [];
+  let parsed: unknown;
+  try { parsed = JSON.parse(value); } catch { return []; }
+  const recorded = SwebenchRunnerFeaturesSchema.safeParse(parsed);
+  return recorded.success && recorded.data.runnerImage === runnerImage ? recorded.data.features : [];
 }
 
 /** The stored settings, or a refusal naming the parameter; the parser's own words would quote it. */

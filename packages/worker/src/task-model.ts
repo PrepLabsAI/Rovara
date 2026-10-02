@@ -1,15 +1,15 @@
-import type { ModelIdentifier } from "@agentx/contracts";
+import type { ModelSelection } from "@agentx/contracts";
 import type { WorkspaceModelConfiguration } from "./pi-session.js";
 import { effectiveCacheRetention } from "./usage.js";
 
 export function resolveTaskModel(
-  selected: ModelIdentifier | undefined,
+  selected: ModelSelection | undefined,
   environment: NodeJS.ProcessEnv = process.env,
 ): WorkspaceModelConfiguration {
   return {
     provider: selected?.provider ?? required(environment, "AGENTX_MODEL_PROVIDER"),
     modelId: selected?.modelId ?? required(environment, "AGENTX_MODEL_ID"),
-    ...((selected?.provider ?? environment.AGENTX_MODEL_PROVIDER) === "openrouter" ? {} : { thinkingLevel: "medium" as const }),
+    ...(selected?.thinkingLevel === undefined ? {} : { thinkingLevel: selected.thinkingLevel }),
     cacheRetention: effectiveCacheRetention(environment.PI_CACHE_RETENTION),
   };
 }

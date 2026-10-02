@@ -20,7 +20,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
 import { createModelRuntimeWithFallback } from "@agentx/model-runtime";
-import { agentXError } from "@agentx/contracts";
+import { agentXError, ThinkingLevelSchema, type ThinkingLevel } from "@agentx/contracts";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import {
@@ -32,7 +32,7 @@ import {
 } from "./repository-context.js";
 import type { PiCacheRetention } from "./usage.js";
 
-export type PiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export type PiThinkingLevel = ThinkingLevel;
 
 export interface WorkspaceModelConfiguration {
   provider: string;
@@ -48,7 +48,10 @@ export interface PiSessionHandle {
   /** Queues a message the model reads before its next call, while a prompt runs. */
   steer?(text: string): Promise<void>;
   abort(): Promise<void>;
-  getModel(): { provider: string; modelId: string };
+  /** The model and the thinking level the session actually runs with, read back after creation. */
+  getModel(): { provider: string; modelId: string; thinkingLevel?: PiThinkingLevel };
+  /** Pi's own resolved level, even one outside AgentX's six (Pi's "max"); for artifacts only, never telemetry. */
+  piThinkingLevel?(): string | undefined;
   getSessionStats(): SessionStats;
   subscribe(listener: (event: unknown) => void): () => void;
   dispose(): void;
@@ -203,13 +206,17 @@ async function createDefaultSession(
         `configured model ${input.model.provider}/${input.model.modelId} is unavailable`,
       );
     }
+    const requestedLevel = input.model.thinkingLevel;
+    if (!model.reasoning && requestedLevel !== undefined && requestedLevel !== "off") {
+      throw agentXError("CONFIG_INVALID", "the selected model does not support reasoning; set thinkingLevel to off");
+    }
     const { resourceLoader, settingsManager } = await createWorkerResources(input);
     const { session } = await createAgentSession({
       cwd: input.cwd,
       agentDir: input.agentDirectory,
       modelRuntime,
       model,
-      thinkingLevel: input.model.thinkingLevel ?? (model.reasoning ? "medium" : "off"),
+      thinkingLevel: requestedLevel ?? (model.reasoning ? "medium" : "off"),
       tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
       // A custom tool with a built-in's name replaces it.
       customTools: [
@@ -231,7 +238,11 @@ async function createDefaultSession(
       getModel: () => ({
         provider: session.model?.provider ?? resolved.model.provider,
         modelId: session.model?.id ?? resolved.model.modelId,
+        // Pi also knows "max", which AgentX does not offer: a level outside ours is left out of telemetry
+        // (the key is omitted, never guessed); piThinkingLevel reports it for artifacts.
+        ...(ThinkingLevelSchema.safeParse(session.thinkingLevel).success ? { thinkingLevel: session.thinkingLevel as PiThinkingLevel } : {}),
       }),
+      piThinkingLevel: () => session.thinkingLevel,
       getSessionStats: () => session.getSessionStats(),
       subscribe: (listener) => session.subscribe((event) => listener(event)),
       dispose: () => session.dispose(),

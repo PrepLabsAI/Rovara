@@ -2,15 +2,20 @@ import { describe, expect, it } from "vitest";
 import { resolveTaskModel } from "../../packages/worker/src/task-model.js";
 
 describe("worker task model resolution", () => {
-  it("lets Pi choose supported reasoning for an OpenRouter project model", () => {
+  it("leaves an unset level unset for an OpenRouter project model, so the session default applies (spec 053)", () => {
     expect(resolveTaskModel({ provider: "openrouter", modelId: "qwen/qwen3-coder" }, {})).not.toHaveProperty("thinkingLevel");
+  });
+
+  it("returns the selection's level when given, for any provider", () => {
+    expect(resolveTaskModel({ provider: "openrouter", modelId: "qwen/qwen3-coder", thinkingLevel: "high" }, {})).toMatchObject({ thinkingLevel: "high" });
+    expect(resolveTaskModel({ provider: "amazon-bedrock", modelId: "m", thinkingLevel: "off" }, {})).toMatchObject({ thinkingLevel: "off" });
   });
 
   it("uses the broker-resolved model while keeping deployment-owned session settings", () => {
     expect(resolveTaskModel(
       { provider: "amazon-bedrock", modelId: "project-model" },
       { AGENTX_MODEL_PROVIDER: "fallback", AGENTX_MODEL_ID: "fallback-model", PI_CACHE_RETENTION: "long" },
-    )).toEqual({ provider: "amazon-bedrock", modelId: "project-model", thinkingLevel: "medium", cacheRetention: "long" });
+    )).toEqual({ provider: "amazon-bedrock", modelId: "project-model", cacheRetention: "long" });
   });
 
   it("uses deployment defaults when an older task has no model", () => {

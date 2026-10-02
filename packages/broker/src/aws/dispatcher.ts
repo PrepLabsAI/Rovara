@@ -2,7 +2,7 @@ import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { KMSClient, SignCommand } from "@aws-sdk/client-kms";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { DynamoDBDocumentClient, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
+import { WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
 import { requiredEnvironment, type DurableOutboxRecord, type Ec2OutboxRecord } from "./lambda.js";
 import type { Ec2Delivery } from "./ec2-delivery.js";
 import { failOutboxOperation } from "./outbox-failure.js";
@@ -118,6 +118,21 @@ const kms = new KMSClient(awsClientConfiguration);
 const sfn = new SFNClient(awsClientConfiguration);
 /** A worker answers /invocations as soon as it has journaled the operation. */
 const WORKER_POST_TIMEOUT_MS = 10_000;
+/** Asking a worker what it parses (spec 053); one that does not answer gets no optional field. */
+const WORKER_PING_TIMEOUT_MS = 3_000;
+
+/**
+ * Spec 053: the invocation features a worker reports on GET /ping; none for a worker built before
+ * them, whose /ping has no such field. A worker that does not answer, or answers with a non-2xx
+ * status, rejects, failing the attempt rather than dropping the level.
+ */
+export async function workerPingFeatures(url: string, fetchPing: typeof fetch = fetch): Promise<string[]> {
+  const response = await fetchPing(url, { signal: AbortSignal.timeout(WORKER_PING_TIMEOUT_MS) });
+  if (!response.ok) throw new Error(`worker /ping returned HTTP ${response.status}`);
+  const body: unknown = await response.json();
+  const features = typeof body === "object" && body !== null ? (body as Record<string, unknown>)[WORKER_PING_FEATURES_FIELD] : undefined;
+  return Array.isArray(features) ? features.filter((feature): feature is string => typeof feature === "string") : [];
+}
 
 const deliverEc2 = createEc2Delivery({
   sessions: new SessionManager({
@@ -150,6 +165,7 @@ const deliverEc2 = createEc2Delivery({
     });
     return { status: response.status, body: await response.text() };
   },
+  workerFeatures: (url) => workerPingFeatures(url),
   async progress(record, message) {
     await appendOperationEvent(documentClient, tableName ?? requiredEnvironment("STATE_TABLE_NAME"), {
       workspaceId: record.workspaceId,

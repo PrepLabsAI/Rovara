@@ -26,6 +26,7 @@ import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
 import {
   createTaskUsageTelemetry,
+  usageForControlPlane,
   type TaskUsageOutcome,
 } from "./usage.js";
 
@@ -261,7 +262,7 @@ export async function runTaskInvocation(
           : { cacheRetention: dependencies.model.cacheRetention }),
       }, outcome);
       const redactedUsage = redactCredentials(usage);
-      await events.append("usage", redactedUsage);
+      await events.append("usage", usageForControlPlane(redactedUsage, dependencies.model));
       await dependencies.artifactSink({
         name: "usage.json",
         mediaType: "application/json",
