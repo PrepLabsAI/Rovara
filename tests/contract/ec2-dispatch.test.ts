@@ -63,6 +63,62 @@ describe("ec2-ebs delivery", () => {
     })).toEqual({ ok: false, reason: "expired" });
   });
 
+  describe("the task's readiness and workers built before it (spec 051)", () => {
+    const readiness = [{ cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 300 }];
+    function taskRecord(payload: Record<string, unknown>): Ec2OutboxRecord {
+      const record = recordFor();
+      const invocation = {
+        ...record.invocation,
+        kind: "task",
+        payload: { conversationId: randomUUID(), prompt: "test it", ...payload },
+      } as WorkerInvocation;
+      return { ...record, invocation };
+    }
+    const postedPayload = (post: ReturnType<typeof delivery>["post"]) => (JSON.parse(post.mock.calls[0]![1].body) as { payload: Record<string, unknown> }).payload;
+
+    it("keeps the readiness for a worker whose /ping lists it", async () => {
+      const workerFeatures = vi.fn<NonNullable<Ec2DeliveryDependencies["workerFeatures"]>>(async () => ["task.readiness"]);
+      const { deliver, post } = delivery({ workerFeatures });
+      const record = taskRecord({ readiness });
+      expect(await deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(workerFeatures).toHaveBeenCalledExactlyOnceWith("http://10.42.128.10:8080/ping");
+      expect(postedPayload(post).readiness).toEqual(readiness);
+    });
+
+    it("drops only the readiness for a worker built before it, which falls back to the agent's commands", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const leveled = { provider: "amazon-bedrock", modelId: "fast", thinkingLevel: "low" };
+      const { deliver, post } = delivery({ workerFeatures: async () => ["model.thinkingLevel"] });
+      const record = taskRecord({ readiness, model: leveled });
+      expect(await deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(post)).not.toHaveProperty("readiness");
+      expect(postedPayload(post).model).toEqual(leveled);
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({
+        event: "dispatch.readiness_omitted", reason: "worker-lacks-feature", operationId: record.operationId,
+      }));
+      log.mockRestore();
+    });
+
+    it("drops the readiness when the dispatcher has no way to ask the worker", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const { deliver, post } = delivery();
+      const record = taskRecord({ readiness });
+      await deliver(record, record.invocation);
+      expect(postedPayload(post)).not.toHaveProperty("readiness");
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({ event: "dispatch.readiness_omitted", reason: "no-probe" }));
+      log.mockRestore();
+    });
+
+    it("does not ask the worker when the task carries no readiness", async () => {
+      const workerFeatures = vi.fn<NonNullable<Ec2DeliveryDependencies["workerFeatures"]>>(async () => []);
+      const { deliver, post } = delivery({ workerFeatures });
+      const record = taskRecord({});
+      await deliver(record, record.invocation);
+      expect(workerFeatures).not.toHaveBeenCalled();
+      expect(post.mock.calls[0]![1].body).toBe(JSON.stringify(record.invocation));
+    });
+  });
+
   describe("the thinking level and workers built before it (spec 053)", () => {
     function taskRecord(model: Record<string, unknown>): Ec2OutboxRecord {
       const record = recordFor();

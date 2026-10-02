@@ -2565,6 +2565,9 @@ async function taskOperationParts(
       conversationStarted: input.conversationStarted,
       ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
       ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
+      // Spec 051 (P-1): the checks the worker reruns when the agent finishes. The latest revision's readiness, as
+      // publicationProject merges it, since that is what publication gates on. None when the project has none.
+      ...(settings.definition.readiness.length === 0 ? {} : { readiness: settings.definition.readiness }),
     },
   };
   return { operation, outbox: outboxRecord(workspace, invocation), fence };

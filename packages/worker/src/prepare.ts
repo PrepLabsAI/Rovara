@@ -344,10 +344,12 @@ async function gitHead(directory: string): Promise<string> {
   return result.stdout.trim();
 }
 
+/** A project command (`setup` or `readiness`) on the host. Spec 051: `signal` stops it, as a check rerun needs. */
 export async function runProjectCommand(
   command: ProjectCommand,
   _index: number,
   rootPath: string,
+  signal?: AbortSignal,
 ): Promise<CommandResult> {
   const cwd = containedPath(rootPath, command.cwd);
   // The workspace-relative path only: Node's own error would show the worker's absolute path (#154).
@@ -360,6 +362,7 @@ export async function runProjectCommand(
       cwd,
       timeoutMs: command.timeoutSeconds * 1_000,
       env: gitSafeEnvironment(cwd, command.env),
+      ...(signal !== undefined ? { signal } : {}),
     });
   } catch (error) {
     // The command could not start (for example, its executable does not exist).

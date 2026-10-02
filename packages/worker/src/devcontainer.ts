@@ -163,12 +163,14 @@ export async function ensureDevcontainer(cli: DevcontainerCli, target: Devcontai
 
 /**
  * A project command (`setup` or `readiness`) run in the devcontainer, in its workspace directory. It
- * runs in its own process group in the container, so its timeout stops it there too (#174).
+ * runs in its own process group in the container, so its timeout stops it there too (#174), and so
+ * does `signal` (spec 051, a check rerun): the abort ends the local client at once.
  */
 export async function runDevcontainerCommand(
   cli: DevcontainerCli,
   target: DevcontainerTarget,
   command: ProjectCommand,
+  signal?: AbortSignal,
 ): Promise<CommandResult> {
   const cwd = contained(target.rootPath, command.cwd);
   const run = await runInContainerGroup(devcontainerExec(cli, target), {
@@ -180,6 +182,7 @@ export async function runDevcontainerCommand(
     timeoutMs: command.timeoutSeconds * 1_000,
     // The command's own variables (#54) reach the command only, never the TERM and KILL execs.
     ...(command.env !== undefined ? { env: { ...command.env } } : {}),
+    ...(signal !== undefined ? { signal } : {}),
   });
   const { result } = run;
   return {

@@ -73,10 +73,12 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
  * worker keeps its image after a release (or after a worker-image rollback), so a thinking level goes
  * only to a worker whose /ping lists it. A task's level is dropped and the worker runs at its own
  * default level. Prepare, publish and maintain carry the whole stored project definition, whose
- * models carry levels the worker does not use there, so those are stripped. The invoke token signs the operation,
- * not the payload, so dropping a field leaves it valid. A ping that fails fails the attempt: the
- * worker journals a hash of the whole invocation, so a retry must send what the first attempt would
- * have, and a blip must not run a capable worker at the default level.
+ * models carry levels the worker does not use there, so those are stripped. Spec 051: a task's
+ * readiness goes only to a worker whose /ping lists "task.readiness"; one built before it checks the
+ * agent's own test commands instead. The invoke token signs the operation, not the payload, so
+ * dropping a field leaves it valid. A ping that fails fails the attempt: the worker journals a hash of
+ * the whole invocation, so a retry must send what the first attempt would have, and a blip must not
+ * run a capable worker at the default level.
  */
 async function forWorker(
   invocation: WorkerInvocation,
@@ -84,7 +86,8 @@ async function forWorker(
   workerFeatures: Ec2DeliveryDependencies["workerFeatures"],
 ): Promise<WorkerInvocation> {
   const requestedThinkingLevel = carriedThinkingLevel(invocation);
-  if (requestedThinkingLevel === undefined) return invocation;
+  const carriesReadiness = invocation.kind === "task" && invocation.payload.readiness !== undefined;
+  if (requestedThinkingLevel === undefined && !carriesReadiness) return invocation;
   let features: readonly string[] = [];
   if (workerFeatures !== undefined) {
     try {
@@ -93,17 +96,37 @@ async function forWorker(
       throw agentXError("RUNTIME_UNAVAILABLE", `could not ask the EC2 worker which invocation fields it parses: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512));
     }
   }
-  const sent = withoutUnparsedFields(invocation, features);
-  if (sent === invocation) return invocation;
-  console.log(JSON.stringify({
-    component: "dispatcher",
-    event: "dispatch.thinking_level_omitted",
-    reason: workerFeatures === undefined ? "no-probe" : "worker-lacks-feature",
-    requestedThinkingLevel,
-    operationId: invocation.operationId,
-    workspaceId: invocation.workspaceId,
-  }));
+  const reason = workerFeatures === undefined ? "no-probe" : "worker-lacks-feature";
+  const leveled = withoutUnparsedFields(invocation, features);
+  if (leveled !== invocation) {
+    console.log(JSON.stringify({
+      component: "dispatcher",
+      event: "dispatch.thinking_level_omitted",
+      reason,
+      requestedThinkingLevel,
+      operationId: invocation.operationId,
+      workspaceId: invocation.workspaceId,
+    }));
+  }
+  const sent = withoutReadiness(leveled, features);
+  if (sent !== leveled) {
+    console.log(JSON.stringify({
+      component: "dispatcher",
+      event: "dispatch.readiness_omitted",
+      reason,
+      operationId: invocation.operationId,
+      workspaceId: invocation.workspaceId,
+    }));
+  }
   return sent;
+}
+
+/** A task without its readiness, for a worker that does not parse it (spec 051). */
+function withoutReadiness(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind !== "task" || invocation.payload.readiness === undefined || features.includes("task.readiness")) return invocation;
+  const payload = { ...invocation.payload };
+  delete payload.readiness;
+  return { ...invocation, payload };
 }
 
 /** The first thinking level the invocation carries: a task's model, or a project definition's models. */
