@@ -516,7 +516,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     if (options.yes) throw agentXError("CONFIG_INVALID", "agentx init --ui asks its questions on a page; --yes answers them without asking. Use one or the other");
     // Task 14: opened before the wizard, so its address and the log's own path are both ready for
     // the wizard's start lines (FR-070); the token is hidden from it the moment the server has one.
-    session.log = await openInitLog(initLogPath(services.home, env));
+    session.log = await openInitLog(initLogPath(services.home, env), { onError: (line) => services.stderr.write(`${line}\n`) });
     const wizard = await startInstallWizard({
       env,
       write: (line) => services.stderr.write(`${line}\n`),
