@@ -2,7 +2,7 @@
 // disagree. The agent runs on Pi's real session and the faux model, so the real extension and agent_before_settle
 // hook run; the checks' runners are fakes except where a test pins the container path. Offline.
 import { execFile } from "node:child_process";
-import { cp, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -11,6 +11,7 @@ import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentxPreambleSha256, SwebenchRunResultSchema, type SwebenchRunnerConfig, type SwebenchRunResult } from "../../packages/contracts/src/index.js";
 import { createDefaultPiSessionAdapter, type PiSessionAdapter } from "../../packages/worker/src/pi-session.js";
+import { runSwebenchAgent } from "../../packages/worker/src/swebench/agent.js";
 import type { DockerCli } from "../../packages/worker/src/swebench/containers.js";
 import type { SwebenchInstance } from "../../packages/worker/src/swebench/dataset.js";
 import { runSwebench, type RunReporter } from "../../packages/worker/src/swebench/run.js";
@@ -26,7 +27,7 @@ afterEach(async () => {
   for (const path of cleanup.splice(0)) await rm(path, { recursive: true, force: true });
 });
 
-async function repository(files: Record<string, string>): Promise<{ path: string; base: string }> {
+async function repository(files: Record<string, string>, links: Record<string, string> = {}): Promise<{ path: string; base: string }> {
   const path = await mkdtemp(join(tmpdir(), "agentx-eval-verification-repo-"));
   cleanup.push(path);
   const git = (...args: string[]) => exec("git", args, { cwd: path }).then((result) => result.stdout.trim());
@@ -34,6 +35,7 @@ async function repository(files: Record<string, string>): Promise<{ path: string
   await git("config", "user.email", "t@example.com");
   await git("config", "user.name", "Test");
   for (const [name, body] of Object.entries(files)) await writeFile(join(path, name), body);
+  for (const [name, target] of Object.entries(links)) await symlink(target, join(path, name));
   await git("add", ".");
   await git("commit", "--quiet", "-m", "base");
   return { path, base: await git("rev-parse", "HEAD") };
@@ -114,8 +116,9 @@ const swebenchConfig = (): SwebenchRunnerConfig => ({
   artifactsPrefix: `evals/${RUN_ID}/`,
 });
 
-async function swebenchRun(options: { finalText: string; passToPass: { passed: number; total: number }; replayExit?: number; useContainerRunners?: boolean }) {
-  const repo = await repository({ "validators.py": "PATTERN = 0\n" });
+async function swebenchRun(options: { commands?: string[]; links?: Record<string, string>; finalText: string; passToPass: { passed: number; total: number }; replayExit?: number; useContainerRunners?: boolean }) {
+  await mkdir(join(tmpdir(), "agentx-eval-outside"), { recursive: true });
+  const repo = await repository({ "validators.py": "PATTERN = 0\n" }, options.links);
   const rootPath = await mkdtemp(join(tmpdir(), "agentx-eval-verification-root-"));
   cleanup.push(rootPath);
   const testbed = join(rootPath, RUN_ID, "testbed");
@@ -130,7 +133,7 @@ async function swebenchRun(options: { finalText: string; passToPass: { passed: n
   const result = await runSwebench(swebenchConfig(), {
     rootPath, model: { provider: "amazon-bedrock", modelId: "fixture-model" }, docker, reporter: recorded.reporter, log: () => undefined,
     dataset: { fetch: async () => new Response(JSON.stringify({ rows: [{ row: instance }] })) },
-    piAdapter: agentAdapter(agentSteps(testbed, options.finalText)),
+    piAdapter: agentAdapter(agentSteps(testbed, options.finalText, options.commands)),
     ...(options.useContainerRunners === true ? {} : { checkRunners: replays.runners }),
     grade: async () => ({ resolved: true, failToPass: { passed: 1, total: 1 }, passToPass: options.passToPass, files: [] }),
   });
@@ -218,6 +221,78 @@ describe("the eval runner records AgentX's checks and the agent's claim (spec 05
     // And the replay itself ran in the container: its command text is in an exec call.
     expect(calls.some((args) => args[0] === "exec" && args.join(" ").includes("pytest tests/"))).toBe(true);
   });
+});
+
+describe("the agent's commands as the container writes them (spec 051 Ruling X)", () => {
+  const checkIds = (artifacts: Map<string, string>) =>
+    (JSON.parse(artifacts.get("result.json")!) as { checks: { checks: Array<{ label: string; after: string }> } }).checks.checks;
+
+  it("replays `cd /testbed && pytest` and `cd /testbed/pkg && pytest -k x` from the run root, as `cd testbed ...`", async () => {
+    const { replays, artifacts } = await swebenchRun({ finalText: "AgentX result: done", passToPass: { passed: 1, total: 1 }, commands: ["cd /testbed && pytest", "cd /testbed/pkg && pytest -k x"] });
+    expect(replays).toEqual(["cd testbed && pytest", "cd testbed/pkg && pytest -k x"]);
+    expect(checkIds(artifacts)).toHaveLength(2);
+  });
+
+  it("neither records nor runs a cd that leaves the testbed or only looks like it", async () => {
+    const { replays, result } = await swebenchRun({
+      finalText: "AgentX result: done", passToPass: { passed: 1, total: 1 },
+      commands: ["cd /testbed/../etc && pytest", "cd /testbedX && pytest", "cd /elsewhere && pytest"],
+    });
+    expect(replays).toEqual([]);
+    expect(result).toMatchObject({ checks: { status: "not_verified", notVerifiedReason: "no_checks", checks: [] } });
+  });
+
+  it("refuses at replay a sub path that is a link out of the testbed, and runs nothing for it", async () => {
+    const outside = join(tmpdir(), "agentx-eval-outside");
+    const { calls, artifacts } = await swebenchRun({
+      finalText: "AgentX result: done", passToPass: { passed: 1, total: 1 },
+      commands: ["cd /testbed/escape && pytest"], links: { escape: outside }, useContainerRunners: true,
+    });
+    const [entry] = checkIds(artifacts);
+    expect(entry).toMatchObject({ after: "not_run" });
+    expect(calls.some((args) => args[0] === "exec" && args.join(" ").includes("pytest"))).toBe(false);
+  });
+});
+
+describe("the eval limit and the time budget govern AgentX's checks (spec 051 P-3, P-4)", () => {
+  async function agentRun(options: { timeLimitMs: number; now?: () => number; runners: CheckRunners; finalText?: string }) {
+    const rootPath = await mkdtemp(join(tmpdir(), "agentx-eval-verification-agent-"));
+    cleanup.push(rootPath);
+    const outcome = await runSwebenchAgent({
+      rootPath, model: { provider: "amazon-bedrock", modelId: "fixture-model" }, bashOperations: agentShell,
+      paths: { hostFolder: join(rootPath, "testbed"), containerFolder: "/testbed" },
+      problemStatement: "p", maxCostUsd: 10, timeLimitMs: options.timeLimitMs,
+      piAdapter: agentAdapter(agentSteps(join(rootPath, "testbed"), options.finalText ?? "AgentX result: done")),
+      checkRunners: options.runners, ...(options.now === undefined ? {} : { now: options.now }),
+    });
+    outcome.session.dispose();
+    return outcome;
+  }
+
+  it("starts no check when less than a second of the agent's time is left", async () => {
+    const { runners, replays } = fakeRunners(0);
+    // The clock jumps to 500 ms before the limit once the agent has started.
+    let calls = 0;
+    const now = () => (calls++ === 0 ? 0 : 3_599_500);
+    const outcome = await agentRun({ timeLimitMs: 3_600_000, now, runners });
+    expect(replays).toEqual([]);
+    expect(outcome.checks.checks[0]).toMatchObject({ after: "not_run" });
+  });
+
+  it("stops a running check when the eval limit fires, and reports not_verified/stopped with no claim", async () => {
+    let sawAbort = false;
+    const runners: CheckRunners = {
+      runAgentCommand: (_replay, _timeout, signal) => new Promise((_resolve, reject) => {
+        signal.addEventListener("abort", () => { sawAbort = true; reject(new Error("aborted")); });
+      }),
+      async runProjectCommand() { throw new Error("none"); },
+    };
+    const outcome = await agentRun({ timeLimitMs: 4_000, runners });
+    expect(sawAbort).toBe(true);
+    expect(outcome.stopReason).toBe("time_limit");
+    expect(outcome.checks).toMatchObject({ status: "not_verified", notVerifiedReason: "stopped" });
+    expect(outcome.agentClaim).toBe("none");
+  }, 15_000);
 });
 
 describe("a SEC-bench run's disagreement (spec 051 FR-011)", () => {

@@ -1,3 +1,4 @@
+import { basename } from "node:path";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { parseAgentClaim, redactText, type CheckReport, type SwebenchStopReason } from "@agentx/contracts";
 import { recorderFingerprint } from "../artifacts.js";
@@ -72,8 +73,9 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
   const recorder = new CommandRecorder({
     fingerprint: (signal) => recorderFingerprint([{ name: "testbed", directory: input.paths.hostFolder }], signal),
     onDiagnostic,
+    canonicalCommand: (command) => testbedRelativeCommand(command, input.paths),
   });
-  const runners = input.checkRunners ?? containerCheckRunners(input);
+  const runners = input.checkRunners ?? createCheckRunners({ rootPath: input.rootPath, bashOperations: input.bashOperations });
   let reportedChecks: CheckReport | undefined;
   let firstRoundChecks: CheckReport | undefined;
   let started = 0;
@@ -147,33 +149,26 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
     ?? (firstRoundChecks !== undefined && finalStop === undefined && modelError === undefined ? firstRoundChecks : undefined)
     ?? notVerifiedReport(finalStop === undefined && modelError !== undefined ? "error" : "stopped", {
       extraTry: firstRoundChecks === undefined ? "not_needed" : "given",
-      agentClaim,
+      agentClaim: finalStop === undefined ? agentClaim : "none",
     });
-  const common = { session, agentSeconds, toolCalls, diagnostics, checks, agentClaim };
+  // A claim made before a limit stopped the run says nothing about how it ended.
+  const claim = finalStop === undefined ? agentClaim : "none";
+  const common = { session, agentSeconds, toolCalls, diagnostics, checks, agentClaim: claim };
   if (finalStop !== undefined) return { stopReason: finalStop.reason, detail: finalStop.detail, ...common };
   if (modelError !== undefined) return { stopReason: "model_error", detail: modelError.slice(0, 500), ...common };
   return { stopReason: "finished", ...common };
 }
 
 /**
- * The checks' runners: the agent's own shell (the container's bash operations), in the run's root. The agent writes
- * `cd /testbed && ...`, a path only the container has, so a leading `cd` into the container folder is replayed against
- * the same files on the host, where the worker's containment check can resolve it.
+ * The agent writes `cd /testbed && pytest`, a path only the container has. The run's root, where the agent's shell
+ * starts, holds the testbed as `testbed`, so a leading `cd <containerFolder>[/sub] &&` reads as `cd testbed[/sub] &&`
+ * (Ruling X). Only that exact folder, then a `/`, a space or the end, so `/testbedX` stays out; the matcher then applies
+ * its own safe-path rule to `sub`, and the replay's realpath containment refuses a link out of the testbed.
  */
-function containerCheckRunners(input: AgentRunInput): CheckRunners {
-  const runners = createCheckRunners({ rootPath: input.rootPath, bashOperations: input.bashOperations });
-  const { containerFolder, hostFolder } = input.paths;
-  return {
-    runProjectCommand: (command, signal) => runners.runProjectCommand(command, signal),
-    runAgentCommand(replay, timeoutMs, signal) {
-      const cd = /^cd (\S+) && /.exec(replay);
-      const target = cd?.[1];
-      const mapped = target !== undefined && (target === containerFolder || target.startsWith(`${containerFolder}/`))
-        ? `cd ${hostFolder}${target.slice(containerFolder.length)} && ${replay.slice(cd![0].length)}`
-        : replay;
-      return runners.runAgentCommand(mapped, timeoutMs, signal);
-    },
-  };
+export function testbedRelativeCommand(command: string, paths: Pick<DevcontainerPaths, "hostFolder" | "containerFolder">): string {
+  const folder = basename(paths.hostFolder);
+  const escaped = paths.containerFolder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return command.replace(new RegExp(`^( *cd +)${escaped}(?=/| )(/?\\S*)`, "s"), (_match, head: string, sub: string) => `${head}${folder}${sub}`);
 }
 
 function assistantEnd(event: unknown): { stopReason: string; errorMessage?: string } | undefined {

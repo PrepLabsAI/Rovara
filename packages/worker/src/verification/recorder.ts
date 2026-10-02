@@ -28,6 +28,11 @@ export interface CommandRecorderOptions {
   /** A digest of the workspace's repositories; equal digests mean nothing changed (Ruling E). */
   fingerprint: (signal?: AbortSignal) => Promise<string>;
   onDiagnostic?: (message: string) => void;
+  /**
+   * Rewrites a command before the test-command matcher reads it, for a shell whose paths differ from the workspace's
+   * (an eval's container). Only the matcher's input changes; the stored command is the agent's own text.
+   */
+  canonicalCommand?: (command: string) => string;
 }
 
 const EXIT_MARKER = /Command exited with code (\d+)/g;
@@ -69,7 +74,7 @@ export class CommandRecorder {
    */
   async observeCall(event: RecorderToolCall, signal?: AbortSignal): Promise<void> {
     this.#baseline ??= this.#capture(signal);
-    const replay = bashReplay(event);
+    const replay = bashReplay(event, this.#options.canonicalCommand);
     const mayChange = replay === undefined && (event.toolName === "bash" || event.toolName === "edit" || event.toolName === "write");
     if (mayChange) {
       for (const [id, call] of this.#inFlight) if (call.test) this.#overlapped.add(id);
@@ -117,7 +122,7 @@ export class CommandRecorder {
       this.#edited = true;
       return;
     }
-    const replay = bashReplay(event);
+    const replay = bashReplay(event, this.#options.canonicalCommand);
     if (replay === undefined) return;
     const command = event.input.command as string;
     // A result whose call was never seen has an unknown before.
@@ -176,10 +181,10 @@ export class CommandRecorder {
   }
 }
 
-function bashReplay(event: RecorderToolCall): string | undefined {
+function bashReplay(event: RecorderToolCall, canonical?: (command: string) => string): string | undefined {
   if (event.toolName !== "bash") return undefined;
   const command = event.input.command;
-  return typeof command === "string" ? matchTestCommand(command) : undefined;
+  return typeof command === "string" ? matchTestCommand(canonical === undefined ? command : canonical(command)) : undefined;
 }
 
 function exitCode(event: RecorderToolResult, output: string): number | undefined {

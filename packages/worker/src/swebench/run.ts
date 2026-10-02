@@ -214,8 +214,12 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
   }
   // The offline settings go in the artifact only: the broker's result schema is strict, and the
   // runner image can ship before a broker that knows a new field.
+  // The full report, unless it is unusually large: then the compact one, so result.json stays small.
+  const savedResult = result.outcome === "GRADED" && result.checks !== undefined && Buffer.byteLength(JSON.stringify(result.checks)) > 1_000_000
+    ? { ...result, checks: compactCheckReport(result.checks) }
+    : result;
   await save("result.json", JSON.stringify({
-    ...result,
+    ...savedResult,
     dataset: config.dataset,
     ...(taskCommit === undefined ? {} : { taskCommit }),
     offlineSettings: [...OFFLINE_SETTINGS],
