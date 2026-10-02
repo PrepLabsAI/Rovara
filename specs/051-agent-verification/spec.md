@@ -2,7 +2,7 @@
 
 **Feature Branch**: `docs/051-agent-verification` (spec), then `feat/051-agent-verification`  
 **Created**: 2026-10-01  
-**Status**: Draft; builds on Pi 0.99 (spec 050 phase 2)  
+**Status**: Building on Pi 1.0.0  
 **Input**: SWE-bench pilot findings (2026-09-30/10-01) and decisions with Abhishek (2026-10-01)
 
 ## Why
@@ -127,6 +127,27 @@ These may come later (spec 053 or after).
 - **D-5 (2026-10-01):** No paid validation runs during development (pre-launch; see spec 046). The pilot's failure tasks
   (astropy-13398, sphinx-7590) and the final campaign measure the effect. Development is verified by tests that run
   on the scripted model.
+- **D-6 (2026-10-02):** The "before" for project checks is always "passed at preparation": readiness runs once at
+  workspace preparation, and a workspace becomes READY only if every check passes. The task payload did not carry the
+  readiness commands, so the broker adds an optional `readiness` list (`ProjectCommand[]`) to the task invocation
+  payload, and the worker reruns those commands.
+- **D-7 (2026-10-02):** A remaining regression publishes as a draft PR. Publish no longer refuses on a failing readiness
+  check: it opens the PR as a draft with the failing checks listed in a deterministic checks section, and it also reads
+  the workspace's latest task check report for agent-command checks. CodeBuild gates are unchanged. This relaxes an
+  existing gate and needs the user's approval.
+- **D-8 (2026-10-02):** Time limits. Production coding tasks have no task time limit, only the 200-tool-call guard. Each
+  check keeps its own timeout (the command's `timeoutSeconds`, or 10 minutes for agent commands), and one verification
+  round has a total budget of 30 minutes. Checks the budget leaves unrun are recorded as `not_run`. Eval runs count
+  verification against their agent timer, using the time remaining.
+- **D-9 (2026-10-02):** Stopped runs. Pi does not fire `agent_before_settle` after an abort (a cancel, the loop guard, or
+  an eval time or cost limit). Such a task's report is `not_verified` with reason `stopped`, and no checks run.
+- **D-10 (2026-10-02):** The agent's claim is read deterministically. The preamble asks the agent to end its final
+  message with exactly one line, `AgentX result: done` or `AgentX result: not done`. The claim is `success`, `failure`,
+  or `none` when the line is missing.
+- **D-11 (2026-10-02):** Only a simple test command is replayed from the agent's own commands: an optional leading
+  `cd <path> &&`, then `NAME=value` assignments, an optional `timeout <n>`, then a listed test command (FR-003) with its
+  arguments. Anything with `|`, `;`, `||`, `&`, redirection, backticks or `$(` is not a check and is never replayed,
+  because replaying an arbitrary command can change the workspace.
 
 ## Success Criteria
 
