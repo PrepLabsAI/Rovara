@@ -33,6 +33,7 @@ describe("matchTestCommand (FR-003, P-6)", () => {
     ["FOO=1 BAR=2 pytest -k x", "FOO=1 BAR=2 pytest -k x"],
     ["timeout 600 pytest", "timeout 600 pytest"],
     ["  pytest  ", "pytest"],
+    ["pytest --junitxml=out/report.xml", "pytest --junitxml=out/report.xml"],
   ])("replays %j", (command, replay) => {
     expect(matchTestCommand(command)).toBe(replay);
   });
@@ -44,6 +45,7 @@ describe("matchTestCommand (FR-003, P-6)", () => {
     "FOO=$X pytest", "pytest ${X}", "cd $HOME && pytest", "pytest *", "cd .. && pytest", "cd /etc && pytest",
     "cd ~ && pytest", "cd -- && pytest", "cd a/../.. && pytest", 'cd "a b" && pytest', 'pytest "-k x"',
     "pytest 'x'", "pytest ~/x", "pytest !x", "pytest a\\b", "pytest {a,b}", "pytest [a]", "pytest ?",
+    "pytest --junitxml=/etc/x", "FOO=/etc/x pytest", "make test -C /", "pytest --basetemp=../x", "npm test --prefix=/tmp",
   ])("does not treat %j as a check", (command) => {
     expect(matchTestCommand(command)).toBeUndefined();
   });

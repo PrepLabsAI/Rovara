@@ -67,6 +67,14 @@ function safeCdPath(path: string): boolean {
   return path.length > 0 && !path.startsWith("-") && !path.startsWith("/") && !path.split("/").includes("..");
 }
 
+/** A word, or the value after `=` in it, must not point outside the workspace: absolute, home-relative or `..`. */
+function escapesWorkspace(word: string): boolean {
+  const eq = word.indexOf("=");
+  return [word, ...(eq === -1 ? [] : [word.slice(eq + 1)])].some(
+    (part) => part.startsWith("/") || part.startsWith("~") || part.split("/").includes(".."),
+  );
+}
+
 /** The command to replay if `command` is a simple test command (P-6), else undefined. */
 export function matchTestCommand(command: string): string | undefined {
   const cd = /^ *cd +(\S+) +&& +(.+)$/s.exec(command);
@@ -74,6 +82,7 @@ export function matchTestCommand(command: string): string | undefined {
   if (rest.length === 0 || !ALLOWED.test(rest)) return undefined;
   if (cd !== null && (!ALLOWED.test(cd[1]!) || !safeCdPath(cd[1]!))) return undefined;
   const words = rest.split(/ +/);
+  if (words.some(escapesWorkspace)) return undefined;
   let index = 0;
   while (index < words.length && ASSIGNMENT.test(words[index]!)) index += 1;
   if (words[index] === "timeout" && /^\d+[smh]?$/.test(words[index + 1] ?? "")) index += 2;
