@@ -15,7 +15,7 @@ import { isRootUser, ROOT_WARNING } from "./prerequisites.js";
 import type { Prompter } from "./prompts.js";
 import { problemText } from "./retry.js";
 import { markOperatorStop, operatorStop } from "./stop.js";
-import { awsCard, awsSignedOutCard, rootUserCard } from "./ui/cards.js";
+import { awsCard, awsSignedOutCard, awsSignInCard, rootUserCard } from "./ui/cards.js";
 
 export type AwsProfileKind = "sso" | "login" | "keys" | "other";
 export interface AwsProfile { name: string; kind: AwsProfileKind; region?: string }
@@ -185,6 +185,7 @@ export async function resolveCaller(input: {
       if (next === "signin" && signIn !== undefined) {
         try {
           await input.runner.run(signIn.command, signIn.args, { cwd: process.cwd(), display: signIn.display });
+          surface.card(awsSignInCard({ done: true }));
         } catch (runError) {
           ranProblem = ranProblemText(signIn.display, runError);
         }

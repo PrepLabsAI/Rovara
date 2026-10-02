@@ -90,7 +90,7 @@ export interface WizardResume {
 /** A status card's id: one card per id, and a newer card with the same id replaces it in place.
  * Phase 3 appends the finishing screens' ids. */
 export type CardId =
-  | "release" | "aws" | "account-checks" | "prerequisites" | "github" | "slack" | "slack-urls"
+  | "release" | "aws" | "aws-signin" | "account-checks" | "prerequisites" | "github" | "slack" | "slack-urls"
   // Phase 3's finishing screens, appended.
   | "admin" | "project" | "channel" | "connectors" | "alerts" | "reply" | "ready";
 

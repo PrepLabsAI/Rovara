@@ -9,6 +9,7 @@ import { CONNECTOR_LABELS, type InstallProgress } from "../install-state.js";
 import { ADMIN_USER_GUIDE_URL, DEDICATED_ACCOUNT_NOTE, ROOT_WARNING, type PrerequisiteCheck } from "../prerequisites.js";
 import { STEP_PLAN } from "./journey.js";
 import type { WizardCard } from "./protocol.js";
+import type { ChildAction } from "./child-actions.js";
 
 const megabytes = (bytes: number): string => (bytes / 1_000_000).toFixed(1);
 
@@ -65,6 +66,17 @@ export function awsCard(input: { account: string; arn: string; region?: string; 
       DEDICATED_ACCOUNT_NOTE,
     ],
     details: [input.arn],
+  };
+}
+
+/** FR-038: an AWS sign-in a child process started (aws sso login), on the page. */
+export function awsSignInCard(input: ChildAction & { done?: boolean }): WizardCard {
+  const base = { id: "aws-signin" as const, title: "Sign in to AWS" };
+  if (input.done === true) return { ...base, status: "ok", lines: ["You are signed in to AWS."] };
+  return {
+    ...base, status: "waiting",
+    lines: ["AWS asks you to approve this sign-in in your browser.", ...(input.code === undefined ? [] : [`Check that AWS shows this code: ${input.code}`]), "This page moves on by itself once you approve it."],
+    ...(input.url === undefined ? {} : { link: { url: input.url, label: "Open the AWS sign-in page" } }),
   };
 }
 

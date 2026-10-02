@@ -148,7 +148,9 @@ describe("the account the install lands in", () => {
     expect(caller.account).toBe("123456789012");
     expect(commands.runs).toEqual(["aws sso login --profile dev"]);
     expect(clients).toBe(2);
-    expect(page.cards.map((card) => card.status)).toEqual(["failed", "ok"]);
+    expect(page.cards.map((card) => [card.id, card.status])).toEqual([
+      ["aws", "failed"], ["aws-signin", "ok"], ["aws", "ok"],
+    ]);
     expect(page.cards[0]?.lines).toEqual([
       "The AWS sign-in of the profile dev is missing or has ended.",
       "Choose Sign in again. A browser tab opens for the AWS sign-in; finish it there, then come back to this tab.",

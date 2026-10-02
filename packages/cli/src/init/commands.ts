@@ -55,7 +55,8 @@ import { botNameOf, slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } 
 import { isOperatorStop, isWordedOperatorStop } from "./stop.js";
 import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from "./steps.js";
 import { browserAvailable, NO_BROWSER_LINE, resolveUiMode } from "./ui-mode.js";
-import { accountChecksCard, prerequisitesCard, readyCard, releaseCard } from "./ui/cards.js";
+import { accountChecksCard, awsSignInCard, prerequisitesCard, readyCard, releaseCard } from "./ui/cards.js";
+import { childActionWatcher } from "./ui/child-actions.js";
 import { askFailureAction, failureScreen, isRetryableStep, plainReason, STOPPED_OUTCOME } from "./ui/failure.js";
 import { startInstallWizard, type InstallWizard } from "./ui/index.js";
 import { READY_LINE, stageLine, STEP_PLAN, stoppedLine, terminalStepLine } from "./ui/journey.js";
@@ -289,6 +290,8 @@ interface InitSession {
   /** Task 14: the page-mode log file, opened before the wizard and closed with it. Holds what the
    * terminal no longer shows, and never a secret or the session token (FR-070, FR-071). */
   log?: InitLog;
+  /** FR-038: recognizes a browser action in streamed child-process output while the page is open. */
+  watcher?: { feed(text: string): void };
   /** A property, not a method, so `init` can pass it on as `write` without rebinding it.
    * A progress line: the terminal without the page; the log file and the page's technical log
    * with it. */
@@ -322,7 +325,11 @@ export async function runInit(options: InitOptions, deps: InitCliDependencies, s
       session.wizard.log(line);
     },
     say: (line) => { services.stderr.write(`${line}\n`); session.log?.write(`${line}\n`); },
-    output: { write: (text: string) => (session.wizard === undefined ? services.stderr.write(text) : session.log?.write(text)) },
+    output: { write: (text: string) => {
+      if (session.wizard === undefined) return services.stderr.write(text);
+      session.watcher?.feed(text);
+      return session.log?.write(text);
+    } },
   };
   try {
     const result = await init(options, deps, services, session);
@@ -523,6 +530,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     });
     session.log.hide(wizard.token);
     session.wizard = wizard;
+    session.watcher = childActionWatcher((action) => wizard.surface.card(awsSignInCard(action)));
     prompter = deps.prompter ?? wizard.prompter;
     session.say(stageLine("get-started"));
   } else if (deps.prompter !== undefined) {
