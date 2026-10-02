@@ -300,6 +300,20 @@ describe("the agent's limits (spec 043 FR-013)", () => {
     expect(outcome.detail).toBeUndefined();
   });
 
+  it("counts the agent's tool calls (spec 052 Ruling 28)", async () => {
+    const call = (id: number) => [
+      { type: "tool_execution_start", toolCallId: `t${id}`, toolName: "read", args: { path: `f${id}` } },
+      { type: "tool_execution_end", toolCallId: `t${id}`, toolName: "read", isError: false, result: { content: [] } },
+    ];
+    const { outcome } = await agent({ events: [...[1, 2, 3].flatMap(call), assistantEnd()] });
+    expect(outcome).toMatchObject({ stopReason: "finished", toolCalls: 3 });
+    const none = await agent({ events: [assistantEnd()] });
+    expect(none.outcome.toolCalls).toBe(0);
+    // A run the loop guard stopped still counts every call it started.
+    const looped = await agent({ events: [1, 2, 3, 4, 5].flatMap(failingCall) });
+    expect(looped.outcome).toMatchObject({ stopReason: "loop_guard", toolCalls: 5 });
+  });
+
   it("reports a failed model call", async () => {
     const { outcome } = await agent({ events: [assistantEnd("error", "throttled by Bedrock")] });
     expect(outcome).toMatchObject({ stopReason: "model_error", detail: "throttled by Bedrock" });
@@ -398,6 +412,7 @@ describe("one SWE-bench run (spec 043 FR-008 to FR-015)", () => {
       imageDigest: "swebench/sweb.eval.x86_64.django_1776_django-11099@sha256:abc",
       artifactsPrefix: `evals/${RUN_ID}/`,
       usage: { provider: "amazon-bedrock", costUsd: 0.01 },
+      toolCalls: 0,
     });
     expect(results).toEqual([result]);
     expect(steps).toEqual(["started", "result"]);

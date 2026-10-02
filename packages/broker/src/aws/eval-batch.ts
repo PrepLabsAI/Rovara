@@ -719,6 +719,8 @@ function measureOf(batchId: string, run: SwebenchRun, end: RecordedEnd): EvalRun
     ...(result?.passToPass === undefined ? {} : { passToPass: result.passToPass }),
     ...(result === undefined ? {} : { stopReason: result.stopReason }),
     agentSeconds: result?.agentSeconds ?? 0,
+    // Ruling 28: an older runner image reports no count, and the row leaves it empty.
+    ...(result?.toolCalls === undefined ? {} : { toolCalls: result.toolCalls }),
     tokens,
     costUsd: charge.costUsd,
     chargedUsd: charge.chargedUsd,

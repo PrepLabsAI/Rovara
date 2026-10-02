@@ -711,6 +711,18 @@ describe("run ends and the single infrastructure retry (spec 052 FR-008, FR-010)
     await expectChargesMatchSpend(h, batch.batchId);
   });
 
+  it("records the runner's count of tool calls in the row, and leaves it empty for an older runner's result (Ruling 28)", async () => {
+    const h = await harness({ maxConcurrentEvals: 3 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]] }));
+    await topUpBatches(h.dependencies);
+    const [counted, old] = await runIds(h, batch.batchId);
+    await finish(h, counted!, { ...graded(1), toolCalls: 42 });
+    await finish(h, old!, graded(1));
+    const measures = await listBatchMeasures(h.dependencies, batch.batchId);
+    expect(measures.find((measure) => measure.runId === counted)).toMatchObject({ toolCalls: 42 });
+    expect(measures.find((measure) => measure.runId === old)!.toolCalls).toBeUndefined();
+  });
+
   it("starts the next queued run when a run ends, one start inline, leaving more to the tick", async () => {
     const h = await harness({ maxConcurrentEvals: 1 });
     const batch = await createBatch(h.dependencies, h.context, file());

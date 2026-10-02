@@ -114,6 +114,8 @@ export const SwebenchGradedResultSchema = z.object({
   /** SEC-bench runs (spec 045): the evaluator's verdict, in place of test counts. */
   secbench: SecbenchVerdictSchema.optional(),
   agentSeconds: z.number().int().nonnegative(),
+  /** Spec 052 Ruling 28: the tool calls the agent started; absent from a runner older than the count. */
+  toolCalls: z.number().int().nonnegative().optional(),
   imageDigest: z.string().max(256),
   usage: TaskUsageTelemetrySchema,
   artifactsPrefix: z.string().max(512),

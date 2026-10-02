@@ -10,6 +10,8 @@ export interface AgentRun {
   detail?: string;
   session: PiSessionHandle;
   agentSeconds: number;
+  /** The tool calls the agent started (spec 052 Ruling 28). */
+  toolCalls: number;
 }
 
 export interface AgentRunInput {
@@ -93,11 +95,12 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
     unsubscribe();
   }
   const agentSeconds = Math.round((now() - started) / 1_000);
+  const toolCalls = guard.toolCalls;
   const finalStop = stop as { reason: SwebenchStopReason; detail: string } | undefined;
-  if (finalStop !== undefined) return { stopReason: finalStop.reason, detail: finalStop.detail, session, agentSeconds };
+  if (finalStop !== undefined) return { stopReason: finalStop.reason, detail: finalStop.detail, session, agentSeconds, toolCalls };
   const modelError = thrown ?? (lastAssistant?.stopReason === "error" ? lastAssistant.errorMessage ?? "the model call failed" : undefined);
-  if (modelError !== undefined) return { stopReason: "model_error", detail: modelError.slice(0, 500), session, agentSeconds };
-  return { stopReason: "finished", session, agentSeconds };
+  if (modelError !== undefined) return { stopReason: "model_error", detail: modelError.slice(0, 500), session, agentSeconds, toolCalls };
+  return { stopReason: "finished", session, agentSeconds, toolCalls };
 }
 
 function assistantEnd(event: unknown): { stopReason: string; errorMessage?: string } | undefined {
