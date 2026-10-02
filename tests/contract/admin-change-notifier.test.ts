@@ -136,16 +136,17 @@ describe("an expired Confirm message loses its buttons without a press (#217)", 
   it("schedules the expiry edit when it posts the message, just after the change expires", async () => {
     const db = new FakeDynamoDb();
     db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z" }));
-    const h = notifier(db, Date.parse("2026-10-02T09:00:06.000Z"));
+    const enqueue = vi.fn(async () => undefined);
+    const h = notifier(db, Date.parse("2026-10-02T09:00:06.000Z"), { enqueue });
     await h.deliver(dmNotice);
     expect(h.posts).toHaveLength(1);
-    expect(h.deps.enqueue).toHaveBeenCalledExactlyOnceWith([expiryNotice]);
+    expect(enqueue).toHaveBeenCalledExactlyOnceWith([expiryNotice]);
     expect(Date.parse(expiryNotice.notBefore!) - Date.parse("2026-10-02T09:10:00.000Z")).toBe(ADMIN_CHANGE_EXPIRY_GRACE_MS);
     // A repeated delivery of a posted message schedules it again (the edit happens once), so a
     // failed schedule is never lost.
     await h.deliver(dmNotice);
     expect(h.posts).toHaveLength(1);
-    expect(h.deps.enqueue).toHaveBeenCalledTimes(2);
+    expect(enqueue).toHaveBeenCalledTimes(2);
   });
 
   it("delays the queued notice until its time, within SQS's 15 minutes", () => {
@@ -178,11 +179,12 @@ describe("an expired Confirm message loses its buttons without a press (#217)", 
   it("waits, editing nothing, while the change has not expired yet", async () => {
     const db = new FakeDynamoDb();
     db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z", dm: DM }));
-    const h = notifier(db, Date.parse("2026-10-02T09:10:01.000Z"));
+    const retryLater = vi.fn(async () => undefined);
+    const h = notifier(db, Date.parse("2026-10-02T09:10:01.000Z"), { retryLater });
     const answer = await h.deliver(expiryNotice);
     expect(h.updates).toEqual([]);
     expect(answer.batchItemFailures).toEqual([{ itemIdentifier: "m1" }]);
-    expect(h.deps.retryLater).toHaveBeenCalledOnce();
+    expect(retryLater).toHaveBeenCalledOnce();
   });
 
   it("leaves an answered change's message to its outcome edit", async () => {
