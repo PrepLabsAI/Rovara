@@ -5,9 +5,9 @@
 import { createHmac, randomUUID } from "node:crypto";
 import { beforeAll, describe, expect, it } from "vitest";
 import {
-  SLACK_CHANNEL, SLACK_TEAM, createBroker, ensureWorkspace, finishOperation, loadSlackBroker, markReady, registerSlackProject, serviceCall,
+  SLACK_CHANNEL, SLACK_TEAM, call, createBroker, ensureWorkspace, finishOperation, loadSlackBroker, markReady, registerSlackProject, serviceCall,
 } from "../support/slack-broker.js";
-import { STUCK_CANCEL_RETRY_MS, createCancelRetrier, sweepStuckCancels } from "../../packages/broker/src/aws/stuck-cancels.js";
+import { FAILED_CANCEL_RELEASED_MESSAGE, STUCK_CANCEL_RETRY_MS, createCancelRetrier, sweepStuckCancels } from "../../packages/broker/src/aws/stuck-cancels.js";
 
 const SIGNING_KEY = "c".repeat(64);
 
@@ -154,11 +154,116 @@ describe("the retried cancel's result (issue 195)", () => {
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ activeOperationId: operation().id });
     const logs: Array<Record<string, unknown>> = [];
     const later = new Date(Date.now() + STUCK_CANCEL_RETRY_MS + 60_000);
-    const result = await sweepStuckCancels({ client: db, tableName: "state", log: (entry) => { logs.push(entry); } }, [{ workspaceId, compute: "alive" }], later);
+    // Issue 202, owner answer 3: only once the worker says it runs nothing.
+    const busy = await sweepStuckCancels({ client: db, tableName: "state", log: (entry) => { logs.push(entry); } }, [{ workspaceId, compute: "alive", worker: "busy" }], later);
+    expect(busy.failed).toEqual([operation().id]);
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ activeOperationId: operation().id });
+    logs.length = 0;
+    const result = await sweepStuckCancels({ client: db, tableName: "state", log: (entry) => { logs.push(entry); } }, [{ workspaceId, compute: "alive", worker: "idle" }], later);
     expect(result.interrupted).toEqual([operation().id]);
-    expect(operation()).toMatchObject({ status: "INTERRUPTED" });
+    expect(operation()).toMatchObject({ status: "INTERRUPTED", workspaceReleaseReason: "worker-idle" });
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "READY" });
     expect(db.get(`WORKSPACE#${workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
-    expect(logs).toEqual([{ event: "stuck_cancel.released", workspaceId, operationId: operation().id }]);
+    expect(logs).toEqual([{ event: "stuck_cancel.released", workspaceId, operationId: operation().id, reason: "worker-idle" }]);
+  });
+});
+
+describe("a task's own late result after a failed cancel (issue 202)", () => {
+  /** The task's own result callback, as its worker sends it, answered as the broker answers it. */
+  async function ownResult(handler: Parameters<typeof call>[0], db: Parameters<typeof finishOperation>[1], workspaceId: string, operationId: string, status: string) {
+    const outbox = db.find((item) => item.entityType === "OUTBOX" && item.operationId === operationId)[0]!;
+    const capability = (outbox.invocation as { callbackCapability: string }).callbackCapability;
+    return call(handler, {
+      method: "POST",
+      path: `/v1/internal/workspaces/${workspaceId}/operations/${operationId}/result`,
+      headers: { "x-agentx-callback-capability": capability },
+      body: { operationId, status, result: { summary: "done" } },
+    });
+  }
+
+  /** A thread's task whose member's first cancel failed: INTERRUPTED, still holding the workspace. */
+  async function failedFirstCancel() {
+    const broker = await stuckCancel({ claimed: false });
+    await finishOperation(broker.handler, broker.db, broker.workspaceId, broker.firstCancelId, "FAILED");
+    expect(broker.operation()).toMatchObject({ status: "INTERRUPTED" });
+    expect(broker.db.get(`WORKSPACE#${broker.workspaceId}`, "META")).toMatchObject({ status: "BUSY", activeOperationId: broker.taskOperationId });
+    return { ...broker, meta: () => broker.db.get(`WORKSPACE#${broker.workspaceId}`, "META")! };
+  }
+
+  it("frees the workspace, keeps the task INTERRUPTED, records own-result, and answers the worker without a conflict", async () => {
+    const { db, handler, workspaceId, taskOperationId, operation, meta } = await failedFirstCancel();
+    const response = await ownResult(handler, db, workspaceId, taskOperationId, "SUCCEEDED");
+    expect(response.status).toBe(200);
+    expect(response.body.operation).toMatchObject({ id: taskOperationId, status: "INTERRUPTED" });
+    expect(operation()).toMatchObject({ status: "INTERRUPTED", workspaceReleaseReason: "own-result", error: FAILED_CANCEL_RELEASED_MESSAGE });
+    expect(operation()).toHaveProperty("workspaceReleasedAt");
+    // Results stay immutable: the late result is not stored.
+    expect(operation().result).not.toEqual({ summary: "done" });
+    expect(meta()).toMatchObject({ status: "READY" });
+    expect(meta()).not.toHaveProperty("activeOperationId");
+  });
+
+  it("answers a repeat of that result the same way, and writes nothing more", async () => {
+    const { db, handler, workspaceId, taskOperationId, operation } = await failedFirstCancel();
+    await ownResult(handler, db, workspaceId, taskOperationId, "FAILED");
+    const released = structuredClone(operation());
+    const again = await ownResult(handler, db, workspaceId, taskOperationId, "FAILED");
+    expect(again.status).toBe(200);
+    expect(again.body.operation).toMatchObject({ id: taskOperationId, status: "INTERRUPTED" });
+    expect(operation()).toEqual(released);
+  });
+
+  it("writes nothing, and still refuses it as today, for an INTERRUPTED task that no longer holds the workspace", async () => {
+    const { db, handler, workspaceId, taskOperationId, operation, meta } = await failedFirstCancel();
+    db.set({ ...meta(), status: "READY", activeOperationId: undefined });
+    const before = structuredClone(operation());
+    const response = await ownResult(handler, db, workspaceId, taskOperationId, "SUCCEEDED");
+    expect(response.status).not.toBe(200);
+    expect(JSON.stringify(response.body)).toContain("IDEMPOTENCY_CONFLICT");
+    expect(operation()).toEqual(before);
+    expect(meta()).toMatchObject({ status: "READY" });
+  });
+
+  it("never frees a workspace a newer operation holds, or one whose fence moved", async () => {
+    for (const change of ["newer-operation", "new-fence"] as const) {
+      const { db, handler, workspaceId, taskOperationId, operation, meta } = await failedFirstCancel();
+      const newer = randomUUID();
+      db.set(change === "newer-operation" ? { ...meta(), activeOperationId: newer } : { ...meta(), fence: (meta().fence as number) + 1 });
+      const before = structuredClone(operation());
+      const response = await ownResult(handler, db, workspaceId, taskOperationId, "SUCCEEDED");
+      expect(JSON.stringify(response.body)).toContain("IDEMPOTENCY_CONFLICT");
+      expect(operation()).toEqual(before);
+      expect(meta()).toMatchObject({ status: "BUSY", activeOperationId: change === "newer-operation" ? newer : taskOperationId });
+    }
+  });
+
+  it("answers a late result after the reconciler already freed the workspace without a conflict, and writes nothing", async () => {
+    const { db, handler, workspaceId, taskOperationId, operation, meta } = await failedFirstCancel();
+    const swept = await sweepStuckCancels({ client: db, tableName: "state" }, [{ workspaceId, compute: "gone" }], new Date());
+    expect(swept.interrupted).toEqual([taskOperationId]);
+    const released = structuredClone(operation());
+    const response = await ownResult(handler, db, workspaceId, taskOperationId, "SUCCEEDED");
+    expect(response.status).toBe(200);
+    expect(response.body.operation).toMatchObject({ id: taskOperationId, status: "INTERRUPTED" });
+    expect(operation()).toEqual(released);
+    expect(operation()).toMatchObject({ workspaceReleaseReason: "compute-gone" });
+    expect(meta()).not.toHaveProperty("activeOperationId");
+  });
+
+  it("frees an AI tool's developer task's workspace the same way", async () => {
+    const { db, handler, workspaceId, taskOperationId, operation, meta } = await failedFirstCancel();
+    db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK", entityType: "DEVELOPER_TASK_POINTER", taskId: randomUUID() });
+    expect((await ownResult(handler, db, workspaceId, taskOperationId, "SUCCEEDED")).status).toBe(200);
+    expect(operation()).toMatchObject({ status: "INTERRUPTED", workspaceReleaseReason: "own-result" });
+    expect(meta()).not.toHaveProperty("activeOperationId");
+  });
+
+  it("leaves other terminal results as they were: a cancelled task's late result is still refused", async () => {
+    const { db, handler, workspaceId, taskOperationId, firstCancelId, operation } = await stuckCancel({ claimed: false });
+    await finishOperation(handler, db, workspaceId, firstCancelId, "SUCCEEDED");
+    expect(operation()).toMatchObject({ status: "CANCELLED" });
+    const response = await ownResult(handler, db, workspaceId, taskOperationId, "SUCCEEDED");
+    expect(JSON.stringify(response.body)).toContain("IDEMPOTENCY_CONFLICT");
+    expect(operation()).not.toHaveProperty("workspaceReleasedAt");
   });
 });

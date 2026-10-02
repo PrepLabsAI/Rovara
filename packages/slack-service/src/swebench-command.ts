@@ -31,7 +31,7 @@ export interface SwebenchCommandOptions {
   pollMilliseconds?: number;
 }
 
-const DATASET_NAMES: Record<SwebenchDataset, string> = {
+export const DATASET_NAMES: Record<SwebenchDataset, string> = {
   verified: "SWE-bench Verified", lite: "SWE-bench Lite", full: "SWE-bench",
   pro: "SWE-Bench Pro", "pro-hard": "SWE-Bench Pro HARD-51",
   "secbench-patch": "SEC-bench patch task",

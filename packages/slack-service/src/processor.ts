@@ -1,6 +1,7 @@
 import {
   CLOSED_SHARED_NOTICE,
   VIEW_ONLY_NOTICE,
+  checksReplyPrefix,
   detailsButtonValue,
   detailsReplyBlocks,
   slackThreadSubject,
@@ -16,9 +17,11 @@ import {
   type ActionPolicy,
   type PendingConfirmation,
   type TurnObservation,
+  type CheckReport,
   type TurnRecord,
   type ModelIdentifier,
   type ProjectModelOptions,
+  parseEvalBatchCommand,
   parseSwebenchCommand,
 } from "@agentx/contracts";
 import type { WorkerAccess } from "@agentx/orchestrator";
@@ -37,7 +40,9 @@ import {
   type ActiveTurn, type TurnNote,
 } from "./interrupted-turn.js";
 import { runSwebenchCommand, type SwebenchApi } from "./swebench-command.js";
+import { runEvalBatchCommand, type EvalBatchStartApi } from "./eval-batch-command.js";
 import { SHARED_CLOSE_REFUSED_MESSAGE, SHARED_SETUP_FAILED_MESSAGE, TASK_STILL_BUSY_MESSAGE, taskBusy, waitForIdleTask } from "./shared-task.js";
+import { createProgressNote, progressSubject, type ProgressNote } from "./progress-note.js";
 
 export interface ThreadServiceApi {
   ensureWorkspace(requestId: string): Promise<SlackThreadWorkspaceResult>;
@@ -47,7 +52,7 @@ export interface ThreadServiceApi {
   completeClose(requestId: string, operationId: string): Promise<SlackWorkspaceCloseCompleteResult>;
   waitForOperation(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; error?: string | undefined; result?: unknown }>;
   /** Issue 157: waits for a worker task and returns its final response; without it, a resumed turn posts the status alone. */
-  taskResult?(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; response?: string | undefined; error?: string | undefined }>;
+  taskResult?(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; response?: string | undefined; error?: string | undefined; checks?: CheckReport | undefined }>;
   /**
    * Issue 167: asks the worker to cancel a task (a finished one is left as it is). Called only when
    * a Slack turn gives up for good, so nobody will ever read the task's result.
@@ -59,6 +64,9 @@ export interface ThreadServiceApi {
   /** Spec 043: absent where the control plane has no SWE-bench routes. */
   startSwebenchRun?: SwebenchApi["startSwebenchRun"];
   getSwebenchRun?: SwebenchApi["getSwebenchRun"];
+  /** Spec 052 FR-002: absent where the control plane has no batch routes. */
+  startEvalBatch?: EvalBatchStartApi["startEvalBatch"];
+  updateEvalBatchWatch?: NonNullable<EvalBatchStartApi["updateEvalBatchWatch"]>;
 }
 
 /** Issue 167: a cancel was queued for a task still running, or the task had already finished. */
@@ -163,10 +171,22 @@ export interface ProcessorDependencies {
   cancelTaskMilliseconds?: number;
   /** Waits between polls of a SWE-bench run (spec 043); a timer when absent. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * Issue 219: posts a message in the thread and answers its timestamp, for the progress note a
+   * long task edits while it runs. With updateMessage; without both, no progress note is posted.
+   */
+  postProgress?: (thread: SlackThread, text: string) => Promise<string | undefined>;
+  /** Issue 219: edits a message the service posted (chat.update). */
+  updateMessage?: (thread: SlackThread, ts: string, text: string) => Promise<void>;
+  /** Issue 219: how often the progress note is edited; three minutes when absent. */
+  progressIntervalMs?: number;
 }
 
 /** Issue 157: a save already in flight at the hand-off gets this long to land. */
 const PENDING_SAVE_MILLISECONDS = 5_000;
+
+/** Issue 219: the progress note's last edit gets this long before the reply is posted anyway. */
+const PROGRESS_FINISH_MILLISECONDS = 5_000;
 
 /** Issue 167: cancelling an abandoned task gets this long, well inside the time left before SIGKILL. */
 const CANCEL_TASK_MILLISECONDS = 5_000;
@@ -197,16 +217,16 @@ export async function processSlackRequest(
   const subject = slackThreadSubject(message.thread);
   const log: ServiceLog = dependencies.log ?? (() => undefined);
   const startedAt = new Date();
-  // Only a configured sink or refresh store gets a recorder, so a service without either runs the
-  // turn exactly as before.
-  const recorder = dependencies.turnRecords === undefined && dependencies.threads.saveRefreshConnectors === undefined
-    ? undefined
-    : new TurnRecorder();
+  // Spec 051 FR-009: every turn has a recorder, because the reply leads with the check report of the
+  // tasks it ran. Writing a record, a refresh list or a details button still needs its own sink.
+  const recorder = new TurnRecorder();
   const draft: TurnDraft = { disposition: "abandoned" };
   let lastPosted = "";
   // Issue 157: set the moment this attempt is handed off. From then on the new task owns the
   // thread, so the old turn (a lazy worker still waiting, say) posts nothing more and saves nothing.
   let handedOff = false;
+  // Issue 219: this attempt's progress note, once the worker accepted a task.
+  let progress: ProgressNote | undefined;
   // Remembers only what reached Slack, so the record never claims a message the member did not see.
   const post = async (text: string) => {
     if (handedOff) {
@@ -277,7 +297,7 @@ export async function processSlackRequest(
     const waiting = api.taskResult === undefined
       ? api.waitForOperation(active.workspaceId, active.operationId, waitStop.signal)
       : api.taskResult(active.workspaceId, active.operationId, waitStop.signal);
-    let result: { status: string; response?: string | undefined; error?: string | undefined };
+    let result: { status: string; response?: string | undefined; error?: string | undefined; checks?: CheckReport | undefined };
     try {
       result = await untilHandoff(waiting, options.handoff);
     } catch (error) {
@@ -302,8 +322,14 @@ export async function processSlackRequest(
       status: result.status,
       ...(typeof result.response === "string" ? { response: result.response } : {}),
       ...(result.error === undefined ? {} : { error: result.error }),
+      ...(result.checks === undefined ? {} : { checks: result.checks }),
     }));
-    draft.responseText = text;
+    // As on a normal turn, the record keeps the model-side text, without AgentX's verdict prefix.
+    draft.responseText = slackReplyText(resumedResultText({
+      status: result.status,
+      ...(typeof result.response === "string" ? { response: result.response } : {}),
+      ...(result.error === undefined ? {} : { error: result.error }),
+    }));
     for (const chunk of splitSlackMessage(text)) await post(chunk);
     // The interrupted turn's session was not saved: the next turn's model reads this instead.
     if (dependencies.threads.saveTurnNote !== undefined) {
@@ -369,6 +395,19 @@ export async function processSlackRequest(
         finished = true;
         return;
       }
+    }
+    // Spec 052 FR-002: a batch is recorded and announced here; the batch watcher posts the rest.
+    const batchCommand = parseEvalBatchCommand(message.text);
+    if (batchCommand !== undefined) {
+      draft.disposition = "eval_batch";
+      if (api.startEvalBatch === undefined) throw new Error("eval batches are unavailable in this deployment");
+      await runEvalBatchCommand(batchCommand, {
+        startEvalBatch: (request) => api.startEvalBatch!(request),
+        ...(api.listProjectModels === undefined ? {} : { listProjectModels: () => api.listProjectModels!() }),
+        ...(api.updateEvalBatchWatch === undefined ? {} : { updateEvalBatchWatch: (batchId, revision, change) => api.updateEvalBatchWatch!(batchId, revision, change) }),
+      }, { post, redelivered: options.redelivered === true, ...(dependencies.now === undefined ? {} : { now: dependencies.now }), log });
+      finished = true;
+      return;
     }
     const swebenchCommand = parseSwebenchCommand(message.text);
     if (swebenchCommand !== undefined) {
@@ -604,6 +643,9 @@ export async function processSlackRequest(
       return;
     }
     if (confirmation?.claim) claimed = true;
+    // The gate removes each approval as it lets the confirmed call through, before the task is
+    // accepted, so what was approved is read now, once.
+    const approvedSummary = claimed ? confirmation?.session.approvals.map((approval) => approval.summary).join("; ") : undefined;
     // Spec 014 FR-026: the ingress has already said "I'm on it". Say work has started only when the
     // member was told to wait, behind earlier requests, for setup, or because SQS redelivered this
     // request after an earlier attempt threw: that attempt's own "Working on it now" is 15 minutes
@@ -616,7 +658,30 @@ export async function processSlackRequest(
     const turnStop = new AbortController();
     const workspaceForTurn = workspace.workspaceId;
     const saveActiveTurn = dependencies.threads.saveActiveTurn?.bind(dependencies.threads);
+    // Issue 219: once the worker accepts the turn's first task, one note says so and is edited while it runs.
+    const postProgress = dependencies.postProgress;
+    const updateMessage = dependencies.updateMessage;
+    const startProgress = async (): Promise<void> => {
+      if (progress !== undefined || postProgress === undefined || updateMessage === undefined || handedOff) return;
+      progress = createProgressNote({
+        what: progressSubject(claimed ? "" : message.text, approvedSummary), eventId: message.eventId, log,
+        post: (text) => postProgress(message.thread, text),
+        update: (ts, text) => updateMessage(message.thread, ts, text),
+        now: dependencies.now ?? Date.now,
+        ...(dependencies.progressIntervalMs === undefined ? {} : { intervalMs: dependencies.progressIntervalMs }),
+      });
+      // Never awaited: a slow Slack post must not hold the task's result back.
+      void progress.start();
+    };
+    /** The last edit gets a few seconds: an edit Slack does not answer never holds the reply back. */
+    const finishProgress = async (outcome: "finished" | "stopped"): Promise<void> => {
+      if (progress === undefined) return;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([progress.finish(outcome), new Promise<void>((resolve) => { timer = setTimeout(resolve, PROGRESS_FINISH_MILLISECONDS); })]);
+      clearTimeout(timer);
+    };
     const onOperationAccepted = async (operationId: string): Promise<void> => {
+      await startProgress();
       // After the hand-off the redelivery owns the thread; a late acceptance must not move it.
       if (saveActiveTurn === undefined) return;
       if (handedOff) {
@@ -626,7 +691,7 @@ export async function processSlackRequest(
       }
       accepted = { workspaceId: workspaceForTurn, operationId };
       // An approval's own text is only "yes": the note names what was approved instead.
-      const approved = claimed ? confirmation?.session.approvals.map((approval) => approval.summary).join("; ") : undefined;
+      const approved = approvedSummary;
       const base: ActiveTurn = { eventId: message.eventId, workspaceId: workspaceForTurn, operationId, ...(approved ? { request: `the member approved: ${approved}` } : {}) };
       // Issue 173: shown as waited on from now; if the save fails, the next heartbeat writes it.
       waitingOn = base;
@@ -667,7 +732,7 @@ export async function processSlackRequest(
         ...(recorder === undefined ? {} : { recorder }),
         ...(state.refreshConnectors?.length ? { refreshConnectors: state.refreshConnectors } : {}),
         // A service that cannot remember operations, or is never stopped mid-turn, runs the turn as before.
-        ...(dependencies.threads.saveActiveTurn === undefined ? {} : { onOperationAccepted }),
+        ...(dependencies.threads.saveActiveTurn === undefined && (postProgress === undefined || updateMessage === undefined) ? {} : { onOperationAccepted }),
         ...(stampActiveTurn === undefined ? {} : { onOperationAttached }),
         ...(options.handoff === undefined ? {} : { signal: turnStop.signal }),
         ...(state.turnNote === undefined ? {} : { turnNote: state.turnNote.text }),
@@ -684,11 +749,13 @@ export async function processSlackRequest(
       }
       draft.disposition = "answered";
       log("task.completed", { eventId: message.eventId, responseLength: response.length });
+      await finishProgress("finished");
     } catch (error) {
       if (error instanceof TurnHandedOffError) throw error;
       draft.disposition = "failed";
       draft.error = errorSummary(error);
       log("task.failed", { eventId: message.eventId, errorName: errorName(error) });
+      await finishProgress("stopped");
       response = `AgentX could not complete the request: ${safeMessage(error)}`;
     }
     // Formatted before anything is posted (spec 014 FR-022): the turn record keeps the formatted
@@ -726,14 +793,17 @@ export async function processSlackRequest(
     if (!quiet) {
       // C13: in a continue thread, the reply names the teammate it answers.
       const mention = shared === undefined ? "" : `<@${message.userId}> `;
-      const chunks = splitSlackMessage(`${mention}${slackReplyText(response)}`);
+      // Spec 051 FR-009: AgentX's check verdict leads, and the model's text follows as the agent's account.
+      // A turn with no report gives "", so its reply is exactly the model's text.
+      const verdict = checksReplyPrefix(recorder.checkReports(), { draftPullRequest: recorder.draftPullRequest() });
+      const chunks = splitSlackMessage(`${mention}${verdict}${slackReplyText(response)}`);
       const details = replyDetails(dependencies, recorder, message);
       for (const [index, chunk] of chunks.entries()) {
         if (details !== undefined && index === chunks.length - 1) await postWithDetails(details, chunk);
         else await post(chunk);
       }
     }
-    if (recorder !== undefined) await rememberRefresh(dependencies, log, subject, message.eventId, state.refreshConnectors ?? [], recorder);
+    await rememberRefresh(dependencies, log, subject, message.eventId, state.refreshConnectors ?? [], recorder);
     // Only once the member has the reply: a failed post before this is redelivered and resumes.
     if (remembered !== undefined || waitingOn !== undefined) await forgetActiveTurn();
     // The model has read the note from a resumed turn, and a turn that answered saved its session,
@@ -803,6 +873,8 @@ export async function processSlackRequest(
   } finally {
     // Issue 173: whatever happened, this attempt shows nothing more.
     stamping = false;
+    // Issue 219: and edits its progress note no more.
+    progress?.dispose();
     if (finished) {
       // Only a finished event is recorded: an attempt that throws for redelivery leaves the one
       // record to the attempt that finishes (SC-006).
@@ -843,9 +915,9 @@ function untilHandoff<T>(work: Promise<T>, handoff: AbortSignal | undefined): Pr
  * and its record will be written (a sink and a recorder exist), so the button always names a record
  * the service tries to save. The value derives from the Slack event, as the record's key does.
  */
-function replyDetails(dependencies: ProcessorDependencies, recorder: TurnRecorder | undefined, message: SlackRequestMessage): ReplyDetails | undefined {
+function replyDetails(dependencies: ProcessorDependencies, recorder: TurnRecorder, message: SlackRequestMessage): ReplyDetails | undefined {
   const postWithBlocks = dependencies.postWithBlocks;
-  if (postWithBlocks === undefined || dependencies.turnRecords === undefined || recorder === undefined) return undefined;
+  if (postWithBlocks === undefined || dependencies.turnRecords === undefined) return undefined;
   let calls: number;
   try {
     calls = recorder.observation().calls.length;

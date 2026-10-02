@@ -12,6 +12,7 @@ import { offlineSettings } from "../../packages/worker/src/swebench/offline.js";
 import { loadSwebenchInstance, type SwebenchInstance } from "../../packages/worker/src/swebench/dataset.js";
 import { parseHarnessReport } from "../../packages/worker/src/swebench/grade.js";
 import { createGitRunner, predictionPatch, stripHistory, untrackedFiles } from "../../packages/worker/src/swebench/history.js";
+import { createRunReporter } from "../../packages/worker/src/swebench/reporter.js";
 import { runSwebench, type RunReporter } from "../../packages/worker/src/swebench/run.js";
 
 const run = promisify(execFile);
@@ -180,6 +181,8 @@ interface FakeTurn {
   hang?: boolean;
   throws?: string;
   edit?: () => Promise<void>;
+  /** Reported through the session's onDiagnostic during the prompt, as an extension's error would be. */
+  diagnostic?: string;
 }
 
 /** The adapter's sessions with some handle members replaced. */
@@ -190,7 +193,7 @@ function withHandle(adapter: PiSessionAdapter, overrides: Partial<PiSessionHandl
 /** A Pi session that emits a scripted turn's events, then ends the prompt. */
 function fakeAdapter(turn: FakeTurn, observed: { aborted: boolean; steered: string[]; prompt?: string }): PiSessionAdapter {
   return {
-    async create({ sessionDirectory }) {
+    async create({ sessionDirectory, onDiagnostic }) {
       const sessionFile = join(sessionDirectory, "fake.jsonl");
       await writeFile(sessionFile, "{\"type\":\"session\"}\n");
       const listeners = new Set<(event: unknown) => void>();
@@ -202,6 +205,7 @@ function fakeAdapter(turn: FakeTurn, observed: { aborted: boolean; steered: stri
         sessionFile,
         async prompt(text) {
           observed.prompt = text;
+          if (turn.diagnostic !== undefined) onDiagnostic?.(turn.diagnostic);
           await turn.edit?.();
           for (const event of turn.events ?? []) {
             if (event && typeof event === "object" && (event as { type?: unknown }).type === "message_end") {
@@ -297,6 +301,20 @@ describe("the agent's limits (spec 043 FR-013)", () => {
     const { outcome } = await agent({ events: [assistantEnd("error", "OpenRouter request failed; rate limited; wait before retrying"), assistantEnd()] });
     expect(outcome.stopReason).toBe("finished");
     expect(outcome.detail).toBeUndefined();
+  });
+
+  it("counts the agent's tool calls (spec 052 Ruling 28)", async () => {
+    const call = (id: number) => [
+      { type: "tool_execution_start", toolCallId: `t${id}`, toolName: "read", args: { path: `f${id}` } },
+      { type: "tool_execution_end", toolCallId: `t${id}`, toolName: "read", isError: false, result: { content: [] } },
+    ];
+    const { outcome } = await agent({ events: [...[1, 2, 3].flatMap(call), assistantEnd()] });
+    expect(outcome).toMatchObject({ stopReason: "finished", toolCalls: 3 });
+    const none = await agent({ events: [assistantEnd()] });
+    expect(none.outcome.toolCalls).toBe(0);
+    // A run the loop guard stopped still counts every call it started.
+    const looped = await agent({ events: [1, 2, 3, 4, 5].flatMap(failingCall) });
+    expect(looped.outcome).toMatchObject({ stopReason: "loop_guard", toolCalls: 5 });
   });
 
   it("reports a failed model call", async () => {
@@ -397,6 +415,7 @@ describe("one SWE-bench run (spec 043 FR-008 to FR-015)", () => {
       imageDigest: "swebench/sweb.eval.x86_64.django_1776_django-11099@sha256:abc",
       artifactsPrefix: `evals/${RUN_ID}/`,
       usage: { provider: "amazon-bedrock", costUsd: 0.01 },
+      toolCalls: 0,
     });
     expect(results).toEqual([result]);
     expect(steps).toEqual(["started", "result"]);
@@ -411,6 +430,22 @@ describe("one SWE-bench run (spec 043 FR-008 to FR-015)", () => {
     expect(started).toEqual(expect.arrayContaining(["--network", "none", "--platform", "linux/amd64", "--name", container]));
     expect(started.join(" ")).toContain(":/testbed");
     expect(calls.at(-1)).toEqual(["rm", "--force", container]);
+  });
+
+  it("keeps the session's diagnostics in result.json, redacted, and leaves the key out when there are none (spec 051 Ruling F)", async () => {
+    const reported = await fixture((testbed) => ({
+      events: [assistantEnd()],
+      diagnostic: "pi extension <inline:agentx-verification> failed on tool_result: clone https://bot:hunter2@example.com/r.git",
+      edit: () => writeFile(join(testbed, "validators.py"), "PATTERN = r'^[\\w.@+-]+\\Z'\n"),
+    }));
+    expect(JSON.parse(reported.artifacts.get("result.json")!)).toMatchObject({
+      diagnostics: ["pi extension <inline:agentx-verification> failed on tool_result: clone https://[REDACTED]@example.com/r.git"],
+    });
+    const quiet = await fixture((testbed) => ({
+      events: [assistantEnd()],
+      edit: () => writeFile(join(testbed, "validators.py"), "PATTERN = r'^[\\w.@+-]+\\Z'\n"),
+    }));
+    expect(JSON.parse(quiet.artifacts.get("result.json")!)).not.toHaveProperty("diagnostics");
   });
 
   it("reports the level in the callback's usage only when the run config carried one, and always in result.json (spec 053)", async () => {
@@ -469,6 +504,45 @@ describe("one SWE-bench run (spec 043 FR-008 to FR-015)", () => {
     expect(recorded.steps).toEqual(["result"]);
     expect(calls).toEqual([["rm", "--force", `agentx-swebench-${RUN_ID}`]]);
     expect(await readFile(join(rootPath, RUN_ID, ".agentx", "swebench-shell.sh"), "utf8").catch(() => "absent")).toBe("absent");
+  });
+});
+
+describe("a run the control plane has already ended (spec 052 Ruling 16)", () => {
+  it("stops before its agent starts when its start is refused with 409, without retrying the start", async () => {
+    const repository = await taskRepository();
+    const rootPath = await mkdtemp(join(tmpdir(), "agentx-swebench-root-"));
+    const instance: SwebenchInstance = {
+      instance_id: "django__django-11099", repo: "django/django", base_commit: repository.base,
+      problem_statement: "trailing newline", image: "swebench/sweb.eval.x86_64.django_1776_django-11099:latest",
+      FAIL_TO_PASS: ["a"], PASS_TO_PASS: ["b"],
+    };
+    const { docker } = fakeDocker(repository.path);
+    const posted: string[] = [];
+    const reporter = createRunReporter(config(), {
+      s3: { send: async () => ({}) } as never,
+      sleep: async () => undefined,
+      fetch: (async (url: string) => {
+        posted.push(String(url).split("/").at(-1)!);
+        return String(url).endsWith("/started") ? new Response("{}", { status: 409 }) : new Response("{}", { status: 200 });
+      }) as never,
+    });
+    let agentCreated = false;
+    const events: string[] = [];
+    const result = await runSwebench(config(), {
+      rootPath,
+      model: { provider: "amazon-bedrock", modelId: "fixture-model" },
+      docker,
+      reporter,
+      log: (event) => { events.push(event); },
+      dataset: { fetch: async () => new Response(JSON.stringify({ rows: [{ row: instance }] })) },
+      piAdapter: { async create() { agentCreated = true; throw new Error("the agent must not start"); } },
+      grade: async () => { throw new Error("nothing to grade"); },
+    });
+    expect(agentCreated).toBe(false);
+    expect(events).not.toContain("agent.starting");
+    expect(result).toMatchObject({ outcome: "FAILED", error: "eval callback started failed: HTTP 409" });
+    // One start, never retried; the FAILED result is reported, and the broker ignores it for an ended run.
+    expect(posted).toEqual(["started", "result"]);
   });
 });
 

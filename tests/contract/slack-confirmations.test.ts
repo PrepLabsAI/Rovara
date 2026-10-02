@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { CONFIRMATION_TTL_MS, answeredConfirmationBlocks, confirmationBlocks, confirmationClickEventId, parseConfirmationClickEventId, parseConfirmationReply, type PendingConfirmation, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
+import { CONFIRMATION_TTL_MS, PendingConfirmationSchema, answeredConfirmationBlocks, confirmationBlocks, confirmationClickEventId, parseConfirmationClickEventId, parseConfirmationReply, type PendingConfirmation, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
 import { createGateSession } from "../../packages/orchestrator/src/action-gate.js";
 import { createDynamoConfirmationStore } from "../../packages/slack-service/src/confirmation-store.js";
 import {
@@ -375,6 +375,35 @@ describe("settling a turn's confirmations", () => {
     expect(await store.load(subject)).toMatchObject({ confirmationId: pending.confirmationId, usedBy: "EvYES0000001" });
     expect(postConfirmation).not.toHaveBeenCalled();
     expect(confirmationMessage(pending)).toContain("• tracker__close_item: id=TRK-9 (destructive)");
+  });
+
+  it("adds the doubt note only when the classifier doubted the call, and never shows a tool name (#215)", () => {
+    const calls = [
+      { tool: "agentx_submit_task", argumentsHash: "1".repeat(64), summary: 'Start a coding task: "replace ZZZ-NOT-THERE with x in README.md"', kind: "unchecked" as const },
+      { tool: "tracker__save_item", argumentsHash: "2".repeat(64), summary: "Use tracker to save item: id TRK-5", kind: "classifier" as const },
+    ];
+    const text = confirmationMessage({ ...pending, calls });
+    expect(text.split("\n").slice(1, 3)).toEqual([
+      '• Start a coding task: "replace ZZZ-NOT-THERE with x in README.md"',
+      "• Use tracker to save item: id TRK-5 (I'm not sure you asked for this)",
+    ]);
+    expect(text).not.toMatch(/agentx_|tracker__|\(\d+ characters\)/u);
+    expect(PendingConfirmationSchema.parse({ ...pending, calls })).toBeDefined();
+  });
+
+  it("shows a stronger note for a deny verdict, the softer one for ask, and none for unchecked (owner decision 2026-10-02)", () => {
+    const calls = [
+      { tool: "tracker__save_item", argumentsHash: "3".repeat(64), summary: "Use tracker to save item: id TRK-5", kind: "deny" as const },
+      { tool: "tracker__save_item", argumentsHash: "4".repeat(64), summary: "Use tracker to save item: id TRK-6", kind: "classifier" as const },
+      { tool: "agentx_submit_task", argumentsHash: "5".repeat(64), summary: 'Start a coding task: "list files"', kind: "unchecked" as const },
+    ];
+    const text = confirmationMessage({ ...pending, calls });
+    expect(text.split("\n").slice(1, 4)).toEqual([
+      "• Use tracker to save item: id TRK-5 (AgentX thinks you did not ask for this. Check it before approving.)",
+      "• Use tracker to save item: id TRK-6 (I'm not sure you asked for this)",
+      '• Start a coding task: "list files"',
+    ]);
+    expect(PendingConfirmationSchema.parse({ ...pending, calls })).toBeDefined();
   });
 
   it("escapes a stored summary's Slack control characters once, so it cannot mention or link anyone", () => {

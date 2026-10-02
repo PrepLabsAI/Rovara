@@ -5,6 +5,9 @@ import { describe, expect, it } from "vitest";
 import { ControlPlaneStack, TURN_DETAILS_READ_ATTRIBUTES } from "../../infra/lib/control-plane.js";
 import { SlackOrchestratorStack } from "../../infra/lib/slack-orchestrator.js";
 import { TURN_DETAILS_ATTRIBUTES } from "../../packages/contracts/src/index.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 interface Statement { Action: string | string[]; Resource: unknown }
 
@@ -201,7 +204,8 @@ describe("Slack service turn records and metric filters", () => {
       FilterPattern: "{ $.event = \"turn_metrics.emit_failed\" }",
       MetricTransformations: [{ MetricNamespace: "AgentX", MetricName: "TurnMetricsEmitFailed", MetricValue: "1" }],
     });
-    template.resourceCountIs("AWS::Logs::MetricFilter", 6);
+    // The six above, and spec 052's EvalBatchWatcherFailed (eval-batch-tick-infrastructure.test.ts).
+    template.resourceCountIs("AWS::Logs::MetricFilter", 7);
   });
 });
 

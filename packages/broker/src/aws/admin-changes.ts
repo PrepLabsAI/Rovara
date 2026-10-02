@@ -424,8 +424,13 @@ async function applyOnce(deps: AdminChangeDependencies, change: PendingChange, a
   }
   if (fresh instanceof AgentXError || stateHash(fresh.snapshot) !== change.stateHash) {
     // Task 6 carry (b): a re-plan the planner refuses is a stale state too, and never applies.
-    const why = fresh instanceof AgentXError ? ` (${stripCode(fresh.message, fresh.code)})` : "";
-    const error = { code: "CHANGE_STALE", message: cap(redactText(`what change ${change.changeId} was planned against has changed${why}; ask for the change again`), ERROR_MESSAGE_MAX) };
+    // #216: say what changed, never only that something did, and name no change ID: the Slack
+    // message and the AI tool's answer both show this text.
+    const what = fresh instanceof AgentXError
+      ? `what this change was planned against has changed since you asked (${stripCode(fresh.message, fresh.code)}); ask for the change again`
+      : fresh.changedSince?.(change.details)
+        ?? `what this change was planned against has changed since you asked. Planned again now: ${fresh.effect} Ask for the change again if you still want it.`;
+    const error = { code: "CHANGE_STALE", message: cap(redactText(what), ERROR_MESSAGE_MAX) };
     if (!(await transition(deps, change, "pending", "failed", { ...answered, failedAt: iso(now), error }, { ...who, error }))) throw await refuseAsItIs(deps, change, how.pressedBy);
     await refuseAttempt(deps, change.changeId, "stale_state", how.pressedBy);
     logChangeStep(deps.log, "stale", { ...traced(change), outcome: "failed", error: error.code });
@@ -462,7 +467,7 @@ async function applyOnce(deps: AdminChangeDependencies, change: PendingChange, a
   const applying: PendingChange = { ...change, status: "applying", claimedAt: iso(now), ...who };
   let result: Record<string, unknown>;
   try {
-    result = redactSecrets(await fresh.apply(applier)) as Record<string, unknown>;
+    result = redactSecrets(await fresh.apply(applier, { method: how.method })) as Record<string, unknown>;
   } catch (error) {
     const failure = errorOf(error);
     await transition(deps, applying, "applying", "failed", { failedAt: iso(deps.now()), error: failure }, { error: failure });

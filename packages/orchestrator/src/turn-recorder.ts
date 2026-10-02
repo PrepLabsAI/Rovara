@@ -12,6 +12,8 @@ import {
   capText,
   createTaskUsageTelemetry,
   redactArguments,
+  taskResultChecks,
+  type CheckReport,
   type TaskUsageTelemetry,
   type TurnCall,
   type TurnObservation,
@@ -52,6 +54,10 @@ export class TurnRecorder {
   private readonly errorCodes = new Map<string, string>();
   /** The action gate's decision on each call, by Pi's toolCallId (spec 014 FR-021). */
   private readonly gates = new Map<string, TurnGate>();
+  /** Spec 051: each worker task's check report, by operation id (or by call when it has none), in the order seen. */
+  private readonly reports = new Map<string, CheckReport>();
+  /** Spec 051 Ruling Z: a pull request this turn opened came back as a draft. */
+  private openedDraft = false;
   private stopReason: string | undefined;
   private emptyResponse = false;
   private usage: TaskUsageTelemetry | undefined;
@@ -142,6 +148,34 @@ export class TurnRecorder {
     if (!this.pending.has(event.toolCallId)) this.toolStarted({ toolCallId: event.toolCallId, toolName: event.toolName, args: undefined });
     const pending = this.pending.get(event.toolCallId)!;
     pending.call = this.classify(event.toolCallId, pending, event);
+    this.guarded("check_report", () => { this.keepReport(event.toolCallId, pending, event); });
+    this.guarded("draft_pull_request", () => { this.keepDraft(pending, event); });
+  }
+
+  private keepDraft(pending: PendingCall, event: { result: unknown; isError: boolean }): void {
+    if (event.isError || pending.name !== "agentx_create_pull_request") return;
+    const parsed = parseObject(resultText(event.result));
+    const result = parsed.result;
+    if (parsed.status === "SUCCEEDED" && result !== null && typeof result === "object" && (result as { draft?: unknown }).draft === true) this.openedDraft = true;
+  }
+
+  /** Spec 051 Ruling Z: a pull request this turn opened is a draft, which the reply says even when no task ran. */
+  draftPullRequest(): boolean {
+    return this.openedDraft;
+  }
+
+  private keepReport(toolCallId: string, pending: PendingCall, event: { result: unknown; isError: boolean }): void {
+    if (event.isError) return;
+    const parsed = parseObject(resultText(event.result));
+    const checks = taskResultChecks(parsed);
+    if (checks === undefined) return;
+    const key = typeof parsed.operationId === "string" ? parsed.operationId : toolCallId;
+    this.reports.set(key, checks);
+  }
+
+  /** Spec 051 FR-009: the check reports of the worker tasks this turn ran, each once, for the Slack reply. */
+  checkReports(): CheckReport[] {
+    return [...this.reports.values()];
   }
 
   agentEnded(messages: readonly unknown[]): void {

@@ -34,6 +34,11 @@ export class ToolLoopGuard {
   private streak = 0;
   private warnedSignature: string | undefined;
 
+  /** The tool calls started so far, including any past the limit (spec 052 Ruling 28). */
+  get toolCalls(): number {
+    return this.calls;
+  }
+
   observe(event: unknown): ToolLoopAction {
     if (!event || typeof event !== "object") return { kind: "none" };
     const value = event as { type?: unknown; toolCallId?: unknown; toolName?: unknown; args?: unknown; isError?: unknown; result?: unknown };

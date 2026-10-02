@@ -15,6 +15,9 @@ import {
   ReleasePipelineStack,
 } from "../../infra/lib/release-pipeline.js";
 import { SlackOrchestratorStack } from "../../infra/lib/slack-orchestrator.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 interface PolicyStatement {
   Sid?: string;
@@ -169,9 +172,9 @@ describe("control-plane infrastructure", () => {
     const template = Template.fromStack(stack);
     const json = JSON.stringify(template.toJSON());
 
-    // Broker, outbox publisher, dispatcher, Slack ingress, and the EC2 session steps (#83), idle
-    // reaper (#85) and reconciler (#86).
-    template.resourceCountIs("AWS::Lambda::Function", 7);
+    // Broker, outbox publisher, dispatcher, Slack ingress, the EC2 session steps (#83), idle
+    // reaper (#85) and reconciler (#86), and the eval batch tick (spec 052).
+    template.resourceCountIs("AWS::Lambda::Function", 8);
     expect(json).not.toContain("ZipFile");
     expect(json).not.toContain("not packaged");
     expect(json).toContain("STATE_TABLE_NAME");
@@ -215,7 +218,7 @@ describe("control-plane infrastructure", () => {
     const template = Template.fromStack(stack);
 
     // One per Lambda, plus the EC2 session provisioner's and deleter's (#83).
-    template.resourceCountIs("AWS::Logs::LogGroup", 9);
+    template.resourceCountIs("AWS::Logs::LogGroup", 10);
     template.allResourcesProperties("AWS::Logs::LogGroup", {
       RetentionInDays: 30,
     });
@@ -424,9 +427,9 @@ describe("Slack interactivity infrastructure (spec 014)", () => {
       Target: { "Fn::Join": ["", ["integrations/", { Ref: Match.stringLikeRegexp("^SlackIngressIntegration") }]] },
     });
     template.hasOutput("SlackInteractivityUrl", {});
-    // Broker, outbox publisher, dispatcher, Slack ingress, and the EC2 session steps (#83), idle
-    // reaper (#85) and reconciler (#86).
-    template.resourceCountIs("AWS::Lambda::Function", 7);
+    // Broker, outbox publisher, dispatcher, Slack ingress, the EC2 session steps (#83), idle
+    // reaper (#85) and reconciler (#86), and the eval batch tick (spec 052).
+    template.resourceCountIs("AWS::Lambda::Function", 8);
   });
 });
 

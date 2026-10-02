@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./dist/index.js",
+    "./catalog": "./dist/catalog.js",
     "./config": "./dist/config.js",
     "./thinking-levels": "./dist/thinking-levels.js"
   },

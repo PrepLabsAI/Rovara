@@ -39,9 +39,10 @@ are, what comes next, how long it takes and when they are needed; every decision
 the long part runs unattended; and every failure is fixed on the page.
 
 It changes how the install is driven and in what order. It does not change what AgentX deploys,
-with three exceptions named in Decisions: two Slack bot scopes are added to the manifest, the
-alert email subscription is made earlier, and developer sign-in is turned on in the same deploy as
-the Slack connection instead of a later one.
+with three exceptions named in Decisions: two Slack bot scopes are added to the manifest when the
+installer chooses to let AgentX create the channel, the alert email subscription is made earlier,
+and developer sign-in is turned on in the same deploy as the Slack connection instead of a later
+one.
 
 Spec 015 SC-002 (at most 15 actions, under 45 minutes) stays the long-term target. This spec sets
 an interim target (SC-007) because reaching 15 needs the Slack manifest API, which is out of scope.
@@ -178,9 +179,11 @@ live check's image failure is reported before anything is created.
 
 ### User Story 5 - Choose The Project's Channel Without Guessing (Priority: P2)
 
-The channel step says what the channel is for and asks whether AgentX should create it. If yes,
-AgentX creates and joins it. If no, the user picks from the channels the bot can see, or types a
-name, and sees the invite step for a private channel before they choose.
+Settings asks, up front, whether AgentX should create the project's channel (before the Slack app
+is created, so its manifest can be built right the first time: owner, 2026-10-02). The channel step
+itself, later, says what the channel is for and carries out that answer: if yes, AgentX creates and
+joins it; if no, the user picks from the channels the bot can see, or types a name, and sees the
+invite step for a private channel before they choose.
 
 **Why this priority**: The blank channel box was the clearest "I can't answer this from the page"
 moment in the live check, but it does not strand the install.
@@ -191,13 +194,15 @@ command with a copy button before the user continues.
 
 **Acceptance Scenarios**:
 
-1. **Given** the channel step, **When** it shows, **Then** it says "AgentX answers in this channel
-   for this project" and asks "Should AgentX create the channel for you?".
-2. **Given** the user answers Yes with a name and public or private, **When** they continue,
-   **Then** AgentX creates the channel, the bot is a member, and the installer is invited to it.
-3. **Given** the user answers No, **When** the picker shows, **Then** it lists the public channels
-   and the private channels the bot is already in, with search, and a field for a channel not
-   listed.
+1. **Given** settings, **When** it shows, **Then** it asks "Should AgentX create the channel for
+   you?" as one of the up-front decisions, before the Slack app is created.
+2. **Given** the channel step, **When** it shows and the settings answer was Yes, **Then** it says
+   "AgentX answers in this channel for this project", lets the user give a name and public or
+   private, and, when they continue, AgentX creates the channel, the bot is a member, and the
+   installer is invited to it.
+3. **Given** the settings answer was No, **When** the picker shows, **Then** it lists the public
+   channels and the private channels the bot is already in, with search, and a field for a channel
+   not listed.
 4. **Given** the user picks or names a private channel the bot is not in, **When** the choice is
    shown, **Then** the page shows "/invite @<bot handle>" with a copy button and says it notices
    when the bot joins.
@@ -318,7 +323,11 @@ banned pattern; seeded examples of each pattern make it fail.
   started, Your choices, Build in AWS, Connect Slack, Finish. Each phase MUST show its time
   estimate and a status word (Done, Now, Waiting for you, Coming up, Stopped); status MUST NOT be
   shown by color or symbol alone. A slim header MUST show the install name, AWS account, region,
-  "step N of 5" and the overall time left.
+  "step N of 5" and the overall time left. **Owner decision, 2026-10-02:** while the run is stopped
+  on a failure, that header place MUST say "Stopped" instead of a time estimate; once a retry
+  resumes the run, the time estimate MUST show again. (Phase 1 first kept the time estimate
+  through a failure, reading SC-001's "100% of screens show ... the time left" literally; the
+  owner overruled that reading after seeing the approved mockup's failure screen.)
 - **FR-002**: Time estimates MUST come from measured durations (at least two clean runs per
   step), stored with the step definitions, and shown as "usually N minutes". A running step MUST
   show its elapsed time. A step that runs past its estimate MUST say "taking longer than usual"
@@ -445,23 +454,30 @@ banned pattern; seeded examples of each pattern make it fail.
 - **FR-050**: The Finish phase MUST ask for the first project on one screen: a repository picker
   (with a note to install the GitHub app only on the repositories AgentX should use), the project
   name prefilled from the repository, the setup and test commands prefilled and editable with one
-  line on why AgentX runs them and where they were found, the channel (FR-051, FR-052), and the
-  issue trackers as checkboxes with "Skip for now".
-- **FR-051**: The channel part MUST say what the channel is for and ask "Should AgentX create the
-  channel for you?". On Yes, the user gives a name (prefilled from the project) and public or
-  private; AgentX MUST create the channel, join it, and invite the installer, found in the workspace
-  by the email from settings. When that email is not found, the page MUST let the installer find
-  themselves in a member search. When the name is taken, the page MUST offer to use that channel or
-  pick another name. When creation is refused, the page MUST say why in plain words and switch to
-  the No path with the answers kept.
-- **FR-052**: On No, the page MUST offer a searchable picker of the public channels and the
-  private channels the bot is already in, plus a field for a channel not listed. For a private
-  channel the bot is not in, the page MUST show "/invite @<bot handle>" with a copy button before
-  the user continues, and MUST detect when the bot joins.
+  line on why AgentX runs them and where they were found, the channel's remaining fields (FR-051,
+  FR-052: the name and visibility on Yes, or the picker on No; the Yes/No decision itself was already
+  made at settings, before this screen), and the issue trackers as checkboxes with "Skip for now".
+- **FR-051**: [Owner, 2026-10-02: the create-or-not question moves to settings, asked before the
+  Slack app is created; see Decisions. The rest of this requirement, from "the user gives a name"
+  on, still happens on the first-project screen (FR-050), once Slack is connected.] Settings MUST
+  ask "Should AgentX create the channel for you?" as one of the up-front decisions, before the
+  Slack app's manifest is built, so the manifest can be built correctly the first time (FR-053). On
+  Yes, the first-project screen MUST say what the channel is for and let the user give a name
+  (prefilled from the project) and public or private; AgentX MUST create the channel, join it, and
+  invite the installer, found in the workspace by the email from settings. When that email is not
+  found, the page MUST let the installer find themselves in a member search. When the name is
+  taken, the page MUST offer to use that channel or pick another name. When creation is refused,
+  the page MUST say why in plain words and switch to the No path with the answers kept.
+- **FR-052**: On No, the first-project screen MUST offer a searchable picker of the public channels
+  and the private channels the bot is already in, plus a field for a channel not listed. For a
+  private channel the bot is not in, the page MUST show "/invite @<bot handle>" with a copy button
+  before the user continues, and MUST detect when the bot joins.
 - **FR-053**: The Slack app manifest MUST include the bot scopes that creating public and private
-  channels needs (`channels:manage`, `groups:write`), because Slack scopes are fixed at install
-  time and adding one later forces a reinstall. AgentX MUST use them only when the user answers Yes
-  in FR-051.
+  channels needs (`channels:manage`, `groups:write`) only when the installer answered Yes in
+  FR-051; on No, the manifest MUST NOT include them. [Owner, 2026-10-02: because Slack scopes are
+  fixed at install time and adding one later forces a reinstall, FR-051's question MUST be answered
+  before the Slack app's manifest is submitted, not at the channel step itself as this spec first
+  drafted it; see Decisions.]
 
 **Finish**
 
@@ -571,7 +587,8 @@ banned pattern; seeded examples of each pattern make it fail.
 ### Measurable Outcomes
 
 - **SC-001**: 100% of screens show the current phase, "step N of 5" and the time left (a test per
-  screen).
+  screen); on a screen where the run is stopped on a failure, that place says "Stopped" instead
+  (owner decision, 2026-10-02), and the time left returns once a retry resumes the run.
 - **SC-002**: Zero instructions exist only in the terminal: a test asserts that every line the user
   must act on also appears on the page.
 - **SC-003**: Zero page text tells the user to pass a CLI flag, run a command or read the terminal,
@@ -685,13 +702,37 @@ The 21 gaps from the live check, ranked by harm, and the requirements that close
 7. Scope B, the full guided redesign, in four PRs against mainline; the first PR carries the quick
    copy and link fixes.
 
+**Owner decisions (2026-10-02)**
+
+8. **The channel create-or-not question moves to settings, before the Slack app is created**,
+   reversing the "Decided in this spec" placeholder below. The question itself, and what Yes and No
+   each do, are unchanged from decision 3; only when it is asked moves: it is now one of the
+   up-front decisions, asked during settings rather than at the channel step, specifically so the
+   Slack app manifest can be built with the channel-creating scopes (`channels:manage`,
+   `groups:write`) only when the answer is Yes, and without them on No, never always (FR-051,
+   FR-053). The channel step (the first-project screen) still asks for the name afterward: a name
+   and public-or-private field on Yes, or the picker plus the up-front invite step on No (FR-052),
+   exactly as decision 3 already said.
+9. **`--channel <name>` in a scripted install (no page) means "use it or create it"**: unless
+   `--no-create-channel` is also given, passing `--channel <name>` counts as answering Yes to FR-051,
+   so the channel-creating scopes go in the manifest and the channel step creates the named channel
+   if it does not already exist (inviting the installer), or uses it if it does, with no one to ask
+   so a taken name is always resolved by using the existing channel, never by stopping. Passing
+   `--no-create-channel` drops those scopes from the manifest and keeps today's behavior: use an
+   existing channel named by `--channel`, and if it is not found, stop with a clear message to
+   create it and invite the bot. The page path is unaffected: there, the up-front settings question
+   (decision 8) is always asked and answered before the channel step runs (FR-051 to FR-053,
+   FR-072).
+
 **Decided in this spec (for the owner to confirm)**
 
-- **The channel scopes are always in the manifest** (FR-053). The owner left open whether the
-  extra scopes are requested only on Yes or always. Slack fixes scopes when the app is installed,
-  and the channel question comes after the Slack app exists, so asking for them only on Yes would
-  mean either a reinstall or moving the channel question before the Slack visit. This spec keeps
-  the question at the channel step, as decided, and always requests the two scopes.
+- ~~**The channel scopes are always in the manifest**~~ (FR-053). Superseded by owner decision 8
+  above (2026-10-02): the owner moved the create-or-not question before the Slack app's manifest is
+  built, so the scopes can follow the Yes/No answer instead of always being present. This paragraph
+  is kept for history: the owner had left open whether the extra scopes are requested only on Yes or
+  always; Slack fixes scopes when the app is installed, and the channel question came after the
+  Slack app existed at the time, so asking for them only on Yes would have meant either a reinstall
+  or moving the channel question before the Slack visit. The owner chose the latter.
 - **The installer is invited to a channel AgentX creates** (FR-051), found by the email from
   settings. A private channel the bot creates has no other member, so without this the installer
   could not see it.
@@ -710,8 +751,8 @@ specs 040 and 015.
 |---|---|---|---|
 | 1 | Page shell and quick fixes (about 2 weeks) | Progress rail with phases and estimates, one current-step panel, help text and forms in the question protocol, verb buttons, the basic failure screen with "Try this step again" for deploy steps and no "Finished" on failure, link buttons on every external card, the copy-lint test and the copy fixes it forces, root warning, one app name pattern, model prices and the budget default, the quiet terminal, the ready screen that stays, #222, and the image check before anything is created | FR-001 to FR-004, FR-005 (tab title), FR-006, FR-008, FR-010 to FR-012, FR-016, FR-017, FR-023, FR-024, FR-026, FR-027, FR-037, FR-058 to FR-060, FR-070, FR-071, FR-080 to FR-082, and the image check of FR-065 |
 | 2 | Order and early checks (about 1.5 weeks) | Account checks first, the settings screen with Recommended and Advanced, answer checks, the plain plan with "Change answers", GitHub before the build, one Slack visit, sign-in folded into the Slack connection, alerts offered and subscribed early, the release download on the page, the no-UI path in the same order | FR-009, FR-015, FR-018, FR-020 to FR-022, FR-025, FR-028 to FR-036, FR-038, FR-065, FR-072 |
-| 3 | Recovery (about 1.5 weeks) | Page actions by kind of failure, answer change after a failure, same-address resume, waits that do not end the run, the lost connection notice | FR-061 to FR-064, FR-066, FR-067 |
-| 4 | Pickers and progress (about 1 week) | The project screen with the channel question and picker, the channel scopes, real build progress, notifications, measured estimates, admin sign-in, alert and test reply cards | FR-002 (measured numbers), FR-007, FR-050 to FR-053, FR-055 to FR-057, and FR-005's notification |
+| 3 | Recovery (about 1.5 weeks) | Page actions by kind of failure, answer change after a failure, same-address resume, waits that do not end the run, the lost connection notice; on top of phase 2's settings screen and Slack manifest builder, the channel create-or-not question moves to settings and the manifest's channel-creating scopes follow that answer (owner, 2026-10-02) | FR-061 to FR-064, FR-066, FR-067, FR-051, FR-053 |
+| 4 | Pickers and progress (about 1 week) | The project screen with the channel's remaining fields (name and visibility on Yes, the picker on No) and the scripted `--channel` "use it or create it" parity, real build progress (combined across a two-stack step, owner 2026-10-02), notifications, measured estimates, admin sign-in, alert and test reply cards | FR-002 (measured numbers), FR-007, FR-050 to FR-053, FR-055 to FR-057, and FR-005's notification |
 
 Each phase ships with its own tests (SC-001 to SC-004, SC-009, SC-011, SC-012, SC-015 as their
 requirements land). SC-005 to SC-008, SC-010, SC-013, SC-014 and SC-016 are checked in the final

@@ -15,7 +15,9 @@ export const COPY_RULES: readonly CopyRule[] = [
   { id: "cloudformation-type", pattern: /\bAWS::[A-Za-z0-9]+::[A-Za-z0-9]+/, allowedIn: ["details"] },
   { id: "cloudformation-logical-id", pattern: /\b[A-Z][a-z]+(?:[A-Z][a-z]+)*[0-9A-F]{8}\b/, allowedIn: ["details"] },
   { id: "raw-slack-markup", pattern: /<[@#!][A-Z0-9]/, allowedIn: [] },
-  { id: "raw-slack-id", pattern: /\b[UWTBCGA](?=[A-Z0-9]*\d)[A-Z0-9]{4,}\b/, allowedIn: ["details"] },
+  // Slack IDs are standalone values in prose. Do not mistake a random uppercase path segment for
+  // one: paths can put the same shape between a hyphen and a slash.
+  { id: "raw-slack-id", pattern: /(?:^|[\s("'`])[UWTBCGA](?=[A-Z0-9]*\d)[A-Z0-9]{4,}(?=$|[\s)"'`,.;:!?])/, allowedIn: ["details"] },
   { id: "aws-arn", pattern: /\barn:aws[a-z-]*:/, allowedIn: ["details"] },
   { id: "enter-for", pattern: /\bEnter for\b/, allowedIn: [] },
   { id: "empty-leave-empty-for", pattern: /\bLeave empty for\s*(?:$|[.,;:)])/, allowedIn: [] },

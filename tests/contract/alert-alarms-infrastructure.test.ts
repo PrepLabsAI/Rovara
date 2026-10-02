@@ -4,6 +4,9 @@ import { describe, expect, it } from "vitest";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { SlackOrchestratorStack } from "../../infra/lib/slack-orchestrator.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 const naming = environmentNaming("staging");
 const slack = Template.fromStack(new SlackOrchestratorStack(new App(), "AlarmsSlack", { naming }));

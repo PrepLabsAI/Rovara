@@ -127,9 +127,12 @@ export function journeyOf(input: { stage: JourneyPhaseId; steps: readonly Journe
     }
   }
   const minutesLeft = toMinutes(remaining);
+  // Owner decision, 2026-10-02: a stopped run's header says "Stopped", not a time estimate (not
+  // even "Taking longer than usual"); the estimate returns once a retry resumes the run.
   const timeLeftText = input.finished ? "Done"
-    : overdue ? `Taking longer than usual.${minutesLeft > 0 ? ` About ${minutesLeft} ${minutesLeft === 1 ? "minute" : "minutes"} after this step.` : ""}`
-      : minutesLeft === 0 ? "Less than a minute left" : minutesLeft === 1 ? "About 1 minute left" : `About ${minutesLeft} minutes left`;
+    : input.stopped ? "Stopped"
+      : overdue ? `Taking longer than usual.${minutesLeft > 0 ? ` About ${minutesLeft} ${minutesLeft === 1 ? "minute" : "minutes"} after this step.` : ""}`
+        : minutesLeft === 0 ? "Less than a minute left" : minutesLeft === 1 ? "About 1 minute left" : `About ${minutesLeft} minutes left`;
   const phases = JOURNEY_PHASE_IDS.map((id, index): JourneyPhaseView => {
     const status: JourneyStatus = input.finished || index < at ? "done"
       : index > at ? "coming"

@@ -61,6 +61,21 @@ describe("SWE-bench contracts", () => {
     expect(() => SwebenchRunResultSchema.parse({ outcome: "FAILED", error: "" })).toThrow();
   });
 
+  it("takes an optional count of the agent's tool calls, which an older runner leaves out (spec 052 Ruling 28)", () => {
+    const usage = {
+      schemaVersion: 1, outcome: "SUCCEEDED", provider: "amazon-bedrock", modelId: "m", cacheRetention: "short",
+      tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cacheReadRatio: 0, costUsd: 0.01,
+    };
+    const graded = {
+      outcome: "GRADED", resolved: false, stopReason: "finished", patchBytes: 0, agentSeconds: 5,
+      imageDigest: "swebench/x@sha256:abc", usage, artifactsPrefix: "evals/x/",
+    };
+    expect(SwebenchRunResultSchema.parse({ ...graded, toolCalls: 37 })).toMatchObject({ toolCalls: 37 });
+    expect(SwebenchRunResultSchema.parse(graded)).not.toHaveProperty("toolCalls");
+    expect(SwebenchRunResultSchema.safeParse({ ...graded, toolCalls: -1 }).success).toBe(false);
+    expect(SwebenchRunResultSchema.safeParse({ ...graded, toolCalls: 1.5 }).success).toBe(false);
+  });
+
   it("admits only an evals/<run>/ artifact prefix and an HTTPS control plane", () => {
     const config = {
       runId: "3f0c2a4e-8a51-4b8e-9d57-0e5f4f5b1c11", dataset: "verified", instanceId: "django__django-11099",

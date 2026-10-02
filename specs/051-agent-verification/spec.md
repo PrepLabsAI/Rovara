@@ -2,7 +2,7 @@
 
 **Feature Branch**: `docs/051-agent-verification` (spec), then `feat/051-agent-verification`  
 **Created**: 2026-10-01  
-**Status**: Draft; builds on Pi 0.99 (spec 050 phase 2)  
+**Status**: Implemented; awaiting release  
 **Input**: SWE-bench pilot findings (2026-09-30/10-01) and decisions with Abhishek (2026-10-01)
 
 ## Why
@@ -74,9 +74,11 @@ none, the result says "Not verified: no checks ran", and the reply suggests addi
 ### One extra try
 
 - **FR-006:** When the agent tries to finish and a regression exists, AgentX MUST give it the failing checks' output
-  (trimmed) and **one** more turn, using Pi 0.99's `agent_before_settle` hook with `continue: true`. That extra turn
+  (trimmed) and **one** more turn, using Pi 1.0.0's `agent_before_settle` hook with `continue: true`. That extra turn
   counts against the task's time, cost and step limits. After it, AgentX reruns the checks once more and records the
-  final result. There is never a third round.
+  final result. There is never a third round. One exception is outside AgentX's control: a message already queued
+  when the agent settles (for example, AgentX's own loop-guard warning) makes Pi run another turn whatever the hook
+  returns. AgentX never asks for it; it reruns the checks when that turn settles, and the last report is the result.
 
 ### Honest reporting
 
@@ -89,10 +91,12 @@ none, the result says "Not verified: no checks ran", and the reply suggests addi
   - **No regression remains:** a normal PR, with a checks section in the description.
   - **A regression remains:** a **draft** PR (publishing already supports `draft`), whose description lists each
     failing check with its before and after result and the trimmed output.
-  - **Already failing:** a check that was already failing before the agent does not make the PR a draft; the
-    description notes it.
+  - **Already failing:** a check that was already failing before the agent: see Ruling Y (D-12). AgentX cannot tell it
+    from a failure the agent caused in an earlier task, so a check that still fails makes a draft, whatever its class.
 - **FR-009 (Slack):**
   - **Regression remains:** the reply starts with "Not done:", then names the failing checks, before and after.
+  - **A rerun check fails now, with no regression:** the reply starts "Checks: <p> of <n> pass.", never "Checks passed"
+    (Ruling Z, D-13). A turn whose pull request opened as a draft says so.
   - **Nothing was checked:** the reply says "Not verified: no checks ran" and suggests configuring readiness checks.
   - **In every case:** the agent's own summary appears after AgentX's result, labelled as the agent's account.
 
@@ -127,6 +131,72 @@ These may come later (spec 053 or after).
 - **D-5 (2026-10-01):** No paid validation runs during development (pre-launch; see spec 046). The pilot's failure tasks
   (astropy-13398, sphinx-7590) and the final campaign measure the effect. Development is verified by tests that run
   on the scripted model.
+- **D-6 (2026-10-02, amended by Ruling J):** The task payload did not carry the readiness commands, so the broker adds
+  an optional `readiness` list (`ProjectCommand[]`, the latest revision's, as publication gates on) to the task
+  invocation payload, and the worker reruns those commands. The "before" for a project check is the last known outcome
+  of that exact command in this workspace: each task's final round records its project-check outcomes in
+  `.agentx/last-checks.json`, keyed by a hash of the command's cwd, executable, args and env. With no recorded outcome,
+  a command that preparation ran (recorded in the preparation manifest) is "passed", since a workspace becomes READY
+  only if every check passes; any other command, such as one added in a later revision, is "unknown", so a failure is
+  "failing (no before result)" and never the agent's regression. A check that was not run keeps its earlier outcome.
+  This history is for a task's own rounds only. Publication never reads it (Ruling S, D-7): an earlier task's failure is
+  not "before" the pull request's change.
+- **D-7 (2026-10-02, amended by Rulings S and T):** A failing check publishes as a draft PR. Publish no longer refuses on
+  a failing readiness check. Instead it opens the PR as a draft, with the checks listed in a deterministic checks
+  section. It also reads the workspace's latest task check report for agent-command checks. CodeBuild gates are
+  unchanged. This relaxes an existing gate, which the user approved (P-2).
+  - The broker asks for this behaviour with `reportChecks` in the publish payload. It sends that only to a worker whose
+    /ping lists `publish.reportChecks`. A worker without it, or one asked by an older broker, refuses as before.
+  - **Ruling S.** A pull request is the workspace's whole change since preparation, so publication judges each check
+    against the preparation baseline:
+    - a command preparation ran that fails now reads "regression (passed at preparation, fails now)";
+    - any other failing command, including every command of a workspace prepared before spec 051, reads "fails now,
+      with no earlier result";
+    - any failing publish-time check makes the PR a draft, as does a latest task report of `regression`.
+  - **Ruling T.** Every task's end records the workspace's latest checks, ordered by the operation's fence: its report,
+    or a `not_verified` marker (`failed`, `cancelled`, `interrupted` or `no_report`). A task reads as `interrupted` from
+    its start until its result arrives, so an older report never stands for a newer task. A `not_verified` latest of
+    `failed` or `no_report` does not make a draft on its own, and the section says "Not verified".
+  - **Ruling AA (amends T).** A latest marker of `cancelled` or `interrupted` makes the next PR a draft, with the line
+    "Not verified: the last task was cancelled" (or "was interrupted"), until a later task's report replaces it. The
+    member stopped the work, or the worker was lost, so it is unfinished. `failed` carries its regression in its
+    result, and `no_report` comes from an old worker, so neither makes a draft.
+- **D-8 (2026-10-02):** Time limits. Production coding tasks have no task time limit, only the 200-tool-call guard. Each
+  check keeps its own timeout (the command's `timeoutSeconds`, or 10 minutes for agent commands), and one verification
+  round has a total budget of 30 minutes. Checks the budget leaves unrun are recorded as `not_run`. Eval runs count
+  verification against their agent timer, using the time remaining.
+- **D-9 (2026-10-02):** Stopped runs. Pi does not fire `agent_before_settle` after an abort (a cancel, the loop guard, or
+  an eval time or cost limit). Such a task's report is `not_verified` with reason `stopped`, and no checks run. Amended
+  by Ruling Y (D-12): once a round found a regression, a stop on the extra turn keeps it as a `regression`.
+- **D-10 (2026-10-02):** The agent's claim is read deterministically. The preamble asks the agent to end its final
+  message with exactly one line, `AgentX result: done` or `AgentX result: not done`. The claim is `success`, `failure`,
+  or `none` when the line is missing.
+- **D-11 (2026-10-02):** Only a simple test command is replayed from the agent's own commands: an optional leading
+  `cd <path> &&`, then `NAME=value` assignments, an optional `timeout <n>`, then a listed test command (FR-003) with its
+  arguments. Anything with `|`, `;`, `||`, `&`, redirection, backticks or `$(` is not a check and is never replayed,
+  because replaying an arbitrary command can change the workspace.- **D-12 (2026-10-02, Ruling Y, from the final review's C-1):** A regression is not forgotten across tasks.
+  - **Report.** Once any round found a regression, the task's final report stays `regression` unless a later round
+    reran it. A stop, a cancel, a loop-guard stop or a model error on the extra turn keeps the first round's regression
+    (it was `not_verified`). A task that ends failed or cancelled with a regression sends its report in its terminal
+    result, so the broker keeps it.
+  - **Standing failures.** The workspace keeps `standingFailures`, written in the same fenced terminal transaction as
+    the latest checks. A task report clears each earlier failure that it shows passing, and adds every check failing in
+    it (regression, already failing, or no earlier result). A task that ends without a report keeps them exactly.
+  - **Draft.** A PR is a draft when any standing failure remains, or a publish-time check fails. Its section lists the
+    failures. A project check that publish reran and found passing is left out, unless it was a regression. The status
+    line says "No check that passed before this change fails now" only when nothing fails now.
+  - **Known limit.** A task cancelled by a cancel operation whose own result never arrives records "cancelled" and
+    keeps the failures known before it; the extra turn's regression is then lost. Ruling AA makes such a PR a draft.
+  - **Matching.** A standing failure of the agent's own commands is matched by exact command text, so only a later task
+    rerunning the same command and passing clears it (R-2). A project regression that publish reran and found passing
+    stays a draft, worded "regressed in the last task, passes at publish" (R-3).
+  - **Re-preparation.** Standing failures are not reset when a workspace is prepared again (R-4).
+- **D-13 (2026-10-02, Ruling Z, from the final review's I-1 and I-2):** The publish result carries `draft`, true when
+  the PR opened as a draft. The PR tool's description says AgentX opens a draft when a check fails. A turn whose
+  publish returned a draft adds "Opened as a draft: AgentX's checks found failures." to the reply, with or without a
+  task in the turn. The headline "Checks passed (...)" is used only when every check AgentX reran passes now; otherwise
+  it is "Checks: <p> of <n> pass." followed by the per-check lines. The orchestrator model's task results carry the
+  report's status, labels and classes, not the check outputs.
 
 ## Success Criteria
 

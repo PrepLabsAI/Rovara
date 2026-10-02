@@ -28,6 +28,7 @@ import { stopWorkspace } from "./admin/stop.js";
 import { setTaskShareMode } from "./admin/task-share-mode.js";
 import { cancelWorkspaceTask } from "./admin/cancel.js";
 import { askToApply, exportChanges, runCliChange } from "./admin/changes.js";
+import { batchResultsOutput, evalBatchShowText, evalBatchStartText, fetchEvalBatchResults, showEvalBatch, startEvalBatch, stopEvalBatch } from "./admin/eval-batch.js";
 import { disableEvalChannel, enableEvalChannel, parseMaxCostUsd, showEvalChannel } from "./admin/eval.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
@@ -40,12 +41,14 @@ import { runWorkspacesCommand } from "./workspaces-ui/index.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
 import { installMcp, MCP_CLIENTS, runCommand, type McpClientKind, type McpInstallDeps } from "./mcp/install.js";
 import { runMcpServer, type McpServeDeps } from "./mcp/serve.js";
-import type { AdminSession } from "@agentx/mcp";
+import { adminSignInCommand, adminSignInExpiredText, type AdminSession } from "@agentx/mcp";
 import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
 import { resolveDeploymentFile } from "./environments/cache.js";
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL, type InitFlags } from "./init/answers.js";
 import { runInit, type InitCliDependencies, type InitOptions } from "./init/commands.js";
+import { cliCommandLine, currentCliInvocation, type CliInvocation } from "./init/cli-command.js";
+import { StoppedByOperator, isCtrlCAtPrompt } from "./stopped.js";
 import type { FinishFlags, SecretFlags } from "./init/context.js";
 import { INIT_STEP_IDS, type InitStepId } from "./init/install-state.js";
 import { parseConnectorsFlag } from "./init/finish-steps.js";
@@ -83,6 +86,12 @@ interface TextWriter {
 }
 
 export interface CliDependencies {
+  /**
+   * Owner decision 2026-10-02 (#218, #235 follow-up): how this CLI process was launched, for tests;
+   * `currentCliInvocation()` otherwise. Shared by the admin sign-in notices, the Ctrl-C stop line,
+   * and `agentx mcp`.
+   */
+  cliInvocation?: CliInvocation;
   fetchImplementation?: typeof fetch;
   tokenStore?: TokenStore;
   stdout?: TextWriter;
@@ -188,6 +197,11 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     stdout: dependencies.stdout ?? process.stdout,
     stderr: dependencies.stderr ?? process.stderr,
   };
+  // Owner decision 2026-10-02 (#218, #235 follow-up): how this CLI process was launched (bare, or
+  // through npx), the same helper the install ready screen uses, reused for every live message that
+  // tells the person the command that runs right now.
+  const cliInvocation = dependencies.cliInvocation ?? currentCliInvocation();
+  const commandFor = (args: string): string => cliCommandLine(cliInvocation, args);
   // Where `agentx env use` caches settings and, for production only, where the legacy
   // deployment file lives.
   const home = dependencies.environments?.home ?? homedir();
@@ -216,19 +230,28 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   ): Promise<AuthenticatedDeployment> {
     const settings = await deploymentSettings(options);
     const tokens = await tokenStore.get(tokenStoreKey(settings.auth));
-    if (!tokens || tokens.expiresAt <= Date.now()) throw agentXError("AUTH_REQUIRED", "run agentx login");
+    // Issue #218: an expired admin sign-in says so and when, never as if none was ever made.
+    if (!tokens) throw agentXError("AUTH_REQUIRED", `this computer holds no admin sign-in for ${options.env}; run ${adminSignInCommand(options.env, commandFor)}`);
+    const now = Date.now();
+    if (tokens.expiresAt <= now) throw agentXError("AUTH_REQUIRED", adminSignInExpiredText(options.env, tokens.expiresAt, now, commandFor));
     return { settings, accessToken: tokens.accessToken };
+  }
+
+  /** This computer's stored admin sign-in (agentx --env <name> login --admin) for an environment by name, expired or not. */
+  async function storedAdminSignIn(name: string): Promise<{ baseUrl: string; accessToken: string; expiresAt: number } | undefined> {
+    try {
+      const settings = await deploymentSettings({ ...globalOptions(program), env: name });
+      const tokens = await services.tokenStore.get(tokenStoreKey(settings.auth));
+      return tokens === undefined ? undefined : { baseUrl: settings.controlPlaneUrl.replace(/\/$/, ""), accessToken: tokens.accessToken, expiresAt: tokens.expiresAt };
+    } catch {
+      return undefined;
+    }
   }
 
   /** This computer's unexpired admin sign-in (agentx --env <name> login --admin) for an environment by name. Never refreshed (Q4). */
   async function adminSessionFor(name: string): Promise<(AdminSession & { expiresAt: number }) | undefined> {
-    try {
-      const settings = await deploymentSettings({ ...globalOptions(program), env: name });
-      const tokens = await services.tokenStore.get(tokenStoreKey(settings.auth));
-      return tokens !== undefined && tokens.expiresAt > Date.now() ? { baseUrl: settings.controlPlaneUrl.replace(/\/$/, ""), accessToken: tokens.accessToken, expiresAt: tokens.expiresAt } : undefined;
-    } catch {
-      return undefined;
-    }
+    const stored = await storedAdminSignIn(name);
+    return stored !== undefined && stored.expiresAt > Date.now() ? stored : undefined;
   }
 
   /** The developer sign-in's session dependencies: this computer's home and token store. */
@@ -578,6 +601,57 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       services.stdout.write(formatSuccess(await disableEvalChannel(evalChannel(options, settings, accessToken), services.fetchImplementation), globals.json));
     });
 
+  const adminEvalBatch = adminEval.command("batch").description("batches of eval runs from a file (spec 052): start, show, stop, results");
+  const batchOutput = (globals: { json: boolean }, result: unknown, text: string) => formatSuccess(globals.json ? result : text, globals.json);
+  adminEvalBatch
+    .command("start")
+    .description("start a batch from a YAML file in a bound, eval-enabled channel; prints its batch ID")
+    .requiredOption("--file <path>", "the batch file: benchmark, tasks, models, repeats, order, concurrency, costCapUsd (docs/swebench-eval.md)")
+    .requiredOption("--team <team-id>", "Slack team ID, for example T0123456789")
+    .requiredOption("--channel <channel-id>", "Slack channel ID, for example C0123456789")
+    .option("--label <text>", "start another batch from a file that has already been run in this channel (the same file starts the same batch)")
+    .action(async (options: { file: string; team: string; channel: string; label?: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await startEvalBatch({
+        controlPlaneUrl: settings.controlPlaneUrl, accessToken, teamId: options.team, channelId: options.channel, filePath: options.file,
+        ...(options.label === undefined ? {} : { label: options.label }),
+      }, services.fetchImplementation);
+      services.stdout.write(batchOutput(globals, result, evalBatchStartText(result)));
+    });
+  adminEvalBatch
+    .command("show")
+    .description("show a batch's progress, spend and final status")
+    .argument("<batch-id>", "the batch ID")
+    .action(async (batchId: string, _options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await showEvalBatch({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, batchId }, services.fetchImplementation);
+      services.stdout.write(batchOutput(globals, result, evalBatchShowText(result)));
+    });
+  adminEvalBatch
+    .command("stop")
+    .description("stop a batch: queued runs are cancelled and runs in flight are stopped; an ended batch reports its final status")
+    .argument("<batch-id>", "the batch ID")
+    .action(async (batchId: string, _options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await stopEvalBatch({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, batchId }, services.fetchImplementation);
+      services.stdout.write(batchOutput(globals, result, evalBatchShowText(result)));
+    });
+  adminEvalBatch
+    .command("results")
+    .description("a batch's results, read through the control plane: the per-model table, or the per-run CSV with --csv")
+    .argument("<batch-id>", "the batch ID")
+    .option("--csv <path>", "write the per-run results.csv here instead of printing the table")
+    .action(async (batchId: string, options: { csv?: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await fetchEvalBatchResults({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, batchId }, services.fetchImplementation);
+      const text = await batchResultsOutput(result, options.csv);
+      services.stdout.write(batchOutput(globals, globals.json && options.csv !== undefined ? { ...(result as object), csv: undefined, csvPath: options.csv } : result, text));
+    });
+
   const adminCredential = admin.command("credential").description("register connector credentials stored in Secrets Manager under agentx/connectors/ or agentx/<env>/connectors/");
   adminCredential
     .command("register")
@@ -925,7 +999,19 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const globals = globalOptions(command);
       if (options.export !== undefined && options.stopAfter !== undefined) throw agentXError("CONFIG_INVALID", "--stop-after cannot be used with --export, which runs no init step; drop one of them");
       if (options.export === undefined) {
-        const result = await runInit(initOptions(globals, options, command), dependencies.init ?? {}, { stderr: services.stderr, home });
+        let result: Awaited<ReturnType<typeof runInit>>;
+        try {
+          result = await runInit(initOptions(globals, options, command), dependencies.init ?? {}, { stderr: services.stderr, home });
+        } catch (error) {
+          // Issue #235: Ctrl-C at a terminal question stops the install where it is; it can continue.
+          // Owner decision 2026-10-02: the same command-line helper as the ready screen and the
+          // other live messages, so this shows bare or npx exactly as the person just ran AgentX.
+          if (isCtrlCAtPrompt(error)) {
+            const initInvocation = dependencies.init?.cliInvocation ?? cliInvocation;
+            throw new StoppedByOperator(`Stopped. Run ${cliCommandLine(initInvocation, `init --env ${globals.env}`)} again to continue from here.`);
+          }
+          throw error;
+        }
         if (globals.json) {
           // pageMode is the CLI's own note that the page already told the person; not part of the result.
           // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
@@ -1000,6 +1086,17 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     return adminSessionFor(name);
   };
   const adminSignedIn = async (env: string | undefined): Promise<boolean> => (await adminSession(env)) !== undefined;
+  /** Issue #218: the developer's environment and its stored admin sign-in's expiry, expired or not. */
+  const adminSignInExpiry = async (env: string | undefined): Promise<{ env: string; expiresAt: number } | undefined> => {
+    let name: string;
+    try {
+      name = (await resolveDeveloperEnvironment(home, env)).env;
+    } catch {
+      return undefined;
+    }
+    const stored = await storedAdminSignIn(name);
+    return stored === undefined ? undefined : { env: name, expiresAt: stored.expiresAt };
+  };
 
   const mcp = program
     .command("mcp")
@@ -1017,6 +1114,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
           ...(env === undefined ? {} : { env }),
           adminSignedIn,
           adminSession,
+          adminSignInExpiry,
+          cliInvocation,
           stdin: dependencies.stdin ?? process.stdin,
           stdout: (dependencies.stdout ?? process.stdout) as Writable,
           stderr: services.stderr,

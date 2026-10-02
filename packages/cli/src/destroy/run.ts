@@ -5,6 +5,8 @@
 import { access, rm } from "node:fs/promises";
 import { agentXError, environmentPullThroughPrefix, environmentStackName, type StackPart } from "@agentx/contracts";
 import { tokenStoreKey } from "../auth.js";
+import { forgetDeveloperSignIn } from "../developer/config.js";
+import { plainMessage } from "../output.js";
 import { ADOPTED_STACK_NAMES, type CallerIdentity } from "../environments/adopt.js";
 import { cachedEnvironmentRegion, environmentCachePath } from "../environments/cache.js";
 import { lockParameterName, withEnvironmentLock, type LockRecord } from "../environments/lock.js";
@@ -273,6 +275,16 @@ export async function runDestroy(options: { env: string; keepData: boolean }, de
   for (const path of localFiles) await rm(path, { force: true });
   if (settings !== undefined) await deps.tokenStore.delete(tokenStoreKey({ issuer: settings.identity.issuer, clientId: settings.identity.clientId, audience: settings.identity.audience }));
   result.localFiles = localFiles;
+  // Issue #221: the developer sign-in for the removed environment, so it is never left the default.
+  // The environment is already gone: a developer.yaml that cannot be read is said, not thrown.
+  try {
+    const forgotten = await forgetDeveloperSignIn(deps.home, env, deps.tokenStore);
+    if (forgotten !== undefined) {
+      deps.write(`Removed this computer's developer sign-in for ${env}; ${forgotten.default === undefined ? "no developer environment is the default now" : `the default developer environment is now ${forgotten.default}`}.`);
+    }
+  } catch (error) {
+    deps.write(`Could not remove this computer's developer sign-in for ${env}: ${error instanceof Error ? plainMessage(error) : String(error)}`);
+  }
 
   // 9. What AgentX cannot do. Live check L6: the ECR step only when the cache made a repository
   // (listed in step 1), or, when that listing failed, without names.

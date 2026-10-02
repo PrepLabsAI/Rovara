@@ -28,7 +28,7 @@ export const TURN_GATE_REASON_LIMIT = 200;
 export const TurnGateSchema = z.object({
   outcome: z.enum(["allow", "ask", "deny"]),
   source: z.enum(["confirmation", "rule", "default", "yes_to_all", "classifier", "classifier_unavailable", "gate_error"]),
-  kind: z.enum(["classifier", "destructive", "admin", "bulk", "hint", "read", "create", "allowed"]).optional(),
+  kind: z.enum(["classifier", "destructive", "admin", "bulk", "hint", "read", "create", "allowed", "deny"]).optional(),
   rule: z.string().regex(/^[1-9][0-9]{0,2}$/).optional(),
   reason: z.string().max(TURN_GATE_REASON_LIMIT),
 }).strict();
@@ -71,13 +71,14 @@ export const TurnObservationSchema = z.object({
  * that could not be used (another member's, no longer pending, expired, or claimed by another
  * event), so nothing ran. `confirmation_cancelled`: the requester cancelled a pending confirmation.
  * `yes_to_all_granted`: a "yes to all" with no pending confirmation only granted it. `swebench_run`
- * (spec 043): an `eval swebench` command, answered or run outside any workspace. Like the workspace
+ * (spec 043): an `eval swebench` command, answered or run outside any workspace. `eval_batch` (spec
+ * 052): an `eval batch` form, answered or started outside any workspace. Like the workspace
  * dispositions, none of these ran the orchestrator or counts in turn metrics.
  */
 export const TurnDispositionSchema = z.enum([
   "answered", "failed", "abandoned", "workspace_close", "workspace_limit", "workspace_closed", "workspace_unavailable",
   "confirmation_refused", "confirmation_cancelled", "yes_to_all_granted",
-  "model_list", "model_switch", "swebench_run",
+  "model_list", "model_switch", "swebench_run", "eval_batch",
 ]);
 
 export const TurnRecordSchema = TurnObservationSchema.extend({

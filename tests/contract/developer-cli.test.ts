@@ -98,6 +98,15 @@ describe("agentx whoami and logout (FR-011)", () => {
     expect(h.out.join("") + h.err.join("")).not.toContain(REFRESH);
   });
 
+  it("logout of the default environment moves the default to a remaining one (#221)", async () => {
+    const h = await signedIn();
+    const other = { url: "https://other.example.test", issuer: "https://other.example.test/v1/auth", tokenEndpoint: "https://other.example.test/v1/auth/token", revocationEndpoint: "https://other.example.test/v1/auth/revoke" };
+    await saveDeveloperEnvironment(h.home, "other", other);
+    await saveDeveloperEnvironment(h.home, "staging", entry);
+    expect(await h.run(["logout"])).toBe(0);
+    expect(await readDeveloperConfig(h.home)).toEqual({ default: "other", environments: { other } });
+  });
+
   it("logout still removes the local tokens when the server cannot be reached, and says the server session may stay", async () => {
     const h = await signedIn({ revoke: () => Promise.reject(new TypeError("fetch failed")) });
     expect(await h.run(["logout"])).toBe(0);

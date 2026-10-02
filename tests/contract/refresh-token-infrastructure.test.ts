@@ -2,6 +2,9 @@ import { App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 interface Statement { Effect?: string; Action?: string | string[]; NotAction?: string | string[]; Resource: unknown; Condition?: unknown }
 interface PolicyDocument { Statement: Statement | Statement[] }

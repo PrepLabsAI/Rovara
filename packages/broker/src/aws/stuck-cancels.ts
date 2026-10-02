@@ -8,9 +8,15 @@
 //   through the cancel route's requestCancellation: the retry is recorded on the operation first
 //   (cancelRetriedAt), so a crash or a failed retry can never retry it twice;
 // - a retried one still CANCEL_REQUESTED STUCK_CANCEL_RETRY_MS later is ended INTERRUPTED, and its
-//   workspace freed.
-// - a retried one whose cancel failed (the result marks it INTERRUPTED but leaves it holding the
-//   workspace) has its workspace freed.
+//   workspace freed, only when this run's ping found the worker idle (owner decision on PR 255);
+//   one whose worker answers busy is held, and logged and counted for the alarm on every run.
+// - issue 202: a task whose cancel failed, first or retried (the result marks it INTERRUPTED but
+//   leaves it holding the workspace, as the worker may still run it), has its workspace freed only
+//   on evidence that nothing runs there: at once when its compute is gone; when this run's ping
+//   found the worker idle, FAILED_CANCEL_GRACE_MS after the cancel failed (STUCK_CANCEL_RETRY_MS
+//   after the retry, for one this sweep retried); never while the worker answers busy, which is
+//   logged and counted for the alarm once STUCK_CANCEL_RETRY_MS has passed, on every run. The
+//   same rule holds for an AI tool's developer task. A Slack thread is told in plain words.
 // A cancel operation for the task that is still live and changed within STUCK_CANCEL_MS counts as
 // progressing, so a live worker's task is neither retried nor interrupted while it moves.
 // Operations not CANCEL_REQUESTED, and cancels within their limit, are never touched. A task an AI
@@ -18,26 +24,39 @@
 // gone, never retried or interrupted while its compute is alive.
 //
 // Every write is conditioned on the operation still being in the state read (CANCEL_REQUESTED, or
-// for a release INTERRUPTED with the sweep's retry recorded) under the fence read, and on the
-// workspace still being held by it, so a cancel result that lands first stands.
+// for a release INTERRUPTED and not yet released) under the fence read, and on the workspace still
+// being held by it, so a cancel result that lands first stands.
 import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { AgentXError, WorkspaceInstanceSchema, workspaceRecordFields } from "@agentx/contracts";
 import { taskPointerKey } from "../developer/task-records.js";
 import { getItem, requestCancellation, type CancellationDependencies } from "./cancellation.js";
 import { releaseFailedPreparation } from "./failed-preparation.js";
+import {
+  FAILED_CANCEL_GRACE_MS,
+  FAILED_CANCEL_RELEASED_MESSAGE,
+  releaseFailedCancelWorkspace,
+  releasedStatus,
+  type FailedCancelReleaseReason,
+} from "./failed-cancel-release.js";
+import type { SlackThreadPlace } from "./unwaited-tasks.js";
+
+export { FAILED_CANCEL_GRACE_MS, FAILED_CANCEL_RELEASED_MESSAGE } from "./failed-cancel-release.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 
 /** Owner decision, 2026-10-01: a cancel normally finishes in seconds. */
 export const STUCK_CANCEL_MS = 30 * 60_000;
-/** How long a re-queued cancel gets before the task is ended as interrupted. */
+/** How long a re-queued cancel gets before the task is ended as interrupted, if its worker answers idle. */
 export const STUCK_CANCEL_RETRY_MS = 30 * 60_000;
 export const STUCK_CANCEL_LOST_MESSAGE = "RUNTIME_UNAVAILABLE: workspace compute was lost before the cancel finished; the task was stopped";
 export const STUCK_CANCEL_INTERRUPTED_MESSAGE = "the cancel did not reach the worker, even after a retry; the task was stopped and its workspace freed";
 
 /** What the reconciler knows of a workspace's compute this run. "unknown": starting or stopping. */
 export type StuckCancelCompute = "alive" | "gone" | "unknown";
-export interface StuckCancelCandidate { workspaceId: string; compute: StuckCancelCompute }
+/** Issue 202: a live worker's answer to this run's ping: idle (Healthy) or busy (HealthyBusy). */
+export type StuckCancelWorker = "idle" | "busy";
+/** `worker` only for alive compute whose ping answered this run. */
+export interface StuckCancelCandidate { workspaceId: string; compute: StuckCancelCompute; worker?: StuckCancelWorker }
 
 export type StuckCancelRetry =
   | { outcome: "REQUEUED"; cancelOperationId: string }
@@ -48,6 +67,8 @@ export interface StuckCancelDependencies {
   tableName: string;
   /** Queues the cancel again (createCancelRetrier). Absent where the reconciler has no signing key (legacy). */
   retryCancel?: (workspaceId: string, operationId: string) => Promise<StuckCancelRetry>;
+  /** Issue 202: tells a Slack thread its workspace is free again. Absent where the reconciler has no Slack token (legacy). */
+  postNote?: (thread: SlackThreadPlace, text: string) => Promise<void>;
   log?: (entry: Record<string, unknown>) => void;
 }
 
@@ -68,6 +89,7 @@ interface StuckOperation {
   updatedAt?: unknown;
   cancelRetriedAt?: unknown;
   closePreviousStatus?: unknown;
+  error?: unknown;
 }
 
 export async function sweepStuckCancels(
@@ -91,7 +113,7 @@ export async function sweepStuckCancels(
 
 async function settle(
   dependencies: StuckCancelDependencies,
-  { workspaceId, compute }: StuckCancelCandidate,
+  { workspaceId, compute, worker }: StuckCancelCandidate,
   at: Date,
   result: StuckCancelSweepResult,
   log: (entry: Record<string, unknown>) => void,
@@ -103,18 +125,37 @@ async function settle(
   const operationId = workspace?.activeOperationId;
   if (typeof operationId !== "string") return;
   const operation = await get({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` }) as StuckOperation | undefined;
-  // The retried cancel failed (the worker no longer knew the task): the result marked the task
-  // INTERRUPTED but, as for any failed cancel, left it holding the workspace. Only an operation
-  // this sweep retried is freed so, and only after the retry limit, as a stuck retry would be.
-  if (operation?.status === "INTERRUPTED" && typeof operation.cancelRetriedAt === "string" && typeof operation.fence === "number") {
-    const changedAt = Math.max(Date.parse(operation.cancelRetriedAt), typeof operation.updatedAt === "string" ? Date.parse(operation.updatedAt) : 0);
-    if (!(at.getTime() - changedAt > STUCK_CANCEL_RETRY_MS)) return;
-    if (await release(dependencies, { workspaceId, operationId }, operation, at)) {
-      result.interrupted.push(operationId);
-      log({ event: "stuck_cancel.released", workspaceId, operationId });
+  // Issue 202: a cancel failed (the worker no longer knew the task, say). The result marked the task
+  // INTERRUPTED but, as for any failed cancel, left it holding the workspace, since the worker may
+  // still run it. Freed only when nothing can run there; a busy worker keeps it.
+  if (operation?.status === "INTERRUPTED" && typeof operation.fence === "number" && typeof operation.updatedAt === "string") {
+    const retried = typeof operation.cancelRetriedAt === "string";
+    const failedAt = Math.max(retried ? Date.parse(operation.cancelRetriedAt as string) : 0, Date.parse(operation.updatedAt));
+    const waited = at.getTime() - failedAt;
+    let reason: FailedCancelReleaseReason;
+    if (compute === "gone") {
+      reason = "compute-gone";
+    } else if (worker === "idle") {
+      // A retried one keeps #200's retry limit (30 minutes from when its retried cancel failed),
+      // longer than the 10 minutes a first failed cancel waits.
+      if (!(waited > (retried ? STUCK_CANCEL_RETRY_MS : FAILED_CANCEL_GRACE_MS))) return;
+      reason = "worker-idle";
     } else {
-      log({ event: "stuck_cancel.skipped", workspaceId, operationId, reason: "changed" });
+      // Busy: never freed on time alone. Unknown (the ping failed): the ping-failure rule replaces
+      // the worker, and a later run finds its compute gone.
+      if (worker === "busy" && waited > STUCK_CANCEL_RETRY_MS) {
+        result.failed.push(operationId);
+        log({ event: "stuck_cancel.held_busy", workspaceId, operationId, status: "INTERRUPTED" });
+      }
+      return;
     }
+    if (!(await releaseFailedCancelWorkspace(client, tableName, { workspaceId, operationId }, operation, reason, at))) {
+      log({ event: "stuck_cancel.skipped", workspaceId, operationId, reason: "changed" });
+      return;
+    }
+    result.interrupted.push(operationId);
+    log({ event: "stuck_cancel.released", workspaceId, operationId, reason });
+    if (dependencies.postNote !== undefined) await noteRelease(dependencies, workspace!, { workspaceId, operationId }, log);
     return;
   }
   if (operation?.status !== "CANCEL_REQUESTED" || typeof operation.fence !== "number" || typeof operation.updatedAt !== "string") return;
@@ -140,6 +181,16 @@ async function settle(
   if (retriedAt !== undefined) {
     // Timed from the retry, or from a newer cancel request made after it.
     if (!(now - Math.max(retriedAt, requestedAt) > STUCK_CANCEL_RETRY_MS)) return;
+    // Owner decision on PR 255: ended only once the worker says it runs nothing. Busy: held for
+    // good, and counted for the alarm on every run. Unknown (the ping failed): the ping-failure rule
+    // replaces the worker, and a later run finds its compute gone.
+    if (worker !== "idle") {
+      if (worker === "busy") {
+        result.failed.push(operationId);
+        log({ event: "stuck_cancel.held_busy", ...ids, status: "CANCEL_REQUESTED" });
+      }
+      return;
+    }
     if (await end(dependencies, ids, operation, at, "INTERRUPTED", STUCK_CANCEL_INTERRUPTED_MESSAGE)) {
       result.interrupted.push(operationId);
       log({ event: "stuck_cancel.interrupted", ...ids });
@@ -232,44 +283,31 @@ async function claimRetry(
   }
 }
 
-/** The released status, as failActiveOperation picks it for lost compute. */
-function releasedStatus(operation: StuckOperation): string {
-  return operation.kind === "prepare"
-    ? "PREPARATION_FAILED"
-    : operation.kind === "close" && typeof operation.closePreviousStatus === "string" ? operation.closePreviousStatus : "READY";
-}
-
-/** Frees the workspace an INTERRUPTED, retried operation still holds. False when something moved first. */
-async function release(
-  { client, tableName }: StuckCancelDependencies,
-  { workspaceId, operationId }: { workspaceId: string; operationId: string },
-  operation: StuckOperation,
-  at: Date,
-): Promise<boolean> {
+/**
+ * Tells the workspace's Slack thread, if it has one, that its workspace is free again. A note that
+ * could not be posted is logged by its error name only, and never undoes the release.
+ */
+async function noteRelease(
+  dependencies: StuckCancelDependencies,
+  workspace: Record<string, unknown>,
+  ids: { workspaceId: string; operationId: string },
+  log: (entry: Record<string, unknown>) => void,
+): Promise<void> {
   try {
-    await client.send(new TransactWriteCommand({ TransactItems: [
-      { ConditionCheck: {
-        TableName: tableName,
-        Key: { pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}` },
-        ConditionExpression: "#status = :interrupted AND fence = :fence AND attribute_exists(cancelRetriedAt)",
-        ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: { ":interrupted": "INTERRUPTED", ":fence": operation.fence },
-      } },
-      { Update: {
-        TableName: tableName,
-        Key: { pk: `WORKSPACE#${workspaceId}`, sk: "META" },
-        UpdateExpression: "SET #status = :released, updatedAt = :now REMOVE activeOperationId",
-        ConditionExpression: "activeOperationId = :operation AND fence = :fence",
-        ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: { ":released": releasedStatus(operation), ":now": at.toISOString(), ":operation": operationId, ":fence": operation.fence },
-      } },
-    ] }));
-    // #213: a prepare's workspace freed as PREPARATION_FAILED stops counting toward the limits.
-    if (releasedStatus(operation) === "PREPARATION_FAILED") await releaseFailedPreparation(client, tableName, workspaceId);
-    return true;
-  } catch (failure) {
-    if (failure instanceof Error && failure.name === "TransactionCanceledException") return false;
-    throw failure;
+    if (typeof workspace.ownerKey !== "string") return;
+    const record = ((await dependencies.client.send(new GetCommand({ TableName: dependencies.tableName, Key: { pk: `SLACK_THREAD#${workspace.ownerKey}`, sk: "META" }, ConsistentRead: true }))) as { Item?: Record<string, unknown> }).Item;
+    // An API, CLI or AI-tool workspace has no thread; a thread now bound to another workspace is not this one's.
+    // A closed thread takes no more requests, so it is not told (as failed-preparation.ts skips it).
+    if (record === undefined || record.workspaceId !== ids.workspaceId || record.closedAt != null) return;
+    const parts = typeof record.thread === "string" ? record.thread.split("/") : [];
+    if (parts.length !== 3 || parts.some((part) => part.length === 0)) {
+      log({ event: "stuck_cancel.note_skipped", ...ids, reason: "thread-record-unreadable" });
+      return;
+    }
+    await dependencies.postNote!({ channelId: parts[1]!, threadTs: parts[2]! }, FAILED_CANCEL_RELEASED_MESSAGE);
+  } catch (error) {
+    // Logged, not counted: the release stands, and the task's status carries the same message.
+    log({ event: "stuck_cancel.note_failed", ...ids, errorName: error instanceof Error ? error.name : "unknown" });
   }
 }
 

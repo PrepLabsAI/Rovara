@@ -18,6 +18,9 @@ import type { DeployAnswers } from "../../packages/cli/src/deploy/deploy-environ
 import { readBundleAnswers, writeExportBundle } from "../../packages/cli/src/deploy/export-bundle.js";
 import type { DeployPart } from "../../packages/cli/src/deploy/parameters.js";
 import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 const ENV = "staging";
 const REGION = "us-east-1";

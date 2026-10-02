@@ -38,6 +38,7 @@ const GOOD = [
   "Start the AgentX service: usually 13 minutes",
   "Claude Sonnet 4.6 (recommended; about $0.025 a turn)",
   "The Bot User OAuth Token is under OAuth & Permissions. It starts with xoxb-.",
+  "Everything here is also in /tmp/agentx-init-ui-home-GP6AHZ/.agentx/logs/init-staging.log.",
   "Keep the terminal open and your computer awake until the install is done.",
   "the steps that finished are kept",
 ];

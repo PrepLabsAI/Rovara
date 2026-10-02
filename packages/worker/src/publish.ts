@@ -6,6 +6,7 @@ import {
   PullRequestResultSchema,
   PullRequestLifecycleResultSchema,
   agentXError,
+  type CheckEntry,
   type PublicationCheckResult,
   type PullRequestResult,
   type PullRequestLifecycleResult,
@@ -18,6 +19,7 @@ import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
 import type { RepositoryCredentialProvider } from "./repository-credentials.js";
 import { runProjectCommand, type PreparationCommandRunner, type PreparationManifest } from "./prepare.js";
 import { storedCommandOutput } from "./command-failure.js";
+import { planChecks, publicationCheckEntries } from "./verification/checks.js";
 import type { CommandResult } from "./readiness.js";
 import {
   createDevcontainerCli,
@@ -110,9 +112,13 @@ export async function publishWorkspace(
   const checks: PublicationCheckResult[] = await runReadinessChecks(rootPath, invocation, manifest, {
     ...(options.devcontainerCli !== undefined ? { devcontainerCli: options.devcontainerCli } : {}),
   });
-  if (checks.some((check) => check.outcome !== "passed")) {
+  // Spec 051 P-2 (D-7, Ruling S): a broker that asks for the checks opens a draft pull request when one fails, so a failing
+  // check no longer refuses the publication. A broker built before it would open a normal one, so it still refuses.
+  const reportChecks = invocation.payload.reportChecks === true;
+  if (!reportChecks && checks.some((check) => check.outcome !== "passed")) {
     throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
   }
+  const checkEntries = reportChecks ? judgedChecks(invocation, manifest, checks) : undefined;
 
   try {
     await runGitWithCredential({
@@ -149,6 +155,7 @@ export async function publishWorkspace(
     commit,
     title: invocation.payload.title,
     ...(invocation.payload.body === undefined ? {} : { body: invocation.payload.body }),
+    ...(checkEntries === undefined ? {} : { checks: checkEntries }),
   });
   const baseResult = {
     repository: repository.name,
@@ -161,7 +168,7 @@ export async function publishWorkspace(
     codeBuildChecks,
     reconciled: pullRequest.reconciled,
   };
-  if (mode === "create") return PullRequestResultSchema.parse(baseResult);
+  if (mode === "create") return PullRequestResultSchema.parse({ ...baseResult, ...(pullRequest.draft === undefined ? {} : { draft: pullRequest.draft }) });
   return PullRequestLifecycleResultSchema.parse({
     ...baseResult,
     action: mode,
@@ -170,6 +177,22 @@ export async function publishWorkspace(
       ? { replacementFor: invocation.payload.targetPullRequestNumber }
       : {}),
   });
+}
+
+/**
+ * Each readiness result judged against the preparation baseline (Ruling S). The pull request is the workspace's whole
+ * change since preparation, so a command preparation ran (and so passed: the workspace was READY) is "passed" before,
+ * and any other command, including every command of a workspace prepared before spec 051, has no earlier result. The
+ * task history in .agentx/last-checks.json is never read here: an earlier task's failure is not "before this change".
+ */
+function judgedChecks(
+  invocation: PublishInvocation,
+  manifest: PreparationManifest,
+  results: readonly PublicationCheckResult[],
+): CheckEntry[] {
+  const baseline = { lastOutcomes: {}, preparedKeys: manifest.readinessCommandKeys ?? [] };
+  const plan = planChecks(invocation.payload.project.readiness, { firstRuns: () => [] }, baseline);
+  return publicationCheckEntries(plan, results);
 }
 
 async function prepareRevertCommit(input: {

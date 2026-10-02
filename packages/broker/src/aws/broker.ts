@@ -22,6 +22,18 @@ import {
 import {
   AgentXError,
   CHANNEL_TURN_REQUEST_MAX,
+  CheckReportSchema,
+  LatestChecksSchema,
+  PULL_REQUEST_BODY_MAX_CHARS,
+  checksForSection,
+  StandingFailuresSchema,
+  checksMakeDraft,
+  checksSection,
+  nextStandingFailures,
+  type StandingFailure,
+  taskResultChecks,
+  type CheckEntry,
+  type LatestChecks,
   CONNECTOR_SECRET_PREFIX,
   ChannelTurnSchema,
   DEVELOPER_TASK_OWNER_ISSUER,
@@ -81,6 +93,7 @@ import {
   type WorkspaceInstance,
   cleanDisplayName,
   redactAndCap,
+  redactText,
   DISPLAY_NAME_MAX_ENCODED_LENGTH,
   modelKey,
   type ModelIdentifier,
@@ -102,7 +115,9 @@ import { pressAdminChange, routeAdminChange, type AdminChangeDependencies } from
 import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans.js";
 import { ZodError } from "zod";
 import { healthProbes } from "./health-probes.js";
+import { recordPrepareFailureEvent } from "./operation-events.js";
 import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js";
+import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
@@ -151,9 +166,11 @@ import {
   putSwebenchChannel,
   startSwebenchRun,
   stopSwebenchRun,
-  type SwebenchDependencies,
   type SwebenchSlackContext,
 } from "./swebench.js";
+import { withEvalBatches, type EvalBatchDependencies } from "./eval-batch.js";
+import { dropWatchedBatch, listWatchedBatches, recordWatchedBatchThread, startSlackBatch, updateWatchedBatch } from "./eval-batch-service.js";
+import { batchResults, parseStartBody, requireBatchProject, showBatch, startBatch, stopBatchById } from "./eval-batch-admin.js";
 import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
 
 const MAX_ARTIFACT_BYTES = 5_000_000;
@@ -261,7 +278,7 @@ interface AwsBrokerDependencies {
   /** Spec 025 phase 25e: the admin changes' method switch, clock and metric; the defaults serve production. */
   adminChanges?: { confirm?: { elicitation: boolean; slack: boolean }; now?: () => number; metric?: (outcome: AdminChangeOutcome) => void };
   /** Spec 043: SWE-bench runs; absent in a harness that does not exercise them. */
-  swebench?: Pick<SwebenchDependencies, "deployment" | "startExecution" | "now">;
+  swebench?: Pick<EvalBatchDependencies, "deployment" | "startExecution" | "stopBatchForThread" | "onRunEnded" | "now" | "estimateRunCostUsd">;
 }
 
 /**
@@ -600,8 +617,14 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
 
       // The hosted Slack orchestrator authenticates with its IAM role and acts only as a Slack thread owner.
       if (url.pathname.startsWith("/v1/service/")) {
-        const identity = await slackServiceIdentity(dependencies, request);
         const serviceUrl = new URL(`/v1${url.pathname.slice("/v1/service".length)}${url.search}`, "https://agentx.invalid");
+        // Spec 052 Task 6: the batch watcher's list is the whole Slack service's, not one thread's.
+        if (request.method === "GET" && serviceUrl.pathname === "/v1/evals/batches/active") {
+          requireSlackServiceRole(dependencies, request);
+          if (dependencies.swebench === undefined) return json({ batches: [], dropped: [] }, request.requestId);
+          return json(await listWatchedBatches(swebenchDependencies(dependencies), async (teamId, channelId) => (await getSlackBinding(dependencies, teamId, channelId))?.projectName), request.requestId);
+        }
+        const identity = await slackServiceIdentity(dependencies, request);
         if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace") {
           return json(await ensureThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
         }
@@ -622,6 +645,22 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         }
         if (request.method === "POST" && serviceUrl.pathname === "/v1/evals/swebench") {
           return json(await startSwebenchRun(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId);
+        }
+        // Spec 052 FR-002 and Task 6: the Slack batch form, and the watcher's thread and posts for one batch.
+        if (request.method === "POST" && serviceUrl.pathname === "/v1/evals/batches") {
+          return json(await startSlackBatch(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId);
+        }
+        const watchedBatch = /^\/v1\/evals\/batches\/([0-9a-f-]{36})\/(thread|watch|drop)$/.exec(serviceUrl.pathname);
+        if (request.method === "POST" && watchedBatch?.[1] && watchedBatch[2]) {
+          const slack = identity.slack;
+          if (!slack) throw agentXError("FORBIDDEN", "Slack thread context is required");
+          const scope = { thread: slack.thread, projectName: slack.binding.projectName };
+          const swebench = swebenchDependencies(dependencies);
+          const body = parseBody(request.body);
+          const answer = watchedBatch[2] === "thread" ? await recordWatchedBatchThread(swebench, scope, watchedBatch[1], body)
+            : watchedBatch[2] === "drop" ? await dropWatchedBatch(swebench, scope, watchedBatch[1], body)
+            : await updateWatchedBatch(swebench, scope, watchedBatch[1], body);
+          return json(answer, request.requestId);
         }
         const evalRun = /^\/v1\/evals\/swebench\/([0-9a-f-]{36})$/.exec(serviceUrl.pathname);
         if (request.method === "GET" && evalRun?.[1]) {
@@ -676,6 +715,18 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       }
       if (slackBinding?.[1] && slackBinding[2] && request.method === "DELETE") {
         return json(await deleteSlackBinding(dependencies, identity, slackBinding[1], slackBinding[2]), request.requestId);
+      }
+      // Spec 052: batches of eval runs, started, shown, stopped and read by an administrator of the channel's project.
+      if (url.pathname === "/v1/admin/evals/batches" && request.method === "POST") {
+        return json(await routeStartEvalBatch(dependencies, identity, body), request.requestId);
+      }
+      const evalBatch = /^\/v1\/admin\/evals\/batches\/([0-9a-f-]{36})(?:\/(stop|results))?$/.exec(url.pathname);
+      if (evalBatch?.[1]) {
+        const action = evalBatch[2];
+        if ((action === undefined || action === "results") && request.method === "GET") {
+          return json(await routeEvalBatch(dependencies, identity, evalBatch[1], action ?? "show"), request.requestId);
+        }
+        if (action === "stop" && request.method === "POST") return json(await routeEvalBatch(dependencies, identity, evalBatch[1], "stop"), request.requestId);
       }
       const evalChannel = /^\/v1\/admin\/evals\/channels\/([^/]+)\/([^/]+)$/.exec(url.pathname);
       if (evalChannel?.[1] && evalChannel[2] && (request.method === "PUT" || request.method === "DELETE" || request.method === "GET")) {
@@ -1176,15 +1227,20 @@ async function newWorkspacePreparation(
   };
 }
 
-async function slackServiceIdentity(
-  dependencies: AwsBrokerDependencies,
-  request: AdaptedHttpRequest,
-): Promise<AuthenticatedIdentity> {
+/** The service routes' caller must be the Slack orchestrator's role. */
+function requireSlackServiceRole(dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest): void {
   const configuration = dependencies.slack;
   if (!configuration) throw agentXError("NOT_FOUND", "route not found");
   if (!request.iamPrincipalArn || !isAssumedRoleOf(request.iamPrincipalArn, configuration.orchestratorRoleArn)) {
     throw agentXError("FORBIDDEN", "only the Slack orchestrator role may call service routes");
   }
+}
+
+async function slackServiceIdentity(
+  dependencies: AwsBrokerDependencies,
+  request: AdaptedHttpRequest,
+): Promise<AuthenticatedIdentity> {
+  requireSlackServiceRole(dependencies, request);
   const context = parseSlackHeaders(request.headers);
   const binding = await getSlackBinding(dependencies, context.thread.teamId, context.thread.channelId);
   if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
@@ -2524,6 +2580,9 @@ async function taskOperationParts(
       conversationStarted: input.conversationStarted,
       ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
       ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
+      // Spec 051 (P-1): the checks the worker reruns when the agent finishes. The latest revision's readiness, as
+      // publicationProject merges it, since that is what publication gates on. None when the project has none.
+      ...(settings.definition.readiness.length === 0 ? {} : { readiness: settings.definition.readiness }),
     },
   };
   return { operation, outbox: outboxRecord(workspace, invocation), fence };
@@ -2577,10 +2636,14 @@ async function acceptTask(
       { Update: {
         TableName: dependencies.tableName,
         Key: workspaceKey(workspaceId),
-        UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
+        // Spec 051 Ruling T: until its own result arrives, the task reads as interrupted, so no older report stands.
+        UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now, latestChecks = :latestChecks",
         ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
         ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: { ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED", ":operation": operation.id, ":fence": fence, ":now": now },
+        ExpressionAttributeValues: {
+          ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED", ":operation": operation.id, ":fence": fence, ":now": now,
+          ":latestChecks": latestChecksItem({ status: "not_verified", reason: "interrupted" }, operation.id, fence, now),
+        },
       } },
       { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
@@ -2698,6 +2761,9 @@ async function acceptPullRequest(
         "push",
         repository.name,
       ),
+      // Spec 051 P-2: a failing check opens a draft (reconcilePullRequest) rather than refusing the publication.
+      // Without readiness there is no check to report, and the worker need not be asked whether it can.
+      ...(project.definition.readiness.length === 0 ? {} : { reportChecks: true as const }),
     },
   };
   const outbox = outboxRecord(workspace, invocation);
@@ -2913,6 +2979,8 @@ async function acceptPullRequestLifecycle(
         ),
         targetPullRequestNumber: record.number,
         ...(remote.mergeCommit === undefined ? {} : { revertCommit: remote.mergeCommit }),
+        // Spec 051 P-2, as for a new pull request.
+        ...(project.definition.readiness.length === 0 ? {} : { reportChecks: true as const }),
       },
     };
     const outbox = outboxRecord(workspace, invocation);
@@ -3390,7 +3458,7 @@ async function reconcilePullRequest(
   }
   const input = object(value, "pull request callback");
   const expected = operation.publication;
-  const allowed = new Set(["repository", "repositoryUrl", "headBranch", "baseBranch", "commit", "title", "body"]);
+  const allowed = new Set(["repository", "repositoryUrl", "headBranch", "baseBranch", "commit", "title", "body", "checks"]);
   if (Object.keys(input).some((key) => !allowed.has(key))) {
     throw agentXError("CONFIG_INVALID", "pull request callback contains unknown fields");
   }
@@ -3406,14 +3474,19 @@ async function reconcilePullRequest(
   if (typeof input.commit !== "string" || !/^[a-f0-9]{40,64}$/.test(input.commit)) {
     throw agentXError("CONFIG_INVALID", "published commit is invalid");
   }
+  const publishChecks = publicationChecks(input.checks);
   await assertCodeBuildGatesPassed(dependencies, operation, input.commit);
+  // A revert undoes a merged pull request, so the workspace's own task work is not what it publishes.
+  const latestChecks = expected.mode === "revert" ? undefined : await latestWorkspaceChecks(dependencies, operation.workspaceId);
+  const standingFailures = expected.mode === "revert" ? [] : await workspaceStandingFailures(dependencies, operation.workspaceId);
+  const { body, draft } = checkedPullRequest(expected.body, expected.draft, publishChecks, latestChecks, standingFailures);
   const pullRequest = await dependencies.githubPullRequests.reconcilePullRequest({
     repositoryUrl: expected.repositoryUrl,
     headBranch: expected.headBranch,
     baseBranch: expected.baseBranch,
     title: expected.title,
-    ...(expected.body === undefined ? {} : { body: expected.body }),
-    ...(expected.draft === undefined ? {} : { draft: expected.draft }),
+    ...(body === undefined ? {} : { body }),
+    ...(draft === undefined ? {} : { draft }),
   });
   const record: PullRequestRecord = {
     ...pullRequestKey(operation.workspaceId, expected.repository, pullRequest.number),
@@ -3428,7 +3501,7 @@ async function reconcilePullRequest(
     baseBranch: expected.baseBranch,
     expectedHeadCommit: input.commit,
     title: expected.title,
-    body: expected.body ?? "",
+    body: body ?? "",
     createdByOperationId: operation.id,
     ...(expected.mode === "replace" && expected.targetPullRequestNumber !== undefined
       ? { replacementFor: expected.targetPullRequestNumber }
@@ -3463,7 +3536,58 @@ async function reconcilePullRequest(
       Item: record,
     }));
   }
-  return pullRequest;
+  // Ruling Z: the worker's result says whether the pull request is a draft, so the reply can say so.
+  return { ...pullRequest, draft: draft === true };
+}
+
+/** Spec 051 (D-7): the checks the worker ran at publish, judged against their befores; none from an older worker. */
+function publicationChecks(value: unknown): CheckEntry[] | undefined {
+  if (value === undefined) return undefined;
+  const parsed = CheckReportSchema.shape.checks.safeParse(value);
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", "pull request callback checks are invalid");
+  return parsed.data;
+}
+
+/**
+ * The workspace's latest checks (Ruling T), or undefined: none yet. One that does not parse is logged and treated as
+ * none; a failing publish check still makes the draft (Ruling S).
+ */
+async function latestWorkspaceChecks(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<LatestChecks | undefined> {
+  const workspace = await getItem<{ latestChecks?: { report?: unknown; operationId?: unknown } }>(dependencies, workspaceKey(workspaceId));
+  if (workspace?.latestChecks === undefined) return undefined;
+  const parsed = LatestChecksSchema.safeParse(workspace.latestChecks.report);
+  if (parsed.success) return parsed.data;
+  console.log(JSON.stringify({ component: "broker", event: "pull_request.latest_checks_unreadable", workspaceId, operationId: typeof workspace.latestChecks.operationId === "string" ? workspace.latestChecks.operationId : undefined }));
+  return undefined;
+}
+
+/** Spec 051 M-1: labels and outputs redacted again at the broker before they reach GitHub (as #154 does for errors). */
+function redactedEntries(checks: readonly CheckEntry[]): CheckEntry[] {
+  return checks.map((check) => ({ ...check, label: redactText(check.label), output: redactText(check.output) }));
+}
+
+/**
+ * Spec 051 FR-008 (D-2): the pull request's description and draft flag, given the checks. A draft when a check that
+ * passed before fails now, whatever was asked; otherwise the draft flag stays as asked (the developer API asks for a
+ * draft by default). The checks section goes after the description, cut so the whole stays within GitHub's limit.
+ * With nothing to report, both are exactly as asked (Review Focus 5).
+ */
+function checkedPullRequest(
+  body: string | undefined,
+  draft: boolean | undefined,
+  publishChecks: readonly CheckEntry[] | undefined,
+  latestChecks: LatestChecks | undefined,
+  standingFailures: readonly StandingFailure[] = [],
+): { body: string | undefined; draft: boolean | undefined } {
+  const separator = body === undefined || body === "" ? "" : "\n\n";
+  const shownPublish = publishChecks === undefined ? undefined : redactedEntries(publishChecks);
+  const shownLatest = latestChecks === undefined || "reason" in latestChecks ? latestChecks : { ...latestChecks, checks: redactedEntries(latestChecks.checks) };
+  const shownStanding = standingFailures.map((failure) => ({ ...failure, label: redactText(failure.label) }));
+  const section = checksSection(shownPublish, shownLatest, PULL_REQUEST_BODY_MAX_CHARS - (body?.length ?? 0) - separator.length, shownStanding);
+  return {
+    body: section === "" ? body : `${body ?? ""}${separator}${section}`,
+    draft: checksMakeDraft(publishChecks, latestChecks, standingFailures) ? true : draft,
+  };
 }
 
 async function assertCodeBuildGatesPassed(
@@ -3655,12 +3779,13 @@ async function queuedFirstTask(
     workspaceUpdate: { Update: {
       TableName: dependencies.tableName,
       Key: workspaceKey(workspace.id),
-      UpdateExpression: "SET #status = :busy, updatedAt = :now, preparationManifest = :manifest, activeOperationId = :task, fence = :taskFence",
+      UpdateExpression: "SET #status = :busy, updatedAt = :now, preparationManifest = :manifest, activeOperationId = :task, fence = :taskFence, latestChecks = :latestChecks",
       ConditionExpression: "activeOperationId = :operation AND fence = :fence",
       ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: {
         ":busy": "BUSY", ":now": now, ":manifest": ".agentx/preparation-manifest.json",
         ":task": operation.id, ":taskFence": fence, ":operation": prepare.id, ":fence": prepare.fence,
+        ":latestChecks": latestChecksItem({ status: "not_verified", reason: "interrupted" }, operation.id, fence, now),
       },
     } },
     items: [
@@ -3910,10 +4035,21 @@ async function recordTerminalResult(
   const status = input.status;
   if (!TERMINAL.has(status as OperationStatus)) throw agentXError("CONFIG_INVALID", "terminal status is invalid");
   if (TERMINAL.has(operation.status)) {
+    // Issue 202: a task whose cancel failed ended INTERRUPTED but kept its workspace, as it might
+    // still run. Its own result proves the run ended, so it frees the workspace; the result itself
+    // is not stored (results stay immutable), and the worker gets the stored operation.
+    if (operation.kind === "task" && operation.status === "INTERRUPTED") {
+      const released = await releaseOnOwnResult(dependencies, operation);
+      if (released !== undefined) return released;
+    }
     if (operation.status !== status && !isQueueFailedPrepare(operation, status) && !isSweptPrepare(operation)) throw agentXError("IDEMPOTENCY_CONFLICT", "terminal result is immutable");
     // #213: a repeated result releases a failed prepare's slot too, in case the first one's release
     // did not land (the release is idempotent, and does nothing to a workspace that moved on).
-    if (operation.kind === "prepare" && operation.status !== "SUCCEEDED") await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, operation.workspaceId);
+    if (operation.kind === "prepare" && operation.status !== "SUCCEEDED") {
+      await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, operation.workspaceId);
+      // #225 review: and records its failure event, in case the first one's did not land (once per prepare).
+      await repeatPrepareFailureEvent(dependencies, operation);
+    }
     return operation;
   }
   const workspace = await requireWorkspace(dependencies, operation.workspaceId);
@@ -3970,14 +4106,20 @@ async function recordTerminalResult(
       },
     } });
   }
+  // Spec 051 Ruling T: a task's end, or its cancel's, sets the workspace's latest checks in the same transaction. That
+  // update holds only while this operation owns the workspace at its fence, so a late or repeated result never
+  // replaces a newer task's, and no write can be lost after the result commits.
+  const latestChecks = await terminalLatestChecks(dependencies, operation, terminalStatus, result, now);
+  const standingFailures = latestChecks === undefined ? undefined : await nextWorkspaceStanding(dependencies, operation.workspaceId, latestChecks.report);
+  const workspaceExpression = operation.kind === "prepare" && terminalStatus === "SUCCEEDED"
+    ? "SET #status = :status, updatedAt = :now, preparationManifest = :manifest REMOVE activeOperationId"
+    : operation.kind === "close" && closePreflight?.safeToClose !== true
+      ? "SET #status = :status, updatedAt = :now, closeError = :closeError REMOVE activeOperationId"
+      : "SET #status = :status, updatedAt = :now REMOVE activeOperationId, closeError";
   const workspaceUpdate: TransactItems[number] = { Update: {
     TableName: dependencies.tableName,
     Key: workspaceKey(workspace.id),
-    UpdateExpression: operation.kind === "prepare" && terminalStatus === "SUCCEEDED"
-      ? "SET #status = :status, updatedAt = :now, preparationManifest = :manifest REMOVE activeOperationId"
-      : operation.kind === "close" && closePreflight?.safeToClose !== true
-        ? "SET #status = :status, updatedAt = :now, closeError = :closeError REMOVE activeOperationId"
-        : "SET #status = :status, updatedAt = :now REMOVE activeOperationId, closeError",
+    UpdateExpression: latestChecks === undefined ? workspaceExpression : workspaceExpression.replace(" REMOVE ", ", latestChecks = :latestChecks, standingFailures = :standingFailures REMOVE "),
     ConditionExpression: operation.kind === "cancel"
       ? "activeOperationId = :target AND fence = :fence"
       : "activeOperationId = :operation AND fence = :fence",
@@ -3988,6 +4130,7 @@ async function recordTerminalResult(
       ":fence": operation.fence,
       ...(operation.kind === "cancel" ? { ":target": operation.targetOperationId } : { ":operation": operation.id }),
       ...(operation.kind === "prepare" && terminalStatus === "SUCCEEDED" ? { ":manifest": ".agentx/preparation-manifest.json" } : {}),
+      ...(latestChecks === undefined ? {} : { ":latestChecks": latestChecks, ":standingFailures": standingFailures }),
       ...(operation.kind === "close" && closePreflight?.safeToClose !== true
         ? { ":closeError": error ?? (closePreflight ? "workspace contains unpublished work" : "workspace close preflight failed") }
         : {}),
@@ -4020,7 +4163,10 @@ async function recordTerminalResult(
     if (!isConditional(transactionError)) throw transactionError;
     const existing = await requireOperation(dependencies, operation.workspaceId, operation.id);
     if (existing.status === terminalStatus || isQueueFailedPrepare(existing, terminalStatus) || isSweptPrepare(existing)) {
-      if (existing.kind === "prepare" && existing.status !== "SUCCEEDED") await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, existing.workspaceId);
+      if (existing.kind === "prepare" && existing.status !== "SUCCEEDED") {
+        await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, existing.workspaceId);
+        await repeatPrepareFailureEvent(dependencies, existing);
+      }
       return existing;
     }
     // A cancel whose target finished first (its own result, and for a developer task its
@@ -4048,9 +4194,111 @@ async function recordTerminalResult(
   // counting toward the workspace limits now; the release logs, and never fails the callback.
   if (operation.kind === "prepare" && recordedStatus !== "SUCCEEDED") {
     await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, workspace.id);
+    // #225: a developer task's failed setup is an event of its own, so the task shows when it failed.
+    if (taskPointer !== undefined) {
+      await recordPrepareFailureEvent(dependencies.documentClient, dependencies.tableName, {
+        workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, status: recordedStatus,
+        error: recordedStatus !== terminalStatus ? FIRST_TASK_QUEUE_FAILED : error, at: now,
+        // The setup itself finished; it was the task's start that failed.
+        ...(recordedStatus !== terminalStatus ? { lead: "The task could not start" } : {}),
+      });
+    }
   }
   if (recordedStatus !== terminalStatus) return { ...operation, status: recordedStatus, updatedAt: now, error: FIRST_TASK_QUEUE_FAILED };
   return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
+}
+
+/** Spec 051 Ruling T: the workspace's latest checks, as stored: what is known, which task, and when. */
+function latestChecksItem(latest: LatestChecks, operationId: string, fence: number, recordedAt: string) {
+  return { report: checksForSection(latest), operationId, fence, recordedAt };
+}
+
+/**
+ * Spec 051 Ruling Y: the workspace's standing failures once `latest` is recorded: the earlier ones not shown passing in
+ * it, and every check failing in it. A task that ends without a report keeps the earlier ones. Written with the latest
+ * checks in the terminal transaction, so the fence guards both.
+ */
+async function nextWorkspaceStanding(dependencies: AwsBrokerDependencies, workspaceId: string, latest: LatestChecks): Promise<StandingFailure[]> {
+  return nextStandingFailures(await workspaceStandingFailures(dependencies, workspaceId), latest);
+}
+
+async function workspaceStandingFailures(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<StandingFailure[]> {
+  const workspace = await getItem<{ standingFailures?: unknown }>(dependencies, workspaceKey(workspaceId));
+  const parsed = StandingFailuresSchema.safeParse(workspace?.standingFailures ?? []);
+  if (parsed.success) return parsed.data;
+  console.log(JSON.stringify({ component: "broker", event: "workspace.standing_failures_unreadable", workspaceId }));
+  return [];
+}
+
+/**
+ * Spec 051 Ruling T: the latest checks a task's terminal result records: its report, or why it has none. A successful
+ * cancel records its task as cancelled. Undefined for every other operation, which leaves them as they are.
+ */
+async function terminalLatestChecks(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  status: OperationStatus,
+  result: unknown,
+  now: string,
+) {
+  if (operation.kind === "task") {
+    const report = taskResultChecks(result);
+    const reason = status === "SUCCEEDED" ? "no_report" : status === "FAILED" ? "failed" : status === "CANCELLED" ? "cancelled" : "interrupted";
+    return latestChecksItem(report ?? { status: "not_verified", reason }, operation.id, operation.fence, now);
+  }
+  if (operation.kind === "cancel" && status === "SUCCEEDED" && operation.targetOperationId) {
+    const target = await getItem<OperationRecord>(dependencies, operationKey(operation.workspaceId, operation.targetOperationId));
+    if (target?.kind === "task") return latestChecksItem({ status: "not_verified", reason: "cancelled" }, target.id, operation.fence, now);
+  }
+  return undefined;
+}
+
+/**
+ * #225 review: a repeated result of a developer task's failed prepare records the failure event the
+ * first result's best-effort write may have missed; the event's once-key keeps it to one.
+ */
+async function repeatPrepareFailureEvent(dependencies: AwsBrokerDependencies, operation: OperationRecord): Promise<void> {
+  try {
+    if ((await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId))) === undefined) return;
+  } catch (error) {
+    // Best effort, as the event itself: a failed read never fails the result callback.
+    console.log(JSON.stringify({ component: "broker", event: "developer.prepare_failure_event_failed", operationId: operation.id, error: error instanceof Error ? error.name : "unknown" }));
+    return;
+  }
+  await recordPrepareFailureEvent(dependencies.documentClient, dependencies.tableName, {
+    workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, status: operation.status, error: operation.error, at: operation.updatedAt,
+    ...(operation.error === FIRST_TASK_QUEUE_FAILED ? { lead: "The task could not start" } : {}),
+  });
+}
+
+/**
+ * Issue 202: frees the workspace an INTERRUPTED task still holds after its cancel failed, when the
+ * task's own late result arrives, under the fence the callback holds. Returns the stored operation
+ * when the workspace is freed now, or was already freed after the failed cancel (by an earlier copy
+ * of this result or by the reconciler); undefined when the task no longer holds the workspace for
+ * another reason (a newer operation, a moved fence), so the result is refused as before. Only a
+ * task: the Slack and AI-tool stop only ever cancels a task, and any other kind is left to the
+ * reconciler's sweep.
+ */
+async function releaseOnOwnResult(dependencies: AwsBrokerDependencies, operation: OperationRecord): Promise<OperationRecord | undefined> {
+  const stored = operation as OperationRecord & { workspaceReleasedAt?: unknown; workspaceReleaseReason?: unknown };
+  if (typeof stored.workspaceReleasedAt === "string") {
+    // Already freed (by an earlier copy of this result, or by the reconciler): answered, never stored.
+    if (stored.workspaceReleaseReason !== "own-result") {
+      console.log(JSON.stringify({ component: "broker", event: "stuck_cancel.late_result_after_release", workspaceId: operation.workspaceId, operationId: operation.id, reason: stored.workspaceReleaseReason }));
+    }
+    return operation;
+  }
+  const workspace = await getItem<{ activeOperationId?: unknown; fence?: unknown }>(dependencies, workspaceKey(operation.workspaceId));
+  if (workspace?.activeOperationId !== operation.id || workspace.fence !== operation.fence) return undefined;
+  const at = new Date();
+  if (!(await releaseFailedCancelWorkspace(dependencies.documentClient, dependencies.tableName, { workspaceId: operation.workspaceId, operationId: operation.id }, operation, "own-result", at))) {
+    // Something moved first: read again, so a copy of this result that won the race is answered too.
+    const again = await requireOperation(dependencies, operation.workspaceId, operation.id) as OperationRecord & { workspaceReleasedAt?: unknown };
+    return typeof again.workspaceReleasedAt === "string" ? again : undefined;
+  }
+  console.log(JSON.stringify({ component: "broker", event: "stuck_cancel.released", workspaceId: operation.workspaceId, operationId: operation.id, reason: "own-result" }));
+  return await requireOperation(dependencies, operation.workspaceId, operation.id);
 }
 
 /**
@@ -4403,28 +4651,30 @@ async function requireAdministrator(
   if (membership.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
 }
 
-/** Spec 043: the SWE-bench module's dependencies, from the broker's. */
-function swebenchDependencies(dependencies: AwsBrokerDependencies): SwebenchDependencies {
+/** Spec 043: the SWE-bench module's dependencies, from the broker's; spec 052 wires its batches into them. */
+function swebenchDependencies(dependencies: AwsBrokerDependencies): EvalBatchDependencies {
   const swebench = dependencies.swebench;
   if (swebench === undefined) throw agentXError("NOT_FOUND", "SWE-bench runs are not available in this deployment");
-  return {
+  return withEvalBatches({
     documentClient: dependencies.documentClient,
     s3: dependencies.s3,
     tableName: dependencies.tableName,
     artifactBucketName: dependencies.artifactBucketName,
     callbackSigningKey: dependencies.callbackSigningKey,
     ...swebench,
-  };
+  });
 }
 
 /** The thread, requester and project model a SWE-bench run takes from the Slack service identity. */
 function swebenchSlackContext(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity): SwebenchSlackContext {
   const slack = identity.slack;
   if (!slack) throw agentXError("FORBIDDEN", "Slack thread context is required");
-  const projectName = slack.binding.projectName;
+  return { thread: slack.thread, requester: slack.requester, ...swebenchProjectContext(dependencies, slack.binding.projectName) };
+}
+
+/** The project and its approved models, for a run or batch whose thread and requester the caller supplies. */
+function swebenchProjectContext(dependencies: AwsBrokerDependencies, projectName: string): Pick<SwebenchSlackContext, "projectName" | "projectModel"> {
   return {
-    thread: slack.thread,
-    requester: slack.requester,
     projectName,
     projectModel: async (requested) => {
       const project = await requireLatestProject(dependencies, projectName);
@@ -4437,6 +4687,26 @@ function swebenchSlackContext(dependencies: AwsBrokerDependencies, identity: Aut
       return (await resolveProjectModel(dependencies, project)).model;
     },
   };
+}
+
+/** Spec 052 FR-001: an administrator of the channel's project starts a batch from a file. */
+async function routeStartEvalBatch(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, value: unknown): Promise<unknown> {
+  const body = parseStartBody(value);
+  const binding = await getSlackBinding(dependencies, body.teamId, body.channelId);
+  if (!binding) throw agentXError("NOT_FOUND", "Slack channel binding not found; bind the channel to a project first");
+  await requireAdministrator(dependencies, identity, binding.projectName);
+  return startBatch(swebenchDependencies(dependencies), swebenchProjectContext(dependencies, binding.projectName), body);
+}
+
+/** Spec 052 FR-009, FR-010: show, stop or read the results of a batch, for an administrator of its channel's project. */
+async function routeEvalBatch(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, batchId: string, action: "show" | "stop" | "results"): Promise<unknown> {
+  // The admin claim first, so a non-administrator learns nothing about which batch IDs exist.
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+  const swebench = swebenchDependencies(dependencies);
+  // The project stored on the batch, not the channel's current binding: a rebound channel does not hand over old batches.
+  await requireAdministrator(dependencies, identity, await requireBatchProject(swebench, batchId));
+  if (action === "stop") return stopBatchById(swebench, batchId);
+  return action === "results" ? batchResults(swebench, batchId) : showBatch(swebench, batchId);
 }
 
 /** Spec 043 FR-002: an administrator of the channel's project enables, reads or disables SWE-bench runs there. */
@@ -4875,7 +5145,9 @@ export const handler = createAwsBrokerHandler({
             return new Map((response.Parameters ?? []).flatMap((parameter) => parameter.Name && parameter.Value ? [[parameter.Name, parameter.Value] as const] : []));
           }),
           async startExecution(input) {
-            await stepFunctions.send(new StartExecutionCommand(input));
+            const response = await stepFunctions.send(new StartExecutionCommand(input));
+            // Spec 052 Ruling 13: recorded on the run, so the batch tick can find a dead execution.
+            return { executionArn: response.executionArn };
           },
         },
       }
