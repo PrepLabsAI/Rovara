@@ -169,7 +169,7 @@ describe("the first project's channel wait on the page", () => {
     expect((failure as Error).message).toContain("the bot cannot see a channel named #payments after 10 minutes");
     expect(surface.cards).toEqual([
       projectCard({ name: "payments-api", revision: 1 }),
-      channelCard({ stage: "waiting", channelName: "payments", botName: "agentx" }),
+      channelCard({ stage: "waiting", channelName: "payments", botName: "agentx-acme-staging" }),
       channelCard({ stage: "failed", channelName: "payments", problem: problemText(failure) }),
     ]);
     expect(surface.cards[2]?.details).toEqual(["the bot cannot see a channel named #payments after 10 minutes; create it in Slack (or invite the bot to it, if it is private), then run this again"]);

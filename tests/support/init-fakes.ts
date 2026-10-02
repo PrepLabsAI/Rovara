@@ -33,8 +33,8 @@ export function sampleAnswers(overrides: Partial<InitAnswers> = {}): InitAnswers
     identity: { mode: "cognito" },
     models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "amazon.nova-lite-v1:0", worker: "amazon.nova-pro-v1:0" },
     alert: { kind: "email", address: "ops@example.com" },
-    github: { account: "acme", accountType: "organization", appName: "AgentX acme staging" },
-    slack: { appName: "AgentX", appPostedMessages: "accept" },
+    github: { account: "acme", accountType: "organization", appName: "AgentX acme (staging)" },
+    slack: { appName: "AgentX acme (staging)", appPostedMessages: "accept" },
     createdAt: "2026-09-27T00:00:00.000Z",
     ...overrides,
   };

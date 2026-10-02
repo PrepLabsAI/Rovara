@@ -204,7 +204,7 @@ describe("Slack app step", () => {
   it("waits when a workspace admin must approve the app, and continues on the next run", async () => {
     const waiting = slackContext(["approval"]);
     const outcome = await slackAppStep(fakeSlackApi()).run(waiting, progressHandle());
-    expect(outcome).toEqual({ status: "waiting", message: 'Slack is waiting for a workspace admin to approve "AgentX". Once it is installed, run agentx init --env staging --region us-east-1 again; it continues here.' });
+    expect(outcome).toEqual({ status: "waiting", message: 'Slack is waiting for a workspace admin to approve "AgentX acme (staging)". Once it is installed, run agentx init --env staging --region us-east-1 again; it continues here.' });
     expect(storedSlack(waiting).botToken).toBe("unset");
 
     const resumed = slackContext(["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true]);
