@@ -5,9 +5,13 @@ import { adminUserStep, e2eStep, finishSteps, readyText, subscribeAlertsAfterDep
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
 import { subscribeAlertsEarly, type AlertsApi } from "../../packages/cli/src/setup/alerts.js";
 import { initContext, progressHandle, sampleAnswers, scriptedPrompter, T0, TEST_CLI_INVOCATION, type TestInitContext } from "../support/init-fakes.js";
-import { ADMIN_EMAIL, fakeAlerts, fakeCognito, fakeControlPlane, setupServices, STAGING_SETTINGS, turn } from "../support/setup-fakes.js";
+import { ADMIN_EMAIL, ALERTS_TOPIC_ARN, fakeAlerts, fakeCognito, fakeControlPlane, setupServices, STAGING_SETTINGS, turn } from "../support/setup-fakes.js";
 
-const TOPIC = "arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts";
+const TOPIC = ALERTS_TOPIC_ARN;
+
+// Contexts finishContext builds, so afterEach cleans up their home directories alongside the
+// file's own `context` variable (initContext's own contract: a test that uses it deletes its home).
+const finishContexts: TestInitContext[] = [];
 
 /** A context for subscribeAlertsAfterDeploy: the control-plane stack reports TOPIC, and the alerts
  * api and write are fakeAlerts() and a no-op unless overridden. */
@@ -17,6 +21,7 @@ async function finishContext(overrides: { answers?: ReturnType<typeof sampleAnsw
     setup: setupServices({ alerts: overrides.alerts ?? fakeAlerts(), stackOutputs: async () => ({ OperatorAlertsTopicArn: TOPIC }) }),
     ...(overrides.write === undefined ? {} : { write: overrides.write }),
   });
+  finishContexts.push(built);
   return { context: built };
 }
 
@@ -27,7 +32,10 @@ const READY_PROGRESS_FIXTURE = {
 };
 
 let context: TestInitContext | undefined;
-afterEach(async () => { if (context !== undefined) await rm(context.home, { recursive: true, force: true }); });
+afterEach(async () => {
+  if (context !== undefined) await rm(context.home, { recursive: true, force: true });
+  await Promise.all(finishContexts.splice(0).map((built) => rm(built.home, { recursive: true, force: true })));
+});
 
 describe("the e2e step (FR-018 step 11)", () => {
   const progress = () => progressHandle({

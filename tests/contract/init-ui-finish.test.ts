@@ -12,7 +12,7 @@ import { alertsCard, channelCard, projectCard } from "../../packages/cli/src/ini
 import { startInstallWizard } from "../../packages/cli/src/init/ui/index.js";
 import type { WizardCard, WizardLink } from "../../packages/cli/src/init/ui/protocol.js";
 import { initContext, memoryInitSecrets, progressHandle, sampleAnswers, scriptedPrompter, T0, TEST_BOT_TOKEN, TEST_SIGNING_SECRET, type TestInitContext } from "../support/init-fakes.js";
-import { accessToken, ADMIN_EMAIL, CONTROL_PLANE, fakeAlerts, fakeCognito, fakeControlPlane, fakeSlackChannels, setupServices, STAGING_SETTINGS, turn } from "../support/setup-fakes.js";
+import { accessToken, ADMIN_EMAIL, ALERTS_TOPIC_ARN, CONTROL_PLANE, fakeAlerts, fakeCognito, fakeControlPlane, fakeSlackChannels, setupServices, STAGING_SETTINGS, turn } from "../support/setup-fakes.js";
 
 let context: TestInitContext | undefined;
 afterEach(async () => { if (context !== undefined) await rm(context.home, { recursive: true, force: true }); context = undefined; });
@@ -185,7 +185,7 @@ describe("the first project's channel wait on the page", () => {
 });
 
 describe("the alerts on the page", () => {
-  const TOPIC = "arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts";
+  const TOPIC = ALERTS_TOPIC_ARN;
   const setupFor = (alerts: ReturnType<typeof fakeAlerts>) => setupServices({ alerts, stackOutputs: async () => ({ OperatorAlertsTopicArn: TOPIC }) });
   const answers = sampleAnswers({ alert: { kind: "email", address: "ops@example.com" } });
 

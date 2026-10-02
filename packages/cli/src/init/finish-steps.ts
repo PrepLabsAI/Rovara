@@ -17,7 +17,7 @@ import { REPLY_WAIT_MS, waitForThreadedReply } from "../setup/reply-watch.js";
 import { BUDGET_TAG_NOTE, checkAlertWebhook } from "./answers.js";
 import { cliCommandLine, type CliInvocation } from "./cli-command.js";
 import type { InitContext } from "./context.js";
-import { CONNECTOR_LABELS, CONNECTOR_TYPES, type ConnectorType, type InstallProgress } from "./install-state.js";
+import { CONNECTOR_LABELS, CONNECTOR_TYPES, type ConnectorType, type InitAnswers, type InstallProgress } from "./install-state.js";
 import { problemText, retryOnPage } from "./retry.js";
 import { botNameOf, readSlackBotToken } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
@@ -227,6 +227,15 @@ export function connectorsStep(): InitStep<InitContext> {
   };
 }
 
+/** The AlertTarget subscribeAlertsAfterDeploy and alertsStep both build from a non-"none" alert
+ * answer (the webhook case reads its secret through requireWebhook, which never logs or returns
+ * it). */
+async function alertTargetFrom(context: InitContext, alert: Exclude<InitAnswers["alert"], { kind: "none" }>): Promise<AlertTarget> {
+  return alert.kind === "email"
+    ? { kind: "email", address: alert.address }
+    : { kind: "webhook", display: alert.display, endpoint: await requireWebhook(context, alert.secretName) };
+}
+
 /** Spec 048 FR-025: the AgentX service step's last act. A failure is a log line, never the build's
  * failure: the alerts step subscribes again (ensureSubscribed is idempotent). */
 export async function subscribeAlertsAfterDeploy(context: InitContext): Promise<void> {
@@ -234,9 +243,7 @@ export async function subscribeAlertsAfterDeploy(context: InitContext): Promise<
   if (alert.kind === "none") return;
   try {
     const topicArn = await alertsTopicArn({ stackOutputs: context.setup.stackOutputs, stackName: environmentStackName(context.env, "control-plane"), next: "the alerts step tries again" });
-    const target: AlertTarget = alert.kind === "email"
-      ? { kind: "email", address: alert.address }
-      : { kind: "webhook", display: alert.display, endpoint: await requireWebhook(context, alert.secretName) };
+    const target = await alertTargetFrom(context, alert);
     await subscribeAlertsEarly({ api: context.setup.alerts, topicArn, target, write: context.write });
   } catch (error) {
     context.write(`could not subscribe the alert address yet (${problemText(error)}); the alerts step tries again`);
@@ -265,9 +272,7 @@ export function alertsStep(): InitStep<InitContext> {
       const shownAs = answers.alert.kind === "email" ? answers.alert.address : answers.alert.display;
       const topicArn = await alertsTopicArn({ stackOutputs: context.setup.stackOutputs, stackName: settings.stacks["control-plane"], next: "run agentx init again" });
       if (!recorded.subscribed) {
-        const target: AlertTarget = answers.alert.kind === "email"
-          ? { kind: "email", address: answers.alert.address }
-          : { kind: "webhook", display: answers.alert.display, endpoint: await requireWebhook(context, answers.alert.secretName) };
+        const target = await alertTargetFrom(context, answers.alert);
         const surface = context.surface;
         // On the page, a card shows the run's own wait for the confirmation while it polls.
         const subscribe = () => ensureSubscribed({
