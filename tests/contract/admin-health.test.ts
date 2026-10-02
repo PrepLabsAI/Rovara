@@ -52,6 +52,18 @@ describe("GET /v1/admin/health (FR-030, A13)", () => {
     expect(answer.body.version).not.toHaveProperty("release");
   });
 
+  it("warns, never all clear, when a listed alarm is missing, and counts it beside firing ones (issue 206)", async () => {
+    const answer = async (alarms: Array<{ name: string; state: string }>) => {
+      const { admin } = await createAdminReadBroker({ brokerExtra: { adminReads: { health: { alarms: async () => alarms } } } });
+      return (await admin("GET", "/v1/admin/health")).body.alarmsCheck;
+    };
+    expect(await answer([{ name: "agentx-live25d-SlackDeadLetters", state: "MISSING" }, { name: "agentx-live25d-TurnErrors", state: "OK" }]))
+      .toStrictEqual({ status: "warn", detail: "1 alarm missing" });
+    expect(await answer([{ name: "agentx-live25d-SlackDeadLetters", state: "MISSING" }, { name: "agentx-live25d-TestAlarm", state: "MISSING" }, { name: "agentx-live25d-TurnErrors", state: "ALARM" }]))
+      .toStrictEqual({ status: "warn", detail: "1 alarm in ALARM, 2 alarms missing" });
+    expect(await answer([{ name: "agentx-live25d-TurnErrors", state: "OK" }])).toStrictEqual({ status: "ok", detail: "1 alarms, none in ALARM" });
+  });
+
   it("gives up on a slow probe after its time limit", async () => {
     const slow = { githubInstallations: () => new Promise<number>(() => undefined), timeoutMs: 20 };
     const { admin } = await createAdminReadBroker({ brokerExtra: { adminReads: { health: slow } } });

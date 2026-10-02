@@ -114,6 +114,8 @@ export const SwebenchGradedResultSchema = z.object({
   /** SEC-bench runs (spec 045): the evaluator's verdict, in place of test counts. */
   secbench: SecbenchVerdictSchema.optional(),
   agentSeconds: z.number().int().nonnegative(),
+  /** Spec 052 Ruling 28: the tool calls the agent started; absent from a runner older than the count. */
+  toolCalls: z.number().int().nonnegative().optional(),
   imageDigest: z.string().max(256),
   usage: TaskUsageTelemetrySchema,
   artifactsPrefix: z.string().max(512),
@@ -151,6 +153,14 @@ export const SwebenchRunSchema = z.object({
   finishedAt: z.string().datetime().optional(),
   error: z.string().max(2_000).optional(),
   result: SwebenchGradedResultSchema.optional(),
+  /** Spec 052: the batch that queued the run; absent for a single run. */
+  batchId: z.string().uuid().optional(),
+  /** Spec 052: the runner image the batch pinned; absent when the run used the deployment's current one. */
+  runnerImage: z.string().max(512).optional(),
+  /** Spec 052: what a FAILED run's report said it used, so its cost is kept wherever its end is recorded. */
+  usage: TaskUsageTelemetrySchema.optional(),
+  /** Spec 052: when the runner reported it had started; a run cancelled before then spent no tokens. */
+  runnerStartedAt: z.string().datetime().optional(),
 }).strict();
 
 export const SwebenchStartResultSchema = z.discriminatedUnion("outcome", [
@@ -279,6 +289,8 @@ export const SwebenchSettingsSchema = z.object({
   subnetIds: z.array(z.string().regex(/^subnet-[0-9a-f]{8,17}$/)).min(1).max(8),
   controlPlaneUrl: z.string().url().startsWith("https://"),
   logGroupName: z.string().regex(/^[A-Za-z0-9._/-]{1,512}$/),
+  /** Runs at once, deployment-wide (spec 052 FR-005); stored settings without it get the default. */
+  maxConcurrentEvals: z.number().int().min(1).max(6).default(4),
 }).strict();
 
 /**

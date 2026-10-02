@@ -2,13 +2,93 @@
 // question, and the rules that keep a link, or a secret, from reaching the page by accident.
 import { describe, expect, it } from "vitest";
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
-import { adminCard, alertsCard, channelCard, connectorsCard, githubCard, onPageProblem, projectCard, readyCard, replyCard, slackAppCard, slackChannelLink, slackUrlsCard } from "../../packages/cli/src/init/ui/cards.js";
+import {
+  adminCard, alertsCard, awsCard, awsSignedOutCard, channelCard, connectorsCard, githubCard, onPageProblem, prerequisitesCard, projectCard, readyCard, replyCard,
+  signedInAs, slackAppCard, slackChannelLink, slackUrlsCard,
+} from "../../packages/cli/src/init/ui/cards.js";
 import { startInstallWizard } from "../../packages/cli/src/init/ui/index.js";
 import { WIZARD_JS, wizardHtml } from "../../packages/cli/src/init/ui/page.js";
 import type { WizardCard, WizardState } from "../../packages/cli/src/init/ui/protocol.js";
-import { createWizardHub, isShowableLink, LINK_REFUSED } from "../../packages/cli/src/init/ui/state.js";
+import { createWizardHub, isShowableLink, LINK_REFUSED, NEW_TAB_NOTE } from "../../packages/cli/src/init/ui/state.js";
+import { lintCopy, type CopyEntry } from "../support/copy-lint.js";
 
 const card = (overrides: Partial<WizardCard> = {}): WizardCard => ({ id: "github", title: "GitHub App", status: "waiting", lines: ["one"], ...overrides });
+
+/** A card's page words and its technical details, for the copy-lint rules. */
+function cardEntries(input: WizardCard): CopyEntry[] {
+  const where = `${input.id} card`;
+  return [
+    { where, text: input.title, context: "page" },
+    ...input.lines.map((text) => ({ where, text, context: "page" as const })),
+    ...(input.checks ?? []).flatMap((check) => [{ where, text: check.label, context: "page" as const }, { where, text: check.detail, context: "page" as const }]),
+    ...(input.link === undefined ? [] : [{ where, text: input.link.label, context: "page" as const }]),
+    ...(input.details ?? []).map((text) => ({ where, text, context: "details" as const })),
+  ];
+}
+
+const EVERY_CARD: WizardCard[] = [
+  awsCard({ account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice", region: "us-east-1", profile: "dev" }),
+  awsSignedOutCard({ profile: "dev", problem: "AUTH_REQUIRED: your AWS session has expired. Refresh your AWS session first (for example aws sso login or aws login)", signIn: "aws sso login --profile dev" }),
+  prerequisitesCard({ status: "failed", checks: [{ label: "EC2 vCPU quota", ok: false, detail: "Ask AWS for more in Service Quotas." }] }),
+  githubCard({ stage: "create", appName: "AgentX acme (staging)", account: "acme", startUrl: "http://127.0.0.1:5000/github/start?t=x" }),
+  githubCard({ stage: "install", appName: "AgentX acme (staging)", slug: "agentx-acme-staging", account: "acme", installUrl: "https://github.com/apps/agentx-acme-staging/installations/new" }),
+  githubCard({ stage: "repositories", appName: "AgentX acme (staging)", slug: "agentx-acme-staging", account: "acme", settingsUrl: "https://github.com/organizations/acme/settings/installations/1" }),
+  githubCard({ stage: "done", appName: "AgentX acme (staging)", slug: "agentx-acme-staging", account: "acme" }),
+  githubCard({ stage: "failed", problem: "no GitHub App was created within 15 minutes; run agentx init again" }),
+  slackAppCard({ stage: "create", appName: "AgentX acme (staging)", createUrl: "https://api.slack.com/apps?new_app=1" }),
+  slackAppCard({ stage: "credentials", appName: "AgentX acme (staging)" }),
+  slackAppCard({ stage: "bot", user: "agentx-acme-staging", team: "Acme" }),
+  slackAppCard({ stage: "refused", problem: "Slack refused the bot token (invalid_auth); copy it again from OAuth & Permissions" }),
+  slackAppCard({ stage: "approval", appName: "AgentX acme (staging)" }),
+  slackAppCard({ stage: "done", appName: "AgentX acme (staging)", appId: "A0APP", teamId: "T0TEAM", teamName: "Acme" }),
+  slackUrlsCard({ stage: "verify", pageUrl: "https://api.slack.com/apps/A0APP/event-subscriptions" }),
+  slackUrlsCard({ stage: "failed", problem: "the URL answered 401; run agentx init again", pageUrl: "https://api.slack.com/apps/A0APP/event-subscriptions" }),
+  adminCard({ stage: "signing-in", who: "you@example.com", createdEmail: "you@example.com" }),
+  adminCard({ stage: "failed", problem: "the AgentX sign-in did not finish within 10 minutes; run agentx init again", retry: false }),
+  projectCard({ name: "payments-api", revision: 1, repository: "acme/payments-api" }),
+  channelCard({ stage: "waiting", channelName: "payments", botName: "agentx-acme-staging" }),
+  channelCard({ stage: "failed", channelName: "payments", problem: "the bot was not invited within 10 minutes; run agentx init again" }),
+  connectorsCard({ projectName: "payments-api", connected: [] }),
+  alertsCard({ stage: "confirm", shownAs: "ops@example.com" }),
+  alertsCard({ stage: "failed", problem: "CloudWatch refused SetAlarmState" }),
+  alertsCard({ stage: "none" }),
+  replyCard({ stage: "waiting", channelName: "payments", channelId: "C0PAY00001", teamId: "T0TEAM", botName: "agentx-acme-staging", minutes: 10 }),
+  replyCard({ stage: "failed", channelName: "payments", channelId: "C0PAY00001", teamId: "T0TEAM", problem: "no reply within 10 minutes; run agentx init again" }),
+];
+
+describe("spec 048 card copy", () => {
+  it("SC-011: no card says an internal word, a raw ID, a flag or a command outside its technical details", () => {
+    expect(lintCopy(EVERY_CARD.flatMap(cardEntries))).toEqual([]);
+  });
+
+  it("FR-027: names who is signed in, never the ARN, which is kept in the details", () => {
+    expect(signedInAs("arn:aws:sts::123456789012:assumed-role/Admin/alice")).toBe("alice (role Admin)");
+    expect(signedInAs("arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_AdministratorAccess_0123456789abcdef/alice@example.com")).toBe("alice@example.com (AdministratorAccess, through IAM Identity Center)");
+    expect(signedInAs("arn:aws:iam::123456789012:user/ops/bob")).toBe("the IAM user bob");
+    expect(signedInAs("arn:aws:iam::123456789012:root")).toBe("the AWS root user");
+    expect(EVERY_CARD[0]?.details).toEqual(["arn:aws:sts::123456789012:assumed-role/Admin/alice"]);
+  });
+
+  it("FR-027: the GitHub app keeps its name on every card, and its slug only in the details", () => {
+    for (const shown of EVERY_CARD.filter((entry) => entry.id === "github" && entry.status !== "failed")) {
+      expect(shown.lines.join(" ")).toContain("AgentX acme (staging)");
+      expect(shown.lines.join(" ")).not.toContain("agentx-acme-staging");
+    }
+    expect(githubCard({ stage: "done", appName: "AgentX acme (staging)", slug: "agentx-acme-staging", account: "acme" }).details).toEqual(["GitHub app slug: agentx-acme-staging"]);
+  });
+
+  it("FR-027: Slack's workspace and bot are named, and their IDs are only in the details", () => {
+    const done = slackAppCard({ stage: "done", appName: "AgentX acme (staging)", appId: "A0APP", teamId: "T0TEAM", teamName: "Acme" });
+    expect(done.lines).toEqual(['"AgentX acme (staging)" is installed in the Acme workspace.']);
+    expect(done.details).toEqual(["Slack app ID: A0APP", "Slack workspace ID: T0TEAM"]);
+    expect(channelCard({ stage: "waiting", channelName: "payments", botName: "agentx-acme-staging" }).commands).toEqual([{ label: "Invite the bot", command: "/invite @agentx-acme-staging" }]);
+  });
+
+  it("FR-034: the Slack create card says up front that a Request URL error is expected", () => {
+    expect(slackAppCard({ stage: "create", appName: "AgentX acme (staging)", createUrl: "https://api.slack.com/apps?new_app=1" }).lines)
+      .toContain("Slack may show a red error next to the Request URL. That is expected; AgentX fixes it in a later step.");
+  });
+});
 
 describe("status cards", () => {
   it("shows a card, replaces it in place by id, and keeps the order cards first appeared in", () => {
@@ -55,7 +135,7 @@ describe("links", () => {
       expect(await wizard.openLink("http://example.com/")).toBe(false);
       expect(wizard.hub.state().link).toBeUndefined();
       expect(await wizard.openLink("https://github.com/apps/agentx-acme-staging/installations/new")).toBe(true);
-      expect(wizard.hub.state().link).toEqual({ url: "https://github.com/apps/agentx-acme-staging/installations/new", label: "Open github.com" });
+      expect(wizard.hub.state().link).toEqual({ url: "https://github.com/apps/agentx-acme-staging/installations/new", label: "Open github.com", note: NEW_TAB_NOTE });
     } finally {
       await wizard.close();
     }
@@ -95,6 +175,19 @@ describe("links", () => {
     expect(hub.snapshot().log).toEqual([LINK_REFUSED, LINK_REFUSED]);
   });
 
+  it("keeps a card's details and commands when its link is refused", () => {
+    const hub = createWizardHub("staging");
+    hub.showCard(card({
+      link: { url: "javascript:alert(1)", label: "Create" },
+      details: ["raw error ARN"],
+      commands: [{ label: "Continue later with", command: "agentx --env staging init" }],
+    }));
+    const shown = hub.state().cards?.[0];
+    expect(shown).not.toHaveProperty("link");
+    expect(shown?.details).toEqual(["raw error ARN"]);
+    expect(shown?.commands).toEqual([{ label: "Continue later with", command: "agentx --env staging init" }]);
+  });
+
   it("clearLink drops the run's link, and does nothing when there is none", () => {
     const hub = createWizardHub("staging");
     const states: WizardState[] = [];
@@ -110,13 +203,13 @@ describe("links", () => {
 
   it("clears the run's link when its step ends, or when the next one starts", () => {
     const hub = createWizardHub("staging");
-    hub.setSteps([{ id: "github-app", title: "Create and install the GitHub App" }, { id: "control-plane", title: "Deploy the control plane and runtime" }]);
+    hub.setSteps([{ id: "github-app", title: "Create the GitHub app" }, { id: "control-plane", title: "Start the AgentX service" }]);
     hub.showLink({ url: "https://github.com/apps/agentx-acme-staging/installations/new", label: "Open github.com" });
-    expect(hub.state().link).toEqual({ url: "https://github.com/apps/agentx-acme-staging/installations/new", label: "Open github.com" });
-    hub.applyEvent({ kind: "step-done", id: "github-app", title: "Create and install the GitHub App" });
+    expect(hub.state().link).toEqual({ url: "https://github.com/apps/agentx-acme-staging/installations/new", label: "Open github.com", note: NEW_TAB_NOTE });
+    hub.applyEvent({ kind: "step-done", id: "github-app", title: "Create the GitHub app" });
     expect(hub.state().link).toBeUndefined();
     hub.showLink({ url: "https://api.slack.com/apps", label: "Open api.slack.com" });
-    hub.applyEvent({ kind: "step-started", id: "control-plane", title: "Deploy the control plane and runtime" });
+    hub.applyEvent({ kind: "step-started", id: "control-plane", title: "Start the AgentX service" });
     expect(hub.state().link).toBeUndefined();
   });
 });
@@ -135,7 +228,7 @@ describe("the page", () => {
     expect(WIZARD_JS).not.toContain("document.write");
     expect(WIZARD_JS).toContain('anchor.target = "_blank";');
     expect(WIZARD_JS).toContain('anchor.rel = "noopener noreferrer";');
-    expect(WIZARD_JS).toContain("renderCards(state.cards, state.link);");
+    expect(WIZARD_JS).toContain("renderPanelCards(state);");
   });
 
   it("Q4: empties a masked field the moment it is sent, empties the question area once answered, and asks password managers to leave it alone", () => {
@@ -170,109 +263,116 @@ describe("cards that offer to try again on the page (M18)", () => {
   });
 
   it("a failed Request URL check says to run the check again below, not agentx init", () => {
-    const failed = slackUrlsCard({
-      stage: "failed", pageUrl: "https://api.slack.com/apps/A0APP/event-subscriptions",
-      problem: "Slack has not verified https://abc.execute-api.us-east-1.amazonaws.com/slack/events. On https://api.slack.com/apps/A0APP/event-subscriptions, press Retry; if it still fails, look for invalid_signature in the control plane's SlackIngress logs, then run agentx init again",
-    });
-    expect(failed.lines).toEqual([
-      "Slack has not verified https://abc.execute-api.us-east-1.amazonaws.com/slack/events. On https://api.slack.com/apps/A0APP/event-subscriptions, press Retry; if it still fails, look for invalid_signature in the control plane's SlackIngress logs",
-      "Fix it, then answer Yes below to run the check again.",
-    ]);
+    const problem = "Slack has not verified https://abc.execute-api.us-east-1.amazonaws.com/slack/events. On https://api.slack.com/apps/A0APP/event-subscriptions, press Retry; if it still fails, look for invalid_signature in the control plane's SlackIngress logs, then run agentx init again";
+    const failed = slackUrlsCard({ stage: "failed", pageUrl: "https://api.slack.com/apps/A0APP/event-subscriptions", problem });
+    expect(failed.lines).toEqual(["Slack's check of the address did not pass.", "Fix it, then choose Check again below."]);
     expect(failed.link).toEqual({ url: "https://api.slack.com/apps/A0APP/event-subscriptions", label: "Open Event Subscriptions" });
-    expect(JSON.stringify(failed)).not.toContain("run agentx init again");
+    expect(failed.details).toEqual([problem]);
+    expect(JSON.stringify(failed.lines)).not.toContain("run agentx init again");
   });
 });
 
-const T0 = Date.parse("2026-09-27T00:00:00.000Z");
 const WHERE = { channelName: "payments", channelId: "C0PAY00001", teamId: "T0123456789" };
 
 describe("the finishing cards", () => {
   it("admin: the new user, the sign-in wait, a failed sign-in, and who signed in", () => {
     expect(adminCard({ stage: "signing-in", who: "alice@example.com", createdEmail: "alice@example.com" })).toEqual({
-      id: "admin", title: "Admin user", status: "waiting",
+      id: "admin", title: "Your AgentX sign-in", status: "waiting",
       lines: [
-        "Created your admin user alice@example.com. Cognito emailed a temporary password to alice@example.com; you choose your own password when you first sign in.",
-        "Sign in to AgentX as alice@example.com in the tab the button opens. This page moves on by itself once you have.",
+        "AgentX made your admin sign-in for alice@example.com. Look for an email with your temporary password; you choose your own when you first sign in.",
+        "Sign in to AgentX as alice@example.com in the tab the Sign in button opens. This page moves on by itself when you have.",
       ],
     });
     expect(adminCard({ stage: "signing-in", who: "alice@example.com" }).lines).toHaveLength(1);
-    expect(adminCard({ stage: "failed", problem: "the AgentX sign-in did not finish within 10 minutes" })).toMatchObject({ status: "failed", lines: ["the AgentX sign-in did not finish within 10 minutes", "Answer Yes below to sign in again."] });
-    expect(adminCard({ stage: "done", username: "alice@example.com" })).toMatchObject({ status: "ok", lines: ["Signed in to AgentX as alice@example.com."] });
+    expect(adminCard({ stage: "failed", problem: "the AgentX sign-in did not finish within 10 minutes" })).toMatchObject({ status: "failed", lines: ["the AgentX sign-in did not finish within 10 minutes", "Choose Sign in again below."] });
+    expect(adminCard({ stage: "done", username: "alice@example.com" })).toMatchObject({ status: "ok", lines: ["You are signed in to AgentX as alice@example.com."] });
   });
 
   it("project and channel", () => {
     expect(projectCard({ name: "payments-api", revision: 1, repository: "acme/payments-api" })).toEqual({
-      id: "project", title: "First project", status: "ok", lines: ["Project payments-api, revision 1, for acme/payments-api, runs on EC2 workers."],
+      id: "project", title: "Your first project", status: "ok",
+      lines: ["The project payments-api is set up for acme/payments-api."],
+      details: ["Project revision 1"],
     });
-    expect(projectCard({ name: "payments-api", revision: 2 }).lines).toEqual(["Project payments-api, revision 2, runs on EC2 workers."]);
-    expect(channelCard({ stage: "waiting", channelName: "payments", botUserId: "U0BOT00001" })).toEqual({
+    expect(projectCard({ name: "payments-api", revision: 2 }).lines).toEqual(["The project payments-api is set up."]);
+    expect(channelCard({ stage: "waiting", channelName: "payments", botName: "agentx-acme-staging" })).toEqual({
       id: "channel", title: "Slack channel", status: "waiting",
-      lines: ["The bot cannot see #payments yet.", "If #payments is private, type /invite <@U0BOT00001> in it; if it does not exist, create it. This page moves on by itself (up to 10 minutes)."],
+      lines: [
+        "AgentX's bot cannot see #payments yet.",
+        "If #payments is private, invite the bot in it with the command below. If it does not exist yet, create it in Slack.",
+        "This page moves on by itself when the bot can see it (up to 10 minutes).",
+      ],
+      commands: [{ label: "Invite the bot", command: "/invite @agentx-acme-staging" }],
     });
-    expect(channelCard({ stage: "done", channelName: "payments", projectName: "payments-api" })).toMatchObject({ status: "ok", lines: ["#payments is bound to project payments-api."] });
+    expect(channelCard({ stage: "done", channelName: "payments", projectName: "payments-api" })).toMatchObject({ status: "ok", lines: ["AgentX answers in #payments for payments-api."] });
   });
 
   it("a channel wait that timed out is failed, with the problem whole, since the page offers no retry", () => {
     const problem = "the bot cannot see a channel named #payments after 10 minutes; create it in Slack (or invite the bot to it, if it is private), then run this again";
-    expect(channelCard({ stage: "failed", channelName: "payments", problem })).toEqual({ id: "channel", title: "Slack channel", status: "failed", lines: [problem] });
+    expect(channelCard({ stage: "failed", channelName: "payments", problem })).toEqual({ id: "channel", title: "Slack channel", status: "failed", lines: ["AgentX's bot still cannot see #payments."], details: [problem] });
   });
 
   it("a GitHub App wait that failed is failed, with the problem whole and no link", () => {
     const problem = "the GitHub App was not installed on acme within 15 minutes; install it at https://github.com/apps/agentx-acme-staging/installations/new, then run agentx init again";
-    expect(githubCard({ stage: "failed", problem })).toEqual({ id: "github", title: "GitHub App", status: "failed", lines: [problem] });
+    expect(githubCard({ stage: "failed", problem })).toEqual({ id: "github", title: "GitHub app", status: "failed", lines: ["The GitHub app was not set up."], details: [problem] });
   });
 
   it("connectors and alerts, naming a webhook only by its display form", () => {
-    expect(connectorsCard({ projectName: "payments-api", connected: [] }).lines).toEqual(["No connectors on payments-api yet. You can add Linear, Jira or Asana later."]);
+    expect(connectorsCard({ projectName: "payments-api", connected: [] }).lines).toEqual(["No issue trackers are connected to payments-api yet. You can connect Linear, Jira or Asana later."]);
     expect(connectorsCard({ projectName: "payments-api", connected: [{ label: "Linear" }, { label: "Jira", warning: "the Jira service account can also see issues in HR" }] }).lines).toEqual([
       "Connected to payments-api: Linear, Jira.", "Warning (Jira): the Jira service account can also see issues in HR.",
     ]);
     expect(alertsCard({ stage: "confirm", shownAs: "https://events.pagerduty.com/..." })).toMatchObject({
       id: "alerts", status: "waiting",
       lines: [
-        "Confirm the alert subscription for https://events.pagerduty.com/...: open the email from AWS Notifications and choose Confirm subscription (a webhook confirms by opening the SubscribeURL that SNS sent it).",
-        "Then answer Yes below to check again.",
+        "Confirm the alert email for https://events.pagerduty.com/...: open the email from AWS Notifications and choose Confirm subscription.",
+        "Then choose Check again below.",
       ],
     });
     expect(alertsCard({ stage: "waiting", shownAs: "ops@example.com" })).toEqual({
       id: "alerts", title: "Alerts", status: "waiting",
       lines: [
-        "Confirm the alert subscription for ops@example.com: open the email from AWS Notifications and choose Confirm subscription (a webhook confirms by opening the SubscribeURL that SNS sent it).",
-        "This page moves on by itself once it is confirmed (up to 10 minutes).",
+        "Confirm the alert email for ops@example.com: open the email from AWS Notifications and choose Confirm subscription.",
+        "This page moves on by itself when it is confirmed (up to 10 minutes).",
       ],
+      details: ["A webhook confirms by opening the SubscribeURL that AWS sent it."],
     });
-    expect(alertsCard({ stage: "done", shownAs: "ops@example.com" }).lines).toEqual(["Alerts go to ops@example.com, and the test alarm arrived."]);
-    expect(alertsCard({ stage: "none" }).lines).toEqual(["No alert address yet. Set one later with agentx config set alerts.address."]);
+    expect(alertsCard({ stage: "done", shownAs: "ops@example.com" }).lines).toEqual(["Alerts go to ops@example.com, and the test alert arrived."]);
+    expect(alertsCard({ stage: "none" }).lines).toEqual(["No alerts yet. The ready screen shows how to turn them on."]);
   });
 
   it("I1: alerts while the test alarm is out, and a test alarm that failed", () => {
     expect(alertsCard({ stage: "testing", shownAs: "ops@example.com" })).toEqual({
       id: "alerts", title: "Alerts", status: "waiting",
-      lines: ["Alerts are subscribed for ops@example.com. AgentX sent a test alarm; answer below whether it arrived."],
+      lines: ["Alerts go to ops@example.com. AgentX sent a test alert; answer below whether it arrived."],
     });
     const problem = "the test alarm did not arrive; check the subscription is confirmed and your spam folder, then run agentx alerts test";
-    expect(alertsCard({ stage: "failed", problem })).toEqual({ id: "alerts", title: "Alerts", status: "failed", lines: [problem] });
+    expect(alertsCard({ stage: "failed", problem })).toEqual({ id: "alerts", title: "Alerts", status: "failed", lines: ["The test alert could not be sent."], details: [problem] });
   });
 
   it("the test reply: how to mention the bot, a link to the channel, and what to fix", () => {
     expect(slackChannelLink("T0123456789", "C0PAY00001")).toBe("https://slack.com/app_redirect?team=T0123456789&channel=C0PAY00001");
-    expect(replyCard({ stage: "waiting", ...WHERE, botUserId: "U0BOT00001", minutes: 10 })).toEqual({
-      id: "reply", title: "Test reply", status: "waiting",
+    expect(replyCard({ stage: "waiting", ...WHERE, botName: "agentx-acme-staging", minutes: 10 })).toEqual({
+      id: "reply", title: "First reply", status: "waiting",
       lines: [
-        'In #payments, post a message that mentions the bot, for example "@<the bot> what can you do?".',
-        "Type @ and pick the bot from Slack's mention list: a workspace that had an older AgentX app shows two bots with similar names, and this one's member ID is U0BOT00001.",
-        "Waiting up to 10 minutes for AgentX to reply in its thread. This page moves on by itself.",
+        'In #payments, post a message that mentions @agentx-acme-staging, for example "@agentx-acme-staging what can you do?".',
+        "Type @ and pick agentx-acme-staging from Slack's list. If you see two bots with similar names, pick agentx-acme-staging.",
+        "Waiting up to 10 minutes for AgentX to reply in the thread. This page moves on by itself.",
       ],
       link: { url: "https://slack.com/app_redirect?team=T0123456789&channel=C0PAY00001", label: "Open #payments in Slack" },
     });
-    expect(replyCard({ stage: "failed", ...WHERE, problem: "no AgentX reply in #payments within 10 minutes" })).toMatchObject({ status: "failed", lines: ["no AgentX reply in #payments within 10 minutes", "When it is fixed, answer Yes below to watch for a reply again."] });
+    expect(replyCard({ stage: "failed", ...WHERE, problem: "no AgentX reply in #payments within 10 minutes" })).toMatchObject({
+      status: "failed", lines: ["AgentX did not reply.", "When it is fixed, choose Watch again below."], details: ["no AgentX reply in #payments within 10 minutes"],
+    });
     expect(replyCard({ stage: "done", channelName: "payments", seconds: 12 })).toMatchObject({ status: "ok", lines: ["AgentX replied in #payments in 12 seconds."] });
   });
 
-  it("R2: a failed test reply drops the reply watch's closing run agentx --env <env> init again", () => {
-    const failed = replyCard({ stage: "failed", ...WHERE, problem: "the bot is not in #payments; invite it, then run agentx --env staging init again" });
-    expect(failed.lines).toEqual(["the bot is not in #payments; invite it", "When it is fixed, answer Yes below to watch for a reply again."]);
-    expect(JSON.stringify(failed)).not.toContain("init again");
+  it("R2: a failed test reply shows plain words on the page, and keeps the raw problem in its details", () => {
+    const problem = "the bot is not in #payments; invite it, then run agentx --env staging init again";
+    const failed = replyCard({ stage: "failed", ...WHERE, problem });
+    expect(failed.lines).toEqual(["AgentX did not reply.", "When it is fixed, choose Watch again below."]);
+    expect(failed.details).toEqual([problem]);
+    expect(JSON.stringify(failed.lines)).not.toContain("init again");
   });
 
   it("R2: onPageProblem also strips a closing run agentx --env <env> init again", () => {
@@ -288,33 +388,62 @@ describe("the finishing cards", () => {
       .toBe("your sign-in token has no email or sub claim; fix it");
   });
 
-  it("M2: an admin card the page offers no retry for keeps the problem whole, and asks nothing", () => {
+  it("M2: an admin card the page offers no retry for keeps the problem whole in its details, and asks nothing", () => {
     expect(adminCard({ stage: "failed", problem: "your sign-in token has no email or sub claim; fix it, then run agentx init again", retry: false }))
-      .toEqual({ id: "admin", title: "Admin user", status: "failed", lines: ["your sign-in token has no email or sub claim; fix it, then run agentx init again"] });
+      .toEqual({ id: "admin", title: "Your AgentX sign-in", status: "failed", lines: ["The sign-in did not finish."], details: ["your sign-in token has no email or sub claim; fix it, then run agentx init again"] });
   });
 
-  it("FR-052 and Q10: the ready card says what works now, and puts every command under Later", () => {
-    const card = readyCard({ env: "staging", controlPlaneUrl: "https://cp.example.test", progress: {
-      ...emptyProgress("staging", T0),
-      slack: { appId: "A0APP00001", teamId: "T0123456789", botUserId: "U0BOT00001" },
-      project: { name: "payments-api", revision: 2, channelName: "payments", channelId: "C0PAY00001", teamId: "T0123456789" },
-      connectors: [{ type: "linear", ref: "linear" }],
-    } });
-    expect(card).toEqual({
-      id: "ready", title: "AgentX is ready", status: "ok",
-      lines: [
-        "AgentX environment staging is ready.",
-        "Talk to it: mention the bot (member ID U0BOT00001) in #payments, project payments-api, revision 2.",
-        "Developers sign in from their AI tools with: npx @charterarc/agentx login https://cp.example.test",
-        "Connected: Linear.",
-        "Later, if you want more:",
-        "More connectors: agentx --env staging connector add linear|jira|asana --project payments-api",
-        "More projects: agentx --env staging project add, then agentx --env staging channel add",
-        "A test alarm any time: agentx --env staging alerts test",
-      ],
-      link: { url: "https://slack.com/app_redirect?team=T0123456789&channel=C0PAY00001", label: "Open #payments in Slack" },
+});
+
+const FROM_SOURCE = { published: false, cliPath: "/opt/agentx/dist/main.js" };
+const READY_PROGRESS = {
+  ...emptyProgress("staging", 0),
+  slack: { appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT", botName: "agentx-acme-staging" },
+  project: { name: "payments-api", revision: 1, channelName: "payments", channelId: "C0PAY00001", teamId: "T0TEAM" },
+};
+
+describe("spec 048 the ready screen", () => {
+  it("FR-059 and #222: says how to try AgentX by name, and gives commands that work as shown, each with --env", () => {
+    const card = readyCard({
+      env: "staging", controlPlaneUrl: "https://abc.execute-api.us-east-1.amazonaws.com", progress: READY_PROGRESS, botName: "agentx-acme-staging",
+      invocation: FROM_SOURCE, root: false, alertsOn: true, created: ["agentx-staging-access"], logPath: "/home/a/.agentx/logs/init-staging.log",
     });
-    const later = card.lines.indexOf("Later, if you want more:");
-    expect(card.lines.slice(0, later).some((line) => line.includes("agentx --env"))).toBe(false);
+    expect(card.lines).toEqual([
+      "Try it: in #payments, mention @agentx-acme-staging and ask it something.",
+      "Send your developers the sign-in command below. They run it once, then use AgentX from Claude Code, Codex or Cursor.",
+      "The AgentX CLI is not published yet, so this command works on this computer. Other computers need their own copy of the AgentX CLI first.",
+      "No issue trackers connected yet.",
+      "Everything here is also in /home/a/.agentx/logs/init-staging.log.",
+    ]);
+    expect(card.commands).toEqual([
+      { label: "Developer sign-in", command: "node /opt/agentx/dist/main.js login https://abc.execute-api.us-east-1.amazonaws.com", group: "Invite your developers" },
+      { label: "Check the install", command: "node /opt/agentx/dist/main.js --env staging doctor", group: "Look after it" },
+      { label: "Connect an issue tracker", command: "node /opt/agentx/dist/main.js --env staging connector add linear --project payments-api", group: "Look after it" },
+      { label: "Add a project", command: "node /opt/agentx/dist/main.js --env staging project add", group: "Look after it" },
+      { label: "Send a test alert", command: "node /opt/agentx/dist/main.js --env staging alerts test", group: "Look after it" },
+      { label: "Remove AgentX", command: "node /opt/agentx/dist/main.js --env staging destroy", group: "Look after it" },
+    ]);
+    expect(card.details).toEqual(["What was created: agentx-staging-access"]);
+    expect(lintCopy([
+      ...cardEntries(card).map((entry) => ({ ...entry, context: entry.context === "page" ? ("ready" as const) : entry.context })),
+      ...(card.commands ?? []).map((command) => ({ where: "ready", text: command.command, context: "ready" as const })),
+    ])).toEqual([]);
+  });
+
+  it("FR-016: names the commands that need an admin user when the install ran as root", () => {
+    const card = readyCard({
+      env: "staging", controlPlaneUrl: "https://abc.example.com", progress: READY_PROGRESS, botName: "agentx-acme-staging",
+      invocation: FROM_SOURCE, root: true, alertsOn: true, created: [],
+    });
+    expect(card.lines).toContain("You installed as the AWS root user. The day-two commands below need an admin user: AWS does not let the root user use the AgentX operator role.");
+  });
+
+  it("names the published package only when the CLI is the published one", () => {
+    const card = readyCard({
+      env: "staging", controlPlaneUrl: "https://abc.example.com", progress: READY_PROGRESS, botName: "agentx-acme-staging",
+      invocation: { published: true, version: "1.2.3", cliPath: "/x" }, root: false, alertsOn: true, created: [],
+    });
+    expect(card.commands?.[0]?.command).toBe("npx @charterarc/agentx@1.2.3 login https://abc.example.com");
+    expect(card.lines.join(" ")).not.toContain("not published");
   });
 });

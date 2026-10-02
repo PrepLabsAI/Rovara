@@ -27,3 +27,5 @@ export * from "./workspace.js";
 export * from "./admin.js";
 export * from "./admin-changes.js";
 export * from "./swebench.js";
+export * from "./eval-batch.js";
+export * from "./eval-stats.js";

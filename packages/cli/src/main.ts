@@ -28,6 +28,7 @@ import { stopWorkspace } from "./admin/stop.js";
 import { setTaskShareMode } from "./admin/task-share-mode.js";
 import { cancelWorkspaceTask } from "./admin/cancel.js";
 import { askToApply, exportChanges, runCliChange } from "./admin/changes.js";
+import { batchResultsOutput, evalBatchShowText, evalBatchStartText, fetchEvalBatchResults, showEvalBatch, startEvalBatch, stopEvalBatch } from "./admin/eval-batch.js";
 import { disableEvalChannel, enableEvalChannel, parseMaxCostUsd, showEvalChannel } from "./admin/eval.js";
 import { exportTurns, parseSince } from "./admin/turns.js";
 import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
@@ -221,11 +222,11 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   }
 
   /** This computer's unexpired admin sign-in (agentx --env <name> login --admin) for an environment by name. Never refreshed (Q4). */
-  async function adminSessionFor(name: string): Promise<AdminSession | undefined> {
+  async function adminSessionFor(name: string): Promise<(AdminSession & { expiresAt: number }) | undefined> {
     try {
       const settings = await deploymentSettings({ ...globalOptions(program), env: name });
       const tokens = await services.tokenStore.get(tokenStoreKey(settings.auth));
-      return tokens !== undefined && tokens.expiresAt > Date.now() ? { baseUrl: settings.controlPlaneUrl.replace(/\/$/, ""), accessToken: tokens.accessToken } : undefined;
+      return tokens !== undefined && tokens.expiresAt > Date.now() ? { baseUrl: settings.controlPlaneUrl.replace(/\/$/, ""), accessToken: tokens.accessToken, expiresAt: tokens.expiresAt } : undefined;
     } catch {
       return undefined;
     }
@@ -363,7 +364,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     // Spec 025 FR-053: the workspace limits change with the admin sign-in of the environment --env names.
     adminSession: async (env: string) => {
       const session = await adminSessionFor(env);
-      return session === undefined ? undefined : { controlPlaneUrl: session.baseUrl, accessToken: session.accessToken };
+      return session === undefined ? undefined : { controlPlaneUrl: session.baseUrl, accessToken: session.accessToken, expiresAt: session.expiresAt };
     },
   });
 
@@ -576,6 +577,57 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const globals = globalOptions(command);
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
       services.stdout.write(formatSuccess(await disableEvalChannel(evalChannel(options, settings, accessToken), services.fetchImplementation), globals.json));
+    });
+
+  const adminEvalBatch = adminEval.command("batch").description("batches of eval runs from a file (spec 052): start, show, stop, results");
+  const batchOutput = (globals: { json: boolean }, result: unknown, text: string) => formatSuccess(globals.json ? result : text, globals.json);
+  adminEvalBatch
+    .command("start")
+    .description("start a batch from a YAML file in a bound, eval-enabled channel; prints its batch ID")
+    .requiredOption("--file <path>", "the batch file: benchmark, tasks, models, repeats, order, concurrency, costCapUsd (docs/swebench-eval.md)")
+    .requiredOption("--team <team-id>", "Slack team ID, for example T0123456789")
+    .requiredOption("--channel <channel-id>", "Slack channel ID, for example C0123456789")
+    .option("--label <text>", "start another batch from a file that has already been run in this channel (the same file starts the same batch)")
+    .action(async (options: { file: string; team: string; channel: string; label?: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await startEvalBatch({
+        controlPlaneUrl: settings.controlPlaneUrl, accessToken, teamId: options.team, channelId: options.channel, filePath: options.file,
+        ...(options.label === undefined ? {} : { label: options.label }),
+      }, services.fetchImplementation);
+      services.stdout.write(batchOutput(globals, result, evalBatchStartText(result)));
+    });
+  adminEvalBatch
+    .command("show")
+    .description("show a batch's progress, spend and final status")
+    .argument("<batch-id>", "the batch ID")
+    .action(async (batchId: string, _options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await showEvalBatch({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, batchId }, services.fetchImplementation);
+      services.stdout.write(batchOutput(globals, result, evalBatchShowText(result)));
+    });
+  adminEvalBatch
+    .command("stop")
+    .description("stop a batch: queued runs are cancelled and runs in flight are stopped; an ended batch reports its final status")
+    .argument("<batch-id>", "the batch ID")
+    .action(async (batchId: string, _options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await stopEvalBatch({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, batchId }, services.fetchImplementation);
+      services.stdout.write(batchOutput(globals, result, evalBatchShowText(result)));
+    });
+  adminEvalBatch
+    .command("results")
+    .description("a batch's results, read through the control plane: the per-model table, or the per-run CSV with --csv")
+    .argument("<batch-id>", "the batch ID")
+    .option("--csv <path>", "write the per-run results.csv here instead of printing the table")
+    .action(async (batchId: string, options: { csv?: string }, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await fetchEvalBatchResults({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, batchId }, services.fetchImplementation);
+      const text = await batchResultsOutput(result, options.csv);
+      services.stdout.write(batchOutput(globals, globals.json && options.csv !== undefined ? { ...(result as object), csv: undefined, csvPath: options.csv } : result, text));
     });
 
   const adminCredential = admin.command("credential").description("register connector credentials stored in Secrets Manager under agentx/connectors/ or agentx/<env>/connectors/");
@@ -927,9 +979,13 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       if (options.export === undefined) {
         const result = await runInit(initOptions(globals, options, command), dependencies.init ?? {}, { stderr: services.stderr, home });
         if (globals.json) {
-          services.stdout.write(formatSuccess(result, true));
+          // pageMode is the CLI's own note that the page already told the person; not part of the result.
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
+          const { pageMode: _pageMode, ...printed } = result;
+          services.stdout.write(formatSuccess(printed, true));
           return;
         }
+        if (result.pageMode === true) return;
         if (result.status === "waiting") {
           services.stdout.write(`${result.message}\n`);
           return;

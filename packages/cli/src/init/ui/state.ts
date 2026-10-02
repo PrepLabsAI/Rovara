@@ -8,14 +8,25 @@
 import { randomUUID } from "node:crypto";
 import type { InitStepId } from "../install-state.js";
 import type { InitEvent } from "../steps.js";
-import type { WizardCard, WizardLink, WizardPhase, WizardQuestion, WizardResume, WizardSnapshot, WizardState, WizardStep } from "./protocol.js";
+import { journeyOf, STEP_PLAN, usualText, welcomeLines, type JourneyPhaseId } from "./journey.js";
+import type {
+  WizardCard, WizardCommand, WizardFailure, WizardHeader, WizardLink, WizardPhase, WizardQuestion, WizardResume, WizardSnapshot, WizardState, WizardStep,
+} from "./protocol.js";
+
+/** FR-037: every link the page shows says it opens in a new tab and to come back. */
+export const NEW_TAB_NOTE = "Opens in a new tab. Come back to this tab when you are done.";
+/** FR-005: the tab title whenever the run waits on the operator. */
+export const ACTION_NEEDED_TITLE = "(Action needed) Install AgentX";
+
+const withNote = (link: WizardLink): WizardLink => ({ ...link, note: NEW_TAB_NOTE });
 
 /** How many log lines the page is given on connect; the terminal keeps all of them either way. */
 export const LOG_BACKLOG = 1000;
 
 /** Checks and normalizes one posted answer. `error` is shown on the field and the question is asked
- * again; `value` is what the `Prompter` caller receives. */
-export type AnswerCheck = (raw: string) => { value: string } | { error: string };
+ * again; `value` is what the `Prompter` caller receives. `retry` republishes a different question
+ * than the one asked (a form redisplays its fields with the valid ones kept and errors marked). */
+export type AnswerCheck = (raw: string) => { value: string } | { error: string; retry?: NewQuestion };
 
 export interface WizardListener {
   state(state: WizardState): void;
@@ -50,7 +61,19 @@ export interface WizardHub {
   ask(question: NewQuestion, check: AnswerCheck): Promise<string>;
   /** The page's answer. Returns the message to show on the field, or undefined when accepted. */
   answer(id: string, value: string): string | undefined;
-  finish(outcome: string, phase?: Exclude<WizardPhase, "running">): void;
+  /** FR-001: the phase before any step has run (Get started, Your choices). */
+  setStage(stage: JourneyPhaseId): void;
+  /** FR-001: the account and region, once the install knows them. */
+  setPlace(place: { account: string; region: string }): void;
+  /** FR-060: a failure in three parts, shown instead of the run going on. */
+  showFailure(failure: WizardFailure): void;
+  /** Drops the failure: the operator is trying again. */
+  clearFailure(): void;
+  finish(outcome: string, phase?: Exclude<WizardPhase, "running">, commands?: WizardCommand[]): void;
+  /** The page asked to close (FR-002). */
+  requestClose(): void;
+  /** Resolves once the page has asked to close. */
+  closeRequested(): Promise<void>;
   /** Rejects any question still waiting, then tells every listener the run is over. */
   close(reason?: Error): void;
 }
@@ -96,39 +119,75 @@ export function isShowableLink(url: string): boolean {
   }
 }
 
-/** The card without its link. */
+/** The card without its link. Destructures out only `link`, so every other field (including one a
+ * later spec adds) survives a refused link. */
 function withoutLink(card: WizardCard): WizardCard {
-  return { id: card.id, title: card.title, status: card.status, lines: card.lines, ...(card.checks === undefined ? {} : { checks: card.checks }) };
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
+  const { link: _link, ...rest } = card;
+  return rest;
 }
 
-export function createWizardHub(env: string): WizardHub {
+export function createWizardHub(env: string, options: { now?: () => number; logPath?: string } = {}): WizardHub {
+  const now = options.now ?? Date.now;
   let phase: WizardPhase = "running";
+  let stage: JourneyPhaseId = "get-started";
   let steps: WizardStep[] = [];
+  let header: WizardHeader = { installName: env };
   let question: WizardQuestion | undefined;
   let plan: string | undefined;
   let resume: WizardResume | undefined;
   let outcome: string | undefined;
   let cards: WizardCard[] = [];
   let link: WizardLink | undefined;
+  let failure: WizardFailure | undefined;
+  let commands: WizardCommand[] | undefined;
   const log: string[] = [];
   const listeners = new Set<WizardListener>();
   let pending: Pending | undefined;
   let closed = false;
+  let closeWanted: () => void = () => undefined;
+  const closeRequest = new Promise<void>((resolvePromise) => { closeWanted = resolvePromise; });
 
-  const state = (): WizardState => ({
-    env,
-    phase,
-    steps,
-    ...(question === undefined ? {} : { question }),
-    ...(plan === undefined ? {} : { plan }),
-    ...(resume === undefined ? {} : { resume }),
-    ...(cards.length === 0 ? {} : { cards }),
-    ...(link === undefined ? {} : { link }),
-    ...(outcome === undefined ? {} : { outcome }),
-  });
+  // A question, a link, a waiting card or a failure: the operator has something to do before the
+  // run goes on (FR-005). Once the run has ended there is nothing left to answer on the page.
+  const waitingOnYou = (): boolean => phase === "running" && !closed
+    && (question !== undefined || link !== undefined || failure !== undefined || cards.some((card) => card.status === "waiting"));
+
+  const state = (): WizardState => {
+    const waiting = waitingOnYou();
+    const journey = journeyOf({
+      stage,
+      steps: steps.map((step) => ({ id: step.id, status: step.status, ...(step.startedAt === undefined ? {} : { startedAtMs: Date.parse(step.startedAt) }) })),
+      // A paused run ended on a step that waits on someone: its phase says so, not Done.
+      waitingOnYou: waiting || phase === "paused",
+      stopped: failure !== undefined || phase === "failed",
+      finished: phase === "finished",
+      nowMs: now(),
+    });
+    return {
+      env,
+      phase,
+      steps,
+      header,
+      journey,
+      waitingOnYou: waiting,
+      pageTitle: waiting ? ACTION_NEEDED_TITLE : `Install AgentX (step ${journey.stepNumber} of ${journey.stepCount})`,
+      ...(stage === "get-started" && steps.every((step) => step.status === "pending") ? { welcome: welcomeLines() } : {}),
+      ...(question === undefined ? {} : { question }),
+      ...(plan === undefined ? {} : { plan }),
+      ...(resume === undefined ? {} : { resume }),
+      ...(cards.length === 0 ? {} : { cards }),
+      ...(link === undefined ? {} : { link }),
+      ...(failure === undefined ? {} : { failure }),
+      ...(outcome === undefined ? {} : { outcome }),
+      ...(commands === undefined ? {} : { commands }),
+      ...(options.logPath === undefined ? {} : { logPath: options.logPath }),
+    };
+  };
   const publish = () => { const current = state(); for (const listener of listeners) listener.state(current); };
+  const planFields = (id: InitStepId) => ({ phase: STEP_PLAN[id].phase, usualSeconds: STEP_PLAN[id].usualSeconds, usualText: usualText(STEP_PLAN[id].usualSeconds) });
   const changeStep = (id: InitStepId, title: string, change: Partial<Omit<WizardStep, "id">>) => {
-    const known = steps.some((step) => step.id === id) ? steps : [...steps, { id, title, status: "pending" as const }];
+    const known = steps.some((step) => step.id === id) ? steps : [...steps, { id, title, status: "pending" as const, ...planFields(id) }];
     steps = known.map((step) => (step.id === id ? { ...step, title, ...change } : step));
     publish();
   };
@@ -155,17 +214,22 @@ export function createWizardHub(env: string): WizardHub {
     connected: () => listeners.size,
     log: appendLog,
     setSteps(next) {
-      steps = next.map((step) => ({ id: step.id, title: step.title, status: "pending" }));
+      steps = next.map((step) => ({ id: step.id, title: step.title, status: "pending", ...planFields(step.id) }));
       publish();
     },
     applyEvent(event) {
       // The link belonged to the step that just started or ended.
       link = undefined;
+      const at = new Date(now()).toISOString();
       switch (event.kind) {
         case "step-skipped": return changeStep(event.id, event.title, { status: "skipped" });
-        case "step-started": return changeStep(event.id, event.title, { status: "running" });
-        case "step-done": return changeStep(event.id, event.title, { status: "done" });
+        case "step-started": return changeStep(event.id, event.title, { status: "running", startedAt: at });
+        case "step-done": {
+          const started = steps.find((step) => step.id === event.id)?.startedAt;
+          return changeStep(event.id, event.title, { status: "done", ...(started === undefined ? {} : { tookSeconds: Math.round((now() - Date.parse(started)) / 1000) }) });
+        }
         case "step-waiting": return changeStep(event.id, event.title, { status: "waiting", message: event.message });
+        case "step-failed": return changeStep(event.id, event.title, { status: "failed" });
       }
     },
     showPlan(text) { plan = text; publish(); },
@@ -176,6 +240,7 @@ export function createWizardHub(env: string): WizardHub {
         appendLog(LINK_REFUSED);
         shown = withoutLink(next);
       }
+      shown = shown.link === undefined ? shown : { ...shown, link: withNote(shown.link) };
       const replaced = cards.find((existing) => existing.id === shown.id);
       // The run's link came from the card being replaced (Slack's create button, GitHub's install
       // page): once the new card no longer offers it, it is stale, and the page drops it too.
@@ -190,13 +255,29 @@ export function createWizardHub(env: string): WizardHub {
         appendLog(LINK_REFUSED);
         return;
       }
-      link = next;
+      link = withNote(next);
       publish();
     },
     clearLink() {
       link = undefined;
       publish();
     },
+    setStage(next) { stage = next; publish(); },
+    setPlace(place) { header = { installName: env, account: place.account, region: place.region }; publish(); },
+    showFailure(next) {
+      if (next.link === undefined || isShowableLink(next.link.url)) {
+        failure = next;
+      } else {
+        appendLog(LINK_REFUSED);
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
+        const { link: _link, ...rest } = next;
+        failure = rest;
+      }
+      publish();
+    },
+    clearFailure() { failure = undefined; publish(); },
+    requestClose() { closeWanted(); },
+    closeRequested: () => closeRequest,
     async ask(next, check) {
       if (closed) throw new Error("the install wizard has closed");
       if (pending !== undefined) throw new Error("the install wizard is already waiting on a question");
@@ -214,7 +295,7 @@ export function createWizardHub(env: string): WizardHub {
       const checked = waiting.check(value);
       if ("error" in checked) {
         // Never echo `value`: it may be a secret. Only the check's own message reaches the page.
-        pending = { ...waiting, question: publishQuestion(waiting.asked, checked.error) };
+        pending = { ...waiting, question: publishQuestion(checked.retry ?? waiting.asked, checked.error) };
         return checked.error;
       }
       pending = undefined;
@@ -223,10 +304,11 @@ export function createWizardHub(env: string): WizardHub {
       waiting.resolve(checked.value);
       return undefined;
     },
-    finish(next, ended = "finished") {
+    finish(next, ended = "finished", continueWith) {
       phase = ended;
       outcome = next;
       question = undefined;
+      commands = continueWith;
       publish();
     },
     close(reason) {

@@ -1,7 +1,7 @@
 // Spec 025 A13: the health answer. Every probe has a time limit and answers `unknown` with a reason
 // when it is not set up or fails, so the route itself never fails for a probe. Details carry
 // counts, names, codes and error classes only.
-import { ADMIN_API_VERSION, DEVELOPER_API_VERSION, type AdminHealthCheck, type AdminHealthResponse, type SlackAuthCheckResponse } from "@agentx/contracts";
+import { ADMIN_API_VERSION, DEVELOPER_API_VERSION, MISSING_ALARM_STATE, type AdminHealthCheck, type AdminHealthResponse, type SlackAuthCheckResponse } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { adminProjects, projectWorkspaceRows, readFailures, type AdminReadDependencies } from "./admin-reads.js";
 
@@ -63,7 +63,13 @@ export async function adminHealth(deps: AdminReadDependencies, identity: Authent
     try {
       const alarms = [...await within(ms, probes.alarms)].sort((left, right) => left.name.localeCompare(right.name));
       const firing = alarms.filter((alarm) => alarm.state === "ALARM").length;
-      return { alarms, alarmsCheck: firing === 0 ? { status: "ok", detail: `${alarms.length} alarms, none in ALARM` } : { status: "warn", detail: `${firing} alarm${firing === 1 ? "" : "s"} in ALARM` } };
+      // Issue 206: a listed alarm CloudWatch did not return is a warning too, never an all clear.
+      const missing = alarms.filter((alarm) => alarm.state === MISSING_ALARM_STATE).length;
+      const problems = [
+        ...(firing === 0 ? [] : [`${firing} alarm${firing === 1 ? "" : "s"} in ALARM`]),
+        ...(missing === 0 ? [] : [`${missing} alarm${missing === 1 ? "" : "s"} missing`]),
+      ];
+      return { alarms, alarmsCheck: problems.length === 0 ? { status: "ok", detail: `${alarms.length} alarms, none in ALARM` } : { status: "warn", detail: problems.join(", ") } };
     } catch (error) {
       return { alarms: [], alarmsCheck: failed("the alarms", ms, error) };
     }

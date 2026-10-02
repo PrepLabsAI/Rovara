@@ -15,7 +15,7 @@
   },
   "dependencies": {
     "@agentx/contracts": "0.1.0",
-    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-coding-agent": "1.0.0",
     "typebox": "1.3.7",
     "@agentx/model-runtime": "0.1.0"
   }

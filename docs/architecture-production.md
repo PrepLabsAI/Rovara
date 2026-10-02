@@ -339,12 +339,12 @@ as it finishes:
 1. **prerequisites**: the checks above (already run on a first run; a resumed run runs them here).
 2. **access**: the access stack, deployed with the caller's own AWS credentials.
 3. **core**: foundation and identity (skipped when bringing your own OIDC).
-4. **the GitHub App**: one click on GitHub's pre-filled manifest page creates the app; then choose which
+4. **Create the GitHub app** (`github-app`): one click on GitHub's pre-filled manifest page creates the app; then choose which
    repositories it may use. A GitHub App made beforehand can be used instead, with `--github-app-id`,
    `--github-installation-id` and `--github-private-key-file` (or `-env`); its private key cannot be
    pasted into a hidden prompt because it spans several lines.
 5. **control-plane**: the control plane and runtime.
-6. **the Slack app**: create it from AgentX's manifest, install it to the workspace, then paste the Bot
+6. **Create the Slack app** (`slack-app`): create it from AgentX's manifest, install it to the workspace, then paste the Bot
    User OAuth Token and the Signing Secret into two hidden prompts.
 7. **slack-service**: the Slack service, a signed self-probe of both Slack URLs, then a request to
    confirm the app's Event Subscriptions page shows "Verified" (Slack has no API that reports this).

@@ -1,5 +1,5 @@
 // tests/contract/action-classifier.test.ts
-import { fauxAssistantMessage } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, normalizeContext } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { CLASSIFIER_SYSTEM_PROMPT, ClassifierError, classifierContext, createModelClassifier, parseVerdict } from "../../packages/orchestrator/src/action-classifier.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
@@ -24,7 +24,8 @@ describe("the action classifier, offline with Pi's faux model", () => {
     const verdict = await classify({ memberMessages: ["what's open?", "set CHA-5 to high priority"], call });
     expect(verdict).toMatchObject({ decision: "allow", reason: "The member asked to raise this issue's priority." });
     expect(verdict.usage).toEqual({ input: expect.any(Number) as number, output: expect.any(Number) as number, cost: 0 });
-    expect(seen).toEqual([expect.objectContaining(classifierContext({ memberMessages: ["what's open?", "set CHA-5 to high priority"], call }))]);
+    // Pi 0.86+ hands providers the normalized transcript (the prompt in a leading system message), so compare with that form.
+    expect(seen).toEqual([expect.objectContaining(normalizeContext(classifierContext({ memberMessages: ["what's open?", "set CHA-5 to high priority"], call })))]);
   });
 
   it("returns ask with the model's reason", async () => {

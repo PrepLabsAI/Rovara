@@ -1,7 +1,6 @@
-import { getSupportedThinkingLevels, type Api, type Model } from "@earendil-works/pi-ai";
-import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
-import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import { ThinkingLevelSchema, type ModelIdentifier, type ModelRef, type ProjectModels, type ThinkingLevel } from "@agentx/contracts";
+import { catalogModel } from "./catalog.js";
 
 /**
  * Spec 053 FR-003: whether the model can run at an admin's thinking level. Pi clamps an unsupported
@@ -11,16 +10,6 @@ import { ThinkingLevelSchema, type ModelIdentifier, type ModelRef, type ProjectM
  * The supported list names only levels AgentX can set: Pi's own "max" is left out.
  */
 export type ThinkingLevelSupport = { ok: true } | { ok: false; supported: string[] };
-
-let catalogs: Map<string, ReadonlyMap<string, Model<Api>>> | undefined;
-
-function catalogModel(model: ModelIdentifier): Model<Api> | undefined {
-  catalogs ??= new Map([
-    ["openrouter", new Map(openrouterProvider().getModels().map((entry) => [entry.id, entry as Model<Api>]))],
-    ["amazon-bedrock", new Map(amazonBedrockProvider().getModels().map((entry) => [entry.id, entry as Model<Api>]))],
-  ]);
-  return catalogs.get(model.provider)?.get(model.modelId);
-}
 
 export function thinkingLevelSupport(model: ModelIdentifier, level: ThinkingLevel): ThinkingLevelSupport {
   const known = catalogModel(model);

@@ -7,16 +7,64 @@ import { AgentXError, agentXError } from "@agentx/contracts";
 
 export interface TextWriter { write(text: string): unknown }
 export interface PromptFlag { flag: string }
+
+/** Spec 048 FR-010 and FR-011: how the install page shows a question. The terminal ignores it. */
+export interface QuestionHelp {
+  /** The page's question, in plain words; the terminal keeps its own text. */
+  label?: string;
+  /** One line on why the question is asked. */
+  why?: string;
+  example?: string;
+  learnMoreUrl?: string;
+  /** The default in words, when the raw default is not readable (a model id). */
+  defaultText?: string;
+  /** Replaces the computed "Leave empty to use ..." hint. */
+  hint?: string;
+  /** confirm: verb labels for the two buttons. Yes is always the forward, primary one. */
+  yesLabel?: string;
+  noLabel?: string;
+  /** choose: one button per choice instead of a list, the first one primary. */
+  buttons?: boolean;
+  /** choose: the page's label for a choice value. */
+  choiceLabels?: Readonly<Record<string, string>>;
+}
+
 export interface Prompter {
-  ask(question: string, options: PromptFlag & { defaultValue?: string; validate?: (value: string) => string | undefined }): Promise<string>;
+  ask(question: string, options: PromptFlag & { defaultValue?: string; validate?: (value: string) => string | undefined; help?: QuestionHelp }): Promise<string>;
   /** `unattendedRefusal`: with no one to ask (--yes, or no terminal) and more than one choice, refuse
    * with this message instead of taking the default. */
-  choose<T extends string>(question: string, choices: ReadonlyArray<{ value: T; label: string }>, options: PromptFlag & { defaultValue: T; unattendedRefusal?: string }): Promise<T>;
-  confirm(question: string, options: { defaultValue: boolean }): Promise<boolean>;
+  choose<T extends string>(question: string, choices: ReadonlyArray<{ value: T; label: string }>, options: PromptFlag & { defaultValue: T; unattendedRefusal?: string; help?: QuestionHelp }): Promise<T>;
+  confirm(question: string, options: { defaultValue: boolean; help?: QuestionHelp }): Promise<boolean>;
   /** Hidden answer: nothing typed is echoed. A multiline request is refused up front on an
    * interactive prompt. `validate` is checked on the field by the install page (spec 040 FR-040);
    * the terminal's hidden prompt ignores it, and the caller's own check still runs after. */
-  secret(question: string, options: PromptFlag & { multiline?: boolean; validate?: (value: string) => string | undefined }): Promise<string>;
+  secret(question: string, options: PromptFlag & { multiline?: boolean; validate?: (value: string) => string | undefined; help?: QuestionHelp }): Promise<string>;
+  /** Optional: several related values on one screen (the install page). */
+  form?(title: string, fields: readonly FormField[], options: { help?: QuestionHelp }): Promise<Record<string, string>>;
+}
+
+/** Spec 048 FR-012: one value of a form. `question` and `flag` are what the terminal asks. */
+export interface FormField {
+  name: string;
+  question: string;
+  flag: string;
+  defaultValue?: string;
+  secret?: boolean;
+  validate?: (value: string) => string | undefined;
+  help?: QuestionHelp;
+}
+
+/** The page's one form, or, with no form on this prompter (the terminal), the same questions in order. */
+export async function askForm(prompter: Prompter, title: string, fields: readonly FormField[], options: { help?: QuestionHelp } = {}): Promise<Record<string, string>> {
+  if (prompter.form !== undefined) return prompter.form(title, fields, options);
+  const values: Record<string, string> = {};
+  for (const field of fields) {
+    const validate = field.validate === undefined ? {} : { validate: field.validate };
+    values[field.name] = field.secret === true
+      ? await prompter.secret(field.question, { flag: field.flag, ...validate })
+      : await prompter.ask(field.question, { flag: field.flag, ...(field.defaultValue === undefined ? {} : { defaultValue: field.defaultValue }), ...validate });
+  }
+  return values;
 }
 
 const PASTE_START = "\u001b[200~";
@@ -225,6 +273,7 @@ export async function secretFromSource(input: {
   what: string; flag: string; source: SecretSource; processEnv: NodeJS.ProcessEnv; prompter: Prompter; multiline?: boolean;
   /** Checked on the install page's field only; a file or an environment variable has no field. */
   validate?: (value: string) => string | undefined;
+  help?: QuestionHelp;
   readFile?: (path: string) => Promise<string>;
 }): Promise<string> {
   const read = input.readFile ?? ((path: string) => readFileFromDisk(path, "utf8"));
@@ -247,6 +296,7 @@ export async function secretFromSource(input: {
     flag: input.flag,
     ...(input.multiline === true ? { multiline: true } : {}),
     ...(input.validate === undefined ? {} : { validate: input.validate }),
+    ...(input.help === undefined ? {} : { help: input.help }),
   };
   return clean(await input.prompter.secret(input.what, secretOptions));
 }

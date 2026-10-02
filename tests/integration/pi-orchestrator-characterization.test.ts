@@ -1,18 +1,19 @@
 // tests/integration/pi-orchestrator-characterization.test.ts
-// Spec 050 phase 1: pins what Pi 0.85.1 does at every place the orchestrator meets Pi, so the 0.99.2
+// Spec 050 phase 1: pins what Pi 0.85.1 does at every place the orchestrator meets Pi, so the Pi 1.0.0
 // upgrade cannot change it unnoticed. Real orchestrator factories, Pi's scripted faux model, offline.
-// Characterization: every expected value below was observed on 0.85.1, then pinned exactly.
+// Characterization: every expected value below was observed on 0.85.1, then pinned exactly. Spec 050 phase 2
+// moved Pi to 1.0.0 and changed a pin only where a ruling allowed it; each such line says why ("Ruling A".."E").
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall, type Context } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, getCurrentSystemPrompt, getCurrentTools, type Context, type TranscriptContext } from "@earendil-works/pi-ai";
 import type { AgentSessionRuntime, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { describe, expect, it, vi } from "vitest";
 import type { ConnectorCatalog } from "../../packages/contracts/src/index.js";
 import { createGateSession } from "../../packages/orchestrator/src/action-gate.js";
 import type { OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
-import { createOrchestratorRuntime, createPiSessionRuntime, runOrchestratorTurn, type ExtensionFailure } from "../../packages/orchestrator/src/orchestrator.js";
+import { createOrchestratorRuntime, createPiSessionRuntime, orchestratorSystemPrompt, runOrchestratorTurn, type ExtensionFailure } from "../../packages/orchestrator/src/orchestrator.js";
 import { TurnRecorder } from "../../packages/orchestrator/src/turn-recorder.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
@@ -48,10 +49,11 @@ const snapshot = <T>(value: T): T => {
  * What the model is offered on one call: the system prompt, the conversation (copied) and the tool names.
  * The only code phase 2 may change: read the prompt/tools from the leading system message (pi-ai getCurrentSystemPrompt).
  */
-const modelView = (modelContext: Context) => ({
-  systemPrompt: modelContext.systemPrompt,
+// Spec 050 phase 2 (allowed edit 1): Pi 0.86+ carries the prompt and tools in the leading system message (TranscriptContext).
+const modelView = (modelContext: TranscriptContext) => ({
+  systemPrompt: getCurrentSystemPrompt(modelContext.messages),
   messages: JSON.parse(JSON.stringify(modelContext.messages.filter((message) => (message as { role: string }).role !== "system"))) as Context["messages"],
-  tools: (modelContext.tools ?? []).map((tool) => tool.name),
+  tools: getCurrentTools(modelContext.messages).map((tool) => tool.name),
 });
 type Message = { role?: string; toolName?: string; isError?: boolean; stopReason?: string; content?: unknown };
 const toolResults = (runtime: AgentSessionRuntime) => (runtime.session.messages as Message[]).flatMap((message) =>
@@ -76,7 +78,7 @@ async function hostUserBash(runtime: AgentSessionRuntime, command: string) {
   return { handledByExtension: false, result: await session.executeBash(command, undefined, { excludeFromContext: false }) };
 }
 
-describe("orchestrator extensions on Pi 0.85.1", () => {
+describe("orchestrator extensions, as pinned on Pi 0.85.1", () => {
   it("answers user_bash from the boundary with exit 126 and runs no shell", async () => {
     // protects packages/orchestrator/src/orchestrator.ts (boundaryExtension); guards: user_bash fails closed (0.99)
     const { modelRuntime } = await fauxModelRuntime();
@@ -117,7 +119,8 @@ describe("orchestrator extensions on Pi 0.85.1", () => {
     const { modelRuntime, faux } = await fauxModelRuntime();
     const note = "PINNED NOTE: the resumed task already opened PR 7.";
     const seen: unknown[] = [];
-    faux.setResponses([(modelContext) => { seen.push(modelView(modelContext).messages); return fauxAssistantMessage("Ok."); }]);
+    const prompts: string[] = [];
+    faux.setResponses([(modelContext) => { seen.push(modelView(modelContext).messages); prompts.push(modelView(modelContext).systemPrompt); return fauxAssistantMessage("Ok."); }]);
     const runtime = await createOrchestratorRuntime({ stateDirectory: await createFixtureDirectory("agentx-char-note-"), projectInstructions: "Delegate.", api: api(), context, modelRuntime, model: FAUX_MODEL, turnNote: note });
     try {
       expect(await runOrchestratorTurn(runtime, "hello")).toBe("Ok.");
@@ -126,16 +129,23 @@ describe("orchestrator extensions on Pi 0.85.1", () => {
         { role: "user", content: [{ type: "text", text: "hello" }], timestamp: expect.any(Number) as number },
         { role: "user", content: [{ type: "text", text: note }], timestamp: expect.any(Number) as number },
       ]]);
+      // Ruling A: whatever Pi's prompt framing, AgentX's orchestrator prompt reaches the model verbatim (the capabilities
+      // manifest precedes it), and the hidden note above reaches it verbatim as a user message.
+      expect(prompts).toHaveLength(1);
+      expect(prompts[0]).toContain(orchestratorSystemPrompt("Delegate."));
       // In the session it is a custom message, hidden from display.
       const custom = (runtime.session.messages as Message[]).filter((message) => message.role === "custom");
       expect(custom).toEqual([{ role: "custom", customType: "agentx-turn-note", content: note, display: false, details: undefined, timestamp: expect.any(Number) as number }]);
       expect(keys(custom[0])).toEqual(["content", "customType", "details", "display", "role", "timestamp"]);
       const lines = (await readFile(runtime.session.sessionFile!, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
-      expect(lines.map((line) => line.type)).toEqual(["session", "model_change", "thinking_level_change", "message", "custom_message", "message"]);
+      // Ruling D (Pi 0.86+): the leading system message entry (prompt and tools) comes before the member's message.
+      expect(lines.map((line) => line.type)).toEqual(["session", "model_change", "thinking_level_change", "message", "message", "custom_message", "message"]);
       const entry = lines.find((line) => line.type === "custom_message")!;
       expect(keys(entry)).toEqual(["content", "customType", "display", "id", "parentId", "timestamp", "type"]);
       expect(entry).toMatchObject({ type: "custom_message", customType: "agentx-turn-note", content: note, display: false });
-      expect(entry.parentId).toBe(lines[3]!.id);
+      // Ruling D: the note still follows the member's message, now one entry later because of the system message entry.
+      expect((lines[4]!.message as { role: string }).role).toBe("user");
+      expect(entry.parentId).toBe(lines[4]!.id);
     } finally { await runtime.dispose(); }
   });
 
@@ -225,7 +235,7 @@ describe("orchestrator extensions on Pi 0.85.1", () => {
  *   action-gate.ts:364-374       check          <- tool_call: toolCallId, toolName, input; ctx: sessionManager.getBranch(), signal
  *   action-gate.ts:110-116       memberMessages <- getBranch() entries: type, message; message: role, content
  */
-describe("orchestrator event shapes on Pi 0.85.1", () => {
+describe("orchestrator event shapes, as pinned on Pi 0.85.1", () => {
   it("pins every event the orchestrator's extensions see in one turn with a tool call", async () => {
     // protects packages/orchestrator/src/turn-recorder.ts and action-gate.ts; guards: ExtensionEvent union and TurnEndEvent shape changes (0.99)
     const { modelRuntime, faux } = await fauxModelRuntime();
@@ -273,7 +283,8 @@ describe("orchestrator event shapes on Pi 0.85.1", () => {
     const order = seen.map((entry) => entry.type).filter((type, index, all) => type !== "message_update" || all[index - 1] !== "message_update");
     expect(order).toEqual([
       "session_start", "resources_discover", "input", "before_agent_start", "agent_start",
-      "turn_start", "message_start", "message_end", "context", "before_provider_headers", "after_provider_response",
+      // Ruling D (Pi 0.86+): the first message_start/message_end pair is the leading system message (prompt and tools).
+      "turn_start", "message_start", "message_end", "message_start", "message_end", "context", "before_provider_headers", "after_provider_response",
       "message_start", "message_update", "message_end",
       "tool_execution_start", "tool_call", "tool_result", "tool_execution_end", "message_start", "message_end", "turn_end",
       "turn_start", "context", "before_provider_headers", "after_provider_response",
@@ -308,33 +319,45 @@ describe("orchestrator event shapes on Pi 0.85.1", () => {
     expect(keys(end.result)).toEqual(["content", "details"]);
 
     const messageEnds = seen.filter((entry) => entry.type === "message_end").map((entry) => entry.event);
-    expect(messageEnds.map((event) => keys(event))).toEqual([["message", "type"], ["message", "type"], ["message", "type"], ["message", "type"]]);
+    // Ruling D (Pi 0.86+): one more message_end, for the leading system message that carries the prompt and tools.
+    expect(messageEnds.map((event) => keys(event))).toEqual([["message", "type"], ["message", "type"], ["message", "type"], ["message", "type"], ["message", "type"]]);
+    // Ruling D (Pi 0.99+, additive): assistant messages also carry the thinkingLevel they ran at.
     expect(messageEnds.map((event) => keys(event.message))).toEqual([
+      // Ruling D (Pi 0.86+): the leading system message.
+      ["content", "role", "sections", "timestamp", "toolsAdded"],
       ["content", "role", "timestamp"],
-      ["api", "content", "model", "provider", "role", "stopReason", "timestamp", "usage"],
+      ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
       ["content", "details", "isError", "role", "timestamp", "toolCallId", "toolName", "usage"],
-      ["api", "content", "model", "provider", "role", "stopReason", "timestamp", "usage"],
+      ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
     ]);
     const turnEnds = seen.filter((entry) => entry.type === "turn_end").map((entry) => entry.event);
-    expect(turnEnds.map((event) => keys(event))).toEqual([["message", "toolResults", "turnIndex", "type"], ["message", "toolResults", "turnIndex", "type"]]);
+    // Allowed edit 2 (Pi 0.87 actionable turn_end boundary, additive): context, continue, entries, messageEntryId, outcome, toolResultEntryIds.
+    const turnEndKeys = ["context", "continue", "entries", "message", "messageEntryId", "outcome", "toolResultEntryIds", "toolResults", "turnIndex", "type"];
+    expect(turnEnds.map((event) => keys(event))).toEqual([turnEndKeys, turnEndKeys]);
     expect(turnEnds.map((event) => event.turnIndex)).toEqual([0, 1]);
 
     expect(keys(agentEnd)).toEqual(["messages", "type"]);
     const messages = agentEnd.messages as Array<Record<string, unknown>>;
+    // Ruling D (Pi 0.99+, additive): assistant messages also carry the thinkingLevel they ran at.
     expect(messages.map((message) => keys(message))).toEqual([
+      // Ruling D (Pi 0.86+): agent_end's messages start with the leading system message.
+      ["content", "role", "sections", "timestamp", "toolsAdded"],
       ["content", "role", "timestamp"],
-      ["api", "content", "model", "provider", "role", "stopReason", "timestamp", "usage"],
+      ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
       ["content", "details", "isError", "role", "timestamp", "toolCallId", "toolName", "usage"],
-      ["api", "content", "model", "provider", "role", "stopReason", "timestamp", "usage"],
+      ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
     ]);
-    expect(messages.map((message) => [message.role, message.stopReason])).toEqual([["user", undefined], ["assistant", "toolUse"], ["toolResult", undefined], ["assistant", "stop"]]);
+    // Ruling D (Pi 0.86+): the leading system message, then the conversation as before.
+    expect(messages.map((message) => [message.role, message.stopReason])).toEqual([["system", undefined], ["user", undefined], ["assistant", "toolUse"], ["toolResult", undefined], ["assistant", "stop"]]);
     expect(messages.at(-1)!.content).toEqual([{ type: "text", text: "None open." }]);
 
-    expect(branchAtToolCall.map((entry) => entry.type)).toEqual(["model_change", "thinking_level_change", "message", "message"]);
+    // Ruling D (Pi 0.86+): the branch gains the leading system message entry, so the member's message moves from [2] to [3].
+    expect(branchAtToolCall.map((entry) => entry.type)).toEqual(["model_change", "thinking_level_change", "message", "message", "message"]);
     expect(branchAtToolCall.filter((entry) => entry.type === "message").map((entry) => keys(entry))).toEqual([
-      ["id", "message", "parentId", "timestamp", "type"], ["id", "message", "parentId", "timestamp", "type"],
+      ["id", "message", "parentId", "timestamp", "type"], ["id", "message", "parentId", "timestamp", "type"], ["id", "message", "parentId", "timestamp", "type"],
     ]);
-    expect(branchAtToolCall[2]!.message).toMatchObject({ role: "user", content: [{ type: "text", text: "list open items" }] });
+    expect((branchAtToolCall[2]!.message as { role: string }).role).toBe("system");
+    expect(branchAtToolCall[3]!.message).toMatchObject({ role: "user", content: [{ type: "text", text: "list open items" }] });
 
     // Cross-check: every field a reader above takes is in the pinned shapes.
     expect(keys(start)).toEqual(expect.arrayContaining(["toolCallId", "toolName", "args"]));
@@ -344,8 +367,8 @@ describe("orchestrator event shapes on Pi 0.85.1", () => {
     expect(keys(messages.at(-1))).toContain("stopReason");
     expect(keys(toolCall)).toEqual(expect.arrayContaining(["toolCallId", "toolName", "input"]));
     expect(toolCallCtxKeys).toEqual(expect.arrayContaining(["sessionManager", "signal"]));
-    expect(keys(branchAtToolCall[2])).toEqual(expect.arrayContaining(["type", "message"]));
-    expect(keys(branchAtToolCall[2]!.message)).toEqual(expect.arrayContaining(["role", "content"]));
+    expect(keys(branchAtToolCall[3])).toEqual(expect.arrayContaining(["type", "message"]));
+    expect(keys(branchAtToolCall[3]!.message)).toEqual(expect.arrayContaining(["role", "content"]));
     // And the readers really took them: the recorder kept the call and the stop, the gate counted the run.
     expect(recorder.observation().calls.map(({ name, connector, validation, outcome }) => ({ name, connector, validation, outcome })))
       .toEqual([{ name: "tracker__list_items", connector: "tracker", validation: "ok", outcome: "SUCCEEDED" }]);

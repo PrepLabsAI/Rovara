@@ -74,7 +74,7 @@ an installed one) exposes `PromptCacheRetention` as a CloudFormation parameter w
 `long` values; it defaults to `long` so Bedrock cache entries can survive normal gaps between
 Slack turns.
 
-Both roles currently use `@earendil-works/pi-coding-agent` 0.85.1. GitHub Spec Kit supplies the
+Both roles currently use `@earendil-works/pi-coding-agent` 1.0.0. GitHub Spec Kit supplies the
 specification workflow and demo repository; it is not the coding-agent runtime.
 
 See the [production architecture](docs/architecture-production.md) for the EBS-backed platform,

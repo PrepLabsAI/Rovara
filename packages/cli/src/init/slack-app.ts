@@ -8,10 +8,12 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { AgentXError, agentXError, environmentStackName, errorStatus } from "@agentx/contracts";
 import type { InitContext, InitSecrets } from "./context.js";
+import { SLACK_BOT_HANDLE_PATTERN, type InstallProgress } from "./install-state.js";
 import { checkSlackBotToken, checkSlackSigningSecret, fieldCheck, secretFromSource, type SecretSource } from "./prompts.js";
 import { problemText, retryOnPage } from "./retry.js";
 import type { InitStep, ProgressHandle } from "./steps.js";
 import { slackAppCard, type SlackCardInput, slackUrlsCard, type SlackUrlsCardInput } from "./ui/cards.js";
+import { STEP_PLAN } from "./ui/journey.js";
 
 // channels:join, channels:read and groups:read serve 15d2's `channel add`; users:read.email and
 // im:write serve developer sign-in (spec 025 FR-044). Adding scopes later forces a reinstall (R10).
@@ -284,7 +286,7 @@ async function controlPlaneSlackUrls(context: InitContext): Promise<{ stackName:
 export function slackAppStep(api: SlackApi): InitStep<InitContext> {
   return {
     id: "slack-app",
-    title: "Create the Slack app",
+    title: STEP_PLAN["slack-app"].title,
     async run(context, progress) {
       const { env } = context;
       const { appName } = context.answers.slack;
@@ -311,7 +313,7 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
         { value: "approval", label: "Not yet: a workspace admin must approve it first" },
       ], { flag: "--slack-install", defaultValue: "installed" });
       if (installed === "approval") {
-        show({ stage: "approval", appName, rerun: `agentx init --env ${env} --region ${context.answers.region}` });
+        show({ stage: "approval", appName });
         return { status: "waiting", message: `Slack is waiting for a workspace admin to approve "${appName}". Once it is installed, run agentx init --env ${env} --region ${context.answers.region} again; it continues here.` };
       }
 
@@ -341,14 +343,20 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
       // Read, merge, write: a concurrent writer (this step alongside `agentx signin enable slack`)
       // could lose an update. Left for admins to avoid by running one at a time.
       await context.secrets.put(slackSecretName(env), slackSecretWithBot(await context.secrets.get(slackSecretName(env)), { signingSecret: bot.signingSecret, botToken: bot.botToken }));
-      await progress.update({ slack: { appId: bot.appId, teamId: bot.teamId, botUserId: bot.botUserId } });
-      show({ stage: "done", appId: bot.appId, teamId: bot.teamId });
+      await progress.update({ slack: { appId: bot.appId, teamId: bot.teamId, botUserId: bot.botUserId, ...(bot.botName === undefined ? {} : { botName: bot.botName }), ...(bot.teamName === undefined ? {} : { teamName: bot.teamName }) } });
+      show({ stage: "done", appName, appId: bot.appId, teamId: bot.teamId, ...(bot.teamName === undefined ? {} : { teamName: bot.teamName }) });
       return { status: "done", note: `Slack app ${bot.appId} in workspace ${bot.teamId}` };
     },
   };
 }
 
-interface SlackBot { botToken: string; signingSecret: string; appId: string; teamId: string; botUserId: string }
+/** FR-026 and FR-027: Slack's own handle for the bot, as the Slack app step stored it, else the
+ * handle AgentX derived from the app's name when it created the manifest. */
+export function botNameOf(progress: InstallProgress, appName: string): string {
+  return progress.slack?.botName ?? slackBotDisplayName(appName);
+}
+
+interface SlackBot { botToken: string; signingSecret: string; appId: string; teamId: string; botUserId: string; botName?: string; teamName?: string }
 
 /** The two credentials, checked on their fields (FR-040) and then with Slack, and the operator's
  * word that this is the right bot. Throws, and saves nothing, when any of it fails. */
@@ -378,7 +386,16 @@ async function collectBot(context: InitContext, api: SlackApi, progress: Progres
   if (!(await context.prompter.confirm("Is this the AgentX bot in the right workspace?", { defaultValue: true }))) {
     throw agentXError("CONFIG_INVALID", "nothing was saved; copy the Bot User OAuth Token from the AgentX app in the right workspace, then run agentx init again");
   }
-  return { botToken, signingSecret, appId, teamId: auth.team_id, botUserId: auth.user_id };
+  // A handle Slack sends that does not match the stored handle's own pattern is left out rather
+  // than refusing the whole install over a display name AgentX never validated itself.
+  const botName = auth.user !== undefined && SLACK_BOT_HANDLE_PATTERN.test(auth.user) ? auth.user : undefined;
+  // The same for the workspace's name: kept within the 1 to 100 characters the progress record
+  // takes, so recording it can never fail after the secret was written.
+  const teamName = auth.team === undefined || auth.team.trim() === "" ? undefined : auth.team.slice(0, 100);
+  return {
+    botToken, signingSecret, appId, teamId: auth.team_id, botUserId: auth.user_id,
+    ...(botName === undefined ? {} : { botName }), ...(teamName === undefined ? {} : { teamName }),
+  };
 }
 
 function storedSigningSecret(raw: string | undefined): string | undefined {

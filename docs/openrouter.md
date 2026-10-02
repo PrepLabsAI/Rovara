@@ -151,6 +151,9 @@ Without it, OpenRouter chooses an eligible upstream for the requested model. The
 AgentX model escalation or fallback to Bedrock on inference errors. A missing secret is the explicit exception described below. The transport performs no automatic HTTP retry;
 Pi's session recovery retains completed tool results instead of starting the task again.
 Unsupported parameters, exhausted credits, and unavailable permitted providers fail the request.
+Each request carries the session's current system prompt once, at the start, even after a resumed
+Slack turn changes it. AgentX does not send Pi's session ID to OpenRouter (no `x-session-id` header),
+and Pi's prompt-cache warming requests are off.
 
 `data_collection: "deny"` is a provider data-policy filter, **not a guarantee of zero retention
 or data residency**. Consult [OpenRouter's routing policy documentation](https://openrouter.ai/docs/guides/routing/provider-selection)

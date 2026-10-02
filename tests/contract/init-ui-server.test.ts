@@ -186,7 +186,7 @@ describe("the install wizard's server", () => {
 
   it("streams the snapshot, then every state change and log line, then the close", async () => {
     const { hub, server, origin } = await wizard();
-    hub.setSteps([{ id: "prerequisites", title: "Check prerequisites" }]);
+    hub.setSteps([{ id: "prerequisites", title: "Check your AWS account" }]);
     hub.log("fetching the release");
     const stream = await request(origin, "/events");
     expect(stream.headers.get("content-type")).toBe("text/event-stream; charset=utf-8");
@@ -202,10 +202,10 @@ describe("the install wizard's server", () => {
     };
     await until("event: snapshot");
     expect(text).toContain('"log":["fetching the release"]');
-    hub.log("==> Check prerequisites");
+    hub.log("==> Check your AWS account");
     await until("event: log");
-    expect(text).toContain('data: "==> Check prerequisites"');
-    hub.applyEvent({ kind: "step-started", id: "prerequisites", title: "Check prerequisites" });
+    expect(text).toContain('data: "==> Check your AWS account"');
+    hub.applyEvent({ kind: "step-started", id: "prerequisites", title: "Check your AWS account" });
     await until("event: state");
     expect(text).toContain('"status":"running"');
     hub.close();
@@ -218,5 +218,32 @@ describe("the install wizard's server", () => {
     hub.close();
     await server.close();
     await expect(request(origin, "/state")).rejects.toThrow();
+  });
+
+  it("POST /close tells the hub the page asked to close, behind the same checks as every route", async () => {
+    const { hub, origin } = await wizard();
+    let asked = false;
+    void hub.closeRequested().then(() => { asked = true; });
+    const refused = await fetch(`${origin}/close`, { method: "POST" });
+    expect(refused.status).toBe(401);
+    const accepted = await fetch(`${origin}/close`, { method: "POST", headers: { [WIZARD_TOKEN_HEADER]: TOKEN } });
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toEqual({ ok: true });
+    await hub.closeRequested();
+    expect(asked).toBe(true);
+  });
+
+  it("FR-037: GitHub's return tab closes itself where the browser allows, and says to go back otherwise", async () => {
+    const { server, origin } = await wizard();
+    const host = server.mountManifest({ state: "s".repeat(32), page: () => "<p>form</p>", timeoutMs: 60_000 });
+    const response = await fetch(`${origin}/github/created?code=0123456789abcdef0123&state=${"s".repeat(32)}`, { headers: { "sec-fetch-site": "cross-site" } });
+    expect(response.status).toBe(200);
+    const csp = response.headers.get("content-security-policy") ?? "";
+    const nonce = /script-src 'nonce-([^']+)'/.exec(csp)?.[1];
+    expect(nonce).toBeDefined();
+    const body = await response.text();
+    expect(body).toContain(`<script nonce="${nonce}">window.close()</script>`);
+    expect(body).toContain("GitHub sent AgentX the new app. You can close this tab and go back to the Install AgentX tab.");
+    await expect(host.code).resolves.toBe("0123456789abcdef0123");
   });
 });

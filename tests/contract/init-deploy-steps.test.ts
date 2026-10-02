@@ -57,7 +57,7 @@ describe("init deploy steps", () => {
     const context = initContext();
     homes.push(context.home);
     await deployStep({ id: "access", title: "Deploy the access stack" }).run(context, progressHandle());
-    await deployStep({ id: "core", title: "Deploy the foundation and identity stacks" }).run(context, progressHandle());
+    await deployStep({ id: "core", title: "Build the network and sign-in" }).run(context, progressHandle());
     expect(context.deployer.requests.map((request) => request.part)).toEqual(["access", "foundation", "identity"]);
     expect(context.deployer.requests[1]?.roleArn).toBe("arn:aws:iam::123456789012:role/agentx-staging-cloudformation");
     // deployEnvironment reads the lock to confirm the runner holds it; it never writes or deletes it.
@@ -110,7 +110,7 @@ describe("init deploy steps", () => {
     const progress = progressHandle({ ...emptyProgress("staging", T0), github: GITHUB });
     for (const id of ["access", "core", "control-plane"] as const) await deployStep({ id, title: id }).run(context, progress);
     const after = vi.fn(async () => undefined);
-    await deployStep({ id: "slack-service", title: "Deploy the Slack service", after }).run(context, progress);
+    await deployStep({ id: "slack-service", title: "Start the Slack connection", after }).run(context, progress);
     const settings = await readEnvironmentSettings(context.store, "staging");
     expect(settings?.controlPlaneUrl).toBe("https://abc123.execute-api.us-east-1.amazonaws.com");
     expect(context.lines.join("\n")).toContain(environmentCachePath(context.home, "staging"));

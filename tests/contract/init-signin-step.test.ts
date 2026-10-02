@@ -39,7 +39,7 @@ describe("the developer-signin init step (FR-044)", () => {
     expect(await developerSignInStep({ slack: withScopes }).run(ctx, progress)).toEqual({ status: "done", note: "developer sign-in: Slack" });
     expect(cloudFormation.parameters).toMatchObject({ DeveloperSignInSlack: "enabled", SlackTeamId: "T0TEAM" });
     expect(await readSignInSettings(ctx.store, "staging")).toMatchObject({ slack: true });
-    expect(ctx.lines).toContain("Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com");
+    expect(ctx.lines).toContain("Developers sign in with: node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com");
     expect(ctx.lines.join("\n")).not.toContain(CLIENT_SECRET);
   });
 

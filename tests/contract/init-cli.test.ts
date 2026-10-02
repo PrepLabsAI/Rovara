@@ -14,10 +14,13 @@ import { environmentCachePath } from "../../packages/cli/src/environments/cache.
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import { readEnvironmentSettings, settingsParameterName } from "../../packages/cli/src/environments/settings.js";
 import { INIT_STEP_IDS, installAnswersParameterName, installProgressParameterName, readInstallAnswers, readInstallProgress } from "../../packages/cli/src/init/install-state.js";
+import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL } from "../../packages/cli/src/init/answers.js";
 import { initSteps, type InitCliDependencies } from "../../packages/cli/src/init/commands.js";
+import { estimateMonthlyCost, suggestedBudgetUsd } from "../../packages/cli/src/init/cost.js";
+import { markOperatorStop } from "../../packages/cli/src/init/stop.js";
 import {
   allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, fakeSlackApi, HOLDER, memoryInitSecrets, passingChecks, scriptedDeployer, scriptedPrompter,
-  slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET,
+  slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_CLI_INVOCATION, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET,
 } from "../support/init-fakes.js";
 import { stagingSettings } from "../support/environment-fixtures.js";
 import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "../support/fake-cloudformation.js";
@@ -72,7 +75,7 @@ async function harness(options: { releaseVersion?: string; regions?: string[] } 
   // day after T0, so it counts whenever the run's fake clock starts the e2e step.
   const plane = fakeControlPlane();
   plane.turns = [turn({ subject: "T0TEAM/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 86_400_000).toISOString() })];
-  const alerts = fakeAlerts({ confirmAfterPolls: 0, budgetUsd: 100 });
+  const alerts = fakeAlerts({ confirmAfterPolls: 0, budgetUsd: FIRST_RUN_BUDGET_USD });
   const cognito = fakeCognito();
   const setup = setupServices({
     cognito,
@@ -84,6 +87,7 @@ async function harness(options: { releaseVersion?: string; regions?: string[] } 
     configDir: await tmp("agentx-projects-"),
   });
   const deps: InitCliDependencies = {
+    cliInvocation: TEST_CLI_INVOCATION,
     deploy: { identity: { get: async () => ({ account: "123456789012", arn: HOLDER }) }, store, secrets, deployer },
     initSecrets: secrets,
     checks: passingChecks(),
@@ -144,6 +148,8 @@ const SIGNIN = ["", "1111111111.2222222222222", "fedcba9876543210fedcba987654321
 // The finishing steps (F15): admin email; repository; project name; use the proposed commands;
 // channel; the three connector offers; "did the test alarm arrive?".
 const FINISH = [ADMIN_EMAIL, "acme/payments-api", "", true, "payments", false, false, false, true];
+// The budget FIRST_RUN's all-default models produce: the estimate plus 20%, one source with cost.ts.
+const FIRST_RUN_BUDGET_USD = suggestedBudgetUsd(estimateMonthlyCost({ orchestrator: DEFAULT_ORCHESTRATOR_MODEL, classifier: DEFAULT_CLASSIFIER_MODEL, worker: DEFAULT_WORKER_MODEL }));
 // A GitHub App made beforehand, and both Slack secrets, so --yes needs no prompt at all.
 const UNATTENDED = [
   "--yes", "--no-browser", "--github-account", "acme", "--github-app-id", "424242", "--github-installation-id", "777",
@@ -202,7 +208,7 @@ describe("agentx init", () => {
 
   it("a first run asks, checks, shows the plan, deploys every stack, creates both apps, writes settings and the local cache, and ends on a threaded Slack reply", async () => {
     // The harness's finishing services (F15): one repository, the payments channel, a confirmed
-    // alert subscription and the $100 budget FIRST_RUN takes (F16), and a turn received a day later.
+    // alert subscription and the budget FIRST_RUN takes (F16, the estimate plus 20%), and a turn received a day later.
     const h = await harness();
     const prompter = scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     expect(await h.run([], { prompter })).toBe(0);
@@ -219,9 +225,9 @@ describe("agentx init", () => {
     expect(printed).toContain("Estimated monthly total");
     // The manual next steps of earlier installs (create the admin user, agentx login, register
     // and bind a project) are gone: init did them.
-    expect(printed).toContain("AgentX environment staging is ready.\n  Talk to it: mention <@U0BOT> in #payments (project payments-api, revision 1).");
+    expect(printed).toContain("AgentX environment staging is ready.\n  Talk to it: mention @agentx in #payments (project payments-api).");
     expect(printed).not.toContain("aws cognito-idp admin-create-user");
-    expect(printed).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com\n");
+    expect(printed).toContain("  Developers sign in with: node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com\n");
     const everywhere = await everywhereButSecrets(h);
     expect(everywhere).toContain("abc123.execute-api");
     expect(everywhere).not.toContain("fedcba9876543210fedcba9876543210");
@@ -233,7 +239,7 @@ describe("agentx init", () => {
 
   it("a resume that finishes after the alert confirmation wait still ends with the developer sign-in command", async () => {
     const h = await harness();
-    const alerts = fakeAlerts({ confirmAfterPolls: 1_000, budgetUsd: 100 });
+    const alerts = fakeAlerts({ confirmAfterPolls: 1_000, budgetUsd: FIRST_RUN_BUDGET_USD });
     const setup = { ...h.setup, alerts };
     // Everything up to the alerts step, which waits for the subscription to be confirmed.
     expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH.slice(0, -1)]), setup })).toBe(0);
@@ -244,9 +250,9 @@ describe("agentx init", () => {
     expect(await h.run([], { prompter, setup })).toBe(0);
     expect(prompter.remaining()).toBe(0);
     const resumed = h.printedSince(mark);
-    expect(resumed).toContain("already done: Set up developer sign-in");
+    expect(resumed).toContain("already done: Turn on developer sign-in");
     expect(resumed).toContain("AgentX environment staging is ready.");
-    expect(resumed).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com\n");
+    expect(resumed).toContain("  Developers sign in with: node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com\n");
   });
 
   it("a rerun after the e2e check failed repeats only that check: no second admin and no second project", async () => {
@@ -260,8 +266,8 @@ describe("agentx init", () => {
     const prompter = scriptedPrompter([]);
     expect(await h.run([], { prompter })).toBe(0);
     const rerun = h.printedSince(mark);
-    expect(rerun).toContain("already done: Create the admin user and sign in");
-    expect(rerun).toContain("already done: Set up the first project and its channel");
+    expect(rerun).toContain("already done: Sign in to AgentX");
+    expect(rerun).toContain("already done: Set up your first project");
     expect(rerun).toContain("AgentX environment staging is ready.");
     expect(h.cognito.created).toEqual([ADMIN_EMAIL]);
     expect(h.plane.registered).toHaveLength(1);
@@ -272,7 +278,7 @@ describe("agentx init", () => {
     const h = await harness();
     h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
     expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).not.toBe(0);
-    expect(h.printed()).toContain('init stopped at "Deploy the control plane and runtime": Resource limit exceeded. Run agentx init --env staging --region us-east-1 again to continue from this step.');
+    expect(h.printed()).toContain('init stopped at "Start the AgentX service": Resource limit exceeded. Run agentx init --env staging --region us-east-1 again to continue from this step.');
     expect(h.store.values.has(lockParameterName("staging"))).toBe(false);
     h.deployer.fail.clear();
     h.deployer.requests.length = 0;
@@ -280,6 +286,16 @@ describe("agentx init", () => {
     expect(h.printed()).toContain("Resuming the install of environment staging.");
     expect(h.github.conversions).toHaveLength(1);
     expect(h.deployer.requests.map((request) => request.part)).toEqual(["control-plane", "runtime", "slack"]);
+  });
+
+  // Fix round 1: the terminal path has no page and no onStepFailure hook, so a step's own stop
+  // (markOperatorStop) prints and stops exactly as any other step error does; only the page's
+  // own onStepFailure/runInit catch treat it differently (spec 048 FR-060 fix, Plan ruling 8).
+  it("spec 048 FR-060 fix: the terminal path is unaffected by a step's own stop", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), markOperatorStop(new Error("the person chose not to continue")));
+    expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).not.toBe(0);
+    expect(h.printed()).toContain('init stopped at "Start the AgentX service": the person chose not to continue. Run agentx init --env staging --region us-east-1 again to continue from this step.');
   });
 
   it("changes nothing when run again after it finished", async () => {
@@ -292,7 +308,7 @@ describe("agentx init", () => {
     expect(h.deployer.requests).toEqual([]);
     expect(h.store.values.get(installProgressParameterName("staging"))).toBe(before);
     expect(h.store.values.get(settingsParameterName("staging"))).toBe(settingsBefore);
-    expect(h.printed()).toContain("already done: Deploy the Slack service");
+    expect(h.printed()).toContain("already done: Start the Slack connection");
   });
 
   it("stops before creating anything when a model cannot be used", async () => {
@@ -357,7 +373,7 @@ describe("agentx init", () => {
     h.deployer.fail.set(environmentStackName("staging", "access"), agentXError("CONFIG_INVALID", "stack agentx-staging-access failed to create earlier and must be deleted before it can be deployed again (aws cloudformation delete-stack --stack-name agentx-staging-access --region us-east-1)"));
     expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).toBe(2);
     const printed = h.printed();
-    expect(printed).toContain('init stopped at "Deploy the access stack (IAM roles, artifact bucket, image cache)": stack agentx-staging-access failed to create earlier');
+    expect(printed).toContain('init stopped at "Set up AWS permissions": stack agentx-staging-access failed to create earlier');
     expect(printed).toContain("Run agentx init --env staging --region us-east-1 again to continue from this step.");
     expect(printed).not.toContain("agentx deploy");
     expect(printed).not.toContain("answers file");
@@ -410,7 +426,7 @@ describe("agentx init", () => {
     const data = (JSON.parse(h.out.join("")) as { data: { status: string; ready?: string } }).data;
     expect(data.status).toBe("complete");
     expect(data.ready).toContain("AgentX environment staging is ready.");
-    expect(data.ready).toContain("Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com");
+    expect(data.ready).toContain("Developers sign in with: node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com");
   });
 
   it("under --yes without --connectors, adds none and says how to add them later", async () => {
@@ -457,7 +473,7 @@ describe("agentx init", () => {
     expect(await h.run(without(UNATTENDED, "--channel"), { processEnv: UNATTENDED_ENV })).not.toBe(0);
     const rerun = h.printedSince(mark);
     expect(rerun).not.toContain("agentx init --yes needs");
-    expect(rerun).toContain('init stopped at "Set up the first project and its channel"');
+    expect(rerun).toContain('init stopped at "Set up your first project"');
     expect(rerun).toContain("with --yes, pass --channel");
     const progress = await readInstallProgress(h.store, "staging");
     expect(progress?.admin?.username).toBe(ADMIN_EMAIL);
@@ -541,7 +557,7 @@ describe("agentx init", () => {
       cleanup: async () => { throw new Error("directory busy"); },
     });
     expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN), prepareDeployment: prepare })).not.toBe(0);
-    expect(h.printed()).toContain('init stopped at "Deploy the control plane and runtime": Resource limit exceeded.');
+    expect(h.printed()).toContain('init stopped at "Start the AgentX service": Resource limit exceeded.');
     expect(h.printed()).toContain("could not remove temporary files: directory busy");
   });
 
@@ -986,7 +1002,7 @@ describe("init --resume --from-bundle (FR-026)", () => {
     expect(await h.run(["--resume", "--from-bundle", dir], { prompter: scriptedPrompter([]), stackStatus: ACCESS_DEPLOYED, deploy })).not.toBe(0);
     const rerun = h.printedSince(mark);
     expect(rerun).not.toContain("you are using the AgentX operator role");
-    expect(rerun).toContain("already done: Deploy the access stack");
+    expect(rerun).toContain("already done: Set up AWS permissions");
     expect((await readInstallProgress(h.store, "staging"))?.steps.access).toMatchObject({ status: "done", note: "deployed by your platform team from the export bundle" });
     expect(deployer.requests.map((request) => request.part)).toEqual(["foundation", "foundation"]);
   });

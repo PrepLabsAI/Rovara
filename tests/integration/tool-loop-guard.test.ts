@@ -170,7 +170,8 @@ describe("a real pi session whose model loops on a failing command", () => {
         return {
           conversationId: "real-loop", sessionFile: session.sessionFile!,
           prompt: (text) => session.prompt(text, { expandPromptTemplates: false }),
-          steer: (text) => session.steer(text),
+          // Pi 0.99 returns a queued-input disposition; the adapter contract is Promise<void>.
+          steer: async (text) => { await session.steer(text); },
           abort: () => session.abort(),
           getModel: () => ({ provider: FAUX_MODEL.provider, modelId: FAUX_MODEL.modelId }),
           getSessionStats: () => session.getSessionStats(),

@@ -1,7 +1,7 @@
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall, type FauxProviderHandle } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type FauxProviderHandle, type JsonObject } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
 import { EVAL_ROOT, EvalProjectSchema, loadCases, loadCatalog, loadProject, type EvalCase } from "../eval/case.js";
 import { parseEvalArguments, recordLiveReport, runEvalCli, runEvalCommand } from "../eval/command.js";
@@ -19,7 +19,7 @@ function oracle(faux: FauxProviderHandle, pick: (evalCase: EvalCase) => { tool?:
     const answer = pick(evalCase);
     faux.setResponses(answer.tool === undefined
       ? [fauxAssistantMessage(answer.text ?? "")]
-      : [fauxAssistantMessage([fauxToolCall(answer.tool, answer.args ?? {})], { stopReason: "toolUse" }), fauxAssistantMessage("Done.")]);
+      : [fauxAssistantMessage([fauxToolCall(answer.tool, (answer.args ?? {}) as JsonObject)], { stopReason: "toolUse" }), fauxAssistantMessage("Done.")]);
   };
 }
 

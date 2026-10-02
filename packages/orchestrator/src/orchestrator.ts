@@ -259,6 +259,9 @@ export async function createPiSessionRuntime(options: PiSessionOptions): Promise
         systemPrompt: options.systemPrompt,
       },
     });
+    // Pi 0.86+ warms prompt caches with extra paid requests during long tool runs by default ("streaming"); 0.85.1 made
+    // none. The mode is a global-only setting, so it is written to AgentX's own agent directory.
+    services.settingsManager.setCacheWarmingMode("off");
     const created = await createAgentSessionFromServices({
       services,
       sessionManager,

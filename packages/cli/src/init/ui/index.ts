@@ -10,8 +10,9 @@ import type { Prompter } from "../prompts.js";
 import type { InitEvent } from "../steps.js";
 import type { InitStepId } from "../install-state.js";
 import { linkLabel } from "./cards.js";
+import { minutesText, totalMinutes, type JourneyPhaseId } from "./journey.js";
 import { browserPrompter } from "./prompter.js";
-import type { WizardPhase, WizardResume } from "./protocol.js";
+import type { WizardCommand, WizardFailure, WizardPhase, WizardResume } from "./protocol.js";
 import { startWizardServer, type WizardServer } from "./server.js";
 import { createWizardHub, isShowableLink, type WizardHub } from "./state.js";
 
@@ -49,6 +50,10 @@ export function pageClosedReminder(input: { hub: WizardHub; url: string; write: 
 export interface InstallWizard {
   /** The loopback address the wizard was opened at, session token and all. */
   url: string;
+  /** The session token alone (url already carries it in its query string). */
+  token: string;
+  /** Where the full log is, when the run was given one (FR-059, FR-070). */
+  logPath?: string;
   prompter: Prompter;
   /** The page's cards, for the init context (context.surface). */
   surface: InstallSurface;
@@ -68,7 +73,17 @@ export interface InstallWizard {
   plan(text: string): void;
   /** What `readInstallProgress` already recorded, for the resume screen (FR-006). */
   resume(resume: WizardResume): void;
-  finish(outcome: string, phase?: Exclude<WizardPhase, "running">): void;
+  /** FR-001: the phase before any step has run (Get started, Your choices). */
+  setStage(stage: JourneyPhaseId): void;
+  /** FR-001: the account and region, once the install knows them. */
+  setPlace(place: { account: string; region: string }): void;
+  /** FR-060: a failure in three parts, shown instead of the run going on. */
+  showFailure(failure: WizardFailure): void;
+  /** Drops the failure: the operator is trying again. */
+  clearFailure(): void;
+  finish(outcome: string, phase?: Exclude<WizardPhase, "running">, commands?: WizardCommand[]): void;
+  /** Resolves once the page has asked to close (FR-002). */
+  closeRequested(): Promise<void>;
   /** Ends the wizard with the run (FR-002). Safe to call more than once. */
   close(): Promise<void>;
 }
@@ -81,19 +96,22 @@ export async function startInstallWizard(input: {
   openBrowser?: (url: string) => Promise<boolean>;
   port?: number;
   token?: string;
+  /** Where the full log is (Task 14), shown on the failure and Stop for now screens. */
+  logPath?: string;
 }): Promise<InstallWizard> {
-  const hub = createWizardHub(input.env);
+  const hub = createWizardHub(input.env, { ...(input.logPath === undefined ? {} : { logPath: input.logPath }) });
   const server: WizardServer = await startWizardServer({
     hub,
     ...(input.port === undefined ? {} : { port: input.port }),
     ...(input.token === undefined ? {} : { token: input.token }),
   });
-  input.write(`The AgentX installer is at ${server.url}`);
   const opened = input.openBrowser === undefined ? false : await input.openBrowser(server.url);
+  input.write(opened ? `The AgentX installer is open in your browser: ${server.url}` : `The AgentX installer is at ${server.url}`);
   if (!opened) {
-    input.write(`Open that address in a browser on this machine to continue. From another machine, first run: ssh -L ${server.port}:127.0.0.1:${server.port} <this host>`);
+    input.write(`Open that address in a browser on this machine. From another machine, first run: ssh -L ${server.port}:127.0.0.1:${server.port} <this host>`);
   }
-  input.write("Every question agentx init asks is on that page; nothing else needs typing here.");
+  input.write(`Keep this terminal open and your computer awake (${minutesText(totalMinutes())}).`);
+  if (input.logPath !== undefined) input.write(`Full log: ${input.logPath}`);
   const reminder = pageClosedReminder({ hub, url: server.url, write: input.write, now: Date.now });
   const timer = setInterval(() => reminder.check(), REMINDER_CHECK_MS);
   timer.unref();
@@ -101,6 +119,8 @@ export async function startInstallWizard(input: {
   let closed = false;
   return {
     url: server.url,
+    token: server.token,
+    ...(input.logPath === undefined ? {} : { logPath: input.logPath }),
     hub,
     prompter: browserPrompter(hub),
     surface: { card: (card) => hub.showCard(card), clearLink: () => hub.clearLink() },
@@ -116,7 +136,12 @@ export async function startInstallWizard(input: {
     setSteps: (steps) => hub.setSteps(steps),
     plan: (text) => hub.showPlan(text),
     resume: (resume) => hub.showResume(resume),
-    finish: (outcome, phase) => hub.finish(outcome, phase),
+    setStage: (stage) => hub.setStage(stage),
+    setPlace: (place) => hub.setPlace(place),
+    showFailure: (failure) => hub.showFailure(failure),
+    clearFailure: () => hub.clearFailure(),
+    closeRequested: () => hub.closeRequested(),
+    finish: (outcome, phase, commands) => hub.finish(outcome, phase, commands),
     async close() {
       if (closed) return;
       closed = true;

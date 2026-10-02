@@ -2,8 +2,11 @@
 // only in named environments.
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { App } from "aws-cdk-lib";
+import { App, Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
+import { Alarm, AlarmRule, AlarmState, CompositeAlarm, Metric } from "aws-cdk-lib/aws-cloudwatch";
+import { HEALTH_ALARM_SUFFIXES } from "@agentx/contracts";
+import { buildAgentXApp } from "../../infra/lib/app.js";
 import { describe, expect, it } from "vitest";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
@@ -33,6 +36,38 @@ describe("the health route's grants (A13)", () => {
     expect(JSON.stringify(describe[0]?.Resource)).toContain(":alarm:agentx-live25d-*");
     expect(brokerEnvironment(named).AGENTX_ALARM_PREFIX).toBe("agentx-live25d-");
   });
+
+  // Issue 206: a DescribeAlarms call by name prefix is authorized against *, so the probe asks for
+  // the environment's alarms by exact name (HEALTH_ALARM_SUFFIXES), authorized against each alarm's ARN.
+  it("names every alarm a named app creates in the probe's list, and lists no alarm the app never creates (issue 206)", () => {
+    const stacks = buildAgentXApp({ agentxEnv: "live25d" }).node.children.filter((child): child is Stack => Stack.isStack(child));
+    const alarmNames = stacks.flatMap((stack) => Object.values(Template.fromStack(stack).findResources("AWS::CloudWatch::Alarm") as Record<string, { Properties: { AlarmName?: unknown } }>))
+      .map((alarm) => alarm.Properties.AlarmName);
+    expect([...alarmNames].sort()).toStrictEqual(HEALTH_ALARM_SUFFIXES.map((suffix) => `agentx-live25d-${suffix}`).sort());
+    expect(stacks.flatMap((stack) => Object.keys(Template.fromStack(stack).findResources("AWS::CloudWatch::CompositeAlarm")))).toEqual([]);
+  }, 120_000);
+
+  it("keeps the grant the unchanged prefix ARN, which covers every listed name (issue 206)", () => {
+    expect(brokerStatements(named).filter((statement) => statement.Action === "cloudwatch:DescribeAlarms")).toStrictEqual([{
+      Action: "cloudwatch:DescribeAlarms",
+      Effect: "Allow",
+      Resource: { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":cloudwatch:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":alarm:agentx-live25d-*"]] },
+    }]);
+    for (const suffix of HEALTH_ALARM_SUFFIXES) expect(suffix).toMatch(/^[A-Za-z0-9]+$/);
+  });
+
+  it("refuses to synthesize an alarm the probe would not read: unlisted, outside the prefix, or composite (issue 206)", () => {
+    const metric = new Metric({ namespace: "AgentX/live25d", metricName: "Stray" });
+    for (const alarmName of ["other-SlackDeadLetters", "agentx-live25d-Unlisted", "agentx-live25d-eu-SlackDeadLetters"]) {
+      const stack = new ControlPlaneStack(new App(), "StrayAlarmControlPlane", { naming: environmentNaming("live25d") });
+      new Alarm(stack, "Stray", { alarmName, metric, threshold: 1, evaluationPeriods: 1 });
+      expect(() => Template.fromStack(stack)).toThrow(`the health probe does not read alarm StrayAlarmControlPlane/Stray/Resource (${alarmName})`);
+    }
+    const stack = new ControlPlaneStack(new App(), "CompositeControlPlane", { naming: environmentNaming("live25d") });
+    const member = new Alarm(stack, "Member", { alarmName: "agentx-live25d-TestAlarm", metric, threshold: 1, evaluationPeriods: 1 });
+    new CompositeAlarm(stack, "Composite", { compositeAlarmName: "agentx-live25d-Composite", alarmRule: AlarmRule.fromAlarm(member, AlarmState.ALARM) });
+    expect(() => Template.fromStack(stack)).toThrow("the health probe cannot read composite alarm CompositeControlPlane/Composite/Resource");
+    }, 120_000);
 
   it("lets the broker read the attributes of exactly the four dead-letter queues", () => {
     const queues = brokerStatements(named).filter((statement) => statement.Action === "sqs:GetQueueAttributes");

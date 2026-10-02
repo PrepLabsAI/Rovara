@@ -3,91 +3,17 @@
 // list prices checked on the date in PRICES_CHECKED; the orchestrator per-turn figures come from the
 // 2026-09-25 evaluation in the spec's Decisions.
 import {
-  agentXError, defaultBoundaryName, environmentCloudFormationRoleName, environmentOperatorRoleName, environmentRolePath, environmentStackName,
+  defaultBoundaryName, environmentCloudFormationRoleName, environmentOperatorRoleName, environmentRolePath, environmentStackName,
 } from "@agentx/contracts";
 import { installOrder } from "../deploy/parameters.js";
 import { callbackSigningKeySecretName } from "../deploy/signing-key.js";
 import { openRouterSecretName } from "./answers.js";
+import { count, estimateMonthlyCost, modelName, money, notCounted, PRICES_CHECKED, STATED_USAGE, type CostEstimate } from "./cost.js";
 import type { InitAnswers } from "./install-state.js";
 import type { Prompter } from "./prompts.js";
+import { operatorStop } from "./stop.js";
 
-const PRICES_CHECKED = "September 2026";
-const HOURS_PER_MONTH = 730;
-
-// Checked against the AWS pricing pages for PRICES_CHECKED (us-east-1 list prices):
-// - NAT Gateway: https://aws.amazon.com/vpc/pricing/ ($0.045 per NAT Gateway-hour).
-// - Fargate arm64: https://aws.amazon.com/fargate/pricing/ (Linux/ARM: $0.0000089944 per vCPU-second,
-//   $0.0000009889 per GB-second, i.e. $0.03238 per vCPU-hour and $0.00356 per GB-hour).
-// - EBS gp3: https://aws.amazon.com/ebs/pricing/ ($0.08 per GB-month baseline storage).
-// EC2 m6g.medium on-demand ($0.0385/hour) is AWS's long-standing Graviton2 list price; Bedrock's
-// current per-model on-demand tables render client-side and could not be scraped directly, so the
-// model prices below are corroborated from AWS's own worked examples and documentation instead of
-// the live pricing widget (see ORCHESTRATOR_PER_TURN, CLASSIFIER_PER_CHECK and WORKER_PER_SESSION).
-// Each running EC2 worker also carries its own 30 GiB gp3 root volume, deleted with the instance
-// (infra/lib/ec2-workers.ts EC2_WORKER_ROOT_VOLUME_GIB); that is separate from the 20 GiB gp3
-// workspace volume kept until the workspace closes.
-const PRICES = {
-  natGatewayHour: 0.045,
-  fargateArmVcpuHour: 0.03238,
-  fargateArmGbHour: 0.00356,
-  m6gMediumHour: 0.0385,
-  gp3GbMonth: 0.08,
-  workspaceGiB: 20,
-  ec2WorkerRootVolumeGiB: 30,
-  smallServicesMonth: 10,
-};
-// The Sonnet 4.6 and GLM 4.7 figures come from the spec's 2026-09-25 evaluation (do not change).
-const ORCHESTRATOR_PER_TURN: Record<string, number> = { "us.anthropic.claude-sonnet-4-6": 0.025, "zai.glm-4.7": 0.007 };
-/** About 2,000 input and 100 output tokens per check. Nova Lite: $0.06/1M input, $0.24/1M output
- * (AWS Bedrock pricing, corroborated by AWS's own Nova fine-tuning cost-analysis worked example).
- * Claude Haiku 4.5 is assumed to price on Bedrock the same as Anthropic's own list price
- * ($1/1M input, $5/1M output); this is an assumption, not a confirmed Bedrock rate. */
-const CLASSIFIER_PER_CHECK: Record<string, number> = { "amazon.nova-lite-v1:0": 0.00015, "us.anthropic.claude-haiku-4-5-20251001-v1:0": 0.0025 };
-/** The model ids whose price above is an assumption, not a confirmed Bedrock rate: the printed plan says so. */
-const ASSUMED_PRICES: ReadonlySet<string> = new Set(["us.anthropic.claude-haiku-4-5-20251001-v1:0"]);
-/** About 200,000 input and 10,000 output tokens per session. Nova Pro: $0.8/1M input, $3.2/1M
- * output (AWS Bedrock pricing). */
-const WORKER_PER_SESSION: Record<string, number> = { "amazon.nova-pro-v1:0": 0.192 };
-
-export const STATED_USAGE = { turnsPerMonth: 1000, workerSessionsPerMonth: 100, workerInstanceHoursPerMonth: 60, keptWorkspaces: 10 };
-
-export interface CostLine { item: string; usd: number | undefined; basis: string }
-export interface CostEstimate { lines: CostLine[]; totalUsd: number; unpriced: string[] }
-
-const cents = (usd: number) => Math.round(usd * 100);
-const money = (usd: number) => `$${usd.toFixed(2)}`;
-const count = (n: number) => n.toLocaleString("en-US");
-
-export function estimateMonthlyCost(models: InitAnswers["models"], usage = STATED_USAGE): CostEstimate {
-  const unpriced: string[] = [];
-  const priced = (item: string, usd: number, basis: string): CostLine => ({ item, usd: cents(usd) / 100, basis });
-  const perUse = (item: string, id: string, table: Record<string, number>, uses: number, what: string): CostLine => {
-    const each = table[id];
-    if (each === undefined) {
-      unpriced.push(id);
-      return { item, usd: undefined, basis: `not estimated: no price on file for ${id}` };
-    }
-    const assumed = ASSUMED_PRICES.has(id) ? ", assumed: no confirmed Bedrock rate" : "";
-    return priced(item, each * uses, `${count(uses)} ${what} at about $${each} each${assumed}`);
-  };
-  const lines: CostLine[] = [
-    priced("Two NAT gateways", 2 * PRICES.natGatewayHour * HOURS_PER_MONTH, `2 x $${PRICES.natGatewayHour}/hour, plus $0.045 per GB processed`),
-    priced("Slack service (Fargate, 0.5 vCPU, 1 GB, arm64)", (0.5 * PRICES.fargateArmVcpuHour + 1 * PRICES.fargateArmGbHour) * HOURS_PER_MONTH, "one task, always on"),
-    priced("Worker instances (m6g.medium)", PRICES.m6gMediumHour * usage.workerInstanceHoursPerMonth, `${usage.workerInstanceHoursPerMonth} instance-hours at $${PRICES.m6gMediumHour}/hour`),
-    priced(
-      `Worker root volumes (${PRICES.ec2WorkerRootVolumeGiB} GiB gp3)`,
-      usage.workerInstanceHoursPerMonth * PRICES.ec2WorkerRootVolumeGiB * (PRICES.gp3GbMonth / HOURS_PER_MONTH),
-      `${usage.workerInstanceHoursPerMonth} instance-hours at ${PRICES.ec2WorkerRootVolumeGiB} GiB gp3 and $${PRICES.gp3GbMonth}/GB-month, the same usage assumption as the worker instances above; each running worker's root volume is deleted with it, unlike the workspace volumes below`,
-    ),
-    priced("Workspace volumes", usage.keptWorkspaces * PRICES.workspaceGiB * PRICES.gp3GbMonth, `${usage.keptWorkspaces} kept workspaces x ${PRICES.workspaceGiB} GiB gp3 at $${PRICES.gp3GbMonth}/GB-month`),
-    priced("API Gateway, Lambda, DynamoDB, SQS, Secrets Manager, KMS (including the invocation-signing key) and CloudWatch", PRICES.smallServicesMonth, "about, at this usage"),
-    perUse(`Orchestrator model (${models.orchestrator})`, models.orchestrator, models.providers?.orchestrator === "openrouter" ? {} : ORCHESTRATOR_PER_TURN, usage.turnsPerMonth, "turns"),
-    perUse(`Classifier model (${models.classifier})`, models.classifier, models.providers?.classifier === "openrouter" ? {} : CLASSIFIER_PER_CHECK, usage.turnsPerMonth, "checks"),
-    perUse(`Worker model (${models.worker})`, models.worker, models.providers?.worker === "openrouter" ? {} : WORKER_PER_SESSION, usage.workerSessionsPerMonth, "sessions"),
-  ];
-  const totalCents = lines.reduce((sum, line) => sum + (line.usd === undefined ? 0 : cents(line.usd)), 0);
-  return { lines, totalUsd: totalCents / 100, unpriced };
-}
+export { estimateMonthlyCost, STATED_USAGE, type CostEstimate, type CostLine } from "./cost.js";
 
 /** What the plan must say beyond the answers: an OpenRouter key init stores itself has no ARN yet. */
 export interface PlanExtras { storesOpenRouterKey?: boolean; openRouterProviders?: readonly string[] }
@@ -107,29 +33,31 @@ export function installPlanText(answers: InitAnswers, estimate: CostEstimate, no
     : answers.alert.kind === "webhook"
       ? `${answers.alert.display} (the full address is kept in ${answers.alert.secretName})`
       : "none";
+  const provider = (role: "orchestrator" | "classifier" | "worker") => (answers.models.providers?.[role] === "openrouter" ? "OpenRouter" : "Amazon Bedrock");
+  const engine = answers.engine === "templates" ? "published templates" : "AgentX's source code";
   const lines = [
-    `AgentX will create environment ${env} in account ${answers.account} (${answers.region}) with the ${answers.engine} engine, release ${answers.releaseVersion}:`,
+    `AgentX will create the install ${env} in AWS account ${answers.account} (${answers.region}), from release ${answers.releaseVersion} with ${engine}:`,
     `- Stacks, in this order: ${stacks.join(", ")}`,
     `- IAM roles ${environmentCloudFormationRoleName(env)} (CloudFormation deploys through it) and ${environmentOperatorRoleName(env)} (day-2 commands), and the permission boundary ${boundary}, which every AgentX role carries; the stacks' own roles live under the IAM path ${environmentRolePath(env)}`,
     `- Secrets ${secrets.join(", ")}`,
     `- Settings under /agentx/${env}/`,
     `- In GitHub: an app named "${answers.github.appName}" owned by ${answers.github.account}, with read and write access to contents, pull requests and issues, and read access to metadata. No webhook.`,
     `- In Slack: an app named "${answers.slack.appName}".`,
-    `- Models: orchestrator ${answers.models.providers?.orchestrator ?? "amazon-bedrock"}/${answers.models.orchestrator}, classifier ${answers.models.providers?.classifier ?? "amazon-bedrock"}/${answers.models.classifier}, worker ${answers.models.providers?.worker ?? "amazon-bedrock"}/${answers.models.worker}`,
+    `- Models: main model ${modelName(answers.models.orchestrator)} (${provider("orchestrator")}), safety check model ${modelName(answers.models.classifier)} (${provider("classifier")}), coding model ${modelName(answers.models.worker)} (${provider("worker")})`,
     ...(answers.models.openRouter ? [`- OpenRouter: read existing secret ${answers.models.openRouter.secretArn}; ${routing(answers.models.openRouter.providers)}`] : []),
     ...(extras.storesOpenRouterKey === true ? [`- OpenRouter: your API key is stored in the new secret ${openRouterSecretName(env)}; ${routing(extras.openRouterProviders)}`] : []),
-    `- Alerts: ${alerts}${answers.alert.kind === "none" ? "" : ", subscribed and tested at the end of init"}`,
+    `- Alerts: ${alerts}${answers.alert.kind === "none" ? "" : ", subscribed and tested at the end of the install"}`,
     answers.budget === undefined
       ? "- Budget: none"
       : `- Budget agentx-${env}-monthly: $${answers.budget.monthlyUsd} a month for ${answers.budget.scope === "tag" ? `costs tagged agentx:env=${env}` : "the whole account"}, alerting at 80% spent and 100% forecast`,
-    `- AgentX never answers itself or other bots. Mentions people post through other apps: ${answers.slack.appPostedMessages} (slack.appPostedMessages).`,
+    `- AgentX never answers itself or other bots. Messages other apps post for people: ${answers.slack.appPostedMessages === "accept" ? "answered" : "ignored"}.`,
     ...notes.map((note) => `Note: ${note}`),
     "",
     "Estimated monthly cost:",
-    ...estimate.lines.map((line) => `  ${line.usd === undefined ? "    n/a" : money(line.usd).padStart(8)}  ${line.item} (${line.basis})`),
-    `Estimated monthly total: ${money(estimate.totalUsd)} at ${count(STATED_USAGE.turnsPerMonth)} turns, ${count(STATED_USAGE.workerSessionsPerMonth)} worker sessions and ${STATED_USAGE.workerInstanceHoursPerMonth} worker instance-hours a month (us-east-1 list prices, ${PRICES_CHECKED}; your bill will differ)${estimate.unpriced.length > 0 ? `, not counting ${estimate.unpriced.join(", ")}` : ""}.`,
+    ...estimate.lines.map((line) => `  ${(line.usd === undefined ? "not priced" : money(line.usd)).padStart(10)}  ${line.item} (${line.basis})`),
+    `Estimated monthly total: ${money(estimate.totalUsd)} at ${count(STATED_USAGE.turnsPerMonth)} turns, ${count(STATED_USAGE.workerSessionsPerMonth)} coding sessions and ${STATED_USAGE.workerInstanceHoursPerMonth} machine-hours a month (us-east-1 list prices, ${PRICES_CHECKED}; your bill will differ)${notCounted(estimate).length > 0 ? `, not counting ${notCounted(estimate).join(" and ")}, whose price is not on file` : ""}.`,
     "",
-    "To remove it later, follow the teardown guide (agentx destroy arrives in phase 15e). EC2 worker volumes are deleted by the teardown steps.",
+    "To remove everything later, use the remove command in the ready summary. It deletes the coding machines' disks too.",
   ];
   return `${lines.join("\n")}\n`;
 }
@@ -137,6 +65,6 @@ export function installPlanText(answers: InitAnswers, estimate: CostEstimate, no
 export async function confirmInstallPlan(input: { answers: InitAnswers; notes: readonly string[]; prompter: Prompter; write: (text: string) => void; extras?: PlanExtras }): Promise<void> {
   input.write(installPlanText(input.answers, estimateMonthlyCost(input.answers.models), input.notes, input.extras));
   if (!(await input.prompter.confirm("Create all of this?", { defaultValue: false }))) {
-    throw agentXError("CONFIG_INVALID", "install declined; nothing was created");
+    throw operatorStop("install declined; nothing was created");
   }
 }

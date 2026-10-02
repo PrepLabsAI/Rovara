@@ -65,20 +65,22 @@ describe("browserPrompter", () => {
   });
 
   it("choose offers every choice, takes the default for an empty answer, and refuses anything else", async () => {
+    // A flag with no entry in the page's question-copy catalog (question-copy.ts), so the
+    // choices here pass through unrelabelled: this test is about choose's own mechanics.
     const choices = [{ value: "cognito" as const, label: "AgentX signs people in" }, { value: "oidc" as const, label: "Your own provider" }];
     const picked = setup();
-    const chosen = picked.prompter.choose("Sign-in", choices, { flag: "--identity", defaultValue: "cognito" });
+    const chosen = picked.prompter.choose("Sign-in", choices, { flag: "--not-a-real-flag", defaultValue: "cognito" });
     expect(shown(picked.hub)).toMatchObject({ kind: "choose", defaultValue: "cognito", choices });
     expect(post(picked.hub, "oidc")).toBeUndefined();
     await expect(chosen).resolves.toBe("oidc");
 
     const defaulted = setup();
-    const takesDefault = defaulted.prompter.choose("Sign-in", choices, { flag: "--identity", defaultValue: "cognito" });
+    const takesDefault = defaulted.prompter.choose("Sign-in", choices, { flag: "--not-a-real-flag", defaultValue: "cognito" });
     expect(post(defaulted.hub, "")).toBeUndefined();
     await expect(takesDefault).resolves.toBe("cognito");
 
     const refused = setup();
-    void refused.prompter.choose("Sign-in", choices, { flag: "--identity", defaultValue: "cognito" });
+    void refused.prompter.choose("Sign-in", choices, { flag: "--not-a-real-flag", defaultValue: "cognito" });
     expect(post(refused.hub, "saml")).toBe("choose one of the options");
   });
 
@@ -152,21 +154,22 @@ describe("browserPrompter", () => {
 
 describe("the wizard's state", () => {
   it("builds the checklist from the InitEvent stream", () => {
-    const hub = createWizardHub("staging");
+    // A fixed clock, so the step's recorded startedAt and tookSeconds are exact values below.
+    const hub = createWizardHub("staging", { now: () => 0 });
     hub.setSteps([
-      { id: "prerequisites", title: "Check prerequisites" },
+      { id: "prerequisites", title: "Check your AWS account" },
       { id: "access", title: "Deploy the access stack" },
-      { id: "github-app", title: "Create and install the GitHub App" },
+      { id: "github-app", title: "Create the GitHub app" },
     ]);
     expect(hub.state().steps.map((step) => step.status)).toEqual(["pending", "pending", "pending"]);
-    hub.applyEvent({ kind: "step-skipped", id: "prerequisites", title: "Check prerequisites" });
+    hub.applyEvent({ kind: "step-skipped", id: "prerequisites", title: "Check your AWS account" });
     hub.applyEvent({ kind: "step-started", id: "access", title: "Deploy the access stack" });
     hub.applyEvent({ kind: "step-done", id: "access", title: "Deploy the access stack" });
-    hub.applyEvent({ kind: "step-waiting", id: "github-app", title: "Create and install the GitHub App", message: "install it on acme" });
+    hub.applyEvent({ kind: "step-waiting", id: "github-app", title: "Create the GitHub app", message: "install it on acme" });
     expect(hub.state().steps).toEqual([
-      { id: "prerequisites", title: "Check prerequisites", status: "skipped" },
-      { id: "access", title: "Deploy the access stack", status: "done" },
-      { id: "github-app", title: "Create and install the GitHub App", status: "waiting", message: "install it on acme" },
+      { id: "prerequisites", title: "Check your AWS account", status: "skipped", phase: "your-choices", usualSeconds: 30, usualText: "usually under a minute" },
+      { id: "access", title: "Deploy the access stack", status: "done", phase: "build", usualSeconds: 60, usualText: "usually 1 minute", startedAt: "1970-01-01T00:00:00.000Z", tookSeconds: 0 },
+      { id: "github-app", title: "Create the GitHub app", status: "waiting", message: "install it on acme", phase: "build", usualSeconds: 120, usualText: "usually 2 minutes" },
     ]);
   });
 
@@ -179,7 +182,7 @@ describe("the wizard's state", () => {
       closed: () => seen.push("closed"),
     });
     hub.log("fetching the release");
-    hub.setSteps([{ id: "prerequisites", title: "Check prerequisites" }]);
+    hub.setSteps([{ id: "prerequisites", title: "Check your AWS account" }]);
     hub.finish("AgentX environment staging is installed.");
     hub.close();
     expect(seen).toEqual(["log:fetching the release", "state:running:1", "state:finished:1", "closed"]);
