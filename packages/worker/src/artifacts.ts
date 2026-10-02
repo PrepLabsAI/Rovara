@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
@@ -108,19 +108,32 @@ export async function workspaceFingerprint(rootPath: string): Promise<string> {
   return repositoriesFingerprint(manifest.repositories.map((repository) => ({ name: repository.name, directory: resolve(rootPath, repository.path) })));
 }
 
-/** How many untracked files the fingerprint stats; beyond it, only their list counts (M-9). */
+/** How many untracked files the recorder's fingerprint stats (M-9); past it, the digest never matches (Ruling H). */
 export const MAX_FINGERPRINT_UNTRACKED_STATS = 5_000;
 
 /**
+ * The spec 051 recorder's fingerprint: repositoriesFingerprint with the untracked-file cap. Past the cap an edit to an
+ * untracked file could go unseen, so each read gets a fresh digest and the test run's before counts as unknown.
+ */
+export function recorderFingerprint(
+  repositories: ReadonlyArray<{ name: string; directory: string }>,
+  signal?: AbortSignal,
+  maxUntrackedStats: number = MAX_FINGERPRINT_UNTRACKED_STATS,
+): Promise<string> {
+  return repositoriesFingerprint(repositories, { maxUntrackedStats, ...(signal === undefined ? {} : { signal }) });
+}
+
+/**
  * workspaceFingerprint's digest over the given repositories. It respects each repository's .gitignore. An aborted
- * `signal` stops the git calls and the stat loop, and rejects.
+ * `signal` stops the git calls and the stat loop, and rejects. Uncapped by default, as workspaceFingerprint has always
+ * been; with `maxUntrackedStats`, a read past the cap mixes in a nonce, so no two such reads match.
  */
 export async function repositoriesFingerprint(
   repositories: ReadonlyArray<{ name: string; directory: string }>,
   options: { signal?: AbortSignal; maxUntrackedStats?: number } = {},
 ): Promise<string> {
   const { signal } = options;
-  const maxUntrackedStats = options.maxUntrackedStats ?? MAX_FINGERPRINT_UNTRACKED_STATS;
+  const maxUntrackedStats = options.maxUntrackedStats ?? Number.POSITIVE_INFINITY;
   const hash = createHash("sha256");
   for (const { name, directory } of repositories) {
     signal?.throwIfAborted();
@@ -139,7 +152,10 @@ export async function repositoriesFingerprint(
     let statted = 0;
     for (const entry of status.split("\u0000")) {
       if (!entry.startsWith("?? ")) continue;
-      if (statted >= maxUntrackedStats) break;
+      if (statted >= maxUntrackedStats) {
+        hash.update(`capped\u0000${randomUUID()}\u0000`);
+        break;
+      }
       statted += 1;
       signal?.throwIfAborted();
       const file = await stat(resolve(directory, entry.slice(3))).catch(() => undefined);

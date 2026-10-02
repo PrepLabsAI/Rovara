@@ -249,3 +249,21 @@ describe("CommandRecorder: fingerprint cost (M-9, M-11)", () => {
     expect(signals.every((signal) => signal === controller.signal)).toBe(true);
   });
 });
+
+describe("CommandRecorder: a call that never gets a tool_result (M-12)", () => {
+  it("drops a blocked call from the calls in flight at its tool_execution_end", async () => {
+    const h = harness();
+    await h.recorder.observeCall({ toolCallId: "blocked", toolName: "bash", input: { command: "sed -i s/a/b/ src.py" } });
+    h.recorder.observeExecutionEnd("blocked");
+    await h.bash("pytest");
+    expect((await h.runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: false });
+  });
+
+  it("clears the calls in flight at turn_end", async () => {
+    const h = harness();
+    await h.recorder.observeCall({ toolCallId: "aborted", toolName: "edit", input: { path: "a.ts" } });
+    h.recorder.observeTurnEnd();
+    await h.bash("pytest");
+    expect((await h.runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: false });
+  });
+});

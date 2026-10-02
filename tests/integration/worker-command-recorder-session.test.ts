@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
 import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { repositoriesFingerprint } from "../../packages/worker/src/artifacts.js";
+import { recorderFingerprint, repositoriesFingerprint, workspaceFingerprint } from "../../packages/worker/src/artifacts.js";
 import { createDefaultPiSessionAdapter, createWorkspacePiSession } from "../../packages/worker/src/pi-session.js";
 import { CommandRecorder } from "../../packages/worker/src/verification/recorder.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
@@ -37,16 +37,18 @@ async function workspace(): Promise<{ rootPath: string; repository: string }> {
   return { rootPath, repository };
 }
 
-async function recordedSession(commands: Array<string | string[]>, fingerprint?: () => Promise<string>) {
+async function recordedSession(commands: Array<string | string[]>, fingerprint?: (signal?: AbortSignal) => Promise<string>) {
   const { rootPath, repository } = await workspace();
   const diagnostics: string[] = [];
   const recorder = new CommandRecorder({
-    fingerprint: fingerprint ?? (() => repositoriesFingerprint([{ name: "web", directory: repository }])),
+    fingerprint: fingerprint ?? ((signal) => recorderFingerprint([{ name: "web", directory: repository }], signal)),
     onDiagnostic: (message) => { diagnostics.push(message); },
   });
   const extension: ExtensionFactory = (pi) => {
     pi.on("tool_call", async (event, context) => { await recorder.observeCall(event, context.signal); });
     pi.on("tool_result", (event) => { recorder.observe(event); });
+    pi.on("tool_execution_end", (event) => { recorder.observeExecutionEnd(event.toolCallId); });
+    pi.on("turn_end", () => { recorder.observeTurnEnd(); });
   };
   const { modelRuntime, faux } = await fauxModelRuntime();
   // A string is one call in its own turn; an array is one assistant message with several calls, which Pi runs as a batch.
@@ -94,24 +96,47 @@ describe("the command recorder in the worker's Pi session (spec 051 Ruling E)", 
   });
 });
 
-describe("repositoriesFingerprint (M-9)", () => {
-  it("still sees an added untracked file beyond the stat cap, and an untracked file's size within it", async () => {
+describe("the fingerprints and the untracked-file cap (M-9, Ruling H)", () => {
+  it("leaves run-task's workspaceFingerprint uncapped: it sees a change to an untracked file past 5,000 files", async () => {
+    const { rootPath, repository } = await workspace();
+    await mkdir(join(repository, "tree"));
+    await Promise.all(Array.from({ length: 5_001 }, (_, index) => writeFile(join(repository, "tree", `f${String(index).padStart(5, "0")}.txt`), "x")));
+    const first = await workspaceFingerprint(rootPath);
+    expect(await workspaceFingerprint(rootPath)).toBe(first);
+    await writeFile(join(repository, "tree", "f05000.txt"), "longer");
+    expect(await workspaceFingerprint(rootPath)).not.toBe(first);
+  });
+
+  it("gives the recorder's fingerprint a new digest on every read once the cap is hit, and a stable one below it", async () => {
     const { repository } = await workspace();
     const read = () => repositoriesFingerprint([{ name: "web", directory: repository }], { maxUntrackedStats: 1 });
     await writeFile(join(repository, "u1.txt"), "1");
+    expect(await read()).toBe(await read());
     await writeFile(join(repository, "u2.txt"), "2");
-    const first = await read();
-    await writeFile(join(repository, "u3.txt"), "3");
-    const second = await read();
-    expect(second).not.toBe(first);
-    await writeFile(join(repository, "u1.txt"), "longer");
-    expect(await read()).not.toBe(second);
+    expect(await read()).not.toBe(await read());
+  });
+
+  it("marks a test run as after an edit once the recorder's fingerprint hit the cap (Ruling H)", async () => {
+    const { repository } = await workspace();
+    await writeFile(join(repository, "u1.txt"), "1");
+    await writeFile(join(repository, "u2.txt"), "2");
+    const diagnostics: string[] = [];
+    const recorder = new CommandRecorder({
+      fingerprint: (signal) => recorderFingerprint([{ name: "web", directory: repository }], signal, 1),
+      onDiagnostic: (message) => { diagnostics.push(message); },
+    });
+    await recorder.observeCall({ toolCallId: "t", toolName: "bash", input: { command: "pytest" } });
+    recorder.observe({ toolCallId: "t", toolName: "bash", input: { command: "pytest" }, isError: true, content: [{ type: "text", text: "Command exited with code 1" }] });
+    await recorder.settled();
+    expect(recorder.firstRuns()[0]).toMatchObject({ replay: "pytest", afterFirstEdit: true });
+    // The cap, not a failed read, decided it.
+    expect(diagnostics).toEqual([]);
   });
 
   it("rejects promptly when its signal is aborted", async () => {
     const { repository } = await workspace();
     const controller = new AbortController();
     controller.abort();
-    await expect(repositoriesFingerprint([{ name: "web", directory: repository }], { signal: controller.signal })).rejects.toThrow();
+    await expect(recorderFingerprint([{ name: "web", directory: repository }], controller.signal)).rejects.toThrow();
   });
 });

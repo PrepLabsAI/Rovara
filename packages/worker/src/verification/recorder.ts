@@ -95,6 +95,20 @@ export class CommandRecorder {
     await changed;
   }
 
+  /**
+   * Feed every Pi extension `tool_execution_end` event. A call that was blocked or aborted gets no tool_result, and
+   * would otherwise stay in flight and void every later test's before (M-12).
+   */
+  observeExecutionEnd(toolCallId: string): void {
+    // Its execution is over either way; a test call's overlap so far stays in #overlapped for its tool_result.
+    this.#inFlight.delete(toolCallId);
+  }
+
+  /** Feed every Pi extension `turn_end` event: no call outlives its turn. */
+  observeTurnEnd(): void {
+    this.#inFlight.clear();
+  }
+
   /** Feed every Pi extension `tool_result` event, in order. Read `firstRuns()` only after `settled()`. */
   observe(event: RecorderToolResult): void {
     this.#inFlight.delete(event.toolCallId);
