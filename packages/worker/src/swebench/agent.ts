@@ -1,8 +1,12 @@
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
-import { redactText, type SwebenchStopReason } from "@agentx/contracts";
+import { parseAgentClaim, redactText, type CheckReport, type SwebenchStopReason } from "@agentx/contracts";
+import { recorderFingerprint } from "../artifacts.js";
 import type { DevcontainerPaths } from "../devcontainer.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "../pi-session.js";
 import { ToolLoopGuard } from "../tool-loop-guard.js";
+import { createCheckRunners, planChecks, type CheckRunners } from "../verification/checks.js";
+import { assistantText, notVerifiedReport, verificationExtension } from "../verification/extension.js";
+import { CommandRecorder } from "../verification/recorder.js";
 
 export interface AgentRun {
   stopReason: SwebenchStopReason;
@@ -14,6 +18,10 @@ export interface AgentRun {
   toolCalls: number;
   /** What the session reported without failing, such as an extension's error (spec 051 Ruling F); redacted. */
   diagnostics: string[];
+  /** AgentX's own result for the agent's work (spec 051 FR-010): rerun at the finish, else not_verified. */
+  checks: CheckReport;
+  /** What the agent's final message claimed (parseAgentClaim of the last assistant text). */
+  agentClaim: "success" | "failure" | "none";
 }
 
 export interface AgentRunInput {
@@ -29,6 +37,8 @@ export interface AgentRunInput {
   /** The tool-loop guard's call backstop; its default when absent. */
   toolCallLimit?: number;
   piAdapter?: PiSessionAdapter;
+  /** The runners AgentX's checks use; tests supply fakes. Default: the container's own bash operations. */
+  checkRunners?: CheckRunners;
   now?: () => number;
 }
 
@@ -55,22 +65,49 @@ export function swebenchPrompt(problemStatement: string, repositoryFolder: strin
 export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> {
   const now = input.now ?? Date.now;
   const diagnostics: string[] = [];
+  const onDiagnostic = (message: string): void => { diagnostics.push(redactText(message)); };
+  // Spec 051 FR-010: the checks are the agent's own test commands, replayed through the shell it used, in the
+  // testbed. Evals have no readiness, so there are no project checks. The limit's abort stops a running check (P-4).
+  const limitStop = new AbortController();
+  const recorder = new CommandRecorder({
+    fingerprint: (signal) => recorderFingerprint([{ name: "testbed", directory: input.paths.hostFolder }], signal),
+    onDiagnostic,
+  });
+  const runners = input.checkRunners ?? containerCheckRunners(input);
+  let reportedChecks: CheckReport | undefined;
+  let firstRoundChecks: CheckReport | undefined;
+  let started = 0;
+  const verification = verificationExtension({
+    plan: () => planChecks(undefined, recorder),
+    runners,
+    // P-3: the agent's time remaining, so verification never outlives the run's own limit.
+    budgetMs: () => Math.max(0, input.timeLimitMs - (now() - started)),
+    signal: limitStop.signal,
+    recorder,
+    onReport: (report) => { reportedChecks = report; },
+    onExtraTry: (firstRound) => { firstRoundChecks = firstRound; reportedChecks = undefined; },
+    onDiagnostic,
+  });
   const session = await createWorkspacePiSession({
-    onDiagnostic: (message) => { diagnostics.push(redactText(message)); },
+    onDiagnostic,
+    extensionFactories: [verification],
     rootPath: input.rootPath,
     model: input.model,
     bashOperations: input.bashOperations,
     devcontainerPaths: input.paths,
   }, input.piAdapter);
-  const started = now();
+  started = now();
   let stop: { reason: SwebenchStopReason; detail: string } | undefined;
   // Only the last model response decides a model error: pi retries a failed call (a rate limit, say)
   // and the session goes on, so an earlier failed response does not mean the agent stopped there.
   let lastAssistant: { stopReason: string; errorMessage?: string } | undefined;
   let thrown: string | undefined;
+  // The last assistant message's text: the agent's claim, when Pi never reached the check (P-4).
+  let finalText: string | undefined;
   const halt = (reason: SwebenchStopReason, detail: string) => {
     if (stop !== undefined) return;
     stop = { reason, detail };
+    limitStop.abort();
     void session.abort().catch(() => undefined);
   };
   const guard = new ToolLoopGuard(input.toolCallLimit);
@@ -81,6 +118,7 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
     const assistant = assistantEnd(event);
     if (assistant === undefined) return;
     lastAssistant = assistant;
+    finalText = assistantText((event as { message?: unknown }).message);
     const stats = session.getSessionStats();
     if (stats.tokens.total > 0 && stats.cost === 0) {
       halt("cost_unknown", `the cost of ${session.getModel().provider}/${session.getModel().modelId} cannot be estimated, so the cost ceiling cannot be enforced`);
@@ -101,10 +139,41 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
   const agentSeconds = Math.round((now() - started) / 1_000);
   const toolCalls = guard.toolCalls;
   const finalStop = stop as { reason: SwebenchStopReason; detail: string } | undefined;
-  if (finalStop !== undefined) return { stopReason: finalStop.reason, detail: finalStop.detail, session, agentSeconds, toolCalls, diagnostics };
   const modelError = thrown ?? (lastAssistant?.stopReason === "error" ? lastAssistant.errorMessage ?? "the model call failed" : undefined);
-  if (modelError !== undefined) return { stopReason: "model_error", detail: modelError.slice(0, 500), session, agentSeconds, toolCalls, diagnostics };
-  return { stopReason: "finished", session, agentSeconds, toolCalls, diagnostics };
+  const agentClaim = parseAgentClaim(finalText);
+  // P-4: Pi skips agent_before_settle after an abort, so a stopped run has no report from the extension; a model
+  // error is no finish to check. Ruling N: an extra try with no second settle and no stop keeps the first round.
+  const checks: CheckReport = reportedChecks
+    ?? (firstRoundChecks !== undefined && finalStop === undefined && modelError === undefined ? firstRoundChecks : undefined)
+    ?? notVerifiedReport(finalStop === undefined && modelError !== undefined ? "error" : "stopped", {
+      extraTry: firstRoundChecks === undefined ? "not_needed" : "given",
+      agentClaim,
+    });
+  const common = { session, agentSeconds, toolCalls, diagnostics, checks, agentClaim };
+  if (finalStop !== undefined) return { stopReason: finalStop.reason, detail: finalStop.detail, ...common };
+  if (modelError !== undefined) return { stopReason: "model_error", detail: modelError.slice(0, 500), ...common };
+  return { stopReason: "finished", ...common };
+}
+
+/**
+ * The checks' runners: the agent's own shell (the container's bash operations), in the run's root. The agent writes
+ * `cd /testbed && ...`, a path only the container has, so a leading `cd` into the container folder is replayed against
+ * the same files on the host, where the worker's containment check can resolve it.
+ */
+function containerCheckRunners(input: AgentRunInput): CheckRunners {
+  const runners = createCheckRunners({ rootPath: input.rootPath, bashOperations: input.bashOperations });
+  const { containerFolder, hostFolder } = input.paths;
+  return {
+    runProjectCommand: (command, signal) => runners.runProjectCommand(command, signal),
+    runAgentCommand(replay, timeoutMs, signal) {
+      const cd = /^cd (\S+) && /.exec(replay);
+      const target = cd?.[1];
+      const mapped = target !== undefined && (target === containerFolder || target.startsWith(`${containerFolder}/`))
+        ? `cd ${hostFolder}${target.slice(containerFolder.length)} && ${replay.slice(cd![0].length)}`
+        : replay;
+      return runners.runAgentCommand(mapped, timeoutMs, signal);
+    },
+  };
 }
 
 function assistantEnd(event: unknown): { stopReason: string; errorMessage?: string } | undefined {

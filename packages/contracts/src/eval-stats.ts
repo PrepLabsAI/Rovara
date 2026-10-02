@@ -25,6 +25,8 @@ export function summarize(measures: readonly EvalRunMeasure[]): EvalBatchModelSu
     const resolved = graded.filter((measure) => measure.resolved).length;
     const totalCostUsd = group.reduce((sum, measure) => sum + measure.chargedUsd, 0);
     const interval = wilsonInterval(resolved, graded.length);
+    // Spec 051: a run with no claim line, or from a runner older than the checks, is not in the denominator.
+    const claimed = graded.filter((measure) => measure.agentClaim === "success" || measure.agentClaim === "failure");
     return {
       provider: first.provider,
       modelId: first.modelId,
@@ -41,6 +43,7 @@ export function summarize(measures: readonly EvalRunMeasure[]): EvalBatchModelSu
       totalCostUsd,
       unpricedRuns: group.filter((measure) => measure.costUsd === null).length,
       costPerSolvedUsd: resolved === 0 ? null : totalCostUsd / resolved,
+      disagreementRate: claimed.length === 0 ? null : claimed.filter((measure) => measure.disagrees === true).length / claimed.length,
     };
   });
 }

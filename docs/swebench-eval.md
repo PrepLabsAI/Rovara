@@ -51,7 +51,10 @@ regression tests, so a pass is "sanitizer-verified, no regression tests"; say so
 is shown. Its reports and the grading container's log are under the run's `harness/` artifacts.
 
 Ship order: the control plane release (its result schema knows the SEC-bench verdict) before
-`npm run swebench:runner-image`.
+`npm run swebench:runner-image`. The same holds for spec 051: the runner's graded result now carries
+`checks`, `agentClaim`, `disagreement` and `preambleSha256`, which a strict older broker answers with
+400. Release the control plane first, then the runner image. These fields flow from the runner to the
+broker, so `eval/runner-features` does not gate them.
 
 ## How a run works
 

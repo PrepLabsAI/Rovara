@@ -86,13 +86,13 @@ describe("the results files (spec 052 FR-010)", () => {
       "resolved", "error", "secbenchStrict", "secbenchMedium", "secbenchGenerous", "secbenchFailedStep",
       "failToPassPassed", "failToPassTotal", "passToPassPassed", "passToPassTotal", "stopReason", "agentSeconds", "toolCalls",
       "inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "totalTokens",
-      "costUsd", "chargedUsd", "costEstimated", "imageDigest", "claimCheck",
+      "costUsd", "chargedUsd", "costEstimated", "imageDigest", "claimCheck", "checkStatus", "agentClaim", "disagrees",
     ]);
     expect(csv.split("\r\n")).toEqual([
       EVAL_BATCH_RESULTS_COLUMNS.join(","),
-      `${batch.batchId},${first},${tasks[0]},openrouter,vendor/cheap-v1,high,fireworks,1,1,GRADED,true,,,,,,3,3,19,19,finished,420,,10,5,100,0,115,0.25,0.25,false,swebench/x@sha256:abc,`,
+      `${batch.batchId},${first},${tasks[0]},openrouter,vendor/cheap-v1,high,fireworks,1,1,GRADED,true,,,,,,3,3,19,19,finished,420,,10,5,100,0,115,0.25,0.25,false,swebench/x@sha256:abc,,,,`,
       // RFC 4180: a field with a comma, quote or line break is quoted, and its quotes doubled.
-      `${batch.batchId},${second},${tasks[0]},amazon-bedrock,us.vendor.dear-v1,medium,,1,1,FAILED,,"the agent said ""no"", then\nquit, again\r\n",,,,,,,,,,0,,0,0,0,0,0,,10,true,,`,
+      `${batch.batchId},${second},${tasks[0]},amazon-bedrock,us.vendor.dear-v1,medium,,1,1,FAILED,,"the agent said ""no"", then\nquit, again\r\n",,,,,,,,,,0,,0,0,0,0,0,,10,true,,,,,`,
       "",
     ].join("\r\n").split("\r\n"));
     expect(csv.endsWith("\r\n")).toBe(true);
@@ -117,8 +117,52 @@ describe("the results files (spec 052 FR-010)", () => {
       routing: undefined, claimCheck: undefined, error: "he said \"stop\"\nbye", imageDigest: "y",
     };
     const lines = evalBatchResultsCsv((await getBatch(h.dependencies, batch.batchId))!, [failed, measure]).split("\r\n");
-    expect(lines[1]).toBe(`${batch.batchId},${measure.runId},${tasks[0]},openrouter,vendor/cheap-v1,high,fireworks|together,1,1,GRADED,false,,true,true,false,poc,,,,,finished,7,3,1,2,3,4,10,0.5,0.5,false,x,"{""claim"":""fixed, I think"",""score"":2}"`);
-    expect(lines[2]).toBe(`${batch.batchId},${failed.runId},${tasks[0]},openrouter,vendor/cheap-v1,high,,1,2,FAILED,,"he said ""stop""\nbye",,,,,,,,,finished,7,3,1,2,3,4,10,0.5,0.5,false,y,`);
+    expect(lines[1]).toBe(`${batch.batchId},${measure.runId},${tasks[0]},openrouter,vendor/cheap-v1,high,fireworks|together,1,1,GRADED,false,,true,true,false,poc,,,,,finished,7,3,1,2,3,4,10,0.5,0.5,false,x,"{""claim"":""fixed, I think"",""score"":2}",,,`);
+    expect(lines[2]).toBe(`${batch.batchId},${failed.runId},${tasks[0]},openrouter,vendor/cheap-v1,high,,1,2,FAILED,,"he said ""stop""\nbye",,,,,,,,,finished,7,3,1,2,3,4,10,0.5,0.5,false,y,,,,`);
+  });
+
+  it("carries AgentX's check status, the agent's claim and their disagreement into the row, the CSV and the per-model rate (spec 051 FR-010)", async () => {
+    const h = await harness({ maxConcurrentEvals: 5 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    await topUpBatches(h.dependencies);
+    const report = (status: string) => ({
+      status, source: "agent_commands", preambleVersion: "1", preambleSha256: "a".repeat(64), checks: [], extraTry: "not_needed", agentClaim: "success",
+    });
+    const withChecks = (checkStatus: string, agentClaim: string, disagrees: boolean) => ({
+      ...graded(0.25),
+      checks: report(checkStatus),
+      agentClaim,
+      disagreement: { claimedSuccess: agentClaim === "success", checkRegression: checkStatus === "regression", graderBrokenPassToPass: false, disagrees },
+      preambleSha256: "a".repeat(64),
+    });
+    const [first] = (await getBatch(h.dependencies, batch.batchId))!.queue;
+    await finish(h, first!.runId!, withChecks("regression", "success", true));
+    await runEvalBatchTick(h.dependencies);
+    const [row] = await listBatchMeasures(h.dependencies, batch.batchId);
+    expect(row).toMatchObject({ checkStatus: "regression", agentClaim: "success", disagrees: true });
+    const csv = h.objects.get(`evals/batches/${batch.batchId}/results.csv`)!.split("\r\n");
+    const header = csv[0]!.split(",");
+    const fields = csv[1]!.split(",");
+    expect(["checkStatus", "agentClaim", "disagrees"].map((column) => fields[header.indexOf(column)])).toEqual(["regression", "success", "true"]);
+    const summary = EvalBatchSummarySchema.parse(JSON.parse(h.objects.get(`evals/batches/${batch.batchId}/summary.json`)!));
+    expect(summary.models[0]).toMatchObject({ runs: 1, disagreementRate: 1 });
+  });
+
+  it("leaves the columns empty and the rate null for a result from a runner older than the checks", async () => {
+    const h = await harness({ maxConcurrentEvals: 5 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    await topUpBatches(h.dependencies);
+    const [first] = (await getBatch(h.dependencies, batch.batchId))!.queue;
+    await finish(h, first!.runId!, graded(0.25));
+    await runEvalBatchTick(h.dependencies);
+    const [row] = await listBatchMeasures(h.dependencies, batch.batchId);
+    expect(row).not.toHaveProperty("checkStatus");
+    expect(row).not.toHaveProperty("agentClaim");
+    expect(row).not.toHaveProperty("disagrees");
+    const csv = h.objects.get(`evals/batches/${batch.batchId}/results.csv`)!.split("\r\n");
+    expect(csv[1]!.endsWith(",swebench/x@sha256:abc,,,,")).toBe(true);
+    const summary = EvalBatchSummarySchema.parse(JSON.parse(h.objects.get(`evals/batches/${batch.batchId}/summary.json`)!));
+    expect(summary.models[0]!.disagreementRate).toBeNull();
   });
 
   it("writes summary.json from the rows, removes the batch from the active list, and writes nothing again on the next tick", async () => {

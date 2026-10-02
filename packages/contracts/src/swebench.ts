@@ -3,6 +3,7 @@
 import { z } from "zod";
 import { ModelSelectionSchema } from "./models.js";
 import { SlackRequesterSchema, SlackThreadSchema, SlackChannelIdSchema, SlackTeamIdSchema } from "./slack.js";
+import { CheckReportSchema } from "./checks.js";
 import { TaskUsageTelemetrySchema } from "./usage.js";
 
 /**
@@ -118,6 +119,17 @@ export const SwebenchGradedResultSchema = z.object({
   toolCalls: z.number().int().nonnegative().optional(),
   imageDigest: z.string().max(256),
   usage: TaskUsageTelemetrySchema,
+  /** Spec 051 FR-010: AgentX's check report (compact in the callback), absent from a runner older than the checks. */
+  checks: CheckReportSchema.optional(),
+  agentClaim: z.enum(["success", "failure", "none"]).optional(),
+  /** FR-011: the claim against AgentX's checks and the grader. `graderBrokenPassToPass` is null where the family has no PASS_TO_PASS (SEC-bench). */
+  disagreement: z.object({
+    claimedSuccess: z.boolean(),
+    checkRegression: z.boolean(),
+    graderBrokenPassToPass: z.boolean().nullable(),
+    disagrees: z.boolean(),
+  }).strict().optional(),
+  preambleSha256: z.string().regex(/^[0-9a-f]{64}$/).optional(),
   artifactsPrefix: z.string().max(512),
 }).strict();
 
