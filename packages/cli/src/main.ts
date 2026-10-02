@@ -38,6 +38,7 @@ import { resolveDeveloperEnvironment } from "./developer/config.js";
 import { developerLogin } from "./developer/login.js";
 import { fetchDeveloperWorkspaces, type DeveloperWorkspacesResult } from "./developer/workspaces.js";
 import { runWorkspacesCommand } from "./workspaces-ui/index.js";
+import { listAdminWorkspaces } from "./admin/workspaces.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
 import { installMcp, MCP_CLIENTS, runCommand, type McpClientKind, type McpInstallDeps } from "./mcp/install.js";
 import { runMcpServer, type McpServeDeps } from "./mcp/serve.js";
@@ -493,6 +494,15 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   }
 
   const adminWorkspace = admin.command("workspace").description("administer AgentX workspaces");
+  adminWorkspace
+    .command("list")
+    .description("list workspaces with their Slack or developer owner identity and available name")
+    .action(async (_options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const { settings, accessToken } = await authenticate(globals, services.tokenStore);
+      const result = await listAdminWorkspaces({ controlPlaneUrl: settings.controlPlaneUrl, accessToken }, services.fetchImplementation);
+      services.stdout.write(formatSuccess(result, globals.json));
+    });
   adminWorkspace
     .command("cancel")
     .description("cancel the workspace's running coding task; its conversation keeps what finished before")

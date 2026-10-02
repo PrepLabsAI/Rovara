@@ -1799,6 +1799,14 @@ async function createUnpreparedThreadWorkspace(
         Item: { pk: `IDEMPOTENCY#${identity.ownerKey}#THREAD`, sk: `REQUEST#${requestId}`, entityType: "IDEMPOTENCY", workspaceId: workspace.id },
         ConditionExpression: "attribute_not_exists(pk)",
       } },
+      // Capture creation provenance atomically, before a later participant can touch the thread.
+      { Update: {
+        TableName: dependencies.tableName,
+        Key: slackThreadKey(identity.ownerKey),
+        UpdateExpression: "SET #creator = if_not_exists(#creator, :creator)",
+        ExpressionAttributeNames: { "#creator": "creator" },
+        ExpressionAttributeValues: { ":creator": { userId: identity.slack!.requester.userId, ...(identity.slack!.requesterName === undefined ? {} : { name: identity.slack!.requesterName }) } },
+      } },
     ] }));
   } catch (error) {
     if (!isConditional(error)) throw error;
@@ -2043,15 +2051,16 @@ function threadChargeItems(
       Key: slackThreadKey(identity.ownerKey),
       // The same record recordThreadRequester(..., true) writes, so a missing thread row is
       // created whole and the charged member is among its requesters.
-      UpdateExpression: "SET #entity = :entity, #thread = if_not_exists(#thread, :thread), #workspace = if_not_exists(#workspace, :workspace), starterUserId = :user ADD #requesters :users",
+      UpdateExpression: "SET #entity = :entity, #thread = if_not_exists(#thread, :thread), #workspace = if_not_exists(#workspace, :workspace), starterUserId = :user, #starter = :starter ADD #requesters :users",
       ConditionExpression: "attribute_not_exists(starterUserId)",
-      ExpressionAttributeNames: { "#entity": "entityType", "#thread": "thread", "#workspace": "workspaceId", "#requesters": "requesters" },
+      ExpressionAttributeNames: { "#entity": "entityType", "#thread": "thread", "#workspace": "workspaceId", "#requesters": "requesters", "#starter": "starter" },
       ExpressionAttributeValues: {
         ":entity": "SLACK_THREAD",
         ":thread": identity.subject,
         ":workspace": workspaceId,
         ":user": userId,
         ":users": new Set([userId]),
+        ":starter": { userId, ...(identity.slack?.requesterName === undefined ? {} : { name: identity.slack.requesterName }) },
       },
     } },
   ];
@@ -2274,7 +2283,7 @@ async function recordThreadRequester(
     Key: slackThreadKey(identity.ownerKey),
     UpdateExpression: [
       "SET #entity = :entity, #thread = if_not_exists(#thread, :thread), #workspace = if_not_exists(#workspace, :workspace)",
-      ...(starter ? [", #starter = if_not_exists(#starter, :user)"] : []),
+      ...(starter ? [", #starter = if_not_exists(#starter, :user), #creator = if_not_exists(#creator, :creator)"] : []),
       " ADD #requesters :users",
     ].join(""),
     ExpressionAttributeNames: {
@@ -2282,14 +2291,14 @@ async function recordThreadRequester(
       "#thread": "thread",
       "#workspace": "workspaceId",
       "#requesters": "requesters",
-      ...(starter ? { "#starter": "starterUserId" } : {}),
+      ...(starter ? { "#starter": "starterUserId", "#creator": "creator" } : {}),
     },
     ExpressionAttributeValues: {
       ":entity": "SLACK_THREAD",
       ":thread": identity.subject,
       ":workspace": workspaceId,
       ":users": new Set([slack.requester.userId]),
-      ...(starter ? { ":user": slack.requester.userId } : {}),
+      ...(starter ? { ":user": slack.requester.userId, ":creator": { userId: slack.requester.userId, ...(slack.requesterName === undefined ? {} : { name: slack.requesterName }) } } : {}),
     },
   }));
 }

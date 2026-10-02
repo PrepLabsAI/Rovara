@@ -192,7 +192,11 @@ export const AdminWorkspaceSchema = z.object({
   id: Uuid,
   project: z.string(),
   origin: AdminOriginSchema,
-  owner: z.object({ threadUrl: z.string().optional(), taskId: Uuid.optional(), developerName: z.string().optional() }),
+  owner: z.object({
+    threadUrl: z.string().optional(), taskId: Uuid.optional(), developerName: z.string().optional(),
+    developerId: Hex64.optional(), slackTeamId: SlackTeamIdSchema.optional(),
+    slackUserId: SlackUserIdSchema.optional(), slackName: z.string().optional(),
+  }),
   /** R23: any string on the wire, so a status a newer control plane adds does not fail the answer; the route sends WorkspaceStatusSchema's values. */
   status: z.string(),
   busy: z.boolean(),
