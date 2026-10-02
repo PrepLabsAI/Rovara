@@ -368,7 +368,8 @@ describe("agentx init --ui", () => {
     expect(processEnv.AWS_PROFILE).toBe("dev");
     // The account is on the page by the time the review screen asks to create anything.
     const review = operator.states.find((state) => state.question?.text === "Create all of this?");
-    expect(review?.cards?.find((card) => card.id === "aws")?.lines[0]).toBe("AgentX installs into AWS account 123456789012 in us-east-1.");
+    // Spec 048 FR-015: the account is shown before the region is known, so its card never names one.
+    expect(review?.cards?.find((card) => card.id === "aws")?.lines[0]).toBe("AgentX installs into AWS account 123456789012.");
   });
 
   it("FR-022: the region picker offers only the release's regions", async () => {
@@ -400,45 +401,32 @@ describe("agentx init --ui", () => {
     expect(region?.defaultValue).toBe("us-west-2");
   });
 
-  it("FR-023: a failed prerequisite is a checklist on the page, and checking again after the fix goes on", async () => {
+  it("FR-015 and FR-018: the account checks come before the first setting, and run again after a fix", async () => {
     const h = await harness();
     let quotaReads = 0;
     const checks = passingChecks({ ec2Quota: async () => { quotaReads += 1; return quotaReads === 1 ? 0 : 32; } });
-    // Every first-run answer, then "Check the prerequisites again?" yes, then the review screen.
-    const operator = fakeWizardOperator([...FIRST_RUN.slice(0, -1), true, true, ...SLACK, ...SIGNIN, ...FINISH]);
+    const operator = fakeWizardOperator([true, ...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     expect(await h.run(["--ui"], { openBrowser: operator.open, checks })).toBe(0);
     await operator.settled();
-    expect(operator.asked).toContain("Check the prerequisites again?");
-    const cards = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "prerequisites") ?? []);
-    const failed = cards.find((card) => card.status === "failed");
-    expect(failed?.checks?.find((check) => check.label === "EC2 vCPU quota")).toMatchObject({ ok: false });
-    // Review Focus 5: the card after the fix lists only the new results.
-    const last = cards.at(-1);
-    expect(last?.status).toBe("ok");
-    expect(last?.checks?.every((check) => check.ok)).toBe(true);
-    expect(last?.checks?.filter((check) => check.label === "EC2 vCPU quota")).toHaveLength(1);
-    // Every check ran again, not only the one that failed.
-    expect(last?.checks?.map((check) => check.label)).toEqual(failed?.checks?.map((check) => check.label));
-    // FR-065: the release's images are checked right after the region, before EC2 and Elastic IPs.
-    expect(last?.checks?.map((check) => check.label).slice(0, 5)).toEqual(["Region", "The coding image", "The Slack connection image", "EC2 vCPU quota", "Elastic IPs"]);
-    expect(last?.checks?.some((check) => check.label.startsWith("Model "))).toBe(true);
+    expect(operator.asked[0]).toBe("Check your AWS account again?");
+    const cards = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "account-checks") ?? []);
+    expect(cards.find((card) => card.status === "failed")?.checks?.map((check) => [check.label, check.ok])).toEqual([["EC2 vCPU quota", false], ["Elastic IPs", true]]);
+    expect(cards.at(-1)?.status).toBe("ok");
+    // The later checks no longer repeat the account's own.
+    const later = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "prerequisites") ?? []).at(-1);
+    expect(later?.checks?.map((check) => check.label).slice(0, 3)).toEqual(["Region", "The coding image", "The Slack connection image"]);
+    expect(later?.checks?.map((check) => check.label)).not.toContain("EC2 vCPU quota");
   });
 
-  it("FR-023: saying no to checking again creates nothing", async () => {
+  it("FR-018 and SC-009: stopping at the account checks asks no setting and creates nothing", async () => {
     const h = await harness();
-    const operator = fakeWizardOperator([...FIRST_RUN.slice(0, -1), false]);
+    const operator = fakeWizardOperator([false]);
     expect(await h.run(["--ui"], { openBrowser: operator.open, checks: passingChecks({ ec2Quota: async () => 0 }) })).not.toBe(0);
     await operator.settled();
-    // The question came with the failed checklist beside it.
-    const asking = operator.states.find((state) => state.question?.text === "Check the prerequisites again?");
-    const card = asking?.cards?.find((shown) => shown.id === "prerequisites");
-    expect(card?.status).toBe("failed");
-    expect(card?.checks?.find((check) => check.label === "EC2 vCPU quota")).toMatchObject({ ok: false });
+    expect(operator.asked).toEqual(["Check your AWS account again?"]);
     expect(h.printed()).toContain("init cannot start; nothing was created");
     expect(h.deployer.requests).toEqual([]);
     expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
-    // Declining a check-again question is a stop, told in the fixed words, not the raw problem.
-    expect(operator.states.at(-1)?.outcome).toBe("The install stopped. Your progress is saved.");
   });
 
   it("FR-023: a failure no check reports is still on the checklist, in the error's own words", async () => {
@@ -529,7 +517,7 @@ describe("agentx init --ui", () => {
     expect(code).toBe(0);
     const last = operator.states.at(-1);
     expect(last?.cards?.map((card) => [card.id, card.status])).toEqual([
-      ["aws", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"], ["admin", "ok"], ["project", "ok"], ["channel", "ok"], ["connectors", "ok"], ["alerts", "ok"], ["reply", "ok"], ["ready", "ok"],
+      ["aws", "ok"], ["account-checks", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"], ["admin", "ok"], ["project", "ok"], ["channel", "ok"], ["connectors", "ok"], ["alerts", "ok"], ["reply", "ok"], ["ready", "ok"],
     ]);
     // Every answer came from the scripted operator, and no answer was an address pasted back:
     // the GitHub code arrived through the wizard's own callback.
@@ -540,7 +528,7 @@ describe("agentx init --ui", () => {
     // The screens came in order: each card first appears after the one before it.
     const firstSeen: string[] = [];
     for (const card of operator.states.flatMap((state) => state.cards ?? [])) if (!firstSeen.includes(card.id)) firstSeen.push(card.id);
-    expect(firstSeen).toEqual(["aws", "prerequisites", "github", "slack", "slack-urls", "admin", "project", "channel", "connectors", "alerts", "reply", "ready"]);
+    expect(firstSeen).toEqual(["aws", "account-checks", "prerequisites", "github", "slack", "slack-urls", "admin", "project", "channel", "connectors", "alerts", "reply", "ready"]);
   });
 
   it("FR-012: no secret reaches a card, a link, the page's state, the log, the terminal, SSM or the cache", async () => {
@@ -573,9 +561,9 @@ describe("agentx init --ui", () => {
     await h.run(["--ui"], { openBrowser: operator.open });
     await operator.settled();
     const review = operator.states.find((state) => state.question?.text === "Create all of this?");
-    expect(review?.cards?.map((card) => card.id)).toEqual(["aws", "prerequisites"]);
+    expect(review?.cards?.map((card) => card.id)).toEqual(["aws", "account-checks", "prerequisites"]);
     expect(reconnected?.question?.text).toBe("Create all of this?");
-    expect(reconnected?.cards?.map((card) => card.id)).toEqual(["aws", "prerequisites"]);
+    expect(reconnected?.cards?.map((card) => card.id)).toEqual(["aws", "account-checks", "prerequisites"]);
   });
 
   it("FR-050 and Q5: the admin sign-in page is a button on the install page, never a tab opened by itself", async () => {
@@ -735,7 +723,7 @@ describe("agentx init --ui", () => {
     const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     expect(code).toBe(0);
     expect(operator.states.at(-1)?.cards?.map((card) => [card.id, card.status])).toEqual([
-      ["aws", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"],
+      ["aws", "ok"], ["account-checks", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"],
       ["admin", "ok"], ["project", "ok"], ["channel", "ok"], ["connectors", "ok"], ["alerts", "ok"], ["reply", "ok"], ["ready", "ok"],
     ]);
     expect(h.plane.bindings).toEqual(["T0TEAM/C0PAY00001"]);

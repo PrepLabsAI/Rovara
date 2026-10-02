@@ -38,11 +38,16 @@ export function signedInAs(arn: string): string {
   return "your AWS sign-in";
 }
 
-export function awsCard(input: { account: string; arn: string; region: string; profile?: string }): WizardCard {
+/** Spec 048 FR-015: the account, its alias (when known) and its region (when chosen yet). Shown
+ * before the region when `region` is not given, so it never names "in undefined". */
+const whereLine = (input: { account: string; region?: string; alias?: string }): string =>
+  `AgentX installs into AWS account ${input.account}${input.alias === undefined ? "" : ` (${input.alias})`}${input.region === undefined ? "" : ` in ${input.region}`}.`;
+
+export function awsCard(input: { account: string; arn: string; region?: string; alias?: string; profile?: string }): WizardCard {
   return {
     id: "aws", title: "AWS account", status: "ok",
     lines: [
-      `AgentX installs into AWS account ${input.account} in ${input.region}.`,
+      whereLine(input),
       `You are signed in as ${signedInAs(input.arn)}${input.profile === undefined ? "" : `, with the AWS profile ${input.profile}`}.`,
       DEDICATED_ACCOUNT_NOTE,
     ],
@@ -51,16 +56,32 @@ export function awsCard(input: { account: string; arn: string; region: string; p
 }
 
 /** FR-016: the caller is the AWS root user. The page still offers to continue. */
-export function rootUserCard(input: { account: string; arn: string; region: string; profile?: string }): WizardCard {
+export function rootUserCard(input: { account: string; arn: string; region?: string; alias?: string; profile?: string }): WizardCard {
   return {
     id: "aws", title: "AWS account", status: "waiting",
     lines: [
-      `AgentX installs into AWS account ${input.account} in ${input.region}.`,
+      whereLine(input),
       ROOT_WARNING,
       "You can continue as root. A few day-two commands need an admin user instead; the ready screen says which.",
     ],
     link: { url: ADMIN_USER_GUIDE_URL, label: "How to create an admin user" },
     details: [input.arn],
+  };
+}
+
+/** The account checks' own card (FR-018): what only the account and region can answer, checked
+ * right after the region is chosen and before any setting is asked. */
+export function accountChecksCard(input: { status: "running" | "ok" | "failed"; checks: readonly PrerequisiteCheck[] }): WizardCard {
+  const lines = input.status === "running"
+    ? ["Checking your AWS account and region. Nothing is created yet."]
+    : input.status === "ok"
+      ? ["Your AWS account and region have what AgentX needs."]
+      : ["Nothing has been created. Fix each item marked Not ready, then choose Check again."];
+  const technical = input.checks.flatMap((check) => (check.technical === undefined ? [] : [`${check.label}: ${check.technical}`]));
+  return {
+    id: "account-checks", title: "Check your AWS account", status: input.status, lines,
+    checks: input.checks.map((check) => ({ label: check.label, ok: check.ok, detail: check.detail })),
+    ...(technical.length === 0 ? {} : { details: technical }),
   };
 }
 

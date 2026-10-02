@@ -5,6 +5,7 @@ import { EC2Client, type DescribeAddressesCommand } from "@aws-sdk/client-ec2";
 import { ServiceQuotasClient, type GetServiceQuotaCommand } from "@aws-sdk/client-service-quotas";
 import {
   awsPrerequisiteChecks,
+  checkAccount,
   checkPrerequisites,
   CONVERSE_CLIENT_MAX_ATTEMPTS,
   CONVERSE_REQUEST_HANDLER_OPTIONS,
@@ -628,5 +629,41 @@ describe("spec 048 FR-027, FR-080: prerequisite problems in page words", () => {
     await expect(checkPrerequisites({
       answers: sampleAnswers({ engine: "cdk" }), release: fakeRelease(), caller, checks, prompter: scriptedPrompter([false]), write: () => undefined, audience: "page",
     })).rejects.toThrow("This region is not prepared for deploying from source code. Prepare it, or deploy with published templates, which need no preparation.");
+  });
+});
+
+describe("spec 048 FR-018: the account checks", () => {
+  it("collects every account problem together, before any setting is asked", async () => {
+    const found: PrerequisiteCheck[] = [];
+    await expect(checkAccount({
+      region: "us-east-1", write: () => undefined, onCheck: (check) => found.push(check),
+      checks: passingChecks({ ec2Quota: async () => 0, elasticIps: async () => ({ quota: 5, allocated: 5 }) }),
+    })).rejects.toThrow(/^CONFIG_INVALID: init cannot start; nothing was created:\n- EC2 Standard on-demand vCPU quota in us-east-1 must be at least 1[\s\S]*\n- this environment needs 2 Elastic IPs/);
+    expect(found.map((check) => [check.label, check.ok])).toEqual([["EC2 vCPU quota", false], ["Elastic IPs", false]]);
+  });
+
+  it("says in page words when Amazon Bedrock is not in the region", async () => {
+    const found: PrerequisiteCheck[] = [];
+    await expect(checkAccount({
+      region: "ap-east-2", write: () => undefined, audience: "page", onCheck: (check) => found.push(check),
+      checks: { ...passingChecks(), bedrockAvailable: async () => false },
+    })).rejects.toThrow("nothing was created");
+    expect(found.at(-1)).toEqual({ label: "Amazon Bedrock", ok: false, detail: "Amazon Bedrock is not available in ap-east-2. Stop for now and start again in a region that has it." });
+  });
+
+  it("passes with a check for each, and skips Amazon Bedrock when the checks cannot look", async () => {
+    const found: PrerequisiteCheck[] = [];
+    await checkAccount({ region: "us-east-1", write: () => undefined, checks: passingChecks(), onCheck: (check) => found.push(check) });
+    expect(found.map((check) => check.label)).toEqual(["EC2 vCPU quota", "Elastic IPs"]);
+  });
+
+  it("skipAccount leaves the quota and Elastic IPs out of the later checks", async () => {
+    const unexpected = async (): Promise<never> => { throw new Error("test setup: the account was already checked"); };
+    const found: PrerequisiteCheck[] = [];
+    await checkPrerequisites({
+      answers: sampleAnswers(), release: fakeRelease(), caller: { account: "123456789012", arn: HOLDER }, prompter: scriptedPrompter([]), write: () => undefined,
+      checks: passingChecks({ ec2Quota: unexpected, elasticIps: unexpected }), skipAccount: true, onCheck: (check) => found.push(check),
+    });
+    expect(found.map((check) => check.label)).not.toContain("EC2 vCPU quota");
   });
 });

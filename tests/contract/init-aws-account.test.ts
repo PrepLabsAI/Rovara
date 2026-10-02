@@ -22,6 +22,8 @@ function runner(fail?: Error): CommandRunner & { runs: string[] } {
   const runs: string[] = [];
   return { runs, async run(command, args) { runs.push([command, ...args].join(" ")); if (fail !== undefined) throw fail; return { stdout: "" }; } };
 }
+/** A runner double for a resolveCaller call that must never sign in again: a success needs no sign-in. */
+const neverRuns: CommandRunner = { run: async () => { throw new Error("test setup: this run should never sign in again"); } };
 const DEV: AwsProfile = { name: "dev", kind: "sso" };
 
 describe("the AWS profiles on this machine", () => {
@@ -240,5 +242,20 @@ describe("the account the install lands in", () => {
     expect(isRootUser("arn:aws:iam::123456789012:root")).toBe(true);
     expect(isRootUser("arn:aws-us-gov:iam::123456789012:root")).toBe(true);
     expect(isRootUser("arn:aws:sts::123456789012:assumed-role/root/alice")).toBe(false);
+  });
+
+  it("spec 048 FR-015: shows the account, its alias and who is signed in, before any region is chosen", async () => {
+    const cards: WizardCard[] = [];
+    const arn = "arn:aws:sts::123456789012:assumed-role/Admin/dev";
+    const caller = await resolveCaller({
+      identity: () => ({ get: async () => ({ account: "123456789012", arn }) }),
+      prompter: scriptedPrompter([]), runner: neverRuns, surface: { card: (card) => cards.push(card) }, alias: async () => "acme-prod",
+    });
+    expect(caller.account).toBe("123456789012");
+    expect(cards.at(-1)?.lines).toEqual([
+      "AgentX installs into AWS account 123456789012 (acme-prod).",
+      `You are signed in as ${signedInAs(arn)}.`,
+      DEDICATED_ACCOUNT_NOTE,
+    ]);
   });
 });

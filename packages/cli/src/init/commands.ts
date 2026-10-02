@@ -41,11 +41,11 @@ import {
 import { deployStep } from "./deploy-steps.js";
 import { finishSteps, readSettingsOrThrow, readyText } from "./finish-steps.js";
 import { githubAppStep, githubRestApi, type GitHubApi } from "./github-app.js";
-import { listAwsProfiles, pickAwsProfile, resolveCaller } from "./aws-account.js";
+import { listAwsProfiles, pickAwsProfile, realAccountAlias, resolveCaller } from "./aws-account.js";
 import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallProgress, type InitAnswers, type InitStepId } from "./install-state.js";
 import { initLogPath, openInitLog, type InitLog } from "./log-file.js";
 import { confirmInstallPlan } from "./plan.js";
-import { awsPrerequisiteChecks, checkPrerequisites, isRootUser, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
+import { awsPrerequisiteChecks, checkAccount, checkPrerequisites, isRootUser, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
 import { askForm, processPrompter, secretFromSource, unattendedPrompter, type FormField, type FormOptions, type Prompter, type QuestionHelp } from "./prompts.js";
 import { fetchRelease, sourceRelease } from "./release-fetch.js";
 import { problemText, retryOnPage } from "./retry.js";
@@ -54,7 +54,7 @@ import { botNameOf, slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } 
 import { isOperatorStop, isWordedOperatorStop } from "./stop.js";
 import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from "./steps.js";
 import { browserAvailable, NO_BROWSER_LINE, resolveUiMode } from "./ui-mode.js";
-import { prerequisitesCard, readyCard } from "./ui/cards.js";
+import { accountChecksCard, prerequisitesCard, readyCard } from "./ui/cards.js";
 import { askFailureAction, failureScreen, isRetryableStep, plainReason, STOPPED_OUTCOME } from "./ui/failure.js";
 import { startInstallWizard, type InstallWizard } from "./ui/index.js";
 import { READY_LINE, stageLine, STEP_PLAN, stoppedLine, terminalStepLine } from "./ui/journey.js";
@@ -89,6 +89,9 @@ export interface InitCliDependencies {
   /** The command this CLI runs as, for the page's "Continue later with" command (tests pin it; the
    * real one is currentCliInvocation()). */
   cliInvocation?: CliInvocation;
+  /** Spec 048 FR-015: the AWS account's alias, for the account card. Defaults to `realAccountAlias`
+   * (an IAM call); every test injects its own (usually `async () => undefined`) so none reaches IAM. */
+  accountAlias?: () => Promise<string | undefined>;
 }
 
 export interface InitOptions {
@@ -568,12 +571,30 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   const [configured] = configuredRegions;
   const choices = options.flags.engine === "cdk" && configured !== undefined && !regions.includes(configured) ? [configured, ...regions] : regions;
   const environmentRegion = configuredRegions.find((value) => choices.includes(value));
+
+  // FR-015: the account is shown first, before the region is asked. STS answers in any region, so
+  // the caller is read in the region the run already knows, or the AWS configuration's, or
+  // us-east-1; with --ui, the page's cards; the terminal path has none (SC-004).
+  const identityRegion = options.region ?? bundle?.region ?? configured ?? "us-east-1";
+  const surface = session.wizard?.surface;
+  // FR-020 and FR-021: the account the install lands in, on the page; there, an expired session
+  // is signed in again instead of ending the run. The terminal path throws as before.
+  const caller = await resolveCaller({
+    identity: () => deployDeps.identity ?? stsCallerIdentity(new STSClient({ region: identityRegion })),
+    prompter, runner, write,
+    alias: deps.accountAlias ?? (() => realAccountAlias(identityRegion)),
+    ...(surface === undefined ? {} : { surface }),
+    ...(awsProfile === undefined ? {} : { profile: awsProfile }),
+  });
+  if (options.account !== undefined && options.account !== caller.account) {
+    throw agentXError("CONFIG_INVALID", `--account ${options.account} does not match your AWS credentials, which are for account ${caller.account}; use credentials for ${options.account}, or leave --account off`);
+  }
   // A bundle names its region, so a bundle resume never asks it. With no list to choose from, the
   // AWS configuration's region is taken as it is, and said.
   const region = options.region ?? bundle?.region ?? (releaseRegions === undefined
     ? configuredRegion(configured, write)
     : await prompter.choose<string>("AWS region", choices.map((value) => ({ value, label: value })), { flag: "--region", defaultValue: environmentRegion ?? choices[0] ?? "us-east-1" }));
-  // Spec 048 FR-060: once known, so a failure before the caller is resolved still names the region.
+  // Spec 048 FR-060: once known, so a failure before the account checks run still names the region.
   session.region = region;
   if (bundle !== undefined && bundle.region !== region) throw agentXError("CONFIG_INVALID", `the bundle is for region ${bundle.region}; pass --region ${bundle.region}`);
   // The cdk engine synthesizes its own templates for any region; only the templates engine needs the release to cover it.
@@ -581,18 +602,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
 
   const store = deployDeps.store ?? ssmParameterStore(new SSMClient({ region }));
   const secrets = deps.initSecrets ?? secretsManagerInitSecrets(new SecretsManagerClient({ region }));
-  // FR-020 and FR-021: the account the install lands in, on the page; there, an expired session
-  // is signed in again instead of ending the run. The terminal path throws as before.
-  const caller = await resolveCaller({
-    identity: () => deployDeps.identity ?? stsCallerIdentity(new STSClient({ region })),
-    region, prompter, runner, write,
-    ...(session.wizard === undefined ? {} : { surface: session.wizard.surface }),
-    ...(awsProfile === undefined ? {} : { profile: awsProfile }),
-  });
-  if (options.account !== undefined && options.account !== caller.account) {
-    throw agentXError("CONFIG_INVALID", `--account ${options.account} does not match your AWS credentials, which are for account ${caller.account}; use credentials for ${options.account}, or leave --account off`);
-  }
-  // Spec 048 FR-001: the header's account and region, once the caller is known and checked.
+  // Spec 048 FR-001: the header's account and region, once the caller is known and the region chosen.
   session.wizard?.setPlace({ account: caller.account, region });
   const checks = deps.checks ?? awsPrerequisiteChecks({ region, account: caller.account, store, runner, fetch: fetchImplementation });
   const stackStatus = deps.stackStatus ?? cloudFormationStatusReader(new CloudFormationClient({ region }));
@@ -631,6 +641,33 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     if (first !== undefined) throw agentXError("CONFIG_INVALID", `agentx init --yes needs ${first[0]} (${first[1]}); pass it, or run agentx init without --yes to be asked`);
   }
 
+  // FR-018: a first run checks the account and region before any setting is asked. On the page a
+  // failure is a checklist with Check again; the terminal stops with every problem, as before.
+  const runAccountChecks = () => retryOnPage({
+    surface, prompter, question: "Check your AWS account again?",
+    // The card already lists every failed check, so the retry shows nothing of its own.
+    failed: () => undefined,
+    run: async () => {
+      const found: PrerequisiteCheck[] = [];
+      const show = (status: "running" | "ok" | "failed") => surface?.card(accountChecksCard({ status, checks: found }));
+      show("running");
+      try {
+        await checkAccount({
+          region, checks, write, audience: surface === undefined ? "terminal" : "page",
+          onCheck: (check) => { found.push(check); show("running"); },
+        });
+      } catch (error) {
+        // A failure no check reported is still listed, so the page never shows a failed card with
+        // nothing to fix.
+        if (!found.some((check) => !check.ok)) found.push({ label: "Your AWS account", ok: false, detail: problemText(error) });
+        show("failed");
+        throw error;
+      }
+      show("ok");
+    },
+  });
+  if (stored === undefined) await runAccountChecks();
+
   // Spec 048 FR-001: the questions (a first run) and the resume screen (a resume) are both "Your choices".
   session.wizard?.setStage("your-choices");
   if (session.wizard !== undefined) session.say(stageLine("your-choices"));
@@ -659,8 +696,6 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   if (answers.engine === "cdk" && options.source !== undefined && !fromSource) await assertSourceAtRelease({ runner, source: options.source, version: release.manifest.version });
 
   const activePrompter = prompter;
-  // With --ui, the page's cards; the terminal path has none (SC-004).
-  const surface = session.wizard?.surface;
   // Q5: with --ui, every other site is a button on the page. The terminal path opens the system
   // browser, or prints the address with --no-browser, as before.
   const stepBrowser = session.wizard?.openLink
@@ -671,8 +706,10 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     ? undefined
     : { key: collected.openRouterKey, ...(collected.openRouterProviders === undefined ? {} : { providers: collected.openRouterProviders }) };
   // FR-023 (Q7): on the page, the checks are a checklist, and a failure can be checked again
-  // after the fix; the terminal path stops with the collected problems, as before.
-  const runPrerequisites = () => retryOnPage({
+  // after the fix; the terminal path stops with the collected problems, as before. FR-018:
+  // `skipAccount` leaves out the EC2 vCPU quota and Elastic IPs on a first run, since
+  // `runAccountChecks` already checked them right after the region was chosen.
+  const runPrerequisites = (prereqOptions: { skipAccount?: boolean } = {}) => retryOnPage({
     surface, prompter: activePrompter, question: "Check the prerequisites again?",
     // The card already lists every failed check, so the retry shows nothing of its own.
     failed: () => undefined,
@@ -685,6 +722,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
           answers: finalAnswers, release, caller, checks, prompter: activePrompter, write,
           onCheck: (check) => { found.push(check); show("running"); },
           images: release.manifest.images, audience: surface === undefined ? "terminal" : "page",
+          skipAccount: prereqOptions.skipAccount === true,
           ...(pendingKey === undefined ? {} : { openRouterKey: pendingKey }),
         });
       } catch (error) {
@@ -701,7 +739,8 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   let rotatedWebhook: string | undefined;
   let rotatedOpenRouterKey: string | undefined;
   if (collected !== undefined) {
-    await runPrerequisites();
+    // FR-018: the account and region were already checked, right after the region was chosen.
+    await runPrerequisites({ skipAccount: true });
     prerequisitesPassed = true;
     // Printed even under --yes, before anything is created. FR-005: with --ui the same priced plan
     // is the review screen, and its confirm is a button.
@@ -799,7 +838,9 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     stackStatus,
     home: services.home,
     prerequisitesPassed,
-    runPrerequisites,
+    // A resume (the only caller of context.runPrerequisites) checks everything once more, since
+    // runAccountChecks runs only on a first run.
+    runPrerequisites: () => runPrerequisites(),
     setup,
     adminSession,
     flags: options.finishFlags,

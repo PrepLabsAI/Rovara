@@ -92,6 +92,8 @@ async function harness(options: { releaseVersion?: string; regions?: string[] } 
     deploy: { identity: { get: async () => ({ account: "123456789012", arn: HOLDER }) }, store, secrets, deployer },
     initSecrets: secrets,
     checks: passingChecks(),
+    // Spec 048 FR-015: no test reaches IAM for the account's alias.
+    accountAlias: async () => undefined,
     github,
     slack: fakeSlackApi(),
     cloudFormation: fakeCloudFormation({ parameters: SIGN_IN_PARAMETERS }),

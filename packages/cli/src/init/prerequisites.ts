@@ -30,6 +30,9 @@ export interface PrerequisiteChecks {
   runCdkBootstrap(): Promise<void>;
   oidcDiscovery(issuer: string): Promise<unknown>;
   sleep(ms: number): Promise<void>;
+  /** Spec 048 FR-018: false when Amazon Bedrock has no endpoint in the region. Optional: a checks
+   * object without it skips the check. */
+  bedrockAvailable?(): Promise<boolean>;
 }
 
 /** The foundation stack gives each of its two NAT gateways its own Elastic IP. */
@@ -180,6 +183,77 @@ function nodeVersionOk(version: string): boolean {
   return major > 22 || (major === 22 && minor >= 19);
 }
 
+/** Reports one check's result, for both `checkAccount` and `checkPrerequisites`: `passed` writes
+ * the ok line and reports it; `failed` collects the problem and reports it, with optional raw
+ * technical detail the page keeps collapsed (FR-027, FR-060). */
+type Report = { passed: (label: string, line: string) => void; failed: (label: string, problem: string, technical?: string) => void };
+
+/** Spec 048 FR-018: what only the account and region can answer, shared by `checkAccount` (run
+ * once, right after the region is chosen) and `checkPrerequisites` (which skips this when
+ * `checkAccount` already ran). The EC2 vCPU quota and Elastic IP checks are phase 1's own, moved
+ * here unchanged; `bedrock` is true only for `checkAccount`'s own call, since `checkPrerequisites`
+ * leaves Amazon Bedrock to the model checks it already runs, which name a missing endpoint themselves. */
+async function accountChecks(input: { region: string; checks: PrerequisiteChecks; audience: CheckAudience; bedrock: boolean } & Report): Promise<void> {
+  const { region, checks, audience, failed, passed } = input;
+  try {
+    const quota = await checks.ec2Quota();
+    if (!Number.isFinite(quota) || quota < 1) {
+      failed("EC2 vCPU quota", `EC2 Standard on-demand vCPU quota in ${region} must be at least 1 for an m6g.medium worker; request an increase in Service Quotas`);
+    } else passed("EC2 vCPU quota", `ok EC2 Standard on-demand vCPU quota is ${quota} in ${region}`);
+  } catch (error) {
+    failed("EC2 vCPU quota", `could not check EC2 vCPU quota in ${region}: ${errorMessage(error)}; check Service Quotas read permission and your network`);
+  }
+
+  // The foundation stack's NAT gateways fail five minutes in when the region is out of addresses.
+  try {
+    const { quota, allocated } = await checks.elasticIps();
+    if (!Number.isFinite(quota) || !Number.isFinite(allocated)) throw new Error("the Elastic IP quota or address count did not return a number");
+    const free = Math.max(0, quota - allocated);
+    if (free < NAT_ELASTIC_IPS) {
+      const command = `aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-0263D0A3 --desired-value ${allocated + NAT_ELASTIC_IPS} --region ${region}`;
+      if (audience === "page") {
+        failed("Elastic IPs", `this install needs ${NAT_ELASTIC_IPS} Elastic IPs for its network, but ${allocated} of the ${quota} allowed in ${region} are already in use. Release addresses you no longer use, or ask AWS for more EC2-VPC Elastic IPs in Service Quotas.`, command);
+      } else {
+        failed("Elastic IPs", `this environment needs ${NAT_ELASTIC_IPS} Elastic IPs for its NAT gateways, but ${allocated} of the ${quota} allowed in ${region} are already allocated. `
+          + `Release addresses you no longer use, or raise the EC2-VPC Elastic IPs quota (L-0263D0A3) in Service Quotas: ${command}`);
+      }
+    } else passed("Elastic IPs", `ok ${free} of ${quota} EC2-VPC Elastic IPs free in ${region}; this environment needs ${NAT_ELASTIC_IPS}`);
+  } catch (error) {
+    failed("Elastic IPs", `could not check Elastic IPs in ${region}: ${errorMessage(error)}; check EC2 DescribeAddresses and Service Quotas read permission and your network`);
+  }
+
+  if (input.bedrock && checks.bedrockAvailable !== undefined) {
+    try {
+      if (await checks.bedrockAvailable()) passed("Amazon Bedrock", `ok Amazon Bedrock answers in ${region}`);
+      else {
+        failed("Amazon Bedrock", audience === "page"
+          ? `Amazon Bedrock is not available in ${region}. Stop for now and start again in a region that has it.`
+          : `Amazon Bedrock is not available in ${region}; choose another region with --region`);
+      }
+    } catch (error) {
+      failed("Amazon Bedrock", `could not check Amazon Bedrock in ${region}: ${errorMessage(error)}; check your network`);
+    }
+  }
+}
+
+/** Spec 048 FR-018: what needs only the account and region, right after the region is chosen and
+ * before any setting is asked. Every problem is collected and thrown together, exactly as
+ * `checkPrerequisites` always has. */
+export async function checkAccount(input: {
+  region: string; checks: PrerequisiteChecks; write: (line: string) => void; audience?: CheckAudience; onCheck?: (check: PrerequisiteCheck) => void;
+}): Promise<void> {
+  const problems: string[] = [];
+  await accountChecks({
+    region: input.region, checks: input.checks, audience: input.audience ?? "terminal", bedrock: true,
+    passed: (label, line) => { input.write(line); input.onCheck?.({ label, ok: true, detail: line.replace(/^ok /, "") }); },
+    failed: (label, problem, technical) => {
+      problems.push(problem);
+      input.onCheck?.({ label, ok: false, detail: problem, ...(technical === undefined ? {} : { technical }) });
+    },
+  });
+  if (problems.length > 0) throw agentXError("CONFIG_INVALID", `init cannot start; nothing was created:\n${problems.map((problem) => `- ${problem}`).join("\n")}`);
+}
+
 /** Everything `agentx init` must confirm before it creates a single resource: the account and
  * region has EC2 capacity quota, each distinct model answers, the identity provider (when self-hosted)
  * agrees with itself, and the chosen engine's tooling is in place. Every problem found is collected
@@ -195,6 +269,9 @@ export async function checkPrerequisites(input: {
   /** Who the problems collected below are written for. Default "terminal": the terminal's own
    * problems, flags and commands, exactly as before this spec. */
   audience?: CheckAudience;
+  /** Spec 048 FR-018: true leaves out the EC2 vCPU quota and Elastic IPs, because `checkAccount`
+   * already checked them right after the region was chosen, before any setting was asked. */
+  skipAccount?: boolean;
   onCheck?: (check: PrerequisiteCheck) => void;
 }): Promise<void> {
   const { answers, checks, write } = input;
@@ -227,32 +304,10 @@ export async function checkPrerequisites(input: {
     }
   }
 
-  try {
-    const quota = await checks.ec2Quota();
-    if (!Number.isFinite(quota) || quota < 1) {
-      failed("EC2 vCPU quota", `EC2 Standard on-demand vCPU quota in ${region} must be at least 1 for an m6g.medium worker; request an increase in Service Quotas`);
-    } else passed("EC2 vCPU quota", `ok EC2 Standard on-demand vCPU quota is ${quota} in ${region}`);
-  } catch (error) {
-    failed("EC2 vCPU quota", `could not check EC2 vCPU quota in ${region}: ${errorMessage(error)}; check Service Quotas read permission and your network`);
-  }
-
-  // The foundation stack's NAT gateways fail five minutes in when the region is out of addresses.
-  try {
-    const { quota, allocated } = await checks.elasticIps();
-    if (!Number.isFinite(quota) || !Number.isFinite(allocated)) throw new Error("the Elastic IP quota or address count did not return a number");
-    const free = Math.max(0, quota - allocated);
-    if (free < NAT_ELASTIC_IPS) {
-      const command = `aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-0263D0A3 --desired-value ${allocated + NAT_ELASTIC_IPS} --region ${region}`;
-      if (audience === "page") {
-        failed("Elastic IPs", `this install needs ${NAT_ELASTIC_IPS} Elastic IPs for its network, but ${allocated} of the ${quota} allowed in ${region} are already in use. Release addresses you no longer use, or ask AWS for more EC2-VPC Elastic IPs in Service Quotas.`, command);
-      } else {
-        failed("Elastic IPs", `this environment needs ${NAT_ELASTIC_IPS} Elastic IPs for its NAT gateways, but ${allocated} of the ${quota} allowed in ${region} are already allocated. `
-          + `Release addresses you no longer use, or raise the EC2-VPC Elastic IPs quota (L-0263D0A3) in Service Quotas: ${command}`);
-      }
-    } else passed("Elastic IPs", `ok ${free} of ${quota} EC2-VPC Elastic IPs free in ${region}; this environment needs ${NAT_ELASTIC_IPS}`);
-  } catch (error) {
-    failed("Elastic IPs", `could not check Elastic IPs in ${region}: ${errorMessage(error)}; check EC2 DescribeAddresses and Service Quotas read permission and your network`);
-  }
+  // FR-018: a first run already checked the account and region (checkAccount), right after the
+  // region was chosen and before any setting was asked; a resume (or any caller with no prior
+  // account check) still gets them checked here.
+  if (input.skipAccount !== true) await accountChecks({ region, checks, audience, bedrock: false, passed, failed });
 
   const roles: Array<[ModelRole, string]> = [
     ["orchestrator", answers.models.orchestrator],
@@ -412,6 +467,12 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
   });
   const quotas = new ServiceQuotasClient({ region: input.region });
   const ec2 = new EC2Client({ region: input.region });
+  // Lifted so both `converse` and `bedrockAvailable` (spec 048 FR-018) share the one call.
+  const converse = (modelId: string) => withDeadline(
+    (signal) => bedrock.send(new ConverseCommand({ modelId, messages: [{ role: "user", content: [{ text: "Reply with OK." }] }], inferenceConfig: { maxTokens: 1 } }), { abortSignal: signal }),
+    CONVERSE_DEADLINE_MS,
+    `${modelId} did not answer a one-token test call in ${input.region} within ${CONVERSE_DEADLINE_MS / 1000}s; check your credentials or network, or try again`,
+  ).then(() => undefined);
   return {
     async openRouter(modelId, config, suppliedKey) {
       openRouterModel(modelId);
@@ -434,12 +495,16 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
         if (result.error || !result.choices?.length) throw new Error("model returned no completion");
       }, CONVERSE_DEADLINE_MS, "OpenRouter preflight timed out");
     },
-    async converse(modelId) {
-      await withDeadline(
-        (signal) => bedrock.send(new ConverseCommand({ modelId, messages: [{ role: "user", content: [{ text: "Reply with OK." }] }], inferenceConfig: { maxTokens: 1 } }), { abortSignal: signal }),
-        CONVERSE_DEADLINE_MS,
-        `${modelId} did not answer a one-token test call in ${input.region} within ${CONVERSE_DEADLINE_MS / 1000}s; check your credentials or network, or try again`,
-      );
+    converse,
+    /** Spec 048 FR-018: only a missing endpoint means no Bedrock here; any other refusal (access
+     * denied, a bad model id) is the model checks' own to report, not this account-level check's. */
+    async bedrockAvailable() {
+      try {
+        await converse(defaultBedrockModel("classifier").modelId);
+        return true;
+      } catch (error) {
+        return !endpointMissing(error);
+      }
     },
     async ec2Quota() {
       const response = await quotas.send(new GetServiceQuotaCommand({ ServiceCode: "ec2", QuotaCode: "L-1216C47A" }));
