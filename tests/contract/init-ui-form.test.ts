@@ -79,7 +79,10 @@ describe("forms", () => {
 });
 
 describe("spec 048 phase 2: richer forms", () => {
-  const engine: FormField = { name: "engine", question: "Deploy engine", flag: "--engine", defaultValue: "templates", section: "advanced", choices: [{ value: "templates", label: "Published templates" }, { value: "cdk", label: "From source" }] };
+  // A flag with no entry in the page's question-copy catalog (question-copy.ts), so the choices
+  // here pass through unrelabelled: this test is about a choice field's own mechanics, not the
+  // catalog's label override (covered separately below, by a field using the real --engine flag).
+  const engine: FormField = { name: "engine", question: "Deploy engine", flag: "--test-engine", defaultValue: "templates", section: "advanced", choices: [{ value: "templates", label: "Published templates" }, { value: "cdk", label: "From source" }] };
   const email: FormField = { name: "email", question: "Your email", flag: "--admin-email" };
   const signing: FormField = { name: "signing", question: "Signing Secret", flag: "--slack-signing-secret", secret: true };
   const client: FormField = { name: "client", question: "Client Secret", flag: "--slack-client-secret", secret: true };
@@ -129,5 +132,16 @@ describe("spec 048 phase 2: richer forms", () => {
     expect(question?.summary).toEqual(["Models: Claude Sonnet 4.6 on Amazon Bedrock."]);
     expect(question?.submitLabel).toBe("Review the plan");
     expect(question?.fields?.[0]).toMatchObject({ group: "How people sign in", link: { url: "https://api.slack.com/apps", label: "Open your Slack apps", note: NEW_TAB_NOTE } });
+  });
+
+  it("a choice field using a real flag shows the question-copy catalog's own labels (Task 6 relies on this)", () => {
+    const hub = createWizardHub("staging");
+    const catalogEngine: FormField = { name: "engine", question: "Deploy engine", flag: "--engine", defaultValue: "templates", choices: [{ value: "templates", label: "templates" }, { value: "cdk", label: "cdk" }] };
+    void browserPrompter(hub).form?.("Your settings", [catalogEngine], {});
+    const field = hub.state().question?.fields?.find((each) => each.name === "engine");
+    expect(field?.choices).toEqual([
+      { value: "templates", label: "Published templates (recommended)" },
+      { value: "cdk", label: "From AgentX's source code, for contributors" },
+    ]);
   });
 });

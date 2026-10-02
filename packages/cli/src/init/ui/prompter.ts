@@ -115,11 +115,8 @@ export function browserPrompter(hub: WizardHub): Prompter {
           ...(words.example === undefined ? {} : { example: words.example }),
           ...(hint === undefined ? {} : { hint }),
           ...(field.secret === true ? { masked: true } : {}),
-          // A choice's own label is the field's own data; only the field's own `help` relabels it
-          // (never the shared question-copy catalog, which is keyed by flag and could otherwise
-          // relabel an unrelated form field that happens to reuse a flag such as --engine).
           ...(field.choices === undefined ? {} : {
-            choices: field.choices.map((choice) => ({ value: choice.value, label: field.help?.choiceLabels?.[choice.value] ?? choice.label })),
+            choices: field.choices.map((choice) => ({ value: choice.value, label: words.choiceLabels?.[choice.value] ?? choice.label })),
             defaultValue: field.defaultValue ?? field.choices[0]?.value ?? "",
           }),
           ...(field.section === undefined ? {} : { section: field.section }),
