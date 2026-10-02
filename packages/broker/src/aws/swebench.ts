@@ -558,6 +558,24 @@ export async function reconcileSwebenchSlots(dependencies: SwebenchDependencies)
   return corrections;
 }
 
+/**
+ * Spec 052 Ruling 10: whether the slot reconcile has anything to look at, in at most two small
+ * reads: the counter item, then, only when it is 0 or absent, one slot item (Limit 1). True when the
+ * counter is not 0 or a slot item exists.
+ */
+export async function swebenchSlotsNeedReconcile(dependencies: SwebenchDependencies): Promise<boolean> {
+  const counter = await get(dependencies, SLOT_COUNTER_KEY);
+  if (counter !== undefined && counter.count !== 0) return true;
+  const page = await dependencies.documentClient.send(new QueryCommand({
+    TableName: dependencies.tableName,
+    KeyConditionExpression: "pk = :pk AND begins_with(sk, :run)",
+    ExpressionAttributeValues: { ":pk": SLOT_PK, ":run": "RUN#" },
+    ConsistentRead: true,
+    Limit: 1,
+  }));
+  return (page.Items ?? []).length > 0;
+}
+
 /** Releases an ended run's slot, as a run's end does; undefined when it was released meanwhile or the run is not terminal. */
 async function releaseEndedRunSlot(dependencies: SwebenchDependencies, runId: string): Promise<"released_slot" | "deleted_slot" | undefined> {
   const terminal: Record<string, unknown> = {};

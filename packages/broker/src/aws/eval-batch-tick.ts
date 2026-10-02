@@ -1,10 +1,12 @@
 // Spec 052 FR-006, FR-010, FR-011: the eval batch tick, an EventBridge schedule every 2 minutes.
-// While no batch is active it reads the active list once and stops. Otherwise it records the run
+// While no batch is active it reads the active list, the slot counter and at most one slot item, and
+// reconciles the slots only if one is held (Ruling 10). Otherwise it records the run
 // ends the broker missed, reconciles the slot counter, fills every free slot (the run-ended callback
 // starts at most one run), and writes the results of each batch that has ended.
 //
-// The schedule is always on rather than switched on with a batch: a tick with no batch costs one
-// DynamoDB query, and nothing has to remember to switch it off.
+// The schedule is always on rather than switched on with a batch: an idle tick costs three small
+// DynamoDB reads, nothing has to remember to switch it off, and a leaked slot is repaired even
+// when no batch runs.
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { S3Client } from "@aws-sdk/client-s3";
 import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
@@ -19,7 +21,7 @@ import {
   type EvalBatchDependencies,
 } from "./eval-batch.js";
 import { requiredEnvironment } from "./lambda.js";
-import { reconcileSwebenchSlots, type SwebenchSlotCorrection } from "./swebench.js";
+import { reconcileSwebenchSlots, swebenchSlotsNeedReconcile, type SwebenchSlotCorrection } from "./swebench.js";
 import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
 
 export interface EvalBatchTickReport {
@@ -41,7 +43,12 @@ export async function runEvalBatchTick(dependencies: EvalBatchDependencies): Pro
   const report: EvalBatchTickReport = { active: 0, endsRecorded: 0, slotCorrections: [], rowsRebuilt: 0, finalized: [] };
   const batchIds = await activeBatchIds(dependencies);
   report.active = batchIds.length;
-  if (batchIds.length === 0) return report;
+  if (batchIds.length === 0) {
+    // Ruling 10: a leaked slot must not block single runs while no batch runs. The idle tick reads
+    // the counter and at most one slot item, and reconciles only when either shows a slot held.
+    if (await swebenchSlotsNeedReconcile(dependencies)) report.slotCorrections = await reconcileSwebenchSlots(dependencies);
+    return report;
+  }
   const failures: string[] = [];
   const step = async (name: string, fields: Record<string, unknown>, work: () => Promise<void>) => {
     try {

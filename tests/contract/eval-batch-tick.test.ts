@@ -138,7 +138,8 @@ describe("the results files (spec 052 FR-010)", () => {
     const before = h.db.commandNames().length;
     await runEvalBatchTick(h.dependencies);
     expect(h.s3Send).not.toHaveBeenCalled();
-    expect(h.db.commandNames().slice(before)).toEqual(["QueryCommand"]);
+    // No batch, and no slot held: the idle tick's reads only.
+    expect(h.db.commandNames().slice(before)).toEqual(["QueryCommand", "GetCommand", "QueryCommand"]);
   });
 
   it("writes the same files again when a tick stopped before it took the batch off the active list", async () => {
@@ -429,20 +430,61 @@ describe("slot reconcile (spec 052 FR-005)", () => {
 });
 
 describe("the tick with no batch active", () => {
-  it("reads the active list once and does nothing else", async () => {
+  // Ruling 10: the idle tick reads the active list, the slot counter and at most one slot item.
+  const IDLE_READS = ["QueryCommand", "GetCommand", "QueryCommand"];
+
+  it("makes three small reads and nothing else while no run holds a slot", async () => {
     const h = await harness();
-    // A leaked slot is left for a tick with a batch active (FR-011: the timer works only for batches).
-    await singleRun(h, RUN_A);
-    endWithoutRelease(h, RUN_A);
     h.startExecution.mockClear();
     h.deployment.mockClear();
     h.s3Send.mockClear();
     const before = h.db.commandNames().length;
     expect(await runEvalBatchTick(h.dependencies)).toEqual({ active: 0, endsRecorded: 0, slotCorrections: [], rowsRebuilt: 0, finalized: [] });
-    expect(h.db.commandNames().slice(before)).toEqual(["QueryCommand"]);
+    expect(h.db.commandNames().slice(before)).toEqual(IDLE_READS);
     expect(h.deployment).not.toHaveBeenCalled();
     expect(h.s3Send).not.toHaveBeenCalled();
     expect(h.startExecution).not.toHaveBeenCalled();
+  });
+
+  it("releases a leaked slot of an ended run, so it cannot block single runs", async () => {
+    const h = await harness({ maxConcurrentEvals: 1 });
+    await singleRun(h, RUN_A);
+    endWithoutRelease(h, RUN_A);
+    const report = await runEvalBatchTick(h.dependencies);
+    expect(report.slotCorrections).toEqual([expect.objectContaining({ correction: "released_slot", runId: RUN_A })]);
+    expect(slotRunIds(h)).toEqual([]);
+    expect(counter(h)).toBe(0);
+    // The next single run gets the slot.
+    await singleRun(h, RUN_B);
+  });
+
+  it("sets a counter left above 0 with no slot held, and deletes a slot item the counter missed", async () => {
+    const h = await harness();
+    h.db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: 2 });
+    await runEvalBatchTick(h.dependencies);
+    expect(counter(h)).toBe(0);
+    await singleRun(h, RUN_A);
+    endWithoutRelease(h, RUN_A);
+    h.db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: 0 });
+    await runEvalBatchTick(h.dependencies);
+    expect(slotRunIds(h)).toEqual([]);
+    expect(counter(h)).toBe(0);
+  });
+
+  it("sets a negative counter to the slots held", async () => {
+    const h = await harness();
+    h.db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: -1 });
+    await runEvalBatchTick(h.dependencies);
+    expect(counter(h)).toBe(0);
+  });
+
+  it("leaves the slot of a run that has not ended alone", async () => {
+    const h = await harness();
+    await singleRun(h, RUN_A);
+    h.db.set({ ...h.db.get(`SWEBENCH_RUN#${RUN_A}`, "META")!, status: "RUNNING" });
+    const report = await runEvalBatchTick(h.dependencies);
+    expect(report.slotCorrections).toEqual([]);
+    expect(slotRunIds(h)).toEqual([RUN_A]);
     expect(counter(h)).toBe(1);
   });
 
