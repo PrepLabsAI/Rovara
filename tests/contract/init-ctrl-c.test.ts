@@ -8,7 +8,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { agentXError } from "@agentx/contracts";
 import { executeCli } from "../../packages/cli/src/main.js";
 import type { Prompter } from "../../packages/cli/src/init/prompts.js";
-import { TEST_CLI_INVOCATION } from "../support/init-fakes.js";
+import type { CliInvocation } from "../../packages/cli/src/init/cli-command.js";
+import { INSTALLED_CLI_INVOCATION, NPX_CLI_INVOCATION } from "../support/init-fakes.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -41,14 +42,14 @@ function failingPrompter(error: () => Error): Prompter {
   return { ask: fail, choose: fail, confirm: fail, secret: fail };
 }
 
-async function run(error: () => Error, argv: string[] = []) {
+async function run(error: () => Error, argv: string[] = [], cliInvocation: CliInvocation = INSTALLED_CLI_INVOCATION) {
   const err: string[] = [];
   const out: string[] = [];
   const code = await executeCli(["--env", "livefinal", "init", "--no-ui", "--release", await releaseDir(), ...argv], {
     stdout: { write: (text: string) => { out.push(text); return true; } },
     stderr: { write: (text: string) => { err.push(text); return true; } },
     environments: { home: await tmp("agentx-init-ctrlc-home-") },
-    init: { cliInvocation: TEST_CLI_INVOCATION, prompter: failingPrompter(error), processEnv: {} },
+    init: { cliInvocation, prompter: failingPrompter(error), processEnv: {} },
   });
   return { code, err: err.join(""), out: out.join("") };
 }
@@ -82,5 +83,12 @@ describe("Ctrl-C at an agentx init --no-ui question (#235)", () => {
     const { code, err } = await run(readlineCtrlC, ["--json"]);
     expect(code).toBe(130);
     expect(JSON.parse(err.trim().split("\n").at(-1)!)).toEqual({ ok: false, error: { code: "STOPPED", message: "Stopped. Run agentx init --env livefinal again to continue from here." } });
+  });
+
+  // Owner decision 2026-10-02: the same line, through npx with its version, when AgentX ran that way.
+  it("shows that command through npx, with its version, when AgentX ran that way", async () => {
+    const { code, err } = await run(readlineCtrlC, [], NPX_CLI_INVOCATION);
+    expect(code).toBe(130);
+    expect(err.endsWith(`Stopped. Run npx @charterarc/agentx@${NPX_CLI_INVOCATION.version} init --env livefinal again to continue from here.\n`)).toBe(true);
   });
 });

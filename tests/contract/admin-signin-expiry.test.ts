@@ -1,6 +1,10 @@
 // Issue #218: an admin sign-in that expired (it lasts an hour and is never refreshed) says it
 // expired and when, with the exact command, in the CLI and in the MCP tools; one about to expire
 // says so in the admin tools' results and in agentx_whoami.
+//
+// Owner decision 2026-10-02: that command is shown the way the person actually ran AgentX, bare
+// `agentx ...` when they ran the installed command, `npx @charterarc/agentx@<version> ...` when
+// they ran it through npx, reusing the install ready screen's own cliCommandLine helper.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { mkdtemp } from "node:fs/promises";
@@ -17,6 +21,7 @@ import { cacheFromSettings, writeEnvironmentCache } from "../../packages/cli/src
 import { agentxMcpServer } from "../../packages/cli/src/mcp/serve.js";
 import { saveDeveloperEnvironment, developerTokenKey } from "../../packages/cli/src/developer/config.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
+import type { CliInvocation } from "../../packages/cli/src/init/cli-command.js";
 import { ADMIN_EXPIRY_WARNING_MS, adminSignInExpiredText, adminSignInExpiringText, isExpiredNotice, localClockTime } from "../../packages/mcp/src/admin-expiry.js";
 import { stagingSettings } from "../support/environment-fixtures.js";
 import { toolError } from "../support/mcp-tool-error.js";
@@ -25,6 +30,11 @@ const URL_BASE = "https://abc123.execute-api.us-east-1.amazonaws.com";
 const ISSUER = `${URL_BASE}/v1/auth`;
 const ADMIN_TOKEN = "admin-access-token-planted-218";
 
+/** This computer ran the published package as the bare, installed `agentx` command. */
+const INSTALLED_BARE: CliInvocation = { published: true, version: "1.4.0", cliPath: "/opt/node_modules/@charterarc/agentx/dist/main.js", invokedViaNpx: false };
+/** The same install, but this run of it was through npx. */
+const INSTALLED_NPX: CliInvocation = { ...INSTALLED_BARE, invokedViaNpx: true };
+
 describe("the admin sign-in's expiry, in words (#218)", () => {
   it("names a time today by its local hour and minute, and another day's with its date", () => {
     const now = new Date(2026, 9, 1, 13, 0, 0).getTime();
@@ -32,17 +42,25 @@ describe("the admin sign-in's expiry, in words (#218)", () => {
     expect(localClockTime(new Date(2026, 8, 30, 9, 5).getTime(), now)).toBe("2026-09-30 09:05");
   });
 
-  it("says it expired, when, and the exact command", () => {
+  it("says it expired, when, and the exact command, bare, when the caller's command runs bare", () => {
     const now = new Date(2026, 9, 1, 13, 0).getTime();
-    expect(adminSignInExpiredText("livefinal", new Date(2026, 9, 1, 12, 31).getTime(), now)).toBe("Your admin sign-in for livefinal expired at 12:31. Run agentx --env livefinal login --admin.");
-    expect(isExpiredNotice(adminSignInExpiredText("livefinal", 0, now))).toBe(true);
-    expect(isExpiredNotice(adminSignInExpiringText("livefinal", now + 60_000, now))).toBe(false);
-    expect(adminSignInExpiringText("livefinal", new Date(2026, 9, 1, 13, 4).getTime(), now)).toBe("Your admin sign-in for livefinal expires at 13:04; run agentx --env livefinal login --admin to sign in again.");
+    const bare = (args: string) => `agentx ${args}`;
+    expect(adminSignInExpiredText("livefinal", new Date(2026, 9, 1, 12, 31).getTime(), now, bare)).toBe("Your admin sign-in for livefinal expired at 12:31. Run agentx --env livefinal login --admin.");
+    expect(isExpiredNotice(adminSignInExpiredText("livefinal", 0, now, bare))).toBe(true);
+    expect(isExpiredNotice(adminSignInExpiringText("livefinal", now + 60_000, now, bare))).toBe(false);
+    expect(adminSignInExpiringText("livefinal", new Date(2026, 9, 1, 13, 4).getTime(), now, bare)).toBe("Your admin sign-in for livefinal expires at 13:04; run agentx --env livefinal login --admin to sign in again.");
+  });
+
+  it("says the same through whatever command the caller's formatter builds, such as npx with a version", () => {
+    const now = new Date(2026, 9, 1, 13, 0).getTime();
+    const npx = (args: string) => `npx @charterarc/agentx@1.4.0 ${args}`;
+    expect(adminSignInExpiredText("livefinal", new Date(2026, 9, 1, 12, 31).getTime(), now, npx)).toBe("Your admin sign-in for livefinal expired at 12:31. Run npx @charterarc/agentx@1.4.0 --env livefinal login --admin.");
+    expect(adminSignInExpiringText("livefinal", new Date(2026, 9, 1, 13, 4).getTime(), now, npx)).toBe("Your admin sign-in for livefinal expires at 13:04; run npx @charterarc/agentx@1.4.0 --env livefinal login --admin to sign in again.");
   });
 });
 
 describe("agentx admin commands with an expired admin sign-in (#218)", () => {
-  async function run(token: { expiresAt: number } | undefined) {
+  async function run(token: { expiresAt: number } | undefined, cliInvocation: CliInvocation = INSTALLED_BARE) {
     const home = await mkdtemp(join(tmpdir(), "agentx-admin-expiry-"));
     const tokenStore = new InMemoryTokenStore();
     await writeEnvironmentCache(home, stagingSettings);
@@ -51,6 +69,7 @@ describe("agentx admin commands with an expired admin sign-in (#218)", () => {
     const code = await executeCli(["--env", "staging", "admin", "credential", "list"], {
       environments: { home }, tokenStore, stdout: { write: () => true }, stderr: { write: (text: string) => { err.push(text); return true; } },
       fetchImplementation: vi.fn(async () => { throw new Error("no request is expected"); }),
+      cliInvocation,
     });
     return { code, err: err.join("") };
   }
@@ -67,6 +86,19 @@ describe("agentx admin commands with an expired admin sign-in (#218)", () => {
     const { code, err } = await run(undefined);
     expect(code).toBe(3);
     expect(err).toBe("AgentX error [AUTH_REQUIRED]: this computer holds no admin sign-in for staging; run agentx --env staging login --admin\n");
+  });
+
+  it("shows that command through npx, with its version, when AgentX ran that way", async () => {
+    const expiresAt = Date.now() - 60_000;
+    const { code, err } = await run({ expiresAt }, INSTALLED_NPX);
+    expect(code).toBe(3);
+    expect(err).toBe(`AgentX error [AUTH_REQUIRED]: Your admin sign-in for staging expired at ${localClockTime(expiresAt, Date.now())}. Run npx @charterarc/agentx@1.4.0 --env staging login --admin.\n`);
+  });
+
+  it("shows the no-sign-in-stored command through npx too, when AgentX ran that way", async () => {
+    const { code, err } = await run(undefined, INSTALLED_NPX);
+    expect(code).toBe(3);
+    expect(err).toBe("AgentX error [AUTH_REQUIRED]: this computer holds no admin sign-in for staging; run npx @charterarc/agentx@1.4.0 --env staging login --admin\n");
   });
 });
 
@@ -94,7 +126,7 @@ const controlPlane = () => vi.fn<typeof fetch>(async (input) => {
 });
 
 describe("agentx mcp with an expired admin sign-in (#218)", () => {
-  async function cli(admin: { expiresAt: number }) {
+  async function cli(admin: { expiresAt: number }, cliInvocation: CliInvocation = INSTALLED_BARE) {
     const home = await mkdtemp(join(tmpdir(), "agentx-admin-expiry-mcp-"));
     const tokenStore = new InMemoryTokenStore();
     await writeEnvironmentCache(home, stagingSettings);
@@ -103,7 +135,7 @@ describe("agentx mcp with an expired admin sign-in (#218)", () => {
     await tokenStore.set(tokenStoreKey(cacheFromSettings(stagingSettings).auth), { accessToken: ADMIN_TOKEN, expiresAt: admin.expiresAt });
     const stdin = new PassThrough();
     const stdout = new PassThrough();
-    const running = executeCli(["mcp"], { environments: { home }, tokenStore, fetchImplementation: controlPlane(), stdin, stdout, stderr: { write: () => true } });
+    const running = executeCli(["mcp"], { environments: { home }, tokenStore, fetchImplementation: controlPlane(), stdin, stdout, stderr: { write: () => true }, cliInvocation });
     const client = new Client({ name: "claude-code", version: "2.1.0" });
     await client.connect(streamTransport(stdin, stdout));
     return { client, stop: async () => { await client.close(); return running; } };
@@ -126,10 +158,23 @@ describe("agentx mcp with an expired admin sign-in (#218)", () => {
     expect(text).not.toContain("holds no admin sign-in");
     expect(await stop()).toBe(0);
   });
+
+  it("shows that command through npx, with its version, when agentx mcp itself ran that way", async () => {
+    const expiresAt = Date.now() - 60_000;
+    const { client, stop } = await cli({ expiresAt }, INSTALLED_NPX);
+    const time = localClockTime(expiresAt, Date.now());
+    const refusal = async () => toolError((await client.callTool({ name: "agentx_admin_list_projects", arguments: {} })) as Parameters<typeof toolError>[0]);
+    await expect.poll(refusal).toEqual({
+      code: "ADMIN_REQUIRED", message: `Your admin sign-in for staging expired at ${time}`, next_step: "run npx @charterarc/agentx@1.4.0 --env staging login --admin",
+    });
+    const whoami = await client.callTool({ name: "agentx_whoami", arguments: {} });
+    expect(JSON.stringify(whoami.content)).toContain(`Your admin sign-in for staging expired at ${time}. Run npx @charterarc/agentx@1.4.0 --env staging login --admin.`);
+    expect(await stop()).toBe(0);
+  });
 });
 
 describe("an admin sign-in about to expire (#218)", () => {
-  async function server(expiresAt: number) {
+  async function server(expiresAt: number, cliInvocation: CliInvocation = INSTALLED_BARE) {
     const home = await mkdtemp(join(tmpdir(), "agentx-admin-expiring-"));
     const tokenStore = new InMemoryTokenStore();
     await saveDeveloperEnvironment(home, "staging", { url: URL_BASE, issuer: ISSUER, tokenEndpoint: `${ISSUER}/token`, revocationEndpoint: `${ISSUER}/revoke` });
@@ -139,6 +184,7 @@ describe("an admin sign-in about to expire (#218)", () => {
       adminSignedIn: async () => expiresAt > Date.now(),
       adminSession: async () => (expiresAt > Date.now() ? { baseUrl: URL_BASE, accessToken: ADMIN_TOKEN } : undefined),
       adminSignInExpiry: async () => ({ env: "staging", expiresAt }),
+      cliInvocation,
     });
     const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
     await mcp.connect(serverSide);
@@ -157,6 +203,15 @@ describe("an admin sign-in about to expire (#218)", () => {
     expect(result.structuredContent).toEqual({ projects: [] });
     expect(JSON.stringify(result.content)).toContain(warning);
     expect(JSON.stringify((await client.callTool({ name: "agentx_whoami", arguments: {} })).content)).toContain(warning);
+  });
+
+  it("warns through npx, with its version, when agentx mcp itself ran that way", async () => {
+    const expiresAt = Date.now() + 120_000;
+    const client = await server(expiresAt, INSTALLED_NPX);
+    await expect.poll(async () => (await client.listTools()).tools.some((tool) => tool.name === "agentx_admin_list_projects")).toBe(true);
+    const warning = `Your admin sign-in for staging expires at ${localClockTime(expiresAt, Date.now())}; run npx @charterarc/agentx@1.4.0 --env staging login --admin to sign in again.`;
+    const result = await client.callTool({ name: "agentx_admin_list_projects", arguments: {} });
+    expect(JSON.stringify(result.content)).toContain(warning);
   });
 
   it("says nothing of the expiry while it is further off than the warning window", async () => {

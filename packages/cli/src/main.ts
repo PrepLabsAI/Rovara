@@ -47,6 +47,7 @@ import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type
 import { resolveDeploymentFile } from "./environments/cache.js";
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL, type InitFlags } from "./init/answers.js";
 import { runInit, type InitCliDependencies, type InitOptions } from "./init/commands.js";
+import { cliCommandLine, currentCliInvocation, type CliInvocation } from "./init/cli-command.js";
 import { StoppedByOperator, isCtrlCAtPrompt } from "./stopped.js";
 import type { FinishFlags, SecretFlags } from "./init/context.js";
 import { INIT_STEP_IDS, type InitStepId } from "./init/install-state.js";
@@ -85,6 +86,12 @@ interface TextWriter {
 }
 
 export interface CliDependencies {
+  /**
+   * Owner decision 2026-10-02 (#218, #235 follow-up): how this CLI process was launched, for tests;
+   * `currentCliInvocation()` otherwise. Shared by the admin sign-in notices, the Ctrl-C stop line,
+   * and `agentx mcp`.
+   */
+  cliInvocation?: CliInvocation;
   fetchImplementation?: typeof fetch;
   tokenStore?: TokenStore;
   stdout?: TextWriter;
@@ -190,6 +197,11 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     stdout: dependencies.stdout ?? process.stdout,
     stderr: dependencies.stderr ?? process.stderr,
   };
+  // Owner decision 2026-10-02 (#218, #235 follow-up): how this CLI process was launched (bare, or
+  // through npx), the same helper the install ready screen uses, reused for every live message that
+  // tells the person the command that runs right now.
+  const cliInvocation = dependencies.cliInvocation ?? currentCliInvocation();
+  const commandFor = (args: string): string => cliCommandLine(cliInvocation, args);
   // Where `agentx env use` caches settings and, for production only, where the legacy
   // deployment file lives.
   const home = dependencies.environments?.home ?? homedir();
@@ -219,9 +231,9 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     const settings = await deploymentSettings(options);
     const tokens = await tokenStore.get(tokenStoreKey(settings.auth));
     // Issue #218: an expired admin sign-in says so and when, never as if none was ever made.
-    if (!tokens) throw agentXError("AUTH_REQUIRED", `this computer holds no admin sign-in for ${options.env}; run ${adminSignInCommand(options.env)}`);
+    if (!tokens) throw agentXError("AUTH_REQUIRED", `this computer holds no admin sign-in for ${options.env}; run ${adminSignInCommand(options.env, commandFor)}`);
     const now = Date.now();
-    if (tokens.expiresAt <= now) throw agentXError("AUTH_REQUIRED", adminSignInExpiredText(options.env, tokens.expiresAt, now));
+    if (tokens.expiresAt <= now) throw agentXError("AUTH_REQUIRED", adminSignInExpiredText(options.env, tokens.expiresAt, now, commandFor));
     return { settings, accessToken: tokens.accessToken };
   }
 
@@ -992,7 +1004,12 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
           result = await runInit(initOptions(globals, options, command), dependencies.init ?? {}, { stderr: services.stderr, home });
         } catch (error) {
           // Issue #235: Ctrl-C at a terminal question stops the install where it is; it can continue.
-          if (isCtrlCAtPrompt(error)) throw new StoppedByOperator(`Stopped. Run agentx init --env ${globals.env} again to continue from here.`);
+          // Owner decision 2026-10-02: the same command-line helper as the ready screen and the
+          // other live messages, so this shows bare or npx exactly as the person just ran AgentX.
+          if (isCtrlCAtPrompt(error)) {
+            const initInvocation = dependencies.init?.cliInvocation ?? cliInvocation;
+            throw new StoppedByOperator(`Stopped. Run ${cliCommandLine(initInvocation, `init --env ${globals.env}`)} again to continue from here.`);
+          }
           throw error;
         }
         if (globals.json) {
@@ -1098,6 +1115,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
           adminSignedIn,
           adminSession,
           adminSignInExpiry,
+          cliInvocation,
           stdin: dependencies.stdin ?? process.stdin,
           stdout: (dependencies.stdout ?? process.stdout) as Writable,
           stderr: services.stderr,

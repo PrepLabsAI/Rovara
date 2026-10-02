@@ -10,6 +10,7 @@ import {
   compatibilityChecker, createAgentXMcpServer, httpAdminClient, httpControlPlaneClient, type AdminOffer, type AdminSession, type Compatibility, type ControlPlaneClient,
 } from "@agentx/mcp";
 import { developerAccessToken, type DeveloperSessionDeps } from "../developer/session.js";
+import { cliCommandLine, currentCliInvocation, type CliInvocation } from "../init/cli-command.js";
 import { CLI_VERSION } from "../version.js";
 
 export interface McpServeDeps extends DeveloperSessionDeps {
@@ -22,6 +23,12 @@ export interface McpServeDeps extends DeveloperSessionDeps {
    * or not; undefined when none is stored. Absent, an expired sign-in reads as none held.
    */
   adminSignInExpiry?(env: string | undefined): Promise<{ env: string; expiresAt: number } | undefined>;
+  /**
+   * Owner decision 2026-10-02 (#218 follow-up): how this `agentx mcp` process was launched, so its
+   * admin sign-in notices show the command the way this computer actually runs it. Defaults to
+   * `currentCliInvocation()`, for tests only.
+   */
+  cliInvocation?: CliInvocation;
   stderr: { write(text: string): unknown };
   clock?: { now(): number; sleep(ms: number, signal: AbortSignal): Promise<void> };
 }
@@ -69,6 +76,10 @@ export function agentxMcpServer(deps: McpServeDeps): McpServer {
   // One checker for the server's life, outside the per-call context, so its 10-minute cache holds.
   const compatibility = compatibilityChecker(client, { now });
   const log = stderrLog(deps);
+  // Owner decision 2026-10-02: the command these notices suggest matches how this `agentx mcp`
+  // process itself was launched (bare, or through npx), the same helper the install ready screen uses.
+  const invocation = deps.cliInvocation ?? currentCliInvocation();
+  const commandFor = (args: string): string => cliCommandLine(invocation, args);
   /** The stored admin sign-in's expiry; a failed read is taken as none stored. */
   const storedAdmin = async (): Promise<{ env: string; expiresAt: number } | undefined> => {
     try {
@@ -80,7 +91,7 @@ export function agentxMcpServer(deps: McpServeDeps): McpServer {
   /** Issue #218: why no admin sign-in is held: it expired (when, and the command), or there is none. */
   const notHeld = async (): Promise<ToolError> => {
     const stored = await storedAdmin();
-    return stored !== undefined && stored.expiresAt <= now() ? adminSignInExpiredError(stored.env, stored.expiresAt, now()) : NOT_OFFERED;
+    return stored !== undefined && stored.expiresAt <= now() ? adminSignInExpiredError(stored.env, stored.expiresAt, now(), commandFor) : NOT_OFFERED;
   };
   // A14: the admin sign-in as stored; an absent or expired one is ADMIN_REQUIRED, never refreshed (Q4).
   const admin = httpAdminClient({
@@ -148,7 +159,7 @@ export function agentxMcpServer(deps: McpServeDeps): McpServer {
       confirmation,
       serverVersion: CLI_VERSION,
       adminSignedIn: () => deps.adminSignedIn(deps.env),
-      adminSignInNotice: async () => adminSignInNotice(await storedAdmin(), now()),
+      adminSignInNotice: async () => adminSignInNotice(await storedAdmin(), now(), commandFor),
       compatibility,
       admin,
       now,

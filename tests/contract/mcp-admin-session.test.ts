@@ -134,7 +134,12 @@ describe("agentx mcp's own admin sign-in (main.ts, A14)", () => {
     const stdin = new PassThrough();
     const stdout = new PassThrough();
     const stderr: string[] = [];
-    const running = executeCli(["mcp"], { environments: { home }, tokenStore, fetchImplementation: fetch, stdin, stdout, stderr: { write: (text: string) => stderr.push(text) } });
+    // Issue #218 follow-up (owner decision 2026-10-02): an expired sign-in's command is shown bare,
+    // as if this computer ran the published package's installed command, not through npx.
+    const running = executeCli(["mcp"], {
+      environments: { home }, tokenStore, fetchImplementation: fetch, stdin, stdout, stderr: { write: (text: string) => stderr.push(text) },
+      cliInvocation: { published: true, version: "1.4.0", cliPath: "/opt/node_modules/@charterarc/agentx/dist/main.js", invokedViaNpx: false },
+    });
     const client = new Client({ name: "claude-code", version: "2.1.0" });
     await client.connect(streamTransport(stdin, stdout));
     return { client, fetch, stderr, stop: async () => { await client.close(); return running; } };

@@ -112,6 +112,18 @@ export const HOLDER = "arn:aws:sts::123456789012:assumed-role/Admin/alice";
  * without pinning its own. */
 export const TEST_CLI_INVOCATION: CliInvocation = { published: false, cliPath: "/opt/agentx/dist/main.js" };
 
+/**
+ * Owner decision 2026-10-02 (#218, #235 follow-up): a published install, run as the bare, directly-
+ * invoked `agentx` command (not through npx), for tests of a live message that shows the command
+ * the way the person actually ran AgentX.
+ */
+export const INSTALLED_CLI_INVOCATION: CliInvocation = {
+  published: true, version: "1.4.0", cliPath: "/opt/node_modules/@charterarc/agentx/dist/main.js", invokedViaNpx: false,
+};
+
+/** The same install, but this run of it was through npx. */
+export const NPX_CLI_INVOCATION: CliInvocation = { ...INSTALLED_CLI_INVOCATION, invokedViaNpx: true };
+
 export function memoryInitSecrets(initial: Record<string, string> = {}): InitSecrets & { values: Map<string, string> } {
   const values = new Map(Object.entries(initial));
   return {
