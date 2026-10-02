@@ -28,7 +28,8 @@ export const ConfirmationCallSchema = z.object({
   tool: z.string().min(1).max(128),
   argumentsHash: z.string().regex(/^[a-f0-9]{64}$/),
   summary: z.string().min(1).max(400),
-  kind: z.enum(["classifier", "destructive", "admin", "bulk", "hint"]),
+  /** `unchecked` (#215): asked because the classifier could not check the call, not because it doubted it. */
+  kind: z.enum(["classifier", "unchecked", "destructive", "admin", "bulk", "hint"]),
 }).strict();
 
 /**

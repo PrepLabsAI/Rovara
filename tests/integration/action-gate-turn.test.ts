@@ -72,7 +72,7 @@ describe("the action gate in a real Pi turn", () => {
     expect(results).toEqual([{ tool: "tracker__close_item", isError: true, text: expect.stringContaining("AgentX has already posted a confirmation request for this action to the member in the Slack thread") as string }]);
     expect(results[0]!.text).not.toContain("TRK-9");
     expect(session.ran).toBe(0);
-    expect(session.asks).toMatchObject([{ tool: "tracker__close_item", kind: "destructive", summary: "tracker__close_item: id=TRK-9" }]);
+    expect(session.asks).toMatchObject([{ tool: "tracker__close_item", kind: "destructive", summary: "Use tracker to close item: id TRK-9" }]);
     expect(reply).toBe("I asked you to confirm closing TRK-9.");
   });
 
@@ -82,7 +82,7 @@ describe("the action gate in a real Pi turn", () => {
       script: [toolUse(fauxToolCall("agentx_manage_pull_request", { repository: "demo", pullRequestNumber: 12, action: "close" })), fauxAssistantMessage("Waiting.")] });
     expect(api.managePullRequest).not.toHaveBeenCalled();
     expect(results[0]!.isError).toBe(true);
-    expect(session.asks).toMatchObject([{ tool: "agentx_manage_pull_request", kind: "destructive", summary: "agentx_manage_pull_request: repository=demo, pullRequestNumber=12, action=close" }]);
+    expect(session.asks).toMatchObject([{ tool: "agentx_manage_pull_request", kind: "destructive", summary: "Close pull request #12 in demo" }]);
   });
 
   it("gates each of several parallel calls, runs the read, and collects every ask for one confirmation", async () => {
@@ -91,7 +91,7 @@ describe("the action gate in a real Pi turn", () => {
       script: [toolUse(fauxToolCall("tracker__list_items", {}), fauxToolCall("tracker__close_item", { id: "TRK-1" }), fauxToolCall("tracker__close_item", { id: "TRK-2" })), fauxAssistantMessage("Waiting.")] });
     expect(callConnectorTool).toHaveBeenCalledOnce();
     expect(results.map((result) => [result.tool, result.isError])).toEqual([["tracker__list_items", false], ["tracker__close_item", true], ["tracker__close_item", true]]);
-    expect(session.asks.map((ask) => ask.summary)).toEqual(["tracker__close_item: id=TRK-1", "tracker__close_item: id=TRK-2"]);
+    expect(session.asks.map((ask) => ask.summary)).toEqual(["Use tracker to close item: id TRK-1", "Use tracker to close item: id TRK-2"]);
     expect(session.decisions.map((decision) => decision.outcome)).toEqual(["allow", "ask", "ask"]);
     expect(session.ran).toBe(1);
   });
