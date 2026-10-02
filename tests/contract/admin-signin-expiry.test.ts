@@ -49,7 +49,7 @@ describe("agentx admin commands with an expired admin sign-in (#218)", () => {
     const err: string[] = [];
     const code = await executeCli(["--env", "staging", "admin", "credential", "list"], {
       environments: { home }, tokenStore, stdout: { write: () => true }, stderr: { write: (text: string) => { err.push(text); return true; } },
-      fetchImplementation: vi.fn(async () => { throw new Error("no request is expected"); }) as never,
+      fetchImplementation: vi.fn(async () => { throw new Error("no request is expected"); }),
     });
     return { code, err: err.join("") };
   }
