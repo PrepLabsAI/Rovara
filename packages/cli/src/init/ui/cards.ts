@@ -69,6 +69,18 @@ export function rootUserCard(input: { account: string; arn: string; region?: str
   };
 }
 
+/** Fix round 1: the checks list and the technical details, shared by every checklist card (the
+ * account checks' own card and the prerequisites card below differ only in id, title and the
+ * status wording of `lines`). */
+function checklistCard(input: { id: WizardCard["id"]; title: string; status: "running" | "ok" | "failed"; lines: string[]; checks: readonly PrerequisiteCheck[] }): WizardCard {
+  const technical = input.checks.flatMap((check) => (check.technical === undefined ? [] : [`${check.label}: ${check.technical}`]));
+  return {
+    id: input.id, title: input.title, status: input.status, lines: input.lines,
+    checks: input.checks.map((check) => ({ label: check.label, ok: check.ok, detail: check.detail })),
+    ...(technical.length === 0 ? {} : { details: technical }),
+  };
+}
+
 /** The account checks' own card (FR-018): what only the account and region can answer, checked
  * right after the region is chosen and before any setting is asked. */
 export function accountChecksCard(input: { status: "running" | "ok" | "failed"; checks: readonly PrerequisiteCheck[] }): WizardCard {
@@ -77,12 +89,7 @@ export function accountChecksCard(input: { status: "running" | "ok" | "failed"; 
     : input.status === "ok"
       ? ["Your AWS account and region have what AgentX needs."]
       : ["Nothing has been created. Fix each item marked Not ready, then choose Check again."];
-  const technical = input.checks.flatMap((check) => (check.technical === undefined ? [] : [`${check.label}: ${check.technical}`]));
-  return {
-    id: "account-checks", title: "Check your AWS account", status: input.status, lines,
-    checks: input.checks.map((check) => ({ label: check.label, ok: check.ok, detail: check.detail })),
-    ...(technical.length === 0 ? {} : { details: technical }),
-  };
+  return checklistCard({ id: "account-checks", title: "Check your AWS account", status: input.status, lines, checks: input.checks });
 }
 
 /** FR-021: the session is missing or expired. `signIn` is the command Sign in runs, when the
@@ -107,12 +114,7 @@ export function prerequisitesCard(input: { status: "running" | "ok" | "failed"; 
     : input.status === "ok"
       ? ["Everything AgentX needs is in place."]
       : ["Nothing has been created. Fix each item marked Not ready, then choose Check again."];
-  const technical = input.checks.flatMap((check) => (check.technical === undefined ? [] : [`${check.label}: ${check.technical}`]));
-  return {
-    id: "prerequisites", title: STEP_PLAN.prerequisites.title, status: input.status, lines,
-    checks: input.checks.map((check) => ({ label: check.label, ok: check.ok, detail: check.detail })),
-    ...(technical.length === 0 ? {} : { details: technical }),
-  };
+  return checklistCard({ id: "prerequisites", title: STEP_PLAN.prerequisites.title, status: input.status, lines, checks: input.checks });
 }
 
 export type GitHubCardInput =

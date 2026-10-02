@@ -188,6 +188,18 @@ function nodeVersionOk(version: string): boolean {
  * technical detail the page keeps collapsed (FR-027, FR-060). */
 type Report = { passed: (label: string, line: string) => void; failed: (label: string, problem: string, technical?: string) => void };
 
+/** Fix round 1: `checkAccount` and `checkPrerequisites` built an identical `Report` by hand; this
+ * is the one place that does it, writing into the caller's own `problems` array. */
+function reporter(input: { write: (line: string) => void; onCheck: ((check: PrerequisiteCheck) => void) | undefined; problems: string[] }): Report {
+  return {
+    passed: (label, line) => { input.write(line); input.onCheck?.({ label, ok: true, detail: line.replace(/^ok /, "") }); },
+    failed: (label, problem, technical) => {
+      input.problems.push(problem);
+      input.onCheck?.({ label, ok: false, detail: problem, ...(technical === undefined ? {} : { technical }) });
+    },
+  };
+}
+
 /** Spec 048 FR-018: what only the account and region can answer, shared by `checkAccount` (run
  * once, right after the region is chosen) and `checkPrerequisites` (which skips this when
  * `checkAccount` already ran). The EC2 vCPU quota and Elastic IP checks are phase 1's own, moved
@@ -245,11 +257,7 @@ export async function checkAccount(input: {
   const problems: string[] = [];
   await accountChecks({
     region: input.region, checks: input.checks, audience: input.audience ?? "terminal", bedrock: true,
-    passed: (label, line) => { input.write(line); input.onCheck?.({ label, ok: true, detail: line.replace(/^ok /, "") }); },
-    failed: (label, problem, technical) => {
-      problems.push(problem);
-      input.onCheck?.({ label, ok: false, detail: problem, ...(technical === undefined ? {} : { technical }) });
-    },
+    ...reporter({ write: input.write, onCheck: input.onCheck, problems }),
   });
   if (problems.length > 0) throw agentXError("CONFIG_INVALID", `init cannot start; nothing was created:\n${problems.map((problem) => `- ${problem}`).join("\n")}`);
 }
@@ -280,11 +288,7 @@ export async function checkPrerequisites(input: {
   const problems: string[] = [];
   // Each check is reported as it finishes (the page's checklist); the lines written and the
   // problems collected are exactly what they were before.
-  const passed = (label: string, line: string) => { write(line); input.onCheck?.({ label, ok: true, detail: line.replace(/^ok /, "") }); };
-  const failed = (label: string, problem: string, technical?: string) => {
-    problems.push(problem);
-    input.onCheck?.({ label, ok: false, detail: problem, ...(technical === undefined ? {} : { technical }) });
-  };
+  const { passed, failed } = reporter({ write, onCheck: input.onCheck, problems });
   write(`AWS account ${input.caller.account} as ${input.caller.arn}`);
   write(DEDICATED_ACCOUNT_NOTE);
 
