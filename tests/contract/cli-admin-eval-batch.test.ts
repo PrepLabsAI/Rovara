@@ -143,6 +143,12 @@ describe("agentx admin eval batch results (spec 052 FR-010)", () => {
     expect(written).toContain(csvPath);
   });
 
+  it("counts the CSV's records, not its lines, when a field holds a line break", async () => {
+    const csv = "batchId,error\r\nx,\"he said\r\nstop\"\r\ny,\r\n";
+    const csvPath = join(await mkdtemp(join(tmpdir(), "agentx-batch-")), "out.csv");
+    expect(await batchResultsOutput({ ready: true, status: "DONE", csv, summary }, csvPath)).toBe(`Wrote 2 rows to ${csvPath}`);
+  });
+
   it("prints the per-model summary table without --csv", async () => {
     const text = await batchResultsOutput({ ready: true, status: "DONE", csv: "", summary }, undefined);
     expect(text).toContain("amazon-bedrock/us.vendor.batch-v1");

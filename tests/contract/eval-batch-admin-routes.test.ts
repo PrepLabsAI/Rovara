@@ -129,6 +129,21 @@ describe("a batch's results (spec 052 FR-010)", () => {
   });
 });
 
+describe("a batch whose results could not be confirmed (spec 052 Ruling 31, review M-8)", () => {
+  it("answers not ready, saying the results are incomplete, when finalize wrote the files and then failed", async () => {
+    const { handler, dependencies, db } = await batchBroker();
+    const batchId = ((await start(handler)).body.batch as { batchId: string }).batchId;
+    await call(handler, { method: "POST", path: `${base}/${batchId}/stop`, user: administrator });
+    // The rows no longer sum to the spend: finalize writes the files, keeps the batch listed and fails.
+    const item = db.get(`EVAL_BATCH#${batchId}`, "META")!;
+    db.set({ ...item, spentUsd: 5 });
+    await expect(finalizeBatch(dependencies, batchId)).rejects.toThrow(/results are incomplete/);
+    const results = await call(handler, { method: "GET", path: `${base}/${batchId}/results`, user: administrator });
+    expect(results).toMatchObject({ status: 200, body: { ready: false, incomplete: true, status: "STOPPED", message: expect.stringMatching(/results are incomplete/) as unknown } });
+    expect(results.body).not.toHaveProperty("csv");
+  });
+});
+
 describe("the project's administrator (spec 052 Task 5)", () => {
   it("refuses an administrator who is not a member of the batch's project on show, stop and results", async () => {
     const { handler } = await batchBroker();

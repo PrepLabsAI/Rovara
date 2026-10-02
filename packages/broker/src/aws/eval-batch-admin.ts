@@ -13,7 +13,7 @@ import {
   type SlackRequester,
   type SlackThread,
 } from "@agentx/contracts";
-import { createBatch, evalBatchResultsKeys, getBatch, getBatchProjectName, stopBatch, type EvalBatchDependencies } from "./eval-batch.js";
+import { createBatch, evalBatchResultsKeys, getBatch, getBatchProjectName, isBatchActiveListed, stopBatch, type EvalBatchDependencies } from "./eval-batch.js";
 import type { SwebenchSlackContext } from "./swebench.js";
 
 const TERMINAL: ReadonlySet<EvalBatchRecord["status"]> = new Set(["DONE", "STOPPED", "CAPPED"]);
@@ -127,6 +127,16 @@ export async function batchResults(dependencies: EvalBatchDependencies, batchId:
   const [csv, summary] = [await readObject(dependencies, keys.csv), await readObject(dependencies, keys.summary)];
   if (csv === undefined || summary === undefined) {
     return { ready: false, status: record.status, message: `batch ${batchId} has ended (${record.status}), but its results are not written yet; they are written within a few minutes, try again shortly` };
+  }
+  // Review M-8: finalize writes the files before it checks them, and keeps a batch whose rows are lost
+  // or do not sum to its spend on the active list (Ruling 14). Such files are not the results.
+  if (await isBatchActiveListed(dependencies, batchId)) {
+    return {
+      ready: false,
+      incomplete: true,
+      status: record.status,
+      message: `batch ${batchId} has ended (${record.status}), but its results are incomplete: the tick wrote them and could not confirm them (rows lost, or charges that do not sum to the spend), so its alarm is firing. If this does not clear within a few minutes, an operator must resolve it; see the broker's eval_batch logs`,
+    };
   }
   const parsed: EvalBatchSummary = EvalBatchSummarySchema.parse(JSON.parse(summary));
   return { ready: true, status: record.status, csv, summary: parsed };

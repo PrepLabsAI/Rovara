@@ -112,10 +112,27 @@ export async function batchResultsOutput(result: unknown, csvPath: string | unde
   }
   if (csvPath !== undefined) {
     await writeFile(csvPath, str(answer.csv));
-    const rows = Math.max(0, str(answer.csv).split("\n").filter((line) => line.length > 0).length - 1);
+    const rows = Math.max(0, csvRecordCount(str(answer.csv)) - 1);
     return `Wrote ${rows} rows to ${csvPath}`;
   }
   return summaryTable(answer.summary as EvalBatchSummary);
+}
+
+/** RFC 4180 records, the header included: a line break inside a quoted field does not end a record. */
+function csvRecordCount(csv: string): number {
+  let records = 0;
+  let quoted = false;
+  let empty = true;
+  for (const character of csv) {
+    if (character === "\"") quoted = !quoted;
+    if (!quoted && character === "\n") {
+      if (!empty) records += 1;
+      empty = true;
+    } else if (character !== "\r") {
+      empty = false;
+    }
+  }
+  return empty ? records : records + 1;
 }
 
 function summaryTable(summary: EvalBatchSummary): string {
