@@ -206,6 +206,25 @@ export const AdminWorkspacesResponseSchema = z.object({
 }).passthrough();
 export type AdminWorkspacesResponse = z.infer<typeof AdminWorkspacesResponseSchema>;
 
+/**
+ * Issue 206: the suffix of every alarm a named environment can create (`agentx-<env>-<suffix>`). The
+ * admin health probe asks CloudWatch for exactly these names, because a call that names its alarms
+ * is authorized against each alarm's ARN while a prefix listing is authorized against *. The infra
+ * refuses to synthesize a named environment with an alarm missing from this list, and
+ * tests/contract/admin-health-infrastructure.test.ts checks the list against a named app's alarms.
+ */
+export const HEALTH_ALARM_SUFFIXES = [
+  "BedrockThrottling", "CheckerFailures", "ClassifierThrottling", "ConnectorBroken", "ConnectorNotConnected",
+  "DeveloperNoticeDeadLetters", "DeveloperNoticeStreamFailures", "DispatchDeadLetters", "EmptyResponses",
+  "ReconcilerLostInstances", "ReconcilerQuarantinedVolumes", "ReconcilerStuckProvisioning", "RecordingFailures",
+  "SessionDeleterFailures", "SessionProvisionerFailures", "SessionReaperErrors", "SessionReconcilerErrors",
+  "SlackDeadLetters", "SlackDeliveryFailed", "SlowTurns", "StuckCancels", "TestAlarm", "TurnErrors", "UnwaitedTaskFailures",
+] as const;
+/** The listed alarms an environment creates only on Amazon Bedrock, so their absence is expected. */
+export const HEALTH_ALARM_CONDITIONAL_SUFFIXES = ["BedrockThrottling", "ClassifierThrottling"] as const satisfies ReadonlyArray<typeof HEALTH_ALARM_SUFFIXES[number]>;
+/** The state the health route gives a listed alarm CloudWatch did not return. */
+export const MISSING_ALARM_STATE = "MISSING";
+
 export const AdminHealthCheckSchema = z.object({ status: z.enum(["ok", "warn", "failed", "unknown"]), detail: z.string().max(300).optional() });
 export type AdminHealthCheck = z.infer<typeof AdminHealthCheckSchema>;
 export const AdminHealthResponseSchema = z.object({
