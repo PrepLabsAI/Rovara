@@ -45,7 +45,7 @@ orchestratorInstructions: Delegate every repository read, edit, build, and test 
 | `revision` | yes | A positive whole number. Revisions are immutable: increase it before registering a changed file. New threads use the latest registered revision. |
 | `repositories` | yes | 1 to 32 repositories (below). |
 | `setup` | yes | Up to 64 commands run once when a workspace is prepared. May be empty. |
-| `readiness` | yes | Up to 64 commands run in the workspace before any candidate is pushed. A failure stops the publication. May be empty. |
+| `readiness` | yes | Up to 64 commands run in the workspace before any candidate is pushed. A failure opens a new pull request as a draft, with the failing checks listed in its description (spec 051); it still stops an update to an existing pull request. May be empty. |
 | `devcontainer` | no | Runs `setup`, `readiness` and the agent's shell inside a repository's dev container (below). |
 | `orchestratorInstructions` | yes | Up to 32,768 characters of project guidance for the orchestrator. |
 | `models` | no | The models a channel may choose from (below). |

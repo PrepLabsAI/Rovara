@@ -53,7 +53,7 @@ describe("checksSection (FR-008)", () => {
       "- `npm test`: passed → failed, regression",
       "",
       "At publish, AgentX reran the project's checks:",
-      "- `npm test`: passed → failed, regression",
+      "- `npm test`: passed → failed, regression (passed at preparation, fails now)",
       "",
       "### Output: `npm test` (after the last task)",
       "",
@@ -69,23 +69,44 @@ describe("checksSection (FR-008)", () => {
     ].join("\n"));
   });
 
-  it("notes an already-failing check without making a draft", () => {
+  it("notes a check the task found already failing, without making a draft", () => {
     const already = entry({ label: "make lint", before: "failed", after: "failed", class: "already_failing", output: "" });
-    expect(checksSection([already], undefined)).toBe([
+    const latest = report({ checks: [already] });
+    expect(checksSection(undefined, latest)).toBe([
       "## Checks",
       "",
       "No check that passed before this change fails now.",
       "",
-      "At publish, AgentX reran the project's checks:",
+      "After the last task, AgentX reran the project's checks:",
       "- `make lint`: failed → failed, already failing before this change",
       "",
-      "### Output: `make lint` (at publish)",
+      "### Output: `make lint` (after the last task)",
       "",
       "```text",
       "(no output)",
       "```",
     ].join("\n"));
-    expect(checksMakeDraft([already], undefined)).toBe(false);
+    expect(checksMakeDraft(undefined, latest)).toBe(false);
+  });
+
+  // Ruling S: the pull request is the whole change since preparation, so any failing check at publish is a draft.
+  it("makes any check failing at publish a draft, and words one with no earlier result as such", () => {
+    const unprepared = entry({ label: "make lint", before: "unknown", after: "failed", class: "failing_no_before", output: "lint error" });
+    expect(checksSection([unprepared], undefined)).toBe([
+      "## Checks",
+      "",
+      "**This pull request is a draft: a check fails at publish.**",
+      "",
+      "At publish, AgentX reran the project's checks:",
+      "- `make lint`: unknown → failed, fails now, with no earlier result",
+      "",
+      "### Output: `make lint` (at publish)",
+      "",
+      "```text",
+      "lint error",
+      "```",
+    ].join("\n"));
+    expect(checksMakeDraft([unprepared], undefined)).toBe(true);
   });
 
   it("lists mixed checks, with a check that has no earlier result (Ruling C) and a timeout", () => {
@@ -122,19 +143,46 @@ describe("checksSection (FR-008)", () => {
     ].join("\n"));
   });
 
-  it("says when the last task was not checked", () => {
-    expect(checksSection(undefined, report({ status: "not_verified", notVerifiedReason: "no_checks", source: "none" }))).toBe(
-      "## Checks\n\nNo check that passed before this change fails now.\n\nAfter the last task, no checks ran.",
-    );
-    expect(checksSection(undefined, report({ status: "not_verified", notVerifiedReason: "stopped", source: "none" }))).toBe(
-      "## Checks\n\nNo check that passed before this change fails now.\n\n"
-        + "After the last task, AgentX could not check the work: the task stopped before AgentX could check it.",
-    );
+  it("says when the last task was not verified", () => {
+    const head = "## Checks\n\nNo check that passed before this change fails now.\n\n";
+    expect(checksSection(undefined, report({ status: "not_verified", notVerifiedReason: "no_checks", source: "none" })))
+      .toBe(`${head}After the last task: Not verified (no checks ran).`);
+    expect(checksSection(undefined, report({ status: "not_verified", notVerifiedReason: "stopped", source: "none" })))
+      .toBe(`${head}After the last task: Not verified (the task stopped before AgentX could check it).`);
+    expect(checksSection(undefined, report({ status: "not_verified", checks: [entry({ after: "not_run", class: "not_rerun" })] })))
+      .toBe(`${head}After the last task: Not verified. AgentX could not rerun the project's checks:\n- \`npm test\`: passed → not run, not rerun`);
   });
 
-  it("makes a draft only for a regression (Ruling C)", () => {
+  // Ruling T: a task that ended without a report leaves a marker, never an older report.
+  it.each([
+    ["failed", "the task failed"],
+    ["cancelled", "the task was cancelled"],
+    ["interrupted", "the task was interrupted"],
+  ] as const)("says Not verified for a task that %s", (reason, text) => {
+    const marker = { status: "not_verified", reason } as const;
+    expect(checksSection([entry({})], marker)).toBe([
+      "## Checks",
+      "",
+      "No check that passed before this change fails now.",
+      "",
+      `After the last task: Not verified (${text}).`,
+      "",
+      "At publish, AgentX reran the project's checks:",
+      "- `npm test`: passed → passed, passing",
+    ].join("\n"));
+    expect(checksMakeDraft([entry({})], marker)).toBe(false);
+  });
+
+  it("keeps the description as before for a worker that sends no report, unless a check fails", () => {
+    const marker = { status: "not_verified", reason: "no_report" } as const;
+    expect(checksSection([entry({})], marker)).toBe("");
+    expect(checksSection([entry({ after: "failed", class: "regression" })], marker))
+      .toContain("After the last task: Not verified (the worker sent no check report).");
+  });
+
+  it("makes a draft for a failing publish check or a regression report (Rulings C, S)", () => {
     expect(checksMakeDraft(undefined, undefined)).toBe(false);
-    expect(checksMakeDraft([entry({ before: "unknown", after: "failed", class: "failing_no_before" })], undefined)).toBe(false);
+    expect(checksMakeDraft(undefined, report({ checks: [entry({ before: "unknown", after: "failed", class: "failing_no_before" })] }))).toBe(false);
     expect(checksMakeDraft([entry({ after: "failed", class: "regression" })], undefined)).toBe(true);
     expect(checksMakeDraft(undefined, report({ status: "regression" }))).toBe(true);
     expect(checksMakeDraft(undefined, report({ status: "verified" }))).toBe(false);
@@ -144,14 +192,14 @@ describe("checksSection (FR-008)", () => {
     const output = Array.from({ length: 50 }, (_, index) => `line ${index + 1}`).join("\n");
     expect(checkOutputTail(output).split("\n")).toEqual(Array.from({ length: 40 }, (_, index) => `line ${index + 11}`));
     const section = checksSection([entry({ label: "a `b` c", after: "failed", class: "regression", output: "```\nboom" })], undefined);
-    expect(section).toContain("- ``a `b` c``: passed → failed, regression");
+    expect(section).toContain("- ``a `b` c``: passed → failed, regression (passed at preparation, fails now)");
     expect(section).toContain("````text\n```\nboom\n````");
   });
 
   it("puts a label on one line, cut to 200 characters", () => {
     const section = checksSection([entry({ label: `npm test\n${"x".repeat(300)}`, after: "failed", class: "regression" })], undefined);
     const line = section.split("\n").find((text) => text.startsWith("- "))!;
-    expect(line).toBe(`- \`npm test ${"x".repeat(190)}…\`: passed → failed, regression`);
+    expect(line).toBe(`- \`npm test ${"x".repeat(190)}…\`: passed → failed, regression (passed at preparation, fails now)`);
   });
 
   it("stays within its limit: outputs are left out first, then lines, each with a note", () => {
@@ -171,8 +219,11 @@ describe("checksSection (FR-008)", () => {
     expect(checksSection(checks, undefined)).toBe(checksSection(checks, undefined));
   });
 
-  it("stores a report with outputs cut to the section's tail", () => {
-    const stored = checksForSection(report({ checks: [entry({ output: "q".repeat(10_000) })] }));
-    expect(stored.checks[0]!.output).toBe("q".repeat(4_000));
+  it("stores a report with outputs cut to the section's tail, 48,000 characters in all", () => {
+    const one = checksForSection(report({ checks: [entry({ output: "q".repeat(10_000) })] }));
+    expect("checks" in one && one.checks[0]!.output).toBe("q".repeat(4_000));
+    const many = checksForSection(report({ checks: Array.from({ length: 64 }, (_, index) => entry({ id: `readiness:${index}`, output: "q".repeat(10_000) })) }));
+    expect("checks" in many && many.checks[0]!.output).toBe("q".repeat(750));
+    expect(checksForSection({ status: "not_verified", reason: "failed" })).toEqual({ status: "not_verified", reason: "failed" });
   });
 });

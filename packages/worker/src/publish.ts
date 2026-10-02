@@ -19,7 +19,6 @@ import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
 import type { RepositoryCredentialProvider } from "./repository-credentials.js";
 import { runProjectCommand, type PreparationCommandRunner, type PreparationManifest } from "./prepare.js";
 import { storedCommandOutput } from "./command-failure.js";
-import { readCheckHistory } from "./verification/check-history.js";
 import { planChecks, publicationCheckEntries } from "./verification/checks.js";
 import type { CommandResult } from "./readiness.js";
 import {
@@ -113,13 +112,13 @@ export async function publishWorkspace(
   const checks: PublicationCheckResult[] = await runReadinessChecks(rootPath, invocation, manifest, {
     ...(options.devcontainerCli !== undefined ? { devcontainerCli: options.devcontainerCli } : {}),
   });
-  // Spec 051 P-2 (D-7): a broker that asks for the checks opens a draft pull request when one regressed, so a failing
+  // Spec 051 P-2 (D-7, Ruling S): a broker that asks for the checks opens a draft pull request when one fails, so a failing
   // check no longer refuses the publication. A broker built before it would open a normal one, so it still refuses.
   const reportChecks = invocation.payload.reportChecks === true;
   if (!reportChecks && checks.some((check) => check.outcome !== "passed")) {
     throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
   }
-  const checkEntries = reportChecks ? await judgedChecks(rootPath, invocation, manifest, checks) : undefined;
+  const checkEntries = reportChecks ? judgedChecks(invocation, manifest, checks) : undefined;
 
   try {
     await runGitWithCredential({
@@ -181,18 +180,18 @@ export async function publishWorkspace(
 }
 
 /**
- * Each readiness result judged against its before, by the rule a task's final round uses (Ruling J): the outcome the
- * last task recorded in .agentx/last-checks.json, else passed if preparation ran it, else unknown. Reading the history
- * here is safe, unlike during a task (Ruling L): publish runs only once the task has ended, and every task ending
- * rewrites the file from AgentX's own snapshot (Ruling O), so nothing the agent wrote mid-task survives to be read.
+ * Each readiness result judged against the preparation baseline (Ruling S). The pull request is the workspace's whole
+ * change since preparation, so a command preparation ran (and so passed: the workspace was READY) is "passed" before,
+ * and any other command, including every command of a workspace prepared before spec 051, has no earlier result. The
+ * task history in .agentx/last-checks.json is never read here: an earlier task's failure is not "before this change".
  */
-async function judgedChecks(
-  rootPath: string,
+function judgedChecks(
   invocation: PublishInvocation,
   manifest: PreparationManifest,
   results: readonly PublicationCheckResult[],
-): Promise<CheckEntry[]> {
-  const plan = planChecks(invocation.payload.project.readiness, { firstRuns: () => [] }, await readCheckHistory(rootPath, manifest));
+): CheckEntry[] {
+  const baseline = { lastOutcomes: {}, preparedKeys: manifest.readinessCommandKeys ?? [] };
+  const plan = planChecks(invocation.payload.project.readiness, { firstRuns: () => [] }, baseline);
   return publicationCheckEntries(plan, results);
 }
 

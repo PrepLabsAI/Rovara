@@ -166,6 +166,16 @@ describe("ec2-ebs delivery", () => {
       log.mockRestore();
     });
 
+    it("drops reportChecks when the dispatcher has no way to ask the worker (M-4)", async () => {
+      const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+      const { deliver, post } = delivery();
+      const record = publishRecord({ reportChecks: true });
+      await deliver(record, record.invocation);
+      expect(postedPayload(post)).not.toHaveProperty("reportChecks");
+      expect(log.mock.calls.map(([line]) => JSON.parse(String(line)) as unknown)).toContainEqual(expect.objectContaining({ event: "dispatch.report_checks_omitted", reason: "no-probe" }));
+      log.mockRestore();
+    });
+
     it("does not ask the worker when the publication does not carry it", async () => {
       const workerFeatures = vi.fn<NonNullable<Ec2DeliveryDependencies["workerFeatures"]>>(async () => []);
       const { deliver, post } = delivery({ workerFeatures });

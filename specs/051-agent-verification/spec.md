@@ -137,10 +137,24 @@ These may come later (spec 053 or after).
   a command that preparation ran (recorded in the preparation manifest) is "passed", since a workspace becomes READY
   only if every check passes; any other command, such as one added in a later revision, is "unknown", so a failure is
   "failing (no before result)" and never the agent's regression. A check that was not run keeps its earlier outcome.
-- **D-7 (2026-10-02):** A remaining regression publishes as a draft PR. Publish no longer refuses on a failing readiness
-  check: it opens the PR as a draft with the failing checks listed in a deterministic checks section, and it also reads
-  the workspace's latest task check report for agent-command checks. CodeBuild gates are unchanged. This relaxes an
-  existing gate and needs the user's approval.
+  This history is for a task's own rounds only. Publication never reads it (Ruling S, D-7): an earlier task's failure is
+  not "before" the pull request's change.
+- **D-7 (2026-10-02, amended by Rulings S and T):** A failing check publishes as a draft PR. Publish no longer refuses on
+  a failing readiness check. Instead it opens the PR as a draft, with the checks listed in a deterministic checks
+  section. It also reads the workspace's latest task check report for agent-command checks. CodeBuild gates are
+  unchanged. This relaxes an existing gate, which the user approved (P-2).
+  - The broker asks for this behaviour with `reportChecks` in the publish payload. It sends that only to a worker whose
+    /ping lists `publish.reportChecks`. A worker without it, or one asked by an older broker, refuses as before.
+  - **Ruling S.** A pull request is the workspace's whole change since preparation, so publication judges each check
+    against the preparation baseline:
+    - a command preparation ran that fails now reads "regression (passed at preparation, fails now)";
+    - any other failing command, including every command of a workspace prepared before spec 051, reads "fails now,
+      with no earlier result";
+    - any failing publish-time check makes the PR a draft, as does a latest task report of `regression`.
+  - **Ruling T.** Every task's end records the workspace's latest checks, ordered by the operation's fence: its report,
+    or a `not_verified` marker (`failed`, `cancelled`, `interrupted` or `no_report`). A task reads as `interrupted` from
+    its start until its result arrives, so an older report never stands for a newer task. A `not_verified` latest does
+    not make a draft on its own, and the section says "Not verified".
 - **D-8 (2026-10-02):** Time limits. Production coding tasks have no task time limit, only the 200-tool-call guard. Each
   check keeps its own timeout (the command's `timeoutSeconds`, or 10 minutes for agent commands), and one verification
   round has a total budget of 30 minutes. Checks the budget leaves unrun are recorded as `not_run`. Eval runs count

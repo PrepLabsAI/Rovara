@@ -783,21 +783,25 @@ describe("publication with a failing check reports it (spec 051, P-2)", () => {
     expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.invocation.payload.headBranch}`])).toMatch(/^[a-f0-9]{40}\n$/);
   });
 
-  it("judges a check's before by the outcome the last task recorded: one already failing is not a regression", async () => {
+  // Ruling S (inverts C-1): the pull request is the whole change since preparation, so publish judges against the
+  // preparation baseline and never the task history, where an earlier task's own failure reads as already failing.
+  it("judges a check against preparation, not the last task's recorded outcome: a task-caused failure is a regression", async () => {
     const fixture = await createFixture(false);
     await markPrepared(fixture);
-    // Publish runs after the task, which restored the history (Ruling O), so this is AgentX's own record.
     await recordProjectOutcomes(fixture.root, { source: "project", readiness: fixture.invocation.payload.project.readiness }, [{
       id: "readiness:0", label: "x", source: "project", before: "passed", after: "failed", class: "regression", output: "", durationMs: 1,
     }]);
     await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
     const pullRequestSink = sink();
     await publishWorkspace({ rootPath: fixture.root, invocation: reporting(fixture), credentialProvider: async () => ({}), pullRequestSink });
-    expect(pullRequestSink.mock.calls[0]![0].checks).toEqual([expect.objectContaining({ before: "failed", after: "failed", class: "already_failing" })]);
+    expect(pullRequestSink.mock.calls[0]![0].checks).toEqual([expect.objectContaining({ before: "passed", after: "failed", class: "regression" })]);
   });
 
-  it("gives a check preparation did not run, with no recorded outcome, no before result (Ruling C)", async () => {
+  it("gives every check of a workspace prepared before spec 051 (no prepared keys) no before result, even with a task history", async () => {
     const fixture = await createFixture("timeout");
+    await recordProjectOutcomes(fixture.root, { source: "project", readiness: fixture.invocation.payload.project.readiness }, [{
+      id: "readiness:0", label: "x", source: "project", before: "passed", after: "passed", class: "passing", output: "", durationMs: 1,
+    }]);
     await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
     const pullRequestSink = sink();
     await publishWorkspace({ rootPath: fixture.root, invocation: reporting(fixture), credentialProvider: async () => ({}), pullRequestSink });

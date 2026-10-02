@@ -23,13 +23,14 @@ import {
   AgentXError,
   CHANNEL_TURN_REQUEST_MAX,
   CheckReportSchema,
+  LatestChecksSchema,
   PULL_REQUEST_BODY_MAX_CHARS,
   checksForSection,
   checksMakeDraft,
   checksSection,
   taskResultChecks,
   type CheckEntry,
-  type CheckReport,
+  type LatestChecks,
   CONNECTOR_SECRET_PREFIX,
   ChannelTurnSchema,
   DEVELOPER_TASK_OWNER_ISSUER,
@@ -89,6 +90,7 @@ import {
   type WorkspaceInstance,
   cleanDisplayName,
   redactAndCap,
+  redactText,
   DISPLAY_NAME_MAX_ENCODED_LENGTH,
   modelKey,
   type ModelIdentifier,
@@ -2630,10 +2632,14 @@ async function acceptTask(
       { Update: {
         TableName: dependencies.tableName,
         Key: workspaceKey(workspaceId),
-        UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
+        // Spec 051 Ruling T: until its own result arrives, the task reads as interrupted, so no older report stands.
+        UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now, latestChecks = :latestChecks",
         ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
         ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: { ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED", ":operation": operation.id, ":fence": fence, ":now": now },
+        ExpressionAttributeValues: {
+          ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED", ":operation": operation.id, ":fence": fence, ":now": now,
+          ":latestChecks": latestChecksItem({ status: "not_verified", reason: "interrupted" }, operation.id, fence, now),
+        },
       } },
       { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
@@ -2752,7 +2758,8 @@ async function acceptPullRequest(
         repository.name,
       ),
       // Spec 051 P-2: a failing check opens a draft (reconcilePullRequest) rather than refusing the publication.
-      reportChecks: true,
+      // Without readiness there is no check to report, and the worker need not be asked whether it can.
+      ...(project.definition.readiness.length === 0 ? {} : { reportChecks: true as const }),
     },
   };
   const outbox = outboxRecord(workspace, invocation);
@@ -2969,7 +2976,7 @@ async function acceptPullRequestLifecycle(
         targetPullRequestNumber: record.number,
         ...(remote.mergeCommit === undefined ? {} : { revertCommit: remote.mergeCommit }),
         // Spec 051 P-2, as for a new pull request.
-        reportChecks: true,
+        ...(project.definition.readiness.length === 0 ? {} : { reportChecks: true as const }),
       },
     };
     const outbox = outboxRecord(workspace, invocation);
@@ -3535,11 +3542,22 @@ function publicationChecks(value: unknown): CheckEntry[] | undefined {
   return parsed.data;
 }
 
-/** The workspace's latest task check report (recordLatestChecks), or undefined: none yet, or one that does not parse. */
-async function latestWorkspaceChecks(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<CheckReport | undefined> {
-  const workspace = await getItem<{ latestChecks?: { report?: unknown } }>(dependencies, workspaceKey(workspaceId));
-  const parsed = CheckReportSchema.safeParse(workspace?.latestChecks?.report);
-  return parsed.success ? parsed.data : undefined;
+/**
+ * The workspace's latest checks (Ruling T), or undefined: none yet. One that does not parse is logged and treated as
+ * none; a failing publish check still makes the draft (Ruling S).
+ */
+async function latestWorkspaceChecks(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<LatestChecks | undefined> {
+  const workspace = await getItem<{ latestChecks?: { report?: unknown; operationId?: unknown } }>(dependencies, workspaceKey(workspaceId));
+  if (workspace?.latestChecks === undefined) return undefined;
+  const parsed = LatestChecksSchema.safeParse(workspace.latestChecks.report);
+  if (parsed.success) return parsed.data;
+  console.log(JSON.stringify({ component: "broker", event: "pull_request.latest_checks_unreadable", workspaceId, operationId: typeof workspace.latestChecks.operationId === "string" ? workspace.latestChecks.operationId : undefined }));
+  return undefined;
+}
+
+/** Spec 051 M-1: labels and outputs redacted again at the broker before they reach GitHub (as #154 does for errors). */
+function redactedEntries(checks: readonly CheckEntry[]): CheckEntry[] {
+  return checks.map((check) => ({ ...check, label: redactText(check.label), output: redactText(check.output) }));
 }
 
 /**
@@ -3552,10 +3570,12 @@ function checkedPullRequest(
   body: string | undefined,
   draft: boolean | undefined,
   publishChecks: readonly CheckEntry[] | undefined,
-  latestChecks: CheckReport | undefined,
+  latestChecks: LatestChecks | undefined,
 ): { body: string | undefined; draft: boolean | undefined } {
   const separator = body === undefined || body === "" ? "" : "\n\n";
-  const section = checksSection(publishChecks, latestChecks, PULL_REQUEST_BODY_MAX_CHARS - (body?.length ?? 0) - separator.length);
+  const shownPublish = publishChecks === undefined ? undefined : redactedEntries(publishChecks);
+  const shownLatest = latestChecks === undefined || "reason" in latestChecks ? latestChecks : { ...latestChecks, checks: redactedEntries(latestChecks.checks) };
+  const section = checksSection(shownPublish, shownLatest, PULL_REQUEST_BODY_MAX_CHARS - (body?.length ?? 0) - separator.length);
   return {
     body: section === "" ? body : `${body ?? ""}${separator}${section}`,
     draft: checksMakeDraft(publishChecks, latestChecks) ? true : draft,
@@ -3751,12 +3771,13 @@ async function queuedFirstTask(
     workspaceUpdate: { Update: {
       TableName: dependencies.tableName,
       Key: workspaceKey(workspace.id),
-      UpdateExpression: "SET #status = :busy, updatedAt = :now, preparationManifest = :manifest, activeOperationId = :task, fence = :taskFence",
+      UpdateExpression: "SET #status = :busy, updatedAt = :now, preparationManifest = :manifest, activeOperationId = :task, fence = :taskFence, latestChecks = :latestChecks",
       ConditionExpression: "activeOperationId = :operation AND fence = :fence",
       ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: {
         ":busy": "BUSY", ":now": now, ":manifest": ".agentx/preparation-manifest.json",
         ":task": operation.id, ":taskFence": fence, ":operation": prepare.id, ":fence": prepare.fence,
+        ":latestChecks": latestChecksItem({ status: "not_verified", reason: "interrupted" }, operation.id, fence, now),
       },
     } },
     items: [
@@ -4017,8 +4038,6 @@ async function recordTerminalResult(
     // #213: a repeated result releases a failed prepare's slot too, in case the first one's release
     // did not land (the release is idempotent, and does nothing to a workspace that moved on).
     if (operation.kind === "prepare" && operation.status !== "SUCCEEDED") await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, operation.workspaceId);
-    // Spec 051: a repeated result writes the latest checks too, in case the first write did not land.
-    await recordLatestChecks(dependencies, operation, operation.status, operation.result, operation.updatedAt);
     return operation;
   }
   const workspace = await requireWorkspace(dependencies, operation.workspaceId);
@@ -4075,14 +4094,19 @@ async function recordTerminalResult(
       },
     } });
   }
+  // Spec 051 Ruling T: a task's end, or its cancel's, sets the workspace's latest checks in the same transaction. That
+  // update holds only while this operation owns the workspace at its fence, so a late or repeated result never
+  // replaces a newer task's, and no write can be lost after the result commits.
+  const latestChecks = await terminalLatestChecks(dependencies, operation, terminalStatus, result, now);
+  const workspaceExpression = operation.kind === "prepare" && terminalStatus === "SUCCEEDED"
+    ? "SET #status = :status, updatedAt = :now, preparationManifest = :manifest REMOVE activeOperationId"
+    : operation.kind === "close" && closePreflight?.safeToClose !== true
+      ? "SET #status = :status, updatedAt = :now, closeError = :closeError REMOVE activeOperationId"
+      : "SET #status = :status, updatedAt = :now REMOVE activeOperationId, closeError";
   const workspaceUpdate: TransactItems[number] = { Update: {
     TableName: dependencies.tableName,
     Key: workspaceKey(workspace.id),
-    UpdateExpression: operation.kind === "prepare" && terminalStatus === "SUCCEEDED"
-      ? "SET #status = :status, updatedAt = :now, preparationManifest = :manifest REMOVE activeOperationId"
-      : operation.kind === "close" && closePreflight?.safeToClose !== true
-        ? "SET #status = :status, updatedAt = :now, closeError = :closeError REMOVE activeOperationId"
-        : "SET #status = :status, updatedAt = :now REMOVE activeOperationId, closeError",
+    UpdateExpression: latestChecks === undefined ? workspaceExpression : workspaceExpression.replace(" REMOVE ", ", latestChecks = :latestChecks REMOVE "),
     ConditionExpression: operation.kind === "cancel"
       ? "activeOperationId = :target AND fence = :fence"
       : "activeOperationId = :operation AND fence = :fence",
@@ -4093,6 +4117,7 @@ async function recordTerminalResult(
       ":fence": operation.fence,
       ...(operation.kind === "cancel" ? { ":target": operation.targetOperationId } : { ":operation": operation.id }),
       ...(operation.kind === "prepare" && terminalStatus === "SUCCEEDED" ? { ":manifest": ".agentx/preparation-manifest.json" } : {}),
+      ...(latestChecks === undefined ? {} : { ":latestChecks": latestChecks }),
       ...(operation.kind === "close" && closePreflight?.safeToClose !== true
         ? { ":closeError": error ?? (closePreflight ? "workspace contains unpublished work" : "workspace close preflight failed") }
         : {}),
@@ -4126,7 +4151,6 @@ async function recordTerminalResult(
     const existing = await requireOperation(dependencies, operation.workspaceId, operation.id);
     if (existing.status === terminalStatus || isQueueFailedPrepare(existing, terminalStatus) || isSweptPrepare(existing)) {
       if (existing.kind === "prepare" && existing.status !== "SUCCEEDED") await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, existing.workspaceId);
-      await recordLatestChecks(dependencies, existing, existing.status, existing.result, existing.updatedAt);
       return existing;
     }
     // A cancel whose target finished first (its own result, and for a developer task its
@@ -4156,41 +4180,35 @@ async function recordTerminalResult(
     await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, workspace.id);
   }
   if (recordedStatus !== terminalStatus) return { ...operation, status: recordedStatus, updatedAt: now, error: FIRST_TASK_QUEUE_FAILED };
-  await recordLatestChecks(dependencies, operation, terminalStatus, result, now);
   return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
 }
 
+/** Spec 051 Ruling T: the workspace's latest checks, as stored: what is known, which task, and when. */
+function latestChecksItem(latest: LatestChecks, operationId: string, fence: number, recordedAt: string) {
+  return { report: checksForSection(latest), operationId, fence, recordedAt };
+}
+
 /**
- * Spec 051 (D-7): the workspace keeps the check report of its latest successful task, which publish reads. The write
- * is conditional on the operation's fence, which grows with each operation on the workspace, so a late or repeated
- * result from an older task never replaces a newer one's. A result without a report (a worker built before spec 051)
- * writes nothing. The outputs are cut to what the pull request's checks section shows.
+ * Spec 051 Ruling T: the latest checks a task's terminal result records: its report, or why it has none. A successful
+ * cancel records its task as cancelled. Undefined for every other operation, which leaves them as they are.
  */
-async function recordLatestChecks(
+async function terminalLatestChecks(
   dependencies: AwsBrokerDependencies,
-  operation: Pick<OperationRecord, "id" | "kind" | "workspaceId" | "fence">,
+  operation: OperationRecord,
   status: OperationStatus,
   result: unknown,
-  completedAt: string,
-): Promise<void> {
-  if (operation.kind !== "task" || status !== "SUCCEEDED") return;
-  const report = taskResultChecks(result);
-  if (report === undefined) return;
-  try {
-    await dependencies.documentClient.send(new UpdateCommand({
-      TableName: dependencies.tableName,
-      Key: workspaceKey(operation.workspaceId),
-      UpdateExpression: "SET latestChecks = :latest",
-      ConditionExpression: "attribute_exists(pk) AND (attribute_not_exists(latestChecks) OR latestChecks.fence < :fence)",
-      ExpressionAttributeValues: {
-        ":latest": { report: checksForSection(report), operationId: operation.id, completedAt, fence: operation.fence },
-        ":fence": operation.fence,
-      },
-    }));
-  } catch (error) {
-    // A newer task's report is already there (or the workspace is gone): nothing to do.
-    if (!isConditional(error)) throw error;
+  now: string,
+) {
+  if (operation.kind === "task") {
+    const report = taskResultChecks(result);
+    const reason = status === "SUCCEEDED" ? "no_report" : status === "FAILED" ? "failed" : status === "CANCELLED" ? "cancelled" : "interrupted";
+    return latestChecksItem(report ?? { status: "not_verified", reason }, operation.id, operation.fence, now);
   }
+  if (operation.kind === "cancel" && status === "SUCCEEDED" && operation.targetOperationId) {
+    const target = await getItem<OperationRecord>(dependencies, operationKey(operation.workspaceId, operation.targetOperationId));
+    if (target?.kind === "task") return latestChecksItem({ status: "not_verified", reason: "cancelled" }, target.id, operation.fence, now);
+  }
+  return undefined;
 }
 
 /**
