@@ -584,7 +584,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   adminEvalBatch
     .command("start")
     .description("start a batch from a YAML file in a bound, eval-enabled channel; prints its batch ID")
-    .requiredOption("--file <path>", "the batch file: benchmark, tasks or sample, models, repeats, order, costCapUsd")
+    .requiredOption("--file <path>", "the batch file: benchmark, tasks, models, repeats, order, concurrency, costCapUsd (docs/swebench-eval.md)")
     .requiredOption("--team <team-id>", "Slack team ID, for example T0123456789")
     .requiredOption("--channel <channel-id>", "Slack channel ID, for example C0123456789")
     .option("--label <text>", "start another batch from a file that has already been run in this channel (the same file starts the same batch)")
