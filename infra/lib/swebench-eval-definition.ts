@@ -4,8 +4,9 @@
 // it, and always terminates the instance. A run it ends (cancelled, over its ceiling, or an instance
 // that stopped without reporting) it marks terminal and releases its slot, in the same transaction
 // as the broker's finishRun for a reported result; a run already terminal is left as it is. A
-// release that fails for any other reason still terminates the instance, then fails the execution,
-// so the failure is seen rather than leaking a slot.
+// release that fails for any other reason still terminates the instance, then fails the execution
+// (SlotReleaseFailed, its only Fail state), so the control plane's EvalExecutionsFailed alarm sees
+// it rather than a slot leaking unseen; the batch tick repairs the slot.
 import { SWEBENCH_RUN_TIME_LIMIT_SECONDS } from "@agentx/contracts";
 
 type State = Record<string, unknown>;

@@ -68,4 +68,29 @@ describe("the eval batch tick's infrastructure (spec 052 FR-006, FR-011)", () =>
     expect(alarm.Properties).toMatchObject({ MetricName: "Errors", Threshold: 1, EvaluationPeriods: 3, TreatMissingData: "notBreaching" });
     expect(JSON.stringify(alarm.Properties.AlarmActions)).toContain("OperatorAlerts");
   });
+
+  it("alarms the operator when the eval state machine fails an execution, which only its SlotReleaseFailed does (Ruling 31, review M-2)", () => {
+    const alarm = Object.values(resources).find((r) => r.Type === "AWS::CloudWatch::Alarm" && r.Properties.MetricName === "ExecutionsFailed")!;
+    expect(alarm.Properties).toMatchObject({ Namespace: "AWS/States", Statistic: "Sum", Threshold: 1, EvaluationPeriods: 1, TreatMissingData: "notBreaching" });
+    expect(JSON.stringify(alarm.Properties.Dimensions)).toContain(":stateMachine:agentx-production-swebench-eval");
+    expect(String(alarm.Properties.AlarmDescription)).toContain("SlotReleaseFailed");
+    expect(JSON.stringify(alarm.Properties.AlarmActions)).toContain("OperatorAlerts");
+  });
+
+  it("alarms the operator on the Slack service's batch watcher errors (Ruling 31, review M-1)", () => {
+    const alarm = Object.values(resources).find((r) => r.Type === "AWS::CloudWatch::Alarm" && r.Properties.MetricName === "EvalBatchWatcherFailed")!;
+    expect(alarm.Properties).toMatchObject({ Namespace: "AgentX", Statistic: "Sum", Threshold: 1, EvaluationPeriods: 1, TreatMissingData: "notBreaching" });
+    expect(String(alarm.Properties.AlarmDescription)).toContain("eval_batch_watch");
+    expect(JSON.stringify(alarm.Properties.AlarmActions)).toContain("OperatorAlerts");
+  });
+
+  it("publishes the watcher's error lines as a metric from the Slack service's log group", () => {
+    const app = buildAgentXApp();
+    const slack = app.node.children.find((c): c is Stack => Stack.isStack(c) && c.stackName === "AgentXSlackOrchestrator")!;
+    const filters = Object.values(Template.fromStack(slack).toJSON().Resources as Record<string, Resource>).filter((r) => r.Type === "AWS::Logs::MetricFilter"
+      && JSON.stringify(r.Properties.MetricTransformations).includes("EvalBatchWatcherFailed"));
+    expect(filters).toHaveLength(1);
+    expect(filters[0]!.Properties.FilterPattern).toBe('{ ($.event = "eval_batch_watch.*") && ($.level = "error") }');
+    expect(filters[0]!.Properties.MetricTransformations).toEqual([{ MetricNamespace: "AgentX", MetricName: "EvalBatchWatcherFailed", MetricValue: "1" }]);
+  }, 240_000);
 });

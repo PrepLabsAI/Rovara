@@ -733,6 +733,8 @@ export class ControlPlaneStack extends Stack {
     // results. It also ends runs whose execution died without ending them (Ruling 13). The schedule
     // stays on: with no batch active a tick is three small DynamoDB reads (and a slot repair when a
     // slot is held), and nothing has to switch it off. Overlapping ticks are safe: every change is a conditional write.
+    // Its 90-second timeout, like the broker's 30, must stay well below EVAL_BATCH_STALE_CLAIM_MS (5 minutes,
+    // eval-batch.ts): a stale claim is recovered only once the top-up that made it is dead.
     const evalBatchTick = packagedFunction(this, "EvalBatchTick", "packages/broker/src/aws/eval-batch-tick.ts", {
       STATE_TABLE_NAME: state.tableName,
       ARTIFACT_BUCKET_NAME: artifacts.bucketName,
@@ -768,6 +770,36 @@ export class ControlPlaneStack extends Stack {
       metric: evalBatchTick.metricErrors({ period: Duration.minutes(5), statistic: "Sum" }),
       threshold: 1,
       evaluationPeriods: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(notifyOperator);
+    // Spec 052 Ruling 31 (review M-2): the eval state machine fails an execution only at its
+    // SlotReleaseFailed state, a run it could not end with its slot released. The alarm lives here,
+    // where the release deploys it, rather than in the eval stack, which is deployed by hand.
+    new cloudwatch.Alarm(this, "EvalExecutionsFailedAlarm", {
+      alarmName: naming.alarmName("EvalExecutionsFailed"),
+      alarmDescription: "An eval run's execution failed (SlotReleaseFailed): the state machine could not end the run and release its eval slot. The batch tick repairs the slot within minutes; check the execution's cause and the run's record.",
+      metric: new cloudwatch.Metric({
+        namespace: "AWS/States",
+        metricName: "ExecutionsFailed",
+        dimensionsMap: { StateMachineArn: this.formatArn({ service: "states", resource: "stateMachine", resourceName: swebenchNames(naming).stateMachineName, arnFormat: ArnFormat.COLON_RESOURCE_NAME }) },
+        statistic: "Sum",
+        period: Duration.minutes(5),
+      }),
+      threshold: 1,
+      evaluationPeriods: 1,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(notifyOperator);
+    // Spec 052 Ruling 31 (review M-1): the Slack service's batch watcher logs each failure as an
+    // eval_batch_watch.* error line, which its log group's filter counts (slack-orchestrator.ts).
+    // A dropped batch, a batch whose channel was unbound, or a broker the watcher cannot list from.
+    new cloudwatch.Alarm(this, "EvalBatchWatcherErrorsAlarm", {
+      alarmName: naming.alarmName("EvalBatchWatcherErrors"),
+      alarmDescription: "The Slack service's eval batch watcher failed: a batch's thread may miss its progress or summary, or a batch was dropped. Check the Slack orchestrator logs for eval_batch_watch.* errors.",
+      metric: agentxSum("EvalBatchWatcherFailed", Duration.minutes(5)),
+      threshold: 1,
+      evaluationPeriods: 1,
       comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
       treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
     }).addAlarmAction(notifyOperator);

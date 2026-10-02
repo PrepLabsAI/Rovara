@@ -1843,6 +1843,71 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::IAM::Policy",
     },
+    "EvalBatchWatcherErrorsAlarm332A4FD8": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "The Slack service's eval batch watcher failed: a batch's thread may miss its progress or summary, or a batch was dropped. Check the Slack orchestrator logs for eval_batch_watch.* errors.",
+        "AlarmName": "AgentXEvalBatchWatcherErrors",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "EvaluationPeriods": 1,
+        "MetricName": "EvalBatchWatcherFailed",
+        "Namespace": "AgentX",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
+    "EvalExecutionsFailedAlarm44E1E795": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "An eval run's execution failed (SlotReleaseFailed): the state machine could not end the run and release its eval slot. The batch tick repairs the slot within minutes; check the execution's cause and the run's record.",
+        "AlarmName": "AgentXEvalExecutionsFailed",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "StateMachineArn",
+            "Value": {
+              "Fn::Join": [
+                "",
+                [
+                  "arn:",
+                  {
+                    "Ref": "AWS::Partition",
+                  },
+                  ":states:",
+                  {
+                    "Ref": "AWS::Region",
+                  },
+                  ":",
+                  {
+                    "Ref": "AWS::AccountId",
+                  },
+                  ":stateMachine:agentx-production-swebench-eval",
+                ],
+              ],
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "ExecutionsFailed",
+        "Namespace": "AWS/States",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
     "HttpApi": {
       "Properties": {
         "Name": "agentx-control-plane",
@@ -8276,6 +8341,22 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
       },
       "Type": "AWS::Logs::LogGroup",
       "UpdateReplacePolicy": "Delete",
+    },
+    "LogsEvalBatchWatcherFailedMetricEA3F0B1F": {
+      "Properties": {
+        "FilterPattern": "{ ($.event = "eval_batch_watch.*") && ($.level = "error") }",
+        "LogGroupName": {
+          "Ref": "Logs6819BB44",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "EvalBatchWatcherFailed",
+            "MetricNamespace": "AgentX",
+            "MetricValue": "1",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
     },
     "LogsToolSchemaErrorMetric416461BE": {
       "Properties": {
