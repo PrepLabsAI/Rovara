@@ -259,13 +259,19 @@ reads exactly as before.
   broken test and sees it "already failing", cannot hide an earlier regression. A task that ends
   without a report (failed, cancelled, interrupted) keeps what was known. The section lists a
   check from an earlier task under "Still failing from earlier tasks". A project check that
-  publish reran and found passing does not stand, unless it was a regression.
+  publish reran and found passing does not stand, unless it was a regression; that one is listed
+  as "regressed in the last task, passes at publish" and still makes a draft.
+- **Clearing a failure from the agent's own commands.** A later task has to rerun the same command
+  and see it pass. The match is on the exact command text, so `pytest tests/test_a.py -q` does not
+  clear a failure recorded for `pytest tests/test_a.py`. The same goes for a test that was already
+  failing before the agent started. This errs towards a draft.
 - The section judges each check against the workspace's preparation: a command that passed at
   preparation and fails now reads "regression (passed at preparation, fails now)"; any other
   failing command reads "fails now, with no earlier result".
 - If the latest task was not verified (it failed, was cancelled, was interrupted or produced no
-  report), the section says "Not verified". That alone does not make a draft: earlier failures
-  still do.
+  report), the section says "Not verified". For a failed task or a missing report that alone does
+  not make a draft: earlier failures still do. A task that was cancelled or interrupted does make
+  a draft ("Not verified: the last task was cancelled"), until a later task's report replaces it.
 - Appending to an existing pull request, and syncing it, still refuse when a readiness check
   fails. CodeBuild gates are unchanged.
 

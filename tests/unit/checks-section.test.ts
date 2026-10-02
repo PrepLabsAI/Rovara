@@ -160,8 +160,6 @@ describe("checksSection (FR-008)", () => {
   // Ruling T: a task that ended without a report leaves a marker, never an older report.
   it.each([
     ["failed", "the task failed"],
-    ["cancelled", "the task was cancelled"],
-    ["interrupted", "the task was interrupted"],
   ] as const)("says Not verified for a task that %s", (reason, text) => {
     const marker = { status: "not_verified", reason } as const;
     expect(checksSection([entry({})], marker)).toBe([
@@ -175,6 +173,50 @@ describe("checksSection (FR-008)", () => {
       "- `npm test`: passed → passed, passing",
     ].join("\n"));
     expect(checksMakeDraft([entry({})], marker)).toBe(false);
+  });
+
+  // Ruling AA (amends T): a latest cancelled or interrupted task makes a draft until a later report replaces it.
+  it.each([["cancelled"], ["interrupted"]] as const)("makes a draft with a Not verified line when the last task was %s (Ruling AA)", (reason) => {
+    const marker = { status: "not_verified", reason } as const;
+    expect(checksMakeDraft(undefined, marker)).toBe(true);
+    expect(checksSection([entry({})], marker)).toBe([
+      "## Checks",
+      "",
+      `**This pull request is a draft: Not verified: the last task was ${reason}.**`,
+      "",
+      `After the last task: Not verified (the task was ${reason}).`,
+      "",
+      "At publish, AgentX reran the project's checks:",
+      "- `npm test`: passed → passed, passing",
+    ].join("\n"));
+    // A later task's report replaces the marker and clears the draft.
+    expect(checksMakeDraft(undefined, report({ status: "verified" }))).toBe(false);
+    expect(checksSection([entry({})], report({ checks: [entry({})] }))).toContain("No check that passed before this change fails now.");
+  });
+
+  it("does not make a draft for failed or no_report alone (Ruling AA)", () => {
+    expect(checksMakeDraft(undefined, { status: "not_verified", reason: "failed" })).toBe(false);
+    expect(checksMakeDraft(undefined, { status: "not_verified", reason: "no_report" })).toBe(false);
+    expect(checksSection(undefined, { status: "not_verified", reason: "no_report" })).toBe("");
+  });
+
+  it("words a project regression that publish reran and found passing as such, and keeps the draft (R-3)", () => {
+    const standing = [{ label: "npm test", source: "project" as const, class: "regression" as const }];
+    const marker = { status: "not_verified", reason: "failed" } as const;
+    expect(checksMakeDraft([entry({})], marker, standing)).toBe(true);
+    expect(checksSection([entry({})], marker, undefined, standing)).toBe([
+      "## Checks",
+      "",
+      "**This pull request is a draft: a check regressed in the last task and passes at publish.**",
+      "",
+      "After the last task: Not verified (the task failed).",
+      "",
+      "Still failing from earlier tasks:",
+      "- `npm test`: regressed in the last task, passes at publish",
+      "",
+      "At publish, AgentX reran the project's checks:",
+      "- `npm test`: passed → passed, passing",
+    ].join("\n"));
   });
 
   it("keeps the description as before for a worker that sends no report, unless a check fails", () => {

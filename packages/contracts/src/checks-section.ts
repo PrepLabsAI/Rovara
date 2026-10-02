@@ -114,11 +114,23 @@ export function failingChecks(
     || !(publishChecks ?? []).some((check) => check.label === failure.label && check.after === "passed"));
 }
 
+/** Ruling AA: a task its member cancelled, or one whose worker was lost, leaves the work unfinished and unchecked. */
+function stoppedByMember(latestChecks: LatestChecks | undefined): boolean {
+  return isMarker(latestChecks) && (latestChecks.reason === "cancelled" || latestChecks.reason === "interrupted");
+}
+
+/** R-3: a regression kept from an earlier task, in a project check that publish reran and found passing. */
+function passesAtPublish(failure: StandingFailure, publishChecks: readonly CheckEntry[]): boolean {
+  return failure.source === "project" && failure.class === "regression"
+    && publishChecks.some((check) => check.label === failure.label && check.after === "passed");
+}
+
 /**
  * A draft when any publish-time check fails (Ruling S: the pull request is the workspace's whole change since
  * preparation), or when a check still fails that an earlier task or the latest one found failing (Ruling Y: whatever
- * its class, because the agent's own commands have no preparation baseline). A latest task that was not verified does
- * not make a draft on its own: it keeps what was known before.
+ * its class, because the agent's own commands have no preparation baseline). A latest task that failed or sent no
+ * report does not make a draft on its own: it keeps what was known before. One that was cancelled or interrupted does
+ * (Ruling AA, amending T), until a later task's report replaces it.
  */
 export function checksMakeDraft(
   publishChecks: readonly CheckEntry[] | undefined,
@@ -127,6 +139,7 @@ export function checksMakeDraft(
 ): boolean {
   return (publishChecks ?? []).some((check) => check.after !== "passed")
     || (!isMarker(latestChecks) && latestChecks?.status === "regression")
+    || stoppedByMember(latestChecks)
     || failingChecks(publishChecks, latestChecks, standingFailures).length > 0;
 }
 
@@ -152,12 +165,16 @@ interface Group {
   atPublish: boolean;
   /** Ruling Y: earlier tasks' failures, which have no entry (and no output) of their own. */
   earlier?: readonly StandingFailure[];
+  /** R-3: the failures among `earlier` that publish found passing. */
+  passesAtPublish?: (failure: StandingFailure) => boolean;
 }
 
 function groupLines(group: Group): string[] {
   return [
     ...group.checks.map((check) => checkLine(check, group.atPublish)),
-    ...(group.earlier ?? []).map((failure) => `- ${inlineCode(failure.label)}: still fails, ${CLASS_TEXT[failure.class]}`),
+    ...(group.earlier ?? []).map((failure) => group.passesAtPublish?.(failure) === true
+      ? `- ${inlineCode(failure.label)}: regressed in the last task, passes at publish`
+      : `- ${inlineCode(failure.label)}: still fails, ${CLASS_TEXT[failure.class]}`),
   ];
 }
 
@@ -179,11 +196,16 @@ export function checksSection(
   if (nothingToSay && failing.length === 0 && publish.every((check) => check.after === "passed")) return "";
   const regressed = publish.some((check) => check.class === "regression")
     || (!isMarker(latestChecks) && latestChecks?.status === "regression")
-    || failing.some((failure) => failure.class === "regression");
+    || failing.some((failure) => failure.class === "regression" && !passesAtPublish(failure, publish));
+  const stale = failing.some((failure) => passesAtPublish(failure, publish));
   const status = regressed
     ? "**This pull request is a draft: a check that passed before this change fails now.**"
+    : stoppedByMember(latestChecks)
+      ? `**This pull request is a draft: Not verified: the last task was ${(latestChecks as { reason: string }).reason}.**`
     : publish.some((check) => check.after !== "passed")
       ? "**This pull request is a draft: a check fails at publish.**"
+      : stale && failing.every((failure) => passesAtPublish(failure, publish))
+        ? "**This pull request is a draft: a check regressed in the last task and passes at publish.**"
       : failing.length > 0
         ? "**This pull request is a draft: a check still fails.**"
         : "No check that passed before this change fails now.";
@@ -206,7 +228,7 @@ export function checksSection(
   // Ruling Y: failures from earlier tasks that the latest report does not show.
   const earlier = failing.filter((failure) => isMarker(latestChecks) || latestChecks === undefined
     || !latestChecks.checks.some((check) => sameCheck(check, failure)));
-  if (earlier.length > 0) groups.push({ heading: "Still failing from earlier tasks:", checks: [], earlier, where: "earlier tasks", atPublish: false });
+  if (earlier.length > 0) groups.push({ heading: "Still failing from earlier tasks:", checks: [], earlier, where: "earlier tasks", atPublish: false, passesAtPublish: (failure) => passesAtPublish(failure, publish) });
   if (publish.length > 0) groups.push({ heading: "At publish, AgentX reran the project's checks:", checks: publish, where: "at publish", atPublish: true });
   const totalLines = groups.reduce((sum, group) => sum + groupLines(group).length, 0);
   const outputs = groups.flatMap((group) => group.checks

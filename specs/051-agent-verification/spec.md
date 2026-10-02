@@ -155,8 +155,12 @@ These may come later (spec 053 or after).
     - any failing publish-time check makes the PR a draft, as does a latest task report of `regression`.
   - **Ruling T.** Every task's end records the workspace's latest checks, ordered by the operation's fence: its report,
     or a `not_verified` marker (`failed`, `cancelled`, `interrupted` or `no_report`). A task reads as `interrupted` from
-    its start until its result arrives, so an older report never stands for a newer task. A `not_verified` latest does
-    not make a draft on its own, and the section says "Not verified".
+    its start until its result arrives, so an older report never stands for a newer task. A `not_verified` latest of
+    `failed` or `no_report` does not make a draft on its own, and the section says "Not verified".
+  - **Ruling AA (amends T).** A latest marker of `cancelled` or `interrupted` makes the next PR a draft, with the line
+    "Not verified: the last task was cancelled" (or "was interrupted"), until a later task's report replaces it. The
+    member stopped the work, or the worker was lost, so it is unfinished. `failed` carries its regression in its
+    result, and `no_report` comes from an old worker, so neither makes a draft.
 - **D-8 (2026-10-02):** Time limits. Production coding tasks have no task time limit, only the 200-tool-call guard. Each
   check keeps its own timeout (the command's `timeoutSeconds`, or 10 minutes for agent commands), and one verification
   round has a total budget of 30 minutes. Checks the budget leaves unrun are recorded as `not_run`. Eval runs count
@@ -182,7 +186,11 @@ These may come later (spec 053 or after).
     failures. A project check that publish reran and found passing is left out, unless it was a regression. The status
     line says "No check that passed before this change fails now" only when nothing fails now.
   - **Known limit.** A task cancelled by a cancel operation whose own result never arrives records "cancelled" and
-    keeps the failures known before it; the extra turn's regression is then lost.
+    keeps the failures known before it; the extra turn's regression is then lost. Ruling AA makes such a PR a draft.
+  - **Matching.** A standing failure of the agent's own commands is matched by exact command text, so only a later task
+    rerunning the same command and passing clears it (R-2). A project regression that publish reran and found passing
+    stays a draft, worded "regressed in the last task, passes at publish" (R-3).
+  - **Re-preparation.** Standing failures are not reset when a workspace is prepared again (R-4).
 - **D-13 (2026-10-02, Ruling Z, from the final review's I-1 and I-2):** The publish result carries `draft`, true when
   the PR opened as a draft. The PR tool's description says AgentX opens a draft when a check fails. A turn whose
   publish returned a draft adds "Opened as a draft: AgentX's checks found failures." to the reply, with or without a
