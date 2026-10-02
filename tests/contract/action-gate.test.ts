@@ -304,6 +304,17 @@ describe("the approval text says what will happen in plain words (#215)", () => 
     expect(describeAction("mystery_tool", {})).toBe("Run mystery tool");
   });
 
+  it("redacts secrets in the values it shows, and never cuts an escape in two (review)", () => {
+    const token = `ghp_${"A".repeat(36)}`;
+    const shown = describeAction("tracker__save_item", { body: `use ${token} please` });
+    expect(shown).not.toContain(token);
+    expect(describeAction("agentx_submit_task", { prompt: `push with ${token}` })).not.toContain(token);
+    const cut = describeAction("agentx_submit_task", { prompt: "&".repeat(400) });
+    expect(cut).not.toMatch(/&(?:a|am|amp)?…/u);
+    expect(cut.length).toBeLessThanOrEqual(300);
+    expect(describeAction("agentx_new_thing", { a: 1 })).toBe("Run an AgentX action: a 1");
+  });
+
   it("keeps the classifier's own summary, and puts the plain words in the ask", async () => {
     const seen: unknown[] = [];
     const { gate: g, session } = gate({ classifier: async (input) => { seen.push(input.call.summary); return { decision: "ask", reason: "unclear" }; } });

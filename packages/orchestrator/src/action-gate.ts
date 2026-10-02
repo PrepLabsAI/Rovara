@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type { InlineExtension } from "@earendil-works/pi-coding-agent";
-import type { ActionPolicy, ConnectorCatalog } from "@agentx/contracts";
+import { redactText, type ActionPolicy, type ConnectorCatalog } from "@agentx/contracts";
 import { ClassifierError, usableClassifierTimeout, type ActionClassifier, type ClassifierUsage, type ClassifierVerdict } from "./action-classifier.js";
 
 export type { ActionClassifier } from "./action-classifier.js";
@@ -136,7 +136,8 @@ const SLACK_ESCAPES: Readonly<Record<string, string>> = { "&": "&amp;", "<": "&l
 /** Text safe inside a Slack message: one line, no backticks, and no mentions or links it could smuggle in. */
 function slackSafe(text: string, limit: number): string {
   const flat = text.replace(/[`\s]+/gu, " ").replace(/[&<>]/gu, (character) => SLACK_ESCAPES[character] ?? character).trim();
-  return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
+  // A cut never leaves half an escape such as `&am`.
+  return flat.length > limit ? `${flat.slice(0, limit - 1).replace(/&[a-z]{0,3}$/u, "")}…` : flat;
 }
 
 const SHOWN_ARGUMENTS = 6;
@@ -158,9 +159,12 @@ export function describeCall(tool: string, args: Record<string, unknown>): strin
 const PROMPT_SHOWN = 200;
 const VALUE_SHOWN = 80;
 
-/** A value shortened for a person to read: never a count of its characters (#215). */
+/**
+ * A value shortened for a person to read: never a count of its characters (#215). Redacted first:
+ * the text is posted in the thread and stored with the confirmation.
+ */
 function shortened(text: string, limit: number): string {
-  const flat = text.replace(/\s+/gu, " ").trim();
+  const flat = redactText(text).replace(/\s+/gu, " ").trim();
   return flat.length > limit ? `${flat.slice(0, limit - 1)}…` : flat;
 }
 
@@ -224,7 +228,8 @@ export function describeAction(tool: string, args: Record<string, unknown>): str
   const more = entries.length > SHOWN_ARGUMENTS ? `, and ${entries.length - SHOWN_ARGUMENTS} more` : "";
   const where = typeof target === "string" ? ` in ${target}` : "";
   const split = tool.indexOf("__");
-  const action = split > 0 ? `Use ${tool.slice(0, split)} to ${words(tool.slice(split + 2))}` : `Run ${words(tool)}`;
+  // An in-house tool not described above is never named, even in words.
+  const action = split > 0 ? `Use ${tool.slice(0, split)} to ${words(tool.slice(split + 2))}` : tool.startsWith("agentx_") ? "Run an AgentX action" : `Run ${words(tool)}`;
   return slackSafe(`${action}${where}${shown.length > 0 ? `: ${shown.join(", ")}${more}` : ""}`, 300);
 }
 
@@ -311,7 +316,8 @@ export class ActionGate {
     }
     if (decision.outcome === "ask") {
       // #215: the member reads the ask, so it says what will happen in words; the classifier still
-      // reads describeCall. Only a classifier that answered "ask" doubts the request.
+      // reads describeCall. Only a classifier that answered "ask" doubts the request; one that failed,
+      // or answered something other than allow or ask (even "deny"), checked nothing, so it is unchecked.
       const kind = decision.source === "classifier_unavailable" ? "unchecked" : decision.kind as AskKind;
       session.asks.push({ toolCallId: call.toolCallId, tool: call.toolName, argumentsHash: hash, summary: describeAction(call.toolName, call.input), kind });
     }
