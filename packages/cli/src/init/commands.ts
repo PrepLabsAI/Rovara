@@ -776,13 +776,19 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     // Built once and reused by every deploy step. The caller identity is the one already checked
     // against the answers' account, and no partition is passed, so prepareDeployment's "answers
     // file" account and partition errors cannot arise here.
+    // A preparation that failed (npm ci, build or synth) is forgotten, so "Try this step again"
+    // prepares it again instead of failing the same way forever.
     deployment: () => {
-      deployment ??= (deps.prepareDeployment ?? prepareDeployment)({
-        engine: finalAnswers.engine, env, region, account: finalAnswers.account, identityMode: finalAnswers.identity.mode, release,
-        ...(options.source === undefined ? {} : { source: options.source }),
-        deps: { ...deployDeps, store, secrets, identity: { get: async () => caller } },
-        stderr: session.output,
-      });
+      if (deployment === undefined) {
+        const preparing = (deps.prepareDeployment ?? prepareDeployment)({
+          engine: finalAnswers.engine, env, region, account: finalAnswers.account, identityMode: finalAnswers.identity.mode, release,
+          ...(options.source === undefined ? {} : { source: options.source }),
+          deps: { ...deployDeps, store, secrets, identity: { get: async () => caller } },
+          stderr: session.output,
+        });
+        deployment = preparing;
+        preparing.catch(() => { if (deployment === preparing) deployment = undefined; });
+      }
       return deployment;
     },
     stackStatus,

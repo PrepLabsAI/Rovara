@@ -9,6 +9,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { environmentStackName } from "@agentx/contracts";
 import { executeCli } from "../../packages/cli/src/main.js";
+import { prepareDeployment } from "../../packages/cli/src/deploy/commands.js";
+import type { InitCliDependencies } from "../../packages/cli/src/init/commands.js";
 import { READY_HOLD_MS, READY_OUTCOME, holdReadyScreen } from "../../packages/cli/src/init/commands.js";
 import { initLogPath } from "../../packages/cli/src/init/log-file.js";
 import { NO_BROWSER_LINE } from "../../packages/cli/src/init/ui-mode.js";
@@ -263,6 +265,23 @@ describe("agentx init --ui", () => {
     expect(operator.remaining()).toBe(0);
     expect(h.deployer.requests.filter((request) => request.part === "control-plane")).toHaveLength(2);
     expect(operator.states.at(-1)?.failure).toBeUndefined();
+  });
+
+  it("spec 048 FR-060: a deployment that failed to prepare (npm ci, build or synth) is prepared again on Try this step again", async () => {
+    const h = await harness();
+    let prepared = 0;
+    let cleanedUp = 0;
+    const prepare: InitCliDependencies["prepareDeployment"] = async (input) => {
+      prepared += 1;
+      if (prepared === 1) throw new Error("npm ci exited with code 1");
+      return { ...(await prepareDeployment(input)), cleanup: async () => { cleanedUp += 1; } };
+    };
+    const operator = fakeWizardOperator([...FIRST_RUN, "retry", ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(await h.run(["--ui"], { openBrowser: operator.open, prepareDeployment: prepare })).toBe(0);
+    await operator.settled();
+    expect(operator.remaining()).toBe(0);
+    expect(prepared).toBe(2);
+    expect(cleanedUp).toBe(1);
   });
 
   it("a page that reconnects during a failure gets the failure screen back", async () => {
