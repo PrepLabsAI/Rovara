@@ -4,7 +4,9 @@
 import { describe, expect, it } from "vitest";
 import { unattendedPrompter } from "../../packages/cli/src/init/prompts.js";
 import { browserPrompter } from "../../packages/cli/src/init/ui/prompter.js";
-import { ALERT_FLAG, pageHint, questionHelp } from "../../packages/cli/src/init/ui/question-copy.js";
+import { ALERT_FLAG, pageHint, QUESTION_COPY, questionHelp } from "../../packages/cli/src/init/ui/question-copy.js";
+import type { QuestionHelp } from "../../packages/cli/src/init/prompts.js";
+import { lintCopy, type CopyEntry } from "../support/copy-lint.js";
 import { createWizardHub, type WizardHub } from "../../packages/cli/src/init/ui/state.js";
 
 const shown = (hub: WizardHub) => {
@@ -73,6 +75,25 @@ describe("the page's words for each question", () => {
       }
     });
   }
+
+  // FR-081: every source of page text is linted, not only the entries a driven journey reaches.
+  it("FR-081: every catalog entry's words pass the copy lint", () => {
+    const entries: CopyEntry[] = QUESTION_COPY.flatMap((entry, index): CopyEntry[] => {
+      let help: QuestionHelp;
+      if (typeof entry.help === "function") {
+        // A sample match: the default path's own text for this entry.
+        const sample = DEFAULT_PATH.map(([, , text]) => (entry.text === undefined ? null : entry.text.exec(text))).find((found) => found !== null);
+        if (sample === undefined || sample === null) throw new Error(`no sample text for catalog entry ${index}`);
+        help = entry.help(sample);
+      } else {
+        help = entry.help;
+      }
+      const texts = [help.label, help.why, help.example, help.hint, help.defaultText, help.yesLabel, help.noLabel, ...Object.values(help.choiceLabels ?? {})];
+      return texts.filter((text): text is string => text !== undefined).map((text) => ({ where: `catalog entry ${index} (${entry.kind} ${entry.flag ?? String(entry.text)})`, text, context: "page" }));
+    });
+    expect(entries.length).toBeGreaterThan(150);
+    expect(lintCopy(entries)).toEqual([]);
+  });
 
   it("lets the caller's own help win over the catalog", () => {
     expect(questionHelp({ kind: "ask", text: "x", flag: "--budget", given: { why: "About $210 a month." } }).why).toBe("About $210 a month.");
