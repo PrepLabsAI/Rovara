@@ -78,8 +78,9 @@ describe("processing a thread's workspace result (characterization)", () => {
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
     const turn = h.turns[0]!;
     expect(Object.keys(turn).sort()).toEqual([
+      // Spec 051 FR-009: the recorder is always handed in, so the reply can lead with the check report.
       // Spec 014 final fix I1: a runnable workspace also tells the gate its compute is prepared (D5).
-      "computePrepared", "connectors", "conversationId", "message", "orchestratorInstructions", "recoverableOperations", "repositories", "requestId", "subject", "workspaceId",
+      "computePrepared", "connectors", "conversationId", "message", "orchestratorInstructions", "recorder", "recoverableOperations", "repositories", "requestId", "subject", "workspaceId",
     ]);
     expect(turn).toMatchObject({ computePrepared: true, connectors, repositories: ["demo"], recoverableOperations: [operationId], workspaceId, conversationId });
   });
@@ -87,6 +88,50 @@ describe("processing a thread's workspace result (characterization)", () => {
   it("hands the turn no routing field the workspace did not send", async () => {
     const h = harness(workspace());
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
-    expect(Object.keys(h.turns[0]!).sort()).toEqual(["computePrepared", "conversationId", "message", "orchestratorInstructions", "requestId", "subject", "workspaceId"]);
+    expect(Object.keys(h.turns[0]!).sort()).toEqual(["computePrepared", "conversationId", "message", "orchestratorInstructions", "recorder", "requestId", "subject", "workspaceId"]);
+  });
+});
+
+// Spec 051 Task 6 (FR-009): AgentX's check verdict leads the reply, and the agent's account follows.
+describe("the reply leads with AgentX's check result (spec 051)", () => {
+  const report = (overrides: Record<string, unknown>) => ({
+    status: "regression", source: "project", preambleVersion: "1", preambleSha256: "a".repeat(64),
+    checks: [{ id: "readiness:0", label: "npm test", source: "project", before: "passed", after: "failed", class: "regression", output: "x", durationMs: 1 }],
+    extraTry: "not_needed", agentClaim: "success", ...overrides,
+  });
+  const taskCall = (input: TurnInput, name: string, result: unknown, id: string) => {
+    input.recorder!.toolStarted({ toolCallId: id, toolName: name, args: {} });
+    input.recorder!.toolEnded({ toolCallId: id, toolName: name, isError: false, result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
+  };
+
+  it("puts the regression first and labels the model's text as the agent's account", async () => {
+    const h = harness(workspace());
+    h.dependencies.runTurn = async (input) => {
+      taskCall(input, "agentx_submit_task", { operationId, status: "SUCCEEDED", response: "All good.", checks: report({}) }, "1");
+      return "All good.";
+    };
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
+    expect(h.posts).toEqual([WORKING, "Not done: npm test passed before and fails now.\n\n*Agent's account:*\nAll good."]);
+  });
+
+  it("adds the draft PR sentence only when the turn published a pull request", async () => {
+    const h = harness(workspace());
+    h.dependencies.runTurn = async (input) => {
+      taskCall(input, "agentx_submit_task", { operationId, status: "SUCCEEDED", checks: report({}) }, "1");
+      taskCall(input, "agentx_create_pull_request", { operationId: conversationId, status: "SUCCEEDED" }, "2");
+      return "Raised it.";
+    };
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
+    expect(h.posts.at(-1)).toBe("Not done: npm test passed before and fails now.\nThe draft PR lists the failures.\n\n*Agent's account:*\nRaised it.");
+  });
+
+  it("leaves a turn with no check report exactly as before", async () => {
+    const h = harness(workspace());
+    h.dependencies.runTurn = async (input) => {
+      taskCall(input, "agentx_submit_task", { operationId, status: "SUCCEEDED", response: "Done." }, "1");
+      return "Done.";
+    };
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
+    expect(h.posts).toEqual([WORKING, "Done."]);
   });
 });

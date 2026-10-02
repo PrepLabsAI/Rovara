@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { TurnObservationSchema, UNRECORDABLE_ARGUMENTS, redactArguments } from "../../packages/contracts/src/turns.js";
+import { completedTaskResult } from "../../packages/orchestrator/src/control-plane-api.js";
 import { TurnRecorder } from "../../packages/orchestrator/src/turn-recorder.js";
 
 const text = (value: unknown) => ({ content: [{ type: "text", text: typeof value === "string" ? value : JSON.stringify(value) }], details: {} });
@@ -207,5 +208,41 @@ describe("turn recorder", () => {
     const observation = turn.observation();
     expect(observation.calls[0]?.arguments).toBe(UNRECORDABLE_ARGUMENTS);
     expect(TurnObservationSchema.parse(observation).calls).toHaveLength(1);
+  });
+});
+
+describe("turn recorder check reports (spec 051)", () => {
+  const checks = {
+    status: "verified", source: "project", preambleVersion: "1", preambleSha256: "a".repeat(64),
+    checks: [], extraTry: "not_needed", agentClaim: "none",
+  };
+  it("keeps each worker operation's report, and whether a pull request was published", () => {
+    const turn = recorder();
+    expect(turn.checkReports()).toEqual([]);
+    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: {} });
+    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text({ operationId: operation, status: "SUCCEEDED", checks }) });
+    turn.toolStarted({ toolCallId: "2", toolName: "agentx_task_result", args: {} });
+    turn.toolEnded({ toolCallId: "2", toolName: "agentx_task_result", isError: false, result: text({ operationId: operation, status: "SUCCEEDED", checks }) });
+    expect(turn.checkReports()).toEqual([checks]);
+    expect(turn.pullRequestPublished()).toBe(false);
+    turn.toolStarted({ toolCallId: "3", toolName: "agentx_create_pull_request", args: {} });
+    turn.toolEnded({ toolCallId: "3", toolName: "agentx_create_pull_request", isError: false, result: text({ operationId: "x", status: "SUCCEEDED" }) });
+    expect(turn.pullRequestPublished()).toBe(true);
+  });
+
+  it("ignores a report that does not parse", () => {
+    const turn = recorder();
+    turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: {} });
+    turn.toolEnded({ toolCallId: "1", toolName: "agentx_submit_task", isError: false, result: text({ status: "SUCCEEDED", checks: { status: "bogus" } }) });
+    expect(turn.checkReports()).toEqual([]);
+  });
+});
+
+describe("a task result carries the check report (spec 051)", () => {
+  const checks = { status: "not_verified", notVerifiedReason: "no_checks", source: "none", preambleVersion: "1", preambleSha256: "a".repeat(64), checks: [], extraTry: "not_needed", agentClaim: "none" };
+  it("includes checks when the operation result has them, and is unchanged otherwise", () => {
+    expect(completedTaskResult({ id: operation, status: "SUCCEEDED", result: { checks } }, [])).toEqual({ operationId: operation, status: "SUCCEEDED", checks });
+    expect(completedTaskResult({ id: operation, status: "SUCCEEDED", result: { other: 1 } }, [])).toEqual({ operationId: operation, status: "SUCCEEDED" });
+    expect(completedTaskResult({ id: operation, status: "SUCCEEDED" }, [])).toEqual({ operationId: operation, status: "SUCCEEDED" });
   });
 });

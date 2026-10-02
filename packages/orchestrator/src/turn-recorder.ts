@@ -12,6 +12,8 @@ import {
   capText,
   createTaskUsageTelemetry,
   redactArguments,
+  taskResultChecks,
+  type CheckReport,
   type TaskUsageTelemetry,
   type TurnCall,
   type TurnObservation,
@@ -52,6 +54,9 @@ export class TurnRecorder {
   private readonly errorCodes = new Map<string, string>();
   /** The action gate's decision on each call, by Pi's toolCallId (spec 014 FR-021). */
   private readonly gates = new Map<string, TurnGate>();
+  /** Spec 051: each worker task's check report, by operation id (or by call when it has none), in the order seen. */
+  private readonly reports = new Map<string, CheckReport>();
+  private published = false;
   private stopReason: string | undefined;
   private emptyResponse = false;
   private usage: TaskUsageTelemetry | undefined;
@@ -142,6 +147,27 @@ export class TurnRecorder {
     if (!this.pending.has(event.toolCallId)) this.toolStarted({ toolCallId: event.toolCallId, toolName: event.toolName, args: undefined });
     const pending = this.pending.get(event.toolCallId)!;
     pending.call = this.classify(event.toolCallId, pending, event);
+    this.guarded("check_report", () => { this.keepReport(event.toolCallId, pending, event); });
+  }
+
+  private keepReport(toolCallId: string, pending: PendingCall, event: { result: unknown; isError: boolean }): void {
+    if (event.isError) return;
+    const parsed = parseObject(resultText(event.result));
+    if (pending.name === "agentx_create_pull_request" && parsed.status === "SUCCEEDED") this.published = true;
+    const checks = taskResultChecks(parsed);
+    if (checks === undefined) return;
+    const key = typeof parsed.operationId === "string" ? parsed.operationId : toolCallId;
+    this.reports.set(key, checks);
+  }
+
+  /** Spec 051 FR-009: the check reports of the worker tasks this turn ran, each once, for the Slack reply. */
+  checkReports(): CheckReport[] {
+    return [...this.reports.values()];
+  }
+
+  /** True once the turn's pull request publication succeeded (a remaining regression is then a draft PR). */
+  pullRequestPublished(): boolean {
+    return this.published;
   }
 
   agentEnded(messages: readonly unknown[]): void {

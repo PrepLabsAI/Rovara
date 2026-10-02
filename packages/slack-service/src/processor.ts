@@ -1,6 +1,7 @@
 import {
   CLOSED_SHARED_NOTICE,
   VIEW_ONLY_NOTICE,
+  checksReplyPrefix,
   detailsButtonValue,
   detailsReplyBlocks,
   slackThreadSubject,
@@ -16,6 +17,7 @@ import {
   type ActionPolicy,
   type PendingConfirmation,
   type TurnObservation,
+  type CheckReport,
   type TurnRecord,
   type ModelIdentifier,
   type ProjectModelOptions,
@@ -49,7 +51,7 @@ export interface ThreadServiceApi {
   completeClose(requestId: string, operationId: string): Promise<SlackWorkspaceCloseCompleteResult>;
   waitForOperation(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; error?: string | undefined; result?: unknown }>;
   /** Issue 157: waits for a worker task and returns its final response; without it, a resumed turn posts the status alone. */
-  taskResult?(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; response?: string | undefined; error?: string | undefined }>;
+  taskResult?(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; response?: string | undefined; error?: string | undefined; checks?: CheckReport | undefined }>;
   /**
    * Issue 167: asks the worker to cancel a task (a finished one is left as it is). Called only when
    * a Slack turn gives up for good, so nobody will ever read the task's result.
@@ -202,11 +204,9 @@ export async function processSlackRequest(
   const subject = slackThreadSubject(message.thread);
   const log: ServiceLog = dependencies.log ?? (() => undefined);
   const startedAt = new Date();
-  // Only a configured sink or refresh store gets a recorder, so a service without either runs the
-  // turn exactly as before.
-  const recorder = dependencies.turnRecords === undefined && dependencies.threads.saveRefreshConnectors === undefined
-    ? undefined
-    : new TurnRecorder();
+  // Spec 051 FR-009: every turn has a recorder, because the reply leads with the check report of the
+  // tasks it ran. Writing a record, a refresh list or a details button still needs its own sink.
+  const recorder = new TurnRecorder();
   const draft: TurnDraft = { disposition: "abandoned" };
   let lastPosted = "";
   // Issue 157: set the moment this attempt is handed off. From then on the new task owns the
@@ -282,7 +282,7 @@ export async function processSlackRequest(
     const waiting = api.taskResult === undefined
       ? api.waitForOperation(active.workspaceId, active.operationId, waitStop.signal)
       : api.taskResult(active.workspaceId, active.operationId, waitStop.signal);
-    let result: { status: string; response?: string | undefined; error?: string | undefined };
+    let result: { status: string; response?: string | undefined; error?: string | undefined; checks?: CheckReport | undefined };
     try {
       result = await untilHandoff(waiting, options.handoff);
     } catch (error) {
@@ -307,6 +307,7 @@ export async function processSlackRequest(
       status: result.status,
       ...(typeof result.response === "string" ? { response: result.response } : {}),
       ...(result.error === undefined ? {} : { error: result.error }),
+      ...(result.checks === undefined ? {} : { checks: result.checks }),
     }));
     draft.responseText = text;
     for (const chunk of splitSlackMessage(text)) await post(chunk);
@@ -744,7 +745,10 @@ export async function processSlackRequest(
     if (!quiet) {
       // C13: in a continue thread, the reply names the teammate it answers.
       const mention = shared === undefined ? "" : `<@${message.userId}> `;
-      const chunks = splitSlackMessage(`${mention}${slackReplyText(response)}`);
+      // Spec 051 FR-009: AgentX's check verdict leads, and the model's text follows as the agent's account.
+      // A turn with no report gives "", so its reply is exactly the model's text.
+      const verdict = checksReplyPrefix(recorder.checkReports(), { pullRequestPublished: recorder.pullRequestPublished() });
+      const chunks = splitSlackMessage(`${mention}${verdict}${slackReplyText(response)}`);
       const details = replyDetails(dependencies, recorder, message);
       for (const [index, chunk] of chunks.entries()) {
         if (details !== undefined && index === chunks.length - 1) await postWithDetails(details, chunk);

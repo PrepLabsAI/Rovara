@@ -6,6 +6,8 @@ import {
   OperationSchema,
   agentXError,
   lastAssistantResponse,
+  taskResultChecks,
+  type CheckReport,
   type Operation,
 } from "@agentx/contracts";
 import {
@@ -262,13 +264,15 @@ export class ControlPlaneApi implements OrchestrationApi, OperationPollingTransp
 export function completedTaskResult(
   operation: RemoteOperationStatus,
   events: RemoteEventPage["events"],
-): { operationId: string; status: string; response?: string; error?: string } {
+): { operationId: string; status: string; response?: string; error?: string; checks?: CheckReport } {
   const response = lastAssistantResponse(events);
+  const checks = taskResultChecks(operation.result);
   return {
     operationId: operation.id,
     status: operation.status,
     ...(response === undefined ? {} : { response }),
     ...(operation.error === undefined ? {} : { error: operation.error }),
+    ...(checks === undefined ? {} : { checks }),
   };
 }
 
