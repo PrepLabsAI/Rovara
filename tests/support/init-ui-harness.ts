@@ -67,7 +67,7 @@ export const SLACK_VALUES = JSON.stringify({
 export const SLACK = ["installed", SLACK_VALUES, true, true];
 /** The Slack app step answered in the terminal, where the form's values are separate prompts. */
 export const TERMINAL_SLACK = ["installed", SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEST_SIGNING_SECRET, TEST_BOT_TOKEN, true, true];
-export const SIGNIN = ["", true];
+export const SIGNIN: Array<string | boolean> = [];
 export const FINISH = ["acme/payments-api", "", true, "payments", false, false, false, true];
 /** The three recommended models FIRST_RUN takes. */
 export const DEFAULTS = { orchestrator: DEFAULT_ORCHESTRATOR_MODEL, classifier: DEFAULT_CLASSIFIER_MODEL, worker: DEFAULT_WORKER_MODEL };
