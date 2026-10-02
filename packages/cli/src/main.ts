@@ -47,6 +47,7 @@ import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type
 import { resolveDeploymentFile } from "./environments/cache.js";
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL, type InitFlags } from "./init/answers.js";
 import { runInit, type InitCliDependencies, type InitOptions } from "./init/commands.js";
+import { StoppedByOperator, isCtrlCAtPrompt } from "./stopped.js";
 import type { FinishFlags, SecretFlags } from "./init/context.js";
 import { INIT_STEP_IDS, type InitStepId } from "./init/install-state.js";
 import { parseConnectorsFlag } from "./init/finish-steps.js";
@@ -986,7 +987,14 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       const globals = globalOptions(command);
       if (options.export !== undefined && options.stopAfter !== undefined) throw agentXError("CONFIG_INVALID", "--stop-after cannot be used with --export, which runs no init step; drop one of them");
       if (options.export === undefined) {
-        const result = await runInit(initOptions(globals, options, command), dependencies.init ?? {}, { stderr: services.stderr, home });
+        let result: Awaited<ReturnType<typeof runInit>>;
+        try {
+          result = await runInit(initOptions(globals, options, command), dependencies.init ?? {}, { stderr: services.stderr, home });
+        } catch (error) {
+          // Issue #235: Ctrl-C at a terminal question stops the install where it is; it can continue.
+          if (isCtrlCAtPrompt(error)) throw new StoppedByOperator(`Stopped. Run agentx init --env ${globals.env} again to continue from here.`);
+          throw error;
+        }
         if (globals.json) {
           // pageMode is the CLI's own note that the page already told the person; not part of the result.
           // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
