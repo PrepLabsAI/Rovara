@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall, type Context, type FauxResponseStep } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, getCurrentSystemPrompt, getCurrentTools, type Context, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import type { WorkerInvocation } from "../../packages/contracts/src/index.js";
@@ -31,10 +31,11 @@ const snapshot = <T>(value: T): T => structuredClone(value);
  * The only code phase 2 may change: read the prompt/tools from the leading system message (pi-ai getCurrentSystemPrompt).
  */
 type ModelView = { systemPrompt: string | undefined; messages: Context["messages"]; tools: string[] };
-const modelView = (context: Context): ModelView => ({
-  systemPrompt: context.systemPrompt,
+// Spec 050 phase 2 (allowed edit 1): Pi 0.86+ carries the prompt and tools in the leading system message (TranscriptContext).
+const modelView = (context: TranscriptContext): ModelView => ({
+  systemPrompt: getCurrentSystemPrompt(context.messages),
   messages: JSON.parse(JSON.stringify(context.messages.filter((message) => (message as { role: string }).role !== "system"))) as Context["messages"],
-  tools: (context.tools ?? []).map((tool) => tool.name),
+  tools: getCurrentTools(context.messages).map((tool) => tool.name),
 });
 const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const anyNumber = expect.any(Number) as number;
@@ -120,7 +121,8 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
       // only what the readers rely on is pinned: whole numbers, a positive total (swebench/agent.ts:79).
       for (const value of Object.values(stats.tokens)) expect(Number.isSafeInteger(value) && value >= 0).toBe(true);
       expect(stats.tokens.total).toBeGreaterThan(0);
-      expect((await sessionEntries(handle.sessionFile)).map((entry) => entry.type)).toEqual(["session", "model_change", "thinking_level_change", "message", "message"]);
+      // Ruling D (Pi 0.86+): the prompt and tools are persisted as a leading system message entry, so one more "message".
+      expect((await sessionEntries(handle.sessionFile)).map((entry) => entry.type)).toEqual(["session", "model_change", "thinking_level_change", "message", "message", "message"]);
       // Exactly Pi's seven built-in tools, bash being AgentX's shell: no MCP, codemode or tool_search tool is offered.
       expect(views).toHaveLength(1);
       expect([...views[0]!.tools].sort()).toEqual(["bash", "edit", "find", "grep", "ls", "read", "write"]);
@@ -198,8 +200,9 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
       const root = await realpath(rootPath);
       expect(prompts).toHaveLength(1);
       const section = prompts[0]!.slice(prompts[0]!.indexOf("<project_context>"));
+      // Ruling A (Pi 0.86+): sections are tag-wrapped (<project_context>, <cwd>) without the inner blank lines.
       expect(section).toBe([
-        "<project_context>", "", "Project-specific instructions and guidelines:", "",
+        "<project_context>", "Project-specific instructions and guidelines:", "",
         "<project_instructions path=\"AgentX workspace\">",
         "AgentX workspace note (written by AgentX, not by any repository):",
         "The repository \"web\" is checked out at repos/web in this workspace. Make every change inside it; files outside it are not part of the repository or its pull request.",
@@ -207,8 +210,17 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
         `<project_instructions path="${root}/repos/web/AGENTS.md">`,
         "AGENTS.md of the \"web\" repository, checked out at repos/web in this workspace. Its guidance applies to the files under repos/web.", "",
         "PINNED: run npm test before committing.", "",
-        "</project_instructions>", "", "</project_context>", "",
-        `Current working directory: ${root}`,
+        "</project_instructions>", "</project_context>", "",
+        "<cwd>", root, "</cwd>",
+      ].join("\n"));
+      // Ruling A: AgentX's own content reaches the model verbatim, whatever Pi's framing: the workspace note and the context file.
+      expect(prompts[0]).toContain([
+        "AgentX workspace note (written by AgentX, not by any repository):",
+        "The repository \"web\" is checked out at repos/web in this workspace. Make every change inside it; files outside it are not part of the repository or its pull request.",
+      ].join("\n"));
+      expect(prompts[0]).toContain([
+        "AGENTS.md of the \"web\" repository, checked out at repos/web in this workspace. Its guidance applies to the files under repos/web.", "",
+        "PINNED: run npm test before committing.",
       ].join("\n"));
       expect(prompts[0]!.split("<project_context>")).toHaveLength(2);
       expect(prompts[0]!.startsWith("You are an expert coding assistant operating inside pi, a coding agent harness.")).toBe(true);
@@ -216,13 +228,14 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
       // directory line), so a section 0.99 inserts anywhere is caught. The temp root reads <ROOT>.
       const boundaries = prompts[0]!.split(root).join("<ROOT>").split("\n")
         .filter((line) => /^<\/?[a-z_]+( .*)?>$/.test(line) || /^[A-Z][^.]*:$/.test(line) || line.startsWith("Current working directory: "));
+      // Ruling A (Pi 0.86+): the headings became tagged sections (<tools>, <rules>, <docs>, <cwd>); the order is unchanged.
       expect(boundaries).toEqual([
-        "Available tools:", "Guidelines:",
-        "Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):",
+        "<tools>", "</tools>", "<rules>", "</rules>", "<docs>",
+        "Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):", "</docs>",
         "<project_context>", "Project-specific instructions and guidelines:",
         "<project_instructions path=\"AgentX workspace\">", "AgentX workspace note (written by AgentX, not by any repository):", "</project_instructions>",
         "<project_instructions path=\"<ROOT>/repos/web/AGENTS.md\">", "</project_instructions>",
-        "</project_context>", "Current working directory: <ROOT>",
+        "</project_context>", "<cwd>", "</cwd>",
       ]);
     } finally { handle.dispose(); }
   });
@@ -248,9 +261,12 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
       const entries = await sessionEntries(sessionFile);
       expect(entries.map((entry) => [entry.type, (entry.message as { role?: string } | undefined)?.role])).toEqual([
         ["session", undefined], ["model_change", undefined], ["thinking_level_change", undefined],
+        // Ruling D (Pi 0.86+): the leading system message entry that carries the prompt and tools; resume adds no second one.
+        ["message", "system"],
         ["message", "user"], ["message", "assistant"], ["message", "user"], ["message", "assistant"],
       ]);
-      expect(entries.filter((entry) => entry.type === "message")).toHaveLength(4);
+      // Ruling D: the four conversation messages, plus the one system message entry pinned above.
+      expect(entries.filter((entry) => entry.type === "message" && (entry.message as { role?: string }).role !== "system")).toHaveLength(4);
       const stats = resumed.getSessionStats();
       expect({ userMessages: stats.userMessages, assistantMessages: stats.assistantMessages, totalMessages: stats.totalMessages }).toEqual({ userMessages: 2, assistantMessages: 2, totalMessages: 4 });
     } finally { resumed.dispose(); }
@@ -288,7 +304,8 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
       // Observed on 0.85.1: an abort between model calls is not stopReason "aborted". The next call fails
       // before it streams, and Pi reports it as an error with the AbortSignal's message.
       const last = ends.at(-1)!;
-      expect(keys(last)).toEqual(["api", "content", "errorMessage", "model", "provider", "role", "stopReason", "timestamp", "usage"]);
+      // Ruling D (Pi 0.99+, additive): assistant messages also carry the thinkingLevel they ran at.
+      expect(keys(last)).toEqual(["api", "content", "errorMessage", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"]);
       expect({ role: last.role, stopReason: last.stopReason, errorMessage: last.errorMessage, content: last.content }).toEqual({
         role: "assistant", stopReason: "error", errorMessage: "This operation was aborted", content: [],
       });
@@ -337,11 +354,12 @@ describe("the worker's message_end payloads on Pi 0.85.1", () => {
       expect(await settle(handle, "abort")).toBe("resolved");
       const assistantEnds = events.filter((event) => event.type === "message_end" && event.message?.role === "assistant");
       expect(assistantEnds.map((event) => keys(event))).toEqual([["message", "type"], ["message", "type"], ["message", "type"], ["message", "type"]]);
+      // Ruling D (Pi 0.99+, additive): assistant messages also carry the thinkingLevel they ran at.
       expect(assistantEnds.map((event) => keys(event.message))).toEqual([
-        ["api", "content", "model", "provider", "role", "stopReason", "timestamp", "usage"],
-        ["api", "content", "model", "provider", "role", "stopReason", "timestamp", "usage"],
-        ["api", "content", "errorMessage", "model", "provider", "role", "stopReason", "timestamp", "usage"],
-        ["api", "content", "errorMessage", "model", "provider", "role", "stopReason", "timestamp", "usage"],
+        ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
+        ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
+        ["api", "content", "errorMessage", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
+        ["api", "content", "errorMessage", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
       ]);
       expect(assistantEnds.map(({ message }) => ({ role: message!.role, stopReason: message!.stopReason, errorMessage: message!.errorMessage }))).toEqual([
         { role: "assistant", stopReason: "toolUse", errorMessage: undefined },
@@ -415,17 +433,20 @@ describe("the worker's session event shapes on Pi 0.85.1", () => {
     ]);
     expect(keys(end)).toEqual(["isError", "result", "toolCallId", "toolName", "type"]);
     // The result carries a details key whose value is undefined; toEqual ignores undefined, so it is pinned on its own.
-    expect(end).toEqual({ type: "tool_execution_end", toolCallId: "call-bash-1", toolName: "bash", isError: false, result: { content: [{ type: "text", text: "pinned\n" }], details: undefined } });
-    expect(keys(end.result)).toEqual(["content", "details"]);
+    // Ruling D (Pi 0.99+, additive): bash results also carry structuredContent (the form codemode scripts read); the model still gets content.
+    expect(end).toEqual({ type: "tool_execution_end", toolCallId: "call-bash-1", toolName: "bash", isError: false, result: { content: [{ type: "text", text: "pinned\n" }], details: undefined,
+      structuredContent: { exit_code: 0, output: "pinned\n", truncated: false, wall_time_seconds: anyNumber } } });
+    expect(keys(end.result)).toEqual(["content", "details", "structuredContent"]);
     expect((end.result as { details?: unknown }).details).toBeUndefined();
 
     const messageEnds = events.filter((event) => event.type === "message_end");
     expect(messageEnds.map((event) => keys(event))).toEqual(Array(4).fill(["message", "type"]));
+    // Ruling D (Pi 0.99+, additive): assistant messages also carry the thinkingLevel they ran at.
     expect(messageEnds.map((event) => keys(event.message))).toEqual([
       ["content", "role", "timestamp"],
-      ["api", "content", "model", "provider", "role", "stopReason", "timestamp", "usage"],
+      ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
       ["content", "details", "isError", "role", "timestamp", "toolCallId", "toolName", "usage"],
-      ["api", "content", "model", "provider", "role", "stopReason", "timestamp", "usage"],
+      ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
     ]);
     const turnEnds = events.filter((event) => event.type === "turn_end");
     expect(turnEnds.map((event) => keys(event))).toEqual([["message", "toolResults", "type"], ["message", "toolResults", "type"]]);
@@ -434,11 +455,12 @@ describe("the worker's session event shapes on Pi 0.85.1", () => {
     expect(keys(agentEnd)).toEqual(["messages", "type", "willRetry"]);
     expect(agentEnd.willRetry).toBe(false);
     const messages = agentEnd.messages as Array<Record<string, unknown>>;
+    // Ruling D (Pi 0.99+, additive): assistant messages also carry the thinkingLevel they ran at.
     expect(messages.map((message) => keys(message))).toEqual([
       ["content", "role", "timestamp"],
-      ["api", "content", "model", "provider", "role", "stopReason", "timestamp", "usage"],
+      ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
       ["content", "details", "isError", "role", "timestamp", "toolCallId", "toolName", "usage"],
-      ["api", "content", "model", "provider", "role", "stopReason", "timestamp", "usage"],
+      ["api", "content", "model", "provider", "role", "stopReason", "thinkingLevel", "timestamp", "usage"],
     ]);
     expect(messages.map((message) => [message.role, message.stopReason])).toEqual([["user", undefined], ["assistant", "toolUse"], ["toolResult", undefined], ["assistant", "stop"]]);
     expect(messages.at(-1)!.content).toEqual([{ type: "text", text: "Done." }]);

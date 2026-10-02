@@ -16,6 +16,7 @@ import {
   type ToolDefinition,
   SessionManager,
   SettingsManager,
+  type SessionEntry,
   type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
@@ -244,10 +245,36 @@ async function createDefaultSession(
         ...(ThinkingLevelSchema.safeParse(session.thinkingLevel).success ? { thinkingLevel: session.thinkingLevel as PiThinkingLevel } : {}),
       }),
       piThinkingLevel: () => session.thinkingLevel,
-      getSessionStats: () => session.getSessionStats(),
-      subscribe: (listener) => session.subscribe((event) => listener(event)),
+      getSessionStats: () => conversationStats(session.getSessionStats(), session.sessionManager.getEntries()),
+      subscribe: (listener) => session.subscribe((event) => { if (!isSystemMessageEvent(event)) listener(withoutSystemMessages(event)); }),
       dispose: () => session.dispose(),
     };
+}
+
+/**
+ * Pi 0.86+ records the system prompt and tool set as `system` messages in the transcript and emits
+ * message_start/message_end for them. The worker's handle keeps the 0.85.1 view: those events never reach
+ * its subscribers, agent_end lists the conversation only (so the task's event log does not gain the whole
+ * system prompt), and totalMessages counts the conversation only. The session file keeps them; Pi needs them
+ * to resume.
+ */
+function isSystemMessageEvent(event: unknown): boolean {
+  if (!event || typeof event !== "object") return false;
+  const { type, message } = event as { type?: unknown; message?: { role?: unknown } };
+  return (type === "message_start" || type === "message_end" || type === "message_update") && message?.role === "system";
+}
+
+function withoutSystemMessages<T>(event: T): T {
+  if (!event || typeof event !== "object") return event;
+  const { type, messages } = event as { type?: unknown; messages?: unknown };
+  if (type !== "agent_end" || !Array.isArray(messages)) return event;
+  return { ...event, messages: messages.filter((message: { role?: unknown } | null) => message?.role !== "system") };
+}
+
+function conversationStats(stats: SessionStats, entries: readonly SessionEntry[]): SessionStats {
+  // Pi counts every message entry, as getSessionStats does, so the system ones are counted the same way.
+  const system = entries.filter((entry) => entry.type === "message" && entry.message.role === "system").length;
+  return { ...stats, totalMessages: stats.totalMessages - system };
 }
 
 /**

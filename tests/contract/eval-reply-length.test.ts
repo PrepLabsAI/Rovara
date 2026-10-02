@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { fauxAssistantMessage, fauxToolCall } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, getCurrentSystemPrompt, type JsonObject } from "@earendil-works/pi-ai";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { SLACK_REPLY_INSTRUCTIONS } from "../../packages/orchestrator/src/orchestrator.js";
@@ -43,8 +43,9 @@ describe("reply length in the evaluation (spec 014 SC-006)", () => {
       beforeRun: (evalCase) => {
         faux.setResponses([
           (context) => {
-            prompts.push(context.systemPrompt ?? "");
-            return fauxAssistantMessage([fauxToolCall(String(evalCase.expect.tool), evalCase.expect.argsSubset ?? {})], { stopReason: "toolUse" });
+            // Pi 0.86+ carries the prompt in the leading system message (TranscriptContext).
+            prompts.push(getCurrentSystemPrompt(context.messages));
+            return fauxAssistantMessage([fauxToolCall(String(evalCase.expect.tool), (evalCase.expect.argsSubset ?? {}) as JsonObject)], { stopReason: "toolUse" });
           },
           fauxAssistantMessage("Created PAY-31: <https://example.atlassian.net/browse/PAY-31>"),
         ]);
@@ -109,7 +110,7 @@ describe("Jira reply link guard, so the model never invents a site (issue 061)",
       model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1,
       beforeRun: (evalCase) => {
         faux.setResponses([
-          () => fauxAssistantMessage([fauxToolCall(String(evalCase.expect.tool), evalCase.expect.argsSubset ?? {})], { stopReason: "toolUse" }),
+          () => fauxAssistantMessage([fauxToolCall(String(evalCase.expect.tool), (evalCase.expect.argsSubset ?? {}) as JsonObject)], { stopReason: "toolUse" }),
           fauxAssistantMessage("Created PAY-31: https://your-jira-instance.atlassian.net/browse/PAY-31"),
         ]);
       },
@@ -127,7 +128,7 @@ describe("Jira reply link guard, so the model never invents a site (issue 061)",
         model: FAUX_MODEL, modelRuntime, presentation: "new", repeat: 1,
         beforeRun: (evalCase) => {
           faux.setResponses([
-            () => fauxAssistantMessage([fauxToolCall(String(evalCase.expect.tool), evalCase.expect.argsSubset ?? {})], { stopReason: "toolUse" }),
+            () => fauxAssistantMessage([fauxToolCall(String(evalCase.expect.tool), (evalCase.expect.argsSubset ?? {}) as JsonObject)], { stopReason: "toolUse" }),
             fauxAssistantMessage(response),
           ]);
         },

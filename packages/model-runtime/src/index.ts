@@ -2,7 +2,7 @@ import { MissingOpenRouterSecret, defaultBedrockModel, type ModelRole } from "./
 import { readOpenRouterKey, openRouterRouting, openRouterModel } from "./config.js";
 export { readOpenRouterKey, openRouterRouting, openRouterModel } from "./config.js";
 import { agentXError, type ModelIdentifier } from "@agentx/contracts";
-import { InMemoryCredentialStore, createAssistantMessageEventStream, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage } from "@earendil-works/pi-ai";
+import { InMemoryCredentialStore, createAssistantMessageEventStream, type Model, type SimpleStreamOptions, type TranscriptContext, type OpenAICompletionsCompat, type AssistantMessage } from "@earendil-works/pi-ai";
 import { streamSimple } from "@earendil-works/pi-ai/api/openai-completions";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
@@ -36,7 +36,9 @@ export async function createConfiguredModelRuntime(selected: ModelIdentifier & {
   const key = await readOpenRouterKey(environment.AGENTX_OPENROUTER_SECRET_ARN ?? "", options.readSecret);
   runtime.registerProvider("openrouter", {
     baseUrl: "https://openrouter.ai/api/v1", api: "openai-completions",
-    models: runtime.getModels("openrouter").map((entry) => ({ ...entry, api: "openai-completions", baseUrl: "https://openrouter.ai/api/v1" })),
+    // Pi 0.86 sends Pi's session ID to OpenRouter as x-session-id; AgentX keeps the 0.85.1 request, which has no such header.
+    models: runtime.getModels("openrouter").map((entry) => ({ ...entry, api: "openai-completions", baseUrl: "https://openrouter.ai/api/v1",
+      compat: { ...(entry.compat as OpenAICompletionsCompat | undefined), sendSessionAffinityHeaders: false } })),
     streamSimple: (entry, context, streamOptions) => safeOpenRouterStream(entry as Model<"openai-completions">, context, streamOptions, routing, options.fetch, options.onUsage),
   });
   try { await runtime.setRuntimeApiKey("openrouter", key); }

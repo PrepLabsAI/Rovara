@@ -77,7 +77,9 @@ describe("OpenRouter custom provider on Pi 0.85.1", () => {
     expect(sdkHeaders.filter((name) => name !== "accept" && name !== "user-agent").every((name) => name.startsWith("x-stainless-"))).toBe(true);
     // Volatile: the system prompt embeds the temp working directory, replaced by <CWD>.
     const body: unknown = JSON.parse(JSON.stringify(request.body).split(cwd).join("<CWD>"));
-    expect(body).toEqual({"model":"anthropic/claude-sonnet-4","messages":[{"role":"developer","content":[{"type":"text","text":"You are a test agent.\nCurrent working directory: <CWD>\n","cache_control":{"type":"ephemeral"}}]},{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}],"stream":true,"stream_options":{"include_usage":true},"store":false,"max_completion_tokens":64000,"tools":[{"type":"function","function":{"name":"read_file","description":"Read a file","parameters":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}},"strict":false},"cache_control":{"type":"ephemeral"}}],"reasoning":{"effort":"low"},"provider":{"allow_fallbacks":false,"require_parameters":true,"data_collection":"deny","only":["anthropic"],"order":["anthropic"]}});
+    // Ruling A (Pi 0.86+): the working directory is a tagged <cwd> section; AgentX's prompt text leads verbatim.
+    // Ruling C (Pi 0.87): "strict": false is no longer sent on tools (the API default, same meaning).
+    expect(body).toEqual({"model":"anthropic/claude-sonnet-4","messages":[{"role":"developer","content":[{"type":"text","text":"You are a test agent.\n\n<cwd>\n<CWD>\n</cwd>","cache_control":{"type":"ephemeral"}}]},{"role":"user","content":[{"type":"text","text":"hello","cache_control":{"type":"ephemeral"}}]}],"stream":true,"stream_options":{"include_usage":true},"store":false,"max_completion_tokens":64000,"tools":[{"type":"function","function":{"name":"read_file","description":"Read a file","parameters":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}},"cache_control":{"type":"ephemeral"}}],"reasoning":{"effort":"low"},"provider":{"allow_fallbacks":false,"require_parameters":true,"data_collection":"deny","only":["anthropic"],"order":["anthropic"]}});
   });
 
   // protects packages/model-runtime/src/index.ts (stream-to-message mapping and onUsage)
@@ -93,12 +95,16 @@ describe("OpenRouter custom provider on Pi 0.85.1", () => {
     const dir = await createFixtureDirectory("agentx-char-openrouter-");
     const session = await createPiSessionRuntime({ stateDirectory: dir, modelRuntime: runtime, model: model as never, systemPrompt: "Test", extensions: [],
       customTools: [{ ...tool, execute: async () => ({ content: [{ type: "text" as const, text: "file content" }], details: {} }) }] });
+    const cwd = session.session.sessionManager.getCwd();
     try {
       expect(await runOrchestratorTurn(session, "read it")).toBe("Done");
-      expect(noTimes(session.session.messages)).toEqual([{"role":"user","content":[{"type":"text","text":"read it"}],"timestamp":"<TIMESTAMP>"},{"role":"assistant","content":[{"type":"text","text":"Reading."},{"type":"toolCall","id":"call_1","name":"read_file","arguments":{"path":"README.md"}}],"api":"openai-completions","provider":"openrouter","model":"anthropic/claude-sonnet-4","usage":{"input":10,"output":3,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":13,"cost":{"input":0.00003,"output":0.000045,"cacheRead":0,"cacheWrite":0,"total":0.00007500000000000001}},"stopReason":"toolUse","timestamp":"<TIMESTAMP>","responseId":"gen-tool","responseModel":"anthropic/claude-sonnet-4-20250514","rawStopReason":"tool_calls"},{"role":"toolResult","toolCallId":"call_1","toolName":"read_file","content":[{"type":"text","text":"file content"}],"details":{},"isError":false,"timestamp":"<TIMESTAMP>"},{"role":"assistant","content":[{"type":"text","text":"Done"}],"api":"openai-completions","provider":"openrouter","model":"anthropic/claude-sonnet-4","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":12,"cost":{"input":0.00003,"output":0.00003,"cacheRead":0,"cacheWrite":0,"total":0.00006}},"stopReason":"stop","timestamp":"<TIMESTAMP>","responseId":"gen-test","responseModel":"anthropic/claude-sonnet-4-20250514","rawStopReason":"stop"}]);
+      // Ruling D (Pi 0.86+): the transcript starts with the system message that carries the prompt and tools (the temp
+      // working directory reads <CWD>), and (Pi 0.99+) assistant messages carry the thinkingLevel they ran at.
+      expect(JSON.parse(JSON.stringify(noTimes(session.session.messages)).split(cwd).join("<CWD>"))).toEqual([{"role":"system","content":"","sections":{"preamble":"Test","cwd":"<cwd>\n<CWD>\n</cwd>"},"toolsAdded":[{"name":"read_file","description":"Read a file","parameters":{"type":"object","required":["path"],"properties":{"path":{"type":"string"}}}}],"timestamp":"<TIMESTAMP>"},{"role":"user","content":[{"type":"text","text":"read it"}],"timestamp":"<TIMESTAMP>"},{"role":"assistant","content":[{"type":"text","text":"Reading."},{"type":"toolCall","id":"call_1","name":"read_file","arguments":{"path":"README.md"}}],"api":"openai-completions","provider":"openrouter","model":"anthropic/claude-sonnet-4","usage":{"input":10,"output":3,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":13,"cost":{"input":0.00003,"output":0.000045,"cacheRead":0,"cacheWrite":0,"total":0.00007500000000000001}},"stopReason":"toolUse","thinkingLevel":"medium","timestamp":"<TIMESTAMP>","responseId":"gen-tool","responseModel":"anthropic/claude-sonnet-4-20250514","rawStopReason":"tool_calls"},{"role":"toolResult","toolCallId":"call_1","toolName":"read_file","content":[{"type":"text","text":"file content"}],"details":{},"isError":false,"timestamp":"<TIMESTAMP>"},{"role":"assistant","content":[{"type":"text","text":"Done"}],"api":"openai-completions","provider":"openrouter","model":"anthropic/claude-sonnet-4","usage":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0,"reasoning":0,"totalTokens":12,"cost":{"input":0.00003,"output":0.00003,"cacheRead":0,"cacheWrite":0,"total":0.00006}},"stopReason":"stop","thinkingLevel":"medium","timestamp":"<TIMESTAMP>","responseId":"gen-test","responseModel":"anthropic/claude-sonnet-4-20250514","rawStopReason":"stop"}]);
       // Volatile: sessionFile and sessionId are per-run; every other stats key is pinned.
       const stats = Object.fromEntries(Object.entries(session.session.getSessionStats()).filter(([key]) => key !== "sessionFile" && key !== "sessionId"));
-      expect(stats).toEqual({"userMessages":1,"assistantMessages":2,"toolCalls":1,"toolResults":1,"totalMessages":4,"tokens":{"input":20,"output":5,"cacheRead":0,"cacheWrite":0,"total":25},"cost":0.000135,"contextUsage":{"tokens":12,"contextWindow":200000,"percent":0.006}});
+      // Ruling D (Pi 0.86+): Pi's own totalMessages counts the system message entry too (4 -> 5); AgentX reads only tokens and cost here.
+      expect(stats).toEqual({"userMessages":1,"assistantMessages":2,"toolCalls":1,"toolResults":1,"totalMessages":5,"tokens":{"input":20,"output":5,"cacheRead":0,"cacheWrite":0,"total":25},"cost":0.000135,"contextUsage":{"tokens":12,"contextWindow":200000,"percent":0.006}});
     } finally { await session.dispose(); await rm(dir, { recursive: true, force: true }); }
     expect(captured).toHaveLength(2);
     expect(onUsage.mock.calls).toEqual([[{"event":"model_request_usage","provider":"openrouter","requestedModel":"anthropic/claude-sonnet-4","returnedModel":"anthropic/claude-sonnet-4-20250514","returnedProvider":"Anthropic","tokens":{"input":10,"output":3,"cacheRead":0,"cacheWrite":0},"costUsd":0.00007500000000000001,"costSource":"estimated","outcome":"toolUse"}],[{"event":"model_request_usage","provider":"openrouter","requestedModel":"anthropic/claude-sonnet-4","returnedModel":"anthropic/claude-sonnet-4-20250514","returnedProvider":"Anthropic","tokens":{"input":10,"output":2,"cacheRead":0,"cacheWrite":0},"costUsd":0.00006,"costSource":"estimated","outcome":"stop"}]]);
@@ -138,14 +144,17 @@ describe("OpenRouter custom provider on Pi 0.85.1", () => {
   it("surfaces a mid-stream abort with a fixed message and keeps the text streamed so far", async () => {
     const controller = new AbortController();
     const encoder = new TextEncoder();
-    // The first chunk is queued at start; the reader asking for the next one means the first was taken,
-    // so the abort lands mid-stream, with no timer.
+    // The first chunk is queued at start. Ruling B (openai SDK 7, via Pi 1.0): the SDK drops a read that resolves after
+    // the abort, so the abort must land after the first chunk was consumed, not on the read that takes it. Each pull
+    // hands out one SSE keep-alive comment; the reads pass through AgentX's pass-through stream, so the abort waits for
+    // the third pull, which comes only after the SDK has consumed the first chunk. Event-driven, no timer.
+    let pulls = 0;
     const midStream = capturing((_n, init) => new Response(new ReadableStream({
       start(c) {
         c.enqueue(encoder.encode(`data: ${JSON.stringify(textChunks[0])}\n\n`));
         init.signal?.addEventListener("abort", () => c.error(init.signal?.reason));
       },
-      pull() { controller.abort(); },
+      pull(c) { pulls += 1; if (pulls <= 2) c.enqueue(encoder.encode(": keep-alive\n\n")); else controller.abort(); },
     }), { headers: { "Content-Type": "text/event-stream" } }));
     const b = await build(midStream.transport);
     const aborted = await b.runtime.completeSimple(b.runtime.getModel(selected.provider, selected.modelId)!, userContext, { signal: controller.signal });
