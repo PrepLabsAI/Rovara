@@ -144,7 +144,7 @@ export const READY_HOLD_MS = 30 * 60_000;
 /** The plain words for a run that stopped waiting on someone else (a workspace admin, an alert
  * subscription), shown as the terminal's one-line summary in place of the raw step message, which
  * carries its own (terminal-only) rerun instruction. */
-const WAITING_STEP_PLAIN: Partial<Record<InitStepId, string>> = {
+export const WAITING_STEP_PLAIN: Partial<Record<InitStepId, string>> = {
   "slack-app": "Waiting for a Slack admin to approve the app.",
   alerts: "Waiting for the alert subscription to be confirmed.",
 };

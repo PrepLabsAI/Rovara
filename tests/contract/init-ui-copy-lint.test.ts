@@ -2,7 +2,12 @@
 // Spec 048 FR-081 and SC-011: the copy-lint rules. Each rule is proven by a seeded example that
 // must fail it, and good copy must pass every rule. Task 17 runs the rules over the whole journey.
 import { describe, expect, it } from "vitest";
-import { COPY_RULES, lintCopy, quotedStrings } from "../support/copy-lint.js";
+import { environmentStackName } from "@agentx/contracts";
+import { WAITING_STEP_PLAIN } from "../../packages/cli/src/init/commands.js";
+import type { WizardQuestion } from "../../packages/cli/src/init/ui/protocol.js";
+import { COPY_RULES, lintCopy, quotedStrings, stateEntries } from "../support/copy-lint.js";
+import { FINISH, FIRST_RUN, harness, SIGNIN, SLACK } from "../support/init-ui-harness.js";
+import { fakeWizardOperator } from "../support/wizard-browser.js";
 
 const SEEDED: Record<string, string> = {
   "phase-or-spec-number": "To remove it later, follow the teardown guide (agentx destroy arrives in phase 15e).",
@@ -72,5 +77,64 @@ describe("copy-lint rules", () => {
 
   it("reads the string literals out of the page's source", () => {
     expect(quotedStrings(`a.textContent = "Show technical log"; b = 'x'; c = \`y\`;`)).toEqual(["Show technical log", "x", "y"]);
+  });
+});
+
+describe("SC-011: the whole install, as the page shows it", () => {
+  it("a first install says no internal word anywhere on the page", async () => {
+    const h = await harness();
+    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(code).toBe(0);
+    expect(lintCopy(operator.states.flatMap((state, index) => stateEntries(state, `state ${index}`)))).toEqual([]);
+  });
+
+  it("a failed and retried step says no internal word either", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    const operator = fakeWizardOperator([...FIRST_RUN, "retry", ...SLACK, ...SIGNIN, ...FINISH], {
+      beforeAnswer: async (question) => { if (question.text === "The install stopped. What next?") h.deployer.fail.clear(); },
+    });
+    expect(await h.run(["--ui"], { openBrowser: operator.open })).toBe(0);
+    await operator.settled();
+    expect(lintCopy(operator.states.flatMap((state, index) => stateEntries(state, `state ${index}`)))).toEqual([]);
+  });
+
+  it("a stopped install says no internal word, and never Finished", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    const { operator } = await h.runUi([...FIRST_RUN, "stop"]);
+    expect(lintCopy(operator.states.flatMap((state, index) => stateEntries(state, `state ${index}`)))).toEqual([]);
+  });
+
+  it("FR-010 and FR-011: every question of a first install has a label, a why line, and verb buttons", async () => {
+    const h = await harness();
+    const { operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    const questions = new Map<string, WizardQuestion>(operator.states.flatMap((state) => (state.question === undefined ? [] : [[state.question.id, state.question] as const])));
+    expect(questions.size).toBeGreaterThan(20);
+    for (const question of questions.values()) {
+      expect({ text: question.text, label: question.label }).toMatchObject({ label: expect.stringMatching(/\S/) as unknown });
+      expect({ text: question.text, why: question.why }).toMatchObject({ why: expect.stringMatching(/\S/) as unknown });
+      if (question.kind === "ask" && question.defaultValue !== undefined) expect({ text: question.text, hint: question.hint }).toMatchObject({ hint: expect.stringMatching(/\S/) as unknown });
+      for (const button of question.buttons ?? []) expect(["Yes", "No"]).not.toContain(button.label);
+    }
+  });
+
+  it("SC-001: every state shows the phase, step N of 5 and the time left", async () => {
+    const h = await harness();
+    const { operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    for (const state of operator.states) {
+      expect(state.journey.stepCount).toBe(5);
+      expect(state.journey.stepNumber).toBeGreaterThanOrEqual(1);
+      expect(state.journey.phases.find((phase) => phase.id === state.journey.current)?.title).toMatch(/\S/);
+      expect(state.journey.timeLeftText).toMatch(/\S/);
+    }
+  });
+
+  // Controller ruling: these two reasons never reach a WizardState (they are folded into the
+  // terminal's own stoppedLine, in commands.ts's catch block), so stateEntries never sees them;
+  // they still have to pass the same rules (FR-081), since the terminal is part of the install too.
+  it("the terminal's own waiting reasons pass the copy-lint too", () => {
+    const entries = Object.entries(WAITING_STEP_PLAIN).map(([id, text]) => ({ where: `waiting reason: ${id}`, text, context: "page" as const }));
+    expect(lintCopy(entries)).toEqual([]);
   });
 });
