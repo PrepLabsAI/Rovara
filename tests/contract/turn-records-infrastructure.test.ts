@@ -201,7 +201,8 @@ describe("Slack service turn records and metric filters", () => {
       FilterPattern: "{ $.event = \"turn_metrics.emit_failed\" }",
       MetricTransformations: [{ MetricNamespace: "AgentX", MetricName: "TurnMetricsEmitFailed", MetricValue: "1" }],
     });
-    template.resourceCountIs("AWS::Logs::MetricFilter", 6);
+    // The six above, and spec 052's EvalBatchWatcherFailed (eval-batch-tick-infrastructure.test.ts).
+    template.resourceCountIs("AWS::Logs::MetricFilter", 7);
   });
 });
 
