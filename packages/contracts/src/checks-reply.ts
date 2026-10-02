@@ -14,8 +14,10 @@ function reportLines(report: CheckReport): string[] {
   } else if (report.status === "verified") {
     // Only checks that passed now count: not already-failing, failing-with-no-earlier-result or not-rerun ones.
     const count = report.checks.filter((check) => check.class === "passing" || check.class === "fixed").length;
-    lines.push(report.source === "agent_commands"
-      ? `Checks passed (${count} of the agent's own test ${count === 1 ? "command" : "commands"}, rerun by AgentX).`
+    // With nothing passing (only checks that fail with no earlier result), "Checks passed" would mislead.
+    if (count === 0) lines.push("No regression found, but no check passes yet.");
+    else lines.push(report.source === "agent_commands"
+      ? `Checks passed (${count} of the agent's own test commands, rerun by AgentX).`
       : `Checks passed (${count} project ${count === 1 ? "check" : "checks"}).`);
   } else if (report.notVerifiedReason === "no_checks") {
     lines.push("Not verified: no checks ran. Add readiness checks to the project so AgentX can check the agent's work.");

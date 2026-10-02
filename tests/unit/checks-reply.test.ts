@@ -33,7 +33,7 @@ describe("checksReplyPrefix (FR-009)", () => {
     expect(checksReplyPrefix([report({ checks: two })])).toBe(`Checks passed (2 project checks).${TAIL}`);
     expect(checksReplyPrefix([report({ checks: [entry({})] })])).toBe(`Checks passed (1 project check).${TAIL}`);
     expect(checksReplyPrefix([report({ source: "agent_commands", checks: [entry({ source: "agent_commands" })] })]))
-      .toBe(`Checks passed (1 of the agent's own test command, rerun by AgentX).${TAIL}`);
+      .toBe(`Checks passed (1 of the agent's own test commands, rerun by AgentX).${TAIL}`);
   });
 
   it("says why nothing was verified", () => {
@@ -60,7 +60,7 @@ describe("checksReplyPrefix (FR-009)", () => {
     const r = report({ checks: [entry({ class: "fixed", before: "failed" }), entry({ id: "readiness:1", label: "types", before: "unknown", after: "failed", class: "failing_no_before" })] });
     expect(checksReplyPrefix([r])).toBe(`Checks passed (1 project check).\nFails now, with no earlier result: types.${TAIL}`);
     expect(checksReplyPrefix([report({ checks: [entry({ label: "types", before: "unknown", after: "failed", class: "failing_no_before" })] })]))
-      .toBe(`Checks passed (0 project checks).\nFails now, with no earlier result: types.${TAIL}`);
+      .toBe(`No regression found, but no check passes yet.\nFails now, with no earlier result: types.${TAIL}`);
   });
 
   it("uses only the last report of a turn, so a stale verdict never leads", () => {
