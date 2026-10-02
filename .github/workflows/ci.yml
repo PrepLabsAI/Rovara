@@ -6,9 +6,22 @@ on:
   push:
     branches: [mainline]
 
+# Pushing to a pull request again supersedes its run in progress. A push to mainline is never
+# cancelled: every merge keeps its own result.
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# The checks, the test shards and the release check run side by side, each on its own machine. The
+# job called `local` waits for all of them and is the one check a pull request needs (scripts/ci-gate.ts).
 jobs:
-  local:
+  # A pull request that changes only Markdown under specs/ or docs/, which no test reads, skips the
+  # jobs below (scripts/ci-docs-only.ts). Pushes and manual runs always run them.
+  scope:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      docs_only: ${{ steps.scope.outputs.docs_only }}
     steps:
       # Depth 2 keeps the pull request's merge commit and its first parent, the base branch.
       - uses: actions/checkout@v5
@@ -17,9 +30,6 @@ jobs:
       - uses: actions/setup-node@v5
         with:
           node-version-file: .node-version
-          cache: npm
-      # A pull request that changes only Markdown under specs/ or docs/, which no test reads, skips
-      # the steps below (scripts/ci-docs-only.ts). Pushes and manual runs always run them.
       - name: Docs-only change?
         id: scope
         if: github.event_name == 'pull_request'
@@ -29,27 +39,90 @@ jobs:
       - name: Markdown-only change
         if: steps.scope.outputs.docs_only == 'true'
         run: echo "Only Markdown that no test reads changed; typecheck, the stricter type check, lint, tests, synth and the release check are skipped."
+
+  checks:
+    needs: scope
+    if: needs.scope.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
       - run: npm ci
-        if: steps.scope.outputs.docs_only != 'true'
       - run: npm run typecheck
-        if: steps.scope.outputs.docs_only != 'true'
       # The stricter type check (tsconfig.lint.json, which also covers tests/ and scripts/) may not
       # add errors beyond tests/typecheck-baseline.json (issue #50, scripts/typecheck-baseline.ts).
       - run: npm run typecheck:all
-        if: steps.scope.outputs.docs_only != 'true'
       - run: npm run lint
-        if: steps.scope.outputs.docs_only != 'true'
-      - run: npm test
-        if: steps.scope.outputs.docs_only != 'true'
+
+  # Vitest hands each shard an even share of the test files. To change the count, change the list:
+  # the shard total below comes from it.
+  test:
+    needs: scope
+    if: needs.scope.outputs.docs_only != 'true'
+    name: test (${{ matrix.shard }}/${{ strategy.job-total }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      # The packages import each other through their built output, which `npm run typecheck` used to leave behind.
+      - run: npm run build
+      - run: npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+
+  release:
+    needs: scope
+    if: needs.scope.outputs.docs_only != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 2
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: npm
+      - run: npm ci
+      - run: npm run build
       - run: npm run infra:synth
-        if: steps.scope.outputs.docs_only != 'true'
       - name: Release builds are reproducible
-        if: steps.scope.outputs.docs_only != 'true'
         run: |
           npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-a"
           npm run release:build -- --version 0.0.0-ci --out "$RUNNER_TEMP/release-b"
           diff "$RUNNER_TEMP/release-a/release.json" "$RUNNER_TEMP/release-b/release.json"
           npm run release:verify -- "$RUNNER_TEMP/release-a"
+
+  # The one check a pull request needs. It runs even when a job before it failed or was cancelled.
+  local:
+    needs: [scope, checks, test, release]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+      - name: Every job passed?
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/ci-gate.ts
 
   live-aws:
     if: github.event_name == 'workflow_dispatch' && vars.AGENTX_ENABLE_AWS_TESTS == 'true'
