@@ -65,6 +65,9 @@ export interface WizardHub {
   setStage(stage: JourneyPhaseId): void;
   /** FR-001: the account and region, once the install knows them. */
   setPlace(place: { account: string; region: string }): void;
+  /** Spec 048 FR-020: a Change answers (or a first settings submission) can rename the install;
+   * the header follows it from then on. */
+  setInstallName(name: string): void;
   /** FR-060: a failure in three parts, shown instead of the run going on. */
   showFailure(failure: WizardFailure): void;
   /** Drops the failure: the operator is trying again. */
@@ -132,7 +135,8 @@ export function createWizardHub(env: string, options: { now?: () => number; logP
   let phase: WizardPhase = "running";
   let stage: JourneyPhaseId = "get-started";
   let steps: WizardStep[] = [];
-  let header: WizardHeader = { installName: env };
+  let installName = env;
+  let header: WizardHeader = { installName };
   let question: WizardQuestion | undefined;
   let plan: WizardPlan | undefined;
   let resume: WizardResume | undefined;
@@ -263,7 +267,8 @@ export function createWizardHub(env: string, options: { now?: () => number; logP
       publish();
     },
     setStage(next) { stage = next; publish(); },
-    setPlace(place) { header = { installName: env, account: place.account, region: place.region }; publish(); },
+    setPlace(place) { header = { installName, account: place.account, region: place.region }; publish(); },
+    setInstallName(name) { installName = name; header = { ...header, installName: name }; publish(); },
     showFailure(next) {
       if (next.link === undefined || isShowableLink(next.link.url)) {
         failure = next;

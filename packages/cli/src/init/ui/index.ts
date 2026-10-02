@@ -77,6 +77,9 @@ export interface InstallWizard {
   setStage(stage: JourneyPhaseId): void;
   /** FR-001: the account and region, once the install knows them. */
   setPlace(place: { account: string; region: string }): void;
+  /** Spec 048 FR-020: a Change answers (or a first settings submission) can rename the install;
+   * the header follows it from then on. */
+  setInstallName(name: string): void;
   /** FR-060: a failure in three parts, shown instead of the run going on. */
   showFailure(failure: WizardFailure): void;
   /** Drops the failure: the operator is trying again. */
@@ -138,6 +141,7 @@ export async function startInstallWizard(input: {
     resume: (resume) => hub.showResume(resume),
     setStage: (stage) => hub.setStage(stage),
     setPlace: (place) => hub.setPlace(place),
+    setInstallName: (name) => hub.setInstallName(name),
     showFailure: (failure) => hub.showFailure(failure),
     clearFailure: () => hub.clearFailure(),
     closeRequested: () => hub.closeRequested(),

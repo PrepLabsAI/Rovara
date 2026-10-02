@@ -15,18 +15,18 @@ import { READY_HOLD_MS, READY_OUTCOME, holdReadyScreen } from "../../packages/cl
 import { initLogPath } from "../../packages/cli/src/init/log-file.js";
 import { NO_BROWSER_LINE } from "../../packages/cli/src/init/ui-mode.js";
 import { INSTALL_STEP_ORDER, READY_LINE, stageLine, terminalStepLine } from "../../packages/cli/src/init/ui/journey.js";
-import { INIT_STEP_IDS, installAnswersParameterName, readInstallProgress, type InitAnswers } from "../../packages/cli/src/init/install-state.js";
+import { INIT_STEP_IDS, installAnswersParameterName, readInstallProgress, writeInstallAnswers, type InitAnswers } from "../../packages/cli/src/init/install-state.js";
 import { estimateMonthlyCost } from "../../packages/cli/src/init/cost.js";
 import { recommendedSummary } from "../../packages/cli/src/init/settings-form.js";
 import { readEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import {
-  allStackOutputs, browserThatCreatesGitHubApp, fakeSlackApi, passingChecks, scriptedDeployer, scriptedPrompter,
+  allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, fakeSlackApi, passingChecks, sampleAnswers, scriptedDeployer, scriptedPrompter,
   TEST_BOT_TOKEN, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET,
 } from "../support/init-fakes.js";
 import { fakeWizardOperator, snapshotOnReconnect } from "../support/wizard-browser.js";
 import { ADMIN_EMAIL, fakeAlerts, fakeSlackChannels } from "../support/setup-fakes.js";
 import { markOperatorStop } from "../../packages/cli/src/init/stop.js";
-import { WIZARD_TOKEN_HEADER, type WizardSnapshot } from "../../packages/cli/src/init/ui/protocol.js";
+import { WIZARD_TOKEN_HEADER, type WizardPlan, type WizardSnapshot } from "../../packages/cli/src/init/ui/protocol.js";
 import { DEFAULTS, FINISH, FIRST_RUN, FIRST_RUN_BUDGET_USD, harness, releaseDir, SETTINGS, SIGNIN, SLACK, TERMINAL_FIRST_RUN } from "../support/init-ui-harness.js";
 
 const dirs: string[] = [];
@@ -478,6 +478,44 @@ describe("agentx init --ui", () => {
     const failed = operator.states.flatMap((state) => state.cards ?? []).find((card) => card.id === "prerequisites" && card.status === "failed");
     expect(failed?.checks?.find((check) => check.label === "GitHub owner")?.detail).toBe("GitHub has no organization or user named acmee. Check the spelling.");
     expect(h.github.conversions).toHaveLength(1); // the app was made once, after the fix
+  });
+
+  it("FR-029 and Review Focus 2: Change answers keeps every answer and recomputes an app name the user never typed", async () => {
+    const h = await harness();
+    const github = { ...fakeGitHubApi({ owner: "acme-labs" }), owner: async (login: string) => ({ login, type: "Organization" as const }) };
+    const moved = JSON.stringify({ email: ADMIN_EMAIL, githubAccount: "acme-labs", alertEmail: "ops@example.com" });
+    const operator = fakeWizardOperator([SETTINGS, "change", moved, "create"], { beforeAnswer: async (question) => { if (question.text === "Create all of this?" && h.store.values.size > 0) throw new Error("test setup: something was saved before Create AgentX"); } });
+    // --stop-after prerequisites: the run ends before the GitHub step, which is all this test needs.
+    expect(await h.run(["--ui", "--stop-after", "prerequisites"], { openBrowser: operator.open, github })).toBe(0);
+    await operator.settled();
+    const plans = operator.states.map((state) => state.plan).filter((plan): plan is WizardPlan => plan !== undefined);
+    expect(plans[0]?.sections[1]?.lines[0]).toContain("\"AgentX acme (staging)\" owned by acme.");
+    expect(plans.at(-1)?.sections[1]?.lines[0]).toContain("\"AgentX acme-labs (staging)\" owned by acme-labs.");
+    const second = operator.states.map((state) => state.question).filter((question) => question?.text === "Your settings")[1];
+    expect(second?.fields?.find((field) => field.name === "email")?.value).toBe(ADMIN_EMAIL);
+    expect(second?.fields?.find((field) => field.name === "alertEmail")?.value).toBe("ops@example.com");
+    expect(second?.fields?.find((field) => field.name === "appName")?.value).toBe("");
+    const answers = JSON.parse(h.store.values.get(installAnswersParameterName("staging")) ?? "{}") as InitAnswers;
+    expect(answers.github).toEqual({ account: "acme-labs", accountType: "organization", appName: "AgentX acme-labs (staging)" });
+  });
+
+  it("FR-020: a new install name is the install's name from then on, and a used one is refused", async () => {
+    const h = await harness();
+    const renamed = JSON.stringify({ email: ADMIN_EMAIL, githubAccount: "acme", installName: "trial", alertEmail: "ops@example.com" });
+    const operator = fakeWizardOperator([renamed, "create"]);
+    expect(await h.run(["--ui", "--stop-after", "prerequisites"], { openBrowser: operator.open })).toBe(0);
+    await operator.settled();
+    expect(h.store.values.has(installAnswersParameterName("trial"))).toBe(true);
+    expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
+    expect(operator.states.at(-1)?.header.installName).toBe("trial");
+
+    const again = await harness();
+    await writeInstallAnswers(again.store, sampleAnswers({ env: "trial" }));
+    const refused = fakeWizardOperator([renamed, "stop"]);
+    expect(await again.run(["--ui"], { openBrowser: refused.open })).not.toBe(0);
+    await refused.settled();
+    const card = refused.states.flatMap((state) => state.cards ?? []).find((each) => each.id === "prerequisites" && each.status === "failed");
+    expect(card?.checks?.find((check) => check.label === "Install name")?.detail).toBe("This AWS account and region already have an AgentX install named trial. Choose another install name.");
   });
 
   it("FR-023: a failure no check reports is still on the checklist, in the error's own words", async () => {

@@ -281,6 +281,10 @@ function neverThrowingBrowser(open: (url: string) => Promise<unknown>, write: (l
  * progress line to both the terminal and the page's log pane. Held out here so the wizard is closed
  * with the run whichever way it ends (FR-002). */
 interface InitSession {
+  /** Spec 048 FR-020: the install's current name, which a Change answers (or a first settings
+   * submission) can rename; starts as options.env, and every "Continue later with" command uses
+   * this, not options.env, so it keeps up with the rename. */
+  env: string;
   wizard?: InstallWizard;
   /** Task 14: the page-mode log file, opened before the wizard and closed with it. Holds what the
    * terminal no longer shows, and never a secret or the session token (FR-070, FR-071). */
@@ -307,6 +311,7 @@ interface InitSession {
 
 export async function runInit(options: InitOptions, deps: InitCliDependencies, services: { stderr: Writer; home: string }): Promise<InitResult> {
   const session: InitSession = {
+    env: options.env,
     invocation: deps.cliInvocation ?? currentCliInvocation(),
     write: (line) => {
       if (session.wizard === undefined) { services.stderr.write(`${line}\n`); return; }
@@ -332,7 +337,7 @@ export async function runInit(options: InitOptions, deps: InitCliDependencies, s
       } else {
         const region = session.region ?? options.region ?? "<region>";
         wizard.finish("The install is paused. Your progress is saved.", "paused", [
-          { label: "Continue later with", command: cliCommandLine(session.invocation, `--env ${options.env} init --region ${region}`) },
+          { label: "Continue later with", command: cliCommandLine(session.invocation, `--env ${session.env} init --region ${region}`) },
         ]);
       }
       // FR-070 and FR-071: the full ready summary goes to the log file, never the terminal; the
@@ -364,13 +369,13 @@ export async function runInit(options: InitOptions, deps: InitCliDependencies, s
       // themselves (declining the plan, the root warning, or a "check again" question): that is
       // not a failure, so no screen is shown for it (Plan ruling 8).
       if (session.failureShown !== true && !isOperatorStop(error)) {
-        wizard.showFailure(failureScreen({ env: options.env, region, error, ...(wizard.logPath === undefined ? {} : { logPath: wizard.logPath }) }));
+        wizard.showFailure(failureScreen({ env: session.env, region, error, ...(wizard.logPath === undefined ? {} : { logPath: wizard.logPath }) }));
         await askFailureAction(session.prompter ?? wizard.prompter, { retry: false });
       }
       // Only a stop with its own words (declining the plan, the root warning) tells them; any other
       // stop, such as declining a check-again question, ends on the fixed words.
       const outcome = isWordedOperatorStop(error) ? (plainReason(error) ?? STOPPED_OUTCOME) : STOPPED_OUTCOME;
-      wizard.finish(outcome, "failed", [{ label: "Continue later with", command: cliCommandLine(session.invocation, `--env ${options.env} init --region ${region}`) }]);
+      wizard.finish(outcome, "failed", [{ label: "Continue later with", command: cliCommandLine(session.invocation, `--env ${session.env} init --region ${region}`) }]);
       // FR-070: a real failure (not a stop the operator chose) collapses to one terminal line;
       // the full error still goes to the log file. An operator stop keeps throwing `mapped` as
       // before (unchanged for FR-005's declined-plan and FR-023's declined-recheck messages).
@@ -469,7 +474,9 @@ async function assertBundleResumable(input: { bundle: BundleAnswers; bundleDir: 
 }
 
 async function init(options: InitOptions, deps: InitCliDependencies, services: { stderr: Writer; home: string }, session: InitSession): Promise<InitResult> {
-  const { env } = options;
+  // Spec 048 FR-020: the settings form's install name (typed or kept) becomes the install's name
+  // from then on; every collect() call below updates this, session.env and the page's header.
+  let env = options.env;
   const { write } = session;
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? realSleep;
@@ -710,6 +717,11 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   if (stored === undefined) {
     collected = await collect();
     initialAnswers = collected.answers;
+    // Spec 048 FR-020: a first settings submission can already rename the install (its default is
+    // options.env, kept until typed over); everything from here on follows the name just collected.
+    env = collected.answers.env;
+    session.env = env;
+    session.wizard?.setInstallName(env);
   } else {
     initialAnswers = stored;
     if (stored.account !== caller.account) throw agentXError("CONFIG_INVALID", `the install of ${env} started in account ${stored.account}, but your AWS credentials are for account ${caller.account}; use credentials for ${stored.account}`);
@@ -803,12 +815,20 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
         if (action === "change") {
           collected = await collect(collected.settings);
           finalAnswersRef.current = collected.answers;
+          // Spec 048 FR-020 and FR-029: Change answers keeps every answer, and a renamed install
+          // is the install's name from here on (the checks, the lock, the steps, the page).
+          env = collected.answers.env;
+          session.env = env;
+          session.wizard?.setInstallName(env);
           continue;
         }
         break;
       }
       collected = await collect(collected.settings);
       finalAnswersRef.current = collected.answers;
+      env = collected.answers.env;
+      session.env = env;
+      session.wizard?.setInstallName(env);
     }
     prerequisitesPassed = true;
   } else {

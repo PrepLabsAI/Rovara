@@ -34,6 +34,13 @@ describe("the hub's journey", () => {
     expect(hub.state().journey.stepNumber).toBe(2);
   });
 
+  it("spec 048 FR-020: the header follows a new install name", () => {
+    const hub = createWizardHub("production");
+    hub.setPlace({ account: "123456789012", region: "us-east-1" });
+    hub.setInstallName("staging");
+    expect(hub.state().header).toEqual({ installName: "staging", account: "123456789012", region: "us-east-1" });
+  });
+
   it("records when a step started and how long it took", () => {
     const { hub, advance } = clocked();
     hub.applyEvent({ kind: "step-started", id: "access", title: STEP_PLAN.access.title });
