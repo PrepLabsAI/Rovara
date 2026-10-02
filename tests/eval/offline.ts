@@ -1,6 +1,6 @@
 // The offline mode's scripted model: it answers every case as the case expects, so an offline run
 // checks the harness, the fixtures and the real orchestrator wiring without calling a model.
-import { fauxAssistantMessage, fauxToolCall, type FauxProviderHandle } from "@earendil-works/pi-ai";
+import { fauxAssistantMessage, fauxToolCall, type FauxProviderHandle, type JsonObject } from "@earendil-works/pi-ai";
 import type { ActionClassifier } from "../../packages/orchestrator/src/action-gate.js";
 import type { EvalCase } from "./case.js";
 import type { EvalOptions } from "./runner.js";
@@ -20,7 +20,7 @@ export function scriptExpectedAnswers(faux: FauxProviderHandle): NonNullable<Eva
       return;
     }
     const call = present(answer.tool, answer.args);
-    faux.setResponses([fauxAssistantMessage([fauxToolCall(call.tool, call.args)], { stopReason: "toolUse" }), fauxAssistantMessage("Done.")]);
+    faux.setResponses([fauxAssistantMessage([fauxToolCall(call.tool, call.args as JsonObject)], { stopReason: "toolUse" }), fauxAssistantMessage("Done.")]);
   };
 }
 

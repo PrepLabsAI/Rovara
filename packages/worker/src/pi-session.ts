@@ -16,6 +16,7 @@ import {
   type ToolDefinition,
   SessionManager,
   SettingsManager,
+  type SessionEntry,
   type SessionStats,
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
@@ -233,7 +234,8 @@ async function createDefaultSession(
       conversationId: conversationId ?? session.sessionId,
       sessionFile,
       prompt: async (text) => session.prompt(text, { expandPromptTemplates: false }),
-      steer: async (text) => session.steer(text),
+      // Pi 0.99 returns a disposition ("handled" | "queued"); the adapter's contract stays Promise<void>.
+      steer: async (text) => { await session.steer(text); },
       abort: async () => session.abort(),
       getModel: () => ({
         provider: session.model?.provider ?? resolved.model.provider,
@@ -243,10 +245,47 @@ async function createDefaultSession(
         ...(ThinkingLevelSchema.safeParse(session.thinkingLevel).success ? { thinkingLevel: session.thinkingLevel as PiThinkingLevel } : {}),
       }),
       piThinkingLevel: () => session.thinkingLevel,
-      getSessionStats: () => session.getSessionStats(),
-      subscribe: (listener) => session.subscribe((event) => listener(event)),
+      getSessionStats: () => conversationStats(session.getSessionStats(), session.sessionManager.getEntries()),
+      subscribe: (listener) => session.subscribe((event) => { if (!isSystemMessageEvent(event)) listener(withoutStructuredContent(withoutSystemMessages(event))); }),
       dispose: () => session.dispose(),
     };
+}
+
+/**
+ * Pi 0.86+ records the system prompt and tool set as `system` messages in the transcript and emits
+ * message_start/message_end for them. The worker's handle keeps the 0.85.1 view: those events never reach
+ * its subscribers, agent_end lists the conversation only (so the task's event log does not gain the whole
+ * system prompt), and totalMessages counts the conversation only. The session file keeps them; Pi needs them
+ * to resume.
+ */
+function isSystemMessageEvent(event: unknown): boolean {
+  if (!event || typeof event !== "object") return false;
+  const { type, message } = event as { type?: unknown; message?: { role?: unknown } };
+  return (type === "message_start" || type === "message_end" || type === "message_update") && message?.role === "system";
+}
+
+function withoutSystemMessages<T>(event: T): T {
+  if (!event || typeof event !== "object") return event;
+  const { type, messages } = event as { type?: unknown; messages?: unknown };
+  if (type !== "agent_end" || !Array.isArray(messages)) return event;
+  return { ...event, messages: messages.filter((message: { role?: unknown } | null) => message?.role !== "system") };
+}
+
+// Ruling E (amends D for this field only): bash results carry up to 1 MiB of structuredContent, which only codemode reads;
+// in a tool_end event it can pass the broker's 400 KB DynamoDB item limit and poison the whole event batch.
+function withoutStructuredContent<T>(event: T): T {
+  if (!event || typeof event !== "object") return event;
+  const { type, toolName, result } = event as { type?: unknown; toolName?: unknown; result?: unknown };
+  if (type !== "tool_execution_end" || toolName !== "bash" || !result || typeof result !== "object" || !("structuredContent" in result)) return event;
+  const kept: Record<string, unknown> = { ...result };
+  delete kept.structuredContent;
+  return { ...event, result: kept };
+}
+
+function conversationStats(stats: SessionStats, entries: readonly SessionEntry[]): SessionStats {
+  // Pi counts every message entry, as getSessionStats does, so the system ones are counted the same way.
+  const system = entries.filter((entry) => entry.type === "message" && entry.message.role === "system").length;
+  return { ...stats, totalMessages: stats.totalMessages - system };
 }
 
 /**
@@ -266,6 +305,9 @@ export async function createWorkerResources(
   input: Pick<PiSessionInput, "cwd" | "agentDirectory" | "contextFiles">,
 ): Promise<{ resourceLoader: DefaultResourceLoader; settingsManager: SettingsManager }> {
   const settingsManager = SettingsManager.create(input.cwd, input.agentDirectory, { projectTrusted: false });
+  // Pi 0.86+ warms prompt caches with extra paid requests during long tool runs by default ("streaming"); 0.85.1 made
+  // none. The mode is a global-only setting, so it is written to AgentX's own agent directory.
+  settingsManager.setCacheWarmingMode("off");
   const resourceLoader = new DefaultResourceLoader({
     cwd: input.cwd,
     agentDir: input.agentDirectory,
