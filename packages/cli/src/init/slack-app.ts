@@ -8,7 +8,7 @@
 import { createHmac, randomBytes } from "node:crypto";
 import { AgentXError, agentXError, environmentStackName, errorStatus } from "@agentx/contracts";
 import type { InitContext, InitSecrets } from "./context.js";
-import type { InstallProgress } from "./install-state.js";
+import { SLACK_BOT_HANDLE_PATTERN, type InstallProgress } from "./install-state.js";
 import { checkSlackBotToken, checkSlackSigningSecret, fieldCheck, secretFromSource, type SecretSource } from "./prompts.js";
 import { problemText, retryOnPage } from "./retry.js";
 import type { InitStep, ProgressHandle } from "./steps.js";
@@ -388,10 +388,13 @@ async function collectBot(context: InitContext, api: SlackApi, progress: Progres
   }
   // A handle Slack sends that does not match the stored handle's own pattern is left out rather
   // than refusing the whole install over a display name AgentX never validated itself.
-  const botName = auth.user !== undefined && /^[a-z0-9][a-z0-9._-]{0,79}$/.test(auth.user) ? auth.user : undefined;
+  const botName = auth.user !== undefined && SLACK_BOT_HANDLE_PATTERN.test(auth.user) ? auth.user : undefined;
+  // The same for the workspace's name: kept within the 1 to 100 characters the progress record
+  // takes, so recording it can never fail after the secret was written.
+  const teamName = auth.team === undefined || auth.team.trim() === "" ? undefined : auth.team.slice(0, 100);
   return {
     botToken, signingSecret, appId, teamId: auth.team_id, botUserId: auth.user_id,
-    ...(botName === undefined ? {} : { botName }), ...(auth.team === undefined ? {} : { teamName: auth.team }),
+    ...(botName === undefined ? {} : { botName }), ...(teamName === undefined ? {} : { teamName }),
   };
 }
 

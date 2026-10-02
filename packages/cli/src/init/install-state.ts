@@ -67,6 +67,9 @@ export type InitAnswers = z.infer<typeof InitAnswersSchema>;
 const StepRecordSchema = z.object({ status: z.enum(["done", "waiting"]), at: z.iso.datetime(), note: z.string().max(300).optional() }).strict();
 export type StepRecord = z.infer<typeof StepRecordSchema>;
 
+/** A Slack bot handle as AgentX stores it; the Slack app step leaves out any other (slack-app.ts). */
+export const SLACK_BOT_HANDLE_PATTERN = /^[a-z0-9][a-z0-9._-]{0,79}$/;
+
 export const InstallProgressSchema = z.object({
   schemaVersion: z.literal(1),
   env: EnvironmentNameSchema,
@@ -81,7 +84,7 @@ export const InstallProgressSchema = z.object({
   slack: z.object({
     appId: z.string().regex(/^A[A-Z0-9]+$/), teamId: z.string().regex(/^T[A-Z0-9]+$/), botUserId: z.string().regex(/^[UW][A-Z0-9]+$/),
     /** Spec 048 FR-026 and FR-027: the bot's handle and the workspace's name, as Slack reported them. */
-    botName: z.string().regex(/^[a-z0-9][a-z0-9._-]{0,79}$/).optional(),
+    botName: z.string().regex(SLACK_BOT_HANDLE_PATTERN).optional(),
     teamName: z.string().min(1).max(100).optional(),
   }).strict().optional(),
   admin: z.object({ username: z.string().min(3).max(128), mode: z.enum(["cognito", "oidc"]) }).strict().optional(),

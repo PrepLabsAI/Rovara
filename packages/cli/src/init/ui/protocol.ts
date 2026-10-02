@@ -88,8 +88,9 @@ export type CardStatus = "info" | "running" | "waiting" | "ok" | "failed";
  * opens in a new tab and to come back (FR-037). */
 export interface WizardLink { url: string; label: string; note?: string }
 
-/** A command shown with a copy button: only on the ready screen and after Stop for now (FR-061). */
-export interface WizardCommand { label: string; command: string }
+/** A command shown with a copy button: only on the ready screen and after Stop for now (FR-061).
+ * `group` is the subheading it sits under; the page starts a new one where the group changes. */
+export interface WizardCommand { label: string; command: string; group?: string }
 
 /** One line of a checklist card, such as one prerequisite. */
 export interface WizardCheck { label: string; ok: boolean; detail: string }

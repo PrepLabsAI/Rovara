@@ -193,6 +193,18 @@ describe("Slack app step", () => {
     expect(confirmations).toEqual([{ question: "Is this the AgentX bot in the right workspace?", defaultValue: true }]);
   });
 
+  it("records a workspace name Slack sends only within 1 to 100 characters, and a handle only in the stored pattern", async () => {
+    const run = async (auth: { team: string; user: string }) => {
+      const context = slackContext(["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true]);
+      const progress = progressHandle();
+      const api = fakeSlackApi({ authTest: async () => ({ ok: true, user_id: "U0BOT", bot_id: "B0BOT", team_id: "T0TEAM", url: "https://acme.slack.com/", ...auth }) });
+      expect(await slackAppStep(api).run(context, progress)).toMatchObject({ status: "done" });
+      return progress.value().slack;
+    };
+    expect(await run({ team: "A".repeat(150), user: "agentx" })).toEqual({ appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT", botName: "agentx", teamName: "A".repeat(100) });
+    expect(await run({ team: "", user: "AgentX Bot" })).toEqual({ appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT" });
+  });
+
   it("stores nothing when the engineer says the token is for the wrong bot or workspace", async () => {
     const context = slackContext(["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, false]);
     await expect(slackAppStep(fakeSlackApi()).run(context, progressHandle()))

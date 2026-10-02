@@ -67,9 +67,14 @@ export const MODEL_NAMES: Readonly<Record<string, string>> = {
 export const PRICE_NOT_ON_FILE = "price not on file";
 export const modelName = (id: string): string => MODEL_NAMES[id] ?? id;
 
+/** One use of a model, in US dollars, or undefined when its price is not on file. OpenRouter's
+ * prices are not on file. The plan's estimate and the choices' labels both read it. */
+const pricePerUse = (role: ModelRole, id: string, provider: string | undefined): number | undefined =>
+  (provider === "openrouter" ? undefined : TABLES[role][id]);
+
 /** FR-024: a model's price as the choice that offers it shows it. */
 export function modelPriceLabel(role: ModelRole, id: string, provider = "amazon-bedrock"): string {
-  const each = provider === "openrouter" ? undefined : TABLES[role][id];
+  const each = pricePerUse(role, id, provider);
   return each === undefined ? PRICE_NOT_ON_FILE : `about $${each} ${UNIT[role]}`;
 }
 
@@ -79,7 +84,7 @@ export function estimateMonthlyCost(models: InitAnswers["models"], usage = STATE
   const perUse = (role: ModelRole, uses: number, what: string): CostLine => {
     const id = models[role];
     const item = `${ROLE_NAMES[role]} (${modelName(id)})`;
-    const each = models.providers?.[role] === "openrouter" ? undefined : TABLES[role][id];
+    const each = pricePerUse(role, id, models.providers?.[role]);
     if (each === undefined) {
       unpriced.push(id);
       return { item, usd: undefined, basis: `not priced: ${PRICE_NOT_ON_FILE} for ${id}` };

@@ -656,12 +656,12 @@ describe("agentx init --ui", () => {
       `Everything here is also in ${initLogPath(h.home, "staging")}.`,
     ]);
     expect(ready?.commands).toEqual([
-      { label: "Developer sign-in", command: "node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com" },
-      { label: "Check the install", command: "node /opt/agentx/dist/main.js --env staging doctor" },
-      { label: "Connect an issue tracker", command: "node /opt/agentx/dist/main.js --env staging connector add linear --project payments-api" },
-      { label: "Add a project", command: "node /opt/agentx/dist/main.js --env staging project add" },
-      { label: "Send a test alert", command: "node /opt/agentx/dist/main.js --env staging alerts test" },
-      { label: "Remove AgentX", command: "node /opt/agentx/dist/main.js --env staging destroy" },
+      { label: "Developer sign-in", command: "node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com", group: "Invite your developers" },
+      { label: "Check the install", command: "node /opt/agentx/dist/main.js --env staging doctor", group: "Look after it" },
+      { label: "Connect an issue tracker", command: "node /opt/agentx/dist/main.js --env staging connector add linear --project payments-api", group: "Look after it" },
+      { label: "Add a project", command: "node /opt/agentx/dist/main.js --env staging project add", group: "Look after it" },
+      { label: "Send a test alert", command: "node /opt/agentx/dist/main.js --env staging alerts test", group: "Look after it" },
+      { label: "Remove AgentX", command: "node /opt/agentx/dist/main.js --env staging destroy", group: "Look after it" },
     ]);
     expect(ready?.link?.url).toBe("https://slack.com/app_redirect?team=T0TEAM&channel=C0PAY00001");
     // FR-058: the outcome is the fixed line, never the ready card's own words repeated.

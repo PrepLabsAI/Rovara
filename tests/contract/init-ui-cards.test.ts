@@ -255,9 +255,9 @@ describe("cards that offer to try again on the page (M18)", () => {
     expect(slackAppCard({ stage: "refused", problem: "Slack bots.info did not return the app id (no app_id); run agentx init again" }).lines)
       .toEqual(["Slack bots.info did not return the app id (no app_id)", "Nothing was saved."]);
     expect(slackAppCard({ stage: "refused", problem: "nothing was saved; copy the Bot User OAuth Token from the AgentX app in the right workspace, then run agentx init again" }).lines)
-      .toEqual(["nothing was saved; copy the Bot User OAuth Token from the AgentX app in the right workspace", "Nothing was saved."]);
+      .toEqual(["nothing was saved; copy the Bot User OAuth Token from the AgentX app in the right workspace"]);
     expect(slackAppCard({ stage: "refused", problem: "that token belongs to Slack workspace T0OTHER, but this install uses T0TEAM; nothing was saved" }).lines)
-      .toEqual(["that token belongs to Slack workspace T0OTHER, but this install uses T0TEAM; nothing was saved", "Nothing was saved."]);
+      .toEqual(["that token belongs to Slack workspace T0OTHER, but this install uses T0TEAM; nothing was saved"]);
     expect(slackAppCard({ stage: "refused", problem: "Slack refused the bot token (invalid_auth); copy it again from OAuth & Permissions" }).lines)
       .toEqual(["Slack refused the bot token (invalid_auth); copy it again from OAuth & Permissions", "Nothing was saved."]);
   });
@@ -416,12 +416,12 @@ describe("spec 048 the ready screen", () => {
       "Everything here is also in /home/a/.agentx/logs/init-staging.log.",
     ]);
     expect(card.commands).toEqual([
-      { label: "Developer sign-in", command: "node /opt/agentx/dist/main.js login https://abc.execute-api.us-east-1.amazonaws.com" },
-      { label: "Check the install", command: "node /opt/agentx/dist/main.js --env staging doctor" },
-      { label: "Connect an issue tracker", command: "node /opt/agentx/dist/main.js --env staging connector add linear --project payments-api" },
-      { label: "Add a project", command: "node /opt/agentx/dist/main.js --env staging project add" },
-      { label: "Send a test alert", command: "node /opt/agentx/dist/main.js --env staging alerts test" },
-      { label: "Remove AgentX", command: "node /opt/agentx/dist/main.js --env staging destroy" },
+      { label: "Developer sign-in", command: "node /opt/agentx/dist/main.js login https://abc.execute-api.us-east-1.amazonaws.com", group: "Invite your developers" },
+      { label: "Check the install", command: "node /opt/agentx/dist/main.js --env staging doctor", group: "Look after it" },
+      { label: "Connect an issue tracker", command: "node /opt/agentx/dist/main.js --env staging connector add linear --project payments-api", group: "Look after it" },
+      { label: "Add a project", command: "node /opt/agentx/dist/main.js --env staging project add", group: "Look after it" },
+      { label: "Send a test alert", command: "node /opt/agentx/dist/main.js --env staging alerts test", group: "Look after it" },
+      { label: "Remove AgentX", command: "node /opt/agentx/dist/main.js --env staging destroy", group: "Look after it" },
     ]);
     expect(card.details).toEqual(["What was created: agentx-staging-access"]);
     expect(lintCopy([

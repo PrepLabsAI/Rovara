@@ -55,6 +55,10 @@ describe("the page shell", () => {
     expect(WIZARD_JS).toContain('document.querySelectorAll("#question button, #failure-actions button")');
   });
 
+  it("FR-058: the ready card's commands sit under their group's subheading, as in the mockup", () => {
+    expect(WIZARD_JS).toContain('if (command.group && command.group !== group) section.append(el("h3", "", command.group));');
+  });
+
   it("Q4: a form field is never filled with a masked value, even if the server sent one", () => {
     expect(WIZARD_JS).toContain("if (field.value && !field.masked) input.value = field.value;");
   });

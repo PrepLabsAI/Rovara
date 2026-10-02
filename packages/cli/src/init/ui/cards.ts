@@ -162,11 +162,11 @@ export function slackAppCard(input: SlackCardInput): WizardCard {
       link: { url: SLACK_APPS_URL, label: "Open your Slack apps" },
     };
     case "bot": return { ...base, status: "waiting", lines: [`The token belongs to the bot @${input.user} in the ${input.team} workspace.`] };
-    case "refused": return {
-      ...base, status: "failed",
-      lines: [input.retry === false ? "Slack did not accept those values." : onPageProblem(input.problem), "Nothing was saved."],
-      details: [input.problem],
-    };
+    case "refused": {
+      const shown = input.retry === false ? "Slack did not accept those values." : onPageProblem(input.problem);
+      // Said once: some problems already say nothing was saved.
+      return { ...base, status: "failed", lines: [shown, ...(/\bnothing was saved\b/i.test(shown) ? [] : ["Nothing was saved."])], details: [input.problem] };
+    }
     case "approval": return {
       ...base, status: "waiting",
       lines: [`Slack is waiting for a workspace admin to approve "${input.appName}".`, "Your progress is saved. When the app is installed, start the install again and it continues from here."],
@@ -333,6 +333,9 @@ export function replyCard(input: ReplyCardInput): WizardCard {
 /** FR-058, FR-059 and #222: what works now, and every day-two command, each written so it works
  * exactly as shown (Plan ruling 4: the CLI's own path when it is not the published package). The
  * same facts as readyText, which the terminal and the page's outcome still show. */
+/** The ready card's command subheadings (the approved mockup's words). */
+export const READY_GROUPS = { invite: "Invite your developers", lookAfter: "Look after it" } as const;
+
 export function readyCard(input: {
   env: string; controlPlaneUrl: string; progress: InstallProgress; botName: string; invocation: CliInvocation;
   root: boolean; alertsOn: boolean; created: string[]; logPath?: string;
@@ -353,13 +356,16 @@ export function readyCard(input: {
       ...(input.root ? ["You installed as the AWS root user. The day-two commands below need an admin user: AWS does not let the root user use the AgentX operator role."] : []),
       ...(input.logPath === undefined ? [] : [`Everything here is also in ${input.logPath}.`]),
     ],
+    // FR-058: the mockup's two groups, each under its own subheading.
     commands: [
-      { label: "Developer sign-in", command: cliCommandLine(input.invocation, `login ${input.controlPlaneUrl}`) },
-      { label: "Check the install", command: cli("doctor") },
-      ...(project === undefined ? [] : [{ label: "Connect an issue tracker", command: cli(`connector add linear --project ${project.name}`) }]),
-      { label: "Add a project", command: cli("project add") },
-      ...(input.alertsOn ? [{ label: "Send a test alert", command: cli("alerts test") }] : []),
-      { label: "Remove AgentX", command: cli("destroy") },
+      { label: "Developer sign-in", command: cliCommandLine(input.invocation, `login ${input.controlPlaneUrl}`), group: READY_GROUPS.invite },
+      ...[
+        { label: "Check the install", command: cli("doctor") },
+        ...(project === undefined ? [] : [{ label: "Connect an issue tracker", command: cli(`connector add linear --project ${project.name}`) }]),
+        { label: "Add a project", command: cli("project add") },
+        ...(input.alertsOn ? [{ label: "Send a test alert", command: cli("alerts test") }] : []),
+        { label: "Remove AgentX", command: cli("destroy") },
+      ].map((command) => ({ ...command, group: READY_GROUPS.lookAfter })),
     ],
     ...(input.created.length === 0 ? {} : { details: [`What was created: ${input.created.join(", ")}`] }),
     ...(project?.channelId === undefined || project.channelName === undefined || teamId === undefined

@@ -200,7 +200,12 @@ function renderCard(card) {
     section.append(list);
   }
   if (card.link) section.append(linkBlock(card.link));
-  for (const command of card.commands ?? []) section.append(commandRow(command));
+  let group;
+  for (const command of card.commands ?? []) {
+    if (command.group && command.group !== group) section.append(el("h3", "", command.group));
+    group = command.group;
+    section.append(commandRow(command));
+  }
   if (card.id === "ready" && !installerClosed) {
     const buttons = el("div", "buttons");
     const close = el("button", "primary", "Close installer");

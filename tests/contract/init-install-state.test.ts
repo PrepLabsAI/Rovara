@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   INIT_STEP_IDS, emptyProgress, installAnswersParameterName, installProgressParameterName, readInstallAnswers,
-  readInstallProgress, writeInstallAnswers, writeInstallProgress, type InitAnswers,
+  readInstallProgress, SLACK_BOT_HANDLE_PATTERN, writeInstallAnswers, writeInstallProgress, type InitAnswers,
 } from "../../packages/cli/src/init/install-state.js";
 import { GITHUB_LOGIN_PATTERN } from "../../packages/cli/src/deploy/answer-schemas.js";
 import { sampleAnswers } from "../support/init-fakes.js";
@@ -23,6 +23,21 @@ describe("install state", () => {
     await writeInstallProgress(store, progress);
     expect(await readInstallProgress(store, "staging")).toEqual(progress);
     expect(await readInstallProgress(store, "other")).toBeUndefined();
+  });
+
+  it("reads an older Slack record that has no bot handle or workspace name", async () => {
+    const store = new MemoryParameterStore();
+    const older = { ...emptyProgress("staging", T0), slack: { appId: "A0APP00001", teamId: "T0123456789", botUserId: "U0BOT00001" } };
+    await writeInstallProgress(store, older);
+    expect(await readInstallProgress(store, "staging")).toEqual(older);
+  });
+
+  it("holds the bot handle to one pattern, the one the Slack app step checks before it stores it", async () => {
+    expect(SLACK_BOT_HANDLE_PATTERN.test("agentx-acme-staging")).toBe(true);
+    expect(SLACK_BOT_HANDLE_PATTERN.test("AgentX Bot")).toBe(false);
+    const store = new MemoryParameterStore();
+    const progress = { ...emptyProgress("staging", T0), slack: { appId: "A0APP00001", teamId: "T0123456789", botUserId: "U0BOT00001", botName: "AgentX Bot" } };
+    await expect(writeInstallProgress(store, progress)).rejects.toThrow();
   });
 
   it("shares the GitHub login pattern with answers.ts (Fix round 1, item 1): refuses the same invalid login", async () => {

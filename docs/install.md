@@ -14,8 +14,9 @@ the install, [docs/day-two.md](day-two.md) covers running it.
 
 You need:
 
-- **An AWS account.** AgentX recommends a dedicated AWS account for each install: environments
-  that share an account are not a security boundary against each other.
+- **An AWS account.** A separate AWS account just for AgentX keeps its costs and permissions apart
+  from your other work. Give each install its own: environments that share an account are not a
+  security boundary against each other.
 - **Admin credentials in that account for the first run** (for example `aws login` or an SSO
   profile). The platform team path needs them only on the platform team's side. Later, day-2
   commands use the narrower operator role that the install creates.

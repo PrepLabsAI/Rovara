@@ -74,7 +74,10 @@ export function stateEntries(state: WizardState, where: string): CopyEntry[] {
     entries.push(at(card.title, `${card.id} card`, context), ...card.lines.map((line) => at(line, `${card.id} card`, context)));
     for (const check of card.checks ?? []) entries.push(at(check.label, `${card.id} check`), at(check.detail, `${card.id} check`));
     if (card.link !== undefined) entries.push(at(card.link.label, `${card.id} link`), ...(card.link.note === undefined ? [] : [at(card.link.note, `${card.id} link`)]));
-    for (const command of card.commands ?? []) entries.push(at(command.label, `${card.id} command`, context), at(command.command, `${card.id} command`, context));
+    for (const command of card.commands ?? []) {
+      entries.push(at(command.label, `${card.id} command`, context), at(command.command, `${card.id} command`, context));
+      if (command.group !== undefined) entries.push(at(command.group, `${card.id} command group`));
+    }
     for (const line of card.details ?? []) entries.push(at(line, `${card.id} details`, "details"));
   }
   if (state.link !== undefined) entries.push(at(state.link.label, "run link"), ...(state.link.note === undefined ? [] : [at(state.link.note, "run link")]));
