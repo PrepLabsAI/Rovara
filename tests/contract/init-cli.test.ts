@@ -20,7 +20,7 @@ import { estimateMonthlyCost, suggestedBudgetUsd } from "../../packages/cli/src/
 import { markOperatorStop } from "../../packages/cli/src/init/stop.js";
 import {
   allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, fakeSlackApi, HOLDER, memoryInitSecrets, passingChecks, scriptedDeployer, scriptedPrompter,
-  slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET,
+  slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_CLI_INVOCATION, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET,
 } from "../support/init-fakes.js";
 import { stagingSettings } from "../support/environment-fixtures.js";
 import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "../support/fake-cloudformation.js";
@@ -87,6 +87,7 @@ async function harness(options: { releaseVersion?: string; regions?: string[] } 
     configDir: await tmp("agentx-projects-"),
   });
   const deps: InitCliDependencies = {
+    cliInvocation: TEST_CLI_INVOCATION,
     deploy: { identity: { get: async () => ({ account: "123456789012", arn: HOLDER }) }, store, secrets, deployer },
     initSecrets: secrets,
     checks: passingChecks(),
@@ -224,9 +225,9 @@ describe("agentx init", () => {
     expect(printed).toContain("Estimated monthly total");
     // The manual next steps of earlier installs (create the admin user, agentx login, register
     // and bind a project) are gone: init did them.
-    expect(printed).toContain("AgentX environment staging is ready.\n  Talk to it: mention <@U0BOT> in #payments (project payments-api, revision 1).");
+    expect(printed).toContain("AgentX environment staging is ready.\n  Talk to it: mention @agentx in #payments (project payments-api).");
     expect(printed).not.toContain("aws cognito-idp admin-create-user");
-    expect(printed).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com\n");
+    expect(printed).toContain("  Developers sign in with: node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com\n");
     const everywhere = await everywhereButSecrets(h);
     expect(everywhere).toContain("abc123.execute-api");
     expect(everywhere).not.toContain("fedcba9876543210fedcba9876543210");
@@ -251,7 +252,7 @@ describe("agentx init", () => {
     const resumed = h.printedSince(mark);
     expect(resumed).toContain("already done: Turn on developer sign-in");
     expect(resumed).toContain("AgentX environment staging is ready.");
-    expect(resumed).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com\n");
+    expect(resumed).toContain("  Developers sign in with: node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com\n");
   });
 
   it("a rerun after the e2e check failed repeats only that check: no second admin and no second project", async () => {
@@ -425,7 +426,7 @@ describe("agentx init", () => {
     const data = (JSON.parse(h.out.join("")) as { data: { status: string; ready?: string } }).data;
     expect(data.status).toBe("complete");
     expect(data.ready).toContain("AgentX environment staging is ready.");
-    expect(data.ready).toContain("Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com");
+    expect(data.ready).toContain("Developers sign in with: node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com");
   });
 
   it("under --yes without --connectors, adds none and says how to add them later", async () => {

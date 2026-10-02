@@ -15,6 +15,7 @@ import { addProject } from "../setup/project-add.js";
 import { installationToken } from "../setup/project-files.js";
 import { REPLY_WAIT_MS, waitForThreadedReply } from "../setup/reply-watch.js";
 import { BUDGET_TAG_NOTE, checkAlertWebhook } from "./answers.js";
+import { cliCommandLine, type CliInvocation } from "./cli-command.js";
 import type { InitContext } from "./context.js";
 import { CONNECTOR_LABELS, CONNECTOR_TYPES, type ConnectorType, type InstallProgress } from "./install-state.js";
 import { problemText, retryOnPage } from "./retry.js";
@@ -329,23 +330,24 @@ export function finishSteps(): InitStep<InitContext>[] {
 }
 
 /** The message a finished agentx init ends with: where to talk to AgentX, how developers sign in,
- * and the day-2 commands. */
-export function readyText(input: { env: string; controlPlaneUrl: string; progress: InstallProgress }): string {
+ * and the day-2 commands. FR-058, FR-059 and #222: the bot is named by its handle, never a raw
+ * Slack mention, and every command is built from the CLI's own invocation, so it works as shown. */
+export function readyText(input: { env: string; controlPlaneUrl: string; progress: InstallProgress; botName: string; invocation: CliInvocation }): string {
   const { env, progress } = input;
-  const cli = `agentx --env ${env}`;
-  const { project, slack } = progress;
+  const cli = (args: string) => cliCommandLine(input.invocation, `--env ${env} ${args}`);
+  const { project } = progress;
   const connectors = progress.connectors ?? [];
   const connected = connectors.map((entry) => CONNECTOR_LABELS[entry.type]);
   return [
     `AgentX environment ${env} is ready.`,
-    ...(project?.channelName === undefined || slack === undefined ? [] : [`  Talk to it: mention <@${slack.botUserId}> in #${project.channelName} (project ${project.name}, revision ${project.revision}).`]),
+    ...(project?.channelName === undefined ? [] : [`  Talk to it: mention @${input.botName} in #${project.channelName} (project ${project.name}).`]),
     // Repeated here: the developer-signin step prints it only on the run that executes it, and a
     // resume (after the alert confirmation wait, say) finishes without that step.
-    `  Developers sign in with: npx @charterarc/agentx login ${input.controlPlaneUrl}`,
-    ...(project === undefined ? [] : [`  ${connected.length === 0 ? "No connectors yet." : `Connected: ${connected.join(", ")}.`} Add ${connected.length === 0 ? "one" : "more"} with ${cli} connector add linear|jira|asana --project ${project.name}.`]),
+    `  Developers sign in with: ${cliCommandLine(input.invocation, `login ${input.controlPlaneUrl}`)}`,
+    ...(project === undefined ? [] : [`  ${connected.length === 0 ? "No connectors yet." : `Connected: ${connected.join(", ")}.`} Add ${connected.length === 0 ? "one" : "more"} with ${cli(`connector add linear|jira|asana --project ${project.name}`)}.`]),
     // Owner decision 6: a connector saved with a warning says so again at the end.
     ...connectors.flatMap((entry) => (entry.warning === undefined ? [] : [`  Warning (${CONNECTOR_LABELS[entry.type]}): ${entry.warning}.`])),
-    `  More projects: ${cli} project add, then ${cli} channel add.`,
-    `  Send a test alarm any time: ${cli} alerts test.`,
+    `  More projects: ${cli("project add")}, then ${cli("channel add")}.`,
+    `  Send a test alarm any time: ${cli("alerts test")}.`,
   ].join("\n");
 }

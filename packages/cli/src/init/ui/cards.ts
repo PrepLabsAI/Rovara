@@ -4,6 +4,7 @@
 // detail collapsed rather than dropped). Every card is built here, from facts a step already has,
 // so the page's words are tested in one place and the page only lays text out. No builder takes a
 // secret, so no card can carry one (FR-012).
+import { cliCommandLine, type CliInvocation } from "../cli-command.js";
 import { CONNECTOR_LABELS, type InstallProgress } from "../install-state.js";
 import { ADMIN_USER_GUIDE_URL, DEDICATED_ACCOUNT_NOTE, ROOT_WARNING, type PrerequisiteCheck } from "../prerequisites.js";
 import type { WizardCard } from "./protocol.js";
@@ -329,27 +330,38 @@ export function replyCard(input: ReplyCardInput): WizardCard {
   };
 }
 
-/** FR-052 and Q10: what works now, then the optional commands under "Later, if you want more:".
- * The same facts as readyText, which the terminal and the page's outcome still show. */
-export function readyCard(input: { env: string; controlPlaneUrl: string; progress: InstallProgress }): WizardCard {
-  const { env, progress } = input;
-  const cli = `agentx --env ${env}`;
-  const { project, slack } = progress;
-  const connectors = progress.connectors ?? [];
-  const teamId = project?.teamId ?? slack?.teamId;
+/** FR-058, FR-059 and #222: what works now, and every day-two command, each written so it works
+ * exactly as shown (Plan ruling 4: the CLI's own path when it is not the published package). The
+ * same facts as readyText, which the terminal and the page's outcome still show. */
+export function readyCard(input: {
+  env: string; controlPlaneUrl: string; progress: InstallProgress; botName: string; invocation: CliInvocation;
+  root: boolean; alertsOn: boolean; created: string[]; logPath?: string;
+}): WizardCard {
+  const cli = (args: string) => cliCommandLine(input.invocation, `--env ${input.env} ${args}`);
+  const { project } = input.progress;
+  const connectors = input.progress.connectors ?? [];
+  const teamId = project?.teamId ?? input.progress.slack?.teamId;
   return {
     id: "ready", title: "AgentX is ready", status: "ok",
     lines: [
-      `AgentX environment ${env} is ready.`,
-      ...(project?.channelName === undefined || slack === undefined ? [] : [`Talk to it: mention the bot (member ID ${slack.botUserId}) in #${project.channelName}, project ${project.name}, revision ${project.revision}.`]),
-      `Developers sign in from their AI tools with: npx @charterarc/agentx login ${input.controlPlaneUrl}`,
-      connectors.length === 0 ? "No connectors yet." : `Connected: ${connectors.map((entry) => CONNECTOR_LABELS[entry.type]).join(", ")}.`,
+      ...(project?.channelName === undefined ? [] : [`Try it: in #${project.channelName}, mention @${input.botName} and ask it something.`]),
+      "Send your developers the sign-in command below. They run it once, then use AgentX from Claude Code, Codex or Cursor.",
+      ...(input.invocation.published ? [] : ["The AgentX CLI is not published yet, so this command works on this computer. Other computers need their own copy of the AgentX CLI first."]),
+      connectors.length === 0 ? "No issue trackers connected yet." : `Connected: ${connectors.map((entry) => CONNECTOR_LABELS[entry.type]).join(", ")}.`,
       ...connectors.flatMap((entry) => (entry.warning === undefined ? [] : [`Warning (${CONNECTOR_LABELS[entry.type]}): ${entry.warning}.`])),
-      "Later, if you want more:",
-      ...(project === undefined ? [] : [`More connectors: ${cli} connector add linear|jira|asana --project ${project.name}`]),
-      `More projects: ${cli} project add, then ${cli} channel add`,
-      `A test alarm any time: ${cli} alerts test`,
+      ...(input.alertsOn ? [] : ["Alerts are off. You can turn them on later; the day-two guide says how."]),
+      ...(input.root ? ["You installed as the AWS root user. The day-two commands below need an admin user: AWS does not let the root user use the AgentX operator role."] : []),
+      ...(input.logPath === undefined ? [] : [`Everything here is also in ${input.logPath}.`]),
     ],
+    commands: [
+      { label: "Developer sign-in", command: cliCommandLine(input.invocation, `login ${input.controlPlaneUrl}`) },
+      { label: "Check the install", command: cli("doctor") },
+      ...(project === undefined ? [] : [{ label: "Connect an issue tracker", command: cli(`connector add linear --project ${project.name}`) }]),
+      { label: "Add a project", command: cli("project add") },
+      ...(input.alertsOn ? [{ label: "Send a test alert", command: cli("alerts test") }] : []),
+      { label: "Remove AgentX", command: cli("destroy") },
+    ],
+    ...(input.created.length === 0 ? {} : { details: [`What was created: ${input.created.join(", ")}`] }),
     ...(project?.channelId === undefined || project.channelName === undefined || teamId === undefined
       ? {} : { link: { url: slackChannelLink(teamId, project.channelId), label: `Open #${project.channelName} in Slack` } }),
   };

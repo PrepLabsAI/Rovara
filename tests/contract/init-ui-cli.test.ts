@@ -12,7 +12,7 @@ import { environmentStackName } from "@agentx/contracts";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { environmentCachePath } from "../../packages/cli/src/environments/cache.js";
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL } from "../../packages/cli/src/init/answers.js";
-import type { InitCliDependencies } from "../../packages/cli/src/init/commands.js";
+import { READY_HOLD_MS, READY_OUTCOME, holdReadyScreen, type InitCliDependencies } from "../../packages/cli/src/init/commands.js";
 import { estimateMonthlyCost, suggestedBudgetUsd } from "../../packages/cli/src/init/cost.js";
 import { initLogPath } from "../../packages/cli/src/init/log-file.js";
 import { NO_BROWSER_LINE } from "../../packages/cli/src/init/ui-mode.js";
@@ -28,7 +28,7 @@ import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "../support/fake-cloudfor
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { ADMIN_EMAIL, FOUNDATION_OUTPUTS, fakeAlerts, fakeControlPlane, fakeRepositories, fakeSlackChannels, setupServices, turn } from "../support/setup-fakes.js";
 import { markOperatorStop } from "../../packages/cli/src/init/stop.js";
-import type { WizardSnapshot } from "../../packages/cli/src/init/ui/protocol.js";
+import { WIZARD_TOKEN_HEADER, type WizardSnapshot } from "../../packages/cli/src/init/ui/protocol.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -135,6 +135,10 @@ async function harness() {
   };
   return {
     store, secrets, deployer, github, plane, setup, out, err, home, base, run, runUi, release,
+    /** Moves the harness's own fake clock, the way the default `sleep` does; a test that overrides
+     * `sleep` to intercept one particular wait calls this for every other one, so the run's own
+     * polling loops still behave exactly as the default `sleep` would. */
+    advance: (ms: number) => { clock += ms; },
     printed: () => `${out.join("")}${err.join("")}`,
     /** The terminal, every SSM value, this machine's environment cache, and the project files the
      * finishing steps wrote. */
@@ -314,15 +318,14 @@ describe("agentx init --ui", () => {
     const last = operator.states.at(-1);
     expect(last?.log.join("\n")).toContain("done: Set up your first project");
     expect(last?.log.join("\n")).toContain("done: Get a first reply in Slack");
-    // The page ends on the same summary the terminal does, developer sign-in command and all.
-    expect(last).toMatchObject({ phase: "finished" });
-    expect(last?.outcome).toContain("AgentX environment staging is ready.");
-    expect(last?.outcome).toContain("  Talk to it: mention <@U0BOT> in #payments (project payments-api, revision 1).");
-    expect(last?.outcome).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com");
+    // FR-058: the page ends on the fixed outcome, never the full ready summary (the ready card
+    // already said it in full).
+    expect(last).toMatchObject({ phase: "finished", outcome: READY_OUTCOME });
     // FR-070: with the page open, nothing more reaches stdout; the full ready summary is in the log file.
     expect(h.out.join("")).toBe("");
     const log = await readFile(initLogPath(h.home, "staging"), "utf8");
-    expect(log).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com\n");
+    expect(log).toContain("AgentX environment staging is ready.\n  Talk to it: mention @agentx in #payments (project payments-api).\n");
+    expect(log).toContain("  Developers sign in with: node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com\n");
   });
 
   it("--from-bundle works through the page: only what the export did not know is asked there, and a bad bundle is refused before the page opens", async () => {
@@ -699,19 +702,60 @@ describe("agentx init --ui", () => {
     expect(operator.states.at(-1)?.cards?.find((card) => card.id === "alerts")?.lines).toEqual(["Alerts go to ops@example.com, and the test alert arrived."]);
   });
 
-  it("FR-052: the page ends on a ready card that needs no command to finish, and the outcome is still readyText", async () => {
+  it("spec 048 FR-058 and FR-059: the ready screen is shown once, and the installer stays up until Close installer or 30 minutes", async () => {
+    const h = await harness();
+    let during: WizardSnapshot | undefined;
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    const code = await h.run(["--ui"], {
+      openBrowser: operator.open,
+      sleep: async (ms) => {
+        if (ms !== READY_HOLD_MS) return h.advance(ms);
+        const { origin, searchParams } = new URL(operator.opened[0] ?? "http://x");
+        during = (await (await fetch(`${origin}/state`, { headers: { [WIZARD_TOKEN_HEADER]: searchParams.get("t") ?? "" } })).json()) as WizardSnapshot;
+      },
+    });
+    await operator.settled();
+    expect(code).toBe(0);
+    const ready = during?.cards?.find((card) => card.id === "ready");
+    expect(ready?.status).toBe("ok");
+    expect(during?.outcome).toBe(READY_OUTCOME);
+    for (const line of ready?.lines ?? []) expect(during?.outcome ?? "").not.toContain(line);
+  });
+
+  it("holds until Close installer, and no longer", async () => {
+    let resolveClose: () => void = () => undefined;
+    const closeRequested = new Promise<void>((resolvePromise) => { resolveClose = resolvePromise; });
+    const waited: number[] = [];
+    const holding = holdReadyScreen({ closeRequested, ms: READY_HOLD_MS, sleep: (ms) => { waited.push(ms); return new Promise(() => undefined); } });
+    resolveClose();
+    await holding;
+    expect(waited).toEqual([30 * 60_000]);
+  });
+
+  it("FR-059 and #222: the page ends on a ready card whose commands work as shown, and the outcome does not repeat it (spec 048 FR-058)", async () => {
     const h = await harness();
     const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     expect(code).toBe(0);
     const last = operator.states.at(-1);
     const ready = last?.cards?.find((card) => card.id === "ready");
-    expect(ready?.lines[0]).toBe("AgentX environment staging is ready.");
+    expect(ready?.lines).toEqual([
+      "Try it: in #payments, mention @agentx and ask it something.",
+      "Send your developers the sign-in command below. They run it once, then use AgentX from Claude Code, Codex or Cursor.",
+      "The AgentX CLI is not published yet, so this command works on this computer. Other computers need their own copy of the AgentX CLI first.",
+      "No issue trackers connected yet.",
+      `Everything here is also in ${initLogPath(h.home, "staging")}.`,
+    ]);
+    expect(ready?.commands).toEqual([
+      { label: "Developer sign-in", command: "node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com" },
+      { label: "Check the install", command: "node /opt/agentx/dist/main.js --env staging doctor" },
+      { label: "Connect an issue tracker", command: "node /opt/agentx/dist/main.js --env staging connector add linear --project payments-api" },
+      { label: "Add a project", command: "node /opt/agentx/dist/main.js --env staging project add" },
+      { label: "Send a test alert", command: "node /opt/agentx/dist/main.js --env staging alerts test" },
+      { label: "Remove AgentX", command: "node /opt/agentx/dist/main.js --env staging destroy" },
+    ]);
     expect(ready?.link?.url).toBe("https://slack.com/app_redirect?team=T0TEAM&channel=C0PAY00001");
-    const later = ready?.lines.indexOf("Later, if you want more:") ?? -1;
-    expect(later).toBeGreaterThan(0);
-    expect(ready?.lines.slice(0, later).some((line) => line.includes("agentx --env"))).toBe(false);
-    // The phase 1 outcome is unchanged: the same summary the terminal prints.
-    expect(last?.outcome).toContain("AgentX environment staging is ready.");
+    // FR-058: the outcome is the fixed line, never the ready card's own words repeated.
+    expect(last?.outcome).toBe(READY_OUTCOME);
   });
 
   it("a run stopped with --stop-after shows no ready card", async () => {

@@ -10,6 +10,7 @@ import { readEnvironmentSettings } from "../environments/settings.js";
 import { applySignInChange, errorReason } from "../signin/apply.js";
 import { SIGNIN_FLAG_NAMES, enableOidcSignIn, enableSlackSignIn, type SignInCredentials } from "../signin/collect.js";
 import { readSignInSettings, type DeveloperSignInSettings } from "../signin/settings.js";
+import { cliCommandLine } from "./cli-command.js";
 import type { InitContext } from "./context.js";
 import type { SlackApi } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
@@ -94,7 +95,7 @@ export function developerSignInStep(input: { slack: SlackApi }): InitStep<InitCo
         confirm: async (text) => { context.write(text); return context.prompter.confirm("Apply this change?", { defaultValue: true }); },
         write: context.write, now: context.now, sleep: context.sleep, lockHeld: true, rerun: "agentx init",
       });
-      context.write(`Developers sign in with: npx @charterarc/agentx login ${settings.controlPlaneUrl}`);
+      context.write(`Developers sign in with: ${cliCommandLine(context.cliInvocation, `login ${settings.controlPlaneUrl}`)}`);
       return { status: "done", note: `developer sign-in: ${methods === "both" ? "Slack and company sign-in" : methods === "slack" ? "Slack" : "company sign-in"}` };
     },
   };

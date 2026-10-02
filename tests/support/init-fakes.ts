@@ -8,6 +8,7 @@ import type { LoadedRelease } from "../../packages/cli/src/deploy/release.js";
 import { SecretAlreadyExistsError } from "../../packages/cli/src/deploy/signing-key.js";
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import { readEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
+import type { CliInvocation } from "../../packages/cli/src/init/cli-command.js";
 import type { InitContext, InitSecrets } from "../../packages/cli/src/init/context.js";
 import type { GitHubApi } from "../../packages/cli/src/init/github-app.js";
 import { emptyProgress, type InitAnswers, type InstallProgress } from "../../packages/cli/src/init/install-state.js";
@@ -105,6 +106,11 @@ export function passingChecks(overrides: Partial<PrerequisiteChecks> = {}): Prer
 
 export const T0 = Date.parse("2026-09-27T00:00:00.000Z");
 export const HOLDER = "arn:aws:sts::123456789012:assumed-role/Admin/alice";
+
+/** A sensible default for `InitContext.cliInvocation` and `InitCliDependencies.cliInvocation`:
+ * a CLI built from source (Plan ruling 4), so every test gets a command that works as shown
+ * without pinning its own. */
+export const TEST_CLI_INVOCATION: CliInvocation = { published: false, cliPath: "/opt/agentx/dist/main.js" };
 
 export function memoryInitSecrets(initial: Record<string, string> = {}): InitSecrets & { values: Map<string, string> } {
   const values = new Map(Object.entries(initial));
@@ -224,6 +230,7 @@ export function initContext(overrides: Partial<Omit<InitContext, "secrets">> & {
     runPrerequisites: async () => undefined,
     setup: setupServices(),
     flags: {},
+    cliInvocation: TEST_CLI_INVOCATION,
     // Read at call time, as init builds it: the real openAdminSession over context.setup, with the
     // context's browser (absent means --no-browser) and your own OIDC's admin claim when named.
     adminSession: async () => {

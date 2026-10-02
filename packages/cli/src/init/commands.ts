@@ -15,6 +15,7 @@ import { loginWithPkce, openSystemBrowser } from "../auth.js";
 import { cliErrorFor, cloudFormationOutputsReader, prepareDeployment, realCommandRunner, type DeployCliDependencies, type PreparedDeployment, type Writer } from "../deploy/commands.js";
 import { readBundleAnswers, type BundleAnswers } from "../deploy/export-bundle.js";
 import { assertSourceAtRelease } from "../deploy/cdk-engine.js";
+import { installOrder } from "../deploy/parameters.js";
 import { assertReleaseCoversRegion, loadRelease, type LoadedRelease } from "../deploy/release.js";
 import { stsCallerIdentity } from "../environments/adopt.js";
 import type { LockRecord } from "../environments/lock.js";
@@ -44,12 +45,12 @@ import { listAwsProfiles, pickAwsProfile, resolveCaller } from "./aws-account.js
 import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallProgress, type InitAnswers, type InitStepId } from "./install-state.js";
 import { initLogPath, openInitLog, type InitLog } from "./log-file.js";
 import { confirmInstallPlan } from "./plan.js";
-import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
+import { awsPrerequisiteChecks, checkPrerequisites, isRootUser, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
 import { processPrompter, secretFromSource, unattendedPrompter, type Prompter, type QuestionHelp } from "./prompts.js";
 import { fetchRelease, sourceRelease } from "./release-fetch.js";
 import { problemText, retryOnPage } from "./retry.js";
 import { developerSignInStep } from "./signin-step.js";
-import { slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
+import { botNameOf, slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
 import { isOperatorStop } from "./stop.js";
 import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from "./steps.js";
 import { browserAvailable, NO_BROWSER_LINE, resolveUiMode } from "./ui-mode.js";
@@ -130,6 +131,35 @@ export type InitResult = InitRunResult & {
 /** True when `callerArn` is a session of this environment's AgentX operator role (FR-019). */
 export function isOperatorRole(callerArn: string, env: string): boolean {
   return new RegExp(`:assumed-role/${environmentOperatorRoleName(env)}/`).test(callerArn);
+}
+
+/** FR-058 and FR-059: the ready screen stays up, so the page's outcome names nothing the ready
+ * card already says in full (the card is the one place the developer sign-in and day-two commands
+ * live); the terminal still gets READY_LINE and the full readyText goes to the log file. */
+export const READY_OUTCOME = "AgentX is installed.";
+
+/** FR-059: how long the ready screen stays up on its own, once the install is complete. */
+export const READY_HOLD_MS = 30 * 60_000;
+
+/** The plain words for a run that stopped waiting on someone else (a workspace admin, an alert
+ * subscription), shown as the terminal's one-line summary in place of the raw step message, which
+ * carries its own (terminal-only) rerun instruction. */
+const WAITING_STEP_PLAIN: Partial<Record<InitStepId, string>> = {
+  "slack-app": "Waiting for a Slack admin to approve the app.",
+  alerts: "Waiting for the alert subscription to be confirmed.",
+};
+
+/** FR-059: the ready screen stays until the page asks to close (Plan ruling 3: a page button, not
+ * a question), or for READY_HOLD_MS, whichever comes first; a real run clears its own timer the
+ * moment either happens, so the process exits as soon as Close installer is pressed. */
+export async function holdReadyScreen(input: { closeRequested: Promise<void>; ms: number; sleep?: (ms: number) => Promise<void> }): Promise<void> {
+  if (input.sleep !== undefined) {
+    await Promise.race([input.closeRequested, input.sleep(input.ms)]);
+    return;
+  }
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([input.closeRequested, new Promise<void>((resolvePromise) => { timer = setTimeout(resolvePromise, input.ms); })]);
+  clearTimeout(timer);
 }
 
 export const OPERATOR_ACCESS_REFUSAL =
@@ -284,17 +314,39 @@ export async function runInit(options: InitOptions, deps: InitCliDependencies, s
   };
   try {
     const result = await init(options, deps, services, session);
-    // A finished run ends the page on the same summary the terminal ends on: where to talk to
-    // AgentX, the developer sign-in command, and the day-2 commands (readyText).
-    session.wizard?.finish(result.status !== "complete" ? result.message
-      : result.stoppedAfter !== undefined ? `Stopped after the ${result.stoppedAfter} step, as --stop-after asked.`
-        : result.ready ?? `AgentX environment ${result.env} is installed.`);
-    if (session.wizard !== undefined) {
+    const wizard = session.wizard;
+    if (wizard !== undefined) {
+      const complete = result.status === "complete" && result.stoppedAfter === undefined;
+      // FR-058 and FR-059: the page's outcome never repeats what the ready card already says (its
+      // commands and day-two advice); a paused run (waiting on a Slack admin, an alert
+      // subscription) gets the same plain form, with the continue command instead of a line
+      // naming the terminal; --stop-after keeps its own text.
+      if (complete) {
+        wizard.finish(READY_OUTCOME);
+      } else if (result.stoppedAfter !== undefined) {
+        wizard.finish(`Stopped after the ${result.stoppedAfter} step, as --stop-after asked.`);
+      } else {
+        const region = session.region ?? options.region ?? "<region>";
+        wizard.finish("The install is paused. Your progress is saved.", undefined, [
+          { label: "Continue later with", command: cliCommandLine(session.invocation, `--env ${options.env} init --region ${region}`) },
+        ]);
+      }
       // FR-070 and FR-071: the full ready summary goes to the log file, never the terminal; the
       // terminal gets the one fixed line below (Task 15's own finish work says READY_LINE too, per
       // the controller ruling that moved it here so this task's terminal-lines test passes).
       if (result.ready !== undefined) session.log?.write(`${result.ready}\n`);
-      if (result.status === "complete" && result.stoppedAfter === undefined) session.say(READY_LINE);
+      if (complete) {
+        session.say(READY_LINE);
+        // FR-059: the page stays open (Close installer, or 30 minutes) only once the install is
+        // actually done; a paused or stopped-after run ends the page right away, as before.
+        await holdReadyScreen({ closeRequested: wizard.closeRequested(), ms: READY_HOLD_MS, ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }) });
+      } else if (result.status === "waiting") {
+        session.say(stoppedLine({
+          phase: wizard.hub.state().journey.current,
+          problem: WAITING_STEP_PLAIN[result.step] ?? "The install is paused.",
+          logPath: session.log?.path ?? "the log",
+        }));
+      }
     }
     return result;
   } catch (error) {
@@ -739,6 +791,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     setup,
     adminSession,
     flags: options.finishFlags,
+    cliInvocation: session.invocation,
   };
 
   try {
@@ -788,15 +841,26 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     }
     const settings = result.status === "complete" ? await readEnvironmentSettings(store, env) : undefined;
     const progress = result.status === "complete" ? await readInstallProgress(store, env) : undefined;
-    // FR-052: the page's last card says what works now; the terminal and the page's outcome keep
-    // readyText.
+    // FR-058 and FR-059: the page's last card says what works now, and gives every command in a
+    // form that works as shown; the terminal and the log file keep readyText, the same facts.
     if (surface !== undefined && settings !== undefined && progress !== undefined) {
-      surface.card(readyCard({ env, controlPlaneUrl: settings.controlPlaneUrl, progress }));
+      surface.card(readyCard({
+        env, controlPlaneUrl: settings.controlPlaneUrl, progress,
+        botName: botNameOf(progress, finalAnswers.slack.appName), invocation: session.invocation,
+        root: isRootUser(caller.arn), alertsOn: finalAnswers.alert.kind !== "none",
+        created: installOrder(finalAnswers.identity.mode).map((part) => environmentStackName(env, part)),
+        ...(session.log === undefined ? {} : { logPath: session.log.path }),
+      }));
     }
     return {
       ...result, env, resumed: stored !== undefined,
       ...(settings === undefined ? {} : { controlPlaneUrl: settings.controlPlaneUrl }),
-      ...(settings === undefined || progress === undefined ? {} : { ready: readyText({ env, controlPlaneUrl: settings.controlPlaneUrl, progress }) }),
+      ...(settings === undefined || progress === undefined ? {} : {
+        ready: readyText({
+          env, controlPlaneUrl: settings.controlPlaneUrl, progress,
+          botName: botNameOf(progress, finalAnswers.slack.appName), invocation: session.invocation,
+        }),
+      }),
       ...(session.wizard === undefined ? {} : { pageMode: true as const }),
     };
   } finally {

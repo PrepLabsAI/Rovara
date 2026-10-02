@@ -272,7 +272,6 @@ describe("cards that offer to try again on the page (M18)", () => {
   });
 });
 
-const T0 = Date.parse("2026-09-27T00:00:00.000Z");
 const WHERE = { channelName: "payments", channelId: "C0PAY00001", teamId: "T0123456789" };
 
 describe("the finishing cards", () => {
@@ -394,28 +393,57 @@ describe("the finishing cards", () => {
       .toEqual({ id: "admin", title: "Your AgentX sign-in", status: "failed", lines: ["The sign-in did not finish."], details: ["your sign-in token has no email or sub claim; fix it, then run agentx init again"] });
   });
 
-  it("FR-052 and Q10: the ready card says what works now, and puts every command under Later", () => {
-    const card = readyCard({ env: "staging", controlPlaneUrl: "https://cp.example.test", progress: {
-      ...emptyProgress("staging", T0),
-      slack: { appId: "A0APP00001", teamId: "T0123456789", botUserId: "U0BOT00001" },
-      project: { name: "payments-api", revision: 2, channelName: "payments", channelId: "C0PAY00001", teamId: "T0123456789" },
-      connectors: [{ type: "linear", ref: "linear" }],
-    } });
-    expect(card).toEqual({
-      id: "ready", title: "AgentX is ready", status: "ok",
-      lines: [
-        "AgentX environment staging is ready.",
-        "Talk to it: mention the bot (member ID U0BOT00001) in #payments, project payments-api, revision 2.",
-        "Developers sign in from their AI tools with: npx @charterarc/agentx login https://cp.example.test",
-        "Connected: Linear.",
-        "Later, if you want more:",
-        "More connectors: agentx --env staging connector add linear|jira|asana --project payments-api",
-        "More projects: agentx --env staging project add, then agentx --env staging channel add",
-        "A test alarm any time: agentx --env staging alerts test",
-      ],
-      link: { url: "https://slack.com/app_redirect?team=T0123456789&channel=C0PAY00001", label: "Open #payments in Slack" },
+});
+
+const FROM_SOURCE = { published: false, cliPath: "/opt/agentx/dist/main.js" };
+const READY_PROGRESS = {
+  ...emptyProgress("staging", 0),
+  slack: { appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT", botName: "agentx-acme-staging" },
+  project: { name: "payments-api", revision: 1, channelName: "payments", channelId: "C0PAY00001", teamId: "T0TEAM" },
+};
+
+describe("spec 048 the ready screen", () => {
+  it("FR-059 and #222: says how to try AgentX by name, and gives commands that work as shown, each with --env", () => {
+    const card = readyCard({
+      env: "staging", controlPlaneUrl: "https://abc.execute-api.us-east-1.amazonaws.com", progress: READY_PROGRESS, botName: "agentx-acme-staging",
+      invocation: FROM_SOURCE, root: false, alertsOn: true, created: ["agentx-staging-access"], logPath: "/home/a/.agentx/logs/init-staging.log",
     });
-    const later = card.lines.indexOf("Later, if you want more:");
-    expect(card.lines.slice(0, later).some((line) => line.includes("agentx --env"))).toBe(false);
+    expect(card.lines).toEqual([
+      "Try it: in #payments, mention @agentx-acme-staging and ask it something.",
+      "Send your developers the sign-in command below. They run it once, then use AgentX from Claude Code, Codex or Cursor.",
+      "The AgentX CLI is not published yet, so this command works on this computer. Other computers need their own copy of the AgentX CLI first.",
+      "No issue trackers connected yet.",
+      "Everything here is also in /home/a/.agentx/logs/init-staging.log.",
+    ]);
+    expect(card.commands).toEqual([
+      { label: "Developer sign-in", command: "node /opt/agentx/dist/main.js login https://abc.execute-api.us-east-1.amazonaws.com" },
+      { label: "Check the install", command: "node /opt/agentx/dist/main.js --env staging doctor" },
+      { label: "Connect an issue tracker", command: "node /opt/agentx/dist/main.js --env staging connector add linear --project payments-api" },
+      { label: "Add a project", command: "node /opt/agentx/dist/main.js --env staging project add" },
+      { label: "Send a test alert", command: "node /opt/agentx/dist/main.js --env staging alerts test" },
+      { label: "Remove AgentX", command: "node /opt/agentx/dist/main.js --env staging destroy" },
+    ]);
+    expect(card.details).toEqual(["What was created: agentx-staging-access"]);
+    expect(lintCopy([
+      ...cardEntries(card).map((entry) => ({ ...entry, context: entry.context === "page" ? ("ready" as const) : entry.context })),
+      ...(card.commands ?? []).map((command) => ({ where: "ready", text: command.command, context: "ready" as const })),
+    ])).toEqual([]);
+  });
+
+  it("FR-016: names the commands that need an admin user when the install ran as root", () => {
+    const card = readyCard({
+      env: "staging", controlPlaneUrl: "https://abc.example.com", progress: READY_PROGRESS, botName: "agentx-acme-staging",
+      invocation: FROM_SOURCE, root: true, alertsOn: true, created: [],
+    });
+    expect(card.lines).toContain("You installed as the AWS root user. The day-two commands below need an admin user: AWS does not let the root user use the AgentX operator role.");
+  });
+
+  it("names the published package only when the CLI is the published one", () => {
+    const card = readyCard({
+      env: "staging", controlPlaneUrl: "https://abc.example.com", progress: READY_PROGRESS, botName: "agentx-acme-staging",
+      invocation: { published: true, version: "1.2.3", cliPath: "/x" }, root: false, alertsOn: true, created: [],
+    });
+    expect(card.commands?.[0]?.command).toBe("npx @charterarc/agentx@1.2.3 login https://abc.example.com");
+    expect(card.lines.join(" ")).not.toContain("not published");
   });
 });
