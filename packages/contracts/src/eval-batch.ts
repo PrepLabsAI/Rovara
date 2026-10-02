@@ -109,6 +109,19 @@ export const EvalBatchWatchStateSchema = z.object({
   /** A watcher is posting the summary; another may take over once the claim is old. */
   summaryClaimedAt: z.string().datetime().optional(),
   summaryPostedAt: z.string().datetime().optional(),
+  /** The summary message's timestamp, so a watcher that posted it records it rather than posting again. */
+  summaryTs: SlackThreadSchema.shape.threadTs.optional(),
+  /** The Slack form's start message was posted (Ruling 22 M-3: a redelivery posts it if not). */
+  startPostedAt: z.string().datetime().optional(),
+  /**
+   * Ruling 24: a CLI batch's opener. A watcher claims it before posting and stores its timestamp
+   * after, so a failed thread record retries the record, never the post.
+   */
+  openerClaimedAt: z.string().datetime().optional(),
+  openerTs: SlackThreadSchema.shape.threadTs.optional(),
+  /** Ruling 24: the watcher gave up on the batch's thread (a permanent Slack error); nothing more is posted. */
+  droppedAt: z.string().datetime().optional(),
+  dropReason: z.string().min(1).max(200).optional(),
 }).strict();
 
 export const EvalBatchRecordSchema = z.object({
@@ -222,7 +235,7 @@ export const EvalBatchSummarySchema = z.object({
 export const EvalBatchModelProgressSchema = z.object({
   model: EvalBatchModelSchema,
   runs: z.number().int().nonnegative(),
-  /** Runs that ended (graded, failed or cancelled); a run that never started is not counted. */
+  /** Runs that ran and ended (graded, failed, or cancelled once started); an entry cancelled or left before it started is not counted. */
   finished: z.number().int().nonnegative(),
   resolved: z.number().int().nonnegative(),
   /** True once none of the model's runs is queued or in flight. */
@@ -253,13 +266,24 @@ export const EvalBatchWatchedSchema = z.object({
   summary: EvalBatchSummarySchema.optional(),
 }).strict();
 
-export const EvalBatchWatchListSchema = z.object({ batches: z.array(EvalBatchWatchedSchema) }).strict();
+/** Ruling 24: why the list took a batch off the watcher's list for good. */
+export const EvalBatchWatchDropReasonSchema = z.enum(["channel_unbound", "channel_moved", "ended_over_7_days"]);
+export const EvalBatchWatchListSchema = z.object({
+  batches: z.array(EvalBatchWatchedSchema),
+  /** Batches this list dropped from the watcher's list; the watcher logs each as an error. */
+  dropped: z.array(z.object({ batchId: z.string().uuid(), reason: EvalBatchWatchDropReasonSchema }).strict()).optional(),
+}).strict();
 
 /** FR-002: the Slack form, its models resolved to approved identifiers by the Slack service. */
 export const EvalBatchSlackStartRequestSchema = z.object({
   dataset: SwebenchDatasetSchema,
   instanceIds: z.array(SwebenchInstanceIdSchema).min(1).max(EVAL_BATCH_SLACK_MAX_RUNS),
   models: z.array(ModelIdentifierSchema).min(1).max(EVAL_BATCH_SLACK_MAX_RUNS),
+  /**
+   * Ruling 23: the model names as the member typed them. With the dataset, the instances, the
+   * repeats and the cap as given, they are the form as received, which the batch ID is derived from.
+   */
+  selectors: z.array(z.string().min(1).max(256)).min(1).max(EVAL_BATCH_SLACK_MAX_RUNS),
   repeats: z.number().int().min(1).max(5).default(1),
   costCapUsd: z.number().finite().optional(),
 }).strict();
@@ -274,6 +298,8 @@ export const EvalBatchThreadResultSchema = z.object({ recorded: z.boolean(), thr
 
 export const EvalBatchWatchChangeSchema = EvalBatchWatchStateSchema.omit({ revision: true }).partial();
 export const EvalBatchWatchUpdateRequestSchema = z.object({ revision: z.number().int().nonnegative(), change: EvalBatchWatchChangeSchema }).strict();
+export const EvalBatchWatchDropRequestSchema = z.object({ reason: z.string().min(1).max(200) }).strict();
+export const EvalBatchWatchDropResultSchema = z.object({ dropped: z.boolean() }).strict();
 export const EvalBatchWatchUpdateResultSchema = z.object({ updated: z.boolean(), watch: EvalBatchWatchStateSchema }).strict();
 
 export type EvalBatchWatchState = z.infer<typeof EvalBatchWatchStateSchema>;

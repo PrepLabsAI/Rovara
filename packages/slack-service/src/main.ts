@@ -22,7 +22,7 @@ import { processSlackRequest, type ServiceLog, type ThreadServiceApi, type Threa
 import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createSlackUserNames } from "./user-names.js";
 import { createEvalBatchWatchApi, createThreadApi } from "./thread-api.js";
-import { runEvalBatchWatcher } from "./eval-batch-watcher.js";
+import { SlackApiError, runEvalBatchWatcher } from "./eval-batch-watcher.js";
 import { HANDOFF_MILLISECONDS, activeTurnFromItem, turnNoteFromItem } from "./interrupted-turn.js";
 import { classifierTimeoutMs, createHostedClassifier, createHostedSlackRuntime, gateDecisionLogFields, runHostedTurn } from "./runtime.js";
 import { DynamoTurnRecordWriter } from "./turn-records.js";
@@ -104,7 +104,7 @@ async function postToSlack(channel: string, threadTs: string | undefined, text: 
     body: JSON.stringify({ channel, ...(threadTs === undefined ? {} : { thread_ts: threadTs }), text, unfurl_links: false, ...(blocks === undefined ? {} : { blocks }) }),
   });
   const result = await response.json() as { ok?: boolean; error?: string; ts?: string };
-  if (!response.ok || result.ok !== true) throw new Error(`Slack chat.postMessage failed: ${result.error ?? `HTTP ${response.status}`}`);
+  if (!response.ok || result.ok !== true) throw new SlackApiError("chat.postMessage", result.error ?? `HTTP ${response.status}`);
   return result.ts;
 }
 
@@ -116,7 +116,7 @@ async function deleteFromSlack(channel: string, ts: string): Promise<void> {
     body: JSON.stringify({ channel, ts }),
   });
   const result = await response.json() as { ok?: boolean; error?: string };
-  if (!response.ok || result.ok !== true) throw new Error(`Slack chat.delete failed: ${result.error ?? `HTTP ${response.status}`}`);
+  if (!response.ok || result.ok !== true) throw new SlackApiError("chat.delete", result.error ?? `HTTP ${response.status}`);
 }
 
 function threadApi(message: SlackRequestMessage): ThreadServiceApi {
@@ -369,7 +369,8 @@ await runConsumer(queue, (message, context) => processSlackRequest(message, {
   handoffMilliseconds: HANDOFF_MILLISECONDS,
   log,
 });
-await batchWatcher;
+// The watcher stops at its next pause; a pass still waiting on Slack or the broker is not waited for long (issue 157).
+await Promise.race([batchWatcher, new Promise((resolve) => setTimeout(resolve, 2_000).unref())]);
 log("service.stopped", {});
 // Issue 157: a handed-off turn may still be winding down in this process; its message already
 // belongs to the new task, so nothing here may run on until SIGKILL. Logs go to stdout, which is

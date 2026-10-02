@@ -433,6 +433,23 @@ export async function updateBatchWatch(
   return result.value;
 }
 
+/**
+ * Ruling 24: the watcher gave up on the batch's thread (a permanent Slack error). The watch state
+ * says why, and the batch leaves the watcher's list. Undefined when the batch does not exist.
+ */
+export async function dropBatchWatch(dependencies: EvalBatchDependencies, batchId: string, reason: string): Promise<{ dropped: boolean } | undefined> {
+  const result = await mutate<boolean>(dependencies, batchId, (draft, at) => {
+    const current: EvalBatchWatchState = draft.watch ?? { revision: 0 };
+    if (current.droppedAt !== undefined) return { value: false, write: false };
+    draft.watch = { ...current, revision: current.revision + 1, droppedAt: at, dropReason: reason };
+    return { value: true, write: true };
+  });
+  if (result === undefined) return undefined;
+  await unwatchBatch(dependencies, batchId);
+  if (result.value) log("eval_batch.watch_dropped", { batchId, reason });
+  return { dropped: result.value };
+}
+
 /** FR-010: the batch's measures, one per finished run. */
 export async function listBatchMeasures(dependencies: EvalBatchDependencies, batchId: string): Promise<EvalRunMeasure[]> {
   const measures: EvalRunMeasure[] = [];

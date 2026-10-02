@@ -63,6 +63,7 @@ export interface ThreadServiceApi {
   getSwebenchRun?: SwebenchApi["getSwebenchRun"];
   /** Spec 052 FR-002: absent where the control plane has no batch routes. */
   startEvalBatch?: EvalBatchStartApi["startEvalBatch"];
+  updateEvalBatchWatch?: NonNullable<EvalBatchStartApi["updateEvalBatchWatch"]>;
 }
 
 /** Issue 167: a cancel was queued for a task still running, or the task had already finished. */
@@ -382,7 +383,8 @@ export async function processSlackRequest(
       await runEvalBatchCommand(batchCommand, {
         startEvalBatch: (request) => api.startEvalBatch!(request),
         ...(api.listProjectModels === undefined ? {} : { listProjectModels: () => api.listProjectModels!() }),
-      }, { post, redelivered: options.redelivered === true });
+        ...(api.updateEvalBatchWatch === undefined ? {} : { updateEvalBatchWatch: (batchId, revision, change) => api.updateEvalBatchWatch!(batchId, revision, change) }),
+      }, { post, redelivered: options.redelivered === true, ...(dependencies.now === undefined ? {} : { now: dependencies.now }), log });
       finished = true;
       return;
     }

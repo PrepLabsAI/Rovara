@@ -3,6 +3,7 @@
 // a batch started from the CLI (Ruling 19), and records what it has posted, so a restarted watcher
 // posts nothing twice. The broker checks the Slack orchestrator role; this module checks that a
 // batch is the caller's: in its channel (or thread) and of the project the channel serves.
+import { createHash } from "node:crypto";
 import { catalogModel } from "@agentx/model-runtime/catalog";
 import {
   AgentXError,
@@ -12,12 +13,14 @@ import {
   EvalBatchSlackStartRequestSchema,
   EvalBatchSummarySchema,
   EvalBatchThreadRequestSchema,
+  EvalBatchWatchDropRequestSchema,
   EvalBatchWatchUpdateRequestSchema,
   agentXError,
   slackThreadSubject,
   type EvalBatchEntry,
   type EvalBatchModel,
   type EvalBatchRecord,
+  type EvalBatchSlackStartRequest,
   type EvalBatchSlackStartResult,
   type EvalBatchSummary,
   type EvalBatchWatched,
@@ -30,6 +33,7 @@ import { ZodError } from "zod";
 import {
   EVAL_BATCH_RESERVE_MARGIN,
   createBatch,
+  dropBatchWatch,
   evalBatchResultsKeys,
   getBatch,
   getBatchWithProject,
@@ -41,23 +45,28 @@ import {
   watchedBatchIds,
   type EvalBatchDependencies,
 } from "./eval-batch.js";
-import { evalBatchIdFor, isPlaceholderThreadTs, readObject } from "./eval-batch-admin.js";
+import { isPlaceholderThreadTs, readObject } from "./eval-batch-admin.js";
 import { getSwebenchChannel, type SwebenchSlackContext } from "./swebench.js";
 
 const TERMINAL: ReadonlySet<EvalBatchRecord["status"]> = new Set(["DONE", "STOPPED", "CAPPED"]);
-const ENDED_ENTRY: ReadonlySet<EvalBatchEntry["state"]> = new Set(["DONE", "FAILED", "CANCELLED"]);
+/** Ruling 24: a batch that ended this long ago and still has no summary posted is dropped from the watcher's list. */
+export const EVAL_BATCH_WATCH_MAX_AGE_MS = 7 * 86_400_000;
 const OPEN_ENTRY: ReadonlySet<EvalBatchEntry["state"]> = new Set(["QUEUED", "STARTING", "RUNNING"]);
 
 /**
  * FR-002: the Slack form's batch, built as a batch file would be: the project's thinking level for
  * each model (else the runtime's own default for it), the deployment's OpenRouter providers for an
  * OpenRouter model, `cheapest-first`, the deployment's concurrency, and, with no cap given, enough
- * cap for every run's reservation. Its ID is derived from the definition, the channel and the
- * thread, so a redelivered event finds the batch it created. FR-003 refusals are answered with
+ * cap for every run's reservation. Ruling 23: its ID is derived from the form as received and the
+ * thread, before any default is resolved, so a redelivered event finds the batch it created even
+ * if the project's or the channel's settings changed meanwhile. FR-003 refusals are answered with
  * their reason, for the thread.
  */
 export async function startSlackBatch(dependencies: EvalBatchDependencies, context: SwebenchSlackContext, value: unknown): Promise<EvalBatchSlackStartResult> {
   const request = EvalBatchSlackStartRequestSchema.parse(value);
+  const batchId = slackFormBatchId(request, context.thread);
+  const existing = await getBatch(dependencies, batchId);
+  if (existing !== undefined) return { outcome: "STARTED", created: false, batch: await batchWatchView(dependencies, existing) };
   try {
     const runs = request.instanceIds.length * request.models.length * request.repeats;
     if (runs > EVAL_BATCH_SLACK_MAX_RUNS) return refused(`${runs} runs is more than the ${EVAL_BATCH_SLACK_MAX_RUNS} a Slack message may start; use a batch file for more.`);
@@ -87,9 +96,6 @@ export async function startSlackBatch(dependencies: EvalBatchDependencies, conte
       repeats: request.repeats,
       costCapUsd: request.costCapUsd ?? defaultCapUsd(runs, channel.maxCostUsd),
     };
-    const batchId = evalBatchIdFor(file, context.thread.teamId, context.thread.channelId, `slack:${context.thread.threadTs}`);
-    const existing = await getBatch(dependencies, batchId);
-    if (existing !== undefined) return { outcome: "STARTED", created: false, batch: await batchWatchView(dependencies, existing) };
     const record = await createBatch(dependencies, context, file, { batchId });
     return { outcome: "STARTED", created: true, batch: await batchWatchView(dependencies, record) };
   } catch (error) {
@@ -99,6 +105,21 @@ export async function startSlackBatch(dependencies: EvalBatchDependencies, conte
     }
     throw error;
   }
+}
+
+/**
+ * Ruling 23: the form as received (the dataset, the instances, the model names as typed, the repeats
+ * and the cap if given) and its thread, hashed to a UUID. Model names are compared ignoring case and
+ * spacing; nothing resolved from the project or the deployment is part of it.
+ */
+export function slackFormBatchId(request: EvalBatchSlackStartRequest, thread: SlackThread): string {
+  const selectors = request.selectors.map((selector) => selector.trim().replace(/\s+/gu, " ").toLocaleLowerCase("en-US"));
+  const form = [request.dataset, request.instanceIds, selectors, request.repeats ?? 1, request.costCapUsd ?? null];
+  const bytes = createHash("sha256").update(JSON.stringify(["agentx eval batch slack v1", form, thread.teamId, thread.channelId, thread.threadTs])).digest().subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function refused(message: string): EvalBatchSlackStartResult {
@@ -118,35 +139,52 @@ function defaultCapUsd(runs: number, ceilingUsd: number): number {
   return Math.min(EVAL_BATCH_COST_CAP_MAX_USD, Math.max(EVAL_BATCH_COST_CAP_MIN_USD, reserved));
 }
 
+/** Records the list could not read, logged once per process rather than on every 30-second list. */
+const reportedUnreadable = new Set<string>();
+
 /**
- * The batches the watcher posts for, from creation until their summary is posted. A batch whose
- * channel now serves another project is left out, and one that cannot be read is logged and left
- * out, so one broken record never hides the others.
+ * The batches the watcher posts for, from creation until their summary is posted. Ruling 24: a batch
+ * whose channel was unbound or now serves another project, or that ended more than 7 days ago, is
+ * dropped from the list for good, logged as an error and named in `dropped` for the watcher to log.
+ * One that cannot be read is logged as an error once and left out, so one broken record never hides
+ * the others.
  */
 export async function listWatchedBatches(
   dependencies: EvalBatchDependencies,
   channelProject: (teamId: string, channelId: string) => Promise<string | undefined>,
-): Promise<{ batches: EvalBatchWatched[] }> {
+): Promise<{ batches: EvalBatchWatched[]; dropped: Array<{ batchId: string; reason: "channel_unbound" | "channel_moved" | "ended_over_7_days" }> }> {
   const batches: EvalBatchWatched[] = [];
+  const dropped: Array<{ batchId: string; reason: "channel_unbound" | "channel_moved" | "ended_over_7_days" }> = [];
+  const nowMs = (dependencies.now?.() ?? new Date()).getTime();
   for (const batchId of await watchedBatchIds(dependencies)) {
     try {
       const stored = await getBatchWithProject(dependencies, batchId);
-      if (stored === undefined || stored.record.watch?.summaryPostedAt !== undefined) {
-        // Its summary is posted (and taking it off the list failed then), or it is gone.
+      if (stored === undefined || stored.record.watch?.summaryPostedAt !== undefined || stored.record.watch?.droppedAt !== undefined) {
+        // Its summary is posted or it was dropped (and taking it off the list failed then), or it is gone.
         await unwatchBatch(dependencies, batchId);
         continue;
       }
-      const { thread } = stored.record;
-      if (await channelProject(thread.teamId, thread.channelId) !== stored.projectName) {
-        log("eval_batch_watch.channel_moved", { batchId, projectName: stored.projectName });
+      const { record } = stored;
+      const project = await channelProject(record.thread.teamId, record.thread.channelId);
+      const reason = project === undefined ? "channel_unbound"
+        : project !== stored.projectName ? "channel_moved"
+        : TERMINAL.has(record.status) && record.finishedAt !== undefined && nowMs - Date.parse(record.finishedAt) > EVAL_BATCH_WATCH_MAX_AGE_MS ? "ended_over_7_days"
+        : undefined;
+      if (reason !== undefined) {
+        await unwatchBatch(dependencies, batchId);
+        logError("eval_batch_watch.dropped", { batchId, reason, projectName: stored.projectName });
+        dropped.push({ batchId, reason });
         continue;
       }
-      batches.push(await batchWatchView(dependencies, stored.record));
+      batches.push(await batchWatchView(dependencies, record));
     } catch (error) {
-      log("eval_batch_watch.unreadable", { batchId, error: error instanceof Error ? error.message : String(error) });
+      if (!reportedUnreadable.has(batchId)) {
+        reportedUnreadable.add(batchId);
+        logError("eval_batch_watch.unreadable", { batchId, error: error instanceof Error ? error.message : String(error) });
+      }
     }
   }
-  return { batches };
+  return { batches, dropped };
 }
 
 /** A batch as the watcher and the start message see it. Ruling 11: it has ended by its status; its results are written once the tick took it off the active list. */
@@ -175,7 +213,7 @@ export async function batchWatchView(dependencies: EvalBatchDependencies, record
     costCapUsd: record.file.costCapUsd,
     ...(record.perRunCeilingUsd === undefined ? {} : { perRunCeilingUsd: record.perRunCeilingUsd }),
     runs: record.queue.length,
-    finished: record.queue.filter((entry) => ENDED_ENTRY.has(entry.state)).length,
+    finished: record.queue.filter(ranAndEnded).length,
     resolved: resolvedRows.length,
     notStarted: record.counts.notStarted,
     spentUsd: record.spentUsd,
@@ -185,7 +223,7 @@ export async function batchWatchView(dependencies: EvalBatchDependencies, record
       return {
         model,
         runs: entries.length,
-        finished: entries.filter((entry) => ENDED_ENTRY.has(entry.state)).length,
+        finished: entries.filter(ranAndEnded).length,
         resolved: resolvedRows.filter((measure) => measureKey(measure) === key).length,
         ended: !entries.some((entry) => OPEN_ENTRY.has(entry.state)),
       };
@@ -194,6 +232,11 @@ export async function batchWatchView(dependencies: EvalBatchDependencies, record
     resultsWritten,
     ...(summary === undefined ? {} : { summary }),
   };
+}
+
+/** An entry whose run ended: graded, failed, or cancelled after its run existed. An entry cancelled while queued never ran. */
+function ranAndEnded(entry: EvalBatchEntry): boolean {
+  return entry.state === "DONE" || entry.state === "FAILED" || (entry.state === "CANCELLED" && entry.runId !== undefined);
 }
 
 function modelKey(model: EvalBatchModel): string {
@@ -245,6 +288,20 @@ export async function updateWatchedBatch(dependencies: EvalBatchDependencies, sc
   const result = await updateBatchWatch(dependencies, batchId, revision, change);
   if (result === undefined) throw agentXError("NOT_FOUND", `batch ${batchId} not found`);
   return result;
+}
+
+/** Ruling 24: the watcher gave up on the batch's thread; from the batch's own thread. */
+export async function dropWatchedBatch(dependencies: EvalBatchDependencies, scope: EvalBatchServiceScope, batchId: string, value: unknown) {
+  const { reason } = EvalBatchWatchDropRequestSchema.parse(value);
+  await requireInScope(dependencies, scope, batchId, "thread");
+  const result = await dropBatchWatch(dependencies, batchId, reason);
+  if (result === undefined) throw agentXError("NOT_FOUND", `batch ${batchId} not found`);
+  logError("eval_batch_watch.dropped", { batchId, reason });
+  return result;
+}
+
+function logError(event: string, fields: Record<string, unknown>): void {
+  console.error(JSON.stringify({ component: "broker", level: "error", event, ...fields }));
 }
 
 function log(event: string, fields: Record<string, unknown>): void {

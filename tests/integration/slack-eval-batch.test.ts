@@ -12,8 +12,12 @@ import type {
 } from "../../packages/contracts/src/index.js";
 import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
 import {
+  EVAL_BATCH_FAILURE_BACKOFF_MS,
   EVAL_BATCH_PROGRESS_INTERVAL_MS,
   EVAL_BATCH_WATCH_POLL_MS,
+  PERMANENT_SLACK_ERRORS,
+  SlackApiError,
+  createEvalBatchWatcherState,
   runEvalBatchWatcher,
   watchEvalBatchesOnce,
   type EvalBatchWatchApi,
@@ -62,6 +66,7 @@ function message(text: string, eventId = "EvBATCH0001"): SlackRequestMessage {
 function formHarness(answer: EvalBatchSlackStartResult = { outcome: "STARTED", created: true, batch: batch() }) {
   const posts: string[] = [];
   const startEvalBatch = vi.fn(async () => answer);
+  const updateEvalBatchWatch = vi.fn(async (_batchId: string, revision: number, change: EvalBatchWatchChange) => ({ updated: true, watch: { revision: revision + 1, ...change } }));
   const runTurn = vi.fn();
   const ensureWorkspace = vi.fn();
   const dependencies: ProcessorDependencies = {
@@ -69,12 +74,14 @@ function formHarness(answer: EvalBatchSlackStartResult = { outcome: "STARTED", c
       ensureWorkspace, startClose: vi.fn(), completeClose: vi.fn(), waitForOperation: vi.fn(), createConversation: vi.fn(),
       listProjectModels: async () => projectModels,
       startEvalBatch,
+      updateEvalBatchWatch,
     }),
     threads: { load: vi.fn(), saveConversation: vi.fn(), saveSettingsRevision: vi.fn(), close: vi.fn(), finish: vi.fn(async () => undefined) },
     runTurn,
     post: async (_thread, text) => { posts.push(text); },
+    now: () => Date.parse("2026-10-02T12:00:00.000Z"),
   };
-  return { dependencies, posts, startEvalBatch, runTurn, ensureWorkspace };
+  return { dependencies, posts, startEvalBatch, updateEvalBatchWatch, runTurn, ensureWorkspace };
 }
 
 const FORM = "<@UAGENTX> eval batch secbench patch njs.cve-2022-32414 gpac.cve-2023-5586 models GLM 5.3, MiniMax M3 repeats 2 cap $20";
@@ -87,21 +94,31 @@ describe("the eval batch form in Slack (spec 052 FR-002)", () => {
       dataset: "secbench-patch",
       instanceIds: ["njs.cve-2022-32414", "gpac.cve-2023-5586"],
       models: [{ provider: "openrouter", modelId: "z-ai/glm-5.3" }, { provider: "openrouter", modelId: "minimax/minimax-m3" }],
+      selectors: ["GLM 5.3", "MiniMax M3"],
       repeats: 2,
       costCapUsd: 20,
     });
     expect(h.posts).toEqual([[`Started eval batch \`${batchId}\`: ${START_LINES[0]}`, START_LINES[1], START_LINES[2]].join("\n")]);
+    // The start message is recorded on the batch, so a redelivery knows it was posted.
+    expect(h.updateEvalBatchWatch).toHaveBeenCalledWith(batchId, 0, { startPostedAt: "2026-10-02T12:00:00.000Z" });
     expect(h.ensureWorkspace).not.toHaveBeenCalled();
     expect(h.runTurn).not.toHaveBeenCalled();
   });
 
-  it("posts nothing more for a redelivered event whose batch exists, and says so to a repeated message", async () => {
-    const h = formHarness({ outcome: "STARTED", created: false, batch: batch() });
+  it("posts nothing more for a redelivered event whose start message was posted, and says so to a repeated message", async () => {
+    const h = formHarness({ outcome: "STARTED", created: false, batch: batch({ watch: { revision: 1, startPostedAt: "2026-10-02T11:59:00.000Z" } }) });
     await processSlackRequest(message(FORM), h.dependencies, { finalAttempt: false, redelivered: true });
     expect(h.startEvalBatch).toHaveBeenCalledTimes(1);
     expect(h.posts).toEqual([]);
     await processSlackRequest(message(FORM, "EvBATCH0002"), h.dependencies, { finalAttempt: false });
     expect(h.posts).toEqual([`This thread already started eval batch \`${batchId}\` (RUNNING); its progress is posted here.`]);
+  });
+
+  it("posts the start message on a redelivery whose first delivery created the batch but did not post it (M-3)", async () => {
+    const h = formHarness({ outcome: "STARTED", created: false, batch: batch() });
+    await processSlackRequest(message(FORM), h.dependencies, { finalAttempt: false, redelivered: true });
+    expect(h.posts).toEqual([[`Started eval batch \`${batchId}\`: ${START_LINES[0]}`, START_LINES[1], START_LINES[2]].join("\n")]);
+    expect(h.updateEvalBatchWatch).toHaveBeenCalledWith(batchId, 0, expect.objectContaining({ startPostedAt: expect.any(String) as unknown }) as unknown);
   });
 
   it("posts the broker's refusal with its reason (FR-003)", async () => {
@@ -133,7 +150,10 @@ function broker(initial: EvalBatchWatched[]) {
   const state = new Map(initial.map((entry) => [entry.batchId, structuredClone(entry)]));
   const events: string[] = [];
   const api: EvalBatchWatchApi = {
-    listBatches: vi.fn(async () => [...state.values()].filter((entry) => entry.watch.summaryPostedAt === undefined).map((entry) => structuredClone(entry))),
+    listBatches: vi.fn(async () => ({
+      batches: [...state.values()].filter((entry) => entry.watch.summaryPostedAt === undefined && entry.watch.droppedAt === undefined).map((entry) => structuredClone(entry)),
+      dropped: [] as Array<{ batchId: string; reason: "channel_unbound" | "channel_moved" | "ended_over_7_days" }>,
+    })),
     recordThread: vi.fn(async (seen: EvalBatchWatched, threadTs: string) => {
       const current = state.get(seen.batchId)!;
       events.push(`record ${threadTs}`);
@@ -146,6 +166,11 @@ function broker(initial: EvalBatchWatched[]) {
       if (current.watch.revision !== revision) return { updated: false, watch: current.watch };
       current.watch = { ...current.watch, ...change, revision: revision + 1 };
       return { updated: true, watch: current.watch };
+    }),
+    dropWatch: vi.fn(async (seen: EvalBatchWatched, reason: string) => {
+      const current = state.get(seen.batchId)!;
+      current.watch = { ...current.watch, revision: current.watch.revision + 1, droppedAt: "2026-10-02T12:00:00.000Z", dropReason: reason };
+      return { dropped: true };
     }),
   };
   return { state, api, events, set: (id: string, change: Partial<EvalBatchWatched>) => Object.assign(state.get(id)!, change) };
@@ -174,7 +199,7 @@ function watcher(initial: EvalBatchWatched[]) {
   let clock = Date.parse("2026-10-02T12:00:00.000Z");
   const log = vi.fn();
   const logError = vi.fn();
-  const dependencies = { api: b.api, slack: s.slack, now: () => clock, log, logError };
+  const dependencies = { api: b.api, slack: s.slack, now: () => clock, log, logError, state: createEvalBatchWatcherState() };
   return {
     ...b, ...s, log, logError, dependencies,
     advance: (milliseconds: number) => { clock += milliseconds; },
@@ -244,7 +269,7 @@ describe("the batch watcher's thread for a batch started from the CLI (spec 052 
     await w.once();
     expect(w.slack.post).toHaveBeenCalledTimes(1);
     expect(w.slack.delete).toHaveBeenCalledWith(thread.channelId, "1695700000.000001");
-    expect(w.api.updateWatch).not.toHaveBeenCalled();
+    expect(w.posts.filter((post) => post.threadTs !== undefined)).toEqual([]);
   });
 
   it("never posts in a placeholder thread, even for an ended batch", async () => {
@@ -300,7 +325,7 @@ describe("the batch watcher's progress posts (spec 052 Task 6)", () => {
     await w.once();
     expect(w.posts).toHaveLength(1);
     // A restarted watcher keeps nothing in memory; it has only the broker's record.
-    const restarted = { ...w.dependencies, log: vi.fn(), logError: vi.fn() };
+    const restarted = { ...w.dependencies, log: vi.fn(), logError: vi.fn(), state: createEvalBatchWatcherState() };
     w.advance(EVAL_BATCH_PROGRESS_INTERVAL_MS * 2);
     await watchEvalBatchesOnce(restarted);
     expect(w.posts).toHaveLength(1);
@@ -309,6 +334,7 @@ describe("the batch watcher's progress posts (spec 052 Task 6)", () => {
   it("claims a post before making it, so a second watcher that read the same revision posts nothing", async () => {
     const w = watcher([batch({ finished: 1 })]);
     const listed = await w.api.listBatches();
+    // Each pass reads the same stale list, as a second watcher would.
     vi.mocked(w.api.listBatches).mockResolvedValueOnce(listed).mockResolvedValueOnce(structuredClone(listed));
     await w.once();
     await w.once();
@@ -328,7 +354,7 @@ describe("the batch watcher's summary (spec 052 FR-010, Ruling 11)", () => {
     expect(w.state.get(batchId)!.watch).toMatchObject({ summaryPostedAt: "2026-10-02T12:00:00.000Z" });
     w.advance(EVAL_BATCH_WATCH_POLL_MS);
     await w.once();
-    await watchEvalBatchesOnce({ ...w.dependencies });
+    await watchEvalBatchesOnce({ ...w.dependencies, state: createEvalBatchWatcherState() });
     expect(w.posts).toHaveLength(1);
   });
 
@@ -375,5 +401,116 @@ describe("the batch watcher fails loudly (spec 052 Task 6)", () => {
     expect(EVAL_BATCH_WATCH_POLL_MS).toBe(30_000);
     expect(EVAL_BATCH_PROGRESS_INTERVAL_MS).toBe(5 * 60_000);
     expect(w.logError).toHaveBeenCalledWith("eval_batch_watch.list_failed", { error: "signature expired" });
+  });
+});
+
+describe("the batch watcher's opener (spec 052 Ruling 24, M-1)", () => {
+  const placeholder = { ...thread, threadTs: "0012345678.901234" };
+
+  it("claims the opener and stores its timestamp, so a failed thread record retries the record, never the post", async () => {
+    const w = watcher([batch({ thread: placeholder })]);
+    vi.mocked(w.api.recordThread).mockRejectedValueOnce(new Error("broker unavailable"));
+    await w.once();
+    expect(w.slack.post).toHaveBeenCalledTimes(1);
+    expect(w.state.get(batchId)!.watch).toMatchObject({ openerClaimedAt: "2026-10-02T12:00:00.000Z", openerTs: "1695700000.000001" });
+    expect(w.logError).toHaveBeenCalledWith("eval_batch_watch.batch_failed", { batchId, error: "broker unavailable" });
+    // A restarted watcher, after the back-off, records the stored opener and posts nothing new.
+    w.advance(EVAL_BATCH_FAILURE_BACKOFF_MS);
+    await watchEvalBatchesOnce({ ...w.dependencies, state: createEvalBatchWatcherState() });
+    expect(w.slack.post).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(w.api.recordThread).mock.calls.map((call) => call[1])).toEqual(["1695700000.000001", "1695700000.000001"]);
+    expect(w.state.get(batchId)!.thread.threadTs).toBe("1695700000.000001");
+  });
+
+  it("posts no opener while another watcher's claim on it is fresh", async () => {
+    const w = watcher([batch({ thread: placeholder, watch: { revision: 2, openerClaimedAt: "2026-10-02T11:59:30.000Z" } })]);
+    await w.once();
+    expect(w.slack.post).not.toHaveBeenCalled();
+  });
+
+  it("keeps the opener's timestamp in memory when storing it fails, and records it on the next pass", async () => {
+    const w = watcher([batch({ thread: placeholder })]);
+    const update = vi.mocked(w.api.updateWatch);
+    const real = update.getMockImplementation()!;
+    update.mockImplementation(async (seen, revision, change) => {
+      if (change.openerTs !== undefined) throw new Error("throttled");
+      return real(seen, revision, change);
+    });
+    vi.mocked(w.api.recordThread).mockRejectedValueOnce(new Error("broker unavailable"));
+    await w.once();
+    w.advance(EVAL_BATCH_FAILURE_BACKOFF_MS);
+    await w.once();
+    expect(w.slack.post).toHaveBeenCalledTimes(1);
+    expect(w.state.get(batchId)!.thread.threadTs).toBe("1695700000.000001");
+  });
+});
+
+describe("the batch watcher drops a batch it cannot post for (spec 052 Ruling 24)", () => {
+  it.each([...PERMANENT_SLACK_ERRORS])("drops the batch on Slack's %s, logging an error that names it", async (code) => {
+    const w = watcher([batch({ finished: 1 })]);
+    w.slack.post.mockRejectedValueOnce(new SlackApiError("chat.postMessage", code));
+    await w.once();
+    expect(w.api.dropWatch).toHaveBeenCalledWith(expect.objectContaining({ batchId }) as unknown, `slack:${code}`);
+    expect(w.logError).toHaveBeenCalledWith("eval_batch_watch.dropped", { batchId, reason: `slack:${code}` });
+    w.advance(EVAL_BATCH_FAILURE_BACKOFF_MS);
+    await w.once();
+    expect(w.slack.post).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a CLI batch whose channel is gone before its opener", async () => {
+    const w = watcher([batch({ thread: { ...thread, threadTs: "0012345678.901234" } })]);
+    w.slack.post.mockRejectedValueOnce(new SlackApiError("chat.postMessage", "channel_not_found"));
+    await w.once();
+    expect(w.state.get(batchId)!.watch).toMatchObject({ dropReason: "slack:channel_not_found" });
+  });
+
+  it("logs as an error each batch the broker's list dropped", async () => {
+    const w = watcher([]);
+    vi.mocked(w.api.listBatches).mockResolvedValueOnce({ batches: [], dropped: [{ batchId, reason: "channel_moved" }] });
+    await w.once();
+    expect(w.logError).toHaveBeenCalledWith("eval_batch_watch.dropped", { batchId, reason: "channel_moved" });
+  });
+
+  it("backs off a batch for 10 minutes after a failure that may pass, then tries again", async () => {
+    const w = watcher([batch({ finished: 1 })]);
+    vi.mocked(w.api.updateWatch).mockRejectedValueOnce(new Error("throttled"));
+    await w.once();
+    expect(w.logError).toHaveBeenCalledWith("eval_batch_watch.batch_failed", { batchId, error: "throttled" });
+    w.advance(EVAL_BATCH_WATCH_POLL_MS);
+    await w.once();
+    w.advance(EVAL_BATCH_FAILURE_BACKOFF_MS - EVAL_BATCH_WATCH_POLL_MS - 1);
+    await w.once();
+    expect(w.api.updateWatch).toHaveBeenCalledTimes(1);
+    expect(w.slack.post).not.toHaveBeenCalled();
+    w.advance(1);
+    await w.once();
+    expect(w.posts.map((post) => post.text)).toEqual(["Batch progress: 1/8 done, 0 resolved, $0.00 spent of the $20.00 cap."]);
+    expect(EVAL_BATCH_FAILURE_BACKOFF_MS).toBeGreaterThanOrEqual(10 * 60_000);
+  });
+
+  it("does not drop a batch on a Slack error that may pass, such as rate limiting", async () => {
+    const w = watcher([batch({ finished: 1 })]);
+    w.slack.post.mockRejectedValueOnce(new SlackApiError("chat.postMessage", "ratelimited"));
+    await w.once();
+    expect(w.api.dropWatch).not.toHaveBeenCalled();
+    expect(w.logError).toHaveBeenCalledWith("eval_batch_watch.batch_failed", { batchId, error: "Slack chat.postMessage failed: ratelimited" });
+  });
+});
+
+describe("the batch watcher's summary record (spec 052 M-2)", () => {
+  it("records a posted summary that failed to record, on the next pass, without posting it again", async () => {
+    const w = watcher([ended()]);
+    const update = vi.mocked(w.api.updateWatch);
+    const real = update.getMockImplementation()!;
+    update.mockImplementation(async (seen, revision, change) => {
+      if (change.summaryPostedAt !== undefined && update.mock.calls.filter((call) => call[2].summaryPostedAt !== undefined).length === 1) throw new Error("timeout");
+      return real(seen, revision, change);
+    });
+    await w.once();
+    expect(w.posts).toHaveLength(1);
+    w.advance(EVAL_BATCH_FAILURE_BACKOFF_MS);
+    await w.once();
+    expect(w.posts).toHaveLength(1);
+    expect(w.state.get(batchId)!.watch).toMatchObject({ summaryPostedAt: expect.any(String) as unknown, summaryTs: "1695700000.000001" });
   });
 });

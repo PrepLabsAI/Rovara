@@ -5,27 +5,72 @@
 //
 // What has been posted is kept on the batch record, through the broker, and each post is claimed
 // there first, against the revision the watcher read: a restarted watcher posts nothing twice, and of
-// two watchers that read the same state only one posts. A post whose claim succeeded but whose
-// Slack call failed is lost for progress (the next change posts again); a summary claim expires
-// after 10 minutes, so another pass posts the summary then.
+// two watchers that read the same state only one posts.
 //
 // A batch started from the CLI has a placeholder thread: the watcher opens a thread for it in the
 // batch's channel with a start message, and records that thread before posting in it (Ruling 19).
-import type { EvalBatchThreadResult, EvalBatchWatchChange, EvalBatchWatched, EvalBatchWatchUpdateResult, EvalBatchModelSummary } from "@agentx/contracts";
+// The opener is claimed before it is posted and its timestamp stored after, so a failed thread
+// record retries the record, never the post (Ruling 24).
+//
+// What remains (Ruling 22, as reviewed): a claimed progress post whose Slack call fails is lost,
+// with any "is done" line it carried; the next change posts again. A crash between a post and its
+// record (the opener's timestamp, or the summary's) leaves the post unrecorded: once its claim is 10
+// minutes old another pass posts it again. Within one process the timestamp is kept in memory, so a
+// failed record is retried without posting again.
+//
+// Ruling 24: a batch Slack can never post for (a permanent error, PERMANENT_SLACK_ERRORS) is dropped
+// from the watcher's list, logged as an error. After any other failure the batch is left alone for
+// 10 minutes.
+import type {
+  EvalBatchModelSummary,
+  EvalBatchThreadResult,
+  EvalBatchWatchChange,
+  EvalBatchWatched,
+  EvalBatchWatchUpdateResult,
+} from "@agentx/contracts";
 import { batchStartMessage, modelLabel, usd } from "./eval-batch-command.js";
 import { escapeText } from "./slack-format.js";
 
 export const EVAL_BATCH_WATCH_POLL_MS = 30_000;
 export const EVAL_BATCH_PROGRESS_INTERVAL_MS = 5 * 60_000;
-/** A summary claimed this long ago and still not posted is taken over: its watcher stopped or its post failed. */
-export const EVAL_BATCH_SUMMARY_CLAIM_MS = 10 * 60_000;
+/** An opener or summary claimed this long ago and still not recorded is taken over: its watcher stopped or its post failed. */
+export const EVAL_BATCH_CLAIM_MS = 10 * 60_000;
+export const EVAL_BATCH_SUMMARY_CLAIM_MS = EVAL_BATCH_CLAIM_MS;
+/** Ruling 24: after a failure, a batch's next attempt waits at least this long. */
+export const EVAL_BATCH_FAILURE_BACKOFF_MS = 10 * 60_000;
+
+/**
+ * Ruling 24: Slack errors no retry can fix for this batch's channel: the channel is gone or
+ * archived, the bot is not in it, or posting there is not allowed. A token or rate error is not here:
+ * it is the deployment's, not the batch's.
+ */
+export const PERMANENT_SLACK_ERRORS: readonly string[] = [
+  "channel_not_found", "is_archived", "channel_is_archived", "not_in_channel", "restricted_action", "team_access_not_granted",
+];
+
+/**
+ * A Slack Web API answer with `ok: false`, carrying Slack's error code. Its message and name are the
+ * ones the service's posts always threw, so the processor's refusal check and logs are unchanged.
+ */
+export class SlackApiError extends Error {
+  constructor(readonly method: string, readonly code: string) {
+    super(`Slack ${method} failed: ${code}`);
+  }
+}
+
+export interface EvalBatchWatchList {
+  batches: EvalBatchWatched[];
+  dropped?: Array<{ batchId: string; reason: string }> | undefined;
+}
 
 export interface EvalBatchWatchApi {
-  listBatches: () => Promise<EvalBatchWatched[]>;
+  listBatches: () => Promise<EvalBatchWatchList>;
   /** Records the thread opened for a batch whose record names a placeholder; `recorded` is false when another thread is recorded. */
   recordThread: (batch: EvalBatchWatched, threadTs: string) => Promise<EvalBatchThreadResult>;
   /** Records a post (or a claim on one), only if the watch state is still at `revision`. */
   updateWatch: (batch: EvalBatchWatched, revision: number, change: EvalBatchWatchChange) => Promise<EvalBatchWatchUpdateResult>;
+  /** Ruling 24: gives up on the batch's thread for good. */
+  dropWatch: (batch: EvalBatchWatched, reason: string) => Promise<{ dropped: boolean }>;
 }
 
 export interface EvalBatchSlack {
@@ -36,6 +81,17 @@ export interface EvalBatchSlack {
 
 type Log = (event: string, fields: Readonly<Record<string, string | number | boolean>>) => void;
 
+/** What one watcher process remembers between passes: back-offs, and posts made but not yet recorded. */
+export interface EvalBatchWatcherState {
+  retryAt: Map<string, number>;
+  openers: Map<string, string>;
+  summaries: Map<string, string>;
+}
+
+export function createEvalBatchWatcherState(): EvalBatchWatcherState {
+  return { retryAt: new Map(), openers: new Map(), summaries: new Map() };
+}
+
 export interface EvalBatchWatcherDependencies {
   api: EvalBatchWatchApi;
   slack: EvalBatchSlack;
@@ -43,6 +99,8 @@ export interface EvalBatchWatcherDependencies {
   log?: Log;
   /** Failures: a batch the watcher could not post for, or a list it could not read. */
   logError: Log;
+  /** Kept across passes by runEvalBatchWatcher; a pass without it remembers nothing. */
+  state?: EvalBatchWatcherState;
 }
 
 const TERMINAL = new Set<EvalBatchWatched["status"]>(["DONE", "STOPPED", "CAPPED"]);
@@ -59,8 +117,9 @@ export async function runEvalBatchWatcher(dependencies: EvalBatchWatcherDependen
   intervalMilliseconds?: number;
 }): Promise<void> {
   const sleep = dependencies.sleep ?? abortableSleep;
+  const watching = { ...dependencies, state: dependencies.state ?? createEvalBatchWatcherState() };
   while (!dependencies.signal.aborted) {
-    await watchEvalBatchesOnce(dependencies);
+    await watchEvalBatchesOnce(watching);
     if (dependencies.signal.aborted) break;
     await sleep(dependencies.intervalMilliseconds ?? EVAL_BATCH_WATCH_POLL_MS, dependencies.signal);
   }
@@ -68,45 +127,102 @@ export async function runEvalBatchWatcher(dependencies: EvalBatchWatcherDependen
 
 /** One pass over the broker's batches; one batch's failure is logged and the others still get their posts. */
 export async function watchEvalBatchesOnce(dependencies: EvalBatchWatcherDependencies): Promise<void> {
-  let batches: EvalBatchWatched[];
+  const state = dependencies.state ?? createEvalBatchWatcherState();
+  let list: EvalBatchWatchList;
   try {
-    batches = await dependencies.api.listBatches();
+    list = await dependencies.api.listBatches();
   } catch (error) {
     dependencies.logError("eval_batch_watch.list_failed", { error: errorMessage(error) });
     return;
   }
-  for (const batch of batches) {
+  for (const { batchId, reason } of list.dropped ?? []) {
+    dependencies.logError("eval_batch_watch.dropped", { batchId, reason });
+    forget(state, batchId);
+  }
+  for (const listed of list.batches) {
+    const now = dependencies.now?.() ?? Date.now();
+    const retryAt = state.retryAt.get(listed.batchId);
+    if (retryAt !== undefined && now < retryAt) continue;
+    // The batch as this pass last knew it: its thread once opened.
+    const current = { batch: listed };
     try {
-      await watchBatch(dependencies, batch);
+      await watchBatch(dependencies, state, current, now);
+      state.retryAt.delete(listed.batchId);
     } catch (error) {
-      dependencies.logError("eval_batch_watch.batch_failed", { batchId: batch.batchId, error: errorMessage(error) });
+      if (error instanceof SlackApiError && PERMANENT_SLACK_ERRORS.includes(error.code)) {
+        const reason = `slack:${error.code}`;
+        try {
+          await dependencies.api.dropWatch(current.batch, reason);
+          dependencies.logError("eval_batch_watch.dropped", { batchId: listed.batchId, reason });
+          forget(state, listed.batchId);
+          continue;
+        } catch (dropError) {
+          dependencies.logError("eval_batch_watch.drop_failed", { batchId: listed.batchId, reason, error: errorMessage(dropError) });
+        }
+      } else {
+        dependencies.logError("eval_batch_watch.batch_failed", { batchId: listed.batchId, error: errorMessage(error) });
+      }
+      state.retryAt.set(listed.batchId, now + EVAL_BATCH_FAILURE_BACKOFF_MS);
     }
   }
 }
 
-async function watchBatch(dependencies: EvalBatchWatcherDependencies, listed: EvalBatchWatched): Promise<void> {
-  let batch = listed;
-  if (isPlaceholderThreadTs(batch.thread.threadTs)) {
-    const opened = await openThread(dependencies, batch);
+function forget(state: EvalBatchWatcherState, batchId: string): void {
+  state.retryAt.delete(batchId);
+  state.openers.delete(batchId);
+  state.summaries.delete(batchId);
+}
+
+async function watchBatch(dependencies: EvalBatchWatcherDependencies, state: EvalBatchWatcherState, current: { batch: EvalBatchWatched }, now: number): Promise<void> {
+  if (isPlaceholderThreadTs(current.batch.thread.threadTs)) {
+    const opened = await openThread(dependencies, state, current.batch, now);
     if (opened === undefined) return;
-    batch = { ...batch, thread: opened };
+    current.batch = { ...current.batch, thread: opened.thread, watch: opened.watch };
   }
-  const now = dependencies.now?.() ?? Date.now();
+  const { batch } = current;
   if (TERMINAL.has(batch.status)) {
-    await postSummary(dependencies, batch, now);
+    await postSummary(dependencies, state, batch, now);
     return;
   }
   await postProgress(dependencies, batch, now);
 }
 
-/** Ruling 19: posts the start message in the batch's channel and records its thread; undefined when another watcher's thread won. */
-async function openThread(dependencies: EvalBatchWatcherDependencies, batch: EvalBatchWatched): Promise<EvalBatchWatched["thread"] | undefined> {
+/**
+ * Ruling 19: posts the start message in the batch's channel and records its thread; undefined when
+ * another watcher holds the opener or its thread won. Ruling 24: the opener is claimed first, and
+ * its timestamp stored on the record (and in memory) before the thread is recorded, so a failed
+ * record is retried with the same opener.
+ */
+async function openThread(
+  dependencies: EvalBatchWatcherDependencies,
+  state: EvalBatchWatcherState,
+  batch: EvalBatchWatched,
+  now: number,
+): Promise<{ thread: EvalBatchWatched["thread"]; watch: EvalBatchWatched["watch"] } | undefined> {
   const { channelId } = batch.thread;
-  const threadTs = await dependencies.slack.post(channelId, undefined, batchStartMessage(batch, "cli"));
+  let { watch } = batch;
+  let threadTs = watch.openerTs ?? state.openers.get(batch.batchId);
+  if (threadTs === undefined) {
+    if (watch.openerClaimedAt !== undefined && now - Date.parse(watch.openerClaimedAt) < EVAL_BATCH_CLAIM_MS) return undefined;
+    const claimed = await dependencies.api.updateWatch(batch, watch.revision, { openerClaimedAt: new Date(now).toISOString() });
+    if (!claimed.updated) return undefined;
+    watch = claimed.watch;
+    threadTs = await dependencies.slack.post(channelId, undefined, batchStartMessage(batch, "cli"));
+    state.openers.set(batch.batchId, threadTs);
+    try {
+      const stored = await dependencies.api.updateWatch(batch, watch.revision, { openerTs: threadTs });
+      if (stored.updated) watch = stored.watch;
+    } catch (error) {
+      // Kept in memory: this process records the same opener on its next pass.
+      dependencies.logError("eval_batch_watch.opener_store_failed", { batchId: batch.batchId, threadTs, error: errorMessage(error) });
+    }
+  }
   const result = await dependencies.api.recordThread(batch, threadTs);
-  if (result.recorded) {
+  state.openers.delete(batch.batchId);
+  // A repeated record of this opener (the first answer was lost) finds it recorded.
+  if (result.recorded || result.thread.threadTs === threadTs) {
     dependencies.log?.("eval_batch_watch.thread_opened", { batchId: batch.batchId, threadTs });
-    return result.thread;
+    return { thread: result.thread, watch };
   }
   // Another watcher opened the batch's thread first: this opener is removed, so the channel shows one.
   dependencies.log?.("eval_batch_watch.thread_lost_race", { batchId: batch.batchId, threadTs, recorded: result.thread.threadTs });
@@ -135,21 +251,37 @@ async function postProgress(dependencies: EvalBatchWatcherDependencies, batch: E
   await inThread(dependencies, batch, progressMessage(batch, newlyEnded));
 }
 
-async function postSummary(dependencies: EvalBatchWatcherDependencies, batch: EvalBatchWatched, now: number): Promise<void> {
+/** Claim, post, then record the summary with its timestamp; a post this process made but could not record is recorded, not posted again. */
+async function postSummary(dependencies: EvalBatchWatcherDependencies, state: EvalBatchWatcherState, batch: EvalBatchWatched, now: number): Promise<void> {
   const { watch } = batch;
-  if (watch.summaryPostedAt !== undefined || !batch.resultsWritten || batch.summary === undefined) return;
-  if (watch.summaryClaimedAt !== undefined && now - Date.parse(watch.summaryClaimedAt) < EVAL_BATCH_SUMMARY_CLAIM_MS) return;
-  const claimed = await dependencies.api.updateWatch(batch, watch.revision, { summaryClaimedAt: new Date(now).toISOString() });
-  if (!claimed.updated) return;
-  await inThread(dependencies, batch, summaryMessage(batch));
-  const posted = await dependencies.api.updateWatch(batch, claimed.watch.revision, { summaryPostedAt: new Date(now).toISOString() });
-  if (!posted.updated) dependencies.logError("eval_batch_watch.summary_record_failed", { batchId: batch.batchId });
+  if (watch.summaryPostedAt !== undefined) {
+    state.summaries.delete(batch.batchId);
+    return;
+  }
+  let summaryTs = state.summaries.get(batch.batchId);
+  let revision = watch.revision;
+  if (summaryTs === undefined) {
+    if (!batch.resultsWritten || batch.summary === undefined) return;
+    if (watch.summaryClaimedAt !== undefined && now - Date.parse(watch.summaryClaimedAt) < EVAL_BATCH_CLAIM_MS) return;
+    const claimed = await dependencies.api.updateWatch(batch, revision, { summaryClaimedAt: new Date(now).toISOString() });
+    if (!claimed.updated) return;
+    revision = claimed.watch.revision;
+    summaryTs = await inThread(dependencies, batch, summaryMessage(batch));
+    state.summaries.set(batch.batchId, summaryTs);
+  }
+  const posted = await dependencies.api.updateWatch(batch, revision, { summaryPostedAt: new Date(now).toISOString(), summaryTs });
+  if (posted.updated || posted.watch.summaryPostedAt !== undefined) {
+    state.summaries.delete(batch.batchId);
+    return;
+  }
+  // Another write came first; the next pass records it against the newer revision.
+  dependencies.logError("eval_batch_watch.summary_record_failed", { batchId: batch.batchId });
 }
 
 /** Never with a placeholder: a CLI batch's thread is opened and recorded first. */
-async function inThread(dependencies: EvalBatchWatcherDependencies, batch: EvalBatchWatched, text: string): Promise<void> {
+async function inThread(dependencies: EvalBatchWatcherDependencies, batch: EvalBatchWatched, text: string): Promise<string> {
   if (isPlaceholderThreadTs(batch.thread.threadTs)) throw new Error(`batch ${batch.batchId} has no Slack thread yet`);
-  await dependencies.slack.post(batch.thread.channelId, batch.thread.threadTs, text);
+  return dependencies.slack.post(batch.thread.channelId, batch.thread.threadTs, text);
 }
 
 /** "12/72 done, 7 resolved, $41.20 spent", and a line for each model that has just finished. */

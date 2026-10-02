@@ -138,6 +138,36 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
   whose execution died without ending it, found by DescribeExecution once the run is 10 minutes old (or, with no
   recorded execution, past its time limit plus 15 minutes), as an infrastructure failure charged per D-5. A tick that
   cannot top up a batch, or finds a batch's rows incomplete or not summing to its spend, fails, so its alarm fires.
+- **D-10 (2026-10-02, Ruling 22):** The Slack service's batch watcher reads its own index, `EVAL_BATCHES#WATCH`, not
+  the active list. The index is written with the batch and removed once the summary is posted (or the entry is
+  dropped, D-12). The active list cannot serve: the tick removes a batch from it when it writes the results, before
+  the summary can be posted. The Slack form's defaults:
+  - a model the project approves with no thinking level runs at the runtime's own default: `medium` for a reasoning
+    model, else `off`; a model the catalog does not know is refused;
+  - an OpenRouter model gets the deployment's OpenRouter providers;
+  - with no `cap $X`, the cap is every run's reservation (runs × the channel's ceiling × 1.1), rounded up to cents and
+    at most $1,000.
+- **D-11 (2026-10-02, Ruling 23):** The Slack form's batch ID is derived from the form as received, plus the team,
+  channel and thread. The form is the benchmark, the instances, the model names as typed (ignoring case and spacing),
+  the repeats, and the cap if one was given. No default resolved at request time is part of it. So a redelivered
+  event finds the batch it created, even if the project's thinking levels, the providers or the channel's ceiling
+  changed in between. The same form in another thread is another batch.
+- **D-12 (2026-10-02, Rulings 22, 24):** The watcher stops watching a batch, logged as an error naming the batch, when:
+  - its channel is unbound, or now serves another project;
+  - Slack answers a permanent error for its channel: `channel_not_found`, `is_archived`, `channel_is_archived`,
+    `not_in_channel`, `restricted_action` or `team_access_not_granted`;
+  - the batch ended more than 7 days ago without its summary posted.
+
+  After any other failure, the watcher leaves the batch alone for 10 minutes.
+
+  Each post is claimed on the batch record before it is made. A CLI batch's opener stores its timestamp before the
+  thread is recorded, so a failed record retries the record, not the post. A posted summary is recorded with its
+  timestamp. Within one process, both timestamps are kept until recorded. The risks that remain, accepted as
+  reviewed:
+  - a claimed progress post whose Slack call fails is lost, with any "model is done" line it carried;
+  - a crash between a post and its record (or a Slack call that timed out after Slack delivered it) can repeat that
+    opener or summary, once its claim is 10 minutes old;
+  - a Slack form whose start message failed posts it on the redelivery, unless the record of the post was written.
 
 ## Success Criteria
 

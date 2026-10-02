@@ -154,7 +154,7 @@ import {
   type SwebenchSlackContext,
 } from "./swebench.js";
 import { withEvalBatches, type EvalBatchDependencies } from "./eval-batch.js";
-import { listWatchedBatches, recordWatchedBatchThread, startSlackBatch, updateWatchedBatch } from "./eval-batch-service.js";
+import { dropWatchedBatch, listWatchedBatches, recordWatchedBatchThread, startSlackBatch, updateWatchedBatch } from "./eval-batch-service.js";
 import { batchResults, parseStartBody, requireBatchProject, showBatch, startBatch, stopBatchById } from "./eval-batch-admin.js";
 import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
 
@@ -606,7 +606,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         // Spec 052 Task 6: the batch watcher's list is the whole Slack service's, not one thread's.
         if (request.method === "GET" && serviceUrl.pathname === "/v1/evals/batches/active") {
           requireSlackServiceRole(dependencies, request);
-          if (dependencies.swebench === undefined) return json({ batches: [] }, request.requestId);
+          if (dependencies.swebench === undefined) return json({ batches: [], dropped: [] }, request.requestId);
           return json(await listWatchedBatches(swebenchDependencies(dependencies), async (teamId, channelId) => (await getSlackBinding(dependencies, teamId, channelId))?.projectName), request.requestId);
         }
         const identity = await slackServiceIdentity(dependencies, request);
@@ -635,15 +635,17 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         if (request.method === "POST" && serviceUrl.pathname === "/v1/evals/batches") {
           return json(await startSlackBatch(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId);
         }
-        const watchedBatch = /^\/v1\/evals\/batches\/([0-9a-f-]{36})\/(thread|watch)$/.exec(serviceUrl.pathname);
+        const watchedBatch = /^\/v1\/evals\/batches\/([0-9a-f-]{36})\/(thread|watch|drop)$/.exec(serviceUrl.pathname);
         if (request.method === "POST" && watchedBatch?.[1] && watchedBatch[2]) {
           const slack = identity.slack;
           if (!slack) throw agentXError("FORBIDDEN", "Slack thread context is required");
           const scope = { thread: slack.thread, projectName: slack.binding.projectName };
           const swebench = swebenchDependencies(dependencies);
-          return json(watchedBatch[2] === "thread"
-            ? await recordWatchedBatchThread(swebench, scope, watchedBatch[1], parseBody(request.body))
-            : await updateWatchedBatch(swebench, scope, watchedBatch[1], parseBody(request.body)), request.requestId);
+          const body = parseBody(request.body);
+          const answer = watchedBatch[2] === "thread" ? await recordWatchedBatchThread(swebench, scope, watchedBatch[1], body)
+            : watchedBatch[2] === "drop" ? await dropWatchedBatch(swebench, scope, watchedBatch[1], body)
+            : await updateWatchedBatch(swebench, scope, watchedBatch[1], body);
+          return json(answer, request.requestId);
         }
         const evalRun = /^\/v1\/evals\/swebench\/([0-9a-f-]{36})$/.exec(serviceUrl.pathname);
         if (request.method === "GET" && evalRun?.[1]) {

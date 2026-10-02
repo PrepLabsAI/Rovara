@@ -22,7 +22,7 @@ const bedrock = { provider: "amazon-bedrock", modelId: "us.vendor.batch-v1" };
 // A model the catalog knows as a reasoning model, approved with no thinking level.
 const glm = { provider: "openrouter", modelId: "z-ai/glm-4.6" };
 const unknown = { provider: "amazon-bedrock", modelId: "us.vendor.unknown-v1" };
-const form = { dataset: "verified", instanceIds: ["django__django-11099", "django__django-11100"], models: [bedrock, glm], repeats: 1 };
+const form = { dataset: "verified", instanceIds: ["django__django-11099", "django__django-11100"], models: [bedrock, glm], selectors: ["Batch", "GLM"], repeats: 1 };
 const batches = "/v1/service/evals/batches";
 
 beforeAll(async () => {
@@ -59,7 +59,7 @@ async function slackBatchBroker(options: { enable?: boolean } = {}) {
     documentClient: broker.db as never, s3: s3 as never, tableName: "state", artifactBucketName: "artifacts", callbackSigningKey: "c".repeat(64),
     deployment: async () => deployment, startExecution, estimateRunCostUsd: () => 2,
   });
-  return { ...broker, dependencies, objects };
+  return { ...broker, dependencies, objects, deployment };
 }
 
 type H = Awaited<ReturnType<typeof slackBatchBroker>>["handler"];
@@ -253,7 +253,13 @@ describe("the batch watcher against the broker (spec 052 Task 6, Ruling 19)", ()
     expect(posts).toEqual([{ threadTs: undefined, text: expect.stringContaining(`Eval batch \`${batchId}\` started from the CLI: 1 run of SWE-bench Verified: 1 task × 1 model × 1 repeat, with a cost cap of $50.00`) as unknown }]);
     // The list carries no thread; the record acts for the batch's placeholder thread.
     expect(sent[0]).toEqual({ thread: null, path: "/v1/service/evals/batches/active" });
-    expect(sent[1]!.path).toBe(`/v1/service/evals/batches/${batchId}/thread`);
+    // The opener is claimed, posted, its timestamp stored, and then its thread recorded (Ruling 24).
+    expect(sent.slice(1).map((request) => request.path)).toEqual([
+      `/v1/service/evals/batches/${batchId}/watch`,
+      `/v1/service/evals/batches/${batchId}/watch`,
+      `/v1/service/evals/batches/${batchId}/thread`,
+    ]);
+    expect(db.get(`EVAL_BATCH#${batchId}`, "META")).toMatchObject({ watch: { openerTs: "1695800000.000001" } });
     const opened = { ...thread, threadTs: "1695800000.000001" };
     expect(db.get(`EVAL_BATCH#${batchId}`, "META")).toMatchObject({ thread: opened });
     await handler({ source: "agentx.slack-ingress", action: "stop-task", thread: opened, userId: member });
@@ -266,9 +272,97 @@ describe("the batch watcher against the broker (spec 052 Task 6, Ruling 19)", ()
     // Its one run was cancelled before it started, so it has no result row.
     expect(posts[1]!.threadTs).toBe(opened.threadTs);
     expect(posts[1]!.text.split("\n").slice(0, 2)).toEqual([
-      `Eval batch \`${batchId}\` was stopped: 1/1 runs finished, 0 resolved, $0.00 spent of the $50.00 cap.`,
+      `Eval batch \`${batchId}\` was stopped: 0/1 runs finished, 0 resolved, $0.00 spent of the $50.00 cap.`,
       "No run has a result row, so there is no table.",
     ]);
     expect(db.get(`EVAL_BATCH#${batchId}`, "META")).toMatchObject({ watch: { summaryPostedAt: "2026-10-02T12:00:00.000Z" } });
+  });
+});
+
+describe("the Slack form's batch ID (spec 052 Ruling 23)", () => {
+  it("is the form as received: a redelivery after the project's thinking level, the providers and the channel ceiling changed reaches the same batch", async () => {
+    const { handler, db, deployment } = await slackBatchBroker();
+    const first = await startForm(handler);
+    expect(first.body).toMatchObject({ outcome: "STARTED", created: true });
+    await registerSlackProject(handler, {
+      revision: 2,
+      bind: false,
+      models: { default: bedrock, approved: [{ ...bedrock, thinkingLevel: "high", label: "Batch" }, { ...glm, thinkingLevel: "low", label: "GLM" }] },
+    });
+    deployment.environment.AGENTX_OPENROUTER_PROVIDERS = "together";
+    await call(handler, { method: "PUT", path: `/v1/admin/evals/channels/${SLACK_TEAM}/${SLACK_CHANNEL}`, user: administrator, body: { maxCostUsd: 7 } });
+    const redelivered = await startForm(handler);
+    expect(redelivered).toMatchObject({ status: 200, body: { outcome: "STARTED", created: false, batch: { costCapUsd: 22 } } });
+    expect((redelivered.body.batch as { batchId: string }).batchId).toBe((first.body.batch as { batchId: string }).batchId);
+    expect(metaItems(db)).toHaveLength(1);
+  });
+
+  it("names the form's model names as typed, ignoring case and spacing, so a resolved identifier does not change it", async () => {
+    const { handler, db } = await slackBatchBroker();
+    const first = await startForm(handler);
+    const respaced = await startForm(handler, { ...form, selectors: [" batch ", "glm"] });
+    expect((respaced.body.batch as { batchId: string }).batchId).toBe((first.body.batch as { batchId: string }).batchId);
+    expect(metaItems(db)).toHaveLength(1);
+  });
+});
+
+describe("the Slack form's default cap (spec 052 Ruling 22)", () => {
+  it("rounds every run's reservation up to cents and is at most $1,000", async () => {
+    const { handler } = await slackBatchBroker();
+    const channel = `/v1/admin/evals/channels/${SLACK_TEAM}/${SLACK_CHANNEL}`;
+    await call(handler, { method: "PUT", path: channel, user: administrator, body: { maxCostUsd: 4.33 } });
+    const three = { ...form, instanceIds: ["django__django-11099", "django__django-11100", "django__django-11101"], models: [bedrock], selectors: ["Batch"] };
+    // 3 × $4.33 × 1.1 = $14.289.
+    expect(await startForm(handler, three)).toMatchObject({ body: { outcome: "STARTED", batch: { costCapUsd: 14.29 } } });
+    await call(handler, { method: "PUT", path: channel, user: administrator, body: { maxCostUsd: 100 } });
+    const twenty = { ...form, instanceIds: Array.from({ length: 10 }, (_, index) => `django__django-${11_200 + index}`) };
+    // 20 × $110 is $2,200.
+    expect(await startForm(handler, twenty)).toMatchObject({ body: { outcome: "STARTED", batch: { costCapUsd: 1_000, runs: 20 } } });
+  });
+});
+
+describe("dropping a watch entry (spec 052 Ruling 24)", () => {
+  it("drops a batch whose channel was rebound or unbound, once, and names it", async () => {
+    const { handler, db } = await slackBatchBroker();
+    const rebound = ((await startForm(handler)).body.batch as { batchId: string }).batchId;
+    db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)!.projectName = "elsewhere";
+    expect(await list(handler)).toMatchObject({ status: 200, body: { batches: [], dropped: [{ batchId: rebound, reason: "channel_moved" }] } });
+    expect(await list(handler)).toMatchObject({ body: { batches: [], dropped: [] } });
+    db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)!.projectName = "payments";
+    const unbound = ((await startForm(handler, form, slackThreadSubject({ ...thread, threadTs: "1695500000.000003" }))).body.batch as { batchId: string }).batchId;
+    db.delete(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`);
+    expect(await list(handler)).toMatchObject({ body: { batches: [], dropped: [{ batchId: unbound, reason: "channel_unbound" }] } });
+    expect(db.find((item) => item.entityType === "EVAL_BATCH_WATCH")).toHaveLength(0);
+  });
+
+  it("drops a batch that ended more than 7 days ago without its summary posted", async () => {
+    const { handler, db, dependencies } = await slackBatchBroker();
+    const batchId = ((await startForm(handler)).body.batch as { batchId: string }).batchId;
+    await handler({ source: "agentx.slack-ingress", action: "stop-task", thread, userId: member });
+    await finalizeBatch(dependencies, batchId);
+    const item = db.get(`EVAL_BATCH#${batchId}`, "META")!;
+    item.finishedAt = new Date(Date.now() - 6 * 86_400_000).toISOString();
+    expect(await list(handler)).toMatchObject({ body: { batches: [{ batchId }], dropped: [] } });
+    item.finishedAt = new Date(Date.now() - 8 * 86_400_000).toISOString();
+    expect(await list(handler)).toMatchObject({ body: { batches: [], dropped: [{ batchId, reason: "ended_over_7_days" }] } });
+  });
+
+  it("drops a batch the watcher gave up on, from the batch's own thread", async () => {
+    const { handler, db } = await slackBatchBroker();
+    const batchId = ((await startForm(handler)).body.batch as { batchId: string }).batchId;
+    const drop = (threadSubject: string) => serviceCall(handler, threadSubject, member, "POST", `${batches}/${batchId}/drop`, { reason: "slack:channel_not_found" });
+    expect((await drop(slackThreadSubject({ ...thread, threadTs: "1695500000.000002" }))).status).toBe(404);
+    expect(await drop(subject)).toMatchObject({ status: 200, body: { dropped: true } });
+    expect(db.get(`EVAL_BATCH#${batchId}`, "META")).toMatchObject({ watch: { dropReason: "slack:channel_not_found", droppedAt: expect.any(String) as unknown } });
+    expect(await list(handler)).toMatchObject({ body: { batches: [] } });
+  });
+});
+
+describe("a stopped batch's counts (spec 052 Task 6 M-6)", () => {
+  it("does not count a run cancelled before it started as finished", async () => {
+    const { handler } = await slackBatchBroker();
+    await startForm(handler);
+    await handler({ source: "agentx.slack-ingress", action: "stop-task", thread, userId: member });
+    expect(await list(handler)).toMatchObject({ body: { batches: [{ status: "STOPPED", finished: 0, models: [{ finished: 0, ended: true }, { finished: 0, ended: true }] }] } });
   });
 });

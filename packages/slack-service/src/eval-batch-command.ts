@@ -6,7 +6,9 @@ import type {
   EvalBatchModel,
   EvalBatchSlackStartRequest,
   EvalBatchSlackStartResult,
+  EvalBatchWatchChange,
   EvalBatchWatched,
+  EvalBatchWatchUpdateResult,
   ModelIdentifier,
   ProjectModelOptions,
 } from "@agentx/contracts";
@@ -17,12 +19,19 @@ import { DATASET_NAMES } from "./swebench-command.js";
 export interface EvalBatchStartApi {
   startEvalBatch(request: EvalBatchSlackStartRequest): Promise<EvalBatchSlackStartResult>;
   listProjectModels?(): Promise<ProjectModelOptions>;
+  /** Records on the batch that its start message was posted (M-3). */
+  updateEvalBatchWatch?(batchId: string, revision: number, change: EvalBatchWatchChange): Promise<EvalBatchWatchUpdateResult>;
 }
 
 export async function runEvalBatchCommand(
   command: EvalBatchCommand,
   api: EvalBatchStartApi,
-  options: { post: (text: string) => Promise<void>; redelivered?: boolean },
+  options: {
+    post: (text: string) => Promise<void>;
+    redelivered?: boolean;
+    now?: () => number;
+    log?: (event: string, fields: Readonly<Record<string, string | number | boolean>>) => void;
+  },
 ): Promise<void> {
   if (command.kind === "invalid") {
     await options.post(escapeText(command.message));
@@ -46,6 +55,7 @@ export async function runEvalBatchCommand(
     dataset: command.dataset,
     instanceIds: command.instanceIds,
     models,
+    selectors: command.modelSelectors,
     repeats: command.repeats,
     ...(command.costCapUsd === undefined ? {} : { costCapUsd: command.costCapUsd }),
   });
@@ -53,8 +63,16 @@ export async function runEvalBatchCommand(
     await options.post(`I couldn't start this batch: ${escapeText(started.message)}`);
     return;
   }
-  if (started.created) {
-    await options.post(batchStartMessage(started.batch, "slack"));
+  const { batch } = started;
+  // A redelivery whose first delivery created the batch but failed to post its start message posts it now.
+  if (started.created || batch.watch.startPostedAt === undefined) {
+    await options.post(batchStartMessage(batch, "slack"));
+    try {
+      await api.updateEvalBatchWatch?.(batch.batchId, batch.watch.revision, { startPostedAt: new Date(options.now?.() ?? Date.now()).toISOString() });
+    } catch (error) {
+      // Only a hint for a redelivery: the batch runs and the watcher posts either way.
+      options.log?.("eval_batch.start_record_failed", { batchId: batch.batchId, error: error instanceof Error ? error.message : String(error) });
+    }
     return;
   }
   // A redelivered event found the batch its first delivery created, and announced.

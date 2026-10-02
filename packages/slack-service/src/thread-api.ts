@@ -2,6 +2,8 @@ import {
   EvalBatchSlackStartRequestSchema,
   EvalBatchSlackStartResultSchema,
   EvalBatchThreadResultSchema,
+  EvalBatchWatchDropRequestSchema,
+  EvalBatchWatchDropResultSchema,
   EvalBatchWatchListSchema,
   EvalBatchWatchUpdateRequestSchema,
   EvalBatchWatchUpdateResultSchema,
@@ -114,6 +116,10 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
       const body = EvalBatchSlackStartRequestSchema.parse(request);
       return EvalBatchSlackStartResultSchema.parse(await servicePost("/v1/evals/batches", body, "eval batch request failed"));
     },
+    async updateEvalBatchWatch(batchId, revision, change) {
+      const body = EvalBatchWatchUpdateRequestSchema.parse({ revision, change });
+      return EvalBatchWatchUpdateResultSchema.parse(await servicePost(`/v1/evals/batches/${encodeURIComponent(batchId)}/watch`, body, "eval batch watch record failed"));
+    },
   };
 }
 
@@ -130,7 +136,12 @@ export function createEvalBatchWatchApi(options: {
   const path = (batchId: string, action: string) => `${controlPlaneUrl}/v1/evals/batches/${encodeURIComponent(batchId)}/${action}`;
   return {
     async listBatches() {
-      return EvalBatchWatchListSchema.parse(await serviceRequestWith(signedFetchFor(), `${controlPlaneUrl}/v1/evals/batches/active`, "GET", undefined, "eval batch list failed")).batches;
+      return EvalBatchWatchListSchema.parse(await serviceRequestWith(signedFetchFor(), `${controlPlaneUrl}/v1/evals/batches/active`, "GET", undefined, "eval batch list failed"));
+    },
+    async dropWatch(batch, reason) {
+      const signed = signedFetchFor({ thread: batch.thread, userId: batch.createdBy.userId });
+      const body = EvalBatchWatchDropRequestSchema.parse({ reason });
+      return EvalBatchWatchDropResultSchema.parse(await serviceRequestWith(signed, path(batch.batchId, "drop"), "POST", body, "eval batch watch drop failed"));
     },
     async recordThread(batch, threadTs) {
       const signed = signedFetchFor({ thread: batch.thread, userId: batch.createdBy.userId });
