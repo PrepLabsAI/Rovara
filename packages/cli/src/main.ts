@@ -41,7 +41,7 @@ import { runWorkspacesCommand } from "./workspaces-ui/index.js";
 import { loadDeploymentSettings, type DeploymentSettings } from "./deployment.js";
 import { installMcp, MCP_CLIENTS, runCommand, type McpClientKind, type McpInstallDeps } from "./mcp/install.js";
 import { runMcpServer, type McpServeDeps } from "./mcp/serve.js";
-import type { AdminSession } from "@agentx/mcp";
+import { adminSignInCommand, adminSignInExpiredText, type AdminSession } from "@agentx/mcp";
 import { resumeCommand, runDeploy, runInitExport, type DeployCliDependencies, type DeployCommandOptions } from "./deploy/commands.js";
 import { cloudFormationStackReader, stsCallerIdentity, type CallerIdentity, type StackReader } from "./environments/adopt.js";
 import { resolveDeploymentFile } from "./environments/cache.js";
@@ -217,19 +217,28 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   ): Promise<AuthenticatedDeployment> {
     const settings = await deploymentSettings(options);
     const tokens = await tokenStore.get(tokenStoreKey(settings.auth));
-    if (!tokens || tokens.expiresAt <= Date.now()) throw agentXError("AUTH_REQUIRED", "run agentx login");
+    // Issue #218: an expired admin sign-in says so and when, never as if none was ever made.
+    if (!tokens) throw agentXError("AUTH_REQUIRED", `this computer holds no admin sign-in for ${options.env}; run ${adminSignInCommand(options.env)}`);
+    const now = Date.now();
+    if (tokens.expiresAt <= now) throw agentXError("AUTH_REQUIRED", adminSignInExpiredText(options.env, tokens.expiresAt, now));
     return { settings, accessToken: tokens.accessToken };
+  }
+
+  /** This computer's stored admin sign-in (agentx --env <name> login --admin) for an environment by name, expired or not. */
+  async function storedAdminSignIn(name: string): Promise<{ baseUrl: string; accessToken: string; expiresAt: number } | undefined> {
+    try {
+      const settings = await deploymentSettings({ ...globalOptions(program), env: name });
+      const tokens = await services.tokenStore.get(tokenStoreKey(settings.auth));
+      return tokens === undefined ? undefined : { baseUrl: settings.controlPlaneUrl.replace(/\/$/, ""), accessToken: tokens.accessToken, expiresAt: tokens.expiresAt };
+    } catch {
+      return undefined;
+    }
   }
 
   /** This computer's unexpired admin sign-in (agentx --env <name> login --admin) for an environment by name. Never refreshed (Q4). */
   async function adminSessionFor(name: string): Promise<(AdminSession & { expiresAt: number }) | undefined> {
-    try {
-      const settings = await deploymentSettings({ ...globalOptions(program), env: name });
-      const tokens = await services.tokenStore.get(tokenStoreKey(settings.auth));
-      return tokens !== undefined && tokens.expiresAt > Date.now() ? { baseUrl: settings.controlPlaneUrl.replace(/\/$/, ""), accessToken: tokens.accessToken, expiresAt: tokens.expiresAt } : undefined;
-    } catch {
-      return undefined;
-    }
+    const stored = await storedAdminSignIn(name);
+    return stored !== undefined && stored.expiresAt > Date.now() ? stored : undefined;
   }
 
   /** The developer sign-in's session dependencies: this computer's home and token store. */
@@ -1052,6 +1061,17 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     return adminSessionFor(name);
   };
   const adminSignedIn = async (env: string | undefined): Promise<boolean> => (await adminSession(env)) !== undefined;
+  /** Issue #218: the developer's environment and its stored admin sign-in's expiry, expired or not. */
+  const adminSignInExpiry = async (env: string | undefined): Promise<{ env: string; expiresAt: number } | undefined> => {
+    let name: string;
+    try {
+      name = (await resolveDeveloperEnvironment(home, env)).env;
+    } catch {
+      return undefined;
+    }
+    const stored = await storedAdminSignIn(name);
+    return stored === undefined ? undefined : { env: name, expiresAt: stored.expiresAt };
+  };
 
   const mcp = program
     .command("mcp")
@@ -1069,6 +1089,7 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
           ...(env === undefined ? {} : { env }),
           adminSignedIn,
           adminSession,
+          adminSignInExpiry,
           stdin: dependencies.stdin ?? process.stdin,
           stdout: (dependencies.stdout ?? process.stdout) as Writable,
           stderr: services.stderr,

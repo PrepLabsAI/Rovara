@@ -157,7 +157,8 @@ describe("agentx mcp's own admin sign-in (main.ts, A14)", () => {
     const whoami = await client.callTool({ name: "agentx_whoami", arguments: {} });
     expect(whoami.structuredContent).toMatchObject({ admin: false });
     expect((await client.listTools()).tools).toHaveLength(11);
-    expect(toolError(await client.callTool({ name: "agentx_admin_list_projects", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED", next_step: "run npx @charterarc/agentx login --admin" });
+    // Issue #218: an expired sign-in names its environment and the exact command.
+    expect(toolError(await client.callTool({ name: "agentx_admin_list_projects", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED", next_step: "run agentx --env staging login --admin" });
     expect(fetch.mock.calls.some((entry) => new URL(String(entry[0])).pathname.includes("/token") || new URL(String(entry[0])).pathname.startsWith("/v1/admin/"))).toBe(false);
     expect(await stop()).toBe(0);
     expect(stderr.join("")).not.toContain(ADMIN_TOKEN);

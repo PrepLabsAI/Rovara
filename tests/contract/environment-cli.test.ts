@@ -287,7 +287,8 @@ describe("legacy deployment file and --env validation", () => {
     // No token is cached, so the command fails past settings loading, at the login check;
     // that proves the legacy file (the only settings source here) was found and parsed.
     expect(code).not.toBe(0);
-    expect(io.err.join("")).toContain("run agentx login");
+    // Issue #218: the admin command, for the environment the legacy file serves.
+    expect(io.err.join("")).toContain("this computer holds no admin sign-in for production; run agentx --env production login --admin");
   });
 
   it("refuses an invalid --env before any SSM or file access, for a non-env command", async () => {

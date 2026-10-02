@@ -6,7 +6,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import type { AdminMeResponse } from "@agentx/contracts";
 import {
-  ADMIN_AUDIT_TOOLS, ADMIN_CHANGE_TOOLS, ADMIN_READ_TOOLS, NEXT_STEPS, NOT_OFFERED, REQUIRED_CHANGE_ADMIN_MINOR, UPGRADE_AGENTX_STEP, ToolError, adminApiFits,
+  ADMIN_AUDIT_TOOLS, ADMIN_CHANGE_TOOLS, ADMIN_READ_TOOLS, NEXT_STEPS, NOT_OFFERED, REQUIRED_CHANGE_ADMIN_MINOR, UPGRADE_AGENTX_STEP, ToolError, adminApiFits, adminSignInExpiredError, adminSignInNotice,
   compatibilityChecker, createAgentXMcpServer, httpAdminClient, httpControlPlaneClient, type AdminOffer, type AdminSession, type Compatibility, type ControlPlaneClient,
 } from "@agentx/mcp";
 import { developerAccessToken, type DeveloperSessionDeps } from "../developer/session.js";
@@ -17,6 +17,11 @@ export interface McpServeDeps extends DeveloperSessionDeps {
   adminSignedIn(env: string | undefined): Promise<boolean>;
   /** Spec 025 A14: this computer's unexpired admin sign-in for the environment, or undefined. Never refreshed (Q4). */
   adminSession(env: string | undefined): Promise<AdminSession | undefined>;
+  /**
+   * Issue #218: the environment and expiry of the admin sign-in stored for the environment, expired
+   * or not; undefined when none is stored. Absent, an expired sign-in reads as none held.
+   */
+  adminSignInExpiry?(env: string | undefined): Promise<{ env: string; expiresAt: number } | undefined>;
   stderr: { write(text: string): unknown };
   clock?: { now(): number; sleep(ms: number, signal: AbortSignal): Promise<void> };
 }
@@ -64,12 +69,25 @@ export function agentxMcpServer(deps: McpServeDeps): McpServer {
   // One checker for the server's life, outside the per-call context, so its 10-minute cache holds.
   const compatibility = compatibilityChecker(client, { now });
   const log = stderrLog(deps);
+  /** The stored admin sign-in's expiry; a failed read is taken as none stored. */
+  const storedAdmin = async (): Promise<{ env: string; expiresAt: number } | undefined> => {
+    try {
+      return await deps.adminSignInExpiry?.(deps.env);
+    } catch {
+      return undefined;
+    }
+  };
+  /** Issue #218: why no admin sign-in is held: it expired (when, and the command), or there is none. */
+  const notHeld = async (): Promise<ToolError> => {
+    const stored = await storedAdmin();
+    return stored !== undefined && stored.expiresAt <= now() ? adminSignInExpiredError(stored.env, stored.expiresAt, now()) : NOT_OFFERED;
+  };
   // A14: the admin sign-in as stored; an absent or expired one is ADMIN_REQUIRED, never refreshed (Q4).
   const admin = httpAdminClient({
     fetch: deps.fetch,
     session: async () => {
       const session = await deps.adminSession(deps.env);
-      if (session === undefined) throw NOT_OFFERED;
+      if (session === undefined) throw await notHeld();
       return session;
     },
   });
@@ -77,7 +95,7 @@ export function agentxMcpServer(deps: McpServeDeps): McpServer {
   // that fits: the compatibility it read, or why not. The checker's 10-minute cache holds, so the
   // 30-second check does not read the configuration each time.
   const readsOffer = async (): Promise<{ refusal: ToolError } | { refusal: undefined; compatibility: Compatibility }> => {
-    if ((await deps.adminSession(deps.env)) === undefined) return { refusal: NOT_OFFERED };
+    if ((await deps.adminSession(deps.env)) === undefined) return { refusal: await notHeld() };
     let read: Compatibility;
     try {
       read = await compatibility();
@@ -130,6 +148,7 @@ export function agentxMcpServer(deps: McpServeDeps): McpServer {
       confirmation,
       serverVersion: CLI_VERSION,
       adminSignedIn: () => deps.adminSignedIn(deps.env),
+      adminSignInNotice: async () => adminSignInNotice(await storedAdmin(), now()),
       compatibility,
       admin,
       now,
