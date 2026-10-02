@@ -150,7 +150,7 @@ function undoableSecretWrite(input: { secrets: InitSecrets; name: string; write:
 }
 
 /** Whether the Slack secret already holds a well-formed client ID and client secret. Reads only their shape; never returns or prints them. */
-async function hasStoredSlackClient(secrets: InitSecrets, name: string): Promise<boolean> {
+export async function hasStoredSlackClient(secrets: InitSecrets, name: string): Promise<boolean> {
   const text = await secrets.get(name);
   if (text === undefined) return false;
   let value: unknown;

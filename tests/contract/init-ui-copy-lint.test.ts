@@ -7,7 +7,8 @@ import { WAITING_STEP_PLAIN } from "../../packages/cli/src/init/commands.js";
 import type { WizardQuestion } from "../../packages/cli/src/init/ui/protocol.js";
 import { settingsFields } from "../../packages/cli/src/init/settings-form.js";
 import { COPY_RULES, lintCopy, quotedStrings, stateEntries } from "../support/copy-lint.js";
-import { FINISH, FIRST_RUN, harness, SIGNIN, SLACK } from "../support/init-ui-harness.js";
+import { FINISH, FIRST_RUN, FIRST_RUN_BUDGET_USD, harness, SIGNIN, SLACK } from "../support/init-ui-harness.js";
+import { fakeAlerts } from "../support/setup-fakes.js";
 import { fakeWizardOperator } from "../support/wizard-browser.js";
 
 const SEEDED: Record<string, string> = {
@@ -109,18 +110,14 @@ describe("SC-011: the whole install, as the page shows it", () => {
     expect(lintCopy(operator.states.flatMap((state, index) => stateEntries(state, `state ${index}`)))).toEqual([]);
   });
 
-  // Review fix round 1: a waiting step carries a `message` (WizardStep.message) the earlier three
-  // journeys never reach, since none of them pauses on someone else. Driving one here (the same
-  // script as commands.ts's "a run paused waiting on a Slack admin's approval" test) proves
-  // stateEntries actually walks a waiting step's message, and that the whole state history still
-  // lints clean with it present.
-  it("a run paused waiting on a Slack admin's approval says no internal word anywhere on the page", async () => {
+  it("a run paused waiting on the alert confirmation says no internal word anywhere on the page", async () => {
     const h = await harness();
-    const operator = fakeWizardOperator([...FIRST_RUN, "approval"]);
-    const code = await h.run(["--ui"], { openBrowser: operator.open });
+    const alerts = fakeAlerts({ confirmAfterPolls: 1_000_000, budgetUsd: FIRST_RUN_BUDGET_USD });
+    const finish = FINISH.slice(0, -1);
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ...finish, false]);
+    const code = await h.run(["--ui"], { openBrowser: operator.open, setup: { ...h.setup, alerts } });
     await operator.settled();
     expect(code).toBe(0);
-    // Not vacuous: a step really did reach "waiting" with a message, in some state of the run.
     expect(operator.states.some((state) => state.steps.some((step) => step.status === "waiting" && step.message !== undefined))).toBe(true);
     expect(lintCopy(operator.states.flatMap((state, index) => stateEntries(state, `state ${index}`)))).toEqual([]);
   });

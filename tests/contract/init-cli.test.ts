@@ -147,9 +147,9 @@ const FIRST_RUN = [...settingsScript({ email: ADMIN_EMAIL, owner: "acme", advanc
 const CDK_FIRST_RUN = [...settingsScript({ email: ADMIN_EMAIL, owner: "acme", flags: { engine: "cdk" }, advanced: { alertEmail: "ops@example.com" } }), true];
 // The Slack step: installed, the token, the signing secret, "the right bot?"; then the Slack
 // service step's "Request URL Verified?" (Task 9's fix round added both confirms).
-const SLACK = ["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true];
-// The developer-signin step: default method Slack, client ID, client secret, "Apply this change?".
-const SIGNIN = ["", "1111111111.2222222222222", "fedcba9876543210fedcba9876543210", true];
+const SLACK = ["installed", "1111111111.2222222222222", "fedcba9876543210fedcba9876543210", TEST_SIGNING_SECRET, TEST_BOT_TOKEN, true, true];
+// The developer-signin step: default method Slack and "Apply this change?".
+const SIGNIN = ["", true];
 // The finishing steps (F15): repository; project name; use the proposed commands; channel; the
 // three connector offers; "did the test alarm arrive?". Your email comes from the settings (spec 048 FR-020).
 const FINISH = ["acme/payments-api", "", true, "payments", false, false, false, true];

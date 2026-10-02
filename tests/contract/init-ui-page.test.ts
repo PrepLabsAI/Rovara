@@ -79,6 +79,11 @@ describe("the page shell", () => {
     expect(WIZARD_JS).not.toContain("Leave empty for");
   });
 
+  it("FR-034: counts down to a card's waitUntil", () => {
+    expect(WIZARD_JS).toContain("card.waitUntil");
+    expect(WIZARD_JS).toContain("node.dataset.until");
+  });
+
   // Review fix round 1: a waiting step's message (protocol.ts's WizardStep.message) is terminal-only
   // text that keeps the terminal's own rerun instruction (FR-072; slack-app.ts, finish-steps.ts).
   // Pinned here so the page cannot start rendering it without this test being touched too; the

@@ -56,8 +56,18 @@ export const SETTINGS = JSON.stringify({ email: ADMIN_EMAIL, githubAccount: "acm
 export const FIRST_RUN = [SETTINGS, "create"];
 /** The same settings answered in the terminal, in the form's order, then the plan's confirm. */
 export const TERMINAL_FIRST_RUN = [...settingsScript({ email: ADMIN_EMAIL, owner: "acme", advanced: { alertEmail: "ops@example.com" } }), true];
-export const SLACK = ["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true];
-export const SIGNIN = ["", "1111111111.2222222222222", "fedcba9876543210fedcba9876543210", true];
+export const SLACK_CLIENT_ID = "1111111111.2222222222222";
+export const SLACK_CLIENT_SECRET = "fedcba9876543210fedcba9876543210";
+export const SLACK_VALUES = JSON.stringify({
+  clientId: SLACK_CLIENT_ID,
+  clientSecret: SLACK_CLIENT_SECRET,
+  signingSecret: TEST_SIGNING_SECRET,
+  botToken: TEST_BOT_TOKEN,
+});
+export const SLACK = ["installed", SLACK_VALUES, true, true];
+/** The Slack app step answered in the terminal, where the form's values are separate prompts. */
+export const TERMINAL_SLACK = ["installed", SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEST_SIGNING_SECRET, TEST_BOT_TOKEN, true, true];
+export const SIGNIN = ["", true];
 export const FINISH = ["acme/payments-api", "", true, "payments", false, false, false, true];
 /** The three recommended models FIRST_RUN takes. */
 export const DEFAULTS = { orchestrator: DEFAULT_ORCHESTRATOR_MODEL, classifier: DEFAULT_CLASSIFIER_MODEL, worker: DEFAULT_WORKER_MODEL };

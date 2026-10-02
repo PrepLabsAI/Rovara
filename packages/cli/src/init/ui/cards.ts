@@ -192,9 +192,9 @@ export function slackAppCard(input: SlackCardInput): WizardCard {
     case "credentials": return {
       ...base, status: "waiting",
       lines: [
-        `Copy two values from the settings of "${input.appName}" and paste them below.`,
-        "The Bot User OAuth Token is under OAuth & Permissions. The Signing Secret is under Basic Information, App Credentials.",
-        "Both are saved in AWS Secrets Manager and never shown again.",
+        `Copy the values from the settings of "${input.appName}" and paste them below.`,
+        "The Client ID, Client Secret and Signing Secret are under Basic Information, App Credentials. The Bot User OAuth Token is under OAuth & Permissions.",
+        "They are saved in AWS Secrets Manager and never shown again.",
       ],
       link: { url: SLACK_APPS_URL, label: "Open your Slack apps" },
     };
@@ -206,7 +206,11 @@ export function slackAppCard(input: SlackCardInput): WizardCard {
     }
     case "approval": return {
       ...base, status: "waiting",
-      lines: [`Slack is waiting for a workspace admin to approve "${input.appName}".`, "Your progress is saved. When the app is installed, start the install again and it continues from here."],
+      lines: [
+        `Slack is waiting for a workspace admin to approve "${input.appName}".`,
+        "Your progress is saved. You can leave the installer running, or stop and continue later.",
+        "When the app is installed in Slack, choose Installed, continue.",
+      ],
     };
     case "done": return {
       ...base, status: "ok",
@@ -218,8 +222,9 @@ export function slackAppCard(input: SlackCardInput): WizardCard {
 
 export type SlackUrlsCardInput =
   | { stage: "checking"; eventsUrl: string }
-  | { stage: "waiting-for-secret"; eventsUrl: string }
+  | { stage: "waiting-for-secret"; eventsUrl: string; until?: string }
   | { stage: "verify"; pageUrl: string }
+  | { stage: "not-verified"; pageUrl: string }
   | { stage: "failed"; problem: string; pageUrl: string }
   | { stage: "done"; eventsUrl: string };
 
@@ -232,10 +237,20 @@ export function slackUrlsCard(input: SlackUrlsCardInput): WizardCard {
     case "waiting-for-secret": return {
       ...base, status: "running",
       lines: [`Checking that Slack can reach AgentX at ${input.eventsUrl}.`, "AgentX can take up to 5 minutes to start using the new Signing Secret. Checking again every 15 seconds."],
+      ...(input.until === undefined ? {} : { waitUntil: input.until }),
     };
     case "verify": return {
       ...base, status: "waiting",
       lines: ["AgentX answers Slack's check.", "Open Event Subscriptions in your Slack app. If the address is not marked Verified, press Retry there, then answer below."],
+      link: { url: input.pageUrl, label: events },
+    };
+    case "not-verified": return {
+      ...base, status: "failed",
+      lines: [
+        "Slack still shows an error next to the address.",
+        "In Event Subscriptions, press Retry next to the address. If it still fails, check that the Signing Secret you pasted is the one on Basic Information, App Credentials, not the Client Secret.",
+        "Then choose Check again below.",
+      ],
       link: { url: input.pageUrl, label: events },
     };
     case "failed": return {

@@ -130,6 +130,8 @@ export interface WizardCard {
   /** Technical details, shown collapsed: raw messages, IDs, ARNs (FR-027, FR-060). */
   details?: string[];
   commands?: WizardCommand[];
+  /** FR-034: an ISO time the page counts down to. */
+  waitUntil?: string;
 }
 
 /** FR-001: the slim header. */

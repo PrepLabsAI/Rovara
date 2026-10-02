@@ -27,7 +27,11 @@ import { fakeWizardOperator, snapshotOnReconnect } from "../support/wizard-brows
 import { ADMIN_EMAIL, fakeAlerts, fakeSlackChannels } from "../support/setup-fakes.js";
 import { markOperatorStop } from "../../packages/cli/src/init/stop.js";
 import { WIZARD_TOKEN_HEADER, type WizardPlan, type WizardSnapshot } from "../../packages/cli/src/init/ui/protocol.js";
-import { DEFAULTS, FINISH, FIRST_RUN, FIRST_RUN_BUDGET_USD, harness, releaseDir, SETTINGS, SIGNIN, SLACK, TERMINAL_FIRST_RUN } from "../support/init-ui-harness.js";
+import {
+  DEFAULTS, FINISH, FIRST_RUN, FIRST_RUN_BUDGET_USD, harness, releaseDir, SETTINGS, SIGNIN, SLACK,
+  SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, SLACK_VALUES, TERMINAL_FIRST_RUN, TERMINAL_SLACK,
+} from "../support/init-ui-harness.js";
+import { SLACK_VALUES_TITLE } from "../../packages/cli/src/init/slack-app.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -50,7 +54,7 @@ describe("agentx init --ui", () => {
     // Spec 048 FR-020: the settings are one form on the page, the deploy engine among them.
     expect(operator.asked).toContain("Your settings");
     expect(operator.asked).toContain("Create all of this?");
-    expect(operator.asked).toContain("Slack bot token");
+    expect(operator.asked).toContain(SLACK_VALUES_TITLE);
     expect(operator.asked).toHaveLength(FIRST_RUN.length + SLACK.length + SIGNIN.length + FINISH.length);
 
     expect(h.deployer.requests.map((request) => request.part)).toEqual(["access", "foundation", "identity", "control-plane", "runtime", "slack"]);
@@ -228,7 +232,7 @@ describe("agentx init --ui", () => {
     const h = await harness();
     expect(await h.run(["--ui", "--yes"])).not.toBe(0);
     expect(h.printed()).toContain("agentx init --ui asks its questions on a page; --yes answers them without asking");
-    expect(await h.run(["--no-ui"], { prompter: scriptedPrompter([...TERMINAL_FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]) })).toBe(0);
+    expect(await h.run(["--no-ui"], { prompter: scriptedPrompter([...TERMINAL_FIRST_RUN, ...TERMINAL_SLACK, ...SIGNIN, ...FINISH]) })).toBe(0);
   });
 
   it("asks the finishing steps' questions on the page, and ends the page on the developer sign-in command", async () => {
@@ -399,7 +403,7 @@ describe("agentx init --ui", () => {
   it("the terminal path still opens every site in the system browser", async () => {
     const h = await harness();
     const opened: string[] = [];
-    expect(await h.run([], { prompter: scriptedPrompter([...TERMINAL_FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]), openBrowser: browserThatCreatesGitHubApp(opened) })).toBe(0);
+    expect(await h.run([], { prompter: scriptedPrompter([...TERMINAL_FIRST_RUN, ...TERMINAL_SLACK, ...SIGNIN, ...FINISH]), openBrowser: browserThatCreatesGitHubApp(opened) })).toBe(0);
     expect(opened).toContain("https://github.com/apps/agentx-acme-staging/installations/new");
     expect(opened).toContain("https://api.slack.com/apps/A0APP/event-subscriptions");
   });
@@ -584,11 +588,14 @@ describe("agentx init --ui", () => {
   it("FR-040: the Slack app is created from a button, and a wrong token is refused on the field", async () => {
     const h = await harness();
     const typo = "xoxp-9999-USERtokenVALUE";
-    const { code, operator } = await h.runUi([...FIRST_RUN, "installed", typo, TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true, ...SIGNIN, ...FINISH]);
+    const wrong = JSON.stringify({ clientId: SLACK_CLIENT_ID, clientSecret: SLACK_CLIENT_SECRET, signingSecret: TEST_SIGNING_SECRET, botToken: typo });
+    const { code, operator } = await h.runUi([...FIRST_RUN, "installed", wrong, SLACK_VALUES, true, true, ...SIGNIN, ...FINISH]);
     expect(code).toBe(0);
     expect(operator.clicked.some((url) => url.startsWith("https://api.slack.com/apps?new_app=1&manifest_json="))).toBe(true);
-    expect(operator.fieldErrors).toContain("that is a user token (xoxp-); paste the Bot User OAuth Token from OAuth & Permissions, which starts with xoxb-");
-    expect(operator.asked.filter((question) => question === "Slack bot token")).toHaveLength(2);
+    expect(operator.fieldErrors).toEqual(["Check the field marked below.", "Check the field marked below."]);
+    expect(operator.asked.filter((question) => question === SLACK_VALUES_TITLE)).toHaveLength(2);
+    const refused = operator.states.map((state) => state.question).find((question) => question?.kind === "form" && question.text === SLACK_VALUES_TITLE && question.error !== undefined);
+    expect(refused?.fields?.find((field) => field.name === "botToken")?.error).toBe("that is a user token (xoxp-); paste the Bot User OAuth Token from OAuth & Permissions, which starts with xoxb-");
     expect(JSON.stringify(operator.states)).not.toContain("USERtokenVALUE");
     expect(await h.everywhere()).not.toContain("USERtokenVALUE");
     const slack = operator.states.at(-1)?.cards?.find((card) => card.id === "slack");
@@ -603,16 +610,16 @@ describe("agentx init --ui", () => {
     });
     // What was stored when the page asked to paste again, after the first refusal.
     let atRefusal: { secret: string | undefined; slack: unknown } | undefined;
-    const operator = fakeWizardOperator([...FIRST_RUN, "installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true, ...SIGNIN, ...FINISH], {
+    const operator = fakeWizardOperator([...FIRST_RUN, "installed", SLACK_VALUES, true, SLACK_VALUES, true, true, ...SIGNIN, ...FINISH], {
       beforeAnswer: async (question) => {
-        if (question.text === "Paste the Slack bot token and signing secret again?") {
+        if (question.text === "Paste the Slack values again?") {
           atRefusal = { secret: h.secrets.values.get("agentx/staging/slack"), slack: (await readInstallProgress(h.store, "staging"))?.slack };
         }
       },
     });
     expect(await h.run(["--ui"], { openBrowser: operator.open, slack })).toBe(0);
     await operator.settled();
-    expect(operator.asked).toContain("Paste the Slack bot token and signing secret again?");
+    expect(operator.asked).toContain("Paste the Slack values again?");
     // Nothing was saved after the refusal: the secret holds what it held before, and no Slack app is recorded.
     expect(atRefusal).toEqual({ secret: JSON.stringify({ botToken: "unset", signingSecret: "placeholder" }), slack: undefined });
     // Once a token worked, both were stored.
@@ -624,7 +631,7 @@ describe("agentx init --ui", () => {
   it("Q8: the terminal path still stops when Slack refuses the token", async () => {
     const h = await harness();
     const slack = fakeSlackApi({ authTest: async () => ({ ok: false, error: "invalid_auth" }) });
-    expect(await h.run([], { prompter: scriptedPrompter([...TERMINAL_FIRST_RUN, "installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET]), slack })).not.toBe(0);
+    expect(await h.run([], { prompter: scriptedPrompter([...TERMINAL_FIRST_RUN, "installed", SLACK_CLIENT_ID, SLACK_CLIENT_SECRET, TEST_SIGNING_SECRET, TEST_BOT_TOKEN]), slack })).not.toBe(0);
     expect(h.printed()).toContain("Slack refused the bot token (invalid_auth); copy it again from OAuth & Permissions");
   });
 
@@ -777,25 +784,17 @@ describe("agentx init --ui", () => {
     expect(last?.journey.timeLeftText).toBe("Done");
   });
 
-  it("spec 048 FR-059: a run paused waiting on a Slack admin's approval shows the plain outcome, a continue command, and the same reason in the terminal", async () => {
+  it("FR-036: a page waiting on a Slack admin stays open and continues after approval", async () => {
     const h = await harness();
-    const operator = fakeWizardOperator([...FIRST_RUN, "approval"]);
+    const operator = fakeWizardOperator([...FIRST_RUN, "approval", "installed", SLACK_VALUES, true, true, ...SIGNIN, ...FINISH]);
     const code = await h.run(["--ui"], { openBrowser: operator.open });
     await operator.settled();
     expect(code).toBe(0);
     const last = operator.states.at(-1);
-    expect(last?.outcome).toBe("The install is paused. Your progress is saved.");
-    expect(last?.commands).toEqual([{ label: "Continue later with", command: "node /opt/agentx/dist/main.js --env staging init --region us-east-1" }]);
-    expect(h.err.join("").trimEnd().split("\n").at(-1)).toEqual(
-      `[4/5] Stopped: Waiting for a Slack admin to approve the app. Details in the browser and in ${initLogPath(h.home, "staging")}.`,
-    );
-    // A paused run is not drawn as finished: the waiting step's phase waits for you, and the time
-    // left is what the install still has to do.
-    expect(last?.phase).toBe("paused");
-    expect(last?.journey.current).toBe("connect-slack");
-    expect(last?.journey.stepNumber).toBe(4);
-    expect(last?.journey.phases.map((phase) => phase.statusWord)).toEqual(["Done", "Done", "Done", "Waiting for you", "Coming up"]);
-    expect(last?.journey.timeLeftText).toBe("About 16 minutes left");
+    expect(operator.asked.filter((question) => question === "Is the Slack app installed in your workspace?")).toHaveLength(2);
+    expect(operator.states.flatMap((state) => state.cards ?? []).some((card) => card.id === "slack" && card.status === "waiting")).toBe(true);
+    expect(last?.phase).toBe("finished");
+    expect(last?.outcome).toBe(READY_OUTCOME);
   });
 
   it("spec 048 FR-059: a run paused waiting on the alert subscription shows its own plain reason", async () => {

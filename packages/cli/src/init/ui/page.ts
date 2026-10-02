@@ -121,6 +121,11 @@ function elapsedText(node) {
   return " (" + clockText(seconds) + " so far, " + (seconds > usual ? "taking longer than usual" : node.dataset.usualText) + ")";
 }
 
+function untilText(node) {
+  const seconds = Math.max(0, Math.round((Date.parse(node.dataset.until) - Date.now()) / 1000));
+  return seconds > 0 ? "About " + clockText(seconds) + " left." : "Still checking.";
+}
+
 function linkBlock(link) {
   const wrap = el("p");
   const anchor = el("a", "button primary", link.label);
@@ -194,6 +199,12 @@ function renderCard(card) {
   const section = el("section", "card status " + card.status);
   section.append(el("h2", "", card.title));
   for (const line of card.lines) section.append(el("p", "", line));
+  if (card.waitUntil) {
+    const left = el("p", "hint");
+    left.dataset.until = card.waitUntil;
+    left.textContent = untilText(left);
+    section.append(left);
+  }
   if (card.checks) {
     const list = el("ul", "checks");
     for (const check of card.checks) list.append(el("li", check.ok ? "ok" : "failed", (check.ok ? "Ready: " : "Not ready: ") + check.label + ". " + check.detail));
@@ -526,7 +537,10 @@ function appendLog(line) {
   if (atBottom) pane.scrollTop = pane.scrollHeight;
 }
 
-setInterval(() => { for (const node of document.querySelectorAll("[data-started]")) node.textContent = elapsedText(node); }, 1000);
+setInterval(() => {
+  for (const node of document.querySelectorAll("[data-started]")) node.textContent = elapsedText(node);
+  for (const node of document.querySelectorAll("[data-until]")) node.textContent = untilText(node);
+}, 1000);
 
 const source = new EventSource("/events?" + ${JSON.stringify(WIZARD_TOKEN_QUERY)} + "=" + encodeURIComponent(token));
 source.addEventListener("snapshot", (event) => {
