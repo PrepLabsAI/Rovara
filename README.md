@@ -854,7 +854,8 @@ receives and lands in the dispatch dead-letter queue. To clear it, find the job'
 the dispatcher logs, then redrive or purge the `DispatchDeadLetterQueueUrl` queue. An installed
 environment also has `agentx-<env>-StuckCancels`: it fires when the session reconciler finds a task
 whose cancel never reached its worker for 30 minutes, and queues the cancel again once or ends the
-task (or fails to). Look for `stuck_cancel` events in the reconciler's logs. `agentx init` subscribes
+task (or fails to), or a task whose cancel failed while its worker still says it is busy (it keeps
+its workspace until the worker is idle or gone). Look for `stuck_cancel` events in the reconciler's logs. `agentx init` subscribes
 your alert address and sends a test alarm, and `agentx alerts test` sends another. Five
 alarms ship in `AgentXControlPlane`: `AgentXConnectorBroken` (a connector's discovery failed or a
 vendor changed an approved tool's schema), `AgentXConnectorNotConnected` (a connector's vendor

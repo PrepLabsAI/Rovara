@@ -318,7 +318,11 @@ banned pattern; seeded examples of each pattern make it fail.
   started, Your choices, Build in AWS, Connect Slack, Finish. Each phase MUST show its time
   estimate and a status word (Done, Now, Waiting for you, Coming up, Stopped); status MUST NOT be
   shown by color or symbol alone. A slim header MUST show the install name, AWS account, region,
-  "step N of 5" and the overall time left.
+  "step N of 5" and the overall time left. **Owner decision, 2026-10-02:** while the run is stopped
+  on a failure, that header place MUST say "Stopped" instead of a time estimate; once a retry
+  resumes the run, the time estimate MUST show again. (Phase 1 first kept the time estimate
+  through a failure, reading SC-001's "100% of screens show ... the time left" literally; the
+  owner overruled that reading after seeing the approved mockup's failure screen.)
 - **FR-002**: Time estimates MUST come from measured durations (at least two clean runs per
   step), stored with the step definitions, and shown as "usually N minutes". A running step MUST
   show its elapsed time. A step that runs past its estimate MUST say "taking longer than usual"
@@ -571,7 +575,8 @@ banned pattern; seeded examples of each pattern make it fail.
 ### Measurable Outcomes
 
 - **SC-001**: 100% of screens show the current phase, "step N of 5" and the time left (a test per
-  screen).
+  screen); on a screen where the run is stopped on a failure, that place says "Stopped" instead
+  (owner decision, 2026-10-02), and the time left returns once a retry resumes the run.
 - **SC-002**: Zero instructions exist only in the terminal: a test asserts that every line the user
   must act on also appears on the page.
 - **SC-003**: Zero page text tells the user to pass a CLI flag, run a command or read the terminal,
