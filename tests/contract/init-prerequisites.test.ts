@@ -12,13 +12,14 @@ import {
   endpointMissing,
   modelCheckProblem,
   NAT_ELASTIC_IPS,
+  releaseImageChecks,
   type PrerequisiteCheck,
   withDeadline,
 } from "../../packages/cli/src/init/prerequisites.js";
 import type { InitAnswers } from "../../packages/cli/src/init/install-state.js";
 import type { ParameterStore } from "../../packages/cli/src/environments/parameter-store.js";
 import type { CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
-import { fakeRelease, passingChecks, sampleAnswers, scriptedPrompter } from "../support/init-fakes.js";
+import { fakeRelease, HOLDER, passingChecks, sampleAnswers, scriptedPrompter } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 const caller = { account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice" };
@@ -529,5 +530,54 @@ describe("the prerequisite checklist (spec 040 FR-023)", () => {
     expect(reported.find((check) => check.label === "EC2 vCPU quota")).toEqual({
       label: "EC2 vCPU quota", ok: false, detail: "EC2 Standard on-demand vCPU quota in us-east-1 must be at least 1 for an m6g.medium worker; request an increase in Service Quotas",
     });
+  });
+});
+
+const PUBLIC = `public.ecr.aws/agentx/worker@sha256:${"a".repeat(64)}`;
+const PRIVATE = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx/worker@sha256:${"a".repeat(64)}`;
+const SLACK = `public.ecr.aws/agentx/slack@sha256:${"b".repeat(64)}`;
+
+describe("spec 048 FR-065: the release's images", () => {
+  it("passes images AWS can pull through the image cache", () => {
+    expect(releaseImageChecks({ version: "1.2.3", images: { worker: PUBLIC, slack: SLACK }, audience: "page" }).map((check) => [check.label, check.ok])).toEqual([
+      ["The coding image", true], ["The Slack connection image", true],
+    ]);
+  });
+
+  it("refuses an image that is not on Amazon ECR Public, in page words on the page and with the flag in the terminal", () => {
+    const [page] = releaseImageChecks({ version: "1.2.3", images: { worker: PRIVATE, slack: SLACK }, audience: "page" });
+    expect(page).toEqual({
+      label: "The coding image", ok: false,
+      detail: "This release's coding image is not on Amazon ECR Public, so AWS cannot pull it. Use a published AgentX release, or start the install again with an image address AWS can reach.",
+      technical: PRIVATE,
+    });
+    const [terminal] = releaseImageChecks({ version: "1.2.3", images: { worker: PRIVATE, slack: SLACK }, audience: "terminal" });
+    expect(terminal?.detail).toBe(`release 1.2.3's worker image ${PRIVATE} is not a public.ecr.aws/ reference, so the install would fail after about 15 minutes; use a published release, or pass --worker-image <repository@sha256:...> with an image AWS can pull`);
+  });
+
+  it("refuses an image not pinned to a digest, and accepts one the answers name instead", () => {
+    const [unpinned] = releaseImageChecks({ version: "1.2.3", images: { worker: "public.ecr.aws/agentx/worker:latest", slack: SLACK }, audience: "page" });
+    expect(unpinned?.ok).toBe(false);
+    const [overridden] = releaseImageChecks({ version: "1.2.3", images: { worker: PRIVATE, slack: SLACK }, overrides: { worker: PRIVATE }, audience: "page" });
+    expect(overridden).toMatchObject({ ok: true, detail: "uses the image address you gave" });
+  });
+
+  it("SC-009: checkPrerequisites reports a private image with every other problem, before anything is created", async () => {
+    const found: PrerequisiteCheck[] = [];
+    await expect(checkPrerequisites({
+      answers: sampleAnswers(), release: { manifest: { version: "1.2.3" }, regions: () => ["us-east-1"] }, caller: { account: "123456789012", arn: HOLDER },
+      checks: passingChecks(), prompter: scriptedPrompter([]), write: () => undefined, images: { worker: PRIVATE, slack: SLACK }, onCheck: (check) => found.push(check),
+    })).rejects.toThrow(`init cannot start; nothing was created:\n- release 1.2.3's worker image ${PRIVATE} is not a public.ecr.aws/ reference`);
+    expect(found.find((check) => check.label === "The coding image")?.ok).toBe(false);
+  });
+
+  it("on the page, a model problem says what to do on the page, not which flag to pass", async () => {
+    const checks = { ...passingChecks(), converse: async () => { throw Object.assign(new Error("model identifier is invalid"), { name: "ValidationException" }); } };
+    const error = (await checkPrerequisites({
+      answers: sampleAnswers(), release: { manifest: { version: "1.2.3" }, regions: () => ["us-east-1"] }, caller: { account: "123456789012", arn: HOLDER },
+      checks, prompter: scriptedPrompter([]), write: () => undefined, audience: "page",
+    }).catch((caught: unknown) => caught)) as Error;
+    expect(error.message).not.toMatch(/--[a-z]/);
+    expect(error.message).toContain("or choose another with the model question");
   });
 });

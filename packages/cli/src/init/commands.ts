@@ -542,6 +542,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
         await checkPrerequisites({
           answers: finalAnswers, release, caller, checks, prompter: activePrompter, write,
           onCheck: (check) => { found.push(check); show("running"); },
+          images: release.manifest.images, audience: surface === undefined ? "terminal" : "page",
           ...(pendingKey === undefined ? {} : { openRouterKey: pendingKey }),
         });
       } catch (error) {

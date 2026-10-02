@@ -129,7 +129,7 @@ async function harness() {
     return { code, operator };
   };
   return {
-    store, secrets, deployer, github, plane, setup, out, err, home, base, run, runUi,
+    store, secrets, deployer, github, plane, setup, out, err, home, base, run, runUi, release,
     printed: () => `${out.join("")}${err.join("")}`,
     /** The terminal, every SSM value, this machine's environment cache, and the project files the
      * finishing steps wrote. */
@@ -202,6 +202,19 @@ describe("agentx init --ui", () => {
     expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
     expect(h.printed()).toContain("install declined; nothing was created");
     expect(operator.states.at(-1)).toMatchObject({ phase: "failed" });
+  });
+
+  it("spec 048 SC-009: a release with a private image is refused on the page before anything is created", async () => {
+    const h = await harness();
+    const manifest = JSON.parse(await readFile(join(h.release, "release.json"), "utf8")) as { images: Record<string, string> };
+    manifest.images.worker = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx/worker@sha256:${"a".repeat(64)}`;
+    await writeFile(join(h.release, "release.json"), JSON.stringify(manifest));
+    const { code, operator } = await h.runUi([...FIRST_RUN.slice(0, -1), false]);
+    expect(code).not.toBe(0);
+    const card = operator.states.flatMap((state) => state.cards ?? []).filter((shown) => shown.id === "prerequisites").at(-1);
+    expect(card?.checks?.find((check) => check.label === "The coding image")).toMatchObject({ ok: false });
+    expect(h.deployer.requests).toEqual([]);
+    expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
   });
 
   it("FR-006: a part-finished install opens on a resume screen naming what is done and what is next", async () => {
@@ -387,7 +400,8 @@ describe("agentx init --ui", () => {
     expect(last?.checks?.filter((check) => check.label === "EC2 vCPU quota")).toHaveLength(1);
     // Every check ran again, not only the one that failed.
     expect(last?.checks?.map((check) => check.label)).toEqual(failed?.checks?.map((check) => check.label));
-    expect(last?.checks?.map((check) => check.label).slice(0, 3)).toEqual(["Region", "EC2 vCPU quota", "Elastic IPs"]);
+    // FR-065: the release's images are checked right after the region, before EC2 and Elastic IPs.
+    expect(last?.checks?.map((check) => check.label).slice(0, 5)).toEqual(["Region", "The coding image", "The Slack connection image", "EC2 vCPU quota", "Elastic IPs"]);
     expect(last?.checks?.some((check) => check.label.startsWith("Model "))).toBe(true);
   });
 
