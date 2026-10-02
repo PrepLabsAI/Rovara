@@ -60,6 +60,11 @@ export interface SwebenchDependencies {
    */
   describeExecution?: (executionArn: string) => Promise<{ status: string } | undefined>;
   /**
+   * Spec 052 Ruling 16: terminates an eval instance; an instance already gone is not an error.
+   * Absent, a dead run's instance is left to its execution's own terminate step.
+   */
+  terminateInstance?: (instanceId: string) => Promise<void>;
+  /**
    * Spec 052: stops the thread's eval batch, if it has one, and returns the batch ID it stopped.
    * Called by every stop, since a batch between runs holds no slot; absent, no batch is stopped.
    */
@@ -392,6 +397,10 @@ export async function handleSwebenchCallback(
   const run = await readRun(dependencies, runId);
   if (run === undefined) throw agentXError("NOT_FOUND", "SWE-bench run not found");
   if (action === "started") {
+    // Spec 052 Ruling 16: a run that has ended (the tick may have ended a dead one, charged $0 if its
+    // runner had not started) refuses its runner's start with a final 409: the reporter treats it
+    // as final, and the runner stops before its agent starts.
+    if (SWEBENCH_TERMINAL_STATUSES.has(run.status)) throw agentXError("OPERATION_INTERRUPTED", "this eval run has already ended; do not start it");
     try {
       await dependencies.documentClient.send(new UpdateCommand({
         TableName: dependencies.tableName,
@@ -404,7 +413,7 @@ export async function handleSwebenchCallback(
     } catch (error) {
       // Already running, cancelling or finished: the report changes nothing, except that a run being
       // cancelled records that its runner started, so it is charged as one that may have spent
-      // (spec 052 Ruling 4). A run already ended keeps the charge its end was recorded with.
+      // (spec 052 Ruling 4). A run that ended meanwhile keeps the charge its end was recorded with.
       if (!isConditionFailure(error)) throw error;
       await dependencies.documentClient.send(new UpdateCommand({
         TableName: dependencies.tableName,
@@ -621,7 +630,9 @@ export async function reconcileSwebenchSlots(dependencies: SwebenchDependencies)
  * period; a run with no recorded execution is taken for dead past its time limit plus 15 minutes.
  * It is ended FAILED through finishRun, which releases its slot once, with an error the batch reads
  * as the infrastructure's (FR-008): "could not start" when its runner never started, which is
- * charged $0, else "stopped without reporting a result", charged its ceiling (D-5). Undefined when
+ * charged $0, else "stopped without reporting a result", charged its ceiling (D-5). Its instance is
+ * terminated first when the run recorded it, and a late `started` is refused (Ruling 16), so a run
+ * charged $0 cannot go on to spend. Undefined when
  * the run is alive, too young, already ended, or was ended meanwhile by its execution.
  */
 async function endDeadRun(dependencies: SwebenchDependencies, runId: string): Promise<{ executionStatus: string | null; runnerStarted: boolean } | undefined> {
@@ -647,6 +658,9 @@ async function endDeadRun(dependencies: SwebenchDependencies, runId: string): Pr
   const error = runnerStarted
     ? `the eval instance stopped (${how}) without reporting a result; the batch tick ended the run`
     : `the run could not start: ${how} before the runner started`;
+  // Ruling 16: its instance first, so a runner still alive cannot spend once the run is charged. A
+  // failure leaves the run to the next tick.
+  if (typeof item.ec2InstanceId === "string" && dependencies.terminateInstance !== undefined) await dependencies.terminateInstance(item.ec2InstanceId);
   await finishRun(dependencies, runId, { status: "FAILED", error });
   // EndRun may have ended it first: then its own end stands, and this changed nothing.
   return (await readRun(dependencies, runId))?.error === error ? { executionStatus, runnerStarted } : undefined;

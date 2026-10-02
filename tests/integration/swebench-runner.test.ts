@@ -12,6 +12,7 @@ import { offlineSettings } from "../../packages/worker/src/swebench/offline.js";
 import { loadSwebenchInstance, type SwebenchInstance } from "../../packages/worker/src/swebench/dataset.js";
 import { parseHarnessReport } from "../../packages/worker/src/swebench/grade.js";
 import { createGitRunner, predictionPatch, stripHistory, untrackedFiles } from "../../packages/worker/src/swebench/history.js";
+import { createRunReporter } from "../../packages/worker/src/swebench/reporter.js";
 import { runSwebench, type RunReporter } from "../../packages/worker/src/swebench/run.js";
 
 const run = promisify(execFile);
@@ -469,6 +470,45 @@ describe("one SWE-bench run (spec 043 FR-008 to FR-015)", () => {
     expect(recorded.steps).toEqual(["result"]);
     expect(calls).toEqual([["rm", "--force", `agentx-swebench-${RUN_ID}`]]);
     expect(await readFile(join(rootPath, RUN_ID, ".agentx", "swebench-shell.sh"), "utf8").catch(() => "absent")).toBe("absent");
+  });
+});
+
+describe("a run the control plane has already ended (spec 052 Ruling 16)", () => {
+  it("stops before its agent starts when its start is refused with 409, without retrying the start", async () => {
+    const repository = await taskRepository();
+    const rootPath = await mkdtemp(join(tmpdir(), "agentx-swebench-root-"));
+    const instance: SwebenchInstance = {
+      instance_id: "django__django-11099", repo: "django/django", base_commit: repository.base,
+      problem_statement: "trailing newline", image: "swebench/sweb.eval.x86_64.django_1776_django-11099:latest",
+      FAIL_TO_PASS: ["a"], PASS_TO_PASS: ["b"],
+    };
+    const { docker } = fakeDocker(repository.path);
+    const posted: string[] = [];
+    const reporter = createRunReporter(config(), {
+      s3: { send: async () => ({}) } as never,
+      sleep: async () => undefined,
+      fetch: (async (url: string) => {
+        posted.push(String(url).split("/").at(-1)!);
+        return String(url).endsWith("/started") ? new Response("{}", { status: 409 }) : new Response("{}", { status: 200 });
+      }) as never,
+    });
+    let agentCreated = false;
+    const events: string[] = [];
+    const result = await runSwebench(config(), {
+      rootPath,
+      model: { provider: "amazon-bedrock", modelId: "fixture-model" },
+      docker,
+      reporter,
+      log: (event) => { events.push(event); },
+      dataset: { fetch: async () => new Response(JSON.stringify({ rows: [{ row: instance }] })) },
+      piAdapter: { async create() { agentCreated = true; throw new Error("the agent must not start"); } },
+      grade: async () => { throw new Error("nothing to grade"); },
+    });
+    expect(agentCreated).toBe(false);
+    expect(events).not.toContain("agent.starting");
+    expect(result).toMatchObject({ outcome: "FAILED", error: "eval callback started failed: HTTP 409" });
+    // One start, never retried; the FAILED result is reported, and the broker ignores it for an ended run.
+    expect(posted).toEqual(["started", "result"]);
   });
 });
 

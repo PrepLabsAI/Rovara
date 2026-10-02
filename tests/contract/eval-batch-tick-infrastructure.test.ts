@@ -35,14 +35,19 @@ describe("the eval batch tick's infrastructure (spec 052 FR-006, FR-011)", () =>
     expect(schedules[0]!.Properties).toMatchObject({ ScheduleExpression: "rate(2 minutes)", State: "ENABLED" });
   });
 
-  it("may only use the State table, write eval objects, read the eval settings, and start and describe the eval state machine's executions", () => {
+  it("may only use the State table, write eval objects, read the eval settings, start and describe the eval state machine's executions, and terminate eval instances", () => {
     expect(actions().filter((action) => !action.startsWith("dynamodb:") && !action.startsWith("xray:"))).toEqual([
-      "s3:PutObject", "ssm:GetParameters", "states:DescribeExecution", "states:StartExecution",
+      "ec2:TerminateInstances", "s3:PutObject", "ssm:GetParameters", "states:DescribeExecution", "states:StartExecution",
     ]);
     const byAction = (action: string) => statements().filter((s) => [s.Action].flat().includes(action));
     expect(byAction("s3:PutObject")).toHaveLength(1);
     expect(JSON.stringify(byAction("s3:PutObject")[0]!.Resource)).toMatch(/"\/evals\/\*"\]/);
     expect(JSON.stringify(byAction("states:StartExecution")[0]!.Resource)).toContain(":stateMachine:agentx-production-swebench-eval");
+    // Ruling 16: it terminates only this environment's eval instances, by the tags the launcher sets.
+    const terminate = byAction("ec2:TerminateInstances");
+    expect(terminate).toHaveLength(1);
+    expect(JSON.stringify(terminate[0]!.Resource)).toContain(":instance/*");
+    expect(terminate[0]!.Condition).toEqual({ StringEquals: { "aws:ResourceTag/DeploymentMode": "swebench-eval", "aws:ResourceTag/Environment": "production" } });
     // Ruling 13: it describes only the eval state machine's executions.
     expect(byAction("states:DescribeExecution")).toHaveLength(1);
     expect(JSON.stringify(byAction("states:DescribeExecution")[0]!.Resource)).toMatch(/:execution:agentx-production-swebench-eval:\*"/);

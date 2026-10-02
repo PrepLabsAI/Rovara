@@ -9,6 +9,7 @@
 // DynamoDB reads, nothing has to remember to switch it off, and a leaked slot is repaired even
 // when no batch runs.
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { EC2Client, TerminateInstancesCommand } from "@aws-sdk/client-ec2";
 import { S3Client } from "@aws-sdk/client-s3";
 import { DescribeExecutionCommand, SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
@@ -94,6 +95,7 @@ function productionDependencies(): EvalBatchDependencies {
   const awsClientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const ssm = new SSMClient(awsClientConfiguration);
   const stepFunctions = new SFNClient(awsClientConfiguration);
+  const ec2 = new EC2Client(awsClientConfiguration);
   const settingsPrefix = requiredEnvironment("SWEBENCH_SETTINGS_PREFIX");
   production = withEvalBatches({
     documentClient: DynamoDBDocumentClient.from(new DynamoDBClient(awsClientConfiguration), { marshallOptions: { removeUndefinedValues: true } }),
@@ -108,6 +110,14 @@ function productionDependencies(): EvalBatchDependencies {
     async startExecution(input) {
       const response = await stepFunctions.send(new StartExecutionCommand(input));
       return { executionArn: response.executionArn };
+    },
+    async terminateInstance(instanceId) {
+      try {
+        await ec2.send(new TerminateInstancesCommand({ InstanceIds: [instanceId] }));
+      } catch (error) {
+        if (error instanceof Error && error.name === "InvalidInstanceID.NotFound") return;
+        throw error;
+      }
     },
     async describeExecution(executionArn) {
       try {

@@ -36,6 +36,7 @@ import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.j
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
 import { SessionLifecycle } from "./session-lifecycle.js";
 import { swebenchNames } from "./swebench-eval.js";
+import { SWEBENCH_DEPLOYMENT_MODE } from "./swebench-eval-definition.js";
 
 const MAX_DISPATCH_ATTEMPTS = 5;
 // Matches MAX_RECEIVE_COUNT in packages/slack-service, which reports the final attempt in the thread.
@@ -743,6 +744,13 @@ export class ControlPlaneStack extends Stack {
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "WriteEvalObjects", actions: ["s3:PutObject"], resources: [artifacts.arnForObjects("evals/*")] }));
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "ReadEvalSettings", actions: ["ssm:GetParameters"], resources: swebenchParameterArns }));
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "StartEvalRuns", actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
+    // Ruling 16: a dead run's instance, ended before the run is charged; this environment's eval instances only.
+    evalBatchTick.addToRolePolicy(new iam.PolicyStatement({
+      sid: "TerminateDeadEvalInstances",
+      actions: ["ec2:TerminateInstances"],
+      resources: [`arn:${Aws.PARTITION}:ec2:${Aws.REGION}:${Aws.ACCOUNT_ID}:instance/*`],
+      conditions: { StringEquals: { "aws:ResourceTag/DeploymentMode": SWEBENCH_DEPLOYMENT_MODE, "aws:ResourceTag/Environment": naming.environmentTagValue } },
+    }));
     // Ruling 13: whether a stuck run's execution is still alive; the eval state machine's executions only.
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({
       sid: "DescribeEvalRuns",

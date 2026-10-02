@@ -595,14 +595,15 @@ describe("the cost cap (spec 052 FR-007)", () => {
     expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({ outcome: "CANCELLED", chargedUsd: 10, costEstimated: true })]);
   });
 
-  it("ignores a runner's start reported after its run ended: the charge and the row stand", async () => {
+  it("refuses a runner's start reported after its run ended: the charge and the row stand", async () => {
     const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10 });
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
     await topUpBatches(h.dependencies);
     const runId = evalBatchRunId(batch.batchId, 0, 1);
     await stopBatch(h.dependencies, batch.batchId, requester);
     await endByStateMachine(h, runId, "CANCELLED", "cancelled from Slack");
-    await runnerStarted(h, runId);
+    // Ruling 16: a final 409, so the runner stops before its agent starts.
+    await expect(runnerStarted(h, runId)).rejects.toMatchObject({ statusCode: 409 });
     const run = h.db.get(`SWEBENCH_RUN#${runId}`, "META")!;
     expect(run).toMatchObject({ status: "CANCELLED" });
     expect(run.runnerStartedAt).toBeUndefined();

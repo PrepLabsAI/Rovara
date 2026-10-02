@@ -542,7 +542,9 @@ function recordedEnd(record: EvalBatchRecord, run: SwebenchRun, charge: Charge):
 /** Ruling 4: the run's reported cost; else 0 for an end that used no tokens; else the per-run ceiling, marked estimated. */
 function chargeOf(run: SwebenchRun, ceiling: number): Charge {
   const reported = run.result?.usage.costUsd ?? run.usage?.costUsd ?? null;
-  if (reported !== null) return { costUsd: reported, chargedUsd: reported, costEstimated: false };
+  // Ruling 17: rounded once, as spend is, so the rows' charges sum exactly to the spend. The row
+  // keeps the reported cost as it came.
+  if (reported !== null) return { costUsd: reported, chargedUsd: roundUsd(reported), costEstimated: false };
   const usedNoTokens = (run.status === "CANCELLED" && run.runnerStartedAt === undefined)
     || (run.status === "FAILED" && NO_TOKEN_FAILURES.some((pattern) => pattern.test(run.error ?? "")));
   if (usedNoTokens) return { costUsd: 0, chargedUsd: 0, costEstimated: false };

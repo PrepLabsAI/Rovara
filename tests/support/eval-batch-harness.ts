@@ -47,6 +47,7 @@ export interface Harness {
   /** Each execution's status, by execution ARN, as DescribeExecution reports it; RUNNING when unset. */
   executions: Map<string, string>;
   describeExecution: Mock<NonNullable<SwebenchDependencies["describeExecution"]>>;
+  terminateInstance: Mock<NonNullable<SwebenchDependencies["terminateInstance"]>>;
   deployment: Mock<() => Promise<SwebenchDeployment | undefined>>;
   advance: (ms: number) => void;
 }
@@ -60,6 +61,7 @@ export async function harness(options: { maxConcurrentEvals?: number; maxCostUsd
   });
   const startExecution = vi.fn<SwebenchDependencies["startExecution"]>(async (input) => ({ executionArn: executionArn(input.name) }));
   const executions = new Map<string, string>();
+  const terminateInstance = vi.fn<NonNullable<SwebenchDependencies["terminateInstance"]>>(async () => undefined);
   const describeExecution = vi.fn<NonNullable<SwebenchDependencies["describeExecution"]>>(async (arn) => ({ status: executions.get(arn) ?? "RUNNING" }));
   let clock = new Date("2026-10-02T10:00:00.000Z").getTime();
   const deployment = vi.fn(async (): Promise<SwebenchDeployment | undefined> => ({
@@ -84,6 +86,7 @@ export async function harness(options: { maxConcurrentEvals?: number; maxCostUsd
     deployment,
     startExecution,
     describeExecution,
+    terminateInstance,
     now: () => new Date(clock),
     estimateRunCostUsd: (model) => prices[model.modelId],
     sleep: async () => undefined,
@@ -99,7 +102,7 @@ export async function harness(options: { maxConcurrentEvals?: number; maxCostUsd
     },
   };
   s3Send.mockClear();
-  return { db, dependencies, context, objects, s3Send, startExecution, executions, describeExecution, deployment, advance: (ms) => { clock += ms; } };
+  return { db, dependencies, context, objects, s3Send, startExecution, executions, describeExecution, terminateInstance, deployment, advance: (ms) => { clock += ms; } };
 }
 
 /** The ARN Step Functions gives a run's execution: the run ID is the execution's name. */

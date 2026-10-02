@@ -674,6 +674,97 @@ describe("runs whose execution died before it ended them (spec 052 Ruling 13)", 
   });
 });
 
+describe("a dead run's runner that is still alive (spec 052 Ruling 16)", () => {
+  const GRACE_MS = 10 * 60_000;
+
+  it("refuses the runner's late start with a final 409, so a run charged $0 cannot spend, and its retry is counted once", async () => {
+    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    await topUpBatches(h.dependencies);
+    const runId = evalBatchRunId(batch.batchId, 0, 1);
+    h.executions.set(executionArn(runId), "ABORTED");
+    h.advance(GRACE_MS + 1);
+    await runEvalBatchTick(h.dependencies);
+    expect(h.db.get(`SWEBENCH_RUN#${runId}`, "META")).toMatchObject({ status: "FAILED" });
+    // The runner was still pulling its image: its start is refused, and it stops before the agent.
+    await expect(runnerStarted(h, runId)).rejects.toMatchObject({ statusCode: 409 });
+    expect(h.db.get(`SWEBENCH_RUN#${runId}`, "META")!.runnerStartedAt).toBeUndefined();
+    await runEvalBatchTick(h.dependencies);
+    const after = (await getBatch(h.dependencies, batch.batchId))!;
+    expect(after).toMatchObject({ spentUsd: 0 });
+    expect(after.queue[0]).toMatchObject({ attempt: 2, state: "RUNNING" });
+    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({ runId, outcome: "RETRIED", chargedUsd: 0 })]);
+    expect(h.startExecution).toHaveBeenCalledTimes(2);
+  });
+
+  it("still answers a repeated start of a run that is running", async () => {
+    const h = await harness();
+    await singleRun(h, RUN_A);
+    await runnerStarted(h, RUN_A);
+    await expect(runnerStarted(h, RUN_A)).resolves.toBeUndefined();
+  });
+
+  it("terminates a dead run's instance, when it is known, before ending the run", async () => {
+    const h = await harness();
+    await singleRun(h, RUN_A);
+    h.db.set({ ...h.db.get(`SWEBENCH_RUN#${RUN_A}`, "META")!, ec2InstanceId: "i-0123456789abcdef0" });
+    await singleRun(h, RUN_B);
+    h.executions.set(executionArn(RUN_A), "ABORTED");
+    h.executions.set(executionArn(RUN_B), "FAILED");
+    const order: string[] = [];
+    h.terminateInstance.mockImplementation(async (instanceId) => {
+      order.push(`terminate ${instanceId} while ${String(h.db.get(`SWEBENCH_RUN#${RUN_A}`, "META")!.status)}`);
+    });
+    h.advance(GRACE_MS + 1);
+    await reconcileSwebenchSlots(h.dependencies);
+    expect(order).toEqual(["terminate i-0123456789abcdef0 while STARTING"]);
+    expect(h.terminateInstance).toHaveBeenCalledTimes(1);
+    expect(h.db.get(`SWEBENCH_RUN#${RUN_A}`, "META")).toMatchObject({ status: "FAILED" });
+    expect(h.db.get(`SWEBENCH_RUN#${RUN_B}`, "META")).toMatchObject({ status: "FAILED" });
+  });
+
+  it("leaves the run to the next tick when its instance cannot be terminated", async () => {
+    const h = await harness();
+    await singleRun(h, RUN_A);
+    h.db.set({ ...h.db.get(`SWEBENCH_RUN#${RUN_A}`, "META")!, ec2InstanceId: "i-0123456789abcdef0" });
+    h.executions.set(executionArn(RUN_A), "ABORTED");
+    h.terminateInstance.mockRejectedValueOnce(Object.assign(new Error("not authorized"), { name: "UnauthorizedOperation" }));
+    h.advance(GRACE_MS + 1);
+    await expect(reconcileSwebenchSlots(h.dependencies)).rejects.toThrow(/could not be ended/);
+    expect(h.db.get(`SWEBENCH_RUN#${RUN_A}`, "META")).toMatchObject({ status: "STARTING" });
+    await reconcileSwebenchSlots(h.dependencies);
+    expect(h.db.get(`SWEBENCH_RUN#${RUN_A}`, "META")).toMatchObject({ status: "FAILED" });
+  });
+});
+
+describe("charges that sum exactly to the spend (spec 052 Ruling 17)", () => {
+  it("rounds each reported cost once, so 200 runs at unrounded costs still finalize", async () => {
+    const h = await harness({ maxConcurrentEvals: 6, maxCostUsd: 10 });
+    const ids = Array.from({ length: 100 }, (_, index) => `django__django-${10000 + index}`);
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: ids, models: [dear, cheap], costCapUsd: 1000 }));
+    // A seeded stream of costs with nine and more decimals, as session statistics report them.
+    let seed = 20261002;
+    const cost = () => {
+      seed = (seed * 1_103_515_245 + 12_345) % 2_147_483_648;
+      return (seed / 2_147_483_648) * 4.9 + 0.000_000_123;
+    };
+    await topUpBatches(h.dependencies);
+    for (let round = 0; round < 100; round += 1) {
+      const running = (await getBatch(h.dependencies, batch.batchId))!.queue.filter((entry) => entry.state === "RUNNING");
+      if (running.length === 0) break;
+      for (const entry of running) await finish(h, entry.runId!, graded(cost()));
+      await topUpBatches(h.dependencies);
+    }
+    const ended = (await getBatch(h.dependencies, batch.batchId))!;
+    expect(ended).toMatchObject({ status: "DONE", counts: { done: 200 } });
+    expect(await runEvalBatchTick(h.dependencies)).toMatchObject({ finalized: [batch.batchId] });
+    const rows = await listBatchMeasures(h.dependencies, batch.batchId);
+    expect(rows).toHaveLength(200);
+    const charged = rows.reduce((sum, measure) => sum + measure.chargedUsd, 0);
+    expect(Math.round(charged * 1_000_000) / 1_000_000).toBe(ended.spentUsd);
+  }, 60_000);
+});
+
 describe("a tick that cannot do its work fails (spec 052 Ruling 14)", () => {
   it("fails when a batch cannot be topped up, after topping up the others", async () => {
     const h = await harness();

@@ -120,9 +120,11 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
   enforces, and its row is marked estimated (`costUsd` null, `chargedUsd` the ceiling, `costEstimated`). Ends that
   provably used no tokens are charged nothing: the instance could not be launched or recorded, the run could not start,
   or it was cancelled before its runner started. A FAILED result's usage is kept on the run record, so its reported cost
-  survives whichever path records the end. The rows' charges sum to the batch's spend. A runner that reports `started`
-  after a stop is charged its ceiling. A `started` that arrives after the run has ended is ignored: the run keeps the
-  charge it already has, and the few seconds the runner keeps working until its instance is terminated are not charged.
+  survives whichever path records the end. A reported cost is charged rounded to a millionth of a dollar, as spend is,
+  so the rows' charges sum exactly to the batch's spend (Ruling 17). A runner that reports `started` after a stop is
+  charged its ceiling. A `started` that arrives after the run has ended is refused with a final 409 (Ruling 16): the
+  runner stops before its agent starts, and the run keeps the charge it already has. When the batch tick ends a run
+  whose execution died, it terminates the run's instance first, if the run recorded it.
 - **D-6 (2026-10-02, Ruling 5):** The runner halts only after a turn crosses its ceiling, so each run in flight, and the
   next start, reserves its ceiling plus 10%: a start fits while `spent + (inFlight + 1) × ceiling × 1.1 ≤ costCapUsd`.
 - **D-7 (2026-10-02, Ruling 6):** A batch's models are checked against the project's approved list when the batch is
