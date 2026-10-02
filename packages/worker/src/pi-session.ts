@@ -12,6 +12,7 @@ import {
   DefaultResourceLoader,
   type BashOperations,
   type BashSpawnContext,
+  type ModelRuntime,
   type ToolDefinition,
   SessionManager,
   SettingsManager,
@@ -145,34 +146,56 @@ export async function openRegisteredWorkspacePiSession(
   return handle;
 }
 
-const defaultPiSessionAdapter: PiSessionAdapter = {
-  async create(input) {
-    return createDefaultSession(
-      input,
-      SessionManager.create(input.cwd, input.sessionDirectory),
-      input.conversationId,
-    );
-  },
-  async open(input) {
-    return createDefaultSession(
-      input,
-      SessionManager.open(input.sessionFile, input.sessionDirectory, input.cwd),
-      input.conversationId,
-    );
-  },
-};
+/** Resolves the session's model runtime; tests supply an offline one, the worker uses the default. */
+export type PiModelRuntimeResolver = (
+  model: WorkspaceModelConfiguration,
+) => Promise<{ runtime: ModelRuntime; model: WorkspaceModelConfiguration }>;
+
+/** The worker's Pi session adapter. Without `modelRuntime` it resolves the configured model as the worker always has. */
+export function createDefaultPiSessionAdapter(options: { modelRuntime?: PiModelRuntimeResolver } = {}): PiSessionAdapter {
+  const resolveModelRuntime = options.modelRuntime ?? workerModelRuntime;
+  return {
+    async create(input) {
+      return createDefaultSession(
+        input,
+        SessionManager.create(input.cwd, input.sessionDirectory),
+        resolveModelRuntime,
+        input.conversationId,
+      );
+    },
+    async open(input) {
+      return createDefaultSession(
+        input,
+        SessionManager.open(input.sessionFile, input.sessionDirectory, input.cwd),
+        resolveModelRuntime,
+        input.conversationId,
+      );
+    },
+  };
+}
+
+export const defaultPiSessionAdapter: PiSessionAdapter = createDefaultPiSessionAdapter();
+
+async function workerModelRuntime(
+  configured: WorkspaceModelConfiguration,
+): Promise<{ runtime: ModelRuntime; model: WorkspaceModelConfiguration }> {
+  const resolved = await createModelRuntimeWithFallback(configured, "worker");
+  const modelRuntime = resolved.runtime;
+  if (resolved.model.provider === "amazon-bedrock") {
+    modelRuntime.registerNativeProvider(executionRoleBedrockProvider());
+    await modelRuntime.refresh({ allowNetwork: false, providers: ["amazon-bedrock"] });
+  }
+  return { runtime: modelRuntime, model: resolved.model };
+}
 
 async function createDefaultSession(
   input: PiSessionInput,
   manager: SessionManager,
+  resolveModelRuntime: PiModelRuntimeResolver,
   conversationId?: string,
 ): Promise<PiSessionHandle> {
-    const resolved = await createModelRuntimeWithFallback(input.model, "worker");
+    const resolved = await resolveModelRuntime(input.model);
     const modelRuntime = resolved.runtime;
-    if (resolved.model.provider === "amazon-bedrock") {
-      modelRuntime.registerNativeProvider(executionRoleBedrockProvider());
-      await modelRuntime.refresh({ allowNetwork: false, providers: ["amazon-bedrock"] });
-    }
     const model = modelRuntime.getModel(resolved.model.provider, resolved.model.modelId);
     if (!model) {
       throw agentXError(
