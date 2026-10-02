@@ -50,7 +50,7 @@ describe("the docs-only check (CI skips the heavy steps for a Markdown-only pull
     const workflow = YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
     const heavySteps = (job: string) => workflow.jobs[job]!.steps.filter((step) => step.run !== undefined).map((step) => step.name ?? step.run);
     expect(heavySteps("checks")).toEqual(["npm ci", "npm run typecheck", "npm run typecheck:all", "npm run lint"]);
-    expect(heavySteps("test")).toEqual(["npm ci", "npm run build", "npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}"]);
+    expect(heavySteps("test")).toEqual(["npm ci", "npm run build", "npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }} --maxWorkers=2"]);
     expect(heavySteps("release")).toEqual(["npm ci", "npm run build", "npm run infra:synth", "Release builds are reproducible"]);
     for (const job of ["checks", "test", "release"]) {
       expect(workflow.jobs[job]!.needs, job).toBe("scope");

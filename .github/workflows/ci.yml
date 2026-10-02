@@ -83,7 +83,8 @@ jobs:
       - run: npm ci
       # The packages import each other through their built output, which `npm run typecheck` used to leave behind.
       - run: npm run build
-      - run: npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}
+      # Vitest's default is one worker fewer than the CPUs, which is one on a 2-CPU runner and leaves a CPU idle.
+      - run: npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }} --maxWorkers=2
 
   release:
     needs: scope

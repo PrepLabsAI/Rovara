@@ -23,7 +23,7 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     const test = (await workflow()).jobs.test!;
     expect(test.strategy?.["fail-fast"]).toBe(false);
     expect(test.strategy?.matrix?.shard).toEqual([1, 2, 3, 4]);
-    expect(test.steps.some((step) => step.run === "npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }}")).toBe(true);
+    expect(test.steps.some((step) => step.run === "npm test -- --shard=${{ matrix.shard }}/${{ strategy.job-total }} --maxWorkers=2")).toBe(true);
   });
 
   it("keeps checks, tests and the release check in jobs of their own, none waiting on another", async () => {
