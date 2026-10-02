@@ -1,9 +1,10 @@
 // tests/integration/pi-openrouter-characterization.test.ts
-// Spec 050 phase 1: pins what Pi 0.85.1 does with AgentX's OpenRouter custom provider, so the 0.99.2
+// Spec 050 phase 1: pins what Pi 0.85.1 does with AgentX's OpenRouter custom provider, so the Pi 1.0.0
 // upgrade cannot change it unnoticed: the exact request sent, the stream-to-message mapping, the usage
 // record, and the fixed failure messages. The real provider from packages/model-runtime/src/index.ts,
 // with only its fetch replaced by a recording transport. Offline.
-// Characterization: every expected value below was observed on 0.85.1, then pinned exactly.
+// Characterization: every expected value below was observed on 0.85.1, then pinned exactly. Spec 050 phase 2
+// moved Pi to 1.0.0 and changed a pin only where a ruling allowed it; each such line says why ("Ruling A".."E").
 import { copyFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -49,7 +50,7 @@ const userContext = { systemPrompt: "Test", messages: [{ role: "user" as const, 
 // Pi stores wall-clock timestamps; every other field is pinned exactly.
 const noTimes = (messages: readonly unknown[]) => JSON.parse(JSON.stringify(messages), (key: string, v: unknown) => (key === "timestamp" ? PLACEHOLDER : v)) as unknown[];
 
-describe("OpenRouter custom provider on Pi 0.85.1", () => {
+describe("OpenRouter custom provider, as pinned on Pi 0.85.1", () => {
   // Pi adds its OpenRouter attribution headers only while install telemetry is on, and PI_TELEMETRY wins over settings.
   beforeEach(() => { vi.stubEnv("PI_TELEMETRY", "1"); });
   afterEach(() => { vi.unstubAllEnvs(); });

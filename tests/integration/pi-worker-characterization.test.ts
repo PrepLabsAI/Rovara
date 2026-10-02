@@ -1,9 +1,10 @@
 // tests/integration/pi-worker-characterization.test.ts
-// Spec 050 phase 1: pins what Pi 0.85.1 does in the worker's real Pi session, so the 0.99.2 upgrade
+// Spec 050 phase 1: pins what Pi 0.85.1 does in the worker's real Pi session, so the Pi 1.0.0 upgrade
 // cannot change it unnoticed. Every session goes through pi-session.ts's own path,
 // createWorkspacePiSession / openRegisteredWorkspacePiSession with createDefaultPiSessionAdapter, and only
 // the model runtime is swapped for Pi's scripted faux model. Offline.
-// Characterization: every expected value below was observed on 0.85.1, then pinned exactly.
+// Characterization: every expected value below was observed on 0.85.1, then pinned exactly. Spec 050 phase 2
+// moved Pi to 1.0.0 and changed a pin only where a ruling allowed it; each such line says why ("Ruling A".."E").
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
@@ -94,7 +95,7 @@ async function settle(handle: PiSessionHandle, text: string): Promise<string> {
   return handle.prompt(text).then(() => "resolved", (error: unknown) => `rejected: ${error instanceof Error ? error.message : String(error)}`);
 }
 
-describe("the worker's Pi session on Pi 0.85.1", () => {
+describe("the worker's Pi session, as pinned on Pi 0.85.1", () => {
   it("runs a plain turn: persisted session file, stable conversation ID, the configured model, and these stats", async () => {
     // protects packages/worker/src/pi-session.ts (createDefaultSession handle); guards: SessionStats and session ID changes (0.99)
     const views: ModelView[] = [];
@@ -336,7 +337,7 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
  *   swebench/agent.ts:75,103-107 assistantEnd     <- message_end: type, message.role, message.stopReason, message.errorMessage
  *   swebench/agent.ts:78-79    cost checks        <- getSessionStats(): tokens.total, cost
  */
-describe("the worker's message_end payloads on Pi 0.85.1", () => {
+describe("the worker's message_end payloads, as pinned on Pi 0.85.1", () => {
   it("pins message_end for a turn ending in toolUse, stop, error and aborted", async () => {
     // protects packages/worker/src/run-task.ts (assistantOutcome) and swebench/agent.ts (assistantEnd); guards: AssistantMessage and AgentEvent shape changes (0.99)
     const shell = recordingShell();
@@ -389,7 +390,7 @@ describe("the worker's message_end payloads on Pi 0.85.1", () => {
   });
 });
 
-describe("the worker's session event shapes on Pi 0.85.1", () => {
+describe("the worker's session event shapes, as pinned on Pi 0.85.1", () => {
   it("pins every event session.subscribe delivers in one turn with a tool call", async () => {
     // protects packages/worker/src/run-task.ts (event log, FileChangeAttempts, assistantOutcome), tool-loop-guard.ts and swebench/agent.ts; guards: AgentEvent union changes (0.99)
     const shell = recordingShell();
@@ -480,9 +481,10 @@ describe("the worker's session event shapes on Pi 0.85.1", () => {
     // to 1 MiB, and the broker stores each event as one DynamoDB item (400 KB limit), so one big output poisoned its batch.
     const line = "0123456789 abcdefghij klmnopqrst uvwxyz ABCDEFGHIJ KLMNOPQRS\n";
     const shell = recordingShell(line.repeat(Math.ceil((2 * 1024 * 1024) / line.length)));
+    const contexts: ModelView[] = [];
     const { handle, events } = await workerSession([
       toolUse(fauxToolCall("bash", { command: "print a lot" }, { id: "call-big-1" })),
-      fauxAssistantMessage("Done."),
+      (context) => { contexts.push(modelView(context)); return fauxAssistantMessage("Done."); },
     ], { bashOperations: shell.operations });
     try {
       expect(await settle(handle, "run it")).toBe("resolved");
@@ -491,9 +493,14 @@ describe("the worker's session event shapes on Pi 0.85.1", () => {
     const result = end.result as { content: unknown; structuredContent?: unknown };
     expect(keys(end.result)).toEqual(["content", "details"]);
     expect(result.structuredContent).toBeUndefined();
-    // The text is what Pi gives the model, the toolResult message's content, exactly as before.
-    const toolResult = events.find((event) => event.type === "message_end" && event.message?.role === "toolResult")!.message!;
-    expect(result.content).toEqual(toolResult.content);
+    // The event's text is exactly what the model received in its next request: the shell's output, which Pi
+    // truncates for the model as it did on 0.85.1 (the full 2 MB never reaches either).
+    expect(contexts).toHaveLength(1);
+    const received = contexts[0]!.messages.at(-1) as { role: string; toolCallId: string; content: Array<{ type: string; text: string }> };
+    expect({ role: received.role, toolCallId: received.toolCallId }).toEqual({ role: "toolResult", toolCallId: "call-big-1" });
+    expect(result.content).toEqual(received.content);
+    expect(received.content).toHaveLength(1);
+    expect(received.content[0]!.text).toContain(line);
     // The record run-task's event log stores (events.ts EventBatcher) stays far below the 400 KB item limit.
     expect(Buffer.byteLength(JSON.stringify({ type: "tool_end", timestamp: new Date().toISOString(), payload: redactCredentials(end) }))).toBeLessThan(150 * 1024);
   });
@@ -552,7 +559,7 @@ function cancelledReport(run: Awaited<ReturnType<typeof cancelDuringTool>>) {
   };
 }
 
-describe("cancelling a worker task during a tool call on Pi 0.85.1", () => {
+describe("cancelling a worker task during a tool call, as pinned on Pi 0.85.1", () => {
   // Guards finishTurn (0.99): a cancel during a tool must abort the tool, end the task CANCELLED with no
   // result, and never call the model again. F3 (the loop calling the model after an aborted tool) is refuted on 0.85.1.
   it("aborts a running bash call, ends the task CANCELLED, and never calls the model again", async () => {

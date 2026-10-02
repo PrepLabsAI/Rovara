@@ -1,7 +1,8 @@
 // tests/integration/pi-orchestrator-characterization.test.ts
-// Spec 050 phase 1: pins what Pi 0.85.1 does at every place the orchestrator meets Pi, so the 0.99.2
+// Spec 050 phase 1: pins what Pi 0.85.1 does at every place the orchestrator meets Pi, so the Pi 1.0.0
 // upgrade cannot change it unnoticed. Real orchestrator factories, Pi's scripted faux model, offline.
-// Characterization: every expected value below was observed on 0.85.1, then pinned exactly.
+// Characterization: every expected value below was observed on 0.85.1, then pinned exactly. Spec 050 phase 2
+// moved Pi to 1.0.0 and changed a pin only where a ruling allowed it; each such line says why ("Ruling A".."E").
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -77,7 +78,7 @@ async function hostUserBash(runtime: AgentSessionRuntime, command: string) {
   return { handledByExtension: false, result: await session.executeBash(command, undefined, { excludeFromContext: false }) };
 }
 
-describe("orchestrator extensions on Pi 0.85.1", () => {
+describe("orchestrator extensions, as pinned on Pi 0.85.1", () => {
   it("answers user_bash from the boundary with exit 126 and runs no shell", async () => {
     // protects packages/orchestrator/src/orchestrator.ts (boundaryExtension); guards: user_bash fails closed (0.99)
     const { modelRuntime } = await fauxModelRuntime();
@@ -234,7 +235,7 @@ describe("orchestrator extensions on Pi 0.85.1", () => {
  *   action-gate.ts:364-374       check          <- tool_call: toolCallId, toolName, input; ctx: sessionManager.getBranch(), signal
  *   action-gate.ts:110-116       memberMessages <- getBranch() entries: type, message; message: role, content
  */
-describe("orchestrator event shapes on Pi 0.85.1", () => {
+describe("orchestrator event shapes, as pinned on Pi 0.85.1", () => {
   it("pins every event the orchestrator's extensions see in one turn with a tool call", async () => {
     // protects packages/orchestrator/src/turn-recorder.ts and action-gate.ts; guards: ExtensionEvent union and TurnEndEvent shape changes (0.99)
     const { modelRuntime, faux } = await fauxModelRuntime();
