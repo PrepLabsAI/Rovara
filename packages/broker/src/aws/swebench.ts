@@ -503,6 +503,162 @@ async function endRunWithoutSlot(dependencies: SwebenchDependencies, runId: stri
   }
 }
 
+/** A change the slot reconcile made, as it logs it. */
+export type SwebenchSlotCorrection =
+  | { correction: "released_slot" | "deleted_slot"; runId: string; runStatus: string }
+  | { correction: "deleted_legacy_lock"; runId: string; runStatus: string }
+  | { correction: "counter_set"; from: number | null; to: number };
+
+/**
+ * Spec 052: repairs drift between the slot counter and the slot items, run by the batch tick.
+ *
+ * - A slot item whose run has ended (an older broker ended it without a release) is released as
+ *   finishRun and EndRun release it: the item deleted and the counter decremented in one
+ *   transaction, only while the item exists and the run is terminal, so a slot is released once
+ *   and a run that has not ended never loses its slot. A counter that cannot be decremented leaves
+ *   the item deleted alone, and the counter is set below.
+ * - The one-run lock of a run that has ended is deleted.
+ * - The counter is set to the number of slot items, only when it is wrong. A start takes its slot
+ *   item and the counter together, so the slots are read, then the counter, then the slots again:
+ *   if the two reads differ, a run started or ended meanwhile and the counter is left for the next
+ *   tick. The write requires the counter unchanged and every slot read still held, so a start or a
+ *   release after the reads cancels it.
+ */
+export async function reconcileSwebenchSlots(dependencies: SwebenchDependencies): Promise<SwebenchSlotCorrection[]> {
+  const corrections: SwebenchSlotCorrection[] = [];
+  const correct = (correction: SwebenchSlotCorrection) => {
+    corrections.push(correction);
+    console.log(JSON.stringify({ component: "broker", event: "eval_slots.corrected", ...correction }));
+  };
+  for (const runId of await slotRunIds(dependencies)) {
+    const run = await readRun(dependencies, runId);
+    if (run === undefined || !SWEBENCH_TERMINAL_STATUSES.has(run.status)) continue;
+    const released = await releaseEndedRunSlot(dependencies, runId);
+    if (released !== undefined) correct({ correction: released, runId, runStatus: run.status });
+  }
+  const legacy = await get(dependencies, LEGACY_LOCK_KEY);
+  if (typeof legacy?.runId === "string") {
+    const run = await readRun(dependencies, legacy.runId);
+    if (run !== undefined && SWEBENCH_TERMINAL_STATUSES.has(run.status)) {
+      try {
+        await dependencies.documentClient.send(new DeleteCommand({
+          TableName: dependencies.tableName,
+          Key: LEGACY_LOCK_KEY,
+          ConditionExpression: "runId = :runId",
+          ExpressionAttributeValues: { ":runId": legacy.runId },
+        }));
+        correct({ correction: "deleted_legacy_lock", runId: legacy.runId, runStatus: run.status });
+      } catch (error) {
+        if (!isConditionFailure(error)) throw error;
+      }
+    }
+  }
+  const counted = await setSlotCounter(dependencies);
+  if (counted !== undefined) correct({ correction: "counter_set", ...counted });
+  return corrections;
+}
+
+/** Releases an ended run's slot, as a run's end does; undefined when it was released meanwhile or the run is not terminal. */
+async function releaseEndedRunSlot(dependencies: SwebenchDependencies, runId: string): Promise<"released_slot" | "deleted_slot" | undefined> {
+  const terminal: Record<string, unknown> = {};
+  [...SWEBENCH_TERMINAL_STATUSES].forEach((status, index) => { terminal[`:ended${index}`] = status; });
+  const runEnded = {
+    ConditionCheck: {
+      TableName: dependencies.tableName,
+      Key: swebenchRunKey(runId),
+      ConditionExpression: Object.keys(terminal).map((name) => `#status = ${name}`).join(" OR "),
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: terminal,
+    },
+  };
+  const deleteSlot = { Delete: { TableName: dependencies.tableName, Key: swebenchSlotKey(runId), ConditionExpression: "attribute_exists(pk)" } };
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({
+      TransactItems: [
+        runEnded,
+        deleteSlot,
+        {
+          Update: {
+            TableName: dependencies.tableName,
+            Key: SLOT_COUNTER_KEY,
+            UpdateExpression: "SET #count = #count - :one",
+            ConditionExpression: "#count > :zero",
+            ExpressionAttributeNames: { "#count": "count" },
+            ExpressionAttributeValues: { ":one": 1, ":zero": 0 },
+          },
+        },
+      ],
+    }));
+    return "released_slot";
+  } catch (error) {
+    if (!isTransactionCancelled(error)) throw error;
+  }
+  // Released meanwhile, or a conflict: the next tick looks again. Otherwise the counter is at 0 or
+  // below: the item is deleted alone, and the counter is set from the items that remain.
+  const counter = await get(dependencies, SLOT_COUNTER_KEY);
+  if (await get(dependencies, swebenchSlotKey(runId)) === undefined || (typeof counter?.count === "number" && counter.count > 0)) return undefined;
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [runEnded, deleteSlot] }));
+    return "deleted_slot";
+  } catch (error) {
+    if (!isTransactionCancelled(error)) throw error;
+    return undefined;
+  }
+}
+
+/** Sets the counter to the slot items held, when it differs and nothing changed while they were counted. */
+async function setSlotCounter(dependencies: SwebenchDependencies): Promise<{ from: number | null; to: number } | undefined> {
+  const before = await slotRunIds(dependencies);
+  const counter = await get(dependencies, SLOT_COUNTER_KEY);
+  const after = await slotRunIds(dependencies);
+  const seen = typeof counter?.count === "number" ? counter.count : undefined;
+  if (before.join() !== after.join()) return undefined;
+  if ((seen ?? 0) === after.length) return undefined;
+  // DynamoDB allows 100 items in a transaction; far more slot items than maxConcurrentEvals (6) is
+  // not drift this pass can count safely.
+  if (after.length > 98) return undefined;
+  try {
+    await dependencies.documentClient.send(new TransactWriteCommand({
+      TransactItems: [
+        ...after.map((runId) => ({ ConditionCheck: { TableName: dependencies.tableName, Key: swebenchSlotKey(runId), ConditionExpression: "attribute_exists(pk)" } })),
+        {
+          Update: {
+            TableName: dependencies.tableName,
+            Key: SLOT_COUNTER_KEY,
+            UpdateExpression: "SET #count = :count",
+            ConditionExpression: seen === undefined ? "attribute_not_exists(#count)" : "#count = :seen",
+            ExpressionAttributeNames: { "#count": "count" },
+            ExpressionAttributeValues: { ":count": after.length, ...(seen === undefined ? {} : { ":seen": seen }) },
+          },
+        },
+      ],
+    }));
+  } catch (error) {
+    if (!isTransactionCancelled(error)) throw error;
+    return undefined;
+  }
+  return { from: seen ?? null, to: after.length };
+}
+
+/** The run IDs of every slot item, sorted. */
+async function slotRunIds(dependencies: SwebenchDependencies): Promise<string[]> {
+  const runIds: string[] = [];
+  let start: Record<string, unknown> | undefined;
+  do {
+    const page = await dependencies.documentClient.send(new QueryCommand({
+      TableName: dependencies.tableName,
+      KeyConditionExpression: "pk = :pk AND begins_with(sk, :run)",
+      ExpressionAttributeValues: { ":pk": SLOT_PK, ":run": "RUN#" },
+      ConsistentRead: true,
+      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+    }));
+    // The key names the run, so an item is counted even without its runId attribute.
+    for (const item of page.Items ?? []) runIds.push(String(item.sk).slice("RUN#".length));
+    start = page.LastEvaluatedKey;
+  } while (start !== undefined);
+  return runIds.sort();
+}
+
 export function issueSwebenchCapability(dependencies: Pick<SwebenchDependencies, "callbackSigningKey" | "now">, runId: string): string {
   const claims = SwebenchCapabilityClaimsSchema.parse({
     kind: "swebench",

@@ -1,0 +1,63 @@
+// Spec 052 FR-011: the eval batch tick is a scheduled Lambda in the control plane, every 2 minutes,
+// with only the permissions its work needs.
+import { Stack } from "aws-cdk-lib";
+import { Template } from "aws-cdk-lib/assertions";
+import { beforeAll, describe, expect, it } from "vitest";
+import { buildAgentXApp } from "../../infra/lib/app.js";
+
+type Resource = { Type: string; Properties: Record<string, unknown> };
+type Statement = { Sid?: string; Effect: string; Action: string | string[]; Resource: unknown; Condition?: unknown };
+
+describe("the eval batch tick's infrastructure (spec 052 FR-006, FR-011)", () => {
+  let resources: Record<string, Resource>;
+
+  beforeAll(() => {
+    const app = buildAgentXApp();
+    const control = app.node.children.find((c): c is Stack => Stack.isStack(c) && c.stackName === "AgentXControlPlane")!;
+    resources = Template.fromStack(control).toJSON().Resources as Record<string, Resource>;
+  }, 240_000);
+
+  const tickId = () => Object.entries(resources).find(([id, r]) => r.Type === "AWS::Lambda::Function" && id.startsWith("EvalBatchTick"))![0];
+  const roleId = () => (resources[tickId()]!.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];
+  const statements = () => Object.values(resources)
+    .filter((r) => r.Type === "AWS::IAM::Policy" && JSON.stringify(r.Properties.Roles).includes(roleId()))
+    .flatMap((r) => (r.Properties.PolicyDocument as { Statement: Statement[] }).Statement);
+  const actions = () => [...new Set(statements().flatMap((s) => [s.Action].flat()))].sort();
+
+  it("is a Lambda with the broker's eval settings, run every 2 minutes by EventBridge Scheduler", () => {
+    const tick = resources[tickId()]!;
+    expect(tick.Properties.Timeout).toBe(90);
+    const environment = (tick.Properties.Environment as { Variables: Record<string, unknown> }).Variables;
+    expect(Object.keys(environment)).toEqual(expect.arrayContaining(["STATE_TABLE_NAME", "ARTIFACT_BUCKET_NAME", "CALLBACK_SIGNING_KEY", "SWEBENCH_SETTINGS_PREFIX"]));
+    expect(environment.SWEBENCH_SETTINGS_PREFIX).toBe("/agentx/production/");
+    const schedules = Object.values(resources).filter((r) => r.Type === "AWS::Scheduler::Schedule" && JSON.stringify(r.Properties.Target).includes(tickId()));
+    expect(schedules).toHaveLength(1);
+    expect(schedules[0]!.Properties).toMatchObject({ ScheduleExpression: "rate(2 minutes)", State: "ENABLED" });
+  });
+
+  it("may only use the State table, write eval objects, read the eval settings and start the eval state machine", () => {
+    expect(actions().filter((action) => !action.startsWith("dynamodb:") && !action.startsWith("xray:"))).toEqual([
+      "s3:PutObject", "ssm:GetParameters", "states:StartExecution",
+    ]);
+    const byAction = (action: string) => statements().filter((s) => [s.Action].flat().includes(action));
+    expect(byAction("s3:PutObject")).toHaveLength(1);
+    expect(JSON.stringify(byAction("s3:PutObject")[0]!.Resource)).toMatch(/"\/evals\/\*"\]/);
+    expect(JSON.stringify(byAction("states:StartExecution")[0]!.Resource)).toContain(":stateMachine:agentx-production-swebench-eval");
+    const ssm = JSON.stringify(byAction("ssm:GetParameters")[0]!.Resource);
+    expect(ssm).toContain("parameter/agentx/production/eval/settings");
+    expect(ssm).not.toContain("*");
+    // The table's data only: the grant names the State table and its indexes, nothing else.
+    const dynamo = statements().filter((s) => [s.Action].flat().some((action) => action.startsWith("dynamodb:")));
+    expect(dynamo.every((s) => JSON.stringify(s.Resource).includes("State"))).toBe(true);
+    // Only X-Ray's tracing calls, which take no resource, are allowed on every resource.
+    const unscoped = statements().filter((s) => s.Resource === "*" && ![s.Action].flat().every((action) => action.startsWith("xray:")));
+    expect(unscoped).toEqual([]);
+    expect(statements().every((s) => s.Effect === "Allow")).toBe(true);
+  });
+
+  it("alarms the operator when it keeps failing", () => {
+    const alarm = Object.values(resources).find((r) => r.Type === "AWS::CloudWatch::Alarm" && JSON.stringify(r.Properties.Dimensions ?? []).includes(tickId()))!;
+    expect(alarm.Properties).toMatchObject({ MetricName: "Errors", Threshold: 1, EvaluationPeriods: 3, TreatMissingData: "notBreaching" });
+    expect(JSON.stringify(alarm.Properties.AlarmActions)).toContain("OperatorAlerts");
+  });
+});

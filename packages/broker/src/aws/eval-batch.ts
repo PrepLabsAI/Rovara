@@ -7,15 +7,18 @@
 // first, so two top-ups at once can never both claim the last slot or the last run that fits the cap.
 import { createHash, randomUUID } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { listPricesPerMillion } from "@agentx/model-runtime/catalog";
 import { thinkingLevelRefusal, thinkingLevelSupport } from "@agentx/model-runtime/thinking-levels";
 import {
   EvalBatchFileSchema,
   EvalBatchRecordSchema,
+  EvalBatchSummarySchema,
   EvalRunMeasureSchema,
   SWEBENCH_TERMINAL_STATUSES,
   agentXError,
   slackThreadSubject,
+  summarize,
   swebenchInstanceIdFits,
   type EvalBatchEntry,
   type EvalBatchRecord,
@@ -338,11 +341,13 @@ export async function topUpBatches(dependencies: EvalBatchDependencies, options:
 
 async function topUpBatch(dependencies: EvalBatchDependencies, batchId: string, budget: { starts: number }): Promise<void> {
   const stored = await readStored(dependencies, batchId);
-  if (stored === undefined || TERMINAL_BATCH.has(stored.record.status)) {
-    // Its index item outlived the batch (the delete after its last write failed).
+  if (stored === undefined) {
+    // An index item with no batch behind it.
     await dependencies.documentClient.send(new DeleteCommand({ TableName: dependencies.tableName, Key: activeKey(batchId) }));
     return;
   }
+  // An ended batch stays listed until the tick has written its results (finalizeBatch).
+  if (TERMINAL_BATCH.has(stored.record.status)) return;
   const deployment = await dependencies.deployment();
   if (deployment === undefined) return;
   await recoverStaleClaims(dependencies, stored);
@@ -494,16 +499,7 @@ export async function recordBatchRunEnd(dependencies: EvalBatchDependencies, run
   });
   const end = ended?.value;
   if (end === undefined) return;
-  const measure = measureOf(batchId, run, end);
-  try {
-    await dependencies.documentClient.send(new PutCommand({
-      TableName: dependencies.tableName,
-      Item: { ...measureKey(batchId, run.runId), entityType: "EVAL_BATCH_MEASURE", ...measure },
-      ConditionExpression: "attribute_not_exists(pk)",
-    }));
-  } catch (error) {
-    if (!isConditionFailure(error)) throw error;
-  }
+  await putMeasure(dependencies, measureOf(batchId, run, end));
 }
 
 type MeasureOutcome = EvalRunMeasure["outcome"];
@@ -592,9 +588,183 @@ export async function stopBatchForThread(dependencies: EvalBatchDependencies, th
   let first: string | undefined;
   for (const item of await activeItems(dependencies)) {
     if (item.threadSubject !== subject || typeof item.batchId !== "string") continue;
+    // An ended batch stays listed until its results are written; there is nothing left to stop.
+    const current = await getBatch(dependencies, item.batchId);
+    if (current === undefined || TERMINAL_BATCH.has(current.status)) continue;
     if (await stopBatch(dependencies, item.batchId, requester) !== undefined) first ??= item.batchId;
   }
   return first;
+}
+
+// --- The tick's work on one batch ------------------------------------------------------------------
+
+/**
+ * FR-006: records the ends of the batch's runs that the state machine ended (time limit, instance
+ * lost, cancel) without the runner's callback, which is the broker's only other way to hear of them.
+ * Returns how many it recorded.
+ */
+export async function recordMissedRunEnds(dependencies: EvalBatchDependencies, batchId: string): Promise<number> {
+  const record = await getBatch(dependencies, batchId);
+  if (record === undefined) return 0;
+  let recorded = 0;
+  for (const entry of record.queue) {
+    if (!IN_FLIGHT.has(entry.state)) continue;
+    const run = await readRun(dependencies, entry.runId ?? evalBatchRunId(batchId, entry.index, entry.attempt));
+    if (run === undefined || !SWEBENCH_TERMINAL_STATUSES.has(run.status)) continue;
+    log("eval_batch.missed_end", { batchId, runId: run.runId, status: run.status });
+    await recordBatchRunEnd(dependencies, run);
+    recorded += 1;
+  }
+  return recorded;
+}
+
+/**
+ * Ruling 8: rebuilds every terminal row the batch should have and does not, from its record and its
+ * runs' records. A crash between a write of the record and the write of its row loses the row; this
+ * writes it again, keyed by its run ID (which names the entry and the attempt), with the charge the
+ * record's spend already holds (Ruling 4), so the rows' charges still sum to the spend. The rows:
+ * an attempt that was retried (RETRIED), the entry's last attempt once its run has ended, and a
+ * retry that never started (Ruling 7). An attempt that never ran, or is still running, has none.
+ * Returns how many it rebuilt.
+ */
+export async function reconcileBatchRows(dependencies: EvalBatchDependencies, batchId: string): Promise<number> {
+  const record = await getBatch(dependencies, batchId);
+  if (record === undefined) return 0;
+  const written = new Set((await listBatchMeasures(dependencies, batchId)).map((measure) => measure.runId));
+  let rebuilt = 0;
+  for (const entry of record.queue) {
+    for (let attempt = 1; attempt <= entry.attempt; attempt += 1) {
+      const runId = evalBatchRunId(batchId, entry.index, attempt);
+      if (written.has(runId)) continue;
+      const last = attempt === entry.attempt;
+      if (last && (entry.state === "QUEUED" || IN_FLIGHT.has(entry.state))) continue;
+      if (last && entry.runId === undefined) {
+        if (!isUnstartedRetry(entry)) continue;
+        await putMeasure(dependencies, unstartedRetryMeasure(batchId, entry));
+      } else {
+        const run = await readRun(dependencies, runId);
+        if (run === undefined || !SWEBENCH_TERMINAL_STATUSES.has(run.status)) {
+          log("eval_batch.row_unrecoverable", { batchId, runId, index: entry.index, attempt, status: run?.status ?? null });
+          continue;
+        }
+        await recordBatchRunEnd(dependencies, run);
+      }
+      log("eval_batch.row_rebuilt", { batchId, runId, index: entry.index, attempt });
+      rebuilt += 1;
+    }
+  }
+  return rebuilt;
+}
+
+/** Where a batch's results are written in the artifact bucket (FR-010). */
+export function evalBatchResultsKeys(batchId: string): { csv: string; summary: string } {
+  return { csv: `evals/batches/${batchId}/results.csv`, summary: `evals/batches/${batchId}/summary.json` };
+}
+
+/**
+ * FR-010: once a batch has ended, rebuilds its lost rows (Ruling 8), writes results.csv and
+ * summary.json, and takes it off the active list. Until the last step succeeds the batch stays
+ * listed, so the next tick does it all again and writes the same files. `finalized` is false while
+ * the batch has not ended.
+ */
+export async function finalizeBatch(dependencies: EvalBatchDependencies, batchId: string): Promise<{ finalized: boolean; rowsRebuilt: number }> {
+  const record = await getBatch(dependencies, batchId);
+  if (record === undefined || !TERMINAL_BATCH.has(record.status)) return { finalized: false, rowsRebuilt: 0 };
+  const rowsRebuilt = await reconcileBatchRows(dependencies, batchId);
+  const measures = orderedMeasures(record, await listBatchMeasures(dependencies, batchId));
+  const charged = roundUsd(measures.reduce((sum, measure) => sum + measure.chargedUsd, 0));
+  if (Math.abs(charged - record.spentUsd) > 1e-6) log("eval_batch.charges_differ_from_spend", { batchId, chargedUsd: charged, spentUsd: record.spentUsd });
+  const keys = evalBatchResultsKeys(batchId);
+  await dependencies.s3.send(new PutObjectCommand({
+    Bucket: dependencies.artifactBucketName,
+    Key: keys.csv,
+    Body: evalBatchResultsCsv(record, measures),
+    ContentType: "text/csv; charset=utf-8",
+  }));
+  const summary = EvalBatchSummarySchema.parse({ batchId, models: summarize(measures) });
+  await dependencies.s3.send(new PutObjectCommand({
+    Bucket: dependencies.artifactBucketName,
+    Key: keys.summary,
+    Body: `${JSON.stringify(summary, null, 2)}\n`,
+    ContentType: "application/json",
+  }));
+  await dependencies.documentClient.send(new DeleteCommand({ TableName: dependencies.tableName, Key: activeKey(batchId) }));
+  log("eval_batch.results_written", { batchId, status: record.status, rows: measures.length, rowsRebuilt, spentUsd: record.spentUsd });
+  return { finalized: true, rowsRebuilt };
+}
+
+/** results.csv's columns, in order (FR-010). */
+export const EVAL_BATCH_RESULTS_COLUMNS = [
+  "batchId", "runId", "instanceId", "provider", "modelId", "thinkingLevel", "routing", "repeat", "attempt", "outcome",
+  "resolved", "error", "secbenchStrict", "secbenchMedium", "secbenchGenerous", "secbenchFailedStep",
+  "failToPassPassed", "failToPassTotal", "passToPassPassed", "passToPassTotal", "stopReason", "agentSeconds", "toolCalls",
+  "inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "totalTokens",
+  "costUsd", "chargedUsd", "costEstimated", "imageDigest", "claimCheck",
+] as const;
+
+/**
+ * results.csv (RFC 4180): a header and one row per measure, in queue order then attempt, CRLF line
+ * ends. A field with a comma, a double quote or a line break is quoted, with its quotes doubled. An
+ * absent value is empty; a pin's providers are joined with `|`; claim-check fields are JSON.
+ */
+export function evalBatchResultsCsv(record: EvalBatchRecord, measures: readonly EvalRunMeasure[]): string {
+  const rows = orderedMeasures(record, measures).map((measure) => {
+    const values: Record<(typeof EVAL_BATCH_RESULTS_COLUMNS)[number], CsvValue> = {
+      batchId: measure.batchId,
+      runId: measure.runId,
+      instanceId: measure.instanceId,
+      provider: measure.provider,
+      modelId: measure.modelId,
+      thinkingLevel: measure.thinkingLevel,
+      routing: measure.routing?.only.join("|"),
+      repeat: measure.repeat,
+      attempt: measure.attempt,
+      outcome: measure.outcome,
+      resolved: measure.resolved,
+      error: measure.error,
+      secbenchStrict: measure.secbench?.strict,
+      secbenchMedium: measure.secbench?.medium,
+      secbenchGenerous: measure.secbench?.generous,
+      secbenchFailedStep: measure.secbench?.failedStep,
+      failToPassPassed: measure.failToPass?.passed,
+      failToPassTotal: measure.failToPass?.total,
+      passToPassPassed: measure.passToPass?.passed,
+      passToPassTotal: measure.passToPass?.total,
+      stopReason: measure.stopReason,
+      agentSeconds: measure.agentSeconds,
+      toolCalls: measure.toolCalls,
+      inputTokens: measure.tokens.input,
+      outputTokens: measure.tokens.output,
+      cacheReadTokens: measure.tokens.cacheRead,
+      cacheWriteTokens: measure.tokens.cacheWrite,
+      totalTokens: measure.tokens.total,
+      costUsd: measure.costUsd,
+      chargedUsd: measure.chargedUsd,
+      costEstimated: measure.costEstimated === true,
+      imageDigest: measure.imageDigest,
+      claimCheck: measure.claimCheck === undefined ? undefined : JSON.stringify(measure.claimCheck),
+    };
+    return EVAL_BATCH_RESULTS_COLUMNS.map((column) => csvField(values[column]));
+  });
+  return [[...EVAL_BATCH_RESULTS_COLUMNS], ...rows].map((fields) => `${fields.join(",")}\r\n`).join("");
+}
+
+type CsvValue = string | number | boolean | null | undefined;
+
+function csvField(value: CsvValue): string {
+  if (value === undefined || value === null) return "";
+  const text = String(value);
+  return /[",\r\n]/.test(text) ? `"${text.replaceAll("\"", "\"\"")}"` : text;
+}
+
+/** Rows in queue order, then attempt; a row no entry names (none should) goes last, by run ID. */
+function orderedMeasures(record: EvalBatchRecord, measures: readonly EvalRunMeasure[]): EvalRunMeasure[] {
+  const position = new Map<string, number>();
+  for (const entry of record.queue) {
+    for (let attempt = 1; attempt <= entry.attempt; attempt += 1) position.set(evalBatchRunId(record.batchId, entry.index, attempt), entry.index * 2 + attempt);
+  }
+  const at = (measure: EvalRunMeasure) => position.get(measure.runId) ?? Number.POSITIVE_INFINITY;
+  return [...measures].sort((left, right) => at(left) - at(right) || left.runId.localeCompare(right.runId));
 }
 
 /**
@@ -666,9 +836,10 @@ async function mutate<T>(dependencies: EvalBatchDependencies, batchId: string, c
       continue;
     }
     await writeUnstartedRetryRows(dependencies, stored.record, next);
+    // The batch stays on the active list until the tick has rebuilt any lost row and written its
+    // results (finalizeBatch, Ruling 8).
     if (TERMINAL_BATCH.has(next.status) && !TERMINAL_BATCH.has(stored.record.status)) {
       log("eval_batch.ended", { batchId, status: next.status, spentUsd: next.spentUsd, counts: next.counts });
-      await dependencies.documentClient.send(new DeleteCommand({ TableName: dependencies.tableName, Key: activeKey(batchId) }));
     }
     return { record: next, value, stored: { ...stored, record: next } };
   }
@@ -681,38 +852,50 @@ async function mutate<T>(dependencies: EvalBatchDependencies, batchId: string, c
  */
 async function writeUnstartedRetryRows(dependencies: EvalBatchDependencies, before: EvalBatchRecord, after: EvalBatchRecord): Promise<void> {
   for (const entry of after.queue) {
-    // A retry that ran has its own row; only one that never got a run is ended here.
-    if (entry.attempt !== 2 || entry.runId !== undefined || (entry.state !== "NOT_STARTED" && entry.state !== "CANCELLED")) continue;
+    if (!isUnstartedRetry(entry)) continue;
     // Only the write that moved it there (from QUEUED, or from RUNNING in the same write that requeued it).
     if (before.queue.find((candidate) => candidate.index === entry.index)?.state === entry.state) continue;
-    const runId = evalBatchRunId(after.batchId, entry.index, entry.attempt);
-    const measure = EvalRunMeasureSchema.parse({
-      batchId: after.batchId,
-      runId,
-      instanceId: entry.task,
-      provider: entry.model.provider,
-      modelId: entry.model.modelId,
-      thinkingLevel: entry.model.thinkingLevel,
-      ...(entry.model.routing === undefined ? {} : { routing: entry.model.routing }),
-      repeat: entry.repeat,
-      attempt: entry.attempt,
-      outcome: "FAILED",
-      error: entry.state === "NOT_STARTED" ? "the retry did not start: the batch's cost cap was reached" : "the retry did not start: the batch was stopped",
-      agentSeconds: 0,
-      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-      costUsd: 0,
-      chargedUsd: 0,
-      imageDigest: "",
-    });
-    try {
-      await dependencies.documentClient.send(new PutCommand({
-        TableName: dependencies.tableName,
-        Item: { ...measureKey(after.batchId, runId), entityType: "EVAL_BATCH_MEASURE", ...measure },
-        ConditionExpression: "attribute_not_exists(pk)",
-      }));
-    } catch (error) {
-      if (!isConditionFailure(error)) throw error;
-    }
+    await putMeasure(dependencies, unstartedRetryMeasure(after.batchId, entry));
+  }
+}
+
+/** A retry (attempt 2) that never got a run, now NOT_STARTED or CANCELLED: a retry that ran has its own row. */
+function isUnstartedRetry(entry: EvalBatchEntry): boolean {
+  return entry.attempt === 2 && entry.runId === undefined && (entry.state === "NOT_STARTED" || entry.state === "CANCELLED");
+}
+
+/** Ruling 7's row for a retry that never started: FAILED, charged $0, naming the cap or the stop. */
+function unstartedRetryMeasure(batchId: string, entry: EvalBatchEntry): EvalRunMeasure {
+  return EvalRunMeasureSchema.parse({
+    batchId,
+    runId: evalBatchRunId(batchId, entry.index, entry.attempt),
+    instanceId: entry.task,
+    provider: entry.model.provider,
+    modelId: entry.model.modelId,
+    thinkingLevel: entry.model.thinkingLevel,
+    ...(entry.model.routing === undefined ? {} : { routing: entry.model.routing }),
+    repeat: entry.repeat,
+    attempt: entry.attempt,
+    outcome: "FAILED",
+    error: entry.state === "NOT_STARTED" ? "the retry did not start: the batch's cost cap was reached" : "the retry did not start: the batch was stopped",
+    agentSeconds: 0,
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    costUsd: 0,
+    chargedUsd: 0,
+    imageDigest: "",
+  });
+}
+
+/** Writes a run end's row once: a row already written is left as it is. */
+async function putMeasure(dependencies: EvalBatchDependencies, measure: EvalRunMeasure): Promise<void> {
+  try {
+    await dependencies.documentClient.send(new PutCommand({
+      TableName: dependencies.tableName,
+      Item: { ...measureKey(measure.batchId, measure.runId), entityType: "EVAL_BATCH_MEASURE", ...measure },
+      ConditionExpression: "attribute_not_exists(pk)",
+    }));
+  } catch (error) {
+    if (!isConditionFailure(error)) throw error;
   }
 }
 
@@ -784,7 +967,7 @@ async function activeItems(dependencies: EvalBatchDependencies): Promise<Array<R
   return items;
 }
 
-async function activeBatchIds(dependencies: EvalBatchDependencies): Promise<string[]> {
+export async function activeBatchIds(dependencies: EvalBatchDependencies): Promise<string[]> {
   return (await activeItems(dependencies)).map((item) => item.batchId).filter((batchId): batchId is string => typeof batchId === "string");
 }
 

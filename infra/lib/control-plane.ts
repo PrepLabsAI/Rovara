@@ -23,6 +23,8 @@ import {
   aws_lambda_nodejs as lambdaNodejs,
   aws_logs as logs,
   aws_s3 as s3,
+  aws_scheduler as scheduler,
+  aws_scheduler_targets as schedulerTargets,
   aws_secretsmanager as secretsmanager,
   aws_sns as sns,
   aws_sqs as sqs,
@@ -160,19 +162,15 @@ export class ControlPlaneStack extends Stack {
     // and the worker model per request, and starts the eval state machine by its fixed name; both
     // exist only once the eval stack is deployed, and until then a run is refused as not installed.
     broker.addEnvironment("SWEBENCH_SETTINGS_PREFIX", naming.ec2.workerSettingsPrefix);
-    broker.addToRolePolicy(new iam.PolicyStatement({
-      actions: ["ssm:GetParameters"],
-      resources: [
-        swebenchNames(naming).settingsParameterName,
-        swebenchNames(naming).runnerImageParameterName,
-        swebenchNames(naming).runnerFeaturesParameterName,
-        ...Object.values(WORKER_SETTING_PARAMETERS).map((name) => `${naming.ec2.workerSettingsPrefix}${name}`),
-      ].map((name) => `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${name}`),
-    }));
-    broker.addToRolePolicy(new iam.PolicyStatement({
-      actions: ["states:StartExecution"],
-      resources: [this.formatArn({ service: "states", resource: "stateMachine", resourceName: swebenchNames(naming).stateMachineName, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
-    }));
+    const swebenchParameterArns = [
+      swebenchNames(naming).settingsParameterName,
+      swebenchNames(naming).runnerImageParameterName,
+      swebenchNames(naming).runnerFeaturesParameterName,
+      ...Object.values(WORKER_SETTING_PARAMETERS).map((name) => `${naming.ec2.workerSettingsPrefix}${name}`),
+    ].map((name) => `arn:${Aws.PARTITION}:ssm:${Aws.REGION}:${Aws.ACCOUNT_ID}:parameter${name}`);
+    const swebenchStateMachineArn = this.formatArn({ service: "states", resource: "stateMachine", resourceName: swebenchNames(naming).stateMachineName, arnFormat: ArnFormat.COLON_RESOURCE_NAME });
+    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["ssm:GetParameters"], resources: swebenchParameterArns }));
+    broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
 
     const outboxPublisher = packagedFunction(
       this,
@@ -727,6 +725,37 @@ export class ControlPlaneStack extends Stack {
     sessions.steps.addEnvironment("CONTROL_PLANE_URL", api.attrApiEndpoint);
     sessions.connectDispatcher(dispatcher);
     sessions.connectBroker(broker);
+
+    // Spec 052 FR-006, FR-011: the eval batch tick. Every 2 minutes it records run ends the broker
+    // missed, reconciles the eval slot counter, fills free slots through the broker's own run path
+    // (startSwebenchRun: launch.json, then the eval state machine) and writes ended batches'
+    // results. The schedule stays on: with no batch active a tick is one DynamoDB query, and nothing
+    // has to switch it off. Overlapping ticks are safe: every change is a conditional write.
+    const evalBatchTick = packagedFunction(this, "EvalBatchTick", "packages/broker/src/aws/eval-batch-tick.ts", {
+      STATE_TABLE_NAME: state.tableName,
+      ARTIFACT_BUCKET_NAME: artifacts.bucketName,
+      CALLBACK_SIGNING_KEY: callbackSigningKey.valueAsString,
+      SWEBENCH_SETTINGS_PREFIX: naming.ec2.workerSettingsPrefix,
+    }, Duration.seconds(90));
+    state.grantReadWriteData(evalBatchTick);
+    // A run's launch.json (evals/<runId>/) and a batch's results (evals/batches/<id>/); it reads nothing there.
+    evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "WriteEvalObjects", actions: ["s3:PutObject"], resources: [artifacts.arnForObjects("evals/*")] }));
+    evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "ReadEvalSettings", actions: ["ssm:GetParameters"], resources: swebenchParameterArns }));
+    evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "StartEvalRuns", actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
+    new scheduler.Schedule(this, "EvalBatchTickSchedule", {
+      description: "Runs the AgentX eval batch tick",
+      schedule: scheduler.ScheduleExpression.rate(Duration.minutes(2)),
+      target: new schedulerTargets.LambdaInvoke(evalBatchTick, {}),
+    });
+    new cloudwatch.Alarm(this, "EvalBatchTickErrorsAlarm", {
+      alarmName: naming.alarmName("EvalBatchTickErrors"),
+      alarmDescription: "The eval batch tick failed in each of the last three 5-minute periods; batches may not start runs, record ends or write results. Check the tick's logs.",
+      metric: evalBatchTick.metricErrors({ period: Duration.minutes(5), statistic: "Sum" }),
+      threshold: 1,
+      evaluationPeriods: 3,
+      comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+      treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+    }).addAlarmAction(notifyOperator);
 
     new CfnOutput(this, "ApiEndpoint", { value: api.attrApiEndpoint });
     new CfnOutput(this, "StateTableName", { value: state.tableName });
