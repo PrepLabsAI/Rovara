@@ -123,6 +123,7 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
       ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }),
     });
     log("agent.stopped", { stopReason: agent.stopReason, agentSeconds: agent.agentSeconds });
+    for (const diagnostic of agent.diagnostics) log("agent.diagnostic", { message: diagnostic });
     usage = sessionUsage(agent, dependencies.model, agent.stopReason === "finished" ? "SUCCEEDED" : "FAILED");
     await removeContainer(docker, container);
     const patch = await predictionPatch(git, imageHead, untrackedBefore, secbench ? SECBENCH_SOURCE_EXTENSIONS : undefined);
@@ -198,6 +199,8 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
     dataset: config.dataset,
     ...(taskCommit === undefined ? {} : { taskCommit }),
     offlineSettings: [...OFFLINE_SETTINGS],
+    // Spec 051 Ruling F: what the session reported without failing (an extension's error), already redacted.
+    ...(agent === undefined || agent.diagnostics.length === 0 ? {} : { diagnostics: agent.diagnostics }),
     // What a later comparison needs to know about how the run was set up (pilot lesson, 2026-10-01).
     limits: swebenchAgentLimits(config.dataset),
     ...(thinkingLevel === undefined ? {} : { thinkingLevel }),

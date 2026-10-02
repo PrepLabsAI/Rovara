@@ -10,14 +10,14 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, getCurrentSystemPrompt, getCurrentTools, type Context, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
-import type { BashOperations, ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import type { BashOperations, ExtensionFactory, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import { AGENTX_PREAMBLE, type WorkerInvocation } from "../../packages/contracts/src/index.js";
 import { WorkerCancellationController, WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";
 import type { DevcontainerPaths } from "../../packages/worker/src/devcontainer.js";
 import { redactCredentials, type WorkerEvent } from "../../packages/worker/src/events.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "../../packages/worker/src/git.js";
-import { createDefaultPiSessionAdapter, createWorkspacePiSession, openRegisteredWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle } from "../../packages/worker/src/pi-session.js";
+import { createDefaultPiSessionAdapter, createWorkerResources, createWorkspacePiSession, openRegisteredWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle } from "../../packages/worker/src/pi-session.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
 import { runSwebenchAgent } from "../../packages/worker/src/swebench/agent.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
@@ -59,7 +59,7 @@ async function workspaceRoot(repositories: Array<{ name: string; path: string }>
 /** The worker's real session on the faux model: the default adapter with only its model runtime supplied. */
 async function workerSession(responses: FauxResponseStep[], options: {
   rootPath?: string; conversationId?: string; bashOperations?: BashOperations; devcontainerPaths?: DevcontainerPaths;
-  extensionFactories?: ExtensionFactory[]; onDiagnostic?: (message: string) => void;
+  extensionFactories?: InlineExtension[]; onDiagnostic?: (message: string) => void;
 } = {}) {
   const { modelRuntime, faux } = await fauxModelRuntime();
   faux.setResponses(responses);
@@ -445,6 +445,105 @@ describe("spec 051: the worker's session carries the AgentX preamble and the inl
     expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toContain("tool_result");
     expect(diagnostics[0]).toContain("recorder exploded");
+  });
+
+  it("names an inline extension in its error report, and redacts credentials in it (Ruling F)", async () => {
+    // protects packages/worker/src/pi-session.ts (InlineExtension names, redactCredentials on diagnostics)
+    const extension: InlineExtension = {
+      name: "agentx-test",
+      factory: (pi) => { pi.on("tool_result", () => { throw new Error("push to https://bot:hunter2@example.com/r.git failed"); }); },
+    };
+    const diagnostics: string[] = [];
+    const { handle } = await workerSession([
+      toolUse(fauxToolCall("bash", { command: "echo hi" }, { id: "call-bash-red" })),
+      fauxAssistantMessage("Done."),
+    ], { bashOperations: recordingShell().operations, extensionFactories: [extension], onDiagnostic: (message) => { diagnostics.push(message); } });
+    try {
+      expect(await settle(handle, "run it")).toBe("resolved");
+    } finally { handle.dispose(); }
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("<inline:agentx-test>");
+    expect(diagnostics[0]).toContain("https://[REDACTED]@example.com");
+    expect(diagnostics[0]).not.toContain("hunter2");
+  });
+
+  it("fails session start loudly when an inline extension fails to load (Ruling F)", async () => {
+    // protects packages/worker/src/pi-session.ts (resourceLoader.getExtensions().errors)
+    const extension: InlineExtension = { name: "agentx-verification", factory: () => { throw new Error("cannot load"); } };
+    await expect(workerSession([fauxAssistantMessage("Ok.")], { extensionFactories: [extension] }))
+      .rejects.toThrow(/agentx-verification.*cannot load/);
+  });
+
+  it("gives a reopened session the same preamble", async () => {
+    // protects packages/worker/src/pi-session.ts (openRegisteredWorkspacePiSession -> createWorkerResources)
+    const { handle, rootPath, adapter, faux } = await workerSession([fauxAssistantMessage("One.")]);
+    expect(await settle(handle, "first prompt")).toBe("resolved");
+    const { conversationId, sessionFile } = handle;
+    handle.dispose();
+    const prompts: string[] = [];
+    faux.setResponses([(context) => { prompts.push(modelView(context).systemPrompt ?? ""); return fauxAssistantMessage("Two."); }]);
+    const resumed = await openRegisteredWorkspacePiSession({ rootPath, model: FAUX_MODEL, conversationId, sessionFile }, adapter);
+    try {
+      expect(await settle(resumed, "second prompt")).toBe("resolved");
+    } finally { resumed.dispose(); }
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain(`<addendum>\n${AGENTX_PREAMBLE}\n</addendum>`);
+  });
+
+  it("appends only the AgentX preamble, never an APPEND_SYSTEM.md from the project or the agent directory", async () => {
+    // protects packages/worker/src/pi-session.ts (createWorkerResources appendSystemPrompt)
+    const cwd = await createFixtureDirectory("agentx-char-append-");
+    const agentDirectory = join(cwd, ".agentx/pi");
+    await mkdir(join(cwd, ".pi"), { recursive: true });
+    await mkdir(agentDirectory, { recursive: true });
+    await writeFile(join(cwd, ".pi/APPEND_SYSTEM.md"), "PROJECT APPEND");
+    await writeFile(join(agentDirectory, "APPEND_SYSTEM.md"), "AGENT DIR APPEND");
+    const { resourceLoader } = await createWorkerResources({ cwd, agentDirectory, contextFiles: [] });
+    expect(resourceLoader.getAppendSystemPrompt()).toEqual([AGENTX_PREAMBLE]);
+  });
+
+  it("reports an extension error raised mid-turn in the task's event log, also when the task then fails (Ruling F)", async () => {
+    // protects packages/worker/src/run-task.ts (diagnostics flushed after the prompt, on success and on error)
+    const runWith = async (finalStep: FauxResponseStep) => {
+      const { modelRuntime, faux } = await fauxModelRuntime();
+      faux.setResponses([toolUse(fauxToolCall("bash", { command: "echo hi" }, { id: "call-mid" })), finalStep]);
+      const base = createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) });
+      const extension: InlineExtension = { name: "agentx-test", factory: (pi) => { pi.on("tool_result", () => { throw new Error("mid-turn failure"); }); } };
+      const piAdapter: PiSessionAdapter = { create: (input) => base.create({ ...input, extensionFactories: [extension] }) };
+      const invocation: Extract<WorkerInvocation, { kind: "task" }> = {
+        protocolVersion: 1, kind: "task", operationId: randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1,
+        callbackCapability: "c".repeat(64), payload: { conversationId: randomUUID(), prompt: "run it" },
+      };
+      const workerEvents: WorkerEvent[] = [];
+      const rootPath = await workspaceRoot();
+      const shell = recordingShell();
+      await runTaskInvocation(invocation, {
+        rootPath, model: FAUX_MODEL, piAdapter: { create: (input) => piAdapter.create({ ...input, bashOperations: shell.operations }) },
+        eventSink: async (batch) => { workerEvents.push(...batch); }, artifactSink: async () => undefined,
+      }).catch(() => undefined);
+      return workerEvents.filter((event) => event.type === "progress" && typeof (event.payload as { message?: unknown }).message === "string")
+        .map((event) => (event.payload as { message: string }).message);
+    };
+    expect(await runWith(fauxAssistantMessage("Done."))).toEqual(expect.arrayContaining([expect.stringContaining("mid-turn failure")]));
+    expect(await runWith(fauxAssistantMessage("", { stopReason: "error", errorMessage: "model down" })))
+      .toEqual(expect.arrayContaining([expect.stringContaining("mid-turn failure")]));
+  });
+
+  it("gives the eval run's result the diagnostics its session reported (Ruling F)", async () => {
+    // protects packages/worker/src/swebench/agent.ts (onDiagnostic -> AgentRun.diagnostics)
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    faux.setResponses([toolUse(fauxToolCall("bash", { command: "echo hi" }, { id: "call-eval" })), fauxAssistantMessage("Done.")]);
+    const base = createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) });
+    const extension: InlineExtension = { name: "agentx-test", factory: (pi) => { pi.on("tool_result", () => { throw new Error("eval failure"); }); } };
+    const rootPath = await workspaceRoot();
+    const run = await runSwebenchAgent({
+      rootPath, model: FAUX_MODEL, bashOperations: recordingShell().operations,
+      paths: { hostFolder: join(rootPath, "testbed"), containerFolder: "/testbed" },
+      problemStatement: "Fix it.", maxCostUsd: 10, timeLimitMs: 60_000,
+      piAdapter: { create: (input) => base.create({ ...input, extensionFactories: [extension] }) },
+    });
+    run.session.dispose();
+    expect(run.diagnostics).toEqual([expect.stringContaining("eval failure")]);
   });
 
   it("gives the eval path's session (runSwebenchAgent through the default adapter) the same preamble", async () => {

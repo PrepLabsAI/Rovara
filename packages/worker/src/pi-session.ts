@@ -12,7 +12,7 @@ import {
   DefaultResourceLoader,
   type BashOperations,
   type BashSpawnContext,
-  type ExtensionFactory,
+  type InlineExtension,
   type ModelRuntime,
   type ToolDefinition,
   SessionManager,
@@ -24,6 +24,7 @@ import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-be
 import { createModelRuntimeWithFallback } from "@agentx/model-runtime";
 import { AGENTX_PREAMBLE, agentXError, ThinkingLevelSchema, type ThinkingLevel } from "@agentx/contracts";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
+import { redactCredentials } from "./events.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import {
   appendRepositoryContextFiles,
@@ -72,9 +73,9 @@ export interface PiSessionInput {
   bashOperations?: BashOperations;
   /** The repository's folder in the devcontainer, which the file tools resolve to the host folder (#128). */
   devcontainerPaths?: DevcontainerPaths;
-  /** Inline Pi extensions for this session (spec 051); file-path extensions stay disabled. */
-  extensionFactories?: ExtensionFactory[];
-  /** Where the session reports what it does not fail on, such as an extension handler's error. */
+  /** Inline Pi extensions for this session (spec 051), named so a report says which; file-path extensions stay disabled. */
+  extensionFactories?: InlineExtension[];
+  /** Where the session reports what it does not fail on, such as an extension handler's error. Messages arrive redacted. */
   onDiagnostic?: (message: string) => void;
 }
 
@@ -91,7 +92,7 @@ export async function createWorkspacePiSession(
     onDiagnostic?: (message: string) => void;
     bashOperations?: BashOperations;
     devcontainerPaths?: DevcontainerPaths;
-    extensionFactories?: ExtensionFactory[];
+    extensionFactories?: InlineExtension[];
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
@@ -128,7 +129,7 @@ export async function openRegisteredWorkspacePiSession(
     onDiagnostic?: (message: string) => void;
     bashOperations?: BashOperations;
     devcontainerPaths?: DevcontainerPaths;
-    extensionFactories?: ExtensionFactory[];
+    extensionFactories?: InlineExtension[];
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
@@ -223,6 +224,14 @@ async function createDefaultSession(
       throw agentXError("CONFIG_INVALID", "the selected model does not support reasoning; set thinkingLevel to off");
     }
     const { resourceLoader, settingsManager } = await createWorkerResources(input);
+    // An AgentX extension that failed to load would leave its work silently undone, so the session does not start.
+    const loadErrors = resourceLoader.getExtensions().errors;
+    if (loadErrors.length > 0) {
+      throw agentXError(
+        "RUNTIME_UNAVAILABLE",
+        String(redactCredentials(`an AgentX Pi extension failed to load: ${loadErrors.map((error) => `${error.path}: ${error.error}`).join("; ")}`)),
+      );
+    }
     const { session } = await createAgentSession({
       cwd: input.cwd,
       agentDir: input.agentDirectory,
@@ -239,16 +248,22 @@ async function createDefaultSession(
       settingsManager,
       sessionManager: manager,
     });
-    // Binding emits session_start to the extensions. A handler's error is reported, never swallowed, and never fails the turn.
-    await session.bindExtensions({
-      onError: (error) => {
-        try {
-          input.onDiagnostic?.(`pi extension ${error.extensionPath} failed on ${error.event}: ${error.error}`);
-        } catch { /* Reporting must not break a turn. */ }
-      },
-    });
-    const sessionFile = session.sessionFile;
-    if (!sessionFile) throw new Error("pi did not create a persisted session file");
+    let sessionFile: string | undefined;
+    try {
+      // Binding emits session_start to the extensions. A handler's error is reported, never swallowed, and never fails the turn.
+      await session.bindExtensions({
+        onError: (error) => {
+          try {
+            input.onDiagnostic?.(String(redactCredentials(`pi extension ${error.extensionPath} failed on ${error.event}: ${error.error}`)));
+          } catch { /* Reporting must not break a turn. */ }
+        },
+      });
+      sessionFile = session.sessionFile;
+      if (!sessionFile) throw new Error("pi did not create a persisted session file");
+    } catch (error) {
+      session.dispose();
+      throw error;
+    }
     return {
       conversationId: conversationId ?? session.sessionId,
       sessionFile,

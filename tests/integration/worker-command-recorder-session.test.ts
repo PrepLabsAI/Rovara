@@ -1,0 +1,88 @@
+// Spec 051 Ruling E: in the worker's real Pi session, a test run's "before" is valid only while the workspace
+// fingerprint still equals its state at the agent's first tool call. Real bash, real git, the faux model. Offline.
+import { execFile } from "node:child_process";
+import { mkdir, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { promisify } from "node:util";
+import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep } from "@earendil-works/pi-ai";
+import type { ExtensionFactory } from "@earendil-works/pi-coding-agent";
+import { describe, expect, it } from "vitest";
+import { repositoriesFingerprint } from "../../packages/worker/src/artifacts.js";
+import { createDefaultPiSessionAdapter, createWorkspacePiSession } from "../../packages/worker/src/pi-session.js";
+import { CommandRecorder } from "../../packages/worker/src/verification/recorder.js";
+import { createFixtureDirectory } from "../fixtures/index.js";
+import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
+
+const run = promisify(execFile);
+const toolUse = (...calls: ReturnType<typeof fauxToolCall>[]) => fauxAssistantMessage(calls, { stopReason: "toolUse" });
+
+/** A workspace root with one prepared repository, repos/web: a tracked src.py, and .pytest_cache ignored. */
+async function workspace(): Promise<{ rootPath: string; repository: string }> {
+  const rootPath = await createFixtureDirectory("agentx-recorder-session-");
+  const repository = join(rootPath, "repos/web");
+  await mkdir(repository, { recursive: true });
+  await mkdir(join(rootPath, ".agentx"));
+  await writeFile(join(rootPath, ".agentx/preparation-manifest.json"), JSON.stringify({
+    schemaVersion: 2, projectName: "rec", projectRevision: 1, repositories: [{ name: "web", path: "repos/web" }], completedSetupSteps: [],
+    readinessResults: [], creationIdentity: "fixture", complete: true, updatedAt: new Date().toISOString(),
+  }));
+  await writeFile(join(repository, "src.py"), "a\n");
+  await writeFile(join(repository, ".gitignore"), ".pytest_cache/\n");
+  // The test script writes a cache the repository ignores, as pytest does.
+  await writeFile(join(repository, "package.json"), JSON.stringify({ scripts: { test: "mkdir -p .pytest_cache && date +%s%N > .pytest_cache/v && exit 1" } }));
+  const git = (...args: string[]) => run("git", ["-C", repository, ...args]);
+  await git("init", "-q");
+  await git("add", ".");
+  await git("-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "-qm", "init");
+  return { rootPath, repository };
+}
+
+async function recordedSession(commands: string[], fingerprint?: () => Promise<string>) {
+  const { rootPath, repository } = await workspace();
+  const diagnostics: string[] = [];
+  const recorder = new CommandRecorder({
+    fingerprint: fingerprint ?? (() => repositoriesFingerprint([{ name: "web", directory: repository }])),
+    onDiagnostic: (message) => { diagnostics.push(message); },
+  });
+  const extension: ExtensionFactory = (pi) => {
+    pi.on("tool_call", async (event) => { await recorder.observeCall(event); });
+    pi.on("tool_result", (event) => { recorder.observe(event); });
+  };
+  const { modelRuntime, faux } = await fauxModelRuntime();
+  const steps: FauxResponseStep[] = commands.map((command, index) => toolUse(fauxToolCall("bash", { command }, { id: `call-${index}` })));
+  faux.setResponses([...steps, fauxAssistantMessage("Done.")]);
+  const adapter = createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) });
+  const handle = await createWorkspacePiSession({ rootPath, model: FAUX_MODEL, extensionFactories: [extension] }, adapter);
+  try {
+    await handle.prompt("go");
+  } finally { handle.dispose(); }
+  await recorder.settled();
+  return { runs: recorder.firstRuns().map(({ replay, exitCode, afterFirstEdit }) => ({ replay, exitCode, afterFirstEdit })), diagnostics };
+}
+
+describe("the command recorder in the worker's Pi session (spec 051 Ruling E)", () => {
+  it("counts an edit made with sed -i through bash: the next test run has no valid before", async () => {
+    const { runs } = await recordedSession(["cd repos/web && sed -i.orig 's/a/b/' src.py", "cd repos/web && npm test"]);
+    expect(runs).toEqual([{ replay: "cd repos/web && npm test", exitCode: 1, afterFirstEdit: true }]);
+  });
+
+  it("keeps the before valid after a command that changed nothing", async () => {
+    const { runs } = await recordedSession(["cd repos/web && ls", "cd repos/web && npm test"]);
+    expect(runs).toEqual([{ replay: "cd repos/web && npm test", exitCode: 1, afterFirstEdit: false }]);
+  });
+
+  it("does not count a gitignored cache the test command itself wrote as an edit", async () => {
+    const { runs } = await recordedSession(["cd repos/web && npm test", "cd repos/web && npm run test"]);
+    expect(runs).toEqual([
+      { replay: "cd repos/web && npm test", exitCode: 1, afterFirstEdit: false },
+      { replay: "cd repos/web && npm run test", exitCode: 1, afterFirstEdit: false },
+    ]);
+  });
+
+  it("treats a run as after an edit when the fingerprint fails, and reports it", async () => {
+    const { runs, diagnostics } = await recordedSession(["cd repos/web && npm test"], () => repositoriesFingerprint([{ name: "web", directory: "/nonexistent-agentx-repo" }]));
+    expect(runs).toEqual([{ replay: "cd repos/web && npm test", exitCode: 1, afterFirstEdit: true }]);
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics[0]).toContain("AgentX could not read the workspace state");
+  });
+});

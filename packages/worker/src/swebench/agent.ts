@@ -1,6 +1,7 @@
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import type { SwebenchStopReason } from "@agentx/contracts";
 import type { DevcontainerPaths } from "../devcontainer.js";
+import { redactCredentials } from "../events.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "../pi-session.js";
 import { ToolLoopGuard } from "../tool-loop-guard.js";
 
@@ -12,6 +13,8 @@ export interface AgentRun {
   agentSeconds: number;
   /** The tool calls the agent started (spec 052 Ruling 28). */
   toolCalls: number;
+  /** What the session reported without failing, such as an extension's error (spec 051 Ruling F); redacted. */
+  diagnostics: string[];
 }
 
 export interface AgentRunInput {
@@ -52,7 +55,9 @@ export function swebenchPrompt(problemStatement: string, repositoryFolder: strin
  */
 export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> {
   const now = input.now ?? Date.now;
+  const diagnostics: string[] = [];
   const session = await createWorkspacePiSession({
+    onDiagnostic: (message) => { diagnostics.push(String(redactCredentials(message))); },
     rootPath: input.rootPath,
     model: input.model,
     bashOperations: input.bashOperations,
@@ -97,10 +102,10 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
   const agentSeconds = Math.round((now() - started) / 1_000);
   const toolCalls = guard.toolCalls;
   const finalStop = stop as { reason: SwebenchStopReason; detail: string } | undefined;
-  if (finalStop !== undefined) return { stopReason: finalStop.reason, detail: finalStop.detail, session, agentSeconds, toolCalls };
+  if (finalStop !== undefined) return { stopReason: finalStop.reason, detail: finalStop.detail, session, agentSeconds, toolCalls, diagnostics };
   const modelError = thrown ?? (lastAssistant?.stopReason === "error" ? lastAssistant.errorMessage ?? "the model call failed" : undefined);
-  if (modelError !== undefined) return { stopReason: "model_error", detail: modelError.slice(0, 500), session, agentSeconds, toolCalls };
-  return { stopReason: "finished", session, agentSeconds, toolCalls };
+  if (modelError !== undefined) return { stopReason: "model_error", detail: modelError.slice(0, 500), session, agentSeconds, toolCalls, diagnostics };
+  return { stopReason: "finished", session, agentSeconds, toolCalls, diagnostics };
 }
 
 function assistantEnd(event: unknown): { stopReason: string; errorMessage?: string } | undefined {

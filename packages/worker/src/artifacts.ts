@@ -105,9 +105,13 @@ export async function workspaceFingerprint(rootPath: string): Promise<string> {
   const manifest = JSON.parse(
     await readFile(resolve(rootPath, ".agentx/preparation-manifest.json"), "utf8"),
   ) as PreparationManifest;
+  return repositoriesFingerprint(manifest.repositories.map((repository) => ({ name: repository.name, directory: resolve(rootPath, repository.path) })));
+}
+
+/** workspaceFingerprint's digest over the given repositories. It respects each repository's .gitignore. */
+export async function repositoriesFingerprint(repositories: ReadonlyArray<{ name: string; directory: string }>): Promise<string> {
   const hash = createHash("sha256");
-  for (const repository of manifest.repositories) {
-    const directory = resolve(rootPath, repository.path);
+  for (const { name, directory } of repositories) {
     const head = await gitHead(directory);
     const { stdout: status } = await execFileAsync(
       "git",
@@ -119,7 +123,7 @@ export async function workspaceFingerprint(rootPath: string): Promise<string> {
       ["-C", directory, "diff", "--no-ext-diff", "--binary", "HEAD", "--"],
       { timeout: 60_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
     );
-    hash.update(`${repository.name}\u0000${head}\u0000${status}\u0000${diff}\u0000`);
+    hash.update(`${name}\u0000${head}\u0000${status}\u0000${diff}\u0000`);
     for (const entry of status.split("\u0000")) {
       if (!entry.startsWith("?? ")) continue;
       const file = await stat(resolve(directory, entry.slice(3))).catch(() => undefined);

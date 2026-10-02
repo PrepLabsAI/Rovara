@@ -85,7 +85,16 @@ export async function runTaskInvocation(
   const toolEvidence: unknown[] = [];
   const contextDiagnostics: string[] = [];
   const onDiagnostic = (message: string): void => {
-    contextDiagnostics.push(message);
+    contextDiagnostics.push(String(redactCredentials(message)));
+  };
+  // Diagnostics arrive before the session runs and, from extensions, during the turn (Ruling F): each is reported once.
+  let reportedDiagnostics = 0;
+  const flushDiagnostics = async (): Promise<void> => {
+    while (reportedDiagnostics < contextDiagnostics.length) {
+      const message = contextDiagnostics[reportedDiagnostics]!;
+      reportedDiagnostics += 1;
+      await events.append("progress", { message });
+    }
   };
   if (invocation.payload.modelSelectionDiagnostic !== undefined) {
     onDiagnostic(invocation.payload.modelSelectionDiagnostic);
@@ -173,7 +182,7 @@ export async function runTaskInvocation(
         conversationId,
         conversation: { started: true, reopened: registered !== undefined },
       });
-      for (const message of contextDiagnostics) await events.append("progress", { message });
+      await flushDiagnostics();
       // The state before the prompt, so a turn is judged by what it changed, not by what earlier
       // turns left in the tree (#158).
       let before: string | undefined;
@@ -184,7 +193,11 @@ export async function runTaskInvocation(
           message: "AgentX could not record the workspace state before this task; it will judge the task by the final diff only.",
         });
       }
-      await session.prompt(invocation.payload.prompt);
+      try {
+        await session.prompt(invocation.payload.prompt);
+      } finally {
+        await flushDiagnostics().catch(() => undefined);
+      }
       // An abort can end the prompt without an error; the guard's reason is the task's outcome.
       if (loopStop !== undefined) throw loopStop;
       const modelFailure = failedTurn(lastAssistant);
