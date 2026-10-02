@@ -52,7 +52,13 @@ export interface SwebenchDependencies {
   artifactBucketName: string;
   callbackSigningKey: string;
   deployment: () => Promise<SwebenchDeployment | undefined>;
-  startExecution: (input: { stateMachineArn: string; name: string; input: string }) => Promise<void>;
+  /** Starts a run's execution; the ARN it returns is recorded on the run, so the tick can find a dead execution (Ruling 13). */
+  startExecution: (input: { stateMachineArn: string; name: string; input: string }) => Promise<{ executionArn?: string | undefined } | void>;
+  /**
+   * Spec 052 Ruling 13: an execution's status (RUNNING, SUCCEEDED, FAILED, TIMED_OUT, ABORTED…);
+   * undefined when it does not exist. Absent, a run with no live callback is ended only by its age.
+   */
+  describeExecution?: (executionArn: string) => Promise<{ status: string } | undefined>;
   /**
    * Spec 052: stops the thread's eval batch, if it has one, and returns the batch ID it stopped.
    * Called by every stop, since a batch between runs holds no slot; absent, no batch is stopped.
@@ -240,6 +246,7 @@ export async function startSwebenchRun(
     return refusedActive(typeof counter?.count === "number" ? counter.count : 0);
   }
   const artifactsPrefix = `evals/${runId}/`;
+  let executionArn: string | undefined;
   try {
     const launch = SwebenchLaunchSchema.parse({
       runnerImage,
@@ -266,16 +273,36 @@ export async function startSwebenchRun(
       ContentType: "application/json",
     }));
     const subnets = deployment.settings.subnetIds;
-    await dependencies.startExecution({
+    const execution = await dependencies.startExecution({
       stateMachineArn: deployment.settings.stateMachineArn,
       name: runId,
       input: JSON.stringify({ runId, subnetId: subnets[Math.floor(Math.random() * subnets.length)] }),
     });
+    executionArn = execution?.executionArn;
   } catch (error) {
     await finishRun(dependencies, runId, { status: "FAILED", error: `the run could not start: ${error instanceof Error ? error.message : String(error)}` }).catch(() => undefined);
     throw error;
   }
+  if (executionArn !== undefined) await recordExecutionArn(dependencies, runId, executionArn);
   return { outcome: "STARTED", run };
+}
+
+/**
+ * Ruling 13: the started execution's ARN, kept on the run (storage only). The execution is running,
+ * so a failed write is logged, not thrown: the run is then ended by its age if its execution dies.
+ */
+async function recordExecutionArn(dependencies: SwebenchDependencies, runId: string, executionArn: string): Promise<void> {
+  try {
+    await dependencies.documentClient.send(new UpdateCommand({
+      TableName: dependencies.tableName,
+      Key: swebenchRunKey(runId),
+      UpdateExpression: "SET executionArn = :arn",
+      ConditionExpression: "attribute_exists(pk)",
+      ExpressionAttributeValues: { ":arn": executionArn },
+    }));
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "swebench.execution_arn_not_recorded", runId, error: error instanceof Error ? error.message : String(error) }));
+  }
 }
 
 /** The Slack service's poll: a run, only from the thread that started it. */
@@ -507,7 +534,20 @@ async function endRunWithoutSlot(dependencies: SwebenchDependencies, runId: stri
 export type SwebenchSlotCorrection =
   | { correction: "released_slot" | "deleted_slot"; runId: string; runStatus: string }
   | { correction: "deleted_legacy_lock"; runId: string; runStatus: string }
-  | { correction: "counter_set"; from: number | null; to: number };
+  | { correction: "counter_set"; from: number | null; to: number }
+  | { correction: "ended_dead_run"; runId: string; executionStatus: string | null; runnerStarted: boolean };
+
+/**
+ * Ruling 13: a run holding a slot is looked at only once it is this old. A start records the run,
+ * writes launch.json and starts its execution within seconds, and EndRun ends a run within seconds
+ * of its execution's end; 10 minutes is far past both, so a run being started or ended is never
+ * taken for a dead one, and a dead one holds its slot for at most 12 minutes (one more tick).
+ */
+export const SWEBENCH_DEAD_RUN_GRACE_MS = 10 * 60_000;
+/** Ruling 13: a run whose execution is not recorded is taken for dead past its time limit plus this. */
+export const SWEBENCH_DEAD_RUN_FALLBACK_MARGIN_MS = 15 * 60_000;
+/** Execution statuses of an execution still at work. */
+const LIVE_EXECUTION_STATUSES = new Set(["RUNNING", "PENDING_REDRIVE"]);
 
 /**
  * Spec 052: repairs drift between the slot counter and the slot items, run by the batch tick.
@@ -522,7 +562,12 @@ export type SwebenchSlotCorrection =
  *   item and the counter together, so the slots are read, then the counter, then the slots again:
  *   if the two reads differ, a run started or ended meanwhile and the counter is left for the next
  *   tick. The write requires the counter unchanged and every slot read still held, so a start or a
- *   release after the reads cancels it.
+ *   release after the reads cancels it. One sequence still passes: a run starts after the first
+ *   read, fails within milliseconds after the counter is read, and another run starts before the
+ *   write. The counter is then one low, allowing one run over maxConcurrentEvals until the next
+ *   reconcile, which counts it right (tested). A version every start and release bumps would close
+ *   it, but EndRun in the state machine would have to bump it too.
+ * - A run that holds a slot but whose execution died without ending it is ended (Ruling 13).
  */
 export async function reconcileSwebenchSlots(dependencies: SwebenchDependencies): Promise<SwebenchSlotCorrection[]> {
   const corrections: SwebenchSlotCorrection[] = [];
@@ -555,7 +600,56 @@ export async function reconcileSwebenchSlots(dependencies: SwebenchDependencies)
   }
   const counted = await setSlotCounter(dependencies);
   if (counted !== undefined) correct({ correction: "counter_set", ...counted });
+  // After the counter is right, so ending a dead run can release its slot.
+  const failures: string[] = [];
+  for (const runId of await slotRunIds(dependencies)) {
+    try {
+      const ended = await endDeadRun(dependencies, runId);
+      if (ended !== undefined) correct({ correction: "ended_dead_run", runId, ...ended });
+    } catch (error) {
+      failures.push(runId);
+      console.log(JSON.stringify({ component: "broker", event: "eval_slots.dead_run_not_ended", runId, error: error instanceof Error ? error.message : String(error) }));
+    }
+  }
+  if (failures.length > 0) throw new Error(`the dead eval runs ${failures.join(", ")} could not be ended`);
   return corrections;
+}
+
+/**
+ * Ruling 13: ends a run that holds a slot but whose execution has stopped without ending it (EndRun's
+ * release failed, or the execution died). Its execution is described once the run is past the grace
+ * period; a run with no recorded execution is taken for dead past its time limit plus 15 minutes.
+ * It is ended FAILED through finishRun, which releases its slot once, with an error the batch reads
+ * as the infrastructure's (FR-008): "could not start" when its runner never started, which is
+ * charged $0, else "stopped without reporting a result", charged its ceiling (D-5). Undefined when
+ * the run is alive, too young, already ended, or was ended meanwhile by its execution.
+ */
+async function endDeadRun(dependencies: SwebenchDependencies, runId: string): Promise<{ executionStatus: string | null; runnerStarted: boolean } | undefined> {
+  const item = await get(dependencies, swebenchRunKey(runId));
+  if (item === undefined) return undefined;
+  const run = await readRun(dependencies, runId);
+  if (run === undefined || SWEBENCH_TERMINAL_STATUSES.has(run.status)) return undefined;
+  const age = now(dependencies).getTime() - Date.parse(run.createdAt);
+  if (age <= SWEBENCH_DEAD_RUN_GRACE_MS) return undefined;
+  const pastLimit = age > SWEBENCH_RUN_TIME_LIMIT_SECONDS * 1_000 + SWEBENCH_DEAD_RUN_FALLBACK_MARGIN_MS;
+  const executionArn = typeof item.executionArn === "string" ? item.executionArn : undefined;
+  let executionStatus: string | null = null;
+  if (executionArn !== undefined && dependencies.describeExecution !== undefined) {
+    const execution = await dependencies.describeExecution(executionArn);
+    if (execution !== undefined && LIVE_EXECUTION_STATUSES.has(execution.status)) return undefined;
+    if (execution === undefined && !pastLimit) return undefined;
+    executionStatus = execution?.status ?? null;
+  } else if (!pastLimit) {
+    return undefined;
+  }
+  const how = executionStatus === null ? "its execution is unknown and the run is past its time limit" : `its execution ended ${executionStatus}`;
+  const runnerStarted = run.runnerStartedAt !== undefined;
+  const error = runnerStarted
+    ? `the eval instance stopped (${how}) without reporting a result; the batch tick ended the run`
+    : `the run could not start: ${how} before the runner started`;
+  await finishRun(dependencies, runId, { status: "FAILED", error });
+  // EndRun may have ended it first: then its own end stands, and this changed nothing.
+  return (await readRun(dependencies, runId))?.error === error ? { executionStatus, runnerStarted } : undefined;
 }
 
 /**
@@ -634,7 +728,10 @@ async function setSlotCounter(dependencies: SwebenchDependencies): Promise<{ fro
   if ((seen ?? 0) === after.length) return undefined;
   // DynamoDB allows 100 items in a transaction; far more slot items than maxConcurrentEvals (6) is
   // not drift this pass can count safely.
-  if (after.length > 98) return undefined;
+  if (after.length > 98) {
+    console.log(JSON.stringify({ component: "broker", event: "eval_slots.too_many_to_count", level: "warning", slots: after.length, counter: seen ?? null }));
+    return undefined;
+  }
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({
       TransactItems: [
@@ -708,7 +805,7 @@ export async function readRun(dependencies: SwebenchDependencies, runId: string)
   const item = await get(dependencies, swebenchRunKey(runId));
   if (item === undefined) return undefined;
   // The state machine records the EC2 instance as ec2InstanceId; the run's instanceId is SWE-bench's.
-  return SwebenchRunSchema.parse(withoutKeys(item, ["pk", "sk", "entityType", "projectName", "cancelRequestedBy", "ec2InstanceId"]));
+  return SwebenchRunSchema.parse(withoutKeys(item, ["pk", "sk", "entityType", "projectName", "cancelRequestedBy", "ec2InstanceId", "executionArn"]));
 }
 
 async function get(dependencies: SwebenchDependencies, key: { pk: string; sk: string }): Promise<Record<string, unknown> | undefined> {

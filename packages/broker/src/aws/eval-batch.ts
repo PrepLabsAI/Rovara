@@ -322,24 +322,32 @@ export async function listBatchMeasures(dependencies: EvalBatchDependencies, bat
   return measures;
 }
 
+/** A batch the top-up could not fill: its top-up failed, or a run could not be started. */
+export interface EvalBatchTopUpFailure { batchId: string; error: string }
+
 /**
  * FR-006: fills each running batch's free slots. One batch's failure is logged and leaves the others
- * to fill. `maxStarts` bounds the starts of one call, so a runner's callback that tops up inline
- * stays well inside its 30-second timeout; the tick fills the rest.
+ * to fill; the failures are returned, so the tick can fail and its alarm see them (Ruling 14).
+ * `maxStarts` bounds the starts of one call, so a runner's callback that tops up inline stays well
+ * inside its 30-second timeout; the tick fills the rest.
  */
-export async function topUpBatches(dependencies: EvalBatchDependencies, options: { maxStarts?: number } = {}): Promise<void> {
+export async function topUpBatches(dependencies: EvalBatchDependencies, options: { maxStarts?: number } = {}): Promise<{ failures: EvalBatchTopUpFailure[] }> {
   const budget = { starts: options.maxStarts ?? Number.POSITIVE_INFINITY };
+  const failures: EvalBatchTopUpFailure[] = [];
   for (const batchId of await activeBatchIds(dependencies)) {
-    if (budget.starts <= 0) return;
+    if (budget.starts <= 0) break;
     try {
-      await topUpBatch(dependencies, batchId, budget);
+      await topUpBatch(dependencies, batchId, budget, failures);
     } catch (error) {
-      log("eval_batch.top_up_failed", { batchId, error: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      log("eval_batch.top_up_failed", { batchId, error: message });
+      failures.push({ batchId, error: message });
     }
   }
+  return { failures };
 }
 
-async function topUpBatch(dependencies: EvalBatchDependencies, batchId: string, budget: { starts: number }): Promise<void> {
+async function topUpBatch(dependencies: EvalBatchDependencies, batchId: string, budget: { starts: number }, failures: EvalBatchTopUpFailure[]): Promise<void> {
   const stored = await readStored(dependencies, batchId);
   if (stored === undefined) {
     // An index item with no batch behind it.
@@ -349,7 +357,10 @@ async function topUpBatch(dependencies: EvalBatchDependencies, batchId: string, 
   // An ended batch stays listed until the tick has written its results (finalizeBatch).
   if (TERMINAL_BATCH.has(stored.record.status)) return;
   const deployment = await dependencies.deployment();
-  if (deployment === undefined) return;
+  if (deployment === undefined) {
+    failures.push({ batchId, error: "eval runs are not installed in this deployment, so the batch cannot start its runs" });
+    return;
+  }
   await recoverStaleClaims(dependencies, stored);
   while (budget.starts > 0) {
     // The counter read only saves a pointless claim: the start takes its slot atomically.
@@ -366,12 +377,12 @@ async function topUpBatch(dependencies: EvalBatchDependencies, batchId: string, 
     });
     if (claim?.value === undefined) return;
     budget.starts -= 1;
-    if (!await startClaimed(dependencies, claim.stored, claim.value)) return;
+    if (!await startClaimed(dependencies, claim.stored, claim.value, failures)) return;
   }
 }
 
 /** Starts a claimed entry's run; false when no run started and topping up should stop for now. */
-async function startClaimed(dependencies: EvalBatchDependencies, stored: Stored, claim: { index: number; attempt: number; claimedAt: string }): Promise<boolean> {
+async function startClaimed(dependencies: EvalBatchDependencies, stored: Stored, claim: { index: number; attempt: number; claimedAt: string }, failures: EvalBatchTopUpFailure[]): Promise<boolean> {
   const { record } = stored;
   const entry = record.queue.find((candidate) => candidate.index === claim.index)!;
   const runId = evalBatchRunId(record.batchId, claim.index, claim.attempt);
@@ -401,7 +412,9 @@ async function startClaimed(dependencies: EvalBatchDependencies, stored: Stored,
         await sleep(dependencies, BACKOFF_MS * attempt * (1 + Math.random()));
         continue;
       }
-      log("eval_batch.start_failed", { batchId: record.batchId, runId, error: error instanceof Error ? error.message : String(error) });
+      const message = error instanceof Error ? error.message : String(error);
+      log("eval_batch.start_failed", { batchId: record.batchId, runId, error: message });
+      failures.push({ batchId: record.batchId, error: `run ${runId} could not start: ${message}` });
       // A run the start recorded has ended FAILED (it could not be launched): its end is recorded,
       // and retried as the infrastructure's. Otherwise the claim is given back.
       const run = await readRun(dependencies, runId);
@@ -411,7 +424,11 @@ async function startClaimed(dependencies: EvalBatchDependencies, stored: Stored,
       return false;
     }
     if (started.outcome === "REFUSED") {
-      if (started.reason !== "RUN_ACTIVE") log("eval_batch.start_refused", { batchId: record.batchId, runId, reason: started.reason });
+      // No free slot is the normal wait; any other refusal is a deployment fault that stalls the batch.
+      if (started.reason !== "RUN_ACTIVE") {
+        log("eval_batch.start_refused", { batchId: record.batchId, runId, reason: started.reason });
+        failures.push({ batchId: record.batchId, error: `run ${runId} was refused: ${started.reason}` });
+      }
       await releaseClaim(dependencies, record.batchId, claim);
       return false;
     }
@@ -628,8 +645,14 @@ export async function recordMissedRunEnds(dependencies: EvalBatchDependencies, b
  * Returns how many it rebuilt.
  */
 export async function reconcileBatchRows(dependencies: EvalBatchDependencies, batchId: string): Promise<number> {
+  return (await rebuildRows(dependencies, batchId)).rebuilt;
+}
+
+/** Ruling 8's rebuild; `unrecoverable` names the rows it could not rebuild, since their runs are missing or not ended. */
+async function rebuildRows(dependencies: EvalBatchDependencies, batchId: string): Promise<{ rebuilt: number; unrecoverable: string[] }> {
+  const unrecoverable: string[] = [];
   const record = await getBatch(dependencies, batchId);
-  if (record === undefined) return 0;
+  if (record === undefined) return { rebuilt: 0, unrecoverable };
   const written = new Set((await listBatchMeasures(dependencies, batchId)).map((measure) => measure.runId));
   let rebuilt = 0;
   for (const entry of record.queue) {
@@ -645,6 +668,7 @@ export async function reconcileBatchRows(dependencies: EvalBatchDependencies, ba
         const run = await readRun(dependencies, runId);
         if (run === undefined || !SWEBENCH_TERMINAL_STATUSES.has(run.status)) {
           log("eval_batch.row_unrecoverable", { batchId, runId, index: entry.index, attempt, status: run?.status ?? null });
+          unrecoverable.push(runId);
           continue;
         }
         await recordBatchRunEnd(dependencies, run);
@@ -653,7 +677,7 @@ export async function reconcileBatchRows(dependencies: EvalBatchDependencies, ba
       rebuilt += 1;
     }
   }
-  return rebuilt;
+  return { rebuilt, unrecoverable };
 }
 
 /** Where a batch's results are written in the artifact bucket (FR-010). */
@@ -666,14 +690,24 @@ export function evalBatchResultsKeys(batchId: string): { csv: string; summary: s
  * summary.json, and takes it off the active list. Until the last step succeeds the batch stays
  * listed, so the next tick does it all again and writes the same files. `finalized` is false while
  * the batch has not ended.
+ *
+ * Ruling 14: a row that cannot be rebuilt, or rows whose charges do not sum to the spend, mean the
+ * results are wrong. The files are still written, but the batch stays listed and this throws, so
+ * every tick fails and the alarm fires until an operator resolves it (and removes the
+ * `EVAL_BATCHES#ACTIVE` item by hand if the results are to stand).
  */
 export async function finalizeBatch(dependencies: EvalBatchDependencies, batchId: string): Promise<{ finalized: boolean; rowsRebuilt: number }> {
   const record = await getBatch(dependencies, batchId);
   if (record === undefined || !TERMINAL_BATCH.has(record.status)) return { finalized: false, rowsRebuilt: 0 };
-  const rowsRebuilt = await reconcileBatchRows(dependencies, batchId);
+  const { rebuilt: rowsRebuilt, unrecoverable } = await rebuildRows(dependencies, batchId);
   const measures = orderedMeasures(record, await listBatchMeasures(dependencies, batchId));
   const charged = roundUsd(measures.reduce((sum, measure) => sum + measure.chargedUsd, 0));
-  if (Math.abs(charged - record.spentUsd) > 1e-6) log("eval_batch.charges_differ_from_spend", { batchId, chargedUsd: charged, spentUsd: record.spentUsd });
+  const problems: string[] = [];
+  if (unrecoverable.length > 0) problems.push(`the rows of runs ${unrecoverable.join(", ")} are lost and cannot be rebuilt`);
+  if (Math.abs(charged - record.spentUsd) > 1e-6) {
+    log("eval_batch.charges_differ_from_spend", { batchId, chargedUsd: charged, spentUsd: record.spentUsd });
+    problems.push(`the rows charge $${charged} but the batch spent $${record.spentUsd}`);
+  }
   const keys = evalBatchResultsKeys(batchId);
   await dependencies.s3.send(new PutObjectCommand({
     Bucket: dependencies.artifactBucketName,
@@ -688,6 +722,7 @@ export async function finalizeBatch(dependencies: EvalBatchDependencies, batchId
     Body: `${JSON.stringify(summary, null, 2)}\n`,
     ContentType: "application/json",
   }));
+  if (problems.length > 0) throw new Error(`batch ${batchId}'s results are incomplete: ${problems.join("; ")}`);
   await dependencies.documentClient.send(new DeleteCommand({ TableName: dependencies.tableName, Key: activeKey(batchId) }));
   log("eval_batch.results_written", { batchId, status: record.status, rows: measures.length, rowsRebuilt, spentUsd: record.spentUsd });
   return { finalized: true, rowsRebuilt };

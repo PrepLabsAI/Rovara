@@ -4875,7 +4875,9 @@ export const handler = createAwsBrokerHandler({
             return new Map((response.Parameters ?? []).flatMap((parameter) => parameter.Name && parameter.Value ? [[parameter.Name, parameter.Value] as const] : []));
           }),
           async startExecution(input) {
-            await stepFunctions.send(new StartExecutionCommand(input));
+            const response = await stepFunctions.send(new StartExecutionCommand(input));
+            // Spec 052 Ruling 13: recorded on the run, so the batch tick can find a dead execution.
+            return { executionArn: response.executionArn };
           },
         },
       }

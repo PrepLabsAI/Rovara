@@ -729,8 +729,9 @@ export class ControlPlaneStack extends Stack {
     // Spec 052 FR-006, FR-011: the eval batch tick. Every 2 minutes it records run ends the broker
     // missed, reconciles the eval slot counter, fills free slots through the broker's own run path
     // (startSwebenchRun: launch.json, then the eval state machine) and writes ended batches'
-    // results. The schedule stays on: with no batch active a tick is three small DynamoDB reads (and
-    // a slot repair when a slot is held), and nothing has to switch it off. Overlapping ticks are safe: every change is a conditional write.
+    // results. It also ends runs whose execution died without ending them (Ruling 13). The schedule
+    // stays on: with no batch active a tick is three small DynamoDB reads (and a slot repair when a
+    // slot is held), and nothing has to switch it off. Overlapping ticks are safe: every change is a conditional write.
     const evalBatchTick = packagedFunction(this, "EvalBatchTick", "packages/broker/src/aws/eval-batch-tick.ts", {
       STATE_TABLE_NAME: state.tableName,
       ARTIFACT_BUCKET_NAME: artifacts.bucketName,
@@ -742,6 +743,12 @@ export class ControlPlaneStack extends Stack {
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "WriteEvalObjects", actions: ["s3:PutObject"], resources: [artifacts.arnForObjects("evals/*")] }));
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "ReadEvalSettings", actions: ["ssm:GetParameters"], resources: swebenchParameterArns }));
     evalBatchTick.addToRolePolicy(new iam.PolicyStatement({ sid: "StartEvalRuns", actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
+    // Ruling 13: whether a stuck run's execution is still alive; the eval state machine's executions only.
+    evalBatchTick.addToRolePolicy(new iam.PolicyStatement({
+      sid: "DescribeEvalRuns",
+      actions: ["states:DescribeExecution"],
+      resources: [this.formatArn({ service: "states", resource: "execution", resourceName: `${swebenchNames(naming).stateMachineName}:*`, arnFormat: ArnFormat.COLON_RESOURCE_NAME })],
+    }));
     new scheduler.Schedule(this, "EvalBatchTickSchedule", {
       description: "Runs the AgentX eval batch tick",
       schedule: scheduler.ScheduleExpression.rate(Duration.minutes(2)),

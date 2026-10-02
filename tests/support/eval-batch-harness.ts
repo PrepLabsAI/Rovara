@@ -44,6 +44,9 @@ export interface Harness {
   objects: Map<string, string>;
   s3Send: Mock;
   startExecution: Mock<SwebenchDependencies["startExecution"]>;
+  /** Each execution's status, by execution ARN, as DescribeExecution reports it; RUNNING when unset. */
+  executions: Map<string, string>;
+  describeExecution: Mock<NonNullable<SwebenchDependencies["describeExecution"]>>;
   deployment: Mock<() => Promise<SwebenchDeployment | undefined>>;
   advance: (ms: number) => void;
 }
@@ -55,7 +58,9 @@ export async function harness(options: { maxConcurrentEvals?: number; maxCostUsd
     if (command.input.Key !== undefined) objects.set(command.input.Key, String(command.input.Body));
     return {};
   });
-  const startExecution = vi.fn<SwebenchDependencies["startExecution"]>(async () => undefined);
+  const startExecution = vi.fn<SwebenchDependencies["startExecution"]>(async (input) => ({ executionArn: executionArn(input.name) }));
+  const executions = new Map<string, string>();
+  const describeExecution = vi.fn<NonNullable<SwebenchDependencies["describeExecution"]>>(async (arn) => ({ status: executions.get(arn) ?? "RUNNING" }));
   let clock = new Date("2026-10-02T10:00:00.000Z").getTime();
   const deployment = vi.fn(async (): Promise<SwebenchDeployment | undefined> => ({
     settings: {
@@ -78,6 +83,7 @@ export async function harness(options: { maxConcurrentEvals?: number; maxCostUsd
     callbackSigningKey: "c".repeat(64),
     deployment,
     startExecution,
+    describeExecution,
     now: () => new Date(clock),
     estimateRunCostUsd: (model) => prices[model.modelId],
     sleep: async () => undefined,
@@ -93,8 +99,11 @@ export async function harness(options: { maxConcurrentEvals?: number; maxCostUsd
     },
   };
   s3Send.mockClear();
-  return { db, dependencies, context, objects, s3Send, startExecution, deployment, advance: (ms) => { clock += ms; } };
+  return { db, dependencies, context, objects, s3Send, startExecution, executions, describeExecution, deployment, advance: (ms) => { clock += ms; } };
 }
+
+/** The ARN Step Functions gives a run's execution: the run ID is the execution's name. */
+export const executionArn = (runId: string) => `arn:aws:states:us-east-1:111122223333:execution:agentx-production-swebench-eval:${runId}`;
 
 export const file = (overrides: Record<string, unknown> = {}) => ({
   benchmark: "verified", tasks, models: [dear, cheap], repeats: 1, costCapUsd: 200, ...overrides,

@@ -97,7 +97,8 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
 ### Infrastructure
 
 - **FR-011:** No new stack. The eval stack's state machine is reused per run. The broker gains the batch routes, and
-  the timer is an EventBridge schedule in the control plane, enabled only while a batch is active.
+  the timer is an always-on EventBridge schedule in the control plane, every 2 minutes (D-9). An idle tick is a few
+  cheap reads, plus a slot repair when a slot is held (Ruling 10).
 
 ## Out of scope
 
@@ -129,6 +130,12 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
 - **D-8 (2026-10-02, Ruling 7):** A retry that the cap or a stop keeps from starting still ends its task's attempt chain
   with a FAILED row, charged $0, whose error names the cap or the stop. Every task in the batch therefore ends in a
   terminal row.
+- **D-9 (2026-10-02, Rulings 10, 13, 14):** The batch timer runs every 2 minutes whether or not a batch is active,
+  instead of being switched on with a batch: an idle tick reads the active list, the slot counter and at most one slot
+  item, and repairs the slots when one is held, so a leaked slot never blocks single runs. The tick also ends a run
+  whose execution died without ending it, found by DescribeExecution once the run is 10 minutes old (or, with no
+  recorded execution, past its time limit plus 15 minutes), as an infrastructure failure charged per D-5. A tick that
+  cannot top up a batch, or finds a batch's rows incomplete or not summing to its spend, fails, so its alarm fires.
 
 ## Success Criteria
 

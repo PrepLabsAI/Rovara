@@ -35,14 +35,17 @@ describe("the eval batch tick's infrastructure (spec 052 FR-006, FR-011)", () =>
     expect(schedules[0]!.Properties).toMatchObject({ ScheduleExpression: "rate(2 minutes)", State: "ENABLED" });
   });
 
-  it("may only use the State table, write eval objects, read the eval settings and start the eval state machine", () => {
+  it("may only use the State table, write eval objects, read the eval settings, and start and describe the eval state machine's executions", () => {
     expect(actions().filter((action) => !action.startsWith("dynamodb:") && !action.startsWith("xray:"))).toEqual([
-      "s3:PutObject", "ssm:GetParameters", "states:StartExecution",
+      "s3:PutObject", "ssm:GetParameters", "states:DescribeExecution", "states:StartExecution",
     ]);
     const byAction = (action: string) => statements().filter((s) => [s.Action].flat().includes(action));
     expect(byAction("s3:PutObject")).toHaveLength(1);
     expect(JSON.stringify(byAction("s3:PutObject")[0]!.Resource)).toMatch(/"\/evals\/\*"\]/);
     expect(JSON.stringify(byAction("states:StartExecution")[0]!.Resource)).toContain(":stateMachine:agentx-production-swebench-eval");
+    // Ruling 13: it describes only the eval state machine's executions.
+    expect(byAction("states:DescribeExecution")).toHaveLength(1);
+    expect(JSON.stringify(byAction("states:DescribeExecution")[0]!.Resource)).toMatch(/:execution:agentx-production-swebench-eval:\*"/);
     const ssm = JSON.stringify(byAction("ssm:GetParameters")[0]!.Resource);
     expect(ssm).toContain("parameter/agentx/production/eval/settings");
     expect(ssm).not.toContain("*");

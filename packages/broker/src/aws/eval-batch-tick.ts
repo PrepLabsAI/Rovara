@@ -1,15 +1,16 @@
 // Spec 052 FR-006, FR-010, FR-011: the eval batch tick, an EventBridge schedule every 2 minutes.
 // While no batch is active it reads the active list, the slot counter and at most one slot item, and
-// reconciles the slots only if one is held (Ruling 10). Otherwise it records the run
-// ends the broker missed, reconciles the slot counter, fills every free slot (the run-ended callback
-// starts at most one run), and writes the results of each batch that has ended.
+// reconciles the slots only if one is held (Ruling 10). Otherwise it reconciles the slots (ending
+// runs whose execution died, Ruling 13), records the run ends the broker missed, fills every free
+// slot (the run-ended callback starts at most one run), and writes the results of each batch that
+// has ended.
 //
 // The schedule is always on rather than switched on with a batch: an idle tick costs three small
 // DynamoDB reads, nothing has to remember to switch it off, and a leaked slot is repaired even
 // when no batch runs.
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { S3Client } from "@aws-sdk/client-s3";
-import { SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
+import { DescribeExecutionCommand, SFNClient, StartExecutionCommand } from "@aws-sdk/client-sfn";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
 import {
@@ -58,13 +59,17 @@ export async function runEvalBatchTick(dependencies: EvalBatchDependencies): Pro
       log("eval_batch_tick.step_failed", { step: name, ...fields, error: error instanceof Error ? error.message : String(error) });
     }
   };
+  // First, so a slot freed and a dead run ended here (Ruling 13) are recorded and filled in this tick.
+  await step("reconcile_slots", {}, async () => { report.slotCorrections = await reconcileSwebenchSlots(dependencies); });
   for (const batchId of batchIds) {
     await step("record_missed_ends", { batchId }, async () => { report.endsRecorded += await recordMissedRunEnds(dependencies, batchId); });
   }
-  // Before the top-up, so a slot freed here is filled in this tick.
-  await step("reconcile_slots", {}, async () => { report.slotCorrections = await reconcileSwebenchSlots(dependencies); });
-  // No start cap: the tick fills every free slot.
-  await step("top_up", {}, () => topUpBatches(dependencies));
+  // No start cap: the tick fills every free slot. Ruling 14: every batch is topped up, then the step
+  // fails if any batch could not be, so a stalled batch reaches the alarm.
+  await step("top_up", {}, async () => {
+    const { failures: topUpFailures } = await topUpBatches(dependencies);
+    if (topUpFailures.length > 0) throw new Error(topUpFailures.map((failure) => `batch ${failure.batchId}: ${failure.error}`).join("; "));
+  });
   for (const batchId of batchIds) {
     await step("finalize", { batchId }, async () => {
       const result = await finalizeBatch(dependencies, batchId);
@@ -101,7 +106,17 @@ function productionDependencies(): EvalBatchDependencies {
       return new Map((response.Parameters ?? []).flatMap((parameter) => parameter.Name && parameter.Value ? [[parameter.Name, parameter.Value] as const] : []));
     }),
     async startExecution(input) {
-      await stepFunctions.send(new StartExecutionCommand(input));
+      const response = await stepFunctions.send(new StartExecutionCommand(input));
+      return { executionArn: response.executionArn };
+    },
+    async describeExecution(executionArn) {
+      try {
+        const response = await stepFunctions.send(new DescribeExecutionCommand({ executionArn }));
+        return response.status === undefined ? undefined : { status: response.status };
+      } catch (error) {
+        if (error instanceof Error && error.name === "ExecutionDoesNotExist") return undefined;
+        throw error;
+      }
     },
   });
   return production;

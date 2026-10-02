@@ -2,7 +2,8 @@
 // start cap, reconciles the slot counter, and at a batch's end rebuilds lost rows (Ruling 8) and
 // writes results.csv and summary.json. Offline: FakeDynamoDb, a vi.fn state machine and S3.
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { EvalBatchSummarySchema, summarize } from "@agentx/contracts";
+import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { EvalBatchSummarySchema, SWEBENCH_RUN_TIME_LIMIT_SECONDS, summarize } from "@agentx/contracts";
 import {
   EVAL_BATCH_RESULTS_COLUMNS,
   createBatch,
@@ -21,6 +22,7 @@ import {
   cheap,
   dear,
   endByStateMachine,
+  executionArn,
   file,
   finish,
   graded,
@@ -33,6 +35,7 @@ import {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
 });
 
 const counter = (h: Harness) => h.db.get("SWEBENCH#SLOTS", "COUNTER")?.count;
@@ -406,6 +409,54 @@ describe("slot reconcile (spec 052 FR-005)", () => {
     expect(counter(h)).toBe(2);
   });
 
+  // Review M-2: a run that starts and fails within the counting, then another start before the write,
+  // leaves the counter one low. The write cannot see it; the next reconcile corrects it.
+  it("heals the one sequence that leaves the counter one low at the next reconcile", async () => {
+    const h = await harness({ maxConcurrentEvals: 6 });
+    await singleRun(h, RUN_A);
+    h.db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: 3 });
+    const send = h.db.send;
+    let step = 0;
+    h.db.send = async (command) => {
+      const name = command.constructor.name;
+      const isCounter = name === "GetCommand" && (command.input.Key as { pk?: string }).pk === "SWEBENCH#SLOTS";
+      if (step === 0 && isCounter) {
+        step = 1;
+        h.db.send = send;
+        await singleRun(h, RUN_B);
+        const result = await send(command);
+        await endByStateMachine(h, RUN_B, "FAILED", "the run could not start: boom");
+        h.db.send = intercept;
+        return result;
+      }
+      if (step === 1 && name === "QueryCommand") {
+        step = 2;
+        const result = await send(command);
+        h.db.send = send;
+        await singleRun(h, RUN_C);
+        h.db.send = intercept;
+        return result;
+      }
+      return send(command);
+    };
+    const intercept = h.db.send;
+    await reconcileSwebenchSlots(h.dependencies);
+    h.db.send = send;
+    expect(step).toBe(2);
+    expect(slotRunIds(h)).toEqual([RUN_A, RUN_C]);
+    await reconcileSwebenchSlots(h.dependencies);
+    expect(counter(h)).toBe(2);
+  });
+
+  it("logs a warning when there are too many slot items to count", async () => {
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const h = await harness();
+    for (let index = 0; index < 99; index += 1) h.db.set({ pk: "SWEBENCH#SLOT", sk: `RUN#${String(index).padStart(36, "0")}` });
+    await reconcileSwebenchSlots(h.dependencies);
+    const events = vi.mocked(console.log).mock.calls.map(([line]) => String(line));
+    expect(events.some((line) => line.includes("eval_slots.too_many_to_count") && line.includes("\"slots\":99"))).toBe(true);
+  });
+
   it("deletes the one-run lock of a run that has ended, and keeps that of one still running", async () => {
     const h = await harness();
     await singleRun(h, RUN_A);
@@ -488,8 +539,240 @@ describe("the tick with no batch active", () => {
     expect(counter(h)).toBe(1);
   });
 
-  it("is what the scheduled handler runs", async () => {
-    const module = await import("../../packages/broker/src/aws/eval-batch-tick.js");
-    expect(typeof module.handler).toBe("function");
+  it("is what the scheduled handler runs, with the Lambda's environment", async () => {
+    const { handler } = await import("../../packages/broker/src/aws/eval-batch-tick.js");
+    await expect(handler()).rejects.toThrow(/is required/);
+    vi.stubEnv("AWS_REGION", "us-east-1");
+    vi.stubEnv("STATE_TABLE_NAME", "agentx-state");
+    vi.stubEnv("ARTIFACT_BUCKET_NAME", "agentx-artifacts");
+    vi.stubEnv("CALLBACK_SIGNING_KEY", "k".repeat(64));
+    vi.stubEnv("SWEBENCH_SETTINGS_PREFIX", "/agentx/production/");
+    const sent: Array<{ name: string; input: Record<string, unknown> }> = [];
+    vi.spyOn(DynamoDBDocumentClient.prototype, "send").mockImplementation((async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+      sent.push({ name: command.constructor.name, input: command.input });
+      return command.constructor.name === "GetCommand" ? {} : { Items: [] };
+    }) as never);
+    expect(await handler()).toEqual({ active: 0, endsRecorded: 0, slotCorrections: [], rowsRebuilt: 0, finalized: [] });
+    expect(sent.map((command) => command.name)).toEqual(IDLE_READS);
+    expect(sent.every((command) => command.input.TableName === "agentx-state")).toBe(true);
+    expect(sent[0]!.input.ExpressionAttributeValues).toMatchObject({ ":pk": "EVAL_BATCHES#ACTIVE" });
+  });
+});
+
+describe("runs whose execution died before it ended them (spec 052 Ruling 13)", () => {
+  const GRACE_MS = 10 * 60_000;
+  const run = (h: Harness, runId: string) => h.db.get(`SWEBENCH_RUN#${runId}`, "META")!;
+
+  it("records the execution's ARN on the run as it starts", async () => {
+    const h = await harness();
+    await singleRun(h, RUN_A);
+    expect(run(h, RUN_A).executionArn).toBe(executionArn(RUN_A));
+  });
+
+  it("ends a run whose execution stopped, charges its ceiling, releases its slot once, and lets the batch finalize", async () => {
+    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap], costCapUsd: 20 }));
+    await topUpBatches(h.dependencies);
+    const runId = evalBatchRunId(batch.batchId, 0, 1);
+    await runnerStarted(h, runId);
+    h.executions.set(executionArn(runId), "FAILED");
+    h.advance(GRACE_MS + 1);
+    const report = await runEvalBatchTick(h.dependencies);
+    expect(report.slotCorrections).toEqual([expect.objectContaining({ correction: "ended_dead_run", runId, executionStatus: "FAILED" })]);
+    expect(run(h, runId)).toMatchObject({ status: "FAILED", error: expect.stringMatching(/^the eval instance stopped \(its execution ended FAILED\) without reporting a result/) as unknown });
+    expect(slotRunIds(h)).toEqual([]);
+    expect(counter(h)).toBe(0);
+    // An infrastructure failure: retried, but the retry does not fit the cap, so the batch is CAPPED and finalized.
+    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "CAPPED", spentUsd: 10 });
+    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ runId, outcome: "RETRIED", chargedUsd: 10, costEstimated: true }),
+    ]));
+    expect(report.finalized).toEqual([batch.batchId]);
+    expect(h.objects.has(`evals/batches/${batch.batchId}/results.csv`)).toBe(true);
+    await expectChargesMatchSpend(h, batch.batchId);
+  });
+
+  it("charges nothing for a run whose runner never started, and retries it", async () => {
+    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    await topUpBatches(h.dependencies);
+    const runId = evalBatchRunId(batch.batchId, 0, 1);
+    h.executions.set(executionArn(runId), "ABORTED");
+    h.advance(GRACE_MS + 1);
+    await runEvalBatchTick(h.dependencies);
+    expect(run(h, runId)).toMatchObject({ status: "FAILED", error: expect.stringMatching(/^the run could not start: its execution ended ABORTED before the runner started/) as unknown });
+    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ spentUsd: 0 });
+    expect((await getBatch(h.dependencies, batch.batchId))!.queue[0]).toMatchObject({ attempt: 2, state: "RUNNING" });
+    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({ runId, outcome: "RETRIED", chargedUsd: 0 })]);
+  });
+
+  it("leaves a run alone while its execution runs, and does not look before the grace period", async () => {
+    const h = await harness();
+    await singleRun(h, RUN_A);
+    h.executions.set(executionArn(RUN_A), "FAILED");
+    await reconcileSwebenchSlots(h.dependencies);
+    expect(h.describeExecution).not.toHaveBeenCalled();
+    expect(run(h, RUN_A).status).toBe("STARTING");
+    h.executions.set(executionArn(RUN_A), "RUNNING");
+    h.advance(GRACE_MS + 1);
+    expect(await reconcileSwebenchSlots(h.dependencies)).toEqual([]);
+    expect(h.describeExecution).toHaveBeenCalledWith(executionArn(RUN_A));
+    expect(run(h, RUN_A).status).toBe("STARTING");
+    expect(slotRunIds(h)).toEqual([RUN_A]);
+    expect(counter(h)).toBe(1);
+  });
+
+  it("ends a run with no recorded execution only once it is past the run time limit plus 15 minutes", async () => {
+    const h = await harness();
+    await singleRun(h, RUN_A);
+    await runnerStarted(h, RUN_A);
+    // A run started before its execution's ARN was recorded.
+    const older = { ...run(h, RUN_A) };
+    delete older.executionArn;
+    h.db.set(older);
+    h.advance(SWEBENCH_RUN_TIME_LIMIT_SECONDS * 1_000 + 15 * 60_000 - 1_000);
+    await reconcileSwebenchSlots(h.dependencies);
+    expect(run(h, RUN_A).status).toBe("RUNNING");
+    h.advance(2_000);
+    expect(await reconcileSwebenchSlots(h.dependencies)).toEqual([expect.objectContaining({ correction: "ended_dead_run", runId: RUN_A, executionStatus: null })]);
+    expect(h.describeExecution).not.toHaveBeenCalled();
+    expect(run(h, RUN_A)).toMatchObject({ status: "FAILED", error: expect.stringMatching(/^the eval instance stopped \(its execution is unknown and the run is past its time limit\) without reporting a result/) as unknown });
+    expect(slotRunIds(h)).toEqual([]);
+    expect(counter(h)).toBe(0);
+  });
+
+  it("ends a stuck run whose release had failed on a counter at 0", async () => {
+    const h = await harness();
+    await singleRun(h, RUN_A);
+    await runnerStarted(h, RUN_A);
+    h.db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: 0 });
+    h.executions.set(executionArn(RUN_A), "FAILED");
+    h.advance(GRACE_MS + 1);
+    await reconcileSwebenchSlots(h.dependencies);
+    expect(run(h, RUN_A).status).toBe("FAILED");
+    expect(slotRunIds(h)).toEqual([]);
+    expect(counter(h)).toBe(0);
+  });
+
+  it("releases once and writes one row when EndRun ends the run while the tick looks", async () => {
+    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    await topUpBatches(h.dependencies);
+    const runId = evalBatchRunId(batch.batchId, 0, 1);
+    await runnerStarted(h, runId);
+    h.advance(GRACE_MS + 1);
+    h.describeExecution.mockImplementationOnce(async () => {
+      await endByStateMachine(h, runId, "FAILED", "the run did not finish within its 2-hour limit");
+      return { status: "SUCCEEDED" };
+    });
+    const report = await runEvalBatchTick(h.dependencies);
+    expect(report.slotCorrections).toEqual([]);
+    expect(run(h, runId)).toMatchObject({ status: "FAILED", error: "the run did not finish within its 2-hour limit" });
+    expect(counter(h)).toBe(0);
+    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "DONE", spentUsd: 10 });
+    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({ runId, outcome: "FAILED", chargedUsd: 10 })]);
+  });
+});
+
+describe("a tick that cannot do its work fails (spec 052 Ruling 14)", () => {
+  it("fails when a batch cannot be topped up, after topping up the others", async () => {
+    const h = await harness();
+    const first = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    const second = await createBatch(h.dependencies, { ...h.context, thread: { ...h.context.thread, threadTs: "1695500000.000002" } }, file({ tasks: [tasks[1]], models: [cheap] }));
+    h.deployment.mockRejectedValueOnce(new Error("ssm:GetParameters is not authorized"));
+    await expect(runEvalBatchTick(h.dependencies)).rejects.toThrow(/top_up/);
+    const started = [first, second].map((batch) => h.startExecution.mock.calls.some(([input]) => input.name === evalBatchRunId(batch.batchId, 0, 1)));
+    expect(started.sort()).toEqual([false, true]);
+  });
+
+  it("fails when the eval stack is not installed while a batch waits", async () => {
+    const h = await harness();
+    await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    h.deployment.mockResolvedValue(undefined);
+    await expect(runEvalBatchTick(h.dependencies)).rejects.toThrow(/top_up/);
+  });
+
+  it("fails when a run cannot be started", async () => {
+    const h = await harness();
+    await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    h.startExecution.mockRejectedValueOnce(new Error("AccessDeniedException: states:StartExecution"));
+    await expect(runEvalBatchTick(h.dependencies)).rejects.toThrow(/top_up/);
+  });
+
+  it("fails when a step other than finalize fails, and still runs the others", async () => {
+    const h = await harness();
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    const send = h.db.send;
+    h.db.send = async (command) => {
+      if (command.constructor.name === "QueryCommand" && (command.input.ExpressionAttributeValues as Record<string, unknown>)[":pk"] === "SWEBENCH#SLOT") throw new Error("throttled");
+      return send(command);
+    };
+    await expect(runEvalBatchTick(h.dependencies)).rejects.toThrow(/reconcile_slots/);
+    h.db.send = send;
+    expect(h.startExecution).toHaveBeenCalledWith(expect.objectContaining({ name: evalBatchRunId(batch.batchId, 0, 1) }));
+  });
+
+  it("fails, keeps the batch listed and still writes its files when the rows' charges do not sum to the spend", async () => {
+    const h = await harness();
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    await topUpBatches(h.dependencies);
+    const runId = evalBatchRunId(batch.batchId, 0, 1);
+    await finish(h, runId, graded(0.25));
+    h.db.set({ ...row(h, batch.batchId, runId)!, chargedUsd: 0.5 });
+    await expect(runEvalBatchTick(h.dependencies)).rejects.toThrow(/finalize/);
+    expect(h.objects.has(`evals/batches/${batch.batchId}/results.csv`)).toBe(true);
+    expect(activeItem(h, batch.batchId)).toBeDefined();
+  });
+
+  it("fails and keeps the batch listed when a lost row cannot be rebuilt", async () => {
+    const h = await harness();
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    await topUpBatches(h.dependencies);
+    const runId = evalBatchRunId(batch.batchId, 0, 1);
+    await finish(h, runId, graded(0.25));
+    h.db.delete(`EVAL_BATCH#${batch.batchId}`, `MEASURE#${runId}`);
+    h.db.delete(`SWEBENCH_RUN#${runId}`, "META");
+    await expect(runEvalBatchTick(h.dependencies)).rejects.toThrow(/finalize/);
+    expect(activeItem(h, batch.batchId)).toBeDefined();
+  });
+});
+
+describe("ticks and callbacks that overlap", () => {
+  it("leaves the charge and the row alone when the runner's result arrives after the tick recorded the end", async () => {
+    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    await topUpBatches(h.dependencies);
+    const runId = evalBatchRunId(batch.batchId, 0, 1);
+    await runnerStarted(h, runId);
+    await endByStateMachine(h, runId, "FAILED", "the run did not finish within its 2-hour limit");
+    await runEvalBatchTick(h.dependencies);
+    const recorded = row(h, batch.batchId, runId);
+    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "DONE", spentUsd: 10 });
+    await finish(h, runId, graded(0.25));
+    expect(row(h, batch.batchId, runId)).toEqual(recorded);
+    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "DONE", spentUsd: 10 });
+    expect(counter(h)).toBe(0);
+  });
+
+  it("writes the same files once over when two ticks finalize a batch at once", async () => {
+    const h = await harness();
+    const batch = await createBatch(h.dependencies, h.context, file());
+    await topUpBatches(h.dependencies);
+    for (const entry of (await getBatch(h.dependencies, batch.batchId))!.queue) await finish(h, entry.runId!, graded(0.25));
+    const puts: string[] = [];
+    h.s3Send.mockImplementation(async (command: { input: { Key?: string; Body?: string } }) => {
+      if (command.input.Key !== undefined) {
+        if (h.objects.has(command.input.Key)) expect(String(command.input.Body)).toBe(h.objects.get(command.input.Key));
+        h.objects.set(command.input.Key, String(command.input.Body));
+        puts.push(command.input.Key);
+      }
+      return {};
+    });
+    const reports = await Promise.all([runEvalBatchTick(h.dependencies), runEvalBatchTick(h.dependencies)]);
+    expect(reports.flatMap((report) => report.finalized)).toContain(batch.batchId);
+    expect(new Set(puts)).toEqual(new Set([`evals/batches/${batch.batchId}/results.csv`, `evals/batches/${batch.batchId}/summary.json`]));
+    expect(activeItem(h, batch.batchId)).toBeUndefined();
+    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toHaveLength(4);
+    await expectChargesMatchSpend(h, batch.batchId);
   });
 });
