@@ -57,10 +57,11 @@ const MAX_HISTORY_BYTES = 1_048_576;
  * The workspace's history. Read it before the agent's session starts, and keep that snapshot for the task's rounds:
  * the agent can write to `.agentx`, so a read after the agent has run may see a file the agent wrote (Ruling L).
  *
- * A missing file is no history: checks fall back to the preparation keys (passed), then unknown. A file that exists but
- * cannot be used (a symlink or other non-regular file, larger than 1 MiB, not JSON, or not a version-1 history) makes
- * every before unknown, preparation keys included: an earlier task may have left a check failing, and passed would then
- * blame this task for it (M-11). A manifest written before the keys were recorded has no prepared keys.
+ * A missing file is no history: checks fall back to the preparation keys (passed), then unknown. A path that cannot be
+ * used (a directory, a symlink or other non-regular file, unreadable, larger than 1 MiB, not JSON, or not a version-1
+ * history) is the same empty history, with the preparation keys kept (Ruling P, reversing M-11). The agent can leave
+ * such a path, and the worker may not be able to remove it, so it must lean towards flagging a regression, never
+ * hiding one. A manifest written before the keys were recorded has no prepared keys.
  */
 export async function readCheckHistory(rootPath: string, manifest: { readinessCommandKeys?: readonly string[] }): Promise<CheckHistory> {
   const preparedKeys = [...(manifest.readinessCommandKeys ?? [])];
@@ -68,11 +69,11 @@ export async function readCheckHistory(rootPath: string, manifest: { readinessCo
   let metadata;
   try {
     metadata = await lstat(path);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { lastOutcomes: {}, preparedKeys };
-    return { lastOutcomes: {}, preparedKeys: [] };
+  } catch {
+    // Missing, or unreadable: no history either way (Ruling P).
+    return { lastOutcomes: {}, preparedKeys };
   }
-  if (!metadata.isFile() || metadata.size > MAX_HISTORY_BYTES) return { lastOutcomes: {}, preparedKeys: [] };
+  if (!metadata.isFile() || metadata.size > MAX_HISTORY_BYTES) return { lastOutcomes: {}, preparedKeys };
   let outcomes: Record<string, KnownOutcome> | undefined;
   try {
     // O_NOFOLLOW: a symlink swapped in after the lstat is not followed either.
@@ -81,7 +82,7 @@ export async function readCheckHistory(rootPath: string, manifest: { readinessCo
   } catch {
     outcomes = undefined;
   }
-  return outcomes === undefined ? { lastOutcomes: {}, preparedKeys: [] } : { lastOutcomes: outcomes, preparedKeys };
+  return { lastOutcomes: outcomes ?? {}, preparedKeys };
 }
 
 /**

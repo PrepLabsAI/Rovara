@@ -146,10 +146,11 @@ describe("the before of a project check (Ruling J)", () => {
     await expect(readCheckHistory(root, {})).resolves.toEqual({ lastOutcomes: {}, preparedKeys: [] });
   });
 
-  it("a history file that exists but cannot be used makes every before unknown, not passed (M-10, M-11)", async () => {
+  it("a history path that cannot be used is an empty history, and prepared commands still count as passed (M-10, Ruling P)", async () => {
+    // Reason (Ruling P reverses M-11): the agent can leave an unusable path, so it must flag (passed), never hide (unknown).
     const { root, manifest } = await workspace([lint]);
     const path = join(root, ".agentx", "last-checks.json");
-    const none = { lastOutcomes: {}, preparedKeys: [] };
+    const none = { lastOutcomes: {}, preparedKeys: manifest.readinessCommandKeys };
     await writeFile(path, "{not json");
     await expect(readCheckHistory(root, manifest)).resolves.toEqual(none);
     await writeFile(path, JSON.stringify({ schemaVersion: 2, outcomes: {} }));
@@ -160,6 +161,10 @@ describe("the before of a project check (Ruling J)", () => {
     // A symlink (here to an endless device) is never followed.
     await rm(path);
     await symlink("/dev/zero", path);
+    await expect(readCheckHistory(root, manifest)).resolves.toEqual(none);
+    // A directory.
+    await rm(path);
+    await mkdir(join(path, "planted"), { recursive: true });
     await expect(readCheckHistory(root, manifest)).resolves.toEqual(none);
   });
 });

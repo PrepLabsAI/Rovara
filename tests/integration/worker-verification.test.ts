@@ -536,6 +536,34 @@ describe("AgentX restores the check history on every ending (Ruling O, I-1)", ()
   });
 });
 
+describe("an unusable history path the worker cannot remove (Ruling P, I-4)", () => {
+  it("task 1's agent leaves a locked directory at the history path; task 2's broken prepared check is a regression", async (context) => {
+    // chmod does not stop root.
+    if (process.getuid?.() === 0) context.skip();
+    const rootPath = await workspaceRoot([lint]);
+    const locked = join(rootPath, ".agentx/last-checks.json/locked");
+    const shell = scriptedShell({}, async (command) => {
+      if (command !== "lock") return;
+      await mkdir(locked, { recursive: true });
+      await writeFile(join(locked, "stale"), "x");
+      await chmod(locked, 0o500);
+    });
+    try {
+      const first = await runTask({ steps: [bash("lock", "c1"), fauxAssistantMessage("Done.")], readiness: [lint], rootPath, shell, runners: fakeRunners().runners });
+      expect(first.report).toMatchObject({ status: "verified" });
+      const fail: ProjectResult = { exitCode: 1, timedOut: false, stdout: "", stderr: "lint failed" };
+      const second = await runTask({
+        steps: [fauxAssistantMessage("Done."), fauxAssistantMessage("Done again.")], readiness: [lint], rootPath,
+        runners: fakeRunners({ project: [fail] }).runners,
+      });
+      expect(second.report).toMatchObject({ status: "regression" });
+      expect(second.report!.checks[0]).toMatchObject({ before: "passed", after: "failed", class: "regression" });
+    } finally {
+      await chmod(locked, 0o700);
+    }
+  });
+});
+
 describe("the round after the extra try (Ruling O)", () => {
   it("I-2: a round-1 regression that round 2's budget leaves unrun stays a regression", async () => {
     const quick: ProjectCommand = { cwd: "app", executable: "npm", args: ["test"], timeoutSeconds: 60 };
