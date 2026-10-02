@@ -10,6 +10,7 @@
 import { DeleteCommand, GetCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
 import { taskPointerKey } from "../developer/task-records.js";
 import { releaseFailedPreparation } from "./failed-preparation.js";
+import { recordPrepareFailureEvent } from "./operation-events.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 
@@ -107,6 +108,8 @@ async function settle(client: Client, tableName: string, watch: SetupWatch, now:
       { Delete: drop },
     ] }));
     await releaseFailedPreparation(client, tableName, watch.workspaceId);
+    // #225: the task shows when its setup was failed, as for a failure the worker reported.
+    await recordPrepareFailureEvent(client, tableName, { workspaceId: watch.workspaceId, operationId: watch.operationId, fence: operation.fence, status: "FAILED", error: STUCK_SETUP_MESSAGE, at: now });
     return "failed";
   } catch (error) {
     // A result landed first: it stands, and the next run drops the watch.

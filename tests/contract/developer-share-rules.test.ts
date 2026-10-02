@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { AgentXError, DEFAULT_DEVELOPER_TASK_POLICY, type DeveloperTaskPolicy } from "@agentx/contracts";
 import { decideShare, decideMode, channelLabel } from "../../packages/broker/src/developer/share.js";
 import { CUT_MARKER } from "../../packages/broker/src/aws/slack-details-view.js";
-import { CANCELLED_REPLY, CLOSED_REPLY, endedReply, modeReply, pullRequestReply, READY_REPLY, setupFailedReply, startMessage } from "../../packages/broker/src/developer/share-messages.js";
+import { CANCELLED_REPLY, CLOSED_REPLY, endedReply, modeReply, pullRequestReply, READY_REPLY, SETUP_OUTPUT_SHOWN_MAX, setupFailedReply, startMessage } from "../../packages/broker/src/developer/share-messages.js";
 
 const policy = (overrides: Partial<DeveloperTaskPolicy> = {}): DeveloperTaskPolicy => ({ ...DEFAULT_DEVELOPER_TASK_POLICY, ...overrides });
 const ONE = [{ channelId: "C0123456789", name: "payments-dev", isPrivate: false }];
@@ -151,6 +151,23 @@ describe("the thread's texts (FR-032, C8)", () => {
     expect(text.slice("The task ended SUCCEEDED.\n".length).length).toBeLessThanOrEqual(1_500);
     expect(endedReply({ status: "SUCCEEDED", summary: "short and whole" })).toBe("The task ended SUCCEEDED.\n>short and whole");
     expect(setupFailedReply("y".repeat(600)).endsWith(CUT_MARKER)).toBe(true);
+  });
+
+  it("keeps a failed setup's last lines of output, quoted, after what failed (#225)", () => {
+    const token = `ghp_${"Z9y8X7w6V5".repeat(4)}`;
+    expect(setupFailedReply(`setup step 0 (npm ci in repo/app) exited 1\nLast lines:\nnpm ERR! code E401\nnpm ERR! 401 Unauthorized <token ${token}>`))
+      .toBe("The workspace could not be set up, so the task did not run: setup step 0 (npm ci in repo/app) exited 1\nLast lines of its output:\n>npm ERR! code E401\n>npm ERR! 401 Unauthorized &lt;token [REDACTED]&gt;");
+    // The lines are bounded, and keep their end, where the error is.
+    const long = setupFailedReply(`setup step 0 (npm ci in repo/app) exited 1\nLast lines:\n${Array.from({ length: 20 }, (_, index) => `line ${index} ${"x".repeat(60)}`).join("\n")}`);
+    const quoted = long.split("Last lines of its output:\n")[1]!;
+    expect(quoted.length).toBeLessThanOrEqual(SETUP_OUTPUT_SHOWN_MAX);
+    expect(quoted.endsWith(`line 19 ${"x".repeat(60)}`)).toBe(true);
+    for (const line of quoted.split("\n")) expect(line.startsWith(">")).toBe(true);
+    // One last line longer than the bound keeps its end.
+    const one = setupFailedReply(`setup step 0 (make in repo/app) exited 2\nLast lines:\n${"a".repeat(2_000)} the real error`).split("Last lines of its output:\n")[1]!;
+    expect(one.startsWith(">...a")).toBe(true);
+    expect(one.endsWith(" the real error")).toBe(true);
+    expect(one.length).toBeLessThanOrEqual(SETUP_OUTPUT_SHOWN_MAX);
   });
 
   it("links a pull request, says the mode, and says a close ended the thread", () => {

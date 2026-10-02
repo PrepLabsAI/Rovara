@@ -273,6 +273,31 @@ describe("a failed setup or readiness command (#154)", () => {
     expect(message.length).toBeLessThanOrEqual(1_000);
   });
 
+  it("shows the last lines of a step's printed output when it wrote no error output (#225)", async () => {
+    const { message, manifest } = await preparing("stdout", {
+      setup: [{ cwd: "repo/stdout", executable: "sh", args: ["-c", `echo npm ci failed; echo token ghp_${"Q1w2E3r4T5".repeat(4)}; exit 1`], timeoutSeconds: 10 }],
+    });
+    expect(message).toBe("setup step 0 (sh -c echo npm ci failed; echo token [REDACTED]; exit 1 in repo/stdout) exited 1\nLast lines:\nnpm ci failed\ntoken [REDACTED]");
+    expect(manifest.failure).toBe(message);
+  });
+
+  it("shows the printed output's last lines, then the error output's, when both have lines (#225)", async () => {
+    const { message } = await preparing("both", {
+      setup: [{ cwd: "repo/both", executable: "sh", args: ["-c", "echo built 3 of 4; echo step 4 broke >&2; exit 2"], timeoutSeconds: 10 }],
+    });
+    expect(message).toBe("setup step 0 (sh -c echo built 3 of 4; echo step 4 broke >&2; exit 2 in repo/both) exited 2\nLast lines:\nbuilt 3 of 4\nstep 4 broke");
+  });
+
+  it("gives the error output the last lines first when it fills them (#225)", async () => {
+    const { message } = await preparing("both-noisy", {
+      setup: [{ cwd: "repo/both-noisy", executable: "sh", args: ["-c", "echo printed; i=1; while [ $i -le 30 ]; do echo err-$i >&2; i=$((i+1)); done; exit 1"], timeoutSeconds: 10 }],
+    });
+    const lines = message.split("Last lines:\n")[1]!.split("\n");
+    expect(lines).toHaveLength(20);
+    expect(lines[0]).toBe("err-11");
+    expect(lines).not.toContain("printed");
+  });
+
   it("keeps the end of more than 1 MiB of error output, where the error is, and lets the step finish", async () => {
     const script = "process.stderr.write(\"noise\\n\".repeat(400000)); process.stderr.write(\"the real error\\n\"); process.exitCode = 1;";
     const { message } = await preparing("flood", {

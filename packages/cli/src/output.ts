@@ -1,4 +1,5 @@
 import { AgentXError, type AgentXErrorCode } from "@agentx/contracts";
+import { StoppedByOperator } from "./stopped.js";
 
 export interface FormattedError {
   text: string;
@@ -11,6 +12,10 @@ export function formatSuccess(data: unknown, json: boolean): string {
 }
 
 export function formatError(error: unknown, json: boolean): FormattedError {
+  // Issue #235: a stop the person chose is its own plain line, not an error.
+  if (error instanceof StoppedByOperator) {
+    return { text: json ? `${JSON.stringify({ ok: false, error: { code: "STOPPED", message: error.message } })}\n` : `${error.message}\n`, exitCode: error.exitCode };
+  }
   const normalized: { code: AgentXErrorCode | "INTERNAL_ERROR"; message: string } =
     error instanceof AgentXError
       ? { code: error.code, message: stripCodePrefix(error.message, error.code) }
