@@ -7,7 +7,7 @@ import { describe, expect, it, vi } from "vitest";
 import { ADMIN_CHANGE_EXPIRY_GRACE_MS, cachedSlackClient, createNotifierHandler, noticeDelaySeconds, type NotifierDependencies } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import { SlackPostError, chatPostMessage, chatUpdate } from "../../packages/broker/src/aws/slack-web.js";
 import { adminChangeMessage, adminChangeOutcomeMessage } from "../../packages/broker/src/developer/change-messages.js";
-import { noticesFromStream, type StreamRecord } from "../../packages/broker/src/developer/notifications.js";
+import { noticesFromStream, type Notice, type StreamRecord } from "../../packages/broker/src/developer/notifications.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 
 const CHANGE = "55555555-5555-4555-8555-555555555555";
@@ -130,7 +130,7 @@ describe("the Slack Confirm message (E13)", () => {
 });
 
 describe("an expired Confirm message loses its buttons without a press (#217)", () => {
-  const expiryNotice = { id: `${CHANGE}:expiry`, kind: "admin_change_expiry", changeId: CHANGE, at: "2026-10-02T09:00:06.000Z", notBefore: "2026-10-02T09:10:05.000Z" };
+  const expiryNotice: Notice = { id: `${CHANGE}:expiry`, kind: "admin_change_expiry", changeId: CHANGE, at: "2026-10-02T09:00:06.000Z", notBefore: "2026-10-02T09:10:05.000Z" };
   const afterExpiry = Date.parse("2026-10-02T09:10:06.000Z");
 
   it("schedules the expiry edit when it posts the message, just after the change expires", async () => {
@@ -140,7 +140,7 @@ describe("an expired Confirm message loses its buttons without a press (#217)", 
     await h.deliver(dmNotice);
     expect(h.posts).toHaveLength(1);
     expect(h.deps.enqueue).toHaveBeenCalledExactlyOnceWith([expiryNotice]);
-    expect(Date.parse(expiryNotice.notBefore) - Date.parse("2026-10-02T09:10:00.000Z")).toBe(ADMIN_CHANGE_EXPIRY_GRACE_MS);
+    expect(Date.parse(expiryNotice.notBefore!) - Date.parse("2026-10-02T09:10:00.000Z")).toBe(ADMIN_CHANGE_EXPIRY_GRACE_MS);
     // A repeated delivery of a posted message schedules it again (the edit happens once), so a
     // failed schedule is never lost.
     await h.deliver(dmNotice);
@@ -153,7 +153,7 @@ describe("an expired Confirm message loses its buttons without a press (#217)", 
     expect(noticeDelaySeconds(expiryNotice, now)).toBe(599);
     expect(noticeDelaySeconds({ ...expiryNotice, notBefore: "2026-10-02T10:00:00.000Z" }, now)).toBe(900);
     expect(noticeDelaySeconds({ ...expiryNotice, notBefore: "2026-10-02T08:00:00.000Z" }, now)).toBe(0);
-    expect(noticeDelaySeconds(dmNotice, now)).toBe(0);
+    expect(noticeDelaySeconds({ ...dmNotice, kind: "admin_change_dm" }, now)).toBe(0);
   });
 
   it("edits a still-pending expired message to say it expired, with no buttons, once", async () => {
