@@ -6,6 +6,7 @@ import { AgentXError, SwebenchLaunchSchema, type SwebenchLaunch } from "@agentx/
 import { swebenchEvalDefinition } from "../../infra/lib/swebench-eval-definition.js";
 import { stopSwebenchRun, type SwebenchDependencies, type SwebenchDeployment } from "../../packages/broker/src/aws/swebench.js";
 import { swebenchDeploymentFromParameters } from "../../packages/broker/src/aws/swebench-settings.js";
+import { createBatch, evalBatchRunId, getBatch, topUpBatches, withEvalBatches } from "../../packages/broker/src/aws/eval-batch.js";
 import { SLACK_CHANNEL, SLACK_TEAM, call, createBroker, loadSlackBroker, registerSlackProject, serviceCall } from "../support/slack-broker.js";
 
 const thread = `${SLACK_TEAM}/${SLACK_CHANNEL}/1695500000.000001`;
@@ -488,8 +489,8 @@ describe("the shared limit on concurrent runs (spec 052 FR-005)", () => {
     // Drift: the counter says no slot is held, so its decrement is refused on every attempt.
     db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: 0 });
     const before = db.commandNames().filter((name) => name === "TransactWriteCommand").length;
-    // The broker's catch-all answers the error; the runner's result is not recorded.
-    expect(await result(runId)).toMatchObject({ status: 400, body: { error: { code: "CONFIG_INVALID" } } });
+    // Spec 052 Ruling 3: a retryable 503, since the runner drops a result on any other 4xx but 429.
+    expect(await result(runId)).toMatchObject({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE" } } });
     expect(db.commandNames().filter((name) => name === "TransactWriteCommand").length - before).toBe(3);
     expect(db.get(`SWEBENCH_RUN#${runId}`, "META")).toMatchObject({ status: "STARTING" });
     expect(db.get("SWEBENCH#SLOT", `RUN#${runId}`)).toBeDefined();
@@ -523,6 +524,40 @@ describe("the shared limit on concurrent runs (spec 052 FR-005)", () => {
     const batchId = randomUUID();
     stopBatchForThread.mockResolvedValueOnce(batchId as never);
     expect(await stopSwebenchRun(dependencies, otherSlackThread, requester)).toBe(batchId);
+  });
+});
+
+describe("eval batches on the broker's run path (spec 052)", () => {
+  it("records a batch run's result from the runner's callback and starts the batch's next run", async () => {
+    const broker = await evalBroker({ maxConcurrentEvals: 1, models: {
+      default: { provider: "amazon-bedrock", modelId: "us.vendor.batch-v1" },
+      approved: [{ provider: "amazon-bedrock", modelId: "us.vendor.batch-v1" }],
+    } });
+    await enable(broker.handler);
+    const dependencies = withEvalBatches({
+      documentClient: broker.db as never, s3: broker.brokerInput.s3 as never, tableName: "state", artifactBucketName: "artifacts", callbackSigningKey: "c".repeat(64),
+      deployment: async () => ({ ...deployment, settings: { ...deployment.settings, maxConcurrentEvals: 1 } }), startExecution: broker.startExecution,
+      estimateRunCostUsd: () => 2,
+    });
+    const model = { provider: "amazon-bedrock", modelId: "us.vendor.batch-v1" };
+    const batch = await createBatch(dependencies, {
+      thread: slackThread, requester: { teamId: SLACK_TEAM, userId: member }, projectName: "payments", projectModel: async () => model,
+    }, { benchmark: "verified", tasks: ["django__django-11099", "django__django-11100"], models: [{ ...model, thinkingLevel: "low" }], costCapUsd: 100 });
+    await topUpBatches(dependencies);
+    const first = evalBatchRunId(batch.batchId, 0, 1);
+    expect(broker.startExecution).toHaveBeenCalledTimes(1);
+    const capability = broker.launches.get(`evals/${first}/launch.json`)!.run.capability;
+    const answered = await call(broker.handler, {
+      method: "POST", path: `/v1/internal/evals/${first}/result`, headers: { "x-agentx-callback-capability": capability },
+      body: { outcome: "FAILED", error: "the SWE-bench harness wrote no report (exit 1): boom" },
+    });
+    expect(answered).toMatchObject({ status: 200, body: { run: { status: "FAILED", batchId: batch.batchId } } });
+    expect((await getBatch(dependencies, batch.batchId))!.queue.map((entry) => entry.state)).toEqual(["FAILED", "RUNNING"]);
+    expect(broker.startExecution).toHaveBeenCalledTimes(2);
+    // The thread's stop command stops the batch through the broker's hook.
+    const stopped = await broker.handler({ source: "agentx.slack-ingress", action: "stop-task", thread: slackThread, userId: member });
+    expect(JSON.parse(stopped.body)).toMatchObject({ outcome: "CANCEL_REQUESTED", targetOperationId: evalBatchRunId(batch.batchId, 1, 1) });
+    expect(await getBatch(dependencies, batch.batchId)).toMatchObject({ status: "STOPPING" });
   });
 });
 

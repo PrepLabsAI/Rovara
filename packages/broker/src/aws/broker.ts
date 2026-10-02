@@ -151,9 +151,9 @@ import {
   putSwebenchChannel,
   startSwebenchRun,
   stopSwebenchRun,
-  type SwebenchDependencies,
   type SwebenchSlackContext,
 } from "./swebench.js";
+import { withEvalBatches, type EvalBatchDependencies } from "./eval-batch.js";
 import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
 
 const MAX_ARTIFACT_BYTES = 5_000_000;
@@ -261,7 +261,7 @@ interface AwsBrokerDependencies {
   /** Spec 025 phase 25e: the admin changes' method switch, clock and metric; the defaults serve production. */
   adminChanges?: { confirm?: { elicitation: boolean; slack: boolean }; now?: () => number; metric?: (outcome: AdminChangeOutcome) => void };
   /** Spec 043: SWE-bench runs; absent in a harness that does not exercise them. */
-  swebench?: Pick<SwebenchDependencies, "deployment" | "startExecution" | "stopBatchForThread" | "now">;
+  swebench?: Pick<EvalBatchDependencies, "deployment" | "startExecution" | "stopBatchForThread" | "onRunEnded" | "now" | "estimateRunCostUsd" | "datasetInstanceIds">;
 }
 
 /**
@@ -4403,18 +4403,18 @@ async function requireAdministrator(
   if (membership.role !== "administrator") throw agentXError("FORBIDDEN", "administrator project membership is required");
 }
 
-/** Spec 043: the SWE-bench module's dependencies, from the broker's. */
-function swebenchDependencies(dependencies: AwsBrokerDependencies): SwebenchDependencies {
+/** Spec 043: the SWE-bench module's dependencies, from the broker's; spec 052 wires its batches into them. */
+function swebenchDependencies(dependencies: AwsBrokerDependencies): EvalBatchDependencies {
   const swebench = dependencies.swebench;
   if (swebench === undefined) throw agentXError("NOT_FOUND", "SWE-bench runs are not available in this deployment");
-  return {
+  return withEvalBatches({
     documentClient: dependencies.documentClient,
     s3: dependencies.s3,
     tableName: dependencies.tableName,
     artifactBucketName: dependencies.artifactBucketName,
     callbackSigningKey: dependencies.callbackSigningKey,
     ...swebench,
-  };
+  });
 }
 
 /** The thread, requester and project model a SWE-bench run takes from the Slack service identity. */

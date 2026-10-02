@@ -26,6 +26,7 @@ import {
   type SwebenchChannel,
   type SwebenchLaunch,
   type SwebenchRun,
+  type SwebenchRunResult,
   type SwebenchSettings,
   type SwebenchStartResult,
 } from "@agentx/contracts";
@@ -57,7 +58,26 @@ export interface SwebenchDependencies {
    * Called by every stop, since a batch between runs holds no slot; absent, no batch is stopped.
    */
   stopBatchForThread?: (thread: SlackThread, requester: SlackRequester) => Promise<string | undefined>;
+  /**
+   * Spec 052: told of each run the runner's result ended, after its slot is released, so its batch
+   * records it and the freed slot is filled. Its errors are logged, never answered: the result is
+   * already recorded, and the batch tick records a run end this missed.
+   */
+  onRunEnded?: (run: SwebenchRun, result: SwebenchRunResult) => Promise<void>;
   now?: () => Date;
+}
+
+/** Spec 052: what a batch pins for its runs; a single run takes the deployment's current values. */
+export interface SwebenchStartOptions {
+  batchId?: string;
+  /** The batch's pinned runner image, an ECR image pinned by digest. */
+  runnerImage?: string;
+  /** The run fields that image parses; the deployment's are used when the image is the current one. */
+  runnerFeatures?: readonly string[];
+  /** The batch's per-run ceiling, so the cap math and the runner agree. */
+  maxCostUsd?: number;
+  /** The model's OpenRouter provider pin, in place of the deployment's. */
+  openRouterProviders?: readonly string[];
 }
 
 /** The Slack context a service route acts in: the thread, its requester and the channel's project. */
@@ -102,6 +122,12 @@ export function swebenchSlotKey(runId: string) {
   return { pk: SLOT_PK, sk: `RUN#${runId}` };
 }
 
+/** Spec 052: how many runs hold a slot, by the counter; a start re-checks it atomically. */
+export async function swebenchSlotsInUse(dependencies: SwebenchDependencies): Promise<number> {
+  const counter = await get(dependencies, SLOT_COUNTER_KEY);
+  return typeof counter?.count === "number" ? counter.count : 0;
+}
+
 /** FR-002: an administrator enables a bound channel, with its cost ceiling. */
 export async function putSwebenchChannel(
   dependencies: SwebenchDependencies,
@@ -143,7 +169,7 @@ export async function startSwebenchRun(
   dependencies: SwebenchDependencies,
   context: SwebenchSlackContext,
   value: unknown,
-  options: { batchId?: string } = {},
+  options: SwebenchStartOptions = {},
 ): Promise<SwebenchStartResult> {
   const request = SwebenchStartRequestSchema.parse(value);
   const runId = request.requestId;
@@ -160,20 +186,24 @@ export async function startSwebenchRun(
   if (channel === undefined) {
     return { outcome: "REFUSED", reason: "NOT_ENABLED", message: "Eval runs are not enabled in this channel. An administrator can enable them with `agentx admin eval enable`." };
   }
+  const runnerImage = options.runnerImage ?? deployment.runnerImage;
+  const runnerFeatures = runnerImage === deployment.runnerImage ? deployment.runnerFeatures : options.runnerFeatures ?? [];
   // The record says what the runner was given: no level when the runner image cannot parse one.
-  const model = modelSelectionFor(await context.projectModel(request.model) ?? deployment.defaultModel, deployment.runnerFeatures);
+  const model = modelSelectionFor(await context.projectModel(request.model) ?? deployment.defaultModel, runnerFeatures);
   const createdAt = now(dependencies).toISOString();
   const run: SwebenchRun = SwebenchRunSchema.parse({
     runId,
     dataset: request.dataset,
     instanceId: request.instanceId,
     model,
-    maxCostUsd: channel.maxCostUsd,
+    maxCostUsd: options.maxCostUsd ?? channel.maxCostUsd,
     thread: context.thread,
     requestedBy: context.requester,
     status: "STARTING",
     createdAt,
     updatedAt: createdAt,
+    ...(options.batchId === undefined ? {} : { batchId: options.batchId }),
+    ...(options.runnerImage === undefined ? {} : { runnerImage }),
   });
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({
@@ -212,9 +242,11 @@ export async function startSwebenchRun(
   const artifactsPrefix = `evals/${runId}/`;
   try {
     const launch = SwebenchLaunchSchema.parse({
-      runnerImage: deployment.runnerImage,
+      runnerImage,
       logGroupName: deployment.settings.logGroupName,
-      environment: deployment.environment,
+      environment: options.openRouterProviders === undefined
+        ? deployment.environment
+        : { ...deployment.environment, AGENTX_OPENROUTER_PROVIDERS: options.openRouterProviders.join(",") },
       run: {
         runId,
         dataset: run.dataset,
@@ -300,7 +332,8 @@ async function threadRunIds(dependencies: SwebenchDependencies, thread: SlackThr
   return runIds;
 }
 
-async function requestCancel(dependencies: SwebenchDependencies, runId: string, requester: SlackRequester): Promise<void> {
+/** Asks an active run to stop; a run already ending or ended, or none at all, is left as it is. */
+export async function requestCancel(dependencies: SwebenchDependencies, runId: string, requester: SlackRequester): Promise<void> {
   try {
     await dependencies.documentClient.send(new UpdateCommand({
       TableName: dependencies.tableName,
@@ -351,7 +384,15 @@ export async function handleSwebenchCallback(
   await finishRun(dependencies, runId, result.outcome === "GRADED"
     ? { status: "SUCCEEDED", result }
     : { status: "FAILED", error: result.error });
-  return { run: (await readRun(dependencies, runId)) ?? run };
+  const ended = (await readRun(dependencies, runId)) ?? run;
+  if (dependencies.onRunEnded !== undefined && SWEBENCH_TERMINAL_STATUSES.has(ended.status)) {
+    try {
+      await dependencies.onRunEnded(ended, result);
+    } catch (error) {
+      console.log(JSON.stringify({ component: "broker", event: "swebench.run_ended_hook_failed", runId, error: error instanceof Error ? error.message : String(error) }));
+    }
+  }
+  return { run: ended };
 }
 
 /**
@@ -410,7 +451,9 @@ async function finishRun(
       if (current === undefined) throw agentXError("NOT_FOUND", "SWE-bench run not found");
       if (SWEBENCH_TERMINAL_STATUSES.has(current.status)) return;
       if (await get(dependencies, swebenchSlotKey(runId)) === undefined) return endRunWithoutSlot(dependencies, runId, endRun);
-      if (attempt >= RELEASE_ATTEMPTS) throw error;
+      // Spec 052 Ruling 3: retryable. The runner treats any other 4xx but 429 as final and would
+      // drop a graded result; the broker's catch-all would answer this cancellation 400.
+      if (attempt >= RELEASE_ATTEMPTS) throw agentXError("RUNTIME_UNAVAILABLE", "the run's eval slot could not be released; try again shortly");
       await new Promise((resolve) => setTimeout(resolve, RELEASE_BACKOFF_MS * attempt * (1 + Math.random())));
     }
   }
@@ -469,7 +512,7 @@ function capabilityKey(callbackSigningKey: string): Buffer {
   return createHmac("sha256", callbackSigningKey).update(CAPABILITY_CONTEXT).digest();
 }
 
-async function readRun(dependencies: SwebenchDependencies, runId: string): Promise<SwebenchRun | undefined> {
+export async function readRun(dependencies: SwebenchDependencies, runId: string): Promise<SwebenchRun | undefined> {
   const item = await get(dependencies, swebenchRunKey(runId));
   if (item === undefined) return undefined;
   // The state machine records the EC2 instance as ec2InstanceId; the run's instanceId is SWE-bench's.
@@ -498,7 +541,7 @@ function isTransactionCancelled(error: unknown): boolean {
   return error instanceof Error && error.name === "TransactionCanceledException";
 }
 
-function isConditionFailure(error: unknown): boolean {
+export function isConditionFailure(error: unknown): boolean {
   if (!(error instanceof Error)) return false;
   if (error.name === "ConditionalCheckFailedException") return true;
   const reasons = (error as Error & { CancellationReasons?: Array<{ Code?: string } | undefined> }).CancellationReasons;

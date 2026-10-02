@@ -151,6 +151,10 @@ export const SwebenchRunSchema = z.object({
   finishedAt: z.string().datetime().optional(),
   error: z.string().max(2_000).optional(),
   result: SwebenchGradedResultSchema.optional(),
+  /** Spec 052: the batch that queued the run; absent for a single run. */
+  batchId: z.string().uuid().optional(),
+  /** Spec 052: the runner image the batch pinned; absent when the run used the deployment's current one. */
+  runnerImage: z.string().max(512).optional(),
 }).strict();
 
 export const SwebenchStartResultSchema = z.discriminatedUnion("outcome", [
