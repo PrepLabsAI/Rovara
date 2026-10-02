@@ -2,6 +2,9 @@ import { Stack } from "aws-cdk-lib";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { normalizedTemplate } from "../support/template-snapshot.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 type Resource = { Type: string; Properties: Record<string, unknown> };
 type Statement = { Sid?: string };

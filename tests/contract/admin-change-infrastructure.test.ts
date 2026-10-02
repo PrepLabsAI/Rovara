@@ -7,6 +7,9 @@ import { describe, expect, it } from "vitest";
 import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { INDEX_EXPIRY_ATTRIBUTE } from "@agentx/contracts";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 type Statement = { Action: string | string[]; Resource: unknown; Condition?: Record<string, Record<string, unknown>> };
 type Policy = { Properties: { PolicyDocument: { Statement: Statement[] }; Roles: Array<{ Ref?: string }> } };

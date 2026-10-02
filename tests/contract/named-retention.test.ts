@@ -6,6 +6,9 @@ import { Stack } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 type Resource = { Type: string; DeletionPolicy?: string; UpdateReplacePolicy?: string };
 type Templates = Record<string, Record<string, Resource>>;

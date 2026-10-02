@@ -4,6 +4,9 @@ import * as iam from "aws-cdk-lib/aws-iam";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { applyPermissionsBoundaryParameter } from "../../infra/lib/permissions-boundary.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 const stacksOf = (app: App) => app.node.children.filter((c): c is Stack => Stack.isStack(c));
 const EXISTING_BOUNDARY = "arn:aws:iam::123456789012:policy/existing-boundary";
