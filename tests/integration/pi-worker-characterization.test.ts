@@ -10,15 +10,16 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, getCurrentSystemPrompt, getCurrentTools, type Context, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
-import type { BashOperations } from "@earendil-works/pi-coding-agent";
+import type { BashOperations, ExtensionFactory } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import type { WorkerInvocation } from "../../packages/contracts/src/index.js";
+import { AGENTX_PREAMBLE, type WorkerInvocation } from "../../packages/contracts/src/index.js";
 import { WorkerCancellationController, WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";
 import type { DevcontainerPaths } from "../../packages/worker/src/devcontainer.js";
 import { redactCredentials, type WorkerEvent } from "../../packages/worker/src/events.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "../../packages/worker/src/git.js";
 import { createDefaultPiSessionAdapter, createWorkspacePiSession, openRegisteredWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle } from "../../packages/worker/src/pi-session.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
+import { runSwebenchAgent } from "../../packages/worker/src/swebench/agent.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
@@ -58,6 +59,7 @@ async function workspaceRoot(repositories: Array<{ name: string; path: string }>
 /** The worker's real session on the faux model: the default adapter with only its model runtime supplied. */
 async function workerSession(responses: FauxResponseStep[], options: {
   rootPath?: string; conversationId?: string; bashOperations?: BashOperations; devcontainerPaths?: DevcontainerPaths;
+  extensionFactories?: ExtensionFactory[]; onDiagnostic?: (message: string) => void;
 } = {}) {
   const { modelRuntime, faux } = await fauxModelRuntime();
   faux.setResponses(responses);
@@ -68,6 +70,8 @@ async function workerSession(responses: FauxResponseStep[], options: {
     ...(options.conversationId === undefined ? {} : { conversationId: options.conversationId }),
     ...(options.bashOperations === undefined ? {} : { bashOperations: options.bashOperations }),
     ...(options.devcontainerPaths === undefined ? {} : { devcontainerPaths: options.devcontainerPaths }),
+    ...(options.extensionFactories === undefined ? {} : { extensionFactories: options.extensionFactories }),
+    ...(options.onDiagnostic === undefined ? {} : { onDiagnostic: options.onDiagnostic }),
   }, adapter);
   const events: Event[] = [];
   handle.subscribe((event) => { events.push(snapshot(event) as Event); });
@@ -235,11 +239,16 @@ describe("the worker's Pi session, as pinned on Pi 0.85.1", () => {
       expect(boundaries).toEqual([
         "<tools>", "</tools>", "<rules>", "</rules>", "<docs>",
         "Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):", "</docs>",
+        // Spec 051 FR-001 appends the AgentX preamble.
+        "<addendum>", "</addendum>",
         "<project_context>", "Project-specific instructions and guidelines:",
         "<project_instructions path=\"AgentX workspace\">", "AgentX workspace note (written by AgentX, not by any repository):", "</project_instructions>",
         "<project_instructions path=\"<ROOT>/repos/web/AGENTS.md\">", "</project_instructions>",
         "</project_context>", "<cwd>", "</cwd>",
       ]);
+      // Spec 051 FR-001: the preamble reaches the model verbatim, as the whole addendum.
+      expect(prompts[0]).toContain(AGENTX_PREAMBLE);
+      expect(prompts[0]).toContain(`<addendum>\n${AGENTX_PREAMBLE}\n</addendum>`);
     } finally { handle.dispose(); }
   });
 
@@ -390,6 +399,72 @@ describe("the worker's message_end payloads, as pinned on Pi 0.85.1", () => {
   });
 });
 
+// Spec 051: the AgentX preamble and inline extensions are new on purpose; these are not 0.85.1 pins.
+describe("spec 051: the worker's session carries the AgentX preamble and the inline extensions it is given", () => {
+  it("loads the inline extension it is given: its tool_result handler sees bash's structuredContent, subscribers do not", async () => {
+    // protects packages/worker/src/pi-session.ts (createWorkerResources extensionFactories, bindExtensions)
+    const results: Array<{ toolName: string; input: unknown; structuredContent: unknown; isError: boolean; content: unknown }> = [];
+    const extension: ExtensionFactory = (pi) => {
+      pi.on("tool_result", (event) => {
+        results.push(snapshot({ toolName: event.toolName, input: event.input, structuredContent: (event as { structuredContent?: unknown }).structuredContent, isError: event.isError, content: event.content }));
+      });
+    };
+    const operations: BashOperations = { exec: async (_command, _cwd, options) => { options.onData(Buffer.from("1 failed\n")); return { exitCode: 3 }; } };
+    const diagnostics: string[] = [];
+    const { handle, events } = await workerSession([
+      toolUse(fauxToolCall("bash", { command: "npm test" }, { id: "call-bash-ext" })),
+      fauxAssistantMessage("Done."),
+    ], { bashOperations: operations, extensionFactories: [extension], onDiagnostic: (message) => { diagnostics.push(message); } });
+    try {
+      expect(await settle(handle, "run it")).toBe("resolved");
+    } finally { handle.dispose(); }
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ toolName: "bash", input: { command: "npm test" }, isError: true });
+    expect(results[0]!.structuredContent).toMatchObject({ exit_code: 3 });
+    // Spec 050 Ruling E still holds for subscribers: the extension saw the field before it was stripped.
+    const end = events.find((event) => event.type === "tool_execution_end")!;
+    expect(keys(end.result)).not.toContain("structuredContent");
+    // Extension-only events still never reach session.subscribe.
+    expect(events.map((event) => event.type)).not.toContain("tool_result");
+    expect(diagnostics).toEqual([]);
+  });
+
+  it("reports an error an extension throws through the session's diagnostic callback, and the turn goes on", async () => {
+    // protects packages/worker/src/pi-session.ts (bindExtensions onError -> onDiagnostic)
+    const extension: ExtensionFactory = (pi) => {
+      pi.on("tool_result", () => { throw new Error("recorder exploded"); });
+    };
+    const diagnostics: string[] = [];
+    const { handle } = await workerSession([
+      toolUse(fauxToolCall("bash", { command: "echo hi" }, { id: "call-bash-err" })),
+      fauxAssistantMessage("Done."),
+    ], { bashOperations: recordingShell().operations, extensionFactories: [extension], onDiagnostic: (message) => { diagnostics.push(message); } });
+    try {
+      expect(await settle(handle, "run it")).toBe("resolved");
+    } finally { handle.dispose(); }
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("tool_result");
+    expect(diagnostics[0]).toContain("recorder exploded");
+  });
+
+  it("gives the eval path's session (runSwebenchAgent through the default adapter) the same preamble", async () => {
+    // protects packages/worker/src/swebench/agent.ts -> createWorkspacePiSession -> createWorkerResources (FR-010)
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    const prompts: string[] = [];
+    faux.setResponses([(context) => { prompts.push(modelView(context).systemPrompt ?? ""); return fauxAssistantMessage("Done."); }]);
+    const rootPath = await workspaceRoot();
+    const run = await runSwebenchAgent({
+      rootPath, model: FAUX_MODEL, bashOperations: recordingShell().operations,
+      paths: { hostFolder: join(rootPath, "testbed"), containerFolder: "/testbed" },
+      problemStatement: "Fix it.", maxCostUsd: 10, timeLimitMs: 60_000,
+      piAdapter: createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) }),
+    });
+    run.session.dispose();
+    expect(prompts).toHaveLength(1);
+    expect(prompts[0]).toContain(`<addendum>\n${AGENTX_PREAMBLE}\n</addendum>`);
+  });
+});
+
 describe("the worker's session event shapes, as pinned on Pi 0.85.1", () => {
   it("pins every event session.subscribe delivers in one turn with a tool call", async () => {
     // protects packages/worker/src/run-task.ts (event log, FileChangeAttempts, assistantOutcome), tool-loop-guard.ts and swebench/agent.ts; guards: AgentEvent union changes (0.99)
@@ -402,7 +477,8 @@ describe("the worker's session event shapes, as pinned on Pi 0.85.1", () => {
       expect(await settle(handle, "run it")).toBe("resolved");
     } finally { handle.dispose(); }
 
-    // The worker loads no extensions, so Pi's extension-only events (tool_call, tool_result, context, ...)
+    // Spec 051: the worker loads only the inline extensions it is given (none here; AgentX verification later).
+    // Pi's extension-only events (tool_call, tool_result, context, ...)
     // never reach session.subscribe; run-task.ts's "tool_result" branch is unreachable on this path.
     expect(eventOrder(events)).toEqual([
       "agent_start", "turn_start", "message_start", "message_end",

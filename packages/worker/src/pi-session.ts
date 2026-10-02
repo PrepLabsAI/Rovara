@@ -12,6 +12,7 @@ import {
   DefaultResourceLoader,
   type BashOperations,
   type BashSpawnContext,
+  type ExtensionFactory,
   type ModelRuntime,
   type ToolDefinition,
   SessionManager,
@@ -21,7 +22,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
 import { createModelRuntimeWithFallback } from "@agentx/model-runtime";
-import { agentXError, ThinkingLevelSchema, type ThinkingLevel } from "@agentx/contracts";
+import { AGENTX_PREAMBLE, agentXError, ThinkingLevelSchema, type ThinkingLevel } from "@agentx/contracts";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import {
@@ -71,6 +72,10 @@ export interface PiSessionInput {
   bashOperations?: BashOperations;
   /** The repository's folder in the devcontainer, which the file tools resolve to the host folder (#128). */
   devcontainerPaths?: DevcontainerPaths;
+  /** Inline Pi extensions for this session (spec 051); file-path extensions stay disabled. */
+  extensionFactories?: ExtensionFactory[];
+  /** Where the session reports what it does not fail on, such as an extension handler's error. */
+  onDiagnostic?: (message: string) => void;
 }
 
 export interface PiSessionAdapter {
@@ -86,6 +91,7 @@ export async function createWorkspacePiSession(
     onDiagnostic?: (message: string) => void;
     bashOperations?: BashOperations;
     devcontainerPaths?: DevcontainerPaths;
+    extensionFactories?: ExtensionFactory[];
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
@@ -106,6 +112,8 @@ export async function createWorkspacePiSession(
     ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
     ...(input.bashOperations === undefined ? {} : { bashOperations: input.bashOperations }),
     ...(input.devcontainerPaths === undefined ? {} : { devcontainerPaths: input.devcontainerPaths }),
+    ...(input.extensionFactories === undefined ? {} : { extensionFactories: input.extensionFactories }),
+    ...(input.onDiagnostic === undefined ? {} : { onDiagnostic: input.onDiagnostic }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
   return handle;
@@ -120,6 +128,7 @@ export async function openRegisteredWorkspacePiSession(
     onDiagnostic?: (message: string) => void;
     bashOperations?: BashOperations;
     devcontainerPaths?: DevcontainerPaths;
+    extensionFactories?: ExtensionFactory[];
   },
   adapter: PiSessionAdapter = defaultPiSessionAdapter,
 ): Promise<PiSessionHandle> {
@@ -145,6 +154,8 @@ export async function openRegisteredWorkspacePiSession(
     sessionFile,
     ...(input.bashOperations === undefined ? {} : { bashOperations: input.bashOperations }),
     ...(input.devcontainerPaths === undefined ? {} : { devcontainerPaths: input.devcontainerPaths }),
+    ...(input.extensionFactories === undefined ? {} : { extensionFactories: input.extensionFactories }),
+    ...(input.onDiagnostic === undefined ? {} : { onDiagnostic: input.onDiagnostic }),
   });
   assertContained(sessionDirectory, handle.sessionFile);
   return handle;
@@ -228,6 +239,14 @@ async function createDefaultSession(
       settingsManager,
       sessionManager: manager,
     });
+    // Binding emits session_start to the extensions. A handler's error is reported, never swallowed, and never fails the turn.
+    await session.bindExtensions({
+      onError: (error) => {
+        try {
+          input.onDiagnostic?.(`pi extension ${error.extensionPath} failed on ${error.event}: ${error.error}`);
+        } catch { /* Reporting must not break a turn. */ }
+      },
+    });
     const sessionFile = session.sessionFile;
     if (!sessionFile) throw new Error("pi did not create a persisted session file");
     return {
@@ -299,10 +318,11 @@ function conversationStats(stats: SessionStats, entries: readonly SessionEntry[]
  * The worker's Pi settings and resources. Pi trusts its working folder by default: a `.pi/SYSTEM.md` there replaces
  * the system prompt, `.pi/settings.json` changes the default model and thinking level, and skills load from the
  * folder and from the home directory. The worker trusts none of it and loads no skills; AgentX passes the context
- * files itself. One settings manager serves the loader and the session, which would otherwise make its own trusted one.
+ * files itself, after the AgentX preamble (spec 051), and loads only the inline extensions it is given. One settings
+ * manager serves the loader and the session, which would otherwise make its own trusted one.
  */
 export async function createWorkerResources(
-  input: Pick<PiSessionInput, "cwd" | "agentDirectory" | "contextFiles">,
+  input: Pick<PiSessionInput, "cwd" | "agentDirectory" | "contextFiles" | "extensionFactories">,
 ): Promise<{ resourceLoader: DefaultResourceLoader; settingsManager: SettingsManager }> {
   const settingsManager = SettingsManager.create(input.cwd, input.agentDirectory, { projectTrusted: false });
   // Pi 0.86+ warms prompt caches with extra paid requests during long tool runs by default ("streaming"); 0.85.1 made
@@ -312,11 +332,15 @@ export async function createWorkerResources(
     cwd: input.cwd,
     agentDir: input.agentDirectory,
     settingsManager,
+    // Disables file-path extensions only; the inline extensionFactories still load.
     noExtensions: true,
+    extensionFactories: [...(input.extensionFactories ?? [])],
     noSkills: true,
     noPromptTemplates: true,
     noThemes: true,
     agentsFilesOverride: appendRepositoryContextFiles(input.contextFiles),
+    // Spec 051 FR-001/FR-010: the same preamble for coding tasks and eval runs, rendered as Pi's <addendum>.
+    appendSystemPrompt: [AGENTX_PREAMBLE],
   });
   await resourceLoader.reload({ resolveProjectTrust: async () => false });
   return { resourceLoader, settingsManager };
