@@ -143,6 +143,8 @@ export interface WizardFailure { title: string; what: string; next: string; deta
 export type WizardPhase = "running" | "finished" | "paused" | "failed";
 
 export interface WizardState {
+  /** The name the run started with; frozen at that value even after a rename (spec 048 FR-020).
+   * The page shows the current name from `header.installName`, which `setInstallName` updates. */
   env: string;
   phase: WizardPhase;
   steps: WizardStep[];

@@ -477,6 +477,14 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   // Spec 048 FR-020: the settings form's install name (typed or kept) becomes the install's name
   // from then on; every collect() call below updates this, session.env and the page's header.
   let env = options.env;
+  // Fix round 1: the one place that follows a just-collected install name, called at every site a
+  // collectInitAnswers result can carry a new one (the first-run collect(), Change answers, and a
+  // failed-check retry), instead of repeating the same three lines at each.
+  const follow = (next: CollectedAnswers): void => {
+    env = next.answers.env;
+    session.env = env;
+    session.wizard?.setInstallName(env);
+  };
   const { write } = session;
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? realSleep;
@@ -719,9 +727,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     initialAnswers = collected.answers;
     // Spec 048 FR-020: a first settings submission can already rename the install (its default is
     // options.env, kept until typed over); everything from here on follows the name just collected.
-    env = collected.answers.env;
-    session.env = env;
-    session.wizard?.setInstallName(env);
+    follow(collected);
   } else {
     initialAnswers = stored;
     if (stored.account !== caller.account) throw agentXError("CONFIG_INVALID", `the install of ${env} started in account ${stored.account}, but your AWS credentials are for account ${caller.account}; use credentials for ${stored.account}`);
@@ -817,18 +823,14 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
           finalAnswersRef.current = collected.answers;
           // Spec 048 FR-020 and FR-029: Change answers keeps every answer, and a renamed install
           // is the install's name from here on (the checks, the lock, the steps, the page).
-          env = collected.answers.env;
-          session.env = env;
-          session.wizard?.setInstallName(env);
+          follow(collected);
           continue;
         }
         break;
       }
       collected = await collect(collected.settings);
       finalAnswersRef.current = collected.answers;
-      env = collected.answers.env;
-      session.env = env;
-      session.wizard?.setInstallName(env);
+      follow(collected);
     }
     prerequisitesPassed = true;
   } else {

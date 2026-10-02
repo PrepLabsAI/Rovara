@@ -518,6 +518,21 @@ describe("agentx init --ui", () => {
     expect(card?.checks?.find((check) => check.label === "Install name")?.detail).toBe("This AWS account and region already have an AgentX install named trial. Choose another install name.");
   });
 
+  // Fix round 1 (review Minor): a renamed install that fails in a later step must still resume
+  // under its new name, not the one the run started with. The access stack is the cheapest step
+  // the fake deployer can fail; access is retryable, so the failure question offers "Stop for now".
+  it("FR-020: a renamed install's Continue later with command names the new install, even after a later step fails", async () => {
+    const h = await harness();
+    const renamed = JSON.stringify({ email: ADMIN_EMAIL, githubAccount: "acme", installName: "trial", alertEmail: "ops@example.com" });
+    h.deployer.fail.set(environmentStackName("trial", "access"), new Error("Resource limit exceeded"));
+    const operator = fakeWizardOperator([renamed, "create", "stop"]);
+    expect(await h.run(["--ui"], { openBrowser: operator.open })).not.toBe(0);
+    await operator.settled();
+    const last = operator.states.at(-1);
+    expect(last).toMatchObject({ phase: "failed" });
+    expect(last?.commands).toEqual([{ label: "Continue later with", command: "node /opt/agentx/dist/main.js --env trial init --region us-east-1" }]);
+  });
+
   it("FR-023: a failure no check reports is still on the checklist, in the error's own words", async () => {
     const h = await harness();
     const checks = passingChecks({ cdkBootstrapped: async () => false, runCdkBootstrap: async () => { throw new Error("CDKToolkit stack creation was rolled back"); } });
