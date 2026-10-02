@@ -155,7 +155,7 @@ describe("confirming by the pop-up (FR-040, SC-005)", () => {
     const id = changeId(await broker.propose(BIND));
     broker.db.set({ pk: `SLACK_BINDING#${SLACK_TEAM}`, sk: "CHANNEL#C0LEDGER01", entityType: "SLACK_BINDING", teamId: SLACK_TEAM, channelId: "C0LEDGER01", projectName: "payments-legacy", updatedAt: new Date().toISOString() });
     const answer = await broker.apply(id);
-    // #216: says what it would do against the state as it is now, and names no change ID.
+    // #216: a re-plan the planner refuses says why, and names no change ID.
     expect(answer.body.error).toEqual({ code: "CHANGE_STALE", message: "what this change was planned against has changed since you asked (project not found); ask for the change again" });
     expect(JSON.stringify(answer.body)).not.toContain(id);
     expect(binding(broker.db)).toMatchObject({ projectName: "payments-legacy" });
@@ -196,6 +196,24 @@ describe("confirming by the pop-up (FR-040, SC-005)", () => {
     const message = String(((await broker.apply(id)).body.error as { message: string }).message);
     expect(message).toMatch(/^what this change was planned against has changed since you asked\. Planned again now: Set the workspace limits to 2 per person \(now 4\) and 20 for the organization \(unchanged\)\..* Ask for the change again if you still want it\.$/u);
     expect(message).not.toContain(id);
+  });
+
+  it("names the deployment's defaults, not a person, when no setting decides the limits (review)", async () => {
+    const broker = await createAdminChangeBroker();
+    broker.db.set({ pk: "SETTINGS", sk: "WORKSPACE_LIMITS", entityType: "SETTING", perPerson: 1, perOrganization: 20, updatedBy: { issuer: "x", subject: "s" }, via: "cli", updatedAt: "2026-10-02T12:00:00.000Z" });
+    const id = changeId(await broker.propose({ kind: "set_workspace_limits", perPerson: 2 }));
+    broker.db.delete("SETTINGS", "WORKSPACE_LIMITS");
+    const message = String(((await broker.apply(id)).body.error as { message: string }).message);
+    expect(message).toBe("the per-person limit was changed to 3 (from 1) in the deployment's default limits, after you asked; ask again if you still want 2 per person");
+  });
+
+  it("says what the change would do now when the setting was written again with the same values (review)", async () => {
+    const broker = await createAdminChangeBroker();
+    broker.db.set({ pk: "SETTINGS", sk: "WORKSPACE_LIMITS", entityType: "SETTING", perPerson: 1, perOrganization: 20, updatedAt: "2026-10-02T12:00:00.000Z" });
+    const id = changeId(await broker.propose({ kind: "set_workspace_limits", perPerson: 2 }));
+    broker.db.set({ pk: "SETTINGS", sk: "WORKSPACE_LIMITS", entityType: "SETTING", perPerson: 1, perOrganization: 20, updatedAt: "2026-10-02T13:00:00.000Z" });
+    const message = String(((await broker.apply(id)).body.error as { message: string }).message);
+    expect(message).toMatch(/^what this change was planned against has changed since you asked\. Planned again now: Set the workspace limits to 2 per person \(now 1\)/u);
   });
 
   it("records how a limits change was confirmed, so a stale one names it (#216)", async () => {

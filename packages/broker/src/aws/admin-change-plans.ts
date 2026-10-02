@@ -416,6 +416,11 @@ const limitPair = (value: unknown): { perPerson: number; perOrganization: number
   return typeof record?.perPerson === "number" && typeof record.perOrganization === "number" ? { perPerson: record.perPerson, perOrganization: record.perOrganization } : undefined;
 };
 
+const wanted = (input: { perPerson?: number | undefined; perOrganization?: number | undefined }) => [
+  ...(input.perPerson === undefined ? [] : [`${input.perPerson} per person`]),
+  ...(input.perOrganization === undefined ? [] : [`${input.perOrganization} for the organization`]),
+].join(" and ");
+
 /**
  * #216: what changed in the workspace limits since a change was planned, e.g. "the per-person limit
  * was changed to 4 (from 1) by another administrator from the CLI at 1:04 PM UTC, after you asked;
@@ -424,6 +429,7 @@ const limitPair = (value: unknown): { perPerson: number; perOrganization: number
 function limitsChangedSince(
   planned: Record<string, unknown>,
   now: { perPerson: number; perOrganization: number },
+  source: string,
   setting: Record<string, unknown> | undefined,
   identity: AuthenticatedIdentity,
   input: { perPerson?: number | undefined; perOrganization?: number | undefined },
@@ -435,16 +441,17 @@ function limitsChangedSince(
   if (now.perOrganization !== was.perOrganization) {
     changes.push(changes.length === 0 ? `the organization limit was changed to ${now.perOrganization} (from ${was.perOrganization})` : `the organization limit to ${now.perOrganization} (from ${was.perOrganization})`);
   }
-  const what = changes.length > 0 ? changes.join(" and ") : `the workspace limits were set again (still ${now.perPerson} per person and ${now.perOrganization} for the organization)`;
+  // Nothing it can name changed (a setting written again with the same values, or other defaults
+  // behind a setting): the caller then says what the change would do now.
+  if (changes.length === 0) return undefined;
+  const what = changes.join(" and ");
+  // With no valid setting, the limits are the deployment's defaults: no person, method or time to name.
+  if (source === "parameters") return `${what} in the deployment's default limits, after you asked; ask again if you still want ${wanted(input)}`;
   const by = setting?.updatedBy !== null && typeof setting?.updatedBy === "object" ? setting.updatedBy as Record<string, unknown> : undefined;
   const who = by === undefined ? "" : by.issuer === identity.issuer && by.subject === identity.subject ? " by you" : " by another administrator";
   const via = typeof setting?.via === "string" && VIA_WORDS[setting.via] !== undefined ? ` ${VIA_WORDS[setting.via]}` : "";
   const time = setting === undefined ? undefined : clockTime(setting.updatedAt);
-  const wanted = [
-    ...(input.perPerson === undefined ? [] : [`${input.perPerson} per person`]),
-    ...(input.perOrganization === undefined ? [] : [`${input.perOrganization} for the organization`]),
-  ].join(" and ");
-  return `${what}${who}${via}${time === undefined ? "" : ` at ${time}`}, after you asked; ask again if you still want ${wanted}`;
+  return `${what}${who}${via}${time === undefined ? "" : ` at ${time}`}, after you asked; ask again if you still want ${wanted(input)}`;
 }
 
 const planLimits: Planner = async (deps, identity, input) => {
@@ -480,7 +487,7 @@ const planLimits: Planner = async (deps, identity, input) => {
     // The counts are informational and change often, so they are deliberately outside the hash.
     snapshot: { setting: setting === undefined ? null : { perPerson: setting.perPerson ?? null, perOrganization: setting.perOrganization ?? null, updatedAt: setting.updatedAt ?? null }, defaults: deps.reads.limitDefaults },
     apply: async (applier, how) => setWorkspaceLimits(deps.actions, { issuer: applier.issuer, subject: applier.subject }, next, how?.method),
-    changedSince: (planned) => limitsChangedSince(planned, { perPerson: current.member, perOrganization: current.organization }, setting, identity, input),
+    changedSince: (planned) => limitsChangedSince(planned, { perPerson: current.member, perOrganization: current.organization }, current.source, setting, identity, input),
   };
 };
 
