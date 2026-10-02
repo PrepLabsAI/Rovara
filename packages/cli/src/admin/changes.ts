@@ -7,8 +7,8 @@
 import { randomUUID } from "node:crypto";
 import { createInterface } from "node:readline";
 import {
-  AdminChangeResponseWireSchema, AdminChangesResponseWireSchema, AgentXErrorCodeSchema, agentXError,
-  type AdminChangeInput, type AdminChangeViewWire,
+  AdminChangeResponseWireSchema, AdminChangesResponseWireSchema, AgentXErrorCodeSchema, RecordedChangeResponseWireSchema, agentXError,
+  type AdminChangeAuditRecordWire, type AdminChangeInput, type AdminChangeViewWire, type ConfigChange, type ConfigChangeOutcomeRequest,
 } from "@agentx/contracts";
 import { adminResponseBody, readJsonResponse, serverError } from "./http.js";
 
@@ -28,12 +28,14 @@ function plain(text: string): string {
   return out;
 }
 
-type Step = "plan" | "apply" | "decline" | "list";
+type Step = "plan" | "apply" | "decline" | "list" | "record" | "outcome";
 const UNREACHABLE: Record<Step, (changeId?: string) => string> = {
   plan: () => "could not reach AgentX to plan the change; nothing was applied, try again",
   apply: (changeId) => `could not reach AgentX to apply change ${changeId}, so it may or may not have applied; ${CHECK_STEP}`,
   decline: (changeId) => `could not reach AgentX to decline change ${changeId}; nothing was applied, and it expires on its own`,
   list: () => "could not reach AgentX to read change records; try again",
+  record: () => "could not reach AgentX",
+  outcome: () => "could not reach AgentX",
 };
 
 interface Session { controlPlaneUrl: string; accessToken: string }
@@ -137,6 +139,28 @@ export async function runCliChange(input: CliChangeInput, fetchImplementation: t
   throw agentXError("RUNTIME_UNAVAILABLE", `AgentX answered change ${changeId} as ${plain(applied.status)}, which this CLI does not read as applied; ${CHECK_STEP}`);
 }
 
+/**
+ * Issue #205: records a change this CLI applies itself (agentx config set's stack update), after the
+ * yes and before the change: the record starts applying, with the cli method. Returns its change ID.
+ */
+export async function recordConfigChange(input: { controlPlaneUrl: string; accessToken: string; cliVersion: string; requestId: string; change: ConfigChange; requestedAt?: string; answeredAt: string }, fetchImplementation: typeof fetch = fetch): Promise<{ changeId: string; traceId: string }> {
+  const traceId = randomUUID();
+  const request = { requestId: input.requestId, change: input.change, client: { cliVersion: input.cliVersion }, ...(input.requestedAt === undefined ? {} : { requestedAt: input.requestedAt }), answeredAt: input.answeredAt };
+  const body = await send(input, traceId, "POST", "/v1/admin/changes/config", request, fetchImplementation, "record");
+  const parsed = RecordedChangeResponseWireSchema.safeParse(body);
+  // A repeated request answers the record it made, whatever its status since.
+  if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", "AgentX answered with a change record this version of the CLI cannot read");
+  return { changeId: parsed.data.change.changeId, traceId };
+}
+
+/** Issue #205: how a recorded config change ended. */
+export async function recordConfigOutcome(input: { controlPlaneUrl: string; accessToken: string; changeId: string; traceId: string; outcome: ConfigChangeOutcomeRequest }, fetchImplementation: typeof fetch = fetch): Promise<AdminChangeAuditRecordWire> {
+  const body = await send(input, input.traceId, "POST", `/v1/admin/changes/${encodeURIComponent(input.changeId)}/outcome`, input.outcome, fetchImplementation, "outcome", input.changeId);
+  const parsed = RecordedChangeResponseWireSchema.safeParse(body);
+  if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", "AgentX answered with a change record this version of the CLI cannot read");
+  return parsed.data.change;
+}
+
 /** Where the terminal prompt reads and writes; `signals` is the process, for Ctrl-C outside the prompt's own line. */
 export interface PromptStreams {
   input: NodeJS.ReadableStream;
@@ -179,6 +203,12 @@ export function askToApply(question: string, streams: PromptStreams): Promise<bo
   });
 }
 
+/** A config set change's line names its key too (issue #205); every other kind is its kind alone. */
+function kindText(record: AdminChangeAuditRecordWire): string {
+  const key = record.change.key;
+  return record.kind === "set_config" && typeof key === "string" ? `set_config ${key}` : record.kind;
+}
+
 /** FR-052: every change record since `since`, newest first, as text lines or as JSON Lines of the records as stored. */
 export async function exportChanges(input: { controlPlaneUrl: string; accessToken: string; since: string; write(line: string): void | Promise<void>; json: boolean }, fetchImplementation: typeof fetch = fetch): Promise<{ exported: number; since: string }> {
   const traceId = randomUUID();
@@ -198,7 +228,7 @@ export async function exportChanges(input: { controlPlaneUrl: string; accessToke
       // JSON Lines carry the record exactly as AgentX sent it (redacted as the broker stores it).
       await input.write(input.json
         ? `${JSON.stringify(raw[index])}\n`
-        : `${[record.proposedAt, record.outcome ?? record.status, record.kind, record.admin.displayName ?? record.admin.subject, record.changeId].map(plain).join("  ")}\n`);
+        : `${[record.proposedAt, record.outcome ?? record.status, kindText(record), record.admin.displayName ?? record.admin.subject, record.changeId].map(plain).join("  ")}\n`);
       exported += 1;
     }
     cursor = page.data.cursor;

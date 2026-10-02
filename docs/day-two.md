@@ -154,8 +154,18 @@ agentx --env <env> config get <key> --region <region>
 agentx --env <env> config set <key> <value> --region <region>
 ```
 
-`set` shows the change and asks first (`--yes` skips the question). Each key lives in exactly one
-place:
+`set` shows the change and asks first (`--yes` skips the question). With this computer's admin
+sign-in (`agentx --env <env> login --admin`), every change `set` makes is recorded in the admin
+change history (`agentx --env <env> admin changes`) with the admin who made it, the `cli` client,
+the key, the value before and after, and when it was asked, applied or failed. It is recorded
+after the yes and before anything changes; if AgentX cannot record it, nothing changes. If the
+outcome cannot be recorded, or a stack update may still be running when `set` stops, `set` warns
+and the record stays `applying`. `alerts.address` is recorded only as changed, never its value.
+Without the admin sign-in, the operator role alone can still change a setting, but `set` warns
+first that the change will not be recorded. A stack-parameter change needs a sign-in with at
+least 35 minutes left, so its outcome can be recorded too. The record is an audit trail for
+admins, not a control: the operator role alone can always change a setting unrecorded. Changes made outside `agentx config
+set` (the CloudFormation console, say) are not recorded. Each key lives in exactly one place:
 
 | Key | Where it lives | Default | Notes |
 |---|---|---|---|
