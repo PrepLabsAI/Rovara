@@ -274,9 +274,9 @@ function buttonRow(question) {
   return row;
 }
 
-function sendButton(onSend) {
+function sendButton(onSend, label) {
   const row = el("div", "buttons");
-  const send = el("button", "primary", "Continue");
+  const send = el("button", "primary", label ?? "Continue");
   send.type = "button";
   send.addEventListener("click", onSend);
   row.append(send);
@@ -291,18 +291,64 @@ function hideFromPasswordManagers(field) {
   field.setAttribute("data-bwignore", "");
 }
 
+function fieldInput(field, id) {
+  if (field.choices) {
+    const input = el("select");
+    input.id = id;
+    for (const choice of field.choices) {
+      const option = el("option", "", choice.label);
+      option.value = choice.value;
+      input.append(option);
+    }
+    input.value = field.value || field.defaultValue || "";
+    return input;
+  }
+  const input = el("input");
+  input.id = id;
+  input.type = field.masked ? "password" : "text";
+  if (field.masked) hideFromPasswordManagers(input);
+  if (field.value && !field.masked) input.value = field.value;
+  return input;
+}
+
 function buildForm(question, body) {
+  if (question.summary && question.summary.length > 0) {
+    const box = el("div", "recommended");
+    box.append(el("h3", "", "Recommended settings"));
+    const list = el("ul");
+    for (const line of question.summary) list.append(el("li", "", line));
+    box.append(list);
+    body.append(box);
+  }
   const inputs = [];
+  const groups = new Map();
+  let advanced = null;
   for (const field of question.fields ?? []) {
+    let holder = body;
+    if (field.section === "advanced") {
+      if (!advanced) {
+        advanced = el("details", "advanced");
+        advanced.append(el("summary", "", "Advanced settings"));
+        advanced.open = (question.fields ?? []).some((each) => each.section === "advanced" && each.error);
+        body.append(advanced);
+      }
+      holder = advanced;
+    }
+    if (field.group) {
+      const key = (field.section ?? "") + "/" + field.group;
+      if (!groups.has(key)) {
+        const set = el("fieldset", "group");
+        set.append(el("legend", "", field.group));
+        holder.append(set);
+        groups.set(key, set);
+      }
+      holder = groups.get(key);
+    }
     const id = "field-" + field.name;
     const wrap = el("div", "field");
     const label = el("label", "field-label", field.label);
     label.htmlFor = id;
-    const input = el("input");
-    input.id = id;
-    input.type = field.masked ? "password" : "text";
-    if (field.masked) hideFromPasswordManagers(input);
-    if (field.value && !field.masked) input.value = field.value;
+    const input = fieldInput(field, id);
     const notes = [];
     for (const [suffix, text, className] of [["why", field.why, "hint"], ["example", field.example ? "For example: " + field.example : undefined, "hint"], ["hint", field.hint, "hint"], ["error", field.error, "error"]]) {
       if (!text) continue;
@@ -310,17 +356,27 @@ function buildForm(question, body) {
       note.id = id + "-" + suffix;
       notes.push(note);
     }
+    if (field.link) {
+      const line = el("p", "hint");
+      const anchor = el("a", "field-link", field.link.label);
+      anchor.href = field.link.url;
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+      line.append(anchor, " " + (field.link.note ?? ""));
+      line.id = id + "-link";
+      notes.push(line);
+    }
     if (field.error) input.setAttribute("aria-invalid", "true");
     input.setAttribute("aria-describedby", notes.map((note) => note.id).join(" "));
     wrap.append(label, input, ...notes);
-    body.append(wrap);
+    holder.append(wrap);
     inputs.push([field, input]);
   }
   body.append(sendButton(() => {
     const values = Object.fromEntries(inputs.map(([field, input]) => [field.name, input.value]));
     if (!sending) for (const [field, input] of inputs) if (field.masked) input.value = "";
     submit(question.id, JSON.stringify(values));
-  }));
+  }, question.submitLabel ?? "Continue"));
 }
 
 function buildQuestion(question) {

@@ -73,6 +73,13 @@ describe("the installer's design system", () => {
     for (const name of PAGE_CLASSES) expect({ name, defined: new RegExp(`\\.${name}(?![a-z0-9-])`).test(WIZARD_CSS) }).toEqual({ name, defined: true });
   });
 
+  it("spec 048 phase 2: styles the settings screen's recommended, advanced, group and field-link classes", () => {
+    for (const name of ["recommended", "advanced", "group", "field-link"]) {
+      expect(PAGE_CLASSES).toContain(name);
+      expect(WIZARD_CSS).toMatch(new RegExp(`\\.${name}[\\s{.,:]`));
+    }
+  });
+
   it("is the stylesheet the server sends", () => {
     expect(SERVED_CSS).toBe(WIZARD_CSS);
   });

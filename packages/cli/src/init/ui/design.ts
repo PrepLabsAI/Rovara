@@ -80,6 +80,7 @@ export const PAGE_CLASSES = [
   "top", "time-left", "layout", "rail", "phase", "phase-title", "phase-status", "phase-time", "steps", "step", "elapsed", "step-of",
   "card", "status", "question", "why", "hint", "note", "error", "field", "field-label", "choices", "buttons", "button", "primary",
   "command", "checks", "chip", "hidden",
+  "recommended", "advanced", "group", "field-link",
   "done", "now", "waiting", "coming", "stopped", "running", "ok", "failed", "info", "pending", "skipped",
 ] as const;
 
@@ -143,6 +144,16 @@ textarea { font-family: var(--mono); font-size: var(--text-sm); min-height: 8rem
 .choices label { align-items: flex-start; border: 1px solid var(--field-border); border-radius: var(--radius); cursor: pointer; display: flex; gap: var(--space-3); padding: var(--space-3); }
 .choices label:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); }
 .choices input { accent-color: var(--accent); margin-top: .3rem; }
+.recommended { background: var(--accent-soft); border-radius: var(--radius); padding: var(--space-4) var(--space-5); margin: 0 0 var(--space-5); }
+.recommended h3 { font-size: var(--text-lg); margin: 0 0 var(--space-2); }
+.recommended ul { margin: 0; padding-left: var(--space-5); }
+.advanced { border-top: 1px solid var(--border); margin-top: var(--space-5); padding-top: var(--space-4); }
+.advanced > summary { cursor: pointer; font-weight: 600; min-height: 2.75rem; display: flex; align-items: center; }
+.group { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; }
+.group legend { font-weight: 600; padding: 0 var(--space-2); }
+.field select { min-height: 2.75rem; width: 100%; border: 1px solid var(--field-border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); padding: 0 var(--space-3); font: inherit; }
+.field select:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+.field-link { color: var(--accent); }
 .buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); }
 #failure-actions + details, .buttons + details { margin-top: var(--space-4); }
 button, a.button { align-items: center; background: var(--surface); border: 1px solid var(--field-border); border-radius: var(--radius-sm); color: var(--text); cursor: pointer; display: inline-flex; font: inherit; font-weight: 600; gap: var(--space-2); min-height: 2.75rem; padding: var(--space-2) var(--space-4); text-decoration: none; }

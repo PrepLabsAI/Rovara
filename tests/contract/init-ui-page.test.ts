@@ -108,3 +108,38 @@ describe("the page shell", () => {
     expect(lintCopy(entries)).toEqual([]);
   });
 });
+
+describe("spec 048 phase 2: the settings screen", () => {
+  it("FR-020: shows the Recommended settings above the fields", () => {
+    expect(WIZARD_JS).toContain('el("h3", "", "Recommended settings")');
+    expect(WIZARD_JS).toContain("question.summary");
+  });
+
+  it("FR-021: puts advanced fields in a collapsed Advanced settings section, opened when one of them is refused", () => {
+    expect(WIZARD_JS).toContain('el("details", "advanced")');
+    expect(WIZARD_JS).toContain('el("summary", "", "Advanced settings")');
+    expect(WIZARD_JS).toContain('(question.fields ?? []).some((each) => each.section === "advanced" && each.error)');
+  });
+
+  it("FR-022: groups fields under one heading with a fieldset and legend", () => {
+    expect(WIZARD_JS).toContain('el("fieldset", "group")');
+    expect(WIZARD_JS).toContain('el("legend", "", field.group)');
+  });
+
+  it("FR-008: a choice field is a labelled select that starts on its default", () => {
+    expect(WIZARD_JS).toContain('el("select")');
+    expect(WIZARD_JS).toContain("input.value = field.value || field.defaultValue || \"\";");
+    expect(WIZARD_JS).toContain("label.htmlFor = id;");
+  });
+
+  it("FR-011 and FR-037: the forward button carries the form's verb, and a field's link opens in a new tab", () => {
+    expect(WIZARD_JS).toContain('sendButton(() => {');
+    expect(WIZARD_JS).toContain('question.submitLabel ?? "Continue"');
+    expect(WIZARD_JS).toContain('el("a", "field-link", field.link.label)');
+  });
+
+  it("every new text the page module holds passes the copy-lint", () => {
+    const entries: CopyEntry[] = quotedStrings(WIZARD_JS).map((text) => ({ where: "page module", text, context: "page" }));
+    expect(lintCopy(entries)).toEqual([]);
+  });
+});
