@@ -27,6 +27,18 @@ export type LatestNotVerified = z.infer<typeof LatestNotVerifiedSchema>;
 export const LatestChecksSchema = z.union([CheckReportSchema, LatestNotVerifiedSchema]);
 export type LatestChecks = z.infer<typeof LatestChecksSchema>;
 
+/**
+ * Spec 051 Ruling Y: a check that fails now and that no later report has shown passing. It outlives the report that
+ * found it, so a follow-up task that runs no tests (or one that reruns it as already failing) cannot hide it.
+ */
+export const StandingFailureSchema = z.object({
+  label: z.string().min(1).max(8_192),
+  source: z.enum(["project", "agent_commands"]),
+  class: z.enum(["regression", "already_failing", "failing_no_before"]),
+}).strict();
+export type StandingFailure = z.infer<typeof StandingFailureSchema>;
+export const StandingFailuresSchema = z.array(StandingFailureSchema).max(64);
+
 const NOT_VERIFIED_TEXT: Record<LatestNotVerified["reason"], string> = {
   failed: "the task failed",
   cancelled: "the task was cancelled",
@@ -56,13 +68,66 @@ function isMarker(latest: LatestChecks | undefined): latest is LatestNotVerified
   return latest !== undefined && "reason" in latest;
 }
 
+function failsNow(check: CheckEntry): boolean {
+  return check.after === "failed" || check.after === "timed_out";
+}
+
+function sameCheck(left: { label: string; source: string }, right: { label: string; source: string }): boolean {
+  return left.source === right.source && left.label === right.label;
+}
+
+/**
+ * Ruling Y: the standing failures after a task ends. A report clears each earlier failure it shows passing, and adds
+ * every check that fails in it, whatever its class (an earlier regression keeps its class). A marker (no report) keeps
+ * the earlier failures exactly.
+ */
+export function nextStandingFailures(previous: readonly StandingFailure[], latest: LatestChecks): StandingFailure[] {
+  if (isMarker(latest)) return [...previous];
+  const next = previous.filter((failure) => !latest.checks.some((check) => sameCheck(check, failure) && check.after === "passed"));
+  for (const check of latest.checks) {
+    if (!failsNow(check)) continue;
+    const failureClass = check.class === "regression" || check.class === "already_failing" || check.class === "failing_no_before" ? check.class : "failing_no_before";
+    const index = next.findIndex((failure) => sameCheck(check, failure));
+    if (index === -1) next.push({ label: check.label, source: check.source, class: failureClass });
+    else if (next[index]!.class !== "regression") next[index] = { ...next[index]!, class: failureClass };
+  }
+  return next.slice(0, 64);
+}
+
+/**
+ * The checks that still fail as the pull request sees them: the standing failures and any check failing in the latest
+ * report, less a project check that publish reran and found passing (publish judges the project's checks itself). A
+ * regression is never taken out that way: it stands until a later task's report shows it passing.
+ */
+export function failingChecks(
+  publishChecks: readonly CheckEntry[] | undefined,
+  latestChecks: LatestChecks | undefined,
+  standingFailures: readonly StandingFailure[] | undefined,
+): StandingFailure[] {
+  const failures = [...(standingFailures ?? [])];
+  for (const check of isMarker(latestChecks) || latestChecks === undefined ? [] : latestChecks.checks) {
+    if (failsNow(check) && !failures.some((failure) => sameCheck(failure, check))) {
+      failures.push({ label: check.label, source: check.source, class: check.class === "regression" || check.class === "already_failing" ? check.class : "failing_no_before" });
+    }
+  }
+  return failures.filter((failure) => failure.source !== "project" || failure.class === "regression"
+    || !(publishChecks ?? []).some((check) => check.label === failure.label && check.after === "passed"));
+}
+
 /**
  * A draft when any publish-time check fails (Ruling S: the pull request is the workspace's whole change since
- * preparation), or when the workspace's latest task report is a regression (D-2). A latest task that was not verified
- * does not make a draft on its own; neither does an already-failing check in a task report (FR-008).
+ * preparation), or when a check still fails that an earlier task or the latest one found failing (Ruling Y: whatever
+ * its class, because the agent's own commands have no preparation baseline). A latest task that was not verified does
+ * not make a draft on its own: it keeps what was known before.
  */
-export function checksMakeDraft(publishChecks: readonly CheckEntry[] | undefined, latestChecks: LatestChecks | undefined): boolean {
-  return (publishChecks ?? []).some((check) => check.after !== "passed") || (!isMarker(latestChecks) && latestChecks?.status === "regression");
+export function checksMakeDraft(
+  publishChecks: readonly CheckEntry[] | undefined,
+  latestChecks: LatestChecks | undefined,
+  standingFailures?: readonly StandingFailure[],
+): boolean {
+  return (publishChecks ?? []).some((check) => check.after !== "passed")
+    || (!isMarker(latestChecks) && latestChecks?.status === "regression")
+    || failingChecks(publishChecks, latestChecks, standingFailures).length > 0;
 }
 
 /** The tail of a check's output that the section shows. The worker and broker cut to it before sending or storing. */
@@ -85,6 +150,15 @@ interface Group {
   where: string;
   /** Publish judges against preparation (Ruling S), so its regression says so. */
   atPublish: boolean;
+  /** Ruling Y: earlier tasks' failures, which have no entry (and no output) of their own. */
+  earlier?: readonly StandingFailure[];
+}
+
+function groupLines(group: Group): string[] {
+  return [
+    ...group.checks.map((check) => checkLine(check, group.atPublish)),
+    ...(group.earlier ?? []).map((failure) => `- ${inlineCode(failure.label)}: still fails, ${CLASS_TEXT[failure.class]}`),
+  ];
 }
 
 /**
@@ -97,16 +171,22 @@ export function checksSection(
   publishChecks: readonly CheckEntry[] | undefined,
   latestChecks: LatestChecks | undefined,
   maxLength: number = PULL_REQUEST_BODY_MAX_CHARS,
+  standingFailures?: readonly StandingFailure[],
 ): string {
   const publish = publishChecks ?? [];
+  const failing = failingChecks(publish, latestChecks, standingFailures);
   const nothingToSay = latestChecks === undefined || (isMarker(latestChecks) && latestChecks.reason === "no_report");
-  if (nothingToSay && publish.every((check) => check.after === "passed")) return "";
-  const regressed = publish.some((check) => check.class === "regression") || (!isMarker(latestChecks) && latestChecks?.status === "regression");
+  if (nothingToSay && failing.length === 0 && publish.every((check) => check.after === "passed")) return "";
+  const regressed = publish.some((check) => check.class === "regression")
+    || (!isMarker(latestChecks) && latestChecks?.status === "regression")
+    || failing.some((failure) => failure.class === "regression");
   const status = regressed
     ? "**This pull request is a draft: a check that passed before this change fails now.**"
-    : checksMakeDraft(publish, latestChecks)
+    : publish.some((check) => check.after !== "passed")
       ? "**This pull request is a draft: a check fails at publish.**"
-      : "No check that passed before this change fails now.";
+      : failing.length > 0
+        ? "**This pull request is a draft: a check still fails.**"
+        : "No check that passed before this change fails now.";
   const groups: Group[] = [];
   let latestNote: string | undefined;
   if (isMarker(latestChecks)) {
@@ -123,8 +203,12 @@ export function checksSection(
         : "After the last task: Not verified (no checks ran).";
     }
   }
+  // Ruling Y: failures from earlier tasks that the latest report does not show.
+  const earlier = failing.filter((failure) => isMarker(latestChecks) || latestChecks === undefined
+    || !latestChecks.checks.some((check) => sameCheck(check, failure)));
+  if (earlier.length > 0) groups.push({ heading: "Still failing from earlier tasks:", checks: [], earlier, where: "earlier tasks", atPublish: false });
   if (publish.length > 0) groups.push({ heading: "At publish, AgentX reran the project's checks:", checks: publish, where: "at publish", atPublish: true });
-  const totalLines = groups.reduce((sum, group) => sum + group.checks.length, 0);
+  const totalLines = groups.reduce((sum, group) => sum + groupLines(group).length, 0);
   const outputs = groups.flatMap((group) => group.checks
     .filter((check) => check.after === "failed" || check.after === "timed_out")
     .map((check) => outputBlock(check, group.where)));
@@ -134,7 +218,7 @@ export function checksSection(
     let shown = 0;
     for (const group of groups) {
       const room = Math.max(0, lineLimit - shown);
-      const lines = group.checks.slice(0, room).map((check) => checkLine(check, group.atPublish));
+      const lines = groupLines(group).slice(0, room);
       shown += lines.length;
       if (lines.length > 0) blocks.push([group.heading, ...lines].join("\n"));
     }

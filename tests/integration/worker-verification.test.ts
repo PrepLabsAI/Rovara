@@ -452,7 +452,10 @@ describe("an extra try with no second settle (Ruling N)", () => {
     });
     expect(run.failure).toBeInstanceOf(WorkerOperationCancelledError);
     expect(fake.agentCalls).toEqual(["pytest"]);
-    expect(run.report).toMatchObject({ status: "not_verified", notVerifiedReason: "stopped", extraTry: "given" });
+    // Ruling Y: a stop does not verify the regression AgentX found, so it stands, and the failure carries it to the broker.
+    expect(run.report).toMatchObject({ status: "regression", extraTry: "given", source: "agent_commands" });
+    expect(run.report!.checks).toEqual([expect.objectContaining({ class: "regression" })]);
+    expect(CheckReportSchema.parse((run.failure as { checks?: unknown }).checks)).toMatchObject({ status: "regression" });
   });
 });
 
@@ -615,15 +618,27 @@ describe("the round after the extra try (Ruling O)", () => {
     expect(run.report).toMatchObject({ status: "regression", extraTry: "given" });
   });
 
-  it("M-2: a model error on the extra turn keeps the first round's checks, with not_verified/error", async () => {
+  it("M-2 (Ruling Y): a model error on the extra turn keeps the first round's regression, and the failure carries it", async () => {
     const fake = fakeRunners({ agent: [failedRun("1 failed")] });
     const run = await runTask({
       steps: [bash("pytest", "c1"), write("src.py", "x\n", "c2"), fauxAssistantMessage("Done."), fauxAssistantMessage("", { stopReason: "error", errorMessage: "model down" })],
       runners: fake.runners, shell: scriptedShell({ pytest: { exitCode: 0, output: "3 passed\n" } }),
     });
     expect(fake.agentCalls).toHaveLength(1);
-    expect(run.report).toMatchObject({ status: "not_verified", notVerifiedReason: "error", extraTry: "given", source: "agent_commands" });
+    expect(run.report).toMatchObject({ status: "regression", extraTry: "given", source: "agent_commands" });
+    expect(run.report).not.toHaveProperty("notVerifiedReason");
     expect(run.report!.checks).toEqual([expect.objectContaining({ class: "regression" })]);
+    // The task ends FAILED, and its error carries the report so the broker can keep the regression standing.
+    expect(run.failure).toBeInstanceOf(Error);
+    expect((run.failure as { checks?: unknown }).checks).toEqual(compactCheckReport(run.report!));
+  });
+
+  it("a task that fails with no regression carries no report on its error", async () => {
+    const run = await runTask({
+      steps: [fauxAssistantMessage("", { stopReason: "error", errorMessage: "model down" })],
+    });
+    expect(run.failure).toBeInstanceOf(Error);
+    expect(run.failure).not.toHaveProperty("checks");
   });
 });
 

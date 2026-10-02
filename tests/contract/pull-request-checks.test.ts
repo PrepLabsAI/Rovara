@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import {
   AGENTX_PREAMBLE_VERSION,
   agentxPreambleSha256,
+  checksReplyPrefix,
   checksSection,
   type CheckEntry,
   type CheckReport,
@@ -357,5 +358,95 @@ describe("the workspace's latest checks (spec 051, Ruling T)", () => {
     };
     await completeTask(h, report());
     expect(sent.filter((name) => name === "UpdateCommand")).toHaveLength(0);
+  });
+});
+
+// Ruling Y (C-1): with the agent's own commands there is no preparation baseline to judge publish against, so the
+// workspace remembers every check that fails now, across tasks, until a later report shows it passing.
+describe("standing failures across tasks (spec 051 Ruling Y)", () => {
+  const agentEntry = (overrides: Partial<CheckEntry> = {}): CheckEntry => entry({
+    id: "agent:0", label: "pytest -k a", source: "agent_commands", before: "passed", after: "failed", class: "regression", output: "1 failed", ...overrides,
+  });
+  const agentReport = (checks: CheckEntry[], overrides: Partial<CheckReport> = {}): CheckReport => report({ source: "agent_commands", checks, ...overrides });
+  const task1 = () => agentReport([agentEntry()], { status: "regression", extraTry: "given" });
+  const standingOf = (h: Harness): unknown => h.db.get(`WORKSPACE#${h.workspaceId}`, "META")?.standingFailures;
+  const listed = [{ label: "pytest -k a", source: "agent_commands", class: "regression" }];
+
+  it.each([
+    ["runs no tests", agentReport([], { status: "not_verified", notVerifiedReason: "no_checks", source: "none" })],
+    ["reruns the test before editing, so it is already failing", agentReport([agentEntry({ before: "failed", class: "already_failing" })])],
+    ["reruns the test after editing, with no earlier result", agentReport([agentEntry({ before: "unknown", class: "failing_no_before" })])],
+    ["runs a different test that passes", agentReport([agentEntry({ id: "agent:0", label: "pytest -k b", before: "unknown", after: "passed", class: "passing", output: "ok" })])],
+  ])("opens a draft listing the earlier regression when task 2 %s (C-1a)", async (_name, second) => {
+    const h = await harness({ readiness: [] });
+    await completeTask(h, task1());
+    await completeTask(h, second);
+    expect(standingOf(h)).toMatchObject(listed);
+    await publish(h);
+    const sent = sentToGitHub(h);
+    expect(sent.draft).toBe(true);
+    expect(sent.body).toContain("**This pull request is a draft: a check that passed before this change fails now.**");
+    expect(sent.body).toContain("`pytest -k a`");
+    expect(sent.body).not.toContain("No check that passed before this change fails now.");
+  });
+
+  it("does not say Checks passed in the reply for a task that ran no tests (C-1a)", () => {
+    expect(checksReplyPrefix([agentReport([], { status: "not_verified", notVerifiedReason: "no_checks", source: "none" })])).not.toContain("Checks passed");
+  });
+
+  it("clears the failure when task 2 reruns the test and it now passes, and opens a normal pull request (C-1b)", async () => {
+    const h = await harness({ readiness: [] });
+    await completeTask(h, task1());
+    const fixed = agentReport([agentEntry({ before: "failed", after: "passed", class: "fixed", output: "ok" })]);
+    await completeTask(h, fixed);
+    expect(standingOf(h)).toStrictEqual([]);
+    await publish(h);
+    const sent = sentToGitHub(h);
+    expect(sent).not.toHaveProperty("draft");
+    expect(sent.body).toContain("No check that passed before this change fails now.");
+  });
+
+  it("keeps a regression when the extra turn failed on a model error, because the failed task still reports it (C-1c)", async () => {
+    const h = await harness({ readiness: [] });
+    await completeTask(h, task1(), "FAILED");
+    expect(standingOf(h)).toMatchObject(listed);
+    await completeTask(h, undefined);
+    await publish(h);
+    expect(sentToGitHub(h).draft).toBe(true);
+  });
+
+  it.each([
+    ["a task without a report", async (h: Harness) => { await completeTask(h, undefined, "SUCCEEDED"); }],
+    ["a failed task", async (h: Harness) => { await completeTask(h, undefined, "FAILED"); }],
+    ["a cancelled task", async (h: Harness) => { await completeTask(h, undefined, "CANCELLED"); }],
+    ["a task still running", async (h: Harness) => { await completeTask(h, undefined, "none"); }],
+    ["a task its cancel ended", async (h: Harness) => {
+      await completeTask(h, undefined, "none");
+      const stopped = await h.handler({
+        source: "agentx.slack-ingress", action: "stop-task", userId: user,
+        thread: { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000002" },
+      });
+      await finishOperation(h.handler, h.db, h.workspaceId, (JSON.parse(stopped.body) as { cancelOperationId: string }).cancelOperationId, "SUCCEEDED");
+    }],
+  ])("keeps the earlier failures through %s", async (_name, marker) => {
+    const h = await harness({ readiness: [] });
+    await completeTask(h, task1());
+    await marker(h);
+    expect(standingOf(h)).toMatchObject(listed);
+    expect(latestChecksOf(h)).toMatchObject({ report: { status: "not_verified" } });
+  });
+
+  it("keeps a failure that a later task stopped before rerunning, and clears it only on a pass", async () => {
+    const h = await harness({ readiness: [] });
+    await completeTask(h, task1());
+    await completeTask(h, agentReport([], { status: "not_verified", notVerifiedReason: "stopped", source: "none" }));
+    expect(standingOf(h)).toMatchObject(listed);
+  });
+
+  it("does not let a project check's earlier failure draft a pull request that publish reran and passed", async () => {
+    const h = await harness();
+    await completeTask(h, report({ checks: [entry({ before: "failed", after: "failed", class: "already_failing", output: "lint error" })] }));
+    await publish(h, [entry()]);
+    expect(sentToGitHub(h)).not.toHaveProperty("draft");
   });
 });

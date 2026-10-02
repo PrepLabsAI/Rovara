@@ -26,8 +26,11 @@ import {
   LatestChecksSchema,
   PULL_REQUEST_BODY_MAX_CHARS,
   checksForSection,
+  StandingFailuresSchema,
   checksMakeDraft,
   checksSection,
+  nextStandingFailures,
+  type StandingFailure,
   taskResultChecks,
   type CheckEntry,
   type LatestChecks,
@@ -3475,7 +3478,8 @@ async function reconcilePullRequest(
   await assertCodeBuildGatesPassed(dependencies, operation, input.commit);
   // A revert undoes a merged pull request, so the workspace's own task work is not what it publishes.
   const latestChecks = expected.mode === "revert" ? undefined : await latestWorkspaceChecks(dependencies, operation.workspaceId);
-  const { body, draft } = checkedPullRequest(expected.body, expected.draft, publishChecks, latestChecks);
+  const standingFailures = expected.mode === "revert" ? [] : await workspaceStandingFailures(dependencies, operation.workspaceId);
+  const { body, draft } = checkedPullRequest(expected.body, expected.draft, publishChecks, latestChecks, standingFailures);
   const pullRequest = await dependencies.githubPullRequests.reconcilePullRequest({
     repositoryUrl: expected.repositoryUrl,
     headBranch: expected.headBranch,
@@ -3532,7 +3536,8 @@ async function reconcilePullRequest(
       Item: record,
     }));
   }
-  return pullRequest;
+  // Ruling Z: the worker's result says whether the pull request is a draft, so the reply can say so.
+  return { ...pullRequest, draft: draft === true };
 }
 
 /** Spec 051 (D-7): the checks the worker ran at publish, judged against their befores; none from an older worker. */
@@ -3572,14 +3577,16 @@ function checkedPullRequest(
   draft: boolean | undefined,
   publishChecks: readonly CheckEntry[] | undefined,
   latestChecks: LatestChecks | undefined,
+  standingFailures: readonly StandingFailure[] = [],
 ): { body: string | undefined; draft: boolean | undefined } {
   const separator = body === undefined || body === "" ? "" : "\n\n";
   const shownPublish = publishChecks === undefined ? undefined : redactedEntries(publishChecks);
   const shownLatest = latestChecks === undefined || "reason" in latestChecks ? latestChecks : { ...latestChecks, checks: redactedEntries(latestChecks.checks) };
-  const section = checksSection(shownPublish, shownLatest, PULL_REQUEST_BODY_MAX_CHARS - (body?.length ?? 0) - separator.length);
+  const shownStanding = standingFailures.map((failure) => ({ ...failure, label: redactText(failure.label) }));
+  const section = checksSection(shownPublish, shownLatest, PULL_REQUEST_BODY_MAX_CHARS - (body?.length ?? 0) - separator.length, shownStanding);
   return {
     body: section === "" ? body : `${body ?? ""}${separator}${section}`,
-    draft: checksMakeDraft(publishChecks, latestChecks) ? true : draft,
+    draft: checksMakeDraft(publishChecks, latestChecks, standingFailures) ? true : draft,
   };
 }
 
@@ -4103,6 +4110,7 @@ async function recordTerminalResult(
   // update holds only while this operation owns the workspace at its fence, so a late or repeated result never
   // replaces a newer task's, and no write can be lost after the result commits.
   const latestChecks = await terminalLatestChecks(dependencies, operation, terminalStatus, result, now);
+  const standingFailures = latestChecks === undefined ? undefined : await nextWorkspaceStanding(dependencies, operation.workspaceId, latestChecks.report);
   const workspaceExpression = operation.kind === "prepare" && terminalStatus === "SUCCEEDED"
     ? "SET #status = :status, updatedAt = :now, preparationManifest = :manifest REMOVE activeOperationId"
     : operation.kind === "close" && closePreflight?.safeToClose !== true
@@ -4111,7 +4119,7 @@ async function recordTerminalResult(
   const workspaceUpdate: TransactItems[number] = { Update: {
     TableName: dependencies.tableName,
     Key: workspaceKey(workspace.id),
-    UpdateExpression: latestChecks === undefined ? workspaceExpression : workspaceExpression.replace(" REMOVE ", ", latestChecks = :latestChecks REMOVE "),
+    UpdateExpression: latestChecks === undefined ? workspaceExpression : workspaceExpression.replace(" REMOVE ", ", latestChecks = :latestChecks, standingFailures = :standingFailures REMOVE "),
     ConditionExpression: operation.kind === "cancel"
       ? "activeOperationId = :target AND fence = :fence"
       : "activeOperationId = :operation AND fence = :fence",
@@ -4122,7 +4130,7 @@ async function recordTerminalResult(
       ":fence": operation.fence,
       ...(operation.kind === "cancel" ? { ":target": operation.targetOperationId } : { ":operation": operation.id }),
       ...(operation.kind === "prepare" && terminalStatus === "SUCCEEDED" ? { ":manifest": ".agentx/preparation-manifest.json" } : {}),
-      ...(latestChecks === undefined ? {} : { ":latestChecks": latestChecks }),
+      ...(latestChecks === undefined ? {} : { ":latestChecks": latestChecks, ":standingFailures": standingFailures }),
       ...(operation.kind === "close" && closePreflight?.safeToClose !== true
         ? { ":closeError": error ?? (closePreflight ? "workspace contains unpublished work" : "workspace close preflight failed") }
         : {}),
@@ -4203,6 +4211,23 @@ async function recordTerminalResult(
 /** Spec 051 Ruling T: the workspace's latest checks, as stored: what is known, which task, and when. */
 function latestChecksItem(latest: LatestChecks, operationId: string, fence: number, recordedAt: string) {
   return { report: checksForSection(latest), operationId, fence, recordedAt };
+}
+
+/**
+ * Spec 051 Ruling Y: the workspace's standing failures once `latest` is recorded: the earlier ones not shown passing in
+ * it, and every check failing in it. A task that ends without a report keeps the earlier ones. Written with the latest
+ * checks in the terminal transaction, so the fence guards both.
+ */
+async function nextWorkspaceStanding(dependencies: AwsBrokerDependencies, workspaceId: string, latest: LatestChecks): Promise<StandingFailure[]> {
+  return nextStandingFailures(await workspaceStandingFailures(dependencies, workspaceId), latest);
+}
+
+async function workspaceStandingFailures(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<StandingFailure[]> {
+  const workspace = await getItem<{ standingFailures?: unknown }>(dependencies, workspaceKey(workspaceId));
+  const parsed = StandingFailuresSchema.safeParse(workspace?.standingFailures ?? []);
+  if (parsed.success) return parsed.data;
+  console.log(JSON.stringify({ component: "broker", event: "workspace.standing_failures_unreadable", workspaceId }));
+  return [];
 }
 
 /**

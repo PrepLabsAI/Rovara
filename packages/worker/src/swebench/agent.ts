@@ -6,7 +6,7 @@ import type { DevcontainerPaths } from "../devcontainer.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "../pi-session.js";
 import { ToolLoopGuard } from "../tool-loop-guard.js";
 import { createCheckRunners, planChecks, type CheckRunners } from "../verification/checks.js";
-import { assistantText, notVerifiedReport, verificationExtension } from "../verification/extension.js";
+import { assistantText, finalCheckReport, verificationExtension } from "../verification/extension.js";
 import { CommandRecorder } from "../verification/recorder.js";
 
 export interface AgentRun {
@@ -145,12 +145,13 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
   const agentClaim = parseAgentClaim(finalText);
   // P-4: Pi skips agent_before_settle after an abort, so a stopped run has no report from the extension; a model
   // error is no finish to check. Ruling N: an extra try with no second settle and no stop keeps the first round.
-  const checks: CheckReport = reportedChecks
-    ?? (firstRoundChecks !== undefined && finalStop === undefined && modelError === undefined ? firstRoundChecks : undefined)
-    ?? notVerifiedReport(finalStop === undefined && modelError !== undefined ? "error" : "stopped", {
-      extraTry: firstRoundChecks === undefined ? "not_needed" : "given",
-      agentClaim: finalStop === undefined ? agentClaim : "none",
-    });
+  const checks: CheckReport = finalCheckReport({
+    reported: reportedChecks,
+    firstRound: firstRoundChecks,
+    stopped: finalStop !== undefined,
+    errored: modelError !== undefined,
+    agentClaim: finalStop === undefined ? agentClaim : "none",
+  });
   // A claim made before a limit stopped the run says nothing about how it ended.
   const claim = finalStop === undefined ? agentClaim : "none";
   const common = { session, agentSeconds, toolCalls, diagnostics, checks, agentClaim: claim };

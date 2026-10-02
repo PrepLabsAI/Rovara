@@ -26,7 +26,7 @@ import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
 import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
-import { assistantText, checksArtifactContent, compactCheckReport, notVerifiedReport, verificationExtension } from "./verification/extension.js";
+import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, verificationExtension } from "./verification/extension.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
   createTaskUsageTelemetry,
@@ -230,12 +230,14 @@ export async function runTaskInvocation(
     // P-4: Pi skips agent_before_settle after an abort, so a stopped run has no report from the extension.
     // Ruling N: an extra try with no second settle and no stop keeps the first round's regression.
     // A cancelled model call also ends with stopReason "error", so the stop is read first.
-    const finalChecks = (): CheckReport => reportedChecks
-      ?? (firstRoundChecks !== undefined && !verificationStop.signal.aborted && lastAssistant?.stopReason !== "error" ? firstRoundChecks : undefined)
-      ?? notVerifiedReport(
-        !verificationStop.signal.aborted && lastAssistant?.stopReason === "error" ? "error" : "stopped",
-        { extraTry: firstRoundChecks === undefined ? "not_needed" : "given", agentClaim: parseAgentClaim(finalText) },
-      );
+    // Ruling Y: a regression AgentX found stands through a stop, a cancel or a model error on the extra turn.
+    const finalChecks = (): CheckReport => finalCheckReport({
+      reported: reportedChecks,
+      firstRound: firstRoundChecks,
+      stopped: verificationStop.signal.aborted,
+      errored: lastAssistant?.stopReason === "error",
+      agentClaim: parseAgentClaim(finalText),
+    });
     let checksAttempted = false;
     const publishChecks = async (): Promise<void> => {
       checksAttempted = true;
@@ -400,8 +402,13 @@ export async function runTaskInvocation(
     } catch (error) {
       telemetryFailure ??= error;
     }
-    if (taskFailure !== undefined) throw taskFailure;
-    if (telemetryFailure !== undefined) throw asError(telemetryFailure);
+    // Ruling Y: a task that ends failed or cancelled still tells the broker about a regression, so it stays standing.
+    const withChecks = (error: Error): Error => {
+      const final = finalChecks();
+      return final.status === "regression" ? Object.assign(error, { checks: compactCheckReport(final) }) : error;
+    };
+    if (taskFailure !== undefined) throw withChecks(taskFailure);
+    if (telemetryFailure !== undefined) throw withChecks(asError(telemetryFailure));
     if (!taskResult) throw new Error("task completed without a result");
     return taskResult;
   } finally {

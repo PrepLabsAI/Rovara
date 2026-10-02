@@ -30,6 +30,8 @@ export interface PullRequestCallbackResult {
   number: number;
   url: string;
   reconciled: boolean;
+  /** Spec 051 Ruling Z: the pull request opened as a draft. A broker built before it omits this. */
+  draft?: boolean;
 }
 
 export type PullRequestSink = (input: PullRequestCallbackInput) => Promise<PullRequestCallbackResult>;
@@ -123,6 +125,7 @@ export function createWorkerCallbackSinks(input: {
         number: result.number as number,
         url: result.url,
         reconciled: result.reconciled,
+        ...(typeof result.draft === "boolean" ? { draft: result.draft } : {}),
       };
     },
     pullRequestUpdateSink: async (request) => {

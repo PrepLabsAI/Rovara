@@ -7,6 +7,7 @@ import {
   checksForSection,
   checksMakeDraft,
   checksSection,
+  nextStandingFailures,
   type CheckEntry,
   type CheckReport,
 } from "@agentx/contracts";
@@ -69,13 +70,15 @@ describe("checksSection (FR-008)", () => {
     ].join("\n"));
   });
 
-  it("notes a check the task found already failing, without making a draft", () => {
+  // Ruling Y (C-1): AgentX cannot tell that a check the agent's own task found failing was not the agent's doing, so it
+  // is a draft; a project check that publish reran and found passing is left out (publish judges those itself).
+  it("notes a check the task found already failing, and makes a draft", () => {
     const already = entry({ label: "make lint", before: "failed", after: "failed", class: "already_failing", output: "" });
     const latest = report({ checks: [already] });
     expect(checksSection(undefined, latest)).toBe([
       "## Checks",
       "",
-      "No check that passed before this change fails now.",
+      "**This pull request is a draft: a check still fails.**",
       "",
       "After the last task, AgentX reran the project's checks:",
       "- `make lint`: failed → failed, already failing before this change",
@@ -86,7 +89,8 @@ describe("checksSection (FR-008)", () => {
       "(no output)",
       "```",
     ].join("\n"));
-    expect(checksMakeDraft(undefined, latest)).toBe(false);
+    expect(checksMakeDraft(undefined, latest)).toBe(true);
+    expect(checksMakeDraft([entry({ label: "make lint" })], latest)).toBe(false);
   });
 
   // Ruling S: the pull request is the whole change since preparation, so any failing check at publish is a draft.
@@ -182,10 +186,46 @@ describe("checksSection (FR-008)", () => {
 
   it("makes a draft for a failing publish check or a regression report (Rulings C, S)", () => {
     expect(checksMakeDraft(undefined, undefined)).toBe(false);
-    expect(checksMakeDraft(undefined, report({ checks: [entry({ before: "unknown", after: "failed", class: "failing_no_before" })] }))).toBe(false);
+    expect(checksMakeDraft(undefined, report({ checks: [entry({ before: "unknown", after: "failed", class: "failing_no_before" })] }))).toBe(true);
     expect(checksMakeDraft([entry({ after: "failed", class: "regression" })], undefined)).toBe(true);
     expect(checksMakeDraft(undefined, report({ status: "regression" }))).toBe(true);
     expect(checksMakeDraft(undefined, report({ status: "verified" }))).toBe(false);
+  });
+
+  it("makes a draft for a standing failure, whatever the latest report is, and lists it (Ruling Y)", () => {
+    const standing = [{ label: "pytest -k a", source: "agent_commands" as const, class: "regression" as const }];
+    const none = report({ status: "not_verified", notVerifiedReason: "no_checks", source: "none" });
+    expect(checksMakeDraft(undefined, none)).toBe(false);
+    expect(checksMakeDraft(undefined, none, standing)).toBe(true);
+    expect(checksMakeDraft(undefined, { status: "not_verified", reason: "failed" }, standing)).toBe(true);
+    expect(checksSection(undefined, none, undefined, standing)).toBe([
+      "## Checks",
+      "",
+      "**This pull request is a draft: a check that passed before this change fails now.**",
+      "",
+      "After the last task: Not verified (no checks ran).",
+      "",
+      "Still failing from earlier tasks:",
+      "- `pytest -k a`: still fails, regression",
+    ].join("\n"));
+    // A failure the latest report also shows is listed once, there (its line and its output).
+    const shown = report({ source: "agent_commands", checks: [entry({ label: "pytest -k a", source: "agent_commands", before: "failed", after: "failed", class: "already_failing" })] });
+    expect(checksSection(undefined, shown, undefined, standing).match(/pytest -k a/g)).toHaveLength(2);
+    expect(checksSection(undefined, shown, undefined, standing)).not.toContain("Still failing from earlier tasks");
+  });
+
+  it("tracks standing failures: a report clears what passes, adds what fails, and a marker keeps them (Ruling Y)", () => {
+    const failing = (label: string, checkClass: CheckEntry["class"]) => entry({ label, source: "agent_commands", after: "failed", class: checkClass });
+    const first = nextStandingFailures([], report({ source: "agent_commands", checks: [failing("a", "regression"), failing("b", "failing_no_before"), entry({ label: "c", source: "agent_commands" })] }));
+    expect(first).toEqual([
+      { label: "a", source: "agent_commands", class: "regression" },
+      { label: "b", source: "agent_commands", class: "failing_no_before" },
+    ]);
+    expect(nextStandingFailures(first, { status: "not_verified", reason: "cancelled" })).toEqual(first);
+    // "a" now reads as already failing, and stays a regression; "b" passes and clears.
+    const second = nextStandingFailures(first, report({ source: "agent_commands", checks: [failing("a", "already_failing"), entry({ label: "b", source: "agent_commands", before: "failed", class: "fixed" })] }));
+    expect(second).toEqual([{ label: "a", source: "agent_commands", class: "regression" }]);
+    expect(nextStandingFailures(second, report({ source: "agent_commands", checks: [entry({ label: "a", source: "agent_commands", before: "failed", class: "fixed" })] }))).toEqual([]);
   });
 
   it("shows the last 40 lines of output, within a fence its backticks cannot close", () => {

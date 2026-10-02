@@ -168,7 +168,7 @@ export async function publishWorkspace(
     codeBuildChecks,
     reconciled: pullRequest.reconciled,
   };
-  if (mode === "create") return PullRequestResultSchema.parse(baseResult);
+  if (mode === "create") return PullRequestResultSchema.parse({ ...baseResult, ...(pullRequest.draft === undefined ? {} : { draft: pullRequest.draft }) });
   return PullRequestLifecycleResultSchema.parse({
     ...baseResult,
     action: mode,

@@ -57,6 +57,28 @@ export function notVerifiedReport(
   };
 }
 
+/**
+ * What a task reports at its end when the extension's last report is missing or stale. Ruling Y: once a round found a
+ * regression, nothing but a later round that reruns it clears it, so a stop, a cancel, a model error or a loop-guard
+ * stop on the extra turn keeps the regression (Ruling N: so does an extra try that never settled again). With no
+ * regression behind it, a stop reads `stopped`, a model error `error`. One definition for the coding task and the eval.
+ */
+export function finalCheckReport(input: {
+  reported: CheckReport | undefined;
+  firstRound: CheckReport | undefined;
+  stopped: boolean;
+  errored: boolean;
+  agentClaim: CheckReport["agentClaim"];
+}): CheckReport {
+  if (input.reported !== undefined) return input.reported;
+  if (input.firstRound !== undefined) return { ...input.firstRound, agentClaim: input.agentClaim };
+  return notVerifiedReason(input);
+}
+
+function notVerifiedReason(input: { stopped: boolean; errored: boolean; agentClaim: CheckReport["agentClaim"] }): CheckReport {
+  return notVerifiedReport(!input.stopped && input.errored ? "error" : "stopped", { agentClaim: input.agentClaim });
+}
+
 /** The final assistant message's text, as the agent's account is read (lastAssistantResponse), or undefined. */
 export function assistantText(message: unknown): string | undefined {
   return lastAssistantResponse([{ payload: { type: "message_end", message } }]);
@@ -74,6 +96,14 @@ export function verificationExtension(options: VerificationOptions): InlineExten
       let extraTry: CheckReport["extraTry"] = "not_needed";
       // The round that gave the extra try: its regressions stand until a later round reruns them (I-2, M-2).
       let firstRound: { source: CheckReport["source"]; entries: CheckEntry[] } | undefined;
+      // Ruling Y: what an end that is not a verdict reports: the regression that stands, or the reason there is no check.
+      const unverified = (reason: NonNullable<CheckReport["notVerifiedReason"]>, claim: CheckReport["agentClaim"], details: { source?: CheckReport["source"]; checks?: CheckEntry[] } = {}): CheckReport => {
+        if (firstRound === undefined) return notVerifiedReport(reason, { extraTry, agentClaim: claim, ...details });
+        return {
+          status: "regression", source: firstRound.source, preambleVersion: AGENTX_PREAMBLE_VERSION, preambleSha256: agentxPreambleSha256(),
+          checks: firstRound.entries, extraTry: "given", agentClaim: claim,
+        };
+      };
       // Only the last assistant message counts: after the extra try, the extra turn's own message (Review Focus 4).
       let finalText: string | undefined;
 
@@ -94,24 +124,22 @@ export function verificationExtension(options: VerificationOptions): InlineExten
         try {
           // Review Focus 3: a model error is no finish to check; Pi skips this hook on an abort, but not on every one.
           if (event.outcome === "error") {
-            return report(notVerifiedReport("error", {
-              extraTry, agentClaim: claim,
-              ...(firstRound === undefined ? {} : { source: firstRound.source, checks: firstRound.entries }),
-            }));
+            return report(unverified("error", claim));
           }
-          if (event.outcome !== "completed" || options.signal.aborted) return report(notVerifiedReport("stopped", { extraTry, agentClaim: claim }));
+          if (event.outcome !== "completed" || options.signal.aborted) return report(unverified("stopped", claim));
           await recorder.settled();
           const plan = options.plan();
-          if (plan.source === "none") return report(notVerifiedReport("no_checks", { extraTry, agentClaim: claim }));
+          if (plan.source === "none") return report(unverified("no_checks", claim));
           const round = await runChecks(plan, options.runners, { budgetMs: options.budgetMs(), signal: options.signal });
           if (round.stopped || options.signal.aborted) {
-            return report(notVerifiedReport("stopped", { source: plan.source, checks: round.entries, extraTry, agentClaim: claim }));
+            return report(unverified("stopped", claim, { source: plan.source, checks: round.entries }));
           }
           const entries = firstRound === undefined ? round.entries : withStandingRegressions(round.entries, firstRound.entries);
           const status = reportStatus(entries);
           const roundReport = (): CheckReport => ({
             status,
-            ...(status === "not_verified" ? { notVerifiedReason: "no_checks" as const } : {}),
+            // Every check unrerun (the budget, or a refused cd): the project has checks, so "no checks" would mislead.
+            ...(status === "not_verified" ? { notVerifiedReason: "stopped" as const } : {}),
             source: plan.source,
             preambleVersion: AGENTX_PREAMBLE_VERSION,
             preambleSha256: agentxPreambleSha256(),
@@ -137,7 +165,7 @@ export function verificationExtension(options: VerificationOptions): InlineExten
           try {
             options.onDiagnostic?.(`AgentX could not check the agent's work: ${error instanceof Error ? error.message : String(error)}`);
           } catch { /* Reporting must not break the settle. */ }
-          return report(notVerifiedReport("error", { extraTry, agentClaim: claim }));
+          return report(unverified("error", claim));
         }
       });
     },
