@@ -51,7 +51,14 @@ export function stateEntries(state: WizardState, where: string): CopyEntry[] {
   const at = (text: string, part: string, context: CopyContext = "page"): CopyEntry => ({ where: `${where}: ${part}`, text, context, failedRun });
   const entries: CopyEntry[] = [at(state.pageTitle, "tab title"), at(state.journey.timeLeftText, "time left")];
   for (const phase of state.journey.phases) entries.push(at(phase.title, "rail"), at(phase.statusWord, "rail"), at(phase.timeText, "rail"));
-  for (const step of state.steps) entries.push(at(step.title, "step"), at(step.usualText, "step"));
+  for (const step of state.steps) {
+    entries.push(at(step.title, "step"), at(step.usualText, "step"));
+    // review fix round 1: a waiting step's message is terminal-only text (FR-072; slack-app.ts,
+    // finish-steps.ts say "run agentx init --env ... again"); the page never renders it
+    // (page.ts's renderRail reads only title/status/startedAt/usualSeconds/usualText/tookSeconds),
+    // so it is linted as technical detail, not page copy.
+    if (step.message !== undefined) entries.push(at(step.message, "step message", "details"));
+  }
   for (const line of state.welcome ?? []) entries.push(at(line, "welcome"));
   if (state.resume !== undefined) entries.push(...state.resume.completed.map((title) => at(title, "resume")), ...(state.resume.continueFrom === undefined ? [] : [at(state.resume.continueFrom, "resume")]));
   const question = state.question;
@@ -70,7 +77,7 @@ export function stateEntries(state: WizardState, where: string): CopyEntry[] {
     for (const command of card.commands ?? []) entries.push(at(command.label, `${card.id} command`, context), at(command.command, `${card.id} command`, context));
     for (const line of card.details ?? []) entries.push(at(line, `${card.id} details`, "details"));
   }
-  if (state.link !== undefined) entries.push(at(state.link.label, "run link"));
+  if (state.link !== undefined) entries.push(at(state.link.label, "run link"), ...(state.link.note === undefined ? [] : [at(state.link.note, "run link")]));
   if (state.failure !== undefined) {
     entries.push(at(state.failure.title, "failure"), at(state.failure.what, "failure"), at(state.failure.next, "failure"));
     entries.push(...state.failure.details.map((line) => at(line, "failure details", "details")));

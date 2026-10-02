@@ -67,6 +67,15 @@ describe("the page shell", () => {
     expect(WIZARD_JS).not.toContain("Leave empty for");
   });
 
+  // Review fix round 1: a waiting step's message (protocol.ts's WizardStep.message) is terminal-only
+  // text that keeps the terminal's own rerun instruction (FR-072; slack-app.ts, finish-steps.ts).
+  // Pinned here so the page cannot start rendering it without this test being touched too; the
+  // copy-lint's stateEntries (tests/support/copy-lint.ts) reads it only as a technical detail.
+  it("never renders a step's message: that text stays terminal-only (FR-072)", () => {
+    expect(WIZARD_JS).not.toMatch(/\bstep\.message\b/);
+    expect(WIZARD_JS).not.toContain(".message");
+  });
+
   it("uses only the design system's classes, on every element it builds", () => {
     const used = new Set<string>();
     for (const match of html.matchAll(/class="([^"]+)"/g)) for (const name of (match[1] ?? "").split(" ")) used.add(name);

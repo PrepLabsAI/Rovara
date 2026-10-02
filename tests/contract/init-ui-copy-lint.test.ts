@@ -106,6 +106,22 @@ describe("SC-011: the whole install, as the page shows it", () => {
     expect(lintCopy(operator.states.flatMap((state, index) => stateEntries(state, `state ${index}`)))).toEqual([]);
   });
 
+  // Review fix round 1: a waiting step carries a `message` (WizardStep.message) the earlier three
+  // journeys never reach, since none of them pauses on someone else. Driving one here (the same
+  // script as commands.ts's "a run paused waiting on a Slack admin's approval" test) proves
+  // stateEntries actually walks a waiting step's message, and that the whole state history still
+  // lints clean with it present.
+  it("a run paused waiting on a Slack admin's approval says no internal word anywhere on the page", async () => {
+    const h = await harness();
+    const operator = fakeWizardOperator([...FIRST_RUN, "approval"]);
+    const code = await h.run(["--ui"], { openBrowser: operator.open });
+    await operator.settled();
+    expect(code).toBe(0);
+    // Not vacuous: a step really did reach "waiting" with a message, in some state of the run.
+    expect(operator.states.some((state) => state.steps.some((step) => step.status === "waiting" && step.message !== undefined))).toBe(true);
+    expect(lintCopy(operator.states.flatMap((state, index) => stateEntries(state, `state ${index}`)))).toEqual([]);
+  });
+
   it("FR-010 and FR-011: every question of a first install has a label, a why line, and verb buttons", async () => {
     const h = await harness();
     const { operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
