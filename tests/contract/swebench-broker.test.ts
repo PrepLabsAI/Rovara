@@ -529,14 +529,15 @@ describe("the shared limit on concurrent runs (spec 052 FR-005)", () => {
 
 describe("eval batches on the broker's run path (spec 052)", () => {
   it("records a batch run's result from the runner's callback and starts the batch's next run", async () => {
-    const broker = await evalBroker({ maxConcurrentEvals: 1, models: {
+    // Two slots: one for the batch, one kept for single runs (Ruling 30).
+    const broker = await evalBroker({ maxConcurrentEvals: 2, models: {
       default: { provider: "amazon-bedrock", modelId: "us.vendor.batch-v1" },
       approved: [{ provider: "amazon-bedrock", modelId: "us.vendor.batch-v1" }],
     } });
     await enable(broker.handler);
     const dependencies = withEvalBatches({
       documentClient: broker.db as never, s3: broker.brokerInput.s3 as never, tableName: "state", artifactBucketName: "artifacts", callbackSigningKey: "c".repeat(64),
-      deployment: async () => ({ ...deployment, settings: { ...deployment.settings, maxConcurrentEvals: 1 } }), startExecution: broker.startExecution,
+      deployment: async () => ({ ...deployment, settings: { ...deployment.settings, maxConcurrentEvals: 2 } }), startExecution: broker.startExecution,
       estimateRunCostUsd: () => 2,
     });
     const model = { provider: "amazon-bedrock", modelId: "us.vendor.batch-v1" };

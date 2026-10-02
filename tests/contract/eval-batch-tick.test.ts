@@ -122,7 +122,7 @@ describe("the results files (spec 052 FR-010)", () => {
   });
 
   it("writes summary.json from the rows, removes the batch from the active list, and writes nothing again on the next tick", async () => {
-    const h = await harness();
+    const h = await harness({ maxConcurrentEvals: 5 });
     const batch = await createBatch(h.dependencies, h.context, file());
     await topUpBatches(h.dependencies);
     for (const entry of (await getBatch(h.dependencies, batch.batchId))!.queue) {
@@ -220,7 +220,7 @@ describe("rebuilding lost rows before a batch's results are written (spec 052 Ru
   ];
 
   it.each(variants)("rebuilds $name with the charge it had, so the charges still sum to the spend", async ({ name, setUp }) => {
-    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10 });
+    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap], costCapUsd: name.startsWith("a D-8") ? 20 : 200 }));
     await topUpBatches(h.dependencies);
     const runId = await setUp(h, batch.batchId);
@@ -247,7 +247,7 @@ describe("rebuilding lost rows before a batch's results are written (spec 052 Ru
   });
 
   it("writes no row for an entry that never ran", async () => {
-    const h = await harness({ maxConcurrentEvals: 1 });
+    const h = await harness({ maxConcurrentEvals: 2 });
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]] }));
     await topUpBatches(h.dependencies);
     await stopBatch(h.dependencies, batch.batchId, h.context.requester);
@@ -261,7 +261,7 @@ describe("rebuilding lost rows before a batch's results are written (spec 052 Ru
 
 describe("run ends the broker missed (spec 052 FR-006)", () => {
   it("records runs the state machine ended, and fills every free slot, not just one", async () => {
-    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
+    const h = await harness({ maxConcurrentEvals: 3, maxCostUsd: 10 });
     const batch = await createBatch(h.dependencies, h.context, file());
     await topUpBatches(h.dependencies);
     const running = (await getBatch(h.dependencies, batch.batchId))!.queue.filter((entry) => entry.state === "RUNNING");
@@ -469,7 +469,7 @@ describe("slot reconcile (spec 052 FR-005)", () => {
   });
 
   it("runs in the tick, before the top-up, so a leaked slot is filled in the same tick", async () => {
-    const h = await harness({ maxConcurrentEvals: 1 });
+    const h = await harness({ maxConcurrentEvals: 2 });
     await singleRun(h, RUN_A);
     endWithoutRelease(h, RUN_A);
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
@@ -498,7 +498,7 @@ describe("the tick with no batch active", () => {
   });
 
   it("releases a leaked slot of an ended run, so it cannot block single runs", async () => {
-    const h = await harness({ maxConcurrentEvals: 1 });
+    const h = await harness({ maxConcurrentEvals: 2 });
     await singleRun(h, RUN_A);
     endWithoutRelease(h, RUN_A);
     const report = await runEvalBatchTick(h.dependencies);
@@ -570,7 +570,7 @@ describe("runs whose execution died before it ended them (spec 052 Ruling 13)", 
   });
 
   it("ends a run whose execution stopped, charges its ceiling, releases its slot once, and lets the batch finalize", async () => {
-    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10 });
+    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap], costCapUsd: 20 }));
     await topUpBatches(h.dependencies);
     const runId = evalBatchRunId(batch.batchId, 0, 1);
@@ -593,7 +593,7 @@ describe("runs whose execution died before it ended them (spec 052 Ruling 13)", 
   });
 
   it("charges nothing for a run whose runner never started, and retries it", async () => {
-    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10 });
+    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
     await topUpBatches(h.dependencies);
     const runId = evalBatchRunId(batch.batchId, 0, 1);
@@ -655,7 +655,7 @@ describe("runs whose execution died before it ended them (spec 052 Ruling 13)", 
   });
 
   it("releases once and writes one row when EndRun ends the run while the tick looks", async () => {
-    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10 });
+    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
     await topUpBatches(h.dependencies);
     const runId = evalBatchRunId(batch.batchId, 0, 1);
@@ -678,7 +678,7 @@ describe("a dead run's runner that is still alive (spec 052 Ruling 16)", () => {
   const GRACE_MS = 10 * 60_000;
 
   it("refuses the runner's late start with a final 409, so a run charged $0 cannot spend, and its retry is counted once", async () => {
-    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10 });
+    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
     await topUpBatches(h.dependencies);
     const runId = evalBatchRunId(batch.batchId, 0, 1);
@@ -770,7 +770,7 @@ describe("a dead run's runner that is still alive (spec 052 Ruling 16)", () => {
 
 describe("charges that sum exactly to the spend (spec 052 Ruling 17)", () => {
   it("rounds an estimated ceiling charge as spend is rounded", async () => {
-    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10.123_456_7 });
+    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10.123_456_7 });
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
     await topUpBatches(h.dependencies);
     const runId = evalBatchRunId(batch.batchId, 0, 1);
@@ -873,7 +873,7 @@ describe("a tick that cannot do its work fails (spec 052 Ruling 14)", () => {
 
 describe("ticks and callbacks that overlap", () => {
   it("leaves the charge and the row alone when the runner's result arrives after the tick recorded the end", async () => {
-    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10 });
+    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
     await topUpBatches(h.dependencies);
     const runId = evalBatchRunId(batch.batchId, 0, 1);
@@ -889,7 +889,7 @@ describe("ticks and callbacks that overlap", () => {
   });
 
   it("writes the same files once over when two ticks finalize a batch at once", async () => {
-    const h = await harness();
+    const h = await harness({ maxConcurrentEvals: 5 });
     const batch = await createBatch(h.dependencies, h.context, file());
     await topUpBatches(h.dependencies);
     for (const entry of (await getBatch(h.dependencies, batch.batchId))!.queue) await finish(h, entry.runId!, graded(0.25));

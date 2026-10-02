@@ -134,6 +134,14 @@ export function swebenchSlotKey(runId: string) {
 }
 
 /** Spec 052: how many runs hold a slot, by the counter; a start re-checks it atomically. */
+/** Spec 052 Ruling 30: the slots batch runs never take, so a single run is never locked out (D-2). */
+export const EVAL_SLOTS_KEPT_FOR_SINGLE_RUNS = 1;
+
+/** The slots all batches together may hold: maxConcurrentEvals less the one kept for single runs. */
+export function batchSlotLimit(maxConcurrentEvals: number): number {
+  return Math.max(0, maxConcurrentEvals - EVAL_SLOTS_KEPT_FOR_SINGLE_RUNS);
+}
+
 export async function swebenchSlotsInUse(dependencies: SwebenchDependencies): Promise<number> {
   const counter = await get(dependencies, SLOT_COUNTER_KEY);
   return typeof counter?.count === "number" ? counter.count : 0;
@@ -216,6 +224,10 @@ export async function startSwebenchRun(
     ...(options.batchId === undefined ? {} : { batchId: options.batchId }),
     ...(options.runnerImage === undefined ? {} : { runnerImage }),
   });
+  // Spec 052 Ruling 30: a batch run starts only while it leaves a slot free, so all batches together
+  // hold at most maxConcurrentEvals - 1 slots and a single run always finds one. A single run may
+  // take the last slot.
+  const slotLimit = deployment.settings.maxConcurrentEvals - (options.batchId === undefined ? 0 : EVAL_SLOTS_KEPT_FOR_SINGLE_RUNS);
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({
       TransactItems: [
@@ -227,7 +239,7 @@ export async function startSwebenchRun(
             UpdateExpression: "SET #count = if_not_exists(#count, :zero) + :one",
             ConditionExpression: "attribute_not_exists(#count) OR #count < :limit",
             ExpressionAttributeNames: { "#count": "count" },
-            ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":limit": deployment.settings.maxConcurrentEvals },
+            ExpressionAttributeValues: { ":zero": 0, ":one": 1, ":limit": slotLimit },
           },
         },
         {

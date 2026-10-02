@@ -68,7 +68,8 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
   counter**: at most `maxConcurrentEvals` runs at once per deployment (default 4, at most 6 under today's quota of 32
   vCPUs for standard On-Demand instances, with 4 vCPUs per `m7i.xlarge`). Single and batch runs share it, and taking
   a slot is atomic. A single run that finds no free slot is refused with "N eval runs are in progress; try again
-  shortly", the same reply as today's `RUN_ACTIVE`, reworded.
+  shortly", the same reply as today's `RUN_ACTIVE`, reworded. A batch run starts only while it leaves a slot free, so
+  all batches together hold at most `maxConcurrentEvals − 1` slots and a single run always finds one (D-14).
 - **FR-006:** When a run reaches a terminal state, the slot is released, and if its batch has queued runs and spend is
   below the cap, the next queued run starts. The batch also tops up its slots on a timer (every 2 minutes), so a
   missed event never stalls it.
@@ -181,6 +182,15 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
   instance IDs in production, and spec 046's campaign lists its tasks explicitly, which was the decided scope. A batch
   file with a `sample` is refused with "sampling is not available yet; list the instance IDs". The schema and the
   seeded draw (`drawSample`) stay, so sampling can be wired to a population source later without a format change.
+
+- **D-14 (2026-10-02, Ruling 30):** One slot is always kept for single runs, which is how D-2's "never locked out"
+  holds while a campaign's queue is long. A batch run's start takes its slot only while the slots in use, before it,
+  are fewer than `maxConcurrentEvals − 1`, checked in the same transaction as today's slot condition. This bounds all
+  batches together to `maxConcurrentEvals − 1` slots atomically, and a slot a single run's end frees is never taken by
+  a batch beyond that, whether by the result callback's inline top-up or the tick. While single runs hold slots,
+  batches leave one more free, so a second single run can start too. A batch's `concurrency` is clamped to the same
+  limit. A deployment with `maxConcurrentEvals` 1 has no slot for batches: a batch is refused at create with the reason,
+  and a running batch whose deployment was lowered to 1 makes the tick fail, so its alarm fires.
 
 ## Success Criteria
 

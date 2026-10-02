@@ -32,6 +32,7 @@ import {
   type SwebenchRun,
 } from "@agentx/contracts";
 import {
+  batchSlotLimit,
   getSwebenchChannel,
   isConditionFailure,
   readRun,
@@ -234,6 +235,10 @@ export async function createBatch(
   // release wrote (swebench-settings.ts); a run is never launched on an image whose fields are guessed.
   if (file.runnerImage !== undefined && file.runnerImage !== deployment.runnerImage) {
     throw agentXError("CONFIG_INVALID", `the runner image ${file.runnerImage} is not the current one, so its run features are not known; release it as the current runner image first, or pin the current runner image (${deployment.runnerImage})`);
+  }
+  // Ruling 30: one slot is kept for single runs, so a deployment of one slot has none for a batch.
+  if (batchSlotLimit(deployment.settings.maxConcurrentEvals) < 1) {
+    throw agentXError("CONFIG_INVALID", noBatchSlotReason(deployment.settings.maxConcurrentEvals));
   }
   const runnerImage = deployment.runnerImage;
   const runnerFeatures = [...deployment.runnerFeatures];
@@ -511,13 +516,21 @@ async function topUpBatch(dependencies: EvalBatchDependencies, batchId: string, 
     return;
   }
   await recoverStaleClaims(dependencies, stored);
+  // Ruling 30: all batches together hold at most this many slots; one is kept for single runs.
+  const batchSlots = batchSlotLimit(deployment.settings.maxConcurrentEvals);
+  if (batchSlots < 1) {
+    failures.push({ batchId, error: noBatchSlotReason(deployment.settings.maxConcurrentEvals) });
+    return;
+  }
   while (budget.starts > 0) {
-    // The counter read only saves a pointless claim: the start takes its slot atomically.
-    const free = await swebenchSlotsInUse(dependencies) < deployment.settings.maxConcurrentEvals;
+    // The counter read only saves a pointless claim: the start takes its slot atomically, and only
+    // while it leaves one free (startSwebenchRun), so a slot a single run's end frees beyond the
+    // batches' limit is never taken here.
+    const free = await swebenchSlotsInUse(dependencies) < batchSlots;
     const claim = await mutate<{ index: number; attempt: number; claimedAt: string } | undefined>(dependencies, batchId, (draft, at) => {
       if (!free || draft.status !== "RUNNING") return none();
       const inFlight = inFlightCount(draft);
-      if (inFlight >= (draft.file.concurrency ?? Number.POSITIVE_INFINITY) || !nextStartFits(draft, inFlight)) return none();
+      if (inFlight >= Math.min(draft.file.concurrency ?? Number.POSITIVE_INFINITY, batchSlots) || !nextStartFits(draft, inFlight)) return none();
       const entry = draft.queue.find((candidate) => candidate.state === "QUEUED");
       if (entry === undefined) return none();
       entry.state = "STARTING";
@@ -528,6 +541,10 @@ async function topUpBatch(dependencies: EvalBatchDependencies, batchId: string, 
     budget.starts -= 1;
     if (!await startClaimed(dependencies, claim.stored, claim.value, failures)) return;
   }
+}
+
+function noBatchSlotReason(maxConcurrentEvals: number): string {
+  return `this deployment runs ${maxConcurrentEvals === 1 ? "one eval at a time" : `${maxConcurrentEvals} evals at once`}, and one slot is kept for single runs, so no batch run can start; raise maxConcurrentEvals to 2 or more in the eval settings`;
 }
 
 /** Starts a claimed entry's run; false when no run started and topping up should stop for now. */
