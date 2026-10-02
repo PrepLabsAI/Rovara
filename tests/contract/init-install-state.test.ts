@@ -175,6 +175,28 @@ describe("install state", () => {
     await expect(writeInstallProgress(store, huge)).rejects.toThrow(/delete the install\/progress parameter/);
     await expect(writeInstallProgress(store, huge)).rejects.toThrow(/restart agentx init safely/);
   });
+
+  describe("spec 048 phase 2: the install record", () => {
+    it("keeps your email and the developer sign-in choice, and still reads a record without them", async () => {
+      const store = new MemoryParameterStore();
+      await writeInstallAnswers(store, sampleAnswers({ adminEmail: "alice@example.com", signinMethods: "both" }));
+      expect(await readInstallAnswers(store, "staging")).toMatchObject({ adminEmail: "alice@example.com", signinMethods: "both" });
+      await writeInstallAnswers(store, sampleAnswers());
+      expect(await readInstallAnswers(store, "staging")).not.toHaveProperty("adminEmail");
+    });
+
+    it("refuses an email that is not one, and a sign-in choice it does not know", async () => {
+      const store = new MemoryParameterStore();
+      await expect(writeInstallAnswers(store, sampleAnswers({ adminEmail: "alice" }))).rejects.toThrow("install answers are invalid: adminEmail");
+      await expect(writeInstallAnswers(store, { ...sampleAnswers(), signinMethods: "saml" } as unknown as InitAnswers)).rejects.toThrow("install answers are invalid: signinMethods");
+    });
+
+    it("FR-032: records a GitHub app made but not yet stored", async () => {
+      const store = new MemoryParameterStore();
+      await writeInstallProgress(store, { ...emptyProgress("staging", T0), githubPending: { account: "acme", appId: "424242", slug: "agentx-acme-staging" } });
+      expect((await readInstallProgress(store, "staging"))?.githubPending).toEqual({ account: "acme", appId: "424242", slug: "agentx-acme-staging" });
+    });
+  });
 });
 
 describe("15d2 install state", () => {

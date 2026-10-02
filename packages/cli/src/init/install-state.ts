@@ -59,6 +59,10 @@ export const InitAnswersSchema = z.object({
   budget: BudgetAnswersSchema.optional(),
   github: z.object({ account: z.string().regex(GITHUB_LOGIN_PATTERN), accountType: z.enum(["organization", "user"]), appName: z.string().min(1).max(34) }).strict(),
   slack: z.object({ appName: z.string().min(1).max(35), appPostedMessages: z.enum(["accept", "ignore"]) }).strict(),
+  /** Spec 048 FR-020 and FR-055: your email from the settings, for the admin user and the default alert address. */
+  adminEmail: AlertEmailSchema.optional(),
+  /** Spec 048 FR-022 and FR-030: how developers sign in, chosen with the settings and turned on with the Slack connection. */
+  signinMethods: z.enum(["slack", "oidc", "both"]).optional(),
   createdAt: z.iso.datetime(),
 }).strict().superRefine(requireWebhookSecretMatchesEnv);
 
@@ -81,6 +85,10 @@ export const InstallProgressSchema = z.object({
     privateKeySecretArn: z.string().regex(SECRET_ARN),
     installationId: z.string().regex(/^\d+$/).optional(),
   }).strict().optional(),
+  /** Spec 048 FR-032: a GitHub app GitHub has made, recorded before its private key is stored, so a
+   * run that stops in between can offer to finish with it or replace it. Read only while `github`
+   * is not recorded. */
+  githubPending: z.object({ account: z.string().regex(GITHUB_LOGIN_PATTERN), appId: z.string().regex(/^\d+$/), slug: z.string().regex(/^[a-z0-9-]+$/) }).strict().optional(),
   slack: z.object({
     appId: z.string().regex(/^A[A-Z0-9]+$/), teamId: z.string().regex(/^T[A-Z0-9]+$/), botUserId: z.string().regex(/^[UW][A-Z0-9]+$/),
     /** Spec 048 FR-026 and FR-027: the bot's handle and the workspace's name, as Slack reported them. */
