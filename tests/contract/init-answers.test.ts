@@ -31,7 +31,7 @@ const FORM_QUESTIONS = [
   "App name for GitHub and Slack (unique on GitHub)", "Change the advanced settings?",
   "Deploy engine", "Sign-in", "How will developers sign in to AgentX from their AI tools?", "Model provider", "Orchestrator model",
   "Action-gate classifier model", "Worker model", "Permission boundary policy ARN (Enter for AgentX's default boundary)",
-  "IAM principal allowed to assume the AgentX operator role (Enter for this account)", "Monthly AWS budget for this environment, in US dollars (0 for none)",
+  "IAM principal allowed to assume the AgentX operator role (Enter for this account)", "Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)",
   "Which costs should the budget count?", "Answer mentions people post through other apps with their own Slack token?", "Where should AgentX send alerts?", "Alert email address",
 ];
 // Every default taken but alerts to the ops address, then "" for the owner's type (no GitHub lookup here).
@@ -84,15 +84,17 @@ describe("init questions", () => {
   });
 
   it("spec 048 FR-023: the budget's default is the estimate plus 20% for the whole account, with the estimate beside it", async () => {
-    const asked: Array<{ question: string; defaultValue?: string; why?: string }> = [];
+    const asked: Array<{ question: string; defaultValue?: string; why?: string; hint?: string }> = [];
     const prompter = scriptedPrompter(FIRST_RUN);
-    const recording = { ...prompter, ask: (question: string, options: Parameters<typeof prompter.ask>[1]) => { asked.push({ question, ...(options.defaultValue === undefined ? {} : { defaultValue: options.defaultValue }), ...(options.help?.why === undefined ? {} : { why: options.help.why }) }); return prompter.ask(question, options); } };
+    const recording = { ...prompter, ask: (question: string, options: Parameters<typeof prompter.ask>[1]) => { asked.push({ question, ...(options.defaultValue === undefined ? {} : { defaultValue: options.defaultValue }), ...(options.help?.why === undefined ? {} : { why: options.help.why }), ...(options.help?.hint === undefined ? {} : { hint: options.help.hint }) }); return prompter.ask(question, options); } };
     const collected = await collectInitAnswers({ env: "staging", region: "us-east-1", account: "123456789012", releaseVersion: "1.2.3", flags: {}, prompter: recording, processEnv: {}, now: () => 0 });
     expect(collected.answers.budget).toEqual({ monthlyUsd: 260, scope: "account" });
     expect(asked.find((entry) => entry.question.startsWith("Monthly AWS budget"))).toEqual({
-      // Spec 048 FR-023: empty is the estimate of the models chosen, plus 20%, so the field's own default is empty.
-      question: "Monthly AWS budget for this environment, in US dollars (0 for none)", defaultValue: "",
+      // Spec 048 FR-023: empty is the estimate of the models chosen, plus 20%, so the field's own default is
+      // empty; the suggested amount is in the terminal's question and the page's hint.
+      question: "Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)", defaultValue: "",
       why: "AgentX's estimate is about $208.78 a month. The suggested budget is the estimate plus 20%. AWS emails you when this month's costs pass 80% of it. 0 turns it off.",
+      hint: "Optional. Leave empty to use the estimate plus 20% ($260).",
     });
     expect(collected.notes).not.toContain(BUDGET_TAG_NOTE);
   });
@@ -157,7 +159,7 @@ describe("init questions", () => {
     expect(message).not.toContain("SECRET-KEY");
   });
 
-  it("with --yes and no alert flag, names every way to answer", async () => {
+  it("with --yes and no alert flag, refuses for want of your email, and sends alerts to --admin-email when given", async () => {
     const flags = { ...everyFlag, alertEmail: undefined } as InitFlags;
     // Spec 048 FR-025 (Ruling 9): alerts go to your email, so with neither flag your email is what is missing.
     await expect(collectInitAnswers({ ...base, flags, prompter: unattendedPrompter() }))
@@ -170,6 +172,11 @@ describe("init questions", () => {
     const { answers, notes } = await collectWithFlags({ ...base, flags: { ...everyFlag, alertEmail: undefined, alerts: false } as InitFlags });
     expect(answers.alert).toEqual({ kind: "none" });
     expect(notes.join("\n")).toContain("nobody is told when AgentX fails");
+  });
+
+  it("refuses an --admin-email that is not an email address, naming the flag", async () => {
+    await expect(collectWithFlags({ ...base, flags: everyFlag, adminEmail: "not-an-email" }))
+      .rejects.toThrow("--admin-email not-an-email is not an email address");
   });
 
   it("refuses an image override that is not a digest reference", async () => {

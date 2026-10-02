@@ -139,14 +139,15 @@ export interface GitHubApi {
   owner?(login: string): Promise<{ login: string; type: "User" | "Organization" } | undefined>;
 }
 
+/** The headers every GitHub REST call sends. */
+const GITHUB_HEADERS = { accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": "agentx-cli" } as const;
+
 export function githubRestApi(fetchImplementation: typeof fetch): GitHubApi {
   const call = async (what: string, path: string, init: { method?: string; token?: string } = {}): Promise<unknown> => {
     const response = await fetchImplementation(`${API}${path}`, {
       method: init.method ?? "GET",
       headers: {
-        accept: "application/vnd.github+json",
-        "x-github-api-version": "2022-11-28",
-        "user-agent": "agentx-cli",
+        ...GITHUB_HEADERS,
         ...(init.token === undefined ? {} : { authorization: `Bearer ${init.token}` }),
       },
     });
@@ -156,7 +157,7 @@ export function githubRestApi(fetchImplementation: typeof fetch): GitHubApi {
   };
   /** A public GET: undefined for a 404, the status alone in any other refusal. */
   const lookup = async (what: string, path: string): Promise<unknown> => {
-    const response = await fetchImplementation(`${API}${path}`, { headers: { accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": "agentx-cli" } });
+    const response = await fetchImplementation(`${API}${path}`, { headers: GITHUB_HEADERS });
     if (response.status === 404) return undefined;
     if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub ${what} failed with HTTP ${response.status}`);
     return response.json();

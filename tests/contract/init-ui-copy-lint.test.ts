@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { environmentStackName } from "@agentx/contracts";
 import { WAITING_STEP_PLAIN } from "../../packages/cli/src/init/commands.js";
 import type { WizardQuestion } from "../../packages/cli/src/init/ui/protocol.js";
+import { settingsFields } from "../../packages/cli/src/init/settings-form.js";
 import { COPY_RULES, lintCopy, quotedStrings, stateEntries } from "../support/copy-lint.js";
 import { FINISH, FIRST_RUN, harness, SIGNIN, SLACK } from "../support/init-ui-harness.js";
 import { fakeWizardOperator } from "../support/wizard-browser.js";
@@ -137,9 +138,14 @@ describe("SC-011: the whole install, as the page shows it", () => {
       if (question.kind === "ask" && question.defaultValue !== undefined) expect({ text: question.text, hint: question.hint }).toMatchObject({ hint: expect.stringMatching(/\S/) as unknown });
       for (const button of question.buttons ?? []) expect(["Yes", "No"]).not.toContain(button.label);
     }
+    // The settings form shows all 18 settings; a text field with a default says what empty means.
+    expect([...fields.keys()].filter((where) => where.startsWith("Your settings/"))).toHaveLength(18);
+    const withDefault = new Set(settingsFields({ env: "staging", flags: {}, fixed: false, budgetWhy: "" }).filter((field) => field.choices === undefined && field.defaultValue !== undefined).map((field) => field.name));
+    expect(withDefault.size).toBeGreaterThan(0);
     for (const [where, field] of fields) {
       expect({ where, label: field.label }).toMatchObject({ label: expect.stringMatching(/\S/) as unknown });
       expect({ where, why: field.why }).toMatchObject({ why: expect.stringMatching(/\S/) as unknown });
+      if (field.choices === undefined && withDefault.has(field.name)) expect({ where, hint: field.hint }).toMatchObject({ hint: expect.stringMatching(/\S/) as unknown });
     }
   });
 

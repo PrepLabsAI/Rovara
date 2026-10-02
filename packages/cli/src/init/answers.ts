@@ -143,6 +143,7 @@ export async function collectInitAnswers(input: {
 }): Promise<CollectedAnswers> {
   const { flags, prompter } = input;
   const notes: string[] = [];
+  if (input.adminEmail !== undefined && emailProblem(input.adminEmail) !== undefined) throw agentXError("CONFIG_INVALID", `--admin-email ${input.adminEmail} is not an email address`);
   const workerImage = digestFlag(flags.workerImage, "--worker-image");
   const slackImage = digestFlag(flags.slackImage, "--slack-image");
   const recommended = estimateMonthlyCost({ orchestrator: DEFAULT_ORCHESTRATOR_MODEL, classifier: DEFAULT_CLASSIFIER_MODEL, worker: DEFAULT_WORKER_MODEL });

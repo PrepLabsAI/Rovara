@@ -8,7 +8,7 @@ import { DEFAULT_BEDROCK_MODELS } from "@agentx/model-runtime/config";
 import { ENVIRONMENT_NAME_PATTERN, ENVIRONMENT_PLACEHOLDER, EnvironmentNameSchema } from "@agentx/contracts";
 import { AlertEmailSchema, GITHUB_LOGIN_PATTERN, MAX_BUDGET_USD } from "../deploy/answer-schemas.js";
 import type { InitFlags } from "./answers.js";
-import { modelName, modelPriceLabel, money } from "./cost.js";
+import { estimateMonthlyCost, modelName, modelPriceLabel, money, suggestedBudgetUsd } from "./cost.js";
 import type { FormField } from "./prompts.js";
 import { ALERT_FLAG } from "./ui/question-copy.js";
 
@@ -110,7 +110,10 @@ export function settingsFields(input: SettingsFieldsInput): FormField[] {
   const alertAnswered = flags.alerts === false || flags.alertEmail !== undefined || flags.alertWebhook !== undefined ? true : undefined;
   const fixed = input.fixed ? true : undefined;
 
-  unless(input.adminEmail ?? flags.alertEmail, { name: SETTINGS_FIELD.email, question: "Your email, for your AgentX admin user and alerts", flag: "--admin-email", validate: emailProblem });
+  // Your own OIDC needs no admin email, so with the alerts answered by a flag nothing needs it (--yes
+  // with --identity oidc and --no-alerts or --alert-webhook-* asks no email, as before phase 2).
+  const noEmailNeeded = flags.identity === "oidc" && (flags.alerts === false || flags.alertWebhook !== undefined) ? true : undefined;
+  unless(input.adminEmail ?? flags.alertEmail ?? noEmailNeeded, { name: SETTINGS_FIELD.email, question: "Your email, for your AgentX admin user and alerts", flag: "--admin-email", validate: emailProblem });
   unless(flags.githubAccount, { name: SETTINGS_FIELD.githubAccount, question: "GitHub organization or user that will own the AgentX GitHub App", flag: "--github-account", validate: loginProblem });
   unless(fixed, { name: SETTINGS_FIELD.installName, question: "Install name", flag: "--env", defaultValue: input.env, validate: installNameProblem });
   unless(flags.githubAppName, { name: SETTINGS_FIELD.appName, question: "App name for GitHub and Slack (unique on GitHub)", flag: "--github-app-name", defaultValue: "", validate: appNameProblem });
@@ -129,9 +132,12 @@ export function settingsFields(input: SettingsFieldsInput): FormField[] {
   }
   unless(fixed ?? flags.permissionBoundary, advanced({ name: SETTINGS_FIELD.permissionBoundary, question: "Permission boundary policy ARN (Enter for AgentX's default boundary)", flag: "--permission-boundary", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:iam::\d{12}:policy\/.+$/, "an IAM policy ARN") }));
   unless(fixed ?? flags.operatorPrincipal, advanced({ name: SETTINGS_FIELD.operatorPrincipal, question: "IAM principal allowed to assume the AgentX operator role (Enter for this account)", flag: "--operator-principal", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:(iam|sts)::\d{12}:.+$/, "an IAM principal ARN") }));
+  // FR-023: empty is the estimate plus 20%; the amount for the recommended models is said in the
+  // terminal's question (the terminal shows no hint) and in the page's hint.
+  const suggested = suggestedBudgetUsd(estimateMonthlyCost(DEFAULT));
   unless(flags.budget, advanced({
-    name: SETTINGS_FIELD.budget, question: "Monthly AWS budget for this environment, in US dollars (0 for none)", flag: "--budget", defaultValue: "",
-    validate: orEmpty(budgetProblem), help: { why: input.budgetWhy, hint: "Optional. Leave empty to use the estimate plus 20%." },
+    name: SETTINGS_FIELD.budget, question: `Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $${suggested})`, flag: "--budget", defaultValue: "",
+    validate: orEmpty(budgetProblem), help: { why: input.budgetWhy, hint: `Optional. Leave empty to use the estimate plus 20% ($${suggested}).` },
   }));
   unless(flags.budgetScope, advanced({ name: SETTINGS_FIELD.budgetScope, question: "Which costs should the budget count?", flag: "--budget-scope", defaultValue: "account", choices: BUDGET_SCOPE_CHOICES }));
   unless(flags.slackAppPostedMessages, advanced({ name: SETTINGS_FIELD.appPostedMessages, question: "Answer mentions people post through other apps with their own Slack token?", flag: "--slack-app-posted-messages", defaultValue: "accept", choices: POSTED_CHOICES }));

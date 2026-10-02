@@ -34,6 +34,20 @@ describe("the settings form", () => {
     expect(grouped.map((field) => field.name)).toEqual(["identity", "signin"]);
   });
 
+  it("FR-020: your own OIDC with the alerts answered by a flag needs no email; without such a flag it does", () => {
+    const names = (flags: Parameters<typeof settingsFields>[0]["flags"]) => settingsFields({ env: "staging", flags, fixed: false, budgetWhy: "" }).map((field) => field.name);
+    expect(names({ identity: "oidc", alerts: false })).not.toContain("email");
+    expect(names({ identity: "oidc", alertWebhook: { envName: "HOOK" } })).not.toContain("email");
+    expect(names({ identity: "oidc" })).toContain("email");
+    expect(names({ alerts: false })).toContain("email");
+  });
+
+  it("FR-023: the budget field says the suggested amount, on the page and in the terminal", () => {
+    const budget = settingsFields({ env: "staging", flags: {}, fixed: false, budgetWhy: "" }).find((field) => field.name === "budget");
+    expect(budget?.question).toBe("Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)");
+    expect(budget?.help?.hint).toBe("Optional. Leave empty to use the estimate plus 20% ($260).");
+  });
+
   it("leaves out every field a typed flag already answers, and the platform fields for a bundle", () => {
     const names = (flags: Parameters<typeof settingsFields>[0]["flags"], fixed = false) => settingsFields({ env: "staging", flags, fixed, budgetWhy: "" }).map((field) => field.name);
     expect(names({ githubAccount: "acme", engine: "cdk", budget: "300" })).not.toEqual(expect.arrayContaining(["githubAccount", "engine", "budget"]));

@@ -506,6 +506,20 @@ describe("agentx init", () => {
     expect(h.printed()).toContain("stop at access");
   });
 
+  it("under --yes with your own OIDC and alerts answered by a flag, needs no email at all (spec 048 FR-020)", async () => {
+    const h = await harness();
+    const argv = without(UNATTENDED, "--admin-email");
+    const oidc = ["--identity", "oidc", "--oidc-issuer", "https://login.example.com", "--oidc-audience", "agentx", "--oidc-client-id", "cli", "--admin-claim", "groups", "--admin-values", "agentx-admins"];
+    h.deployer.fail.set(environmentStackName("staging", "access"), new Error("stop at access"));
+    expect(await h.run([...argv, ...oidc, "--no-alerts"], { processEnv: UNATTENDED_ENV })).not.toBe(0);
+    expect(h.printed()).not.toContain("needs an answer");
+    expect(h.printed()).not.toContain("needs --admin-email");
+    expect(h.printed()).toContain("stop at access");
+    const saved = await readInstallAnswers(h.store, "staging");
+    expect(saved).toMatchObject({ identity: { mode: "oidc" }, alert: { kind: "none" } });
+    expect(saved?.adminEmail).toBeUndefined();
+  });
+
   it("refuses a --connectors typo before asking or deploying anything", async () => {
     const h = await harness();
     const prompter = scriptedPrompter([]);
