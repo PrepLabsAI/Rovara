@@ -102,6 +102,7 @@ import { pressAdminChange, routeAdminChange, type AdminChangeDependencies } from
 import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans.js";
 import { ZodError } from "zod";
 import { healthProbes } from "./health-probes.js";
+import { recordPrepareFailureEvent } from "./operation-events.js";
 import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js";
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
@@ -4097,6 +4098,13 @@ async function recordTerminalResult(
   // counting toward the workspace limits now; the release logs, and never fails the callback.
   if (operation.kind === "prepare" && recordedStatus !== "SUCCEEDED") {
     await releaseFailedPreparation(dependencies.documentClient, dependencies.tableName, workspace.id);
+    // #225: a developer task's failed setup is an event of its own, so the task shows when it failed.
+    if (taskPointer !== undefined) {
+      await recordPrepareFailureEvent(dependencies.documentClient, dependencies.tableName, {
+        workspaceId: operation.workspaceId, operationId: operation.id, fence: operation.fence, status: recordedStatus,
+        error: recordedStatus !== terminalStatus ? FIRST_TASK_QUEUE_FAILED : error, at: now,
+      });
+    }
   }
   if (recordedStatus !== terminalStatus) return { ...operation, status: recordedStatus, updatedAt: now, error: FIRST_TASK_QUEUE_FAILED };
   return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
