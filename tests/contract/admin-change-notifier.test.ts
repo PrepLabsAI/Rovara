@@ -4,7 +4,7 @@
 import { AdminChangePendingRecordSchema } from "@agentx/contracts";
 import { marshall } from "@aws-sdk/util-dynamodb";
 import { describe, expect, it, vi } from "vitest";
-import { cachedSlackClient, createNotifierHandler, type NotifierDependencies } from "../../packages/broker/src/aws/developer-task-notifier.js";
+import { ADMIN_CHANGE_EXPIRY_GRACE_MS, cachedSlackClient, createNotifierHandler, noticeDelaySeconds, type NotifierDependencies } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import { SlackPostError, chatPostMessage, chatUpdate } from "../../packages/broker/src/aws/slack-web.js";
 import { adminChangeMessage, adminChangeOutcomeMessage } from "../../packages/broker/src/developer/change-messages.js";
 import { noticesFromStream, type StreamRecord } from "../../packages/broker/src/developer/notifications.js";
@@ -129,6 +129,89 @@ describe("the Slack Confirm message (E13)", () => {
   });
 });
 
+describe("an expired Confirm message loses its buttons without a press (#217)", () => {
+  const expiryNotice = { id: `${CHANGE}:expiry`, kind: "admin_change_expiry", changeId: CHANGE, at: "2026-10-02T09:00:06.000Z", notBefore: "2026-10-02T09:10:05.000Z" };
+  const afterExpiry = Date.parse("2026-10-02T09:10:06.000Z");
+
+  it("schedules the expiry edit when it posts the message, just after the change expires", async () => {
+    const db = new FakeDynamoDb();
+    db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z" }));
+    const h = notifier(db, Date.parse("2026-10-02T09:00:06.000Z"));
+    await h.deliver(dmNotice);
+    expect(h.posts).toHaveLength(1);
+    expect(h.deps.enqueue).toHaveBeenCalledExactlyOnceWith([expiryNotice]);
+    expect(Date.parse(expiryNotice.notBefore) - Date.parse("2026-10-02T09:10:00.000Z")).toBe(ADMIN_CHANGE_EXPIRY_GRACE_MS);
+    // A repeated delivery of a posted message schedules it again (the edit happens once), so a
+    // failed schedule is never lost.
+    await h.deliver(dmNotice);
+    expect(h.posts).toHaveLength(1);
+    expect(h.deps.enqueue).toHaveBeenCalledTimes(2);
+  });
+
+  it("delays the queued notice until its time, within SQS's 15 minutes", () => {
+    const now = Date.parse("2026-10-02T09:00:06.000Z");
+    expect(noticeDelaySeconds(expiryNotice, now)).toBe(599);
+    expect(noticeDelaySeconds({ ...expiryNotice, notBefore: "2026-10-02T10:00:00.000Z" }, now)).toBe(900);
+    expect(noticeDelaySeconds({ ...expiryNotice, notBefore: "2026-10-02T08:00:00.000Z" }, now)).toBe(0);
+    expect(noticeDelaySeconds(dmNotice, now)).toBe(0);
+  });
+
+  it("edits a still-pending expired message to say it expired, with no buttons, once", async () => {
+    const db = new FakeDynamoDb();
+    db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z", dm: DM }));
+    const h = notifier(db, afterExpiry);
+    await h.deliver(expiryNotice);
+    expect(h.updates).toHaveLength(1);
+    expect(h.updates[0]).toMatchObject({ channel: DM.channel, ts: DM.ts });
+    expect(h.updates[0]?.text).toContain("Expired; nothing was changed. Ask again if you still want it.");
+    expect(JSON.stringify(h.updates[0]?.blocks)).not.toContain("agentx_admin_change");
+    expect(JSON.stringify(h.updates[0])).not.toContain(PLANTED);
+    expect(db.get(`ADMIN_CHANGE#${CHANGE}`, "META")).toMatchObject({ status: "pending", dmEditedAt: "2026-10-02T09:10:06.000Z" });
+    expect(AdminChangePendingRecordSchema.safeParse(db.get(`ADMIN_CHANGE#${CHANGE}`, "META")).success).toBe(true);
+    await h.deliver(expiryNotice);
+    // The broker later records the expiry on its first touch; that outcome edits nothing more.
+    db.set({ ...db.get(`ADMIN_CHANGE#${CHANGE}`, "META") as Record<string, unknown>, status: "expired" });
+    await h.deliver(outcomeNotice);
+    expect(h.updates).toHaveLength(1);
+  });
+
+  it("waits, editing nothing, while the change has not expired yet", async () => {
+    const db = new FakeDynamoDb();
+    db.set(pending({ slackRequestedAt: "2026-10-02T09:00:05.000Z", dm: DM }));
+    const h = notifier(db, Date.parse("2026-10-02T09:10:01.000Z"));
+    const answer = await h.deliver(expiryNotice);
+    expect(h.updates).toEqual([]);
+    expect(answer.batchItemFailures).toEqual([{ itemIdentifier: "m1" }]);
+    expect(h.deps.retryLater).toHaveBeenCalledOnce();
+  });
+
+  it("leaves an answered change's message to its outcome edit", async () => {
+    for (const status of ["applying", "applied", "declined"]) {
+      const db = new FakeDynamoDb();
+      db.set(pending({ status, dm: DM }));
+      const h = notifier(db, afterExpiry);
+      await h.deliver(expiryNotice);
+      expect(h.updates).toEqual([]);
+      expect(db.get(`ADMIN_CHANGE#${CHANGE}`, "META")).not.toHaveProperty("dmEditedAt");
+    }
+  });
+
+  it("writes the outcome over its expiry edit when the change was answered while it edited", async () => {
+    const db = new FakeDynamoDb();
+    db.set(pending({ dm: DM }));
+    // The change applies between the notifier's read and its record of the edit.
+    const h = notifier(db, afterExpiry, {
+      update: vi.fn(async (input: { channel: string; ts: string; text: string; blocks: unknown[] }) => {
+        h.updates.push(input);
+        if (h.updates.length === 1) db.set({ ...db.get(`ADMIN_CHANGE#${CHANGE}`, "META") as Record<string, unknown>, status: "applied", pressedBy: "U0ADA00001" });
+      }),
+    });
+    await h.deliver(expiryNotice);
+    expect(h.updates.map((update) => update.text.split("\n\n").at(-1))).toEqual(["Expired; nothing was changed. Ask again if you still want it.", "Applied, confirmed by <@U0ADA00001>."]);
+    expect(db.get(`ADMIN_CHANGE#${CHANGE}`, "META")).toHaveProperty("dmEditedAt");
+  });
+});
+
 describe("the message's content (E13, R4, FR-051)", () => {
   const PRIVATE = `Bind channel #secret-launch (C0PRIVATE01, a private channel) to project ledger. ${PLANTED}`;
 
@@ -158,7 +241,7 @@ describe("the message's content (E13, R4, FR-051)", () => {
       [{ status: "applied", pressedBy: "U0ADA00001" }, "Applied, confirmed by <@U0ADA00001>."],
       [{ status: "applied", methodUsed: "cli" }, "Applied."],
       [{ status: "declined" }, "Cancelled; nothing was changed."],
-      [{ status: "expired" }, "This change expired, so nothing was changed. Ask for it again if you still want it."],
+      [{ status: "expired" }, "Expired; nothing was changed. Ask again if you still want it."],
       [{ status: "failed", error: { code: "SLACK_UNAVAILABLE", message: failedMessage } }, "It was not applied: the channel could not be bound; check it, then ask again"],
     ];
     for (const [fields, said] of cases) {

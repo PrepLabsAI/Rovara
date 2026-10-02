@@ -8,7 +8,7 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { INDEX_EXPIRY_ATTRIBUTE, AdminChangePendingRecordSchema, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, adminChangeKey, indexExpiresAt, lastAssistantResponse, sharedTaskKey, type PendingChange } from "@agentx/contracts";
-import { adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
+import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
 import { deriveTaskStatus, failureCategory, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
@@ -49,7 +49,31 @@ class StartPending extends Error {
 /** 30, 60, 120, 240, 480, then 900 seconds, by the delivery attempt that failed. */
 export const retryDelaySeconds = (attempt: number): number => Math.min(900, 30 * 2 ** Math.max(0, Math.min(attempt - 1, 5)));
 
-const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "admin_change_dm", "admin_change_outcome"]);
+const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "admin_change_dm", "admin_change_outcome", "admin_change_expiry"]);
+
+/**
+ * #217: how long after a change's expiry its message is edited. The broker refuses a claim at or
+ * after `expiresAt` by its own clock; the margin keeps a press in the last second, read by a
+ * Lambda whose clock runs a little ahead, from being shown as expired.
+ */
+export const ADMIN_CHANGE_EXPIRY_GRACE_MS = 5_000;
+/** SQS's longest per-message delay. */
+const MAX_DELAY_SECONDS = 900;
+
+/** #217: the queue delay for a notice the notifier scheduled: until its `notBefore`, within SQS's 15 minutes. */
+export function noticeDelaySeconds(notice: Notice, now: number): number {
+  if (notice.notBefore === undefined) return 0;
+  const seconds = Math.ceil((Date.parse(notice.notBefore) - now) / 1_000);
+  return Number.isNaN(seconds) ? 0 : Math.min(MAX_DELAY_SECONDS, Math.max(0, seconds));
+}
+
+/** #217: the expiry notice came early (a short delay or a fast clock): it is retried. */
+class ExpiryPending extends Error {
+  constructor() {
+    super("the change has not expired yet");
+    this.name = "ExpiryPending";
+  }
+}
 /** The statuses an ended operation can have; only these reach the reply text, which does not escape them. */
 const ENDED_STATUSES = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 
@@ -258,6 +282,7 @@ async function deliverAdminChange(deps: NotifierDependencies, notice: Notice): P
   const key = adminChangeKey(notice.changeId);
   const change = await readChange(deps, notice.changeId);
   if (change === undefined) return "stale";
+  if (notice.kind === "admin_change_expiry") return editExpired(deps, change);
   if (notice.kind === "admin_change_outcome") {
     // No message to edit: nothing was posted, so there is nothing to deliver.
     if (change.dm === undefined) return "stale";
@@ -281,7 +306,12 @@ async function deliverAdminChange(deps: NotifierDependencies, notice: Notice): P
     deps.log({ event: "admin_change.dm_edited", changeId: change.changeId, traceId: change.traceId, status: change.status });
     return "posted";
   }
-  if (change.dm !== undefined) return "delivered";
+  if (change.dm !== undefined) {
+    // #217: a repeated delivery schedules the expiry edit again, so a schedule lost to a failure
+    // after the post is made good; the edit itself happens at most once.
+    if (change.status === "pending" && change.dmEditedAt === undefined) await scheduleExpiry(deps, change);
+    return "delivered";
+  }
   if (change.status !== "pending" || deps.now() >= Date.parse(change.expiresAt) || change.slackUserId === undefined) return "stale";
   const claimedAt = new Date(deps.now()).toISOString();
   try {
@@ -328,6 +358,56 @@ async function deliverAdminChange(deps: NotifierDependencies, notice: Notice): P
   }
   // FR-052: the notifier's step, with the change and trace IDs.
   deps.log({ event: "admin_change.dm_posted", changeId: change.changeId, traceId: change.traceId });
+  // A failure here retries the notice, which finds the message posted and schedules the edit again.
+  await scheduleExpiry(deps, change);
+  return "posted";
+}
+
+/** #217: queues the edit of the change's message for just after it expires. */
+async function scheduleExpiry(deps: NotifierDependencies, change: PendingChange): Promise<void> {
+  const notBefore = new Date(Date.parse(change.expiresAt) + ADMIN_CHANGE_EXPIRY_GRACE_MS).toISOString();
+  await deps.enqueue([{ id: `${change.changeId}:expiry`, kind: "admin_change_expiry", changeId: change.changeId, at: new Date(deps.now()).toISOString(), notBefore }]);
+}
+
+/** Records that the message was edited; false when it already was, or the change is no longer `status`. */
+async function markEdited(deps: NotifierDependencies, changeId: string, status?: string): Promise<boolean> {
+  try {
+    await deps.documentClient.send(new UpdateCommand({
+      TableName: deps.tableName, Key: adminChangeKey(changeId), UpdateExpression: "SET dmEditedAt = :now",
+      ConditionExpression: `attribute_exists(pk) AND attribute_exists(dm) AND attribute_not_exists(dmEditedAt)${status === undefined ? "" : " AND #status = :status"}`,
+      ...(status === undefined ? {} : { ExpressionAttributeNames: { "#status": "status" } }),
+      ExpressionAttributeValues: { ":now": new Date(deps.now()).toISOString(), ...(status === undefined ? {} : { ":status": status }) },
+    }));
+    return true;
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    return false;
+  }
+}
+
+/**
+ * #217: a change nobody answered keeps live buttons until someone presses one, so at its expiry
+ * the notifier edits its message to say it expired, with no buttons. The broker records the
+ * expiry on the change's next touch, as before (E3); that outcome then edits nothing more. A
+ * change answered meanwhile is left to its own outcome edit.
+ */
+async function editExpired(deps: NotifierDependencies, change: PendingChange): Promise<Outcome> {
+  if (change.dm === undefined) return "stale";
+  if (change.dmEditedAt !== undefined) return "delivered";
+  if (change.status !== "pending" || deps.update === undefined) return "stale";
+  if (deps.now() < Date.parse(change.expiresAt) + ADMIN_CHANGE_EXPIRY_GRACE_MS) throw new ExpiryPending();
+  await deps.update({ channel: change.dm.channel, ts: change.dm.ts, ...adminChangeExpiredMessage(change) });
+  if (await markEdited(deps, change.changeId, "pending")) {
+    deps.log({ event: "admin_change.dm_expired", changeId: change.changeId, traceId: change.traceId });
+    return "posted";
+  }
+  // Answered while this edit was made (or edited by another delivery): the stored outcome wins.
+  const current = await readChange(deps, change.changeId);
+  const outcome = current?.dm === undefined || current.dmEditedAt !== undefined ? undefined : adminChangeOutcomeMessage(current);
+  if (current?.dm === undefined || outcome === undefined) return "delivered";
+  await deps.update({ channel: current.dm.channel, ts: current.dm.ts, ...outcome });
+  await markEdited(deps, current.changeId);
+  deps.log({ event: "admin_change.dm_edited", changeId: current.changeId, traceId: current.traceId, status: current.status });
   return "posted";
 }
 
@@ -473,7 +553,7 @@ export function createNotifierHandler(deps: NotifierDependencies) {
         continue;
       }
       try {
-        const outcome = notice.kind === "admin_change_dm" || notice.kind === "admin_change_outcome" ? await deliverAdminChange(deps, notice) : await deliver(deps, notice);
+        const outcome = notice.kind === "admin_change_dm" || notice.kind === "admin_change_outcome" || notice.kind === "admin_change_expiry" ? await deliverAdminChange(deps, notice) : await deliver(deps, notice);
         deps.log({ event: "developer_notifier.notice", kind: notice.kind, noticeId: notice.id, outcome });
       } catch (error) {
         const reason = error instanceof SlackPostError ? error.slackError : errorName(error);
@@ -569,7 +649,11 @@ function createAwsNotifierHandler() {
         const batch = notices.slice(start, start + 10);
         const result = await sqs.send(new SendMessageBatchCommand({
           QueueUrl: queueUrl(),
-          Entries: batch.map((notice, index) => ({ Id: String(index), MessageBody: JSON.stringify(notice) })),
+          // #217: a notice the notifier scheduled waits in the queue until its time.
+          Entries: batch.map((notice, index) => {
+            const delay = noticeDelaySeconds(notice, Date.now());
+            return { Id: String(index), MessageBody: JSON.stringify(notice), ...(delay === 0 ? {} : { DelaySeconds: delay }) };
+          }),
         }));
         // The stream mapping retries the whole batch; a notice queued twice still posts once (C9).
         if ((result.Failed ?? []).length > 0) throw new Error("some notices could not be queued");

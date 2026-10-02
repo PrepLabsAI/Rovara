@@ -42,13 +42,22 @@ export function adminChangeMessage(change: PendingChange, now: number): { text: 
   };
 }
 
+/** #217: an expired change's message, whether the expiry edit or a later press recorded it. */
+export const EXPIRED_OUTCOME = "Expired; nothing was changed. Ask again if you still want it.";
+
+/** #217: the edit at expiry of a change nobody answered: the same text as a recorded expiry, with no buttons. */
+export function adminChangeExpiredMessage(change: PendingChange): { text: string; blocks: unknown[] } {
+  const effect = shownEffect(change);
+  return { text: `${effect}\n\n${EXPIRED_OUTCOME}`, blocks: [section(effect), section(EXPIRED_OUTCOME)] };
+}
+
 /** The edited message once the change ended, with no buttons; undefined while it has not ended. */
 export function adminChangeOutcomeMessage(change: PendingChange): { text: string; blocks: unknown[] } | undefined {
   let outcome: string;
   switch (change.status) {
     case "applied": outcome = `Applied${change.pressedBy === undefined ? "" : `, confirmed by <@${change.pressedBy}>`}.`; break;
     case "declined": outcome = "Cancelled; nothing was changed."; break;
-    case "expired": outcome = "This change expired, so nothing was changed. Ask for it again if you still want it."; break;
+    case "expired": outcome = EXPIRED_OUTCOME; break;
     case "failed": outcome = `It was not applied: ${safe(change.error?.message ?? "it could not be applied; check the state, then ask again")}`; break;
     default: return undefined;
   }
