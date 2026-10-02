@@ -369,21 +369,29 @@ export async function handleSwebenchCallback(
       await dependencies.documentClient.send(new UpdateCommand({
         TableName: dependencies.tableName,
         Key: swebenchRunKey(runId),
-        UpdateExpression: "SET #status = :running, updatedAt = :now",
+        UpdateExpression: "SET #status = :running, updatedAt = :now, runnerStartedAt = :now",
         ConditionExpression: "#status = :starting",
         ExpressionAttributeNames: { "#status": "status" },
         ExpressionAttributeValues: { ":running": "RUNNING", ":starting": "STARTING", ":now": now(dependencies).toISOString() },
       }));
     } catch (error) {
-      // Already running, cancelling or finished: the report changes nothing.
+      // Already running, cancelling or finished: the report changes nothing but the record that the
+      // runner started (spec 052: a run cancelled before it started is charged nothing).
       if (!isConditionFailure(error)) throw error;
+      await dependencies.documentClient.send(new UpdateCommand({
+        TableName: dependencies.tableName,
+        Key: swebenchRunKey(runId),
+        UpdateExpression: "SET runnerStartedAt = :now",
+        ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(runnerStartedAt)",
+        ExpressionAttributeValues: { ":now": now(dependencies).toISOString() },
+      })).catch((failure: unknown) => { if (!isConditionFailure(failure)) throw failure; });
     }
     return { run: (await readRun(dependencies, runId)) ?? run };
   }
   const result = SwebenchRunResultSchema.parse(body);
   await finishRun(dependencies, runId, result.outcome === "GRADED"
     ? { status: "SUCCEEDED", result }
-    : { status: "FAILED", error: result.error });
+    : { status: "FAILED", error: result.error, ...(result.usage === undefined ? {} : { usage: result.usage }) });
   const ended = (await readRun(dependencies, runId)) ?? run;
   if (dependencies.onRunEnded !== undefined && SWEBENCH_TERMINAL_STATUSES.has(ended.status)) {
     try {
@@ -405,22 +413,30 @@ export async function handleSwebenchCallback(
 async function finishRun(
   dependencies: SwebenchDependencies,
   runId: string,
-  outcome: { status: "SUCCEEDED"; result: unknown } | { status: "FAILED"; error: string },
+  outcome: { status: "SUCCEEDED"; result: unknown } | { status: "FAILED"; error: string; usage?: unknown },
 ): Promise<void> {
   const at = now(dependencies).toISOString();
   const values: Record<string, unknown> = { ":status": outcome.status, ":now": at };
   ACTIVE_STATUSES.forEach((status, index) => { values[`:active${index}`] = status; });
   // RESULT and STATUS are DynamoDB reserved words, so every attribute here goes through a name.
-  const set = outcome.status === "SUCCEEDED" ? "#result = :result" : "#error = :error";
+  const failedUsage = outcome.status === "FAILED" && outcome.usage !== undefined;
+  const set = outcome.status === "SUCCEEDED" ? "#result = :result" : `#error = :error${failedUsage ? ", #usage = :usage" : ""}`;
   if (outcome.status === "SUCCEEDED") values[":result"] = outcome.result;
-  else values[":error"] = outcome.error.slice(0, 2_000);
+  else {
+    values[":error"] = outcome.error.slice(0, 2_000);
+    // Spec 052: kept on the run, so whoever records the run's end in its batch has its cost.
+    if (failedUsage) values[":usage"] = outcome.usage;
+  }
   const endRun = {
     Update: {
       TableName: dependencies.tableName,
       Key: swebenchRunKey(runId),
       UpdateExpression: `SET #status = :status, updatedAt = :now, finishedAt = :now, ${set}`,
       ConditionExpression: ACTIVE_STATUSES.map((_, index) => `#status = :active${index}`).join(" OR "),
-      ExpressionAttributeNames: { "#status": "status", ...(outcome.status === "FAILED" ? { "#error": "error" } : { "#result": "result" }) },
+      ExpressionAttributeNames: {
+        "#status": "status",
+        ...(outcome.status === "FAILED" ? { "#error": "error", ...(failedUsage ? { "#usage": "usage" } : {}) } : { "#result": "result" }),
+      },
       ExpressionAttributeValues: values,
     },
   };

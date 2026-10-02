@@ -155,6 +155,10 @@ export const SwebenchRunSchema = z.object({
   batchId: z.string().uuid().optional(),
   /** Spec 052: the runner image the batch pinned; absent when the run used the deployment's current one. */
   runnerImage: z.string().max(512).optional(),
+  /** Spec 052: what a FAILED run's report said it used, so its cost is kept wherever its end is recorded. */
+  usage: TaskUsageTelemetrySchema.optional(),
+  /** Spec 052: when the runner reported it had started; a run cancelled before then spent no tokens. */
+  runnerStartedAt: z.string().datetime().optional(),
 }).strict();
 
 export const SwebenchStartResultSchema = z.discriminatedUnion("outcome", [

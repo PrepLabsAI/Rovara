@@ -12,7 +12,7 @@ export function wilsonInterval(successes: number, n: number, z = 1.96): { low: n
   return { low: Math.max(0, centre - margin), high: Math.min(1, centre + margin) };
 }
 
-/** Per model (and thinking level): graded runs, resolved, rate with its Wilson interval, and cost. */
+/** Per model (and thinking level): graded runs, resolved, rate over graded runs with its Wilson interval, and every row's charge. */
 export function summarize(measures: readonly EvalRunMeasure[]): EvalBatchModelSummary[] {
   const groups = new Map<string, EvalRunMeasure[]>();
   for (const measure of measures) {
@@ -23,7 +23,7 @@ export function summarize(measures: readonly EvalRunMeasure[]): EvalBatchModelSu
     const first = group[0] as EvalRunMeasure;
     const graded = group.filter((measure) => measure.outcome === "GRADED");
     const resolved = graded.filter((measure) => measure.resolved).length;
-    const totalCostUsd = group.reduce((sum, measure) => sum + (measure.costUsd ?? 0), 0);
+    const totalCostUsd = group.reduce((sum, measure) => sum + measure.chargedUsd, 0);
     const interval = wilsonInterval(resolved, graded.length);
     return {
       provider: first.provider,
@@ -31,7 +31,9 @@ export function summarize(measures: readonly EvalRunMeasure[]): EvalBatchModelSu
       ...(first.thinkingLevel === undefined ? {} : { thinkingLevel: first.thinkingLevel }),
       ...(first.routing === undefined ? {} : { routing: first.routing }),
       runs: graded.length,
-      failed: group.length - graded.length,
+      failed: group.filter((measure) => measure.outcome === "FAILED").length,
+      cancelled: group.filter((measure) => measure.outcome === "CANCELLED").length,
+      retried: group.filter((measure) => measure.outcome === "RETRIED").length,
       resolved,
       rate: graded.length === 0 ? null : resolved / graded.length,
       wilsonLow: graded.length === 0 ? null : interval.low,

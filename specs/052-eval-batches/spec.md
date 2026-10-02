@@ -115,6 +115,15 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
   state or a client-side loop.
 - **D-4:** Pratik owns the runner, broker and eval state machine, and reviews this change. Single-run behaviour and its
   tests stay unchanged, apart from the lock-to-counter wording.
+- **D-5 (2026-10-02, Ruling 4):** A run that reports no cost is charged its per-run ceiling, the upper bound its runner
+  enforces, and its row is marked estimated (`costUsd` null, `chargedUsd` the ceiling, `costEstimated`). Ends that
+  provably used no tokens are charged nothing: the instance could not be launched or recorded, the run could not start,
+  or it was cancelled before its runner started. A FAILED result's usage is kept on the run record, so its reported cost
+  survives whichever path records the end. The rows' charges sum to the batch's spend.
+- **D-6 (2026-10-02, Ruling 5):** The runner halts only after a turn crosses its ceiling, so each run in flight, and the
+  next start, reserves its ceiling plus 10%: a start fits while `spent + (inFlight + 1) × ceiling × 1.1 ≤ costCapUsd`.
+- **D-7 (2026-10-02, Ruling 6):** A batch's models are checked against the project's approved list when the batch is
+  created, not again at each start; the batch runs what it recorded.
 
 ## Success Criteria
 

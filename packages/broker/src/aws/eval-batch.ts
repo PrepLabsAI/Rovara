@@ -26,7 +26,6 @@ import {
   type SlackThread,
   type SwebenchDataset,
   type SwebenchRun,
-  type TaskUsageTelemetry,
 } from "@agentx/contracts";
 import {
   getSwebenchChannel,
@@ -38,9 +37,6 @@ import {
   type SwebenchDependencies,
   type SwebenchSlackContext,
 } from "./swebench.js";
-
-/** What a failed run's report says it used, when it says. */
-type RunUsage = Pick<TaskUsageTelemetry, "tokens" | "costUsd">;
 
 export interface EvalBatchDependencies extends SwebenchDependencies {
   /** A run's estimated cost in USD, for ordering; undefined when the model cannot be priced. Defaults to list prices. */
@@ -91,6 +87,13 @@ const BACKOFF_MS = 25;
 /** OpenRouter provider slugs, as the runner's routing accepts them (model-runtime openRouterRouting). */
 const PROVIDER_SLUG = /^[a-z0-9][a-z0-9_/-]{0,79}$/;
 const THINKING_FEATURE = "model.thinkingLevel";
+/**
+ * Ruling 5: the runner halts only after a turn crosses its ceiling, so each run in flight (and the
+ * next start) reserves its ceiling plus this margin.
+ */
+export const EVAL_BATCH_RESERVE_MARGIN = 1.1;
+/** Ruling 4: run ends that provably used no model tokens, charged nothing when they report no cost. */
+const NO_TOKEN_FAILURES: readonly RegExp[] = [/^the eval instance could not be (?:launched|recorded)\b/, /^the run could not start:/];
 
 export function evalBatchKey(batchId: string) {
   return { pk: `EVAL_BATCH#${batchId}`, sk: "META" };
@@ -124,7 +127,12 @@ export function isInfrastructureFailure(error: string | undefined): boolean {
  */
 export function defaultRunCostEstimate(model: ModelIdentifier): number | undefined {
   const prices = listPricesPerMillion(model);
-  if (prices === undefined || (prices.input <= 0 && prices.output <= 0)) return undefined;
+  return prices === undefined ? undefined : runCostFromPrices(prices);
+}
+
+/** The reference mix priced at these list prices, in USD per million tokens; undefined when nothing is priced. */
+export function runCostFromPrices(prices: { input: number; output: number; cacheRead: number; cacheWrite: number }): number | undefined {
+  if (prices.input <= 0 && prices.output <= 0) return undefined;
   const cacheRead = prices.cacheRead > 0 ? prices.cacheRead : prices.input;
   const cacheWrite = prices.cacheWrite > 0 ? prices.cacheWrite : prices.input;
   const tokens = EVAL_BATCH_REFERENCE_TOKENS;
@@ -190,13 +198,17 @@ export async function createBatch(
   const channel = await getSwebenchChannel(dependencies, context.thread.teamId, context.thread.channelId);
   if (channel === undefined) throw agentXError("CONFIG_INVALID", "Eval runs are not enabled in this channel. An administrator can enable them with `agentx admin eval enable`.");
   const ceiling = channel.maxCostUsd;
-  if (file.costCapUsd < ceiling) {
-    throw agentXError("CONFIG_INVALID", `the cost cap of $${file.costCapUsd} is below one run's ceiling of $${ceiling} in this channel, so no run could start; raise the cap`);
+  const reservation = roundUsd(ceiling * EVAL_BATCH_RESERVE_MARGIN);
+  if (file.costCapUsd < reservation) {
+    throw agentXError("CONFIG_INVALID", `the cost cap of $${file.costCapUsd} is below one run's reservation of $${reservation} (its ceiling of $${ceiling} in this channel, plus 10%), so no run could start; raise the cap`);
   }
-  const runnerImage = file.runnerImage ?? deployment.runnerImage;
-  // The current image's features are recorded by its release; a file's own image is one released
-  // since spec 053, which every batch needs for its explicit thinking level.
-  const runnerFeatures = runnerImage === deployment.runnerImage ? [...deployment.runnerFeatures] : [THINKING_FEATURE];
+  // The run fields an image parses are known only for the current image, from the record its
+  // release wrote (swebench-settings.ts); a run is never launched on an image whose fields are guessed.
+  if (file.runnerImage !== undefined && file.runnerImage !== deployment.runnerImage) {
+    throw agentXError("CONFIG_INVALID", `the runner image ${file.runnerImage} is not the current one, so its run features are not known; release it as the current runner image first, or pin the current runner image (${deployment.runnerImage})`);
+  }
+  const runnerImage = deployment.runnerImage;
+  const runnerFeatures = [...deployment.runnerFeatures];
   if (!runnerFeatures.includes(THINKING_FEATURE)) {
     throw agentXError("CONFIG_INVALID", "the runner image cannot set a model's thinking level; release a newer runner image before running a batch");
   }
@@ -307,18 +319,24 @@ export async function listBatchMeasures(dependencies: EvalBatchDependencies, bat
   return measures;
 }
 
-/** FR-006: fills each running batch's free slots. One batch's failure is logged and leaves the others to fill. */
-export async function topUpBatches(dependencies: EvalBatchDependencies): Promise<void> {
+/**
+ * FR-006: fills each running batch's free slots. One batch's failure is logged and leaves the others
+ * to fill. `maxStarts` bounds the starts of one call, so a runner's callback that tops up inline
+ * stays well inside its 30-second timeout; the tick fills the rest.
+ */
+export async function topUpBatches(dependencies: EvalBatchDependencies, options: { maxStarts?: number } = {}): Promise<void> {
+  const budget = { starts: options.maxStarts ?? Number.POSITIVE_INFINITY };
   for (const batchId of await activeBatchIds(dependencies)) {
+    if (budget.starts <= 0) return;
     try {
-      await topUpBatch(dependencies, batchId);
+      await topUpBatch(dependencies, batchId, budget);
     } catch (error) {
       log("eval_batch.top_up_failed", { batchId, error: error instanceof Error ? error.message : String(error) });
     }
   }
 }
 
-async function topUpBatch(dependencies: EvalBatchDependencies, batchId: string): Promise<void> {
+async function topUpBatch(dependencies: EvalBatchDependencies, batchId: string, budget: { starts: number }): Promise<void> {
   const stored = await readStored(dependencies, batchId);
   if (stored === undefined || TERMINAL_BATCH.has(stored.record.status)) {
     // Its index item outlived the batch (the delete after its last write failed).
@@ -328,10 +346,10 @@ async function topUpBatch(dependencies: EvalBatchDependencies, batchId: string):
   const deployment = await dependencies.deployment();
   if (deployment === undefined) return;
   await recoverStaleClaims(dependencies, stored);
-  for (;;) {
+  while (budget.starts > 0) {
     // The counter read only saves a pointless claim: the start takes its slot atomically.
     const free = await swebenchSlotsInUse(dependencies) < deployment.settings.maxConcurrentEvals;
-    const claim = await mutate<{ index: number; attempt: number } | undefined>(dependencies, batchId, (draft, at) => {
+    const claim = await mutate<{ index: number; attempt: number; claimedAt: string } | undefined>(dependencies, batchId, (draft, at) => {
       if (!free || draft.status !== "RUNNING") return none();
       const inFlight = inFlightCount(draft);
       if (inFlight >= (draft.file.concurrency ?? Number.POSITIVE_INFINITY) || !nextStartFits(draft, inFlight)) return none();
@@ -339,15 +357,16 @@ async function topUpBatch(dependencies: EvalBatchDependencies, batchId: string):
       if (entry === undefined) return none();
       entry.state = "STARTING";
       entry.claimedAt = at;
-      return { value: { index: entry.index, attempt: entry.attempt }, write: true };
+      return { value: { index: entry.index, attempt: entry.attempt, claimedAt: at }, write: true };
     });
     if (claim?.value === undefined) return;
+    budget.starts -= 1;
     if (!await startClaimed(dependencies, claim.stored, claim.value)) return;
   }
 }
 
 /** Starts a claimed entry's run; false when no run started and topping up should stop for now. */
-async function startClaimed(dependencies: EvalBatchDependencies, stored: Stored, claim: { index: number; attempt: number }): Promise<boolean> {
+async function startClaimed(dependencies: EvalBatchDependencies, stored: Stored, claim: { index: number; attempt: number; claimedAt: string }): Promise<boolean> {
   const { record } = stored;
   const entry = record.queue.find((candidate) => candidate.index === claim.index)!;
   const runId = evalBatchRunId(record.batchId, claim.index, claim.attempt);
@@ -363,6 +382,7 @@ async function startClaimed(dependencies: EvalBatchDependencies, stored: Stored,
   const options = {
     batchId: record.batchId,
     runnerImage: record.file.runnerImage!,
+    // Ruling 5's margin is the batch's: the runner keeps the channel's ceiling.
     runnerFeatures: stored.runnerFeatures,
     ...(record.perRunCeilingUsd === undefined ? {} : { maxCostUsd: record.perRunCeilingUsd }),
     ...(entry.model.routing === undefined ? {} : { openRouterProviders: entry.model.routing.only }),
@@ -380,6 +400,7 @@ async function startClaimed(dependencies: EvalBatchDependencies, stored: Stored,
       // A run the start recorded has ended FAILED (it could not be launched): its end is recorded,
       // and retried as the infrastructure's. Otherwise the claim is given back.
       const run = await readRun(dependencies, runId);
+      // The claim's own timestamp: a slow start never gives back a newer claim on the entry.
       if (run !== undefined) await adopt(dependencies, record.batchId, claim, run);
       else await releaseClaim(dependencies, record.batchId, claim);
       return false;
@@ -441,38 +462,39 @@ async function recoverStaleClaims(dependencies: EvalBatchDependencies, stored: S
 }
 
 /**
- * FR-006 to FR-008, FR-010: a batch run has ended. Its cost is added to the batch's spend and its
- * measures recorded. An infrastructure failure on the first attempt is queued again as attempt 2,
- * under a new run ID, and its measures are not recorded, so the results hold one row per entry; a
- * graded run is never queued again. Repeating it changes nothing.
+ * FR-006 to FR-008, FR-010: a batch run has ended. Its charge is added to the batch's spend and a
+ * measure row written for it, whatever its end. An infrastructure failure on the first attempt is
+ * queued again as attempt 2, under a new run ID, and its row says RETRIED; a graded run is never
+ * queued again. Repeating it changes nothing, and writes a row that was lost.
+ *
+ * Ruling 4: a run that reported no cost is charged the per-run ceiling the runner enforces, unless
+ * its end provably used no tokens (it was never launched or started, or was cancelled before the
+ * runner started), so a run with an unknown cost can never take the batch past its cap.
  */
-export async function recordBatchRunEnd(dependencies: EvalBatchDependencies, run: SwebenchRun, usage?: RunUsage): Promise<void> {
+export async function recordBatchRunEnd(dependencies: EvalBatchDependencies, run: SwebenchRun): Promise<void> {
   if (run.batchId === undefined || !SWEBENCH_TERMINAL_STATUSES.has(run.status)) return;
   const batchId = run.batchId;
-  const costUsd = run.result?.usage.costUsd ?? (run.status === "FAILED" ? usage?.costUsd ?? null : null);
-  const ended = await mutate<EvalBatchEntry | undefined>(dependencies, batchId, (draft) => {
+  const ended = await mutate<RecordedEnd | undefined>(dependencies, batchId, (draft) => {
     const entry = draft.queue.find((candidate) => IN_FLIGHT.has(candidate.state) && evalBatchRunId(batchId, candidate.index, candidate.attempt) === run.runId);
-    if (entry === undefined) {
-      // Already recorded: its measures are written again if that write was lost.
-      const recorded = draft.queue.find((candidate) => candidate.runId === run.runId && !IN_FLIGHT.has(candidate.state) && candidate.state !== "QUEUED");
-      return { value: recorded === undefined ? undefined : structuredClone(recorded), write: false };
-    }
-    draft.spentUsd = roundUsd(draft.spentUsd + (costUsd ?? 0));
+    const charge = chargeOf(run, draft.perRunCeilingUsd ?? draft.file.costCapUsd);
+    if (entry === undefined) return { value: recordedEnd(draft, run, charge), write: false };
+    draft.spentUsd = roundUsd(draft.spentUsd + charge.chargedUsd);
     delete entry.claimedAt;
-    if (run.status === "FAILED" && entry.attempt === 1 && draft.status === "RUNNING" && isInfrastructureFailure(run.error)) {
+    const attempt = entry.attempt;
+    if (run.status === "FAILED" && attempt === 1 && draft.status === "RUNNING" && isInfrastructureFailure(run.error)) {
+      const snapshot = structuredClone(entry);
       entry.state = "QUEUED";
       entry.attempt = 2;
       delete entry.runId;
-      return { value: undefined, write: true };
+      return { value: { entry: snapshot, attempt, outcome: "RETRIED", charge }, write: true };
     }
     entry.state = run.status === "SUCCEEDED" ? "DONE" : run.status === "FAILED" ? "FAILED" : "CANCELLED";
     entry.runId = run.runId;
-    return { value: structuredClone(entry), write: true };
+    return { value: { entry: structuredClone(entry), attempt, outcome: outcomeOf(run), charge }, write: true };
   });
-  const entry = ended?.value;
-  // A cancelled run has no result to measure.
-  if (entry === undefined || run.status === "CANCELLED") return;
-  const measure = measureOf(batchId, entry, run, usage, costUsd);
+  const end = ended?.value;
+  if (end === undefined) return;
+  const measure = measureOf(batchId, run, end);
   try {
     await dependencies.documentClient.send(new PutCommand({
       TableName: dependencies.tableName,
@@ -484,9 +506,40 @@ export async function recordBatchRunEnd(dependencies: EvalBatchDependencies, run
   }
 }
 
-function measureOf(batchId: string, entry: EvalBatchEntry, run: SwebenchRun, usage: RunUsage | undefined, costUsd: number | null): EvalRunMeasure {
-  const result = run.result;
-  const tokens = result?.usage.tokens ?? (run.status === "FAILED" ? usage?.tokens : undefined) ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+type MeasureOutcome = EvalRunMeasure["outcome"];
+interface Charge { costUsd: number | null; chargedUsd: number; costEstimated: boolean }
+interface RecordedEnd { entry: EvalBatchEntry; attempt: number; outcome: MeasureOutcome; charge: Charge }
+
+function outcomeOf(run: SwebenchRun): MeasureOutcome {
+  return run.status === "SUCCEEDED" ? "GRADED" : run.status === "FAILED" ? "FAILED" : "CANCELLED";
+}
+
+/** A run end already recorded, so its row can be written again: an earlier attempt was RETRIED. */
+function recordedEnd(record: EvalBatchRecord, run: SwebenchRun, charge: Charge): RecordedEnd | undefined {
+  for (const entry of record.queue) {
+    for (let attempt = 1; attempt <= entry.attempt; attempt += 1) {
+      if (evalBatchRunId(record.batchId, entry.index, attempt) !== run.runId) continue;
+      if (attempt < entry.attempt) return { entry: structuredClone(entry), attempt, outcome: "RETRIED", charge };
+      if (entry.runId === run.runId && !IN_FLIGHT.has(entry.state)) return { entry: structuredClone(entry), attempt, outcome: outcomeOf(run), charge };
+    }
+  }
+  return undefined;
+}
+
+/** Ruling 4: the run's reported cost; else 0 for an end that used no tokens; else the per-run ceiling, marked estimated. */
+function chargeOf(run: SwebenchRun, ceiling: number): Charge {
+  const reported = run.result?.usage.costUsd ?? run.usage?.costUsd ?? null;
+  if (reported !== null) return { costUsd: reported, chargedUsd: reported, costEstimated: false };
+  const usedNoTokens = (run.status === "CANCELLED" && run.runnerStartedAt === undefined)
+    || (run.status === "FAILED" && NO_TOKEN_FAILURES.some((pattern) => pattern.test(run.error ?? "")));
+  if (usedNoTokens) return { costUsd: 0, chargedUsd: 0, costEstimated: false };
+  return { costUsd: null, chargedUsd: ceiling, costEstimated: true };
+}
+
+function measureOf(batchId: string, run: SwebenchRun, end: RecordedEnd): EvalRunMeasure {
+  const { entry, charge } = end;
+  const result = run.status === "SUCCEEDED" ? run.result : undefined;
+  const tokens = result?.usage.tokens ?? run.usage?.tokens ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
   return EvalRunMeasureSchema.parse({
     batchId,
     runId: run.runId,
@@ -496,15 +549,19 @@ function measureOf(batchId: string, entry: EvalBatchEntry, run: SwebenchRun, usa
     thinkingLevel: entry.model.thinkingLevel,
     ...(entry.model.routing === undefined ? {} : { routing: entry.model.routing }),
     repeat: entry.repeat,
-    outcome: run.status === "SUCCEEDED" ? "GRADED" : "FAILED",
-    resolved: result?.resolved ?? false,
+    attempt: end.attempt,
+    outcome: end.outcome,
+    ...(end.outcome === "GRADED" && result !== undefined ? { resolved: result.resolved } : {}),
+    ...(end.outcome !== "GRADED" && run.error !== undefined ? { error: run.error } : {}),
     ...(result?.secbench === undefined ? {} : { secbench: result.secbench }),
     ...(result?.failToPass === undefined ? {} : { failToPass: result.failToPass }),
     ...(result?.passToPass === undefined ? {} : { passToPass: result.passToPass }),
     ...(result === undefined ? {} : { stopReason: result.stopReason }),
     agentSeconds: result?.agentSeconds ?? 0,
     tokens,
-    costUsd,
+    costUsd: charge.costUsd,
+    chargedUsd: charge.chargedUsd,
+    ...(charge.costEstimated ? { costEstimated: true } : {}),
     imageDigest: result?.imageDigest ?? "",
   });
 }
@@ -547,9 +604,10 @@ export async function stopBatchForThread(dependencies: EvalBatchDependencies, th
 export function withEvalBatches<T extends EvalBatchDependencies>(dependencies: T): T {
   const wired: T = { ...dependencies };
   wired.stopBatchForThread ??= (thread, requester) => stopBatchForThread(wired, thread, requester);
-  wired.onRunEnded ??= async (run, result) => {
-    await recordBatchRunEnd(wired, run, result.usage);
-    await topUpBatches(wired);
+  // One slot was freed, so the callback starts at most one run; the tick fills anything else.
+  wired.onRunEnded ??= async (run) => {
+    await recordBatchRunEnd(wired, run);
+    await topUpBatches(wired, { maxStarts: 1 });
   };
   return wired;
 }
@@ -642,10 +700,10 @@ function inFlightCount(record: EvalBatchRecord): number {
   return record.queue.filter((entry) => IN_FLIGHT.has(entry.state)).length;
 }
 
-/** FR-007: a start fits while spent + inFlight × perRunCeiling + perRunCeiling ≤ costCapUsd. */
+/** FR-007 with Ruling 5: a start fits while spent + (inFlight + 1) × perRunCeiling × 1.1 ≤ costCapUsd. */
 function nextStartFits(record: EvalBatchRecord, inFlight: number): boolean {
-  const ceiling = record.perRunCeilingUsd ?? record.file.costCapUsd;
-  return record.spentUsd + (inFlight + 1) * ceiling <= record.file.costCapUsd + 1e-9;
+  const reservation = (record.perRunCeilingUsd ?? record.file.costCapUsd) * EVAL_BATCH_RESERVE_MARGIN;
+  return record.spentUsd + (inFlight + 1) * reservation <= record.file.costCapUsd + 1e-9;
 }
 
 function countsOf(queue: readonly Pick<EvalBatchEntry, "state">[]): EvalBatchRecord["counts"] {

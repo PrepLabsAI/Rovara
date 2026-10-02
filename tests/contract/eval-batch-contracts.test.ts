@@ -107,7 +107,7 @@ describe("fix round 1 (053 selection, duplicates, claim state)", () => {
   });
   it("summarizes all-failed models with a null rate, counts unpriced runs, and keeps pins apart", () => {
     const rows = [
-      measure({ runId: uuid(40), modelId: "z", outcome: "FAILED", resolved: false, costUsd: null }),
+      measure({ runId: uuid(40), modelId: "z", outcome: "FAILED", resolved: undefined, costUsd: null }),
       measure({ runId: uuid(41), modelId: "p", routing: { only: ["a"] } }),
       measure({ runId: uuid(42), modelId: "p", routing: { only: ["b"] }, costUsd: null }),
     ];
@@ -152,13 +152,16 @@ describe("EvalBatchRecordSchema", () => {
   });
 });
 
-function measure(over: Partial<EvalRunMeasure>): EvalRunMeasure {
-  return {
+function measure(over: Partial<Record<keyof EvalRunMeasure, unknown>>): EvalRunMeasure {
+  const row: Record<string, unknown> = {
     batchId: uuid(1), runId: uuid(2), instanceId: "django__django-11099", provider: "anthropic", modelId: "a", thinkingLevel: "medium",
-    repeat: 1, outcome: "GRADED", resolved: true, stopReason: "finished", agentSeconds: 60,
+    repeat: 1, attempt: 1, outcome: "GRADED", resolved: true, stopReason: "finished", agentSeconds: 60,
     tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, costUsd: 1, imageDigest: "sha256:abc",
     ...over,
   };
+  row.chargedUsd ??= row.costUsd ?? 0;
+  // An override of undefined removes the field, as a row without it is written.
+  return Object.fromEntries(Object.entries(row).filter(([, value]) => value !== undefined)) as EvalRunMeasure;
 }
 
 describe("EvalRunMeasureSchema and summarize (FR-010)", () => {
@@ -167,11 +170,33 @@ describe("EvalRunMeasureSchema and summarize (FR-010)", () => {
     expect(EvalRunMeasureSchema.safeParse({ ...measure({}), surprise: 1 }).success).toBe(false);
   });
 
+  it("sets resolved on graded rows only, and takes every run end", () => {
+    for (const outcome of ["FAILED", "CANCELLED", "RETRIED"]) {
+      expect(EvalRunMeasureSchema.safeParse(measure({ outcome, resolved: undefined, error: "boom", costUsd: null, chargedUsd: 10, costEstimated: true })).success).toBe(true);
+      expect(EvalRunMeasureSchema.safeParse(measure({ outcome, resolved: false })).success).toBe(false);
+    }
+    expect(EvalRunMeasureSchema.safeParse(measure({ resolved: undefined })).success).toBe(false);
+    expect(EvalRunMeasureSchema.safeParse(measure({ attempt: 3 })).success).toBe(false);
+  });
+
+  it("rates graded runs only, counts every other end apart, and totals every row's charge", () => {
+    const rows = [
+      measure({ runId: uuid(50), resolved: true, costUsd: 2 }),
+      measure({ runId: uuid(51), resolved: false, costUsd: 3 }),
+      measure({ runId: uuid(52), outcome: "RETRIED", resolved: undefined, costUsd: null, chargedUsd: 10, costEstimated: true }),
+      measure({ runId: uuid(53), outcome: "FAILED", attempt: 2, resolved: undefined, costUsd: 0.5 }),
+      measure({ runId: uuid(54), outcome: "CANCELLED", resolved: undefined, costUsd: 0 }),
+    ];
+    expect(summarize(rows)).toEqual([expect.objectContaining({
+      runs: 2, resolved: 1, rate: 0.5, failed: 1, cancelled: 1, retried: 1, totalCostUsd: 15.5, unpricedRuns: 1, costPerSolvedUsd: 15.5,
+    })]);
+  });
+
   it("summarizes per model with rate, interval, cost and cost per solved task", () => {
     const rows = [
       ...Array.from({ length: 8 }, (_, i) => measure({ runId: uuid(10 + i), resolved: i < 6, costUsd: 2 })),
       measure({ runId: uuid(30), modelId: "b", resolved: false, costUsd: 3 }),
-      measure({ runId: uuid(31), modelId: "b", outcome: "FAILED", resolved: false, costUsd: null }),
+      measure({ runId: uuid(31), modelId: "b", outcome: "FAILED", resolved: undefined, costUsd: null }),
     ];
     const [a, b] = summarize(rows);
     expect(a).toMatchObject({ modelId: "a", runs: 8, failed: 0, resolved: 6, rate: 0.75, totalCostUsd: 16 });

@@ -119,7 +119,11 @@ export const EvalBatchRecordSchema = z.object({
   finishedAt: z.string().datetime().optional(),
 }).strict();
 
-/** One CSV row: a finished run's measures (spec 052 FR-010). */
+/**
+ * One CSV row: a run's end and its measures (spec 052 FR-010). Every run end has a row: GRADED,
+ * FAILED, CANCELLED, or RETRIED (an infrastructure failure whose entry ran again as attempt 2).
+ * `resolved` is present on GRADED rows only, so no other row can be counted as unresolved.
+ */
 export const EvalRunMeasureSchema = z.object({
   batchId: z.string().uuid(),
   runId: z.string().uuid(),
@@ -129,8 +133,11 @@ export const EvalRunMeasureSchema = z.object({
   thinkingLevel: ThinkingLevelSchema.optional(),
   routing: EvalBatchRoutingSchema.optional(),
   repeat: z.number().int().min(1).max(5),
-  outcome: z.enum(["GRADED", "FAILED"]),
-  resolved: z.boolean(),
+  attempt: z.number().int().min(1).max(2),
+  outcome: z.enum(["GRADED", "FAILED", "CANCELLED", "RETRIED"]),
+  resolved: z.boolean().optional(),
+  /** Why a run that was not graded ended: the run's error. */
+  error: z.string().max(2_000).optional(),
   secbench: SecbenchVerdictSchema.optional(),
   failToPass: z.object({ passed: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).strict().optional(),
   passToPass: z.object({ passed: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).strict().optional(),
@@ -144,11 +151,22 @@ export const EvalRunMeasureSchema = z.object({
     cacheWrite: z.number().int().nonnegative(),
     total: z.number().int().nonnegative(),
   }).strict(),
+  /** The cost the run reported; null when it reported none. */
   costUsd: z.number().nonnegative().nullable(),
+  /**
+   * What the run counted against the batch's cap: its reported cost, or, when it reported none,
+   * the per-run ceiling (Ruling 4, `costEstimated`), or 0 for an end that provably used no tokens.
+   * The rows' charges sum to the batch's spend.
+   */
+  chargedUsd: z.number().nonnegative(),
+  costEstimated: z.boolean().optional(),
   imageDigest: z.string().max(256),
   /** Spec 051's claim-and-check fields, when present. */
   claimCheck: z.record(z.string().max(64), z.union([z.string().max(500), z.number(), z.boolean()])).optional(),
-}).strict();
+}).strict().refine((measure) => (measure.outcome === "GRADED") === (measure.resolved !== undefined), {
+  path: ["resolved"],
+  message: "`resolved` is set on graded rows only",
+});
 
 export const EvalBatchModelSummarySchema = z.object({
   provider: z.string().min(1).max(128),
@@ -159,13 +177,18 @@ export const EvalBatchModelSummarySchema = z.object({
   runs: z.number().int().nonnegative(),
   /** Runs that ended FAILED, counted separately (spec 046 R-4). */
   failed: z.number().int().nonnegative(),
+  /** Runs cancelled by a stop. */
+  cancelled: z.number().int().nonnegative(),
+  /** Infrastructure failures whose entry ran again. */
+  retried: z.number().int().nonnegative(),
   resolved: z.number().int().nonnegative(),
   /** Null when no run was graded, so an all-failed model never reads as 0% solved. */
   rate: z.number().min(0).max(1).nullable(),
   wilsonLow: z.number().min(0).max(1).nullable(),
   wilsonHigh: z.number().min(0).max(1).nullable(),
+  /** Every row's charge, as the cap counted it. */
   totalCostUsd: z.number().nonnegative(),
-  /** Runs whose cost is unknown; they add nothing to the total, so the total is a lower bound when this is above 0. */
+  /** Rows that reported no cost; each is charged at the per-run ceiling (or 0 when it used no tokens), so the total is an estimate when this is above 0. */
   unpricedRuns: z.number().int().nonnegative(),
   /** Null when no task was solved. */
   costPerSolvedUsd: z.number().nonnegative().nullable(),
