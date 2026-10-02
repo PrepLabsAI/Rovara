@@ -671,7 +671,8 @@ async function endDeadRun(dependencies: SwebenchDependencies, runId: string): Pr
   const how = executionStatus === null ? "its execution is unknown and the run is past its time limit" : `its execution ended ${executionStatus}`;
   const runnerStarted = run.runnerStartedAt !== undefined;
   const error = runnerStarted
-    ? `the eval instance stopped (${how}) without reporting a result; the batch tick ended the run`
+    // Review M-14: a single run's thread does not mention batches.
+    ? `the eval instance stopped (${how}) without reporting a result; ${run.batchId === undefined ? "AgentX" : "the batch tick"} ended the run`
     : `the run could not start: ${how} before the runner started`;
   // Ruling 16: its instance first, so a runner still alive cannot spend once the run is charged. A
   // failure leaves the run to the next tick.

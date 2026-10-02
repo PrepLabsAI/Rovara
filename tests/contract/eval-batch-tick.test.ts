@@ -579,7 +579,7 @@ describe("runs whose execution died before it ended them (spec 052 Ruling 13)", 
     h.advance(GRACE_MS + 1);
     const report = await runEvalBatchTick(h.dependencies);
     expect(report.slotCorrections).toEqual([expect.objectContaining({ correction: "ended_dead_run", runId, executionStatus: "FAILED" })]);
-    expect(run(h, runId)).toMatchObject({ status: "FAILED", error: expect.stringMatching(/^the eval instance stopped \(its execution ended FAILED\) without reporting a result/) as unknown });
+    expect(run(h, runId)).toMatchObject({ status: "FAILED", error: expect.stringMatching(/^the eval instance stopped \(its execution ended FAILED\) without reporting a result; the batch tick ended the run$/) as unknown });
     expect(slotRunIds(h)).toEqual([]);
     expect(counter(h)).toBe(0);
     // An infrastructure failure: retried, but the retry does not fit the cap, so the batch is CAPPED and finalized.
@@ -636,7 +636,7 @@ describe("runs whose execution died before it ended them (spec 052 Ruling 13)", 
     h.advance(2_000);
     expect(await reconcileSwebenchSlots(h.dependencies)).toEqual([expect.objectContaining({ correction: "ended_dead_run", runId: RUN_A, executionStatus: null })]);
     expect(h.describeExecution).not.toHaveBeenCalled();
-    expect(run(h, RUN_A)).toMatchObject({ status: "FAILED", error: expect.stringMatching(/^the eval instance stopped \(its execution is unknown and the run is past its time limit\) without reporting a result/) as unknown });
+    expect(run(h, RUN_A)).toMatchObject({ status: "FAILED", error: expect.stringMatching(/^the eval instance stopped \(its execution is unknown and the run is past its time limit\) without reporting a result; AgentX ended the run$/) as unknown });
     expect(slotRunIds(h)).toEqual([]);
     expect(counter(h)).toBe(0);
   });
