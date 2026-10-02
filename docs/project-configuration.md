@@ -45,7 +45,7 @@ orchestratorInstructions: Delegate every repository read, edit, build, and test 
 | `revision` | yes | A positive whole number. Revisions are immutable: increase it before registering a changed file. New threads use the latest registered revision. |
 | `repositories` | yes | 1 to 32 repositories (below). |
 | `setup` | yes | Up to 64 commands run once when a workspace is prepared. May be empty. |
-| `readiness` | yes | Up to 64 commands run in the workspace before any candidate is pushed. A failure opens a new pull request as a draft, with the failing checks listed in its description (spec 051); it still stops an update to an existing pull request. May be empty. |
+| `readiness` | yes | Up to 64 commands run in the workspace before any candidate is pushed. A failure opens a new pull request as a draft, with the failing checks listed in its description (spec 051); it still stops an update to an existing pull request. See [Checks](#checks-how-agentx-verifies-the-agents-work-spec-051). May be empty. |
 | `devcontainer` | no | Runs `setup`, `readiness` and the agent's shell inside a repository's dev container (below). |
 | `orchestratorInstructions` | yes | Up to 32,768 characters of project guidance for the orchestrator. |
 | `models` | no | The models a channel may choose from (below). |
@@ -213,6 +213,105 @@ them.
 - `shareMode.allowContinue`: with `false`, every shared task is view only.
 
 See [Sharing a task to Slack](mcp-install.md#sharing-a-task-to-slack).
+
+## Checks: how AgentX verifies the agent's work (spec 051)
+
+The coding agent can say "all tests pass" when they do not. So AgentX does not take its word. When
+the agent tries to finish a coding task, AgentX reruns the project's checks itself, compares each
+with its earlier result, and reports its own result first. The agent's summary comes second.
+
+### What you see in Slack
+
+The reply starts with AgentX's verdict, then the label `*Agent's account:*`, then the agent's own
+summary. The verdict lines, word for word:
+
+| Situation | Line |
+|---|---|
+| A check passed before and fails now | `Not done: <check> passed before and fails now.` (one line per such check) |
+| No regression, and some checks pass | `Checks passed (<n> project check(s)).` or, for a project without readiness checks, `Checks passed (<n> of the agent's own test commands, rerun by AgentX).` |
+| No regression, but nothing passes yet | `No regression found, but no check passes yet.` |
+| Nothing was checked | `Not verified: no checks ran. Add readiness checks to the project so AgentX can check the agent's work.` |
+| The task was stopped, or errored, before the check | `Not verified: the task stopped before AgentX could check it.` |
+| A check was already failing before the change | `Already failing before this change: <check>.` (added to any of the above) |
+| A check fails and has no earlier result | `Fails now, with no earlier result: <check>.` (added to any of the above) |
+
+A reply from a task that produced no report (for example one run by a worker older than spec 051)
+reads exactly as before.
+
+### What you see in the pull request
+
+- Every pull request AgentX opens has a checks section in its description: each check with its
+  result before and after, and the trimmed output of failures.
+- **Any failing readiness check when the pull request is published makes it a draft.** This
+  relaxes an earlier rule, where publishing refused on a failing check. The work now stays visible
+  and cannot be merged as finished by mistake. A draft is also opened when the workspace's latest
+  task report found a regression.
+- The section judges each check against the workspace's preparation: a command that passed at
+  preparation and fails now reads "regression (passed at preparation, fails now)"; any other
+  failing command reads "fails now, with no earlier result".
+- If the latest task was not verified (it failed, was cancelled, was interrupted or produced no
+  report), the section says "Not verified". That alone does not make a draft.
+- Appending to an existing pull request, and syncing it, still refuse when a readiness check
+  fails. CodeBuild gates are unchanged.
+
+### How the checks work
+
+1. **The agent is told the rules.** AgentX appends a fixed preamble to the agent's system prompt
+   for every coding task and every eval run. Its SHA-256 is recorded with each result. Version 1:
+
+   ```text
+   AgentX checks your work after you finish. Work this way:
+   1. Reproduce the problem before changing code, and say how you reproduced it.
+   2. Run the relevant tests before and after your change.
+   3. A test that passed before your change and fails after it is your own regression. Fix it; never call it unrelated.
+   4. Report the commands you ran and their results.
+   5. You must never claim a test passed unless you saw it pass.
+   End your final message with exactly one line: "AgentX result: done" if the work is complete and every test you ran passes, otherwise "AgentX result: not done".
+   ```
+
+   The text lives in `packages/contracts/src/checks.ts` (`AGENTX_PREAMBLE`). Changing it means a
+   new `AGENTX_PREAMBLE_VERSION`. The agent's claim is read from that last line: `success`,
+   `failure`, or `none` when the line is missing.
+2. **AgentX reruns the checks** when the agent tries to finish. A check that passed before and
+   fails now is a regression. A check that failed before and still fails is "already failing" and
+   is not the agent's regression.
+3. **One extra try.** On a regression, the agent gets the failing output and exactly one more turn.
+   AgentX then reruns the checks and reports that result. There is never a third round.
+4. **Stopped tasks** (cancelled, or stopped by the loop guard or a limit) are reported "Not
+   verified"; no checks run.
+
+Each check has its own timeout (the command's `timeoutSeconds`, or 10 minutes for the agent's
+commands), and one round has a total budget of 30 minutes. Checks the budget leaves unrun are
+recorded as not run.
+
+### Add readiness checks to your project
+
+Add the commands that prove the project works to `readiness` (see [Commands](#commands)): the test
+suite, a type check, a lint. They are the best checks, for three reasons:
+
+- they are your commands, run the way you run them, in the dev container when there is one;
+- they run when a workspace is prepared, so a failing project is caught before the agent starts;
+- AgentX reruns exactly them after the agent's change.
+
+A project **without** readiness checks is checked by rerunning the agent's own simple test
+commands instead. That is weaker: the agent chooses what to run, and may run nothing, in which
+case the reply says "Not verified: no checks ran". For each such command, the "before" is the
+agent's first run, counted only if no file had changed yet; otherwise the before is unknown.
+
+Only these commands count, each with its arguments: `npm test`, `npm run test`, `pnpm test`,
+`yarn test`, `pytest`, `python -m pytest`, `go test`, `cargo test`, `make test`, `mvn test`,
+`gradle test`, `./gradlew test`, `bundle exec rspec`, `phpunit` and `tox`. The command may start
+with a relative `cd <path> &&` (no `..`, no absolute path), then `NAME=value` assignments, then an
+optional `timeout <n>`. Anything else is never replayed, because replaying an arbitrary command
+could change the workspace: pipes, `;`, `&&` chains, `||`, `&`, redirection, quotes,
+`$`, backticks, globs, `~`, absolute paths and `..`. So `cd pkg && npm test -- -t foo` and
+`FOO=1 python -m pytest -k x` count, while `pytest | tail -5` and `npm test; echo done` do not.
+
+### Rollout
+
+The broker sends a worker the readiness commands and the draft-PR behaviour only when the worker's
+`/ping` lists the feature, so each costs one extra `/ping` per delivery for readiness and publish.
+An older worker is checked with the agent's own commands, and an older worker publishes as before.
 
 ## Register and bind
 

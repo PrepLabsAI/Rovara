@@ -155,9 +155,25 @@ Every step writes to the AWS account; an administrator runs them.
 | `transcript.jsonl` | The Pi session |
 | `harness/report.json`, `harness/test_output.txt`, `harness/run_instance.log` | The official harness's report and logs |
 | `harness/report_<mode>.jsonl`, `harness/evaluator.log`, `harness/container.log` | SEC-bench's reports and logs (spec 045) |
-| `result.json` | What the runner reported, with the list of saved artifacts. It also records `limits` and `thinkingLevel`, and for SEC-bench `secbench` (the verdict) and `secbenchSetup` (prompt template checksum, smolagents commit, evaluator commit, dataset revision) |
+| `result.json` | What the runner reported, with the list of saved artifacts. It also records `limits` and `thinkingLevel`, and for SEC-bench `secbench` (the verdict) and `secbenchSetup` (prompt template checksum, smolagents commit, evaluator commit, dataset revision). Spec 051 adds `checks`, `agentClaim`, `disagreement` and `preambleSha256` (below) |
 
 The runner's own log is in the `…/swebench` log group, in a stream named `<run>/<instance>`.
+
+### Agent verification fields (spec 051)
+
+Eval runs use the same AgentX preamble and the same rerun of the agent's own test commands as
+production (see [Checks](project-configuration.md#checks-how-agentx-verifies-the-agents-work-spec-051)).
+The grade is still the benchmark's own grader. `result.json` also records:
+
+| Field | Contents |
+|---|---|
+| `checks` | AgentX's check report: `status` (`verified`, `regression` or `not_verified`), `source`, each check with `before`, `after` and `class`, `extraTry`, and the preamble version. A run from a runner older than spec 051 has none |
+| `agentClaim` | What the agent's last line said: `success` (`AgentX result: done`), `failure` (`AgentX result: not done`) or `none`. A stopped run claims nothing |
+| `disagreement` | `claimedSuccess`, `checkRegression`, `graderBrokenPassToPass` (null for SEC-bench, which has no PASS_TO_PASS) and `disagrees`: the agent claimed success and AgentX found a regression, or the grader found a broken PASS_TO_PASS test |
+| `preambleSha256` | The SHA-256 of the preamble the agent ran with |
+
+SWE-bench commands such as `cd /testbed && pytest ...` are recorded and replayed from the run root
+inside the container; paths outside it are still refused.
 
 ## Batches (spec 052)
 
@@ -242,14 +258,19 @@ ceiling × 1.1), rounded up to cents and at most $1,000. `stop` in the batch's t
 
 | File | Contents |
 |---|---|
-| `results.csv` | One row per run: instance, model, provider pin, thinking level, repeat, attempt, outcome, resolved, the SEC-bench verdict or test counts, stop reason, agent seconds, tool calls, tokens by kind, cost and charge, image digest |
-| `summary.json` | Per model: graded runs, resolved, resolve rate with a 95% Wilson interval, failed, total cost and cost per solved task |
+| `results.csv` | One row per run: instance, model, provider pin, thinking level, repeat, attempt, outcome, resolved, the SEC-bench verdict or test counts, stop reason, agent seconds, tool calls, tokens by kind, cost and charge, image digest, and (spec 051) `checkStatus`, `agentClaim` and `disagrees` |
+| `summary.json` | Per model: graded runs, resolved, resolve rate with a 95% Wilson interval, failed, total cost and cost per solved task, and `disagreementRate` (spec 051) |
 
 `agentx admin eval batch results` reads them through the control plane. Until the batch ends it
 says the batch is running; if the tick wrote the files and could not confirm them (a lost row, or
 charges that do not sum to the spend) it says the results are incomplete, and the
 `EvalBatchTickErrors` alarm fires. A run with no reported cost is charged its ceiling and marked
 `costEstimated`. The `toolCalls` column is empty for runs on a runner image older than spec 052.
+
+`disagreementRate` is the share of runs where the agent claimed success and AgentX's check or the
+grader disagreed. Its denominator is the graded runs with a claim (`success` or `failure`); a run
+with no claim line, or from a runner older than spec 051, is left out, and a model with none has a
+null rate. It is the number for spec 046's final campaign.
 
 ### Alarms
 

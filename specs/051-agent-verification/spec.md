@@ -2,7 +2,7 @@
 
 **Feature Branch**: `docs/051-agent-verification` (spec), then `feat/051-agent-verification`  
 **Created**: 2026-10-01  
-**Status**: Building on Pi 1.0.0  
+**Status**: Implemented; awaiting release  
 **Input**: SWE-bench pilot findings (2026-09-30/10-01) and decisions with Abhishek (2026-10-01)
 
 ## Why
