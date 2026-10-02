@@ -310,11 +310,12 @@ async function containedDirectory(root: string, path: string, inContainer: boole
     if (inContainer) throw new CheckNotRunError(`AgentX did not replay this command: the worker could not resolve ${path}.`);
     throw new Error(`cd: ${path}: no such directory in this workspace`);
   }
-  if (!(await stat(target)).isDirectory()) throw new Error(`cd: ${path}: not a directory`);
+  // Containment first (M-13): a link out of the workspace is refused, whatever it points at.
   const fromRoot = relative(root, target);
   if (fromRoot === ".." || fromRoot.startsWith(`..${sep}`) || isAbsolute(fromRoot)) {
     throw new CheckNotRunError(`AgentX did not replay this command: ${path} leads outside the workspace.`);
   }
+  if (!(await stat(target)).isDirectory()) throw new Error(`cd: ${path}: not a directory`);
   return target;
 }
 

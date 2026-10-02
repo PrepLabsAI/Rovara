@@ -1,6 +1,6 @@
 // Spec 051 Task 3: AgentX reruns the project's readiness commands, or the agent's own test commands, within a budget.
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, realpath, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -139,13 +139,28 @@ describe("the before of a project check (Ruling J)", () => {
     expect((await readdir(join(root, ".agentx"))).sort()).toEqual(["last-checks.json"]);
   });
 
-  it("a missing or malformed history file is no history", async () => {
+  it("a missing history file is no history; prepared commands still count as passed", async () => {
     const { root, manifest } = await workspace([lint]);
-    await expect(readCheckHistory(root, manifest)).resolves.toEqual({ lastOutcomes: {}, preparedKeys: [projectCheckKey(lint)] });
-    await writeFile(join(root, ".agentx", "last-checks.json"), "{not json");
     await expect(readCheckHistory(root, manifest)).resolves.toEqual({ lastOutcomes: {}, preparedKeys: [projectCheckKey(lint)] });
     // A workspace prepared before the keys were recorded: nothing counts as prepared.
     await expect(readCheckHistory(root, {})).resolves.toEqual({ lastOutcomes: {}, preparedKeys: [] });
+  });
+
+  it("a history file that exists but cannot be used makes every before unknown, not passed (M-10, M-11)", async () => {
+    const { root, manifest } = await workspace([lint]);
+    const path = join(root, ".agentx", "last-checks.json");
+    const none = { lastOutcomes: {}, preparedKeys: [] };
+    await writeFile(path, "{not json");
+    await expect(readCheckHistory(root, manifest)).resolves.toEqual(none);
+    await writeFile(path, JSON.stringify({ schemaVersion: 2, outcomes: {} }));
+    await expect(readCheckHistory(root, manifest)).resolves.toEqual(none);
+    // Larger than 1 MiB: not read.
+    await writeFile(path, JSON.stringify({ schemaVersion: 1, outcomes: {}, padding: "x".repeat(1_100_000) }));
+    await expect(readCheckHistory(root, manifest)).resolves.toEqual(none);
+    // A symlink (here to an endless device) is never followed.
+    await rm(path);
+    await symlink("/dev/zero", path);
+    await expect(readCheckHistory(root, manifest)).resolves.toEqual(none);
   });
 });
 
@@ -336,6 +351,15 @@ describe("createCheckRunners on the host", () => {
     expect(entries[0]).toMatchObject({ after: "not_run", class: "not_rerun" });
     expect(entries[0]!.output).toMatch(/outside the workspace/);
     expect(entries[0]!.output).not.toContain("escaped");
+  });
+
+  it("refuses a cd through a symlink to a file outside the workspace: not run, not failed (M-13)", async () => {
+    const { root, outside } = await repository();
+    await symlink(join(outside, "Makefile"), join(root, "file-link"));
+    const runners = createCheckRunners({ rootPath: root });
+    const { entries } = await runChecks(planChecks(undefined, recorderOf([recorded("cd file-link && make test", 0)])), runners, budget());
+    expect(entries[0]).toMatchObject({ after: "not_run", class: "not_rerun" });
+    expect(entries[0]!.output).toMatch(/outside the workspace/);
   });
 
   it("refuses a replay that is not a simple test command", async () => {

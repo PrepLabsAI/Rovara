@@ -3,7 +3,8 @@
 // a command that preparation ran (and so passed, since the workspace is READY) counts as passed, and any other as
 // unknown, so a check added in a later revision that already fails is never blamed on the agent.
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { resolve } from "node:path";
 import type { CheckEntry, CheckOutcome, ProjectCommand } from "@agentx/contracts";
 
@@ -48,18 +49,38 @@ export function projectBefore(readiness: readonly ProjectCommand[], history: Che
   });
 }
 
+/** A history file larger than this is not read: it is far beyond 64 checks' worth (M-10). */
+const MAX_HISTORY_BYTES = 1_048_576;
+
 /**
- * The workspace's history. A missing or malformed file is no history (the safe side: checks fall back to the
- * preparation keys, then unknown). A manifest written before the keys were recorded has no prepared keys.
+ * The workspace's history. Read it before the agent's session starts, and keep that snapshot for the task's rounds:
+ * the agent can write to `.agentx`, so a read after the agent has run may see a file the agent wrote (Ruling L).
+ *
+ * A missing file is no history: checks fall back to the preparation keys (passed), then unknown. A file that exists but
+ * cannot be used (a symlink or other non-regular file, larger than 1 MiB, not JSON, or not a version-1 history) makes
+ * every before unknown, preparation keys included: an earlier task may have left a check failing, and passed would then
+ * blame this task for it (M-11). A manifest written before the keys were recorded has no prepared keys.
  */
 export async function readCheckHistory(rootPath: string, manifest: { readinessCommandKeys?: readonly string[] }): Promise<CheckHistory> {
-  let lastOutcomes: Record<string, CheckOutcome> = {};
+  const preparedKeys = [...(manifest.readinessCommandKeys ?? [])];
+  const path = resolve(rootPath, HISTORY_PATH);
+  let metadata;
   try {
-    lastOutcomes = parseHistory(JSON.parse(await readFile(resolve(rootPath, HISTORY_PATH), "utf8"))) ?? {};
-  } catch {
-    // Missing or not JSON: no history.
+    metadata = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { lastOutcomes: {}, preparedKeys };
+    return { lastOutcomes: {}, preparedKeys: [] };
   }
-  return { lastOutcomes, preparedKeys: [...(manifest.readinessCommandKeys ?? [])] };
+  if (!metadata.isFile() || metadata.size > MAX_HISTORY_BYTES) return { lastOutcomes: {}, preparedKeys: [] };
+  let outcomes: Record<string, KnownOutcome> | undefined;
+  try {
+    // O_NOFOLLOW: a symlink swapped in after the lstat is not followed either.
+    const text = await readFile(path, { encoding: "utf8", flag: constants.O_RDONLY | constants.O_NOFOLLOW });
+    outcomes = text.length > MAX_HISTORY_BYTES ? undefined : parseHistory(JSON.parse(text));
+  } catch {
+    outcomes = undefined;
+  }
+  return outcomes === undefined ? { lastOutcomes: {}, preparedKeys: [] } : { lastOutcomes: outcomes, preparedKeys };
 }
 
 /**
