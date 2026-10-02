@@ -369,7 +369,7 @@ describe("the baseline file", () => {
 });
 
 interface Step { id?: string; name?: string; if?: string; run?: string }
-interface Workflow { jobs: Record<string, { steps: Step[] }> }
+interface Workflow { jobs: Record<string, { if?: string; steps: Step[] }> }
 
 describe("wiring", () => {
   it("has npm scripts that build first, then check, and one that lowers the baseline", async () => {
@@ -380,11 +380,11 @@ describe("wiring", () => {
 
   it("runs the ratchet in CI right after the typecheck, behind the docs-only check", async () => {
     const workflow = YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
-    const steps = workflow.jobs.local!.steps;
-    const typecheck = steps.findIndex((step) => step.run === "npm run typecheck");
-    const ratchet = steps.findIndex((step) => step.run === "npm run typecheck:all");
+    const checks = workflow.jobs.checks!;
+    const typecheck = checks.steps.findIndex((step) => step.run === "npm run typecheck");
+    const ratchet = checks.steps.findIndex((step) => step.run === "npm run typecheck:all");
     expect(ratchet).toBe(typecheck + 1);
-    expect(steps[ratchet]!.if).toBe("steps.scope.outputs.docs_only != 'true'");
+    expect(checks.if).toBe("needs.scope.outputs.docs_only != 'true'");
   });
 
   it("runs the ratchet in the release workflow's test job after the typecheck", async () => {
