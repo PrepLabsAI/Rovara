@@ -7,13 +7,14 @@
 // itself, then asks the engineer to confirm the Event Subscriptions page shows Verified.
 import { createHmac, randomBytes } from "node:crypto";
 import { AgentXError, agentXError, environmentStackName, errorStatus } from "@agentx/contracts";
-import type { InitContext, InitSecrets } from "./context.js";
+import type { InitContext, InitSecrets, SecretFlags } from "./context.js";
 import { SLACK_BOT_HANDLE_PATTERN, type InstallProgress } from "./install-state.js";
-import { checkSlackBotToken, checkSlackSigningSecret, fieldCheck, secretFromSource, type SecretSource } from "./prompts.js";
+import { askForm, checkSlackBotToken, checkSlackSigningSecret, cleanSecret, fieldCheck, secretFromSource, type FormField, type SecretSource } from "./prompts.js";
 import { problemText, retryOnPage } from "./retry.js";
 import type { InitStep, ProgressHandle } from "./steps.js";
-import { slackAppCard, type SlackCardInput, slackUrlsCard, type SlackUrlsCardInput } from "./ui/cards.js";
+import { SLACK_APPS_URL, slackAppCard, type SlackCardInput, slackUrlsCard, type SlackUrlsCardInput } from "./ui/cards.js";
 import { STEP_PLAN } from "./ui/journey.js";
+import { checkSlackClientId, checkSlackClientSecret, hasStoredSlackClient, SIGNIN_FLAG_NAMES, slackClientIdProblem, type SigninFlags } from "../signin/collect.js";
 
 // channels:join, channels:read and groups:read serve 15d2's `channel add`; users:read.email and
 // im:write serve developer sign-in (spec 025 FR-044). Adding scopes later forces a reinstall (R10).
@@ -24,6 +25,39 @@ export const SLACK_USER_SCOPES: readonly string[] = ["email", "openid", "profile
 export const SIGN_IN_BOT_SCOPES: readonly string[] = ["channels:read", "groups:read", "im:write", "users:read", "users:read.email"];
 export const SLACK_PROBE_TIMEOUT_MS = 7 * 60 * 1000;
 const PROBE_POLL_MS = 15_000;
+export const SLACK_VALUES_TITLE = "Your Slack app's values";
+const SLACK_APP_LINK = { learnMoreUrl: SLACK_APPS_URL, linkLabel: "Open your Slack apps" };
+const SAME_SECRET = "This is the Client Secret again. Copy the Signing Secret, just below it on Basic Information.";
+
+/** Spec 048 FR-033: the values in Slack's order. A value supplied by a flag or file is omitted. */
+export function slackValuesFields(input: { client: boolean; secretFlags: SecretFlags; signinFlags: SigninFlags }): FormField[] {
+  const fields: FormField[] = [];
+  if (input.client && input.signinFlags.slackClientId === undefined) {
+    fields.push({
+      name: "clientId", question: "Slack app Client ID (Basic Information, App Credentials)", flag: SIGNIN_FLAG_NAMES.slackClientId,
+      validate: slackClientIdProblem, help: SLACK_APP_LINK,
+    });
+  }
+  if (input.client && input.secretFlags.slackClientSecret === undefined) {
+    fields.push({
+      name: "clientSecret", question: "Slack client secret", flag: SIGNIN_FLAG_NAMES.slackClientSecret,
+      secret: true, validate: fieldCheck(checkSlackClientSecret), help: SLACK_APP_LINK,
+    });
+  }
+  if (input.secretFlags.slackSigningSecret === undefined) {
+    fields.push({
+      name: "signingSecret", question: "Slack signing secret", flag: "--slack-signing-secret",
+      secret: true, validate: fieldCheck(checkSlackSigningSecret), help: SLACK_APP_LINK,
+    });
+  }
+  if (input.secretFlags.slackBotToken === undefined) {
+    fields.push({
+      name: "botToken", question: "Slack bot token", flag: "--slack-bot-token",
+      secret: true, validate: fieldCheck(checkSlackBotToken), help: SLACK_APP_LINK,
+    });
+  }
+  return fields;
+}
 
 export interface SlackManifest {
   display_information: { name: string; description: string };
@@ -308,30 +342,35 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
         if (context.openBrowser !== undefined) await context.openBrowser(url);
         show({ stage: "create", appName, createUrl: url });
       }
-      const installed = await context.prompter.choose<"installed" | "approval">("Is the Slack app installed in your workspace?", [
-        { value: "installed", label: "Yes: I can copy its Bot User OAuth Token" },
-        { value: "approval", label: "Not yet: a workspace admin must approve it first" },
-      ], { flag: "--slack-install", defaultValue: "installed" });
-      if (installed === "approval") {
+      for (;;) {
+        const installed = await context.prompter.choose<"installed" | "approval">("Is the Slack app installed in your workspace?", [
+          { value: "installed", label: "Yes: I can copy its Bot User OAuth Token" },
+          { value: "approval", label: "Not yet: a workspace admin must approve it first" },
+        ], { flag: "--slack-install", defaultValue: "installed" });
+        if (installed === "installed") break;
         show({ stage: "approval", appName });
-        return { status: "waiting", message: `Slack is waiting for a workspace admin to approve "${appName}". Once it is installed, run agentx init --env ${env} --region ${context.answers.region} again; it continues here.` };
+        if (context.surface === undefined) {
+          return { status: "waiting", message: `Slack is waiting for a workspace admin to approve "${appName}". Once it is installed, run agentx init --env ${env} --region ${context.answers.region} again; it continues here.` };
+        }
       }
 
-      context.write("Copy the Bot User OAuth Token from OAuth & Permissions, and the Signing Secret from Basic Information, App Credentials.");
+      context.write("Copy the Client ID, Client Secret and Signing Secret from Basic Information, App Credentials, and the Bot User OAuth Token from OAuth & Permissions.");
       show({ stage: "credentials", appName });
       // Q8: on the page, a token Slack refuses is pasted again; the terminal stops, as before. A
       // credential read from a file or an environment variable cannot be pasted again, so then the
       // page stops as the terminal does.
       const fromSource = (source: SecretSource | undefined) => source?.file !== undefined || source?.envName !== undefined;
       const pastedOnPage = !fromSource(context.secretFlags.slackBotToken) && !fromSource(context.secretFlags.slackSigningSecret);
+      const methods = context.signinFlags.methods ?? context.answers.signinMethods ?? "slack";
+      const client = methods !== "oidc" && !(await hasStoredSlackClient(context.secrets, slackSecretName(env)));
       const bot = await retryOnPage({
-        surface: pastedOnPage ? context.surface : undefined, prompter: context.prompter, question: "Paste the Slack bot token and signing secret again?",
+        surface: pastedOnPage ? context.surface : undefined, prompter: context.prompter, question: "Paste the Slack values again?",
         failed: (problem) => show({ stage: "refused", problem }),
         run: pastedOnPage || context.surface === undefined
-          ? () => collectBot(context, api, progress, show)
+          ? () => collectSlackValues(context, api, progress, show, client)
           : async () => {
             try {
-              return await collectBot(context, api, progress, show);
+              return await collectSlackValues(context, api, progress, show, client);
             } catch (error) {
               // No paste again here, so the card keeps the terminal's whole advice.
               show({ stage: "refused", problem: problemText(error), retry: false });
@@ -342,7 +381,9 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
 
       // Read, merge, write: a concurrent writer (this step alongside `agentx signin enable slack`)
       // could lose an update. Left for admins to avoid by running one at a time.
-      await context.secrets.put(slackSecretName(env), slackSecretWithBot(await context.secrets.get(slackSecretName(env)), { signingSecret: bot.signingSecret, botToken: bot.botToken }));
+      const before = await context.secrets.get(slackSecretName(env));
+      const withBot = slackSecretWithBot(before, { signingSecret: bot.signingSecret, botToken: bot.botToken });
+      await context.secrets.put(slackSecretName(env), bot.client === undefined ? withBot : slackSecretWithSignIn(withBot, bot.client));
       await progress.update({ slack: { appId: bot.appId, teamId: bot.teamId, botUserId: bot.botUserId, ...(bot.botName === undefined ? {} : { botName: bot.botName }), ...(bot.teamName === undefined ? {} : { teamName: bot.teamName }) } });
       show({ stage: "done", appName, appId: bot.appId, teamId: bot.teamId, ...(bot.teamName === undefined ? {} : { teamName: bot.teamName }) });
       return { status: "done", note: `Slack app ${bot.appId} in workspace ${bot.teamId}` };
@@ -357,13 +398,33 @@ export function botNameOf(progress: InstallProgress, appName: string): string {
 }
 
 interface SlackBot { botToken: string; signingSecret: string; appId: string; teamId: string; botUserId: string; botName?: string; teamName?: string }
+interface SlackValues extends SlackBot { client?: { clientId: string; clientSecret: string } }
 
 /** The two credentials, checked on their fields (FR-040) and then with Slack, and the operator's
  * word that this is the right bot. Throws, and saves nothing, when any of it fails. */
-async function collectBot(context: InitContext, api: SlackApi, progress: ProgressHandle, show: (card: SlackCardInput) => void): Promise<SlackBot> {
+async function collectSlackValues(context: InitContext, api: SlackApi, progress: ProgressHandle, show: (card: SlackCardInput) => void, client: boolean): Promise<SlackValues> {
   const common = { processEnv: context.processEnv, prompter: context.prompter };
-  const botToken = checkSlackBotToken(await secretFromSource({ ...common, what: "Slack bot token", flag: "--slack-bot-token", source: context.secretFlags.slackBotToken ?? {}, validate: fieldCheck(checkSlackBotToken) }));
-  const signingSecret = checkSlackSigningSecret(await secretFromSource({ ...common, what: "Slack signing secret", flag: "--slack-signing-secret", source: context.secretFlags.slackSigningSecret ?? {}, validate: fieldCheck(checkSlackSigningSecret) }));
+  const fields = slackValuesFields({ client, secretFlags: context.secretFlags, signinFlags: context.signinFlags });
+  const typed = fields.length === 0 ? {} : await askForm(context.prompter, SLACK_VALUES_TITLE, fields, {
+    crossCheck: (values) => (values.clientSecret !== undefined && values.clientSecret === values.signingSecret ? { signingSecret: SAME_SECRET } : undefined),
+  });
+  const fromSource = async (name: string, what: string, flag: string, source: SecretSource | undefined, check: (value: string) => string) => {
+    const pasted = typed[name];
+    return check(pasted === undefined
+      ? await secretFromSource({ ...common, what, flag, source: source ?? {}, validate: fieldCheck(check) })
+      : cleanSecret(pasted, what));
+  };
+  const botToken = await fromSource("botToken", "Slack bot token", "--slack-bot-token", context.secretFlags.slackBotToken, checkSlackBotToken);
+  const signingSecret = await fromSource("signingSecret", "Slack signing secret", "--slack-signing-secret", context.secretFlags.slackSigningSecret, checkSlackSigningSecret);
+  let pair: SlackValues["client"];
+  if (client) {
+    const clientId = checkSlackClientId(context.signinFlags.slackClientId ?? typed.clientId ?? "");
+    const clientSecret = await fromSource("clientSecret", "Slack client secret", SIGNIN_FLAG_NAMES.slackClientSecret, context.secretFlags.slackClientSecret, checkSlackClientSecret);
+    if (clientSecret === signingSecret) {
+      throw agentXError("CONFIG_INVALID", "the Slack client secret and signing secret are the same value; nothing was saved. Copy each from Basic Information, App Credentials");
+    }
+    pair = { clientId, clientSecret };
+  }
 
   const auth = await api.authTest(botToken);
   if (!auth.ok) throw agentXError("CONFIG_INVALID", `Slack refused the bot token (${auth.error ?? "no reason given"}); copy it again from OAuth & Permissions`);
@@ -394,7 +455,7 @@ async function collectBot(context: InitContext, api: SlackApi, progress: Progres
   const teamName = auth.team === undefined || auth.team.trim() === "" ? undefined : auth.team.slice(0, 100);
   return {
     botToken, signingSecret, appId, teamId: auth.team_id, botUserId: auth.user_id,
-    ...(botName === undefined ? {} : { botName }), ...(teamName === undefined ? {} : { teamName }),
+    ...(botName === undefined ? {} : { botName }), ...(teamName === undefined ? {} : { teamName }), ...(pair === undefined ? {} : { client: pair }),
   };
 }
 
@@ -419,12 +480,12 @@ export async function verifySlackUrls(context: InitContext, progress: ProgressHa
   // FR-041 (Q7): on the page, a failed check runs again after the fix; the terminal stops, as before.
   await retryOnPage({
     surface: context.surface, prompter: context.prompter, question: "Run the Request URL check again?",
-    failed: (problem) => show({ stage: "failed", problem, pageUrl: page }),
+    failed: (problem) => show(problem.startsWith("Slack has not verified") ? { stage: "not-verified", pageUrl: page } : { stage: "failed", problem, pageUrl: page }),
     run: async () => {
       show({ stage: "checking", eventsUrl });
       await probeSlackUrls({
         eventsUrl, interactivityUrl, signingSecret, fetch: context.fetch, now: context.now, sleep: context.sleep, write: context.write,
-        onWaiting: () => show({ stage: "waiting-for-secret", eventsUrl }),
+        onWaiting: () => show({ stage: "waiting-for-secret", eventsUrl, until: new Date(context.now() + SLACK_PROBE_TIMEOUT_MS).toISOString() }),
       });
       context.write(`AgentX now answers Slack's URL check. Open ${page}; if the Request URL is not marked Verified, press Retry.`);
       show({ stage: "verify", pageUrl: page });

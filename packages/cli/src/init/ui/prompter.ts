@@ -13,7 +13,7 @@
 import { stripPasteMarkers, type FormField, type Prompter, type QuestionHelp } from "../prompts.js";
 import type { WizardButton, WizardField } from "./protocol.js";
 import { pageHint, questionHelp } from "./question-copy.js";
-import type { AnswerCheck, NewQuestion, WizardHub } from "./state.js";
+import { isShowableLink, NEW_TAB_NOTE, type AnswerCheck, type NewQuestion, type WizardHub } from "./state.js";
 
 export const CONFIRM_YES = "yes";
 export const CONFIRM_NO = "no";
@@ -103,43 +103,58 @@ export function browserPrompter(hub: WizardHub): Prompter {
     },
     async form(title, fields, options) {
       const help = questionHelp({ kind: "form", text: title, ...(options.help === undefined ? {} : { given: options.help }) });
+      const fieldHelp = (field: FormField) => questionHelp({ kind: field.choices !== undefined ? "choose" : field.secret === true ? "secret" : "ask", text: field.question, flag: field.flag, ...(field.help === undefined ? {} : { given: field.help }) });
       const toField = (field: FormField, kept?: string, error?: string): WizardField => {
-        const fieldHelp = questionHelp({ kind: field.secret === true ? "secret" : "ask", text: field.question, flag: field.flag, ...(field.help === undefined ? {} : { given: field.help }) });
-        const hint = field.secret === true ? undefined : pageHint(field.defaultValue, fieldHelp);
+        const words = fieldHelp(field);
+        const hint = field.secret === true || field.choices !== undefined ? undefined : pageHint(field.defaultValue, words);
+        const link = words.learnMoreUrl !== undefined && isShowableLink(words.learnMoreUrl)
+          ? { url: words.learnMoreUrl, label: words.linkLabel ?? "Learn more", note: NEW_TAB_NOTE } : undefined;
         return {
-          name: field.name, label: fieldHelp.label ?? field.question,
-          ...(fieldHelp.why === undefined ? {} : { why: fieldHelp.why }),
-          ...(fieldHelp.example === undefined ? {} : { example: fieldHelp.example }),
+          name: field.name, label: words.label ?? field.question,
+          ...(words.why === undefined ? {} : { why: words.why }),
+          ...(words.example === undefined ? {} : { example: words.example }),
           ...(hint === undefined ? {} : { hint }),
           ...(field.secret === true ? { masked: true } : {}),
+          ...(field.choices === undefined ? {} : {
+            choices: field.choices.map((choice) => ({ value: choice.value, label: words.choiceLabels?.[choice.value] ?? choice.label })),
+            defaultValue: field.defaultValue ?? field.choices[0]?.value ?? "",
+          }),
+          ...(field.section === undefined ? {} : { section: field.section }),
+          ...(field.group === undefined ? {} : { group: field.group }),
+          ...(link === undefined ? {} : { link }),
           // FR-012: only a plain value is ever sent back to the page, never a secret.
           ...(field.secret !== true && kept !== undefined ? { value: kept } : {}),
           ...(error === undefined ? {} : { error }),
         };
       };
-      const question = (kept: Record<string, string> = {}, errors: Record<string, string> = {}): NewQuestion => ({
-        kind: "form", text: title, ...pageFields(help), fields: fields.map((field) => toField(field, kept[field.name], errors[field.name])),
+      const plainStart = Object.fromEntries(fields.filter((field) => field.secret !== true && options.values?.[field.name] !== undefined).map((field) => [field.name, options.values?.[field.name] ?? ""]));
+      const question = (kept: Record<string, string> = plainStart, errors: Record<string, string> = {}): NewQuestion => ({
+        kind: "form", text: title, ...pageFields(help),
+        ...(options.summary === undefined ? {} : { summary: [...options.summary] }),
+        ...(help.submitLabel === undefined ? {} : { submitLabel: help.submitLabel }),
+        fields: fields.map((field) => toField(field, kept[field.name], errors[field.name])),
       });
+      const choiceCheck = (field: FormField): AnswerCheck => (raw) => {
+        const value = raw.trim() === "" ? field.defaultValue ?? field.choices?.[0]?.value ?? "" : raw.trim();
+        return field.choices?.some((choice) => choice.value === value) === true ? { value } : { error: "choose one of the options" };
+      };
       const raw = await hub.ask(question(), (posted) => {
         let parsed: unknown;
-        try {
-          parsed = JSON.parse(posted);
-        } catch {
-          return { error: "the form could not be read; try again" };
-        }
+        try { parsed = JSON.parse(posted); } catch { return { error: "the form could not be read; try again" }; }
         if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { error: "the form could not be read; try again" };
         const given = parsed as Record<string, unknown>;
         const values: Record<string, string> = {};
         const errors: Record<string, string> = {};
         for (const field of fields) {
           const value = typeof given[field.name] === "string" ? (given[field.name] as string) : "";
-          const check = field.secret === true
-            ? secretCheck(field.question, false, field.validate)
-            : askCheck({ ...(field.defaultValue === undefined ? {} : { defaultValue: field.defaultValue }), ...(field.validate === undefined ? {} : { validate: field.validate }) });
+          const check = field.choices !== undefined ? choiceCheck(field)
+            : field.secret === true ? secretCheck(field.question, false, field.validate)
+              : askCheck({ ...(field.defaultValue === undefined ? {} : { defaultValue: field.defaultValue }), ...(field.validate === undefined ? {} : { validate: field.validate }) });
           const result = check(value);
           if ("error" in result) errors[field.name] = result.error;
           else values[field.name] = result.value;
         }
+        if (Object.keys(errors).length === 0) Object.assign(errors, options.crossCheck?.(values) ?? {});
         const refused = Object.keys(errors).length;
         if (refused === 0) return { value: JSON.stringify(values) };
         const kept = Object.fromEntries(fields.filter((field) => field.secret !== true && values[field.name] !== undefined).map((field) => [field.name, values[field.name] ?? ""]));

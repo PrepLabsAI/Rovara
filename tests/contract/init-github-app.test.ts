@@ -6,19 +6,43 @@ import { agentXError } from "@agentx/contracts";
 import {
   githubAppJwt, githubAppManifest, githubAppSecretName, githubAppStep, githubNewAppUrl, githubRestApi, manifestFormPage, parseManifestCallback, startManifestListener,
 } from "../../packages/cli/src/init/github-app.js";
-import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
-import { terminalPrompter } from "../../packages/cli/src/init/prompts.js";
+import { emptyProgress, type InstallProgress } from "../../packages/cli/src/init/install-state.js";
+import { terminalPrompter, unattendedPrompter } from "../../packages/cli/src/init/prompts.js";
 import { problemText } from "../../packages/cli/src/init/retry.js";
 import { githubCard } from "../../packages/cli/src/init/ui/cards.js";
 import { startInstallWizard } from "../../packages/cli/src/init/ui/index.js";
 import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
+import type { ProgressHandle } from "../../packages/cli/src/init/steps.js";
 import {
   browserThatCreatesGitHubApp, fakeGitHubApi, initContext, memoryInitSecrets, progressHandle, sampleAnswers, scriptedPrompter, T0, TEST_PRIVATE_KEY, TEST_PUBLIC_KEY,
+  type ScriptedAnswer, type TestInitContext,
 } from "../support/init-fakes.js";
 
 const homes: string[] = [];
 afterEach(async () => { await Promise.all(homes.splice(0).map((home) => rm(home, { recursive: true, force: true }))); });
 const SECRET = githubAppSecretName("staging");
+
+/** Spec 048 FR-032: an InitContext and ProgressHandle for the GitHub step, built like every other
+ * test's `initContext()` and `progressHandle()`, extended with a seeded `githubPending`, a scripted
+ * prompter's answers, and a surface that records the cards shown. A browser that plays GitHub's
+ * manifest flow is wired in by default, since every path here but a plain resume can end up making
+ * a new GitHub App. Every context's `home` is queued for cleanup, as the other tests in this file do. */
+async function githubContext(input: {
+  secrets?: TestInitContext["secrets"];
+  pending?: InstallProgress["githubPending"];
+  script?: ScriptedAnswer[];
+  cards?: WizardCard[];
+} = {}): Promise<{ context: TestInitContext; progress: ProgressHandle & { value(): InstallProgress } }> {
+  const context = initContext({
+    openBrowser: browserThatCreatesGitHubApp([]),
+    ...(input.secrets === undefined ? {} : { secrets: input.secrets }),
+    ...(input.script === undefined ? {} : { prompter: scriptedPrompter(input.script) }),
+    ...(input.cards === undefined ? {} : { surface: { card: (card: WizardCard) => { input.cards?.push(card); } } }),
+  });
+  homes.push(context.home);
+  const progress = progressHandle({ ...emptyProgress("staging", T0), ...(input.pending === undefined ? {} : { githubPending: input.pending }) });
+  return { context, progress };
+}
 
 describe("GitHub App manifest", () => {
   it("asks for exactly the permissions AgentX uses, no webhook and no events", () => {
@@ -513,5 +537,48 @@ describe("fix round 1 hardening", () => {
     await githubAppStep(api).run(context, progressHandle());
     expect(api.tokens()).toBeGreaterThan(1);
     expect(api.tokens()).toBeLessThan(15);
+  });
+});
+
+describe("spec 048 FR-032: a GitHub app made but not stored", () => {
+  it("is recorded before its key is stored, so a failed store leaves it findable", async () => {
+    const { context, progress } = await githubContext({ secrets: memoryInitSecrets({}, { failCreate: true }) });
+    await expect(githubAppStep(fakeGitHubApi()).run(context, progress)).rejects.toThrow("could not store the private key");
+    expect(progress.current().githubPending).toEqual({ account: "acme", appId: "424242", slug: "agentx-acme-staging" });
+    expect(progress.current().github).toBeUndefined();
+  });
+
+  it("on resume, Finish takes a new private key for the same app and makes no new app", async () => {
+    const api = fakeGitHubApi();
+    const { context, progress } = await githubContext({ pending: { account: "acme", appId: "424242", slug: "agentx-acme-staging" }, script: ["finish", TEST_PRIVATE_KEY] });
+    await expect(githubAppStep(api).run(context, progress)).resolves.toMatchObject({ status: "done" });
+    expect(api.conversions).toEqual([]);
+    expect(progress.current().github).toMatchObject({ appId: "424242", slug: "agentx-acme-staging" });
+  });
+
+  it("on resume, Replace sends the user to delete the old app, then makes a new one", async () => {
+    const api = fakeGitHubApi();
+    const cards: WizardCard[] = [];
+    const { context, progress } = await githubContext({ pending: { account: "acme", appId: "424242", slug: "agentx-acme-staging" }, script: ["replace", true], cards });
+    await expect(githubAppStep(api).run(context, progress)).resolves.toMatchObject({ status: "done" });
+    expect(api.conversions).toHaveLength(1);
+    const recover = cards.find((card) => card.lines.some((line) => line.includes("cannot show that key again")));
+    expect(recover?.link?.url).toBe("https://github.com/organizations/acme/settings/apps/agentx-acme-staging/advanced");
+  });
+
+  it("links to the pending app's owner when the current answers name a different owner", async () => {
+    const cards: WizardCard[] = [];
+    const { context, progress } = await githubContext({ pending: { account: "oldco", appId: "424242", slug: "agentx-oldco-staging" }, script: ["finish", TEST_PRIVATE_KEY], cards });
+    context.answers = sampleAnswers({ github: { account: "newco", accountType: "organization", appName: "AgentX newco (staging)" } });
+    await expect(githubAppStep(fakeGitHubApi({ owner: "oldco" })).run(context, progress)).rejects.toThrow("created under oldco, not newco");
+    expect(cards.find((card) => card.lines.some((line) => line.includes("cannot show that key again")))?.link?.url).toBe("https://github.com/organizations/oldco/settings/apps/agentx-oldco-staging/advanced");
+  });
+
+  it("an unattended resume takes the safe Finish default", async () => {
+    const api = fakeGitHubApi();
+    const { context, progress } = await githubContext({ pending: { account: "acme", appId: "424242", slug: "agentx-acme-staging" } });
+    context.prompter = { ...unattendedPrompter(), secret: async () => TEST_PRIVATE_KEY };
+    await expect(githubAppStep(api).run(context, progress)).resolves.toMatchObject({ status: "done" });
+    expect(api.conversions).toEqual([]);
   });
 });

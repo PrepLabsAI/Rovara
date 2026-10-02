@@ -1,14 +1,14 @@
 // Spec 025 FR-044: the init step that runs after the Slack service step. R9 does not hold (F15):
 // an environment installed before 25a never reaches this step, because agentx init refuses to
 // resume across a release mismatch (a 25a release is a new one); it turns sign-in on with agentx
-// signin enable instead. This step asks which developer sign-in methods to enable (Slack by
-// default), collects the Slack app's client ID and secret or the company OIDC app, and applies the
-// same change as agentx signin enable (F16: enableSlackSignIn and enableOidcSignIn are shared, not
-// copied), under the lock the step runner already holds.
+// signin enable instead. This step uses the developer sign-in method approved in the install plan,
+// collects any company OIDC app values that method needs, and applies the same change as agentx
+// signin enable (F16: enableSlackSignIn and enableOidcSignIn are shared, not copied), under the lock
+// the step runner already holds.
 import { AgentXError, agentXError } from "@agentx/contracts";
 import { readEnvironmentSettings } from "../environments/settings.js";
 import { applySignInChange, errorReason } from "../signin/apply.js";
-import { SIGNIN_FLAG_NAMES, enableOidcSignIn, enableSlackSignIn, type SignInCredentials } from "../signin/collect.js";
+import { enableOidcSignIn, enableSlackSignIn, type SignInCredentials } from "../signin/collect.js";
 import { readSignInSettings, type DeveloperSignInSettings } from "../signin/settings.js";
 import { cliCommandLine } from "./cli-command.js";
 import type { InitContext } from "./context.js";
@@ -61,11 +61,9 @@ export function developerSignInStep(input: { slack: SlackApi }): InitStep<InitCo
       if ((await readSignInSettings(context.store, env)) !== undefined) return { status: "done", note: "developer sign-in was already set up" };
       const settings = await readEnvironmentSettings(context.store, env);
       if (settings === undefined) throw agentXError("CONFIG_INVALID", `environment ${env} has no settings yet; the Slack service step must finish first, so run agentx init again`);
-      const methods = context.signinFlags.methods ?? await context.prompter.choose<"slack" | "oidc" | "both">("How will developers sign in to AgentX from their AI tools?", [
-        { value: "slack", label: "Sign in with Slack (recommended)" },
-        { value: "oidc", label: "Your company's sign-in (OIDC)" },
-        { value: "both", label: "Both" },
-      ], { flag: SIGNIN_FLAG_NAMES.methods, defaultValue: "slack" });
+      // Spec 048 FR-022 and FR-030: the methods were chosen with the settings, and turning them on
+      // is part of the confirmed plan, so nothing is asked here. --signin still wins.
+      const methods = context.signinFlags.methods ?? context.answers.signinMethods ?? "slack";
       const questions = {
         env, apiEndpoint: settings.controlPlaneUrl, secrets: context.secrets, prompter: context.prompter,
         processEnv: context.processEnv, flags: context.signinFlags, secretFlags: context.secretFlags, write: context.write,
@@ -92,7 +90,7 @@ export function developerSignInStep(input: { slack: SlackApi }): InitStep<InitCo
         next: { slack: methods !== "oidc", ...(oidc === undefined ? {} : { oidc }) },
         ...(slackTeamId === undefined ? {} : { slackTeamId }),
         ...(credentials === undefined ? {} : { credentials }),
-        confirm: async (text) => { context.write(text); return context.prompter.confirm("Apply this change?", { defaultValue: true }); },
+        confirm: async (text) => { context.write(text); return true; },
         write: context.write, now: context.now, sleep: context.sleep, lockHeld: true, rerun: "agentx init",
       });
       context.write(`Developers sign in with: ${cliCommandLine(context.cliInvocation, `login ${settings.controlPlaneUrl}`)}`);

@@ -14,6 +14,9 @@ import { fakeGitHubApi } from "./init-fakes.js";
 
 export const CONTROL_PLANE = "https://cp.example.test";
 export const ADMIN_EMAIL = "alice@example.com";
+/** The staging environment's alerts topic ARN (OperatorAlertsTopicArn), as the control-plane stack
+ * reports it; shared so every test that fakes it uses the same value. */
+export const ALERTS_TOPIC_ARN = "arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts";
 
 /** A staging environment's settings (/agentx/staging/settings), with Cognito sign-in. */
 export const STAGING_SETTINGS: EnvironmentSettings = {

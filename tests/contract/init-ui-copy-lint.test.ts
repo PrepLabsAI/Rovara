@@ -5,8 +5,10 @@ import { describe, expect, it } from "vitest";
 import { environmentStackName } from "@agentx/contracts";
 import { WAITING_STEP_PLAIN } from "../../packages/cli/src/init/commands.js";
 import type { WizardQuestion } from "../../packages/cli/src/init/ui/protocol.js";
+import { settingsFields } from "../../packages/cli/src/init/settings-form.js";
 import { COPY_RULES, lintCopy, quotedStrings, stateEntries } from "../support/copy-lint.js";
-import { FINISH, FIRST_RUN, harness, SIGNIN, SLACK } from "../support/init-ui-harness.js";
+import { FINISH, FIRST_RUN, FIRST_RUN_BUDGET_USD, harness, SIGNIN, SLACK } from "../support/init-ui-harness.js";
+import { fakeAlerts } from "../support/setup-fakes.js";
 import { fakeWizardOperator } from "../support/wizard-browser.js";
 
 const SEEDED: Record<string, string> = {
@@ -36,6 +38,7 @@ const GOOD = [
   "Start the AgentX service: usually 13 minutes",
   "Claude Sonnet 4.6 (recommended; about $0.025 a turn)",
   "The Bot User OAuth Token is under OAuth & Permissions. It starts with xoxb-.",
+  "Everything here is also in /tmp/agentx-init-ui-home-GP6AHZ/.agentx/logs/init-staging.log.",
   "Keep the terminal open and your computer awake until the install is done.",
   "the steps that finished are kept",
 ];
@@ -108,18 +111,14 @@ describe("SC-011: the whole install, as the page shows it", () => {
     expect(lintCopy(operator.states.flatMap((state, index) => stateEntries(state, `state ${index}`)))).toEqual([]);
   });
 
-  // Review fix round 1: a waiting step carries a `message` (WizardStep.message) the earlier three
-  // journeys never reach, since none of them pauses on someone else. Driving one here (the same
-  // script as commands.ts's "a run paused waiting on a Slack admin's approval" test) proves
-  // stateEntries actually walks a waiting step's message, and that the whole state history still
-  // lints clean with it present.
-  it("a run paused waiting on a Slack admin's approval says no internal word anywhere on the page", async () => {
+  it("a run paused waiting on the alert confirmation says no internal word anywhere on the page", async () => {
     const h = await harness();
-    const operator = fakeWizardOperator([...FIRST_RUN, "approval"]);
-    const code = await h.run(["--ui"], { openBrowser: operator.open });
+    const alerts = fakeAlerts({ confirmAfterPolls: 1_000_000, budgetUsd: FIRST_RUN_BUDGET_USD });
+    const finish = FINISH.slice(0, -1);
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ...finish, false]);
+    const code = await h.run(["--ui"], { openBrowser: operator.open, setup: { ...h.setup, alerts } });
     await operator.settled();
     expect(code).toBe(0);
-    // Not vacuous: a step really did reach "waiting" with a message, in some state of the run.
     expect(operator.states.some((state) => state.steps.some((step) => step.status === "waiting" && step.message !== undefined))).toBe(true);
     expect(lintCopy(operator.states.flatMap((state, index) => stateEntries(state, `state ${index}`)))).toEqual([]);
   });
@@ -128,12 +127,26 @@ describe("SC-011: the whole install, as the page shows it", () => {
     const h = await harness();
     const { operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     const questions = new Map<string, WizardQuestion>(operator.states.flatMap((state) => (state.question === undefined ? [] : [[state.question.id, state.question] as const])));
-    expect(questions.size).toBeGreaterThan(20);
+    // The settings form, the plan, the Slack installed question, the Slack form, the bot check, the
+    // Verified check, then the eight finishing questions (repository, project name, commands,
+    // channel, three trackers, the test alert).
+    expect(questions.size).toBe(14);
+    // Spec 048 FR-020: the settings are one form, so each of its fields is held to the same words.
+    const fields = new Map([...questions.values()].flatMap((question) => (question.fields ?? []).map((field) => [`${question.text}/${field.name}`, field] as const)));
     for (const question of questions.values()) {
       expect({ text: question.text, label: question.label }).toMatchObject({ label: expect.stringMatching(/\S/) as unknown });
       expect({ text: question.text, why: question.why }).toMatchObject({ why: expect.stringMatching(/\S/) as unknown });
       if (question.kind === "ask" && question.defaultValue !== undefined) expect({ text: question.text, hint: question.hint }).toMatchObject({ hint: expect.stringMatching(/\S/) as unknown });
       for (const button of question.buttons ?? []) expect(["Yes", "No"]).not.toContain(button.label);
+    }
+    // The settings form shows all 18 settings; a text field with a default says what empty means.
+    expect([...fields.keys()].filter((where) => where.startsWith("Your settings/"))).toHaveLength(18);
+    const withDefault = new Set(settingsFields({ env: "staging", flags: {}, fixed: false, budgetWhy: "" }).filter((field) => field.choices === undefined && field.defaultValue !== undefined).map((field) => field.name));
+    expect(withDefault.size).toBeGreaterThan(0);
+    for (const [where, field] of fields) {
+      expect({ where, label: field.label }).toMatchObject({ label: expect.stringMatching(/\S/) as unknown });
+      expect({ where, why: field.why }).toMatchObject({ why: expect.stringMatching(/\S/) as unknown });
+      if (field.choices === undefined && withDefault.has(field.name)) expect({ where, hint: field.hint }).toMatchObject({ hint: expect.stringMatching(/\S/) as unknown });
     }
   });
 

@@ -7,7 +7,7 @@ import { estimateMonthlyCost, suggestedBudgetUsd } from "../../packages/cli/src/
 import { unattendedPrompter } from "../../packages/cli/src/init/prompts.js";
 import { GITHUB_LOGIN_PATTERN } from "../../packages/cli/src/deploy/answer-schemas.js";
 import { SecretAlreadyExistsError } from "../../packages/cli/src/deploy/signing-key.js";
-import { memoryInitSecrets, sampleAnswers, scriptedPrompter } from "../support/init-fakes.js";
+import { memoryInitSecrets, sampleAnswers, scriptedPrompter, settingsScript } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 const T0 = Date.parse("2026-09-27T00:00:00.000Z");
@@ -24,6 +24,25 @@ const everyFlag: InitFlags = {
   slackAppName: "AgentX acme (staging)", slackAppPostedMessages: "accept",
 };
 
+// Spec 048 FR-020: the settings form's questions in the terminal, in its own order: the four, the
+// Advanced question, then (on yes) every Advanced setting.
+const FORM_QUESTIONS = [
+  "Your email, for your AgentX admin user and alerts", "GitHub organization or user that will own the AgentX GitHub App", "Install name",
+  "App name for GitHub and Slack (unique on GitHub)", "Change the advanced settings?",
+  "Deploy engine", "Sign-in", "How will developers sign in to AgentX from their AI tools?", "Model provider", "Orchestrator model",
+  "Action-gate classifier model", "Worker model", "Permission boundary policy ARN (Enter for AgentX's default boundary)",
+  "IAM principal allowed to assume the AgentX operator role (Enter for this account)", "Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)",
+  "Which costs should the budget count?", "Answer mentions people post through other apps with their own Slack token?", "Where should AgentX send alerts?", "Alert email address",
+];
+// Every default taken but alerts to the ops address, then "" for the owner's type (no GitHub lookup here).
+const FIRST_RUN = [...settingsScript({ owner: "acme", advanced: { alertEmail: "ops@example.com" } }), ""];
+
+/** Spec 048 phase 2: collectInitAnswers with the settings form answered as a run with these flags
+ * answers it in the terminal: each default-path field the flags leave (Enter takes its default),
+ * and no to the Advanced settings. */
+const collectWithFlags = (input: Omit<Parameters<typeof collectInitAnswers>[0], "prompter">) =>
+  collectInitAnswers({ ...input, prompter: scriptedPrompter(settingsScript({ flags: input.flags })) });
+
 function memoryAlertSecrets() {
   const values = new Map<string, string>();
   return {
@@ -37,17 +56,17 @@ describe("init questions", () => {
   it("collects mixed providers and only a secret reference, and protects resumed answers", async () => {
     const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:openrouter-AbCdEf";
     const flags = { ...everyFlag, workerProvider: "openrouter", workerModel: "anthropic/claude-sonnet-4", openrouterSecretArn: secretArn, openrouterProviders: "anthropic" };
-    const { answers } = await collectInitAnswers({ ...base, flags, prompter: scriptedPrompter([]) });
+    const { answers } = await collectWithFlags({ ...base, flags });
     expect(answers.models.providers).toEqual({ orchestrator: "amazon-bedrock", classifier: "amazon-bedrock", worker: "openrouter" });
     expect(answers.models.openRouter).toEqual({ secretArn, providers: ["anthropic"] });
     expect(() => assertResumeFlagsMatch(answers, { workerProvider: "amazon-bedrock" })).toThrow();
-    await expect(collectInitAnswers({ ...base, flags: { ...flags, openrouterSecretArn: "sk-raw-secret" }, prompter: scriptedPrompter([]) })).rejects.toThrow("invalid model configuration");
+    await expect(collectWithFlags({ ...base, flags: { ...flags, openrouterSecretArn: "sk-raw-secret" } })).rejects.toThrow("invalid model configuration");
   });
   it("takes every default with Enter and asks for what has no default", async () => {
-    const prompter = scriptedPrompter(["", "", "", "", "", "", "", "", "", "ops@example.com", "", "", "acme", "", "", "", ""]);
+    const prompter = scriptedPrompter(FIRST_RUN);
     const { answers, notes, alertWebhook } = await collectInitAnswers({ ...base, flags: {}, prompter });
     expect(prompter.remaining()).toBe(0);
-    expect(prompter.asked[2]).toBe("Model provider");
+    expect(prompter.asked).toEqual([...FORM_QUESTIONS, "Is acme an organization or a personal account?"]);
     expect(alertWebhook).toBeUndefined();
     expect(notes).toEqual([]);
     expect(answers).toEqual({
@@ -58,50 +77,59 @@ describe("init questions", () => {
       budget: { monthlyUsd: 260, scope: "account" },
       github: { account: "acme", accountType: "organization", appName: "AgentX acme (staging)" },
       slack: { appName: "AgentX acme (staging)", appPostedMessages: "accept" },
+      // Spec 048 FR-020: your email and the developer sign-in are settings now.
+      adminEmail: "ops@example.com", signinMethods: "slack",
       createdAt: "2026-09-27T00:00:00.000Z",
     });
   });
 
   it("spec 048 FR-023: the budget's default is the estimate plus 20% for the whole account, with the estimate beside it", async () => {
-    const asked: Array<{ question: string; defaultValue?: string; why?: string }> = [];
-    const prompter = scriptedPrompter(["", "", "", "", "", "", "", "", "", "ops@example.com", "", "", "acme", "", "", "", ""]);
-    const recording = { ...prompter, ask: (question: string, options: Parameters<typeof prompter.ask>[1]) => { asked.push({ question, ...(options.defaultValue === undefined ? {} : { defaultValue: options.defaultValue }), ...(options.help?.why === undefined ? {} : { why: options.help.why }) }); return prompter.ask(question, options); } };
+    const asked: Array<{ question: string; defaultValue?: string; why?: string; hint?: string }> = [];
+    const prompter = scriptedPrompter(FIRST_RUN);
+    const recording = { ...prompter, ask: (question: string, options: Parameters<typeof prompter.ask>[1]) => { asked.push({ question, ...(options.defaultValue === undefined ? {} : { defaultValue: options.defaultValue }), ...(options.help?.why === undefined ? {} : { why: options.help.why }), ...(options.help?.hint === undefined ? {} : { hint: options.help.hint }) }); return prompter.ask(question, options); } };
     const collected = await collectInitAnswers({ env: "staging", region: "us-east-1", account: "123456789012", releaseVersion: "1.2.3", flags: {}, prompter: recording, processEnv: {}, now: () => 0 });
     expect(collected.answers.budget).toEqual({ monthlyUsd: 260, scope: "account" });
     expect(asked.find((entry) => entry.question.startsWith("Monthly AWS budget"))).toEqual({
-      question: "Monthly AWS budget for this environment, in US dollars (0 for none)", defaultValue: "260",
+      // Spec 048 FR-023: empty is the estimate of the models chosen, plus 20%, so the field's own default is
+      // empty; the suggested amount is in the terminal's question and the page's hint.
+      question: "Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)", defaultValue: "",
       why: "AgentX's estimate is about $208.78 a month. The suggested budget is the estimate plus 20%. AWS emails you when this month's costs pass 80% of it. 0 turns it off.",
+      hint: "Optional. Leave empty to use the estimate plus 20% ($260).",
     });
     expect(collected.notes).not.toContain(BUDGET_TAG_NOTE);
   });
 
-  it("asks nothing when every flag is given", async () => {
-    const { answers } = await collectInitAnswers({ ...base, flags: everyFlag, prompter: scriptedPrompter([]) });
+  it("asks only the install name and the Advanced question when every flag is given", async () => {
+    const prompter = scriptedPrompter(settingsScript({ flags: everyFlag }));
+    const { answers } = await collectInitAnswers({ ...base, flags: everyFlag, prompter });
+    expect(prompter.asked).toEqual(["Install name", "Change the advanced settings?"]);
     expect(answers.github.appName).toBe("AgentX acme (staging)");
   });
 
   it("states GLM 4.7's trade-off and Claude Haiku 4.5's model-access need when chosen", async () => {
-    const { answers, notes } = await collectInitAnswers({ ...base, flags: { ...everyFlag, orchestratorModel: "zai.glm-4.7", classifierModel: "us.anthropic.claude-haiku-4-5-20251001-v1:0" }, prompter: scriptedPrompter([]) });
+    const { answers, notes } = await collectWithFlags({ ...base, flags: { ...everyFlag, orchestratorModel: "zai.glm-4.7", classifierModel: "us.anthropic.claude-haiku-4-5-20251001-v1:0" } });
     expect(answers.models.orchestrator).toBe("zai.glm-4.7");
     expect(notes).toEqual([GLM_NOTE, HAIKU_NOTE]);
     expect(GLM_NOTE).toContain("6 of 7");
   });
 
   it("accepts another Bedrock model id for the orchestrator", async () => {
-    const prompter = scriptedPrompter(["other", "us.amazon.nova-premier-v1:0"]);
-    const { answers } = await collectInitAnswers({ ...base, flags: { ...everyFlag, orchestratorModel: undefined } as InitFlags, prompter });
+    const flags = { ...everyFlag, orchestratorModel: undefined } as InitFlags;
+    const prompter = scriptedPrompter([...settingsScript({ flags, advanced: { orchestratorModel: "other" } }), "us.amazon.nova-premier-v1:0"]);
+    const { answers } = await collectInitAnswers({ ...base, flags, prompter });
+    expect(prompter.asked.at(-1)).toBe("Orchestrator model id");
     expect(answers.models.orchestrator).toBe("us.amazon.nova-premier-v1:0");
   });
 
   it("collects your own OIDC provider's issuer, audience, client and admin claim", async () => {
     const flags: InitFlags = { ...everyFlag, identity: "oidc", oidcIssuer: "https://id.example.com", oidcAudience: "agentx", oidcClientId: "cli", adminClaim: "groups", adminValues: "agentx-admins, platform" };
-    const { answers } = await collectInitAnswers({ ...base, flags, prompter: scriptedPrompter([]) });
+    const { answers } = await collectWithFlags({ ...base, flags });
     expect(answers.identity).toEqual({ mode: "oidc", issuer: "https://id.example.com", audience: "agentx", clientId: "cli", adminClaim: "groups", adminValues: ["agentx-admins", "platform"] });
   });
 
   it("keeps a webhook address out of the answers and stores it only as a secret (Review Focus 4)", async () => {
     const flags: InitFlags = { ...everyFlag, alertEmail: undefined } as InitFlags;
-    const prompter = scriptedPrompter(["webhook", `  ${WEBHOOK}\r\n`]);
+    const prompter = scriptedPrompter([...settingsScript({ flags, advanced: { alertKind: "webhook" } }), `  ${WEBHOOK}\r\n`]);
     const collected = await collectInitAnswers({ ...base, flags, prompter });
     expect(collected.answers.alert).toEqual({ kind: "webhook", display: "https://api.opsgenie.com/...", secretName: "agentx/staging/alert-endpoint" });
     expect(JSON.stringify(collected.answers)).not.toContain("SECRET-KEY");
@@ -117,7 +145,7 @@ describe("init questions", () => {
 
   it("reads a webhook from --alert-webhook-env, refuses one that is not https, and replaces a secret left by an aborted run", async () => {
     const flags: InitFlags = { ...everyFlag, alertEmail: undefined, alertWebhook: { envName: "AGENTX_ALERT_WEBHOOK" } } as InitFlags;
-    const collected = await collectInitAnswers({ ...base, processEnv: { AGENTX_ALERT_WEBHOOK: WEBHOOK }, flags, prompter: scriptedPrompter([]) });
+    const collected = await collectWithFlags({ ...base, processEnv: { AGENTX_ALERT_WEBHOOK: WEBHOOK }, flags });
     const secrets = memoryAlertSecrets();
     secrets.values.set("agentx/staging/alert-endpoint", "https://stale.example.com/x");
     await persistInitAnswers({ store: new MemoryParameterStore(), secrets, collected });
@@ -125,26 +153,34 @@ describe("init questions", () => {
 
     let message = "";
     try {
-      await collectInitAnswers({ ...base, processEnv: { AGENTX_ALERT_WEBHOOK: "http://hooks.example.com/k=SECRET-KEY" }, flags, prompter: scriptedPrompter([]) });
+      await collectWithFlags({ ...base, processEnv: { AGENTX_ALERT_WEBHOOK: "http://hooks.example.com/k=SECRET-KEY" }, flags });
     } catch (error) { message = (error as Error).message; }
     expect(message).toContain("an alert webhook must be an https:// address");
     expect(message).not.toContain("SECRET-KEY");
   });
 
-  it("with --yes and no alert flag, names every way to answer", async () => {
+  it("with --yes and no alert flag, refuses for want of your email, and sends alerts to --admin-email when given", async () => {
     const flags = { ...everyFlag, alertEmail: undefined } as InitFlags;
+    // Spec 048 FR-025 (Ruling 9): alerts go to your email, so with neither flag your email is what is missing.
     await expect(collectInitAnswers({ ...base, flags, prompter: unattendedPrompter() }))
-      .rejects.toThrow("Alert email address needs an answer; with --yes, pass --alert-email (or --alert-webhook-file, --alert-webhook-env, --no-alerts)");
+      .rejects.toThrow("Your email, for your AgentX admin user and alerts needs an answer; with --yes, pass --admin-email");
+    const { answers } = await collectInitAnswers({ ...base, flags, prompter: unattendedPrompter(), adminEmail: "alice@example.com" });
+    expect(answers.alert).toEqual({ kind: "email", address: "alice@example.com" });
   });
 
   it("records no alerts for --no-alerts, with a note saying nobody will hear about failures", async () => {
-    const { answers, notes } = await collectInitAnswers({ ...base, flags: { ...everyFlag, alertEmail: undefined, alerts: false } as InitFlags, prompter: scriptedPrompter([]) });
+    const { answers, notes } = await collectWithFlags({ ...base, flags: { ...everyFlag, alertEmail: undefined, alerts: false } as InitFlags });
     expect(answers.alert).toEqual({ kind: "none" });
     expect(notes.join("\n")).toContain("nobody is told when AgentX fails");
   });
 
+  it("refuses an --admin-email that is not an email address, naming the flag", async () => {
+    await expect(collectWithFlags({ ...base, flags: everyFlag, adminEmail: "not-an-email" }))
+      .rejects.toThrow("--admin-email not-an-email is not an email address");
+  });
+
   it("refuses an image override that is not a digest reference", async () => {
-    await expect(collectInitAnswers({ ...base, flags: { ...everyFlag, workerImage: "repo/worker:latest" }, prompter: scriptedPrompter([]) }))
+    await expect(collectWithFlags({ ...base, flags: { ...everyFlag, workerImage: "repo/worker:latest" } }))
       .rejects.toThrow("--worker-image must be referenced by digest (repository@sha256:...)");
   });
 
@@ -155,7 +191,7 @@ describe("init questions", () => {
 
   it("shares the GitHub login pattern with install-state's schema (Fix round 1, item 1), refusing the same invalid login", async () => {
     expect(GITHUB_LOGIN_PATTERN.test("-bad")).toBe(false);
-    await expect(collectInitAnswers({ ...base, flags: { ...everyFlag, githubAccount: "-bad" }, prompter: scriptedPrompter([]) }))
+    await expect(collectWithFlags({ ...base, flags: { ...everyFlag, githubAccount: "-bad" } }))
       .rejects.toThrow("--github-account -bad is not a GitHub organization or user name");
   });
 });
@@ -163,34 +199,34 @@ describe("init questions", () => {
 describe("the budget question (FR-047)", () => {
   it("defaults to the estimate plus 20% for the whole account, and only the tag choice needs it activated", async () => {
     const suggested = suggestedBudgetUsd(estimateMonthlyCost({ orchestrator: everyFlag.orchestratorModel!, classifier: everyFlag.classifierModel!, worker: everyFlag.workerModel! }));
-    const result = await collectInitAnswers({ ...base, flags: { ...everyFlag, budget: undefined } as InitFlags, prompter: scriptedPrompter(["", ""]) });
+    const result = await collectWithFlags({ ...base, flags: { ...everyFlag, budget: undefined } as InitFlags });
     expect(result.answers.budget).toEqual({ monthlyUsd: suggested, scope: "account" });
     expect(result.notes).not.toContain(BUDGET_TAG_NOTE);
   });
 
   it("takes --budget 0 as no budget, asking nothing", async () => {
-    const result = await collectInitAnswers({ ...base, flags: { ...everyFlag, budget: "0" }, prompter: scriptedPrompter([]) });
+    const result = await collectWithFlags({ ...base, flags: { ...everyFlag, budget: "0" } });
     expect(result.answers.budget).toBeUndefined();
   });
 
   it("takes --budget 250 --budget-scope account without the tag note", async () => {
-    const result = await collectInitAnswers({ ...base, flags: { ...everyFlag, budget: "250", budgetScope: "account" }, prompter: scriptedPrompter([]) });
+    const result = await collectWithFlags({ ...base, flags: { ...everyFlag, budget: "250", budgetScope: "account" } });
     expect(result.answers.budget).toEqual({ monthlyUsd: 250, scope: "account" });
     expect(result.notes).not.toContain(BUDGET_TAG_NOTE);
   });
 
   it("refuses a budget that is not a whole number of dollars", async () => {
-    await expect(collectInitAnswers({ ...base, flags: { ...everyFlag, budget: "99.5" }, prompter: scriptedPrompter([]) }))
+    await expect(collectWithFlags({ ...base, flags: { ...everyFlag, budget: "99.5" } }))
       .rejects.toThrow("--budget must be a whole number of US dollars from 1 to 1000000, or 0 for no budget");
   });
 
   it.each(["00", "-5", "12.5", "abc", "2000000"])("refuses a malformed or too-large budget (--budget %s), before the plan is shown", async (bad) => {
-    await expect(collectInitAnswers({ ...base, flags: { ...everyFlag, budget: bad }, prompter: scriptedPrompter([]) }))
+    await expect(collectWithFlags({ ...base, flags: { ...everyFlag, budget: bad } }))
       .rejects.toThrow("--budget must be a whole number of US dollars from 1 to 1000000, or 0 for no budget");
   });
 
   it("accepts the maximum budget of $1,000,000 (BudgetAnswersSchema's own max)", async () => {
-    const result = await collectInitAnswers({ ...base, flags: { ...everyFlag, budget: "1000000", budgetScope: "tag" }, prompter: scriptedPrompter([]) });
+    const result = await collectWithFlags({ ...base, flags: { ...everyFlag, budget: "1000000", budgetScope: "tag" } });
     expect(result.answers.budget).toEqual({ monthlyUsd: 1_000_000, scope: "tag" });
   });
 
@@ -212,15 +248,21 @@ function recordingSecrets(prompter: ReturnType<typeof scriptedPrompter>) {
 }
 
 describe("OpenRouter from init", () => {
-  // engine, sign-in, provider, the three OpenRouter model ids, the key, boundary, operator, alerts, email, budget amount, budget scope, GitHub account, type, app name, Slack name, posted messages
-  const OPENROUTER_RUN = ["", "", "openrouter", "qwen/qwen3-coder", "qwen/qwen3-coder", "anthropic/claude-sonnet-4", OPENROUTER_KEY, "", "", "", "ops@example.com", "", "", "acme", "", "", "", ""];
+  // The settings with OpenRouter as the provider, then the three OpenRouter model ids, the key, and the owner's type.
+  const OPENROUTER_RUN = [
+    ...settingsScript({ owner: "acme", advanced: { modelProvider: "openrouter", alertEmail: "ops@example.com" } }),
+    "qwen/qwen3-coder", "qwen/qwen3-coder", "anthropic/claude-sonnet-4", OPENROUTER_KEY, "",
+  ];
 
   it("choosing OpenRouter asks the three model ids and the key (hidden), and stores the raw key as agentx/<env>/openrouter with only its ARN in the answers", async () => {
     const scripted = scriptedPrompter(OPENROUTER_RUN);
     const { prompter, hidden } = recordingSecrets(scripted);
     const collected = await collectInitAnswers({ ...base, flags: {}, prompter });
     expect(scripted.remaining()).toBe(0);
-    expect(scripted.asked.slice(2, 7)).toEqual(["Model provider", "OpenRouter orchestrator model id", "OpenRouter classifier model id", "OpenRouter worker model id", "OpenRouter API key"]);
+    expect(scripted.asked).toEqual([
+      ...FORM_QUESTIONS, "OpenRouter orchestrator model id", "OpenRouter classifier model id", "OpenRouter worker model id", "OpenRouter API key",
+      "Is acme an organization or a personal account?",
+    ]);
     expect(hidden).toEqual(["OpenRouter API key"]);
     expect(collected.answers.models).toEqual({
       orchestrator: "qwen/qwen3-coder", classifier: "qwen/qwen3-coder", worker: "anthropic/claude-sonnet-4",
@@ -239,7 +281,7 @@ describe("OpenRouter from init", () => {
 
   it("keeps an --openrouter-providers allowlist with a key init stores", async () => {
     const flags: InitFlags = { ...everyFlag, orchestratorModel: "a/b", classifierModel: "a/b", workerModel: "a/b", modelProvider: "openrouter", openrouterProviders: "deepinfra/turbo", openrouterKey: { envName: "OR_KEY" } };
-    const collected = await collectInitAnswers({ ...base, processEnv: { OR_KEY: OPENROUTER_KEY }, flags, prompter: scriptedPrompter([]) });
+    const collected = await collectWithFlags({ ...base, processEnv: { OR_KEY: OPENROUTER_KEY }, flags });
     const saved = await persistInitAnswers({ store: new MemoryParameterStore(), secrets: memoryInitSecrets(), collected });
     expect(saved.models.openRouter?.providers).toEqual(["deepinfra/turbo"]);
   });
@@ -260,7 +302,9 @@ describe("OpenRouter from init", () => {
 
   it("with --openrouter-secret-arn, asks for no key and stores nothing", async () => {
     const secretArn = "arn:aws:secretsmanager:us-east-1:123456789012:secret:my-openrouter-AbCdEf";
-    const scripted = scriptedPrompter(["", "", "openrouter", "a/b", "a/b", "a/b", "", "", "", "ops@example.com", "", "", "acme", "", "", "", ""]);
+    const scripted = scriptedPrompter([
+      ...settingsScript({ owner: "acme", flags: { openrouterSecretArn: secretArn }, advanced: { modelProvider: "openrouter", alertEmail: "ops@example.com" } }), "a/b", "a/b", "a/b", "",
+    ]);
     const { prompter, hidden } = recordingSecrets(scripted);
     const collected = await collectInitAnswers({ ...base, flags: { openrouterSecretArn: secretArn }, prompter });
     expect(scripted.remaining()).toBe(0);
@@ -274,7 +318,7 @@ describe("OpenRouter from init", () => {
 
   it("lets per-component provider flags win over the provider question, so mixed setups still come from flags", async () => {
     const flags: InitFlags = { ...everyFlag, modelProvider: "openrouter", classifierProvider: "amazon-bedrock", orchestratorModel: "a/b", workerModel: "a/b", openrouterKey: { envName: "OR_KEY" } };
-    const { answers } = await collectInitAnswers({ ...base, processEnv: { OR_KEY: OPENROUTER_KEY }, flags, prompter: scriptedPrompter([]) });
+    const { answers } = await collectWithFlags({ ...base, processEnv: { OR_KEY: OPENROUTER_KEY }, flags });
     expect(answers.models.providers).toEqual({ orchestrator: "openrouter", classifier: "amazon-bedrock", worker: "openrouter" });
     expect(answers.models.classifier).toBe("amazon.nova-lite-v1:0");
   });
@@ -298,7 +342,7 @@ describe("OpenRouter from init", () => {
 
 describe("resuming with flags", () => {
   it("refuses a flag that differs from what the install started with, and accepts matching ones", async () => {
-    const { answers } = await collectInitAnswers({ ...base, flags: everyFlag, prompter: scriptedPrompter([]) });
+    const { answers } = await collectWithFlags({ ...base, flags: everyFlag });
     expect(() => assertResumeFlagsMatch(answers, { orchestratorModel: "us.anthropic.claude-sonnet-4-6" })).not.toThrow();
     expect(() => assertResumeFlagsMatch(answers, { orchestratorModel: "zai.glm-4.7" })).toThrow(
       "--orchestrator-model zai.glm-4.7 differs from what this install started with (us.anthropic.claude-sonnet-4-6); an install's answers cannot change halfway. Run agentx init without that flag to continue",
@@ -308,7 +352,7 @@ describe("resuming with flags", () => {
 
   it("also checks the OIDC flags (F10), refusing a stored cognito install's oidc fields as not set", async () => {
     const flags: InitFlags = { ...everyFlag, identity: "oidc", oidcIssuer: "https://id.example.com", oidcAudience: "agentx", oidcClientId: "cli", adminClaim: "groups", adminValues: "agentx-admins, platform" };
-    const { answers } = await collectInitAnswers({ ...base, flags, prompter: scriptedPrompter([]) });
+    const { answers } = await collectWithFlags({ ...base, flags });
     expect(() => assertResumeFlagsMatch(answers, { oidcIssuer: "https://id.example.com", oidcAudience: "agentx", oidcClientId: "cli", adminClaim: "groups", adminValues: "agentx-admins, platform" })).not.toThrow();
     expect(() => assertResumeFlagsMatch(answers, { oidcIssuer: "https://other.example.com" })).toThrow(
       "--oidc-issuer https://other.example.com differs from what this install started with (https://id.example.com); an install's answers cannot change halfway. Run agentx init without that flag to continue",
@@ -316,7 +360,7 @@ describe("resuming with flags", () => {
     expect(() => assertResumeFlagsMatch(answers, { adminClaim: "role" })).toThrow("--admin-claim role differs");
     expect(() => assertResumeFlagsMatch(answers, { adminValues: "other-group, platform" })).toThrow("--admin-values other-group, platform differs");
 
-    const { answers: cognitoAnswers } = await collectInitAnswers({ ...base, flags: everyFlag, prompter: scriptedPrompter([]) });
+    const { answers: cognitoAnswers } = await collectWithFlags({ ...base, flags: everyFlag });
     expect(() => assertResumeFlagsMatch(cognitoAnswers, { oidcIssuer: "https://id.example.com" })).toThrow(
       "--oidc-issuer https://id.example.com differs from what this install started with (not set); an install's answers cannot change halfway. Run agentx init without that flag to continue",
     );
@@ -324,7 +368,7 @@ describe("resuming with flags", () => {
 
   it("normalizes before comparing on resume (Fix round 1, item 2): trailing slash, case and admin values as a set", async () => {
     const flags: InitFlags = { ...everyFlag, identity: "oidc", oidcIssuer: "https://id.example.com", oidcAudience: "agentx", oidcClientId: "cli", adminClaim: "groups", adminValues: "agentx-admins, platform" };
-    const { answers } = await collectInitAnswers({ ...base, flags, prompter: scriptedPrompter([]) });
+    const { answers } = await collectWithFlags({ ...base, flags });
 
     // A trailing slash on the OIDC issuer must not refuse a matching resume, but a genuinely
     // different issuer must still be refused.
@@ -339,7 +383,7 @@ describe("resuming with flags", () => {
     expect(() => assertResumeFlagsMatch(answers, { adminValues: "agentx-admins,platform" })).not.toThrow();
     expect(() => assertResumeFlagsMatch(answers, { adminValues: "agentx-admins" })).toThrow("--admin-values agentx-admins differs");
 
-    const { answers: emailAnswers } = await collectInitAnswers({ ...base, flags: everyFlag, prompter: scriptedPrompter([]) });
+    const { answers: emailAnswers } = await collectWithFlags({ ...base, flags: everyFlag });
 
     // GitHub logins and email addresses compare case-insensitively, but a genuinely different
     // value must still be refused.
@@ -353,7 +397,7 @@ describe("resuming with flags", () => {
   });
 
   it("also checks --alert-webhook-* and --no-alerts (F10) against the stored alert kind", async () => {
-    const { answers: emailAnswers } = await collectInitAnswers({ ...base, flags: everyFlag, prompter: scriptedPrompter([]) });
+    const { answers: emailAnswers } = await collectWithFlags({ ...base, flags: everyFlag });
     expect(() => assertResumeFlagsMatch(emailAnswers, { alerts: false })).toThrow(
       "--no-alerts differs from what this install started with (email); an install's answers cannot change halfway. Run agentx init without that flag to continue",
     );
@@ -363,14 +407,14 @@ describe("resuming with flags", () => {
     expect(() => assertResumeFlagsMatch(emailAnswers, { alertWebhook: { file: "/tmp/webhook.txt" } })).toThrow("--alert-webhook-file /tmp/webhook.txt differs");
 
     const noneFlags: InitFlags = { ...everyFlag, alertEmail: undefined, alerts: false } as InitFlags;
-    const { answers: noneAnswers } = await collectInitAnswers({ ...base, flags: noneFlags, prompter: scriptedPrompter([]) });
+    const { answers: noneAnswers } = await collectWithFlags({ ...base, flags: noneFlags });
     expect(() => assertResumeFlagsMatch(noneAnswers, { alerts: false })).not.toThrow();
     expect(() => assertResumeFlagsMatch(noneAnswers, { alertEmail: "ops@example.com" })).toThrow(
       "--alert-email ops@example.com differs from what this install started with (not set); an install's answers cannot change halfway. Run agentx init without that flag to continue",
     );
 
     const webhookFlags: InitFlags = { ...everyFlag, alertEmail: undefined, alertWebhook: { envName: "AGENTX_ALERT_WEBHOOK" } } as InitFlags;
-    const { answers: webhookAnswers } = await collectInitAnswers({ ...base, processEnv: { AGENTX_ALERT_WEBHOOK: WEBHOOK }, flags: webhookFlags, prompter: scriptedPrompter([]) });
+    const { answers: webhookAnswers } = await collectWithFlags({ ...base, processEnv: { AGENTX_ALERT_WEBHOOK: WEBHOOK }, flags: webhookFlags });
     expect(() => assertResumeFlagsMatch(webhookAnswers, { alertWebhook: { envName: "AGENTX_ALERT_WEBHOOK" } })).not.toThrow();
     expect(() => assertResumeFlagsMatch(webhookAnswers, { alerts: false })).toThrow("--no-alerts differs from what this install started with (webhook)");
   });
@@ -386,10 +430,10 @@ describe("the questions an export bundle already answered (FR-026)", () => {
   };
 
   it("asks only the alert, budget, GitHub and Slack questions, and takes the rest from the bundle", async () => {
-    const prompter = scriptedPrompter(["", "ops@example.com", "", "", "acme", "", "", "", ""]);
+    const prompter = scriptedPrompter([...settingsScript({ owner: "acme", fixed: true, advanced: { alertEmail: "ops@example.com" } }), ""]);
     const collected = await collectInitAnswers({ ...base, flags: {}, prompter, fixed });
     expect(prompter.remaining()).toBe(0);
-    for (const question of ["Deploy engine", "Sign-in", "Model provider", "Orchestrator model", "Worker model id"]) expect(prompter.asked).not.toContain(question);
+    for (const question of ["Deploy engine", "Sign-in", "Model provider", "Orchestrator model", "Worker model id", "Worker model", "Install name"]) expect(prompter.asked).not.toContain(question);
     expect(prompter.asked.some((question) => /Permission boundary|operator role|OpenRouter/.test(question))).toBe(false);
     expect(collected.answers).toMatchObject({ engine: "templates", identity: fixed.identity, models: fixed.models, permissionsBoundaryArn: fixed.permissionsBoundaryArn });
     expect(collected.answers.operatorPrincipalArn).toBeUndefined();
@@ -412,14 +456,15 @@ describe("spec 048 FR-026: app names", () => {
     expect(name).toBe("AgentX (abcdefghij-klmnopqrs)");
     expect(name.length).toBeLessThanOrEqual(GITHUB_APP_NAME_LIMIT);
 
-    const prompter = scriptedPrompter(["", "", "", "", "", "", "", "", "", "ops@example.com", "", "", owner, "", "", "", ""]);
+    const prompter = scriptedPrompter([...settingsScript({ env, owner, advanced: { alertEmail: "ops@example.com" } }), ""]);
     const collected = await collectInitAnswers({ env, region: "us-east-1", account: "123456789012", releaseVersion: "1.2.3", flags: {}, prompter, processEnv: {}, now: () => 0 });
     expect(collected.answers.github.appName).toBe(name);
     expect(collected.answers.slack.appName).toBe(name);
   });
 
   it("the Slack name follows a GitHub name the user typed", async () => {
-    const prompter = scriptedPrompter(["", "", "", "", "", "", "", "", "", "ops@example.com", "", "", "acme", "", "Our AgentX", "", ""]);
+    // Spec 048 FR-020: one name for both apps.
+    const prompter = scriptedPrompter([...settingsScript({ owner: "acme", appName: "Our AgentX", advanced: { alertEmail: "ops@example.com" } }), ""]);
     const collected = await collectInitAnswers({ env: "staging", region: "us-east-1", account: "123456789012", releaseVersion: "1.2.3", flags: {}, prompter, processEnv: {}, now: () => 0 });
     expect(collected.answers.slack.appName).toBe("Our AgentX");
   });

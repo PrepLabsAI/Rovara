@@ -27,6 +27,10 @@ export interface QuestionHelp {
   buttons?: boolean;
   /** choose: the page's label for a choice value. */
   choiceLabels?: Readonly<Record<string, string>>;
+  /** form: the forward button's verb, for example "Review the plan" (FR-011). */
+  submitLabel?: string;
+  /** A field's link label, when `learnMoreUrl` names the page that holds its value (FR-033). */
+  linkLabel?: string;
 }
 
 export interface Prompter {
@@ -40,7 +44,7 @@ export interface Prompter {
    * the terminal's hidden prompt ignores it, and the caller's own check still runs after. */
   secret(question: string, options: PromptFlag & { multiline?: boolean; validate?: (value: string) => string | undefined; help?: QuestionHelp }): Promise<string>;
   /** Optional: several related values on one screen (the install page). */
-  form?(title: string, fields: readonly FormField[], options: { help?: QuestionHelp }): Promise<Record<string, string>>;
+  form?(title: string, fields: readonly FormField[], options: FormOptions): Promise<Record<string, string>>;
 }
 
 /** Spec 048 FR-012: one value of a form. `question` and `flag` are what the terminal asks. */
@@ -52,18 +56,55 @@ export interface FormField {
   secret?: boolean;
   validate?: (value: string) => string | undefined;
   help?: QuestionHelp;
+  /** FR-021: a choice field. Empty means `defaultValue` (or the first choice). */
+  choices?: ReadonlyArray<{ value: string; label: string }>;
+  /** FR-021: under "Advanced settings". The page collapses these; the terminal asks them only after
+   * ADVANCED_QUESTION. */
+  section?: "advanced";
+  /** FR-022: a heading several fields share, such as "How people sign in". */
+  group?: string;
 }
 
-/** The page's one form, or, with no form on this prompter (the terminal), the same questions in order. */
-export async function askForm(prompter: Prompter, title: string, fields: readonly FormField[], options: { help?: QuestionHelp } = {}): Promise<Record<string, string>> {
+export interface FormOptions {
+  help?: QuestionHelp;
+  /** Values to start from (Change answers keeps every answer). A secret field is never prefilled. */
+  values?: Readonly<Record<string, string>>;
+  /** FR-020: the "Recommended settings" lines shown above the fields. */
+  summary?: readonly string[];
+  /** A check across fields, after each field passes its own: field name to message, or undefined. */
+  crossCheck?: (values: Readonly<Record<string, string>>) => Record<string, string> | undefined;
+}
+
+/** FR-072 (Ruling 6): the terminal's one question in front of the Advanced settings. */
+export const ADVANCED_QUESTION = "Change the advanced settings?";
+
+const fieldDefault = (field: FormField): string => field.defaultValue ?? field.choices?.[0]?.value ?? "";
+
+async function askField(prompter: Prompter, field: FormField, start: string | undefined): Promise<string> {
+  const help = field.help === undefined ? {} : { help: field.help };
+  if (field.choices !== undefined) {
+    return prompter.choose<string>(field.question, field.choices, { flag: field.flag, defaultValue: start ?? fieldDefault(field), ...help });
+  }
+  const validate = field.validate === undefined ? {} : { validate: field.validate };
+  if (field.secret === true) return prompter.secret(field.question, { flag: field.flag, ...validate, ...help });
+  const defaultValue = start ?? field.defaultValue;
+  return prompter.ask(field.question, { flag: field.flag, ...(defaultValue === undefined ? {} : { defaultValue }), ...validate, ...help });
+}
+
+/** The page's one form, or, with no form on this prompter (the terminal and --yes), the same
+ * questions in order: the default-path fields, then ADVANCED_QUESTION, then the advanced ones only
+ * on yes. --yes answers yes to every confirm, so it reaches every field and takes its default. */
+export async function askForm(prompter: Prompter, title: string, fields: readonly FormField[], options: FormOptions = {}): Promise<Record<string, string>> {
   if (prompter.form !== undefined) return prompter.form(title, fields, options);
   const values: Record<string, string> = {};
-  for (const field of fields) {
-    const validate = field.validate === undefined ? {} : { validate: field.validate };
-    values[field.name] = field.secret === true
-      ? await prompter.secret(field.question, { flag: field.flag, ...validate })
-      : await prompter.ask(field.question, { flag: field.flag, ...(field.defaultValue === undefined ? {} : { defaultValue: field.defaultValue }), ...validate });
-  }
+  const start = (field: FormField) => (field.secret === true ? undefined : options.values?.[field.name]);
+  for (const field of fields.filter((each) => each.section !== "advanced")) values[field.name] = await askField(prompter, field, start(field));
+  const advanced = fields.filter((each) => each.section === "advanced");
+  const change = advanced.length > 0 && (await prompter.confirm(ADVANCED_QUESTION, { defaultValue: false }));
+  for (const field of advanced) values[field.name] = change ? await askField(prompter, field, start(field)) : (start(field) ?? fieldDefault(field));
+  const problems = options.crossCheck?.(values);
+  const first = problems === undefined ? undefined : Object.values(problems)[0];
+  if (first !== undefined) throw agentXError("CONFIG_INVALID", first);
   return values;
 }
 

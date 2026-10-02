@@ -9,6 +9,7 @@ import type { InitContext, ManifestHost, OpenManifestHost } from "./context.js";
 import { checkPrivateKeyPem, secretFromSource } from "./prompts.js";
 import { problemText } from "./retry.js";
 import type { InitStep, ProgressHandle, StepOutcome } from "./steps.js";
+import { operatorStop } from "./stop.js";
 import { githubCard, type GitHubCardInput } from "./ui/cards.js";
 import { STEP_PLAN } from "./ui/journey.js";
 
@@ -134,16 +135,30 @@ export interface GitHubApi {
   /** expiresAt is epoch milliseconds. */
   installationToken(jwt: string, installationId: string): Promise<{ token: string; expiresAt: number }>;
   repositoryCount(token: string): Promise<number>;
+  /** Spec 048 FR-020 and FR-028: a public lookup of an owner. undefined: GitHub has no such owner.
+   * Throws when GitHub could not answer (network, rate limit). Optional: a client without it skips. */
+  owner?(login: string): Promise<{ login: string; type: "User" | "Organization" } | undefined>;
+  /** Spec 048 FR-028. Best effort (Ruling 8): GitHub shows a private app by its slug only to its
+   * owner, so undefined means "not visible", not "free". Throws when GitHub could not answer.
+   * Optional: a client without it skips the check. */
+  appBySlug?(slug: string): Promise<{ owner: { login: string } } | undefined>;
 }
+
+/** Spec 048 FR-028: the slug GitHub makes from an app's name (lower case, runs of anything else to
+ * one hyphen), which is how a taken name is found. */
+export function githubAppSlug(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
+}
+
+/** The headers every GitHub REST call sends. */
+const GITHUB_HEADERS = { accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": "agentx-cli" } as const;
 
 export function githubRestApi(fetchImplementation: typeof fetch): GitHubApi {
   const call = async (what: string, path: string, init: { method?: string; token?: string } = {}): Promise<unknown> => {
     const response = await fetchImplementation(`${API}${path}`, {
       method: init.method ?? "GET",
       headers: {
-        accept: "application/vnd.github+json",
-        "x-github-api-version": "2022-11-28",
-        "user-agent": "agentx-cli",
+        ...GITHUB_HEADERS,
         ...(init.token === undefined ? {} : { authorization: `Bearer ${init.token}` }),
       },
     });
@@ -151,7 +166,22 @@ export function githubRestApi(fetchImplementation: typeof fetch): GitHubApi {
     if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub ${what} failed with HTTP ${response.status}`);
     return response.json();
   };
+  /** A public GET: undefined for a 404, the status alone in any other refusal. */
+  const lookup = async (what: string, path: string): Promise<unknown> => {
+    const response = await fetchImplementation(`${API}${path}`, { headers: GITHUB_HEADERS });
+    if (response.status === 404) return undefined;
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub ${what} failed with HTTP ${response.status}`);
+    return response.json();
+  };
   return {
+    async owner(login) {
+      const found = (await lookup("owner lookup", `/users/${encodeURIComponent(login)}`)) as { login?: string; type?: string } | undefined;
+      return found === undefined ? undefined : { login: found.login ?? login, type: found.type === "Organization" ? "Organization" : "User" };
+    },
+    async appBySlug(slug) {
+      const found = (await lookup("app lookup", `/apps/${encodeURIComponent(slug)}`)) as { owner?: { login?: string } } | undefined;
+      return found === undefined ? undefined : { owner: { login: found.owner?.login ?? "" } };
+    },
     async convertManifest(code) {
       return (await call("manifest conversion (the code is valid for one hour)", `/app-manifests/${encodeURIComponent(code)}/conversions`, { method: "POST" })) as Awaited<ReturnType<GitHubApi["convertManifest"]>>;
     },
@@ -288,8 +318,26 @@ async function runGitHubAppStep(context: InitContext, progress: ProgressHandle, 
       context.write(`Found the GitHub App ${recovered.slug} an earlier run created.`);
     }
   }
+  // Spec 048 FR-032: an app GitHub already made but whose key never reached Secrets Manager (a
+  // crash between the two). Offered only on a fresh resume (no --github-app-id of its own):
+  // --github-app-id picks a specific app by id, which the recovery flow has no way to confirm.
+  const pending = progress.current().githubPending;
+  let recovering: "finish" | "replace" | undefined;
+  if (app === undefined && pending !== undefined && preMade === undefined) {
+    const settingsUrl = `${appSettingsUrl({ login: pending.account, type: accountType === "organization" ? "Organization" : "User" }, pending.slug)}/advanced`;
+    show({ stage: "recover", appName, slug: pending.slug, settingsUrl });
+    recovering = await context.prompter.choose<"finish" | "replace">(`Finish with the GitHub app ${pending.slug}, or replace it?`, [
+      { value: "finish", label: "Finish with this app: make a new private key on its GitHub page and paste it" },
+      { value: "replace", label: "Replace it: delete it on GitHub, then make a new one" },
+    ], { flag: "--github-app-recovery", defaultValue: "finish" });
+    if (recovering === "replace" && !(await context.prompter.confirm(`Have you deleted ${pending.slug} on GitHub?`, { defaultValue: true }))) {
+      throw operatorStop(`the GitHub app ${pending.slug} is still there; delete it on GitHub, then continue the install`);
+    }
+  }
   if (app === undefined) {
-    const created = preMade !== undefined ? await usePreMadeApp(context, api, preMade.appId) : await createWithManifest(context, api, show);
+    const created = preMade !== undefined ? await usePreMadeApp(context, api, preMade.appId)
+      : recovering === "finish" && pending !== undefined ? await usePreMadeApp(context, api, pending.appId)
+        : await createWithManifest(context, api, show);
     if (created.owner.login.toLowerCase() !== account.toLowerCase()) {
       // An app made beforehand is the owner's own: point at the flag, never tell them to delete it.
       if (preMade !== undefined) {
@@ -297,6 +345,9 @@ async function runGitHubAppStep(context: InitContext, progress: ProgressHandle, 
       }
       throw agentXError("CONFIG_INVALID", `the GitHub App was created under ${created.owner.login}, not ${account}; nothing was saved. Delete it at ${appSettingsUrl(created.owner, created.slug)}/advanced and run agentx init again`);
     }
+    // FR-032: recorded before the key is stored. GitHub shows the key only once, so a run that stops
+    // between here and the store can still find the app and offer to finish with it or replace it.
+    await progress.update({ githubPending: { account, appId: created.appId, slug: created.slug } });
     try {
       await context.secrets.create(name, JSON.stringify({ appId: created.appId, slug: created.slug, account, privateKey: created.privateKey }));
     } catch (error) {

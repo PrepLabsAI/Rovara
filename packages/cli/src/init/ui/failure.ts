@@ -30,8 +30,11 @@ export function plainReason(error: unknown): string | undefined {
   const mapped = cliErrorFor(error);
   const message = mapped instanceof Error ? messageWithoutCode(mapped) : String(mapped);
   const first = onPageProblem(message.replace(RESUME_TAIL, "")).split(/\r?\n/, 1)[0]?.trim().replace(/^init stopped at "[^"]+": /, "").replace(/[:;,]$/, "") ?? "";
-  if (first === "" || TECHNICAL.test(first)) return undefined;
-  return capitalize(/[.!?]$/.test(first) ? first : `${first}.`);
+  // Keep a safe leading clause when only later instructions contain a flag or internal name. The
+  // complete line remains in technical details; this lets the page still say what failed.
+  const plain = TECHNICAL.test(first) ? (first.split(/[;,]/, 1)[0]?.trim() ?? "") : first;
+  if (plain === "" || TECHNICAL.test(plain)) return undefined;
+  return capitalize(/[.!?]$/.test(plain) ? plain : `${plain}.`);
 }
 
 export function failureScreen(input: { env: string; region: string; stepTitle?: string; stepId?: InitStepId; error: unknown; logPath?: string }): WizardFailure {

@@ -12,6 +12,8 @@ import { count, estimateMonthlyCost, modelName, money, notCounted, PRICES_CHECKE
 import type { InitAnswers } from "./install-state.js";
 import type { Prompter } from "./prompts.js";
 import { operatorStop } from "./stop.js";
+import { minutesText, phaseSeconds } from "./ui/journey.js";
+import type { WizardPlan } from "./ui/protocol.js";
 
 export { estimateMonthlyCost, STATED_USAGE, type CostEstimate, type CostLine } from "./cost.js";
 
@@ -62,9 +64,86 @@ export function installPlanText(answers: InitAnswers, estimate: CostEstimate, no
   return `${lines.join("\n")}\n`;
 }
 
-export async function confirmInstallPlan(input: { answers: InitAnswers; notes: readonly string[]; prompter: Prompter; write: (text: string) => void; extras?: PlanExtras }): Promise<void> {
-  input.write(installPlanText(input.answers, estimateMonthlyCost(input.answers.models), input.notes, input.extras));
-  if (!(await input.prompter.confirm("Create all of this?", { defaultValue: false }))) {
-    throw operatorStop("install declined; nothing was created");
+export type PlanAction = "create" | "change";
+
+/** The plan's opening sentence for "In AWS": what the build creates, named plainly rather than by
+ * stack (the stacks themselves are "Show every resource" only). */
+const BUILD_PARTS = "The network and sign-in, the AgentX service and the Slack connection";
+
+/** FR-029 and FR-030: what the plan says, in plain words, for the page's review screen. The full
+ * text (`installPlanText`) still goes to the log file; its stack, role and secret lines become
+ * `resources`, shown only behind "Show every resource" (they name flags, commands and spec phases
+ * the copy-lint bans everywhere else on the page). */
+export function planSummary(answers: InitAnswers, estimate: CostEstimate, notes: readonly string[], extras: PlanExtras = {}): WizardPlan {
+  const signin = answers.signinMethods ?? "slack";
+  const signinWords = signin === "slack" ? "with Slack" : signin === "oidc" ? "with your company sign-in" : "with Slack or your company sign-in";
+  const alerts = answers.alert.kind === "email"
+    ? `Alerts go to ${answers.alert.address}. AWS sends a confirmation email there while the build runs.`
+    : answers.alert.kind === "webhook"
+      ? `Alerts go to ${answers.alert.display}. It is subscribed while the build runs.`
+      : "Alerts go nowhere for now. Nobody is told when AgentX stops working.";
+  const missing = notCounted(estimate);
+  const full = installPlanText(answers, estimate, notes, extras).split("\n");
+  return {
+    intro: "Here is what AgentX will create. Nothing is created until you press Create AgentX.",
+    sections: [
+      {
+        title: "In AWS",
+        lines: [
+          `${BUILD_PARTS}, in AWS account ${answers.account} (${answers.region}).`,
+          `Building them takes ${minutesText(Math.ceil(phaseSeconds("build") / 60))}, and you can leave while it runs.`,
+        ],
+      },
+      { title: "In GitHub", lines: [`An app named "${answers.github.appName}" owned by ${answers.github.account}. It can read code and open pull requests in the repositories you choose.`] },
+      {
+        title: "In Slack",
+        lines: [
+          `An app named "${answers.slack.appName}" in the Slack workspace you choose.`,
+          `Developers sign in to AgentX ${signinWords}. It is turned on with the Slack connection, with no separate approval.`,
+        ],
+      },
+      {
+        title: "Budget and alerts",
+        lines: [
+          answers.budget === undefined
+            ? "No budget alert."
+            : answers.budget.scope === "tag"
+              ? `A budget alert at $${answers.budget.monthlyUsd} a month for AgentX's own costs, counted once someone with billing rights turns on its billing tag (up to a day later).`
+              : `A budget alert at $${answers.budget.monthlyUsd} a month for the whole account.`,
+          alerts,
+        ],
+      },
+      { title: "To remove it later", lines: ["The ready screen gives you the command that removes everything, the coding machines' disks too."] },
+    ],
+    cost: {
+      rows: estimate.lines.map((line) => ({ item: line.item, monthly: line.usd === undefined ? "not priced" : money(line.usd), basis: line.basis })),
+      total: `About ${money(estimate.totalUsd)} a month${missing.length === 0 ? "" : `, not counting ${missing.join(" and ")}, whose price is not on file`}.`,
+      usage: `At ${count(STATED_USAGE.turnsPerMonth)} turns, ${count(STATED_USAGE.workerSessionsPerMonth)} coding sessions and ${STATED_USAGE.workerInstanceHoursPerMonth} machine-hours a month, at us-east-1 list prices of ${PRICES_CHECKED}. Your bill will differ.`,
+    },
+    resources: full
+      .filter((line) => line.startsWith("- Stacks") || line.startsWith("- IAM roles") || line.startsWith("- Secrets") || line.startsWith("- Settings"))
+      .map((line) => line.slice(2)),
+  };
+}
+
+export async function confirmInstallPlan(input: {
+  answers: InitAnswers; notes: readonly string[]; prompter: Prompter; write: (text: string) => void; extras?: PlanExtras;
+  /** The page asks Create AgentX and Change answers; the terminal keeps its own yes/no confirm, where
+   * no is a stop and never a change. */
+  page: boolean;
+  /** The page's own review screen, built from the same answers and estimate as the log text. */
+  show?: (plan: WizardPlan) => void;
+}): Promise<PlanAction> {
+  const estimate = estimateMonthlyCost(input.answers.models);
+  input.write(installPlanText(input.answers, estimate, input.notes, input.extras));
+  if (input.page) {
+    input.show?.(planSummary(input.answers, estimate, input.notes, input.extras));
+    // FR-029: Create AgentX is the primary button; Change answers goes back with every answer kept.
+    return input.prompter.choose<PlanAction>("Create all of this?", [
+      { value: "create", label: "Create AgentX" },
+      { value: "change", label: "Change answers" },
+    ], { flag: "--plan", defaultValue: "create" });
   }
+  if (!(await input.prompter.confirm("Create all of this?", { defaultValue: false }))) throw operatorStop("install declined; nothing was created");
+  return "create";
 }

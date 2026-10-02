@@ -56,6 +56,7 @@ describe("the installer's design system", () => {
 
   it("FR-008: shows focus, respects reduced motion, and keeps touch targets 44px tall", () => {
     expect(WIZARD_CSS).toMatch(/:focus-visible \{[^}]*outline: 3px solid var\(--focus\)/);
+    expect(WIZARD_CSS).not.toContain(".field select:focus-visible");
     expect(WIZARD_CSS).toContain("@media (prefers-reduced-motion: no-preference)");
     expect(WIZARD_CSS).toMatch(/button, a\.button \{[^}]*min-height: 2\.75rem/);
     expect(WIZARD_CSS).toMatch(/input\[type=text\], input\[type=password\], textarea \{[^}]*min-height: 2\.75rem/);
@@ -71,6 +72,13 @@ describe("the installer's design system", () => {
 
   it("defines every class the page may use", () => {
     for (const name of PAGE_CLASSES) expect({ name, defined: new RegExp(`\\.${name}(?![a-z0-9-])`).test(WIZARD_CSS) }).toEqual({ name, defined: true });
+  });
+
+  it("spec 048 phase 2: styles the settings screen's recommended, advanced, group and field-link classes", () => {
+    for (const name of ["recommended", "advanced", "group", "field-link"]) {
+      expect(PAGE_CLASSES).toContain(name);
+      expect(WIZARD_CSS).toMatch(new RegExp(`\\.${name}[\\s{.,:]`));
+    }
   });
 
   it("is the stylesheet the server sends", () => {

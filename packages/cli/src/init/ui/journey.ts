@@ -3,7 +3,7 @@
 // step's plain name, phase and usual time, and the words for where the install is. Pure: no clock
 // and no I/O, so the hub, the page, the terminal lines and the step titles read one source.
 // Phase 2 moves steps between phases here; phase 4 replaces the first estimates with measured ones.
-import { INIT_STEP_IDS, type InitStepId } from "../install-state.js";
+import type { InitStepId } from "../install-state.js";
 import type { CardId, StepStatus } from "./protocol.js";
 
 export const JOURNEY_PHASE_IDS = ["get-started", "your-choices", "build", "connect-slack", "finish"] as const;
@@ -21,7 +21,7 @@ export const STATUS_WORDS: Readonly<Record<JourneyStatus, string>> = {
 
 /** FR-003: which phase each card belongs to, so a finished one collapses into that phase in the rail. */
 export const CARD_PHASES: Readonly<Record<CardId, JourneyPhaseId>> = {
-  aws: "get-started", prerequisites: "your-choices", github: "build", slack: "connect-slack", "slack-urls": "connect-slack",
+  release: "get-started", aws: "get-started", "aws-signin": "get-started", "account-checks": "get-started", prerequisites: "your-choices", github: "your-choices", slack: "connect-slack", "slack-urls": "connect-slack",
   admin: "finish", project: "finish", channel: "finish", connectors: "finish", alerts: "finish", reply: "finish", ready: "finish",
 };
 
@@ -31,17 +31,26 @@ export const STEP_STATUS_WORDS: Readonly<Record<StepStatus, string>> = {
 
 export interface StepPlan { phase: JourneyPhaseId; title: string; usualSeconds: number; needsYou: boolean }
 
+/** Spec 048 FR-031 and FR-032: the order the steps run in. The GitHub app comes before the long
+ * build. INIT_STEP_IDS keeps its own order: it is the progress schema's list, and a done step is
+ * skipped by its id wherever it now stands. */
+export const INSTALL_STEP_ORDER: readonly InitStepId[] = [
+  "prerequisites", "github-app", "access", "core", "control-plane", "slack-app", "slack-service", "developer-signin",
+  "admin-user", "first-project", "connectors", "alerts", "e2e",
+];
+
 /** First estimates from the live run of 2026-10-01 (spec 048 Assumptions). Phase 4 replaces them
  * with numbers measured on two clean runs (FR-002). */
 export const STEP_PLAN: Readonly<Record<InitStepId, StepPlan>> = {
-  prerequisites: { phase: "your-choices", title: "Check your AWS account", usualSeconds: 30, needsYou: false },
+  prerequisites: { phase: "your-choices", title: "Check your account and choices", usualSeconds: 30, needsYou: false },
+  "github-app": { phase: "your-choices", title: "Create the GitHub app", usualSeconds: 120, needsYou: true },
   access: { phase: "build", title: "Set up AWS permissions", usualSeconds: 60, needsYou: false },
   core: { phase: "build", title: "Build the network and sign-in", usualSeconds: 240, needsYou: false },
-  "github-app": { phase: "build", title: "Create the GitHub app", usualSeconds: 120, needsYou: true },
   "control-plane": { phase: "build", title: "Start the AgentX service", usualSeconds: 780, needsYou: false },
   "slack-app": { phase: "connect-slack", title: "Create the Slack app", usualSeconds: 240, needsYou: true },
   "slack-service": { phase: "connect-slack", title: "Start the Slack connection", usualSeconds: 180, needsYou: true },
-  "developer-signin": { phase: "connect-slack", title: "Turn on developer sign-in", usualSeconds: 120, needsYou: true },
+  // FR-030: part of the confirmed plan; it asks nothing (Task 13).
+  "developer-signin": { phase: "connect-slack", title: "Turn on developer sign-in", usualSeconds: 120, needsYou: false },
   "admin-user": { phase: "finish", title: "Sign in to AgentX", usualSeconds: 120, needsYou: true },
   "first-project": { phase: "finish", title: "Set up your first project", usualSeconds: 120, needsYou: true },
   connectors: { phase: "finish", title: "Connect your issue trackers", usualSeconds: 60, needsYou: true },
@@ -52,7 +61,7 @@ export const STEP_PLAN: Readonly<Record<InitStepId, StepPlan>> = {
 /** The screens before the first step: profile, region and account; then the questions and the plan. */
 export const BEFORE_STEPS_SECONDS: Readonly<Record<"get-started" | "your-choices", number>> = { "get-started": 120, "your-choices": 300 };
 
-const stepsIn = (phase: JourneyPhaseId): InitStepId[] => INIT_STEP_IDS.filter((id) => STEP_PLAN[id].phase === phase);
+const stepsIn = (phase: JourneyPhaseId): InitStepId[] => INSTALL_STEP_ORDER.filter((id) => STEP_PLAN[id].phase === phase);
 const beforeSteps = (phase: JourneyPhaseId): number => (phase === "get-started" || phase === "your-choices" ? BEFORE_STEPS_SECONDS[phase] : 0);
 const phaseIndex = (phase: JourneyPhaseId): number => JOURNEY_PHASE_IDS.indexOf(phase);
 
@@ -70,7 +79,7 @@ export function totalMinutes(): number {
 
 export function needsYouMinutes(): number {
   const seconds = JOURNEY_PHASE_IDS.reduce((sum, id) => sum + beforeSteps(id), 0)
-    + INIT_STEP_IDS.filter((id) => STEP_PLAN[id].needsYou).reduce((sum, id) => sum + STEP_PLAN[id].usualSeconds, 0);
+    + INSTALL_STEP_ORDER.filter((id) => STEP_PLAN[id].needsYou).reduce((sum, id) => sum + STEP_PLAN[id].usualSeconds, 0);
   return toMinutes(seconds);
 }
 

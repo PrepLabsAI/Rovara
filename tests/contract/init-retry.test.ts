@@ -3,7 +3,8 @@
 // always has, asking nothing.
 import { describe, expect, it } from "vitest";
 import { agentXError } from "@agentx/contracts";
-import { problemText, retryOnPage } from "../../packages/cli/src/init/retry.js";
+import { checkWithChangeOnPage, problemText, retryOnPage } from "../../packages/cli/src/init/retry.js";
+import { isOperatorStop } from "../../packages/cli/src/init/stop.js";
 import { scriptedPrompter } from "../support/init-fakes.js";
 import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
 
@@ -51,5 +52,22 @@ describe("retryOnPage", () => {
     expect(problemText(agentXError("RUNTIME_UNAVAILABLE", "https://x/slack/events answered HTTP 500"))).toBe("https://x/slack/events answered HTTP 500");
     expect(problemText(new Error("ENOENT: no such file or directory, open '/tmp/key.pem'"))).toBe("ENOENT: no such file or directory, open '/tmp/key.pem'");
     expect(problemText(new Error("EACCES: permission denied"))).toBe("EACCES: permission denied");
+  });
+});
+
+describe("spec 048 FR-028: a failed check on the page offers Change answers", () => {
+  it("returns change, runs again on Check again, and stops on Stop for now", async () => {
+    let runs = 0;
+    const failing = async () => { runs += 1; throw new Error("GitHub has no organization or user named acmee"); };
+    const surface = { card: () => undefined };
+    await expect(checkWithChangeOnPage({ surface, prompter: scriptedPrompter(["change"]), question: "Your answers need a change. What next?", run: failing, failed: () => undefined })).resolves.toBe("change");
+    await expect(checkWithChangeOnPage({ surface, prompter: scriptedPrompter(["retry", "stop"]), question: "Your answers need a change. What next?", run: failing, failed: () => undefined })).rejects.toSatisfy(isOperatorStop);
+    expect(runs).toBe(3);
+  });
+
+  it("without a page throws the first failure, asking nothing", async () => {
+    const prompter = scriptedPrompter([]);
+    await expect(checkWithChangeOnPage({ surface: undefined, prompter, question: "q", run: async () => { throw new Error("no"); }, failed: () => undefined })).rejects.toThrow("no");
+    expect(prompter.asked).toEqual([]);
   });
 });

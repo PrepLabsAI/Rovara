@@ -3,15 +3,20 @@ import { DEFAULT_BEDROCK_MODELS, OPENROUTER_KEY_MIN_LENGTH } from "@agentx/model
 // commander default never silently skips a question. An alert webhook carries its integration
 // key, so it is a secret: it is never a flag value and never stored in the answers.
 import { agentXError, ImageDigest } from "@agentx/contracts";
-import { AlertEmailSchema, GITHUB_LOGIN_PATTERN, MAX_BUDGET_USD, ModelsAnswersSchema } from "../deploy/answer-schemas.js";
+import { GITHUB_LOGIN_PATTERN, ModelsAnswersSchema } from "../deploy/answer-schemas.js";
 import type { BundleAnswers } from "../deploy/export-bundle.js";
 import { SecretAlreadyExistsError } from "../deploy/signing-key.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
-import { budgetWhy, estimateMonthlyCost, modelPriceLabel, suggestedBudgetUsd } from "./cost.js";
+import { budgetWhy, estimateMonthlyCost, suggestedBudgetUsd } from "./cost.js";
 import { writeInstallAnswers, type InitAnswers } from "./install-state.js";
-import { secretFromSource, type Prompter, type SecretSource } from "./prompts.js";
+import { askForm, secretFromSource, type Prompter, type SecretSource } from "./prompts.js";
+import {
+  budgetProblem, emailProblem, GITHUB_APP_NAME_LIMIT, recommendedSummary, SETTINGS_FIELD, SETTINGS_TITLE, settingsFields, type SettingsFieldName,
+} from "./settings-form.js";
 
-export const GITHUB_APP_NAME_LIMIT = 34;
+// Spec 048 phase 2: the choice lists, the app name limit and the budget check moved to
+// settings-form.ts, the one form they are asked on; they are re-exported here for their callers.
+export { CLASSIFIER_MODEL_CHOICES, GITHUB_APP_NAME_LIMIT, ORCHESTRATOR_MODEL_CHOICES, WORKER_MODEL_CHOICES } from "./settings-form.js";
 
 /** Spec 048 FR-026: one default name for the GitHub app and the Slack app, with the install name in
  * it. GitHub app names are unique across GitHub, so the owner is in it too; when that is longer
@@ -28,14 +33,6 @@ export const DEFAULT_WORKER_MODEL = DEFAULT_BEDROCK_MODELS.worker;
 const GLM = "zai.glm-4.7";
 const HAIKU = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 
-export const ORCHESTRATOR_MODEL_CHOICES: ReadonlyArray<{ value: string; label: string }> = [
-  { value: DEFAULT_ORCHESTRATOR_MODEL, label: `Claude Sonnet 4.6 (recommended; ${modelPriceLabel("orchestrator", DEFAULT_ORCHESTRATOR_MODEL)})` },
-  { value: GLM, label: `GLM 4.7 (lower cost; ${modelPriceLabel("orchestrator", GLM)})` },
-];
-export const CLASSIFIER_MODEL_CHOICES: ReadonlyArray<{ value: string; label: string }> = [
-  { value: DEFAULT_CLASSIFIER_MODEL, label: `Amazon Nova Lite (recommended; ${modelPriceLabel("classifier", DEFAULT_CLASSIFIER_MODEL)})` },
-  { value: HAIKU, label: `Claude Haiku 4.5 (${modelPriceLabel("classifier", HAIKU)}; needs a one-time Anthropic form in Bedrock)` },
-];
 export const GLM_NOTE =
   "GLM 4.7 costs about $0.007 a turn against Claude Sonnet 4.6's $0.025, and passed as many evaluation cases (58 of 65), but it refused correctly in only 6 of 7 cases that needed a refusal (Sonnet 4.6: 7 of 7).";
 export const HAIKU_NOTE =
@@ -83,6 +80,8 @@ export interface CollectedAnswers {
   /** The --openrouter-providers allowlist that goes with openRouterKey's secret. */
   openRouterProviders?: string[];
   notes: string[];
+  /** Spec 048 FR-029: the settings form's own values (never a secret), so Change answers starts from them. */
+  settings: Record<string, string>;
 }
 
 export function openRouterSecretName(env: string): string {
@@ -112,26 +111,6 @@ export function webhookDisplay(url: string): string {
   return `https://${new URL(url).host}/...`;
 }
 
-const optionalArn = (pattern: RegExp, what: string) => (value: string): string | undefined =>
-  value === "" || pattern.test(value) ? undefined : `must be ${what}`;
-
-const checkEmail = (value: string): string | undefined => (AlertEmailSchema.safeParse(value).success ? undefined : "must be an email address");
-
-/** FR-047's budget answer: the control plane's own `BudgetMonthlyUsd` template parameter pattern
- * (no leading zero, "0" alone meaning no budget), and the same maximum as BudgetAnswersSchema
- * (answer-schemas.ts), so a value the CLI accepts here can never be refused later by the schema
- * once the plan has already been shown. */
-const budgetProblem = (value: string): string | undefined =>
-  (/^(0|[1-9][0-9]{0,6})$/.test(value) && Number(value) <= MAX_BUDGET_USD)
-    ? undefined
-    : `must be a whole number of US dollars from 1 to ${MAX_BUDGET_USD}, or 0 for no budget`;
-
-async function modelChoice(prompter: Prompter, flagValue: string | undefined, question: string, flag: string, choices: ReadonlyArray<{ value: string; label: string }>, defaultValue: string): Promise<string> {
-  if (flagValue !== undefined) return flagValue;
-  const picked = await prompter.choose<string>(question, [...choices, { value: "other", label: "Another Bedrock model id" }], { flag, defaultValue });
-  return picked === "other" ? prompter.ask(`${question} id`, { flag }) : picked;
-}
-
 function digestFlag(value: string | undefined, flag: string): string | undefined {
   if (value === undefined) return undefined;
   if (!ImageDigest.safeParse(value).success) throw agentXError("CONFIG_INVALID", `${flag} must be referenced by digest (repository@sha256:...)`);
@@ -139,26 +118,53 @@ function digestFlag(value: string | undefined, flag: string): string | undefined
 }
 
 /** The engine, identity, models, boundary and operator principal: what an export bundle already
- * knows (`fixed`), or asked here. */
+ * knows (`fixed`), or read from the settings form. */
 type PlatformAnswers = Pick<InitAnswers, "engine" | "identity" | "models" | "permissionsBoundaryArn" | "operatorPrincipalArn">;
+type SettingsValues = Readonly<Record<string, string>>;
 
+/** Spec 048 FR-020 to FR-023 and FR-025: every setting comes from one form (settings-form.ts): four
+ * fields, then the Advanced settings, each with its recommended value. A typed flag answers its
+ * field, so the field is left out. Only the follow-ups (your own OIDC's values, a model id for
+ * "Another Bedrock model id", OpenRouter's model ids and key, an alert webhook, and the GitHub
+ * owner's type when GitHub cannot say) are asked after it. */
 export async function collectInitAnswers(input: {
   env: string; region: string; account: string; releaseVersion: string;
   flags: InitFlags; prompter: Prompter; processEnv: NodeJS.ProcessEnv; now: () => number;
   readFile?: (path: string) => Promise<string>;
   /** An export bundle's answers (`init --resume --from-bundle`): their questions are not asked. */
   fixed?: BundleAnswers;
+  /** --admin-email and --signin, from their own steps' flags: each answers one setting. */
+  adminEmail?: string;
+  signinMethods?: "slack" | "oidc" | "both";
+  /** Change answers: the settings to start from (FR-029). */
+  kept?: Readonly<Record<string, string>>;
+  /** FR-020: the owner's type, from GitHub; undefined when GitHub cannot say, and then it is asked. */
+  ownerType?: (login: string) => Promise<"organization" | "user" | undefined>;
 }): Promise<CollectedAnswers> {
   const { flags, prompter } = input;
   const notes: string[] = [];
+  if (input.adminEmail !== undefined && emailProblem(input.adminEmail) !== undefined) throw agentXError("CONFIG_INVALID", `--admin-email ${input.adminEmail} is not an email address`);
   const workerImage = digestFlag(flags.workerImage, "--worker-image");
   const slackImage = digestFlag(flags.slackImage, "--slack-image");
+  const recommended = estimateMonthlyCost({ orchestrator: DEFAULT_ORCHESTRATOR_MODEL, classifier: DEFAULT_CLASSIFIER_MODEL, worker: DEFAULT_WORKER_MODEL });
+  const fields = settingsFields({
+    env: input.env, flags, fixed: input.fixed !== undefined, budgetWhy: budgetWhy(recommended),
+    ...(input.adminEmail === undefined ? {} : { adminEmail: input.adminEmail }),
+    ...(input.signinMethods === undefined ? {} : { signinMethods: input.signinMethods }),
+  });
+  const values: SettingsValues = fields.length === 0 ? {} : await askForm(prompter, SETTINGS_TITLE, fields, {
+    summary: recommendedSummary({ estimateUsd: recommended.totalUsd, suggestedBudgetUsd: suggestedBudgetUsd(recommended) }),
+    ...(input.kept === undefined ? {} : { values: input.kept }),
+  });
+  const typed = (name: SettingsFieldName): string | undefined => (values[name] === undefined || values[name] === "" ? undefined : values[name]);
+  const env = input.fixed?.env ?? typed(SETTINGS_FIELD.installName) ?? input.env;
+  const email = input.adminEmail ?? typed(SETTINGS_FIELD.email) ?? flags.alertEmail;
 
   let platform: PlatformAnswers;
   let openRouterKey: string | undefined;
   let openRouterProviders: string[] | undefined;
   if (input.fixed === undefined) {
-    ({ platform, openRouterKey, openRouterProviders } = await askPlatformAnswers(input));
+    ({ platform, openRouterKey, openRouterProviders } = await platformFromSettings({ ...input, env }, values));
   } else {
     // The export took no OpenRouter key (it stores no secret), so a bundle's OpenRouter secret, if
     // any, is one the team made itself: nothing is stored here.
@@ -174,7 +180,6 @@ export async function collectInitAnswers(input: {
 
   let alert: InitAnswers["alert"] | undefined;
   let alertWebhook: string | undefined;
-  const emailFlag = "--alert-email (or --alert-webhook-file, --alert-webhook-env, --no-alerts)";
   const readWebhook = async (source: SecretSource) => checkAlertWebhook(await secretFromSource({
     what: "alert webhook address", flag: "--alert-webhook", source, processEnv: input.processEnv, prompter,
     ...(input.readFile === undefined ? {} : { readFile: input.readFile }),
@@ -182,71 +187,57 @@ export async function collectInitAnswers(input: {
   if (flags.alerts === false) {
     alert = { kind: "none" };
   } else if (flags.alertEmail !== undefined) {
-    if (checkEmail(flags.alertEmail) !== undefined) throw agentXError("CONFIG_INVALID", `--alert-email ${flags.alertEmail} is not an email address`);
+    if (emailProblem(flags.alertEmail) !== undefined) throw agentXError("CONFIG_INVALID", `--alert-email ${flags.alertEmail} is not an email address`);
     alert = { kind: "email", address: flags.alertEmail };
   } else if (flags.alertWebhook !== undefined) {
     alertWebhook = await readWebhook(flags.alertWebhook);
   } else {
-    const kind = await prompter.choose<"email" | "webhook" | "none">("Where should AgentX send alerts?", [
-      { value: "email", label: "An email address" },
-      { value: "webhook", label: "A PagerDuty or Opsgenie integration address (kept secret)" },
-      { value: "none", label: "Nowhere for now" },
-    ], { flag: emailFlag, defaultValue: "email" });
-    if (kind === "email") {
-      alert = { kind: "email", address: await prompter.ask("Alert email address", { flag: emailFlag, validate: checkEmail }) };
-    } else if (kind === "webhook") {
+    const kind = values[SETTINGS_FIELD.alertKind] ?? "email";
+    if (kind === "webhook") {
       alertWebhook = await readWebhook({});
-    } else {
+    } else if (kind === "none") {
       alert = { kind: "none" };
+    } else {
+      // FR-025: alerts are on by default, to your email.
+      const address = typed(SETTINGS_FIELD.alertEmail) ?? email;
+      if (address === undefined) throw agentXError("CONFIG_INVALID", "alerts need an email address; pass --admin-email <address>, --alert-email <address>, or --no-alerts");
+      if (emailProblem(address) !== undefined) throw agentXError("CONFIG_INVALID", `${address} is not an email address`);
+      alert = { kind: "email", address };
     }
   }
-  if (alertWebhook !== undefined) alert = { kind: "webhook", display: webhookDisplay(alertWebhook), secretName: alertWebhookSecretName(input.env) };
+  if (alertWebhook !== undefined) alert = { kind: "webhook", display: webhookDisplay(alertWebhook), secretName: alertWebhookSecretName(env) };
   if (alert === undefined) throw new Error("unreachable: every alert branch sets alert");
   if (alert.kind === "none") notes.push(NO_ALERTS_NOTE);
 
-  const budgetFlag = "--budget";
+  // FR-023: an empty budget is the estimate of the models actually chosen, plus 20%.
   const estimate = estimateMonthlyCost(platform.models);
-  const suggested = suggestedBudgetUsd(estimate);
-  const rawBudget = flags.budget ?? (await prompter.ask("Monthly AWS budget for this environment, in US dollars (0 for none)", {
-    flag: budgetFlag, defaultValue: String(suggested),
-    validate: budgetProblem,
-    help: { why: budgetWhy(estimate), example: String(suggested) },
-  }));
+  const rawBudget = flags.budget ?? typed(SETTINGS_FIELD.budget) ?? String(suggestedBudgetUsd(estimate));
   const budgetIssue = budgetProblem(rawBudget);
   if (budgetIssue !== undefined) throw agentXError("CONFIG_INVALID", `--budget ${budgetIssue}`);
   let budget: InitAnswers["budget"];
   if (Number(rawBudget) > 0) {
-    const scope = flags.budgetScope ?? (await prompter.choose<"tag" | "account">("Which costs should the budget count?", [
-      { value: "account", label: "The whole account (recommended)" },
-      { value: "tag", label: "Only this environment's (tagged agentx:env; the tag must be activated in Billing)" },
-    ], { flag: "--budget-scope", defaultValue: "account" }));
+    const scope = flags.budgetScope ?? (values[SETTINGS_FIELD.budgetScope] === "tag" ? "tag" : "account");
     budget = { monthlyUsd: Number(rawBudget), scope };
     if (scope === "tag") notes.push(BUDGET_TAG_NOTE);
   }
 
-  const githubAccount = flags.githubAccount ?? (await prompter.ask("GitHub organization or user that will own the AgentX GitHub App", {
-    flag: "--github-account", validate: (value) => (GITHUB_LOGIN_PATTERN.test(value) ? undefined : "must be a GitHub organization or user name"),
-  }));
+  const githubAccount = flags.githubAccount ?? typed(SETTINGS_FIELD.githubAccount) ?? "";
   if (!GITHUB_LOGIN_PATTERN.test(githubAccount)) throw agentXError("CONFIG_INVALID", `--github-account ${githubAccount} is not a GitHub organization or user name`);
-  const accountType = flags.githubAccountType ?? (await prompter.choose<"organization" | "user">(`Is ${githubAccount} an organization or a personal account?`, [
+  // FR-020: GitHub says what the owner is; the question is asked only when it cannot.
+  const accountType = flags.githubAccountType ?? (await input.ownerType?.(githubAccount)) ?? (await prompter.choose<"organization" | "user">(`Is ${githubAccount} an organization or a personal account?`, [
     { value: "organization", label: "An organization" },
     { value: "user", label: "A personal account" },
   ], { flag: "--github-account-type", defaultValue: "organization" }));
-  const appName = flags.githubAppName ?? (await prompter.ask("GitHub App name (must be unique on GitHub)", {
-    flag: "--github-app-name", defaultValue: defaultAppName({ owner: githubAccount, env: input.env }),
-    validate: (value) => (value.length <= GITHUB_APP_NAME_LIMIT ? undefined : `must be at most ${GITHUB_APP_NAME_LIMIT} characters`),
-  }));
-  const slackAppName = flags.slackAppName ?? (await prompter.ask("Slack app name", {
-    flag: "--slack-app-name", defaultValue: appName, validate: (value) => (value.length <= 35 ? undefined : "must be at most 35 characters"),
-  }));
-  const appPostedMessages = flags.slackAppPostedMessages ?? (await prompter.choose<"accept" | "ignore">("Answer mentions people post through other apps with their own Slack token?", [
-    { value: "accept", label: "Yes (accept)" },
-    { value: "ignore", label: "No, only mentions typed in Slack (ignore)" },
-  ], { flag: "--slack-app-posted-messages", defaultValue: "accept" }));
+  // FR-020 and FR-026: one name for both apps; empty is the default pattern for this owner and name.
+  const appName = flags.githubAppName ?? typed(SETTINGS_FIELD.appName) ?? defaultAppName({ owner: githubAccount, env });
+  const slackAppName = flags.slackAppName ?? appName;
+  const appPostedMessages = flags.slackAppPostedMessages ?? (values[SETTINGS_FIELD.appPostedMessages] === "ignore" ? "ignore" : "accept");
+  const signinValue = values[SETTINGS_FIELD.signin];
+  const signinMethods = input.signinMethods ?? (signinValue === "oidc" || signinValue === "both" ? signinValue : "slack");
 
   const answers: InitAnswers = {
     schemaVersion: 1,
-    env: input.env, region: input.region, account: input.account, engine: platform.engine, releaseVersion: input.releaseVersion,
+    env, region: input.region, account: input.account, engine: platform.engine, releaseVersion: input.releaseVersion,
     identity: platform.identity,
     models: platform.models,
     ...(platform.permissionsBoundaryArn === undefined ? {} : { permissionsBoundaryArn: platform.permissionsBoundaryArn }),
@@ -258,29 +249,27 @@ export async function collectInitAnswers(input: {
     ...(budget === undefined ? {} : { budget }),
     github: { account: githubAccount, accountType, appName },
     slack: { appName: slackAppName, appPostedMessages },
+    ...(email === undefined ? {} : { adminEmail: email }),
+    signinMethods,
     createdAt: new Date(input.now()).toISOString(),
   };
   return {
-    answers, notes,
+    answers, notes, settings: { ...values },
     ...(alertWebhook === undefined ? {} : { alertWebhook }),
     ...(openRouterKey === undefined ? {} : { openRouterKey, ...(openRouterProviders === undefined ? {} : { openRouterProviders }) }),
   };
 }
 
-/** The questions an export bundle answers instead (engine, identity, models, boundary, operator). */
-async function askPlatformAnswers(
+/** The settings an export bundle answers instead (engine, identity, models, boundary, operator),
+ * from the form's values: a typed flag first, then the field, then its recommended value. */
+async function platformFromSettings(
   input: { env: string; region: string; account: string; flags: InitFlags; prompter: Prompter; processEnv: NodeJS.ProcessEnv; readFile?: (path: string) => Promise<string> },
+  values: SettingsValues,
 ): Promise<{ platform: PlatformAnswers; openRouterKey?: string; openRouterProviders?: string[] }> {
   const { flags, prompter } = input;
-  const engine = flags.engine ?? (await prompter.choose<"templates" | "cdk">("Deploy engine", [
-    { value: "templates", label: "templates: published CloudFormation templates, no CDK setup (recommended)" },
-    { value: "cdk", label: "cdk: deploy from AgentX's CDK code at the release tag" },
-  ], { flag: "--engine", defaultValue: "templates" }));
+  const engine = flags.engine ?? (values[SETTINGS_FIELD.engine] === "cdk" ? "cdk" : "templates");
 
-  const identityMode = flags.identity ?? (await prompter.choose<"cognito" | "oidc">("Sign-in", [
-    { value: "cognito", label: "Create a Cognito user pool for AgentX (recommended)" },
-    { value: "oidc", label: "Use your own OIDC provider" },
-  ], { flag: "--identity", defaultValue: "cognito" }));
+  const identityMode = flags.identity ?? (values[SETTINGS_FIELD.identity] === "oidc" ? "oidc" : "cognito");
   let identity: InitAnswers["identity"] = { mode: "cognito" };
   if (identityMode === "oidc") {
     const https = (value: string) => (/^https:\/\/\S+$/.test(value) ? undefined : "must be an https:// URL");
@@ -294,15 +283,12 @@ async function askPlatformAnswers(
     identity = { mode: "oidc", issuer, audience, clientId, adminClaim, adminValues };
   }
 
-  // The provider question is asked only when no provider or model flag pins the answer already:
-  // a per-component flag keeps today's meaning (unset components stay on Bedrock), so mixed setups
+  // The provider field is left out when a provider or model flag pins the answer already: a
+  // per-component flag keeps today's meaning (unset components stay on Bedrock), so mixed setups
   // still come from flags.
   const providerFlagGiven = [flags.orchestratorProvider, flags.classifierProvider, flags.workerProvider].some((value) => value !== undefined);
   const modelFlagGiven = [flags.orchestratorModel, flags.classifierModel, flags.workerModel].some((value) => value !== undefined);
-  const allProvider = flags.modelProvider ?? (providerFlagGiven || modelFlagGiven ? "amazon-bedrock" : await prompter.choose<string>("Model provider", [
-    { value: "amazon-bedrock", label: "Amazon Bedrock (recommended)" },
-    { value: "openrouter", label: "OpenRouter" },
-  ], { flag: "--model-provider", defaultValue: "amazon-bedrock" }));
+  const allProvider = flags.modelProvider ?? (providerFlagGiven || modelFlagGiven ? "amazon-bedrock" : values[SETTINGS_FIELD.modelProvider] ?? "amazon-bedrock");
   const providers = {
     orchestrator: flags.orchestratorProvider ?? allProvider,
     classifier: flags.classifierProvider ?? allProvider,
@@ -311,18 +297,21 @@ async function askPlatformAnswers(
   if (!Object.values(providers).every(isModelProvider)) {
     throw agentXError("CONFIG_INVALID", "model providers must be amazon-bedrock or openrouter");
   }
+  /** A Bedrock model from the form: its value, its default when empty, or a follow-up for "other". */
+  const fromForm = async (name: SettingsFieldName, question: string, flag: string, fallback: string): Promise<string> => {
+    const picked = values[name];
+    if (picked === "other") return prompter.ask(`${question} id`, { flag });
+    return picked === undefined || picked === "" ? fallback : picked;
+  };
   const orchestrator = providers.orchestrator === "openrouter"
     ? flags.orchestratorModel ?? await prompter.ask("OpenRouter orchestrator model id", { flag: "--orchestrator-model" })
-    : await modelChoice(prompter, flags.orchestratorModel, "Orchestrator model", "--orchestrator-model", ORCHESTRATOR_MODEL_CHOICES, DEFAULT_ORCHESTRATOR_MODEL);
+    : flags.orchestratorModel ?? await fromForm(SETTINGS_FIELD.orchestratorModel, "Orchestrator model", "--orchestrator-model", DEFAULT_ORCHESTRATOR_MODEL);
   const classifier = providers.classifier === "openrouter"
     ? flags.classifierModel ?? await prompter.ask("OpenRouter classifier model id", { flag: "--classifier-model" })
-    : await modelChoice(prompter, flags.classifierModel, "Action-gate classifier model", "--classifier-model", CLASSIFIER_MODEL_CHOICES, DEFAULT_CLASSIFIER_MODEL);
+    : flags.classifierModel ?? await fromForm(SETTINGS_FIELD.classifierModel, "Action-gate classifier model", "--classifier-model", DEFAULT_CLASSIFIER_MODEL);
   const worker = providers.worker === "openrouter"
     ? flags.workerModel ?? await prompter.ask("OpenRouter worker model id", { flag: "--worker-model" })
-    : flags.workerModel ?? await prompter.ask("Worker model id", {
-      flag: "--worker-model", defaultValue: DEFAULT_WORKER_MODEL,
-      help: { defaultText: `Claude Sonnet 4.6 (${modelPriceLabel("worker", DEFAULT_WORKER_MODEL)})` },
-    });
+    : flags.workerModel ?? await fromForm(SETTINGS_FIELD.workerModel, "Worker model", "--worker-model", DEFAULT_WORKER_MODEL);
   const usesOpenRouter = Object.values(providers).includes("openrouter");
   const secretArn = flags.openrouterSecretArn;
   if (secretArn !== undefined && flags.openrouterKey !== undefined) {
@@ -347,12 +336,8 @@ async function askPlatformAnswers(
   if (!parsedModels.success) throw agentXError("CONFIG_INVALID", "invalid model configuration; check providers and the OpenRouter secret ARN/provider slugs");
   const models: InitAnswers["models"] = secretArn === undefined ? ModelsAnswersSchema.parse(modelsInput) : parsedModels.data;
 
-  const boundary = flags.permissionBoundary ?? (await prompter.ask("Permission boundary policy ARN (Enter for AgentX's default boundary)", {
-    flag: "--permission-boundary", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:iam::\d{12}:policy\/.+$/, "an IAM policy ARN"),
-  }));
-  const operator = flags.operatorPrincipal ?? (await prompter.ask("IAM principal allowed to assume the AgentX operator role (Enter for this account)", {
-    flag: "--operator-principal", defaultValue: "", validate: optionalArn(/^arn:aws[a-z-]*:(iam|sts)::\d{12}:.+$/, "an IAM principal ARN"),
-  }));
+  const boundary = flags.permissionBoundary ?? values[SETTINGS_FIELD.permissionBoundary] ?? "";
+  const operator = flags.operatorPrincipal ?? values[SETTINGS_FIELD.operatorPrincipal] ?? "";
 
   return {
     platform: {

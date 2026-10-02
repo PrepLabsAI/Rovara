@@ -7,7 +7,8 @@ import { afterEach, describe, expect, it } from "vitest";
 import { AgentXError } from "@agentx/contracts";
 import type { CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
 import { realCommandRunner } from "../../packages/cli/src/deploy/commands.js";
-import { fetchRelease, readReleaseManifest, releaseAssetUrls, releaseCacheDir, sourceRelease } from "../../packages/cli/src/init/release-fetch.js";
+import { fetchRelease, readReleaseManifest, readWithProgress, releaseAssetUrls, releaseCacheDir, sourceRelease } from "../../packages/cli/src/init/release-fetch.js";
+import { releaseCard } from "../../packages/cli/src/init/ui/cards.js";
 import { CLI_VERSION, RELEASE_VERSION, isPrereleaseVersion } from "../../packages/cli/src/version.js";
 
 const dirs: string[] = [];
@@ -20,6 +21,31 @@ afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => removeAll(
 const tmp = async (prefix: string) => { const dir = await mkdtemp(join(tmpdir(), prefix)); dirs.push(dir); return dir; };
 const runner = realCommandRunner({ write: () => undefined });
 const MANIFEST = JSON.stringify({ schemaVersion: 1, version: "1.2.3" });
+
+describe("spec 048 FR-009: the download's progress", () => {
+  const streamOf = (chunks: number[]) => new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const size of chunks) controller.enqueue(new Uint8Array(size));
+      controller.close();
+    },
+  });
+
+  it("reports bytes received against the size", async () => {
+    const seen: Array<{ receivedBytes: number; totalBytes?: number }> = [];
+    const body = await readWithProgress(new Response(streamOf([400, 600]), { headers: { "content-length": "1000" } }), (progress) => seen.push(progress));
+    expect(body.length).toBe(1000);
+    expect(seen).toEqual([{ receivedBytes: 400, totalBytes: 1000 }, { receivedBytes: 1000, totalBytes: 1000 }]);
+  });
+
+  it("Review Focus 5: no content-length shows megabytes, never NaN or more than 100", async () => {
+    const seen: Array<{ receivedBytes: number; totalBytes?: number }> = [];
+    await readWithProgress(new Response(streamOf([1_500_000, 1_500_000])), (progress) => seen.push(progress));
+    expect(seen.every((progress) => progress.totalBytes === undefined)).toBe(true);
+    expect(releaseCard({ stage: "downloading", ...seen.at(-1)! }).lines).toEqual(["Downloading AgentX: 3.0 MB so far."]);
+    expect(releaseCard({ stage: "downloading", receivedBytes: 5_000_000, totalBytes: 4_000_000 }).lines).toEqual(["Downloading AgentX (about 4.0 MB): 100% done."]);
+    for (const line of releaseCard({ stage: "downloading", receivedBytes: 0, totalBytes: 0 }).lines) expect(line).not.toMatch(/NaN|Infinity/);
+  });
+});
 
 async function publishedRelease(manifest = MANIFEST): Promise<Buffer> {
   const source = await tmp("agentx-rel-src-");

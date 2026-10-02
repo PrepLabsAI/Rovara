@@ -70,7 +70,7 @@ export function wizardHtml(token: string): string {
       <p id="question-error" class="error hidden" role="alert"></p>
     </section>
     <section id="outcome" class="card hidden"><h2 id="outcome-title"></h2><p id="outcome-body"></p><div id="outcome-commands"></div></section>
-    <details id="plan" class="card hidden"><summary>View the plan</summary><pre id="plan-body"></pre></details>
+    <details id="plan" class="card hidden"><summary>View the plan</summary><div id="plan-body"></div></details>
     <details id="log-box" class="card"><summary>Show technical log</summary><pre id="log"></pre></details>
     <p id="closed-note" class="note hidden"></p>
   </main>
@@ -119,6 +119,11 @@ function elapsedText(node) {
   const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(node.dataset.started)) / 1000));
   const usual = Number(node.dataset.usual);
   return " (" + clockText(seconds) + " so far, " + (seconds > usual ? "taking longer than usual" : node.dataset.usualText) + ")";
+}
+
+function untilText(node) {
+  const seconds = Math.max(0, Math.round((Date.parse(node.dataset.until) - Date.now()) / 1000));
+  return seconds > 0 ? "About " + clockText(seconds) + " left." : "Still checking.";
 }
 
 function linkBlock(link) {
@@ -194,6 +199,12 @@ function renderCard(card) {
   const section = el("section", "card status " + card.status);
   section.append(el("h2", "", card.title));
   for (const line of card.lines) section.append(el("p", "", line));
+  if (card.waitUntil) {
+    const left = el("p", "hint");
+    left.dataset.until = card.waitUntil;
+    left.textContent = untilText(left);
+    section.append(left);
+  }
   if (card.checks) {
     const list = el("ul", "checks");
     for (const check of card.checks) list.append(el("li", check.ok ? "ok" : "failed", (check.ok ? "Ready: " : "Not ready: ") + check.label + ". " + check.detail));
@@ -274,9 +285,9 @@ function buttonRow(question) {
   return row;
 }
 
-function sendButton(onSend) {
+function sendButton(onSend, label) {
   const row = el("div", "buttons");
-  const send = el("button", "primary", "Continue");
+  const send = el("button", "primary", label ?? "Continue");
   send.type = "button";
   send.addEventListener("click", onSend);
   row.append(send);
@@ -291,18 +302,64 @@ function hideFromPasswordManagers(field) {
   field.setAttribute("data-bwignore", "");
 }
 
+function fieldInput(field, id) {
+  if (field.choices) {
+    const input = el("select");
+    input.id = id;
+    for (const choice of field.choices) {
+      const option = el("option", "", choice.label);
+      option.value = choice.value;
+      input.append(option);
+    }
+    input.value = field.value || field.defaultValue || "";
+    return input;
+  }
+  const input = el("input");
+  input.id = id;
+  input.type = field.masked ? "password" : "text";
+  if (field.masked) hideFromPasswordManagers(input);
+  if (field.value && !field.masked) input.value = field.value;
+  return input;
+}
+
 function buildForm(question, body) {
+  if (question.summary && question.summary.length > 0) {
+    const box = el("div", "recommended");
+    box.append(el("h3", "", "Recommended settings"));
+    const list = el("ul");
+    for (const line of question.summary) list.append(el("li", "", line));
+    box.append(list);
+    body.append(box);
+  }
   const inputs = [];
+  const groups = new Map();
+  let advanced = null;
   for (const field of question.fields ?? []) {
+    let holder = body;
+    if (field.section === "advanced") {
+      if (!advanced) {
+        advanced = el("details", "advanced");
+        advanced.append(el("summary", "", "Advanced settings"));
+        advanced.open = (question.fields ?? []).some((each) => each.section === "advanced" && each.error);
+        body.append(advanced);
+      }
+      holder = advanced;
+    }
+    if (field.group) {
+      const key = (field.section ?? "") + "/" + field.group;
+      if (!groups.has(key)) {
+        const set = el("fieldset", "group");
+        set.append(el("legend", "", field.group));
+        holder.append(set);
+        groups.set(key, set);
+      }
+      holder = groups.get(key);
+    }
     const id = "field-" + field.name;
     const wrap = el("div", "field");
     const label = el("label", "field-label", field.label);
     label.htmlFor = id;
-    const input = el("input");
-    input.id = id;
-    input.type = field.masked ? "password" : "text";
-    if (field.masked) hideFromPasswordManagers(input);
-    if (field.value && !field.masked) input.value = field.value;
+    const input = fieldInput(field, id);
     const notes = [];
     for (const [suffix, text, className] of [["why", field.why, "hint"], ["example", field.example ? "For example: " + field.example : undefined, "hint"], ["hint", field.hint, "hint"], ["error", field.error, "error"]]) {
       if (!text) continue;
@@ -310,17 +367,27 @@ function buildForm(question, body) {
       note.id = id + "-" + suffix;
       notes.push(note);
     }
+    if (field.link) {
+      const line = el("p", "hint");
+      const anchor = el("a", "field-link", field.link.label);
+      anchor.href = field.link.url;
+      anchor.target = "_blank";
+      anchor.rel = "noopener noreferrer";
+      line.append(anchor, " " + (field.link.note ?? ""));
+      line.id = id + "-link";
+      notes.push(line);
+    }
     if (field.error) input.setAttribute("aria-invalid", "true");
-    input.setAttribute("aria-describedby", notes.map((note) => note.id).join(" "));
+    if (notes.length > 0) input.setAttribute("aria-describedby", notes.map((note) => note.id).join(" "));
     wrap.append(label, input, ...notes);
-    body.append(wrap);
+    holder.append(wrap);
     inputs.push([field, input]);
   }
   body.append(sendButton(() => {
     const values = Object.fromEntries(inputs.map(([field, input]) => [field.name, input.value]));
     if (!sending) for (const [field, input] of inputs) if (field.masked) input.value = "";
     submit(question.id, JSON.stringify(values));
-  }));
+  }, question.submitLabel ?? "Continue"));
 }
 
 function buildQuestion(question) {
@@ -372,7 +439,7 @@ function buildQuestion(question) {
       described.push(hint.id);
       body.append(hint);
     }
-    field.setAttribute("aria-describedby", described.join(" "));
+    if (described.length > 0) field.setAttribute("aria-describedby", described.join(" "));
     if (question.error) field.setAttribute("aria-invalid", "true");
     read = () => {
       const value = field.value;
@@ -384,6 +451,31 @@ function buildQuestion(question) {
     queueMicrotask(() => field.focus());
   }
   body.append(sendButton(() => submit(question.id, read())));
+}
+
+function renderPlan(plan, open) {
+  const body = byId("plan-body");
+  body.replaceChildren(el("p", "", plan.intro));
+  for (const section of plan.sections) {
+    body.append(el("h3", "", section.title));
+    for (const line of section.lines) body.append(el("p", "", line));
+  }
+  body.append(el("h3", "", "What it costs"));
+  const table = el("table", "plan-table");
+  const head = el("tr");
+  for (const heading of ["Item", "Monthly", "Basis"]) head.append(el("th", "", heading));
+  table.append(head);
+  for (const row of plan.cost.rows) {
+    const tr = el("tr");
+    tr.append(el("td", "", row.item), el("td", "", row.monthly), el("td", "", row.basis));
+    table.append(tr);
+  }
+  body.append(table, el("p", "", plan.cost.total), el("p", "hint", plan.cost.usage));
+  const every = el("details");
+  every.append(el("summary", "", "Show every resource"));
+  for (const line of plan.resources) every.append(el("p", "", line));
+  body.append(every);
+  byId("plan").open = open;
 }
 
 function render(state) {
@@ -407,10 +499,7 @@ function render(state) {
   renderFailure(state.failure);
   renderPanelCards(state);
   show("plan", Boolean(state.plan));
-  if (state.plan) {
-    byId("plan-body").textContent = state.plan;
-    byId("plan").open = state.steps.every((step) => step.status === "pending");
-  }
+  if (state.plan) renderPlan(state.plan, state.steps.every((step) => step.status === "pending"));
   const hasReady = (state.cards ?? []).some((card) => card.id === "ready");
   show("outcome", Boolean(state.outcome) && !hasReady);
   if (state.outcome) {
@@ -448,7 +537,10 @@ function appendLog(line) {
   if (atBottom) pane.scrollTop = pane.scrollHeight;
 }
 
-setInterval(() => { for (const node of document.querySelectorAll("[data-started]")) node.textContent = elapsedText(node); }, 1000);
+setInterval(() => {
+  for (const node of document.querySelectorAll("[data-started]")) node.textContent = elapsedText(node);
+  for (const node of document.querySelectorAll("[data-until]")) node.textContent = untilText(node);
+}, 1000);
 
 const source = new EventSource("/events?" + ${JSON.stringify(WIZARD_TOKEN_QUERY)} + "=" + encodeURIComponent(token));
 source.addEventListener("snapshot", (event) => {

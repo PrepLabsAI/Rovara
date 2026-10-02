@@ -7,7 +7,22 @@
 import { cliCommandLine, type CliInvocation } from "../cli-command.js";
 import { CONNECTOR_LABELS, type InstallProgress } from "../install-state.js";
 import { ADMIN_USER_GUIDE_URL, DEDICATED_ACCOUNT_NOTE, ROOT_WARNING, type PrerequisiteCheck } from "../prerequisites.js";
+import { STEP_PLAN } from "./journey.js";
 import type { WizardCard } from "./protocol.js";
+import type { ChildAction } from "./child-actions.js";
+
+const megabytes = (bytes: number): string => (bytes / 1_000_000).toFixed(1);
+
+/** FR-009: the release download, on the page, with its size and progress. */
+export function releaseCard(input: { stage: "downloading"; receivedBytes: number; totalBytes?: number } | { stage: "ready" }): WizardCard {
+  const base = { id: "release" as const, title: "Getting AgentX ready" };
+  if (input.stage === "ready") return { ...base, status: "ok", lines: ["AgentX is ready to install."] };
+  const total = input.totalBytes !== undefined && input.totalBytes > 0 ? input.totalBytes : undefined;
+  const line = total === undefined
+    ? `Downloading AgentX: ${megabytes(input.receivedBytes)} MB so far.`
+    : `Downloading AgentX (about ${megabytes(total)} MB): ${Math.min(100, Math.floor((input.receivedBytes / total) * 100))}% done.`;
+  return { ...base, status: "running", lines: [line] };
+}
 
 /** A button's label for an address the run opens: "Open github.com". */
 export function linkLabel(url: string): string {
@@ -37,11 +52,16 @@ export function signedInAs(arn: string): string {
   return "your AWS sign-in";
 }
 
-export function awsCard(input: { account: string; arn: string; region: string; profile?: string }): WizardCard {
+/** Spec 048 FR-015: the account, its alias (when known) and its region (when chosen yet). Shown
+ * before the region when `region` is not given, so it never names "in undefined". */
+const whereLine = (input: { account: string; region?: string; alias?: string }): string =>
+  `AgentX installs into AWS account ${input.account}${input.alias === undefined ? "" : ` (${input.alias})`}${input.region === undefined ? "" : ` in ${input.region}`}.`;
+
+export function awsCard(input: { account: string; arn: string; region?: string; alias?: string; profile?: string }): WizardCard {
   return {
     id: "aws", title: "AWS account", status: "ok",
     lines: [
-      `AgentX installs into AWS account ${input.account} in ${input.region}.`,
+      whereLine(input),
       `You are signed in as ${signedInAs(input.arn)}${input.profile === undefined ? "" : `, with the AWS profile ${input.profile}`}.`,
       DEDICATED_ACCOUNT_NOTE,
     ],
@@ -49,18 +69,52 @@ export function awsCard(input: { account: string; arn: string; region: string; p
   };
 }
 
+/** FR-038: an AWS sign-in a child process started (aws sso login), on the page. */
+export function awsSignInCard(input: ChildAction & { done?: boolean }): WizardCard {
+  const base = { id: "aws-signin" as const, title: "Sign in to AWS" };
+  if (input.done === true) return { ...base, status: "ok", lines: ["You are signed in to AWS."] };
+  return {
+    ...base, status: "waiting",
+    lines: ["AWS asks you to approve this sign-in in your browser.", ...(input.code === undefined ? [] : [`Check that AWS shows this code: ${input.code}`]), "This page moves on by itself once you approve it."],
+    ...(input.url === undefined ? {} : { link: { url: input.url, label: "Open the AWS sign-in page" } }),
+  };
+}
+
 /** FR-016: the caller is the AWS root user. The page still offers to continue. */
-export function rootUserCard(input: { account: string; arn: string; region: string; profile?: string }): WizardCard {
+export function rootUserCard(input: { account: string; arn: string; region?: string; alias?: string; profile?: string }): WizardCard {
   return {
     id: "aws", title: "AWS account", status: "waiting",
     lines: [
-      `AgentX installs into AWS account ${input.account} in ${input.region}.`,
+      whereLine(input),
       ROOT_WARNING,
       "You can continue as root. A few day-two commands need an admin user instead; the ready screen says which.",
     ],
     link: { url: ADMIN_USER_GUIDE_URL, label: "How to create an admin user" },
     details: [input.arn],
   };
+}
+
+/** Fix round 1: the checks list and the technical details, shared by every checklist card (the
+ * account checks' own card and the prerequisites card below differ only in id, title and the
+ * status wording of `lines`). */
+function checklistCard(input: { id: WizardCard["id"]; title: string; status: "running" | "ok" | "failed"; lines: string[]; checks: readonly PrerequisiteCheck[] }): WizardCard {
+  const technical = input.checks.flatMap((check) => (check.technical === undefined ? [] : [`${check.label}: ${check.technical}`]));
+  return {
+    id: input.id, title: input.title, status: input.status, lines: input.lines,
+    checks: input.checks.map((check) => ({ label: check.label, ok: check.ok, detail: check.detail })),
+    ...(technical.length === 0 ? {} : { details: technical }),
+  };
+}
+
+/** The account checks' own card (FR-018): what only the account and region can answer, checked
+ * right after the region is chosen and before any setting is asked. */
+export function accountChecksCard(input: { status: "running" | "ok" | "failed"; checks: readonly PrerequisiteCheck[] }): WizardCard {
+  const lines = input.status === "running"
+    ? ["Checking your AWS account and region. Nothing is created yet."]
+    : input.status === "ok"
+      ? ["Your AWS account and region have what AgentX needs."]
+      : ["Nothing has been created. Fix each item marked Not ready, then choose Check again."];
+  return checklistCard({ id: "account-checks", title: "Check your AWS account", status: input.status, lines, checks: input.checks });
 }
 
 /** FR-021: the session is missing or expired. `signIn` is the command Sign in runs, when the
@@ -85,12 +139,7 @@ export function prerequisitesCard(input: { status: "running" | "ok" | "failed"; 
     : input.status === "ok"
       ? ["Everything AgentX needs is in place."]
       : ["Nothing has been created. Fix each item marked Not ready, then choose Check again."];
-  const technical = input.checks.flatMap((check) => (check.technical === undefined ? [] : [`${check.label}: ${check.technical}`]));
-  return {
-    id: "prerequisites", title: "Check your AWS account", status: input.status, lines,
-    checks: input.checks.map((check) => ({ label: check.label, ok: check.ok, detail: check.detail })),
-    ...(technical.length === 0 ? {} : { details: technical }),
-  };
+  return checklistCard({ id: "prerequisites", title: STEP_PLAN.prerequisites.title, status: input.status, lines, checks: input.checks });
 }
 
 export type GitHubCardInput =
@@ -98,6 +147,10 @@ export type GitHubCardInput =
   | { stage: "install"; appName: string; slug: string; account: string; installUrl: string }
   | { stage: "repositories"; appName: string; slug: string; account: string; settingsUrl: string }
   | { stage: "done"; appName: string; slug: string; account: string }
+  /** Spec 048 FR-032: an app GitHub made, whose key a crash kept from reaching Secrets Manager,
+   * found again on resume. `settingsUrl` is the app's "advanced" page, where its private key is
+   * made (Finish) or the app itself is deleted (Replace). */
+  | { stage: "recover"; appName: string; slug: string; settingsUrl: string }
   /** A wait or check that failed. The page offers no retry, so the problem keeps its own next step. */
   | { stage: "failed"; problem: string };
 
@@ -122,6 +175,15 @@ export function githubCard(input: GitHubCardInput): WizardCard {
       link: { url: input.settingsUrl, label: "Choose repositories" },
     };
     case "done": return { ...base, status: "ok", ...slug(input.slug), lines: [`"${input.appName}" is installed on ${input.account}.`] };
+    case "recover": return {
+      ...base, status: "waiting", ...slug(input.slug),
+      lines: [
+        `GitHub made "${input.appName}", but the install stopped before its private key was stored, and GitHub cannot show that key again.`,
+        "Finish with this app: make a new private key on its GitHub page and paste it here. Nothing is removed.",
+        "Replace it: delete the app on its GitHub page first, then AgentX makes a new one. Only the old GitHub app is removed; nothing in AWS is.",
+      ],
+      link: { url: input.settingsUrl, label: "Open the app on GitHub" },
+    };
     case "failed": return { ...base, status: "failed", lines: ["The GitHub app was not set up."], details: [input.problem] };
   }
 }
@@ -155,9 +217,9 @@ export function slackAppCard(input: SlackCardInput): WizardCard {
     case "credentials": return {
       ...base, status: "waiting",
       lines: [
-        `Copy two values from the settings of "${input.appName}" and paste them below.`,
-        "The Bot User OAuth Token is under OAuth & Permissions. The Signing Secret is under Basic Information, App Credentials.",
-        "Both are saved in AWS Secrets Manager and never shown again.",
+        `Copy the values from the settings of "${input.appName}" and paste them below.`,
+        "The Client ID, Client Secret and Signing Secret are under Basic Information, App Credentials. The Bot User OAuth Token is under OAuth & Permissions.",
+        "They are saved in AWS Secrets Manager and never shown again.",
       ],
       link: { url: SLACK_APPS_URL, label: "Open your Slack apps" },
     };
@@ -169,7 +231,11 @@ export function slackAppCard(input: SlackCardInput): WizardCard {
     }
     case "approval": return {
       ...base, status: "waiting",
-      lines: [`Slack is waiting for a workspace admin to approve "${input.appName}".`, "Your progress is saved. When the app is installed, start the install again and it continues from here."],
+      lines: [
+        `Slack is waiting for a workspace admin to approve "${input.appName}".`,
+        "Your progress is saved. You can leave the installer running, or stop and continue later.",
+        "When the app is installed in Slack, choose Installed, continue.",
+      ],
     };
     case "done": return {
       ...base, status: "ok",
@@ -181,8 +247,9 @@ export function slackAppCard(input: SlackCardInput): WizardCard {
 
 export type SlackUrlsCardInput =
   | { stage: "checking"; eventsUrl: string }
-  | { stage: "waiting-for-secret"; eventsUrl: string }
+  | { stage: "waiting-for-secret"; eventsUrl: string; until?: string }
   | { stage: "verify"; pageUrl: string }
+  | { stage: "not-verified"; pageUrl: string }
   | { stage: "failed"; problem: string; pageUrl: string }
   | { stage: "done"; eventsUrl: string };
 
@@ -195,10 +262,20 @@ export function slackUrlsCard(input: SlackUrlsCardInput): WizardCard {
     case "waiting-for-secret": return {
       ...base, status: "running",
       lines: [`Checking that Slack can reach AgentX at ${input.eventsUrl}.`, "AgentX can take up to 5 minutes to start using the new Signing Secret. Checking again every 15 seconds."],
+      ...(input.until === undefined ? {} : { waitUntil: input.until }),
     };
     case "verify": return {
       ...base, status: "waiting",
       lines: ["AgentX answers Slack's check.", "Open Event Subscriptions in your Slack app. If the address is not marked Verified, press Retry there, then answer below."],
+      link: { url: input.pageUrl, label: events },
+    };
+    case "not-verified": return {
+      ...base, status: "failed",
+      lines: [
+        "Slack still shows an error next to the address.",
+        "In Event Subscriptions, press Retry next to the address. If it still fails, check that the Signing Secret you pasted is the one on Basic Information, App Credentials, not the Client Secret.",
+        "Then choose Check again below.",
+      ],
       link: { url: input.pageUrl, label: events },
     };
     case "failed": return {

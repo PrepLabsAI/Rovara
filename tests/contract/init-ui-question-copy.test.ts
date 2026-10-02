@@ -19,6 +19,11 @@ const shown = (hub: WizardHub) => {
 const DEFAULT_PATH: Array<[kind: "ask" | "choose" | "confirm" | "secret", flag: string | undefined, text: string]> = [
   ["choose", "AWS_PROFILE", "AWS profile"],
   ["choose", "--region", "AWS region"],
+  // Spec 048 FR-020: the settings form's fields that are new in phase 2.
+  ["ask", "--admin-email", "Your email, for your AgentX admin user and alerts"],
+  ["ask", "--env", "Install name"],
+  ["ask", "--github-app-name", "App name for GitHub and Slack (unique on GitHub)"],
+  ["choose", "--worker-model", "Worker model"],
   ["choose", "--engine", "Deploy engine"],
   ["choose", "--identity", "Sign-in"],
   ["choose", "--model-provider", "Model provider"],
@@ -29,7 +34,7 @@ const DEFAULT_PATH: Array<[kind: "ask" | "choose" | "confirm" | "secret", flag: 
   ["ask", "--operator-principal", "IAM principal allowed to assume the AgentX operator role (Enter for this account)"],
   ["choose", ALERT_FLAG, "Where should AgentX send alerts?"],
   ["ask", ALERT_FLAG, "Alert email address"],
-  ["ask", "--budget", "Monthly AWS budget for this environment, in US dollars (0 for none)"],
+  ["ask", "--budget", "Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)"],
   ["choose", "--budget-scope", "Which costs should the budget count?"],
   ["ask", "--github-account", "GitHub organization or user that will own the AgentX GitHub App"],
   ["choose", "--github-account-type", "Is acme an organization or a personal account?"],
@@ -37,6 +42,7 @@ const DEFAULT_PATH: Array<[kind: "ask" | "choose" | "confirm" | "secret", flag: 
   ["ask", "--slack-app-name", "Slack app name"],
   ["choose", "--slack-app-posted-messages", "Answer mentions people post through other apps with their own Slack token?"],
   ["confirm", undefined, "Create all of this?"],
+  ["choose", "--plan", "Create all of this?"],
   ["choose", "--slack-install", "Is the Slack app installed in your workspace?"],
   ["secret", "--slack-bot-token", "Slack bot token"],
   ["secret", "--slack-signing-secret", "Slack signing secret"],
@@ -54,7 +60,7 @@ const DEFAULT_PATH: Array<[kind: "ask" | "choose" | "confirm" | "secret", flag: 
   ["confirm", undefined, "Connect Linear to payments-api now? (You can add it later with agentx connector add linear)"],
   ["confirm", undefined, "Did a test alarm named agentx-staging-test arrive at ops@example.com?"],
   ["confirm", undefined, "Check the prerequisites again?"],
-  ["confirm", undefined, "Paste the Slack bot token and signing secret again?"],
+  ["confirm", undefined, "Paste the Slack values again?"],
   ["confirm", undefined, "Run the Request URL check again?"],
   ["confirm", undefined, "Sign in again?"],
   ["confirm", undefined, "Watch for the reply again?"],
@@ -105,6 +111,19 @@ describe("the page's words for each question", () => {
     expect(pageHint("production", {})).toBe("Leave empty to use production.");
     expect(pageHint("us.anthropic.claude-sonnet-4-6", { defaultText: "Claude Sonnet 4.6" })).toBe("Leave empty to use Claude Sonnet 4.6.");
     expect(pageHint("", { hint: "Optional. Leave empty if the project needs none." })).toBe("Optional. Leave empty if the project needs none.");
+  });
+});
+
+describe("the settings form's words (spec 048 FR-020, FR-025)", () => {
+  it("names the form's forward button, and says what turning alerts off gives up", () => {
+    expect(questionHelp({ kind: "form", text: "Your settings" })).toMatchObject({ label: "Your settings", submitLabel: "Review the plan" });
+    expect(questionHelp({ kind: "choose", text: "Where should AgentX send alerts?", flag: ALERT_FLAG }).choiceLabels?.none).toBe("Nowhere for now. Nobody is told when AgentX stops working.");
+    expect(questionHelp({ kind: "choose", text: "Is acme an organization or a personal account?", flag: "--github-account-type" }).why).toBe("GitHub could not tell AgentX, and keeps apps in a different place for each.");
+  });
+
+  it("does not tell the later admin-user question that it still chooses the alert address", () => {
+    expect(questionHelp({ kind: "ask", text: "Your email address, for your AgentX admin user", flag: "--admin-email" }).why)
+      .toBe("AgentX creates your admin sign-in with it.");
   });
 });
 

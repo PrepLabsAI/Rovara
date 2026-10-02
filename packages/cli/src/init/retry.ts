@@ -33,3 +33,30 @@ export async function retryOnPage<T>(input: {
     }
   }
 }
+
+/** Spec 048 FR-028 (and FR-061's first action): a check of the answers that fails on the page offers
+ * Change answers (the settings come back with every answer kept), Check again, or Stop for now.
+ * Without a page it throws the failure, asking nothing, as before. */
+export async function checkWithChangeOnPage(input: {
+  surface: InstallSurface | undefined; prompter: Prompter; question: string; run: () => Promise<void>; failed: (problem: string) => void;
+}): Promise<"passed" | "change"> {
+  for (;;) {
+    try {
+      await input.run();
+      return "passed";
+    } catch (error) {
+      if (input.surface === undefined) throw error;
+      input.failed(problemText(error));
+      // Fix round 1: "--on-check-failure" is only a copy key (question-copy.ts looks up this
+      // question's help by it), not a real CLI option; without a page the loop above already threw,
+      // so the terminal never asks this question and there is no flag to pass.
+      const next = await input.prompter.choose<"change" | "retry" | "stop">(input.question, [
+        { value: "change", label: "Change answers" },
+        { value: "retry", label: "Check again" },
+        { value: "stop", label: "Stop for now" },
+      ], { flag: "--on-check-failure", defaultValue: "change" });
+      if (next === "change") return "change";
+      if (next === "stop") throw markOperatorStop(error);
+    }
+  }
+}

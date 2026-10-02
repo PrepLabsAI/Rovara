@@ -49,7 +49,13 @@ async function run(error: () => Error, argv: string[] = [], cliInvocation: CliIn
     stdout: { write: (text: string) => { out.push(text); return true; } },
     stderr: { write: (text: string) => { err.push(text); return true; } },
     environments: { home: await tmp("agentx-init-ctrlc-home-") },
-    init: { cliInvocation, prompter: failingPrompter(error), processEnv: {} },
+    init: {
+      cliInvocation,
+      prompter: failingPrompter(error),
+      processEnv: {},
+      deploy: { identity: { get: async () => ({ account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice" }) } },
+      accountAlias: async () => undefined,
+    },
   });
   return { code, err: err.join(""), out: out.join("") };
 }

@@ -12,7 +12,7 @@ import type { InitStepId } from "../install-state.js";
 import { linkLabel } from "./cards.js";
 import { minutesText, totalMinutes, type JourneyPhaseId } from "./journey.js";
 import { browserPrompter } from "./prompter.js";
-import type { WizardCommand, WizardFailure, WizardPhase, WizardResume } from "./protocol.js";
+import type { WizardCommand, WizardFailure, WizardPhase, WizardPlan, WizardResume } from "./protocol.js";
 import { startWizardServer, type WizardServer } from "./server.js";
 import { createWizardHub, isShowableLink, type WizardHub } from "./state.js";
 
@@ -20,6 +20,7 @@ import { createWizardHub, isShowableLink, type WizardHub } from "./state.js";
  * says where it is. */
 export const PAGE_CLOSED_MS = 60_000;
 const REMINDER_CHECK_MS = 5_000;
+const PAGE_OPEN_GRACE_MS = 1_000;
 
 export function pageClosedLine(url: string): string {
   return `The install page is closed. Open ${url} to continue, or press Ctrl-C to stop; agentx init continues from here next time.`;
@@ -70,13 +71,16 @@ export interface InstallWizard {
   /** The checklist, before any step has run. */
   setSteps(steps: ReadonlyArray<{ id: InitStepId; title: string }>): void;
   /** `confirmInstallPlan`'s priced plan, for the review screen (FR-005). */
-  plan(text: string): void;
+  plan(plan: WizardPlan): void;
   /** What `readInstallProgress` already recorded, for the resume screen (FR-006). */
   resume(resume: WizardResume): void;
   /** FR-001: the phase before any step has run (Get started, Your choices). */
   setStage(stage: JourneyPhaseId): void;
   /** FR-001: the account and region, once the install knows them. */
   setPlace(place: { account: string; region: string }): void;
+  /** Spec 048 FR-020: a Change answers (or a first settings submission) can rename the install;
+   * the header follows it from then on. */
+  setInstallName(name: string): void;
   /** FR-060: a failure in three parts, shown instead of the run going on. */
   showFailure(failure: WizardFailure): void;
   /** Drops the failure: the operator is trying again. */
@@ -106,6 +110,18 @@ export async function startInstallWizard(input: {
     ...(input.token === undefined ? {} : { token: input.token }),
   });
   const opened = input.openBrowser === undefined ? false : await input.openBrowser(server.url);
+  if (opened) {
+    // Opening a browser launches navigation; it does not mean the page has subscribed yet. Give
+    // that first event stream a brief chance to connect so an immediate preflight failure is still
+    // delivered to the page before the run closes its loopback server.
+    let timer: NodeJS.Timeout | undefined;
+    const grace = new Promise<void>((resolvePromise) => {
+      timer = setTimeout(resolvePromise, PAGE_OPEN_GRACE_MS);
+      timer.unref();
+    });
+    await Promise.race([hub.whenConnected(), grace]);
+    if (timer !== undefined) clearTimeout(timer);
+  }
   input.write(opened ? `The AgentX installer is open in your browser: ${server.url}` : `The AgentX installer is at ${server.url}`);
   if (!opened) {
     input.write(`Open that address in a browser on this machine. From another machine, first run: ssh -L ${server.port}:127.0.0.1:${server.port} <this host>`);
@@ -134,10 +150,11 @@ export async function startInstallWizard(input: {
     log: (line) => hub.log(line),
     event: (event) => hub.applyEvent(event),
     setSteps: (steps) => hub.setSteps(steps),
-    plan: (text) => hub.showPlan(text),
+    plan: (plan) => hub.showPlan(plan),
     resume: (resume) => hub.showResume(resume),
     setStage: (stage) => hub.setStage(stage),
     setPlace: (place) => hub.setPlace(place),
+    setInstallName: (name) => hub.setInstallName(name),
     showFailure: (failure) => hub.showFailure(failure),
     clearFailure: () => hub.clearFailure(),
     closeRequested: () => hub.closeRequested(),

@@ -30,6 +30,9 @@ export interface PrerequisiteChecks {
   runCdkBootstrap(): Promise<void>;
   oidcDiscovery(issuer: string): Promise<unknown>;
   sleep(ms: number): Promise<void>;
+  /** Spec 048 FR-018: false when Amazon Bedrock has no endpoint in the region. Optional: a checks
+   * object without it skips the check. */
+  bedrockAvailable?(): Promise<boolean>;
 }
 
 /** The foundation stack gives each of its two NAT gateways its own Elastic IP. */
@@ -180,53 +183,30 @@ function nodeVersionOk(version: string): boolean {
   return major > 22 || (major === 22 && minor >= 19);
 }
 
-/** Everything `agentx init` must confirm before it creates a single resource: the account and
- * region has EC2 capacity quota, each distinct model answers, the identity provider (when self-hosted)
- * agrees with itself, and the chosen engine's tooling is in place. Every problem found is collected
- * and reported together (FR-015): a person fixing an account should not have to run init five
- * times to hear about a fifth thing wrong each time. */
-export async function checkPrerequisites(input: {
-  answers: InitAnswers; release: ReleaseCoverage; caller: { account: string; arn: string };
-  checks: PrerequisiteChecks; prompter: Prompter; write: (line: string) => void;
-  openRouterKey?: PendingOpenRouterKey;
-  /** The release's own images (FR-065); checked only when given, so a caller with no release
-   * images to check (most existing callers and tests) sees no change at all. */
-  images?: ReleaseImages;
-  /** Who the problems collected below are written for. Default "terminal": the terminal's own
-   * problems, flags and commands, exactly as before this spec. */
-  audience?: CheckAudience;
-  onCheck?: (check: PrerequisiteCheck) => void;
-}): Promise<void> {
-  const { answers, checks, write } = input;
-  const { region } = answers;
-  const audience: CheckAudience = input.audience ?? "terminal";
-  const problems: string[] = [];
-  // Each check is reported as it finishes (the page's checklist); the lines written and the
-  // problems collected are exactly what they were before.
-  const passed = (label: string, line: string) => { write(line); input.onCheck?.({ label, ok: true, detail: line.replace(/^ok /, "") }); };
-  const failed = (label: string, problem: string, technical?: string) => {
-    problems.push(problem);
-    input.onCheck?.({ label, ok: false, detail: problem, ...(technical === undefined ? {} : { technical }) });
+/** Reports one check's result, for both `checkAccount` and `checkPrerequisites`: `passed` writes
+ * the ok line and reports it; `failed` collects the problem and reports it, with optional raw
+ * technical detail the page keeps collapsed (FR-027, FR-060). */
+type Report = { passed: (label: string, line: string) => void; failed: (label: string, problem: string, technical?: string) => void };
+
+/** Fix round 1: `checkAccount` and `checkPrerequisites` built an identical `Report` by hand; this
+ * is the one place that does it, writing into the caller's own `problems` array. */
+function reporter(input: { write: (line: string) => void; onCheck: ((check: PrerequisiteCheck) => void) | undefined; problems: string[] }): Report {
+  return {
+    passed: (label, line) => { input.write(line); input.onCheck?.({ label, ok: true, detail: line.replace(/^ok /, "") }); },
+    failed: (label, problem, technical) => {
+      input.problems.push(problem);
+      input.onCheck?.({ label, ok: false, detail: problem, ...(technical === undefined ? {} : { technical }) });
+    },
   };
-  write(`AWS account ${input.caller.account} as ${input.caller.arn}`);
-  write(DEDICATED_ACCOUNT_NOTE);
+}
 
-  // The same check and wording as agentx deploy's, collected with every other problem. The cdk
-  // engine synthesizes its own templates for any region (issue 152), so only the templates engine needs it.
-  if (answers.engine === "templates") {
-    const regionProblem = releaseRegionProblem(input.release, region);
-    if (regionProblem !== undefined) failed("Region", regionProblem); else input.onCheck?.({ label: "Region", ok: true, detail: `${region} is covered by this release` });
-  }
-
-  // FR-065, SC-009: the release's own images, checked before anything else that would create
-  // something, so a release that cannot be pulled is refused alongside every other problem.
-  if (input.images !== undefined) {
-    for (const check of releaseImageChecks({ version: input.release.manifest.version, images: input.images, ...(answers.images === undefined ? {} : { overrides: answers.images }), audience })) {
-      if (check.ok) input.onCheck?.(check);
-      else failed(check.label, check.detail, check.technical);
-    }
-  }
-
+/** Spec 048 FR-018: what only the account and region can answer, shared by `checkAccount` (run
+ * once, right after the region is chosen) and `checkPrerequisites` (which skips this when
+ * `checkAccount` already ran). The EC2 vCPU quota and Elastic IP checks are phase 1's own, moved
+ * here unchanged; `bedrock` is true only for `checkAccount`'s own call, since `checkPrerequisites`
+ * leaves Amazon Bedrock to the model checks it already runs, which name a missing endpoint themselves. */
+async function accountChecks(input: { region: string; checks: PrerequisiteChecks; audience: CheckAudience; bedrock: boolean } & Report): Promise<void> {
+  const { region, checks, audience, failed, passed } = input;
   try {
     const quota = await checks.ec2Quota();
     if (!Number.isFinite(quota) || quota < 1) {
@@ -253,6 +233,102 @@ export async function checkPrerequisites(input: {
   } catch (error) {
     failed("Elastic IPs", `could not check Elastic IPs in ${region}: ${errorMessage(error)}; check EC2 DescribeAddresses and Service Quotas read permission and your network`);
   }
+
+  if (input.bedrock && checks.bedrockAvailable !== undefined) {
+    try {
+      if (await checks.bedrockAvailable()) passed("Amazon Bedrock", `ok Amazon Bedrock is available in ${region}`);
+      else {
+        failed("Amazon Bedrock", audience === "page"
+          ? `Amazon Bedrock is not available in ${region}. Stop for now and start again in a region that has it.`
+          : `Amazon Bedrock is not available in ${region}; choose another region with --region`);
+      }
+    } catch (error) {
+      failed("Amazon Bedrock", `could not check Amazon Bedrock in ${region}: ${errorMessage(error)}; check your network`);
+    }
+  }
+}
+
+/** Spec 048 FR-018: what needs only the account and region, right after the region is chosen and
+ * before any setting is asked. Every problem is collected and thrown together, exactly as
+ * `checkPrerequisites` always has. */
+export async function checkAccount(input: {
+  region: string; checks: PrerequisiteChecks; write: (line: string) => void; audience?: CheckAudience; onCheck?: (check: PrerequisiteCheck) => void;
+}): Promise<void> {
+  const problems: string[] = [];
+  await accountChecks({
+    region: input.region, checks: input.checks, audience: input.audience ?? "terminal", bedrock: true,
+    ...reporter({ write: input.write, onCheck: input.onCheck, problems }),
+  });
+  if (problems.length > 0) throw agentXError("CONFIG_INVALID", `init cannot start; nothing was created:\n${problems.map((problem) => `- ${problem}`).join("\n")}`);
+}
+
+/** Everything `agentx init` must confirm before it creates a single resource: the account and
+ * region has EC2 capacity quota, each distinct model answers, the identity provider (when self-hosted)
+ * agrees with itself, and the chosen engine's tooling is in place. Every problem found is collected
+ * and reported together (FR-015): a person fixing an account should not have to run init five
+ * times to hear about a fifth thing wrong each time. */
+export async function checkPrerequisites(input: {
+  answers: InitAnswers; release: ReleaseCoverage; caller: { account: string; arn: string };
+  checks: PrerequisiteChecks; prompter: Prompter; write: (line: string) => void;
+  openRouterKey?: PendingOpenRouterKey;
+  /** The release's own images (FR-065); checked only when given, so a caller with no release
+   * images to check (most existing callers and tests) sees no change at all. */
+  images?: ReleaseImages;
+  /** Who the problems collected below are written for. Default "terminal": the terminal's own
+   * problems, flags and commands, exactly as before this spec. */
+  audience?: CheckAudience;
+  /** Spec 048 FR-018: true leaves out the EC2 vCPU quota and Elastic IPs, because `checkAccount`
+   * already checked them right after the region was chosen, before any setting was asked. */
+  skipAccount?: boolean;
+  /** Spec 048 FR-028: more checks of the answers (clash-checks.ts), run right after the image checks
+   * and collected with every other problem. */
+  extraChecks?: () => Promise<readonly PrerequisiteCheck[]>;
+  onCheck?: (check: PrerequisiteCheck) => void;
+}): Promise<void> {
+  const { answers, checks, write } = input;
+  const { region } = answers;
+  const audience: CheckAudience = input.audience ?? "terminal";
+  const problems: string[] = [];
+  // Each check is reported as it finishes (the page's checklist); the lines written and the
+  // problems collected are exactly what they were before.
+  const { passed, failed } = reporter({ write, onCheck: input.onCheck, problems });
+  write(`AWS account ${input.caller.account} as ${input.caller.arn}`);
+  write(DEDICATED_ACCOUNT_NOTE);
+
+  // The same check and wording as agentx deploy's, collected with every other problem. The cdk
+  // engine synthesizes its own templates for any region (issue 152), so only the templates engine needs it.
+  if (answers.engine === "templates") {
+    const regionProblem = releaseRegionProblem(input.release, region);
+    if (regionProblem !== undefined) failed("Region", regionProblem); else input.onCheck?.({ label: "Region", ok: true, detail: `${region} is covered by this release` });
+  }
+
+  // FR-065, SC-009: the release's own images, checked before anything else that would create
+  // something, so a release that cannot be pulled is refused alongside every other problem.
+  if (input.images !== undefined) {
+    for (const check of releaseImageChecks({ version: input.release.manifest.version, images: input.images, ...(answers.images === undefined ? {} : { overrides: answers.images }), audience })) {
+      if (check.ok) input.onCheck?.(check);
+      else failed(check.label, check.detail, check.technical);
+    }
+  }
+
+  // Spec 048 FR-028: the install name, the GitHub owner and the app name (clash-checks.ts).
+  if (input.extraChecks !== undefined) {
+    try {
+      for (const check of await input.extraChecks()) {
+        if (check.ok) input.onCheck?.(check);
+        else failed(check.label, check.detail, check.technical);
+      }
+    } catch (error) {
+      failed("Answer checks", audience === "page"
+        ? `AgentX could not finish checking your answers: ${errorMessage(error)}. Check AWS and GitHub access, then check again.`
+        : `could not run the answer checks: ${errorMessage(error)}; check AWS and GitHub access, then run agentx init again`);
+    }
+  }
+
+  // FR-018: a first run already checked the account and region (checkAccount), right after the
+  // region was chosen and before any setting was asked; a resume (or any caller with no prior
+  // account check) still gets them checked here.
+  if (input.skipAccount !== true) await accountChecks({ region, checks, audience, bedrock: false, passed, failed });
 
   const roles: Array<[ModelRole, string]> = [
     ["orchestrator", answers.models.orchestrator],
@@ -412,6 +488,12 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
   });
   const quotas = new ServiceQuotasClient({ region: input.region });
   const ec2 = new EC2Client({ region: input.region });
+  // Lifted so both `converse` and `bedrockAvailable` (spec 048 FR-018) share the one call.
+  const converse = (modelId: string) => withDeadline(
+    (signal) => bedrock.send(new ConverseCommand({ modelId, messages: [{ role: "user", content: [{ text: "Reply with OK." }] }], inferenceConfig: { maxTokens: 1 } }), { abortSignal: signal }),
+    CONVERSE_DEADLINE_MS,
+    `${modelId} did not answer a one-token test call in ${input.region} within ${CONVERSE_DEADLINE_MS / 1000}s; check your credentials or network, or try again`,
+  ).then(() => undefined);
   return {
     async openRouter(modelId, config, suppliedKey) {
       openRouterModel(modelId);
@@ -434,12 +516,16 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
         if (result.error || !result.choices?.length) throw new Error("model returned no completion");
       }, CONVERSE_DEADLINE_MS, "OpenRouter preflight timed out");
     },
-    async converse(modelId) {
-      await withDeadline(
-        (signal) => bedrock.send(new ConverseCommand({ modelId, messages: [{ role: "user", content: [{ text: "Reply with OK." }] }], inferenceConfig: { maxTokens: 1 } }), { abortSignal: signal }),
-        CONVERSE_DEADLINE_MS,
-        `${modelId} did not answer a one-token test call in ${input.region} within ${CONVERSE_DEADLINE_MS / 1000}s; check your credentials or network, or try again`,
-      );
+    converse,
+    /** Spec 048 FR-018: only a missing endpoint means no Bedrock here; any other refusal (access
+     * denied, a bad model id) is the model checks' own to report, not this account-level check's. */
+    async bedrockAvailable() {
+      try {
+        await converse(defaultBedrockModel("classifier").modelId);
+        return true;
+      } catch (error) {
+        return !endpointMissing(error);
+      }
     },
     async ec2Quota() {
       const response = await quotas.send(new GetServiceQuotaCommand({ ServiceCode: "ec2", QuotaCode: "L-1216C47A" }));

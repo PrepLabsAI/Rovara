@@ -2,7 +2,9 @@
 // and setting it will create, and an estimated monthly cost at a stated usage, then asks. No test
 // here reaches AWS, GitHub or Slack.
 import { describe, expect, it } from "vitest";
-import { confirmInstallPlan, estimateMonthlyCost, installPlanText } from "../../packages/cli/src/init/plan.js";
+import { environmentStackName } from "@agentx/contracts";
+import { confirmInstallPlan, estimateMonthlyCost, installPlanText, planSummary } from "../../packages/cli/src/init/plan.js";
+import { count, PRICES_CHECKED, STATED_USAGE } from "../../packages/cli/src/init/cost.js";
 import { sampleAnswers, scriptedPrompter } from "../support/init-fakes.js";
 
 describe("cost estimate", () => {
@@ -113,8 +115,56 @@ describe("install plan", () => {
 
   it("creates nothing when the engineer says no", async () => {
     const written: string[] = [];
-    await expect(confirmInstallPlan({ answers: sampleAnswers(), notes: [], prompter: scriptedPrompter([false]), write: (text) => written.push(text) }))
+    await expect(confirmInstallPlan({ answers: sampleAnswers(), notes: [], prompter: scriptedPrompter([false]), write: (text) => written.push(text), page: false }))
       .rejects.toThrow("install declined; nothing was created");
     expect(written.join("")).toContain("Estimated monthly total");
+  });
+});
+
+describe("spec 048 FR-029: the plan as a plain summary", () => {
+  const answers = sampleAnswers({ adminEmail: "alice@example.com", signinMethods: "slack", budget: { monthlyUsd: 260, scope: "account" } });
+  const plan = planSummary(answers, estimateMonthlyCost(answers.models), []);
+
+  it("says what is created in AWS, GitHub and Slack by name, how long the build takes, and how to remove it", () => {
+    expect(plan.sections.map((section) => section.title)).toEqual(["In AWS", "In GitHub", "In Slack", "Budget and alerts", "To remove it later"]);
+    expect(plan.sections[0]?.lines).toEqual([
+      "The network and sign-in, the AgentX service and the Slack connection, in AWS account 123456789012 (us-east-1).",
+      "Building them takes about 18 minutes, and you can leave while it runs.",
+    ]);
+    expect(plan.sections[1]?.lines).toEqual(["An app named \"AgentX acme (staging)\" owned by acme. It can read code and open pull requests in the repositories you choose."]);
+    expect(plan.sections[4]?.lines).toEqual(["The ready screen gives you the command that removes everything, the coding machines' disks too."]);
+  });
+
+  it("FR-030: says developer sign-in is turned on with the Slack connection, with no second approval", () => {
+    expect(plan.sections[2]?.lines).toEqual([
+      "An app named \"AgentX acme (staging)\" in the Slack workspace you choose.",
+      "Developers sign in to AgentX with Slack. It is turned on with the Slack connection, with no separate approval.",
+    ]);
+  });
+
+  it("FR-023 and FR-025: names the budget and the alert address", () => {
+    expect(plan.sections[3]?.lines).toEqual([
+      "A budget alert at $260 a month for the whole account.",
+      "Alerts go to ops@example.com. AWS sends a confirmation email there while the build runs.",
+    ]);
+  });
+
+  it("has a three-column cost table with its usage stated once, and every line priced or marked", () => {
+    expect(plan.cost.rows.length).toBe(estimateMonthlyCost(answers.models).lines.length);
+    for (const row of plan.cost.rows) expect(row.monthly).toMatch(/^(\$\d+\.\d{2}|not priced)$/);
+    expect(plan.cost.usage).toBe(`At ${count(STATED_USAGE.turnsPerMonth)} turns, ${count(STATED_USAGE.workerSessionsPerMonth)} coding sessions and ${STATED_USAGE.workerInstanceHoursPerMonth} machine-hours a month, at us-east-1 list prices of ${PRICES_CHECKED}. Your bill will differ.`);
+  });
+
+  it("keeps stacks, roles and secret paths for Show every resource only", () => {
+    expect(plan.resources.some((line) => line.includes(environmentStackName("staging", "control-plane")))).toBe(true);
+    expect(JSON.stringify(plan.sections)).not.toMatch(/agentx-staging-|arn:aws|AWS::/);
+  });
+
+  it("on the page asks Create AgentX or Change answers; in the terminal keeps its confirm", async () => {
+    const page = scriptedPrompter(["change"]);
+    await expect(confirmInstallPlan({ answers, notes: [], prompter: page, write: () => undefined, page: true })).resolves.toBe("change");
+    const terminal = scriptedPrompter([true]);
+    await expect(confirmInstallPlan({ answers, notes: [], prompter: terminal, write: () => undefined, page: false })).resolves.toBe("create");
+    expect(terminal.asked).toEqual(["Create all of this?"]);
   });
 });

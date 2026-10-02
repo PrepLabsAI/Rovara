@@ -9,12 +9,14 @@ import { SecretAlreadyExistsError } from "../../packages/cli/src/deploy/signing-
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import { readEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import type { CliInvocation } from "../../packages/cli/src/init/cli-command.js";
+import type { InitFlags } from "../../packages/cli/src/init/answers.js";
 import type { InitContext, InitSecrets } from "../../packages/cli/src/init/context.js";
 import type { GitHubApi } from "../../packages/cli/src/init/github-app.js";
 import { emptyProgress, type InitAnswers, type InstallProgress } from "../../packages/cli/src/init/install-state.js";
 import type { PrerequisiteChecks } from "../../packages/cli/src/init/prerequisites.js";
 import type { Prompter } from "../../packages/cli/src/init/prompts.js";
 import type { SlackApi } from "../../packages/cli/src/init/slack-app.js";
+import { settingsFields, type SettingsFieldName } from "../../packages/cli/src/init/settings-form.js";
 import type { ProgressHandle } from "../../packages/cli/src/init/steps.js";
 import { openAdminSession } from "../../packages/cli/src/setup/admin-session.js";
 import { fakeCloudFormation, SIGN_IN_PARAMETERS } from "./fake-cloudformation.js";
@@ -84,6 +86,23 @@ export function scriptedPrompter(script: ScriptedAnswer[]): Prompter & { asked: 
   };
 }
 
+/** Spec 048 phase 2: a terminal run's settings answers, in the form's own order. Without `advanced`
+ * the run says no to "Change the advanced settings?"; with it, yes, and these values (every other
+ * advanced field takes its default). `flags`, `env`, `adminEmail` and `fixed` leave out the fields
+ * the run's own flags answer, exactly as collectInitAnswers does. */
+export function settingsScript(input: {
+  email?: string; owner?: string; installName?: string; appName?: string;
+  advanced?: Partial<Record<SettingsFieldName, string>>; flags?: InitFlags; env?: string; adminEmail?: string; fixed?: boolean;
+} = {}): ScriptedAnswer[] {
+  const fields = settingsFields({ env: input.env ?? "staging", flags: input.flags ?? {}, fixed: input.fixed === true, budgetWhy: "", ...(input.adminEmail === undefined ? {} : { adminEmail: input.adminEmail }) });
+  const basic: Record<string, string> = { email: input.email ?? "ops@example.com", githubAccount: input.owner ?? "acme", installName: input.installName ?? "", appName: input.appName ?? "" };
+  const answers: ScriptedAnswer[] = fields.filter((field) => field.section !== "advanced").map((field) => basic[field.name] ?? "");
+  const advanced = fields.filter((field) => field.section === "advanced");
+  if (advanced.length === 0) return answers;
+  if (input.advanced === undefined) return [...answers, false];
+  return [...answers, true, ...advanced.map((field) => input.advanced?.[field.name as SettingsFieldName] ?? "")];
+}
+
 /** Every prerequisite passes; override one method to make it fail. Records every model checked. */
 export function passingChecks(overrides: Partial<PrerequisiteChecks> = {}): PrerequisiteChecks & { models: string[]; bootstraps: number } {
   const state = { models: [] as string[], bootstraps: 0 };
@@ -124,12 +143,17 @@ export const INSTALLED_CLI_INVOCATION: CliInvocation = {
 /** The same install, but this run of it was through npx. */
 export const NPX_CLI_INVOCATION: CliInvocation = { ...INSTALLED_CLI_INVOCATION, invokedViaNpx: true };
 
-export function memoryInitSecrets(initial: Record<string, string> = {}): InitSecrets & { values: Map<string, string> } {
+/** `failCreate`: `create` always throws (spec 048 FR-032 test), as a real `CreateSecret` call that
+ * failed after the app was made on GitHub would. */
+export function memoryInitSecrets(initial: Record<string, string> = {}, options: { failCreate?: boolean } = {}): InitSecrets & { values: Map<string, string> } {
   const values = new Map(Object.entries(initial));
   return {
     values,
     async get(name) { return values.get(name); },
-    async create(name, value) { if (values.has(name)) throw new SecretAlreadyExistsError(name); values.set(name, value); },
+    async create(name, value) {
+      if (options.failCreate === true) throw Object.assign(new Error("test setup: secret creation refused"), { name: "AccessDeniedException" });
+      if (values.has(name)) throw new SecretAlreadyExistsError(name); values.set(name, value);
+    },
     async put(name, value) { if (!values.has(name)) throw Object.assign(new Error(`Secrets Manager can't find ${name}`), { name: "ResourceNotFoundException" }); values.set(name, value); },
     async arn(name) { return values.has(name) ? `arn:aws:secretsmanager:us-east-1:123456789012:secret:${name}-AbCdEf` : undefined; },
   };
@@ -284,6 +308,8 @@ export function fakeGitHubApi(input: { owner?: string; ownerType?: string; insta
     async listInstallations() { polls += 1; return polls > (input.installAfterPolls ?? 0) ? [{ id: input.installationId ?? 777, account: { login: owner.login } }] : []; },
     async installationToken() { tokens += 1; return { token: "ghs_installation-token-value", expiresAt: input.tokenExpiresAt ?? T0 + 60 * 60 * 1000 }; },
     async repositoryCount() { return counts.length > 1 ? (counts.shift() as number) : (counts[0] as number); },
+    async owner(login) { return login.toLowerCase() === owner.login.toLowerCase() ? { login: owner.login, type: owner.type === "User" ? "User" : "Organization" } : undefined; },
+    async appBySlug() { return undefined; },
   };
 }
 

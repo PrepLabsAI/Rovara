@@ -86,15 +86,39 @@ async function withoutEndpoint<T>(target: AlertTarget, action: () => Promise<T>)
   }
 }
 
+/** The target's SNS protocol and endpoint, and its subscription on `topicArn` right now (confirmed
+ * or pending), if one already exists. Shared by subscribeAlertsEarly (which only needs to know
+ * whether one exists) and ensureSubscribed (which polls this same lookup until it is confirmed), so
+ * both look up an existing subscription identically. */
+async function subscriptionFor(api: AlertsApi, topicArn: string, target: AlertTarget): Promise<{ protocol: "email" | "https"; endpoint: string; found: Subscription | undefined }> {
+  const protocol = target.kind === "email" ? "email" : "https";
+  const endpoint = target.kind === "email" ? target.address : target.endpoint;
+  const found = (await api.subscriptions(topicArn)).find((entry) => entry.protocol === protocol && sameEndpoint(entry.endpoint, endpoint, target.kind));
+  return { protocol, endpoint, found };
+}
+
+/** Spec 048 FR-025: subscribes the address as soon as the topic exists, so the confirmation email is
+ * already waiting by the Finish phase. Never waits for the confirmation (ensureSubscribed, in the
+ * alerts step, does), and never subscribes an address twice. */
+export async function subscribeAlertsEarly(input: { api: AlertsApi; topicArn: string; target: AlertTarget; write: (line: string) => void }): Promise<void> {
+  const { target } = input;
+  const { protocol, endpoint, found } = await subscriptionFor(input.api, input.topicArn, target);
+  if (found !== undefined) return;
+  await withoutEndpoint(target, () => input.api.subscribe(input.topicArn, protocol, endpoint));
+  input.write(target.kind === "email"
+    ? `AWS sent ${target.address} an email from AWS Notifications; confirm it any time before the install ends.`
+    : `Subscribed ${target.display} to AgentX's alerts.`);
+}
+
 /** `onWaiting` is called once, when the subscription is still pending and the wait for its
  * confirmation begins (the install page shows a card for that wait). */
 export async function ensureSubscribed(input: { api: AlertsApi; topicArn: string; target: AlertTarget; write: (line: string) => void; sleep: (ms: number) => Promise<void>; now: () => number; onWaiting?: () => void }): Promise<"confirmed" | "pending"> {
   const { target } = input;
-  const protocol = target.kind === "email" ? "email" : "https";
-  const endpoint = target.kind === "email" ? target.address : target.endpoint;
-  const find = async () => (await input.api.subscriptions(input.topicArn)).find((entry) => entry.protocol === protocol && sameEndpoint(entry.endpoint, endpoint, target.kind));
+  const find = () => subscriptionFor(input.api, input.topicArn, target);
+  const first = await find();
+  const { protocol, endpoint } = first;
   // Idempotent: an address already on the topic, confirmed or not, is never subscribed twice.
-  let found = await find();
+  let found = first.found;
   if (found === undefined) {
     await withoutEndpoint(target, () => input.api.subscribe(input.topicArn, protocol, endpoint));
     if (target.kind === "email") {
@@ -105,14 +129,14 @@ export async function ensureSubscribed(input: { api: AlertsApi; topicArn: string
         ? `Subscribed ${target.display}. PagerDuty and Opsgenie confirm the subscription on their own.`
         : `Subscribed ${target.display}. A webhook that is not PagerDuty or Opsgenie must confirm the subscription itself, by opening the SubscribeURL in the first message SNS sends it.`);
     }
-    found = await find();
+    found = (await find()).found;
   }
   if (found?.arn === PENDING) input.onWaiting?.();
   const deadline = input.now() + CONFIRM_WAIT_MS;
   while (found !== undefined && found.arn === PENDING) {
     if (input.now() >= deadline) return "pending";
     await input.sleep(POLL_MS);
-    found = await find();
+    found = (await find()).found;
   }
   return "confirmed";
 }

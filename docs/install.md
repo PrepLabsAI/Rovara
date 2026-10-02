@@ -86,17 +86,33 @@ In a terminal on your own computer, `init` opens a page in your browser, served 
 only (`127.0.0.1`). The page shows the five parts of the install (Get started, Your choices, Build
 in AWS, Connect Slack, Finish), how long each usually takes, which one you are in, and the time
 left. The browser tab's title reads "(Action needed) Install AgentX" whenever the install waits for
-you. Everything `init` asks is asked there, each question with a line on why it is asked: which AWS
-profile and account it installs into (with a Sign in choice when your session has expired, and a
-warning if you are signed in as the AWS root user), the account checks as a checklist, the plan and
-its monthly cost with Create AgentX and Cancel the install buttons, then each step. The GitHub app
-and the Slack app are made from link buttons on the page, and the page moves on by itself once
-GitHub sends you back. Secrets (the Slack token and signing secret, connector keys) are typed into
-hidden fields. Each goes straight to AWS Secrets Manager and is never shown again, and the field is
-emptied as soon as it is sent. If a deploy step fails, the page says what happened and offers
-Try this step again; Stop for now shows the command that continues later. The install ends on a
-ready screen with the commands for your team, which stays open until you press Close installer, or
-for 30 minutes.
+you.
+
+The page walks you through five parts, and tells you when it needs you:
+
+1. **Get started.** The page opens first and shows AgentX downloading. You pick the AWS profile (only
+   when you have more than one), see the account you are signed in to, and pick the region. AgentX
+   then checks the account: EC2 capacity, Elastic IPs and Amazon Bedrock in that region.
+2. **Your choices.** One settings screen: your email, the GitHub owner, the install name and the app
+   name. Everything else has a recommended value under Advanced settings. AgentX checks your answers
+   (the models, the release's images, the names, the GitHub owner) before anything is created, then
+   shows the plan with its cost. Press Create AgentX, or Change answers to go back with every answer
+   kept. Then you create and install the GitHub app.
+3. **Build in AWS.** About 18 minutes, unattended. You can leave; the alert confirmation email
+   arrives during this part.
+4. **Connect Slack.** One visit: create the Slack app, then paste its Client ID, Client Secret,
+   Signing Secret and Bot User OAuth Token on one form. Developer sign-in is turned on with the
+   Slack connection, as the plan said.
+5. **Finish.** Your admin sign-in, the first project and channel, alerts, and a first reply.
+
+Without a browser (`--no-ui`, SSH, CI) the terminal asks in the same order and runs the same checks;
+it asks the Advanced settings only if you answer yes to "Change the advanced settings?".
+
+The GitHub app and Slack app are made from link buttons on the page. Secrets are typed into hidden
+fields, go straight to AWS Secrets Manager, and are never shown again. If a deploy step fails, the
+page says what happened and offers Try this step again; Stop for now shows the command that
+continues later. The install ends on a ready screen with the commands for your team, which stays
+open until you press Close installer, or for 30 minutes.
 
 While the page is open, the terminal prints the page's address, how long the install takes, the
 path of the full log (`~/.agentx/logs/init-<env>.log`), then one line per step. Everything else
@@ -107,55 +123,16 @@ Keep the terminal open and your computer awake until the install finishes. If th
 `init` keeps waiting and, after a minute, prints the address again in the terminal. Open it to
 carry on, or press Ctrl-C and run `init` again later (it continues where it stopped).
 
-`--no-ui` asks every question in this terminal instead. `--yes` also uses the terminal, and
-answers every question for you. A CI run has no one to type answers, so it needs `--yes` (or
-`--ui`); without either, it stops. Over SSH, in AWS CloudShell, on Linux with no display, on
-Windows, or with `--no-browser`, `init` asks in the terminal. In an interactive terminal without
-`--yes`, it first prints this line:
+`--yes` also uses the terminal and answers every question for you. A CI run has no one to type
+answers, so it needs `--yes` (or `--ui`); without either, it stops. Over SSH, in AWS CloudShell, on
+Linux with no display, on Windows, or with `--no-browser`, `init` asks in the terminal. In an
+interactive terminal without `--yes`, it first prints this line:
 
 > No browser here, so agentx init asks in this terminal. To use the install page instead, run agentx init --ui --no-browser and open the address it prints (over SSH, forward its port with ssh -L).
 
 Over SSH, run `agentx init --ui --no-browser`. It prints the page's address and the command that
 forwards its port. Run that command on your own computer (`ssh -L <port>:127.0.0.1:<port> <host>`)
 and open the address there.
-
-`init` asks its questions first: the region, identity (Cognito, or your own OIDC provider), the
-models, the alert address, a monthly budget, and your GitHub account. It checks the
-prerequisites, prints every stack, role, secret and app it will create with an estimated monthly
-cost, and asks before creating anything.
-
-It then runs these steps in order, and records each one in SSM as it finishes:
-
-1. **prerequisites**: checks your credentials, the region, the quotas, model access (a one-token
-   call to each model) and the engine's tools.
-2. **access**: deploys the access stack (`agentx-<env>-access`) with your own credentials: the
-   CloudFormation service role, the operator role, the artifact bucket and the image cache rule.
-3. **core**: deploys the foundation (network, workers) and identity (Cognito) stacks; identity is
-   skipped with your own OIDC provider.
-4. **github-app**: you click once on GitHub's pre-filled page to create the GitHub App, then pick
-   the repositories it may use.
-5. **control-plane**: deploys the control plane and the runtime.
-6. **slack-app**: you create the Slack app from AgentX's manifest, install it, then paste the Bot
-   User OAuth Token and the Signing Secret into two hidden fields.
-7. **slack-service**: deploys the Slack service, checks both Slack URLs with a signed request, and
-   asks you to confirm that Slack shows the Request URL as Verified.
-8. **developer-signin**: sets how developers sign in: Slack (the default), your company's sign-in
-   (OIDC), or both. For Slack, paste the Slack app's Client ID and Client Secret.
-9. **admin-user**: creates your admin user from your email (Cognito emails a temporary password)
-   and opens the sign-in page on `127.0.0.1:8765`.
-10. **first-project**: you pick a repository, confirm or edit its setup and test commands, and pick
-    its Slack channel (for a private channel, `/invite @<bot>` first).
-11. **connectors**: offers Linear, Jira and Asana; say no to add them later.
-12. **alerts**: you confirm the email subscription (a PagerDuty or Opsgenie address confirms on its
-    own); a test alarm is sent and you say whether it arrived.
-13. **e2e**: you mention the bot in the channel; `init` ends when AgentX replies in the thread.
-    Type @ and pick the bot from Slack's mention list. A workspace that had an older AgentX app
-    shows two bots with similar names: pick the one whose member ID `init` prints.
-
-**What you click or paste:** the GitHub App page (create, then pick repositories), the Slack app
-page (create, install), two Slack pastes (token and signing secret), two more for developer
-sign-in (Client ID and Client Secret), the Verified check, your admin sign-in, the alert email's
-confirmation link, and one Slack mention.
 
 **Resuming.** Run the same command again. `init` starts at the first step that is not done; a
 done step never runs again. When the Slack workspace needs an admin to approve the app, `init`

@@ -15,7 +15,9 @@ export const COPY_RULES: readonly CopyRule[] = [
   { id: "cloudformation-type", pattern: /\bAWS::[A-Za-z0-9]+::[A-Za-z0-9]+/, allowedIn: ["details"] },
   { id: "cloudformation-logical-id", pattern: /\b[A-Z][a-z]+(?:[A-Z][a-z]+)*[0-9A-F]{8}\b/, allowedIn: ["details"] },
   { id: "raw-slack-markup", pattern: /<[@#!][A-Z0-9]/, allowedIn: [] },
-  { id: "raw-slack-id", pattern: /\b[UWTBCGA](?=[A-Z0-9]*\d)[A-Z0-9]{4,}\b/, allowedIn: ["details"] },
+  // Slack IDs are standalone values in prose. Do not mistake a random uppercase path segment for
+  // one: paths can put the same shape between a hyphen and a slash.
+  { id: "raw-slack-id", pattern: /(?:^|[\s("'`])[UWTBCGA](?=[A-Z0-9]*\d)[A-Z0-9]{4,}(?=$|[\s)"'`,.;:!?])/, allowedIn: ["details"] },
   { id: "aws-arn", pattern: /\barn:aws[a-z-]*:/, allowedIn: ["details"] },
   { id: "enter-for", pattern: /\bEnter for\b/, allowedIn: [] },
   { id: "empty-leave-empty-for", pattern: /\bLeave empty for\s*(?:$|[.,;:)])/, allowedIn: [] },
@@ -88,7 +90,17 @@ export function stateEntries(state: WizardState, where: string): CopyEntry[] {
   }
   if (state.outcome !== undefined) entries.push(at(state.outcome, "outcome"));
   for (const command of state.commands ?? []) entries.push(at(command.label, "stop for now", "stop-for-now"), at(command.command, "stop for now", "stop-for-now"));
-  if (state.plan !== undefined) for (const line of state.plan.split("\n")) if (line.trim() !== "") entries.push(at(line, "plan"));
+  if (state.plan !== undefined) {
+    entries.push(at(state.plan.intro, "plan"));
+    for (const section of state.plan.sections) {
+      entries.push(at(section.title, "plan"));
+      for (const line of section.lines) entries.push(at(line, "plan"));
+    }
+    for (const row of state.plan.cost.rows) entries.push(at(row.item, "plan"), at(row.monthly, "plan"), at(row.basis, "plan"));
+    entries.push(at(state.plan.cost.total, "plan"), at(state.plan.cost.usage, "plan"));
+    // The plan's stack, role and secret names are "Show every resource" only: technical detail.
+    for (const line of state.plan.resources) entries.push(at(line, "plan resources", "details"));
+  }
   return entries;
 }
 

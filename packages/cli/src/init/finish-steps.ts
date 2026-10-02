@@ -1,12 +1,12 @@
 // The init steps after developer sign-in (phase 15d2), and the message init ends with. Each step
 // is a thin wrapper around a setup/ module, so agentx init and the day-2 commands behave the same.
-import { agentXError } from "@agentx/contracts";
+import { agentXError, environmentStackName } from "@agentx/contracts";
 import { AlertEmailSchema } from "../deploy/answer-schemas.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { tokenClaimValues, userPoolId } from "../setup/admin-session.js";
 import { ensureCognitoAdmin } from "../setup/admin-user.js";
-import { alertsTopicArn, ensureSubscribed, sendTestAlarm, type AlertTarget } from "../setup/alerts.js";
+import { alertsTopicArn, ensureSubscribed, sendTestAlarm, subscribeAlertsEarly, type AlertTarget } from "../setup/alerts.js";
 import { addChannel } from "../setup/channel-add.js";
 import { addAsana } from "../setup/connectors/asana.js";
 import { addJira } from "../setup/connectors/jira.js";
@@ -17,7 +17,7 @@ import { REPLY_WAIT_MS, waitForThreadedReply } from "../setup/reply-watch.js";
 import { BUDGET_TAG_NOTE, checkAlertWebhook } from "./answers.js";
 import { cliCommandLine, type CliInvocation } from "./cli-command.js";
 import type { InitContext } from "./context.js";
-import { CONNECTOR_LABELS, CONNECTOR_TYPES, type ConnectorType, type InstallProgress } from "./install-state.js";
+import { CONNECTOR_LABELS, CONNECTOR_TYPES, type ConnectorType, type InitAnswers, type InstallProgress } from "./install-state.js";
 import { problemText, retryOnPage } from "./retry.js";
 import { botNameOf, readSlackBotToken } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
@@ -69,7 +69,9 @@ export function adminUserStep(): InitStep<InitContext> {
         },
       });
       if (settings.identity.mode === "cognito") {
-        const email = recorded?.username ?? context.flags.adminEmail ?? await context.prompter.ask("Your email address, for your AgentX admin user", {
+        // Spec 048 FR-020: your email is a setting now; the question stays for an install recorded
+        // before that, whose answers have none.
+        const email = recorded?.username ?? context.flags.adminEmail ?? context.answers.adminEmail ?? await context.prompter.ask("Your email address, for your AgentX admin user", {
           flag: "--admin-email", validate: (value) => (AlertEmailSchema.safeParse(value).success ? undefined : "must be an email address"),
         });
         let created = false;
@@ -225,6 +227,29 @@ export function connectorsStep(): InitStep<InitContext> {
   };
 }
 
+/** The AlertTarget subscribeAlertsAfterDeploy and alertsStep both build from a non-"none" alert
+ * answer (the webhook case reads its secret through requireWebhook, which never logs or returns
+ * it). */
+async function alertTargetFrom(context: InitContext, alert: Exclude<InitAnswers["alert"], { kind: "none" }>): Promise<AlertTarget> {
+  return alert.kind === "email"
+    ? { kind: "email", address: alert.address }
+    : { kind: "webhook", display: alert.display, endpoint: await requireWebhook(context, alert.secretName) };
+}
+
+/** Spec 048 FR-025: the AgentX service step's last act. A failure is a log line, never the build's
+ * failure: the alerts step subscribes again (ensureSubscribed is idempotent). */
+export async function subscribeAlertsAfterDeploy(context: InitContext): Promise<void> {
+  const { alert } = context.answers;
+  if (alert.kind === "none") return;
+  try {
+    const topicArn = await alertsTopicArn({ stackOutputs: context.setup.stackOutputs, stackName: environmentStackName(context.env, "control-plane"), next: "the alerts step tries again" });
+    const target = await alertTargetFrom(context, alert);
+    await subscribeAlertsEarly({ api: context.setup.alerts, topicArn, target, write: context.write });
+  } catch (error) {
+    context.write(`could not subscribe the alert address yet (${problemText(error)}); the alerts step tries again`);
+  }
+}
+
 /** FR-045 to FR-047: show the budget, subscribe the alert address, and send a test alarm. */
 export function alertsStep(): InitStep<InitContext> {
   return {
@@ -247,9 +272,7 @@ export function alertsStep(): InitStep<InitContext> {
       const shownAs = answers.alert.kind === "email" ? answers.alert.address : answers.alert.display;
       const topicArn = await alertsTopicArn({ stackOutputs: context.setup.stackOutputs, stackName: settings.stacks["control-plane"], next: "run agentx init again" });
       if (!recorded.subscribed) {
-        const target: AlertTarget = answers.alert.kind === "email"
-          ? { kind: "email", address: answers.alert.address }
-          : { kind: "webhook", display: answers.alert.display, endpoint: await requireWebhook(context, answers.alert.secretName) };
+        const target = await alertTargetFrom(context, answers.alert);
         const surface = context.surface;
         // On the page, a card shows the run's own wait for the confirmation while it polls.
         const subscribe = () => ensureSubscribed({

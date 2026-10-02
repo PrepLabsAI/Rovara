@@ -34,31 +34,33 @@ import {
   assertResumeFlagsMatch, checkAlertWebhook, collectInitAnswers, openRouterSecretName, persistInitAnswers, readOpenRouterKeyAnswer, storeAlertWebhook,
   webhookDisplay, webhookFlagDisplay, type CollectedAnswers, type InitFlags,
 } from "./answers.js";
+import { clashChecks } from "./clash-checks.js";
 import { cliCommandLine, currentCliInvocation, type CliInvocation } from "./cli-command.js";
 import {
   cloudFormationStatusReader, secretsManagerInitSecrets, type FinishFlags, type InitContext, type InitSecrets, type PreMadeGitHubApp, type SecretFlags, type StackStatusReader,
 } from "./context.js";
 import { deployStep } from "./deploy-steps.js";
-import { finishSteps, readSettingsOrThrow, readyText } from "./finish-steps.js";
+import { finishSteps, readSettingsOrThrow, readyText, subscribeAlertsAfterDeploy } from "./finish-steps.js";
 import { githubAppStep, githubRestApi, type GitHubApi } from "./github-app.js";
-import { listAwsProfiles, pickAwsProfile, resolveCaller } from "./aws-account.js";
+import { listAwsProfiles, pickAwsProfile, realAccountAlias, resolveCaller } from "./aws-account.js";
 import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallProgress, type InitAnswers, type InitStepId } from "./install-state.js";
 import { initLogPath, openInitLog, type InitLog } from "./log-file.js";
 import { confirmInstallPlan } from "./plan.js";
-import { awsPrerequisiteChecks, checkPrerequisites, isRootUser, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
-import { askForm, processPrompter, secretFromSource, unattendedPrompter, type FormField, type Prompter, type QuestionHelp } from "./prompts.js";
+import { awsPrerequisiteChecks, checkAccount, checkPrerequisites, isRootUser, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
+import { askForm, processPrompter, secretFromSource, unattendedPrompter, type FormField, type FormOptions, type Prompter, type QuestionHelp } from "./prompts.js";
 import { fetchRelease, sourceRelease } from "./release-fetch.js";
-import { problemText, retryOnPage } from "./retry.js";
+import { checkWithChangeOnPage, problemText, retryOnPage } from "./retry.js";
 import { developerSignInStep } from "./signin-step.js";
 import { botNameOf, slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
 import { isOperatorStop, isWordedOperatorStop } from "./stop.js";
 import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from "./steps.js";
 import { browserAvailable, NO_BROWSER_LINE, resolveUiMode } from "./ui-mode.js";
-import { prerequisitesCard, readyCard } from "./ui/cards.js";
+import { accountChecksCard, awsSignInCard, prerequisitesCard, readyCard, releaseCard } from "./ui/cards.js";
+import { childActionWatcher } from "./ui/child-actions.js";
 import { askFailureAction, failureScreen, isRetryableStep, plainReason, STOPPED_OUTCOME } from "./ui/failure.js";
 import { startInstallWizard, type InstallWizard } from "./ui/index.js";
 import { READY_LINE, stageLine, STEP_PLAN, stoppedLine, terminalStepLine } from "./ui/journey.js";
-import type { WizardResume } from "./ui/protocol.js";
+import type { WizardPlan, WizardResume } from "./ui/protocol.js";
 
 export interface InitCliDependencies {
   /** identity, store, deployer, templatesClients, commandRunner: the same seam agentx deploy uses. */
@@ -89,6 +91,9 @@ export interface InitCliDependencies {
   /** The command this CLI runs as, for the page's "Continue later with" command (tests pin it; the
    * real one is currentCliInvocation()). */
   cliInvocation?: CliInvocation;
+  /** Spec 048 FR-015: the AWS account's alias, for the account card. Defaults to `realAccountAlias`
+   * (an IAM call); every test injects its own (usually `async () => undefined`) so none reaches IAM. */
+  accountAlias?: () => Promise<string | undefined>;
 }
 
 export interface InitOptions {
@@ -191,10 +196,10 @@ export function initSteps(input: { github: GitHubApi; slack: SlackApi }): InitSt
         return { status: "done" };
       },
     },
+    githubAppStep(input.github),
     accessStep(),
     deployStep({ id: "core", title: STEP_PLAN.core.title }),
-    githubAppStep(input.github),
-    deployStep({ id: "control-plane", title: STEP_PLAN["control-plane"].title }),
+    deployStep({ id: "control-plane", title: STEP_PLAN["control-plane"].title, after: subscribeAlertsAfterDeploy }),
     slackAppStep(input.slack),
     deployStep({ id: "slack-service", title: STEP_PLAN["slack-service"].title, after: verifySlackUrls }),
     developerSignInStep({ slack: input.slack }),
@@ -277,10 +282,16 @@ function neverThrowingBrowser(open: (url: string) => Promise<unknown>, write: (l
  * progress line to both the terminal and the page's log pane. Held out here so the wizard is closed
  * with the run whichever way it ends (FR-002). */
 interface InitSession {
+  /** Spec 048 FR-020: the install's current name, which a Change answers (or a first settings
+   * submission) can rename; starts as options.env, and every "Continue later with" command uses
+   * this, not options.env, so it keeps up with the rename. */
+  env: string;
   wizard?: InstallWizard;
   /** Task 14: the page-mode log file, opened before the wizard and closed with it. Holds what the
    * terminal no longer shows, and never a secret or the session token (FR-070, FR-071). */
   log?: InitLog;
+  /** FR-038: recognizes a browser action in streamed child-process output while the page is open. */
+  watcher?: { feed(text: string): void };
   /** A property, not a method, so `init` can pass it on as `write` without rebinding it.
    * A progress line: the terminal without the page; the log file and the page's technical log
    * with it. */
@@ -292,6 +303,9 @@ interface InitSession {
   output: Writer;
   /** The prompter in use, once chosen: the catch below asks on it when no step hook already did. */
   prompter?: Prompter;
+  /** True once a usable release is loaded. Before then a failure screen is terminal: there is no
+   * saved answer or step to retry, so the page does not ask a follow-up question. */
+  releaseLoaded?: boolean;
   /** Once known: names the region in a failure shown before a step runs. */
   region?: string;
   /** Set once `onStepFailure` already showed the screen for the error now being thrown, so the
@@ -303,6 +317,7 @@ interface InitSession {
 
 export async function runInit(options: InitOptions, deps: InitCliDependencies, services: { stderr: Writer; home: string }): Promise<InitResult> {
   const session: InitSession = {
+    env: options.env,
     invocation: deps.cliInvocation ?? currentCliInvocation(),
     write: (line) => {
       if (session.wizard === undefined) { services.stderr.write(`${line}\n`); return; }
@@ -310,7 +325,11 @@ export async function runInit(options: InitOptions, deps: InitCliDependencies, s
       session.wizard.log(line);
     },
     say: (line) => { services.stderr.write(`${line}\n`); session.log?.write(`${line}\n`); },
-    output: { write: (text: string) => (session.wizard === undefined ? services.stderr.write(text) : session.log?.write(text)) },
+    output: { write: (text: string) => {
+      if (session.wizard === undefined) return services.stderr.write(text);
+      session.watcher?.feed(text);
+      return session.log?.write(text);
+    } },
   };
   try {
     const result = await init(options, deps, services, session);
@@ -328,7 +347,7 @@ export async function runInit(options: InitOptions, deps: InitCliDependencies, s
       } else {
         const region = session.region ?? options.region ?? "<region>";
         wizard.finish("The install is paused. Your progress is saved.", "paused", [
-          { label: "Continue later with", command: cliCommandLine(session.invocation, `--env ${options.env} init --region ${region}`) },
+          { label: "Continue later with", command: cliCommandLine(session.invocation, `--env ${session.env} init --region ${region}`) },
         ]);
       }
       // FR-070 and FR-071: the full ready summary goes to the log file, never the terminal; the
@@ -360,13 +379,13 @@ export async function runInit(options: InitOptions, deps: InitCliDependencies, s
       // themselves (declining the plan, the root warning, or a "check again" question): that is
       // not a failure, so no screen is shown for it (Plan ruling 8).
       if (session.failureShown !== true && !isOperatorStop(error)) {
-        wizard.showFailure(failureScreen({ env: options.env, region, error, ...(wizard.logPath === undefined ? {} : { logPath: wizard.logPath }) }));
-        await askFailureAction(session.prompter ?? wizard.prompter, { retry: false });
+        wizard.showFailure(failureScreen({ env: session.env, region, error, ...(wizard.logPath === undefined ? {} : { logPath: wizard.logPath }) }));
+        if (session.releaseLoaded === true) await askFailureAction(session.prompter ?? wizard.prompter, { retry: false });
       }
       // Only a stop with its own words (declining the plan, the root warning) tells them; any other
       // stop, such as declining a check-again question, ends on the fixed words.
       const outcome = isWordedOperatorStop(error) ? (plainReason(error) ?? STOPPED_OUTCOME) : STOPPED_OUTCOME;
-      wizard.finish(outcome, "failed", [{ label: "Continue later with", command: cliCommandLine(session.invocation, `--env ${options.env} init --region ${region}`) }]);
+      wizard.finish(outcome, "failed", [{ label: "Continue later with", command: cliCommandLine(session.invocation, `--env ${session.env} init --region ${region}`) }]);
       // FR-070: a real failure (not a stop the operator chose) collapses to one terminal line;
       // the full error still goes to the log file. An operator stop keeps throwing `mapped` as
       // before (unchanged for FR-005's declined-plan and FR-023's declined-recheck messages).
@@ -401,7 +420,7 @@ async function resumeScreen(store: ParameterStore, env: string, steps: ReadonlyA
 export function answeringSlackInstall(inner: Prompter, answer: "installed" | "approval"): Prompter {
   return {
     // askForm asks through inner's own form, which is there whenever this key is.
-    ...(inner.form === undefined ? {} : { form: (title: string, fields: readonly FormField[], options: { help?: QuestionHelp }) => askForm(inner, title, fields, options) }),
+    ...(inner.form === undefined ? {} : { form: (title: string, fields: readonly FormField[], options: FormOptions) => askForm(inner, title, fields, options) }),
     ask: (question, options) => inner.ask(question, options),
     confirm: (question, options) => inner.confirm(question, options),
     secret: (question, options) => inner.secret(question, options),
@@ -465,7 +484,17 @@ async function assertBundleResumable(input: { bundle: BundleAnswers; bundleDir: 
 }
 
 async function init(options: InitOptions, deps: InitCliDependencies, services: { stderr: Writer; home: string }, session: InitSession): Promise<InitResult> {
-  const { env } = options;
+  // Spec 048 FR-020: the settings form's install name (typed or kept) becomes the install's name
+  // from then on; every collect() call below updates this, session.env and the page's header.
+  let env = options.env;
+  // Fix round 1: the one place that follows a just-collected install name, called at every site a
+  // collectInitAnswers result can carry a new one (the first-run collect(), Change answers, and a
+  // failed-check retry), instead of repeating the same three lines at each.
+  const follow = (next: CollectedAnswers): void => {
+    env = next.answers.env;
+    session.env = env;
+    session.wizard?.setInstallName(env);
+  };
   const { write } = session;
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? realSleep;
@@ -481,32 +510,14 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     throw agentXError("CONFIG_INVALID", "agentx init needs to know the AWS region; with --yes, pass --region <region>");
   }
   const runner = deployDeps.commandRunner ?? realCommandRunner(session.output);
-
-  // The release comes first: a CLI built from source is told to pass --release before anything else.
   const version = deps.releaseVersion === undefined ? RELEASE_VERSION : deps.releaseVersion ?? undefined;
-  // Issue 152: a CLI built from source with --engine cdk (on the command line: the engine question
-  // comes after the release) builds its release from the --source checkout instead.
+  // Issue 152: a CLI built from source with --engine cdk builds its release from --source. These
+  // argument errors stay before UI selection: an invalid invocation must not open a page or ask a
+  // question before explaining what is missing.
   const fromSource = options.releaseDir === undefined && version === undefined && options.flags.engine === "cdk";
-  let release: LoadedRelease;
-  // The regions init offers: the release's, or undefined when nothing lists them (a source release
-  // whose images all come from flags, so no release.json was read).
-  let releaseRegions: string[] | undefined;
-  // Why a source release has no images, when it has none; checked once the saved answers are read.
-  let imagesProblem: string | undefined;
-  if (fromSource) {
-    if (options.source === undefined) throw agentXError("CONFIG_INVALID", "the cdk engine needs --source <a checkout of a release tag>");
-    // "allow": a resume's saved answers may hold both images; they are checked once the answers are known.
-    const built = await sourceRelease({ runner, source: options.source, images: { worker: options.flags.workerImage, slack: options.flags.slackImage }, fetch: fetchImplementation, missingReleaseJson: "allow" });
-    release = built.release;
-    releaseRegions = built.regions;
-    imagesProblem = built.imagesProblem;
-  } else {
-    release = await loadRelease(options.releaseDir ?? (await fetchRelease({ version, home: services.home, fetch: fetchImplementation, runner, write })));
-    releaseRegions = release.regions();
-  }
-  // F23: the saved answers take only x.y.z, so a prerelease would otherwise fail after the plan.
-  if (isPrereleaseVersion(release.manifest.version)) {
-    throw agentXError("CONFIG_INVALID", `release ${release.manifest.version} is a prerelease; agentx init installs only published releases (x.y.z). Pass --release <dir> with a published release`);
+  if (fromSource && options.source === undefined) throw agentXError("CONFIG_INVALID", "the cdk engine needs --source <a checkout of a release tag>");
+  if (options.releaseDir === undefined && version === undefined && !fromSource) {
+    throw agentXError("CONFIG_INVALID", "this agentx was built from source and has no published release to download; pass --release <dir> (npm run release:build builds one), or --engine cdk --source <a checkout of a release tag>");
   }
 
   // FR-001: --ui, --no-ui, or (neither given) the page in an interactive terminal on a machine
@@ -519,8 +530,6 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   let prompter: Prompter;
   if (uiMode.mode === "page") {
     if (options.yes) throw agentXError("CONFIG_INVALID", "agentx init --ui asks its questions on a page; --yes answers them without asking. Use one or the other");
-    // Task 14: opened before the wizard, so its address and the log's own path are both ready for
-    // the wizard's start lines (FR-070); the token is hidden from it the moment the server has one.
     session.log = await openInitLog(initLogPath(services.home, env), { onError: (line) => services.stderr.write(`${line}\n`) });
     const wizard = await startInstallWizard({
       env,
@@ -530,6 +539,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     });
     session.log.hide(wizard.token);
     session.wizard = wizard;
+    session.watcher = childActionWatcher((action) => wizard.surface.card(awsSignInCard(action)));
     prompter = deps.prompter ?? wizard.prompter;
     session.say(stageLine("get-started"));
   } else if (deps.prompter !== undefined) {
@@ -546,9 +556,50 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   if (options.slackInstall !== undefined) prompter = answeringSlackInstall(prompter, options.slackInstall);
   // Spec 048 FR-060: once chosen, so a failure outside any step still has someone to ask.
   session.prompter = prompter;
+
+  // With a page, the release comes after the page opens so download progress and failures appear there.
+  let release: LoadedRelease;
+  // The regions init offers: the release's, or undefined when nothing lists them (a source release
+  // whose images all come from flags, so no release.json was read).
+  let releaseRegions: string[] | undefined;
+  // Why a source release has no images, when it has none; checked once the saved answers are read.
+  let imagesProblem: string | undefined;
+  if (fromSource) {
+    // The same guard above keeps invalid invocations before UI startup; this local guard also
+    // preserves the type invariant at the sourceRelease call if this branch is edited later.
+    if (options.source === undefined) throw agentXError("CONFIG_INVALID", "the cdk engine needs --source <a checkout of a release tag>");
+    // "allow": a resume's saved answers may hold both images; they are checked once the answers are known.
+    const built = await sourceRelease({ runner, source: options.source, images: { worker: options.flags.workerImage, slack: options.flags.slackImage }, fetch: fetchImplementation, missingReleaseJson: "allow" });
+    release = built.release;
+    releaseRegions = built.regions;
+    imagesProblem = built.imagesProblem;
+  } else {
+    let shown = "";
+    const onProgress = (progress: { receivedBytes: number; totalBytes?: number }) => {
+      const card = releaseCard({ stage: "downloading", ...progress });
+      if (card.lines[0] !== shown) {
+        shown = card.lines[0] ?? "";
+        session.wizard?.surface.card(card);
+      }
+    };
+    release = await loadRelease(options.releaseDir ?? (await fetchRelease({
+      version, home: services.home, fetch: fetchImplementation, runner, write,
+      ...(session.wizard === undefined ? {} : { onProgress }),
+    })));
+    releaseRegions = release.regions();
+  }
+  session.wizard?.surface.card(releaseCard({ stage: "ready" }));
+  session.releaseLoaded = true;
+  // F23: the saved answers take only x.y.z, so a prerelease would otherwise fail after the plan.
+  if (isPrereleaseVersion(release.manifest.version)) {
+    throw agentXError("CONFIG_INVALID", `release ${release.manifest.version} is a prerelease; agentx init installs only published releases (x.y.z). Pass --release <dir> with a published release`);
+  }
+
   // Built once: the wizard shows the checklist from it before the first step runs, and the resume
   // screen names its titles.
-  const steps = initSteps({ github: deps.github ?? githubRestApi(fetchImplementation), slack: deps.slack ?? slackWebApi(fetchImplementation) });
+  // Spec 048 FR-020: one GitHub client for the steps and for the owner lookup in the settings.
+  const github = deps.github ?? githubRestApi(fetchImplementation);
+  const steps = initSteps({ github, slack: deps.slack ?? slackWebApi(fetchImplementation) });
   session.wizard?.setSteps(steps.map((step) => ({ id: step.id, title: step.title })));
   // --stop-after runs a prefix of the steps; the wizard's checklist still shows them all.
   const stopIndex = options.stopAfter === undefined ? -1 : steps.findIndex((step) => step.id === options.stopAfter);
@@ -568,12 +619,30 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   const [configured] = configuredRegions;
   const choices = options.flags.engine === "cdk" && configured !== undefined && !regions.includes(configured) ? [configured, ...regions] : regions;
   const environmentRegion = configuredRegions.find((value) => choices.includes(value));
+
+  // FR-015: the account is shown first, before the region is asked. STS answers in any region, so
+  // the caller is read in the region the run already knows, or the AWS configuration's, or
+  // us-east-1; with --ui, the page's cards; the terminal path has none (SC-004).
+  const identityRegion = options.region ?? bundle?.region ?? configured ?? "us-east-1";
+  const surface = session.wizard?.surface;
+  // FR-020 and FR-021: the account the install lands in, on the page; there, an expired session
+  // is signed in again instead of ending the run. The terminal path throws as before.
+  const caller = await resolveCaller({
+    identity: () => deployDeps.identity ?? stsCallerIdentity(new STSClient({ region: identityRegion })),
+    prompter, runner, write,
+    alias: deps.accountAlias ?? (() => realAccountAlias(identityRegion)),
+    ...(surface === undefined ? {} : { surface }),
+    ...(awsProfile === undefined ? {} : { profile: awsProfile }),
+  });
+  if (options.account !== undefined && options.account !== caller.account) {
+    throw agentXError("CONFIG_INVALID", `--account ${options.account} does not match your AWS credentials, which are for account ${caller.account}; use credentials for ${options.account}, or leave --account off`);
+  }
   // A bundle names its region, so a bundle resume never asks it. With no list to choose from, the
   // AWS configuration's region is taken as it is, and said.
   const region = options.region ?? bundle?.region ?? (releaseRegions === undefined
     ? configuredRegion(configured, write)
     : await prompter.choose<string>("AWS region", choices.map((value) => ({ value, label: value })), { flag: "--region", defaultValue: environmentRegion ?? choices[0] ?? "us-east-1" }));
-  // Spec 048 FR-060: once known, so a failure before the caller is resolved still names the region.
+  // Spec 048 FR-060: once known, so a failure before the account checks run still names the region.
   session.region = region;
   if (bundle !== undefined && bundle.region !== region) throw agentXError("CONFIG_INVALID", `the bundle is for region ${bundle.region}; pass --region ${bundle.region}`);
   // The cdk engine synthesizes its own templates for any region; only the templates engine needs the release to cover it.
@@ -581,18 +650,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
 
   const store = deployDeps.store ?? ssmParameterStore(new SSMClient({ region }));
   const secrets = deps.initSecrets ?? secretsManagerInitSecrets(new SecretsManagerClient({ region }));
-  // FR-020 and FR-021: the account the install lands in, on the page; there, an expired session
-  // is signed in again instead of ending the run. The terminal path throws as before.
-  const caller = await resolveCaller({
-    identity: () => deployDeps.identity ?? stsCallerIdentity(new STSClient({ region })),
-    region, prompter, runner, write,
-    ...(session.wizard === undefined ? {} : { surface: session.wizard.surface }),
-    ...(awsProfile === undefined ? {} : { profile: awsProfile }),
-  });
-  if (options.account !== undefined && options.account !== caller.account) {
-    throw agentXError("CONFIG_INVALID", `--account ${options.account} does not match your AWS credentials, which are for account ${caller.account}; use credentials for ${options.account}, or leave --account off`);
-  }
-  // Spec 048 FR-001: the header's account and region, once the caller is known and checked.
+  // Spec 048 FR-001: the header's account and region, once the caller is known and the region chosen.
   session.wizard?.setPlace({ account: caller.account, region });
   const checks = deps.checks ?? awsPrerequisiteChecks({ region, account: caller.account, store, runner, fetch: fetchImplementation });
   const stackStatus = deps.stackStatus ?? cloudFormationStatusReader(new CloudFormationClient({ region }));
@@ -631,60 +689,128 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     if (first !== undefined) throw agentXError("CONFIG_INVALID", `agentx init --yes needs ${first[0]} (${first[1]}); pass it, or run agentx init without --yes to be asked`);
   }
 
+  // FR-018: a first run checks the account and region before any setting is asked. On the page a
+  // failure is a checklist with Check again; the terminal stops with every problem, as before.
+  const runAccountChecks = () => retryOnPage({
+    surface, prompter, question: "Check your AWS account again?",
+    // The card already lists every failed check, so the retry shows nothing of its own.
+    failed: () => undefined,
+    run: async () => {
+      const found: PrerequisiteCheck[] = [];
+      const show = (status: "running" | "ok" | "failed") => surface?.card(accountChecksCard({ status, checks: found }));
+      show("running");
+      try {
+        await checkAccount({
+          region, checks, write, audience: surface === undefined ? "terminal" : "page",
+          onCheck: (check) => { found.push(check); show("running"); },
+        });
+      } catch (error) {
+        // A failure no check reported is still listed, so the page never shows a failed card with
+        // nothing to fix.
+        if (!found.some((check) => !check.ok)) found.push({ label: "Your AWS account", ok: false, detail: problemText(error) });
+        show("failed");
+        throw error;
+      }
+      show("ok");
+    },
+  });
+  if (stored === undefined) await runAccountChecks();
+
   // Spec 048 FR-001: the questions (a first run) and the resume screen (a resume) are both "Your choices".
   session.wizard?.setStage("your-choices");
   if (session.wizard !== undefined) session.say(stageLine("your-choices"));
-  let collected: CollectedAnswers | undefined;
-  let answers: InitAnswers;
-  if (stored === undefined) {
-    collected = await collectInitAnswers({
+  // F7: once the engine is known, and before anything is checked, shown or created. Issue 152: a
+  // given or downloaded release must be the checkout's tag, refused here rather than after the plan
+  // (prepareDeployment checks it again). A release built from the source is its tag.
+  const assertEngineSource = async (checked: InitAnswers) => {
+    if (checked.engine === "cdk" && options.source === undefined) throw agentXError("CONFIG_INVALID", `the cdk engine needs --source <a checkout of tag v${checked.releaseVersion}>`);
+    if (checked.engine === "cdk" && options.source !== undefined && !fromSource) await assertSourceAtRelease({ runner, source: options.source, version: release.manifest.version });
+  };
+  // Spec 048 FR-029: `kept` is the settings a Change answers starts from, every answer as typed.
+  const collect = async (kept?: Readonly<Record<string, string>>): Promise<CollectedAnswers> => {
+    const result = await collectInitAnswers({
       env, region, account: caller.account, releaseVersion: release.manifest.version, flags: options.flags, prompter, processEnv, now,
       ...(bundle === undefined ? {} : { fixed: bundle }),
+      ...(options.finishFlags.adminEmail === undefined ? {} : { adminEmail: options.finishFlags.adminEmail }),
+      ...(options.signinFlags?.methods === undefined ? {} : { signinMethods: options.signinFlags.methods }),
+      ...(kept === undefined ? {} : { kept }),
+      ownerType: async (login) => {
+        try {
+          const owner = await github.owner?.(login);
+          return owner === undefined ? undefined : owner.type === "Organization" ? "organization" : "user";
+        } catch (error) {
+          // GitHub could not say (network, rate limit): the type is asked instead, and the reason is said.
+          write(`Could not look up ${login} on GitHub (${problemText(error)}); asking instead.`);
+          return undefined;
+        }
+      },
     });
-    answers = collected.answers;
     // A typed flag must not contradict what the bundle already decided.
-    if (bundle !== undefined) assertResumeFlagsMatch(answers, options.flags);
+    if (bundle !== undefined) assertResumeFlagsMatch(result.answers, options.flags);
+    await assertEngineSource(result.answers);
+    return result;
+  };
+  let collected: CollectedAnswers | undefined;
+  let initialAnswers: InitAnswers;
+  if (stored === undefined) {
+    collected = await collect();
+    initialAnswers = collected.answers;
+    // Spec 048 FR-020: a first settings submission can already rename the install (its default is
+    // options.env, kept until typed over); everything from here on follows the name just collected.
+    follow(collected);
   } else {
-    answers = stored;
-    if (answers.account !== caller.account) throw agentXError("CONFIG_INVALID", `the install of ${env} started in account ${answers.account}, but your AWS credentials are for account ${caller.account}; use credentials for ${answers.account}`);
-    if (answers.releaseVersion !== release.manifest.version) {
-      throw agentXError("CONFIG_INVALID", `the install of ${env} started with release ${answers.releaseVersion}, but this agentx has release ${release.manifest.version}; run npx @charterarc/agentx@${answers.releaseVersion} init --env ${env}, or pass --release <dir> for ${answers.releaseVersion}`);
+    initialAnswers = stored;
+    if (stored.account !== caller.account) throw agentXError("CONFIG_INVALID", `the install of ${env} started in account ${stored.account}, but your AWS credentials are for account ${caller.account}; use credentials for ${stored.account}`);
+    if (stored.releaseVersion !== release.manifest.version) {
+      throw agentXError("CONFIG_INVALID", `the install of ${env} started with release ${stored.releaseVersion}, but this agentx has release ${release.manifest.version}; run npx @charterarc/agentx@${stored.releaseVersion} init --env ${env}, or pass --release <dir> for ${stored.releaseVersion}`);
     }
-    assertResumeFlagsMatch(answers, options.flags);
+    assertResumeFlagsMatch(stored, options.flags);
+    await assertEngineSource(stored);
   }
-  // F7: once, now that the engine is known, and before anything is checked, shown or created.
-  if (answers.engine === "cdk" && options.source === undefined) throw agentXError("CONFIG_INVALID", `the cdk engine needs --source <a checkout of tag v${answers.releaseVersion}>`);
-  // Issue 152: a given or downloaded release must be the checkout's tag, refused here rather than
-  // after the plan (prepareDeployment checks it again). A release built from the source is its tag.
-  if (answers.engine === "cdk" && options.source !== undefined && !fromSource) await assertSourceAtRelease({ runner, source: options.source, version: release.manifest.version });
+  // Spec 048 FR-028: a holder, because a first run's answers change on each Change answers, and
+  // the checks below read whichever answers are current.
+  const finalAnswersRef: { current: InitAnswers } = { current: initialAnswers };
 
   const activePrompter = prompter;
-  // With --ui, the page's cards; the terminal path has none (SC-004).
-  const surface = session.wizard?.surface;
   // Q5: with --ui, every other site is a button on the page. The terminal path opens the system
   // browser, or prints the address with --no-browser, as before.
   const stepBrowser = session.wizard?.openLink
     ?? (options.browser ? neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) : undefined);
-  const finalAnswers = answers;
-  // A first run's OpenRouter key is not stored until after the plan, so the check uses it directly.
-  const pendingKey = collected?.openRouterKey === undefined
-    ? undefined
-    : { key: collected.openRouterKey, ...(collected.openRouterProviders === undefined ? {} : { providers: collected.openRouterProviders }) };
+  // Spec 048 FR-028 and FR-065: the install name, the GitHub owner and the app name. A bundle's
+  // access stack is the platform team's, there by design; an app made beforehand (--github-app-id)
+  // is this install's own, so its name is not looked up as a clash.
+  const answerChecks = () => clashChecks({
+    answers: finalAnswersRef.current, stackStatus, github,
+    ...(options.preMadeGitHubApp === undefined ? {} : { preMadeApp: true }),
+    audience: surface === undefined ? "terminal" : "page",
+    installUsed: async (name) => (await readEnvironmentSettings(store, name)) !== undefined || (await readInstallAnswers(store, name)) !== undefined,
+    ...(bundle === undefined ? {} : { expectedStacks: [environmentStackName(bundle.env, "access")] }),
+  });
   // FR-023 (Q7): on the page, the checks are a checklist, and a failure can be checked again
-  // after the fix; the terminal path stops with the collected problems, as before.
-  const runPrerequisites = () => retryOnPage({
-    surface, prompter: activePrompter, question: "Check the prerequisites again?",
+  // after the fix; the terminal path stops with the collected problems, as before. FR-018:
+  // `skipAccount` leaves out the EC2 vCPU quota and Elastic IPs on a first run, since
+  // `runAccountChecks` already checked them right after the region was chosen. Spec 048 FR-028:
+  // `askAgain: false` (a first run) throws a failure straight to checkWithChangeOnPage, whose Check
+  // again replaces this question.
+  const runPrerequisites = (prereqOptions: { skipAccount?: boolean; extraChecks?: () => Promise<readonly PrerequisiteCheck[]>; askAgain?: boolean } = {}) => retryOnPage({
+    surface: prereqOptions.askAgain === false ? undefined : surface, prompter: activePrompter, question: "Check the prerequisites again?",
     // The card already lists every failed check, so the retry shows nothing of its own.
     failed: () => undefined,
     run: async () => {
       const found: PrerequisiteCheck[] = [];
       const show = (status: "running" | "ok" | "failed") => surface?.card(prerequisitesCard({ status, checks: found }));
+      // A first run's OpenRouter key is not stored until after the plan, so the check uses it directly.
+      const pendingKey = collected?.openRouterKey === undefined
+        ? undefined
+        : { key: collected.openRouterKey, ...(collected.openRouterProviders === undefined ? {} : { providers: collected.openRouterProviders }) };
       show("running");
       try {
         await checkPrerequisites({
-          answers: finalAnswers, release, caller, checks, prompter: activePrompter, write,
+          answers: finalAnswersRef.current, release, caller, checks, prompter: activePrompter, write,
           onCheck: (check) => { found.push(check); show("running"); },
           images: release.manifest.images, audience: surface === undefined ? "terminal" : "page",
+          skipAccount: prereqOptions.skipAccount === true,
+          ...(prereqOptions.extraChecks === undefined ? {} : { extraChecks: prereqOptions.extraChecks }),
           ...(pendingKey === undefined ? {} : { openRouterKey: pendingKey }),
         });
       } catch (error) {
@@ -701,22 +827,50 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   let rotatedWebhook: string | undefined;
   let rotatedOpenRouterKey: string | undefined;
   if (collected !== undefined) {
-    await runPrerequisites();
+    // FR-018: the account and region were already checked, right after the region was chosen.
+    // Spec 048 FR-028: on the page, a failed check offers Change answers, and the settings come
+    // back with every answer kept; nothing is created, saved or locked until the checks pass.
+    for (;;) {
+      const checked = await checkWithChangeOnPage({
+        surface, prompter, question: "Your answers need a change. What next?",
+        // The card already lists every failed check.
+        failed: () => undefined,
+        run: () => runPrerequisites({ skipAccount: true, extraChecks: answerChecks, askAgain: false }),
+      });
+      if (checked === "passed") {
+        // Printed even under --yes, before anything is created. FR-005: with --ui the same plan is
+        // the review screen; FR-029 and FR-030: its own words are the page's summary, with Create
+        // AgentX and Change answers as its buttons. Spec 048 FR-028: Change answers here loops back
+        // exactly as a Change answers from the checks does, with every answer kept.
+        const action = await confirmInstallPlan({
+          answers: collected.answers, notes: collected.notes, prompter, page: session.wizard !== undefined,
+          write: (text) => session.output.write(text),
+          ...(session.wizard === undefined ? {} : { show: (plan: WizardPlan) => session.wizard?.plan(plan) }),
+          extras: { storesOpenRouterKey: collected.openRouterKey !== undefined, ...(collected.openRouterProviders === undefined ? {} : { openRouterProviders: collected.openRouterProviders }) },
+        });
+        if (action === "change") {
+          collected = await collect(collected.settings);
+          finalAnswersRef.current = collected.answers;
+          // Spec 048 FR-020 and FR-029: Change answers keeps every answer, and a renamed install
+          // is the install's name from here on (the checks, the lock, the steps, the page).
+          follow(collected);
+          continue;
+        }
+        break;
+      }
+      collected = await collect(collected.settings);
+      finalAnswersRef.current = collected.answers;
+      follow(collected);
+    }
     prerequisitesPassed = true;
-    // Printed even under --yes, before anything is created. FR-005: with --ui the same priced plan
-    // is the review screen, and its confirm is a button.
-    await confirmInstallPlan({
-      answers: collected.answers, notes: collected.notes, prompter,
-      write: (text) => { session.output.write(text); session.wizard?.plan(text); },
-      extras: { storesOpenRouterKey: collected.openRouterKey !== undefined, ...(collected.openRouterProviders === undefined ? {} : { openRouterProviders: collected.openRouterProviders }) },
-    });
   } else {
     write(`Resuming the install of environment ${env}.`);
     if (session.wizard !== undefined) session.wizard.resume(await resumeScreen(store, env, steps));
-    rotatedWebhook = await resumedAlertWebhook({ answers, flags: options.flags, processEnv, prompter });
+    rotatedWebhook = await resumedAlertWebhook({ answers: finalAnswersRef.current, flags: options.flags, processEnv, prompter });
     rotatedOpenRouterKey = await resumedOpenRouterKey({ flags: options.flags, processEnv, prompter });
   }
 
+  const finalAnswers = finalAnswersRef.current;
   // F14: the answers and the alert and OpenRouter secrets are saved under the environment lock,
   // which is taken once for the whole run; the deploy steps pass lockHeld. The secrets are stored
   // before the answers, and before any step, so every stack that takes OpenRouterSecretArn gets it.
@@ -799,7 +953,9 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     stackStatus,
     home: services.home,
     prerequisitesPassed,
-    runPrerequisites,
+    // A resume (the only caller of context.runPrerequisites) checks everything once more, since
+    // runAccountChecks runs only on a first run.
+    runPrerequisites: () => runPrerequisites(),
     setup,
     adminSession,
     flags: options.finishFlags,

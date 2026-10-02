@@ -18,9 +18,10 @@ import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MO
 import { initSteps, type InitCliDependencies } from "../../packages/cli/src/init/commands.js";
 import { estimateMonthlyCost, suggestedBudgetUsd } from "../../packages/cli/src/init/cost.js";
 import { markOperatorStop } from "../../packages/cli/src/init/stop.js";
+import { INSTALL_STEP_ORDER } from "../../packages/cli/src/init/ui/journey.js";
 import {
   allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, fakeSlackApi, HOLDER, memoryInitSecrets, passingChecks, scriptedDeployer, scriptedPrompter,
-  slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_CLI_INVOCATION, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET,
+  settingsScript, slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_CLI_INVOCATION, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET,
 } from "../support/init-fakes.js";
 import { stagingSettings } from "../support/environment-fixtures.js";
 import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "../support/fake-cloudformation.js";
@@ -91,6 +92,8 @@ async function harness(options: { releaseVersion?: string; regions?: string[] } 
     deploy: { identity: { get: async () => ({ account: "123456789012", arn: HOLDER }) }, store, secrets, deployer },
     initSecrets: secrets,
     checks: passingChecks(),
+    // Spec 048 FR-015: no test reaches IAM for the account's alias.
+    accountAlias: async () => undefined,
     github,
     slack: fakeSlackApi(),
     cloudFormation: fakeCloudFormation({ parameters: SIGN_IN_PARAMETERS }),
@@ -136,18 +139,20 @@ async function everywhereButSecrets(h: Harness): Promise<string> {
   return [h.printed(), ...h.store.values.values(), cache].join("\n");
 }
 
-// The questions a first run asks with every default taken (Task 4's order, with the model
-// provider question after sign-in, and the budget's amount and scope after the alert answers),
+// The settings a first run answers (spec 048 FR-020: your email, the owner, the install name and
+// the app name; yes to the Advanced settings, every default taken but alerts to the ops address),
 // then the plan.
-const FIRST_RUN = ["", "", "", "", "", "", "", "", "", "ops@example.com", "", "", "acme", "", "", "", "", true];
+const FIRST_RUN = [...settingsScript({ email: ADMIN_EMAIL, owner: "acme", advanced: { alertEmail: "ops@example.com" } }), true];
+// FIRST_RUN's answers for a run with --engine cdk, whose settings form leaves the engine out.
+const CDK_FIRST_RUN = [...settingsScript({ email: ADMIN_EMAIL, owner: "acme", flags: { engine: "cdk" }, advanced: { alertEmail: "ops@example.com" } }), true];
 // The Slack step: installed, the token, the signing secret, "the right bot?"; then the Slack
 // service step's "Request URL Verified?" (Task 9's fix round added both confirms).
-const SLACK = ["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true];
-// The developer-signin step: default method Slack, client ID, client secret, "Apply this change?".
-const SIGNIN = ["", "1111111111.2222222222222", "fedcba9876543210fedcba9876543210", true];
-// The finishing steps (F15): admin email; repository; project name; use the proposed commands;
-// channel; the three connector offers; "did the test alarm arrive?".
-const FINISH = [ADMIN_EMAIL, "acme/payments-api", "", true, "payments", false, false, false, true];
+const SLACK = ["installed", "1111111111.2222222222222", "fedcba9876543210fedcba9876543210", TEST_SIGNING_SECRET, TEST_BOT_TOKEN, true, true];
+// Developer sign-in is part of the approved plan, so its step asks nothing.
+const SIGNIN: Array<string | boolean> = [];
+// The finishing steps (F15): repository; project name; use the proposed commands; channel; the
+// three connector offers; "did the test alarm arrive?". Your email comes from the settings (spec 048 FR-020).
+const FINISH = ["acme/payments-api", "", true, "payments", false, false, false, true];
 // The budget FIRST_RUN's all-default models produce: the estimate plus 20%, one source with cost.ts.
 const FIRST_RUN_BUDGET_USD = suggestedBudgetUsd(estimateMonthlyCost({ orchestrator: DEFAULT_ORCHESTRATOR_MODEL, classifier: DEFAULT_CLASSIFIER_MODEL, worker: DEFAULT_WORKER_MODEL }));
 // A GitHub App made beforehand, and both Slack secrets, so --yes needs no prompt at all.
@@ -165,7 +170,40 @@ const WEBHOOK = "https://events.pagerduty.com/integration/0123SECRETintegrationK
 
 describe("agentx init", () => {
   it("lists its steps in the recorded order", () => {
-    expect(initSteps({ github: fakeGitHubApi(), slack: fakeSlackApi() }).map((step) => step.id)).toEqual([...INIT_STEP_IDS]);
+    expect(initSteps({ github: fakeGitHubApi(), slack: fakeSlackApi() }).map((step) => step.id)).toEqual([...INSTALL_STEP_ORDER]);
+  });
+
+  const YES = ["--yes", "--admin-email", ADMIN_EMAIL, "--alert-email", "ops@example.com", "--github-account", "acme", "--channel", "payments"];
+  it.each<[string, string[], Partial<InitCliDependencies>, string]>([
+    ["model access and the Anthropic form", [], { checks: passingChecks({ converse: async () => { throw Object.assign(new Error("Model use case details have not been submitted for this account"), { name: "ResourceNotFoundException" }); } }) }, "one-time usage form"],
+    // "app name" alone also matches the plan's "an app named", which a run that never checked the length printed.
+    ["a name too long", ["--github-app-name", "x".repeat(35)], {}, "the app name must be at most 34 characters"],
+    ["a clashing stack", [], { stackStatus: { status: async (name) => (name === environmentStackName("staging", "access") ? "CREATE_COMPLETE" : undefined) } }, "already has stacks or settings"],
+    ["the GitHub owner", [], { github: { ...fakeGitHubApi(), owner: async () => undefined } }, "GitHub has no organization or user named acme"],
+    ["the budget value", ["--budget", "12abc"], {}, "--budget must be a whole number"],
+    ["the email address", ["--alert-email", "not-an-email"], {}, "is not an email address"],
+  ])("SC-009: %s is reported before anything is created", async (_item, argv, overrides, words) => {
+    const h = await harness();
+    expect(await h.run([...YES, ...argv], overrides)).not.toBe(0);
+    expect(h.printed()).toContain(words);
+    expect(h.deployer.requests).toEqual([]);
+    expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
+    expect(h.github.conversions).toEqual([]);
+  });
+
+  it("Fix round 1: --yes with the GitHub owner lookup throwing prints exactly the clash check's own line", async () => {
+    const h = await harness();
+    const github = { ...fakeGitHubApi(), owner: async () => { throw new Error("GitHub owner lookup failed with HTTP 403"); } };
+    expect(await h.run([...YES], { github })).not.toBe(0);
+    const line = h.printed().split("\n").find((each) => each.startsWith("- could not check the GitHub owner"));
+    expect(line).toBe("- could not check the GitHub owner acme (GitHub owner lookup failed with HTTP 403); check your network and run agentx init again");
+  });
+
+  it("FR-028: an app made beforehand (--github-app-id) is this install's own, so its name is no clash", async () => {
+    const h = await harness();
+    const github = { ...h.github, appBySlug: async () => ({ owner: { login: "acme" } }) };
+    expect(await h.run([...UNATTENDED, "--alert-email", "ops@example.com"], { processEnv: UNATTENDED_ENV, github })).toBe(0);
+    expect(h.printed()).not.toContain("GitHub already has an app named");
   });
 
   it("stops after the step --stop-after names, records it, and says how to finish", async () => {
@@ -192,6 +230,29 @@ describe("agentx init", () => {
     expect(result?.skipped).toEqual(expect.arrayContaining(beforeStop));
     expect(result?.ran.filter((id) => beforeStop.includes(id))).toEqual([]);
     expect(result?.stoppedAfter).toBeUndefined();
+  });
+
+  it("spec 048 FR-020: asks the GitHub owner's type only when GitHub cannot say, and says why", async () => {
+    const h = await harness();
+    // GitHub cannot answer the settings' lookup; by the answer checks (spec 048 FR-028) it answers
+    // again. Fix round 1: keyed on the owner-type question being answered, not on a lookup count,
+    // so an unrelated extra lookup elsewhere would not break this test for the wrong reason.
+    let settingsAnswered = false;
+    const github = { ...fakeGitHubApi(), owner: async () => { if (!settingsAnswered) throw new Error("GitHub owner lookup failed with HTTP 403"); return { login: "acme", type: "User" as const }; } };
+    // The settings, then the owner's type (a personal account), then no to the plan.
+    const base = scriptedPrompter([...FIRST_RUN.slice(0, -1), "user", false]);
+    const prompter: typeof base = {
+      ...base,
+      async choose(question, choices, options) {
+        const answer = await base.choose(question, choices, options);
+        if (question === "Is acme an organization or a personal account?") settingsAnswered = true;
+        return answer;
+      },
+    };
+    expect(await h.run([], { prompter, github })).not.toBe(0);
+    expect(prompter.asked.at(-2)).toBe("Is acme an organization or a personal account?");
+    expect(h.printed()).toContain("Could not look up acme on GitHub (GitHub owner lookup failed with HTTP 403); asking instead.");
+    expect(h.printed()).toContain("install declined; nothing was created");
   });
 
   it("refuses --stop-after with --export, which runs no init step", async () => {
@@ -490,6 +551,20 @@ describe("agentx init", () => {
     expect(h.printed()).toContain("stop at access");
   });
 
+  it("under --yes with your own OIDC and alerts answered by a flag, needs no email at all (spec 048 FR-020)", async () => {
+    const h = await harness();
+    const argv = without(UNATTENDED, "--admin-email");
+    const oidc = ["--identity", "oidc", "--oidc-issuer", "https://login.example.com", "--oidc-audience", "agentx", "--oidc-client-id", "cli", "--admin-claim", "groups", "--admin-values", "agentx-admins"];
+    h.deployer.fail.set(environmentStackName("staging", "access"), new Error("stop at access"));
+    expect(await h.run([...argv, ...oidc, "--no-alerts"], { processEnv: UNATTENDED_ENV })).not.toBe(0);
+    expect(h.printed()).not.toContain("needs an answer");
+    expect(h.printed()).not.toContain("needs --admin-email");
+    expect(h.printed()).toContain("stop at access");
+    const saved = await readInstallAnswers(h.store, "staging");
+    expect(saved).toMatchObject({ identity: { mode: "oidc" }, alert: { kind: "none" } });
+    expect(saved?.adminEmail).toBeUndefined();
+  });
+
   it("refuses a --connectors typo before asking or deploying anything", async () => {
     const h = await harness();
     const prompter = scriptedPrompter([]);
@@ -585,7 +660,7 @@ describe("agentx init", () => {
   // F7: the cdk --source check runs once, when the answers are known, and before the plan.
   it("refuses the cdk engine without --source before showing the plan", async () => {
     const h = await harness();
-    expect(await h.run(["--engine", "cdk"], { prompter: scriptedPrompter(FIRST_RUN.slice(1, -1)) })).toBe(2);
+    expect(await h.run(["--engine", "cdk"], { prompter: scriptedPrompter(CDK_FIRST_RUN.slice(0, -1)) })).toBe(2);
     expect(h.printed()).toContain("the cdk engine needs --source <a checkout of tag v1.2.3>");
     expect(h.printed()).not.toContain("Estimated monthly total");
     expect(h.store.calls.filter((call) => call.op === "put")).toEqual([]);
@@ -624,7 +699,7 @@ describe("agentx init", () => {
     it("installs with both image flags and no release: the version is the tag's, and nothing is downloaded", async () => {
       const h = await harness();
       const fetchWithGitHub = githubRelease(h.deps.fetch as typeof fetch);
-      const prompter = scriptedPrompter([...FIRST_RUN.slice(1), ...SLACK, ...SIGNIN, ...FINISH]);
+      const prompter = scriptedPrompter([...CDK_FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
       const code = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", "--source", "/src", ...IMAGES], {
         releaseVersion: null, fetch: fetchWithGitHub, prompter, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
       });
@@ -639,7 +714,7 @@ describe("agentx init", () => {
       const h = await harness();
       const fetchWithGitHub = githubRelease(h.deps.fetch as typeof fetch, publishedManifest);
       // us-west-2 is only in the published release.json, not in the harness's release directory.
-      const prompter = scriptedPrompter(["us-west-2", ...FIRST_RUN.slice(1)]);
+      const prompter = scriptedPrompter(["us-west-2", ...CDK_FIRST_RUN]);
       const code = await h.runWithoutRelease(["--engine", "cdk", "--source", "/src", "--stop-after", "prerequisites"], {
         releaseVersion: null, fetch: fetchWithGitHub, prompter, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
       });
@@ -652,7 +727,7 @@ describe("agentx init", () => {
 
     it("takes the region from the AWS configuration when there is no release.json to list regions", async () => {
       const h = await harness();
-      const prompter = scriptedPrompter([...FIRST_RUN.slice(1)]);
+      const prompter = scriptedPrompter([...CDK_FIRST_RUN]);
       const code = await h.runWithoutRelease(["--engine", "cdk", "--source", "/src", ...IMAGES, "--stop-after", "prerequisites"], {
         releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter, processEnv: { AWS_REGION: "eu-west-1" }, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
       });
@@ -666,7 +741,7 @@ describe("agentx init", () => {
 
     it("offers and defaults to the configured region although release.json does not list it: the cdk engine synthesizes for any region (review M7)", async () => {
       const h = await harness();
-      const prompter = scriptedPrompter(["", ...FIRST_RUN.slice(1)]);
+      const prompter = scriptedPrompter(["", ...CDK_FIRST_RUN]);
       const code = await h.runWithoutRelease(["--engine", "cdk", "--source", "/src", "--stop-after", "prerequisites"], {
         releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch, publishedManifest), prompter, processEnv: { AWS_REGION: "eu-west-1" }, deploy: { ...h.deps.deploy, commandRunner: taggedSource },
       });
@@ -678,7 +753,7 @@ describe("agentx init", () => {
     it("resumes an install begun with both image flags without them, although the tag has no published release.json (review I2)", async () => {
       const h = await harness();
       const first = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", "--source", "/src", ...IMAGES, "--stop-after", "prerequisites"], {
-        releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter: scriptedPrompter([...FIRST_RUN.slice(1)]), deploy: { ...h.deps.deploy, commandRunner: taggedSource },
+        releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter: scriptedPrompter([...CDK_FIRST_RUN]), deploy: { ...h.deps.deploy, commandRunner: taggedSource },
       });
       expect(first).toBe(0);
       const mark = h.mark();
@@ -720,7 +795,7 @@ describe("agentx init", () => {
       const deploy = { ...h.deps.deploy };
       delete deploy.deployer;
       const code = await h.runWithoutRelease(["--region", "us-east-1", "--engine", "cdk", "--source", "/src", ...IMAGES, "--stop-after", "access"], {
-        releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter: scriptedPrompter([...FIRST_RUN.slice(1)]),
+        releaseVersion: null, fetch: githubRelease(h.deps.fetch as typeof fetch), prompter: scriptedPrompter([...CDK_FIRST_RUN]),
         deploy: { ...deploy, commandRunner: runner, stackOutputs: async () => undefined },
       });
       expect(h.printed()).not.toContain("AgentX error");
@@ -767,7 +842,7 @@ describe("agentx init", () => {
     it("refuses a --release that does not match the source's tag, before showing the plan", async () => {
       const h = await harness();
       // The harness's --release holds 1.2.3; the checkout is at v1.4.0.
-      const code = await h.run(["--engine", "cdk", "--source", "/src"], { prompter: scriptedPrompter(FIRST_RUN.slice(1, -1)), deploy: { ...h.deps.deploy, commandRunner: taggedSource } });
+      const code = await h.run(["--engine", "cdk", "--source", "/src"], { prompter: scriptedPrompter(CDK_FIRST_RUN.slice(0, -1)), deploy: { ...h.deps.deploy, commandRunner: taggedSource } });
       expect(code).toBe(2);
       expect(h.printed()).toContain("the cdk engine must run from a checkout of tag v1.2.3; /src is at v1.4.0");
       expect(h.printed()).not.toContain("Estimated monthly total");
@@ -838,9 +913,12 @@ describe("agentx init", () => {
 
 const OPENROUTER_KEY = "sk-or-v1-feedface0123456789OPENROUTERSECRET";
 const OPENROUTER_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/openrouter-AbCdEf";
-// A first run choosing OpenRouter: engine, sign-in, provider, the three model ids, the key (hidden),
-// then the rest of FIRST_RUN from the permission boundary on (the plan's confirm included).
-const OPENROUTER_FIRST_RUN = ["", "", "openrouter", "qwen/qwen3-coder", "qwen/qwen3-coder", "anthropic/claude-sonnet-4", OPENROUTER_KEY, ...FIRST_RUN.slice(6)];
+// A first run choosing OpenRouter: FIRST_RUN's settings with OpenRouter as the provider, then the
+// three model ids and the key (hidden), then the plan's confirm.
+const OPENROUTER_FIRST_RUN = [
+  ...settingsScript({ email: ADMIN_EMAIL, owner: "acme", advanced: { modelProvider: "openrouter", alertEmail: "ops@example.com" } }),
+  "qwen/qwen3-coder", "qwen/qwen3-coder", "anthropic/claude-sonnet-4", OPENROUTER_KEY, true,
+];
 const OPENROUTER_FLAGS = ["--model-provider", "openrouter", "--orchestrator-model", "qwen/qwen3-coder", "--classifier-model", "qwen/qwen3-coder", "--worker-model", "qwen/qwen3-coder"];
 
 function recordingOpenRouterChecks() {
@@ -958,9 +1036,9 @@ async function bundleDir(overrides: Record<string, unknown> = {}): Promise<strin
   return dir;
 }
 const OPERATOR = "arn:aws:sts::123456789012:assumed-role/agentx-staging-operator/alice";
-// A bundle resume asks only: alert kind, alert email, budget, budget scope, GitHub account, account
-// type, app name, Slack app name, app-posted messages; then the plan.
-const BUNDLE_RUN = ["", "ops@example.com", "", "", "acme", "", "", "", "", true];
+// A bundle resume's settings leave out what the export knew (the install name, engine, sign-in,
+// models, boundary and operator); then the plan.
+const BUNDLE_RUN = [...settingsScript({ email: ADMIN_EMAIL, owner: "acme", fixed: true, advanced: { alertEmail: "ops@example.com" } }), true];
 const ACCESS_DEPLOYED = { status: async (name: string) => (name === "agentx-staging-access" ? "CREATE_COMPLETE" : undefined) };
 
 describe("init --resume --from-bundle (FR-026)", () => {

@@ -80,6 +80,7 @@ export const PAGE_CLASSES = [
   "top", "time-left", "layout", "rail", "phase", "phase-title", "phase-status", "phase-time", "steps", "step", "elapsed", "step-of",
   "card", "status", "question", "why", "hint", "note", "error", "field", "field-label", "choices", "buttons", "button", "primary",
   "command", "checks", "chip", "hidden",
+  "recommended", "advanced", "group", "field-link", "plan-table",
   "done", "now", "waiting", "coming", "stopped", "running", "ok", "failed", "info", "pending", "skipped",
 ] as const;
 
@@ -143,6 +144,15 @@ textarea { font-family: var(--mono); font-size: var(--text-sm); min-height: 8rem
 .choices label { align-items: flex-start; border: 1px solid var(--field-border); border-radius: var(--radius); cursor: pointer; display: flex; gap: var(--space-3); padding: var(--space-3); }
 .choices label:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); }
 .choices input { accent-color: var(--accent); margin-top: .3rem; }
+.recommended { background: var(--accent-soft); border-radius: var(--radius); padding: var(--space-4) var(--space-5); margin: 0 0 var(--space-5); }
+.recommended h3 { font-size: var(--text-lg); margin: 0 0 var(--space-2); }
+.recommended ul { margin: 0; padding-left: var(--space-5); }
+.advanced { border-top: 1px solid var(--border); margin-top: var(--space-5); padding-top: var(--space-4); }
+.advanced > summary { cursor: pointer; font-weight: 600; min-height: 2.75rem; display: flex; align-items: center; }
+.group { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; }
+.group legend { font-weight: 600; padding: 0 var(--space-2); }
+.field select { min-height: 2.75rem; width: 100%; border: 1px solid var(--field-border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); padding: 0 var(--space-3); font: inherit; }
+.field-link { color: var(--accent); }
 .buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); }
 #failure-actions + details, .buttons + details { margin-top: var(--space-4); }
 button, a.button { align-items: center; background: var(--surface); border: 1px solid var(--field-border); border-radius: var(--radius-sm); color: var(--text); cursor: pointer; display: inline-flex; font: inherit; font-weight: 600; gap: var(--space-2); min-height: 2.75rem; padding: var(--space-2) var(--space-4); text-decoration: none; }
@@ -150,6 +160,9 @@ button:hover, a.button:hover { background: var(--surface-2); }
 button.primary, a.button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 button.primary:hover, a.button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 button[disabled] { cursor: progress; opacity: .6; }
+.plan-table { border-collapse: collapse; display: block; margin: var(--space-2) 0; max-width: 100%; overflow-x: auto; width: 100%; }
+.plan-table th, .plan-table td { border-bottom: 1px solid var(--border); padding: var(--space-2) var(--space-3); text-align: left; }
+.plan-table th:last-child, .plan-table td:last-child { color: var(--text-2); }
 a { color: var(--accent); }
 :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 details > summary { color: var(--accent); cursor: pointer; font-weight: 600; }

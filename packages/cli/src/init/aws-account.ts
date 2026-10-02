@@ -5,6 +5,7 @@
 // into anything this module returns.
 import { readFile as readFileFromDisk } from "node:fs/promises";
 import { join } from "node:path";
+import { IAMClient, ListAccountAliasesCommand } from "@aws-sdk/client-iam";
 import { AgentXError } from "@agentx/contracts";
 import { cliErrorFor } from "../deploy/commands.js";
 import type { CommandRunner } from "../deploy/cdk-engine.js";
@@ -14,7 +15,7 @@ import { isRootUser, ROOT_WARNING } from "./prerequisites.js";
 import type { Prompter } from "./prompts.js";
 import { problemText } from "./retry.js";
 import { markOperatorStop, operatorStop } from "./stop.js";
-import { awsCard, awsSignedOutCard, rootUserCard } from "./ui/cards.js";
+import { awsCard, awsSignedOutCard, awsSignInCard, rootUserCard } from "./ui/cards.js";
 
 export type AwsProfileKind = "sso" | "login" | "keys" | "other";
 export interface AwsProfile { name: string; kind: AwsProfileKind; region?: string }
@@ -118,13 +119,26 @@ const isSignInProblem = (error: unknown): boolean => {
   return mapped instanceof AgentXError && mapped.code === "AUTH_REQUIRED";
 };
 
+/** Spec 048 FR-015: the account's alias, when it has one and the caller may read it. Never throws:
+ * an alias is a courtesy on the account card, not a check. */
+export async function realAccountAlias(region: string): Promise<string | undefined> {
+  try {
+    return (await new IAMClient({ region }).send(new ListAccountAliasesCommand({}))).AccountAliases?.[0];
+  } catch {
+    return undefined;
+  }
+}
+
 /** The caller, shown on the page (FR-020). On the page, a missing or expired session offers the
  * profile's sign-in and asks AWS again (FR-021); `identity` builds a fresh client each time, so a
  * credential the SDK failed to load is looked up again. Without a page, the first failure is
  * thrown exactly as before. A root-user caller is warned and, on the page, asked whether to
- * continue (FR-016); `write` is used only when there is no page. */
+ * continue (FR-016); `write` is used only when there is no page. Spec 048 FR-015: the account is
+ * shown before the region is known, so `region` is optional, and `alias` (never thrown from) reads
+ * the account's alias, a courtesy on the card rather than a check. */
 export async function resolveCaller(input: {
-  identity: () => CallerIdentity; region: string; prompter: Prompter; runner: CommandRunner; surface?: InstallSurface; profile?: AwsProfile; write?: (line: string) => void;
+  identity: () => CallerIdentity; region?: string; prompter: Prompter; runner: CommandRunner; surface?: InstallSurface; profile?: AwsProfile; write?: (line: string) => void;
+  alias?: () => Promise<string | undefined>;
 }): Promise<{ account: string; arn: string }> {
   const { surface, profile } = input;
   const signIn = profile === undefined ? undefined : signInCommand(profile);
@@ -132,7 +146,13 @@ export async function resolveCaller(input: {
   for (;;) {
     try {
       const caller = await input.identity().get();
-      const shown = { ...caller, region: input.region, ...(profile === undefined ? {} : { profile: profile.name }) };
+      const alias = await input.alias?.();
+      const shown = {
+        ...caller,
+        ...(input.region === undefined ? {} : { region: input.region }),
+        ...(alias === undefined ? {} : { alias }),
+        ...(profile === undefined ? {} : { profile: profile.name }),
+      };
       if (isRootUser(caller.arn)) {
         if (surface === undefined) {
           input.write?.(ROOT_WARNING);
@@ -165,6 +185,7 @@ export async function resolveCaller(input: {
       if (next === "signin" && signIn !== undefined) {
         try {
           await input.runner.run(signIn.command, signIn.args, { cwd: process.cwd(), display: signIn.display });
+          surface.card(awsSignInCard({ done: true }));
         } catch (runError) {
           ranProblem = ranProblemText(signIn.display, runError);
         }

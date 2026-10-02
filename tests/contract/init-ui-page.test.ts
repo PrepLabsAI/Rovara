@@ -33,7 +33,7 @@ describe("the page shell", () => {
   });
 
   it("FR-004: the plan and the technical log are behind links", () => {
-    expect(html).toMatch(/<details id="plan"[^>]*><summary>View the plan<\/summary>/);
+    expect(html).toMatch(/<details id="plan"[^>]*><summary>View the plan<\/summary><div id="plan-body"><\/div>/);
     expect(html).toMatch(/<details id="log-box"[^>]*><summary>Show technical log<\/summary>/);
   });
 
@@ -41,6 +41,8 @@ describe("the page shell", () => {
     expect(html).toContain('<main id="panel" aria-live="polite">');
     expect(html).toContain('role="alert"');
     expect(WIZARD_JS).toContain("aria-describedby");
+    expect(WIZARD_JS).toContain("if (notes.length > 0) input.setAttribute(\"aria-describedby\"");
+    expect(WIZARD_JS).toContain("if (described.length > 0) field.setAttribute(\"aria-describedby\"");
     expect(WIZARD_JS).toContain("htmlFor");
     expect(WIZARD_JS).toContain('setAttribute("aria-labelledby", "question-text")');
     expect(WIZARD_CSS).not.toMatch(/text-transform:\s*uppercase/);
@@ -79,6 +81,11 @@ describe("the page shell", () => {
     expect(WIZARD_JS).not.toContain("Leave empty for");
   });
 
+  it("FR-034: counts down to a card's waitUntil", () => {
+    expect(WIZARD_JS).toContain("card.waitUntil");
+    expect(WIZARD_JS).toContain("node.dataset.until");
+  });
+
   // Review fix round 1: a waiting step's message (protocol.ts's WizardStep.message) is terminal-only
   // text that keeps the terminal's own rerun instruction (FR-072; slack-app.ts, finish-steps.ts).
   // Pinned here so the page cannot start rendering it without this test being touched too; the
@@ -106,5 +113,48 @@ describe("the page shell", () => {
     expect(strings.join(" ")).not.toMatch(/\bFinished\b/);
     const entries: CopyEntry[] = strings.map((text, index) => ({ where: `page string ${index}`, text, context: /Lost the connection/.test(text) ? "lost-connection" : "page", failedRun: true }));
     expect(lintCopy(entries)).toEqual([]);
+  });
+});
+
+describe("spec 048 phase 2: the settings screen", () => {
+  it("FR-020: shows the Recommended settings above the fields", () => {
+    expect(WIZARD_JS).toContain('el("h3", "", "Recommended settings")');
+    expect(WIZARD_JS).toContain("question.summary");
+  });
+
+  it("FR-021: puts advanced fields in a collapsed Advanced settings section, opened when one of them is refused", () => {
+    expect(WIZARD_JS).toContain('el("details", "advanced")');
+    expect(WIZARD_JS).toContain('el("summary", "", "Advanced settings")');
+    expect(WIZARD_JS).toContain('(question.fields ?? []).some((each) => each.section === "advanced" && each.error)');
+  });
+
+  it("FR-022: groups fields under one heading with a fieldset and legend", () => {
+    expect(WIZARD_JS).toContain('el("fieldset", "group")');
+    expect(WIZARD_JS).toContain('el("legend", "", field.group)');
+  });
+
+  it("FR-008: a choice field is a labelled select that starts on its default", () => {
+    expect(WIZARD_JS).toContain('el("select")');
+    expect(WIZARD_JS).toContain("input.value = field.value || field.defaultValue || \"\";");
+    expect(WIZARD_JS).toContain("label.htmlFor = id;");
+  });
+
+  it("FR-011 and FR-037: the forward button carries the form's verb, and a field's link opens in a new tab", () => {
+    expect(WIZARD_JS).toContain('sendButton(() => {');
+    expect(WIZARD_JS).toContain('question.submitLabel ?? "Continue"');
+    expect(WIZARD_JS).toContain('el("a", "field-link", field.link.label)');
+  });
+
+  it("every new text the page module holds passes the copy-lint", () => {
+    const entries: CopyEntry[] = quotedStrings(WIZARD_JS).map((text) => ({ where: "page module", text, context: "page" }));
+    expect(lintCopy(entries)).toEqual([]);
+  });
+});
+
+describe("spec 048 FR-029: the plan review screen", () => {
+  it("FR-029: shows the plan as sections and a cost table, with every resource behind a link", () => {
+    expect(WIZARD_JS).toContain('el("table", "plan-table")');
+    expect(WIZARD_JS).toContain('for (const heading of ["Item", "Monthly", "Basis"])');
+    expect(WIZARD_JS).toContain('el("summary", "", "Show every resource")');
   });
 });

@@ -10,7 +10,7 @@ import type { InitStepId } from "../install-state.js";
 import type { InitEvent } from "../steps.js";
 import { journeyOf, STEP_PLAN, usualText, welcomeLines, type JourneyPhaseId } from "./journey.js";
 import type {
-  WizardCard, WizardCommand, WizardFailure, WizardHeader, WizardLink, WizardPhase, WizardQuestion, WizardResume, WizardSnapshot, WizardState, WizardStep,
+  WizardCard, WizardCommand, WizardFailure, WizardHeader, WizardLink, WizardPhase, WizardPlan, WizardQuestion, WizardResume, WizardSnapshot, WizardState, WizardStep,
 } from "./protocol.js";
 
 /** FR-037: every link the page shows says it opens in a new tab and to come back. */
@@ -41,12 +41,14 @@ export interface WizardHub {
   subscribe(listener: WizardListener): () => void;
   /** How many pages are connected now (their event streams). */
   connected(): number;
+  /** Resolves when the first page has connected its event stream. */
+  whenConnected(): Promise<void>;
   /** One line for the log pane (the same line `agentx init` writes to stderr). */
   log(line: string): void;
   /** The checklist, in the order the steps run, before any of them has. */
   setSteps(steps: ReadonlyArray<{ id: InitStepId; title: string }>): void;
   applyEvent(event: InitEvent): void;
-  showPlan(text: string): void;
+  showPlan(plan: WizardPlan): void;
   showResume(resume: WizardResume): void;
   /** Shows a card, or replaces the one with the same id where it stands. */
   showCard(card: WizardCard): void;
@@ -65,6 +67,9 @@ export interface WizardHub {
   setStage(stage: JourneyPhaseId): void;
   /** FR-001: the account and region, once the install knows them. */
   setPlace(place: { account: string; region: string }): void;
+  /** Spec 048 FR-020: a Change answers (or a first settings submission) can rename the install;
+   * the header follows it from then on. */
+  setInstallName(name: string): void;
   /** FR-060: a failure in three parts, shown instead of the run going on. */
   showFailure(failure: WizardFailure): void;
   /** Drops the failure: the operator is trying again. */
@@ -132,9 +137,10 @@ export function createWizardHub(env: string, options: { now?: () => number; logP
   let phase: WizardPhase = "running";
   let stage: JourneyPhaseId = "get-started";
   let steps: WizardStep[] = [];
-  let header: WizardHeader = { installName: env };
+  let installName = env;
+  let header: WizardHeader = { installName };
   let question: WizardQuestion | undefined;
-  let plan: string | undefined;
+  let plan: WizardPlan | undefined;
   let resume: WizardResume | undefined;
   let outcome: string | undefined;
   let cards: WizardCard[] = [];
@@ -143,6 +149,8 @@ export function createWizardHub(env: string, options: { now?: () => number; logP
   let commands: WizardCommand[] | undefined;
   const log: string[] = [];
   const listeners = new Set<WizardListener>();
+  let firstConnection: () => void = () => undefined;
+  const connectedOnce = new Promise<void>((resolvePromise) => { firstConnection = resolvePromise; });
   let pending: Pending | undefined;
   let closed = false;
   let closeWanted: () => void = () => undefined;
@@ -209,9 +217,11 @@ export function createWizardHub(env: string, options: { now?: () => number; logP
     snapshot: () => ({ ...state(), log: log.slice(-LOG_BACKLOG) }),
     subscribe(listener) {
       listeners.add(listener);
+      firstConnection();
       return () => listeners.delete(listener);
     },
     connected: () => listeners.size,
+    whenConnected: () => connectedOnce,
     log: appendLog,
     setSteps(next) {
       steps = next.map((step) => ({ id: step.id, title: step.title, status: "pending", ...planFields(step.id) }));
@@ -232,7 +242,7 @@ export function createWizardHub(env: string, options: { now?: () => number; logP
         case "step-failed": return changeStep(event.id, event.title, { status: "failed" });
       }
     },
-    showPlan(text) { plan = text; publish(); },
+    showPlan(next) { plan = next; publish(); },
     showResume(next) { resume = next; publish(); },
     showCard(next) {
       let shown = next;
@@ -263,7 +273,8 @@ export function createWizardHub(env: string, options: { now?: () => number; logP
       publish();
     },
     setStage(next) { stage = next; publish(); },
-    setPlace(place) { header = { installName: env, account: place.account, region: place.region }; publish(); },
+    setPlace(place) { header = { installName, account: place.account, region: place.region }; publish(); },
+    setInstallName(name) { installName = name; header = { ...header, installName: name }; publish(); },
     showFailure(next) {
       if (next.link === undefined || isShowableLink(next.link.url)) {
         failure = next;

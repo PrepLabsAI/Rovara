@@ -20,7 +20,16 @@ export interface WizardChoice { value: string; label: string }
 export interface WizardButton { value: string; label: string; primary: boolean }
 
 /** One field of a form question. A masked field never carries a value back to the page. */
-export interface WizardField { name: string; label: string; why?: string; example?: string; hint?: string; masked?: boolean; value?: string; error?: string }
+export interface WizardField {
+  name: string; label: string; why?: string; example?: string; hint?: string; masked?: boolean; value?: string; error?: string;
+  /** A choice field's options and the one an empty answer means. */
+  choices?: WizardChoice[];
+  defaultValue?: string;
+  section?: "advanced";
+  group?: string;
+  /** Where the value can be copied from (FR-033). */
+  link?: WizardLink;
+}
 
 export interface WizardQuestion {
   /** Fresh per question, and again after an inline rejection, so a stale page cannot answer twice. */
@@ -47,6 +56,10 @@ export interface WizardQuestion {
   error?: string;
   /** form: its fields, in order. The answer is a JSON object of field name to value. */
   fields?: WizardField[];
+  /** form: "Recommended settings" lines (FR-020). */
+  summary?: string[];
+  /** form: the forward button's label; "Continue" when absent. */
+  submitLabel?: string;
 }
 
 export type StepStatus = "pending" | "skipped" | "running" | "done" | "waiting" | "failed";
@@ -77,7 +90,7 @@ export interface WizardResume {
 /** A status card's id: one card per id, and a newer card with the same id replaces it in place.
  * Phase 3 appends the finishing screens' ids. */
 export type CardId =
-  | "aws" | "prerequisites" | "github" | "slack" | "slack-urls"
+  | "release" | "aws" | "aws-signin" | "account-checks" | "prerequisites" | "github" | "slack" | "slack-urls"
   // Phase 3's finishing screens, appended.
   | "admin" | "project" | "channel" | "connectors" | "alerts" | "reply" | "ready";
 
@@ -87,6 +100,16 @@ export type CardStatus = "info" | "running" | "waiting" | "ok" | "failed";
  * machine's `http://127.0.0.1:<port>/` is ever shown (state.ts's isShowableLink). `note` says it
  * opens in a new tab and to come back (FR-037). */
 export interface WizardLink { url: string; label: string; note?: string }
+
+/** Spec 048 FR-029: the plan as the page shows it. `resources` is "Show every resource"; it (and
+ * nothing else here) carries stack, role and secret names, so `copy-lint.ts`'s `stateEntries` reads
+ * it as technical detail rather than page copy. */
+export interface WizardPlan {
+  intro: string;
+  sections: Array<{ title: string; lines: string[] }>;
+  cost: { rows: Array<{ item: string; monthly: string; basis: string }>; total: string; usage: string };
+  resources: string[];
+}
 
 /** A command shown with a copy button: only on the ready screen and after Stop for now (FR-061).
  * `group` is the subheading it sits under; the page starts a new one where the group changes. */
@@ -107,6 +130,8 @@ export interface WizardCard {
   /** Technical details, shown collapsed: raw messages, IDs, ARNs (FR-027, FR-060). */
   details?: string[];
   commands?: WizardCommand[];
+  /** FR-034: an ISO time the page counts down to. */
+  waitUntil?: string;
 }
 
 /** FR-001: the slim header. */
@@ -120,6 +145,8 @@ export interface WizardFailure { title: string; what: string; next: string; deta
 export type WizardPhase = "running" | "finished" | "paused" | "failed";
 
 export interface WizardState {
+  /** The name the run started with; frozen at that value even after a rename (spec 048 FR-020).
+   * The page shows the current name from `header.installName`, which `setInstallName` updates. */
   env: string;
   phase: WizardPhase;
   steps: WizardStep[];
@@ -133,7 +160,7 @@ export interface WizardState {
   welcome?: string[];
   question?: WizardQuestion;
   /** `confirmInstallPlan`'s priced plan, shown as the review screen (FR-005). */
-  plan?: string;
+  plan?: WizardPlan;
   resume?: WizardResume;
   /** The connect and finishing screens' cards, in the order each first appeared. */
   cards?: WizardCard[];
