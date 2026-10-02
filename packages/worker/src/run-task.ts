@@ -10,6 +10,7 @@ import {
   devcontainerPaths,
   ensureDevcontainer,
   preparedDevcontainerTarget,
+  workspaceRelativeCommand,
   type DevcontainerCli,
   type DevcontainerPaths,
 } from "./devcontainer.js";
@@ -125,6 +126,8 @@ export async function runTaskInvocation(
       signal,
     ),
     onDiagnostic,
+    // The agent's shell is the devcontainer's, where the repository is at its container path (Minor 11).
+    ...(containerPaths === undefined ? {} : { canonicalCommand: (command: string) => workspaceRelativeCommand(command, containerPaths, canonicalRoot) }),
   });
   let checkPlan: CheckPlan | undefined;
   let reportedChecks: CheckReport | undefined;

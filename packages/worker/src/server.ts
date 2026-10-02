@@ -178,7 +178,7 @@ async function executeInBackground(invocation: WorkerInvocation, state: WorkerSe
  * broker keeps the regression standing. No other failure sends a result.
  */
 function checksResult(error: unknown): { result?: { checks: unknown } } {
-  const checks = typeof error === "object" && error !== null && "checks" in error ? (error as { checks: unknown }).checks : undefined;
+  const checks = typeof error === "object" && error !== null && "checks" in error ? error.checks : undefined;
   return checks === undefined ? {} : { result: { checks } };
 }
 

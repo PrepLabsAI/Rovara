@@ -135,7 +135,7 @@ async function publishAnswer(h: Harness, publishChecks?: CheckEntry[]): Promise<
     },
   });
   expect(callback.status).toBe(200);
-  return callback.body as Record<string, unknown>;
+  return callback.body;
 }
 
 function sentToGitHub(h: Harness): Record<string, unknown> {

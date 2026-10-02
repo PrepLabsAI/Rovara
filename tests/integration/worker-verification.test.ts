@@ -306,6 +306,14 @@ describe("AgentX checks the agent's work when it finishes (spec 051 Task 4)", ()
     expect(fake.agentCalls).toEqual([]);
   });
 
+  it("7b. every check left unrun by the budget is not_verified/stopped, never no_checks, so Slack gives no readiness advice (Minor 6)", async () => {
+    const fake = fakeRunners();
+    const run = await runTask({ steps: [fauxAssistantMessage("Done.")], readiness: [lint], runners: fake.runners, budgets: [1] });
+    expect(fake.projectCalls).toEqual([]);
+    expect(run.report).toMatchObject({ status: "not_verified", notVerifiedReason: "stopped", source: "project" });
+    expect(run.report!.checks).toEqual([expect.objectContaining({ class: "not_rerun" })]);
+  });
+
   it("8. an old broker sends no readiness: the agent's own test commands are the checks (Review Focus 5)", async () => {
     const fake = fakeRunners({ agent: [passedRun] });
     const run = await runTask({

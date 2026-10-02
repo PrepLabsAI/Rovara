@@ -1,8 +1,8 @@
-import { basename } from "node:path";
+import { dirname } from "node:path";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { parseAgentClaim, redactText, type CheckReport, type SwebenchStopReason } from "@agentx/contracts";
 import { recorderFingerprint } from "../artifacts.js";
-import type { DevcontainerPaths } from "../devcontainer.js";
+import { workspaceRelativeCommand, type DevcontainerPaths } from "../devcontainer.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "../pi-session.js";
 import { ToolLoopGuard } from "../tool-loop-guard.js";
 import { createCheckRunners, planChecks, type CheckRunners } from "../verification/checks.js";
@@ -163,13 +163,10 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
 /**
  * The agent writes `cd /testbed && pytest`, a path only the container has. The run's root, where the agent's shell
  * starts, holds the testbed as `testbed`, so a leading `cd <containerFolder>[/sub] &&` reads as `cd testbed[/sub] &&`
- * (Ruling X). Only that exact folder, then a `/`, a space or the end, so `/testbedX` stays out; the matcher then applies
- * its own safe-path rule to `sub`, and the replay's realpath containment refuses a link out of the testbed.
+ * (Ruling X); the rewrite is the one a coding task's devcontainer gets.
  */
 export function testbedRelativeCommand(command: string, paths: Pick<DevcontainerPaths, "hostFolder" | "containerFolder">): string {
-  const folder = basename(paths.hostFolder);
-  const escaped = paths.containerFolder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return command.replace(new RegExp(`^( *cd +)${escaped}(?=/| )(/?\\S*)`, "s"), (_match, head: string, sub: string) => `${head}${folder}${sub}`);
+  return workspaceRelativeCommand(command, paths, dirname(paths.hostFolder));
 }
 
 function assistantEnd(event: unknown): { stopReason: string; errorMessage?: string } | undefined {
