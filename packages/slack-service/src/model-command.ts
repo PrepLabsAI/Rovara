@@ -24,7 +24,8 @@ export function modelOptionsMessage(options: ProjectModelOptions, introduction =
     introduction,
     ...options.approved.map((model) => {
       const selected = `${model.provider}\0${model.modelId}` === currentKey ? " _(current)_" : "";
-      return `• ${escapeText(modelName(model))} — \`${escapeText(model.provider)}/${escapeText(model.modelId)}\`${selected}`;
+      const thinking = model.thinkingLevel === undefined ? "" : ` (thinking: ${model.thinkingLevel})`;
+      return `• ${escapeText(modelName(model))}${thinking} — \`${escapeText(model.provider)}/${escapeText(model.modelId)}\`${selected}`;
     }),
     "Choose one with `@agentx use <name>`.",
   ].join("\n");

@@ -23,6 +23,7 @@ const deployment: SwebenchDeployment = {
   runnerImage,
   defaultModel: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-deployment" },
   environment: { PI_CACHE_RETENTION: "long" },
+  runnerFeatures: ["model.thinkingLevel"],
 };
 
 beforeAll(async () => {
@@ -30,7 +31,7 @@ beforeAll(async () => {
 });
 
 /** A broker with SWE-bench runs installed, a bound channel, and the launch files it writes. */
-async function evalBroker(options: { installed?: boolean; models?: unknown; startExecution?: () => Promise<void> } = {}) {
+async function evalBroker(options: { installed?: boolean; models?: unknown; startExecution?: () => Promise<void>; runnerFeatures?: string[] } = {}) {
   const launches = new Map<string, SwebenchLaunch>();
   const s3 = {
     send: vi.fn(async (command: { input: { Key?: string; Body?: string } }) => {
@@ -43,7 +44,7 @@ async function evalBroker(options: { installed?: boolean; models?: unknown; star
     s3,
     extra: {
       swebench: {
-        deployment: async () => (options.installed === false ? undefined : deployment),
+        deployment: async () => (options.installed === false ? undefined : { ...deployment, runnerFeatures: options.runnerFeatures ?? deployment.runnerFeatures }),
         startExecution,
       },
     },
@@ -148,6 +149,51 @@ describe("starting a run (spec 043 FR-001 to FR-006)", () => {
       .toMatchObject({ status: 400, body: { error: { message: expect.stringContaining("not approved") as unknown } } });
   });
 
+  it("carries the approved entry's thinking level into the run record and launch file, and none for an entry or default without one (spec 053)", async () => {
+    const models = {
+      default: { provider: "amazon-bedrock", modelId: "balanced", label: "Balanced" },
+      approved: [
+        { provider: "amazon-bedrock", modelId: "balanced", label: "Balanced" },
+        { provider: "amazon-bedrock", modelId: "fast", label: "Fast", thinkingLevel: "low" },
+      ],
+    };
+    const startWith = async (options: { models?: unknown; runnerFeatures?: string[] }, body: Record<string, unknown>) => {
+      const broker = await evalBroker(options);
+      await enable(broker.handler);
+      const started = await start(broker.handler, body);
+      expect(started.body).toMatchObject({ outcome: "STARTED" });
+      const runId = (started.body.run as { runId: string }).runId;
+      const stored = broker.db.get(`SWEBENCH_RUN#${runId}`, "META")!.model as Record<string, unknown>;
+      return { reply: (started.body.run as { model: Record<string, unknown> }).model, stored, launched: broker.launches.get(`evals/${runId}/launch.json`)!.run.model as Record<string, unknown> };
+    };
+    const fast = { model: { provider: "amazon-bedrock", modelId: "fast" } };
+
+    const leveled = await startWith({ models }, fast);
+    const expected = { provider: "amazon-bedrock", modelId: "fast", thinkingLevel: "low" };
+    expect(leveled).toEqual({ reply: expected, stored: expected, launched: expected });
+
+    for (const { reply, stored, launched } of [await startWith({ models }, {}), await startWith({}, {})]) {
+      for (const model of [reply, stored, launched]) expect(Object.keys(model)).not.toContain("thinkingLevel");
+    }
+    expect((await startWith({}, {})).launched).toEqual(deployment.defaultModel);
+  });
+
+  it("omits the thinking level for a runner image that does not record the feature, in the record as in the launch file (spec 053)", async () => {
+    const models = {
+      default: { provider: "amazon-bedrock", modelId: "fast", label: "Fast", thinkingLevel: "low" },
+      approved: [{ provider: "amazon-bedrock", modelId: "fast", label: "Fast", thinkingLevel: "low" }],
+    };
+    const broker = await evalBroker({ models, runnerFeatures: [] });
+    await enable(broker.handler);
+    const started = await start(broker.handler);
+    const runId = (started.body.run as { runId: string }).runId;
+    const model = { provider: "amazon-bedrock", modelId: "fast" };
+    expect(started.body).toMatchObject({ outcome: "STARTED", run: { model } });
+    expect(Object.keys((started.body.run as { model: object }).model)).not.toContain("thinkingLevel");
+    expect(broker.db.get(`SWEBENCH_RUN#${runId}`, "META")!.model).toEqual(model);
+    expect(broker.launches.get(`evals/${runId}/launch.json`)!.run.model).toEqual(model);
+  });
+
   it("fails the run and releases the lock when the state machine cannot start", async () => {
     const { handler, db } = await evalBroker({ startExecution: async () => { throw new Error("ExecutionLimitExceeded"); } });
     await enable(handler);
@@ -235,6 +281,7 @@ describe("reading the eval settings from SSM (spec 043 FR-016)", () => {
   const complete = {
     "eval/settings": JSON.stringify(deployment.settings),
     "eval/runner-image": runnerImage,
+    "eval/runner-features": JSON.stringify({ runnerImage, features: ["model.thinkingLevel"] }),
     "worker-model-provider": "amazon-bedrock",
     "worker-model-id": "us.anthropic.claude-sonnet-deployment",
     "worker-prompt-cache-retention": "long",
@@ -252,6 +299,19 @@ describe("reading the eval settings from SSM (spec 043 FR-016)", () => {
     await expect(swebenchDeploymentFromParameters(prefix, values(withoutImage))).resolves.toBeUndefined();
     await expect(swebenchDeploymentFromParameters(prefix, values({ ...complete, "eval/runner-image": "none" }))).resolves.toBeUndefined();
     await expect(swebenchDeploymentFromParameters(prefix, values({ ...complete, "eval/runner-image": "agentx-worker:latest" }))).rejects.toThrow("pinned by digest");
+  });
+
+  it("takes the runner's features only when they were recorded for the current runner image (spec 053)", async () => {
+    const features = async (entries: Record<string, string>) => (await swebenchDeploymentFromParameters(prefix, values(entries)))!.runnerFeatures;
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- destructured only to drop the key
+    const { "eval/runner-features": _features, ...withoutFeatures } = complete;
+    // A runner image released before spec 053 has no features parameter.
+    await expect(features(withoutFeatures)).resolves.toEqual([]);
+    // A features value left by an earlier image does not describe this one.
+    const otherImage = `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-worker@sha256:${"b".repeat(64)}`;
+    await expect(features({ ...complete, "eval/runner-features": JSON.stringify({ runnerImage: otherImage, features: ["model.thinkingLevel"] }) })).resolves.toEqual([]);
+    await expect(features({ ...complete, "eval/runner-features": "{not json" })).resolves.toEqual([]);
+    await expect(features({ ...complete, "eval/runner-features": JSON.stringify({ runnerImage, features: "model.thinkingLevel" }) })).resolves.toEqual([]);
   });
 
   it("answers a malformed setting as RUNTIME_UNAVAILABLE naming the parameter, so the broker's catch-all keeps the words (#48 review)", async () => {

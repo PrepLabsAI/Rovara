@@ -1,5 +1,5 @@
 import { createServer, type Server } from "node:http";
-import { AgentXError, WorkerInvocationSchema, redactText, type WorkerInvocation } from "@agentx/contracts";
+import { AgentXError, WORKER_INVOCATION_FEATURES, WORKER_PING_FEATURES_FIELD, WorkerInvocationSchema, redactText, type WorkerInvocation } from "@agentx/contracts";
 import type { OperationJournal } from "./journal.js";
 import { WorkerOperationCancelledError } from "./cancel.js";
 import {
@@ -64,6 +64,8 @@ export async function handleWorkerRequest(request: Request, state: WorkerServerS
     return response(200, {
       status: state.activeOperations.size === 0 ? "Healthy" : "HealthyBusy",
       activeOperations: state.activeOperations.size,
+      // Spec 053: the optional invocation fields this build parses; the dispatcher sends one only when listed.
+      [WORKER_PING_FEATURES_FIELD]: [...WORKER_INVOCATION_FEATURES],
     });
   }
   if (request.method === "POST" && url.pathname === "/invocations") {

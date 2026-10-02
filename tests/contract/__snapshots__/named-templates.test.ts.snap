@@ -2645,6 +2645,26 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                       {
                         "Ref": "AWS::AccountId",
                       },
+                      ":parameter/agentx/staging/eval/runner-features",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
                       ":parameter/agentx/staging/worker-image",
                     ],
                   ],

@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { build, type Metafile, type Plugin } from "esbuild";
+import { NODE_ENGINE_RANGE } from "../../packages/cli/src/node-version.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -11,6 +12,10 @@ const execFileAsync = promisify(execFile);
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
 const DEFAULT_PACKAGE_NAME = "@charterarc/agentx";
 const ENTRY_POINT = join(REPO_ROOT, "packages/cli/src/main.ts");
+// The executable: the Node version check, which loads the bundle above only once it passes (#238).
+const BIN_ENTRY_POINT = join(REPO_ROOT, "packages/cli/src/bin.ts");
+// bin.ts loads "./main.js"; in the package, that is the bundle next to it.
+const CLI_BUNDLE_NAME = "agentx-cli.mjs";
 
 // esbuild reports `args.path` with the platform's own separators, so the filter must match both
 // `/` (macOS/Linux) and `\` (Windows) between path segments. Exported so its cross-platform
@@ -18,13 +23,11 @@ const ENTRY_POINT = join(REPO_ROOT, "packages/cli/src/main.ts");
 export const ENTRY_SHEBANG_FILTER = /packages[\\/]cli[\\/]src[\\/]main\.ts$/;
 
 /**
- * main.ts starts with its own `#!/usr/bin/env node` shebang, needed when @agentx/cli's own
- * "bin" points straight at its tsc-compiled dist/main.js (tsc preserves a leading shebang
- * verbatim). esbuild *also* auto-detects and re-emits an entry point's leading shebang, so
- * bundling main.ts unchanged would duplicate it ahead of the banner below, producing two
- * "#!/usr/bin/env node" lines - the second one is invalid JS and crashes at import time. Strip
- * just the entry file's shebang line before esbuild sees it, so the banner's own shebang is the
- * only one in the bundle.
+ * main.ts starts with its own `#!/usr/bin/env node` shebang, needed when its tsc-compiled
+ * dist/main.js is run directly (tsc preserves a leading shebang verbatim). esbuild *also*
+ * auto-detects and re-emits an entry point's leading shebang. The bundle built from main.ts is not
+ * the executable (bin/agentx.mjs, built from bin.ts, is), so strip just the entry file's shebang
+ * line before esbuild sees it and the bundle starts with the banner below.
  */
 function stripEntryShebang(): Plugin {
   return {
@@ -35,6 +38,19 @@ function stripEntryShebang(): Plugin {
         const stripped = text.startsWith("#!") ? text.slice(text.indexOf("\n") + 1) : text;
         return { contents: stripped, loader: "ts" };
       });
+    },
+  };
+}
+
+/**
+ * bin.ts's `import("./main.js")` becomes `import("./agentx-cli.mjs")`, left for Node to load at run
+ * time, so bin/agentx.mjs holds only the version check and the bundle loads after it passes.
+ */
+function cliBundleAsExternal(): Plugin {
+  return {
+    name: "cli-bundle-as-external",
+    setup(pluginBuild) {
+      pluginBuild.onResolve({ filter: /^\.\/main\.js$/ }, () => ({ path: `./${CLI_BUNDLE_NAME}`, external: true }));
     },
   };
 }
@@ -116,7 +132,7 @@ export async function thirdPartyNotices(metafile: Metafile, root: string): Promi
   const text = [
     "Third-party notices for the AgentX CLI",
     "",
-    "bin/agentx.mjs bundles the open-source packages below. Each is listed with its version, its",
+    `bin/${CLI_BUNDLE_NAME} bundles the open-source packages below. Each is listed with its version, its`,
     "license, and the license text it ships.",
     "",
     ...sections,
@@ -128,7 +144,8 @@ function readmeText(name: string): string {
   return [
     `# ${name}`,
     "",
-    "AgentX installer and administration CLI, bundled as a single self-contained script with no",
+    "AgentX installer and administration CLI, bundled as one self-contained script",
+    "(bin/agentx-cli.mjs) behind a small entry that checks the Node version, with no",
     "runtime dependencies of its own. See LICENSE for terms (Functional Source License 1.1, ALv2",
     "future license). The notices and license texts of the open-source packages the bundle",
     "includes are in THIRD_PARTY_NOTICES.",
@@ -145,7 +162,8 @@ function readmeText(name: string): string {
 
 /**
  * Builds the publishable npm package for the AgentX CLI: a single esbuild bundle at
- * `bin/agentx.mjs` (no `dependencies` in package.json, because everything is bundled), a generated
+ * `bin/agentx-cli.mjs` (no `dependencies` in package.json, because everything is bundled), the
+ * executable `bin/agentx.mjs` that checks the Node version and then loads that bundle, a generated
  * `package.json` and `README.md`, then packs it with `npm pack` and returns the tarball path.
  */
 export async function packCli(input: PackCliInput): Promise<PackCliResult> {
@@ -158,7 +176,7 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
   await rm(packageDir, { recursive: true, force: true });
   await mkdir(binDir, { recursive: true });
 
-  const bundlePath = join(binDir, "agentx.mjs");
+  const bundlePath = join(binDir, CLI_BUNDLE_NAME);
   const { metafile } = await build({
     entryPoints: [ENTRY_POINT],
     // The inputs list names every bundled package, for THIRD_PARTY_NOTICES.
@@ -169,22 +187,35 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
     target: "node22",
     outfile: bundlePath,
     define: { __AGENTX_VERSION__: JSON.stringify(input.version) },
-    // Bundled CommonJS dependencies call `require`, which a native ESM module doesn't have; this
-    // banner also doubles as the executable's shebang.
+    // Bundled CommonJS dependencies call `require`, which a native ESM module doesn't have.
     banner: {
-      js: "#!/usr/bin/env node\nimport { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);",
+      js: "import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);",
     },
     legalComments: "none",
     plugins: [stripEntryShebang()],
   });
-  await chmod(bundlePath, 0o755);
+
+  // The executable runs on whatever Node the user has, so it is built for ES2020 (an old Node can
+  // parse it) and holds only the version check; esbuild keeps bin.ts's own shebang.
+  const executablePath = join(binDir, "agentx.mjs");
+  await build({
+    entryPoints: [BIN_ENTRY_POINT],
+    bundle: true,
+    platform: "node",
+    format: "esm",
+    target: "es2020",
+    outfile: executablePath,
+    legalComments: "none",
+    plugins: [cliBundleAsExternal()],
+  });
+  await chmod(executablePath, 0o755);
 
   const manifest = {
     name,
     version: input.version,
     type: "module",
     bin: { agentx: "bin/agentx.mjs" },
-    engines: { node: ">=22.19.0" },
+    engines: { node: NODE_ENGINE_RANGE },
     license: "FSL-1.1-ALv2",
     files: ["bin", "README.md", "LICENSE", "THIRD_PARTY_NOTICES"],
     description: "AgentX installer and administration CLI",

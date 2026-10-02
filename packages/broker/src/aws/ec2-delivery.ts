@@ -1,6 +1,7 @@
 import {
   WORKER_INVOKE_AUTHORIZATION_SCHEME,
   agentXError,
+  modelSelectionFor,
   workerInvokeToken,
   workerInvokeTokenPayload,
   type Ec2RuntimeBinding,
@@ -25,6 +26,11 @@ export interface Ec2DeliveryDependencies {
   post: (url: string, init: { authorization: string; body: string }) => Promise<{ status: number; body: string }>;
   /** Records a progress event on the operation, once per outbox record. */
   progress: (record: Ec2OutboxRecord, message: string) => Promise<void>;
+  /**
+   * GET on the worker's /ping; resolves to the invocation features it reports (spec 053), none for a
+   * worker built before them. Without it, no optional field is sent.
+   */
+  workerFeatures?: (url: string) => Promise<readonly string[]>;
   now?: () => number;
 }
 
@@ -42,6 +48,7 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
       await dependencies.progress(record, STARTING_COMPUTE_MESSAGE);
       return "WAITING_FOR_SESSION";
     }
+    const sent = await forWorker(invocation, `http://${session.privateIp}:${WORKER_PORT}/ping`, dependencies.workerFeatures);
     const payload = workerInvokeTokenPayload({
       workspaceId: record.workspaceId,
       generation: session.generation,
@@ -52,11 +59,85 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
     const signature = await dependencies.sign(Buffer.from(payload, "ascii"));
     const response = await dependencies.post(`http://${session.privateIp}:${WORKER_PORT}/invocations`, {
       authorization: `${WORKER_INVOKE_AUTHORIZATION_SCHEME} ${workerInvokeToken(payload, signature)}`,
-      body: JSON.stringify(invocation),
+      body: JSON.stringify(sent),
     });
     if (response.status >= 300) {
       throw agentXError("RUNTIME_UNAVAILABLE", `EC2 worker returned HTTP ${response.status}: ${response.body.slice(0, 512)}`);
     }
     return "DELIVERED";
   };
+}
+
+/**
+ * Spec 053: the invocation as the worker can parse it. Worker payloads are strict and a running
+ * worker keeps its image after a release (or after a worker-image rollback), so a thinking level goes
+ * only to a worker whose /ping lists it. A task's level is dropped and the worker runs at its own
+ * default level. Prepare, publish and maintain carry the whole stored project definition, whose
+ * models carry levels the worker does not use there, so those are stripped. The invoke token signs the operation,
+ * not the payload, so dropping a field leaves it valid. A ping that fails fails the attempt: the
+ * worker journals a hash of the whole invocation, so a retry must send what the first attempt would
+ * have, and a blip must not run a capable worker at the default level.
+ */
+async function forWorker(
+  invocation: WorkerInvocation,
+  pingUrl: string,
+  workerFeatures: Ec2DeliveryDependencies["workerFeatures"],
+): Promise<WorkerInvocation> {
+  const requestedThinkingLevel = carriedThinkingLevel(invocation);
+  if (requestedThinkingLevel === undefined) return invocation;
+  let features: readonly string[] = [];
+  if (workerFeatures !== undefined) {
+    try {
+      features = await workerFeatures(pingUrl);
+    } catch (error) {
+      throw agentXError("RUNTIME_UNAVAILABLE", `could not ask the EC2 worker which invocation fields it parses: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512));
+    }
+  }
+  const sent = withoutUnparsedFields(invocation, features);
+  if (sent === invocation) return invocation;
+  console.log(JSON.stringify({
+    component: "dispatcher",
+    event: "dispatch.thinking_level_omitted",
+    reason: workerFeatures === undefined ? "no-probe" : "worker-lacks-feature",
+    requestedThinkingLevel,
+    operationId: invocation.operationId,
+    workspaceId: invocation.workspaceId,
+  }));
+  return sent;
+}
+
+/** The first thinking level the invocation carries: a task's model, or a project definition's models. */
+function carriedThinkingLevel(invocation: WorkerInvocation): string | undefined {
+  if (invocation.kind === "task") return invocation.payload.model?.thinkingLevel;
+  if (!carriesProject(invocation)) return undefined;
+  const models = invocation.payload.project.models;
+  if (models === undefined) return undefined;
+  return [models.default, ...models.approved].find((model) => model.thinkingLevel !== undefined)?.thinkingLevel;
+}
+
+function withoutUnparsedFields(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind === "task") {
+    if (invocation.payload.model === undefined) return invocation;
+    const model = modelSelectionFor(invocation.payload.model, features);
+    return model === invocation.payload.model ? invocation : { ...invocation, payload: { ...invocation.payload, model } };
+  }
+  if (!carriesProject(invocation) || features.includes("model.thinkingLevel")) return invocation;
+  const models = invocation.payload.project.models;
+  if (models === undefined) return invocation;
+  const project = { ...invocation.payload.project, models: { default: withoutLevel(models.default), approved: models.approved.map(withoutLevel) } };
+  // Identical branches so each keeps its own payload type within the discriminated union.
+  if (invocation.kind === "prepare") return { ...invocation, payload: { ...invocation.payload, project } };
+  if (invocation.kind === "publish") return { ...invocation, payload: { ...invocation.payload, project } };
+  return { ...invocation, payload: { ...invocation.payload, project } };
+}
+
+/** Prepare, publish and maintain carry the whole stored project definition; cancel, resume and close carry none. */
+function carriesProject(invocation: WorkerInvocation): invocation is Extract<WorkerInvocation, { kind: "prepare" | "publish" | "maintain" }> {
+  return invocation.kind === "prepare" || invocation.kind === "publish" || invocation.kind === "maintain";
+}
+
+function withoutLevel<Model extends { thinkingLevel?: unknown }>(model: Model): Omit<Model, "thinkingLevel"> {
+  const rest: Model = { ...model };
+  delete rest.thinkingLevel;
+  return rest;
 }

@@ -32,7 +32,7 @@ export async function createConfiguredModelRuntime(selected: ModelIdentifier & {
   const routing = openRouterRouting(environment);
   const runtime = await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null, credentials: new InMemoryCredentialStore() });
   const model = openRouterModel(selected.modelId);
-  if (!model.reasoning && selected.thinkingLevel && selected.thinkingLevel !== "off") throw agentXError("CONFIG_INVALID", "the selected OpenRouter model does not support reasoning; set thinkingLevel to off");
+  if (!model.reasoning && selected.thinkingLevel && selected.thinkingLevel !== "off") throw agentXError("CONFIG_INVALID", "the selected model does not support reasoning; set thinkingLevel to off");
   const key = await readOpenRouterKey(environment.AGENTX_OPENROUTER_SECRET_ARN ?? "", options.readSecret);
   runtime.registerProvider("openrouter", {
     baseUrl: "https://openrouter.ai/api/v1", api: "openai-completions",

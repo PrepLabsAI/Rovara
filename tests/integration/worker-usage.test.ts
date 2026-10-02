@@ -22,9 +22,11 @@ describe("worker usage telemetry", () => {
     const cancellationController = new WorkerCancellationController();
     const execution = runTaskInvocation(invocation, {
       rootPath,
+      // The invocation carried a level, so the control plane parses one in the usage event (spec 053).
       model: {
         provider: "fixture",
         modelId: "configured-model",
+        thinkingLevel: "high",
         cacheRetention: "long",
       },
       piAdapter: usageAdapter(rootPath, invocation.operationId, outcome, cancellationController),
@@ -51,12 +53,37 @@ describe("worker usage telemetry", () => {
       outcome,
       provider: "fixture",
       modelId: "fixture?token=[REDACTED]",
+      thinkingLevel: "high",
       cacheRetention: "long",
       tokens: { input: 100, output: 50, cacheRead: 80, cacheWrite: 20, total: 250 },
       cacheReadRatio: 0.4,
       costUsd: 0.0123,
     });
     expect(JSON.stringify({ events: usageEvents, artifacts: usageArtifacts })).not.toContain("top-secret");
+  });
+
+  it("keeps the level out of the usage event when the invocation carried none, and records it in usage.json (spec 053)", async () => {
+    // A task with no level may come from a control plane built before the field, whose usage schema
+    // is strict: the event would be refused and the usage row lost. usage.json is not parsed by it.
+    const rootPath = await preparedRoot();
+    const invocation = taskInvocation();
+    const events: WorkerEvent[] = [];
+    const artifacts: WorkerArtifact[] = [];
+    await runTaskInvocation(invocation, {
+      rootPath,
+      model: { provider: "fixture", modelId: "configured-model", cacheRetention: "long" },
+      piAdapter: usageAdapter(rootPath, invocation.operationId, "SUCCEEDED", new WorkerCancellationController()),
+      eventSink: async (batch) => { events.push(...batch); },
+      artifactSink: async (artifact) => { artifacts.push(artifact); },
+    });
+    const usageEvents = events.filter((event) => event.type === "usage");
+    expect(usageEvents).toHaveLength(1);
+    const artifactPayload = JSON.parse(artifacts.find((artifact) => artifact.name === "usage.json")!.content) as Record<string, unknown>;
+    expect(artifactPayload).toMatchObject({ provider: "fixture", thinkingLevel: "high", cacheRetention: "long" });
+    expect(usageEvents[0]!.payload).not.toHaveProperty("thinkingLevel");
+    const withoutLevel: Record<string, unknown> = { ...artifactPayload };
+    delete withoutLevel.thinkingLevel;
+    expect(usageEvents[0]!.payload).toEqual(withoutLevel);
   });
 
   it("matches Pi's short fallback and reports a finite ratio for a zero-token session", () => {
@@ -137,7 +164,7 @@ function usageAdapter(
           await writeFile(join(rootPath, "task-complete.txt"), "complete\n");
         },
         async abort() {},
-        getModel: () => ({ provider: "fixture", modelId: "fixture?token=top-secret" }),
+        getModel: () => ({ provider: "fixture", modelId: "fixture?token=top-secret", thinkingLevel: "high" as const }),
         getSessionStats: () => ({
           sessionFile,
           sessionId: "usage-session",

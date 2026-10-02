@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { parse } from "acorn";
 import { build } from "esbuild";
 import { afterEach, describe, expect, it } from "vitest";
+import { NODE_ENGINE_RANGE, nodeVersionProblem } from "../../packages/cli/src/node-version.js";
 import { ENTRY_SHEBANG_FILTER, packCli, parsePackCliArgs, thirdPartyNotices } from "../../scripts/release/pack-cli.js";
 
 const run = promisify(execFile);
@@ -43,16 +45,31 @@ describe("publishable CLI package", () => {
     const bin = join(project, "node_modules", ".bin", "agentx");
     expect((await run(bin, ["--version"])).stdout.trim()).toBe("1.2.3");
     const help = (await run(bin, ["--help"])).stdout;
+    // Issue #238: under the Node 20 that AWS CloudShell ships, the installed executable stops with
+    // the plain message before the bundled CLI (and its AWS SDK) loads, and runs no command.
+    const fakeNode20 = `data:text/javascript,${encodeURIComponent('Object.defineProperty(process, "versions", { value: { ...process.versions, node: "20.20.2" }, configurable: true });')}`;
+    const old = await run(bin, ["--version"], { env: { ...process.env, NODE_OPTIONS: `--import ${fakeNode20}`, AWS_EXECUTION_ENV: "CloudShell" } })
+      .then(() => undefined, (error: { code?: number; stdout?: string; stderr?: string }) => error);
+    expect(old, "the installed executable must fail under Node 20").toBeDefined();
+    expect(old!.code).toBe(1);
+    expect(old!.stdout).toBe("");
+    expect(old!.stderr).toBe(`${nodeVersionProblem("20.20.2", { AWS_EXECUTION_ENV: "CloudShell" })}\n`);
+    // The executable is a small entry an old Node can parse; the CLI itself is the one bundle next to it.
+    const entry = await readFile(join(project, "node_modules", "@charterarc", "agentx", "bin", "agentx.mjs"), "utf8");
+    expect(() => parse(entry, { ecmaVersion: 2020, sourceType: "module", allowHashBang: true })).not.toThrow();
+    expect(entry).toContain("./agentx-cli.mjs");
+    expect(entry.length).toBeLessThan(20_000);
+    expect(manifest.engines).toEqual({ node: NODE_ENGINE_RANGE });
     expect(help).toContain("env");
     expect(help).toContain("admin");
 
-    // FR-060: the install page is inside the installed package's one bundled file, and init's
-    // help names both ways to ask.
+    // FR-060: the install page is inside the installed package's one CLI bundle
+    // (bin/agentx-cli.mjs, which bin/agentx.mjs loads), and init's help names both ways to ask.
     const initHelp = (await run(bin, ["init", "--help"])).stdout;
     expect(initHelp).toContain("--ui");
     expect(initHelp).toContain("--no-ui");
     expect(initHelp).toContain("the default in an interactive terminal that can open a browser");
-    const bundle = await readFile(join(project, "node_modules", "@charterarc", "agentx", "bin", "agentx.mjs"), "utf8");
+    const bundle = await readFile(join(project, "node_modules", "@charterarc", "agentx", "bin", "agentx-cli.mjs"), "utf8");
     expect(bundle).toContain("<title>Install AgentX</title>");
     expect(bundle).toContain("x-agentx-wizard-token");
     expect(bundle).toContain("renderPanelCards(state);");

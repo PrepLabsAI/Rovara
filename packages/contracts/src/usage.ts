@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ThinkingLevelSchema, type ThinkingLevel } from "./models.js";
 
 export type PiCacheRetention = "short" | "long";
 export type TaskUsageOutcome = "SUCCEEDED" | "FAILED" | "CANCELLED";
@@ -8,6 +9,7 @@ export interface TaskUsageTelemetry {
   outcome: TaskUsageOutcome;
   provider: string;
   modelId: string;
+  thinkingLevel?: ThinkingLevel;
   cacheRetention: PiCacheRetention;
   tokens: {
     input: number;
@@ -34,6 +36,7 @@ export const TaskUsageTelemetrySchema = z.object({
   outcome: z.enum(["SUCCEEDED", "FAILED", "CANCELLED"]),
   provider: z.string().min(1).max(128),
   modelId: z.string().min(1).max(256),
+  thinkingLevel: ThinkingLevelSchema.optional(),
   cacheRetention: z.enum(["short", "long"]),
   tokens: z.object({ input: TokenCount, output: TokenCount, cacheRead: TokenCount, cacheWrite: TokenCount, total: TokenCount }).strict(),
   cacheReadRatio: z.number().min(0).max(1),
@@ -47,7 +50,7 @@ export function effectiveCacheRetention(value: unknown): PiCacheRetention {
 
 export function createTaskUsageTelemetry(
   stats: UsageStats,
-  model: { provider: string; modelId: string; cacheRetention?: PiCacheRetention },
+  model: { provider: string; modelId: string; thinkingLevel?: ThinkingLevel; cacheRetention?: PiCacheRetention },
   outcome: TaskUsageOutcome,
 ): TaskUsageTelemetry {
   if (!model.provider || !model.modelId) throw new Error("usage telemetry requires a provider and model ID");
@@ -64,6 +67,7 @@ export function createTaskUsageTelemetry(
     outcome,
     provider: model.provider,
     modelId: model.modelId,
+    ...(model.thinkingLevel === undefined ? {} : { thinkingLevel: model.thinkingLevel }),
     cacheRetention: effectiveCacheRetention(model.cacheRetention),
     tokens,
     cacheReadRatio: inputSideTokens === 0 ? 0 : tokens.cacheRead / inputSideTokens,

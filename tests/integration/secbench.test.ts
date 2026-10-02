@@ -358,7 +358,7 @@ function editingAdapter(testbed: string, observed: { prompt?: string }, files: R
         },
         async steer() {},
         async abort() {},
-        getModel: () => ({ provider: "amazon-bedrock", modelId: "fixture-model" }),
+        getModel: () => ({ provider: "amazon-bedrock", modelId: "fixture-model", thinkingLevel: "medium" as const }),
         getSessionStats: () => ({
           sessionFile, sessionId: "fake", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2,
           tokens: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, total: 100 }, cost: 0.05,

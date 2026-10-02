@@ -40,6 +40,7 @@ export function swebenchNames(naming: AgentXNaming) {
     logGroupName: naming.ec2.workerLogGroupName.replace(/\/worker$/, "/swebench"),
     settingsParameterName: `${naming.ec2.workerSettingsPrefix}${SWEBENCH_SETTING_PARAMETERS.settings}`,
     runnerImageParameterName: `${naming.ec2.workerSettingsPrefix}${SWEBENCH_SETTING_PARAMETERS.runnerImage}`,
+    runnerFeaturesParameterName: `${naming.ec2.workerSettingsPrefix}${SWEBENCH_SETTING_PARAMETERS.runnerFeatures}`,
   };
 }
 

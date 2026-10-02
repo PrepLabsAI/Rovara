@@ -5,8 +5,16 @@ export const ModelIdentifierSchema = z.object({
   modelId: z.string().trim().min(1).max(256),
 }).strict();
 
+export const ThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]);
+
 export const ModelRefSchema = ModelIdentifierSchema.extend({
+  thinkingLevel: ThinkingLevelSchema.optional(),
   label: z.string().trim().min(1).max(64).optional(),
+}).strict();
+
+/** A model plus the thinking level to run it at, as carried by an invocation or an eval run. */
+export const ModelSelectionSchema = ModelIdentifierSchema.extend({
+  thinkingLevel: ThinkingLevelSchema.optional(),
 }).strict();
 
 export const ProjectModelsSchema = z.object({
@@ -43,6 +51,8 @@ export const ProjectModelOptionsSchema = z.object({
 
 export const ProjectModelSelectionRequestSchema = ModelIdentifierSchema;
 
+export type ThinkingLevel = z.infer<typeof ThinkingLevelSchema>;
+export type ModelSelection = z.infer<typeof ModelSelectionSchema>;
 export type ModelIdentifier = z.infer<typeof ModelIdentifierSchema>;
 export type ModelRef = z.infer<typeof ModelRefSchema>;
 export type ProjectModels = z.infer<typeof ProjectModelsSchema>;

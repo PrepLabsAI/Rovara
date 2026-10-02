@@ -17,8 +17,10 @@ import {
   SwebenchRunSchema,
   SwebenchStartRequestSchema,
   agentXError,
+  modelSelectionFor,
   slackThreadSubject,
   type ModelIdentifier,
+  type ModelSelection,
   type SlackRequester,
   type SlackThread,
   type SwebenchChannel,
@@ -35,6 +37,11 @@ export interface SwebenchDeployment {
   /** The worker settings' model, used when the channel's project approves none. */
   defaultModel: ModelIdentifier;
   environment: SwebenchLaunch["environment"];
+  /**
+   * Spec 053: the optional run fields the runner image's build parses, as its release recorded them;
+   * empty for an image released before them. The runner parses its run strictly.
+   */
+  runnerFeatures: readonly string[];
 }
 
 export interface SwebenchDependencies {
@@ -53,8 +60,11 @@ export interface SwebenchSlackContext {
   thread: SlackThread;
   requester: SlackRequester;
   projectName: string;
-  /** The project's approved model a run may use: the requested one if approved, else the current one; undefined when the project approves none. */
-  projectModel: (requested: ModelIdentifier | undefined) => Promise<ModelIdentifier | undefined>;
+  /**
+   * The project's approved model a run may use, with that entry's thinking level when it has one: the
+   * requested one if approved, else the current one; undefined when the project approves none.
+   */
+  projectModel: (requested: ModelIdentifier | undefined) => Promise<ModelSelection | undefined>;
 }
 
 const ACTIVE_KEY = { pk: "SWEBENCH#ACTIVE", sk: "LOCK" } as const;
@@ -124,7 +134,8 @@ export async function startSwebenchRun(dependencies: SwebenchDependencies, conte
   if (channel === undefined) {
     return { outcome: "REFUSED", reason: "NOT_ENABLED", message: "Eval runs are not enabled in this channel. An administrator can enable them with `agentx admin eval enable`." };
   }
-  const model = await context.projectModel(request.model) ?? deployment.defaultModel;
+  // The record says what the runner was given: no level when the runner image cannot parse one.
+  const model = modelSelectionFor(await context.projectModel(request.model) ?? deployment.defaultModel, deployment.runnerFeatures);
   const active = await get(dependencies, ACTIVE_KEY);
   if (active !== undefined) return refusedActive(active);
   const createdAt = now(dependencies).toISOString();
