@@ -16,8 +16,9 @@ function encodedDisplayName(name: string): string | undefined {
 export function createSignedServiceFetch(options: {
   region: string;
   credentials: Credentials;
-  thread: SlackThread;
-  userId: string;
+  /** The thread and member the request acts for; absent for the batch watcher's service-wide list. */
+  thread?: SlackThread;
+  userId?: string;
   userName?: string;
   baseFetch?: typeof fetch;
 }): typeof fetch {
@@ -31,8 +32,8 @@ export function createSignedServiceFetch(options: {
     new Headers(init?.headers).forEach((value, key) => {
       if (key !== "authorization") headers[key] = value;
     });
-    headers["x-agentx-slack-thread"] = slackThreadSubject(options.thread);
-    headers["x-agentx-slack-user"] = options.userId;
+    if (options.thread !== undefined) headers["x-agentx-slack-thread"] = slackThreadSubject(options.thread);
+    if (options.userId !== undefined) headers["x-agentx-slack-user"] = options.userId;
     const userName = options.userName ? encodedDisplayName(options.userName) : undefined;
     if (userName) headers["x-agentx-slack-user-name"] = userName;
     const body = typeof init?.body === "string" ? init.body : undefined;

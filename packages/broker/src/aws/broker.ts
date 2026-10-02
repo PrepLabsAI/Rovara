@@ -154,6 +154,7 @@ import {
   type SwebenchSlackContext,
 } from "./swebench.js";
 import { withEvalBatches, type EvalBatchDependencies } from "./eval-batch.js";
+import { listWatchedBatches, recordWatchedBatchThread, startSlackBatch, updateWatchedBatch } from "./eval-batch-service.js";
 import { batchResults, parseStartBody, requireBatchProject, showBatch, startBatch, stopBatchById } from "./eval-batch-admin.js";
 import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
 
@@ -601,8 +602,14 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
 
       // The hosted Slack orchestrator authenticates with its IAM role and acts only as a Slack thread owner.
       if (url.pathname.startsWith("/v1/service/")) {
-        const identity = await slackServiceIdentity(dependencies, request);
         const serviceUrl = new URL(`/v1${url.pathname.slice("/v1/service".length)}${url.search}`, "https://agentx.invalid");
+        // Spec 052 Task 6: the batch watcher's list is the whole Slack service's, not one thread's.
+        if (request.method === "GET" && serviceUrl.pathname === "/v1/evals/batches/active") {
+          requireSlackServiceRole(dependencies, request);
+          if (dependencies.swebench === undefined) return json({ batches: [] }, request.requestId);
+          return json(await listWatchedBatches(swebenchDependencies(dependencies), async (teamId, channelId) => (await getSlackBinding(dependencies, teamId, channelId))?.projectName), request.requestId);
+        }
+        const identity = await slackServiceIdentity(dependencies, request);
         if (request.method === "POST" && serviceUrl.pathname === "/v1/threads/workspace") {
           return json(await ensureThreadWorkspace(dependencies, identity, parseBody(request.body)), request.requestId);
         }
@@ -623,6 +630,20 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         }
         if (request.method === "POST" && serviceUrl.pathname === "/v1/evals/swebench") {
           return json(await startSwebenchRun(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId);
+        }
+        // Spec 052 FR-002 and Task 6: the Slack batch form, and the watcher's thread and posts for one batch.
+        if (request.method === "POST" && serviceUrl.pathname === "/v1/evals/batches") {
+          return json(await startSlackBatch(swebenchDependencies(dependencies), swebenchSlackContext(dependencies, identity), parseBody(request.body)), request.requestId);
+        }
+        const watchedBatch = /^\/v1\/evals\/batches\/([0-9a-f-]{36})\/(thread|watch)$/.exec(serviceUrl.pathname);
+        if (request.method === "POST" && watchedBatch?.[1] && watchedBatch[2]) {
+          const slack = identity.slack;
+          if (!slack) throw agentXError("FORBIDDEN", "Slack thread context is required");
+          const scope = { thread: slack.thread, projectName: slack.binding.projectName };
+          const swebench = swebenchDependencies(dependencies);
+          return json(watchedBatch[2] === "thread"
+            ? await recordWatchedBatchThread(swebench, scope, watchedBatch[1], parseBody(request.body))
+            : await updateWatchedBatch(swebench, scope, watchedBatch[1], parseBody(request.body)), request.requestId);
         }
         const evalRun = /^\/v1\/evals\/swebench\/([0-9a-f-]{36})$/.exec(serviceUrl.pathname);
         if (request.method === "GET" && evalRun?.[1]) {
@@ -1189,15 +1210,20 @@ async function newWorkspacePreparation(
   };
 }
 
-async function slackServiceIdentity(
-  dependencies: AwsBrokerDependencies,
-  request: AdaptedHttpRequest,
-): Promise<AuthenticatedIdentity> {
+/** The service routes' caller must be the Slack orchestrator's role. */
+function requireSlackServiceRole(dependencies: AwsBrokerDependencies, request: AdaptedHttpRequest): void {
   const configuration = dependencies.slack;
   if (!configuration) throw agentXError("NOT_FOUND", "route not found");
   if (!request.iamPrincipalArn || !isAssumedRoleOf(request.iamPrincipalArn, configuration.orchestratorRoleArn)) {
     throw agentXError("FORBIDDEN", "only the Slack orchestrator role may call service routes");
   }
+}
+
+async function slackServiceIdentity(
+  dependencies: AwsBrokerDependencies,
+  request: AdaptedHttpRequest,
+): Promise<AuthenticatedIdentity> {
+  requireSlackServiceRole(dependencies, request);
   const context = parseSlackHeaders(request.headers);
   const binding = await getSlackBinding(dependencies, context.thread.teamId, context.thread.channelId);
   if (!binding) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");

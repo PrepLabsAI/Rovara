@@ -7,6 +7,7 @@
 // first, so two top-ups at once can never both claim the last slot or the last run that fits the cap.
 import { createHash, randomUUID } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand, QueryCommand, TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import type { TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
 import { PutObjectCommand } from "@aws-sdk/client-s3";
 import { listPricesPerMillion } from "@agentx/model-runtime/catalog";
 import { thinkingLevelRefusal, thinkingLevelSupport } from "@agentx/model-runtime/thinking-levels";
@@ -22,6 +23,8 @@ import {
   swebenchInstanceIdFits,
   type EvalBatchEntry,
   type EvalBatchRecord,
+  type EvalBatchWatchChange,
+  type EvalBatchWatchState,
   type EvalRunMeasure,
   type ModelIdentifier,
   type ModelSelection,
@@ -79,6 +82,8 @@ export const EVAL_BATCH_INFRASTRUCTURE_FAILURES: readonly RegExp[] = [
 ];
 
 const ACTIVE_PK = "EVAL_BATCHES#ACTIVE";
+/** Task 6: every batch the Slack service's watcher still has to post for, from its creation until its summary is posted. */
+const WATCH_PK = "EVAL_BATCHES#WATCH";
 const STORAGE_ONLY = ["pk", "sk", "entityType", "projectName", "runnerFeatures"];
 const TERMINAL_BATCH = new Set<EvalBatchRecord["status"]>(["DONE", "STOPPED", "CAPPED"]);
 const IN_FLIGHT = new Set<EvalBatchEntry["state"]>(["STARTING", "RUNNING"]);
@@ -108,6 +113,10 @@ function measureKey(batchId: string, runId: string) {
 
 function activeKey(batchId: string) {
   return { pk: ACTIVE_PK, sk: `BATCH#${batchId}` };
+}
+
+function watchKey(batchId: string) {
+  return { pk: WATCH_PK, sk: `BATCH#${batchId}` };
 }
 
 /** The run ID of an entry's attempt: a UUID derived from the batch, the entry and the attempt, so a repeated start finds its run. */
@@ -274,6 +283,7 @@ export async function createBatch(
             Item: { ...activeKey(batchId), entityType: "EVAL_BATCH_ACTIVE", batchId, threadSubject: slackThreadSubject(context.thread), createdAt: at },
           },
         },
+        { Put: { TableName: dependencies.tableName, Item: { ...watchKey(batchId), entityType: "EVAL_BATCH_WATCH", batchId, createdAt: at } } },
       ],
     }));
   } catch (error) {
@@ -307,6 +317,120 @@ export async function getBatch(dependencies: EvalBatchDependencies, batchId: str
 /** The project a batch was created for, as stored on its record (not the channel's current binding). */
 export async function getBatchProjectName(dependencies: EvalBatchDependencies, batchId: string): Promise<string | undefined> {
   return (await readStored(dependencies, batchId))?.projectName;
+}
+
+/** The batch's record and the project it was created for. */
+export async function getBatchWithProject(dependencies: EvalBatchDependencies, batchId: string): Promise<{ record: EvalBatchRecord; projectName: string } | undefined> {
+  const stored = await readStored(dependencies, batchId);
+  return stored === undefined ? undefined : { record: stored.record, projectName: stored.projectName };
+}
+
+/** Whether the batch is still on the active list: an ended batch leaves it once the tick has written its results. */
+export async function isBatchActiveListed(dependencies: EvalBatchDependencies, batchId: string): Promise<boolean> {
+  const response = await dependencies.documentClient.send(new GetCommand({ TableName: dependencies.tableName, Key: activeKey(batchId), ConsistentRead: true }));
+  return response.Item !== undefined;
+}
+
+/** Task 6: the batches the Slack service's watcher posts for. */
+export async function watchedBatchIds(dependencies: EvalBatchDependencies): Promise<string[]> {
+  const ids: string[] = [];
+  let start: Record<string, unknown> | undefined;
+  do {
+    const page = await dependencies.documentClient.send(new QueryCommand({
+      TableName: dependencies.tableName,
+      KeyConditionExpression: "pk = :pk AND begins_with(sk, :batch)",
+      ExpressionAttributeValues: { ":pk": WATCH_PK, ":batch": "BATCH#" },
+      ConsistentRead: true,
+      ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+    }));
+    for (const item of page.Items ?? []) if (typeof item.batchId === "string") ids.push(item.batchId);
+    start = page.LastEvaluatedKey;
+  } while (start !== undefined);
+  return ids;
+}
+
+/** Takes a batch off the watcher's list: its summary is posted, or it no longer exists. */
+export async function unwatchBatch(dependencies: EvalBatchDependencies, batchId: string): Promise<void> {
+  await dependencies.documentClient.send(new DeleteCommand({ TableName: dependencies.tableName, Key: watchKey(batchId) }));
+}
+
+/**
+ * Ruling 19: records the Slack thread the watcher opened for a batch whose record still names
+ * `expectedThreadTs` (a CLI batch's placeholder). The record (under its version check) and the
+ * active item's thread subject, which a `stop` in the thread is matched by, change in one
+ * transaction. A batch that already names another thread keeps it: only one thread is ever recorded.
+ */
+export async function recordBatchThread(
+  dependencies: EvalBatchDependencies,
+  batchId: string,
+  expectedThreadTs: string,
+  threadTs: string,
+): Promise<{ recorded: boolean; thread: SlackThread } | undefined> {
+  for (let attempt = 1; ; attempt += 1) {
+    const stored = await readStored(dependencies, batchId);
+    if (stored === undefined) return undefined;
+    const { record } = stored;
+    if (record.thread.threadTs !== expectedThreadTs) return { recorded: false, thread: record.thread };
+    const thread: SlackThread = { ...record.thread, threadTs };
+    const at = now(dependencies).toISOString();
+    const next = EvalBatchRecordSchema.parse({ ...record, thread, version: record.version + 1, updatedAt: at });
+    // An ended batch whose results are written is off the active list; there is no subject to change.
+    const listed = await isBatchActiveListed(dependencies, batchId);
+    const items: NonNullable<TransactWriteCommandInput["TransactItems"]> = [{
+      Put: {
+        TableName: dependencies.tableName,
+        Item: { ...evalBatchKey(batchId), entityType: "EVAL_BATCH", projectName: stored.projectName, runnerFeatures: stored.runnerFeatures, ...next },
+        ConditionExpression: "#version = :version",
+        ExpressionAttributeNames: { "#version": "version" },
+        ExpressionAttributeValues: { ":version": record.version },
+      },
+    }];
+    if (listed) {
+      items.push({
+        Update: {
+          TableName: dependencies.tableName,
+          Key: activeKey(batchId),
+          UpdateExpression: "SET threadSubject = :subject",
+          ConditionExpression: "attribute_exists(pk)",
+          ExpressionAttributeValues: { ":subject": slackThreadSubject(thread) },
+        },
+      });
+    }
+    try {
+      await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
+    } catch (error) {
+      // Another write to the record came first, or the tick took the batch off the active list.
+      if (!(isConditionFailure(error) || isTransactionConflict(error)) || attempt >= WRITE_ATTEMPTS) throw error;
+      await sleep(dependencies, BACKOFF_MS * (1 + Math.random()));
+      continue;
+    }
+    log("eval_batch.thread_recorded", { batchId, threadSubject: slackThreadSubject(thread) });
+    return { recorded: true, thread };
+  }
+}
+
+/**
+ * Task 6: records what the watcher has posted, only if the watch state is still at the revision the
+ * watcher read, so of two watchers that read the same state only one may make the post. Undefined
+ * when the batch does not exist. A posted summary takes the batch off the watcher's list.
+ */
+export async function updateBatchWatch(
+  dependencies: EvalBatchDependencies,
+  batchId: string,
+  revision: number,
+  change: EvalBatchWatchChange,
+): Promise<{ updated: boolean; watch: EvalBatchWatchState } | undefined> {
+  const result = await mutate<{ updated: boolean; watch: EvalBatchWatchState }>(dependencies, batchId, (draft) => {
+    const current: EvalBatchWatchState = draft.watch ?? { revision: 0 };
+    if (current.revision !== revision) return { value: { updated: false, watch: current }, write: false };
+    const next: EvalBatchWatchState = { ...current, revision: revision + 1 };
+    for (const [key, value] of Object.entries(change)) if (value !== undefined) Object.assign(next, { [key]: value });
+    draft.watch = next;
+    return { value: { updated: true, watch: next }, write: true };
+  });
+  if (result === undefined) return undefined;
+  if (result.value.updated && result.value.watch.summaryPostedAt !== undefined) await unwatchBatch(dependencies, batchId);
+  return result.value;
 }
 
 /** FR-010: the batch's measures, one per finished run. */

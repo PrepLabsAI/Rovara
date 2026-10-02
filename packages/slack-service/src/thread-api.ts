@@ -1,4 +1,11 @@
 import {
+  EvalBatchSlackStartRequestSchema,
+  EvalBatchSlackStartResultSchema,
+  EvalBatchThreadResultSchema,
+  EvalBatchWatchListSchema,
+  EvalBatchWatchUpdateRequestSchema,
+  EvalBatchWatchUpdateResultSchema,
+  type SlackThread,
   SlackThreadPrepareResultSchema,
   SlackThreadWorkspaceResultSchema,
   SlackWorkspaceCloseCompleteResultSchema,
@@ -12,9 +19,25 @@ import {
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { pollOperation } from "@agentx/orchestrator/event-client";
 import type { ThreadServiceApi } from "./processor.js";
+import type { EvalBatchWatchApi } from "./eval-batch-watcher.js";
 import { threadWorkspaceRequest } from "./thread-workspace-request.js";
 
 /** The Slack service's thread-level control-plane client, moved out of main.ts so tests can drive it. */
+/** One request to a /v1/service route; an error answer throws with its code and message. */
+async function serviceRequestWith(signedFetch: typeof fetch, url: string, method: string, body: unknown, failure: string): Promise<Record<string, unknown>> {
+  const response = await signedFetch(url, {
+    method,
+    ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
+  });
+  const parsed = await response.json() as Record<string, unknown>;
+  if (!response.ok) {
+    const error = parsed.error as { code?: string; message?: string } | undefined;
+    throw new Error(`${failure}: ${error?.code ?? response.status} ${error?.message ?? ""}`.trim());
+  }
+  delete parsed.requestId;
+  return parsed;
+}
+
 export function createThreadApi(options: { controlPlaneUrl: string; signedFetch: typeof fetch; pollIntervalMilliseconds?: number }): ThreadServiceApi {
   const { controlPlaneUrl, signedFetch } = options;
   const client = (workspaceId: string) => new ControlPlaneApi(controlPlaneUrl, "slack-service", workspaceId, signedFetch);
@@ -24,17 +47,7 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
   }
 
   async function serviceRequest(method: string, path: string, body: unknown, failure: string): Promise<Record<string, unknown>> {
-    const response = await signedFetch(`${controlPlaneUrl}${path}`, {
-      method,
-      ...(body === undefined ? {} : { headers: { "content-type": "application/json" }, body: JSON.stringify(body) }),
-    });
-    const parsed = await response.json() as Record<string, unknown>;
-    if (!response.ok) {
-      const error = parsed.error as { code?: string; message?: string } | undefined;
-      throw new Error(`${failure}: ${error?.code ?? response.status} ${error?.message ?? ""}`.trim());
-    }
-    delete parsed.requestId;
-    return parsed;
+    return serviceRequestWith(signedFetch, `${controlPlaneUrl}${path}`, method, body, failure);
   }
 
   return {
@@ -96,6 +109,37 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
     async getSwebenchRun(runId) {
       const response = await serviceRequest("GET", `/v1/evals/swebench/${encodeURIComponent(runId)}`, undefined, "SWE-bench run lookup failed");
       return SwebenchRunSchema.parse(response.run);
+    },
+    async startEvalBatch(request) {
+      const body = EvalBatchSlackStartRequestSchema.parse(request);
+      return EvalBatchSlackStartResultSchema.parse(await servicePost("/v1/evals/batches", body, "eval batch request failed"));
+    },
+  };
+}
+
+/**
+ * Spec 052 Task 6: the batch watcher's client. The list is the Slack service's own; a batch's thread
+ * and posts are recorded acting for the batch's thread (a CLI batch's placeholder until its thread
+ * is opened) and its requester, so the broker can check the batch is that thread's.
+ */
+export function createEvalBatchWatchApi(options: {
+  controlPlaneUrl: string;
+  signedFetchFor: (scope?: { thread: SlackThread; userId: string }) => typeof fetch;
+}): EvalBatchWatchApi {
+  const { controlPlaneUrl, signedFetchFor } = options;
+  const path = (batchId: string, action: string) => `${controlPlaneUrl}/v1/evals/batches/${encodeURIComponent(batchId)}/${action}`;
+  return {
+    async listBatches() {
+      return EvalBatchWatchListSchema.parse(await serviceRequestWith(signedFetchFor(), `${controlPlaneUrl}/v1/evals/batches/active`, "GET", undefined, "eval batch list failed")).batches;
+    },
+    async recordThread(batch, threadTs) {
+      const signed = signedFetchFor({ thread: batch.thread, userId: batch.createdBy.userId });
+      return EvalBatchThreadResultSchema.parse(await serviceRequestWith(signed, path(batch.batchId, "thread"), "POST", { threadTs }, "eval batch thread record failed"));
+    },
+    async updateWatch(batch, revision, change) {
+      const signed = signedFetchFor({ thread: batch.thread, userId: batch.createdBy.userId });
+      const body = EvalBatchWatchUpdateRequestSchema.parse({ revision, change });
+      return EvalBatchWatchUpdateResultSchema.parse(await serviceRequestWith(signed, path(batch.batchId, "watch"), "POST", body, "eval batch watch record failed"));
     },
   };
 }

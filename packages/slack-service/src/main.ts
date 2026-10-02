@@ -21,7 +21,8 @@ import { runConsumer, type QueueClient } from "./consumer.js";
 import { processSlackRequest, type ServiceLog, type ThreadServiceApi, type ThreadStore, type TurnInput } from "./processor.js";
 import { createSignedServiceFetch } from "./signing-fetch.js";
 import { createSlackUserNames } from "./user-names.js";
-import { createThreadApi } from "./thread-api.js";
+import { createEvalBatchWatchApi, createThreadApi } from "./thread-api.js";
+import { runEvalBatchWatcher } from "./eval-batch-watcher.js";
 import { HANDOFF_MILLISECONDS, activeTurnFromItem, turnNoteFromItem } from "./interrupted-turn.js";
 import { classifierTimeoutMs, createHostedClassifier, createHostedSlackRuntime, gateDecisionLogFields, runHostedTurn } from "./runtime.js";
 import { DynamoTurnRecordWriter } from "./turn-records.js";
@@ -95,14 +96,27 @@ function slackBotToken(): Promise<string> {
 
 const slackUserName = createSlackUserNames({ token: slackBotToken });
 
-async function postToSlack(channel: string, threadTs: string, text: string, blocks?: unknown[]): Promise<void> {
+/** Posts in a thread, or with no thread a new message in the channel; answers the message's timestamp. */
+async function postToSlack(channel: string, threadTs: string | undefined, text: string, blocks?: unknown[]): Promise<string | undefined> {
   const response = await fetch("https://slack.com/api/chat.postMessage", {
     method: "POST",
     headers: { authorization: `Bearer ${await slackBotToken()}`, "content-type": "application/json; charset=utf-8" },
-    body: JSON.stringify({ channel, thread_ts: threadTs, text, unfurl_links: false, ...(blocks === undefined ? {} : { blocks }) }),
+    body: JSON.stringify({ channel, ...(threadTs === undefined ? {} : { thread_ts: threadTs }), text, unfurl_links: false, ...(blocks === undefined ? {} : { blocks }) }),
+  });
+  const result = await response.json() as { ok?: boolean; error?: string; ts?: string };
+  if (!response.ok || result.ok !== true) throw new Error(`Slack chat.postMessage failed: ${result.error ?? `HTTP ${response.status}`}`);
+  return result.ts;
+}
+
+/** Spec 052 Ruling 19: removes the bot's own message (a batch thread's opener that lost a race). */
+async function deleteFromSlack(channel: string, ts: string): Promise<void> {
+  const response = await fetch("https://slack.com/api/chat.delete", {
+    method: "POST",
+    headers: { authorization: `Bearer ${await slackBotToken()}`, "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ channel, ts }),
   });
   const result = await response.json() as { ok?: boolean; error?: string };
-  if (!response.ok || result.ok !== true) throw new Error(`Slack chat.postMessage failed: ${result.error ?? `HTTP ${response.status}`}`);
+  if (!response.ok || result.ok !== true) throw new Error(`Slack chat.delete failed: ${result.error ?? `HTTP ${response.status}`}`);
 }
 
 function threadApi(message: SlackRequestMessage): ThreadServiceApi {
@@ -312,6 +326,25 @@ for (const signal of ["SIGTERM", "SIGINT"] as const) {
   });
 }
 
+// Spec 052 Task 6: posts each eval batch's progress and summary in its thread until the service stops.
+const batchWatcher = runEvalBatchWatcher({
+  api: createEvalBatchWatchApi({
+    controlPlaneUrl,
+    signedFetchFor: (scope) => createSignedServiceFetch({ region, credentials, ...(scope === undefined ? {} : { thread: scope.thread, userId: scope.userId }) }),
+  }),
+  slack: {
+    async post(channel, threadTs, text) {
+      const ts = await postToSlack(channel, threadTs, text);
+      if (ts === undefined) throw new Error("Slack chat.postMessage answered no message timestamp");
+      return ts;
+    },
+    delete: deleteFromSlack,
+  },
+  log,
+  logError: (event, fields) => console.error(JSON.stringify({ component: "slack-orchestrator", level: "error", event, ...fields })),
+  signal: controller.signal,
+});
+
 log("service.started", {
   concurrency, provider: model.provider, model: model.modelId,
   classifierProvider: classifierModel.provider, classifierModel: classifierModel.modelId, classifierAvailable,
@@ -320,11 +353,11 @@ await runConsumer(queue, (message, context) => processSlackRequest(message, {
   api: threadApi,
   threads,
   runTurn,
-  post: (thread, text) => postToSlack(thread.channelId, thread.threadTs, text),
+  post: async (thread, text) => { await postToSlack(thread.channelId, thread.threadTs, text); },
   log,
   confirmations,
-  postConfirmation: (thread, confirmation, text) => postToSlack(thread.channelId, thread.threadTs, text, confirmationBlocks(text, confirmation.confirmationId)),
-  postWithBlocks: (thread, text, blocks) => postToSlack(thread.channelId, thread.threadTs, text, blocks),
+  postConfirmation: async (thread, confirmation, text) => { await postToSlack(thread.channelId, thread.threadTs, text, confirmationBlocks(text, confirmation.confirmationId)); },
+  postWithBlocks: async (thread, text, blocks) => { await postToSlack(thread.channelId, thread.threadTs, text, blocks); },
   turnRecords: new DynamoTurnRecordWriter(documentClient, turnRecordsTableName),
   userName: slackUserName,
 }, context), {
@@ -336,6 +369,7 @@ await runConsumer(queue, (message, context) => processSlackRequest(message, {
   handoffMilliseconds: HANDOFF_MILLISECONDS,
   log,
 });
+await batchWatcher;
 log("service.stopped", {});
 // Issue 157: a handed-off turn may still be winding down in this process; its message already
 // belongs to the new task, so nothing here may run on until SIGKILL. Logs go to stdout, which is

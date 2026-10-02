@@ -1,7 +1,7 @@
 // Spec 052: batches of eval runs, several at once. The batch file, its record, the per-run measures
 // and the per-model summary.
 import { z } from "zod";
-import { ModelSelectionSchema, ThinkingLevelSchema } from "./models.js";
+import { ModelIdentifierSchema, ModelSelectionSchema, ThinkingLevelSchema } from "./models.js";
 import { SlackRequesterSchema, SlackThreadSchema } from "./slack.js";
 import {
   SwebenchDatasetSchema,
@@ -93,6 +93,24 @@ export const EvalBatchEntrySchema = z.object({
   estimatedCostUsd: z.number().nonnegative().optional(),
 }).strict();
 
+/**
+ * What the Slack service's batch watcher has posted in the batch's thread (spec 052 Task 6), kept on
+ * the batch record so a restarted watcher does not post it again. Every change names the revision
+ * it read, so two watchers cannot both claim the same post.
+ */
+export const EvalBatchWatchStateSchema = z.object({
+  revision: z.number().int().nonnegative(),
+  /** The last progress post, and the counts it named. */
+  progressPostedAt: z.string().datetime().optional(),
+  progressFinished: z.number().int().nonnegative().optional(),
+  progressResolved: z.number().int().nonnegative().optional(),
+  /** The models (indices into the file's `models`) whose finish a post has named. */
+  modelsAnnounced: z.array(z.number().int().nonnegative()).max(16).optional(),
+  /** A watcher is posting the summary; another may take over once the claim is old. */
+  summaryClaimedAt: z.string().datetime().optional(),
+  summaryPostedAt: z.string().datetime().optional(),
+}).strict();
+
 export const EvalBatchRecordSchema = z.object({
   batchId: z.string().uuid(),
   file: EvalBatchFileSchema,
@@ -117,6 +135,7 @@ export const EvalBatchRecordSchema = z.object({
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime(),
   finishedAt: z.string().datetime().optional(),
+  watch: EvalBatchWatchStateSchema.optional(),
 }).strict();
 
 /**
@@ -199,6 +218,72 @@ export const EvalBatchSummarySchema = z.object({
   models: z.array(EvalBatchModelSummarySchema),
 }).strict();
 
+/** One model's progress in a batch: its runs, how many have ended, and how many were resolved. */
+export const EvalBatchModelProgressSchema = z.object({
+  model: EvalBatchModelSchema,
+  runs: z.number().int().nonnegative(),
+  /** Runs that ended (graded, failed or cancelled); a run that never started is not counted. */
+  finished: z.number().int().nonnegative(),
+  resolved: z.number().int().nonnegative(),
+  /** True once none of the model's runs is queued or in flight. */
+  ended: z.boolean(),
+}).strict();
+
+/** A batch as the Slack service sees it: what its start message, progress and summary say (spec 052 Task 6). */
+export const EvalBatchWatchedSchema = z.object({
+  batchId: z.string().uuid(),
+  thread: SlackThreadSchema,
+  createdBy: SlackRequesterSchema,
+  status: EvalBatchStatusSchema,
+  benchmark: SwebenchDatasetSchema,
+  tasks: z.number().int().nonnegative(),
+  repeats: z.number().int().min(1).max(5),
+  costCapUsd: z.number().nonnegative(),
+  perRunCeilingUsd: z.number().positive().optional(),
+  runs: z.number().int().nonnegative(),
+  finished: z.number().int().nonnegative(),
+  resolved: z.number().int().nonnegative(),
+  notStarted: z.number().int().nonnegative(),
+  spentUsd: z.number().nonnegative(),
+  models: z.array(EvalBatchModelProgressSchema),
+  watch: EvalBatchWatchStateSchema,
+  /** Ruling 11: the batch has ended by its status and the tick has written its results. */
+  resultsWritten: z.boolean(),
+  /** summary.json, once the results are written and until the summary is posted. */
+  summary: EvalBatchSummarySchema.optional(),
+}).strict();
+
+export const EvalBatchWatchListSchema = z.object({ batches: z.array(EvalBatchWatchedSchema) }).strict();
+
+/** FR-002: the Slack form, its models resolved to approved identifiers by the Slack service. */
+export const EvalBatchSlackStartRequestSchema = z.object({
+  dataset: SwebenchDatasetSchema,
+  instanceIds: z.array(SwebenchInstanceIdSchema).min(1).max(EVAL_BATCH_SLACK_MAX_RUNS),
+  models: z.array(ModelIdentifierSchema).min(1).max(EVAL_BATCH_SLACK_MAX_RUNS),
+  repeats: z.number().int().min(1).max(5).default(1),
+  costCapUsd: z.number().finite().optional(),
+}).strict();
+
+export const EvalBatchSlackStartResultSchema = z.discriminatedUnion("outcome", [
+  z.object({ outcome: z.literal("STARTED"), created: z.boolean(), batch: EvalBatchWatchedSchema }).strict(),
+  z.object({ outcome: z.literal("REFUSED"), message: z.string().min(1).max(4_000) }).strict(),
+]);
+
+export const EvalBatchThreadRequestSchema = z.object({ threadTs: SlackThreadSchema.shape.threadTs }).strict();
+export const EvalBatchThreadResultSchema = z.object({ recorded: z.boolean(), thread: SlackThreadSchema }).strict();
+
+export const EvalBatchWatchChangeSchema = EvalBatchWatchStateSchema.omit({ revision: true }).partial();
+export const EvalBatchWatchUpdateRequestSchema = z.object({ revision: z.number().int().nonnegative(), change: EvalBatchWatchChangeSchema }).strict();
+export const EvalBatchWatchUpdateResultSchema = z.object({ updated: z.boolean(), watch: EvalBatchWatchStateSchema }).strict();
+
+export type EvalBatchWatchState = z.infer<typeof EvalBatchWatchStateSchema>;
+export type EvalBatchWatchChange = z.infer<typeof EvalBatchWatchChangeSchema>;
+export type EvalBatchModelProgress = z.infer<typeof EvalBatchModelProgressSchema>;
+export type EvalBatchWatched = z.infer<typeof EvalBatchWatchedSchema>;
+export type EvalBatchSlackStartRequest = z.input<typeof EvalBatchSlackStartRequestSchema>;
+export type EvalBatchSlackStartResult = z.infer<typeof EvalBatchSlackStartResultSchema>;
+export type EvalBatchThreadResult = z.infer<typeof EvalBatchThreadResultSchema>;
+export type EvalBatchWatchUpdateResult = z.infer<typeof EvalBatchWatchUpdateResultSchema>;
 export type EvalBatchModel = z.infer<typeof EvalBatchModelSchema>;
 export type EvalBatchFile = z.infer<typeof EvalBatchFileSchema>;
 export type EvalBatchEntry = z.infer<typeof EvalBatchEntrySchema>;

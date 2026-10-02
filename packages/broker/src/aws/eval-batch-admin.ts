@@ -132,7 +132,7 @@ export async function batchResults(dependencies: EvalBatchDependencies, batchId:
   return { ready: true, status: record.status, csv, summary: parsed };
 }
 
-async function readObject(dependencies: EvalBatchDependencies, key: string): Promise<string | undefined> {
+export async function readObject(dependencies: EvalBatchDependencies, key: string): Promise<string | undefined> {
   try {
     const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: key }));
     return object.Body ? await object.Body.transformToString("utf8") : undefined;
