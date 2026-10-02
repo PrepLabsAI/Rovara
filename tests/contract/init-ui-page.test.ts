@@ -47,6 +47,14 @@ describe("the page shell", () => {
     expect(WIZARD_CSS).toMatch(/\.question h2 \{[^}]*font-size: var\(--text-xl\)/);
   });
 
+  it("FR-060: a failure's actions are buttons inside the failure panel, and the failed step's own card is not repeated under it", () => {
+    expect(html).toMatch(/<section id="failure"[^>]*>[\s\S]*<h3>What to do<\/h3><p id="failure-next"><\/p>\s*<div id="failure-actions"><\/div>\s*<details><summary>Technical details<\/summary>[\s\S]*?<\/section>/);
+    expect(WIZARD_JS).toContain('const failureQuestion = Boolean(state.failure && state.question && state.question.kind === "actions");');
+    expect(WIZARD_JS).toContain('byId("failure-actions").replaceChildren(buttonRow(state.question));');
+    expect(WIZARD_JS).toContain('if (state.failure && card.status === "failed" && CARD_PHASES[card.id] === state.journey.current) continue;');
+    expect(WIZARD_JS).toContain('document.querySelectorAll("#question button, #failure-actions button")');
+  });
+
   it("Q4: a form field is never filled with a masked value, even if the server sent one", () => {
     expect(WIZARD_JS).toContain("if (field.value && !field.masked) input.value = field.value;");
   });

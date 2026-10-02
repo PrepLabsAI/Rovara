@@ -144,6 +144,7 @@ textarea { font-family: var(--mono); font-size: var(--text-sm); min-height: 8rem
 .choices label:has(input:checked) { background: var(--accent-soft); border-color: var(--accent); }
 .choices input { accent-color: var(--accent); margin-top: .3rem; }
 .buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); }
+#failure-actions + details, .buttons + details { margin-top: var(--space-4); }
 button, a.button { align-items: center; background: var(--surface); border: 1px solid var(--field-border); border-radius: var(--radius-sm); color: var(--text); cursor: pointer; display: inline-flex; font: inherit; font-weight: 600; gap: var(--space-2); min-height: 2.75rem; padding: var(--space-2) var(--space-4); text-decoration: none; }
 button:hover, a.button:hover { background: var(--surface-2); }
 button.primary, a.button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }

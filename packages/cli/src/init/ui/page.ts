@@ -57,6 +57,7 @@ export function wizardHtml(token: string): string {
       <h2 id="failure-title"></h2>
       <h3>What happened</h3><p id="failure-what"></p>
       <h3>What to do</h3><p id="failure-next"></p>
+      <div id="failure-actions"></div>
       <details><summary>Technical details</summary><div id="failure-details"></div></details>
     </section>
     <div id="cards"></div>
@@ -224,6 +225,9 @@ function renderPanelCards(state) {
   for (const card of state.cards ?? []) {
     const current = CARD_PHASES[card.id] === state.journey.current;
     if (card.status === "ok" && !current && card.id !== "ready") continue;
+    // FR-060: while the failure panel is up, it is the one place the failure is told; the failed
+    // step's own card would only repeat it (its problem is in the panel's technical details).
+    if (state.failure && card.status === "failed" && CARD_PHASES[card.id] === state.journey.current) continue;
     holder.append(renderCard(card));
   }
   const next = state.link && !offered.has(state.link.url) ? state.link : null;
@@ -245,7 +249,7 @@ function renderFailure(failure) {
 function submit(id, value) {
   if (sending) return;
   sending = true;
-  for (const button of document.querySelectorAll("#question button")) button.disabled = true;
+  for (const button of document.querySelectorAll("#question button, #failure-actions button")) button.disabled = true;
   post("/answer", { id, value }).then((response) => response.json()).then((reply) => {
     if (!reply.ok) sending = false;
   }).catch((error) => {
@@ -413,14 +417,22 @@ function render(state) {
     renderedQuestion = null;
     sending = false;
     byId("question-body").replaceChildren();
+    byId("failure-actions").replaceChildren();
     show("question", false);
     return;
   }
-  show("question", true);
-  if (state.question.id !== renderedQuestion) {
-    renderedQuestion = state.question.id;
+  // FR-060: the failure's own question (Try this step again, Stop for now) is the failure panel's
+  // buttons, not a second card under it.
+  const failureQuestion = Boolean(state.failure && state.question && state.question.kind === "actions");
+  const renderKey = state.question.id + (failureQuestion ? " in failure" : "");
+  show("question", !failureQuestion);
+  if (renderKey !== renderedQuestion) {
+    renderedQuestion = renderKey;
     sending = false;
-    buildQuestion(state.question);
+    byId("question-body").replaceChildren();
+    byId("failure-actions").replaceChildren();
+    if (failureQuestion) byId("failure-actions").replaceChildren(buttonRow(state.question));
+    else buildQuestion(state.question);
   }
 }
 
