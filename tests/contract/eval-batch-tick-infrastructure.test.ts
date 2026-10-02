@@ -84,6 +84,15 @@ describe("the eval batch tick's infrastructure (spec 052 FR-006, FR-011)", () =>
     expect(JSON.stringify(alarm.Properties.AlarmActions)).toContain("OperatorAlerts");
   });
 
+  it("also counts the broker's eval_batch_watch errors, such as a running batch whose channel is unavailable, into the watcher alarm's metric (R-1)", () => {
+    const filters = Object.values(resources).filter((r) => r.Type === "AWS::Logs::MetricFilter"
+      && JSON.stringify(r.Properties.MetricTransformations).includes("EvalBatchWatcherFailed"));
+    expect(filters).toHaveLength(1);
+    expect(filters[0]!.Properties.FilterPattern).toBe('{ ($.event = "eval_batch_watch.*") && ($.level = "error") }');
+    expect(filters[0]!.Properties.MetricTransformations).toEqual([{ MetricNamespace: "AgentX", MetricName: "EvalBatchWatcherFailed", MetricValue: "1" }]);
+    expect(JSON.stringify(filters[0]!.Properties.LogGroupName)).toContain("BrokerLogs");
+  });
+
   it("publishes the watcher's error lines as a metric from the Slack service's log group", () => {
     const app = buildAgentXApp();
     const slack = app.node.children.find((c): c is Stack => Stack.isStack(c) && c.stackName === "AgentXSlackOrchestrator")!;

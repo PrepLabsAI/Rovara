@@ -2321,6 +2321,22 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Type": "AWS::Logs::LogGroup",
       "UpdateReplacePolicy": "Delete",
     },
+    "BrokerLogsEvalBatchWatcherFailedMetricC5DFCB37": {
+      "Properties": {
+        "FilterPattern": "{ ($.event = "eval_batch_watch.*") && ($.level = "error") }",
+        "LogGroupName": {
+          "Ref": "BrokerLogs003CD6FC",
+        },
+        "MetricTransformations": [
+          {
+            "MetricName": "EvalBatchWatcherFailed",
+            "MetricNamespace": "AgentX/staging",
+            "MetricValue": "1",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::MetricFilter",
+    },
     "BrokerServiceRole1938BCC9": {
       "Properties": {
         "AssumeRolePolicyDocument": {
@@ -5140,7 +5156,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "Ref": "OperatorAlertsA2431256",
           },
         ],
-        "AlarmDescription": "The Slack service's eval batch watcher failed: a batch's thread may miss its progress or summary, or a batch was dropped. Check the Slack orchestrator logs for eval_batch_watch.* errors.",
+        "AlarmDescription": "The Slack service's eval batch watcher failed: a batch's thread may miss its progress or summary, or a batch was dropped. Check the Slack orchestrator and broker logs for eval_batch_watch.* errors.",
         "AlarmName": "agentx-staging-EvalBatchWatcherErrors",
         "ComparisonOperator": "GreaterThanOrEqualToThreshold",
         "EvaluationPeriods": 1,

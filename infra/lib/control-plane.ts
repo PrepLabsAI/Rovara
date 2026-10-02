@@ -793,10 +793,20 @@ export class ControlPlaneStack extends Stack {
     }).addAlarmAction(notifyOperator);
     // Spec 052 Ruling 31 (review M-1): the Slack service's batch watcher logs each failure as an
     // eval_batch_watch.* error line, which its log group's filter counts (slack-orchestrator.ts).
-    // A dropped batch, a batch whose channel was unbound, or a broker the watcher cannot list from.
+    // The broker's watch list logs its own (a running batch whose channel is unbound or rebound, a
+    // dropped or unreadable batch) the same way, counted here into the same metric (R-1).
+    broker.logGroup.addMetricFilter("EvalBatchWatcherFailedMetric", {
+      filterPattern: logs.FilterPattern.all(
+        logs.FilterPattern.stringValue("$.event", "=", "eval_batch_watch.*"),
+        logs.FilterPattern.stringValue("$.level", "=", "error"),
+      ),
+      metricNamespace: naming.metricsNamespace,
+      metricName: "EvalBatchWatcherFailed",
+      metricValue: "1",
+    });
     new cloudwatch.Alarm(this, "EvalBatchWatcherErrorsAlarm", {
       alarmName: naming.alarmName("EvalBatchWatcherErrors"),
-      alarmDescription: "The Slack service's eval batch watcher failed: a batch's thread may miss its progress or summary, or a batch was dropped. Check the Slack orchestrator logs for eval_batch_watch.* errors.",
+      alarmDescription: "The Slack service's eval batch watcher failed: a batch's thread may miss its progress or summary, or a batch was dropped. Check the Slack orchestrator and broker logs for eval_batch_watch.* errors.",
       metric: agentxSum("EvalBatchWatcherFailed", Duration.minutes(5)),
       threshold: 1,
       evaluationPeriods: 1,
