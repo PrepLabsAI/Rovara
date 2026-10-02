@@ -86,26 +86,46 @@ export async function readCheckHistory(rootPath: string, manifest: { readinessCo
 /**
  * Records a final round's project-check outcomes, merged over the earlier ones. A check that was not run (or not
  * rerun) keeps its last known outcome. Written to a temporary file and renamed, so a crash never leaves half a file.
- * Task 4 calls this after the final round only.
+ * Task 4 calls this after the final round only, with `base` the snapshot read before the session started: the agent
+ * may have rewritten the file since, and a merge over the file would keep what it wrote (Ruling L).
  */
 export async function recordProjectOutcomes(
   rootPath: string,
   plan: { source: string; readiness?: readonly ProjectCommand[] },
   entries: readonly CheckEntry[],
+  base?: Pick<CheckHistory, "lastOutcomes">,
 ): Promise<void> {
   if (plan.source !== "project" || plan.readiness === undefined) return;
-  const current = await readCheckHistory(rootPath, {});
-  const outcomes: Record<string, KnownOutcome> = {};
-  for (const [key, outcome] of Object.entries(current.lastOutcomes)) if (isKnown(outcome)) outcomes[key] = outcome;
-  let changed = false;
+  const updates: Record<string, KnownOutcome> = {};
   for (const entry of entries) {
     const match = /^readiness:(\d+)$/.exec(entry.id);
     const command = match === null ? undefined : plan.readiness[Number(match[1])];
     if (command === undefined || entry.source !== "project" || !isKnown(entry.after)) continue;
-    outcomes[projectCheckKey(command)] = entry.after;
-    changed = true;
+    updates[projectCheckKey(command)] = entry.after;
   }
-  if (!changed) return;
+  if (Object.keys(updates).length === 0) return;
+  await writeOutcomes(rootPath, base ?? await readCheckHistory(rootPath, {}), updates);
+}
+
+/**
+ * Spec 051 Ruling M: a preparation whose readiness passed records each command as passed, so an outcome a task left
+ * failing before the workspace was prepared again cannot class a later regression as already failing.
+ */
+export async function recordPreparedOutcomes(rootPath: string, readiness: readonly ProjectCommand[]): Promise<void> {
+  if (readiness.length === 0) return;
+  const updates: Record<string, KnownOutcome> = {};
+  for (const command of readiness) updates[projectCheckKey(command)] = "passed";
+  await writeOutcomes(rootPath, await readCheckHistory(rootPath, {}), updates);
+}
+
+async function writeOutcomes(
+  rootPath: string,
+  base: Pick<CheckHistory, "lastOutcomes">,
+  updates: Record<string, KnownOutcome>,
+): Promise<void> {
+  const outcomes: Record<string, KnownOutcome> = {};
+  for (const [key, outcome] of Object.entries(base.lastOutcomes)) if (isKnown(outcome)) outcomes[key] = outcome;
+  Object.assign(outcomes, updates);
   const directory = resolve(rootPath, ".agentx");
   await mkdir(directory, { recursive: true });
   const temporary = resolve(directory, `.last-checks.${randomUUID()}.tmp`);

@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   AGENTX_PREAMBLE, AGENTX_PREAMBLE_VERSION, agentxPreambleSha256, CheckReportSchema,
-  classifyCheck, matchTestCommand, parseAgentClaim, reportStatus,
+  classifyCheck, matchTestCommand, parseAgentClaim, reportStatus, taskResultChecks,
 } from "@agentx/contracts";
 
 describe("the AgentX preamble (spec 051 FR-001)", () => {
@@ -112,5 +112,21 @@ describe("the check report", () => {
     ["too many checks", { ...report, checks: Array.from({ length: 65 }, () => entry) }],
   ])("rejects %s", (_name, value) => {
     expect(CheckReportSchema.safeParse(value).success).toBe(false);
+  });
+});
+
+describe("taskResultChecks: a task result's report (FR-007, Review Focus 5)", () => {
+  const report = {
+    status: "verified", source: "none", preambleVersion: "1", preambleSha256: "a".repeat(64),
+    checks: [], extraTry: "not_needed", agentClaim: "none",
+  };
+  it("reads the report from a new worker's result", () => {
+    expect(taskResultChecks({ conversationId: "c", reopened: false, checks: report })).toEqual(report);
+  });
+  it("is undefined for an old worker's result, or one whose report does not parse", () => {
+    expect(taskResultChecks({ conversationId: "c", reopened: false })).toBeUndefined();
+    expect(taskResultChecks({ conversationId: "c", reopened: false, checks: { ...report, status: "fine" } })).toBeUndefined();
+    expect(taskResultChecks(undefined)).toBeUndefined();
+    expect(taskResultChecks("result")).toBeUndefined();
   });
 });

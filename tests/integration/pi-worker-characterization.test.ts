@@ -571,6 +571,25 @@ describe("spec 051: the worker's session carries the AgentX preamble and the inl
     expect(run.diagnostics).toEqual([expect.stringContaining("eval failure")]);
   });
 
+  it("loads exactly one inline extension in a worker task, AgentX verification, and no other (M-7)", async () => {
+    // protects packages/worker/src/run-task.ts (extensionFactories: [verificationExtension(...)]) and pi-session.ts
+    // Reason (spec 051, allowed pin change 2): the worker now loads one inline extension; before it loaded none.
+    const { modelRuntime, faux } = await fauxModelRuntime();
+    faux.setResponses([fauxAssistantMessage("Done.")]);
+    const base = createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) });
+    const given: Array<InlineExtension[] | undefined> = [];
+    const piAdapter: PiSessionAdapter = { create: (input) => { given.push(input.extensionFactories); return base.create(input); } };
+    const invocation: Extract<WorkerInvocation, { kind: "task" }> = {
+      protocolVersion: 1, kind: "task", operationId: randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1,
+      callbackCapability: "c".repeat(64), payload: { conversationId: randomUUID(), prompt: "hi" },
+    };
+    const rootPath = await workspaceRoot();
+    await runTaskInvocation(invocation, { rootPath, model: FAUX_MODEL, piAdapter, eventSink: async () => undefined, artifactSink: async () => undefined });
+    expect(given).toHaveLength(1);
+    const { resourceLoader } = await createWorkerResources({ cwd: rootPath, agentDirectory: join(rootPath, ".agentx/pi"), contextFiles: [], extensionFactories: given[0]! });
+    expect(resourceLoader.getExtensions().extensions.map((extension) => extension.path)).toEqual(["<inline:agentx-verification>"]);
+  });
+
   it("gives the eval path's session (runSwebenchAgent through the default adapter) the same preamble", async () => {
     // protects packages/worker/src/swebench/agent.ts -> createWorkspacePiSession -> createWorkerResources (FR-010)
     const { modelRuntime, faux } = await fauxModelRuntime();
@@ -601,7 +620,7 @@ describe("the worker's session event shapes, as pinned on Pi 0.85.1", () => {
       expect(await settle(handle, "run it")).toBe("resolved");
     } finally { handle.dispose(); }
 
-    // Spec 051: the worker loads only the inline extensions it is given (none here; AgentX verification later).
+    // Spec 051: the worker loads only the inline extensions it is given (none here; a worker task gives AgentX verification).
     // Pi's extension-only events (tool_call, tool_result, context, ...)
     // never reach session.subscribe; run-task.ts's "tool_result" branch is unreachable on this path.
     expect(eventOrder(events)).toEqual([

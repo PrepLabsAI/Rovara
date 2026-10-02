@@ -30,7 +30,7 @@ import { runCollected, type CollectedProcess } from "./collected-process.js";
 import { describeCommandFailure } from "./command-failure.js";
 import { evaluateReadiness, type CommandResult } from "./readiness.js";
 import { gitSafeEnvironment } from "./git.js";
-import { projectCheckKey } from "./verification/check-history.js";
+import { projectCheckKey, recordPreparedOutcomes } from "./verification/check-history.js";
 import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
 import type {
   RepositoryCloneCredential,
@@ -210,6 +210,8 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
       commandRunner,
     );
     const readinessFailure = readiness.ready ? undefined : describeReadinessFailure(project.readiness, readiness.results);
+    // Spec 051 Ruling M: before the workspace is READY, so a task never plans from an outcome this preparation replaced.
+    if (readiness.ready) await recordPreparedOutcomes(canonicalRoot, project.readiness);
     const readinessManifest: PreparationManifest = {
       ...manifest,
       readinessResults: readiness.results,

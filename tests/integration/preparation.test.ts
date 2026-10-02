@@ -7,7 +7,7 @@ import type { ProjectDefinition, StoredProjectDefinition } from "@agentx/contrac
 import { describe, expect, it } from "vitest";
 import { prepareWorkspace, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
 import { assertWorkspaceReady, evaluateReadiness } from "../../packages/worker/src/readiness.js";
-import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
+import { projectCheckKey, readCheckHistory } from "../../packages/worker/src/verification/check-history.js";
 
 const run = promisify(execFile);
 describe("workspace preparation", () => {
@@ -125,6 +125,29 @@ describe("workspace preparation", () => {
       commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
     });
     expect(manifest.readinessCommandKeys).toEqual(readiness.map(projectCheckKey));
+  });
+
+  it("records passed for its readiness commands in the check history, so a stale failed cannot mask a later regression (spec 051 Ruling M)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const source = await createGitFixture("history");
+    const readiness = [{ cwd: "repo/history", executable: "fixture-check", args: ["a"], timeoutSeconds: 2 }];
+    const project = { ...fixtureProject([{ name: "history", commit: source.commit }]), readiness } satisfies ProjectDefinition;
+    const key = projectCheckKey(readiness[0]!);
+    const other = "f".repeat(64);
+    // An earlier task's final round left the check failing, and another command's outcome.
+    await mkdir(join(root, ".agentx"), { recursive: true });
+    await writeFile(join(root, ".agentx/last-checks.json"), JSON.stringify({ schemaVersion: 1, outcomes: { [key]: "failed", [other]: "failed" } }));
+    const manifest = await prepareWorkspace({
+      rootPath: root,
+      project,
+      materializer: async (_repository, destination) => {
+        await run("git", ["clone", "--quiet", source.directory, destination]);
+      },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    });
+    expect(manifest.complete).toBe(true);
+    const history = await readCheckHistory(root, manifest);
+    expect(history.lastOutcomes).toEqual({ [key]: "passed", [other]: "failed" });
   });
 
   it("ignores an inaccessible filesystem-owned lost+found directory at the workspace root", async () => {

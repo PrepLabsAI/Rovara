@@ -112,3 +112,13 @@ export function reportStatus(checks: readonly CheckEntry[]): "verified" | "regre
   if (checks.every((check) => check.class === "not_rerun")) return "not_verified";
   return "verified";
 }
+
+/**
+ * The check report in a task operation's result (FR-007), or undefined. An older worker's result has none, and a
+ * report that does not parse is treated the same way, so readers behave exactly as before (Review Focus 5).
+ */
+export function taskResultChecks(result: unknown): CheckReport | undefined {
+  if (typeof result !== "object" || result === null || !("checks" in result)) return undefined;
+  const parsed = CheckReportSchema.safeParse(result.checks);
+  return parsed.success ? parsed.data : undefined;
+}
