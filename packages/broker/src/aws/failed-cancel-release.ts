@@ -19,7 +19,7 @@ export const FAILED_CANCEL_GRACE_MS = 10 * 60_000;
 export type FailedCancelReleaseReason = "compute-gone" | "worker-idle" | "own-result";
 
 /** What the task's status says, and a Slack thread is told, once its workspace is free again. */
-export const FAILED_CANCEL_RELEASED_MESSAGE = "The stop request did not reach the task, but the task is no longer running, so its workspace is free again. You can send a new request.";
+export const FAILED_CANCEL_RELEASED_MESSAGE = "The stop request did not reach the task, but the task is no longer running, so its workspace is free again. A request that was waiting starts now, or you can send a new one.";
 
 export interface HeldOperation {
   kind?: unknown;

@@ -4064,20 +4064,28 @@ async function recordTerminalResult(
 /**
  * Issue 202: frees the workspace an INTERRUPTED task still holds after its cancel failed, when the
  * task's own late result arrives, under the fence the callback holds. Returns the stored operation
- * when the workspace is freed now, or was freed so by an earlier copy of this result; undefined when
- * the task no longer holds the workspace (a newer operation, a moved fence, or a reconciler release
- * first), so the result is refused as before.
+ * when the workspace is freed now, or was already freed after the failed cancel (by an earlier copy
+ * of this result or by the reconciler); undefined when the task no longer holds the workspace for
+ * another reason (a newer operation, a moved fence), so the result is refused as before. Only a
+ * task: the Slack and AI-tool stop only ever cancels a task, and any other kind is left to the
+ * reconciler's sweep.
  */
 async function releaseOnOwnResult(dependencies: AwsBrokerDependencies, operation: OperationRecord): Promise<OperationRecord | undefined> {
-  const stored = operation as OperationRecord & { workspaceReleaseReason?: unknown };
-  if (stored.workspaceReleaseReason === "own-result") return operation;
+  const stored = operation as OperationRecord & { workspaceReleasedAt?: unknown; workspaceReleaseReason?: unknown };
+  if (typeof stored.workspaceReleasedAt === "string") {
+    // Already freed (by an earlier copy of this result, or by the reconciler): answered, never stored.
+    if (stored.workspaceReleaseReason !== "own-result") {
+      console.log(JSON.stringify({ component: "broker", event: "stuck_cancel.late_result_after_release", workspaceId: operation.workspaceId, operationId: operation.id, reason: stored.workspaceReleaseReason }));
+    }
+    return operation;
+  }
   const workspace = await getItem<{ activeOperationId?: unknown; fence?: unknown }>(dependencies, workspaceKey(operation.workspaceId));
   if (workspace?.activeOperationId !== operation.id || workspace.fence !== operation.fence) return undefined;
   const at = new Date();
   if (!(await releaseFailedCancelWorkspace(dependencies.documentClient, dependencies.tableName, { workspaceId: operation.workspaceId, operationId: operation.id }, operation, "own-result", at))) {
     // Something moved first: read again, so a copy of this result that won the race is answered too.
-    const again = await requireOperation(dependencies, operation.workspaceId, operation.id) as OperationRecord & { workspaceReleaseReason?: unknown };
-    return again.workspaceReleaseReason === "own-result" ? again : undefined;
+    const again = await requireOperation(dependencies, operation.workspaceId, operation.id) as OperationRecord & { workspaceReleasedAt?: unknown };
+    return typeof again.workspaceReleasedAt === "string" ? again : undefined;
   }
   console.log(JSON.stringify({ component: "broker", event: "stuck_cancel.released", workspaceId: operation.workspaceId, operationId: operation.id, reason: "own-result" }));
   return await requireOperation(dependencies, operation.workspaceId, operation.id);

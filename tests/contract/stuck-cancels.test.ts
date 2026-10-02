@@ -452,6 +452,22 @@ describe("a failed first cancel (issue 202)", () => {
     expect(postNote).not.toHaveBeenCalled();
   });
 
+  it("posts no note to a closed thread", async () => {
+    const postNote = vi.fn<PostNote>(async () => undefined);
+    const { db, sweep } = setup({ postNote });
+    const task = failedCancel(db, 1, {}, { ownerKey: "owner-closed" });
+    db.set({ pk: "SLACK_THREAD#owner-closed", sk: "META", workspaceId: task.workspaceId, thread: "T1/C1/1695500000.000004", closedAt: minutesAgo(1) });
+    expect((await sweep([{ workspaceId: task.workspaceId, compute: "gone" }])).interrupted).toEqual([task.operationId]);
+    expect(postNote).not.toHaveBeenCalled();
+  });
+
+  it("leaves alone an operation with no recorded change time, which cannot be judged", async () => {
+    const { db, sweep } = setup();
+    const task = failedCancel(db, 1, { updatedAt: undefined });
+    expect(await sweep([{ workspaceId: task.workspaceId, compute: "alive", worker: "idle" }, { workspaceId: task.workspaceId, compute: "alive", worker: "busy" }])).toEqual(empty);
+    expect(task.meta()).toMatchObject({ status: "BUSY", activeOperationId: task.operationId });
+  });
+
   it("logs a note that could not be posted by its error name, and still counts the release", async () => {
     const failure = Object.assign(new Error("PLANTED-SLACK-MESSAGE"), { name: "SlackSecretInvalid" });
     const { db, sweep, logs } = setup({ postNote: async () => { throw failure; } });

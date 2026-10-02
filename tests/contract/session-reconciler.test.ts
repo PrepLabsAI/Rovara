@@ -406,6 +406,20 @@ describe("reconciler: stuck cancels (issue 195)", () => {
     expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ReconcilerStuckCancelsInterrupted: 1, ReconcilerStuckCancelFailures: 0 }));
   });
 
+  it("issue 202: counts a failed cancel held by a busy worker past 30 minutes as a failure, so the StuckCancels alarm fires", async () => {
+    const table: { db?: FakeDynamoDb } = {};
+    const { db, state, reconcile, emit } = setup({ ping: async () => "HealthyBusy", sweepStuckCancels: (candidates, now) => sweepStuckCancels({ client: table.db!, tableName: "state" }, candidates, now) });
+    table.db = db;
+    const operationId = randomUUID();
+    const worker = ready();
+    const workspaceId = seedSession(db, "READY", worker, { status: "BUSY", activeOperationId: operationId, fence: 2 });
+    db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}`, kind: "task", status: "INTERRUPTED", fence: 2, updatedAt: minutesAgo(31) });
+    state.instances = [{ instanceId: worker.instanceId, state: "running", workspaceId, launchedAt: minutesAgo(60) }];
+    expect((await reconcile()).stuckCancels?.failed).toEqual([operationId]);
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "BUSY", activeOperationId: operationId });
+    expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ReconcilerStuckCancelsInterrupted: 0, ReconcilerStuckCancelFailures: 1 }));
+  });
+
   it("logs and counts a sweep that throws, and the run goes on", async () => {
     const logs: Array<Record<string, unknown>> = [];
     const failure = Object.assign(new Error("PLANTED-CANCEL-MESSAGE"), { name: "ThrottlingException" });

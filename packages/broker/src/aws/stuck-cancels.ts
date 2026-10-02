@@ -127,15 +127,16 @@ async function settle(
   // Issue 202: a cancel failed (the worker no longer knew the task, say). The result marked the task
   // INTERRUPTED but, as for any failed cancel, left it holding the workspace, since the worker may
   // still run it. Freed only when nothing can run there; a busy worker keeps it.
-  if (operation?.status === "INTERRUPTED" && typeof operation.fence === "number") {
+  if (operation?.status === "INTERRUPTED" && typeof operation.fence === "number" && typeof operation.updatedAt === "string") {
     const retried = typeof operation.cancelRetriedAt === "string";
-    const failedAt = Math.max(retried ? Date.parse(operation.cancelRetriedAt as string) : 0, typeof operation.updatedAt === "string" ? Date.parse(operation.updatedAt) : 0);
+    const failedAt = Math.max(retried ? Date.parse(operation.cancelRetriedAt as string) : 0, Date.parse(operation.updatedAt));
     const waited = at.getTime() - failedAt;
     let reason: FailedCancelReleaseReason;
     if (compute === "gone") {
       reason = "compute-gone";
     } else if (worker === "idle") {
-      // A retried one keeps #200's retry limit.
+      // A retried one keeps #200's retry limit (30 minutes from when its retried cancel failed),
+      // longer than the 10 minutes a first failed cancel waits.
       if (!(waited > (retried ? STUCK_CANCEL_RETRY_MS : FAILED_CANCEL_GRACE_MS))) return;
       reason = "worker-idle";
     } else {
@@ -285,7 +286,8 @@ async function noteRelease(
     if (typeof workspace.ownerKey !== "string") return;
     const record = ((await dependencies.client.send(new GetCommand({ TableName: dependencies.tableName, Key: { pk: `SLACK_THREAD#${workspace.ownerKey}`, sk: "META" }, ConsistentRead: true }))) as { Item?: Record<string, unknown> }).Item;
     // An API, CLI or AI-tool workspace has no thread; a thread now bound to another workspace is not this one's.
-    if (record === undefined || record.workspaceId !== ids.workspaceId) return;
+    // A closed thread takes no more requests, so it is not told (as failed-preparation.ts skips it).
+    if (record === undefined || record.workspaceId !== ids.workspaceId || record.closedAt != null) return;
     const parts = typeof record.thread === "string" ? record.thread.split("/") : [];
     if (parts.length !== 3 || parts.some((part) => part.length === 0)) {
       log({ event: "stuck_cancel.note_skipped", ...ids, reason: "thread-record-unreadable" });
@@ -293,6 +295,7 @@ async function noteRelease(
     }
     await dependencies.postNote!({ channelId: parts[1]!, threadTs: parts[2]! }, FAILED_CANCEL_RELEASED_MESSAGE);
   } catch (error) {
+    // Logged, not counted: the release stands, and the task's status carries the same message.
     log({ event: "stuck_cancel.note_failed", ...ids, errorName: error instanceof Error ? error.name : "unknown" });
   }
 }

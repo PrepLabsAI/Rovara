@@ -237,6 +237,19 @@ describe("a task's own late result after a failed cancel (issue 202)", () => {
     }
   });
 
+  it("answers a late result after the reconciler already freed the workspace without a conflict, and writes nothing", async () => {
+    const { db, handler, workspaceId, taskOperationId, operation, meta } = await failedFirstCancel();
+    const swept = await sweepStuckCancels({ client: db, tableName: "state" }, [{ workspaceId, compute: "gone" }], new Date());
+    expect(swept.interrupted).toEqual([taskOperationId]);
+    const released = structuredClone(operation());
+    const response = await ownResult(handler, db, workspaceId, taskOperationId, "SUCCEEDED");
+    expect(response.status).toBe(200);
+    expect(response.body.operation).toMatchObject({ id: taskOperationId, status: "INTERRUPTED" });
+    expect(operation()).toEqual(released);
+    expect(operation()).toMatchObject({ workspaceReleaseReason: "compute-gone" });
+    expect(meta()).not.toHaveProperty("activeOperationId");
+  });
+
   it("frees an AI tool's developer task's workspace the same way", async () => {
     const { db, handler, workspaceId, taskOperationId, operation, meta } = await failedFirstCancel();
     db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK", entityType: "DEVELOPER_TASK_POINTER", taskId: randomUUID() });
