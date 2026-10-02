@@ -14,7 +14,9 @@ import { environmentCachePath } from "../../packages/cli/src/environments/cache.
 import { lockParameterName } from "../../packages/cli/src/environments/lock.js";
 import { readEnvironmentSettings, settingsParameterName } from "../../packages/cli/src/environments/settings.js";
 import { INIT_STEP_IDS, installAnswersParameterName, installProgressParameterName, readInstallAnswers, readInstallProgress } from "../../packages/cli/src/init/install-state.js";
+import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL } from "../../packages/cli/src/init/answers.js";
 import { initSteps, type InitCliDependencies } from "../../packages/cli/src/init/commands.js";
+import { estimateMonthlyCost, suggestedBudgetUsd } from "../../packages/cli/src/init/cost.js";
 import {
   allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, fakeSlackApi, HOLDER, memoryInitSecrets, passingChecks, scriptedDeployer, scriptedPrompter,
   slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET,
@@ -72,7 +74,7 @@ async function harness(options: { releaseVersion?: string; regions?: string[] } 
   // day after T0, so it counts whenever the run's fake clock starts the e2e step.
   const plane = fakeControlPlane();
   plane.turns = [turn({ subject: "T0TEAM/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 86_400_000).toISOString() })];
-  const alerts = fakeAlerts({ confirmAfterPolls: 0, budgetUsd: 100 });
+  const alerts = fakeAlerts({ confirmAfterPolls: 0, budgetUsd: FIRST_RUN_BUDGET_USD });
   const cognito = fakeCognito();
   const setup = setupServices({
     cognito,
@@ -144,6 +146,8 @@ const SIGNIN = ["", "1111111111.2222222222222", "fedcba9876543210fedcba987654321
 // The finishing steps (F15): admin email; repository; project name; use the proposed commands;
 // channel; the three connector offers; "did the test alarm arrive?".
 const FINISH = [ADMIN_EMAIL, "acme/payments-api", "", true, "payments", false, false, false, true];
+// The budget FIRST_RUN's all-default models produce: the estimate plus 20%, one source with cost.ts.
+const FIRST_RUN_BUDGET_USD = suggestedBudgetUsd(estimateMonthlyCost({ orchestrator: DEFAULT_ORCHESTRATOR_MODEL, classifier: DEFAULT_CLASSIFIER_MODEL, worker: DEFAULT_WORKER_MODEL }));
 // A GitHub App made beforehand, and both Slack secrets, so --yes needs no prompt at all.
 const UNATTENDED = [
   "--yes", "--no-browser", "--github-account", "acme", "--github-app-id", "424242", "--github-installation-id", "777",
@@ -202,7 +206,7 @@ describe("agentx init", () => {
 
   it("a first run asks, checks, shows the plan, deploys every stack, creates both apps, writes settings and the local cache, and ends on a threaded Slack reply", async () => {
     // The harness's finishing services (F15): one repository, the payments channel, a confirmed
-    // alert subscription and the $100 budget FIRST_RUN takes (F16), and a turn received a day later.
+    // alert subscription and the budget FIRST_RUN takes (F16, the estimate plus 20%), and a turn received a day later.
     const h = await harness();
     const prompter = scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     expect(await h.run([], { prompter })).toBe(0);
@@ -233,7 +237,7 @@ describe("agentx init", () => {
 
   it("a resume that finishes after the alert confirmation wait still ends with the developer sign-in command", async () => {
     const h = await harness();
-    const alerts = fakeAlerts({ confirmAfterPolls: 1_000, budgetUsd: 100 });
+    const alerts = fakeAlerts({ confirmAfterPolls: 1_000, budgetUsd: FIRST_RUN_BUDGET_USD });
     const setup = { ...h.setup, alerts };
     // Everything up to the alerts step, which waits for the subscription to be confirmed.
     expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH.slice(0, -1)]), setup })).toBe(0);

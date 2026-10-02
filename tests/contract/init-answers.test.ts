@@ -3,6 +3,7 @@ import {
   alertWebhookSecretName, assertResumeFlagsMatch, BUDGET_TAG_NOTE, collectInitAnswers, GLM_NOTE, HAIKU_NOTE, persistInitAnswers, type InitFlags,
 } from "../../packages/cli/src/init/answers.js";
 import { readInstallAnswers } from "../../packages/cli/src/init/install-state.js";
+import { estimateMonthlyCost, suggestedBudgetUsd } from "../../packages/cli/src/init/cost.js";
 import { unattendedPrompter } from "../../packages/cli/src/init/prompts.js";
 import { GITHUB_LOGIN_PATTERN } from "../../packages/cli/src/deploy/answer-schemas.js";
 import { SecretAlreadyExistsError } from "../../packages/cli/src/deploy/signing-key.js";
@@ -48,17 +49,30 @@ describe("init questions", () => {
     expect(prompter.remaining()).toBe(0);
     expect(prompter.asked[2]).toBe("Model provider");
     expect(alertWebhook).toBeUndefined();
-    expect(notes).toEqual([BUDGET_TAG_NOTE]);
+    expect(notes).toEqual([]);
     expect(answers).toEqual({
       schemaVersion: 1, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates", releaseVersion: "1.2.3",
       identity: { mode: "cognito" },
       models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "amazon.nova-lite-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
       alert: { kind: "email", address: "ops@example.com" },
-      budget: { monthlyUsd: 100, scope: "tag" },
+      budget: { monthlyUsd: 260, scope: "account" },
       github: { account: "acme", accountType: "organization", appName: "AgentX acme staging" },
       slack: { appName: "AgentX", appPostedMessages: "accept" },
       createdAt: "2026-09-27T00:00:00.000Z",
     });
+  });
+
+  it("spec 048 FR-023: the budget's default is the estimate plus 20% for the whole account, with the estimate beside it", async () => {
+    const asked: Array<{ question: string; defaultValue?: string; why?: string }> = [];
+    const prompter = scriptedPrompter(["", "", "", "", "", "", "", "", "", "ops@example.com", "", "", "acme", "", "", "", ""]);
+    const recording = { ...prompter, ask: (question: string, options: Parameters<typeof prompter.ask>[1]) => { asked.push({ question, ...(options.defaultValue === undefined ? {} : { defaultValue: options.defaultValue }), ...(options.help?.why === undefined ? {} : { why: options.help.why }) }); return prompter.ask(question, options); } };
+    const collected = await collectInitAnswers({ env: "staging", region: "us-east-1", account: "123456789012", releaseVersion: "1.2.3", flags: {}, prompter: recording, processEnv: {}, now: () => 0 });
+    expect(collected.answers.budget).toEqual({ monthlyUsd: 260, scope: "account" });
+    expect(asked.find((entry) => entry.question.startsWith("Monthly AWS budget"))).toEqual({
+      question: "Monthly AWS budget for this environment, in US dollars (0 for none)", defaultValue: "260",
+      why: "AgentX's estimate is about $208.78 a month. The suggested budget is the estimate plus 20%. AWS emails you when this month's costs pass 80% of it. 0 turns it off.",
+    });
+    expect(collected.notes).not.toContain(BUDGET_TAG_NOTE);
   });
 
   it("asks nothing when every flag is given", async () => {
@@ -147,10 +161,11 @@ describe("init questions", () => {
 });
 
 describe("the budget question (FR-047)", () => {
-  it("defaults to $100 a month on the agentx:env tag, and says the tag must be activated", async () => {
+  it("defaults to the estimate plus 20% for the whole account, and only the tag choice needs it activated", async () => {
+    const suggested = suggestedBudgetUsd(estimateMonthlyCost({ orchestrator: everyFlag.orchestratorModel!, classifier: everyFlag.classifierModel!, worker: everyFlag.workerModel! }));
     const result = await collectInitAnswers({ ...base, flags: { ...everyFlag, budget: undefined } as InitFlags, prompter: scriptedPrompter(["", ""]) });
-    expect(result.answers.budget).toEqual({ monthlyUsd: 100, scope: "tag" });
-    expect(result.notes).toContain(BUDGET_TAG_NOTE);
+    expect(result.answers.budget).toEqual({ monthlyUsd: suggested, scope: "account" });
+    expect(result.notes).not.toContain(BUDGET_TAG_NOTE);
   });
 
   it("takes --budget 0 as no budget, asking nothing", async () => {

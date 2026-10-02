@@ -11,7 +11,9 @@ import { afterEach, describe, expect, it } from "vitest";
 import { environmentStackName } from "@agentx/contracts";
 import { executeCli } from "../../packages/cli/src/main.js";
 import { environmentCachePath } from "../../packages/cli/src/environments/cache.js";
+import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL } from "../../packages/cli/src/init/answers.js";
 import type { InitCliDependencies } from "../../packages/cli/src/init/commands.js";
+import { estimateMonthlyCost, suggestedBudgetUsd } from "../../packages/cli/src/init/cost.js";
 import { NO_BROWSER_LINE } from "../../packages/cli/src/init/ui-mode.js";
 import { INIT_STEP_IDS, installAnswersParameterName, readInstallProgress } from "../../packages/cli/src/init/install-state.js";
 import { readEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
@@ -60,6 +62,8 @@ const LINEAR_KEY = `lin_api_${"k".repeat(40)}SECRETlinearKEY`;
 // FINISH with Linear connected: yes to the offer, the key (typed on the page), the team (the
 // default, the key's only team), then no to Jira and Asana.
 const FINISH_WITH_LINEAR = [ADMIN_EMAIL, "acme/payments-api", "", true, "payments", true, LINEAR_KEY, "", false, false, true];
+// The budget FIRST_RUN's all-default models produce: the estimate plus 20%, one source with cost.ts.
+const FIRST_RUN_BUDGET_USD = suggestedBudgetUsd(estimateMonthlyCost({ orchestrator: DEFAULT_ORCHESTRATOR_MODEL, classifier: DEFAULT_CLASSIFIER_MODEL, worker: DEFAULT_WORKER_MODEL }));
 
 /** What the finishing steps read from the stacks: every deployed output, with the foundation's EC2
  * worker outputs as the real foundation stack has them (allStackOutputs's are placeholders). */
@@ -80,7 +84,8 @@ async function harness() {
   const release = await releaseDir();
   // The finishing steps' services, faked as the terminal path's tests fake them, so a run that
   // finishes reaches no AWS, GitHub or Slack: one repository, the payments channel, a confirmed
-  // alert subscription and the $100 budget FIRST_RUN takes, and a turn received a day after T0.
+  // alert subscription and the budget FIRST_RUN takes (the estimate plus 20%), and a turn received
+  // a day after T0.
   const projects = await tmp("agentx-init-ui-projects-");
   const plane = fakeControlPlane();
   plane.turns = [turn({ subject: "T0TEAM/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 86_400_000).toISOString() })];
@@ -88,7 +93,7 @@ async function harness() {
     fetch: plane.fetch,
     repositories: fakeRepositories({ "acme/payments-api": { files: { "go.mod": "module example.com/pay" } } }),
     slackChannels: fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: true }]),
-    alerts: fakeAlerts({ confirmAfterPolls: 0, budgetUsd: 100 }),
+    alerts: fakeAlerts({ confirmAfterPolls: 0, budgetUsd: FIRST_RUN_BUDGET_USD }),
     stackOutputs: finishStackOutputs,
     configDir: projects,
   });
@@ -189,7 +194,7 @@ describe("agentx init --ui", () => {
     // The plan and its confirm are on screen together: the confirm is the review screen's button.
     const review = operator.states.find((state) => state.plan !== undefined && state.question !== undefined);
     expect(review?.plan).toContain("Estimated monthly total");
-    expect(review?.plan).toContain("AgentX will create environment staging in account 123456789012");
+    expect(review?.plan).toContain("AgentX will create the install staging in AWS account 123456789012");
     expect(review?.question).toMatchObject({ kind: "confirm", text: "Create all of this?", defaultConfirm: false });
     // Nothing was created before it: no step had even started when the plan went up.
     expect(review?.steps.every((step) => step.status === "pending")).toBe(true);

@@ -7,6 +7,7 @@ import { AlertEmailSchema, GITHUB_LOGIN_PATTERN, MAX_BUDGET_USD, ModelsAnswersSc
 import type { BundleAnswers } from "../deploy/export-bundle.js";
 import { SecretAlreadyExistsError } from "../deploy/signing-key.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
+import { budgetWhy, estimateMonthlyCost, modelPriceLabel, suggestedBudgetUsd } from "./cost.js";
 import { writeInstallAnswers, type InitAnswers } from "./install-state.js";
 import { secretFromSource, type Prompter, type SecretSource } from "./prompts.js";
 
@@ -17,12 +18,12 @@ const GLM = "zai.glm-4.7";
 const HAIKU = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
 
 export const ORCHESTRATOR_MODEL_CHOICES: ReadonlyArray<{ value: string; label: string }> = [
-  { value: DEFAULT_ORCHESTRATOR_MODEL, label: "Claude Sonnet 4.6 (recommended; about $0.025 a turn)" },
-  { value: GLM, label: "GLM 4.7 (lower cost; about $0.007 a turn)" },
+  { value: DEFAULT_ORCHESTRATOR_MODEL, label: `Claude Sonnet 4.6 (recommended; ${modelPriceLabel("orchestrator", DEFAULT_ORCHESTRATOR_MODEL)})` },
+  { value: GLM, label: `GLM 4.7 (lower cost; ${modelPriceLabel("orchestrator", GLM)})` },
 ];
 export const CLASSIFIER_MODEL_CHOICES: ReadonlyArray<{ value: string; label: string }> = [
-  { value: DEFAULT_CLASSIFIER_MODEL, label: "Amazon Nova Lite (default)" },
-  { value: HAIKU, label: "Claude Haiku 4.5 (needs Anthropic model access in Bedrock)" },
+  { value: DEFAULT_CLASSIFIER_MODEL, label: `Amazon Nova Lite (recommended; ${modelPriceLabel("classifier", DEFAULT_CLASSIFIER_MODEL)})` },
+  { value: HAIKU, label: `Claude Haiku 4.5 (${modelPriceLabel("classifier", HAIKU)}; needs a one-time Anthropic form in Bedrock)` },
 ];
 export const GLM_NOTE =
   "GLM 4.7 costs about $0.007 a turn against Claude Sonnet 4.6's $0.025, and passed as many evaluation cases (58 of 65), but it refused correctly in only 6 of 7 cases that needed a refusal (Sonnet 4.6: 7 of 7).";
@@ -193,18 +194,21 @@ export async function collectInitAnswers(input: {
   if (alert.kind === "none") notes.push(NO_ALERTS_NOTE);
 
   const budgetFlag = "--budget";
+  const estimate = estimateMonthlyCost(platform.models);
+  const suggested = suggestedBudgetUsd(estimate);
   const rawBudget = flags.budget ?? (await prompter.ask("Monthly AWS budget for this environment, in US dollars (0 for none)", {
-    flag: budgetFlag, defaultValue: "100",
+    flag: budgetFlag, defaultValue: String(suggested),
     validate: budgetProblem,
+    help: { why: budgetWhy(estimate), example: String(suggested) },
   }));
   const budgetIssue = budgetProblem(rawBudget);
   if (budgetIssue !== undefined) throw agentXError("CONFIG_INVALID", `--budget ${budgetIssue}`);
   let budget: InitAnswers["budget"];
   if (Number(rawBudget) > 0) {
     const scope = flags.budgetScope ?? (await prompter.choose<"tag" | "account">("Which costs should the budget count?", [
+      { value: "account", label: "The whole account (recommended)" },
       { value: "tag", label: "Only this environment's (tagged agentx:env; the tag must be activated in Billing)" },
-      { value: "account", label: "The whole account (for an account used only by AgentX)" },
-    ], { flag: "--budget-scope", defaultValue: "tag" }));
+    ], { flag: "--budget-scope", defaultValue: "account" }));
     budget = { monthlyUsd: Number(rawBudget), scope };
     if (scope === "tag") notes.push(BUDGET_TAG_NOTE);
   }
@@ -304,7 +308,10 @@ async function askPlatformAnswers(
     : await modelChoice(prompter, flags.classifierModel, "Action-gate classifier model", "--classifier-model", CLASSIFIER_MODEL_CHOICES, DEFAULT_CLASSIFIER_MODEL);
   const worker = providers.worker === "openrouter"
     ? flags.workerModel ?? await prompter.ask("OpenRouter worker model id", { flag: "--worker-model" })
-    : flags.workerModel ?? await prompter.ask("Worker model id", { flag: "--worker-model", defaultValue: DEFAULT_WORKER_MODEL });
+    : flags.workerModel ?? await prompter.ask("Worker model id", {
+      flag: "--worker-model", defaultValue: DEFAULT_WORKER_MODEL,
+      help: { defaultText: `Claude Sonnet 4.6 (${modelPriceLabel("worker", DEFAULT_WORKER_MODEL)})` },
+    });
   const usesOpenRouter = Object.values(providers).includes("openrouter");
   const secretArn = flags.openrouterSecretArn;
   if (secretArn !== undefined && flags.openrouterKey !== undefined) {
