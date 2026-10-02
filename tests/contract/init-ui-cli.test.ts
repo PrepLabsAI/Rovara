@@ -758,6 +758,35 @@ describe("agentx init --ui", () => {
     expect(last?.outcome).toBe(READY_OUTCOME);
   });
 
+  it("spec 048 FR-059: a run paused waiting on a Slack admin's approval shows the plain outcome, a continue command, and the same reason in the terminal", async () => {
+    const h = await harness();
+    const operator = fakeWizardOperator([...FIRST_RUN, "approval"]);
+    const code = await h.run(["--ui"], { openBrowser: operator.open });
+    await operator.settled();
+    expect(code).toBe(0);
+    const last = operator.states.at(-1);
+    expect(last?.outcome).toBe("The install is paused. Your progress is saved.");
+    expect(last?.commands).toEqual([{ label: "Continue later with", command: "node /opt/agentx/dist/main.js --env staging init --region us-east-1" }]);
+    expect(h.err.join("").trimEnd().split("\n").at(-1)).toEqual(
+      `[5/5] Stopped: Waiting for a Slack admin to approve the app. Details in the browser and in ${initLogPath(h.home, "staging")}.`,
+    );
+  });
+
+  it("spec 048 FR-059: a run paused waiting on the alert subscription shows its own plain reason", async () => {
+    const h = await harness();
+    const alerts = fakeAlerts({ confirmAfterPolls: 1_000, budgetUsd: FIRST_RUN_BUDGET_USD });
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ADMIN_EMAIL, "acme/payments-api", "", true, "payments", false, false, false, false]);
+    const code = await h.run(["--ui"], { openBrowser: operator.open, setup: { ...h.setup, alerts } });
+    await operator.settled();
+    expect(code).toBe(0);
+    const last = operator.states.at(-1);
+    expect(last?.outcome).toBe("The install is paused. Your progress is saved.");
+    expect(last?.commands).toEqual([{ label: "Continue later with", command: "node /opt/agentx/dist/main.js --env staging init --region us-east-1" }]);
+    expect(h.err.join("").trimEnd().split("\n").at(-1)).toEqual(
+      `[5/5] Stopped: Waiting for the alert subscription to be confirmed. Details in the browser and in ${initLogPath(h.home, "staging")}.`,
+    );
+  });
+
   it("a run stopped with --stop-after shows no ready card", async () => {
     const h = await harness();
     const { code, operator } = await h.runUi([...FIRST_RUN], ["--stop-after", "prerequisites"]);
