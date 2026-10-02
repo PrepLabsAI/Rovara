@@ -265,6 +265,8 @@ export const SwebenchSettingsSchema = z.object({
   subnetIds: z.array(z.string().regex(/^subnet-[0-9a-f]{8,17}$/)).min(1).max(8),
   controlPlaneUrl: z.string().url().startsWith("https://"),
   logGroupName: z.string().regex(/^[A-Za-z0-9._/-]{1,512}$/),
+  /** Runs at once, deployment-wide (spec 052 FR-005); stored settings without it get the default. */
+  maxConcurrentEvals: z.number().int().min(1).max(6).default(4),
 }).strict();
 
 /**

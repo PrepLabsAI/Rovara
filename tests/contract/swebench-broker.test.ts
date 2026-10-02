@@ -19,6 +19,7 @@ const deployment: SwebenchDeployment = {
     subnetIds: ["subnet-0123456789abcdef0"],
     controlPlaneUrl: "https://api.example.com",
     logGroupName: "/agentx/production/swebench",
+    maxConcurrentEvals: 4, // spec 052: the schema default fills stored settings that lack it
   },
   runnerImage,
   defaultModel: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-deployment" },

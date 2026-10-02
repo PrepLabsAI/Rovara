@@ -1,0 +1,223 @@
+// Spec 052: batches of eval runs, several at once. The batch file, its record, the per-run measures
+// and the per-model summary.
+import { z } from "zod";
+import { ModelIdentifierSchema } from "./models.js";
+import { SlackRequesterSchema, SlackThreadSchema } from "./slack.js";
+import {
+  SwebenchDatasetSchema,
+  SwebenchInstanceIdSchema,
+  SwebenchLaunchSchema,
+  SwebenchStopReasonSchema,
+  SecbenchVerdictSchema,
+  swebenchFamily,
+  swebenchInstanceIdFits,
+  type SwebenchDataset,
+} from "./swebench.js";
+
+export const EVAL_BATCH_MAX_RUNS = 500;
+export const EVAL_BATCH_SLACK_MAX_RUNS = 20;
+export const EVAL_BATCH_COST_CAP_MIN_USD = 1;
+export const EVAL_BATCH_COST_CAP_MAX_USD = 1_000;
+
+// switch to @agentx/contracts ModelSelection/ThinkingLevel once spec 053 merges
+export const EvalBatchThinkingLevelSchema = z.enum(["off", "minimal", "low", "medium", "high", "xhigh"]);
+export const EvalBatchModelSchema = ModelIdentifierSchema.extend({
+  thinkingLevel: EvalBatchThinkingLevelSchema.optional(),
+  /** OpenRouter provider pin. */
+  routing: z.object({ only: z.array(z.string().min(1).max(80)).min(1).max(8) }).strict().optional(),
+}).strict();
+
+const RUNNER_IMAGE = SwebenchLaunchSchema.shape.runnerImage;
+
+export const EvalBatchSampleSchema = z.object({
+  count: z.number().int().min(1).max(EVAL_BATCH_MAX_RUNS),
+  seed: z.union([z.number().int(), z.string().min(1).max(64)]),
+  strata: z.array(z.string().min(1).max(64)).min(1).max(4).optional(),
+}).strict();
+
+export const EvalBatchFileSchema = z.object({
+  benchmark: SwebenchDatasetSchema,
+  tasks: z.array(SwebenchInstanceIdSchema).min(1).max(EVAL_BATCH_MAX_RUNS).optional(),
+  sample: EvalBatchSampleSchema.optional(),
+  models: z.array(EvalBatchModelSchema).min(1).max(16),
+  repeats: z.number().int().min(1).max(5).default(1),
+  order: z.enum(["cheapest-first", "as-listed"]).default("cheapest-first"),
+  concurrency: z.number().int().min(1).max(6).optional(),
+  costCapUsd: z.number().finite().min(EVAL_BATCH_COST_CAP_MIN_USD).max(EVAL_BATCH_COST_CAP_MAX_USD),
+  runnerImage: RUNNER_IMAGE.optional(),
+}).strict().superRefine((file, context) => {
+  if ((file.tasks === undefined) === (file.sample === undefined)) {
+    context.addIssue({ code: "custom", path: ["tasks"], message: "name either `tasks` or `sample`, not both and not neither" });
+  }
+  for (const [index, task] of (file.tasks ?? []).entries()) {
+    if (!swebenchInstanceIdFits(file.benchmark, task)) {
+      context.addIssue({ code: "custom", path: ["tasks", index], message: `“${task}” does not fit the ${file.benchmark} dataset` });
+    }
+  }
+  const taskCount = file.tasks?.length ?? file.sample?.count ?? 0;
+  const runs = taskCount * file.models.length * file.repeats;
+  if (runs > EVAL_BATCH_MAX_RUNS) {
+    context.addIssue({ code: "custom", path: ["models"], message: `${runs} runs exceed the ${EVAL_BATCH_MAX_RUNS}-run limit` });
+  }
+});
+
+export const EvalBatchStatusSchema = z.enum(["QUEUED", "RUNNING", "STOPPING", "DONE", "STOPPED", "CAPPED"]);
+export const EvalBatchEntryStateSchema = z.enum(["QUEUED", "RUNNING", "DONE", "FAILED", "CANCELLED", "NOT_STARTED"]);
+
+export const EvalBatchEntrySchema = z.object({
+  index: z.number().int().nonnegative(),
+  task: SwebenchInstanceIdSchema,
+  model: EvalBatchModelSchema,
+  repeat: z.number().int().min(1).max(5),
+  /** 1, or 2 after the one retry of an infrastructure failure (FR-008). */
+  attempt: z.number().int().min(1).max(2),
+  state: EvalBatchEntryStateSchema,
+  runId: z.string().uuid().optional(),
+}).strict();
+
+export const EvalBatchRecordSchema = z.object({
+  batchId: z.string().uuid(),
+  file: EvalBatchFileSchema,
+  createdBy: SlackRequesterSchema,
+  thread: SlackThreadSchema,
+  status: EvalBatchStatusSchema,
+  queue: z.array(EvalBatchEntrySchema).max(EVAL_BATCH_MAX_RUNS * 2),
+  spentUsd: z.number().nonnegative(),
+  counts: z.object({
+    queued: z.number().int().nonnegative(),
+    running: z.number().int().nonnegative(),
+    done: z.number().int().nonnegative(),
+    failed: z.number().int().nonnegative(),
+    cancelled: z.number().int().nonnegative(),
+    notStarted: z.number().int().nonnegative(),
+  }).strict(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  finishedAt: z.string().datetime().optional(),
+}).strict();
+
+/** One CSV row: a finished run's measures (spec 052 FR-010). */
+export const EvalRunMeasureSchema = z.object({
+  batchId: z.string().uuid(),
+  runId: z.string().uuid(),
+  instanceId: SwebenchInstanceIdSchema,
+  provider: z.string().min(1).max(128),
+  modelId: z.string().min(1).max(256),
+  thinkingLevel: EvalBatchThinkingLevelSchema.optional(),
+  repeat: z.number().int().min(1).max(5),
+  outcome: z.enum(["GRADED", "FAILED"]),
+  resolved: z.boolean(),
+  secbench: SecbenchVerdictSchema.optional(),
+  failToPass: z.object({ passed: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).strict().optional(),
+  passToPass: z.object({ passed: z.number().int().nonnegative(), total: z.number().int().nonnegative() }).strict().optional(),
+  stopReason: SwebenchStopReasonSchema.optional(),
+  agentSeconds: z.number().int().nonnegative(),
+  toolCalls: z.number().int().nonnegative().optional(),
+  tokens: z.object({
+    input: z.number().int().nonnegative(),
+    output: z.number().int().nonnegative(),
+    cacheRead: z.number().int().nonnegative(),
+    cacheWrite: z.number().int().nonnegative(),
+    total: z.number().int().nonnegative(),
+  }).strict(),
+  costUsd: z.number().nonnegative().nullable(),
+  imageDigest: z.string().max(256),
+  /** Spec 051's claim-and-check fields, when present. */
+  claimCheck: z.record(z.string().max(64), z.union([z.string().max(500), z.number(), z.boolean()])).optional(),
+}).strict();
+
+export const EvalBatchModelSummarySchema = z.object({
+  provider: z.string().min(1).max(128),
+  modelId: z.string().min(1).max(256),
+  thinkingLevel: EvalBatchThinkingLevelSchema.optional(),
+  /** Graded runs: the denominator of the rate. */
+  runs: z.number().int().nonnegative(),
+  /** Runs that ended FAILED, counted separately (spec 046 R-4). */
+  failed: z.number().int().nonnegative(),
+  resolved: z.number().int().nonnegative(),
+  rate: z.number().min(0).max(1),
+  wilsonLow: z.number().min(0).max(1),
+  wilsonHigh: z.number().min(0).max(1),
+  totalCostUsd: z.number().nonnegative(),
+  /** Null when no task was solved. */
+  costPerSolvedUsd: z.number().nonnegative().nullable(),
+}).strict();
+
+export const EvalBatchSummarySchema = z.object({
+  batchId: z.string().uuid().optional(),
+  models: z.array(EvalBatchModelSummarySchema),
+}).strict();
+
+export type EvalBatchModel = z.infer<typeof EvalBatchModelSchema>;
+export type EvalBatchFile = z.infer<typeof EvalBatchFileSchema>;
+export type EvalBatchEntry = z.infer<typeof EvalBatchEntrySchema>;
+export type EvalBatchRecord = z.infer<typeof EvalBatchRecordSchema>;
+export type EvalRunMeasure = z.infer<typeof EvalRunMeasureSchema>;
+export type EvalBatchModelSummary = z.infer<typeof EvalBatchModelSummarySchema>;
+export type EvalBatchSummary = z.infer<typeof EvalBatchSummarySchema>;
+
+/** The Slack message `eval batch <benchmark> <dataset> <ids…> models <a, b…> [repeats N] [cap $X]` (FR-002). */
+export type EvalBatchCommand =
+  | { kind: "batch"; dataset: SwebenchDataset; instanceIds: string[]; modelSelectors: string[]; repeats: number; costCapUsd?: number }
+  | { kind: "invalid"; message: string };
+
+const BATCH_COMMAND = /^eval\s+batch\b(.*)$/isu;
+const BATCH_USAGE = "Use `eval batch <swebench|secbench> <dataset> <instance-id…> models <a, b…> [repeats N] [cap $X]`.";
+
+export function parseEvalBatchCommand(text: string): EvalBatchCommand | undefined {
+  const command = text.replace(/^\s*<@[A-Z0-9]+>\s*/iu, "").trim().replace(/[.!?]+$/u, "");
+  const match = BATCH_COMMAND.exec(command);
+  if (!match) return undefined;
+  const invalid = (message: string): EvalBatchCommand => ({ kind: "invalid", message: `${message} ${BATCH_USAGE}` });
+  const rest = (match[1] ?? "").trim().split(/\s+/u).filter((word) => word.length > 0);
+  const benchmark = rest[0]?.toLowerCase();
+  if (benchmark === undefined) return invalid("Tell me which benchmark, dataset and instances to run.");
+  if (benchmark !== "swebench" && benchmark !== "secbench") return invalid(`Unknown benchmark “${rest[0]}”.`);
+  const datasetWord = rest[1]?.toLowerCase();
+  if (datasetWord === undefined) return invalid("Tell me which dataset to run.");
+  const dataset = benchmark === "secbench"
+    ? (datasetWord === "patch" ? "secbench-patch" : undefined)
+    : SwebenchDatasetSchema.safeParse(datasetWord).data;
+  if (dataset === undefined || (benchmark === "swebench") === (swebenchFamily(dataset) === "secbench")) {
+    return invalid(`Unknown dataset “${rest[1]}”.`);
+  }
+  const body = rest.slice(2);
+  const modelsAt = body.findIndex((word) => word.toLowerCase() === "models");
+  if (modelsAt < 0) return invalid("Tell me which models to compare after `models`.");
+  const instanceIds = body.slice(0, modelsAt);
+  if (instanceIds.length === 0) return invalid("Tell me which instances to run.");
+  for (const id of instanceIds) {
+    if (!SwebenchInstanceIdSchema.safeParse(id).success || !swebenchInstanceIdFits(dataset, id)) {
+      return invalid(`“${id}” is not an instance ID of the ${datasetWord} dataset.`);
+    }
+  }
+  let tail = body.slice(modelsAt + 1);
+  let repeats = 1;
+  let costCapUsd: number | undefined;
+  // Options come last: `repeats N` and `cap $X`, in either order.
+  for (let pass = 0; pass < 2; pass += 1) {
+    const last2 = tail.slice(-2);
+    const key = last2[0]?.toLowerCase();
+    if (last2.length === 2 && key === "repeats") {
+      if (!/^\d+$/u.test(last2[1] ?? "") || Number(last2[1]) < 1 || Number(last2[1]) > 5) return invalid("`repeats` takes a number from 1 to 5.");
+      repeats = Number(last2[1]);
+      tail = tail.slice(0, -2);
+    } else if (last2.length === 2 && key === "cap") {
+      const cap = /^\$?(\d+(?:\.\d+)?)$/u.exec(last2[1] ?? "");
+      const value = cap ? Number(cap[1]) : Number.NaN;
+      if (!(value >= EVAL_BATCH_COST_CAP_MIN_USD && value <= EVAL_BATCH_COST_CAP_MAX_USD)) {
+        return invalid(`\`cap\` takes a dollar amount from ${EVAL_BATCH_COST_CAP_MIN_USD} to ${EVAL_BATCH_COST_CAP_MAX_USD.toLocaleString("en-US")}.`);
+      }
+      costCapUsd = value;
+      tail = tail.slice(0, -2);
+    }
+  }
+  const modelSelectors = tail.join(" ").split(",").map((name) => name.trim()).filter((name) => name.length > 0);
+  if (modelSelectors.length === 0) return invalid("Tell me which models to compare after `models`.");
+  const runs = instanceIds.length * modelSelectors.length * repeats;
+  if (runs > EVAL_BATCH_SLACK_MAX_RUNS) {
+    return invalid(`${runs} runs is more than the ${EVAL_BATCH_SLACK_MAX_RUNS} a Slack message may start; use a batch file for more.`);
+  }
+  return { kind: "batch", dataset, instanceIds, modelSelectors, repeats, ...(costCapUsd === undefined ? {} : { costCapUsd }) };
+}
+
