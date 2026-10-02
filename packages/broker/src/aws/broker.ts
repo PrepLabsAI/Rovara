@@ -103,6 +103,7 @@ import type { AdminChangeHandlers, PlanDependencies } from "./admin-change-plans
 import { ZodError } from "zod";
 import { healthProbes } from "./health-probes.js";
 import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js";
+import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
@@ -3910,6 +3911,13 @@ async function recordTerminalResult(
   const status = input.status;
   if (!TERMINAL.has(status as OperationStatus)) throw agentXError("CONFIG_INVALID", "terminal status is invalid");
   if (TERMINAL.has(operation.status)) {
+    // Issue 202: a task whose cancel failed ended INTERRUPTED but kept its workspace, as it might
+    // still run. Its own result proves the run ended, so it frees the workspace; the result itself
+    // is not stored (results stay immutable), and the worker gets the stored operation.
+    if (operation.kind === "task" && operation.status === "INTERRUPTED") {
+      const released = await releaseOnOwnResult(dependencies, operation);
+      if (released !== undefined) return released;
+    }
     if (operation.status !== status && !isQueueFailedPrepare(operation, status) && !isSweptPrepare(operation)) throw agentXError("IDEMPOTENCY_CONFLICT", "terminal result is immutable");
     // #213: a repeated result releases a failed prepare's slot too, in case the first one's release
     // did not land (the release is idempotent, and does nothing to a workspace that moved on).
@@ -4051,6 +4059,28 @@ async function recordTerminalResult(
   }
   if (recordedStatus !== terminalStatus) return { ...operation, status: recordedStatus, updatedAt: now, error: FIRST_TASK_QUEUE_FAILED };
   return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
+}
+
+/**
+ * Issue 202: frees the workspace an INTERRUPTED task still holds after its cancel failed, when the
+ * task's own late result arrives, under the fence the callback holds. Returns the stored operation
+ * when the workspace is freed now, or was freed so by an earlier copy of this result; undefined when
+ * the task no longer holds the workspace (a newer operation, a moved fence, or a reconciler release
+ * first), so the result is refused as before.
+ */
+async function releaseOnOwnResult(dependencies: AwsBrokerDependencies, operation: OperationRecord): Promise<OperationRecord | undefined> {
+  const stored = operation as OperationRecord & { workspaceReleaseReason?: unknown };
+  if (stored.workspaceReleaseReason === "own-result") return operation;
+  const workspace = await getItem<{ activeOperationId?: unknown; fence?: unknown }>(dependencies, workspaceKey(operation.workspaceId));
+  if (workspace?.activeOperationId !== operation.id || workspace.fence !== operation.fence) return undefined;
+  const at = new Date();
+  if (!(await releaseFailedCancelWorkspace(dependencies.documentClient, dependencies.tableName, { workspaceId: operation.workspaceId, operationId: operation.id }, operation, "own-result", at))) {
+    // Something moved first: read again, so a copy of this result that won the race is answered too.
+    const again = await requireOperation(dependencies, operation.workspaceId, operation.id) as OperationRecord & { workspaceReleaseReason?: unknown };
+    return again.workspaceReleaseReason === "own-result" ? again : undefined;
+  }
+  console.log(JSON.stringify({ component: "broker", event: "stuck_cancel.released", workspaceId: operation.workspaceId, operationId: operation.id, reason: "own-result" }));
+  return await requireOperation(dependencies, operation.workspaceId, operation.id);
 }
 
 /**

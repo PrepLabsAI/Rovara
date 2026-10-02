@@ -137,6 +137,15 @@ flowchart LR
   minutes later, the task is ended INTERRUPTED and its workspace freed. The legacy reconciler has no
   signing key, so there it only logs and counts a stuck cancel on a live worker. Narrowing the key
   to a cancel-only one is tracked in issue 201.
+- **Failed cancels.** A cancel that reaches the worker and fails (a restarted worker that no longer
+  knows the task, say) ends the task INTERRUPTED but leaves it holding its workspace, because the
+  worker may still be running it (issue 202). The workspace is freed only on evidence that nothing
+  runs there: at once when the compute is gone, or when the task's own late result arrives; 10
+  minutes after the cancel failed when the worker answers its ping idle. While the worker answers
+  busy the workspace stays held, and after 30 minutes each run logs `stuck_cancel.held_busy` and
+  counts it, so the StuckCancels alarm fires. The operation records when and why its workspace was
+  freed (`workspaceReleasedAt`, `workspaceReleaseReason`), the task's status says so in plain words,
+  and in named environments the Slack thread gets a short note.
 
 `AgentXControlPlane` owns the ingress, queue, thread storage, Slack secret, and orchestrator task
 role, because the broker must know that role before the service exists. `AgentXSlackOrchestrator`

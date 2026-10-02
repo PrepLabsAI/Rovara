@@ -4,6 +4,8 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
+  FAILED_CANCEL_GRACE_MS,
+  FAILED_CANCEL_RELEASED_MESSAGE,
   STUCK_CANCEL_INTERRUPTED_MESSAGE,
   STUCK_CANCEL_LOST_MESSAGE,
   STUCK_CANCEL_MS,
@@ -22,7 +24,9 @@ const minutesLater = (minutes: number) => new Date(NOW.getTime() + minutes * 60_
 
 type Retry = NonNullable<StuckCancelDependencies["retryCancel"]>;
 
-function setup(options: { retry?: Retry | false } = {}) {
+type PostNote = NonNullable<StuckCancelDependencies["postNote"]>;
+
+function setup(options: { retry?: Retry | false; postNote?: PostNote } = {}) {
   const db = new FakeDynamoDb();
   const logs: Array<Record<string, unknown>> = [];
   const retryCancel = vi.fn<Retry>(options.retry === false || options.retry === undefined ? async () => ({ outcome: "REQUEUED", cancelOperationId: randomUUID() }) : options.retry);
@@ -30,6 +34,7 @@ function setup(options: { retry?: Retry | false } = {}) {
     client: db,
     tableName: "state",
     ...(options.retry === false ? {} : { retryCancel }),
+    ...(options.postNote === undefined ? {} : { postNote: options.postNote }),
     log: (entry) => { logs.push(entry); },
   };
   const sweep = (candidates: StuckCancelCandidate[], at: Date = NOW) => sweepStuckCancels(dependencies, candidates, at);
@@ -228,24 +233,47 @@ describe("a stuck cancel whose compute is alive", () => {
 });
 
 describe("a retried cancel that failed", () => {
-  it("frees the workspace its INTERRUPTED task still holds, only after the retry limit", async () => {
+  it("frees the workspace its INTERRUPTED task still holds, only after the retry limit, when the worker answers idle", async () => {
     const { db, sweep, logs } = setup();
     const task = seedTask(db, "INTERRUPTED", 1, { cancelRetriedAt: minutesAgo(10) });
-    const candidate = [{ workspaceId: task.workspaceId, compute: "alive" as const }];
+    const candidate = [{ workspaceId: task.workspaceId, compute: "alive" as const, worker: "idle" as const }];
     expect(await sweep(candidate)).toEqual(empty);
     expect(task.meta()).toMatchObject({ status: "BUSY", activeOperationId: task.operationId });
     expect(await sweep(candidate, minutesLater(31))).toEqual({ ...empty, interrupted: [task.operationId] });
-    expect(task.operation()).toMatchObject({ status: "INTERRUPTED" });
+    expect(task.operation()).toMatchObject({ status: "INTERRUPTED", workspaceReleaseReason: "worker-idle", workspaceReleasedAt: minutesLater(31).toISOString() });
     expect(task.meta()).toMatchObject({ status: "READY" });
     expect(task.meta()).not.toHaveProperty("activeOperationId");
-    expect(logs).toEqual([{ event: "stuck_cancel.released", workspaceId: task.workspaceId, operationId: task.operationId }]);
+    expect(logs).toEqual([{ event: "stuck_cancel.released", workspaceId: task.workspaceId, operationId: task.operationId, reason: "worker-idle" }]);
   });
 
-  it("never frees one the sweep did not retry", async () => {
-    const { db, sweep } = setup();
-    const task = seedTask(db, "INTERRUPTED", 600);
-    expect(await sweep([{ workspaceId: task.workspaceId, compute: "alive" }, { workspaceId: task.workspaceId, compute: "gone" }])).toEqual(empty);
+  it("issue 202, owner answer 3: never frees it while the worker answers busy, however old, and counts it for the alarm after the limit", async () => {
+    const { db, sweep, logs } = setup();
+    const task = seedTask(db, "INTERRUPTED", 1, { cancelRetriedAt: minutesAgo(10) });
+    const candidate = [{ workspaceId: task.workspaceId, compute: "alive" as const, worker: "busy" as const }];
+    expect(await sweep(candidate)).toEqual(empty);
+    expect(await sweep(candidate, minutesLater(31))).toEqual({ ...empty, failed: [task.operationId] });
+    expect(await sweep(candidate, minutesLater(600))).toEqual({ ...empty, failed: [task.operationId] });
     expect(task.meta()).toMatchObject({ status: "BUSY", activeOperationId: task.operationId });
+    expect(task.operation()).not.toHaveProperty("workspaceReleasedAt");
+    expect(logs).toEqual([
+      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId },
+      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId },
+    ]);
+  });
+
+  it("issue 202, owner answer 3: never frees it while the worker's answer is unknown (its ping failed)", async () => {
+    const { db, sweep } = setup();
+    const task = seedTask(db, "INTERRUPTED", 600, { cancelRetriedAt: minutesAgo(600) });
+    expect(await sweep([{ workspaceId: task.workspaceId, compute: "alive" }])).toEqual(empty);
+    expect(task.meta()).toMatchObject({ status: "BUSY", activeOperationId: task.operationId });
+  });
+
+  it("issue 202: frees it at once when its compute is gone", async () => {
+    const { db, sweep } = setup();
+    const task = seedTask(db, "INTERRUPTED", 1, { cancelRetriedAt: minutesAgo(10) });
+    expect(await sweep([{ workspaceId: task.workspaceId, compute: "gone" }])).toEqual({ ...empty, interrupted: [task.operationId] });
+    expect(task.operation()).toMatchObject({ status: "INTERRUPTED", workspaceReleaseReason: "compute-gone" });
+    expect(task.meta()).not.toHaveProperty("activeOperationId");
   });
 
   it("logs a release that lost a race, and does not count it", async () => {
@@ -256,9 +284,183 @@ describe("a retried cancel that failed", () => {
       if (command.constructor.name === "TransactWriteCommand") db.set({ ...task.meta(), activeOperationId: randomUUID() });
       return send(command);
     } } as unknown as FakeDynamoDb;
-    const result = await sweepStuckCancels({ client: racing, tableName: "state", log: (entry) => { logs.push(entry); } }, [{ workspaceId: task.workspaceId, compute: "alive" }], NOW);
+    const result = await sweepStuckCancels({ client: racing, tableName: "state", log: (entry) => { logs.push(entry); } }, [{ workspaceId: task.workspaceId, compute: "alive", worker: "idle" }], NOW);
     expect(result).toEqual(empty);
     expect(logs).toEqual([{ event: "stuck_cancel.skipped", workspaceId: task.workspaceId, operationId: task.operationId, reason: "changed" }]);
+  });
+});
+
+describe("a failed first cancel (issue 202)", () => {
+  /** A task whose first cancel failed `minutes` ago: INTERRUPTED, but still holding its workspace. */
+  const failedCancel = (db: FakeDynamoDb, minutes: number, fields: Record<string, unknown> = {}, workspace: Record<string, unknown> = {}) => seedTask(db, "INTERRUPTED", minutes, fields, workspace);
+  const pointer = (db: FakeDynamoDb, workspaceId: string) => db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK", entityType: "DEVELOPER_TASK_POINTER", taskId: randomUUID() });
+
+  it("waits 10 minutes for an idle worker", () => {
+    expect(FAILED_CANCEL_GRACE_MS).toBe(10 * 60_000);
+  });
+
+  it("frees the workspace at once when its compute is gone, keeps the task INTERRUPTED and records why", async () => {
+    const { db, sweep, logs, retryCancel } = setup();
+    const task = failedCancel(db, 1);
+    expect(await sweep([{ workspaceId: task.workspaceId, compute: "gone" }])).toEqual({ ...empty, interrupted: [task.operationId] });
+    expect(task.operation()).toMatchObject({
+      status: "INTERRUPTED", workspaceReleaseReason: "compute-gone", workspaceReleasedAt: NOW.toISOString(), error: FAILED_CANCEL_RELEASED_MESSAGE,
+    });
+    expect(task.meta()).toMatchObject({ status: "READY", fence: 3, updatedAt: NOW.toISOString() });
+    expect(task.meta()).not.toHaveProperty("activeOperationId");
+    expect(retryCancel).not.toHaveBeenCalled();
+    expect(logs).toEqual([{ event: "stuck_cancel.released", workspaceId: task.workspaceId, operationId: task.operationId, reason: "compute-gone" }]);
+  });
+
+  it("frees it when the worker answers idle, only once 10 minutes have passed since the cancel failed", async () => {
+    const { db, sweep, logs } = setup();
+    const task = failedCancel(db, 0);
+    const candidate = [{ workspaceId: task.workspaceId, compute: "alive" as const, worker: "idle" as const }];
+    expect(await sweep(candidate, minutesLater(9))).toEqual(empty);
+    expect(task.meta()).toMatchObject({ status: "BUSY", activeOperationId: task.operationId });
+    expect(logs).toEqual([]);
+    expect(await sweep(candidate, minutesLater(11))).toEqual({ ...empty, interrupted: [task.operationId] });
+    expect(task.operation()).toMatchObject({ status: "INTERRUPTED", workspaceReleaseReason: "worker-idle", workspaceReleasedAt: minutesLater(11).toISOString(), error: FAILED_CANCEL_RELEASED_MESSAGE });
+    expect(task.meta()).toMatchObject({ status: "READY" });
+    expect(task.meta()).not.toHaveProperty("activeOperationId");
+    expect(logs).toEqual([{ event: "stuck_cancel.released", workspaceId: task.workspaceId, operationId: task.operationId, reason: "worker-idle" }]);
+  });
+
+  it("never frees it while the worker answers busy, however old: after 30 minutes it is logged and counted on every run, so the alarm fires", async () => {
+    const { db, sweep, logs } = setup();
+    const task = failedCancel(db, 0);
+    const candidate = [{ workspaceId: task.workspaceId, compute: "alive" as const, worker: "busy" as const }];
+    expect(await sweep(candidate, minutesLater(29))).toEqual(empty);
+    expect(logs).toEqual([]);
+    expect(await sweep(candidate, minutesLater(31))).toEqual({ ...empty, failed: [task.operationId] });
+    expect(await sweep(candidate, minutesLater(24 * 60))).toEqual({ ...empty, failed: [task.operationId] });
+    expect(task.meta()).toMatchObject({ status: "BUSY", activeOperationId: task.operationId });
+    expect(task.operation()).not.toHaveProperty("workspaceReleasedAt");
+    expect(task.operation()).not.toHaveProperty("error");
+    expect(logs).toEqual([
+      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId },
+      { event: "stuck_cancel.held_busy", workspaceId: task.workspaceId, operationId: task.operationId },
+    ]);
+  });
+
+  it("does nothing when the worker's ping failed, or its compute is starting or stopping", async () => {
+    const { db, sweep, logs } = setup();
+    const noAnswer = failedCancel(db, 600);
+    const unknown = failedCancel(db, 600);
+    expect(await sweep([{ workspaceId: noAnswer.workspaceId, compute: "alive" }, { workspaceId: unknown.workspaceId, compute: "unknown" }])).toEqual(empty);
+    expect(noAnswer.meta()).toMatchObject({ status: "BUSY", activeOperationId: noAnswer.operationId });
+    expect(unknown.meta()).toMatchObject({ status: "BUSY", activeOperationId: unknown.operationId });
+    expect(logs).toEqual([]);
+  });
+
+  it("applies the same rule to an AI tool's developer task", async () => {
+    const { db, sweep } = setup();
+    const gone = failedCancel(db, 1);
+    const idle = failedCancel(db, 11);
+    const busy = failedCancel(db, 600);
+    for (const task of [gone, idle, busy]) pointer(db, task.workspaceId);
+    expect(await sweep([
+      { workspaceId: gone.workspaceId, compute: "gone" },
+      { workspaceId: idle.workspaceId, compute: "alive", worker: "idle" },
+      { workspaceId: busy.workspaceId, compute: "alive", worker: "busy" },
+    ])).toEqual({ ...empty, interrupted: [gone.operationId, idle.operationId], failed: [busy.operationId] });
+    expect(gone.operation()).toMatchObject({ workspaceReleaseReason: "compute-gone" });
+    expect(idle.operation()).toMatchObject({ workspaceReleaseReason: "worker-idle" });
+    expect(busy.meta()).toMatchObject({ status: "BUSY", activeOperationId: busy.operationId });
+  });
+
+  it("frees a workspace exactly once: later runs find nothing to do", async () => {
+    const { db, sweep, logs } = setup();
+    const task = failedCancel(db, 1);
+    const candidate = [{ workspaceId: task.workspaceId, compute: "gone" as const }];
+    await sweep(candidate);
+    const released = structuredClone(task.operation());
+    expect(await sweep(candidate, minutesLater(10))).toEqual(empty);
+    expect(await sweep([{ workspaceId: task.workspaceId, compute: "alive", worker: "idle" }], minutesLater(20))).toEqual(empty);
+    expect(task.operation()).toEqual(released);
+    expect(logs).toHaveLength(1);
+  });
+
+  it("never releases twice, even when the workspace points at the operation again", async () => {
+    const { db, sweep, logs } = setup();
+    const task = failedCancel(db, 1, { workspaceReleasedAt: minutesAgo(5), workspaceReleaseReason: "own-result" });
+    expect(await sweep([{ workspaceId: task.workspaceId, compute: "gone" }])).toEqual(empty);
+    expect(task.operation()).toMatchObject({ workspaceReleaseReason: "own-result", workspaceReleasedAt: minutesAgo(5) });
+    expect(logs).toEqual([{ event: "stuck_cancel.skipped", workspaceId: task.workspaceId, operationId: task.operationId, reason: "changed" }]);
+  });
+
+  it("keeps an error the operation already carries", async () => {
+    const { db, sweep } = setup();
+    const task = failedCancel(db, 1, { error: "the worker said no" });
+    await sweep([{ workspaceId: task.workspaceId, compute: "gone" }]);
+    expect(task.operation()).toMatchObject({ error: "the worker said no", workspaceReleaseReason: "compute-gone" });
+  });
+
+  it("frees a close's workspace back to the status it had", async () => {
+    const { db, sweep } = setup();
+    const task = failedCancel(db, 1, { kind: "close", closePreviousStatus: "STOPPED" });
+    await sweep([{ workspaceId: task.workspaceId, compute: "gone" }]);
+    expect(task.meta()).toMatchObject({ status: "STOPPED" });
+  });
+
+  it("a release that lost a race to a result or a new operation is logged as skipped and not counted", async () => {
+    for (const change of ["new-operation", "new-fence"] as const) {
+      const { db, logs } = setup();
+      const task = failedCancel(db, 20);
+      const send = db.send;
+      const racing = { ...db, send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
+        if (command.constructor.name === "TransactWriteCommand") {
+          db.set(change === "new-operation" ? { ...task.meta(), activeOperationId: randomUUID(), fence: 4 } : { ...task.meta(), fence: 4 });
+        }
+        return send(command);
+      } } as unknown as FakeDynamoDb;
+      const result = await sweepStuckCancels({ client: racing, tableName: "state", log: (entry) => { logs.push(entry); } }, [{ workspaceId: task.workspaceId, compute: "alive", worker: "idle" }], NOW);
+      expect(result).toEqual(empty);
+      expect(task.meta()).toMatchObject({ status: "BUSY", fence: 4 });
+      expect(task.operation()).not.toHaveProperty("workspaceReleasedAt");
+      expect(logs).toEqual([{ event: "stuck_cancel.skipped", workspaceId: task.workspaceId, operationId: task.operationId, reason: "changed" }]);
+    }
+  });
+
+  it("tells a Slack thread in plain words that its workspace is free again", async () => {
+    const postNote = vi.fn<PostNote>(async () => undefined);
+    const { db, sweep } = setup({ postNote });
+    const task = failedCancel(db, 1, {}, { ownerKey: "owner-1" });
+    db.set({ pk: "SLACK_THREAD#owner-1", sk: "META", workspaceId: task.workspaceId, thread: "T1/C1/1695500000.000001" });
+    await sweep([{ workspaceId: task.workspaceId, compute: "gone" }]);
+    expect(postNote).toHaveBeenCalledExactlyOnceWith({ channelId: "C1", threadTs: "1695500000.000001" }, FAILED_CANCEL_RELEASED_MESSAGE);
+    expect(FAILED_CANCEL_RELEASED_MESSAGE).not.toMatch(/[\u2013\u2014]/u);
+    // Once only: the next run releases nothing, so it posts nothing.
+    await sweep([{ workspaceId: task.workspaceId, compute: "gone" }], minutesLater(10));
+    expect(postNote).toHaveBeenCalledTimes(1);
+  });
+
+  it("posts no note for a workspace with no Slack thread, or a thread that moved to another workspace, or when nothing was freed", async () => {
+    const postNote = vi.fn<PostNote>(async () => undefined);
+    const { db, sweep } = setup({ postNote });
+    const noThread = failedCancel(db, 1, {}, { ownerKey: "owner-none" });
+    const rebound = failedCancel(db, 1, {}, { ownerKey: "owner-rebound" });
+    db.set({ pk: "SLACK_THREAD#owner-rebound", sk: "META", workspaceId: randomUUID(), thread: "T1/C1/1695500000.000002" });
+    const held = failedCancel(db, 600, {}, { ownerKey: "owner-held" });
+    db.set({ pk: "SLACK_THREAD#owner-held", sk: "META", workspaceId: held.workspaceId, thread: "T1/C1/1695500000.000003" });
+    const result = await sweep([
+      { workspaceId: noThread.workspaceId, compute: "gone" },
+      { workspaceId: rebound.workspaceId, compute: "gone" },
+      { workspaceId: held.workspaceId, compute: "alive", worker: "busy" },
+    ]);
+    expect(result.interrupted).toEqual([noThread.operationId, rebound.operationId]);
+    expect(postNote).not.toHaveBeenCalled();
+  });
+
+  it("logs a note that could not be posted by its error name, and still counts the release", async () => {
+    const failure = Object.assign(new Error("PLANTED-SLACK-MESSAGE"), { name: "SlackSecretInvalid" });
+    const { db, sweep, logs } = setup({ postNote: async () => { throw failure; } });
+    const task = failedCancel(db, 1, {}, { ownerKey: "owner-1" });
+    db.set({ pk: "SLACK_THREAD#owner-1", sk: "META", workspaceId: task.workspaceId, thread: "T1/C1/1695500000.000001" });
+    expect((await sweep([{ workspaceId: task.workspaceId, compute: "gone" }])).interrupted).toEqual([task.operationId]);
+    expect(task.meta()).not.toHaveProperty("activeOperationId");
+    expect(logs).toContainEqual({ event: "stuck_cancel.note_failed", workspaceId: task.workspaceId, operationId: task.operationId, errorName: "SlackSecretInvalid" });
+    expect(JSON.stringify(logs)).not.toContain("PLANTED-SLACK-MESSAGE");
   });
 });
 
@@ -273,9 +475,11 @@ describe("what the sweep never touches", () => {
     expect(retryCancel).not.toHaveBeenCalled();
   });
 
-  it("an operation that is not CANCEL_REQUESTED, however old", async () => {
+  it("an operation that is not CANCEL_REQUESTED, however old (an INTERRUPTED one only once it no longer holds the workspace)", async () => {
     const { db, sweep, retryCancel } = setup();
-    const tasks = ["ACCEPTED", "DISPATCHING", "RUNNING", "SUCCEEDED", "CANCELLED", "INTERRUPTED", "FAILED"].map((status) => seedTask(db, status, 600));
+    const tasks = ["ACCEPTED", "DISPATCHING", "RUNNING", "SUCCEEDED", "CANCELLED", "FAILED"].map((status) => seedTask(db, status, 600));
+    const interrupted = seedTask(db, "INTERRUPTED", 600, {}, { status: "READY", activeOperationId: undefined });
+    tasks.push(interrupted);
     const before = tasks.map((task) => structuredClone(task.operation()));
     for (const compute of ["alive", "gone"] as const) {
       expect(await sweep(tasks.map((task) => ({ workspaceId: task.workspaceId, compute })))).toEqual(empty);
