@@ -3,6 +3,9 @@ import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { swebenchEvalDefinition } from "../../infra/lib/swebench-eval-definition.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 type Resource = { Type: string; Properties: Record<string, unknown> };
 type Statement = { Sid?: string; Action: string | string[]; Resource: unknown; Condition?: Record<string, Record<string, unknown>> };

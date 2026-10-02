@@ -4,6 +4,9 @@ import { describe, expect, it } from "vitest";
 import { ENVIRONMENT_PLACEHOLDER } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
 import { SERVICE_ROLE_SERVICES, defaultBoundaryStatements } from "../../infra/lib/access-policies.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 const stacksOf = (app: App) => app.node.children.filter((c): c is Stack => Stack.isStack(c));
 type Statement = { Sid?: string; Effect: string; Action: string | string[]; Resource: unknown; Condition?: unknown };
