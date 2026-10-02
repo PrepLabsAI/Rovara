@@ -12,6 +12,7 @@ import type {
 } from "../../packages/contracts/src/index.js";
 import { processSlackRequest, type ProcessorDependencies } from "../../packages/slack-service/src/processor.js";
 import {
+  EVAL_BATCH_CLAIM_MS,
   EVAL_BATCH_FAILURE_BACKOFF_MS,
   EVAL_BATCH_PROGRESS_INTERVAL_MS,
   EVAL_BATCH_WATCH_POLL_MS,
@@ -446,8 +447,9 @@ describe("the batch watcher's opener (spec 052 Ruling 24, M-1)", () => {
 });
 
 describe("the batch watcher drops a batch it cannot post for (spec 052 Ruling 24)", () => {
-  it.each([...PERMANENT_SLACK_ERRORS])("drops the batch on Slack's %s, logging an error that names it", async (code) => {
-    const w = watcher([batch({ finished: 1 })]);
+  // Changed by Ruling 26: only an ended batch is dropped on a permanent Slack error.
+  it.each([...PERMANENT_SLACK_ERRORS])("drops an ended batch on Slack's %s, logging an error that names it", async (code) => {
+    const w = watcher([ended()]);
     w.slack.post.mockRejectedValueOnce(new SlackApiError("chat.postMessage", code));
     await w.once();
     expect(w.api.dropWatch).toHaveBeenCalledWith(expect.objectContaining({ batchId }) as unknown, `slack:${code}`);
@@ -457,8 +459,31 @@ describe("the batch watcher drops a batch it cannot post for (spec 052 Ruling 24
     expect(w.slack.post).toHaveBeenCalledTimes(1);
   });
 
-  it("drops a CLI batch whose channel is gone before its opener", async () => {
-    const w = watcher([batch({ thread: { ...thread, threadTs: "0012345678.901234" } })]);
+  it.each([...PERMANENT_SLACK_ERRORS])("backs off, and does not drop, a running batch on Slack's %s", async (code) => {
+    const w = watcher([batch({ finished: 1 })]);
+    w.slack.post.mockRejectedValueOnce(new SlackApiError("chat.postMessage", code));
+    await w.once();
+    expect(w.api.dropWatch).not.toHaveBeenCalled();
+    expect(w.logError).toHaveBeenCalledWith("eval_batch_watch.batch_failed", { batchId, error: `Slack chat.postMessage failed: ${code}` });
+    w.advance(EVAL_BATCH_WATCH_POLL_MS);
+    await w.once();
+    expect(w.slack.post).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["not_in_channel", "restricted_action"])("never drops a batch on Slack's %s, which an admin can fix", async (code) => {
+    expect(PERMANENT_SLACK_ERRORS).not.toContain(code);
+    const w = watcher([ended()]);
+    w.slack.post.mockRejectedValueOnce(new SlackApiError("chat.postMessage", code));
+    await w.once();
+    expect(w.api.dropWatch).not.toHaveBeenCalled();
+    w.advance(EVAL_BATCH_FAILURE_BACKOFF_MS + EVAL_BATCH_CLAIM_MS);
+    await w.once();
+    expect(w.posts).toHaveLength(1);
+  });
+
+  // Changed by Ruling 26: a CLI batch is dropped for a missing channel only once it has ended.
+  it("drops an ended CLI batch whose channel is gone before its opener", async () => {
+    const w = watcher([ended({ thread: { ...thread, threadTs: "0012345678.901234" } })]);
     w.slack.post.mockRejectedValueOnce(new SlackApiError("chat.postMessage", "channel_not_found"));
     await w.once();
     expect(w.state.get(batchId)!.watch).toMatchObject({ dropReason: "slack:channel_not_found" });

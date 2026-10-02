@@ -152,13 +152,20 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
   the repeats, and the cap if one was given. No default resolved at request time is part of it. So a redelivered
   event finds the batch it created, even if the project's thinking levels, the providers or the channel's ceiling
   changed in between. The same form in another thread is another batch.
-- **D-12 (2026-10-02, Rulings 22, 24):** The watcher stops watching a batch, logged as an error naming the batch, when:
+- **D-12 (2026-10-02, Rulings 22, 24, 26):** A batch that has not ended is never dropped. The watcher stops watching
+  an ended batch, logged as an error naming the batch, when:
   - its channel is unbound, or now serves another project;
-  - Slack answers a permanent error for its channel: `channel_not_found`, `is_archived`, `channel_is_archived`,
-    `not_in_channel`, `restricted_action` or `team_access_not_granted`;
-  - the batch ended more than 7 days ago without its summary posted.
+  - Slack answers a permanent error for its channel: `channel_not_found`, `is_archived`, `channel_is_archived` or
+    `team_access_not_granted`;
+  - it ended more than 7 days ago without its summary posted.
 
-  After any other failure, the watcher leaves the batch alone for 10 minutes.
+  A running batch is handled differently:
+  - while its channel is unbound or rebound, it is left out of the list and logged as an error once; it is watched
+    again once the channel serves its project again;
+  - on a permanent Slack error, it is only backed off.
+
+  `not_in_channel` and `restricted_action`, which an admin can fix, are never treated as permanent. After any failure
+  that does not drop the batch, the watcher leaves it alone for 10 minutes.
 
   Each post is claimed on the batch record before it is made. A CLI batch's opener stores its timestamp before the
   thread is recorded, so a failed record retries the record, not the post. A posted summary is recorded with its

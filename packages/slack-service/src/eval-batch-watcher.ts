@@ -18,9 +18,9 @@
 // minutes old another pass posts it again. Within one process the timestamp is kept in memory, so a
 // failed record is retried without posting again.
 //
-// Ruling 24: a batch Slack can never post for (a permanent error, PERMANENT_SLACK_ERRORS) is dropped
-// from the watcher's list, logged as an error. After any other failure the batch is left alone for
-// 10 minutes.
+// Rulings 24 and 26: an ended batch Slack can never post for (a permanent error,
+// PERMANENT_SLACK_ERRORS) is dropped from the watcher's list, logged as an error. A running batch is
+// never dropped. After any other failure the batch is left alone for 10 minutes.
 import type {
   EvalBatchModelSummary,
   EvalBatchThreadResult,
@@ -40,13 +40,12 @@ export const EVAL_BATCH_SUMMARY_CLAIM_MS = EVAL_BATCH_CLAIM_MS;
 export const EVAL_BATCH_FAILURE_BACKOFF_MS = 10 * 60_000;
 
 /**
- * Ruling 24: Slack errors no retry can fix for this batch's channel: the channel is gone or
- * archived, the bot is not in it, or posting there is not allowed. A token or rate error is not here:
- * it is the deployment's, not the batch's.
+ * Rulings 24 and 26: Slack errors no retry can fix for this batch's channel: the channel is gone or
+ * archived, or the workspace no longer grants access. `not_in_channel` and `restricted_action` are
+ * not here, since an admin can fix them, nor is a token or rate error, which is the deployment's.
+ * Even these drop only an ended batch; a running one is backed off.
  */
-export const PERMANENT_SLACK_ERRORS: readonly string[] = [
-  "channel_not_found", "is_archived", "channel_is_archived", "not_in_channel", "restricted_action", "team_access_not_granted",
-];
+export const PERMANENT_SLACK_ERRORS: readonly string[] = ["channel_not_found", "is_archived", "channel_is_archived", "team_access_not_granted"];
 
 /**
  * A Slack Web API answer with `ok: false`, carrying Slack's error code. Its message and name are the
@@ -149,7 +148,7 @@ export async function watchEvalBatchesOnce(dependencies: EvalBatchWatcherDepende
       await watchBatch(dependencies, state, current, now);
       state.retryAt.delete(listed.batchId);
     } catch (error) {
-      if (error instanceof SlackApiError && PERMANENT_SLACK_ERRORS.includes(error.code)) {
+      if (error instanceof SlackApiError && PERMANENT_SLACK_ERRORS.includes(error.code) && TERMINAL.has(current.batch.status)) {
         const reason = `slack:${error.code}`;
         try {
           await dependencies.api.dropWatch(current.batch, reason);

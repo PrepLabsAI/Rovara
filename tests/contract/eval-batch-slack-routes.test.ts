@@ -221,6 +221,23 @@ describe("what the watcher posted (spec 052 Task 6, restart idempotence)", () =>
   });
 });
 
+/** The real watcher client, signing fetch and broker, posting to a Slack stub that records the in-thread texts. */
+function watcherFor(handler: H, posts: string[]) {
+  const toBroker = brokerFetch(handler);
+  const api = createEvalBatchWatchApi({
+    controlPlaneUrl: "https://agentx.example.test",
+    signedFetchFor: (scope) => createSignedServiceFetch({
+      region: "us-east-1", credentials: { accessKeyId: "test-key", secretAccessKey: "test-secret" }, baseFetch: toBroker,
+      ...(scope === undefined ? {} : { thread: scope.thread, userId: scope.userId }),
+    }),
+  });
+  const slack = {
+    post: vi.fn(async (_channel: string, _threadTs: string | undefined, text: string) => { posts.push(text); return "1695800000.000009"; }),
+    delete: vi.fn(async () => undefined),
+  };
+  return { api, slack, logError: vi.fn(), now: () => Date.parse("2026-10-02T12:00:00.000Z") };
+}
+
 describe("the batch watcher against the broker (spec 052 Task 6, Ruling 19)", () => {
   it("opens a CLI batch's thread, a stop there stops the batch, and its summary is posted there once", async () => {
     const { handler, dependencies, db } = await slackBatchBroker();
@@ -322,16 +339,51 @@ describe("the Slack form's default cap (spec 052 Ruling 22)", () => {
 });
 
 describe("dropping a watch entry (spec 052 Ruling 24)", () => {
-  it("drops a batch whose channel was rebound or unbound, once, and names it", async () => {
+  // Changed by Ruling 26: a running batch whose channel moved is left out and logged, never dropped.
+  it("leaves out a running batch whose channel was unbound, logs it once as an error, and watches it again once rebound", async () => {
+    const { handler, db, dependencies } = await slackBatchBroker();
+    const batchId = ((await startForm(handler)).body.batch as { batchId: string }).batchId;
+    const binding = structuredClone(db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)!);
+    const errors = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    try {
+      db.delete(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`);
+      expect(await list(handler)).toMatchObject({ status: 200, body: { batches: [], dropped: [] } });
+      expect(await list(handler)).toMatchObject({ body: { batches: [], dropped: [] } });
+      const unavailable = errors.mock.calls.map((call) => String(call[0])).filter((line) => line.includes("eval_batch_watch.channel_unavailable"));
+      expect(unavailable).toHaveLength(1);
+      expect(unavailable[0]).toContain(batchId);
+      expect(db.find((item) => item.entityType === "EVAL_BATCH_WATCH")).toHaveLength(1);
+    } finally {
+      errors.mockRestore();
+    }
+    db.set({ ...binding });
+    expect(await list(handler)).toMatchObject({ body: { batches: [{ batchId, status: "RUNNING" }] } });
+    // Rebound, the batch's summary still posts once it ends.
+    const posts: string[] = [];
+    const watcher = watcherFor(handler, posts);
+    await handler({ source: "agentx.slack-ingress", action: "stop-task", thread, userId: member });
+    await finalizeBatch(dependencies, batchId);
+    await watchEvalBatchesOnce(watcher);
+    expect(posts).toEqual([expect.stringMatching(new RegExp(`^Eval batch \`${batchId}\` was stopped`)) as unknown]);
+  });
+
+  // Changed by Ruling 26: a rebound channel's running batch is left out, not dropped.
+  it("leaves out a running batch whose channel serves another project, and drops it only once it has ended", async () => {
     const { handler, db } = await slackBatchBroker();
-    const rebound = ((await startForm(handler)).body.batch as { batchId: string }).batchId;
+    const batchId = ((await startForm(handler)).body.batch as { batchId: string }).batchId;
     db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)!.projectName = "elsewhere";
-    expect(await list(handler)).toMatchObject({ status: 200, body: { batches: [], dropped: [{ batchId: rebound, reason: "channel_moved" }] } });
     expect(await list(handler)).toMatchObject({ body: { batches: [], dropped: [] } });
-    db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`)!.projectName = "payments";
-    const unbound = ((await startForm(handler, form, slackThreadSubject({ ...thread, threadTs: "1695500000.000003" }))).body.batch as { batchId: string }).batchId;
+    db.get(`EVAL_BATCH#${batchId}`, "META")!.status = "STOPPED";
+    expect(await list(handler)).toMatchObject({ body: { batches: [], dropped: [{ batchId, reason: "channel_moved" }] } });
+    expect(db.find((item) => item.entityType === "EVAL_BATCH_WATCH")).toHaveLength(0);
+  });
+
+  it("drops an ended batch whose channel was unbound", async () => {
+    const { handler, db } = await slackBatchBroker();
+    const batchId = ((await startForm(handler)).body.batch as { batchId: string }).batchId;
+    await handler({ source: "agentx.slack-ingress", action: "stop-task", thread, userId: member });
     db.delete(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`);
-    expect(await list(handler)).toMatchObject({ body: { batches: [], dropped: [{ batchId: unbound, reason: "channel_unbound" }] } });
+    expect(await list(handler)).toMatchObject({ body: { batches: [], dropped: [{ batchId, reason: "channel_unbound" }] } });
     expect(db.find((item) => item.entityType === "EVAL_BATCH_WATCH")).toHaveLength(0);
   });
 

@@ -141,11 +141,16 @@ function defaultCapUsd(runs: number, ceilingUsd: number): number {
 
 /** Records the list could not read, logged once per process rather than on every 30-second list. */
 const reportedUnreadable = new Set<string>();
+/** Ruling 26: running batches whose channel is unbound or rebound, logged once until they are listed again. */
+const reportedUnavailable = new Set<string>();
 
 /**
- * The batches the watcher posts for, from creation until their summary is posted. Ruling 24: a batch
- * whose channel was unbound or now serves another project, or that ended more than 7 days ago, is
- * dropped from the list for good, logged as an error and named in `dropped` for the watcher to log.
+ * The batches the watcher posts for, from creation until their summary is posted. Ruling 24: an
+ * ended batch whose channel was unbound or now serves another project, or that ended more than 7
+ * days ago, is dropped from the list for good, logged as an error and named in `dropped` for the
+ * watcher to log. Ruling 26: a batch that has not ended is never dropped; while its channel is
+ * unbound or rebound it is left out and logged as an error once, and watched again once the channel
+ * serves its project again.
  * One that cannot be read is logged as an error once and left out, so one broken record never hides
  * the others.
  */
@@ -166,10 +171,19 @@ export async function listWatchedBatches(
       }
       const { record } = stored;
       const project = await channelProject(record.thread.teamId, record.thread.channelId);
+      const ended = TERMINAL.has(record.status);
       const reason = project === undefined ? "channel_unbound"
         : project !== stored.projectName ? "channel_moved"
-        : TERMINAL.has(record.status) && record.finishedAt !== undefined && nowMs - Date.parse(record.finishedAt) > EVAL_BATCH_WATCH_MAX_AGE_MS ? "ended_over_7_days"
+        : ended && record.finishedAt !== undefined && nowMs - Date.parse(record.finishedAt) > EVAL_BATCH_WATCH_MAX_AGE_MS ? "ended_over_7_days"
         : undefined;
+      if (reason !== undefined && !ended) {
+        if (!reportedUnavailable.has(batchId)) {
+          reportedUnavailable.add(batchId);
+          logError("eval_batch_watch.channel_unavailable", { batchId, reason, projectName: stored.projectName });
+        }
+        continue;
+      }
+      reportedUnavailable.delete(batchId);
       if (reason !== undefined) {
         await unwatchBatch(dependencies, batchId);
         logError("eval_batch_watch.dropped", { batchId, reason, projectName: stored.projectName });
