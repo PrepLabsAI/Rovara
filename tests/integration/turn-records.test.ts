@@ -206,13 +206,14 @@ describe("turn record failures and pass-through", () => {
     expect(finish).toHaveBeenCalledOnce();
   });
 
-  it("gives runTurn no recorder when no turn-record sink is configured", async () => {
+  it("hands runTurn a recorder for the check report, and replies with the model's text alone, when no turn-record sink is configured", async () => {
     const inputs: TurnInput[] = [];
     const { dependencies, posts } = harness({ runTurn: async (input) => { inputs.push(input); return "No open issues."; } });
     const withoutSink: ProcessorDependencies = { ...dependencies };
     delete withoutSink.turnRecords;
     await processSlackRequest(message, withoutSink, { finalAttempt: false });
-    expect(inputs[0]).not.toHaveProperty("recorder");
+    // Spec 051 FR-009: the recorder carries the turn's check reports; with none, the reply is unchanged.
+    expect(inputs[0]).toHaveProperty("recorder");
     expect(posts.at(-1)).toBe("No open issues.");
   });
 });

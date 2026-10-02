@@ -766,6 +766,10 @@ function measureOf(batchId: string, run: SwebenchRun, end: RecordedEnd): EvalRun
     chargedUsd: charge.chargedUsd,
     ...(charge.costEstimated ? { costEstimated: true } : {}),
     imageDigest: result?.imageDigest ?? "",
+    // Spec 051: empty from a runner older than the checks.
+    ...(result?.checks === undefined ? {} : { checkStatus: result.checks.status }),
+    ...(result?.agentClaim === undefined ? {} : { agentClaim: result.agentClaim }),
+    ...(result?.disagreement === undefined ? {} : { disagrees: result.disagreement.disagrees }),
   });
 }
 
@@ -925,6 +929,7 @@ export const EVAL_BATCH_RESULTS_COLUMNS = [
   "failToPassPassed", "failToPassTotal", "passToPassPassed", "passToPassTotal", "stopReason", "agentSeconds", "toolCalls",
   "inputTokens", "outputTokens", "cacheReadTokens", "cacheWriteTokens", "totalTokens",
   "costUsd", "chargedUsd", "costEstimated", "imageDigest", "claimCheck",
+  "checkStatus", "agentClaim", "disagrees",
 ] as const;
 
 /**
@@ -968,6 +973,9 @@ export function evalBatchResultsCsv(record: EvalBatchRecord, measures: readonly 
       costEstimated: measure.costEstimated === true,
       imageDigest: measure.imageDigest,
       claimCheck: measure.claimCheck === undefined ? undefined : JSON.stringify(measure.claimCheck),
+      checkStatus: measure.checkStatus,
+      agentClaim: measure.agentClaim,
+      disagrees: measure.disagrees,
     };
     return EVAL_BATCH_RESULTS_COLUMNS.map((column) => csvField(values[column]));
   });

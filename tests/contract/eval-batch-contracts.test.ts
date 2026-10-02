@@ -117,6 +117,22 @@ describe("fix round 1 (053 selection, duplicates, claim state)", () => {
     expect(pb).toMatchObject({ routing: { only: ["b"] }, unpricedRuns: 1, totalCostUsd: 0 });
     expect(EvalBatchSummarySchema.safeParse({ models: [z, pa, pb] }).success).toBe(true);
   });
+  it("computes the disagreement rate over graded runs that have a claim (spec 051 FR-011)", () => {
+    const rows = [
+      measure({ runId: uuid(50), agentClaim: "success", disagrees: true, checkStatus: "regression" }),
+      measure({ runId: uuid(51), agentClaim: "success", disagrees: false, checkStatus: "verified" }),
+      measure({ runId: uuid(52), agentClaim: "failure", disagrees: false, checkStatus: "verified" }),
+      // No claim line, a run from an older runner, and a run that was not graded: none is in the denominator.
+      measure({ runId: uuid(53), agentClaim: "none", disagrees: false }),
+      measure({ runId: uuid(54) }),
+      measure({ runId: uuid(55), outcome: "FAILED", resolved: undefined, agentClaim: "success", disagrees: true }),
+      measure({ runId: uuid(56), modelId: "other" }),
+    ];
+    const [a, other] = summarize(rows);
+    expect(a!.disagreementRate).toBeCloseTo(1 / 3);
+    expect(other!.disagreementRate).toBeNull();
+    expect(EvalBatchSummarySchema.safeParse({ models: [a, other] }).success).toBe(true);
+  });
   it("refuses a repeated option in the Slack form", () => {
     for (const tail of ["repeats 2 repeats 3", "cap 5 cap 6", "repeats 2 cap 5 repeats 3"]) {
       const r = parseEvalBatchCommand(`eval batch swebench verified django__django-11099 models Fast ${tail}`);

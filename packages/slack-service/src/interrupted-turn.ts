@@ -4,7 +4,7 @@
  * the thread remembered, posting its result instead of running the model (and any approved call)
  * again.
  */
-import { redactAndCap } from "@agentx/contracts";
+import { checksReplyPrefix, redactAndCap, type CheckReport } from "@agentx/contracts";
 
 /** The worker operation a turn was waiting on, kept on the thread's META row until the turn ends. */
 export interface ActiveTurn {
@@ -105,13 +105,14 @@ function failureReason(error: string): string {
 }
 
 /** The resumed turn's reply: the operation's result or failure reason, then how to go on. */
-export function resumedResultText(result: { status: string; response?: string | undefined; error?: string | undefined }): string {
+export function resumedResultText(result: { status: string; response?: string | undefined; error?: string | undefined; checks?: CheckReport | undefined }): string {
   const head = result.status === "SUCCEEDED"
     ? result.response === undefined || result.response.trim().length === 0
       ? "The task that was running when AgentX restarted has finished, without a final message."
       : `The task that was running when AgentX restarted has finished:\n${result.response}`
     : `The task that was running when AgentX restarted ended as ${result.status.toLowerCase()}${result.error ? `: ${failureReason(result.error)}` : "."}`;
-  return `${head}\n\n${CONTINUE_TEXT}`;
+  // Spec 051 FR-009: AgentX's check verdict leads, then the agent's account.
+  return `${checksReplyPrefix(result.checks === undefined ? [] : [result.checks])}${head}\n\n${CONTINUE_TEXT}`;
 }
 
 /** The META row's activeTurn, or undefined when it is missing or unreadable. */

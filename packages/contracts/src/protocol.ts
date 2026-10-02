@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { StoredProjectDefinitionSchema } from "./project.js";
+import { ProjectCommandSchema, StoredProjectDefinitionSchema } from "./project.js";
 import { ModelSelectionSchema, type ModelSelection } from "./models.js";
 
 export const AGENTX_PROTOCOL_VERSION = 1 as const;
@@ -11,7 +11,7 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "publish.reportChecks"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number];
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
@@ -46,6 +46,12 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         conversationStarted: z.boolean().optional(),
         model: ModelSelectionSchema.optional(),
         modelSelectionDiagnostic: z.string().min(1).max(512).optional(),
+        /**
+         * Spec 051 (P-1): the project's current readiness commands, which the worker reruns when the agent finishes.
+         * Optional: a payload from a broker built before it has none, and the worker falls back to the agent's own
+         * test commands. Sent only to a worker whose /ping lists "task.readiness". The limit is the project's own.
+         */
+        readiness: z.array(ProjectCommandSchema).max(64).optional(),
       })
       .strict(),
   }).strict(),
@@ -69,6 +75,13 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         mode: z.enum(["create", "replace", "revert"]).default("create"),
         targetPullRequestNumber: z.number().int().positive().optional(),
         revertCommit: z.string().regex(/^[a-f0-9]{40,64}$/).optional(),
+        /**
+         * Spec 051 (D-7, P-2): the broker opens a draft pull request with a checks section when a check fails, so the
+         * worker publishes despite a failing readiness check and reports its checks with the pull request callback.
+         * Without it (a broker built before it), a failing check still refuses the publication, as before. Sent only
+         * to a worker whose /ping lists "publish.reportChecks".
+         */
+        reportChecks: z.literal(true).optional(),
       })
       .strict()
       .superRefine((value, context) => {

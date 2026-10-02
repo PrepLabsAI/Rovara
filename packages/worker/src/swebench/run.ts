@@ -2,6 +2,7 @@ import { mkdir, readFile, rm } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import {
   SWEBENCH_DATASETS,
+  agentxPreambleSha256,
   createTaskUsageTelemetry,
   swebenchAgentLimits,
   swebenchFamily,
@@ -12,6 +13,8 @@ import {
 } from "@agentx/contracts";
 import { containerBashOperations } from "../devcontainer.js";
 import { redactCredentials } from "../events.js";
+import { compactCheckReport } from "../verification/extension.js";
+import type { CheckRunners } from "../verification/checks.js";
 import { usageForControlPlane } from "../usage.js";
 import type { PiSessionAdapter, WorkspaceModelConfiguration } from "../pi-session.js";
 import { runSwebenchAgent, type AgentRun } from "./agent.js";
@@ -47,6 +50,8 @@ export interface SwebenchRunDependencies {
   gradeSecbench?: typeof gradeSecbenchPrediction;
   proTask?: ProTaskOptions;
   timeLimitMs?: number;
+  /** The runners AgentX's checks use; tests supply fakes. Default: the task container's shell. */
+  checkRunners?: CheckRunners;
 }
 
 /**
@@ -121,8 +126,10 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
       toolCallLimit: limits.toolCallLimit,
       ...(secbench ? { prompt: secbenchPatchPrompt(instance as unknown as { work_dir: string; bug_description: string; sanitizer_report: string }, testbed) } : {}),
       ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }),
+      ...(dependencies.checkRunners === undefined ? {} : { checkRunners: dependencies.checkRunners }),
     });
     log("agent.stopped", { stopReason: agent.stopReason, agentSeconds: agent.agentSeconds });
+    for (const diagnostic of agent.diagnostics) log("agent.diagnostic", { message: diagnostic });
     usage = sessionUsage(agent, dependencies.model, agent.stopReason === "finished" ? "SUCCEEDED" : "FAILED");
     await removeContainer(docker, container);
     const patch = await predictionPatch(git, imageHead, untrackedBefore, secbench ? SECBENCH_SOURCE_EXTENSIONS : undefined);
@@ -150,6 +157,11 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
         if (body !== undefined) await save(file.name, body, file.name.endsWith(".json") ? "application/json" : "text/plain");
       }
     }
+    // FR-011: the agent claimed success, and AgentX's checks or the grader's PASS_TO_PASS say it broke something.
+    // SEC-bench runs no regression tests, so it has no grader signal.
+    const graderBrokenPassToPass = secbench ? null : grade !== undefined && "passToPass" in grade ? grade.passToPass.passed < grade.passToPass.total : false;
+    const claimedSuccess = agent.agentClaim === "success";
+    const checkRegression = agent.checks.status === "regression";
     result = {
       outcome: "GRADED",
       resolved: grade?.resolved ?? false,
@@ -161,6 +173,15 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
       toolCalls: agent.toolCalls,
       imageDigest,
       usage,
+      checks: agent.checks,
+      agentClaim: agent.agentClaim,
+      disagreement: {
+        claimedSuccess,
+        checkRegression,
+        graderBrokenPassToPass,
+        disagrees: claimedSuccess && (checkRegression || graderBrokenPassToPass === true),
+      },
+      preambleSha256: agentxPreambleSha256(),
       artifactsPrefix: config.artifactsPrefix,
     };
   } catch (error) {
@@ -193,17 +214,24 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
   }
   // The offline settings go in the artifact only: the broker's result schema is strict, and the
   // runner image can ship before a broker that knows a new field.
+  // The full report, unless it is unusually large: then the compact one, so result.json stays small.
+  const savedResult = result.outcome === "GRADED" && result.checks !== undefined && Buffer.byteLength(JSON.stringify(result.checks)) > 1_000_000
+    ? { ...result, checks: compactCheckReport(result.checks) }
+    : result;
   await save("result.json", JSON.stringify({
-    ...result,
+    ...savedResult,
     dataset: config.dataset,
     ...(taskCommit === undefined ? {} : { taskCommit }),
     offlineSettings: [...OFFLINE_SETTINGS],
+    // Spec 051 Ruling F: what the session reported without failing (an extension's error), already redacted.
+    ...(agent === undefined || agent.diagnostics.length === 0 ? {} : { diagnostics: agent.diagnostics }),
     // What a later comparison needs to know about how the run was set up (pilot lesson, 2026-10-01).
     limits: swebenchAgentLimits(config.dataset),
     ...(thinkingLevel === undefined ? {} : { thinkingLevel }),
     ...(secbenchRun === undefined ? {} : {
       secbenchSetup: {
         promptTemplateSha256: SECBENCH_PATCH_TEMPLATE_SHA256,
+        preambleSha256: agentxPreambleSha256(),
         smolagentsCommit: SECBENCH_SMOLAGENTS_COMMIT,
         evaluatorCommit: SECBENCH_EVALUATOR_COMMIT,
         ...secbenchRun,
@@ -212,7 +240,9 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
     artifacts: [...saved].sort(),
   }, null, 2), "application/json");
   // result.json above keeps the level in usage; the callback carries it only when the config did.
-  const reported = result.usage === undefined ? result : { ...result, usage: usageForControlPlane(result.usage, dependencies.model) };
+  // The callback carries the compact report (the broker's limits); result.json keeps the full one.
+  const withCompactChecks = result.outcome === "GRADED" && result.checks !== undefined ? { ...result, checks: compactCheckReport(result.checks) } : result;
+  const reported = withCompactChecks.usage === undefined ? withCompactChecks : { ...withCompactChecks, usage: usageForControlPlane(withCompactChecks.usage, dependencies.model) };
   await reporter.result(reported);
   return reported;
 }

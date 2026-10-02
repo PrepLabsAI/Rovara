@@ -17,6 +17,7 @@ import {
   SwebenchRunSchema,
   SwebenchStartRequestSchema,
   SwebenchStartResultSchema,
+  taskResultChecks,
 } from "@agentx/contracts";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { pollOperation } from "@agentx/orchestrator/event-client";
@@ -81,10 +82,12 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
     async taskResult(workspaceId, operationId, signal) {
       // The same wait and final response agentx_task_result gives the model (issue 157).
       const result = await client(workspaceId).taskResult({ workspaceId, operationId }, signal === undefined ? {} : { signal }) as {
-        status: string; response?: string; error?: string;
+        status: string; response?: string; error?: string; checks?: unknown;
       };
+      const checks = taskResultChecks(result);
       return {
         status: result.status,
+        ...(checks === undefined ? {} : { checks }),
         ...(result.response === undefined ? {} : { response: result.response }),
         ...(result.error === undefined ? {} : { error: result.error }),
       };

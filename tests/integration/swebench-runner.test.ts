@@ -181,6 +181,8 @@ interface FakeTurn {
   hang?: boolean;
   throws?: string;
   edit?: () => Promise<void>;
+  /** Reported through the session's onDiagnostic during the prompt, as an extension's error would be. */
+  diagnostic?: string;
 }
 
 /** The adapter's sessions with some handle members replaced. */
@@ -191,7 +193,7 @@ function withHandle(adapter: PiSessionAdapter, overrides: Partial<PiSessionHandl
 /** A Pi session that emits a scripted turn's events, then ends the prompt. */
 function fakeAdapter(turn: FakeTurn, observed: { aborted: boolean; steered: string[]; prompt?: string }): PiSessionAdapter {
   return {
-    async create({ sessionDirectory }) {
+    async create({ sessionDirectory, onDiagnostic }) {
       const sessionFile = join(sessionDirectory, "fake.jsonl");
       await writeFile(sessionFile, "{\"type\":\"session\"}\n");
       const listeners = new Set<(event: unknown) => void>();
@@ -203,6 +205,7 @@ function fakeAdapter(turn: FakeTurn, observed: { aborted: boolean; steered: stri
         sessionFile,
         async prompt(text) {
           observed.prompt = text;
+          if (turn.diagnostic !== undefined) onDiagnostic?.(turn.diagnostic);
           await turn.edit?.();
           for (const event of turn.events ?? []) {
             if (event && typeof event === "object" && (event as { type?: unknown }).type === "message_end") {
@@ -427,6 +430,22 @@ describe("one SWE-bench run (spec 043 FR-008 to FR-015)", () => {
     expect(started).toEqual(expect.arrayContaining(["--network", "none", "--platform", "linux/amd64", "--name", container]));
     expect(started.join(" ")).toContain(":/testbed");
     expect(calls.at(-1)).toEqual(["rm", "--force", container]);
+  });
+
+  it("keeps the session's diagnostics in result.json, redacted, and leaves the key out when there are none (spec 051 Ruling F)", async () => {
+    const reported = await fixture((testbed) => ({
+      events: [assistantEnd()],
+      diagnostic: "pi extension <inline:agentx-verification> failed on tool_result: clone https://bot:hunter2@example.com/r.git",
+      edit: () => writeFile(join(testbed, "validators.py"), "PATTERN = r'^[\\w.@+-]+\\Z'\n"),
+    }));
+    expect(JSON.parse(reported.artifacts.get("result.json")!)).toMatchObject({
+      diagnostics: ["pi extension <inline:agentx-verification> failed on tool_result: clone https://[REDACTED]@example.com/r.git"],
+    });
+    const quiet = await fixture((testbed) => ({
+      events: [assistantEnd()],
+      edit: () => writeFile(join(testbed, "validators.py"), "PATTERN = r'^[\\w.@+-]+\\Z'\n"),
+    }));
+    expect(JSON.parse(quiet.artifacts.get("result.json")!)).not.toHaveProperty("diagnostics");
   });
 
   it("reports the level in the callback's usage only when the run config carried one, and always in result.json (spec 053)", async () => {

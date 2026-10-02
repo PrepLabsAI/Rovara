@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -7,6 +8,7 @@ import type { ProjectDefinition, StoredProjectDefinition } from "@agentx/contrac
 import { describe, expect, it } from "vitest";
 import { prepareWorkspace, type RepositoryMaterializer } from "../../packages/worker/src/prepare.js";
 import { assertWorkspaceReady, evaluateReadiness } from "../../packages/worker/src/readiness.js";
+import { projectCheckKey, readCheckHistory } from "../../packages/worker/src/verification/check-history.js";
 
 const run = promisify(execFile);
 describe("workspace preparation", () => {
@@ -105,6 +107,100 @@ describe("workspace preparation", () => {
     expect(JSON.parse(await readFile(join(root, ".agentx/preparation-manifest.json"), "utf8"))).toEqual(
       manifest,
     );
+  });
+
+  it("records the keys of the readiness commands it ran, so a task knows which checks passed at preparation (spec 051 Ruling J)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const source = await createGitFixture("ready");
+    const readiness = [
+      { cwd: "repo/ready", executable: "fixture-check", args: ["a"], timeoutSeconds: 2 },
+      { cwd: "repo/ready", executable: "fixture-check", args: ["b"], timeoutSeconds: 2, env: { CI: "1" } },
+    ];
+    const project = { ...fixtureProject([{ name: "ready", commit: source.commit }]), readiness } satisfies ProjectDefinition;
+    const manifest = await prepareWorkspace({
+      rootPath: root,
+      project,
+      materializer: async (_repository, destination) => {
+        await run("git", ["clone", "--quiet", source.directory, destination]);
+      },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    });
+    expect(manifest.readinessCommandKeys).toEqual(readiness.map(projectCheckKey));
+  });
+
+  it("records passed for its readiness commands in the check history, so a stale failed cannot mask a later regression (spec 051 Ruling M)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const source = await createGitFixture("history");
+    const readiness = [{ cwd: "repo/history", executable: "fixture-check", args: ["a"], timeoutSeconds: 2 }];
+    const project = { ...fixtureProject([{ name: "history", commit: source.commit }]), readiness } satisfies ProjectDefinition;
+    const key = projectCheckKey(readiness[0]!);
+    const other = "f".repeat(64);
+    // An earlier task's final round left the check failing, and another command's outcome.
+    await mkdir(join(root, ".agentx"), { recursive: true });
+    await writeFile(join(root, ".agentx/last-checks.json"), JSON.stringify({ schemaVersion: 1, outcomes: { [key]: "failed", [other]: "failed" } }));
+    const manifest = await prepareWorkspace({
+      rootPath: root,
+      project,
+      materializer: async (_repository, destination) => {
+        await run("git", ["clone", "--quiet", source.directory, destination]);
+      },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+    });
+    expect(manifest.complete).toBe(true);
+    const history = await readCheckHistory(root, manifest);
+    expect(history.lastOutcomes).toEqual({ [key]: "passed", [other]: "failed" });
+  });
+
+  it("does not fail preparation when the check history cannot be written: it removes the history and reports it redacted (Ruling N)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const source = await createGitFixture("history-blocked");
+    const readiness = [{ cwd: "repo/history-blocked", executable: "fixture-check", args: ["a"], timeoutSeconds: 2 }];
+    const project = { ...fixtureProject([{ name: "history-blocked", commit: source.commit }]), readiness } satisfies ProjectDefinition;
+    // A non-empty directory where the history goes: the write (a rename) fails, the removal does not.
+    const awsKey = "AKIAIOSFODNN7EXAMPLE";
+    await mkdir(join(root, ".agentx/last-checks.json", awsKey), { recursive: true });
+    const diagnostics: string[] = [];
+    const manifest = await prepareWorkspace({
+      rootPath: root,
+      project,
+      materializer: async (_repository, destination) => {
+        await run("git", ["clone", "--quiet", source.directory, destination]);
+      },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      onDiagnostic: (message) => { diagnostics.push(message); },
+    });
+    expect(manifest.complete).toBe(true);
+    expect(existsSync(join(root, ".agentx/last-checks.json"))).toBe(false);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("check history");
+    expect(diagnostics[0]).not.toContain(awsKey);
+  });
+
+  it("fails preparation when the check history can neither be written nor removed (Ruling N)", async (context) => {
+    // chmod does not stop root (M-9).
+    if (process.getuid?.() === 0) context.skip();
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const source = await createGitFixture("history-stuck");
+    const readiness = [{ cwd: "repo/history-stuck", executable: "fixture-check", args: ["a"], timeoutSeconds: 2 }];
+    const project = { ...fixtureProject([{ name: "history-stuck", commit: source.commit }]), readiness } satisfies ProjectDefinition;
+    // A directory the worker cannot empty: nothing stale may survive, so preparation fails.
+    const locked = join(root, ".agentx/last-checks.json/locked");
+    await mkdir(locked, { recursive: true });
+    await writeFile(join(locked, "stale"), "failed");
+    await chmod(locked, 0o500);
+    try {
+      await expect(prepareWorkspace({
+        rootPath: root,
+        project,
+        materializer: async (_repository, destination) => {
+          await run("git", ["clone", "--quiet", source.directory, destination]);
+        },
+        commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+        onDiagnostic: () => undefined,
+      })).rejects.toThrow(/check history/);
+    } finally {
+      await chmod(locked, 0o700);
+    }
   });
 
   it("ignores an inaccessible filesystem-owned lost+found directory at the workspace root", async () => {

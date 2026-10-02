@@ -193,6 +193,10 @@ export const EvalRunMeasureSchema = z.object({
   chargedUsd: z.number().nonnegative(),
   costEstimated: z.boolean().optional(),
   imageDigest: z.string().max(256),
+  /** Spec 051 FR-010: AgentX's check status, the agent's claim and whether they disagree; absent from a runner older than the checks. */
+  checkStatus: z.enum(["verified", "regression", "not_verified"]).optional(),
+  agentClaim: z.enum(["success", "failure", "none"]).optional(),
+  disagrees: z.boolean().optional(),
   /** Spec 051's claim-and-check fields, when present. */
   claimCheck: z.record(z.string().max(64), z.union([z.string().max(500), z.number(), z.boolean()])).optional(),
 }).strict().refine((measure) => (measure.outcome === "GRADED") === (measure.resolved !== undefined), {
@@ -224,6 +228,8 @@ export const EvalBatchModelSummarySchema = z.object({
   unpricedRuns: z.number().int().nonnegative(),
   /** Null when no task was solved. */
   costPerSolvedUsd: z.number().nonnegative().nullable(),
+  /** Spec 051 FR-011: graded runs whose claim was success and whom AgentX's checks or the grader contradicted, over graded runs with a claim; null when none has one. */
+  disagreementRate: z.number().min(0).max(1).nullable().optional(),
 }).strict();
 
 export const EvalBatchSummarySchema = z.object({

@@ -6,6 +6,8 @@ import {
   OperationSchema,
   agentXError,
   lastAssistantResponse,
+  taskResultChecks,
+  type CheckReport,
   type Operation,
 } from "@agentx/contracts";
 import {
@@ -262,14 +264,24 @@ export class ControlPlaneApi implements OrchestrationApi, OperationPollingTransp
 export function completedTaskResult(
   operation: RemoteOperationStatus,
   events: RemoteEventPage["events"],
-): { operationId: string; status: string; response?: string; error?: string } {
+): { operationId: string; status: string; response?: string; error?: string; checks?: CheckReport } {
   const response = lastAssistantResponse(events);
+  const checks = taskResultChecks(operation.result);
   return {
     operationId: operation.id,
     status: operation.status,
     ...(response === undefined ? {} : { response }),
     ...(operation.error === undefined ? {} : { error: operation.error }),
+    ...(checks === undefined ? {} : { checks: withoutOutputs(checks) }),
   };
+}
+
+/**
+ * The model reads a report's status, labels and classes, never the check outputs, which can be tens of kilobytes on
+ * every coding turn. The reply's verdict (turn-recorder, checksReplyPrefix) needs no output either.
+ */
+function withoutOutputs(report: CheckReport): CheckReport {
+  return { ...report, checks: report.checks.map((check) => ({ ...check, output: "" })) };
 }
 
 export function acceptedOperationId(value: unknown): string {

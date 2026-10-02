@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
@@ -66,11 +66,11 @@ export async function publishWorkspaceDiff(rootPath: string, sink: ArtifactSink)
 }
 
 /** The repository's HEAD commit. */
-async function gitHead(directory: string): Promise<string> {
+async function gitHead(directory: string, signal?: AbortSignal): Promise<string> {
   const { stdout } = await execFileAsync(
     "git",
     ["-C", directory, "rev-parse", "HEAD"],
-    { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
+    { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory), ...(signal === undefined ? {} : { signal }) },
   );
   return stdout.trim();
 }
@@ -105,23 +105,59 @@ export async function workspaceFingerprint(rootPath: string): Promise<string> {
   const manifest = JSON.parse(
     await readFile(resolve(rootPath, ".agentx/preparation-manifest.json"), "utf8"),
   ) as PreparationManifest;
+  return repositoriesFingerprint(manifest.repositories.map((repository) => ({ name: repository.name, directory: resolve(rootPath, repository.path) })));
+}
+
+/** How many untracked files the recorder's fingerprint stats (M-9); past it, the digest never matches (Ruling H). */
+export const MAX_FINGERPRINT_UNTRACKED_STATS = 5_000;
+
+/**
+ * The spec 051 recorder's fingerprint: repositoriesFingerprint with the untracked-file cap. Past the cap an edit to an
+ * untracked file could go unseen, so each read gets a fresh digest and the test run's before counts as unknown.
+ */
+export function recorderFingerprint(
+  repositories: ReadonlyArray<{ name: string; directory: string }>,
+  signal?: AbortSignal,
+  maxUntrackedStats: number = MAX_FINGERPRINT_UNTRACKED_STATS,
+): Promise<string> {
+  return repositoriesFingerprint(repositories, { maxUntrackedStats, ...(signal === undefined ? {} : { signal }) });
+}
+
+/**
+ * workspaceFingerprint's digest over the given repositories. It respects each repository's .gitignore. An aborted
+ * `signal` stops the git calls and the stat loop, and rejects. Uncapped by default, as workspaceFingerprint has always
+ * been; with `maxUntrackedStats`, a read past the cap mixes in a nonce, so no two such reads match.
+ */
+export async function repositoriesFingerprint(
+  repositories: ReadonlyArray<{ name: string; directory: string }>,
+  options: { signal?: AbortSignal; maxUntrackedStats?: number } = {},
+): Promise<string> {
+  const { signal } = options;
+  const maxUntrackedStats = options.maxUntrackedStats ?? Number.POSITIVE_INFINITY;
   const hash = createHash("sha256");
-  for (const repository of manifest.repositories) {
-    const directory = resolve(rootPath, repository.path);
-    const head = await gitHead(directory);
+  for (const { name, directory } of repositories) {
+    signal?.throwIfAborted();
+    const head = await gitHead(directory, signal);
     const { stdout: status } = await execFileAsync(
       "git",
       ["-C", directory, "status", "--porcelain", "-z", "--untracked-files=all"],
-      { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
+      { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory), ...(signal === undefined ? {} : { signal }) },
     );
     const { stdout: diff } = await execFileAsync(
       "git",
       ["-C", directory, "diff", "--no-ext-diff", "--binary", "HEAD", "--"],
-      { timeout: 60_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
+      { timeout: 60_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory), ...(signal === undefined ? {} : { signal }) },
     );
-    hash.update(`${repository.name}\u0000${head}\u0000${status}\u0000${diff}\u0000`);
+    hash.update(`${name}\u0000${head}\u0000${status}\u0000${diff}\u0000`);
+    let statted = 0;
     for (const entry of status.split("\u0000")) {
       if (!entry.startsWith("?? ")) continue;
+      if (statted >= maxUntrackedStats) {
+        hash.update(`capped\u0000${randomUUID()}\u0000`);
+        break;
+      }
+      statted += 1;
+      signal?.throwIfAborted();
       const file = await stat(resolve(directory, entry.slice(3))).catch(() => undefined);
       hash.update(`${entry}\u0000${file?.size ?? -1}\u0000${file?.mtimeMs ?? -1}\u0000`);
     }

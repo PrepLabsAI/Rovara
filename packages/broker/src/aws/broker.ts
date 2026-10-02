@@ -22,6 +22,18 @@ import {
 import {
   AgentXError,
   CHANNEL_TURN_REQUEST_MAX,
+  CheckReportSchema,
+  LatestChecksSchema,
+  PULL_REQUEST_BODY_MAX_CHARS,
+  checksForSection,
+  StandingFailuresSchema,
+  checksMakeDraft,
+  checksSection,
+  nextStandingFailures,
+  type StandingFailure,
+  taskResultChecks,
+  type CheckEntry,
+  type LatestChecks,
   CONNECTOR_SECRET_PREFIX,
   ChannelTurnSchema,
   DEVELOPER_TASK_OWNER_ISSUER,
@@ -81,6 +93,7 @@ import {
   type WorkspaceInstance,
   cleanDisplayName,
   redactAndCap,
+  redactText,
   DISPLAY_NAME_MAX_ENCODED_LENGTH,
   modelKey,
   type ModelIdentifier,
@@ -2567,6 +2580,9 @@ async function taskOperationParts(
       conversationStarted: input.conversationStarted,
       ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
       ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
+      // Spec 051 (P-1): the checks the worker reruns when the agent finishes. The latest revision's readiness, as
+      // publicationProject merges it, since that is what publication gates on. None when the project has none.
+      ...(settings.definition.readiness.length === 0 ? {} : { readiness: settings.definition.readiness }),
     },
   };
   return { operation, outbox: outboxRecord(workspace, invocation), fence };
@@ -2620,10 +2636,14 @@ async function acceptTask(
       { Update: {
         TableName: dependencies.tableName,
         Key: workspaceKey(workspaceId),
-        UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now",
+        // Spec 051 Ruling T: until its own result arrives, the task reads as interrupted, so no older report stands.
+        UpdateExpression: "SET #status = :busy, activeOperationId = :operation, fence = :fence, updatedAt = :now, latestChecks = :latestChecks",
         ConditionExpression: "ownerKey = :owner AND attribute_not_exists(activeOperationId) AND (#status = :ready OR #status = :stopped)",
         ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: { ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED", ":operation": operation.id, ":fence": fence, ":now": now },
+        ExpressionAttributeValues: {
+          ":owner": identity.ownerKey, ":busy": "BUSY", ":ready": "READY", ":stopped": "STOPPED", ":operation": operation.id, ":fence": fence, ":now": now,
+          ":latestChecks": latestChecksItem({ status: "not_verified", reason: "interrupted" }, operation.id, fence, now),
+        },
       } },
       { Put: { TableName: dependencies.tableName, Item: operation, ConditionExpression: "attribute_not_exists(pk)" } },
       { Put: { TableName: dependencies.tableName, Item: outbox, ConditionExpression: "attribute_not_exists(pk)" } },
@@ -2741,6 +2761,9 @@ async function acceptPullRequest(
         "push",
         repository.name,
       ),
+      // Spec 051 P-2: a failing check opens a draft (reconcilePullRequest) rather than refusing the publication.
+      // Without readiness there is no check to report, and the worker need not be asked whether it can.
+      ...(project.definition.readiness.length === 0 ? {} : { reportChecks: true as const }),
     },
   };
   const outbox = outboxRecord(workspace, invocation);
@@ -2956,6 +2979,8 @@ async function acceptPullRequestLifecycle(
         ),
         targetPullRequestNumber: record.number,
         ...(remote.mergeCommit === undefined ? {} : { revertCommit: remote.mergeCommit }),
+        // Spec 051 P-2, as for a new pull request.
+        ...(project.definition.readiness.length === 0 ? {} : { reportChecks: true as const }),
       },
     };
     const outbox = outboxRecord(workspace, invocation);
@@ -3433,7 +3458,7 @@ async function reconcilePullRequest(
   }
   const input = object(value, "pull request callback");
   const expected = operation.publication;
-  const allowed = new Set(["repository", "repositoryUrl", "headBranch", "baseBranch", "commit", "title", "body"]);
+  const allowed = new Set(["repository", "repositoryUrl", "headBranch", "baseBranch", "commit", "title", "body", "checks"]);
   if (Object.keys(input).some((key) => !allowed.has(key))) {
     throw agentXError("CONFIG_INVALID", "pull request callback contains unknown fields");
   }
@@ -3449,14 +3474,19 @@ async function reconcilePullRequest(
   if (typeof input.commit !== "string" || !/^[a-f0-9]{40,64}$/.test(input.commit)) {
     throw agentXError("CONFIG_INVALID", "published commit is invalid");
   }
+  const publishChecks = publicationChecks(input.checks);
   await assertCodeBuildGatesPassed(dependencies, operation, input.commit);
+  // A revert undoes a merged pull request, so the workspace's own task work is not what it publishes.
+  const latestChecks = expected.mode === "revert" ? undefined : await latestWorkspaceChecks(dependencies, operation.workspaceId);
+  const standingFailures = expected.mode === "revert" ? [] : await workspaceStandingFailures(dependencies, operation.workspaceId);
+  const { body, draft } = checkedPullRequest(expected.body, expected.draft, publishChecks, latestChecks, standingFailures);
   const pullRequest = await dependencies.githubPullRequests.reconcilePullRequest({
     repositoryUrl: expected.repositoryUrl,
     headBranch: expected.headBranch,
     baseBranch: expected.baseBranch,
     title: expected.title,
-    ...(expected.body === undefined ? {} : { body: expected.body }),
-    ...(expected.draft === undefined ? {} : { draft: expected.draft }),
+    ...(body === undefined ? {} : { body }),
+    ...(draft === undefined ? {} : { draft }),
   });
   const record: PullRequestRecord = {
     ...pullRequestKey(operation.workspaceId, expected.repository, pullRequest.number),
@@ -3471,7 +3501,7 @@ async function reconcilePullRequest(
     baseBranch: expected.baseBranch,
     expectedHeadCommit: input.commit,
     title: expected.title,
-    body: expected.body ?? "",
+    body: body ?? "",
     createdByOperationId: operation.id,
     ...(expected.mode === "replace" && expected.targetPullRequestNumber !== undefined
       ? { replacementFor: expected.targetPullRequestNumber }
@@ -3506,7 +3536,58 @@ async function reconcilePullRequest(
       Item: record,
     }));
   }
-  return pullRequest;
+  // Ruling Z: the worker's result says whether the pull request is a draft, so the reply can say so.
+  return { ...pullRequest, draft: draft === true };
+}
+
+/** Spec 051 (D-7): the checks the worker ran at publish, judged against their befores; none from an older worker. */
+function publicationChecks(value: unknown): CheckEntry[] | undefined {
+  if (value === undefined) return undefined;
+  const parsed = CheckReportSchema.shape.checks.safeParse(value);
+  if (!parsed.success) throw agentXError("CONFIG_INVALID", "pull request callback checks are invalid");
+  return parsed.data;
+}
+
+/**
+ * The workspace's latest checks (Ruling T), or undefined: none yet. One that does not parse is logged and treated as
+ * none; a failing publish check still makes the draft (Ruling S).
+ */
+async function latestWorkspaceChecks(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<LatestChecks | undefined> {
+  const workspace = await getItem<{ latestChecks?: { report?: unknown; operationId?: unknown } }>(dependencies, workspaceKey(workspaceId));
+  if (workspace?.latestChecks === undefined) return undefined;
+  const parsed = LatestChecksSchema.safeParse(workspace.latestChecks.report);
+  if (parsed.success) return parsed.data;
+  console.log(JSON.stringify({ component: "broker", event: "pull_request.latest_checks_unreadable", workspaceId, operationId: typeof workspace.latestChecks.operationId === "string" ? workspace.latestChecks.operationId : undefined }));
+  return undefined;
+}
+
+/** Spec 051 M-1: labels and outputs redacted again at the broker before they reach GitHub (as #154 does for errors). */
+function redactedEntries(checks: readonly CheckEntry[]): CheckEntry[] {
+  return checks.map((check) => ({ ...check, label: redactText(check.label), output: redactText(check.output) }));
+}
+
+/**
+ * Spec 051 FR-008 (D-2): the pull request's description and draft flag, given the checks. A draft when a check that
+ * passed before fails now, whatever was asked; otherwise the draft flag stays as asked (the developer API asks for a
+ * draft by default). The checks section goes after the description, cut so the whole stays within GitHub's limit.
+ * With nothing to report, both are exactly as asked (Review Focus 5).
+ */
+function checkedPullRequest(
+  body: string | undefined,
+  draft: boolean | undefined,
+  publishChecks: readonly CheckEntry[] | undefined,
+  latestChecks: LatestChecks | undefined,
+  standingFailures: readonly StandingFailure[] = [],
+): { body: string | undefined; draft: boolean | undefined } {
+  const separator = body === undefined || body === "" ? "" : "\n\n";
+  const shownPublish = publishChecks === undefined ? undefined : redactedEntries(publishChecks);
+  const shownLatest = latestChecks === undefined || "reason" in latestChecks ? latestChecks : { ...latestChecks, checks: redactedEntries(latestChecks.checks) };
+  const shownStanding = standingFailures.map((failure) => ({ ...failure, label: redactText(failure.label) }));
+  const section = checksSection(shownPublish, shownLatest, PULL_REQUEST_BODY_MAX_CHARS - (body?.length ?? 0) - separator.length, shownStanding);
+  return {
+    body: section === "" ? body : `${body ?? ""}${separator}${section}`,
+    draft: checksMakeDraft(publishChecks, latestChecks, standingFailures) ? true : draft,
+  };
 }
 
 async function assertCodeBuildGatesPassed(
@@ -3698,12 +3779,13 @@ async function queuedFirstTask(
     workspaceUpdate: { Update: {
       TableName: dependencies.tableName,
       Key: workspaceKey(workspace.id),
-      UpdateExpression: "SET #status = :busy, updatedAt = :now, preparationManifest = :manifest, activeOperationId = :task, fence = :taskFence",
+      UpdateExpression: "SET #status = :busy, updatedAt = :now, preparationManifest = :manifest, activeOperationId = :task, fence = :taskFence, latestChecks = :latestChecks",
       ConditionExpression: "activeOperationId = :operation AND fence = :fence",
       ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: {
         ":busy": "BUSY", ":now": now, ":manifest": ".agentx/preparation-manifest.json",
         ":task": operation.id, ":taskFence": fence, ":operation": prepare.id, ":fence": prepare.fence,
+        ":latestChecks": latestChecksItem({ status: "not_verified", reason: "interrupted" }, operation.id, fence, now),
       },
     } },
     items: [
@@ -4024,14 +4106,20 @@ async function recordTerminalResult(
       },
     } });
   }
+  // Spec 051 Ruling T: a task's end, or its cancel's, sets the workspace's latest checks in the same transaction. That
+  // update holds only while this operation owns the workspace at its fence, so a late or repeated result never
+  // replaces a newer task's, and no write can be lost after the result commits.
+  const latestChecks = await terminalLatestChecks(dependencies, operation, terminalStatus, result, now);
+  const standingFailures = latestChecks === undefined ? undefined : await nextWorkspaceStanding(dependencies, operation.workspaceId, latestChecks.report);
+  const workspaceExpression = operation.kind === "prepare" && terminalStatus === "SUCCEEDED"
+    ? "SET #status = :status, updatedAt = :now, preparationManifest = :manifest REMOVE activeOperationId"
+    : operation.kind === "close" && closePreflight?.safeToClose !== true
+      ? "SET #status = :status, updatedAt = :now, closeError = :closeError REMOVE activeOperationId"
+      : "SET #status = :status, updatedAt = :now REMOVE activeOperationId, closeError";
   const workspaceUpdate: TransactItems[number] = { Update: {
     TableName: dependencies.tableName,
     Key: workspaceKey(workspace.id),
-    UpdateExpression: operation.kind === "prepare" && terminalStatus === "SUCCEEDED"
-      ? "SET #status = :status, updatedAt = :now, preparationManifest = :manifest REMOVE activeOperationId"
-      : operation.kind === "close" && closePreflight?.safeToClose !== true
-        ? "SET #status = :status, updatedAt = :now, closeError = :closeError REMOVE activeOperationId"
-        : "SET #status = :status, updatedAt = :now REMOVE activeOperationId, closeError",
+    UpdateExpression: latestChecks === undefined ? workspaceExpression : workspaceExpression.replace(" REMOVE ", ", latestChecks = :latestChecks, standingFailures = :standingFailures REMOVE "),
     ConditionExpression: operation.kind === "cancel"
       ? "activeOperationId = :target AND fence = :fence"
       : "activeOperationId = :operation AND fence = :fence",
@@ -4042,6 +4130,7 @@ async function recordTerminalResult(
       ":fence": operation.fence,
       ...(operation.kind === "cancel" ? { ":target": operation.targetOperationId } : { ":operation": operation.id }),
       ...(operation.kind === "prepare" && terminalStatus === "SUCCEEDED" ? { ":manifest": ".agentx/preparation-manifest.json" } : {}),
+      ...(latestChecks === undefined ? {} : { ":latestChecks": latestChecks, ":standingFailures": standingFailures }),
       ...(operation.kind === "close" && closePreflight?.safeToClose !== true
         ? { ":closeError": error ?? (closePreflight ? "workspace contains unpublished work" : "workspace close preflight failed") }
         : {}),
@@ -4117,6 +4206,51 @@ async function recordTerminalResult(
   }
   if (recordedStatus !== terminalStatus) return { ...operation, status: recordedStatus, updatedAt: now, error: FIRST_TASK_QUEUE_FAILED };
   return { ...operation, status: terminalStatus, updatedAt: now, ...(result === undefined ? {} : { result }), ...(error === undefined ? {} : { error }) };
+}
+
+/** Spec 051 Ruling T: the workspace's latest checks, as stored: what is known, which task, and when. */
+function latestChecksItem(latest: LatestChecks, operationId: string, fence: number, recordedAt: string) {
+  return { report: checksForSection(latest), operationId, fence, recordedAt };
+}
+
+/**
+ * Spec 051 Ruling Y: the workspace's standing failures once `latest` is recorded: the earlier ones not shown passing in
+ * it, and every check failing in it. A task that ends without a report keeps the earlier ones. Written with the latest
+ * checks in the terminal transaction, so the fence guards both.
+ */
+async function nextWorkspaceStanding(dependencies: AwsBrokerDependencies, workspaceId: string, latest: LatestChecks): Promise<StandingFailure[]> {
+  return nextStandingFailures(await workspaceStandingFailures(dependencies, workspaceId), latest);
+}
+
+async function workspaceStandingFailures(dependencies: AwsBrokerDependencies, workspaceId: string): Promise<StandingFailure[]> {
+  const workspace = await getItem<{ standingFailures?: unknown }>(dependencies, workspaceKey(workspaceId));
+  const parsed = StandingFailuresSchema.safeParse(workspace?.standingFailures ?? []);
+  if (parsed.success) return parsed.data;
+  console.log(JSON.stringify({ component: "broker", event: "workspace.standing_failures_unreadable", workspaceId }));
+  return [];
+}
+
+/**
+ * Spec 051 Ruling T: the latest checks a task's terminal result records: its report, or why it has none. A successful
+ * cancel records its task as cancelled. Undefined for every other operation, which leaves them as they are.
+ */
+async function terminalLatestChecks(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  status: OperationStatus,
+  result: unknown,
+  now: string,
+) {
+  if (operation.kind === "task") {
+    const report = taskResultChecks(result);
+    const reason = status === "SUCCEEDED" ? "no_report" : status === "FAILED" ? "failed" : status === "CANCELLED" ? "cancelled" : "interrupted";
+    return latestChecksItem(report ?? { status: "not_verified", reason }, operation.id, operation.fence, now);
+  }
+  if (operation.kind === "cancel" && status === "SUCCEEDED" && operation.targetOperationId) {
+    const target = await getItem<OperationRecord>(dependencies, operationKey(operation.workspaceId, operation.targetOperationId));
+    if (target?.kind === "task") return latestChecksItem({ status: "not_verified", reason: "cancelled" }, target.id, operation.fence, now);
+  }
+  return undefined;
 }
 
 /**

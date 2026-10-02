@@ -77,6 +77,24 @@ export function devcontainerPaths(target: DevcontainerTarget, started: Devcontai
   return { hostFolder: target.workspaceFolder, containerFolder };
 }
 
+/**
+ * The agent's shell is the container's, so it writes `cd /workspaces/repo && npm test`, a path only the container has.
+ * AgentX replays from the workspace root, where that folder is `<host folder relative to root>`, so a leading
+ * `cd <containerFolder>[/sub] &&` reads as `cd <relative>[/sub] &&` (spec 051 Ruling X, and the same for coding tasks).
+ * Only that exact folder, then a `/` or a space, so `/workspaces/repoX` stays out. The test-command matcher then
+ * applies its own safe-path rule to what is left (no `..`, no absolute path), and the replay's realpath containment
+ * refuses a link out of the workspace. A host folder outside `root` is never rewritten.
+ */
+export function workspaceRelativeCommand(command: string, paths: DevcontainerPaths, root: string): string {
+  const base = relative(root, paths.hostFolder);
+  if (base === ".." || base.startsWith(`..${sep}`) || isAbsolute(base)) return command;
+  const escaped = paths.containerFolder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  return command.replace(new RegExp(`^( *)cd +${escaped}(?=/| )(/?\\S*)( +&& +)`, "s"), (_match, lead: string, sub: string, join: string) => {
+    const target = `${base}${sub}`;
+    return target === "" ? lead : `${lead}cd ${target}${join}`;
+  });
+}
+
 /** A path under the container folder, as the same file under the host folder; any other path as given. */
 export function hostPath(paths: DevcontainerPaths, path: string): string {
   if (path === paths.containerFolder) return paths.hostFolder;
@@ -163,12 +181,14 @@ export async function ensureDevcontainer(cli: DevcontainerCli, target: Devcontai
 
 /**
  * A project command (`setup` or `readiness`) run in the devcontainer, in its workspace directory. It
- * runs in its own process group in the container, so its timeout stops it there too (#174).
+ * runs in its own process group in the container, so its timeout stops it there too (#174), and so
+ * does `signal` (spec 051, a check rerun): the abort ends the local client at once.
  */
 export async function runDevcontainerCommand(
   cli: DevcontainerCli,
   target: DevcontainerTarget,
   command: ProjectCommand,
+  signal?: AbortSignal,
 ): Promise<CommandResult> {
   const cwd = contained(target.rootPath, command.cwd);
   const run = await runInContainerGroup(devcontainerExec(cli, target), {
@@ -180,6 +200,7 @@ export async function runDevcontainerCommand(
     timeoutMs: command.timeoutSeconds * 1_000,
     // The command's own variables (#54) reach the command only, never the TERM and KILL execs.
     ...(command.env !== undefined ? { env: { ...command.env } } : {}),
+    ...(signal !== undefined ? { signal } : {}),
   });
   const { result } = run;
   return {

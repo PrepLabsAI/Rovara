@@ -173,6 +173,8 @@ export const PullRequestResultSchema = z
     checks: z.array(PublicationCheckResultSchema).max(64),
     codeBuildChecks: z.array(CodeBuildCheckResultSchema).max(8).default([]),
     reconciled: z.boolean(),
+    /** Spec 051 Ruling Z: the pull request opened as a draft, which AgentX does when a check fails. An older worker omits it. */
+    draft: z.boolean().optional(),
   })
   .strict();
 

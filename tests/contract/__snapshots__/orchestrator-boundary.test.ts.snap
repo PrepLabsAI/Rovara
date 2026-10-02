@@ -20,7 +20,7 @@ exports[`pi orchestration boundary > characterizes the in-house agentx_* tools b
     },
   },
   {
-    "description": "Explicitly validate and publish one changed registered repository as a ready-for-review pull request. Call this only when the user clearly asks to create or raise a pull request.",
+    "description": "Explicitly validate and publish one changed registered repository as a pull request. AgentX opens it as a draft when a check fails, and the result says draft. Call this only when the user clearly asks to create or raise a pull request.",
     "name": "agentx_create_pull_request",
     "parameters": {
       "properties": {
@@ -163,7 +163,7 @@ exports[`pi orchestration boundary > keeps the five tools outside the pull-reque
     },
   },
   {
-    "description": "Explicitly validate and publish one changed registered repository as a ready-for-review pull request. Call this only when the user clearly asks to create or raise a pull request.",
+    "description": "Explicitly validate and publish one changed registered repository as a pull request. AgentX opens it as a draft when a check fails, and the result says draft. Call this only when the user clearly asks to create or raise a pull request.",
     "label": "Create pull request",
     "name": "agentx_create_pull_request",
     "parameters": {

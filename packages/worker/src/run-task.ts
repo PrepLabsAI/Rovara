@@ -1,8 +1,8 @@
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
+import { WorkerInvocationSchema, agentXError, parseAgentClaim, redactText, type CheckReport, type WorkerInvocation } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
-import { publishWorkspaceDiff, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
+import { publishWorkspaceDiff, recorderFingerprint, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
 import {
   createDevcontainerCli,
@@ -10,6 +10,7 @@ import {
   devcontainerPaths,
   ensureDevcontainer,
   preparedDevcontainerTarget,
+  workspaceRelativeCommand,
   type DevcontainerCli,
   type DevcontainerPaths,
 } from "./devcontainer.js";
@@ -24,6 +25,10 @@ import {
 } from "./pi-session.js";
 import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
+import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
+import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
+import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, verificationExtension } from "./verification/extension.js";
+import { CommandRecorder } from "./verification/recorder.js";
 import {
   createTaskUsageTelemetry,
   usageForControlPlane,
@@ -35,6 +40,8 @@ export interface TaskInvocationResult {
   conversationId: string;
   /** False on the turn that created the saved session, true on every turn that reopened it. */
   reopened: boolean;
+  /** Spec 051 FR-007: AgentX's check of the agent's work, with outputs cut to fit (compactCheckReport). */
+  checks: CheckReport;
 }
 
 export async function runTaskInvocation(
@@ -47,6 +54,10 @@ export async function runTaskInvocation(
     piAdapter?: PiSessionAdapter;
     cancellationController?: WorkerCancellationController;
     devcontainerCli?: DevcontainerCli;
+    /** The runners AgentX's checks use; tests supply fakes. Default: as preparation and the agent's shell run. */
+    checkRunners?: CheckRunners;
+    /** Each check round's budget; tests supply short ones. Default: CHECK_ROUND_BUDGET_MS (P-3). */
+    checkBudgetMs?: () => number;
   },
 ): Promise<TaskInvocationResult> {
   const invocation = WorkerInvocationSchema.parse(untrustedInvocation);
@@ -64,12 +75,16 @@ export async function runTaskInvocation(
   const devcontainer = preparedDevcontainerTarget(canonicalRoot, manifest);
   let bashOperations: BashOperations | undefined;
   let containerPaths: DevcontainerPaths | undefined;
+  let devcontainerCli: DevcontainerCli | undefined;
   if (devcontainer !== undefined) {
-    const cli = dependencies.devcontainerCli ?? createDevcontainerCli();
-    const started = await ensureDevcontainer(cli, devcontainer);
-    bashOperations = devcontainerBashOperations(cli, devcontainer);
+    devcontainerCli = dependencies.devcontainerCli ?? createDevcontainerCli();
+    const started = await ensureDevcontainer(devcontainerCli, devcontainer);
+    bashOperations = devcontainerBashOperations(devcontainerCli, devcontainer);
     containerPaths = devcontainerPaths(devcontainer, started);
   }
+  // Spec 051 Ruling L: the check history as it was before the agent ran. The agent can write to .agentx, so every
+  // round plans from this snapshot, and the final round's outcomes are merged over it.
+  const checkHistory = await readCheckHistory(canonicalRoot, manifest);
 
   const conversationId = invocation.payload.conversationId;
   const conversations = new WorkspaceConversationStore(dependencies.rootPath);
@@ -85,12 +100,54 @@ export async function runTaskInvocation(
   const toolEvidence: unknown[] = [];
   const contextDiagnostics: string[] = [];
   const onDiagnostic = (message: string): void => {
-    contextDiagnostics.push(message);
+    contextDiagnostics.push(redactText(message));
+  };
+  // Diagnostics arrive before the session runs and, from extensions, during the turn (Ruling F): each is reported once.
+  let reportedDiagnostics = 0;
+  const flushDiagnostics = async (): Promise<void> => {
+    while (reportedDiagnostics < contextDiagnostics.length) {
+      const message = contextDiagnostics[reportedDiagnostics]!;
+      reportedDiagnostics += 1;
+      await events.append("progress", { message });
+    }
   };
   if (invocation.payload.modelSelectionDiagnostic !== undefined) {
     onDiagnostic(invocation.payload.modelSelectionDiagnostic);
   }
   for (const message of modelChangeDiagnostics(registered, dependencies.model)) onDiagnostic(message);
+
+  // Spec 051: AgentX checks the agent's work when it finishes (FR-002 to FR-007). The stop fires on a cancel or the
+  // loop guard's stop, so a running check ends with the task rather than at its own timeout (Review Focus 1).
+  const verificationStop = new AbortController();
+  const readiness = invocation.payload.readiness;
+  const recorder = new CommandRecorder({
+    fingerprint: (signal) => recorderFingerprint(
+      manifest.repositories.map((repository) => ({ name: repository.name, directory: resolve(canonicalRoot, repository.path) })),
+      signal,
+    ),
+    onDiagnostic,
+    // The agent's shell is the devcontainer's, where the repository is at its container path (Minor 11).
+    ...(containerPaths === undefined ? {} : { canonicalCommand: (command: string) => workspaceRelativeCommand(command, containerPaths, canonicalRoot) }),
+  });
+  let checkPlan: CheckPlan | undefined;
+  let reportedChecks: CheckReport | undefined;
+  // The first round's report when the extra try was given (Ruling N).
+  let firstRoundChecks: CheckReport | undefined;
+  const verification = verificationExtension({
+    // Review Focus 5: a broker that sends no readiness leaves the agent's own commands.
+    plan: () => (checkPlan = planChecks(readiness, recorder, checkHistory)),
+    runners: dependencies.checkRunners ?? createCheckRunners({
+      rootPath: canonicalRoot,
+      ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
+    }),
+    budgetMs: dependencies.checkBudgetMs ?? (() => CHECK_ROUND_BUDGET_MS),
+    signal: verificationStop.signal,
+    recorder,
+    onReport: (report) => { reportedChecks = report; },
+    // I-3: an earlier settle's report is stale once the agent has a regression to fix.
+    onExtraTry: (firstRound) => { firstRoundChecks = firstRound; reportedChecks = undefined; },
+    onDiagnostic,
+  });
 
   let session: PiSessionHandle;
   if (registered) {
@@ -101,6 +158,7 @@ export async function runTaskInvocation(
         conversationId,
         sessionFile: registered.sessionFile,
         onDiagnostic,
+        extensionFactories: [verification],
         ...(bashOperations === undefined ? {} : { bashOperations }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
       },
@@ -110,6 +168,7 @@ export async function runTaskInvocation(
     session = await createWorkspacePiSession(
       {
         rootPath: dependencies.rootPath, model: dependencies.model, conversationId, onDiagnostic,
+        extensionFactories: [verification],
         ...(bashOperations === undefined ? {} : { bashOperations }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
       },
@@ -125,7 +184,12 @@ export async function runTaskInvocation(
     throw error;
   }
 
-  const unregisterCancellation = dependencies.cancellationController?.register(invocation.operationId, session);
+  const unregisterCancellation = dependencies.cancellationController?.register(invocation.operationId, {
+    abort: async () => {
+      verificationStop.abort();
+      await session.abort();
+    },
+  });
   // A model repeating the same failing call is told once, then stopped (#127).
   const loopGuard = new ToolLoopGuard();
   // A task whose every edit or write failed, and that changed nothing, did not do its job (#158).
@@ -134,11 +198,17 @@ export async function runTaskInvocation(
   // pi ends a turn normally even when its model call failed or was aborted; only the last assistant
   // message says so (#136).
   let lastAssistant: AssistantOutcome | undefined;
+  // The last assistant message's text, for the agent's claim when Pi never reached the check (P-4).
+  let finalText: string | undefined;
   const unsubscribe = session.subscribe((event) => {
     if (eventType(event) === "tool_end") toolEvidence.push(redactCredentials(event));
     fileChanges.observe(event);
     void events.append(eventType(event), event).catch(() => undefined);
-    lastAssistant = assistantOutcome(event) ?? lastAssistant;
+    const outcome = assistantOutcome(event);
+    if (outcome !== undefined) {
+      lastAssistant = outcome;
+      finalText = assistantText((event as { message?: unknown }).message);
+    }
     if (loopStop !== undefined) return;
     const action = loopGuard.observe(event);
     if (action.kind === "warn") {
@@ -146,6 +216,7 @@ export async function runTaskInvocation(
       void session.steer?.(action.message).catch(() => undefined);
     } else if (action.kind === "stop") {
       loopStop = action.error;
+      verificationStop.abort();
       void session.abort().catch(() => undefined);
     }
   });
@@ -158,6 +229,42 @@ export async function runTaskInvocation(
     let diffAttempted = false;
     const reportUnsaved = async (name: string): Promise<void> => {
       await events.append("progress", { message: `AgentX could not save ${name} for this task.` }).catch(() => undefined);
+    };
+    // P-4: Pi skips agent_before_settle after an abort, so a stopped run has no report from the extension.
+    // Ruling N: an extra try with no second settle and no stop keeps the first round's regression.
+    // A cancelled model call also ends with stopReason "error", so the stop is read first.
+    // Ruling Y: a regression AgentX found stands through a stop, a cancel or a model error on the extra turn.
+    const finalChecks = (): CheckReport => finalCheckReport({
+      reported: reportedChecks,
+      firstRound: firstRoundChecks,
+      stopped: verificationStop.signal.aborted,
+      errored: lastAssistant?.stopReason === "error",
+      agentClaim: parseAgentClaim(finalText),
+    });
+    let checksAttempted = false;
+    const publishChecks = async (): Promise<void> => {
+      checksAttempted = true;
+      await dependencies.artifactSink({
+        name: "checks.json",
+        mediaType: "application/json",
+        content: checksArtifactContent(finalChecks()),
+      });
+    };
+    // Ruling O (I-1): on every ending, the history is the snapshot plus the final round's project outcomes (Ruling M),
+    // whatever the agent left at the path. A failed write removes the path; neither ever fails the task.
+    const restoreHistory = async (): Promise<void> => {
+      const report = reportedChecks;
+      const final = report !== undefined && report.source === "project" && report.status !== "not_verified" && checkPlan !== undefined
+        ? { plan: checkPlan, entries: report.checks }
+        : undefined;
+      try {
+        const restored = await restoreCheckHistory(canonicalRoot, checkHistory, final);
+        if (restored.outcome === "removed") {
+          onDiagnostic(`AgentX could not save this task's check results for the next task, so it removed them: ${errorText(restored.error)}`);
+        }
+      } catch (error) {
+        onDiagnostic(errorText(error));
+      }
     };
     const publishEvidence = async (): Promise<void> => {
       evidenceAttempted = true;
@@ -173,7 +280,7 @@ export async function runTaskInvocation(
         conversationId,
         conversation: { started: true, reopened: registered !== undefined },
       });
-      for (const message of contextDiagnostics) await events.append("progress", { message });
+      await flushDiagnostics();
       // The state before the prompt, so a turn is judged by what it changed, not by what earlier
       // turns left in the tree (#158).
       let before: string | undefined;
@@ -184,14 +291,23 @@ export async function runTaskInvocation(
           message: "AgentX could not record the workspace state before this task; it will judge the task by the final diff only.",
         });
       }
-      await session.prompt(invocation.payload.prompt);
+      try {
+        await session.prompt(invocation.payload.prompt);
+      } finally {
+        await flushDiagnostics().catch(() => undefined);
+      }
       // An abort can end the prompt without an error; the guard's reason is the task's outcome.
       if (loopStop !== undefined) throw loopStop;
+      // A cancel during AgentX's checks ends the prompt normally, after the agent's last turn completed.
+      if (verificationStop.signal.aborted && dependencies.cancellationController?.isCancelled(invocation.operationId)) {
+        throw new WorkerOperationCancelledError(invocation.operationId);
+      }
       const modelFailure = failedTurn(lastAssistant);
       if (modelFailure !== undefined) throw modelFailure;
       diffAttempted = true;
       const { changed: dirty } = await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
       await publishEvidence();
+      await publishChecks();
       // With a before state, "changed" means this turn changed the tree (a revert counts); without
       // one, or when the after state cannot be read, a non-empty diff counts as a change.
       let changed = dirty;
@@ -209,12 +325,14 @@ export async function runTaskInvocation(
       const warning = fileChanges.emptyDiffWarning(changed);
       if (warning !== undefined) await events.append("progress", { message: warning });
       outcome = "SUCCEEDED";
+      const checks = compactCheckReport(finalChecks());
       await events.append("result", {
         status: "SUCCEEDED",
         conversationId,
         sessionFile: "agent-sessions/[server-generated]",
+        checks,
       });
-      taskResult = { conversationId, reopened: registered !== undefined };
+      taskResult = { conversationId, reopened: registered !== undefined, checks };
     } catch (error) {
       if (loopStop === undefined && dependencies.cancellationController?.isCancelled(invocation.operationId)) {
         outcome = "CANCELLED";
@@ -243,6 +361,14 @@ export async function runTaskInvocation(
           await reportUnsaved("test-and-tool-evidence.json");
         }
       }
+      if (!checksAttempted) {
+        try {
+          await publishChecks();
+        } catch (artifactError) {
+          evidenceFailure ??= artifactError;
+          await reportUnsaved("checks.json");
+        }
+      }
       if (!diffAttempted && outcome !== "CANCELLED") {
         try {
           await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
@@ -252,6 +378,9 @@ export async function runTaskInvocation(
         }
       }
     }
+
+    await restoreHistory();
+    await flushDiagnostics().catch(() => undefined);
 
     let telemetryFailure = evidenceFailure;
     try {
@@ -276,8 +405,13 @@ export async function runTaskInvocation(
     } catch (error) {
       telemetryFailure ??= error;
     }
-    if (taskFailure !== undefined) throw taskFailure;
-    if (telemetryFailure !== undefined) throw asError(telemetryFailure);
+    // Ruling Y: a task that ends failed or cancelled still tells the broker about a regression, so it stays standing.
+    const withChecks = (error: Error): Error => {
+      const final = finalChecks();
+      return final.status === "regression" ? Object.assign(error, { checks: compactCheckReport(final) }) : error;
+    };
+    if (taskFailure !== undefined) throw withChecks(taskFailure);
+    if (telemetryFailure !== undefined) throw withChecks(asError(telemetryFailure));
     if (!taskResult) throw new Error("task completed without a result");
     return taskResult;
   } finally {
@@ -407,6 +541,10 @@ function failedTurn(outcome: AssistantOutcome | undefined): Error | undefined {
   // The caller reports it as CANCELLED when a cancellation was requested, and as FAILED otherwise.
   if (outcome?.stopReason === "aborted") return agentXError("OPERATION_INTERRUPTED", "the model call was aborted");
   return undefined;
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function asError(value: unknown): Error {
