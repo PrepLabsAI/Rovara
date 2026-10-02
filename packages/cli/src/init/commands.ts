@@ -40,7 +40,7 @@ import {
   cloudFormationStatusReader, secretsManagerInitSecrets, type FinishFlags, type InitContext, type InitSecrets, type PreMadeGitHubApp, type SecretFlags, type StackStatusReader,
 } from "./context.js";
 import { deployStep } from "./deploy-steps.js";
-import { finishSteps, readSettingsOrThrow, readyText } from "./finish-steps.js";
+import { finishSteps, readSettingsOrThrow, readyText, subscribeAlertsAfterDeploy } from "./finish-steps.js";
 import { githubAppStep, githubRestApi, type GitHubApi } from "./github-app.js";
 import { listAwsProfiles, pickAwsProfile, realAccountAlias, resolveCaller } from "./aws-account.js";
 import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallProgress, type InitAnswers, type InitStepId } from "./install-state.js";
@@ -198,7 +198,7 @@ export function initSteps(input: { github: GitHubApi; slack: SlackApi }): InitSt
     githubAppStep(input.github),
     accessStep(),
     deployStep({ id: "core", title: STEP_PLAN.core.title }),
-    deployStep({ id: "control-plane", title: STEP_PLAN["control-plane"].title }),
+    deployStep({ id: "control-plane", title: STEP_PLAN["control-plane"].title, after: subscribeAlertsAfterDeploy }),
     slackAppStep(input.slack),
     deployStep({ id: "slack-service", title: STEP_PLAN["slack-service"].title, after: verifySlackUrls }),
     developerSignInStep({ slack: input.slack }),

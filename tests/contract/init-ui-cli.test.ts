@@ -163,6 +163,19 @@ describe("agentx init --ui", () => {
     expect(h.deployer.requests.map((request) => request.part)).toEqual(["access", "foundation", "identity", "control-plane", "runtime", "slack"]);
   });
 
+  it("FR-025: the alert address is subscribed while the build runs, before the Slack visit", async () => {
+    const h = await harness();
+    const alerts = fakeAlerts({ confirmAfterPolls: 0, budgetUsd: FIRST_RUN_BUDGET_USD });
+    let atSlack: string[] = [];
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH], {
+      beforeAnswer: async (question) => { if (question.text === "Is the Slack app installed in your workspace?") atSlack = [...alerts.subscribed]; },
+    });
+    expect(await h.run(["--ui"], { openBrowser: operator.open, setup: { ...h.setup, alerts } })).toBe(0);
+    await operator.settled();
+    expect(atSlack).toEqual(["email ops@example.com"]);
+    expect(alerts.subscribed).toEqual(["email ops@example.com"]);
+  });
+
   it("spec 048 SC-009: a release with a private image is refused on the page before anything is created", async () => {
     const h = await harness();
     const manifest = JSON.parse(await readFile(join(h.release, "release.json"), "utf8")) as { images: Record<string, string> };

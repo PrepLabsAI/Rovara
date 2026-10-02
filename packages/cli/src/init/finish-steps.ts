@@ -1,12 +1,12 @@
 // The init steps after developer sign-in (phase 15d2), and the message init ends with. Each step
 // is a thin wrapper around a setup/ module, so agentx init and the day-2 commands behave the same.
-import { agentXError } from "@agentx/contracts";
+import { agentXError, environmentStackName } from "@agentx/contracts";
 import { AlertEmailSchema } from "../deploy/answer-schemas.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
 import { tokenClaimValues, userPoolId } from "../setup/admin-session.js";
 import { ensureCognitoAdmin } from "../setup/admin-user.js";
-import { alertsTopicArn, ensureSubscribed, sendTestAlarm, type AlertTarget } from "../setup/alerts.js";
+import { alertsTopicArn, ensureSubscribed, sendTestAlarm, subscribeAlertsEarly, type AlertTarget } from "../setup/alerts.js";
 import { addChannel } from "../setup/channel-add.js";
 import { addAsana } from "../setup/connectors/asana.js";
 import { addJira } from "../setup/connectors/jira.js";
@@ -225,6 +225,22 @@ export function connectorsStep(): InitStep<InitContext> {
       return { status: "done", note: connected.length === 0 ? "no connectors" : `connected ${connected.join(", ")}` };
     },
   };
+}
+
+/** Spec 048 FR-025: the AgentX service step's last act. A failure is a log line, never the build's
+ * failure: the alerts step subscribes again (ensureSubscribed is idempotent). */
+export async function subscribeAlertsAfterDeploy(context: InitContext): Promise<void> {
+  const { alert } = context.answers;
+  if (alert.kind === "none") return;
+  try {
+    const topicArn = await alertsTopicArn({ stackOutputs: context.setup.stackOutputs, stackName: environmentStackName(context.env, "control-plane"), next: "the alerts step tries again" });
+    const target: AlertTarget = alert.kind === "email"
+      ? { kind: "email", address: alert.address }
+      : { kind: "webhook", display: alert.display, endpoint: await requireWebhook(context, alert.secretName) };
+    await subscribeAlertsEarly({ api: context.setup.alerts, topicArn, target, write: context.write });
+  } catch (error) {
+    context.write(`could not subscribe the alert address yet (${problemText(error)}); the alerts step tries again`);
+  }
 }
 
 /** FR-045 to FR-047: show the budget, subscribe the alert address, and send a test alarm. */

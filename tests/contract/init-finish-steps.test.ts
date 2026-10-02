@@ -1,10 +1,24 @@
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
-import { adminUserStep, e2eStep, finishSteps, readyText } from "../../packages/cli/src/init/finish-steps.js";
+import { adminUserStep, e2eStep, finishSteps, readyText, subscribeAlertsAfterDeploy } from "../../packages/cli/src/init/finish-steps.js";
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
+import { subscribeAlertsEarly, type AlertsApi } from "../../packages/cli/src/setup/alerts.js";
 import { initContext, progressHandle, sampleAnswers, scriptedPrompter, T0, TEST_CLI_INVOCATION, type TestInitContext } from "../support/init-fakes.js";
-import { ADMIN_EMAIL, fakeCognito, fakeControlPlane, setupServices, STAGING_SETTINGS, turn } from "../support/setup-fakes.js";
+import { ADMIN_EMAIL, fakeAlerts, fakeCognito, fakeControlPlane, setupServices, STAGING_SETTINGS, turn } from "../support/setup-fakes.js";
+
+const TOPIC = "arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts";
+
+/** A context for subscribeAlertsAfterDeploy: the control-plane stack reports TOPIC, and the alerts
+ * api and write are fakeAlerts() and a no-op unless overridden. */
+async function finishContext(overrides: { answers?: ReturnType<typeof sampleAnswers>; alerts?: AlertsApi; write?: (line: string) => void } = {}): Promise<{ context: TestInitContext }> {
+  const built = initContext({
+    answers: overrides.answers ?? sampleAnswers(),
+    setup: setupServices({ alerts: overrides.alerts ?? fakeAlerts(), stackOutputs: async () => ({ OperatorAlertsTopicArn: TOPIC }) }),
+    ...(overrides.write === undefined ? {} : { write: overrides.write }),
+  });
+  return { context: built };
+}
 
 const READY_PROGRESS_FIXTURE = {
   ...emptyProgress("staging", 0),
@@ -45,6 +59,25 @@ describe("the e2e step (FR-018 step 11)", () => {
 describe("the finishing steps", () => {
   it("run admin-user, first-project, connectors, alerts and e2e, in that order", () => {
     expect(finishSteps().map((step) => step.id)).toEqual(["admin-user", "first-project", "connectors", "alerts", "e2e"]);
+  });
+});
+
+describe("spec 048 FR-025: the alert address is subscribed early", () => {
+  it("subscribes once, without waiting for the confirmation", async () => {
+    const api = fakeAlerts({ confirmAfterPolls: 1000 });
+    const target = { kind: "email" as const, address: "ops@example.com" };
+    await subscribeAlertsEarly({ api, topicArn: TOPIC, target, write: () => undefined });
+    await subscribeAlertsEarly({ api, topicArn: TOPIC, target, write: () => undefined });
+    expect(api.subscribed).toEqual(["email ops@example.com"]);
+  });
+
+  it("does nothing for no alerts, and a failure never stops the build", async () => {
+    const lines: string[] = [];
+    const none = await finishContext({ answers: sampleAnswers({ alert: { kind: "none" } }) });
+    await expect(subscribeAlertsAfterDeploy(none.context)).resolves.toBeUndefined();
+    const broken = await finishContext({ alerts: { ...fakeAlerts(), subscribe: async () => { throw new Error("SNS is down"); } }, write: (line) => lines.push(line) });
+    await expect(subscribeAlertsAfterDeploy(broken.context)).resolves.toBeUndefined();
+    expect(lines.at(-1)).toBe("could not subscribe the alert address yet (SNS is down); the alerts step tries again");
   });
 });
 
