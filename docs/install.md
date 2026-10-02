@@ -19,7 +19,9 @@ You need:
 - **Admin credentials in that account for the first run** (for example `aws login` or an SSO
   profile). The platform team path needs them only on the platform team's side. Later, day-2
   commands use the narrower operator role that the install creates.
-- **Node 22.19 or later** (Node 22 only).
+- **Node 22.19 or newer (Node 22 LTS recommended).** AWS CloudShell comes with Node 20; see
+  [Node 22 in AWS CloudShell](#node-22-in-aws-cloudshell). With an older Node, `agentx` stops
+  before it does anything and says what to install.
 - **A GitHub organization or personal account** that will own the AgentX GitHub App.
 - **A Slack workspace where you can create apps.** If new apps need an admin's approval, `init`
   waits for it.
@@ -36,6 +38,32 @@ You need:
   aws service-quotas get-service-quota --service-code ec2 --quota-code L-0263D0A3 --region <region>
   aws ec2 describe-addresses --region <region> --query "length(Addresses)"
   ```
+
+### Node 22 in AWS CloudShell
+
+AWS CloudShell has Node 20, and AgentX needs Node 22. `npm install` only warns about it
+(`EBADENGINE`); `agentx` itself stops with this command in its message. Run it once in
+CloudShell's default Bash shell:
+
+```sh
+V=v22.23.3 A=$(uname -m | sed 's/x86_64/x64/;s/aarch64/arm64/') && F=node-$V-linux-$A.tar.gz && D=$HOME/.local/node22 && rm -rf "$D.new" && mkdir -p "$D.new" && (cd "$D.new" && curl -fSL --progress-bar -O "https://nodejs.org/dist/$V/$F" && curl -fsSL "https://nodejs.org/dist/$V/SHASUMS256.txt" | grep " $F\$" | sha256sum -c - && tar -xzf "$F" --strip-components=1 && rm "$F") && rm -rf "$D" && mv "$D.new" "$D" && (grep -qs 'local/node22/bin' ~/.bashrc || echo 'export PATH="$HOME/.local/node22/bin:$PATH"' >> ~/.bashrc) && export PATH="$D/bin:$PATH" && node --version
+```
+
+It downloads the official Node 22.23.3 for this machine (x86_64 or arm64) from nodejs.org,
+checks it against nodejs.org's published SHA-256 checksums before unpacking it, and puts it in
+`~/.local/node22` in your CloudShell home folder (about 200 MB of the 1 GB CloudShell keeps). It
+unpacks into `~/.local/node22.new` first and only then replaces `~/.local/node22`, so a failed
+download leaves the Node you had (run it again, or `rm -rf ~/.local/node22.new`). It adds one
+line to `~/.bashrc` so later CloudShell sessions use it too, and prints the new `node --version`.
+It needs no `sudo`.
+This only affects your own CloudShell, in this region; nothing else in your AWS account uses it.
+
+To remove it, delete the folder and the `~/.bashrc` line, then open a new CloudShell tab:
+
+```sh
+rm -rf ~/.local/node22 ~/.local/node22.new
+sed -i '/local\/node22\/bin/d' ~/.bashrc
+```
 
 Pick an environment name: lower-case letters, digits and hyphens, such as `prod` or `staging`.
 Every command takes it as `--env <env>`. Always pass it: without it, `agentx` means the
