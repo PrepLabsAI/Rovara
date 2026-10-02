@@ -107,7 +107,8 @@ describe("the worker's Pi session on Pi 0.85.1", () => {
       expect(conversationId).toMatch(UUID_V7);
       expect(handle.conversationId).toBe(conversationId);
       expect(basename(handle.sessionFile)).toMatch(new RegExp(`^\\d{4}-\\d{2}-\\d{2}T\\d{2}-\\d{2}-\\d{2}-\\d{3}Z_${conversationId}\\.jsonl$`));
-      expect(handle.getModel()).toEqual({ provider: "agentx-faux", modelId: "scripted" });
+      // Spec 053: getModel also reports the level the session used; the scripted model does not reason, so "off".
+      expect(handle.getModel()).toEqual({ provider: "agentx-faux", modelId: "scripted", thinkingLevel: "off" });
       const stats = handle.getSessionStats();
       expect(keys(stats)).toEqual(["assistantMessages", "contextUsage", "cost", "sessionFile", "sessionId", "tokens", "toolCalls", "toolResults", "totalMessages", "userMessages"]);
       expect(keys(stats.tokens)).toEqual(["cacheRead", "cacheWrite", "input", "output", "total"]);
