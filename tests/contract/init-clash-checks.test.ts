@@ -42,6 +42,25 @@ describe("clash checks", () => {
     expect(taken[2]).toEqual({ label: "App name", ok: false, detail: "GitHub already has an app named AgentX acme (staging). Choose another app name.", technical: "agentx-acme-staging" });
   });
 
+  it("Fix round 1: a failed stack read is could not check the install name, for the page", async () => {
+    const broken = { status: async () => { throw new Error("AccessDenied: not authorized to perform cloudformation:DescribeStacks"); } };
+    const [name] = await clashChecks({ answers: sampleAnswers(), stackStatus: broken, github: fakeGitHubApi(), audience: "page", installUsed: free });
+    expect(name).toEqual({
+      label: "Install name", ok: false,
+      detail: "AgentX could not check whether the install name is free. Check your access to AWS, then check again.",
+      technical: "AccessDenied: not authorized to perform cloudformation:DescribeStacks",
+    });
+  });
+
+  it("Fix round 1: a failed installUsed read is could not check the install name, for the terminal", async () => {
+    const broken = async () => { throw new Error("AccessDenied: not authorized to read the parameter"); };
+    const [name] = await clashChecks({ answers: sampleAnswers(), stackStatus: nothing, github: fakeGitHubApi(), audience: "terminal", installUsed: broken });
+    expect(name).toEqual({
+      label: "Install name", ok: false,
+      detail: "could not check whether environment staging is free (AccessDenied: not authorized to read the parameter); check your AWS access and run agentx init again",
+    });
+  });
+
   it("names the slug as GitHub makes it", () => {
     expect(githubAppSlug("AgentX acme (staging)")).toBe("agentx-acme-staging");
     expect(githubAppSlug("Our  AgentX!")).toBe("our-agentx");

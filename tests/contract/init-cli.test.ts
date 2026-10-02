@@ -191,6 +191,14 @@ describe("agentx init", () => {
     expect(h.github.conversions).toEqual([]);
   });
 
+  it("Fix round 1: --yes with the GitHub owner lookup throwing prints exactly the clash check's own line", async () => {
+    const h = await harness();
+    const github = { ...fakeGitHubApi(), owner: async () => { throw new Error("GitHub owner lookup failed with HTTP 403"); } };
+    expect(await h.run([...YES], { github })).not.toBe(0);
+    const line = h.printed().split("\n").find((each) => each.startsWith("- could not check the GitHub owner"));
+    expect(line).toBe("- could not check the GitHub owner acme (GitHub owner lookup failed with HTTP 403); check your network and run agentx init again");
+  });
+
   it("FR-028: an app made beforehand (--github-app-id) is this install's own, so its name is no clash", async () => {
     const h = await harness();
     const github = { ...h.github, appBySlug: async () => ({ owner: { login: "acme" } }) };
@@ -226,11 +234,21 @@ describe("agentx init", () => {
 
   it("spec 048 FR-020: asks the GitHub owner's type only when GitHub cannot say, and says why", async () => {
     const h = await harness();
-    // GitHub cannot answer the settings' lookup; by the answer checks (spec 048 FR-028) it answers again.
-    let lookups = 0;
-    const github = { ...fakeGitHubApi(), owner: async () => { lookups += 1; if (lookups === 1) throw new Error("GitHub owner lookup failed with HTTP 403"); return { login: "acme", type: "User" as const }; } };
+    // GitHub cannot answer the settings' lookup; by the answer checks (spec 048 FR-028) it answers
+    // again. Fix round 1: keyed on the owner-type question being answered, not on a lookup count,
+    // so an unrelated extra lookup elsewhere would not break this test for the wrong reason.
+    let settingsAnswered = false;
+    const github = { ...fakeGitHubApi(), owner: async () => { if (!settingsAnswered) throw new Error("GitHub owner lookup failed with HTTP 403"); return { login: "acme", type: "User" as const }; } };
     // The settings, then the owner's type (a personal account), then no to the plan.
-    const prompter = scriptedPrompter([...FIRST_RUN.slice(0, -1), "user", false]);
+    const base = scriptedPrompter([...FIRST_RUN.slice(0, -1), "user", false]);
+    const prompter: typeof base = {
+      ...base,
+      async choose(question, choices, options) {
+        const answer = await base.choose(question, choices, options);
+        if (question === "Is acme an organization or a personal account?") settingsAnswered = true;
+        return answer;
+      },
+    };
     expect(await h.run([], { prompter, github })).not.toBe(0);
     expect(prompter.asked.at(-2)).toBe("Is acme an organization or a personal account?");
     expect(h.printed()).toContain("Could not look up acme on GitHub (GitHub owner lookup failed with HTTP 403); asking instead.");

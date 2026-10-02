@@ -29,18 +29,32 @@ export async function clashChecks(input: {
 
   const expected = new Set(input.expectedStacks ?? []);
   const stacks = installOrder(answers.identity.mode).map((part) => environmentStackName(answers.env, part)).filter((stack) => !expected.has(stack));
-  const existing: string[] = [];
-  for (const stack of stacks) if ((await input.stackStatus.status(stack)) !== undefined) existing.push(stack);
-  if (existing.length > 0 || (await input.installUsed(answers.env))) {
+  // Fix round 1: a failed stack read (AccessDenied on DescribeStacks) or a failed `installUsed`
+  // (an SSM read) must become a failed check like every other clash check here, never escape and
+  // abort `checkPrerequisites` part way through (its `extraChecks` call has no try/catch of its
+  // own, so an uncaught throw here would drop every problem collected before it).
+  try {
+    const existing: string[] = [];
+    for (const stack of stacks) if ((await input.stackStatus.status(stack)) !== undefined) existing.push(stack);
+    if (existing.length > 0 || (await input.installUsed(answers.env))) {
+      checks.push({
+        label: "Install name", ok: false,
+        detail: page
+          ? `This AWS account and region already have an AgentX install named ${answers.env}. Choose another install name.`
+          : `environment ${answers.env} already has stacks or settings in this account and region; choose another --env`,
+        ...(existing.length === 0 ? {} : { technical: existing.join(", ") }),
+      });
+    } else {
+      checks.push({ label: "Install name", ok: true, detail: `${answers.env} is free in this account and region` });
+    }
+  } catch (error) {
     checks.push({
       label: "Install name", ok: false,
       detail: page
-        ? `This AWS account and region already have an AgentX install named ${answers.env}. Choose another install name.`
-        : `environment ${answers.env} already has stacks or settings in this account and region; choose another --env`,
-      ...(existing.length === 0 ? {} : { technical: existing.join(", ") }),
+        ? "AgentX could not check whether the install name is free. Check your access to AWS, then check again."
+        : `could not check whether environment ${answers.env} is free (${reason(error)}); check your AWS access and run agentx init again`,
+      ...(page ? { technical: reason(error) } : {}),
     });
-  } else {
-    checks.push({ label: "Install name", ok: true, detail: `${answers.env} is free in this account and region` });
   }
 
   // Review Focus 3: github.owner itself, never the settings' ownerType (which reads a failed lookup

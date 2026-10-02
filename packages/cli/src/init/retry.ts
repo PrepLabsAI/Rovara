@@ -47,6 +47,9 @@ export async function checkWithChangeOnPage(input: {
     } catch (error) {
       if (input.surface === undefined) throw error;
       input.failed(problemText(error));
+      // Fix round 1: "--on-check-failure" is only a copy key (question-copy.ts looks up this
+      // question's help by it), not a real CLI option; without a page the loop above already threw,
+      // so the terminal never asks this question and there is no flag to pass.
       const next = await input.prompter.choose<"change" | "retry" | "stop">(input.question, [
         { value: "change", label: "Change answers" },
         { value: "retry", label: "Check again" },
