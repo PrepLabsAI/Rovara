@@ -467,11 +467,36 @@ describe("spec 051: the worker's session carries the AgentX preamble and the inl
     expect(diagnostics[0]).not.toContain("hunter2");
   });
 
+  it("redacts an extension error as readiness output is: AWS keys and GitHub tokens too (I-4)", async () => {
+    // protects packages/worker/src/pi-session.ts (redactText on diagnostics)
+    const awsKey = "AKIAIOSFODNN7EXAMPLE";
+    const githubToken = `ghp_${"a1B2c3D4e5".repeat(4)}`;
+    const extension: InlineExtension = {
+      name: "agentx-test",
+      factory: (pi) => { pi.on("tool_result", () => { throw new Error(`env AWS_ACCESS_KEY_ID=${awsKey} token ${githubToken}`); }); },
+    };
+    const diagnostics: string[] = [];
+    const { handle } = await workerSession([
+      toolUse(fauxToolCall("bash", { command: "echo hi" }, { id: "call-bash-aws" })),
+      fauxAssistantMessage("Done."),
+    ], { bashOperations: recordingShell().operations, extensionFactories: [extension], onDiagnostic: (message) => { diagnostics.push(message); } });
+    try {
+      expect(await settle(handle, "run it")).toBe("resolved");
+    } finally { handle.dispose(); }
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).not.toContain(awsKey);
+    expect(diagnostics[0]).not.toContain(githubToken);
+    expect(diagnostics[0]).toContain("<inline:agentx-test>");
+  });
+
   it("fails session start loudly when an inline extension fails to load (Ruling F)", async () => {
     // protects packages/worker/src/pi-session.ts (resourceLoader.getExtensions().errors)
     const extension: InlineExtension = { name: "agentx-verification", factory: () => { throw new Error("cannot load"); } };
-    await expect(workerSession([fauxAssistantMessage("Ok.")], { extensionFactories: [extension] }))
-      .rejects.toThrow(/agentx-verification.*cannot load/);
+    const failure = await workerSession([fauxAssistantMessage("Ok.")], { extensionFactories: [extension] }).then(() => undefined, (error: unknown) => error);
+    expect(String(failure)).toMatch(/agentx-verification.*cannot load/);
+    // M-10: an AgentX fault, not a retryable "worker unavailable".
+    expect(String(failure)).not.toMatch(/^(?:AgentXError: )?RUNTIME_UNAVAILABLE/);
+    expect(String(failure)).toContain("AgentX fault");
   });
 
   it("gives a reopened session the same preamble", async () => {

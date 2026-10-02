@@ -66,11 +66,11 @@ export async function publishWorkspaceDiff(rootPath: string, sink: ArtifactSink)
 }
 
 /** The repository's HEAD commit. */
-async function gitHead(directory: string): Promise<string> {
+async function gitHead(directory: string, signal?: AbortSignal): Promise<string> {
   const { stdout } = await execFileAsync(
     "git",
     ["-C", directory, "rev-parse", "HEAD"],
-    { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
+    { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory), ...(signal === undefined ? {} : { signal }) },
   );
   return stdout.trim();
 }
@@ -108,24 +108,40 @@ export async function workspaceFingerprint(rootPath: string): Promise<string> {
   return repositoriesFingerprint(manifest.repositories.map((repository) => ({ name: repository.name, directory: resolve(rootPath, repository.path) })));
 }
 
-/** workspaceFingerprint's digest over the given repositories. It respects each repository's .gitignore. */
-export async function repositoriesFingerprint(repositories: ReadonlyArray<{ name: string; directory: string }>): Promise<string> {
+/** How many untracked files the fingerprint stats; beyond it, only their list counts (M-9). */
+export const MAX_FINGERPRINT_UNTRACKED_STATS = 5_000;
+
+/**
+ * workspaceFingerprint's digest over the given repositories. It respects each repository's .gitignore. An aborted
+ * `signal` stops the git calls and the stat loop, and rejects.
+ */
+export async function repositoriesFingerprint(
+  repositories: ReadonlyArray<{ name: string; directory: string }>,
+  options: { signal?: AbortSignal; maxUntrackedStats?: number } = {},
+): Promise<string> {
+  const { signal } = options;
+  const maxUntrackedStats = options.maxUntrackedStats ?? MAX_FINGERPRINT_UNTRACKED_STATS;
   const hash = createHash("sha256");
   for (const { name, directory } of repositories) {
-    const head = await gitHead(directory);
+    signal?.throwIfAborted();
+    const head = await gitHead(directory, signal);
     const { stdout: status } = await execFileAsync(
       "git",
       ["-C", directory, "status", "--porcelain", "-z", "--untracked-files=all"],
-      { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
+      { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory), ...(signal === undefined ? {} : { signal }) },
     );
     const { stdout: diff } = await execFileAsync(
       "git",
       ["-C", directory, "diff", "--no-ext-diff", "--binary", "HEAD", "--"],
-      { timeout: 60_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
+      { timeout: 60_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory), ...(signal === undefined ? {} : { signal }) },
     );
     hash.update(`${name}\u0000${head}\u0000${status}\u0000${diff}\u0000`);
+    let statted = 0;
     for (const entry of status.split("\u0000")) {
       if (!entry.startsWith("?? ")) continue;
+      if (statted >= maxUntrackedStats) break;
+      statted += 1;
+      signal?.throwIfAborted();
       const file = await stat(resolve(directory, entry.slice(3))).catch(() => undefined);
       hash.update(`${entry}\u0000${file?.size ?? -1}\u0000${file?.mtimeMs ?? -1}\u0000`);
     }

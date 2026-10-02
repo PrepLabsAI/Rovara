@@ -37,7 +37,7 @@ async function workspace(): Promise<{ rootPath: string; repository: string }> {
   return { rootPath, repository };
 }
 
-async function recordedSession(commands: string[], fingerprint?: () => Promise<string>) {
+async function recordedSession(commands: Array<string | string[]>, fingerprint?: () => Promise<string>) {
   const { rootPath, repository } = await workspace();
   const diagnostics: string[] = [];
   const recorder = new CommandRecorder({
@@ -45,11 +45,13 @@ async function recordedSession(commands: string[], fingerprint?: () => Promise<s
     onDiagnostic: (message) => { diagnostics.push(message); },
   });
   const extension: ExtensionFactory = (pi) => {
-    pi.on("tool_call", async (event) => { await recorder.observeCall(event); });
+    pi.on("tool_call", async (event, context) => { await recorder.observeCall(event, context.signal); });
     pi.on("tool_result", (event) => { recorder.observe(event); });
   };
   const { modelRuntime, faux } = await fauxModelRuntime();
-  const steps: FauxResponseStep[] = commands.map((command, index) => toolUse(fauxToolCall("bash", { command }, { id: `call-${index}` })));
+  // A string is one call in its own turn; an array is one assistant message with several calls, which Pi runs as a batch.
+  const steps: FauxResponseStep[] = commands.map((step, index) => toolUse(...(Array.isArray(step) ? step : [step])
+    .map((command, call) => fauxToolCall("bash", { command }, { id: `call-${index}-${call}` }))));
   faux.setResponses([...steps, fauxAssistantMessage("Done.")]);
   const adapter = createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) });
   const handle = await createWorkspacePiSession({ rootPath, model: FAUX_MODEL, extensionFactories: [extension] }, adapter);
@@ -79,10 +81,37 @@ describe("the command recorder in the worker's Pi session (spec 051 Ruling E)", 
     ]);
   });
 
-  it("treats a run as after an edit when the fingerprint fails, and reports it", async () => {
-    const { runs, diagnostics } = await recordedSession(["cd repos/web && npm test"], () => repositoriesFingerprint([{ name: "web", directory: "/nonexistent-agentx-repo" }]));
+  it("voids the before of a test run batched with a sed -i in the same assistant message (Ruling G)", async () => {
+    const { runs } = await recordedSession([["cd repos/web && sed -i.orig 's/a/b/' src.py", "cd repos/web && npm test"]]);
     expect(runs).toEqual([{ replay: "cd repos/web && npm test", exitCode: 1, afterFirstEdit: true }]);
-    expect(diagnostics).toHaveLength(2);
+  });
+
+  it("treats a run as after an edit when the fingerprint fails, and reports it once", async () => {
+    const { runs, diagnostics } = await recordedSession(["cd repos/web && npm test", "cd repos/web && npm run test"], () => repositoriesFingerprint([{ name: "web", directory: "/nonexistent-agentx-repo" }]));
+    expect(runs.map((run) => run.afterFirstEdit)).toEqual([true, true]);
+    expect(diagnostics).toHaveLength(1);
     expect(diagnostics[0]).toContain("AgentX could not read the workspace state");
+  });
+});
+
+describe("repositoriesFingerprint (M-9)", () => {
+  it("still sees an added untracked file beyond the stat cap, and an untracked file's size within it", async () => {
+    const { repository } = await workspace();
+    const read = () => repositoriesFingerprint([{ name: "web", directory: repository }], { maxUntrackedStats: 1 });
+    await writeFile(join(repository, "u1.txt"), "1");
+    await writeFile(join(repository, "u2.txt"), "2");
+    const first = await read();
+    await writeFile(join(repository, "u3.txt"), "3");
+    const second = await read();
+    expect(second).not.toBe(first);
+    await writeFile(join(repository, "u1.txt"), "longer");
+    expect(await read()).not.toBe(second);
+  });
+
+  it("rejects promptly when its signal is aborted", async () => {
+    const { repository } = await workspace();
+    const controller = new AbortController();
+    controller.abort();
+    await expect(repositoriesFingerprint([{ name: "web", directory: repository }], { signal: controller.signal })).rejects.toThrow();
   });
 });

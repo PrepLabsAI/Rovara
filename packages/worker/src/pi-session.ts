@@ -22,9 +22,8 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
 import { createModelRuntimeWithFallback } from "@agentx/model-runtime";
-import { AGENTX_PREAMBLE, agentXError, ThinkingLevelSchema, type ThinkingLevel } from "@agentx/contracts";
+import { AGENTX_PREAMBLE, agentXError, redactText, ThinkingLevelSchema, type ThinkingLevel } from "@agentx/contracts";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
-import { redactCredentials } from "./events.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import {
   appendRepositoryContextFiles,
@@ -225,12 +224,12 @@ async function createDefaultSession(
     }
     const { resourceLoader, settingsManager } = await createWorkerResources(input);
     // An AgentX extension that failed to load would leave its work silently undone, so the session does not start.
+    // It is a deterministic AgentX bug, so not RUNTIME_UNAVAILABLE, which the broker reads as "retry" (M-10).
     const loadErrors = resourceLoader.getExtensions().errors;
     if (loadErrors.length > 0) {
-      throw agentXError(
-        "RUNTIME_UNAVAILABLE",
-        String(redactCredentials(`an AgentX Pi extension failed to load: ${loadErrors.map((error) => `${error.path}: ${error.error}`).join("; ")}`)),
-      );
+      throw new Error(redactText(
+        `an AgentX Pi extension failed to load (an AgentX fault; retrying will not help): ${loadErrors.map((error) => `${error.path}: ${error.error}`).join("; ")}`,
+      ));
     }
     const { session } = await createAgentSession({
       cwd: input.cwd,
@@ -254,7 +253,7 @@ async function createDefaultSession(
       await session.bindExtensions({
         onError: (error) => {
           try {
-            input.onDiagnostic?.(String(redactCredentials(`pi extension ${error.extensionPath} failed on ${error.event}: ${error.error}`)));
+            input.onDiagnostic?.(redactText(`pi extension ${error.extensionPath} failed on ${error.event}: ${error.error}`));
           } catch { /* Reporting must not break a turn. */ }
         },
       });

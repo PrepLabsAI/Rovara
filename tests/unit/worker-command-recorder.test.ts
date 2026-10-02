@@ -14,7 +14,7 @@ const bashResult = (toolCallId: string, command: string, options: { exitCode?: n
 });
 
 /** A recorder over a fake workspace whose state the test changes, as a bash command would. */
-function harness(fingerprint?: () => Promise<string>) {
+function harness(fingerprint?: (signal?: AbortSignal) => Promise<string>) {
   const workspace = { state: "clean" };
   const diagnostics: string[] = [];
   const recorder = new CommandRecorder({
@@ -166,5 +166,86 @@ describe("CommandRecorder: an edit made through bash (Ruling E)", () => {
     const { recorder, runs } = harness();
     recorder.observe(bashResult("unseen", "pytest", { exitCode: 1 }));
     expect((await runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: true });
+  });
+});
+
+describe("CommandRecorder: a parallel batch (Ruling G)", () => {
+  /** Pi runs every call's tool_call hook in a batch first, then the calls together, then their results. */
+  async function batch(h: ReturnType<typeof harness>, calls: Array<{ toolName: string; command?: string; effect?: () => void; isError?: boolean }>, resultOrder?: number[]) {
+    const ids = calls.map(() => nextId());
+    for (const [index, call] of calls.entries()) {
+      await h.recorder.observeCall({ toolCallId: ids[index]!, toolName: call.toolName, input: call.command === undefined ? { path: "a.ts" } : { command: call.command } });
+    }
+    for (const call of calls) call.effect?.();
+    for (const index of resultOrder ?? calls.map((_, i) => i)) {
+      const call = calls[index]!;
+      if (call.command !== undefined) h.recorder.observe(bashResult(ids[index]!, call.command));
+      else h.recorder.observe({ toolCallId: ids[index]!, toolName: call.toolName, input: { path: "a.ts" }, isError: call.isError ?? false, content: [{ type: "text", text: "ok" }] });
+    }
+  }
+
+  it("voids the before of a test run batched with a bash command that is not a test, either order", async () => {
+    const h = harness();
+    await batch(h, [{ toolName: "bash", command: "sed -i s/a/b/ src.py", effect: () => { h.workspace.state = "sed"; } }, { toolName: "bash", command: "pytest" }]);
+    const k = harness();
+    await batch(k, [{ toolName: "bash", command: "npm test" }, { toolName: "bash", command: "sed -i s/a/b/ src.py", effect: () => { k.workspace.state = "sed"; } }]);
+    expect((await h.runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: true });
+    expect((await k.runs())[0]).toMatchObject({ replay: "npm test", afterFirstEdit: true });
+  });
+
+  it("voids the before of a test run batched with an edit or write that finishes after it", async () => {
+    const h = harness();
+    await batch(h, [{ toolName: "edit", effect: () => { h.workspace.state = "edit"; } }, { toolName: "bash", command: "pytest" }], [1, 0]);
+    const k = harness();
+    await batch(k, [{ toolName: "bash", command: "pytest" }, { toolName: "write" }]);
+    expect((await h.runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: true });
+    expect((await k.runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: true });
+  });
+
+  it("keeps the before valid in a batch of test commands and reads", async () => {
+    const h = harness();
+    await batch(h, [{ toolName: "bash", command: "pytest" }, { toolName: "read" }, { toolName: "bash", command: "npm test" }]);
+    expect((await h.runs()).map(({ replay, afterFirstEdit }) => ({ replay, afterFirstEdit }))).toEqual([
+      { replay: "pytest", afterFirstEdit: false },
+      { replay: "npm test", afterFirstEdit: false },
+    ]);
+  });
+
+  it("does not let a finished batch void a later call", async () => {
+    const h = harness();
+    await batch(h, [{ toolName: "bash", command: "ls" }, { toolName: "bash", command: "cat a" }]);
+    await h.bash("pytest");
+    expect((await h.runs())[0]?.afterFirstEdit).toBe(false);
+  });
+});
+
+describe("CommandRecorder: fingerprint cost (M-9, M-11)", () => {
+  it("stops reading the fingerprint once it has differed", async () => {
+    let count = 0;
+    const h = harness(async () => { count += 1; return h.workspace.state; });
+    await h.bash("sed -i s/a/b/ src.py", { effect: () => { h.workspace.state = "sed"; } });
+    await h.bash("pytest");
+    const after = count;
+    await h.bash("npm test");
+    expect(count).toBe(after);
+    expect((await h.runs()).map((run) => run.afterFirstEdit)).toEqual([true, true]);
+  });
+
+  it("reports a failing fingerprint once per session", async () => {
+    const h = harness(async () => { throw new Error("not a git repository"); });
+    await h.bash("pytest");
+    await h.bash("npm test");
+    await h.bash("go test ./...");
+    await h.runs();
+    expect(h.diagnostics).toHaveLength(1);
+  });
+
+  it("passes the tool call's abort signal to the fingerprint", async () => {
+    const signals: Array<AbortSignal | undefined> = [];
+    const recorder = new CommandRecorder({ fingerprint: async (signal) => { signals.push(signal); return "s"; } });
+    const controller = new AbortController();
+    await recorder.observeCall({ toolCallId: "sig", toolName: "bash", input: { command: "pytest" } }, controller.signal);
+    expect(signals.length).toBeGreaterThan(0);
+    expect(signals.every((signal) => signal === controller.signal)).toBe(true);
   });
 });

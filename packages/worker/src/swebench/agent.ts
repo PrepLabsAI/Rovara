@@ -1,7 +1,6 @@
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
-import type { SwebenchStopReason } from "@agentx/contracts";
+import { redactText, type SwebenchStopReason } from "@agentx/contracts";
 import type { DevcontainerPaths } from "../devcontainer.js";
-import { redactCredentials } from "../events.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "../pi-session.js";
 import { ToolLoopGuard } from "../tool-loop-guard.js";
 
@@ -57,7 +56,7 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
   const now = input.now ?? Date.now;
   const diagnostics: string[] = [];
   const session = await createWorkspacePiSession({
-    onDiagnostic: (message) => { diagnostics.push(String(redactCredentials(message))); },
+    onDiagnostic: (message) => { diagnostics.push(redactText(message)); },
     rootPath: input.rootPath,
     model: input.model,
     bashOperations: input.bashOperations,

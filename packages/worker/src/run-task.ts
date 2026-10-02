@@ -1,6 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { WorkerInvocationSchema, agentXError, type WorkerInvocation } from "@agentx/contracts";
+import { WorkerInvocationSchema, agentXError, redactText, type WorkerInvocation } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
@@ -85,7 +85,7 @@ export async function runTaskInvocation(
   const toolEvidence: unknown[] = [];
   const contextDiagnostics: string[] = [];
   const onDiagnostic = (message: string): void => {
-    contextDiagnostics.push(String(redactCredentials(message)));
+    contextDiagnostics.push(redactText(message));
   };
   // Diagnostics arrive before the session runs and, from extensions, during the turn (Ruling F): each is reported once.
   let reportedDiagnostics = 0;
