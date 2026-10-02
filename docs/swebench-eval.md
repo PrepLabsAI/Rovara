@@ -173,7 +173,12 @@ The grade is still the benchmark's own grader. `result.json` also records:
 | `preambleSha256` | The SHA-256 of the preamble the agent ran with |
 
 SWE-bench commands such as `cd /testbed && pytest ...` are recorded and replayed from the run root
-inside the container; paths outside it are still refused.
+inside the container; paths outside it are still refused. Production tasks in a dev container get
+the same rewrite for their container folder.
+
+If the agent's one extra turn is stopped (a limit, the loop guard, a model error), the report stays
+a regression rather than becoming "not verified", as in production: AgentX saw the regression and
+never saw it fixed. A stopped run still claims nothing.
 
 ## Batches (spec 052)
 
@@ -268,9 +273,15 @@ charges that do not sum to the spend) it says the results are incomplete, and th
 `costEstimated`. The `toolCalls` column is empty for runs on a runner image older than spec 052.
 
 `disagreementRate` is the share of runs where the agent claimed success and AgentX's check or the
-grader disagreed. Its denominator is the graded runs with a claim (`success` or `failure`); a run
-with no claim line, or from a runner older than spec 051, is left out, and a model with none has a
-null rate. It is the number for spec 046's final campaign.
+grader disagreed. Its denominator is the graded runs with a claim (`success` or `failure`). Three
+kinds of run are left out of it, so read it with the run counts beside it:
+
+- a run with no claim line, which includes a model that never writes the `AgentX result:` line;
+- a run stopped by a limit (time, cost, the loop guard), which claims nothing, so a run whose
+  finished work was still being checked at the time limit leaves the measure;
+- a run from a runner older than spec 051.
+
+A model with none left has a null rate. It is the number for spec 046's final campaign.
 
 ### Alarms
 

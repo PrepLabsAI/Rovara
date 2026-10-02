@@ -89,8 +89,9 @@ export function planChecks(
 const PUBLICATION_LABEL_MAX = 1_024;
 
 /**
- * Spec 051 (D-7): publish's readiness results as check entries, each judged against its before in `plan` (planChecks
- * with the workspace's history), as a task's final round is. The output is cut to the tail the pull request's checks
+ * Spec 051 (D-7): publish's readiness results as check entries, each judged against its before in `plan`: the
+ * preparation baseline only (Ruling S: the pull request is the whole change since preparation, so the task history in
+ * .agentx/last-checks.json is never read at publish). The output is cut to the tail the pull request's checks
  * section shows, so 64 checks stay small in the callback.
  */
 export function publicationCheckEntries(plan: CheckPlan, results: readonly PublicationCheckResult[]): CheckEntry[] {

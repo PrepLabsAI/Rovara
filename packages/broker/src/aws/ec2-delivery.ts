@@ -74,8 +74,9 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
  * only to a worker whose /ping lists it. A task's level is dropped and the worker runs at its own
  * default level. Prepare, publish and maintain carry the whole stored project definition, whose
  * models carry levels the worker does not use there, so those are stripped. Spec 051: a task's
- * readiness goes only to a worker whose /ping lists "task.readiness"; one built before it checks the
- * agent's own test commands instead, and a publication's reportChecks goes only to one whose /ping lists
+ * readiness goes only to a worker whose /ping lists "task.readiness"; one built before spec 051 has no
+ * verification at all, so it neither checks nor reports (it is a new worker under an old broker, which sends no
+ * readiness, that checks the agent's own test commands), and a publication's reportChecks goes only to one whose /ping lists
  * "publish.reportChecks". The invoke token signs the operation, not the payload, so
  * dropping a field leaves it valid. A ping that fails fails the attempt: the worker journals a hash of
  * the whole invocation, so a retry must send what the first attempt would have, and a blip must not

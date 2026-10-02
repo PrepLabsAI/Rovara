@@ -228,29 +228,44 @@ summary. The verdict lines, word for word:
 | Situation | Line |
 |---|---|
 | A check passed before and fails now | `Not done: <check> passed before and fails now.` (one line per such check) |
-| No regression, and some checks pass | `Checks passed (<n> project check(s)).` or, for a project without readiness checks, `Checks passed (<n> of the agent's own test commands, rerun by AgentX).` |
+| Every check AgentX reran passes | `Checks passed (<n> project check(s)).` or, for a project without readiness checks, `Checks passed (<n> of the agent's own test commands, rerun by AgentX).` |
+| No regression, but a rerun check fails now | `Checks: <p> of <n> pass.` (then one line for each failing check, below). `Checks passed` is never used while a check fails |
 | No regression, but nothing passes yet | `No regression found, but no check passes yet.` |
 | Nothing was checked | `Not verified: no checks ran. Add readiness checks to the project so AgentX can check the agent's work.` |
-| The task was stopped, or errored, before the check | `Not verified: the task stopped before AgentX could check it.` |
+| The task was stopped, or errored, before the check, or AgentX had no time to rerun any of the project's checks | `Not verified: the task stopped before AgentX could check it.` (the advice to add readiness checks is only for a project that has none) |
+| The pull request this turn opened is a draft | `Opened as a draft: AgentX's checks found failures.` (also when the turn ran no task, such as "open the PR" after an earlier task) |
 | A check was already failing before the change | `Already failing before this change: <check>.` (added to any of the above) |
 | A check fails and has no earlier result | `Fails now, with no earlier result: <check>.` (added to any of the above) |
+
+A regression stays a regression: if the agent's one extra turn is stopped, cancelled or ends in a
+model error, the report is still a regression, never "Not verified".
 
 A reply from a task that produced no report (for example one run by a worker older than spec 051)
 reads exactly as before.
 
 ### What you see in the pull request
 
-- Every pull request AgentX opens has a checks section in its description: each check with its
-  result before and after, and the trimmed output of failures.
-- **Any failing readiness check when the pull request is published makes it a draft.** This
-  relaxes an earlier rule, where publishing refused on a failing check. The work now stays visible
-  and cannot be merged as finished by mistake. A draft is also opened when the workspace's latest
-  task report found a regression.
+- A pull request has a checks section in its description when there is something to report: a
+  task report, or a failing check at publish. With no task report (for example a worker older
+  than spec 051) and every check passing at publish, the description is exactly as before. The
+  section shows each check with its result before and after, and the trimmed output of failures.
+- **A pull request is a draft while a check fails.** That is: any readiness check fails when it is
+  published (this relaxes an earlier rule, where publishing refused on a failing check), or a
+  check still fails that an earlier task or the latest one found failing. The work stays visible
+  and cannot be merged as finished by mistake. The publish result says `draft`, and the PR tool's
+  description tells the assistant that AgentX opens a draft when a check fails.
+- **A failing check is remembered across tasks.** The workspace keeps every check that fails now,
+  until a later report shows it passing. So a follow-up task that runs no tests, or reruns a
+  broken test and sees it "already failing", cannot hide an earlier regression. A task that ends
+  without a report (failed, cancelled, interrupted) keeps what was known. The section lists a
+  check from an earlier task under "Still failing from earlier tasks". A project check that
+  publish reran and found passing does not stand, unless it was a regression.
 - The section judges each check against the workspace's preparation: a command that passed at
   preparation and fails now reads "regression (passed at preparation, fails now)"; any other
   failing command reads "fails now, with no earlier result".
 - If the latest task was not verified (it failed, was cancelled, was interrupted or produced no
-  report), the section says "Not verified". That alone does not make a draft.
+  report), the section says "Not verified". That alone does not make a draft: earlier failures
+  still do.
 - Appending to an existing pull request, and syncing it, still refuse when a readiness check
   fails. CodeBuild gates are unchanged.
 
@@ -296,7 +311,14 @@ suite, a type check, a lint. They are the best checks, for three reasons:
 A project **without** readiness checks is checked by rerunning the agent's own simple test
 commands instead. That is weaker: the agent chooses what to run, and may run nothing, in which
 case the reply says "Not verified: no checks ran". For each such command, the "before" is the
-agent's first run, counted only if no file had changed yet; otherwise the before is unknown.
+agent's first run in that task, counted only if no file had changed yet; otherwise the before is
+unknown. A failure is remembered across tasks (above), so the next task cannot lose it.
+
+In a project with a dev container, the agent's shell is the container's, so it writes
+`cd /workspaces/<repo> && npm test`. AgentX reads a leading `cd` to that exact folder (or a
+folder inside it) as the repository's folder in the workspace, records it and replays it there,
+in the container. Any other absolute path, a `..`, a look-alike folder, and a link that leads out
+of the workspace are still refused.
 
 Only these commands count, each with its arguments: `npm test`, `npm run test`, `pnpm test`,
 `yarn test`, `pytest`, `python -m pytest`, `go test`, `cargo test`, `make test`, `mvn test`,
@@ -311,7 +333,15 @@ could change the workspace: pipes, `;`, `&&` chains, `||`, `&`, redirection, quo
 
 The broker sends a worker the readiness commands and the draft-PR behaviour only when the worker's
 `/ping` lists the feature, so each costs one extra `/ping` per delivery for readiness and publish.
-An older worker is checked with the agent's own commands, and an older worker publishes as before.
+A worker built before spec 051 has no verification at all: it adds no preamble, runs no checks
+and reports none, so its replies and pull requests read as before, and it publishes as before. The
+agent's own commands are the checks for a new worker under an older broker (one that sends no
+readiness), and for a project without readiness.
+
+A workspace prepared before spec 051 has no earlier result for its project checks until its first
+task records one, so a regression the agent causes in such a task gets no extra try (its before is
+unknown), and its reply leads with `Checks: <p> of <n> pass.`. Publish still makes the pull request
+a draft, because any failing check there does.
 
 ## Register and bind
 
