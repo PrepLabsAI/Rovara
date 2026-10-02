@@ -154,7 +154,7 @@ import {
   type SwebenchSlackContext,
 } from "./swebench.js";
 import { withEvalBatches, type EvalBatchDependencies } from "./eval-batch.js";
-import { batchResults, parseStartBody, requireBatch, showBatch, startBatch, stopBatchById } from "./eval-batch-admin.js";
+import { batchResults, parseStartBody, requireBatchProject, showBatch, startBatch, stopBatchById } from "./eval-batch-admin.js";
 import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
 
 const MAX_ARTIFACT_BYTES = 5_000_000;
@@ -4468,10 +4468,8 @@ async function routeEvalBatch(dependencies: AwsBrokerDependencies, identity: Aut
   // The admin claim first, so a non-administrator learns nothing about which batch IDs exist.
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   const swebench = swebenchDependencies(dependencies);
-  const { thread } = await requireBatch(swebench, batchId);
-  const binding = await getSlackBinding(dependencies, thread.teamId, thread.channelId);
-  if (!binding) throw agentXError("NOT_FOUND", "the batch's channel is no longer bound to a project");
-  await requireAdministrator(dependencies, identity, binding.projectName);
+  // The project stored on the batch, not the channel's current binding: a rebound channel does not hand over old batches.
+  await requireAdministrator(dependencies, identity, await requireBatchProject(swebench, batchId));
   if (action === "stop") return stopBatchById(swebench, batchId);
   return action === "results" ? batchResults(swebench, batchId) : showBatch(swebench, batchId);
 }

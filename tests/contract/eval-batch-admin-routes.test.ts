@@ -54,6 +54,8 @@ describe("starting a batch from a file (spec 052 FR-001)", () => {
     const { handler } = await batchBroker();
     const first = await start(handler);
     expect(first).toMatchObject({ status: 200, body: { created: true, batch: { status: "RUNNING", counts: { queued: 2 } } } });
+    // A batch started from the CLI has no Slack thread yet: no placeholder is reported.
+    expect(first.body).not.toHaveProperty("thread");
     const batchId = (first.body.batch as { batchId: string }).batchId;
     const again = await start(handler);
     expect(again).toMatchObject({ status: 200, body: { created: false, batch: { batchId } } });
@@ -75,6 +77,21 @@ describe("starting a batch from a file (spec 052 FR-001)", () => {
     expect(await start(handler, { ...batchFile, costCapUsd: 1 })).toMatchObject({ status: 400, body: { error: { message: expect.stringContaining("cost cap") as unknown } } });
     const unbound = await call(handler, { method: "POST", path: base, user: administrator, body: { teamId: SLACK_TEAM, channelId: "C0999999999", file: batchFile } });
     expect(unbound.status).toBe(404);
+  });
+});
+
+describe("a repeated start after the batch ended (spec 052 FR-001, FR-007)", () => {
+  it.each(["STOPPED", "CAPPED", "DONE"] as const)("answers the %s batch, starts no run and leaves its spend", async (ended) => {
+    const { handler, db, startExecution } = await batchBroker();
+    const batchId = ((await start(handler)).body.batch as { batchId: string }).batchId;
+    const item = db.get(`EVAL_BATCH#${batchId}`, "META")!;
+    item.status = ended;
+    item.spentUsd = 7.5;
+    const startsBefore = startExecution.mock.calls.length;
+    const again = await start(handler);
+    expect(again).toMatchObject({ status: 200, body: { created: false, batch: { batchId, status: ended, spentUsd: 7.5, counts: { queued: 2 } } } });
+    expect(startExecution.mock.calls.length).toBe(startsBefore);
+    expect(db.get(`EVAL_BATCH#${batchId}`, "META")).toMatchObject({ status: ended, spentUsd: 7.5, version: item.version });
   });
 });
 
@@ -109,6 +126,29 @@ describe("a batch's results (spec 052 FR-010)", () => {
     const results = await call(handler, { method: "GET", path, user: administrator });
     expect(results).toMatchObject({ status: 200, body: { ready: true, status: "STOPPED", summary: { batchId, models: expect.any(Array) as unknown } } });
     expect(results.body.csv).toMatch(/^batchId,runId,instanceId/);
+  });
+});
+
+describe("the project's administrator (spec 052 Task 5)", () => {
+  it("refuses an administrator who is not a member of the batch's project on show, stop and results", async () => {
+    const { handler } = await batchBroker();
+    const batchId = ((await start(handler)).body.batch as { batchId: string }).batchId;
+    const stranger = { subject: "other-project-admin", admin: true };
+    for (const [method, path] of [["GET", `${base}/${batchId}`], ["POST", `${base}/${batchId}/stop`], ["GET", `${base}/${batchId}/results`]] as const) {
+      expect([403, 404]).toContain((await call(handler, { method, path, user: stranger })).status);
+    }
+    expect([403, 404]).toContain((await start(handler, batchFile, {}, stranger)).status);
+    expect(await call(handler, { method: "GET", path: `${base}/${batchId}`, user: administrator })).toMatchObject({ body: { batch: { status: "RUNNING" } } });
+  });
+
+  it("judges access by the project stored on the batch, not the channel's current binding", async () => {
+    const { handler, db } = await batchBroker();
+    const batchId = ((await start(handler)).body.batch as { batchId: string }).batchId;
+    // The channel is rebound to another project; the batch still belongs to payments.
+    const binding = db.get(`SLACK_BINDING#${SLACK_TEAM}`, `CHANNEL#${SLACK_CHANNEL}`);
+    expect(binding).toBeDefined();
+    binding!.projectName = "elsewhere";
+    expect((await call(handler, { method: "GET", path: `${base}/${batchId}`, user: administrator })).status).toBe(200);
   });
 });
 

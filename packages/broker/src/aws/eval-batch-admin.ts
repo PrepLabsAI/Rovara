@@ -13,7 +13,7 @@ import {
   type SlackRequester,
   type SlackThread,
 } from "@agentx/contracts";
-import { createBatch, evalBatchResultsKeys, getBatch, stopBatch, type EvalBatchDependencies } from "./eval-batch.js";
+import { createBatch, evalBatchResultsKeys, getBatch, getBatchProjectName, stopBatch, type EvalBatchDependencies } from "./eval-batch.js";
 import type { SwebenchSlackContext } from "./swebench.js";
 
 const TERMINAL: ReadonlySet<EvalBatchRecord["status"]> = new Set(["DONE", "STOPPED", "CAPPED"]);
@@ -147,4 +147,11 @@ export async function requireBatch(dependencies: EvalBatchDependencies, batchId:
   const record = await getBatch(dependencies, batchId);
   if (record === undefined) throw agentXError("NOT_FOUND", `batch ${batchId} not found`);
   return record;
+}
+
+/** The project the batch was created for; a batch with no record is NOT_FOUND. */
+export async function requireBatchProject(dependencies: EvalBatchDependencies, batchId: string): Promise<string> {
+  const projectName = await getBatchProjectName(dependencies, batchId);
+  if (projectName === undefined) throw agentXError("NOT_FOUND", `batch ${batchId} not found`);
+  return projectName;
 }

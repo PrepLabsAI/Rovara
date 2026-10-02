@@ -304,6 +304,11 @@ export async function getBatch(dependencies: EvalBatchDependencies, batchId: str
   return (await readStored(dependencies, batchId))?.record;
 }
 
+/** The project a batch was created for, as stored on its record (not the channel's current binding). */
+export async function getBatchProjectName(dependencies: EvalBatchDependencies, batchId: string): Promise<string | undefined> {
+  return (await readStored(dependencies, batchId))?.projectName;
+}
+
 /** FR-010: the batch's measures, one per finished run. */
 export async function listBatchMeasures(dependencies: EvalBatchDependencies, batchId: string): Promise<EvalRunMeasure[]> {
   const measures: EvalRunMeasure[] = [];

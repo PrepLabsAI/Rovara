@@ -13,6 +13,7 @@ import {
   stopEvalBatch,
   fetchEvalBatchResults,
 } from "../../packages/cli/src/admin/eval-batch.js";
+import { evalBatchPlaceholderThreadTs, isPlaceholderThreadTs } from "../../packages/broker/src/aws/eval-batch-admin.js";
 import { exitCodeForError } from "../../packages/cli/src/output.js";
 
 const base = { controlPlaneUrl: "https://api.example.com/", accessToken: "token" };
@@ -118,6 +119,17 @@ describe("agentx admin eval batch show and stop (spec 052 FR-009, Ruling 11)", (
   });
 });
 
+describe("a CLI batch's placeholder thread (spec 052)", () => {
+  it("is distinct from any real Slack timestamp, and stable per batch", () => {
+    const placeholder = evalBatchPlaceholderThreadTs(batchId);
+    expect(placeholder).toMatch(/^00\d{8}\.\d{6}$/);
+    expect(isPlaceholderThreadTs(placeholder)).toBe(true);
+    expect(isPlaceholderThreadTs("1695500000.000001")).toBe(false);
+    expect(evalBatchPlaceholderThreadTs(batchId)).toBe(placeholder);
+    expect(evalBatchPlaceholderThreadTs("00000000-0000-5000-8000-000000000000")).not.toBe(placeholder);
+  });
+});
+
 describe("agentx admin eval batch results (spec 052 FR-010)", () => {
   const summary = { batchId, models: [{ provider: "amazon-bedrock", modelId: "us.vendor.batch-v1", thinkingLevel: "low", runs: 4, failed: 1, cancelled: 0, retried: 0, resolved: 3, rate: 0.75, wilsonLow: 0.3, wilsonHigh: 0.95, totalCostUsd: 12.5, unpricedRuns: 0, costPerSolvedUsd: 4.1667 }] };
 
@@ -142,7 +154,9 @@ describe("agentx admin eval batch results (spec 052 FR-010)", () => {
   it("gives a clear message, not a crash, when the results are not written yet", async () => {
     const message = "batch x has ended (STOPPED), but its results are not written yet; try again shortly";
     const csvPath = join(await mkdtemp(join(tmpdir(), "agentx-batch-")), "never.csv");
-    expect(await batchResultsOutput({ ready: false, status: "STOPPED", message }, csvPath)).toBe(message);
+    expect(await batchResultsOutput({ ready: false, status: "STOPPED", message }, undefined)).toBe(message);
+    // With --csv a script waits for a file: no file is a failure.
+    await expect(batchResultsOutput({ ready: false, status: "STOPPED", message }, csvPath)).rejects.toThrow("not written yet");
     await expect(readFile(csvPath, "utf8")).rejects.toThrow();
   });
 });

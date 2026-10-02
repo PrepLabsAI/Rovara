@@ -105,7 +105,11 @@ export function evalBatchShowText(result: unknown): string {
 /** FR-010: writes the CSV when asked, else prints the per-model table. Not-ready results give a message and write nothing. */
 export async function batchResultsOutput(result: unknown, csvPath: string | undefined): Promise<string> {
   const answer = record(result);
-  if (answer.ready !== true) return str(answer.message, "the batch's results are not available yet");
+  if (answer.ready !== true) {
+    // With --csv a script is waiting for a file: no file is a failure it can see.
+    if (csvPath !== undefined) throw agentXError("RUNTIME_UNAVAILABLE", str(answer.message, "the batch's results are not available yet"));
+    return str(answer.message, "the batch's results are not available yet");
+  }
   if (csvPath !== undefined) {
     await writeFile(csvPath, str(answer.csv));
     const rows = Math.max(0, str(answer.csv).split("\n").filter((line) => line.length > 0).length - 1);
