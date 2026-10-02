@@ -5,6 +5,7 @@
 import { cliErrorFor } from "../deploy/commands.js";
 import type { InstallSurface } from "./context.js";
 import { messageWithoutCode, type Prompter } from "./prompts.js";
+import { markOperatorStop } from "./stop.js";
 
 /** The error's own words for a card: mapped as the rest of the CLI maps it (an expired AWS
  * session reads as one), without an AgentXError's "CODE: " prefix. */
@@ -28,7 +29,7 @@ export async function retryOnPage<T>(input: {
     } catch (error) {
       if (input.surface === undefined) throw error;
       input.failed(problemText(error));
-      if (!(await input.prompter.confirm(input.question, { defaultValue: true }))) throw error;
+      if (!(await input.prompter.confirm(input.question, { defaultValue: true }))) throw markOperatorStop(error);
     }
   }
 }

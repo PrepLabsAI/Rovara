@@ -25,6 +25,7 @@ import { fakeWizardOperator, snapshotOnReconnect } from "../support/wizard-brows
 import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "../support/fake-cloudformation.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { ADMIN_EMAIL, FOUNDATION_OUTPUTS, fakeAlerts, fakeControlPlane, fakeRepositories, fakeSlackChannels, setupServices, turn } from "../support/setup-fakes.js";
+import type { WizardSnapshot } from "../../packages/cli/src/init/ui/protocol.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -98,6 +99,7 @@ async function harness() {
     configDir: projects,
   });
   const base: InitCliDependencies = {
+    cliInvocation: { published: false, cliPath: "/opt/agentx/dist/main.js" },
     deploy: { identity: { get: async () => ({ account: "123456789012", arn: HOLDER }) }, store, secrets, deployer },
     initSecrets: secrets,
     checks: passingChecks(),
@@ -300,7 +302,7 @@ describe("agentx init --ui", () => {
     // The platform team's access stack exists already; the run stops after it, at foundation.
     const deployer = scriptedDeployer(allStackOutputs(), [environmentStackName("staging", "access")]);
     deployer.fail.set(environmentStackName("staging", "foundation"), new Error("stop after access"));
-    const operator = fakeWizardOperator(["", "ops@example.com", "", "", "acme", "", "", "", "", true]);
+    const operator = fakeWizardOperator(["", "ops@example.com", "", "", "acme", "", "", "", "", true, "stop"]);
     const code = await h.run(["--ui", "--resume", "--from-bundle", dir], {
       openBrowser: operator.open,
       stackStatus: { status: async (name: string) => (name === "agentx-staging-access" ? "CREATE_COMPLETE" : undefined) },
@@ -313,9 +315,56 @@ describe("agentx init --ui", () => {
     expect(operator.asked).toContain("Create all of this?");
     expect(operator.asked).not.toContain("Deploy engine");
     expect(operator.states.at(-1)).toMatchObject({ phase: "failed" });
-    expect(operator.states.at(-1)?.outcome).toContain("stop after access");
+    expect(operator.states.flatMap((state) => (state.failure === undefined ? [] : [state.failure])).at(-1)?.details[0]).toContain("stop after access");
     expect((await readInstallProgress(h.store, "staging"))?.steps.access).toMatchObject({ status: "done", note: "deployed by your platform team from the export bundle" });
     expect(deployer.requests.map((request) => request.part)).toEqual(["foundation"]);
+  });
+
+  it("spec 048 FR-060: a failed deploy step stays on the page, and Try this step again finishes the install", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    const operator = fakeWizardOperator([...FIRST_RUN, "retry", ...SLACK, ...SIGNIN, ...FINISH], {
+      beforeAnswer: async (question, wizardUrl) => {
+        if (question.text !== "The install stopped. What next?") return;
+        await snapshotOnReconnect(wizardUrl);
+        h.deployer.fail.clear();
+      },
+    });
+    expect(await h.run(["--ui"], { openBrowser: operator.open })).toBe(0);
+    await operator.settled();
+    expect(operator.remaining()).toBe(0);
+    expect(h.deployer.requests.filter((request) => request.part === "control-plane")).toHaveLength(2);
+    expect(operator.states.at(-1)?.failure).toBeUndefined();
+  });
+
+  it("a page that reconnects during a failure gets the failure screen back", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    let reconnected: WizardSnapshot | undefined;
+    const operator = fakeWizardOperator([...FIRST_RUN, "stop"], {
+      beforeAnswer: async (question, wizardUrl) => { if (question.text === "The install stopped. What next?") reconnected = await snapshotOnReconnect(wizardUrl); },
+    });
+    expect(await h.run(["--ui"], { openBrowser: operator.open })).not.toBe(0);
+    await operator.settled();
+    expect(reconnected?.failure?.what).toBe("Start the AgentX service did not finish. Resource limit exceeded.");
+    expect(reconnected?.question?.buttons?.map((button) => button.label)).toEqual(["Try this step again", "Stop for now"]);
+    expect(reconnected?.steps.find((step) => step.id === "control-plane")?.status).toBe("failed");
+    expect(reconnected?.journey.phases[2]).toMatchObject({ statusWord: "Stopped" });
+    const last = operator.states.at(-1);
+    expect(last).toMatchObject({ phase: "failed", outcome: "The install stopped. Your progress is saved." });
+    expect(last?.commands).toEqual([{ label: "Continue later with", command: "node /opt/agentx/dist/main.js --env staging init --region us-east-1" }]);
+    expect(`${last?.outcome ?? ""} ${last?.failure?.what ?? ""}`).not.toMatch(/Finished|INTERNAL_ERROR|CONFIG_INVALID/);
+  });
+
+  it("spec 048 FR-060: a failure outside a step still shows the screen, with Stop for now only", async () => {
+    const h = await harness();
+    const operator = fakeWizardOperator(["stop"]);
+    expect(await h.run(["--ui", "--account", "999999999999"], { openBrowser: operator.open })).not.toBe(0);
+    await operator.settled();
+    const failing = operator.states.find((state) => state.failure !== undefined && state.question !== undefined);
+    expect(failing?.failure?.what).toBe("The install could not go on.");
+    expect(failing?.failure?.details[0]).toContain("--account 999999999999 does not match your AWS credentials");
+    expect(failing?.question?.buttons?.map((button) => button.label)).toEqual(["Stop for now"]);
   });
 
   it("Q5: every other site is a button on the page, and the installer opens only the page itself", async () => {

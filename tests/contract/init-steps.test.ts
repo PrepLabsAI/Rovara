@@ -172,6 +172,25 @@ describe("init step runner", () => {
     expect(failing.values.has(LOCK)).toBe(false);
     expect(failing.values.has(installProgressParameterName(ENV))).toBe(false);
   });
+
+  it("spec 048 FR-060: a failed step is reported, then run again when onStepFailure says retry", async () => {
+    let runs = 0;
+    const events: string[] = [];
+    const flaky: InitStep<null> = { id: "access", title: "Set up AWS permissions", run: async () => { runs += 1; if (runs === 1) throw new Error("Rate exceeded"); return { status: "done" }; } };
+    const result = await runInitSteps({
+      env: "staging", region: "us-east-1", store: new MemoryParameterStore(), holder: HOLDER, steps: [flaky], context: null,
+      onEvent: (event) => events.push(`${event.kind} ${event.id}`),
+      onStepFailure: async ({ id, error }) => { events.push(`asked ${id} ${(error as Error).message}`); return "retry"; },
+    });
+    expect(result).toMatchObject({ status: "complete", ran: ["access"] });
+    expect(events).toEqual(["step-started access", "step-failed access", "asked access Rate exceeded", "step-started access", "step-done access"]);
+  });
+
+  it("spec 048 FR-060: stop throws the same error the run always threw", async () => {
+    const failing: InitStep<null> = { id: "access", title: "Set up AWS permissions", run: async () => { throw new Error("Rate exceeded"); } };
+    await expect(runInitSteps({ env: "staging", region: "us-east-1", store: new MemoryParameterStore(), holder: HOLDER, steps: [failing], context: null, onStepFailure: async () => "stop" }))
+      .rejects.toThrow('init stopped at "Set up AWS permissions": Rate exceeded. Run agentx init --env staging --region us-east-1 again to continue from this step.');
+  });
 });
 
 describe("step names", () => {

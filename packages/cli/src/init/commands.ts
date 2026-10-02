@@ -33,6 +33,7 @@ import {
   assertResumeFlagsMatch, checkAlertWebhook, collectInitAnswers, openRouterSecretName, persistInitAnswers, readOpenRouterKeyAnswer, storeAlertWebhook,
   webhookDisplay, webhookFlagDisplay, type CollectedAnswers, type InitFlags,
 } from "./answers.js";
+import { cliCommandLine, currentCliInvocation, type CliInvocation } from "./cli-command.js";
 import {
   cloudFormationStatusReader, secretsManagerInitSecrets, type FinishFlags, type InitContext, type InitSecrets, type PreMadeGitHubApp, type SecretFlags, type StackStatusReader,
 } from "./context.js";
@@ -48,9 +49,11 @@ import { fetchRelease, sourceRelease } from "./release-fetch.js";
 import { problemText, retryOnPage } from "./retry.js";
 import { developerSignInStep } from "./signin-step.js";
 import { slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
+import { isOperatorStop } from "./stop.js";
 import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from "./steps.js";
 import { browserAvailable, NO_BROWSER_LINE, resolveUiMode } from "./ui-mode.js";
 import { prerequisitesCard, readyCard } from "./ui/cards.js";
+import { askFailureAction, failureScreen, isRetryableStep, plainReason, STOPPED_OUTCOME } from "./ui/failure.js";
 import { startInstallWizard, type InstallWizard } from "./ui/index.js";
 import { STEP_PLAN } from "./ui/journey.js";
 import type { WizardResume } from "./ui/protocol.js";
@@ -81,6 +84,9 @@ export interface InitCliDependencies {
   prepareDeployment?: typeof prepareDeployment;
   /** Overrides the finishing steps' services (phase 15d2); every field not given is the real one. */
   setup?: Partial<SetupServices>;
+  /** The command this CLI runs as, for the page's "Continue later with" command (tests pin it; the
+   * real one is currentCliInvocation()). */
+  cliInvocation?: CliInvocation;
 }
 
 export interface InitOptions {
@@ -238,10 +244,20 @@ interface InitSession {
   wizard?: InstallWizard;
   /** A property, not a method, so `init` can pass it on as `write` without rebinding it. */
   write: (line: string) => void;
+  /** The prompter in use, once chosen: the catch below asks on it when no step hook already did. */
+  prompter?: Prompter;
+  /** Once known: names the region in a failure shown before a step runs. */
+  region?: string;
+  /** Set once `onStepFailure` already showed the screen for the error now being thrown, so the
+   * catch below does not show a second one for the same failure (Plan ruling 8). */
+  failureShown?: boolean;
+  /** The command this CLI runs as, for the "Continue later with" command on a failure screen. */
+  invocation: CliInvocation;
 }
 
 export async function runInit(options: InitOptions, deps: InitCliDependencies, services: { stderr: Writer; home: string }): Promise<InitResult> {
   const session: InitSession = {
+    invocation: deps.cliInvocation ?? currentCliInvocation(),
     write: (line) => { services.stderr.write(`${line}\n`); session.wizard?.log(line); },
   };
   try {
@@ -254,7 +270,20 @@ export async function runInit(options: InitOptions, deps: InitCliDependencies, s
     return result;
   } catch (error) {
     const mapped = cliErrorFor(error);
-    session.wizard?.finish(mapped instanceof Error ? mapped.message : String(mapped), "failed");
+    const wizard = session.wizard;
+    if (wizard !== undefined) {
+      const region = session.region ?? options.region ?? "<region>";
+      // Spec 048 FR-060: a failure outside a step (or a step's own hook never ran, or already
+      // showed its screen) still gets the screen here, unless the operator chose to stop
+      // themselves (declining the plan, the root warning, or a "check again" question): that is
+      // not a failure, so no screen is shown for it (Plan ruling 8).
+      if (session.failureShown !== true && !isOperatorStop(error)) {
+        wizard.showFailure(failureScreen({ env: options.env, region, error, ...(wizard.logPath === undefined ? {} : { logPath: wizard.logPath }) }));
+        await askFailureAction(session.prompter ?? wizard.prompter, { retry: false });
+      }
+      const outcome = isOperatorStop(error) ? (plainReason(error) ?? STOPPED_OUTCOME) : STOPPED_OUTCOME;
+      wizard.finish(outcome, "failed", [{ label: "Continue later with", command: cliCommandLine(session.invocation, `--env ${options.env} init --region ${region}`) }]);
+    }
     throw mapped;
   } finally {
     await session.wizard?.close();
@@ -411,6 +440,8 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     prompter = processPrompter(services.stderr);
   }
   if (options.slackInstall !== undefined) prompter = answeringSlackInstall(prompter, options.slackInstall);
+  // Spec 048 FR-060: once chosen, so a failure outside any step still has someone to ask.
+  session.prompter = prompter;
   // Built once: the wizard shows the checklist from it before the first step runs, and the resume
   // screen names its titles.
   const steps = initSteps({ github: deps.github ?? githubRestApi(fetchImplementation), slack: deps.slack ?? slackWebApi(fetchImplementation) });
@@ -438,6 +469,8 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   const region = options.region ?? bundle?.region ?? (releaseRegions === undefined
     ? configuredRegion(configured, write)
     : await prompter.choose<string>("AWS region", choices.map((value) => ({ value, label: value })), { flag: "--region", defaultValue: environmentRegion ?? choices[0] ?? "us-east-1" }));
+  // Spec 048 FR-060: once known, so a failure before the caller is resolved still names the region.
+  session.region = region;
   if (bundle !== undefined && bundle.region !== region) throw agentXError("CONFIG_INVALID", `the bundle is for region ${bundle.region}; pass --region ${bundle.region}`);
   // The cdk engine synthesizes its own templates for any region; only the templates engine needs the release to cover it.
   if (options.flags.engine !== "cdk") assertReleaseCoversRegion(release, region);
@@ -455,6 +488,8 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   if (options.account !== undefined && options.account !== caller.account) {
     throw agentXError("CONFIG_INVALID", `--account ${options.account} does not match your AWS credentials, which are for account ${caller.account}; use credentials for ${options.account}, or leave --account off`);
   }
+  // Spec 048 FR-001: the header's account and region, once the caller is known and checked.
+  session.wizard?.setPlace({ account: caller.account, region });
   const checks = deps.checks ?? awsPrerequisiteChecks({ region, account: caller.account, store, runner, fetch: fetchImplementation });
   const stackStatus = deps.stackStatus ?? cloudFormationStatusReader(new CloudFormationClient({ region }));
   if (bundle !== undefined) await assertBundleResumable({ bundle, bundleDir: options.fromBundle ?? "", account: caller.account, releaseVersion: release.manifest.version, stackStatus });
@@ -492,6 +527,8 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     if (first !== undefined) throw agentXError("CONFIG_INVALID", `agentx init --yes needs ${first[0]} (${first[1]}); pass it, or run agentx init without --yes to be asked`);
   }
 
+  // Spec 048 FR-001: the questions (a first run) and the resume screen (a resume) are both "Your choices".
+  session.wizard?.setStage("your-choices");
   let collected: CollectedAnswers | undefined;
   let answers: InitAnswers;
   if (stored === undefined) {
@@ -671,6 +708,21 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
             : `Environment ${env} is locked by ${held.holder} running "${held.command}" since ${held.acquiredAt}, more than 2 hours ago. Take the lock over? Say yes only if that command is no longer running.`,
           { defaultValue: false },
         ),
+      }),
+      // Spec 048 FR-060: on the page only. The terminal path keeps throwing a step's error as before.
+      ...(session.wizard === undefined ? {} : {
+        onStepFailure: async ({ id, title, error }: { id: InitStepId; title: string; error: unknown }) => {
+          const wizard = session.wizard;
+          if (wizard === undefined) return "stop";
+          wizard.showFailure(failureScreen({ env, region, stepTitle: title, stepId: id, error, ...(wizard.logPath === undefined ? {} : { logPath: wizard.logPath }) }));
+          const action = await askFailureAction(activePrompter, { retry: isRetryableStep(id) });
+          if (action === "retry") {
+            wizard.clearFailure();
+            return "retry";
+          }
+          session.failureShown = true;
+          return "stop";
+        },
       }),
     });
     // A run --stop-after cut short is not installed, so it has no ready text.
