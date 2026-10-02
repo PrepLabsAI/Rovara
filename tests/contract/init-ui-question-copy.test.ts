@@ -42,6 +42,7 @@ const DEFAULT_PATH: Array<[kind: "ask" | "choose" | "confirm" | "secret", flag: 
   ["ask", "--slack-app-name", "Slack app name"],
   ["choose", "--slack-app-posted-messages", "Answer mentions people post through other apps with their own Slack token?"],
   ["confirm", undefined, "Create all of this?"],
+  ["choose", "--plan", "Create all of this?"],
   ["choose", "--slack-install", "Is the Slack app installed in your workspace?"],
   ["secret", "--slack-bot-token", "Slack bot token"],
   ["secret", "--slack-signing-secret", "Slack signing secret"],
@@ -118,6 +119,11 @@ describe("the settings form's words (spec 048 FR-020, FR-025)", () => {
     expect(questionHelp({ kind: "form", text: "Your settings" })).toMatchObject({ label: "Your settings", submitLabel: "Review the plan" });
     expect(questionHelp({ kind: "choose", text: "Where should AgentX send alerts?", flag: ALERT_FLAG }).choiceLabels?.none).toBe("Nowhere for now. Nobody is told when AgentX stops working.");
     expect(questionHelp({ kind: "choose", text: "Is acme an organization or a personal account?", flag: "--github-account-type" }).why).toBe("GitHub could not tell AgentX, and keeps apps in a different place for each.");
+  });
+
+  it("does not tell the later admin-user question that it still chooses the alert address", () => {
+    expect(questionHelp({ kind: "ask", text: "Your email address, for your AgentX admin user", flag: "--admin-email" }).why)
+      .toBe("AgentX creates your admin sign-in with it.");
   });
 });
 

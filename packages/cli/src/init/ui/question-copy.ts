@@ -51,7 +51,7 @@ export const QUESTION_COPY: readonly QuestionCopyEntry[] = [
   { kind: "choose", flag: "--signin", help: { label: "How will developers sign in from their AI tools?", why: "Developers sign in once from Claude Code, Codex or Cursor.", choiceLabels: { slack: "Sign in with Slack (recommended)", oidc: "Your company sign-in", both: "Both" } } },
   { kind: "ask", flag: "--slack-client-id", help: { label: "Client ID", why: "On Basic Information, under App Credentials: two numbers joined by a dot.", example: "1111111111.2222222222222" } },
   { kind: "secret", flag: "--slack-client-secret", help: { label: "Client Secret", why: "On Basic Information, under App Credentials, next to the Client ID. Press Show, then copy it." } },
-  { kind: "ask", flag: "--admin-email", help: { label: "Your email", why: "AgentX makes your admin sign-in with it, and sends alerts here unless you choose otherwise.", example: "you@example.com" } },
+  { kind: "ask", flag: "--admin-email", help: { label: "Your email", why: "AgentX creates your admin sign-in with it.", example: "you@example.com" } },
   { kind: "choose", flag: "--repository", help: { label: "Which repository is your first project?", why: "AgentX works in this repository first. You can add more later." } },
   { kind: "ask", flag: "--project-name", help: { label: "Project name", why: "How AgentX names this project in Slack.", example: "payments-api" } },
   { kind: "ask", flag: "--setup-command", help: { label: "Setup command", why: "AgentX runs it before it changes code.", example: "npm ci", hint: "Optional. Leave empty if the project needs none." } },
@@ -62,6 +62,8 @@ export const QUESTION_COPY: readonly QuestionCopyEntry[] = [
   // Spec 048 FR-032: an app GitHub made, whose key a crash kept from reaching Secrets Manager, found again on resume.
   { kind: "choose", flag: "--github-app-recovery", help: { label: "Finish with the GitHub app, or replace it?", why: "The card above says what each choice removes.", buttons: true, choiceLabels: { finish: "Finish with this app", replace: "Replace it" } } },
   { kind: "confirm", text: /^Have you deleted .+ on GitHub\?$/, help: { label: "Deleted the old app on GitHub?", why: "GitHub app names are unique, so the new app needs the old one gone first.", yesLabel: "It is deleted", noLabel: "Stop for now" } },
+  // The terminal still confirms this question. Kept here for callers that render that terminal
+  // prompt through browserPrompter directly; init's page journey uses the --plan action below.
   { kind: "confirm", text: /^Create all of this\?$/, help: { label: "Create AgentX with this plan?", why: "Nothing is created until you press Create AgentX.", yesLabel: "Create AgentX", noLabel: "Cancel the install" } },
   // Spec 048 FR-029: on the page, the plan's confirm is these two buttons, not a yes/no (the
   // terminal keeps the confirm above, unchanged).

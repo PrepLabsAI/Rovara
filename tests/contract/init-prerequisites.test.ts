@@ -190,6 +190,15 @@ describe("init prerequisites", () => {
     await expect(run(sampleAnswers({ models: { orchestrator: "x", classifier: "y", worker: "z" } }), checks)).rejects.toThrow(/- x is not.*\n- y is not.*\n- z is not/s);
   });
 
+  it("collects an answer-check failure instead of dropping it or the later model problems", async () => {
+    const checks = passingChecks({ converse: async () => { throw awsError("ValidationException", "The provided model identifier is invalid."); } });
+    await expect(checkPrerequisites({
+      answers: sampleAnswers({ models: { orchestrator: "x", classifier: "x", worker: "x" } }),
+      release: fakeRelease(), caller, checks, prompter: scriptedPrompter([]), write: () => undefined,
+      extraChecks: async () => { throw new Error("AccessDenied: cannot read stack status"); },
+    })).rejects.toThrow(/could not run the answer checks: AccessDenied: cannot read stack status[\s\S]*x is not a Bedrock model id/);
+  });
+
   it("for the cdk engine, needs Node 22.19 or later and offers cdk bootstrap, running it only when every other check passed", async () => {
     await expect(run(sampleAnswers({ engine: "cdk" }), passingChecks({ commandVersion: async () => "v20.11.0" }))).rejects.toThrow("the cdk engine needs Node 22.19 or later (found v20.11.0)");
 
@@ -655,6 +664,15 @@ describe("spec 048 FR-018: the account checks", () => {
     const found: PrerequisiteCheck[] = [];
     await checkAccount({ region: "us-east-1", write: () => undefined, checks: passingChecks(), onCheck: (check) => found.push(check) });
     expect(found.map((check) => check.label)).toEqual(["EC2 vCPU quota", "Elastic IPs"]);
+  });
+
+  it("calls a responding Bedrock endpoint available without claiming a model answered", async () => {
+    const found: PrerequisiteCheck[] = [];
+    await checkAccount({
+      region: "us-east-1", write: () => undefined, onCheck: (check) => found.push(check),
+      checks: { ...passingChecks(), bedrockAvailable: async () => true },
+    });
+    expect(found.at(-1)).toEqual({ label: "Amazon Bedrock", ok: true, detail: "Amazon Bedrock is available in us-east-1" });
   });
 
   it("skipAccount leaves the quota and Elastic IPs out of the later checks", async () => {

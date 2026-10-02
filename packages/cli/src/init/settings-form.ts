@@ -113,7 +113,10 @@ export function settingsFields(input: SettingsFieldsInput): FormField[] {
   // Your own OIDC needs no admin email, so with the alerts answered by a flag nothing needs it (--yes
   // with --identity oidc and --no-alerts or --alert-webhook-* asks no email, as before phase 2).
   const noEmailNeeded = flags.identity === "oidc" && (flags.alerts === false || flags.alertWebhook !== undefined) ? true : undefined;
-  unless(input.adminEmail ?? flags.alertEmail ?? noEmailNeeded, { name: SETTINGS_FIELD.email, question: "Your email, for your AgentX admin user and alerts", flag: "--admin-email", validate: emailProblem });
+  unless(input.adminEmail ?? flags.alertEmail ?? noEmailNeeded, {
+    name: SETTINGS_FIELD.email, question: "Your email, for your AgentX admin user and alerts", flag: "--admin-email", validate: emailProblem,
+    help: { why: "AgentX uses it for your admin sign-in and, by default, for alerts." },
+  });
   unless(flags.githubAccount, { name: SETTINGS_FIELD.githubAccount, question: "GitHub organization or user that will own the AgentX GitHub App", flag: "--github-account", validate: loginProblem });
   unless(fixed, { name: SETTINGS_FIELD.installName, question: "Install name", flag: "--env", defaultValue: input.env, validate: installNameProblem });
   unless(flags.githubAppName, { name: SETTINGS_FIELD.appName, question: "App name for GitHub and Slack (unique on GitHub)", flag: "--github-app-name", defaultValue: "", validate: appNameProblem });

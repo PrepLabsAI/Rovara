@@ -236,7 +236,7 @@ async function accountChecks(input: { region: string; checks: PrerequisiteChecks
 
   if (input.bedrock && checks.bedrockAvailable !== undefined) {
     try {
-      if (await checks.bedrockAvailable()) passed("Amazon Bedrock", `ok Amazon Bedrock answers in ${region}`);
+      if (await checks.bedrockAvailable()) passed("Amazon Bedrock", `ok Amazon Bedrock is available in ${region}`);
       else {
         failed("Amazon Bedrock", audience === "page"
           ? `Amazon Bedrock is not available in ${region}. Stop for now and start again in a region that has it.`
@@ -313,9 +313,15 @@ export async function checkPrerequisites(input: {
 
   // Spec 048 FR-028: the install name, the GitHub owner and the app name (clash-checks.ts).
   if (input.extraChecks !== undefined) {
-    for (const check of await input.extraChecks()) {
-      if (check.ok) input.onCheck?.(check);
-      else failed(check.label, check.detail, check.technical);
+    try {
+      for (const check of await input.extraChecks()) {
+        if (check.ok) input.onCheck?.(check);
+        else failed(check.label, check.detail, check.technical);
+      }
+    } catch (error) {
+      failed("Answer checks", audience === "page"
+        ? `AgentX could not finish checking your answers: ${errorMessage(error)}. Check AWS and GitHub access, then check again.`
+        : `could not run the answer checks: ${errorMessage(error)}; check AWS and GitHub access, then run agentx init again`);
     }
   }
 

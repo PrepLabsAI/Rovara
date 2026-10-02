@@ -7,7 +7,7 @@ import {
   githubAppJwt, githubAppManifest, githubAppSecretName, githubAppStep, githubNewAppUrl, githubRestApi, manifestFormPage, parseManifestCallback, startManifestListener,
 } from "../../packages/cli/src/init/github-app.js";
 import { emptyProgress, type InstallProgress } from "../../packages/cli/src/init/install-state.js";
-import { terminalPrompter } from "../../packages/cli/src/init/prompts.js";
+import { terminalPrompter, unattendedPrompter } from "../../packages/cli/src/init/prompts.js";
 import { problemText } from "../../packages/cli/src/init/retry.js";
 import { githubCard } from "../../packages/cli/src/init/ui/cards.js";
 import { startInstallWizard } from "../../packages/cli/src/init/ui/index.js";
@@ -564,5 +564,21 @@ describe("spec 048 FR-032: a GitHub app made but not stored", () => {
     expect(api.conversions).toHaveLength(1);
     const recover = cards.find((card) => card.lines.some((line) => line.includes("cannot show that key again")));
     expect(recover?.link?.url).toBe("https://github.com/organizations/acme/settings/apps/agentx-acme-staging/advanced");
+  });
+
+  it("links to the pending app's owner when the current answers name a different owner", async () => {
+    const cards: WizardCard[] = [];
+    const { context, progress } = await githubContext({ pending: { account: "oldco", appId: "424242", slug: "agentx-oldco-staging" }, script: ["finish", TEST_PRIVATE_KEY], cards });
+    context.answers = sampleAnswers({ github: { account: "newco", accountType: "organization", appName: "AgentX newco (staging)" } });
+    await expect(githubAppStep(fakeGitHubApi({ owner: "oldco" })).run(context, progress)).rejects.toThrow("created under oldco, not newco");
+    expect(cards.find((card) => card.lines.some((line) => line.includes("cannot show that key again")))?.link?.url).toBe("https://github.com/organizations/oldco/settings/apps/agentx-oldco-staging/advanced");
+  });
+
+  it("an unattended resume takes the safe Finish default", async () => {
+    const api = fakeGitHubApi();
+    const { context, progress } = await githubContext({ pending: { account: "acme", appId: "424242", slug: "agentx-acme-staging" } });
+    context.prompter = { ...unattendedPrompter(), secret: async () => TEST_PRIVATE_KEY };
+    await expect(githubAppStep(api).run(context, progress)).resolves.toMatchObject({ status: "done" });
+    expect(api.conversions).toEqual([]);
   });
 });

@@ -56,6 +56,7 @@ describe("the installer's design system", () => {
 
   it("FR-008: shows focus, respects reduced motion, and keeps touch targets 44px tall", () => {
     expect(WIZARD_CSS).toMatch(/:focus-visible \{[^}]*outline: 3px solid var\(--focus\)/);
+    expect(WIZARD_CSS).not.toContain(".field select:focus-visible");
     expect(WIZARD_CSS).toContain("@media (prefers-reduced-motion: no-preference)");
     expect(WIZARD_CSS).toMatch(/button, a\.button \{[^}]*min-height: 2\.75rem/);
     expect(WIZARD_CSS).toMatch(/input\[type=text\], input\[type=password\], textarea \{[^}]*min-height: 2\.75rem/);

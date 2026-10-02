@@ -21,6 +21,12 @@ describe("clash checks", () => {
     expect(name).toEqual({ label: "Install name", ok: false, detail: "This AWS account and region already have an AgentX install named staging. Choose another install name.", technical: stack });
   });
 
+  it("does not attach the stack name as a separate terminal detail", async () => {
+    const stack = environmentStackName("staging", "access");
+    const [name] = await clashChecks({ answers: sampleAnswers(), stackStatus: { status: async (each) => (each === stack ? "CREATE_COMPLETE" : undefined) }, github: fakeGitHubApi(), audience: "terminal", installUsed: free });
+    expect(name).toEqual({ label: "Install name", ok: false, detail: "environment staging already has stacks or settings in this account and region; choose another --env" });
+  });
+
   it("refuses an owner GitHub does not have, and the wrong owner type", async () => {
     const missing = await clashChecks({ answers: sampleAnswers(), stackStatus: nothing, github: { ...fakeGitHubApi(), owner: async () => undefined }, audience: "page", installUsed: free });
     expect(missing[1]).toEqual({ label: "GitHub owner", ok: false, detail: "GitHub has no organization or user named acme. Check the spelling." });

@@ -41,6 +41,8 @@ describe("the page shell", () => {
     expect(html).toContain('<main id="panel" aria-live="polite">');
     expect(html).toContain('role="alert"');
     expect(WIZARD_JS).toContain("aria-describedby");
+    expect(WIZARD_JS).toContain("if (notes.length > 0) input.setAttribute(\"aria-describedby\"");
+    expect(WIZARD_JS).toContain("if (described.length > 0) field.setAttribute(\"aria-describedby\"");
     expect(WIZARD_JS).toContain("htmlFor");
     expect(WIZARD_JS).toContain('setAttribute("aria-labelledby", "question-text")');
     expect(WIZARD_CSS).not.toMatch(/text-transform:\s*uppercase/);

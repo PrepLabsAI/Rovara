@@ -378,7 +378,7 @@ function buildForm(question, body) {
       notes.push(line);
     }
     if (field.error) input.setAttribute("aria-invalid", "true");
-    input.setAttribute("aria-describedby", notes.map((note) => note.id).join(" "));
+    if (notes.length > 0) input.setAttribute("aria-describedby", notes.map((note) => note.id).join(" "));
     wrap.append(label, input, ...notes);
     holder.append(wrap);
     inputs.push([field, input]);
@@ -439,7 +439,7 @@ function buildQuestion(question) {
       described.push(hint.id);
       body.append(hint);
     }
-    field.setAttribute("aria-describedby", described.join(" "));
+    if (described.length > 0) field.setAttribute("aria-describedby", described.join(" "));
     if (question.error) field.setAttribute("aria-invalid", "true");
     read = () => {
       const value = field.value;

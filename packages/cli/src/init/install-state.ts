@@ -20,6 +20,8 @@ export const CONNECTOR_LABELS = { linear: "Linear", jira: "Jira", asana: "Asana"
 export const SSM_STANDARD_VALUE_LIMIT = 4096;
 
 const SECRET_ARN = /^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:.+$/;
+const GITHUB_APP_ID = /^\d+$/;
+const GITHUB_APP_SLUG = /^[a-z0-9-]+$/;
 
 // Host and an optional port only: no userinfo (`user@` or `user:pass@`), so a webhook integration
 // key pasted as part of the URL cannot slip into the stored, and later displayed, value.
@@ -80,15 +82,15 @@ export const InstallProgressSchema = z.object({
   steps: z.partialRecord(z.enum(INIT_STEP_IDS), StepRecordSchema),
   github: z.object({
     account: z.string().regex(GITHUB_LOGIN_PATTERN),
-    appId: z.string().regex(/^\d+$/),
-    slug: z.string().regex(/^[a-z0-9-]+$/),
+    appId: z.string().regex(GITHUB_APP_ID),
+    slug: z.string().regex(GITHUB_APP_SLUG),
     privateKeySecretArn: z.string().regex(SECRET_ARN),
     installationId: z.string().regex(/^\d+$/).optional(),
   }).strict().optional(),
   /** Spec 048 FR-032: a GitHub app GitHub has made, recorded before its private key is stored, so a
    * run that stops in between can offer to finish with it or replace it. Read only while `github`
    * is not recorded. */
-  githubPending: z.object({ account: z.string().regex(GITHUB_LOGIN_PATTERN), appId: z.string().regex(/^\d+$/), slug: z.string().regex(/^[a-z0-9-]+$/) }).strict().optional(),
+  githubPending: z.object({ account: z.string().regex(GITHUB_LOGIN_PATTERN), appId: z.string().regex(GITHUB_APP_ID), slug: z.string().regex(GITHUB_APP_SLUG) }).strict().optional(),
   slack: z.object({
     appId: z.string().regex(/^A[A-Z0-9]+$/), teamId: z.string().regex(/^T[A-Z0-9]+$/), botUserId: z.string().regex(/^[UW][A-Z0-9]+$/),
     /** Spec 048 FR-026 and FR-027: the bot's handle and the workspace's name, as Slack reported them. */

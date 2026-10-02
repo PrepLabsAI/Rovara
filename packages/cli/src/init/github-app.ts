@@ -324,7 +324,7 @@ async function runGitHubAppStep(context: InitContext, progress: ProgressHandle, 
   const pending = progress.current().githubPending;
   let recovering: "finish" | "replace" | undefined;
   if (app === undefined && pending !== undefined && preMade === undefined) {
-    const settingsUrl = `${appSettingsUrl({ login: account, type: accountType === "organization" ? "Organization" : "User" }, pending.slug)}/advanced`;
+    const settingsUrl = `${appSettingsUrl({ login: pending.account, type: accountType === "organization" ? "Organization" : "User" }, pending.slug)}/advanced`;
     show({ stage: "recover", appName, slug: pending.slug, settingsUrl });
     recovering = await context.prompter.choose<"finish" | "replace">(`Finish with the GitHub app ${pending.slug}, or replace it?`, [
       { value: "finish", label: "Finish with this app: make a new private key on its GitHub page and paste it" },

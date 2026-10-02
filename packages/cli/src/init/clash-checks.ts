@@ -42,7 +42,7 @@ export async function clashChecks(input: {
         detail: page
           ? `This AWS account and region already have an AgentX install named ${answers.env}. Choose another install name.`
           : `environment ${answers.env} already has stacks or settings in this account and region; choose another --env`,
-        ...(existing.length === 0 ? {} : { technical: existing.join(", ") }),
+        ...(page && existing.length > 0 ? { technical: existing.join(", ") } : {}),
       });
     } else {
       checks.push({ label: "Install name", ok: true, detail: `${answers.env} is free in this account and region` });

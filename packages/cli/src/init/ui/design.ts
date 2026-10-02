@@ -152,7 +152,6 @@ textarea { font-family: var(--mono); font-size: var(--text-sm); min-height: 8rem
 .group { border: 1px solid var(--border); border-radius: var(--radius); padding: var(--space-3) var(--space-4); margin: var(--space-4) 0; }
 .group legend { font-weight: 600; padding: 0 var(--space-2); }
 .field select { min-height: 2.75rem; width: 100%; border: 1px solid var(--field-border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); padding: 0 var(--space-3); font: inherit; }
-.field select:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 .field-link { color: var(--accent); }
 .buttons { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-top: var(--space-4); }
 #failure-actions + details, .buttons + details { margin-top: var(--space-4); }

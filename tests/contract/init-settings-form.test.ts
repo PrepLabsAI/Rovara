@@ -42,6 +42,11 @@ describe("the settings form", () => {
     expect(names({ alerts: false })).toContain("email");
   });
 
+  it("explains the settings email in the context of the form", () => {
+    const email = settingsFields({ env: "staging", flags: {}, fixed: false, budgetWhy: "" }).find((field) => field.name === "email");
+    expect(email?.help?.why).toBe("AgentX uses it for your admin sign-in and, by default, for alerts.");
+  });
+
   it("FR-023: the budget field says the suggested amount, on the page and in the terminal", () => {
     const budget = settingsFields({ env: "staging", flags: {}, fixed: false, budgetWhy: "" }).find((field) => field.name === "budget");
     expect(budget?.question).toBe("Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)");
