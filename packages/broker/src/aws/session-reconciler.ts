@@ -16,8 +16,8 @@ import { failActiveOperation } from "./outbox-failure.js";
 import { SessionManager, workspaceBinding } from "./sessions.js";
 import { expireIndexDays, indexSweepWanted } from "./index-expiry.js";
 import { sweepStuckSetups } from "./stuck-setup.js";
-import { stuckCancelRetrier, sweepStuckCancels, type StuckCancelCandidate, type StuckCancelCompute, type StuckCancelSweepResult } from "./stuck-cancels.js";
-import { slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopConfiguration, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
+import { stuckCancelRetrier, sweepStuckCancels, type StuckCancelCandidate, type StuckCancelCompute, type StuckCancelSweepResult, type StuckCancelWorker } from "./stuck-cancels.js";
+import { slackBotTokenFrom, sweepUnwaitedTasks, unwaitedTaskBackstopConfiguration, type SlackThreadPlace, type UnwaitedTaskSweepResult } from "./unwaited-tasks.js";
 import { cachedSlackPoster } from "./developer-task-notifier.js";
 
 /** A just-launched instance or just-created volume is not judged until its session has recorded it. */
@@ -120,11 +120,15 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
       log({ event: "reconciler.orphan_terminated", instanceId: instance.instanceId, workspaceId: instance.workspaceId });
     }
 
+    // Issue 202: each live worker's answer to this run's ping, for the stuck-cancel sweep.
+    const workers = new Map<string, StuckCancelWorker>();
     for (const session of sessions.values()) {
       switch (session.state) {
-        case "READY":
-          await reconcileReady(dependencies, session, instanceById, report, log);
+        case "READY": {
+          const worker = await reconcileReady(dependencies, session, instanceById, report, log);
+          if (worker !== undefined) workers.set(session.workspaceId, worker);
           break;
+        }
         case "PROVISIONING":
           await reconcileProvisioning(dependencies, session, report, log);
           break;
@@ -140,7 +144,7 @@ export function createReconcilerHandler(dependencies: ReconcilerDependencies) {
     // and in its own try, so a failure here never stops the repairs that follow. Compute is judged
     // from this run's snapshot: a worker the repairs above just stopped still counts as alive, so
     // its one retry may be spent on it. The next run sees it gone and ends the task.
-    const stuckCancelMetrics = await reconcileStuckCancels(dependencies, sessions, instanceById, now, report, log);
+    const stuckCancelMetrics = await reconcileStuckCancels(dependencies, sessions, instanceById, workers, now, report, log);
 
     // Volumes no session claims.
     for (const volume of await dependencies.volumes()) {
@@ -252,6 +256,7 @@ async function reconcileStuckCancels(
   dependencies: ReconcilerDependencies,
   sessions: Map<string, WorkspaceSession>,
   instances: Map<string, InstanceView>,
+  workers: Map<string, StuckCancelWorker>,
   now: number,
   report: ReconcilerReport,
   log: (entry: Record<string, unknown>) => void,
@@ -259,7 +264,11 @@ async function reconcileStuckCancels(
   if (dependencies.sweepStuckCancels === undefined) return {};
   // Only workspaces with a listed session: a task runs only on a session's compute, so a stuck
   // cancel on a workspace with none (or a DELETED one) is not looked for here.
-  const candidates = [...sessions.values()].map((session) => ({ workspaceId: session.workspaceId, compute: computeOf(session, instances) }));
+  const candidates = [...sessions.values()].map((session): StuckCancelCandidate => {
+    const compute = computeOf(session, instances);
+    const worker = compute === "alive" ? workers.get(session.workspaceId) : undefined;
+    return { workspaceId: session.workspaceId, compute, ...(worker === undefined ? {} : { worker }) };
+  });
   let sweepFailed = 0;
   try {
     report.stuckCancels = await dependencies.sweepStuckCancels(candidates, new Date(now));
@@ -277,13 +286,14 @@ async function reconcileStuckCancels(
   };
 }
 
+/** Repairs a READY session; returns its worker's answer to the ping (issue 202), if it answered. */
 async function reconcileReady(
   dependencies: ReconcilerDependencies,
   session: WorkspaceSession,
   instances: Map<string, InstanceView>,
   report: ReconcilerReport,
   log: (entry: Record<string, unknown>) => void,
-): Promise<void> {
+): Promise<StuckCancelWorker | undefined> {
   const instance = instances.get(session.instanceId!);
   if (instance === undefined || instance.state !== "running") {
     // Terminated, stopped or gone from under a READY session: its work cannot finish.
@@ -292,7 +302,7 @@ async function reconcileReady(
     const operationId = await dependencies.failActiveOperation(session.workspaceId, "RUNTIME_UNAVAILABLE: workspace compute was lost; retry the request");
     report.lostInstances.push(session.instanceId!);
     log({ event: "reconciler.instance_lost", workspaceId: session.workspaceId, instanceId: session.instanceId, failedOperationId: operationId });
-    return;
+    return undefined;
   }
   let status: string | undefined;
   try {
@@ -312,6 +322,7 @@ async function reconcileReady(
     const { requeued } = await dependencies.sessions.requeueParked(session.workspaceId);
     report.requeued.push(...requeued);
   }
+  return status === "Healthy" ? "idle" : status === "HealthyBusy" ? "busy" : undefined;
 }
 
 async function reconcileProvisioning(
@@ -396,8 +407,13 @@ const tag = (tags: Array<{ Key?: string | undefined; Value?: string | undefined 
  */
 function stuckCancelSweep(): NonNullable<ReconcilerDependencies["sweepStuckCancels"]> {
   const retryCancel = stuckCancelRetrier(process.env, { client: documentClient, tableName });
+  // Issue 202: a Slack thread whose workspace a failed cancel held is told it is free again, where
+  // the reconciler holds the Slack secret (#173's backstop, named environments).
+  const postNote = backstop.state === "on" ? slackThreadPoster() : undefined;
   const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }));
-  return (candidates, now) => sweepStuckCancels({ client: documentClient, tableName, ...(retryCancel === undefined ? {} : { retryCancel }), log }, candidates, now);
+  return (candidates, now) => sweepStuckCancels({
+    client: documentClient, tableName, ...(retryCancel === undefined ? {} : { retryCancel }), ...(postNote === undefined ? {} : { postNote }), log,
+  }, candidates, now);
 }
 
 /**
@@ -407,22 +423,35 @@ function stuckCancelSweep(): NonNullable<ReconcilerDependencies["sweepStuckCance
  * Slack secret alone).
  */
 function unwaitedTaskSweep(): NonNullable<ReconcilerDependencies["sweepUnwaitedTasks"]> {
-  const secrets = new SecretsManagerClient(awsClientConfiguration);
-  const slackSecretArn = requiredEnvironment("SLACK_SECRET_ARN");
   const threadsTableName = requiredEnvironment("SLACK_THREADS_TABLE_NAME");
   const callbackSigningKey = requiredEnvironment("CALLBACK_SIGNING_KEY");
-  // A bad secret fails the note as SlackSecretInvalid, the name the sweep logs; never the secret's text.
-  const post = cachedSlackPoster(() => secrets.send(new GetSecretValueCommand({ SecretId: slackSecretArn }))
-    .then((secret) => slackBotTokenFrom(secret.SecretString)));
+  const postNote = slackThreadPoster();
   const log = (entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "session-reconciler", ...entry }));
   return (workspaceIds, now) => sweepUnwaitedTasks({
     client: documentClient,
     tableName,
     threadsTableName,
     callbackSigningKey,
-    postNote: async (thread, text) => { await post({ channel: thread.channelId, threadTs: thread.threadTs, text }); },
+    postNote,
     log,
   }, workspaceIds, now);
+}
+
+let threadPoster: ((thread: SlackThreadPlace, text: string) => Promise<void>) | undefined;
+
+/**
+ * Posts a note into a Slack thread with the bot token (the Slack secret alone), shared by the
+ * sweeps that tell a thread what they did. A bad secret fails the note as SlackSecretInvalid, the
+ * name the sweeps log; never the secret's text.
+ */
+function slackThreadPoster(): (thread: SlackThreadPlace, text: string) => Promise<void> {
+  if (threadPoster !== undefined) return threadPoster;
+  const secrets = new SecretsManagerClient(awsClientConfiguration);
+  const slackSecretArn = requiredEnvironment("SLACK_SECRET_ARN");
+  const post = cachedSlackPoster(() => secrets.send(new GetSecretValueCommand({ SecretId: slackSecretArn }))
+    .then((secret) => slackBotTokenFrom(secret.SecretString)));
+  threadPoster = async (thread, text) => { await post({ channel: thread.channelId, threadTs: thread.threadTs, text }); };
+  return threadPoster;
 }
 
 // Issue 173: a half-wired environment runs without the backstop; say so once, by the missing names.

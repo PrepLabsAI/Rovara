@@ -336,7 +336,8 @@ describe("reconciler: stuck cancels (issue 195)", () => {
     const [candidates, at] = sweep.mock.calls[0]!;
     expect(at).toEqual(NOW);
     expect([...candidates].sort((a, b) => a.workspaceId.localeCompare(b.workspaceId))).toEqual([
-      { workspaceId: aliveWorkspace, compute: "alive" },
+      // Issue 202: a live worker's own answer to this run's ping comes with it.
+      { workspaceId: aliveWorkspace, compute: "alive", worker: "idle" },
       { workspaceId: lostWorkspace, compute: "gone" },
       { workspaceId: stopped, compute: "gone" },
       { workspaceId: failed, compute: "gone" },
@@ -362,6 +363,61 @@ describe("reconciler: stuck cancels (issue 195)", () => {
     expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({
       ReconcilerStuckCancelRetries: 1, ReconcilerStuckCancelsEnded: 1, ReconcilerStuckCancelsInterrupted: 0, ReconcilerStuckCancelsUnretried: 0, ReconcilerStuckCancelFailures: 0,
     }));
+  });
+
+  it("issue 202: passes each READY worker's ping answer (idle or busy) to the sweep, and none for a failed ping", async () => {
+    const sweep = vi.fn<NonNullable<ReconcilerDependencies["sweepStuckCancels"]>>(async () => ({ retried: [], ended: [], interrupted: [], unretried: [], failed: [] }));
+    const answers: Record<string, string | Error> = { "10.0.0.1": "Healthy", "10.0.0.2": "HealthyBusy", "10.0.0.3": new Error("timeout"), "10.0.0.4": "Starting" };
+    const { db, state, reconcile } = setup({ sweepStuckCancels: sweep, ping: async (url) => {
+      const answer = answers[new URL(url).hostname]!;
+      if (answer instanceof Error) throw answer;
+      return answer;
+    } });
+    const workers = Object.keys(answers).map((privateIp) => {
+      const worker = { ...ready(), privateIp };
+      const workspaceId = seedSession(db, "READY", worker);
+      state.instances.push({ instanceId: worker.instanceId, state: "running", workspaceId, launchedAt: minutesAgo(60) });
+      return workspaceId;
+    });
+    await reconcile();
+    const candidates = new Map([...sweep.mock.calls[0]![0]].map((candidate) => [candidate.workspaceId, candidate]));
+    expect(candidates.get(workers[0]!)).toEqual({ workspaceId: workers[0], compute: "alive", worker: "idle" });
+    expect(candidates.get(workers[1]!)).toEqual({ workspaceId: workers[1], compute: "alive", worker: "busy" });
+    expect(candidates.get(workers[2]!)).toEqual({ workspaceId: workers[2], compute: "alive" });
+    expect(candidates.get(workers[3]!)).toEqual({ workspaceId: workers[3], compute: "alive" });
+  });
+
+  it("issue 202: frees the workspace an INTERRUPTED task holds after a failed cancel in the same run that finds its compute lost", async () => {
+    const table: { db?: FakeDynamoDb } = {};
+    const { db, state, reconcile, emit } = setup({ sweepStuckCancels: (candidates, now) => sweepStuckCancels({ client: table.db!, tableName: "state" }, candidates, now) });
+    table.db = db;
+    const operationId = randomUUID();
+    const lost = ready();
+    const workspaceId = seedSession(db, "READY", lost, { status: "BUSY", activeOperationId: operationId, fence: 2 });
+    db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}`, kind: "task", status: "INTERRUPTED", fence: 2, updatedAt: minutesAgo(1) });
+    state.instances = [];
+    const report = await reconcile();
+    // The lost-compute path fails only live operations, so it leaves this one to the sweep.
+    expect(report.lostInstances).toEqual([lost.instanceId]);
+    expect(report.stuckCancels?.interrupted).toEqual([operationId]);
+    expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)).toMatchObject({ status: "INTERRUPTED", workspaceReleaseReason: "compute-gone" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "READY" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).not.toHaveProperty("activeOperationId");
+    expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ReconcilerStuckCancelsInterrupted: 1, ReconcilerStuckCancelFailures: 0 }));
+  });
+
+  it("issue 202: counts a failed cancel held by a busy worker past 30 minutes as a failure, so the StuckCancels alarm fires", async () => {
+    const table: { db?: FakeDynamoDb } = {};
+    const { db, state, reconcile, emit } = setup({ ping: async () => "HealthyBusy", sweepStuckCancels: (candidates, now) => sweepStuckCancels({ client: table.db!, tableName: "state" }, candidates, now) });
+    table.db = db;
+    const operationId = randomUUID();
+    const worker = ready();
+    const workspaceId = seedSession(db, "READY", worker, { status: "BUSY", activeOperationId: operationId, fence: 2 });
+    db.set({ pk: `WORKSPACE#${workspaceId}`, sk: `OPERATION#${operationId}`, kind: "task", status: "INTERRUPTED", fence: 2, updatedAt: minutesAgo(31) });
+    state.instances = [{ instanceId: worker.instanceId, state: "running", workspaceId, launchedAt: minutesAgo(60) }];
+    expect((await reconcile()).stuckCancels?.failed).toEqual([operationId]);
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "BUSY", activeOperationId: operationId });
+    expect(emit).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ReconcilerStuckCancelsInterrupted: 0, ReconcilerStuckCancelFailures: 1 }));
   });
 
   it("logs and counts a sweep that throws, and the run goes on", async () => {
