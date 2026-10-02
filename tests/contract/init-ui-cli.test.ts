@@ -768,7 +768,7 @@ describe("agentx init --ui", () => {
     expect(last?.outcome).toBe("The install is paused. Your progress is saved.");
     expect(last?.commands).toEqual([{ label: "Continue later with", command: "node /opt/agentx/dist/main.js --env staging init --region us-east-1" }]);
     expect(h.err.join("").trimEnd().split("\n").at(-1)).toEqual(
-      `[5/5] Stopped: Waiting for a Slack admin to approve the app. Details in the browser and in ${initLogPath(h.home, "staging")}.`,
+      `[4/5] Stopped: Waiting for a Slack admin to approve the app. Details in the browser and in ${initLogPath(h.home, "staging")}.`,
     );
   });
 
