@@ -14,7 +14,7 @@ import { describe, expect, it } from "vitest";
 import type { WorkerInvocation } from "../../packages/contracts/src/index.js";
 import { WorkerCancellationController, WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";
 import type { DevcontainerPaths } from "../../packages/worker/src/devcontainer.js";
-import type { WorkerEvent } from "../../packages/worker/src/events.js";
+import { redactCredentials, type WorkerEvent } from "../../packages/worker/src/events.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "../../packages/worker/src/git.js";
 import { createDefaultPiSessionAdapter, createWorkspacePiSession, openRegisteredWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle } from "../../packages/worker/src/pi-session.js";
 import { runTaskInvocation } from "../../packages/worker/src/run-task.js";
@@ -435,10 +435,9 @@ describe("the worker's session event shapes on Pi 0.85.1", () => {
     ]);
     expect(keys(end)).toEqual(["isError", "result", "toolCallId", "toolName", "type"]);
     // The result carries a details key whose value is undefined; toEqual ignores undefined, so it is pinned on its own.
-    // Ruling D (Pi 0.99+, additive): bash results also carry structuredContent (the form codemode scripts read); the model still gets content.
-    expect(end).toEqual({ type: "tool_execution_end", toolCallId: "call-bash-1", toolName: "bash", isError: false, result: { content: [{ type: "text", text: "pinned\n" }], details: undefined,
-      structuredContent: { exit_code: 0, output: "pinned\n", truncated: false, wall_time_seconds: anyNumber } } });
-    expect(keys(end.result)).toEqual(["content", "details", "structuredContent"]);
+    // Ruling E (amends D): the worker handle strips bash structuredContent from tool_end, so the 0.85.1 pin holds again.
+    expect(end).toEqual({ type: "tool_execution_end", toolCallId: "call-bash-1", toolName: "bash", isError: false, result: { content: [{ type: "text", text: "pinned\n" }], details: undefined } });
+    expect(keys(end.result)).toEqual(["content", "details"]);
     expect((end.result as { details?: unknown }).details).toBeUndefined();
 
     const messageEnds = events.filter((event) => event.type === "message_end");
@@ -474,6 +473,29 @@ describe("the worker's session event shapes on Pi 0.85.1", () => {
     for (const event of messageEnds) expect(keys(event)).toEqual(expect.arrayContaining(["type", "message"]));
     for (const event of messageEnds) expect(keys(event.message)).toContain("role");
     for (const event of messageEnds.filter((entry) => entry.message!.role === "assistant")) expect(keys(event.message)).toContain("stopReason");
+  });
+
+  it("keeps a tool_end event for a 2 MB bash output as small as on 0.85.1: no structuredContent, the same text the model gets", async () => {
+    // protects packages/worker/src/pi-session.ts (withoutStructuredContent); Ruling E: Pi 0.99+ bash structuredContent holds up
+    // to 1 MiB, and the broker stores each event as one DynamoDB item (400 KB limit), so one big output poisoned its batch.
+    const line = "0123456789 abcdefghij klmnopqrst uvwxyz ABCDEFGHIJ KLMNOPQRS\n";
+    const shell = recordingShell(line.repeat(Math.ceil((2 * 1024 * 1024) / line.length)));
+    const { handle, events } = await workerSession([
+      toolUse(fauxToolCall("bash", { command: "print a lot" }, { id: "call-big-1" })),
+      fauxAssistantMessage("Done."),
+    ], { bashOperations: shell.operations });
+    try {
+      expect(await settle(handle, "run it")).toBe("resolved");
+    } finally { handle.dispose(); }
+    const end = events.find((event) => event.type === "tool_execution_end")!;
+    const result = end.result as { content: unknown; structuredContent?: unknown };
+    expect(keys(end.result)).toEqual(["content", "details"]);
+    expect(result.structuredContent).toBeUndefined();
+    // The text is what Pi gives the model, the toolResult message's content, exactly as before.
+    const toolResult = events.find((event) => event.type === "message_end" && event.message?.role === "toolResult")!.message!;
+    expect(result.content).toEqual(toolResult.content);
+    // The record run-task's event log stores (events.ts EventBatcher) stays far below the 400 KB item limit.
+    expect(Buffer.byteLength(JSON.stringify({ type: "tool_end", timestamp: new Date().toISOString(), payload: redactCredentials(end) }))).toBeLessThan(150 * 1024);
   });
 });
 

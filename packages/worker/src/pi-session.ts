@@ -246,7 +246,7 @@ async function createDefaultSession(
       }),
       piThinkingLevel: () => session.thinkingLevel,
       getSessionStats: () => conversationStats(session.getSessionStats(), session.sessionManager.getEntries()),
-      subscribe: (listener) => session.subscribe((event) => { if (!isSystemMessageEvent(event)) listener(withoutSystemMessages(event)); }),
+      subscribe: (listener) => session.subscribe((event) => { if (!isSystemMessageEvent(event)) listener(withoutStructuredContent(withoutSystemMessages(event))); }),
       dispose: () => session.dispose(),
     };
 }
@@ -269,6 +269,17 @@ function withoutSystemMessages<T>(event: T): T {
   const { type, messages } = event as { type?: unknown; messages?: unknown };
   if (type !== "agent_end" || !Array.isArray(messages)) return event;
   return { ...event, messages: messages.filter((message: { role?: unknown } | null) => message?.role !== "system") };
+}
+
+// Ruling E (amends D for this field only): bash results carry up to 1 MiB of structuredContent, which only codemode reads;
+// in a tool_end event it can pass the broker's 400 KB DynamoDB item limit and poison the whole event batch.
+function withoutStructuredContent<T>(event: T): T {
+  if (!event || typeof event !== "object") return event;
+  const { type, toolName, result } = event as { type?: unknown; toolName?: unknown; result?: unknown };
+  if (type !== "tool_execution_end" || toolName !== "bash" || !result || typeof result !== "object" || !("structuredContent" in result)) return event;
+  const kept: Record<string, unknown> = { ...result };
+  delete kept.structuredContent;
+  return { ...event, result: kept };
 }
 
 function conversationStats(stats: SessionStats, entries: readonly SessionEntry[]): SessionStats {
