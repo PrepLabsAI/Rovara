@@ -137,6 +137,16 @@ export interface GitHubApi {
   /** Spec 048 FR-020 and FR-028: a public lookup of an owner. undefined: GitHub has no such owner.
    * Throws when GitHub could not answer (network, rate limit). Optional: a client without it skips. */
   owner?(login: string): Promise<{ login: string; type: "User" | "Organization" } | undefined>;
+  /** Spec 048 FR-028. Best effort (Ruling 8): GitHub shows a private app by its slug only to its
+   * owner, so undefined means "not visible", not "free". Throws when GitHub could not answer.
+   * Optional: a client without it skips the check. */
+  appBySlug?(slug: string): Promise<{ owner: { login: string } } | undefined>;
+}
+
+/** Spec 048 FR-028: the slug GitHub makes from an app's name (lower case, runs of anything else to
+ * one hyphen), which is how a taken name is found. */
+export function githubAppSlug(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 }
 
 /** The headers every GitHub REST call sends. */
@@ -166,6 +176,10 @@ export function githubRestApi(fetchImplementation: typeof fetch): GitHubApi {
     async owner(login) {
       const found = (await lookup("owner lookup", `/users/${encodeURIComponent(login)}`)) as { login?: string; type?: string } | undefined;
       return found === undefined ? undefined : { login: found.login ?? login, type: found.type === "Organization" ? "Organization" : "User" };
+    },
+    async appBySlug(slug) {
+      const found = (await lookup("app lookup", `/apps/${encodeURIComponent(slug)}`)) as { owner?: { login?: string } } | undefined;
+      return found === undefined ? undefined : { owner: { login: found.owner?.login ?? "" } };
     },
     async convertManifest(code) {
       return (await call("manifest conversion (the code is valid for one hour)", `/app-manifests/${encodeURIComponent(code)}/conversions`, { method: "POST" })) as Awaited<ReturnType<GitHubApi["convertManifest"]>>;

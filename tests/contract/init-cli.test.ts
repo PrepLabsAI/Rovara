@@ -173,6 +173,31 @@ describe("agentx init", () => {
     expect(initSteps({ github: fakeGitHubApi(), slack: fakeSlackApi() }).map((step) => step.id)).toEqual([...INSTALL_STEP_ORDER]);
   });
 
+  const YES = ["--yes", "--admin-email", ADMIN_EMAIL, "--alert-email", "ops@example.com", "--github-account", "acme", "--channel", "payments"];
+  it.each<[string, string[], Partial<InitCliDependencies>, string]>([
+    ["model access and the Anthropic form", [], { checks: passingChecks({ converse: async () => { throw Object.assign(new Error("Model use case details have not been submitted for this account"), { name: "ResourceNotFoundException" }); } }) }, "one-time usage form"],
+    // "app name" alone also matches the plan's "an app named", which a run that never checked the length printed.
+    ["a name too long", ["--github-app-name", "x".repeat(35)], {}, "the app name must be at most 34 characters"],
+    ["a clashing stack", [], { stackStatus: { status: async (name) => (name === environmentStackName("staging", "access") ? "CREATE_COMPLETE" : undefined) } }, "already has stacks or settings"],
+    ["the GitHub owner", [], { github: { ...fakeGitHubApi(), owner: async () => undefined } }, "GitHub has no organization or user named acme"],
+    ["the budget value", ["--budget", "12abc"], {}, "--budget must be a whole number"],
+    ["the email address", ["--alert-email", "not-an-email"], {}, "is not an email address"],
+  ])("SC-009: %s is reported before anything is created", async (_item, argv, overrides, words) => {
+    const h = await harness();
+    expect(await h.run([...YES, ...argv], overrides)).not.toBe(0);
+    expect(h.printed()).toContain(words);
+    expect(h.deployer.requests).toEqual([]);
+    expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
+    expect(h.github.conversions).toEqual([]);
+  });
+
+  it("FR-028: an app made beforehand (--github-app-id) is this install's own, so its name is no clash", async () => {
+    const h = await harness();
+    const github = { ...h.github, appBySlug: async () => ({ owner: { login: "acme" } }) };
+    expect(await h.run([...UNATTENDED, "--alert-email", "ops@example.com"], { processEnv: UNATTENDED_ENV, github })).toBe(0);
+    expect(h.printed()).not.toContain("GitHub already has an app named");
+  });
+
   it("stops after the step --stop-after names, records it, and says how to finish", async () => {
     const h = await harness();
     expect(await h.run(["--stop-after", "developer-signin"], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN]) })).toBe(0);
@@ -201,7 +226,9 @@ describe("agentx init", () => {
 
   it("spec 048 FR-020: asks the GitHub owner's type only when GitHub cannot say, and says why", async () => {
     const h = await harness();
-    const github = { ...fakeGitHubApi(), owner: async () => { throw new Error("GitHub owner lookup failed with HTTP 403"); } };
+    // GitHub cannot answer the settings' lookup; by the answer checks (spec 048 FR-028) it answers again.
+    let lookups = 0;
+    const github = { ...fakeGitHubApi(), owner: async () => { lookups += 1; if (lookups === 1) throw new Error("GitHub owner lookup failed with HTTP 403"); return { login: "acme", type: "User" as const }; } };
     // The settings, then the owner's type (a personal account), then no to the plan.
     const prompter = scriptedPrompter([...FIRST_RUN.slice(0, -1), "user", false]);
     expect(await h.run([], { prompter, github })).not.toBe(0);

@@ -280,6 +280,9 @@ export async function checkPrerequisites(input: {
   /** Spec 048 FR-018: true leaves out the EC2 vCPU quota and Elastic IPs, because `checkAccount`
    * already checked them right after the region was chosen, before any setting was asked. */
   skipAccount?: boolean;
+  /** Spec 048 FR-028: more checks of the answers (clash-checks.ts), run right after the image checks
+   * and collected with every other problem. */
+  extraChecks?: () => Promise<readonly PrerequisiteCheck[]>;
   onCheck?: (check: PrerequisiteCheck) => void;
 }): Promise<void> {
   const { answers, checks, write } = input;
@@ -303,6 +306,14 @@ export async function checkPrerequisites(input: {
   // something, so a release that cannot be pulled is refused alongside every other problem.
   if (input.images !== undefined) {
     for (const check of releaseImageChecks({ version: input.release.manifest.version, images: input.images, ...(answers.images === undefined ? {} : { overrides: answers.images }), audience })) {
+      if (check.ok) input.onCheck?.(check);
+      else failed(check.label, check.detail, check.technical);
+    }
+  }
+
+  // Spec 048 FR-028: the install name, the GitHub owner and the app name (clash-checks.ts).
+  if (input.extraChecks !== undefined) {
+    for (const check of await input.extraChecks()) {
       if (check.ok) input.onCheck?.(check);
       else failed(check.label, check.detail, check.technical);
     }

@@ -27,7 +27,7 @@ import { fakeWizardOperator, snapshotOnReconnect } from "../support/wizard-brows
 import { ADMIN_EMAIL, fakeAlerts, fakeSlackChannels } from "../support/setup-fakes.js";
 import { markOperatorStop } from "../../packages/cli/src/init/stop.js";
 import { WIZARD_TOKEN_HEADER, type WizardSnapshot } from "../../packages/cli/src/init/ui/protocol.js";
-import { DEFAULTS, FINISH, FIRST_RUN, FIRST_RUN_BUDGET_USD, harness, releaseDir, SIGNIN, SLACK, TERMINAL_FIRST_RUN } from "../support/init-ui-harness.js";
+import { DEFAULTS, FINISH, FIRST_RUN, FIRST_RUN_BUDGET_USD, harness, releaseDir, SETTINGS, SIGNIN, SLACK, TERMINAL_FIRST_RUN } from "../support/init-ui-harness.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -157,7 +157,8 @@ describe("agentx init --ui", () => {
     const manifest = JSON.parse(await readFile(join(h.release, "release.json"), "utf8")) as { images: Record<string, string> };
     manifest.images.worker = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx/worker@sha256:${"a".repeat(64)}`;
     await writeFile(join(h.release, "release.json"), JSON.stringify(manifest));
-    const { code, operator } = await h.runUi([...FIRST_RUN.slice(0, -1), false]);
+    // Spec 048 FR-028: a failed first-run check offers Change answers, Check again or Stop for now.
+    const { code, operator } = await h.runUi([...FIRST_RUN.slice(0, -1), "stop"]);
     expect(code).not.toBe(0);
     const card = operator.states.flatMap((state) => state.cards ?? []).filter((shown) => shown.id === "prerequisites").at(-1);
     expect(card?.checks?.find((check) => check.label === "The coding image")).toMatchObject({ ok: false });
@@ -452,11 +453,27 @@ describe("agentx init --ui", () => {
     expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
   });
 
+  it("FR-028: an answer check that fails offers Change answers, and the settings come back with every answer kept", async () => {
+    const h = await harness();
+    // Spread from the harness's own fake, so the conversions counted below are this run's.
+    const github = { ...h.github, owner: async (login: string) => (login === "acme" ? { login: "acme", type: "Organization" as const } : undefined) };
+    const wrong = JSON.stringify({ email: ADMIN_EMAIL, githubAccount: "acmee", alertEmail: "ops@example.com" });
+    const operator = fakeWizardOperator([wrong, "organization", "change", SETTINGS, true, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(await h.run(["--ui"], { openBrowser: operator.open, github })).toBe(0);
+    await operator.settled();
+    const forms = operator.states.map((state) => state.question).filter((question) => question?.kind === "form" && question.text === "Your settings");
+    const second = forms.find((question) => question?.fields?.find((field) => field.name === "githubAccount")?.value === "acmee");
+    expect(second?.fields?.find((field) => field.name === "email")?.value).toBe(ADMIN_EMAIL);
+    const failed = operator.states.flatMap((state) => state.cards ?? []).find((card) => card.id === "prerequisites" && card.status === "failed");
+    expect(failed?.checks?.find((check) => check.label === "GitHub owner")?.detail).toBe("GitHub has no organization or user named acmee. Check the spelling.");
+    expect(h.github.conversions).toHaveLength(1); // the app was made once, after the fix
+  });
+
   it("FR-023: a failure no check reports is still on the checklist, in the error's own words", async () => {
     const h = await harness();
     const checks = passingChecks({ cdkBootstrapped: async () => false, runCdkBootstrap: async () => { throw new Error("CDKToolkit stack creation was rolled back"); } });
-    // --engine cdk leaves the engine out of the settings form; then yes to "Run cdk bootstrap ... now?", and no to checking again.
-    const operator = fakeWizardOperator([...FIRST_RUN.slice(0, -1), true, false]);
+    // --engine cdk leaves the engine out of the settings form; then yes to "Run cdk bootstrap ... now?", and Stop for now (spec 048 FR-028).
+    const operator = fakeWizardOperator([...FIRST_RUN.slice(0, -1), true, "stop"]);
     // Issue 152: init checks --source is a clean checkout of the release's tag before the
     // prerequisites, so the source is one: an empty commit tagged v1.2.3, the harness release's version.
     const source = await tmp("agentx-init-ui-source-");
@@ -466,7 +483,7 @@ describe("agentx init --ui", () => {
     git("tag", "v1.2.3");
     expect(await h.run(["--ui", "--engine", "cdk", "--source", source], { openBrowser: operator.open, checks })).not.toBe(0);
     await operator.settled();
-    expect(operator.asked).toContain("Check the prerequisites again?");
+    expect(operator.asked).toContain("Your answers need a change. What next?");
     const failed = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "prerequisites" && card.status === "failed") ?? []).at(-1);
     expect(failed?.checks?.find((check) => !check.ok)).toEqual({ label: "Prerequisites", ok: false, detail: "CDKToolkit stack creation was rolled back" });
     expect(h.deployer.requests).toEqual([]);

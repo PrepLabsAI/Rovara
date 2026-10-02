@@ -34,7 +34,7 @@ const DEFAULT_PATH: Array<[kind: "ask" | "choose" | "confirm" | "secret", flag: 
   ["ask", "--operator-principal", "IAM principal allowed to assume the AgentX operator role (Enter for this account)"],
   ["choose", ALERT_FLAG, "Where should AgentX send alerts?"],
   ["ask", ALERT_FLAG, "Alert email address"],
-  ["ask", "--budget", "Monthly AWS budget for this environment, in US dollars (0 for none)"],
+  ["ask", "--budget", "Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)"],
   ["choose", "--budget-scope", "Which costs should the budget count?"],
   ["ask", "--github-account", "GitHub organization or user that will own the AgentX GitHub App"],
   ["choose", "--github-account-type", "Is acme an organization or a personal account?"],

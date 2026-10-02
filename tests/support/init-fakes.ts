@@ -292,6 +292,7 @@ export function fakeGitHubApi(input: { owner?: string; ownerType?: string; insta
     async installationToken() { tokens += 1; return { token: "ghs_installation-token-value", expiresAt: input.tokenExpiresAt ?? T0 + 60 * 60 * 1000 }; },
     async repositoryCount() { return counts.length > 1 ? (counts.shift() as number) : (counts[0] as number); },
     async owner(login) { return login.toLowerCase() === owner.login.toLowerCase() ? { login: owner.login, type: owner.type === "User" ? "User" : "Organization" } : undefined; },
+    async appBySlug() { return undefined; },
   };
 }
 
