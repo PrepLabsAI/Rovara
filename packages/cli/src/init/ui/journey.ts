@@ -21,7 +21,7 @@ export const STATUS_WORDS: Readonly<Record<JourneyStatus, string>> = {
 
 /** FR-003: which phase each card belongs to, so a finished one collapses into that phase in the rail. */
 export const CARD_PHASES: Readonly<Record<CardId, JourneyPhaseId>> = {
-  aws: "get-started", "account-checks": "get-started", prerequisites: "your-choices", github: "your-choices", slack: "connect-slack", "slack-urls": "connect-slack",
+  release: "get-started", aws: "get-started", "account-checks": "get-started", prerequisites: "your-choices", github: "your-choices", slack: "connect-slack", "slack-urls": "connect-slack",
   admin: "finish", project: "finish", channel: "finish", connectors: "finish", alerts: "finish", reply: "finish", ready: "finish",
 };
 

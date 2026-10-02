@@ -43,6 +43,20 @@ const LINEAR_KEY = `lin_api_${"k".repeat(40)}SECRETlinearKEY`;
 const FINISH_WITH_LINEAR = ["acme/payments-api", "", true, "payments", true, LINEAR_KEY, "", false, false, true];
 
 describe("agentx init --ui", () => {
+  it("FR-009: the page is open before the release is fetched, so a failed download is a failure screen", async () => {
+    const h = await harness();
+    const operator = fakeWizardOperator([]);
+    const missing: typeof fetch = async () => new Response("not found", { status: 404 });
+    const code = await executeCli(["--env", "staging", "init", "--region", "us-east-1", "--ui"], {
+      stdout: { write: () => undefined }, stderr: { write: (text: string) => h.err.push(text) }, environments: { home: h.home },
+      init: { ...h.base, releaseVersion: "9.9.9", fetch: missing, openBrowser: operator.open },
+    });
+    await operator.settled();
+    expect(code).not.toBe(0);
+    expect(operator.states.some((state) => state.failure?.what.toLowerCase().includes("release 9.9.9 was not found"))).toBe(true);
+    expect(h.err.join("")).toMatch(/^The AgentX installer is open in your browser: http:\/\/127\.0\.0\.1:/m);
+  });
+
   it("runs the whole install from the page, with nothing typed in the terminal", async () => {
     const h = await harness();
     const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
@@ -641,7 +655,7 @@ describe("agentx init --ui", () => {
     expect(code).toBe(0);
     const last = operator.states.at(-1);
     expect(last?.cards?.map((card) => [card.id, card.status])).toEqual([
-      ["aws", "ok"], ["account-checks", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"], ["admin", "ok"], ["project", "ok"], ["channel", "ok"], ["connectors", "ok"], ["alerts", "ok"], ["reply", "ok"], ["ready", "ok"],
+      ["release", "ok"], ["aws", "ok"], ["account-checks", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"], ["admin", "ok"], ["project", "ok"], ["channel", "ok"], ["connectors", "ok"], ["alerts", "ok"], ["reply", "ok"], ["ready", "ok"],
     ]);
     // Every answer came from the scripted operator, and no answer was an address pasted back:
     // the GitHub code arrived through the wizard's own callback.
@@ -652,7 +666,7 @@ describe("agentx init --ui", () => {
     // The screens came in order: each card first appears after the one before it.
     const firstSeen: string[] = [];
     for (const card of operator.states.flatMap((state) => state.cards ?? [])) if (!firstSeen.includes(card.id)) firstSeen.push(card.id);
-    expect(firstSeen).toEqual(["aws", "account-checks", "prerequisites", "github", "slack", "slack-urls", "admin", "project", "channel", "connectors", "alerts", "reply", "ready"]);
+    expect(firstSeen).toEqual(["release", "aws", "account-checks", "prerequisites", "github", "slack", "slack-urls", "admin", "project", "channel", "connectors", "alerts", "reply", "ready"]);
   });
 
   it("FR-012: no secret reaches a card, a link, the page's state, the log, the terminal, SSM or the cache", async () => {
@@ -685,9 +699,9 @@ describe("agentx init --ui", () => {
     await h.run(["--ui"], { openBrowser: operator.open });
     await operator.settled();
     const review = operator.states.find((state) => state.question?.text === "Create all of this?");
-    expect(review?.cards?.map((card) => card.id)).toEqual(["aws", "account-checks", "prerequisites"]);
+    expect(review?.cards?.map((card) => card.id)).toEqual(["release", "aws", "account-checks", "prerequisites"]);
     expect(reconnected?.question?.text).toBe("Create all of this?");
-    expect(reconnected?.cards?.map((card) => card.id)).toEqual(["aws", "account-checks", "prerequisites"]);
+    expect(reconnected?.cards?.map((card) => card.id)).toEqual(["release", "aws", "account-checks", "prerequisites"]);
   });
 
   it("FR-050 and Q5: the admin sign-in page is a button on the install page, never a tab opened by itself", async () => {
@@ -839,7 +853,7 @@ describe("agentx init --ui", () => {
     const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     expect(code).toBe(0);
     expect(operator.states.at(-1)?.cards?.map((card) => [card.id, card.status])).toEqual([
-      ["aws", "ok"], ["account-checks", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"],
+      ["release", "ok"], ["aws", "ok"], ["account-checks", "ok"], ["prerequisites", "ok"], ["github", "ok"], ["slack", "ok"], ["slack-urls", "ok"],
       ["admin", "ok"], ["project", "ok"], ["channel", "ok"], ["connectors", "ok"], ["alerts", "ok"], ["reply", "ok"], ["ready", "ok"],
     ]);
     expect(h.plane.bindings).toEqual(["T0TEAM/C0PAY00001"]);

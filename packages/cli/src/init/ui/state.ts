@@ -41,6 +41,8 @@ export interface WizardHub {
   subscribe(listener: WizardListener): () => void;
   /** How many pages are connected now (their event streams). */
   connected(): number;
+  /** Resolves when the first page has connected its event stream. */
+  whenConnected(): Promise<void>;
   /** One line for the log pane (the same line `agentx init` writes to stderr). */
   log(line: string): void;
   /** The checklist, in the order the steps run, before any of them has. */
@@ -147,6 +149,8 @@ export function createWizardHub(env: string, options: { now?: () => number; logP
   let commands: WizardCommand[] | undefined;
   const log: string[] = [];
   const listeners = new Set<WizardListener>();
+  let firstConnection: () => void = () => undefined;
+  const connectedOnce = new Promise<void>((resolvePromise) => { firstConnection = resolvePromise; });
   let pending: Pending | undefined;
   let closed = false;
   let closeWanted: () => void = () => undefined;
@@ -213,9 +217,11 @@ export function createWizardHub(env: string, options: { now?: () => number; logP
     snapshot: () => ({ ...state(), log: log.slice(-LOG_BACKLOG) }),
     subscribe(listener) {
       listeners.add(listener);
+      firstConnection();
       return () => listeners.delete(listener);
     },
     connected: () => listeners.size,
+    whenConnected: () => connectedOnce,
     log: appendLog,
     setSteps(next) {
       steps = next.map((step) => ({ id: step.id, title: step.title, status: "pending", ...planFields(step.id) }));

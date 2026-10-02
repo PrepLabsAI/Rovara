@@ -20,6 +20,7 @@ import { createWizardHub, isShowableLink, type WizardHub } from "./state.js";
  * says where it is. */
 export const PAGE_CLOSED_MS = 60_000;
 const REMINDER_CHECK_MS = 5_000;
+const PAGE_OPEN_GRACE_MS = 1_000;
 
 export function pageClosedLine(url: string): string {
   return `The install page is closed. Open ${url} to continue, or press Ctrl-C to stop; agentx init continues from here next time.`;
@@ -109,6 +110,18 @@ export async function startInstallWizard(input: {
     ...(input.token === undefined ? {} : { token: input.token }),
   });
   const opened = input.openBrowser === undefined ? false : await input.openBrowser(server.url);
+  if (opened) {
+    // Opening a browser launches navigation; it does not mean the page has subscribed yet. Give
+    // that first event stream a brief chance to connect so an immediate preflight failure is still
+    // delivered to the page before the run closes its loopback server.
+    let timer: NodeJS.Timeout | undefined;
+    const grace = new Promise<void>((resolvePromise) => {
+      timer = setTimeout(resolvePromise, PAGE_OPEN_GRACE_MS);
+      timer.unref();
+    });
+    await Promise.race([hub.whenConnected(), grace]);
+    if (timer !== undefined) clearTimeout(timer);
+  }
   input.write(opened ? `The AgentX installer is open in your browser: ${server.url}` : `The AgentX installer is at ${server.url}`);
   if (!opened) {
     input.write(`Open that address in a browser on this machine. From another machine, first run: ssh -L ${server.port}:127.0.0.1:${server.port} <this host>`);

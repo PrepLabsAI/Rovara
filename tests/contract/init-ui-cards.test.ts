@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
 import {
-  adminCard, alertsCard, awsCard, awsSignedOutCard, channelCard, connectorsCard, githubCard, onPageProblem, prerequisitesCard, projectCard, readyCard, replyCard,
+  adminCard, alertsCard, awsCard, awsSignedOutCard, channelCard, connectorsCard, githubCard, onPageProblem, prerequisitesCard, projectCard, readyCard, releaseCard, replyCard,
   signedInAs, slackAppCard, slackChannelLink, slackUrlsCard,
 } from "../../packages/cli/src/init/ui/cards.js";
 import { startInstallWizard } from "../../packages/cli/src/init/ui/index.js";
@@ -27,6 +27,8 @@ function cardEntries(input: WizardCard): CopyEntry[] {
 }
 
 const EVERY_CARD: WizardCard[] = [
+  releaseCard({ stage: "downloading", receivedBytes: 500_000, totalBytes: 1_000_000 }),
+  releaseCard({ stage: "ready" }),
   awsCard({ account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/Admin/alice", region: "us-east-1", profile: "dev" }),
   awsSignedOutCard({ profile: "dev", problem: "AUTH_REQUIRED: your AWS session has expired. Refresh your AWS session first (for example aws sso login or aws login)", signIn: "aws sso login --profile dev" }),
   prerequisitesCard({ status: "failed", checks: [{ label: "EC2 vCPU quota", ok: false, detail: "Ask AWS for more in Service Quotas." }] }),
@@ -66,7 +68,7 @@ describe("spec 048 card copy", () => {
     expect(signedInAs("arn:aws:sts::123456789012:assumed-role/AWSReservedSSO_AdministratorAccess_0123456789abcdef/alice@example.com")).toBe("alice@example.com (AdministratorAccess, through IAM Identity Center)");
     expect(signedInAs("arn:aws:iam::123456789012:user/ops/bob")).toBe("the IAM user bob");
     expect(signedInAs("arn:aws:iam::123456789012:root")).toBe("the AWS root user");
-    expect(EVERY_CARD[0]?.details).toEqual(["arn:aws:sts::123456789012:assumed-role/Admin/alice"]);
+    expect(EVERY_CARD.find((entry) => entry.id === "aws" && entry.status === "ok")?.details).toEqual(["arn:aws:sts::123456789012:assumed-role/Admin/alice"]);
   });
 
   it("FR-027: the GitHub app keeps its name on every card, and its slug only in the details", () => {

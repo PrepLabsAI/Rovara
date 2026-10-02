@@ -10,6 +10,19 @@ import { ADMIN_USER_GUIDE_URL, DEDICATED_ACCOUNT_NOTE, ROOT_WARNING, type Prereq
 import { STEP_PLAN } from "./journey.js";
 import type { WizardCard } from "./protocol.js";
 
+const megabytes = (bytes: number): string => (bytes / 1_000_000).toFixed(1);
+
+/** FR-009: the release download, on the page, with its size and progress. */
+export function releaseCard(input: { stage: "downloading"; receivedBytes: number; totalBytes?: number } | { stage: "ready" }): WizardCard {
+  const base = { id: "release" as const, title: "Getting AgentX ready" };
+  if (input.stage === "ready") return { ...base, status: "ok", lines: ["AgentX is ready to install."] };
+  const total = input.totalBytes !== undefined && input.totalBytes > 0 ? input.totalBytes : undefined;
+  const line = total === undefined
+    ? `Downloading AgentX: ${megabytes(input.receivedBytes)} MB so far.`
+    : `Downloading AgentX (about ${megabytes(total)} MB): ${Math.min(100, Math.floor((input.receivedBytes / total) * 100))}% done.`;
+  return { ...base, status: "running", lines: [line] };
+}
+
 /** A button's label for an address the run opens: "Open github.com". */
 export function linkLabel(url: string): string {
   try {

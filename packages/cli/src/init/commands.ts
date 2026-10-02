@@ -55,7 +55,7 @@ import { botNameOf, slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } 
 import { isOperatorStop, isWordedOperatorStop } from "./stop.js";
 import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from "./steps.js";
 import { browserAvailable, NO_BROWSER_LINE, resolveUiMode } from "./ui-mode.js";
-import { accountChecksCard, prerequisitesCard, readyCard } from "./ui/cards.js";
+import { accountChecksCard, prerequisitesCard, readyCard, releaseCard } from "./ui/cards.js";
 import { askFailureAction, failureScreen, isRetryableStep, plainReason, STOPPED_OUTCOME } from "./ui/failure.js";
 import { startInstallWizard, type InstallWizard } from "./ui/index.js";
 import { READY_LINE, stageLine, STEP_PLAN, stoppedLine, terminalStepLine } from "./ui/journey.js";
@@ -300,6 +300,9 @@ interface InitSession {
   output: Writer;
   /** The prompter in use, once chosen: the catch below asks on it when no step hook already did. */
   prompter?: Prompter;
+  /** True once a usable release is loaded. Before then a failure screen is terminal: there is no
+   * saved answer or step to retry, so the page does not ask a follow-up question. */
+  releaseLoaded?: boolean;
   /** Once known: names the region in a failure shown before a step runs. */
   region?: string;
   /** Set once `onStepFailure` already showed the screen for the error now being thrown, so the
@@ -370,7 +373,7 @@ export async function runInit(options: InitOptions, deps: InitCliDependencies, s
       // not a failure, so no screen is shown for it (Plan ruling 8).
       if (session.failureShown !== true && !isOperatorStop(error)) {
         wizard.showFailure(failureScreen({ env: session.env, region, error, ...(wizard.logPath === undefined ? {} : { logPath: wizard.logPath }) }));
-        await askFailureAction(session.prompter ?? wizard.prompter, { retry: false });
+        if (session.releaseLoaded === true) await askFailureAction(session.prompter ?? wizard.prompter, { retry: false });
       }
       // Only a stop with its own words (declining the plan, the root warning) tells them; any other
       // stop, such as declining a check-again question, ends on the fixed words.
@@ -501,33 +504,6 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   }
   const runner = deployDeps.commandRunner ?? realCommandRunner(session.output);
 
-  // The release comes first: a CLI built from source is told to pass --release before anything else.
-  const version = deps.releaseVersion === undefined ? RELEASE_VERSION : deps.releaseVersion ?? undefined;
-  // Issue 152: a CLI built from source with --engine cdk (on the command line: the engine question
-  // comes after the release) builds its release from the --source checkout instead.
-  const fromSource = options.releaseDir === undefined && version === undefined && options.flags.engine === "cdk";
-  let release: LoadedRelease;
-  // The regions init offers: the release's, or undefined when nothing lists them (a source release
-  // whose images all come from flags, so no release.json was read).
-  let releaseRegions: string[] | undefined;
-  // Why a source release has no images, when it has none; checked once the saved answers are read.
-  let imagesProblem: string | undefined;
-  if (fromSource) {
-    if (options.source === undefined) throw agentXError("CONFIG_INVALID", "the cdk engine needs --source <a checkout of a release tag>");
-    // "allow": a resume's saved answers may hold both images; they are checked once the answers are known.
-    const built = await sourceRelease({ runner, source: options.source, images: { worker: options.flags.workerImage, slack: options.flags.slackImage }, fetch: fetchImplementation, missingReleaseJson: "allow" });
-    release = built.release;
-    releaseRegions = built.regions;
-    imagesProblem = built.imagesProblem;
-  } else {
-    release = await loadRelease(options.releaseDir ?? (await fetchRelease({ version, home: services.home, fetch: fetchImplementation, runner, write })));
-    releaseRegions = release.regions();
-  }
-  // F23: the saved answers take only x.y.z, so a prerelease would otherwise fail after the plan.
-  if (isPrereleaseVersion(release.manifest.version)) {
-    throw agentXError("CONFIG_INVALID", `release ${release.manifest.version} is a prerelease; agentx init installs only published releases (x.y.z). Pass --release <dir> with a published release`);
-  }
-
   // FR-001: --ui, --no-ui, or (neither given) the page in an interactive terminal on a machine
   // that can open a browser. --no-browser reads as "no browser here" for the default (Q2).
   const uiMode = resolveUiMode({
@@ -538,8 +514,6 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   let prompter: Prompter;
   if (uiMode.mode === "page") {
     if (options.yes) throw agentXError("CONFIG_INVALID", "agentx init --ui asks its questions on a page; --yes answers them without asking. Use one or the other");
-    // Task 14: opened before the wizard, so its address and the log's own path are both ready for
-    // the wizard's start lines (FR-070); the token is hidden from it the moment the server has one.
     session.log = await openInitLog(initLogPath(services.home, env), { onError: (line) => services.stderr.write(`${line}\n`) });
     const wizard = await startInstallWizard({
       env,
@@ -565,6 +539,47 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   if (options.slackInstall !== undefined) prompter = answeringSlackInstall(prompter, options.slackInstall);
   // Spec 048 FR-060: once chosen, so a failure outside any step still has someone to ask.
   session.prompter = prompter;
+
+  // With a page, the release comes after the page opens so download progress and failures appear there.
+  const version = deps.releaseVersion === undefined ? RELEASE_VERSION : deps.releaseVersion ?? undefined;
+  // Issue 152: a CLI built from source with --engine cdk (on the command line: the engine question
+  // comes after the release) builds its release from the --source checkout instead.
+  const fromSource = options.releaseDir === undefined && version === undefined && options.flags.engine === "cdk";
+  let release: LoadedRelease;
+  // The regions init offers: the release's, or undefined when nothing lists them (a source release
+  // whose images all come from flags, so no release.json was read).
+  let releaseRegions: string[] | undefined;
+  // Why a source release has no images, when it has none; checked once the saved answers are read.
+  let imagesProblem: string | undefined;
+  if (fromSource) {
+    if (options.source === undefined) throw agentXError("CONFIG_INVALID", "the cdk engine needs --source <a checkout of a release tag>");
+    // "allow": a resume's saved answers may hold both images; they are checked once the answers are known.
+    const built = await sourceRelease({ runner, source: options.source, images: { worker: options.flags.workerImage, slack: options.flags.slackImage }, fetch: fetchImplementation, missingReleaseJson: "allow" });
+    release = built.release;
+    releaseRegions = built.regions;
+    imagesProblem = built.imagesProblem;
+  } else {
+    let shown = "";
+    const onProgress = (progress: { receivedBytes: number; totalBytes?: number }) => {
+      const card = releaseCard({ stage: "downloading", ...progress });
+      if (card.lines[0] !== shown) {
+        shown = card.lines[0] ?? "";
+        session.wizard?.surface.card(card);
+      }
+    };
+    release = await loadRelease(options.releaseDir ?? (await fetchRelease({
+      version, home: services.home, fetch: fetchImplementation, runner, write,
+      ...(session.wizard === undefined ? {} : { onProgress }),
+    })));
+    releaseRegions = release.regions();
+  }
+  session.wizard?.surface.card(releaseCard({ stage: "ready" }));
+  session.releaseLoaded = true;
+  // F23: the saved answers take only x.y.z, so a prerelease would otherwise fail after the plan.
+  if (isPrereleaseVersion(release.manifest.version)) {
+    throw agentXError("CONFIG_INVALID", `release ${release.manifest.version} is a prerelease; agentx init installs only published releases (x.y.z). Pass --release <dir> with a published release`);
+  }
+
   // Built once: the wizard shows the checklist from it before the first step runs, and the resume
   // screen names its titles.
   // Spec 048 FR-020: one GitHub client for the steps and for the owner lookup in the settings.

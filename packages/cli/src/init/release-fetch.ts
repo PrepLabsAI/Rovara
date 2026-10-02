@@ -20,11 +20,30 @@ export function releaseCacheDir(home: string, version: string): string {
   return join(home, ".agentx", "releases", version);
 }
 
-async function download(fetchImplementation: typeof fetch, url: string, version: string): Promise<Buffer> {
+/** Spec 048 FR-009: reads a download, saying how much has arrived. With no usable content-length
+ * there is no total, and the page shows megabytes received instead of a percentage. */
+export async function readWithProgress(response: Response, onProgress?: (progress: { receivedBytes: number; totalBytes?: number }) => void): Promise<Buffer> {
+  if (onProgress === undefined || response.body === null) return Buffer.from(await response.arrayBuffer());
+  const header = Number(response.headers.get("content-length") ?? "");
+  const totalBytes = Number.isFinite(header) && header > 0 ? header : undefined;
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let receivedBytes = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    receivedBytes += value.byteLength;
+    onProgress({ receivedBytes, ...(totalBytes === undefined ? {} : { totalBytes }) });
+  }
+  return Buffer.concat(chunks);
+}
+
+async function download(fetchImplementation: typeof fetch, url: string, version: string, onProgress?: (progress: { receivedBytes: number; totalBytes?: number }) => void): Promise<Buffer> {
   const response = await fetchImplementation(url);
   if (response.status === 404) throw agentXError("CONFIG_INVALID", `release ${version} was not found at ${url}; check the version is published, or pass --release <dir>`);
   if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `downloading ${url} failed with HTTP ${response.status}`);
-  return Buffer.from(await response.arrayBuffer());
+  return readWithProgress(response, onProgress);
 }
 
 function unsafeArchiveError(version: string): Error {
@@ -108,7 +127,7 @@ async function makeRemovable(path: string): Promise<void> {
  * cache and only renamed into place once it checks out, so a failed or interrupted fetch never
  * leaves a half-written release directory. `loadRelease` then checks every file's checksum.
  */
-export async function fetchRelease(input: { version: string | undefined; home: string; fetch: typeof fetch; runner: CommandRunner; write(line: string): void }): Promise<string> {
+export async function fetchRelease(input: { version: string | undefined; home: string; fetch: typeof fetch; runner: CommandRunner; write(line: string): void; onProgress?: (progress: { receivedBytes: number; totalBytes?: number }) => void }): Promise<string> {
   const { version } = input;
   if (version === undefined) {
     // Issue 152: --engine cdk --source needs no release (sourceRelease), so init never gets here with it.
@@ -121,7 +140,7 @@ export async function fetchRelease(input: { version: string | undefined; home: s
   if (cached !== undefined && cached.equals(published)) return dir;
 
   input.write(`Downloading AgentX release ${version} from GitHub`);
-  const tarball = await download(input.fetch, urls.tarball, version);
+  const tarball = await download(input.fetch, urls.tarball, version, input.onProgress);
   await mkdir(dirname(dir), { recursive: true });
   const scratch = await mkdtemp(join(dirname(dir), `.${version}.`));
   try {
