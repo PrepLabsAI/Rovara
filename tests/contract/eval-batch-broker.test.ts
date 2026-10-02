@@ -66,7 +66,7 @@ interface Harness {
   image: { value: string };
 }
 
-async function harness(options: { maxConcurrentEvals?: number; maxCostUsd?: number; datasetInstanceIds?: EvalBatchDependencies["datasetInstanceIds"] } = {}): Promise<Harness> {
+async function harness(options: { maxConcurrentEvals?: number; maxCostUsd?: number } = {}): Promise<Harness> {
   const db = new FakeDynamoDb();
   const launches = new Map<string, SwebenchLaunch>();
   const s3 = {
@@ -103,7 +103,6 @@ async function harness(options: { maxConcurrentEvals?: number; maxCostUsd?: numb
     now: () => new Date(clock),
     estimateRunCostUsd: (model) => prices[model.modelId],
     sleep: async () => undefined,
-    ...(options.datasetInstanceIds === undefined ? {} : { datasetInstanceIds: options.datasetInstanceIds }),
   });
   await putSwebenchChannel(dependencies, TEAM, CHANNEL, { maxCostUsd: options.maxCostUsd ?? 10 });
   const approved: ModelIdentifier[] = [cheap, dear];
@@ -213,24 +212,26 @@ describe("creating a batch (spec 052 FR-001, FR-003, FR-004)", () => {
     expect(h.db.find((item) => String(item.pk).startsWith("EVAL_BATCH#"))).toEqual([]);
   });
 
-  it("draws a sample once with its seed and writes the drawn tasks into the queue", async () => {
-    const population = Array.from({ length: 30 }, (_, index) => `${index % 2 === 0 ? "django__django" : "sympy__sympy"}-${1000 + index}`);
-    const h = await harness({ datasetInstanceIds: vi.fn(async () => population) });
+  it("refuses a sample until sampling is available: the campaign lists its tasks (Ruling 29, D-13)", async () => {
+    const h = await harness();
     const sample = { count: 6, seed: 46 };
-    const batch = await createBatch(h.dependencies, h.context, { benchmark: "verified", sample, models: [cheap], costCapUsd: 50 });
-    const drawn = batch.queue.map((entry) => entry.task);
+    await expect(createBatch(h.dependencies, h.context, { benchmark: "verified", sample, models: [cheap], costCapUsd: 50 }))
+      .rejects.toThrow("sampling is not available yet; list the instance IDs");
+    expect(h.db.find((item) => String(item.pk).startsWith("EVAL_BATCH"))).toEqual([]);
+  });
+
+  it("draws a seeded sample the same way whatever the population's order (kept for when sampling is available)", () => {
+    const population = Array.from({ length: 30 }, (_, index) => `${index % 2 === 0 ? "django__django" : "sympy__sympy"}-${1000 + index}`);
+    const sample = { count: 6, seed: 46 };
+    const drawn = drawSample(population, sample);
     expect(drawn).toHaveLength(6);
     expect(new Set(drawn).size).toBe(6);
-    expect(drawn).toEqual(drawSample(population, sample));
-    expect(drawSample(population, sample)).toEqual(drawSample([...population].reverse(), sample));
+    expect(drawSample([...population].reverse(), sample)).toEqual(drawn);
     expect(drawSample(population, { count: 6, seed: 47 })).not.toEqual(drawn);
     // Strata split the draw across projects as evenly as the count allows.
     const stratified = drawSample(population, { count: 4, seed: 1, strata: ["django", "sympy"] });
     expect(stratified.filter((id) => id.startsWith("django")).length).toBe(2);
     expect(stratified.filter((id) => id.startsWith("sympy")).length).toBe(2);
-    // No population source: a sample is refused with the reason.
-    const none = await harness();
-    await expect(createBatch(none.dependencies, none.context, { benchmark: "verified", sample, models: [cheap], costCapUsd: 50 })).rejects.toThrow(/list the tasks/);
   });
 
   it("estimates a run's cost as list prices times the measured SEC-bench token mix", () => {

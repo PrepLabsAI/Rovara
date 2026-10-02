@@ -39,8 +39,9 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
 
 - **FR-001:** A batch file (YAML, validated by a zod schema in `@agentx/contracts`) names:
   - `benchmark`: any dataset spec 043, 044 or 045 accept;
-  - `tasks`: a list of instance IDs, or `sample: { count, seed, strata? }` drawn once and written into the batch
-    record;
+  - `tasks`: a list of instance IDs. A `sample: { count, seed, strata? }`, drawn once and written into the batch
+    record, is **deferred** (D-13): the file schema accepts it, and the broker refuses it with "sampling is not
+    available yet; list the instance IDs";
   - `models`: each a project-approved model, with an explicit `thinkingLevel` and, for OpenRouter, a pinned
     `provider`;
   - `repeats`;
@@ -175,6 +176,11 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
   - a crash between a post and its record (or a Slack call that timed out after Slack delivered it) can repeat that
     opener or summary, once its claim is 10 minutes old;
   - a Slack form whose start message failed posts it on the redelivery, unless the record of the post was written.
+
+- **D-13 (2026-10-02, Ruling 29):** Sampling (`sample:`) is deferred. The broker has no source of a dataset's
+  instance IDs in production, and spec 046's campaign lists its tasks explicitly, which was the decided scope. A batch
+  file with a `sample` is refused with "sampling is not available yet; list the instance IDs". The schema and the
+  seeded draw (`drawSample`) stay, so sampling can be wired to a population source later without a format change.
 
 ## Success Criteria
 

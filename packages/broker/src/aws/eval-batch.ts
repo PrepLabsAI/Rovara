@@ -20,7 +20,6 @@ import {
   agentXError,
   slackThreadSubject,
   summarize,
-  swebenchInstanceIdFits,
   type EvalBatchEntry,
   type EvalBatchRecord,
   type EvalBatchWatchChange,
@@ -30,7 +29,6 @@ import {
   type ModelSelection,
   type SlackRequester,
   type SlackThread,
-  type SwebenchDataset,
   type SwebenchRun,
 } from "@agentx/contracts";
 import {
@@ -47,8 +45,6 @@ import {
 export interface EvalBatchDependencies extends SwebenchDependencies {
   /** A run's estimated cost in USD, for ordering; undefined when the model cannot be priced. Defaults to list prices. */
   estimateRunCostUsd?: (model: ModelIdentifier) => number | undefined;
-  /** The instance IDs of a dataset, the population a `sample` is drawn from; absent, a batch must list its tasks. */
-  datasetInstanceIds?: (dataset: SwebenchDataset) => Promise<readonly string[]>;
   sleep?: (milliseconds: number) => Promise<void>;
 }
 
@@ -169,7 +165,8 @@ export function runCostFromPrices(prices: { input: number; output: number; cache
 }
 
 /**
- * FR-001: a seeded sample of a dataset's instances. The population's order does not matter. With
+ * FR-001: a seeded sample of a dataset's instances, kept for when sampling is available (D-13 defers
+ * it; createBatch refuses a sample). The population's order does not matter. With
  * strata (project names, such as `django` or `njs`), the draw takes from each stratum in turn, so
  * the count is split as evenly as the strata allow.
  */
@@ -211,7 +208,7 @@ function seededShuffle<T>(items: T[], seed: string): T[] {
 
 /**
  * FR-001 to FR-004: validates a batch file, checks every model is approved for the channel's
- * project and can be priced, draws a sample once, expands and orders the queue, pins the runner
+ * project and can be priced, expands and orders the queue, pins the runner
  * image, and records the batch. Its runs start at the next top-up.
  */
 export async function createBatch(
@@ -221,6 +218,9 @@ export async function createBatch(
   options: { batchId?: string } = {},
 ): Promise<EvalBatchRecord> {
   const file = EvalBatchFileSchema.parse(value);
+  // Ruling 29, D-13: sampling is deferred; the campaign lists its tasks.
+  if (file.tasks === undefined) throw agentXError("CONFIG_INVALID", "sampling is not available yet; list the instance IDs");
+  const tasks = file.tasks;
   const deployment = await dependencies.deployment();
   if (deployment === undefined) throw agentXError("CONFIG_INVALID", "Eval runs are not installed in this deployment. Ask an administrator to deploy the eval stack and runner image.");
   const channel = await getSwebenchChannel(dependencies, context.thread.teamId, context.thread.channelId);
@@ -255,7 +255,6 @@ export async function createBatch(
     if (usd === undefined || !Number.isFinite(usd) || usd < 0) throw agentXError("CONFIG_INVALID", `the cost of ${name} cannot be estimated, so the batch cannot be ordered; choose a model the catalog prices`);
     estimates.set(name, usd);
   }
-  const tasks = file.tasks ?? await sampledTasks(dependencies, file.benchmark, file.sample!);
   const listed: Array<Omit<EvalBatchEntry, "index">> = [];
   for (const task of tasks) {
     for (const model of file.models) {
@@ -312,18 +311,6 @@ export async function createBatch(
     return existing;
   }
   return record;
-}
-
-async function sampledTasks(dependencies: EvalBatchDependencies, dataset: SwebenchDataset, sample: NonNullable<EvalBatchRecord["file"]["sample"]>): Promise<string[]> {
-  if (dependencies.datasetInstanceIds === undefined) {
-    throw agentXError("CONFIG_INVALID", "drawing a sample is not available in this deployment; list the tasks in the batch file");
-  }
-  const population = (await dependencies.datasetInstanceIds(dataset)).filter((id) => swebenchInstanceIdFits(dataset, id));
-  const drawn = drawSample(population, sample);
-  if (drawn.length < sample.count) {
-    throw agentXError("CONFIG_INVALID", `the sample asks for ${sample.count} tasks, but only ${drawn.length} are available${sample.strata === undefined ? "" : " in its strata"}`);
-  }
-  return drawn;
 }
 
 export async function getBatch(dependencies: EvalBatchDependencies, batchId: string): Promise<EvalBatchRecord | undefined> {
