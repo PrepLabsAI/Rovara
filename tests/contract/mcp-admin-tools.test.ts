@@ -111,6 +111,21 @@ describe("the admin read tools (FR-030)", () => {
     expect(olderResult.structuredContent).not.toHaveProperty("dead_letter_queues_check");
   });
 
+  it("names missing alarms in the text beside firing ones, never only \"none firing\" (issue 206)", async () => {
+    const health = {
+      version: { developerApi: "1.2", adminApi: "1.0" },
+      alarms: [{ name: "agentx-staging-TurnErrors", state: "OK" }, { name: "agentx-staging-SlackDeadLetters", state: "MISSING" }, { name: "agentx-staging-TestAlarm", state: "MISSING" }],
+      alarmsCheck: { status: "warn" as const, detail: "2 alarms missing" },
+      deadLetterQueues: [], slack: { status: "ok" as const }, github: { status: "ok" as const }, workerModes: [], workspaces: {}, workspacesTruncated: false,
+    };
+    const result = await (await connect({ health: async () => health })).callTool({ name: "agentx_admin_health", arguments: {} });
+    expect(JSON.stringify(result.content)).toContain("Alarms: none firing; missing: agentx-staging-SlackDeadLetters, agentx-staging-TestAlarm.");
+    expect(result.structuredContent).toMatchObject({ alarms_check: { status: "warn", detail: "2 alarms missing" } });
+    const firing = { ...health, alarms: [{ name: "agentx-staging-TurnErrors", state: "ALARM" }] };
+    const firingResult = await (await connect({ health: async () => firing })).callTool({ name: "agentx_admin_health", arguments: {} });
+    expect(JSON.stringify(firingResult.content)).toContain("Alarms: in ALARM: agentx-staging-TurnErrors. ");
+  });
+
   it("passes the unreadable items' skipped count through for failures and usage", async () => {
     const client = await connect({
       failures: async () => ({ since: "s", until: "u", failures: [], skipped: 2 }),

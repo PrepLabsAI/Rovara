@@ -3,7 +3,7 @@
 // server offers them only while an admin sign-in is held (FR-028, A15). Every result goes through
 // the server's redaction and caps (FR-029, A16).
 import {
-  ADMIN_FAILURES_DEFAULT_LIMIT, ADMIN_LIST_MAX, ADMIN_WORKSPACES_DEFAULT_LIMIT, AdminUsageGroupBySchema, WorkspaceStatusSchema, inertName,
+  ADMIN_FAILURES_DEFAULT_LIMIT, ADMIN_LIST_MAX, ADMIN_WORKSPACES_DEFAULT_LIMIT, AdminUsageGroupBySchema, MISSING_ALARM_STATE, WorkspaceStatusSchema, inertName,
   type AdminRequester, type AdminUsageGroupBy,
 } from "@agentx/contracts";
 import { z } from "zod";
@@ -56,6 +56,8 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
     async handler(context) {
       const health = await adminOf(context).health();
       const firing = health.alarms.filter((alarm) => alarm.state === "ALARM").map((alarm) => alarm.name);
+      // Issue 206: an expected alarm CloudWatch did not return is named too, never read as all clear.
+      const missing = health.alarms.filter((alarm) => alarm.state === MISSING_ALARM_STATE).map((alarm) => alarm.name);
       return {
         structured: {
           version: given({ developer_api: health.version.developerApi, admin_api: health.version.adminApi, release: health.version.release }),
@@ -65,7 +67,7 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
           worker_modes: health.workerModes.map((mode) => given({ mode: mode.mode, configured: mode.configured, latest_dispatch_failure: mode.latestDispatchFailure === undefined ? undefined : { at: mode.latestDispatchFailure.at, operation_id: mode.latestDispatchFailure.operationId, error: mode.latestDispatchFailure.error } })),
           workspaces: health.workspaces, workspaces_truncated: health.workspacesTruncated,
         },
-        text: `AgentX API ${health.version.developerApi}, admin API ${health.version.adminApi}. Alarms: ${firing.length === 0 ? "none firing" : `in ALARM: ${firing.join(", ")}`}. Dead-letter queues: ${health.deadLetterQueuesCheck?.status ?? "not reported by this AgentX"}. Slack: ${health.slack.status}. GitHub App: ${health.github.status}. Open workspaces: ${Object.entries(health.workspaces).map(([status, count]) => `${status} ${count}`).join(", ") || "none"}.`,
+        text: `AgentX API ${health.version.developerApi}, admin API ${health.version.adminApi}. Alarms: ${firing.length === 0 ? "none firing" : `in ALARM: ${firing.join(", ")}`}${missing.length === 0 ? "" : `; missing: ${missing.join(", ")}`}. Dead-letter queues: ${health.deadLetterQueuesCheck?.status ?? "not reported by this AgentX"}. Slack: ${health.slack.status}. GitHub App: ${health.github.status}. Open workspaces: ${Object.entries(health.workspaces).map(([status, count]) => `${status} ${count}`).join(", ") || "none"}.`,
       };
     },
   },
