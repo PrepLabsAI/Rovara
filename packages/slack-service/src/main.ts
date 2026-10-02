@@ -97,9 +97,10 @@ function slackBotToken(): Promise<string> {
 const slackUserName = createSlackUserNames({ token: slackBotToken });
 
 /** Posts in a thread, or with no thread a new message in the channel; answers the message's timestamp. */
-async function postToSlack(channel: string, threadTs: string | undefined, text: string, blocks?: unknown[]): Promise<string | undefined> {
+async function postToSlack(channel: string, threadTs: string | undefined, text: string, blocks?: unknown[], signal?: AbortSignal): Promise<string | undefined> {
   const response = await fetch("https://slack.com/api/chat.postMessage", {
     method: "POST",
+    ...(signal === undefined ? {} : { signal }),
     headers: { authorization: `Bearer ${await slackBotToken()}`, "content-type": "application/json; charset=utf-8" },
     body: JSON.stringify({ channel, ...(threadTs === undefined ? {} : { thread_ts: threadTs }), text, unfurl_links: false, ...(blocks === undefined ? {} : { blocks }) }),
   });
@@ -371,7 +372,8 @@ await runConsumer(queue, (message, context) => processSlackRequest(message, {
   confirmations,
   postConfirmation: async (thread, confirmation, text) => { await postToSlack(thread.channelId, thread.threadTs, text, confirmationBlocks(text, confirmation.confirmationId)); },
   postWithBlocks: async (thread, text, blocks) => { await postToSlack(thread.channelId, thread.threadTs, text, blocks); },
-  postProgress: (thread, text) => postToSlack(thread.channelId, thread.threadTs, text),
+  // Issue 219: a progress post Slack does not answer is given up after ten seconds.
+  postProgress: (thread, text) => postToSlack(thread.channelId, thread.threadTs, text, undefined, AbortSignal.timeout(10_000)),
   updateMessage: (thread, ts, text) => updateInSlack(thread.channelId, ts, text),
   turnRecords: new DynamoTurnRecordWriter(documentClient, turnRecordsTableName),
   userName: slackUserName,
