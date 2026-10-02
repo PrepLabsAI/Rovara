@@ -20,7 +20,16 @@ export interface WizardChoice { value: string; label: string }
 export interface WizardButton { value: string; label: string; primary: boolean }
 
 /** One field of a form question. A masked field never carries a value back to the page. */
-export interface WizardField { name: string; label: string; why?: string; example?: string; hint?: string; masked?: boolean; value?: string; error?: string }
+export interface WizardField {
+  name: string; label: string; why?: string; example?: string; hint?: string; masked?: boolean; value?: string; error?: string;
+  /** A choice field's options and the one an empty answer means. */
+  choices?: WizardChoice[];
+  defaultValue?: string;
+  section?: "advanced";
+  group?: string;
+  /** Where the value can be copied from (FR-033). */
+  link?: WizardLink;
+}
 
 export interface WizardQuestion {
   /** Fresh per question, and again after an inline rejection, so a stale page cannot answer twice. */
@@ -47,6 +56,10 @@ export interface WizardQuestion {
   error?: string;
   /** form: its fields, in order. The answer is a JSON object of field name to value. */
   fields?: WizardField[];
+  /** form: "Recommended settings" lines (FR-020). */
+  summary?: string[];
+  /** form: the forward button's label; "Continue" when absent. */
+  submitLabel?: string;
 }
 
 export type StepStatus = "pending" | "skipped" | "running" | "done" | "waiting" | "failed";

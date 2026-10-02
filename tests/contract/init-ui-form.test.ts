@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { askForm, checkSlackBotToken, fieldCheck, type FormField } from "../../packages/cli/src/init/prompts.js";
 import { answeringSlackInstall } from "../../packages/cli/src/init/commands.js";
 import { browserPrompter } from "../../packages/cli/src/init/ui/prompter.js";
-import { createWizardHub, type WizardHub } from "../../packages/cli/src/init/ui/state.js";
+import { createWizardHub, NEW_TAB_NOTE, type WizardHub } from "../../packages/cli/src/init/ui/state.js";
 import { scriptedPrompter, TEST_BOT_TOKEN } from "../support/init-fakes.js";
 
 const FIELDS: FormField[] = [
@@ -75,5 +75,59 @@ describe("forms", () => {
     const prompter = scriptedPrompter(["1111.2222", TEST_BOT_TOKEN, ""]);
     await expect(askForm(prompter, "Paste the Slack values", FIELDS)).resolves.toEqual({ clientId: "1111.2222", botToken: TEST_BOT_TOKEN, appName: "AgentX acme (staging)" });
     expect(prompter.asked).toEqual(["Slack app Client ID (Basic Information, App Credentials)", "Slack bot token", "Slack app name"]);
+  });
+});
+
+describe("spec 048 phase 2: richer forms", () => {
+  const engine: FormField = { name: "engine", question: "Deploy engine", flag: "--engine", defaultValue: "templates", section: "advanced", choices: [{ value: "templates", label: "Published templates" }, { value: "cdk", label: "From source" }] };
+  const email: FormField = { name: "email", question: "Your email", flag: "--admin-email" };
+  const signing: FormField = { name: "signing", question: "Signing Secret", flag: "--slack-signing-secret", secret: true };
+  const client: FormField = { name: "client", question: "Client Secret", flag: "--slack-client-secret", secret: true };
+
+  it("a choice field takes its default when left empty, and refuses a value it does not list", async () => {
+    const hub = createWizardHub("staging");
+    const asked = browserPrompter(hub).form?.("Your settings", [email, engine], {}) ?? Promise.reject(new Error("no form"));
+    const first = hub.state().question;
+    expect(first?.fields?.[1]).toMatchObject({ name: "engine", section: "advanced", defaultValue: "templates", choices: engine.choices });
+    expect(hub.answer(first?.id ?? "", JSON.stringify({ email: "a@example.com", engine: "terraform" }))).toBe("Check the field marked below.");
+    const second = hub.state().question;
+    expect(second?.fields?.find((field) => field.name === "engine")?.error).toBe("choose one of the options");
+    expect(second?.fields?.find((field) => field.name === "email")?.value).toBe("a@example.com");
+    expect(hub.answer(second?.id ?? "", JSON.stringify({ email: "a@example.com", engine: "" }))).toBeUndefined();
+    await expect(asked).resolves.toEqual({ email: "a@example.com", engine: "templates" });
+  });
+
+  it("starts from the values it is given, but never prefills a secret", () => {
+    const hub = createWizardHub("staging");
+    void browserPrompter(hub).form?.("Your Slack app's values", [email, signing], { values: { email: "kept@example.com", signing: "a".repeat(32) } });
+    const fields = hub.state().question?.fields ?? [];
+    expect(fields.find((field) => field.name === "email")?.value).toBe("kept@example.com");
+    expect(fields.find((field) => field.name === "signing")).not.toHaveProperty("value");
+    expect(JSON.stringify(hub.snapshot())).not.toContain("a".repeat(32));
+  });
+
+  it("a cross-field refusal marks the field, keeps plain values, and empties every secret", () => {
+    const hub = createWizardHub("staging");
+    const same = "f".repeat(32);
+    void browserPrompter(hub).form?.("Your Slack app's values", [email, client, signing], {
+      crossCheck: (values) => (values.client === values.signing ? { signing: "This is the Client Secret again. Copy the Signing Secret, just below it." } : undefined),
+    });
+    const id = hub.state().question?.id ?? "";
+    expect(hub.answer(id, JSON.stringify({ email: "a@example.com", client: same, signing: same }))).toBe("Check the field marked below.");
+    const fields = hub.state().question?.fields ?? [];
+    expect(fields.find((field) => field.name === "signing")?.error).toBe("This is the Client Secret again. Copy the Signing Secret, just below it.");
+    expect(fields.find((field) => field.name === "email")?.value).toBe("a@example.com");
+    expect(JSON.stringify(hub.snapshot())).not.toContain(same);
+  });
+
+  it("carries the summary, the forward button's label, the group and a field's link", () => {
+    const hub = createWizardHub("staging");
+    void browserPrompter(hub).form?.("Your settings", [{ ...engine, group: "How people sign in", help: { learnMoreUrl: "https://api.slack.com/apps", linkLabel: "Open your Slack apps" } }], {
+      summary: ["Models: Claude Sonnet 4.6 on Amazon Bedrock."], help: { submitLabel: "Review the plan" },
+    });
+    const question = hub.state().question;
+    expect(question?.summary).toEqual(["Models: Claude Sonnet 4.6 on Amazon Bedrock."]);
+    expect(question?.submitLabel).toBe("Review the plan");
+    expect(question?.fields?.[0]).toMatchObject({ group: "How people sign in", link: { url: "https://api.slack.com/apps", label: "Open your Slack apps", note: NEW_TAB_NOTE } });
   });
 });

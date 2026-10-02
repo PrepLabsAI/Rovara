@@ -5,8 +5,8 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { agentXError } from "@agentx/contracts";
 import {
-  checkPrivateKeyPem, checkSlackBotToken, checkSlackSigningSecret, cleanSecret, fieldCheck, readHidden, secretFromSource,
-  terminalPrompter, unattendedPrompter,
+  ADVANCED_QUESTION, askForm, checkPrivateKeyPem, checkSlackBotToken, checkSlackSigningSecret, cleanSecret, fieldCheck, readHidden, secretFromSource,
+  terminalPrompter, unattendedPrompter, type FormField,
 } from "../../packages/cli/src/init/prompts.js";
 import { scriptedPrompter } from "../support/init-fakes.js";
 
@@ -227,5 +227,35 @@ describe("fieldCheck and the terminal's secret prompt (spec 040 FR-040)", () => 
   it("the terminal's hidden prompt ignores validate, so a bad value still fails where it always did", async () => {
     const prompter = terminalPrompter({ readLine: async () => "", readSecret: async () => "not-a-token", write: () => undefined });
     await expect(prompter.secret("Slack bot token", { flag: "--slack-bot-token", validate: () => "refused" })).resolves.toBe("not-a-token");
+  });
+});
+
+describe("spec 048 FR-072: a form in the terminal", () => {
+  const fields: FormField[] = [
+    { name: "email", question: "Your email", flag: "--admin-email" },
+    { name: "engine", question: "Deploy engine", flag: "--engine", defaultValue: "templates", section: "advanced", choices: [{ value: "templates", label: "templates" }, { value: "cdk", label: "cdk" }] },
+    { name: "budget", question: "Monthly budget", flag: "--budget", defaultValue: "", section: "advanced" },
+  ];
+
+  it("asks the default-path fields, then whether to change the advanced ones; No takes their defaults", async () => {
+    const prompter = scriptedPrompter(["a@example.com", false]);
+    await expect(askForm(prompter, "Your settings", fields)).resolves.toEqual({ email: "a@example.com", engine: "templates", budget: "" });
+    expect(prompter.asked).toEqual(["Your email", ADVANCED_QUESTION]);
+  });
+
+  it("Yes asks every advanced field, a choice through choose", async () => {
+    const prompter = scriptedPrompter(["a@example.com", true, "cdk", "250"]);
+    await expect(askForm(prompter, "Your settings", fields)).resolves.toEqual({ email: "a@example.com", engine: "cdk", budget: "250" });
+    expect(prompter.asked).toEqual(["Your email", ADVANCED_QUESTION, "Deploy engine", "Monthly budget"]);
+  });
+
+  it("--yes answers every field with its default and still refuses a field with none", async () => {
+    await expect(askForm(unattendedPrompter(), "Your settings", fields.slice(1))).resolves.toEqual({ engine: "templates", budget: "" });
+    await expect(askForm(unattendedPrompter(), "Your settings", fields)).rejects.toThrow("Your email needs an answer; with --yes, pass --admin-email");
+  });
+
+  it("stops on a cross-field refusal, as a refused value does", async () => {
+    const same: FormField[] = [{ name: "a", question: "A", flag: "--a" }, { name: "b", question: "B", flag: "--b" }];
+    await expect(askForm(scriptedPrompter(["x", "x"]), "Pair", same, { crossCheck: () => ({ b: "B must differ from A" }) })).rejects.toThrow("B must differ from A");
   });
 });
