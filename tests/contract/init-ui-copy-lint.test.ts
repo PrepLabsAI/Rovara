@@ -128,12 +128,18 @@ describe("SC-011: the whole install, as the page shows it", () => {
     const h = await harness();
     const { operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     const questions = new Map<string, WizardQuestion>(operator.states.flatMap((state) => (state.question === undefined ? [] : [[state.question.id, state.question] as const])));
-    expect(questions.size).toBeGreaterThan(20);
+    // Spec 048 FR-020: the settings are one form, so each of its fields is held to the same words.
+    const fields = new Map([...questions.values()].flatMap((question) => (question.fields ?? []).map((field) => [`${question.text}/${field.name}`, field] as const)));
+    expect(questions.size + fields.size).toBeGreaterThan(20);
     for (const question of questions.values()) {
       expect({ text: question.text, label: question.label }).toMatchObject({ label: expect.stringMatching(/\S/) as unknown });
       expect({ text: question.text, why: question.why }).toMatchObject({ why: expect.stringMatching(/\S/) as unknown });
       if (question.kind === "ask" && question.defaultValue !== undefined) expect({ text: question.text, hint: question.hint }).toMatchObject({ hint: expect.stringMatching(/\S/) as unknown });
       for (const button of question.buttons ?? []) expect(["Yes", "No"]).not.toContain(button.label);
+    }
+    for (const [where, field] of fields) {
+      expect({ where, label: field.label }).toMatchObject({ label: expect.stringMatching(/\S/) as unknown });
+      expect({ where, why: field.why }).toMatchObject({ why: expect.stringMatching(/\S/) as unknown });
     }
   });
 

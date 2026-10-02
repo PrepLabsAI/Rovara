@@ -14,6 +14,9 @@ type HelpSource = QuestionHelp | ((match: RegExpExecArray) => QuestionHelp);
 export interface QuestionCopyEntry { kind: QuestionKind; flag?: string; text?: RegExp; help: HelpSource }
 
 export const QUESTION_COPY: readonly QuestionCopyEntry[] = [
+  // Spec 048 FR-020: the settings, as one form.
+  { kind: "form", text: /^Your settings$/, help: { label: "Your settings", why: "Answer these four. Everything else has a recommended value you can change under Advanced settings.", submitLabel: "Review the plan" } },
+  { kind: "ask", flag: "--env", help: { label: "Install name", why: "Names this install in AWS, GitHub and Slack, so one account can hold more than one.", example: "production" } },
   {
     kind: "choose", flag: "AWS_PROFILE", text: /sign-in is missing or has expired/,
     help: { label: "Your AWS sign-in has ended", why: "AgentX needs a current AWS sign-in to look at your account.", buttons: true, choiceLabels: { signin: "Sign in again", retry: "I signed in another way, check again", stop: "Stop for now" } },
@@ -28,16 +31,18 @@ export const QUESTION_COPY: readonly QuestionCopyEntry[] = [
   { kind: "choose", flag: "--classifier-model", help: { label: "Safety check model", why: "The safety check model looks at every action before AgentX takes it." } },
   { kind: "ask", flag: "--orchestrator-model", help: { label: "Main model id", why: "The model id exactly as your provider lists it.", example: "us.anthropic.claude-sonnet-4-6" } },
   { kind: "ask", flag: "--classifier-model", help: { label: "Safety check model id", why: "The model id exactly as your provider lists it.", example: "amazon.nova-lite-v1:0" } },
+  { kind: "choose", flag: "--worker-model", help: { label: "Coding model", why: "The coding model writes and tests code in your repositories." } },
   { kind: "ask", flag: "--worker-model", help: { label: "Coding model", why: "The coding model writes and tests code in your repositories.", example: "us.anthropic.claude-sonnet-4-6", defaultText: "Claude Sonnet 4.6" } },
   { kind: "ask", flag: "--permission-boundary", help: { label: "Permission boundary (advanced)", why: "Only if your company requires every IAM role to carry its own boundary policy. Your platform team gives you its address." } },
   { kind: "ask", flag: "--operator-principal", help: { label: "Who may run day-two commands (advanced)", why: "Leave it empty and anyone with admin rights in this AWS account can run them." } },
-  { kind: "choose", flag: ALERT_FLAG, help: { label: "Where should AgentX send alerts?", why: "AgentX tells you here when something stops working.", choiceLabels: { email: "An email address (recommended)", webhook: "A PagerDuty or Opsgenie address (kept secret)", none: "Nowhere for now" } } },
-  { kind: "ask", flag: ALERT_FLAG, help: { label: "Alert email address", why: "AWS sends a confirmation email here first. Confirm it to start getting alerts.", example: "ops@example.com" } },
+  { kind: "choose", flag: ALERT_FLAG, help: { label: "Where should AgentX send alerts?", why: "AgentX tells you here when something stops working.", choiceLabels: { email: "An email address (recommended)", webhook: "A PagerDuty or Opsgenie address (kept secret)", none: "Nowhere for now. Nobody is told when AgentX stops working." } } },
+  { kind: "ask", flag: ALERT_FLAG, help: { label: "Alert email address", why: "AWS sends a confirmation email here first. Confirm it to start getting alerts.", example: "ops@example.com", hint: "Optional. Leave empty to use your email." } },
   { kind: "ask", flag: "--budget", help: { label: "Monthly budget alert, in US dollars", why: "AWS emails you when this month's costs pass 80% of it. 0 turns it off." } },
   { kind: "choose", flag: "--budget-scope", help: { label: "Which costs should the budget count?", why: "The whole account is simplest. Counting only AgentX needs a billing tag that can take a day to start counting.", choiceLabels: { account: "The whole account (recommended)", tag: "Only AgentX's costs (needs a billing tag)" } } },
   { kind: "ask", flag: "--github-account", help: { label: "GitHub owner", why: "The GitHub organization or user that will own AgentX's GitHub app.", example: "acme" } },
-  { kind: "choose", flag: "--github-account-type", help: { label: "Is it an organization or a personal account?", why: "GitHub keeps apps in a different place for each.", choiceLabels: { organization: "An organization", user: "A personal account" } } },
-  { kind: "ask", flag: "--github-app-name", help: { label: "App name", why: "The name of AgentX's app in GitHub, and the default for Slack. GitHub needs it to be unique.", example: "AgentX acme (production)" } },
+  // Asked only when GitHub could not say what the owner is (FR-020).
+  { kind: "choose", text: /^Is .+ an organization or a personal account\?$/, flag: "--github-account-type", help: { label: "Is it an organization or a personal account?", why: "GitHub could not tell AgentX, and keeps apps in a different place for each.", choiceLabels: { organization: "An organization", user: "A personal account" } } },
+  { kind: "ask", flag: "--github-app-name", help: { label: "App name", why: "The name of AgentX's app in GitHub, and the default for Slack. GitHub needs it to be unique.", example: "AgentX acme (production)", hint: "Optional. Leave empty to use AgentX, your GitHub owner and the install name." } },
   { kind: "ask", flag: "--slack-app-name", help: { label: "Slack app name", why: "How AgentX's app shows in your Slack workspace.", example: "AgentX acme (production)" } },
   { kind: "choose", flag: "--slack-app-posted-messages", help: { label: "Answer messages other apps post for people?", why: "Some teams post to Slack through tools that use a person's own Slack token. AgentX never answers itself or other bots.", choiceLabels: { accept: "Yes, answer them (recommended)", ignore: "No, only messages typed in Slack" } } },
   { kind: "choose", flag: "--slack-install", help: { label: "Is the Slack app installed in your workspace?", why: "AgentX needs the app installed before it can use its token.", buttons: true, choiceLabels: { installed: "Installed, continue", approval: "My workspace needs an admin to approve it" } } },
@@ -46,7 +51,7 @@ export const QUESTION_COPY: readonly QuestionCopyEntry[] = [
   { kind: "choose", flag: "--signin", help: { label: "How will developers sign in from their AI tools?", why: "Developers sign in once from Claude Code, Codex or Cursor.", choiceLabels: { slack: "Sign in with Slack (recommended)", oidc: "Your company sign-in", both: "Both" } } },
   { kind: "ask", flag: "--slack-client-id", help: { label: "Client ID", why: "Slack shows it under Basic Information, App Credentials: two numbers joined by a dot.", example: "1111111111.2222222222222" } },
   { kind: "secret", flag: "--slack-client-secret", help: { label: "Client Secret", why: "Under Basic Information, App Credentials, next to the Client ID. Press Show, then copy it." } },
-  { kind: "ask", flag: "--admin-email", help: { label: "Your email", why: "AgentX makes your admin sign-in with it and emails you a temporary password.", example: "you@example.com" } },
+  { kind: "ask", flag: "--admin-email", help: { label: "Your email", why: "AgentX makes your admin sign-in with it, and sends alerts here unless you choose otherwise.", example: "you@example.com" } },
   { kind: "choose", flag: "--repository", help: { label: "Which repository is your first project?", why: "AgentX works in this repository first. You can add more later." } },
   { kind: "ask", flag: "--project-name", help: { label: "Project name", why: "How AgentX names this project in Slack.", example: "payments-api" } },
   { kind: "ask", flag: "--setup-command", help: { label: "Setup command", why: "AgentX runs it before it changes code.", example: "npm ci", hint: "Optional. Leave empty if the project needs none." } },

@@ -551,7 +551,9 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   session.prompter = prompter;
   // Built once: the wizard shows the checklist from it before the first step runs, and the resume
   // screen names its titles.
-  const steps = initSteps({ github: deps.github ?? githubRestApi(fetchImplementation), slack: deps.slack ?? slackWebApi(fetchImplementation) });
+  // Spec 048 FR-020: one GitHub client for the steps and for the owner lookup in the settings.
+  const github = deps.github ?? githubRestApi(fetchImplementation);
+  const steps = initSteps({ github, slack: deps.slack ?? slackWebApi(fetchImplementation) });
   session.wizard?.setSteps(steps.map((step) => ({ id: step.id, title: step.title })));
   // --stop-after runs a prefix of the steps; the wizard's checklist still shows them all.
   const stopIndex = options.stopAfter === undefined ? -1 : steps.findIndex((step) => step.id === options.stopAfter);
@@ -677,6 +679,18 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     collected = await collectInitAnswers({
       env, region, account: caller.account, releaseVersion: release.manifest.version, flags: options.flags, prompter, processEnv, now,
       ...(bundle === undefined ? {} : { fixed: bundle }),
+      ...(options.finishFlags.adminEmail === undefined ? {} : { adminEmail: options.finishFlags.adminEmail }),
+      ...(options.signinFlags?.methods === undefined ? {} : { signinMethods: options.signinFlags.methods }),
+      ownerType: async (login) => {
+        try {
+          const owner = await github.owner?.(login);
+          return owner === undefined ? undefined : owner.type === "Organization" ? "organization" : "user";
+        } catch (error) {
+          // GitHub could not say (network, rate limit): the type is asked instead, and the reason is said.
+          write(`Could not look up ${login} on GitHub (${problemText(error)}); asking instead.`);
+          return undefined;
+        }
+      },
     });
     answers = collected.answers;
     // A typed flag must not contradict what the bundle already decided.

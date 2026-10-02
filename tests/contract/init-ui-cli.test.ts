@@ -15,7 +15,9 @@ import { READY_HOLD_MS, READY_OUTCOME, holdReadyScreen } from "../../packages/cl
 import { initLogPath } from "../../packages/cli/src/init/log-file.js";
 import { NO_BROWSER_LINE } from "../../packages/cli/src/init/ui-mode.js";
 import { INSTALL_STEP_ORDER, READY_LINE, stageLine, terminalStepLine } from "../../packages/cli/src/init/ui/journey.js";
-import { INIT_STEP_IDS, installAnswersParameterName, readInstallProgress } from "../../packages/cli/src/init/install-state.js";
+import { INIT_STEP_IDS, installAnswersParameterName, readInstallProgress, type InitAnswers } from "../../packages/cli/src/init/install-state.js";
+import { estimateMonthlyCost } from "../../packages/cli/src/init/cost.js";
+import { recommendedSummary } from "../../packages/cli/src/init/settings-form.js";
 import { readEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import {
   allStackOutputs, browserThatCreatesGitHubApp, fakeSlackApi, passingChecks, scriptedDeployer, scriptedPrompter,
@@ -25,7 +27,7 @@ import { fakeWizardOperator, snapshotOnReconnect } from "../support/wizard-brows
 import { ADMIN_EMAIL, fakeAlerts, fakeSlackChannels } from "../support/setup-fakes.js";
 import { markOperatorStop } from "../../packages/cli/src/init/stop.js";
 import { WIZARD_TOKEN_HEADER, type WizardSnapshot } from "../../packages/cli/src/init/ui/protocol.js";
-import { FINISH, FIRST_RUN, FIRST_RUN_BUDGET_USD, harness, releaseDir, SIGNIN, SLACK } from "../support/init-ui-harness.js";
+import { DEFAULTS, FINISH, FIRST_RUN, FIRST_RUN_BUDGET_USD, harness, releaseDir, SIGNIN, SLACK, TERMINAL_FIRST_RUN } from "../support/init-ui-harness.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
@@ -34,7 +36,7 @@ const tmp = async (prefix: string) => { const dir = await mkdtemp(join(tmpdir(),
 const LINEAR_KEY = `lin_api_${"k".repeat(40)}SECRETlinearKEY`;
 // FINISH with Linear connected: yes to the offer, the key (typed on the page), the team (the
 // default, the key's only team), then no to Jira and Asana.
-const FINISH_WITH_LINEAR = [ADMIN_EMAIL, "acme/payments-api", "", true, "payments", true, LINEAR_KEY, "", false, false, true];
+const FINISH_WITH_LINEAR = ["acme/payments-api", "", true, "payments", true, LINEAR_KEY, "", false, false, true];
 
 describe("agentx init --ui", () => {
   it("runs the whole install from the page, with nothing typed in the terminal", async () => {
@@ -45,7 +47,8 @@ describe("agentx init --ui", () => {
     expect(operator.fieldErrors).toEqual([]);
     // The page opened, and the questions it showed are init's own, in init's own order.
     expect(operator.opened[0]).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/\?t=/);
-    expect(operator.asked).toContain("Deploy engine");
+    // Spec 048 FR-020: the settings are one form on the page, the deploy engine among them.
+    expect(operator.asked).toContain("Your settings");
     expect(operator.asked).toContain("Create all of this?");
     expect(operator.asked).toContain("Slack bot token");
     expect(operator.asked).toHaveLength(FIRST_RUN.length + SLACK.length + SIGNIN.length + FINISH.length);
@@ -61,6 +64,19 @@ describe("agentx init --ui", () => {
     expect(operator.states.some((state) => state.steps.some((step) => step.status === "running"))).toBe(true);
     expect(operator.states.at(-1)?.steps.every((step) => step.status === "done")).toBe(true);
     expect(last?.log.join("\n")).toContain("done: Create the GitHub app");
+  });
+
+  it("FR-020 and FR-021: a first install asks one settings form, and no Advanced setting is needed to reach the plan", async () => {
+    const h = await harness();
+    const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(code).toBe(0);
+    const form = operator.states.map((state) => state.question).find((question) => question?.kind === "form" && question.text === "Your settings");
+    expect(form?.fields?.filter((field) => field.section !== "advanced").map((field) => field.label)).toEqual(["Your email", "GitHub owner", "Install name", "App name"]);
+    expect(form?.summary).toEqual(recommendedSummary({ estimateUsd: estimateMonthlyCost(DEFAULTS).totalUsd, suggestedBudgetUsd: FIRST_RUN_BUDGET_USD }));
+    expect(form?.submitLabel).toBe("Review the plan");
+    // The settings form posted only email, owner and the alert address; every other value is a default.
+    const answers = JSON.parse(h.store.values.get(installAnswersParameterName("staging")) ?? "{}") as InitAnswers;
+    expect(answers).toMatchObject({ engine: "templates", identity: { mode: "cognito" }, adminEmail: ADMIN_EMAIL, signinMethods: "slack", budget: { monthlyUsd: FIRST_RUN_BUDGET_USD, scope: "account" } });
   });
 
   it("spec 048 FR-070: with the page open, the terminal prints three start lines and one line per step", async () => {
@@ -152,7 +168,7 @@ describe("agentx init --ui", () => {
   it("FR-006: a part-finished install opens on a resume screen naming what is done and what is next", async () => {
     const h = await harness();
     h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
-    expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).not.toBe(0);
+    expect(await h.run([], { prompter: scriptedPrompter(TERMINAL_FIRST_RUN) })).not.toBe(0);
     h.deployer.fail.clear();
 
     const { code, operator } = await h.runUi([...SLACK, ...SIGNIN, ...FINISH]);
@@ -171,21 +187,23 @@ describe("agentx init --ui", () => {
 
   it("FR-003: a rejected answer comes back on the field instead of ending the run", async () => {
     const h = await harness();
-    const script = [...FIRST_RUN];
-    // The alert email address, with a typo first.
-    script.splice(9, 1, "not-an-email", "ops@example.com");
-    const { code, operator } = await h.runUi([...script, ...SLACK, ...SIGNIN, ...FINISH]);
+    // The settings form, with a typo in the alert email address first (spec 048 FR-020: the alert
+    // address is a field of the one settings form now).
+    const typo = JSON.stringify({ email: ADMIN_EMAIL, githubAccount: "acme", alertEmail: "not-an-email" });
+    const { code, operator } = await h.runUi([typo, ...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     expect(code).toBe(0);
-    // Once from the POST's own reply, once on the question that came back carrying it.
-    expect(operator.fieldErrors).toEqual(["must be an email address", "must be an email address"]);
-    expect(operator.asked.filter((question) => question === "Alert email address")).toHaveLength(2);
+    // Once from the POST's own reply, once on the form that came back carrying it; the field says why.
+    expect(operator.fieldErrors).toEqual(["Check the field marked below.", "Check the field marked below."]);
+    expect(operator.asked.filter((question) => question === "Your settings")).toHaveLength(2);
+    const refused = operator.states.map((state) => state.question).find((question) => question?.kind === "form" && question.error !== undefined);
+    expect(refused?.fields?.find((field) => field.name === "alertEmail")?.error).toBe("must be an email address");
   });
 
   it("--ui and --yes are refused together, and --no-ui is the terminal path", async () => {
     const h = await harness();
     expect(await h.run(["--ui", "--yes"])).not.toBe(0);
     expect(h.printed()).toContain("agentx init --ui asks its questions on a page; --yes answers them without asking");
-    expect(await h.run(["--no-ui"], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]) })).toBe(0);
+    expect(await h.run(["--no-ui"], { prompter: scriptedPrompter([...TERMINAL_FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]) })).toBe(0);
   });
 
   it("asks the finishing steps' questions on the page, and ends the page on the developer sign-in command", async () => {
@@ -196,7 +214,8 @@ describe("agentx init --ui", () => {
     // Every finishing question and confirmation was a field on the page, in the steps' own order.
     const finishing = operator.asked.slice(FIRST_RUN.length + SLACK.length + SIGNIN.length);
     expect(finishing).toHaveLength(FINISH.length);
-    expect(finishing[0]).toBe("Your email address, for your AgentX admin user");
+    // Spec 048 FR-020: your email comes from the settings, so the first finishing question is the repository.
+    expect(finishing[0]).toBe("Which repository is the first project's?");
     expect(finishing).toContain("Connect Linear to payments-api now? (You can add it later with agentx connector add linear)");
     // Nothing was asked in the terminal: no scripted terminal prompter exists in this run, and the
     // terminal output carries no question text.
@@ -234,7 +253,8 @@ describe("agentx init --ui", () => {
     // The platform team's access stack exists already; the run stops after it, at foundation.
     const deployer = scriptedDeployer(allStackOutputs(), [environmentStackName("staging", "access")]);
     deployer.fail.set(environmentStackName("staging", "foundation"), new Error("stop after access"));
-    const operator = fakeWizardOperator(["", "ops@example.com", "", "", "acme", "", "", "", "", true, "stop"]);
+    // The settings form (only what the export did not know), the plan, then Stop for now.
+    const operator = fakeWizardOperator([...FIRST_RUN, "stop"]);
     const code = await h.run(["--ui", "--resume", "--from-bundle", dir], {
       openBrowser: operator.open,
       stackStatus: { status: async (name: string) => (name === "agentx-staging-access" ? "CREATE_COMPLETE" : undefined) },
@@ -243,7 +263,10 @@ describe("agentx init --ui", () => {
     await operator.settled();
     expect(code).not.toBe(0);
     expect(operator.remaining()).toBe(0);
-    expect(operator.asked).toContain("Alert email address");
+    expect(operator.asked).toContain("Your settings");
+    const form = operator.states.map((state) => state.question).find((question) => question?.kind === "form" && question.text === "Your settings");
+    expect(form?.fields?.map((field) => field.name)).toContain("alertEmail");
+    expect(form?.fields?.map((field) => field.name)).not.toContain("engine");
     expect(operator.asked).toContain("Create all of this?");
     expect(operator.asked).not.toContain("Deploy engine");
     expect(operator.states.at(-1)).toMatchObject({ phase: "failed" });
@@ -351,7 +374,7 @@ describe("agentx init --ui", () => {
   it("the terminal path still opens every site in the system browser", async () => {
     const h = await harness();
     const opened: string[] = [];
-    expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]), openBrowser: browserThatCreatesGitHubApp(opened) })).toBe(0);
+    expect(await h.run([], { prompter: scriptedPrompter([...TERMINAL_FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]), openBrowser: browserThatCreatesGitHubApp(opened) })).toBe(0);
     expect(opened).toContain("https://github.com/apps/agentx-acme-staging/installations/new");
     expect(opened).toContain("https://api.slack.com/apps/A0APP/event-subscriptions");
   });
@@ -432,8 +455,8 @@ describe("agentx init --ui", () => {
   it("FR-023: a failure no check reports is still on the checklist, in the error's own words", async () => {
     const h = await harness();
     const checks = passingChecks({ cdkBootstrapped: async () => false, runCdkBootstrap: async () => { throw new Error("CDKToolkit stack creation was rolled back"); } });
-    // --engine cdk skips the engine question; then yes to "Run cdk bootstrap ... now?", and no to checking again.
-    const operator = fakeWizardOperator([...FIRST_RUN.slice(1, -1), true, false]);
+    // --engine cdk leaves the engine out of the settings form; then yes to "Run cdk bootstrap ... now?", and no to checking again.
+    const operator = fakeWizardOperator([...FIRST_RUN.slice(0, -1), true, false]);
     // Issue 152: init checks --source is a clean checkout of the release's tag before the
     // prerequisites, so the source is one: an empty commit tagged v1.2.3, the harness release's version.
     const source = await tmp("agentx-init-ui-source-");
@@ -507,7 +530,7 @@ describe("agentx init --ui", () => {
   it("Q8: the terminal path still stops when Slack refuses the token", async () => {
     const h = await harness();
     const slack = fakeSlackApi({ authTest: async () => ({ ok: false, error: "invalid_auth" }) });
-    expect(await h.run([], { prompter: scriptedPrompter([...FIRST_RUN, "installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET]), slack })).not.toBe(0);
+    expect(await h.run([], { prompter: scriptedPrompter([...TERMINAL_FIRST_RUN, "installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET]), slack })).not.toBe(0);
     expect(h.printed()).toContain("Slack refused the bot token (invalid_auth); copy it again from OAuth & Permissions");
   });
 
@@ -684,7 +707,7 @@ describe("agentx init --ui", () => {
   it("spec 048 FR-059: a run paused waiting on the alert subscription shows its own plain reason", async () => {
     const h = await harness();
     const alerts = fakeAlerts({ confirmAfterPolls: 1_000, budgetUsd: FIRST_RUN_BUDGET_USD });
-    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ADMIN_EMAIL, "acme/payments-api", "", true, "payments", false, false, false, false]);
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, "acme/payments-api", "", true, "payments", false, false, false, false]);
     const code = await h.run(["--ui"], { openBrowser: operator.open, setup: { ...h.setup, alerts } });
     await operator.settled();
     expect(code).toBe(0);
@@ -755,7 +778,7 @@ describe("agentx init --ui", () => {
   it("a resumed install shows the finishing cards of the steps it runs", async () => {
     const h = await harness();
     h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
-    expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).not.toBe(0);
+    expect(await h.run([], { prompter: scriptedPrompter(TERMINAL_FIRST_RUN) })).not.toBe(0);
     h.deployer.fail.clear();
     const { code, operator } = await h.runUi([...SLACK, ...SIGNIN, ...FINISH]);
     expect(code).toBe(0);

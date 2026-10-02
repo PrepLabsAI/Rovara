@@ -1,9 +1,10 @@
 import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
-import { e2eStep, finishSteps, readyText } from "../../packages/cli/src/init/finish-steps.js";
+import { writeEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
+import { adminUserStep, e2eStep, finishSteps, readyText } from "../../packages/cli/src/init/finish-steps.js";
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
-import { initContext, progressHandle, T0, TEST_CLI_INVOCATION, type TestInitContext } from "../support/init-fakes.js";
-import { fakeControlPlane, setupServices, turn } from "../support/setup-fakes.js";
+import { initContext, progressHandle, sampleAnswers, scriptedPrompter, T0, TEST_CLI_INVOCATION, type TestInitContext } from "../support/init-fakes.js";
+import { ADMIN_EMAIL, fakeCognito, fakeControlPlane, setupServices, STAGING_SETTINGS, turn } from "../support/setup-fakes.js";
 
 const READY_PROGRESS_FIXTURE = {
   ...emptyProgress("staging", 0),
@@ -44,6 +45,18 @@ describe("the e2e step (FR-018 step 11)", () => {
 describe("the finishing steps", () => {
   it("run admin-user, first-project, connectors, alerts and e2e, in that order", () => {
     expect(finishSteps().map((step) => step.id)).toEqual(["admin-user", "first-project", "connectors", "alerts", "e2e"]);
+  });
+});
+
+describe("the admin user (spec 048 FR-020)", () => {
+  it("takes your email from the settings, asking nothing", async () => {
+    const prompter = scriptedPrompter([]);
+    const cognito = fakeCognito();
+    context = initContext({ answers: sampleAnswers({ adminEmail: ADMIN_EMAIL }), prompter, setup: setupServices({ cognito }), adminSession: async () => ({ controlPlaneUrl: "https://cp.example.test", accessToken: "t" }) });
+    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
+    expect(await adminUserStep().run(context, progressHandle())).toEqual({ status: "done", note: `admin ${ADMIN_EMAIL}` });
+    expect(prompter.asked).toEqual([]);
+    expect(cognito.created).toEqual([ADMIN_EMAIL]);
   });
 });
 

@@ -69,7 +69,9 @@ export function adminUserStep(): InitStep<InitContext> {
         },
       });
       if (settings.identity.mode === "cognito") {
-        const email = recorded?.username ?? context.flags.adminEmail ?? await context.prompter.ask("Your email address, for your AgentX admin user", {
+        // Spec 048 FR-020: your email is a setting now; the question stays for an install recorded
+        // before that, whose answers have none.
+        const email = recorded?.username ?? context.flags.adminEmail ?? context.answers.adminEmail ?? await context.prompter.ask("Your email address, for your AgentX admin user", {
           flag: "--admin-email", validate: (value) => (AlertEmailSchema.safeParse(value).success ? undefined : "must be an email address"),
         });
         let created = false;

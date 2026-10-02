@@ -19,6 +19,11 @@ const shown = (hub: WizardHub) => {
 const DEFAULT_PATH: Array<[kind: "ask" | "choose" | "confirm" | "secret", flag: string | undefined, text: string]> = [
   ["choose", "AWS_PROFILE", "AWS profile"],
   ["choose", "--region", "AWS region"],
+  // Spec 048 FR-020: the settings form's fields that are new in phase 2.
+  ["ask", "--admin-email", "Your email, for your AgentX admin user and alerts"],
+  ["ask", "--env", "Install name"],
+  ["ask", "--github-app-name", "App name for GitHub and Slack (unique on GitHub)"],
+  ["choose", "--worker-model", "Worker model"],
   ["choose", "--engine", "Deploy engine"],
   ["choose", "--identity", "Sign-in"],
   ["choose", "--model-provider", "Model provider"],
@@ -105,6 +110,14 @@ describe("the page's words for each question", () => {
     expect(pageHint("production", {})).toBe("Leave empty to use production.");
     expect(pageHint("us.anthropic.claude-sonnet-4-6", { defaultText: "Claude Sonnet 4.6" })).toBe("Leave empty to use Claude Sonnet 4.6.");
     expect(pageHint("", { hint: "Optional. Leave empty if the project needs none." })).toBe("Optional. Leave empty if the project needs none.");
+  });
+});
+
+describe("the settings form's words (spec 048 FR-020, FR-025)", () => {
+  it("names the form's forward button, and says what turning alerts off gives up", () => {
+    expect(questionHelp({ kind: "form", text: "Your settings" })).toMatchObject({ label: "Your settings", submitLabel: "Review the plan" });
+    expect(questionHelp({ kind: "choose", text: "Where should AgentX send alerts?", flag: ALERT_FLAG }).choiceLabels?.none).toBe("Nowhere for now. Nobody is told when AgentX stops working.");
+    expect(questionHelp({ kind: "choose", text: "Is acme an organization or a personal account?", flag: "--github-account-type" }).why).toBe("GitHub could not tell AgentX, and keeps apps in a different place for each.");
   });
 });
 

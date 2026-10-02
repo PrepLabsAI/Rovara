@@ -134,6 +134,9 @@ export interface GitHubApi {
   /** expiresAt is epoch milliseconds. */
   installationToken(jwt: string, installationId: string): Promise<{ token: string; expiresAt: number }>;
   repositoryCount(token: string): Promise<number>;
+  /** Spec 048 FR-020 and FR-028: a public lookup of an owner. undefined: GitHub has no such owner.
+   * Throws when GitHub could not answer (network, rate limit). Optional: a client without it skips. */
+  owner?(login: string): Promise<{ login: string; type: "User" | "Organization" } | undefined>;
 }
 
 export function githubRestApi(fetchImplementation: typeof fetch): GitHubApi {
@@ -151,7 +154,18 @@ export function githubRestApi(fetchImplementation: typeof fetch): GitHubApi {
     if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub ${what} failed with HTTP ${response.status}`);
     return response.json();
   };
+  /** A public GET: undefined for a 404, the status alone in any other refusal. */
+  const lookup = async (what: string, path: string): Promise<unknown> => {
+    const response = await fetchImplementation(`${API}${path}`, { headers: { accept: "application/vnd.github+json", "x-github-api-version": "2022-11-28", "user-agent": "agentx-cli" } });
+    if (response.status === 404) return undefined;
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub ${what} failed with HTTP ${response.status}`);
+    return response.json();
+  };
   return {
+    async owner(login) {
+      const found = (await lookup("owner lookup", `/users/${encodeURIComponent(login)}`)) as { login?: string; type?: string } | undefined;
+      return found === undefined ? undefined : { login: found.login ?? login, type: found.type === "Organization" ? "Organization" : "User" };
+    },
     async convertManifest(code) {
       return (await call("manifest conversion (the code is valid for one hour)", `/app-manifests/${encodeURIComponent(code)}/conversions`, { method: "POST" })) as Awaited<ReturnType<GitHubApi["convertManifest"]>>;
     },

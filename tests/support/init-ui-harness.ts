@@ -17,7 +17,7 @@ import { estimateMonthlyCost, suggestedBudgetUsd } from "../../packages/cli/src/
 import { initLogPath } from "../../packages/cli/src/init/log-file.js";
 import {
   allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, fakeSlackApi, HOLDER, memoryInitSecrets, passingChecks, scriptedDeployer,
-  slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_SIGNING_SECRET,
+  settingsScript, slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_SIGNING_SECRET,
 } from "./init-fakes.js";
 import { fakeWizardOperator } from "./wizard-browser.js";
 import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "./fake-cloudformation.js";
@@ -47,17 +47,22 @@ export async function releaseDir(regions: readonly string[] = ["us-east-1"]): Pr
   return dir;
 }
 
-// The same answers the terminal path's tests script (init-cli.test.ts), in the same order: `agentx
-// init --ui` asks exactly the questions it always asked, only on a page. FIRST_RUN includes the
-// budget's amount and scope after the alert address; FINISH is the finishing steps (phase 15d2):
-// admin email; repository; project name; use the proposed commands; channel; the three connector
-// offers; "did the test alarm arrive?".
-export const FIRST_RUN = ["", "", "", "", "", "", "", "", "", "ops@example.com", "", "", "acme", "", "", "", "", true];
+// Spec 048 phase 2: the page posts the settings as one form (FR-020), then confirms the plan.
+// FINISH is the finishing steps (phase 15d2), which no longer ask your email (the settings hold
+// it): repository; project name; use the proposed commands; channel; the three connector offers;
+// "did the test alarm arrive?".
+/** The settings form: your email (the admin user), the owner, and alerts to the ops address. */
+export const SETTINGS = JSON.stringify({ email: ADMIN_EMAIL, githubAccount: "acme", alertEmail: "ops@example.com" });
+export const FIRST_RUN = [SETTINGS, true];
+/** The same settings answered in the terminal, in the form's order, then the plan's confirm. */
+export const TERMINAL_FIRST_RUN = [...settingsScript({ email: ADMIN_EMAIL, owner: "acme", advanced: { alertEmail: "ops@example.com" } }), true];
 export const SLACK = ["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true];
 export const SIGNIN = ["", "1111111111.2222222222222", "fedcba9876543210fedcba9876543210", true];
-export const FINISH = [ADMIN_EMAIL, "acme/payments-api", "", true, "payments", false, false, false, true];
+export const FINISH = ["acme/payments-api", "", true, "payments", false, false, false, true];
+/** The three recommended models FIRST_RUN takes. */
+export const DEFAULTS = { orchestrator: DEFAULT_ORCHESTRATOR_MODEL, classifier: DEFAULT_CLASSIFIER_MODEL, worker: DEFAULT_WORKER_MODEL };
 // The budget FIRST_RUN's all-default models produce: the estimate plus 20%, one source with cost.ts.
-export const FIRST_RUN_BUDGET_USD = suggestedBudgetUsd(estimateMonthlyCost({ orchestrator: DEFAULT_ORCHESTRATOR_MODEL, classifier: DEFAULT_CLASSIFIER_MODEL, worker: DEFAULT_WORKER_MODEL }));
+export const FIRST_RUN_BUDGET_USD = suggestedBudgetUsd(estimateMonthlyCost(DEFAULTS));
 
 /** What the finishing steps read from the stacks: every deployed output, with the foundation's EC2
  * worker outputs as the real foundation stack has them (allStackOutputs's are placeholders). */
