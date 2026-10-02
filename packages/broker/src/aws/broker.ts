@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
+import { cancelCallbackForbidden, verifyCancelCallbackCapability } from "./cancel-callback-capability.js";
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
@@ -3197,11 +3198,27 @@ async function handleCallback(
 ) {
   const token = request.headers["x-agentx-callback-capability"];
   if (!token) throw agentXError("CALLBACK_FORBIDDEN", "callback capability is required");
-  const claims = verifyCapability(dependencies, token, action as CallbackClaims["actions"][number]);
+  // #201 Release A: accept the child format before any reconciler starts issuing it. The key
+  // family is selected by the envelope, never by unverified claims or signature fallback.
+  const cancelClaims = token.startsWith("cancel-v1.")
+    ? verifyCancelCallbackCapability(dependencies.callbackSigningKey, token, action)
+    : undefined;
+  const claims = cancelClaims ?? verifyCapability(dependencies, token, action as CallbackClaims["actions"][number]);
   if (claims.workspaceId !== workspaceId || claims.operationId !== operationId) {
     throw agentXError("CALLBACK_FORBIDDEN", "callback route is outside the capability scope");
   }
   const operation = await requireOperation(dependencies, workspaceId, operationId);
+  if (cancelClaims !== undefined) {
+    if (operation.kind !== "cancel" || operation.id !== operationId || operation.workspaceId !== workspaceId
+      || operation.fence !== cancelClaims.fence || operation.targetOperationId !== cancelClaims.targetOperationId) {
+      throw cancelCallbackForbidden();
+    }
+    const target = await getItem<OperationRecord>(dependencies, operationKey(workspaceId, cancelClaims.targetOperationId));
+    if (target === undefined || target.id !== cancelClaims.targetOperationId
+      || target.workspaceId !== workspaceId || target.fence !== cancelClaims.fence) {
+      throw cancelCallbackForbidden();
+    }
+  }
   if (operation.fence !== claims.fence) throw agentXError("STALE_FENCE", "callback fence is stale");
   if (action !== "result" && TERMINAL.has(operation.status)) {
     throw agentXError("STALE_FENCE", "terminal operations cannot publish more output");
