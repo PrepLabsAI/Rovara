@@ -53,7 +53,7 @@ export async function releaseDir(regions: readonly string[] = ["us-east-1"]): Pr
 // "did the test alarm arrive?".
 /** The settings form: your email (the admin user), the owner, and alerts to the ops address. */
 export const SETTINGS = JSON.stringify({ email: ADMIN_EMAIL, githubAccount: "acme", alertEmail: "ops@example.com" });
-export const FIRST_RUN = [SETTINGS, true];
+export const FIRST_RUN = [SETTINGS, "create"];
 /** The same settings answered in the terminal, in the form's order, then the plan's confirm. */
 export const TERMINAL_FIRST_RUN = [...settingsScript({ email: ADMIN_EMAIL, owner: "acme", advanced: { alertEmail: "ops@example.com" } }), true];
 export const SLACK = ["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true];

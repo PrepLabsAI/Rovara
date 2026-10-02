@@ -88,7 +88,17 @@ export function stateEntries(state: WizardState, where: string): CopyEntry[] {
   }
   if (state.outcome !== undefined) entries.push(at(state.outcome, "outcome"));
   for (const command of state.commands ?? []) entries.push(at(command.label, "stop for now", "stop-for-now"), at(command.command, "stop for now", "stop-for-now"));
-  if (state.plan !== undefined) for (const line of state.plan.split("\n")) if (line.trim() !== "") entries.push(at(line, "plan"));
+  if (state.plan !== undefined) {
+    entries.push(at(state.plan.intro, "plan"));
+    for (const section of state.plan.sections) {
+      entries.push(at(section.title, "plan"));
+      for (const line of section.lines) entries.push(at(line, "plan"));
+    }
+    for (const row of state.plan.cost.rows) entries.push(at(row.item, "plan"), at(row.monthly, "plan"), at(row.basis, "plan"));
+    entries.push(at(state.plan.cost.total, "plan"), at(state.plan.cost.usage, "plan"));
+    // The plan's stack, role and secret names are "Show every resource" only: technical detail.
+    for (const line of state.plan.resources) entries.push(at(line, "plan resources", "details"));
+  }
   return entries;
 }
 

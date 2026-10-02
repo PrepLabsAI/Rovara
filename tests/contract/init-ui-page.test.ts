@@ -33,7 +33,7 @@ describe("the page shell", () => {
   });
 
   it("FR-004: the plan and the technical log are behind links", () => {
-    expect(html).toMatch(/<details id="plan"[^>]*><summary>View the plan<\/summary>/);
+    expect(html).toMatch(/<details id="plan"[^>]*><summary>View the plan<\/summary><div id="plan-body"><\/div>/);
     expect(html).toMatch(/<details id="log-box"[^>]*><summary>Show technical log<\/summary>/);
   });
 
@@ -141,5 +141,13 @@ describe("spec 048 phase 2: the settings screen", () => {
   it("every new text the page module holds passes the copy-lint", () => {
     const entries: CopyEntry[] = quotedStrings(WIZARD_JS).map((text) => ({ where: "page module", text, context: "page" }));
     expect(lintCopy(entries)).toEqual([]);
+  });
+});
+
+describe("spec 048 FR-029: the plan review screen", () => {
+  it("FR-029: shows the plan as sections and a cost table, with every resource behind a link", () => {
+    expect(WIZARD_JS).toContain('el("table", "plan-table")');
+    expect(WIZARD_JS).toContain('for (const heading of ["Item", "Monthly", "Basis"])');
+    expect(WIZARD_JS).toContain('el("summary", "", "Show every resource")');
   });
 });

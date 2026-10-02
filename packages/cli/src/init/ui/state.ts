@@ -10,7 +10,7 @@ import type { InitStepId } from "../install-state.js";
 import type { InitEvent } from "../steps.js";
 import { journeyOf, STEP_PLAN, usualText, welcomeLines, type JourneyPhaseId } from "./journey.js";
 import type {
-  WizardCard, WizardCommand, WizardFailure, WizardHeader, WizardLink, WizardPhase, WizardQuestion, WizardResume, WizardSnapshot, WizardState, WizardStep,
+  WizardCard, WizardCommand, WizardFailure, WizardHeader, WizardLink, WizardPhase, WizardPlan, WizardQuestion, WizardResume, WizardSnapshot, WizardState, WizardStep,
 } from "./protocol.js";
 
 /** FR-037: every link the page shows says it opens in a new tab and to come back. */
@@ -46,7 +46,7 @@ export interface WizardHub {
   /** The checklist, in the order the steps run, before any of them has. */
   setSteps(steps: ReadonlyArray<{ id: InitStepId; title: string }>): void;
   applyEvent(event: InitEvent): void;
-  showPlan(text: string): void;
+  showPlan(plan: WizardPlan): void;
   showResume(resume: WizardResume): void;
   /** Shows a card, or replaces the one with the same id where it stands. */
   showCard(card: WizardCard): void;
@@ -134,7 +134,7 @@ export function createWizardHub(env: string, options: { now?: () => number; logP
   let steps: WizardStep[] = [];
   let header: WizardHeader = { installName: env };
   let question: WizardQuestion | undefined;
-  let plan: string | undefined;
+  let plan: WizardPlan | undefined;
   let resume: WizardResume | undefined;
   let outcome: string | undefined;
   let cards: WizardCard[] = [];
@@ -232,7 +232,7 @@ export function createWizardHub(env: string, options: { now?: () => number; logP
         case "step-failed": return changeStep(event.id, event.title, { status: "failed" });
       }
     },
-    showPlan(text) { plan = text; publish(); },
+    showPlan(next) { plan = next; publish(); },
     showResume(next) { resume = next; publish(); },
     showCard(next) {
       let shown = next;

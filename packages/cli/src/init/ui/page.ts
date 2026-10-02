@@ -70,7 +70,7 @@ export function wizardHtml(token: string): string {
       <p id="question-error" class="error hidden" role="alert"></p>
     </section>
     <section id="outcome" class="card hidden"><h2 id="outcome-title"></h2><p id="outcome-body"></p><div id="outcome-commands"></div></section>
-    <details id="plan" class="card hidden"><summary>View the plan</summary><pre id="plan-body"></pre></details>
+    <details id="plan" class="card hidden"><summary>View the plan</summary><div id="plan-body"></div></details>
     <details id="log-box" class="card"><summary>Show technical log</summary><pre id="log"></pre></details>
     <p id="closed-note" class="note hidden"></p>
   </main>
@@ -442,6 +442,31 @@ function buildQuestion(question) {
   body.append(sendButton(() => submit(question.id, read())));
 }
 
+function renderPlan(plan, open) {
+  const body = byId("plan-body");
+  body.replaceChildren(el("p", "", plan.intro));
+  for (const section of plan.sections) {
+    body.append(el("h3", "", section.title));
+    for (const line of section.lines) body.append(el("p", "", line));
+  }
+  body.append(el("h3", "", "What it costs"));
+  const table = el("table", "plan-table");
+  const head = el("tr");
+  for (const heading of ["Item", "Monthly", "Basis"]) head.append(el("th", "", heading));
+  table.append(head);
+  for (const row of plan.cost.rows) {
+    const tr = el("tr");
+    tr.append(el("td", "", row.item), el("td", "", row.monthly), el("td", "", row.basis));
+    table.append(tr);
+  }
+  body.append(table, el("p", "", plan.cost.total), el("p", "hint", plan.cost.usage));
+  const every = el("details");
+  every.append(el("summary", "", "Show every resource"));
+  for (const line of plan.resources) every.append(el("p", "", line));
+  body.append(every);
+  byId("plan").open = open;
+}
+
 function render(state) {
   lastState = state;
   document.title = state.pageTitle;
@@ -463,10 +488,7 @@ function render(state) {
   renderFailure(state.failure);
   renderPanelCards(state);
   show("plan", Boolean(state.plan));
-  if (state.plan) {
-    byId("plan-body").textContent = state.plan;
-    byId("plan").open = state.steps.every((step) => step.status === "pending");
-  }
+  if (state.plan) renderPlan(state.plan, state.steps.every((step) => step.status === "pending"));
   const hasReady = (state.cards ?? []).some((card) => card.id === "ready");
   show("outcome", Boolean(state.outcome) && !hasReady);
   if (state.outcome) {

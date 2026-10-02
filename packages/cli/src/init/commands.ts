@@ -59,7 +59,7 @@ import { accountChecksCard, prerequisitesCard, readyCard } from "./ui/cards.js";
 import { askFailureAction, failureScreen, isRetryableStep, plainReason, STOPPED_OUTCOME } from "./ui/failure.js";
 import { startInstallWizard, type InstallWizard } from "./ui/index.js";
 import { READY_LINE, stageLine, STEP_PLAN, stoppedLine, terminalStepLine } from "./ui/journey.js";
-import type { WizardResume } from "./ui/protocol.js";
+import type { WizardPlan, WizardResume } from "./ui/protocol.js";
 
 export interface InitCliDependencies {
   /** identity, store, deployer, templatesClients, commandRunner: the same seam agentx deploy uses. */
@@ -789,18 +789,28 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
         failed: () => undefined,
         run: () => runPrerequisites({ skipAccount: true, extraChecks: answerChecks, askAgain: false }),
       });
-      if (checked === "passed") break;
+      if (checked === "passed") {
+        // Printed even under --yes, before anything is created. FR-005: with --ui the same plan is
+        // the review screen; FR-029 and FR-030: its own words are the page's summary, with Create
+        // AgentX and Change answers as its buttons. Spec 048 FR-028: Change answers here loops back
+        // exactly as a Change answers from the checks does, with every answer kept.
+        const action = await confirmInstallPlan({
+          answers: collected.answers, notes: collected.notes, prompter, page: session.wizard !== undefined,
+          write: (text) => session.output.write(text),
+          ...(session.wizard === undefined ? {} : { show: (plan: WizardPlan) => session.wizard?.plan(plan) }),
+          extras: { storesOpenRouterKey: collected.openRouterKey !== undefined, ...(collected.openRouterProviders === undefined ? {} : { openRouterProviders: collected.openRouterProviders }) },
+        });
+        if (action === "change") {
+          collected = await collect(collected.settings);
+          finalAnswersRef.current = collected.answers;
+          continue;
+        }
+        break;
+      }
       collected = await collect(collected.settings);
       finalAnswersRef.current = collected.answers;
     }
     prerequisitesPassed = true;
-    // Printed even under --yes, before anything is created. FR-005: with --ui the same priced plan
-    // is the review screen, and its confirm is a button.
-    await confirmInstallPlan({
-      answers: collected.answers, notes: collected.notes, prompter,
-      write: (text) => { session.output.write(text); session.wizard?.plan(text); },
-      extras: { storesOpenRouterKey: collected.openRouterKey !== undefined, ...(collected.openRouterProviders === undefined ? {} : { openRouterProviders: collected.openRouterProviders }) },
-    });
   } else {
     write(`Resuming the install of environment ${env}.`);
     if (session.wizard !== undefined) session.wizard.resume(await resumeScreen(store, env, steps));

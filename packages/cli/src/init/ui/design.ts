@@ -80,7 +80,7 @@ export const PAGE_CLASSES = [
   "top", "time-left", "layout", "rail", "phase", "phase-title", "phase-status", "phase-time", "steps", "step", "elapsed", "step-of",
   "card", "status", "question", "why", "hint", "note", "error", "field", "field-label", "choices", "buttons", "button", "primary",
   "command", "checks", "chip", "hidden",
-  "recommended", "advanced", "group", "field-link",
+  "recommended", "advanced", "group", "field-link", "plan-table",
   "done", "now", "waiting", "coming", "stopped", "running", "ok", "failed", "info", "pending", "skipped",
 ] as const;
 
@@ -161,6 +161,9 @@ button:hover, a.button:hover { background: var(--surface-2); }
 button.primary, a.button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
 button.primary:hover, a.button.primary:hover { background: var(--accent-hover); border-color: var(--accent-hover); }
 button[disabled] { cursor: progress; opacity: .6; }
+.plan-table { border-collapse: collapse; display: block; margin: var(--space-2) 0; max-width: 100%; overflow-x: auto; width: 100%; }
+.plan-table th, .plan-table td { border-bottom: 1px solid var(--border); padding: var(--space-2) var(--space-3); text-align: left; }
+.plan-table th:last-child, .plan-table td:last-child { color: var(--text-2); }
 a { color: var(--accent); }
 :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
 details > summary { color: var(--accent); cursor: pointer; font-weight: 600; }

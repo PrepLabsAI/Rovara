@@ -101,6 +101,16 @@ export type CardStatus = "info" | "running" | "waiting" | "ok" | "failed";
  * opens in a new tab and to come back (FR-037). */
 export interface WizardLink { url: string; label: string; note?: string }
 
+/** Spec 048 FR-029: the plan as the page shows it. `resources` is "Show every resource"; it (and
+ * nothing else here) carries stack, role and secret names, so `copy-lint.ts`'s `stateEntries` reads
+ * it as technical detail rather than page copy. */
+export interface WizardPlan {
+  intro: string;
+  sections: Array<{ title: string; lines: string[] }>;
+  cost: { rows: Array<{ item: string; monthly: string; basis: string }>; total: string; usage: string };
+  resources: string[];
+}
+
 /** A command shown with a copy button: only on the ready screen and after Stop for now (FR-061).
  * `group` is the subheading it sits under; the page starts a new one where the group changes. */
 export interface WizardCommand { label: string; command: string; group?: string }
@@ -146,7 +156,7 @@ export interface WizardState {
   welcome?: string[];
   question?: WizardQuestion;
   /** `confirmInstallPlan`'s priced plan, shown as the review screen (FR-005). */
-  plan?: string;
+  plan?: WizardPlan;
   resume?: WizardResume;
   /** The connect and finishing screens' cards, in the order each first appeared. */
   cards?: WizardCard[];

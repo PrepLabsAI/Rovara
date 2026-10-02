@@ -133,23 +133,34 @@ describe("agentx init --ui", () => {
     expect(h.plane.credentials).toContainEqual({ ref: "linear", type: "static-secret", secretName: "agentx/staging/connectors/linear" });
   });
 
-  it("FR-005: the priced plan is a review screen, and declining it creates nothing", async () => {
+  // Spec 048 FR-029 and FR-030: on the page, the plan's review screen offers Create AgentX and
+  // Change answers only; declining outright is a terminal-only behavior now (init-plan.test.ts's
+  // "creates nothing when the engineer says no" covers that, through confirmInstallPlan directly).
+  it("FR-005: the priced plan is a review screen, and nothing is created before Create AgentX is pressed", async () => {
     const h = await harness();
-    const { code, operator } = await h.runUi([...FIRST_RUN.slice(0, -1), false]);
-    expect(code).not.toBe(0);
-    // The plan and its confirm are on screen together: the confirm is the review screen's button.
+    let deployedBeforeCreate: string[] | undefined;
+    let savedBeforeCreate: boolean | undefined;
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH], {
+      beforeAnswer: async (question) => {
+        if (question.text !== "Create all of this?") return;
+        deployedBeforeCreate = h.deployer.requests.map((request) => request.part);
+        savedBeforeCreate = h.store.values.has(installAnswersParameterName("staging"));
+      },
+    });
+    expect(await h.run(["--ui"], { openBrowser: operator.open })).toBe(0);
+    await operator.settled();
+    // The plan and its confirm are on screen together: the confirm is the review screen's buttons.
     const review = operator.states.find((state) => state.plan !== undefined && state.question !== undefined);
-    expect(review?.plan).toContain("Estimated monthly total");
-    expect(review?.plan).toContain("AgentX will create the install staging in AWS account 123456789012");
-    expect(review?.question).toMatchObject({ kind: "confirm", text: "Create all of this?", defaultConfirm: false });
-    // Nothing was created before it: no step had even started when the plan went up.
+    expect(review?.plan?.sections[0]?.lines[0]).toBe("The network and sign-in, the AgentX service and the Slack connection, in AWS account 123456789012 (us-east-1).");
+    expect(review?.plan?.cost.total).toMatch(/^About \$\d+\.\d{2} a month\.$/);
+    expect(review?.question).toMatchObject({ kind: "actions", text: "Create all of this?" });
+    expect(review?.question?.buttons?.map((button) => button.label)).toEqual(["Create AgentX", "Change answers"]);
+    // Nothing was created before it: no step had even started, and nothing was deployed or saved.
     expect(review?.steps.every((step) => step.status === "pending")).toBe(true);
-    expect(h.deployer.requests).toEqual([]);
-    expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
-    expect(h.printed()).toContain("install declined; nothing was created");
-    expect(operator.states.at(-1)).toMatchObject({ phase: "failed" });
-    // A stop with its own words (operatorStop) keeps them as the outcome.
-    expect(operator.states.at(-1)?.outcome).toBe("Install declined; nothing was created.");
+    expect(deployedBeforeCreate).toEqual([]);
+    expect(savedBeforeCreate).toBe(false);
+    // Once Create AgentX is pressed, the install actually begins.
+    expect(h.deployer.requests.map((request) => request.part)).toEqual(["access", "foundation", "identity", "control-plane", "runtime", "slack"]);
   });
 
   it("spec 048 SC-009: a release with a private image is refused on the page before anything is created", async () => {
@@ -398,8 +409,8 @@ describe("agentx init --ui", () => {
 
   it("FR-022: the region picker offers only the release's regions", async () => {
     const h = await harness();
-    // No --region, so the region is the first question; then the first-run answers, and no to the plan.
-    const operator = fakeWizardOperator(["", ...FIRST_RUN.slice(0, -1), false]);
+    // No --region, so the region is the first question; then the first-run answers, through to the end.
+    const operator = fakeWizardOperator(["", ...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     await executeCli(["--env", "staging", "init", "--release", await releaseDir(), "--ui"], {
       stdout: { write: () => undefined }, stderr: { write: () => undefined }, environments: { home: h.home },
       init: { ...h.base, openBrowser: operator.open },
@@ -413,8 +424,8 @@ describe("agentx init --ui", () => {
     const h = await harness();
     await mkdir(join(h.home, ".aws"), { recursive: true });
     await writeFile(join(h.home, ".aws", "config"), "[default]\nregion = us-east-1\n[profile dev]\nsso_session = acme\nregion = us-west-2\n");
-    // The profile, then the region (us-east-1, not the default), then the first-run answers, and no to the plan.
-    const operator = fakeWizardOperator(["dev", "us-east-1", ...FIRST_RUN.slice(0, -1), false]);
+    // The profile, then the region (us-east-1, not the default), then the first-run answers, through to the end.
+    const operator = fakeWizardOperator(["dev", "us-east-1", ...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     await executeCli(["--env", "staging", "init", "--release", await releaseDir(["us-east-1", "us-west-2"]), "--ui"], {
       stdout: { write: () => undefined }, stderr: { write: () => undefined }, environments: { home: h.home },
       init: { ...h.base, openBrowser: operator.open, processEnv: {} },
@@ -458,7 +469,7 @@ describe("agentx init --ui", () => {
     // Spread from the harness's own fake, so the conversions counted below are this run's.
     const github = { ...h.github, owner: async (login: string) => (login === "acme" ? { login: "acme", type: "Organization" as const } : undefined) };
     const wrong = JSON.stringify({ email: ADMIN_EMAIL, githubAccount: "acmee", alertEmail: "ops@example.com" });
-    const operator = fakeWizardOperator([wrong, "organization", "change", SETTINGS, true, ...SLACK, ...SIGNIN, ...FINISH]);
+    const operator = fakeWizardOperator([wrong, "organization", "change", SETTINGS, "create", ...SLACK, ...SIGNIN, ...FINISH]);
     expect(await h.run(["--ui"], { openBrowser: operator.open, github })).toBe(0);
     await operator.settled();
     const forms = operator.states.map((state) => state.question).filter((question) => question?.kind === "form" && question.text === "Your settings");
@@ -595,7 +606,7 @@ describe("agentx init --ui", () => {
     const h = await harness();
     // While the review question is open, a second page connects, as a reloaded tab would.
     let reconnected: Awaited<ReturnType<typeof snapshotOnReconnect>> | undefined;
-    const operator = fakeWizardOperator([...FIRST_RUN.slice(0, -1), false], {
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH], {
       beforeAnswer: async (question, wizardUrl) => { if (question.text === "Create all of this?") reconnected = await snapshotOnReconnect(wizardUrl); },
     });
     await h.run(["--ui"], { openBrowser: operator.open });

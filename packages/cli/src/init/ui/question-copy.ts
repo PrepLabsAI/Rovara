@@ -60,6 +60,9 @@ export const QUESTION_COPY: readonly QuestionCopyEntry[] = [
   { kind: "ask", text: /^Paste that address/, help: { label: "Paste the address GitHub sent you to", why: "Only needed when GitHub could not send you back to this page." } },
   { kind: "secret", flag: "--github-private-key", help: { label: "GitHub app private key", why: "GitHub offers it as a download on the app's page. Paste the whole file." } },
   { kind: "confirm", text: /^Create all of this\?$/, help: { label: "Create AgentX with this plan?", why: "Nothing is created until you press Create AgentX.", yesLabel: "Create AgentX", noLabel: "Cancel the install" } },
+  // Spec 048 FR-029: on the page, the plan's confirm is these two buttons, not a yes/no (the
+  // terminal keeps the confirm above, unchanged).
+  { kind: "choose", flag: "--plan", help: { label: "Create AgentX with this plan?", why: "Nothing is created until you press Create AgentX.", buttons: true, choiceLabels: { create: "Create AgentX", change: "Change answers" } } },
   // Fix round 1: "--on-check-failure" is a copy key for this entry's lookup, not a real CLI flag;
   // the terminal never asks this question (retry.ts's checkWithChangeOnPage throws straight away
   // without a page), so there is no flag for someone to look for.

@@ -12,7 +12,7 @@ import type { InitStepId } from "../install-state.js";
 import { linkLabel } from "./cards.js";
 import { minutesText, totalMinutes, type JourneyPhaseId } from "./journey.js";
 import { browserPrompter } from "./prompter.js";
-import type { WizardCommand, WizardFailure, WizardPhase, WizardResume } from "./protocol.js";
+import type { WizardCommand, WizardFailure, WizardPhase, WizardPlan, WizardResume } from "./protocol.js";
 import { startWizardServer, type WizardServer } from "./server.js";
 import { createWizardHub, isShowableLink, type WizardHub } from "./state.js";
 
@@ -70,7 +70,7 @@ export interface InstallWizard {
   /** The checklist, before any step has run. */
   setSteps(steps: ReadonlyArray<{ id: InitStepId; title: string }>): void;
   /** `confirmInstallPlan`'s priced plan, for the review screen (FR-005). */
-  plan(text: string): void;
+  plan(plan: WizardPlan): void;
   /** What `readInstallProgress` already recorded, for the resume screen (FR-006). */
   resume(resume: WizardResume): void;
   /** FR-001: the phase before any step has run (Get started, Your choices). */
@@ -134,7 +134,7 @@ export async function startInstallWizard(input: {
     log: (line) => hub.log(line),
     event: (event) => hub.applyEvent(event),
     setSteps: (steps) => hub.setSteps(steps),
-    plan: (text) => hub.showPlan(text),
+    plan: (plan) => hub.showPlan(plan),
     resume: (resume) => hub.showResume(resume),
     setStage: (stage) => hub.setStage(stage),
     setPlace: (place) => hub.setPlace(place),
