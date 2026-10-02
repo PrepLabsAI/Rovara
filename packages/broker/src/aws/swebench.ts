@@ -375,15 +375,17 @@ export async function handleSwebenchCallback(
         ExpressionAttributeValues: { ":running": "RUNNING", ":starting": "STARTING", ":now": now(dependencies).toISOString() },
       }));
     } catch (error) {
-      // Already running, cancelling or finished: the report changes nothing but the record that the
-      // runner started (spec 052: a run cancelled before it started is charged nothing).
+      // Already running, cancelling or finished: the report changes nothing, except that a run being
+      // cancelled records that its runner started, so it is charged as one that may have spent
+      // (spec 052 Ruling 4). A run already ended keeps the charge its end was recorded with.
       if (!isConditionFailure(error)) throw error;
       await dependencies.documentClient.send(new UpdateCommand({
         TableName: dependencies.tableName,
         Key: swebenchRunKey(runId),
         UpdateExpression: "SET runnerStartedAt = :now",
-        ConditionExpression: "attribute_exists(pk) AND attribute_not_exists(runnerStartedAt)",
-        ExpressionAttributeValues: { ":now": now(dependencies).toISOString() },
+        ConditionExpression: "#status = :cancel AND attribute_not_exists(runnerStartedAt)",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":now": now(dependencies).toISOString(), ":cancel": "CANCEL_REQUESTED" },
       })).catch((failure: unknown) => { if (!isConditionFailure(failure)) throw failure; });
     }
     return { run: (await readRun(dependencies, runId)) ?? run };

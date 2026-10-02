@@ -198,7 +198,7 @@ export async function createBatch(
   const channel = await getSwebenchChannel(dependencies, context.thread.teamId, context.thread.channelId);
   if (channel === undefined) throw agentXError("CONFIG_INVALID", "Eval runs are not enabled in this channel. An administrator can enable them with `agentx admin eval enable`.");
   const ceiling = channel.maxCostUsd;
-  const reservation = roundUsd(ceiling * EVAL_BATCH_RESERVE_MARGIN);
+  const reservation = runReservationUsd(ceiling);
   if (file.costCapUsd < reservation) {
     throw agentXError("CONFIG_INVALID", `the cost cap of $${file.costCapUsd} is below one run's reservation of $${reservation} (its ceiling of $${ceiling} in this channel, plus 10%), so no run could start; raise the cap`);
   }
@@ -665,11 +665,54 @@ async function mutate<T>(dependencies: EvalBatchDependencies, batchId: string, c
       await sleep(dependencies, BACKOFF_MS * (1 + Math.random()));
       continue;
     }
+    await writeUnstartedRetryRows(dependencies, stored.record, next);
     if (TERMINAL_BATCH.has(next.status) && !TERMINAL_BATCH.has(stored.record.status)) {
       log("eval_batch.ended", { batchId, status: next.status, spentUsd: next.spentUsd, counts: next.counts });
       await dependencies.documentClient.send(new DeleteCommand({ TableName: dependencies.tableName, Key: activeKey(batchId) }));
     }
     return { record: next, value, stored: { ...stored, record: next } };
+  }
+}
+
+/**
+ * Ruling 7: a retry (attempt 2) that the cap or a stop kept from starting ends its entry's chain with
+ * a FAILED row naming why, charged $0 for the attempt that never ran, so every entry's chain ends in
+ * a terminal row and the rows' charges still sum to the spend. Written once, by the write that moved it.
+ */
+async function writeUnstartedRetryRows(dependencies: EvalBatchDependencies, before: EvalBatchRecord, after: EvalBatchRecord): Promise<void> {
+  for (const entry of after.queue) {
+    // A retry that ran has its own row; only one that never got a run is ended here.
+    if (entry.attempt !== 2 || entry.runId !== undefined || (entry.state !== "NOT_STARTED" && entry.state !== "CANCELLED")) continue;
+    // Only the write that moved it there (from QUEUED, or from RUNNING in the same write that requeued it).
+    if (before.queue.find((candidate) => candidate.index === entry.index)?.state === entry.state) continue;
+    const runId = evalBatchRunId(after.batchId, entry.index, entry.attempt);
+    const measure = EvalRunMeasureSchema.parse({
+      batchId: after.batchId,
+      runId,
+      instanceId: entry.task,
+      provider: entry.model.provider,
+      modelId: entry.model.modelId,
+      thinkingLevel: entry.model.thinkingLevel,
+      ...(entry.model.routing === undefined ? {} : { routing: entry.model.routing }),
+      repeat: entry.repeat,
+      attempt: entry.attempt,
+      outcome: "FAILED",
+      error: entry.state === "NOT_STARTED" ? "the retry did not start: the batch's cost cap was reached" : "the retry did not start: the batch was stopped",
+      agentSeconds: 0,
+      tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      costUsd: 0,
+      chargedUsd: 0,
+      imageDigest: "",
+    });
+    try {
+      await dependencies.documentClient.send(new PutCommand({
+        TableName: dependencies.tableName,
+        Item: { ...measureKey(after.batchId, runId), entityType: "EVAL_BATCH_MEASURE", ...measure },
+        ConditionExpression: "attribute_not_exists(pk)",
+      }));
+    } catch (error) {
+      if (!isConditionFailure(error)) throw error;
+    }
   }
 }
 
@@ -702,8 +745,13 @@ function inFlightCount(record: EvalBatchRecord): number {
 
 /** FR-007 with Ruling 5: a start fits while spent + (inFlight + 1) × perRunCeiling × 1.1 ≤ costCapUsd. */
 function nextStartFits(record: EvalBatchRecord, inFlight: number): boolean {
-  const reservation = (record.perRunCeilingUsd ?? record.file.costCapUsd) * EVAL_BATCH_RESERVE_MARGIN;
+  const reservation = runReservationUsd(record.perRunCeilingUsd ?? record.file.costCapUsd);
   return record.spentUsd + (inFlight + 1) * reservation <= record.file.costCapUsd + 1e-9;
+}
+
+/** One run's reservation, rounded as spend is: the same figure for the create-time refusal and every start. */
+function runReservationUsd(ceiling: number): number {
+  return roundUsd(ceiling * EVAL_BATCH_RESERVE_MARGIN);
 }
 
 function countsOf(queue: readonly Pick<EvalBatchEntry, "state">[]): EvalBatchRecord["counts"] {

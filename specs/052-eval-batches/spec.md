@@ -71,8 +71,8 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
 - **FR-006:** When a run reaches a terminal state, the slot is released, and if its batch has queued runs and spend is
   below the cap, the next queued run starts. The batch also tops up its slots on a timer (every 2 minutes), so a
   missed event never stalls it.
-- **FR-007 (cost cap):** No new run starts once `spent + inFlight × perRunCeiling ≥ costCapUsd`. Runs in flight
-  finish, so the overshoot is bounded by the per-run ceilings. The thread says when the cap stopped the batch, and
+- **FR-007 (cost cap):** A new run starts only while `spent + (inFlight + 1) × perRunCeiling × 1.1 ≤ costCapUsd`
+  (D-6). Runs in flight finish, so the overshoot is bounded by the per-run reservations. The thread says when the cap stopped the batch, and
   how many runs did not start.
 - **FR-008 (failures):** A run that ends `FAILED` for an infrastructure reason (instance lost, image pull, model access)
   is retried **once**, in its batch. A graded result is never retried. A run that fails twice is recorded as failed,

@@ -490,10 +490,19 @@ describe("the cost cap (spec 052 FR-007)", () => {
     const capped = (await getBatch(h.dependencies, batch.batchId))!;
     expect(capped).toMatchObject({ status: "CAPPED", spentUsd: 10, counts: { notStarted: 1 } });
     expect(h.startExecution).toHaveBeenCalledTimes(1);
-    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({
-      runId, attempt: 1, outcome: "RETRIED", costUsd: null, chargedUsd: 10, costEstimated: true,
-      error: "the eval instance stopped (terminated) without reporting a result; see its log stream",
-    })]);
+    // Ruling 7: the retry the cap kept from starting ends the entry's chain with a FAILED row at $0.
+    const rows = await listBatchMeasures(h.dependencies, batch.batchId);
+    expect(rows).toHaveLength(2);
+    expect(rows).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        runId, attempt: 1, outcome: "RETRIED", costUsd: null, chargedUsd: 10, costEstimated: true,
+        error: "the eval instance stopped (terminated) without reporting a result; see its log stream",
+      }),
+      expect.objectContaining({
+        runId: evalBatchRunId(batch.batchId, 0, 2), attempt: 2, outcome: "FAILED", costUsd: 0, chargedUsd: 0,
+        error: expect.stringMatching(/retry did not start: the batch's cost cap was reached/) as unknown,
+      }),
+    ]));
     await expectChargesMatchSpend(h, batch.batchId);
   });
 
@@ -551,6 +560,66 @@ describe("the cost cap (spec 052 FR-007)", () => {
     await endByStateMachine(h, runId, "CANCELLED", "cancelled from Slack");
     expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "STOPPED", spentUsd: 10 });
     expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({ outcome: "CANCELLED", chargedUsd: 10, costEstimated: true })]);
+  });
+
+  it("ends a retry that a stop kept from starting with a FAILED row at $0", async () => {
+    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    await topUpBatches(h.dependencies);
+    const runId = evalBatchRunId(batch.batchId, 0, 1);
+    // A single run takes the slot this run frees, so the retry waits in the queue.
+    h.db.set({ pk: "SWEBENCH#SLOTS", sk: "COUNTER", count: 2 });
+    await finish(h, runId, { outcome: "FAILED", error: "could not pull swebench/x: EOF", usage: usage(0.3) });
+    expect((await getBatch(h.dependencies, batch.batchId))!.queue[0]).toMatchObject({ state: "QUEUED", attempt: 2 });
+    await stopBatch(h.dependencies, batch.batchId, requester);
+    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "STOPPED", spentUsd: 0.3 });
+    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ runId, outcome: "RETRIED", chargedUsd: 0.3 }),
+      expect.objectContaining({ attempt: 2, outcome: "FAILED", chargedUsd: 0, error: expect.stringMatching(/retry did not start: the batch was stopped/) as unknown }),
+    ]));
+    await expectChargesMatchSpend(h, batch.batchId);
+  });
+
+  it("charges a run whose runner started after a stop had asked it to cancel", async () => {
+    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    await topUpBatches(h.dependencies);
+    const runId = evalBatchRunId(batch.batchId, 0, 1);
+    await stopBatch(h.dependencies, batch.batchId, requester);
+    expect(h.db.get(`SWEBENCH_RUN#${runId}`, "META")).toMatchObject({ status: "CANCEL_REQUESTED" });
+    // The runner starts anyway, and works until the state machine's next poll ends the run.
+    await runnerStarted(h, runId);
+    expect(h.db.get(`SWEBENCH_RUN#${runId}`, "META")).toMatchObject({ status: "CANCEL_REQUESTED", runnerStartedAt: expect.any(String) as unknown });
+    await endByStateMachine(h, runId, "CANCELLED", "cancelled from Slack");
+    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "STOPPED", spentUsd: 10 });
+    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({ outcome: "CANCELLED", chargedUsd: 10, costEstimated: true })]);
+  });
+
+  it("ignores a runner's start reported after its run ended: the charge and the row stand", async () => {
+    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    await topUpBatches(h.dependencies);
+    const runId = evalBatchRunId(batch.batchId, 0, 1);
+    await stopBatch(h.dependencies, batch.batchId, requester);
+    await endByStateMachine(h, runId, "CANCELLED", "cancelled from Slack");
+    await runnerStarted(h, runId);
+    const run = h.db.get(`SWEBENCH_RUN#${runId}`, "META")!;
+    expect(run).toMatchObject({ status: "CANCELLED" });
+    expect(run.runnerStartedAt).toBeUndefined();
+    // A lost row rewritten from the run gets the same $0 charge.
+    h.db.delete(`EVAL_BATCH#${batch.batchId}`, `MEASURE#${runId}`);
+    await recordBatchRunEnd(h.dependencies, without(run, "pk", "sk", "entityType", "projectName") as never);
+    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ spentUsd: 0 });
+    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({ outcome: "CANCELLED", chargedUsd: 0 })]);
+  });
+
+  it("uses one rounded reservation at create and at start", async () => {
+    // A ceiling with many decimals: a cap equal to the reservation create accepts starts one run.
+    const h = await harness({ maxConcurrentEvals: 1, maxCostUsd: 10.123456789 });
+    const batch = await createBatch(h.dependencies, h.context, file({ costCapUsd: 11.135802 }));
+    await topUpBatches(h.dependencies);
+    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "RUNNING", counts: { running: 1 } });
+    await expect(createBatch(h.dependencies, h.context, file({ costCapUsd: 11.135801 }))).rejects.toThrow(/below one run's reservation of \$11.135802/);
   });
 
   it("holds the cap when two top-ups race for the last run that fits", async () => {
