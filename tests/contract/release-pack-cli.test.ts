@@ -72,7 +72,7 @@ describe("publishable CLI package", () => {
     const bundle = await readFile(join(project, "node_modules", "@charterarc", "agentx", "bin", "agentx-cli.mjs"), "utf8");
     expect(bundle).toContain("<title>Install AgentX</title>");
     expect(bundle).toContain("x-agentx-wizard-token");
-    expect(bundle).toContain("renderCards(state.cards, state.link);");
+    expect(bundle).toContain("renderPanelCards(state);");
 
     // The owners' license ruling (FSL-1.1-ALv2) travels with the installed package, not just the
     // staged one packCli wrote before running `npm pack`.

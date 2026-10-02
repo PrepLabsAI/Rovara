@@ -8,6 +8,7 @@ import { secretsManagerValueStore, type SecretValueStore } from "../deploy/signi
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { AdminSession, SetupServices } from "../setup/services.js";
 import type { SigninFlags } from "../signin/collect.js";
+import type { CliInvocation } from "./cli-command.js";
 import type { InitAnswers } from "./install-state.js";
 import type { Prompter, SecretSource } from "./prompts.js";
 import type { WizardCard } from "./ui/protocol.js";
@@ -139,4 +140,7 @@ export interface InitContext {
   adminSession: () => Promise<AdminSession>;
   /** Phase 15d2's answers for the finishing steps, from flags (every one also has a prompt). */
   flags: FinishFlags;
+  /** Issue #222 and spec 048 FR-059 and FR-061: the command this CLI runs as, so every command the
+   * steps show (the developer sign-in line, the ready screen) works as shown. */
+  cliInvocation: CliInvocation;
 }

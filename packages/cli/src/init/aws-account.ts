@@ -10,9 +10,11 @@ import { cliErrorFor } from "../deploy/commands.js";
 import type { CommandRunner } from "../deploy/cdk-engine.js";
 import type { CallerIdentity } from "../environments/adopt.js";
 import type { InstallSurface } from "./context.js";
+import { isRootUser, ROOT_WARNING } from "./prerequisites.js";
 import type { Prompter } from "./prompts.js";
 import { problemText } from "./retry.js";
-import { awsCard, awsSignedOutCard } from "./ui/cards.js";
+import { markOperatorStop, operatorStop } from "./stop.js";
+import { awsCard, awsSignedOutCard, rootUserCard } from "./ui/cards.js";
 
 export type AwsProfileKind = "sso" | "login" | "keys" | "other";
 export interface AwsProfile { name: string; kind: AwsProfileKind; region?: string }
@@ -119,9 +121,10 @@ const isSignInProblem = (error: unknown): boolean => {
 /** The caller, shown on the page (FR-020). On the page, a missing or expired session offers the
  * profile's sign-in and asks AWS again (FR-021); `identity` builds a fresh client each time, so a
  * credential the SDK failed to load is looked up again. Without a page, the first failure is
- * thrown exactly as before. */
+ * thrown exactly as before. A root-user caller is warned and, on the page, asked whether to
+ * continue (FR-016); `write` is used only when there is no page. */
 export async function resolveCaller(input: {
-  identity: () => CallerIdentity; region: string; prompter: Prompter; runner: CommandRunner; surface?: InstallSurface; profile?: AwsProfile;
+  identity: () => CallerIdentity; region: string; prompter: Prompter; runner: CommandRunner; surface?: InstallSurface; profile?: AwsProfile; write?: (line: string) => void;
 }): Promise<{ account: string; arn: string }> {
   const { surface, profile } = input;
   const signIn = profile === undefined ? undefined : signInCommand(profile);
@@ -129,7 +132,20 @@ export async function resolveCaller(input: {
   for (;;) {
     try {
       const caller = await input.identity().get();
-      surface?.card(awsCard({ ...caller, region: input.region, ...(profile === undefined ? {} : { profile: profile.name }) }));
+      const shown = { ...caller, region: input.region, ...(profile === undefined ? {} : { profile: profile.name }) };
+      if (isRootUser(caller.arn)) {
+        if (surface === undefined) {
+          input.write?.(ROOT_WARNING);
+          return caller;
+        }
+        surface.card(rootUserCard(shown));
+        const next = await input.prompter.choose<"continue" | "stop">("You are signed in as the AWS root user. Continue?", [
+          { value: "continue", label: "Continue as root" },
+          { value: "stop", label: "Stop for now" },
+        ], { flag: "--continue-as-root", defaultValue: "continue" });
+        if (next === "stop") throw operatorStop("you chose to stop and sign in as an admin user; nothing was created");
+      }
+      surface?.card(awsCard(shown));
       return caller;
     } catch (error) {
       if (surface === undefined || !isSignInProblem(error)) throw error;
@@ -145,7 +161,7 @@ export async function resolveCaller(input: {
         { value: "retry", label: "I signed in another way; check again" },
         { value: "stop", label: "Stop the install" },
       ], { flag: "AWS_PROFILE", defaultValue: signIn === undefined ? "retry" : "signin" });
-      if (next === "stop") throw error;
+      if (next === "stop") throw markOperatorStop(error);
       if (next === "signin" && signIn !== undefined) {
         try {
           await input.runner.run(signIn.command, signIn.args, { cwd: process.cwd(), display: signIn.display });

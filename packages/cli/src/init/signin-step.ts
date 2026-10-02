@@ -10,9 +10,11 @@ import { readEnvironmentSettings } from "../environments/settings.js";
 import { applySignInChange, errorReason } from "../signin/apply.js";
 import { SIGNIN_FLAG_NAMES, enableOidcSignIn, enableSlackSignIn, type SignInCredentials } from "../signin/collect.js";
 import { readSignInSettings, type DeveloperSignInSettings } from "../signin/settings.js";
+import { cliCommandLine } from "./cli-command.js";
 import type { InitContext } from "./context.js";
 import type { SlackApi } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
+import { STEP_PLAN } from "./ui/journey.js";
 
 /** Combines the Slack and company credentials collected for --signin both into the one
  * `applySignInChange` accepts, so both are stored, only once, only after the single change is
@@ -53,7 +55,7 @@ export function combinedCredentials(slack: SignInCredentials | undefined, oidc: 
 export function developerSignInStep(input: { slack: SlackApi }): InitStep<InitContext> {
   return {
     id: "developer-signin",
-    title: "Set up developer sign-in",
+    title: STEP_PLAN["developer-signin"].title,
     async run(context, progress) {
       const { env } = context;
       if ((await readSignInSettings(context.store, env)) !== undefined) return { status: "done", note: "developer sign-in was already set up" };
@@ -93,7 +95,7 @@ export function developerSignInStep(input: { slack: SlackApi }): InitStep<InitCo
         confirm: async (text) => { context.write(text); return context.prompter.confirm("Apply this change?", { defaultValue: true }); },
         write: context.write, now: context.now, sleep: context.sleep, lockHeld: true, rerun: "agentx init",
       });
-      context.write(`Developers sign in with: npx @charterarc/agentx login ${settings.controlPlaneUrl}`);
+      context.write(`Developers sign in with: ${cliCommandLine(context.cliInvocation, `login ${settings.controlPlaneUrl}`)}`);
       return { status: "done", note: `developer sign-in: ${methods === "both" ? "Slack and company sign-in" : methods === "slack" ? "Slack" : "company sign-in"}` };
     },
   };

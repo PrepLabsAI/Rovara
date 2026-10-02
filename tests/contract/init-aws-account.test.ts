@@ -7,6 +7,9 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { listAwsProfiles, parseAwsIni, pickAwsProfile, resolveCaller, signInCommand, type AwsProfile } from "../../packages/cli/src/init/aws-account.js";
 import type { CommandRunner } from "../../packages/cli/src/deploy/cdk-engine.js";
+import { ADMIN_USER_GUIDE_URL, DEDICATED_ACCOUNT_NOTE, isRootUser, ROOT_WARNING } from "../../packages/cli/src/init/prerequisites.js";
+import { isOperatorStop } from "../../packages/cli/src/init/stop.js";
+import { signedInAs } from "../../packages/cli/src/init/ui/cards.js";
 import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
 import { HOLDER, scriptedPrompter } from "../support/init-fakes.js";
 
@@ -117,10 +120,11 @@ describe("the account the install lands in", () => {
     expect(page.cards).toEqual([{
       id: "aws", title: "AWS account", status: "ok",
       lines: [
-        "AgentX installs into account 123456789012 in us-east-1.",
-        `Signed in as ${HOLDER} (profile dev).`,
-        "AgentX recommends a dedicated AWS account for each install: environments that share an account are not a security boundary against each other.",
+        "AgentX installs into AWS account 123456789012 in us-east-1.",
+        `You are signed in as ${signedInAs(HOLDER)}, with the AWS profile dev.`,
+        "Tip: a separate AWS account just for AgentX keeps its costs and permissions apart from your other work.",
       ],
+      details: [HOLDER],
     }]);
   });
 
@@ -144,9 +148,8 @@ describe("the account the install lands in", () => {
     expect(clients).toBe(2);
     expect(page.cards.map((card) => card.status)).toEqual(["failed", "ok"]);
     expect(page.cards[0]?.lines).toEqual([
-      "AgentX cannot use the AWS sign-in of profile dev.",
-      "AWS credentials missing or expired: The security token included in the request is expired",
-      "Choose Sign in to run aws sso login --profile dev; a browser tab opens for it. If no tab opens, the terminal running agentx init shows the address and code.",
+      "The AWS sign-in of the profile dev is missing or has ended.",
+      "Choose Sign in again. A browser tab opens for the AWS sign-in; finish it there, then come back to this tab.",
     ]);
   });
 
@@ -159,7 +162,7 @@ describe("the account the install lands in", () => {
       runner: runner(Object.assign(new Error("spawn aws ENOENT"), { code: "ENOENT" })), surface: page, profile: DEV,
     })).rejects.toBe(failure);
     expect(prompter.asked).toEqual(["Your AWS sign-in is missing or has expired. What next?", "Your AWS sign-in is missing or has expired. What next?"]);
-    expect(page.cards.at(-1)?.lines).toContain("could not run aws sso login --profile dev: spawn aws ENOENT");
+    expect(page.cards.at(-1)?.details).toContain("could not run aws sso login --profile dev: spawn aws ENOENT");
   });
 
   it("names a sign-in that could not start in one line, without the command twice or a stderr tail", async () => {
@@ -175,7 +178,7 @@ describe("the account the install lands in", () => {
       },
     };
     await expect(resolveCaller({ identity: () => ({ get: async () => { throw expired(); } }), region: "us-east-1", prompter, runner: failing, surface: page, profile: DEV })).rejects.toThrow("expired");
-    const problems = page.cards.map((card) => card.lines[2]);
+    const problems = page.cards.map((card) => card.details?.[2]);
     expect(problems[1]).toBe("aws sso login --profile dev could not start: spawn aws ENOENT");
     expect(problems[2]).toBe("aws sso login --profile dev exited with code 255");
     for (const card of page.cards) for (const line of card.lines) expect(line).not.toContain("\n");
@@ -189,9 +192,53 @@ describe("the account the install lands in", () => {
       region: "us-east-1", prompter: scriptedPrompter(["retry"]), runner: runner(), surface: page, profile: { name: "legacy", kind: "keys" },
     });
     expect(caller.account).toBe("123456789012");
-    expect(page.cards[0]?.lines.at(-1)).toBe("Update the credentials of profile legacy in a terminal, then choose Check again.");
+    expect(page.cards[0]?.lines.at(-1)).toBe("Sign in to AWS again another way, then choose I signed in another way, check again.");
 
     const denied = Object.assign(new Error("not authorized to perform sts:GetCallerIdentity"), { name: "AccessDeniedException" });
     await expect(resolveCaller({ identity: () => ({ get: async () => { throw denied; } }), region: "us-east-1", prompter: scriptedPrompter([]), runner: runner(), surface: surface(), profile: DEV })).rejects.toBe(denied);
+  });
+
+  it("FR-016: warns a root user on the page, links to making an admin user, and continuing works", async () => {
+    const page = surface();
+    const root = "arn:aws:iam::123456789012:root";
+    const prompter = scriptedPrompter([""]);
+    const caller = await resolveCaller({ identity: () => ({ get: async () => ({ account: "123456789012", arn: root }) }), region: "us-east-1", prompter, runner: runner(), surface: page });
+    expect(caller).toEqual({ account: "123456789012", arn: root });
+    expect(prompter.asked).toEqual(["You are signed in as the AWS root user. Continue?"]);
+    expect(page.cards[0]).toMatchObject({
+      id: "aws", status: "waiting",
+      lines: [
+        "AgentX installs into AWS account 123456789012 in us-east-1.",
+        "You are signed in as the AWS root user. AgentX works, but AWS advises an admin user instead.",
+        "You can continue as root. A few day-two commands need an admin user instead; the ready screen says which.",
+      ],
+      link: { url: ADMIN_USER_GUIDE_URL, label: "How to create an admin user" },
+      details: [root],
+    });
+    expect(page.cards[1]).toMatchObject({ id: "aws", status: "ok" });
+  });
+
+  it("FR-016: stopping at the root warning is the person's own stop, not a failure", async () => {
+    const error = await resolveCaller({ identity: () => ({ get: async () => ({ account: "123456789012", arn: "arn:aws:iam::123456789012:root" }) }), region: "us-east-1", prompter: scriptedPrompter(["stop"]), runner: runner(), surface: surface() }).catch((caught: unknown) => caught);
+    expect(isOperatorStop(error)).toBe(true);
+  });
+
+  it("FR-016: without a page, a root user gets the warning as a line and no question", async () => {
+    const lines: string[] = [];
+    const prompter = scriptedPrompter([]);
+    await resolveCaller({ identity: () => ({ get: async () => ({ account: "123456789012", arn: "arn:aws:iam::123456789012:root" }) }), region: "us-east-1", prompter, runner: runner(), write: (line) => lines.push(line) });
+    expect(lines).toEqual([ROOT_WARNING]);
+    expect(prompter.asked).toEqual([]);
+  });
+
+  it("FR-017: the account tip is plain words with no double negative", () => {
+    expect(DEDICATED_ACCOUNT_NOTE).toBe("Tip: a separate AWS account just for AgentX keeps its costs and permissions apart from your other work.");
+    expect(DEDICATED_ACCOUNT_NOTE).not.toMatch(/\bnot\b|\bno\b|\bnever\b/);
+  });
+
+  it("knows the root user from its ARN only", () => {
+    expect(isRootUser("arn:aws:iam::123456789012:root")).toBe(true);
+    expect(isRootUser("arn:aws-us-gov:iam::123456789012:root")).toBe(true);
+    expect(isRootUser("arn:aws:sts::123456789012:assumed-role/root/alice")).toBe(false);
   });
 });

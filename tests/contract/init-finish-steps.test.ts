@@ -2,8 +2,14 @@ import { rm } from "node:fs/promises";
 import { afterEach, describe, expect, it } from "vitest";
 import { e2eStep, finishSteps, readyText } from "../../packages/cli/src/init/finish-steps.js";
 import { emptyProgress } from "../../packages/cli/src/init/install-state.js";
-import { initContext, progressHandle, T0, type TestInitContext } from "../support/init-fakes.js";
+import { initContext, progressHandle, T0, TEST_CLI_INVOCATION, type TestInitContext } from "../support/init-fakes.js";
 import { fakeControlPlane, setupServices, turn } from "../support/setup-fakes.js";
+
+const READY_PROGRESS_FIXTURE = {
+  ...emptyProgress("staging", 0),
+  slack: { appId: "A0APP", teamId: "T0TEAM", botUserId: "U0BOT", botName: "agentx-acme-staging" },
+  project: { name: "payments-api", revision: 1, channelName: "payments", channelId: "C0PAY00001", teamId: "T0TEAM" },
+};
 
 let context: TestInitContext | undefined;
 afterEach(async () => { if (context !== undefined) await rm(context.home, { recursive: true, force: true }); });
@@ -43,36 +49,54 @@ describe("the finishing steps", () => {
 
 describe("the message init ends with", () => {
   it("says where to talk to AgentX and what to do next", () => {
-    const text = readyText({ env: "staging", controlPlaneUrl: "https://cp.example.test", progress: {
-      ...emptyProgress("staging", T0),
-      slack: { appId: "A0APP00001", teamId: "T0123456789", botUserId: "U0BOT00001" },
-      project: { name: "payments-api", revision: 2, channelName: "payments", channelId: "C0PAY00001" },
-      connectors: [{ type: "linear", ref: "linear" }],
-    } });
+    const text = readyText({
+      env: "staging", controlPlaneUrl: "https://cp.example.test", botName: "agentx-acme-staging", invocation: TEST_CLI_INVOCATION,
+      progress: {
+        ...emptyProgress("staging", T0),
+        slack: { appId: "A0APP00001", teamId: "T0123456789", botUserId: "U0BOT00001" },
+        project: { name: "payments-api", revision: 2, channelName: "payments", channelId: "C0PAY00001" },
+        connectors: [{ type: "linear", ref: "linear" }],
+      },
+    });
     expect(text).toBe([
       "AgentX environment staging is ready.",
-      "  Talk to it: mention <@U0BOT00001> in #payments (project payments-api, revision 2).",
-      "  Developers sign in with: npx @charterarc/agentx login https://cp.example.test",
-      "  Connected: Linear. Add more with agentx --env staging connector add linear|jira|asana --project payments-api.",
-      "  More projects: agentx --env staging project add, then agentx --env staging channel add.",
-      "  Send a test alarm any time: agentx --env staging alerts test.",
+      "  Talk to it: mention @agentx-acme-staging in #payments (project payments-api).",
+      "  Developers sign in with: node /opt/agentx/dist/main.js login https://cp.example.test",
+      "  Connected: Linear. Add more with node /opt/agentx/dist/main.js --env staging connector add linear|jira|asana --project payments-api.",
+      "  More projects: node /opt/agentx/dist/main.js --env staging project add, then node /opt/agentx/dist/main.js --env staging channel add.",
+      "  Send a test alarm any time: node /opt/agentx/dist/main.js --env staging alerts test.",
+      "  Remove it: node /opt/agentx/dist/main.js --env staging destroy. It deletes the coding machines' disks too.",
     ].join("\n"));
   });
 
   it("says no connectors yet when none was added", () => {
-    const text = readyText({ env: "staging", controlPlaneUrl: "https://cp.example.test", progress: {
-      ...emptyProgress("staging", T0),
-      project: { name: "payments-api", revision: 1 },
-    } });
-    expect(text).toContain("  No connectors yet. Add one with agentx --env staging connector add linear|jira|asana --project payments-api.");
+    const text = readyText({
+      env: "staging", controlPlaneUrl: "https://cp.example.test", botName: "agentx-acme-staging", invocation: TEST_CLI_INVOCATION,
+      progress: { ...emptyProgress("staging", T0), project: { name: "payments-api", revision: 1 } },
+    });
+    expect(text).toContain("  No connectors yet. Add one with node /opt/agentx/dist/main.js --env staging connector add linear|jira|asana --project payments-api.");
   });
 
   it("repeats a connector's warning at the end (owner decision 6)", () => {
-    const text = readyText({ env: "staging", controlPlaneUrl: "https://cp.example.test", progress: {
-      ...emptyProgress("staging", T0),
-      project: { name: "payments-api", revision: 2 },
-      connectors: [{ type: "jira", ref: "jira", warning: "the Jira service account can also see issues in HR" }],
-    } });
+    const text = readyText({
+      env: "staging", controlPlaneUrl: "https://cp.example.test", botName: "agentx-acme-staging", invocation: TEST_CLI_INVOCATION,
+      progress: {
+        ...emptyProgress("staging", T0),
+        project: { name: "payments-api", revision: 2 },
+        connectors: [{ type: "jira", ref: "jira", warning: "the Jira service account can also see issues in HR" }],
+      },
+    });
     expect(text).toContain("  Warning (Jira): the Jira service account can also see issues in HR.");
+  });
+
+  it("#222: the ready summary names the bot by handle and gives a sign-in command that works as shown", () => {
+    const text = readyText({
+      env: "staging", controlPlaneUrl: "https://abc.example.com", progress: READY_PROGRESS_FIXTURE,
+      botName: "agentx-acme-staging", invocation: { published: false, cliPath: "/opt/agentx/dist/main.js" },
+    });
+    expect(text).not.toMatch(/<@/);
+    expect(text).toContain("  Talk to it: mention @agentx-acme-staging in #payments (project payments-api).");
+    expect(text).toContain("  Developers sign in with: node /opt/agentx/dist/main.js login https://abc.example.com");
+    expect(text).not.toContain("@charterarc/agentx");
   });
 });

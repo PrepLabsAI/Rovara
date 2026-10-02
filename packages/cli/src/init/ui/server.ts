@@ -43,7 +43,8 @@ const CALLBACK_HEADERS: Record<string, string> = {
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
 };
-const CALLBACK_PAGE = (text: string) => `<!doctype html><meta charset="utf-8"><title>Install AgentX</title><p>${text}</p>`;
+const CALLBACK_PAGE = (text: string, nonce?: string) =>
+  `<!doctype html><meta charset="utf-8"><title>Install AgentX</title><p>${text}</p>${nonce === undefined ? "" : `<script nonce="${nonce}">window.close()</script>`}`;
 
 interface ManifestRoute {
   state: string;
@@ -139,9 +140,13 @@ export async function startWizardServer(input: { hub: WizardHub; port?: number; 
   // Q6: GitHub's redirect back is a cross-site top-level visit with no session token. It is let
   // through only here: while a GitHub App is awaited, with the flow's own state, once.
   const githubCallback = (url: URL, route: ManifestRoute, response: ServerResponse): void => {
-    const answer = (status: number, text: string) => {
-      const body = CALLBACK_PAGE(text);
-      response.writeHead(status, { ...CALLBACK_HEADERS, "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(body) });
+    // FR-037: the tab GitHub sent back closes itself where the browser allows a script to do that
+    // (it opened the tab itself); otherwise the operator is told to go back by hand.
+    const answer = (status: number, text: string, closeTab = false) => {
+      const nonce = closeTab ? randomBytes(16).toString("base64") : undefined;
+      const body = CALLBACK_PAGE(text, nonce);
+      const csp = nonce === undefined ? CALLBACK_HEADERS["content-security-policy"] : `default-src 'none'; script-src 'nonce-${nonce}'; base-uri 'none'; frame-ancestors 'none'`;
+      response.writeHead(status, { ...CALLBACK_HEADERS, "content-security-policy": csp ?? "", "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(body) });
       response.end(body);
     };
     if (!tokensMatch(url.searchParams.get("state") ?? undefined, route.state)) return answer(400, "This page is from a different agentx init run.");
@@ -150,8 +155,9 @@ export async function startWizardServer(input: { hub: WizardHub; port?: number; 
     manifest = undefined;
     clearTimeout(route.timer);
     route.resolve(code);
-    // GitHub has not converted the code yet; the Install AgentX tab says whether that worked.
-    return answer(200, "GitHub sent AgentX the new app's code. Go back to the Install AgentX tab to continue.");
+    // GitHub has not converted the code yet; the Install AgentX tab says whether that worked. It
+    // claims only what is true so far: GitHub sent the code, not that AgentX already has the app.
+    return answer(200, "GitHub sent AgentX the new app. You can close this tab and go back to the Install AgentX tab.", true);
   };
 
   const handle = async (request: IncomingMessage, response: ServerResponse): Promise<void> => {
@@ -188,6 +194,10 @@ export async function startWizardServer(input: { hub: WizardHub; port?: number; 
     }
     if (request.method === "GET" && url.pathname === "/events") return openStream(response);
     if (request.method === "POST" && url.pathname === "/answer") return answer(request, response);
+    if (request.method === "POST" && url.pathname === "/close") {
+      input.hub.requestClose();
+      return send(response, 200, "application/json; charset=utf-8", JSON.stringify({ ok: true } satisfies AnswerReply));
+    }
     return send(response, 404, "text/plain; charset=utf-8", "not found\n");
   };
 

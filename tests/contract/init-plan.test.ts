@@ -10,23 +10,23 @@ describe("cost estimate", () => {
     const estimate = estimateMonthlyCost(sampleAnswers().models);
     expect(estimate.lines.map((line) => [line.item, line.usd])).toEqual([
       ["Two NAT gateways", 65.7],
-      ["Slack service (Fargate, 0.5 vCPU, 1 GB, arm64)", 14.42],
-      ["Worker instances (m6g.medium)", 2.31],
-      ["Worker root volumes (30 GiB gp3)", 0.2],
-      ["Workspace volumes", 16],
+      ["The Slack connection (Fargate, 0.5 vCPU, 1 GB, arm64)", 14.42],
+      ["Coding machines (m6g.medium)", 2.31],
+      ["Coding machine disks (30 GiB gp3)", 0.2],
+      ["Kept workspaces", 16],
       ["API Gateway, Lambda, DynamoDB, SQS, Secrets Manager, KMS (including the invocation-signing key) and CloudWatch", 10],
-      ["Orchestrator model (us.anthropic.claude-sonnet-4-6)", 25],
-      ["Classifier model (amazon.nova-lite-v1:0)", 0.15],
-      ["Worker model (amazon.nova-pro-v1:0)", 19.2],
+      ["Main model (Claude Sonnet 4.6)", 25],
+      ["Safety check model (Amazon Nova Lite)", 0.15],
+      ["Coding model (Amazon Nova Pro)", 19.2],
     ]);
-    // 60 instance-hours x 30 GiB x ($0.08/GB-month / 730 hours/month) = $0.1972..., rounded to $0.20.
+    // 60 machine-hours x 30 GiB x ($0.08/GB-month / 730 hours/month) = $0.1972..., rounded to $0.20.
     expect(estimate.totalUsd).toBe(152.98);
     expect(estimate.unpriced).toEqual([]);
   });
 
   it("marks the Claude Haiku 4.5 classifier price as assumed, and only that one", () => {
     const estimate = estimateMonthlyCost({ ...sampleAnswers().models, classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0" });
-    const classifier = estimate.lines.find((line) => line.item.startsWith("Classifier model"));
+    const classifier = estimate.lines.find((line) => line.item.startsWith("Safety check model"));
     expect(classifier?.usd).toBe(2.5);
     expect(classifier?.basis).toBe("1,000 checks at about $0.0025 each, assumed: no confirmed Bedrock rate");
     expect(estimateMonthlyCost(sampleAnswers().models).lines.filter((line) => line.basis.includes("assumed"))).toEqual([]);
@@ -36,16 +36,16 @@ describe("cost estimate", () => {
     expect(estimateMonthlyCost({ ...sampleAnswers().models, orchestrator: "zai.glm-4.7" }).totalUsd).toBe(134.98);
     const custom = estimateMonthlyCost({ ...sampleAnswers().models, worker: "us.amazon.nova-premier-v1:0" });
     expect(custom.unpriced).toEqual(["us.amazon.nova-premier-v1:0"]);
-    expect(custom.lines.find((line) => line.item.startsWith("Worker model"))?.usd).toBeUndefined();
+    expect(custom.lines.find((line) => line.item.startsWith("Coding model"))?.usd).toBeUndefined();
     expect(custom.totalUsd).toBe(133.78);
   });
 
-  it("prices the worker root volume at the same usage assumption as the worker instances, separately from the kept workspace volumes", () => {
+  it("prices the coding machine disk at the same usage as the coding machines, separately from the kept workspaces", () => {
     const estimate = estimateMonthlyCost(sampleAnswers().models);
-    const rootVolume = estimate.lines.find((line) => line.item.startsWith("Worker root volumes"));
+    const rootVolume = estimate.lines.find((line) => line.item.startsWith("Coding machine disks"));
     expect(rootVolume?.usd).toBe(0.2);
-    expect(rootVolume?.basis).toContain("the same usage assumption as the worker instances above");
-    expect(rootVolume?.basis).toContain("deleted with it, unlike the workspace volumes below");
+    expect(rootVolume?.basis).toContain("the same usage as the coding machines above");
+    expect(rootVolume?.basis).toContain("each disk is deleted with its machine, unlike the kept workspaces below");
   });
 });
 
@@ -54,19 +54,20 @@ describe("install plan", () => {
     const answers = sampleAnswers();
     const text = installPlanText(answers, estimateMonthlyCost(answers.models), []);
     for (const expected of [
-      "AgentX will create environment staging in account 123456789012 (us-east-1) with the templates engine, release 1.2.3:",
+      "AgentX will create the install staging in AWS account 123456789012 (us-east-1), from release 1.2.3 with published templates:",
       "agentx-staging-access, agentx-staging-foundation, agentx-staging-identity, agentx-staging-control-plane, agentx-staging-runtime, agentx-staging-slack",
       "IAM roles agentx-staging-cloudformation (CloudFormation deploys through it) and agentx-staging-operator (day-2 commands)",
       "the permission boundary agentx-staging-boundary, which every AgentX role carries; the stacks' own roles live under the IAM path /agentx/staging/",
       "Secrets agentx/staging/callback-signing-key, agentx/staging/github-app, agentx/staging/slack",
       "Settings under /agentx/staging/",
-      "In GitHub: an app named \"AgentX acme staging\" owned by acme, with read and write access to contents, pull requests and issues, and read access to metadata. No webhook.",
-      "In Slack: an app named \"AgentX\".",
-      "- Alerts: email to ops@example.com, subscribed and tested at the end of init",
-      "AgentX never answers itself or other bots. Mentions people post through other apps: accept (slack.appPostedMessages).",
-      "Estimated monthly total: $152.98 at 1,000 turns, 100 worker sessions and 60 worker instance-hours a month",
-      "EC2 worker volumes are deleted by the teardown steps.",
-      "Worker root volumes (30 GiB gp3)",
+      "In GitHub: an app named \"AgentX acme (staging)\" owned by acme, with read and write access to contents, pull requests and issues, and read access to metadata. No webhook.",
+      "In Slack: an app named \"AgentX acme (staging)\".",
+      "- Alerts: email to ops@example.com, subscribed and tested at the end of the install",
+      "- Models: main model Claude Sonnet 4.6 (Amazon Bedrock), safety check model Amazon Nova Lite (Amazon Bedrock), coding model Amazon Nova Pro (Amazon Bedrock)",
+      "AgentX never answers itself or other bots. Messages other apps post for people: answered.",
+      "Estimated monthly total: $152.98 at 1,000 turns, 100 coding sessions and 60 machine-hours a month",
+      "To remove everything later, use the remove command in the ready summary. It deletes the coding machines' disks too.",
+      "Coding machine disks (30 GiB gp3)",
       "KMS (including the invocation-signing key)",
     ]) expect(text).toContain(expected);
   });
@@ -79,7 +80,7 @@ describe("install plan", () => {
     });
     const text = installPlanText(answers, estimateMonthlyCost(answers.models), ["a note"]);
     expect(text).toContain("the permission boundary arn:aws:iam::123456789012:policy/CompanyBoundary");
-    expect(text).toContain("- Alerts: https://events.pagerduty.com/... (the full address is kept in agentx/staging/alert-endpoint), subscribed and tested at the end of init");
+    expect(text).toContain("- Alerts: https://events.pagerduty.com/... (the full address is kept in agentx/staging/alert-endpoint), subscribed and tested at the end of the install");
     expect(text).toContain("agentx/staging/alert-endpoint");
     expect(text).not.toContain("agentx-staging-identity");
     expect(text).toContain("a note");
@@ -100,7 +101,7 @@ describe("install plan", () => {
 
   it("names the budget and says alerts are subscribed during init", () => {
     const text = installPlanText(sampleAnswers({ budget: { monthlyUsd: 100, scope: "tag" } }), estimateMonthlyCost(sampleAnswers().models), []);
-    expect(text).toContain("- Alerts: email to ops@example.com, subscribed and tested at the end of init");
+    expect(text).toContain("- Alerts: email to ops@example.com, subscribed and tested at the end of the install");
     expect(text).toContain("- Budget agentx-staging-monthly: $100 a month for costs tagged agentx:env=staging, alerting at 80% spent and 100% forecast");
     expect(installPlanText(sampleAnswers(), estimateMonthlyCost(sampleAnswers().models), [])).toContain("- Budget: none");
   });

@@ -22,8 +22,8 @@ const SECRET = githubAppSecretName("staging");
 
 describe("GitHub App manifest", () => {
   it("asks for exactly the permissions AgentX uses, no webhook and no events", () => {
-    expect(githubAppManifest({ appName: "AgentX acme staging", redirectUrl: "http://127.0.0.1:50123/github/created" })).toEqual({
-      name: "AgentX acme staging",
+    expect(githubAppManifest({ appName: "AgentX acme (staging)", redirectUrl: "http://127.0.0.1:50123/github/created" })).toEqual({
+      name: "AgentX acme (staging)",
       url: "https://github.com/PrepLabsAI/AgentX",
       redirect_url: "http://127.0.0.1:50123/github/created",
       public: false,
@@ -108,7 +108,7 @@ describe("GitHub App step", () => {
     homes.push(page.home);
     expect((await githubAppStep(fakeGitHubApi()).run(page, progressHandle())).status).toBe("done");
     expect(page.lines.some((line) => line.startsWith("If no browser opens"))).toBe(false);
-    expect(cards[0]?.link?.label).toBe("Create the GitHub App");
+    expect(cards[0]?.link?.label).toBe("Open GitHub");
   });
 
   it("refuses an app created under another account, saving nothing and saying how to delete it", async () => {
@@ -173,7 +173,8 @@ describe("GitHub App step", () => {
         expect((failure as Error).message).toBe("CONFIG_INVALID: the GitHub App was not installed on acme within 15 minutes; install it at https://github.com/apps/agentx-acme-staging/installations/new, then run agentx init again");
         const card = wizard.hub.state().cards?.find((shown) => shown.id === "github");
         expect(card).toEqual(githubCard({ stage: "failed", problem: problemText(failure) }));
-        expect(card?.lines).toEqual(["the GitHub App was not installed on acme within 15 minutes; install it at https://github.com/apps/agentx-acme-staging/installations/new, then run agentx init again"]);
+        expect(card?.lines).toEqual(["The GitHub app was not set up."]);
+        expect(card?.details).toEqual(["the GitHub App was not installed on acme within 15 minutes; install it at https://github.com/apps/agentx-acme-staging/installations/new, then run agentx init again"]);
         expect(wizard.hub.state().link).toBeUndefined();
       } finally {
         await wizard.close();

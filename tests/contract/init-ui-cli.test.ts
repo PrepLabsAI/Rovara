@@ -3,137 +3,38 @@
 // real, on 127.0.0.1; every AWS, GitHub, Slack and clock dependency is injected, so nothing here
 // reaches AWS, GitHub or Slack.
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { environmentStackName } from "@agentx/contracts";
 import { executeCli } from "../../packages/cli/src/main.js";
-import { environmentCachePath } from "../../packages/cli/src/environments/cache.js";
+import { prepareDeployment } from "../../packages/cli/src/deploy/commands.js";
 import type { InitCliDependencies } from "../../packages/cli/src/init/commands.js";
+import { READY_HOLD_MS, READY_OUTCOME, holdReadyScreen } from "../../packages/cli/src/init/commands.js";
+import { initLogPath } from "../../packages/cli/src/init/log-file.js";
 import { NO_BROWSER_LINE } from "../../packages/cli/src/init/ui-mode.js";
+import { READY_LINE, stageLine, terminalStepLine } from "../../packages/cli/src/init/ui/journey.js";
 import { INIT_STEP_IDS, installAnswersParameterName, readInstallProgress } from "../../packages/cli/src/init/install-state.js";
 import { readEnvironmentSettings } from "../../packages/cli/src/environments/settings.js";
 import {
-  allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, fakeSlackApi, HOLDER, memoryInitSecrets, passingChecks, scriptedDeployer, scriptedPrompter,
-  slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET,
+  allStackOutputs, browserThatCreatesGitHubApp, fakeSlackApi, passingChecks, scriptedDeployer, scriptedPrompter,
+  TEST_BOT_TOKEN, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET,
 } from "../support/init-fakes.js";
 import { fakeWizardOperator, snapshotOnReconnect } from "../support/wizard-browser.js";
-import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "../support/fake-cloudformation.js";
-import { MemoryParameterStore } from "../support/memory-parameter-store.js";
-import { ADMIN_EMAIL, FOUNDATION_OUTPUTS, fakeAlerts, fakeControlPlane, fakeRepositories, fakeSlackChannels, setupServices, turn } from "../support/setup-fakes.js";
+import { ADMIN_EMAIL, fakeAlerts, fakeSlackChannels } from "../support/setup-fakes.js";
+import { markOperatorStop } from "../../packages/cli/src/init/stop.js";
+import { WIZARD_TOKEN_HEADER, type WizardSnapshot } from "../../packages/cli/src/init/ui/protocol.js";
+import { FINISH, FIRST_RUN, FIRST_RUN_BUDGET_USD, harness, releaseDir, SIGNIN, SLACK } from "../support/init-ui-harness.js";
 
 const dirs: string[] = [];
 afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 const tmp = async (prefix: string) => { const dir = await mkdtemp(join(tmpdir(), prefix)); dirs.push(dir); return dir; };
-const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
-async function releaseDir(regions: readonly string[] = ["us-east-1"]): Promise<string> {
-  const dir = await tmp("agentx-init-ui-release-");
-  const templates = [];
-  for (const region of regions) {
-    await mkdir(join(dir, "templates", region), { recursive: true });
-    for (const part of ["access", "foundation", "identity", "control-plane", "runtime", "slack"]) {
-      const file = `templates/${region}/${part}.template.json`;
-      await writeFile(join(dir, file), "{}");
-      templates.push({ region, part, file, sha256: sha256("{}") });
-    }
-  }
-  await writeFile(join(dir, "release.json"), JSON.stringify({
-    schemaVersion: 1, version: "1.2.3", gitCommit: "a".repeat(40), environmentPlaceholder: "qqenv-placeholderqq", templates, packages: [],
-    images: { worker: `public.ecr.aws/agentx/worker@sha256:${"a".repeat(64)}`, slack: `public.ecr.aws/agentx/slack@sha256:${"b".repeat(64)}` },
-  }));
-  return dir;
-}
-
-// The same answers the terminal path's tests script (init-cli.test.ts), in the same order: `agentx
-// init --ui` asks exactly the questions it always asked, only on a page. FIRST_RUN includes the
-// budget's amount and scope after the alert address; FINISH is the finishing steps (phase 15d2):
-// admin email; repository; project name; use the proposed commands; channel; the three connector
-// offers; "did the test alarm arrive?".
-const FIRST_RUN = ["", "", "", "", "", "", "", "", "", "ops@example.com", "", "", "acme", "", "", "", "", true];
-const SLACK = ["installed", TEST_BOT_TOKEN, TEST_SIGNING_SECRET, true, true];
-const SIGNIN = ["", "1111111111.2222222222222", "fedcba9876543210fedcba9876543210", true];
-const FINISH = [ADMIN_EMAIL, "acme/payments-api", "", true, "payments", false, false, false, true];
 const LINEAR_KEY = `lin_api_${"k".repeat(40)}SECRETlinearKEY`;
 // FINISH with Linear connected: yes to the offer, the key (typed on the page), the team (the
 // default, the key's only team), then no to Jira and Asana.
 const FINISH_WITH_LINEAR = [ADMIN_EMAIL, "acme/payments-api", "", true, "payments", true, LINEAR_KEY, "", false, false, true];
-
-/** What the finishing steps read from the stacks: every deployed output, with the foundation's EC2
- * worker outputs as the real foundation stack has them (allStackOutputs's are placeholders). */
-async function finishStackOutputs(name: string): Promise<Record<string, string> | undefined> {
-  const outputs = allStackOutputs()[name];
-  return outputs === undefined || name !== environmentStackName("staging", "foundation") ? outputs : { ...outputs, ...FOUNDATION_OUTPUTS };
-}
-
-async function harness() {
-  let clock = T0;
-  const store = new MemoryParameterStore();
-  const secrets = memoryInitSecrets({ "agentx/staging/slack": JSON.stringify({ botToken: "unset", signingSecret: "placeholder" }) });
-  const deployer = scriptedDeployer(allStackOutputs());
-  const github = fakeGitHubApi();
-  const out: string[] = [];
-  const err: string[] = [];
-  const home = await tmp("agentx-init-ui-home-");
-  const release = await releaseDir();
-  // The finishing steps' services, faked as the terminal path's tests fake them, so a run that
-  // finishes reaches no AWS, GitHub or Slack: one repository, the payments channel, a confirmed
-  // alert subscription and the $100 budget FIRST_RUN takes, and a turn received a day after T0.
-  const projects = await tmp("agentx-init-ui-projects-");
-  const plane = fakeControlPlane();
-  plane.turns = [turn({ subject: "T0TEAM/C0PAY00001/1790000000.000100", receivedAt: new Date(T0 + 86_400_000).toISOString() })];
-  const setup = setupServices({
-    fetch: plane.fetch,
-    repositories: fakeRepositories({ "acme/payments-api": { files: { "go.mod": "module example.com/pay" } } }),
-    slackChannels: fakeSlackChannels([{ id: "C0PAY00001", name: "payments", isPrivate: false, isMember: true }]),
-    alerts: fakeAlerts({ confirmAfterPolls: 0, budgetUsd: 100 }),
-    stackOutputs: finishStackOutputs,
-    configDir: projects,
-  });
-  const base: InitCliDependencies = {
-    deploy: { identity: { get: async () => ({ account: "123456789012", arn: HOLDER }) }, store, secrets, deployer },
-    initSecrets: secrets,
-    checks: passingChecks(),
-    github,
-    slack: fakeSlackApi(),
-    cloudFormation: fakeCloudFormation({ parameters: SIGN_IN_PARAMETERS }),
-    stackStatus: { status: async () => undefined },
-    fetch: slackIngressFetch({ signingSecret: TEST_SIGNING_SECRET }),
-    // The terminal path's browser, for the runs here that do not use --ui. No run ever reaches
-    // the real openSystemBrowser.
-    openBrowser: browserThatCreatesGitHubApp([]),
-    sleep: async (ms) => { clock += ms; },
-    now: () => clock,
-    processEnv: {},
-    setup,
-  };
-  const run = (argv: string[], overrides: Partial<InitCliDependencies> = {}) =>
-    executeCli(["--env", "staging", "init", "--release", release, "--region", "us-east-1", ...argv], {
-      stdout: { write: (text: string) => out.push(text) },
-      stderr: { write: (text: string) => err.push(text) },
-      environments: { home },
-      init: { ...base, ...overrides },
-    });
-  /** Runs `--ui` with an operator who answers `script` on the page and types nothing. */
-  const runUi = async (script: (string | boolean)[], argv: string[] = []) => {
-    const operator = fakeWizardOperator(script);
-    const code = await run(["--ui", ...argv], { openBrowser: operator.open });
-    await operator.settled();
-    return { code, operator };
-  };
-  return {
-    store, secrets, deployer, github, plane, setup, out, err, home, base, run, runUi,
-    printed: () => `${out.join("")}${err.join("")}`,
-    /** The terminal, every SSM value, this machine's environment cache, and the project files the
-     * finishing steps wrote. */
-    everywhere: async () => [
-      out.join(""), err.join(""), ...store.values.values(), await readFile(environmentCachePath(home, "staging"), "utf8").catch(() => ""),
-      ...(await Promise.all((await readdir(projects)).map((name) => readFile(join(projects, name), "utf8")))),
-    ].join("\n"),
-  };
-}
 
 describe("agentx init --ui", () => {
   it("runs the whole install from the page, with nothing typed in the terminal", async () => {
@@ -159,7 +60,41 @@ describe("agentx init --ui", () => {
     expect(last?.steps.map((step) => step.id)).toEqual([...INIT_STEP_IDS]);
     expect(operator.states.some((state) => state.steps.some((step) => step.status === "running"))).toBe(true);
     expect(operator.states.at(-1)?.steps.every((step) => step.status === "done")).toBe(true);
-    expect(last?.log.join("\n")).toContain("done: Create and install the GitHub App");
+    expect(last?.log.join("\n")).toContain("done: Create the GitHub app");
+  });
+
+  it("spec 048 FR-070: with the page open, the terminal prints three start lines and one line per step", async () => {
+    const h = await harness();
+    const { code } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(code).toBe(0);
+    const lines = h.err.join("").trimEnd().split("\n");
+    expect(lines[0]).toMatch(/^The AgentX installer is open in your browser: http:\/\/127\.0\.0\.1:\d+\/\?t=/);
+    expect(lines.slice(1)).toEqual([
+      "Keep this terminal open and your computer awake (about 44 minutes).",
+      `Full log: ${initLogPath(h.home, "staging")}`,
+      stageLine("get-started"),
+      stageLine("your-choices"),
+      ...INIT_STEP_IDS.map((id) => terminalStepLine(id)),
+      READY_LINE,
+    ]);
+    expect(h.out.join("")).toBe("");
+    // FR-070 and FR-071: the plan, the progress lines and the ready summary are in the log file, the token is not.
+    const log = await readFile(initLogPath(h.home, "staging"), "utf8");
+    expect(log).toContain("Estimated monthly total");
+    expect(log).toContain("done: Start the AgentX service");
+    expect(log).toContain("AgentX environment staging is ready.");
+    const token = new URL(lines[0]?.split(": ").at(-1) ?? "http://x").searchParams.get("t") ?? "missing";
+    expect(token.length).toBeGreaterThan(20);
+    expect(log).not.toContain(token);
+  });
+
+  it("spec 048 FR-070: a failure is one line in the terminal, with the log file named", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    const { code } = await h.runUi([...FIRST_RUN, "stop"]);
+    expect(code).not.toBe(0);
+    expect(h.err.join("")).toContain(`[3/5] Stopped: Start the AgentX service did not finish. Resource limit exceeded. Details in the browser and in ${initLogPath(h.home, "staging")}.`);
+    expect(h.err.join("")).not.toContain("==> ");
   });
 
   it("FR-012: no secret typed on the page reaches the page's state, the log, the terminal, SSM or the cache", async () => {
@@ -189,7 +124,7 @@ describe("agentx init --ui", () => {
     // The plan and its confirm are on screen together: the confirm is the review screen's button.
     const review = operator.states.find((state) => state.plan !== undefined && state.question !== undefined);
     expect(review?.plan).toContain("Estimated monthly total");
-    expect(review?.plan).toContain("AgentX will create environment staging in account 123456789012");
+    expect(review?.plan).toContain("AgentX will create the install staging in AWS account 123456789012");
     expect(review?.question).toMatchObject({ kind: "confirm", text: "Create all of this?", defaultConfirm: false });
     // Nothing was created before it: no step had even started when the plan went up.
     expect(review?.steps.every((step) => step.status === "pending")).toBe(true);
@@ -197,6 +132,21 @@ describe("agentx init --ui", () => {
     expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
     expect(h.printed()).toContain("install declined; nothing was created");
     expect(operator.states.at(-1)).toMatchObject({ phase: "failed" });
+    // A stop with its own words (operatorStop) keeps them as the outcome.
+    expect(operator.states.at(-1)?.outcome).toBe("Install declined; nothing was created.");
+  });
+
+  it("spec 048 SC-009: a release with a private image is refused on the page before anything is created", async () => {
+    const h = await harness();
+    const manifest = JSON.parse(await readFile(join(h.release, "release.json"), "utf8")) as { images: Record<string, string> };
+    manifest.images.worker = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx/worker@sha256:${"a".repeat(64)}`;
+    await writeFile(join(h.release, "release.json"), JSON.stringify(manifest));
+    const { code, operator } = await h.runUi([...FIRST_RUN.slice(0, -1), false]);
+    expect(code).not.toBe(0);
+    const card = operator.states.flatMap((state) => state.cards ?? []).filter((shown) => shown.id === "prerequisites").at(-1);
+    expect(card?.checks?.find((check) => check.label === "The coding image")).toMatchObject({ ok: false });
+    expect(h.deployer.requests).toEqual([]);
+    expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
   });
 
   it("FR-006: a part-finished install opens on a resume screen naming what is done and what is next", async () => {
@@ -209,12 +159,12 @@ describe("agentx init --ui", () => {
     expect(code).toBe(0);
     const resume = operator.states.find((state) => state.resume !== undefined)?.resume;
     expect(resume?.completed).toEqual([
-      "Check prerequisites",
-      "Deploy the access stack (IAM roles, artifact bucket, image cache)",
-      "Deploy the foundation and identity stacks",
-      "Create and install the GitHub App",
+      "Check your AWS account",
+      "Set up AWS permissions",
+      "Build the network and sign-in",
+      "Create the GitHub app",
     ]);
-    expect(resume?.continueFrom).toBe("Deploy the control plane and runtime");
+    expect(resume?.continueFrom).toBe("Start the AgentX service");
     // The resumed run reuses the app the first one made, exactly as the terminal path does.
     expect(h.github.conversions).toHaveLength(1);
   });
@@ -254,14 +204,16 @@ describe("agentx init --ui", () => {
     expect(h.plane.bindings).toEqual(["T0TEAM/C0PAY00001"]);
     // The finishing steps' progress lines reached the page's log pane.
     const last = operator.states.at(-1);
-    expect(last?.log.join("\n")).toContain("done: Set up the first project and its channel");
-    expect(last?.log.join("\n")).toContain("done: Check that AgentX answers in Slack");
-    // The page ends on the same summary the terminal does, developer sign-in command and all.
-    expect(last).toMatchObject({ phase: "finished" });
-    expect(last?.outcome).toContain("AgentX environment staging is ready.");
-    expect(last?.outcome).toContain("  Talk to it: mention <@U0BOT> in #payments (project payments-api, revision 1).");
-    expect(last?.outcome).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com");
-    expect(h.out.join("")).toContain("  Developers sign in with: npx @charterarc/agentx login https://abc123.execute-api.us-east-1.amazonaws.com\n");
+    expect(last?.log.join("\n")).toContain("done: Set up your first project");
+    expect(last?.log.join("\n")).toContain("done: Get a first reply in Slack");
+    // FR-058: the page ends on the fixed outcome, never the full ready summary (the ready card
+    // already said it in full).
+    expect(last).toMatchObject({ phase: "finished", outcome: READY_OUTCOME });
+    // FR-070: with the page open, nothing more reaches stdout; the full ready summary is in the log file.
+    expect(h.out.join("")).toBe("");
+    const log = await readFile(initLogPath(h.home, "staging"), "utf8");
+    expect(log).toContain("AgentX environment staging is ready.\n  Talk to it: mention @agentx in #payments (project payments-api).\n");
+    expect(log).toContain("  Developers sign in with: node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com\n");
   });
 
   it("--from-bundle works through the page: only what the export did not know is asked there, and a bad bundle is refused before the page opens", async () => {
@@ -282,7 +234,7 @@ describe("agentx init --ui", () => {
     // The platform team's access stack exists already; the run stops after it, at foundation.
     const deployer = scriptedDeployer(allStackOutputs(), [environmentStackName("staging", "access")]);
     deployer.fail.set(environmentStackName("staging", "foundation"), new Error("stop after access"));
-    const operator = fakeWizardOperator(["", "ops@example.com", "", "", "acme", "", "", "", "", true]);
+    const operator = fakeWizardOperator(["", "ops@example.com", "", "", "acme", "", "", "", "", true, "stop"]);
     const code = await h.run(["--ui", "--resume", "--from-bundle", dir], {
       openBrowser: operator.open,
       stackStatus: { status: async (name: string) => (name === "agentx-staging-access" ? "CREATE_COMPLETE" : undefined) },
@@ -295,9 +247,94 @@ describe("agentx init --ui", () => {
     expect(operator.asked).toContain("Create all of this?");
     expect(operator.asked).not.toContain("Deploy engine");
     expect(operator.states.at(-1)).toMatchObject({ phase: "failed" });
-    expect(operator.states.at(-1)?.outcome).toContain("stop after access");
+    expect(operator.states.flatMap((state) => (state.failure === undefined ? [] : [state.failure])).at(-1)?.details[0]).toContain("stop after access");
     expect((await readInstallProgress(h.store, "staging"))?.steps.access).toMatchObject({ status: "done", note: "deployed by your platform team from the export bundle" });
     expect(deployer.requests.map((request) => request.part)).toEqual(["foundation"]);
+  });
+
+  it("spec 048 FR-060: a failed deploy step stays on the page, and Try this step again finishes the install", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    const operator = fakeWizardOperator([...FIRST_RUN, "retry", ...SLACK, ...SIGNIN, ...FINISH], {
+      beforeAnswer: async (question, wizardUrl) => {
+        if (question.text !== "The install stopped. What next?") return;
+        await snapshotOnReconnect(wizardUrl);
+        h.deployer.fail.clear();
+      },
+    });
+    expect(await h.run(["--ui"], { openBrowser: operator.open })).toBe(0);
+    await operator.settled();
+    expect(operator.remaining()).toBe(0);
+    expect(h.deployer.requests.filter((request) => request.part === "control-plane")).toHaveLength(2);
+    expect(operator.states.at(-1)?.failure).toBeUndefined();
+  });
+
+  it("spec 048 FR-060: a deployment that failed to prepare (npm ci, build or synth) is prepared again on Try this step again", async () => {
+    const h = await harness();
+    let prepared = 0;
+    let cleanedUp = 0;
+    const prepare: InitCliDependencies["prepareDeployment"] = async (input) => {
+      prepared += 1;
+      if (prepared === 1) throw new Error("npm ci exited with code 1");
+      return { ...(await prepareDeployment(input)), cleanup: async () => { cleanedUp += 1; } };
+    };
+    const operator = fakeWizardOperator([...FIRST_RUN, "retry", ...SLACK, ...SIGNIN, ...FINISH]);
+    expect(await h.run(["--ui"], { openBrowser: operator.open, prepareDeployment: prepare })).toBe(0);
+    await operator.settled();
+    expect(operator.remaining()).toBe(0);
+    expect(prepared).toBe(2);
+    expect(cleanedUp).toBe(1);
+  });
+
+  it("a page that reconnects during a failure gets the failure screen back", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    let reconnected: WizardSnapshot | undefined;
+    const operator = fakeWizardOperator([...FIRST_RUN, "stop"], {
+      beforeAnswer: async (question, wizardUrl) => { if (question.text === "The install stopped. What next?") reconnected = await snapshotOnReconnect(wizardUrl); },
+    });
+    expect(await h.run(["--ui"], { openBrowser: operator.open })).not.toBe(0);
+    await operator.settled();
+    expect(reconnected?.failure?.what).toBe("Start the AgentX service did not finish. Resource limit exceeded.");
+    expect(reconnected?.question?.buttons?.map((button) => button.label)).toEqual(["Try this step again", "Stop for now"]);
+    expect(reconnected?.steps.find((step) => step.id === "control-plane")?.status).toBe("failed");
+    expect(reconnected?.journey.phases[2]).toMatchObject({ statusWord: "Stopped" });
+    const last = operator.states.at(-1);
+    expect(last).toMatchObject({ phase: "failed", outcome: "The install stopped. Your progress is saved." });
+    expect(last?.commands).toEqual([{ label: "Continue later with", command: "node /opt/agentx/dist/main.js --env staging init --region us-east-1" }]);
+    expect(`${last?.outcome ?? ""} ${last?.failure?.what ?? ""}`).not.toMatch(/Finished|INTERNAL_ERROR|CONFIG_INVALID/);
+    expect(last?.journey.current).toBe("build");
+    expect(last?.journey.phases.map((phase) => phase.statusWord)).toEqual(["Done", "Done", "Stopped", "Coming up", "Coming up"]);
+    expect(last?.journey.timeLeftText).toBe("About 29 minutes left");
+  });
+
+  it("spec 048 FR-060: a failure outside a step still shows the screen, with Stop for now only", async () => {
+    const h = await harness();
+    const operator = fakeWizardOperator(["stop"]);
+    expect(await h.run(["--ui", "--account", "999999999999"], { openBrowser: operator.open })).not.toBe(0);
+    await operator.settled();
+    const failing = operator.states.find((state) => state.failure !== undefined && state.question !== undefined);
+    expect(failing?.failure?.what).toBe("The install could not go on.");
+    expect(failing?.failure?.details[0]).toContain("--account 999999999999 does not match your AWS credentials");
+    expect(failing?.question?.buttons?.map((button) => button.label)).toEqual(["Stop for now"]);
+  });
+
+  // Fix round 1 (Plan ruling 8): a step's own run throwing a stop the person already chose (a
+  // deploy step marked with markOperatorStop, the same way a declined "check again" question
+  // inside a step marks its error) is not a failure; the page shows no failure screen and asks no
+  // second question for it.
+  it("spec 048 FR-060 fix: a stop the deploy step itself chose shows no failure screen or question", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), markOperatorStop(new Error("the person chose not to continue")));
+    const operator = fakeWizardOperator([...FIRST_RUN]);
+    expect(await h.run(["--ui"], { openBrowser: operator.open })).not.toBe(0);
+    await operator.settled();
+    expect(operator.remaining()).toBe(0);
+    expect(operator.states.every((state) => state.failure === undefined)).toBe(true);
+    expect(operator.asked).not.toContain("The install stopped. What next?");
+    const last = operator.states.at(-1);
+    expect(last).toMatchObject({ phase: "failed" });
+    expect(last?.commands).toEqual([{ label: "Continue later with", command: "node /opt/agentx/dist/main.js --env staging init --region us-east-1" }]);
   });
 
   it("Q5: every other site is a button on the page, and the installer opens only the page itself", async () => {
@@ -331,7 +368,7 @@ describe("agentx init --ui", () => {
     expect(processEnv.AWS_PROFILE).toBe("dev");
     // The account is on the page by the time the review screen asks to create anything.
     const review = operator.states.find((state) => state.question?.text === "Create all of this?");
-    expect(review?.cards?.find((card) => card.id === "aws")?.lines[0]).toBe("AgentX installs into account 123456789012 in us-east-1.");
+    expect(review?.cards?.find((card) => card.id === "aws")?.lines[0]).toBe("AgentX installs into AWS account 123456789012 in us-east-1.");
   });
 
   it("FR-022: the region picker offers only the release's regions", async () => {
@@ -382,7 +419,8 @@ describe("agentx init --ui", () => {
     expect(last?.checks?.filter((check) => check.label === "EC2 vCPU quota")).toHaveLength(1);
     // Every check ran again, not only the one that failed.
     expect(last?.checks?.map((check) => check.label)).toEqual(failed?.checks?.map((check) => check.label));
-    expect(last?.checks?.map((check) => check.label).slice(0, 3)).toEqual(["Region", "EC2 vCPU quota", "Elastic IPs"]);
+    // FR-065: the release's images are checked right after the region, before EC2 and Elastic IPs.
+    expect(last?.checks?.map((check) => check.label).slice(0, 5)).toEqual(["Region", "The coding image", "The Slack connection image", "EC2 vCPU quota", "Elastic IPs"]);
     expect(last?.checks?.some((check) => check.label.startsWith("Model "))).toBe(true);
   });
 
@@ -399,6 +437,8 @@ describe("agentx init --ui", () => {
     expect(h.printed()).toContain("init cannot start; nothing was created");
     expect(h.deployer.requests).toEqual([]);
     expect(h.store.values.has(installAnswersParameterName("staging"))).toBe(false);
+    // Declining a check-again question is a stop, told in the fixed words, not the raw problem.
+    expect(operator.states.at(-1)?.outcome).toBe("The install stopped. Your progress is saved.");
   });
 
   it("FR-023: a failure no check reports is still on the checklist, in the error's own words", async () => {
@@ -429,10 +469,11 @@ describe("agentx init --ui", () => {
     expect(operator.clicked).toContain(`${wizardOrigin}/github/start?t=${new URL(operator.opened[0] ?? "").searchParams.get("t") ?? ""}`);
     expect(h.github.conversions).toEqual(["0123456789abcdef0123"]);
     const stages = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "github").map((card) => card.lines[0]) ?? []);
-    // The app's name is the first run's default ("AgentX <account> <env>"); its slug is GitHub's.
-    expect(stages).toContain('Create the GitHub App "AgentX acme staging" for acme. GitHub opens with everything filled in; press Create GitHub App.');
-    expect(stages).toContain("Install agentx-acme-staging on acme and choose the repositories AgentX may use.");
-    expect(stages.at(-1)).toBe("agentx-acme-staging is installed on acme.");
+    // The app's name is the first run's default ("AgentX <account> (<env>)"); its slug is GitHub's,
+    // kept in the card's details rather than its words.
+    expect(stages).toContain('Create the GitHub app "AgentX acme (staging)" for acme.');
+    expect(stages).toContain('Install "AgentX acme (staging)" on acme. Choose only the repositories AgentX should work on.');
+    expect(stages.at(-1)).toBe('"AgentX acme (staging)" is installed on acme.');
   });
 
   it("FR-040: the Slack app is created from a button, and a wrong token is refused on the field", async () => {
@@ -446,7 +487,7 @@ describe("agentx init --ui", () => {
     expect(JSON.stringify(operator.states)).not.toContain("USERtokenVALUE");
     expect(await h.everywhere()).not.toContain("USERtokenVALUE");
     const slack = operator.states.at(-1)?.cards?.find((card) => card.id === "slack");
-    expect(slack).toMatchObject({ status: "ok", lines: ["Slack app A0APP is installed in workspace T0TEAM."] });
+    expect(slack).toMatchObject({ status: "ok", lines: ['"AgentX acme (staging)" is installed in the Acme workspace.'] });
   });
 
   it("Q8: when Slack refuses a token that looks right, the page asks for both again and saves nothing until one works", async () => {
@@ -559,8 +600,8 @@ describe("agentx init --ui", () => {
     await operator.settled();
     const channel = operator.states.flatMap((state) => state.cards?.filter((card) => card.id === "channel") ?? []);
     expect(channel.map((card) => card.status)).toContain("waiting");
-    expect(channel.at(-1)).toMatchObject({ status: "ok", lines: ["#payments is bound to project payments-api."] });
-    expect(operator.states.at(-1)?.cards?.find((card) => card.id === "project")?.lines).toEqual(["Project payments-api, revision 1, for acme/payments-api, runs on EC2 workers."]);
+    expect(channel.at(-1)).toMatchObject({ status: "ok", lines: ["AgentX answers in #payments for payments-api."] });
+    expect(operator.states.at(-1)?.cards?.find((card) => card.id === "project")?.lines).toEqual(["The project payments-api is set up for acme/payments-api."]);
   });
 
   it("the connectors card lists what was connected", async () => {
@@ -568,22 +609,118 @@ describe("agentx init --ui", () => {
     const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH_WITH_LINEAR]);
     expect(code).toBe(0);
     expect(operator.states.at(-1)?.cards?.find((card) => card.id === "connectors")?.lines).toEqual(["Connected to payments-api: Linear."]);
-    expect(operator.states.at(-1)?.cards?.find((card) => card.id === "alerts")?.lines).toEqual(["Alerts go to ops@example.com, and the test alarm arrived."]);
+    expect(operator.states.at(-1)?.cards?.find((card) => card.id === "alerts")?.lines).toEqual(["Alerts go to ops@example.com, and the test alert arrived."]);
   });
 
-  it("FR-052: the page ends on a ready card that needs no command to finish, and the outcome is still readyText", async () => {
+  it("spec 048 FR-058 and FR-059: the ready screen is shown once, and the installer stays up until Close installer or 30 minutes", async () => {
+    const h = await harness();
+    let during: WizardSnapshot | undefined;
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
+    const code = await h.run(["--ui"], {
+      openBrowser: operator.open,
+      sleep: async (ms) => {
+        if (ms !== READY_HOLD_MS) return h.advance(ms);
+        const { origin, searchParams } = new URL(operator.opened[0] ?? "http://x");
+        during = (await (await fetch(`${origin}/state`, { headers: { [WIZARD_TOKEN_HEADER]: searchParams.get("t") ?? "" } })).json()) as WizardSnapshot;
+      },
+    });
+    await operator.settled();
+    expect(code).toBe(0);
+    const ready = during?.cards?.find((card) => card.id === "ready");
+    expect(ready?.status).toBe("ok");
+    expect(during?.outcome).toBe(READY_OUTCOME);
+    for (const line of ready?.lines ?? []) expect(during?.outcome ?? "").not.toContain(line);
+  });
+
+  it("holds until Close installer, and no longer", async () => {
+    let resolveClose: () => void = () => undefined;
+    const closeRequested = new Promise<void>((resolvePromise) => { resolveClose = resolvePromise; });
+    const waited: number[] = [];
+    const holding = holdReadyScreen({ closeRequested, ms: READY_HOLD_MS, sleep: (ms) => { waited.push(ms); return new Promise(() => undefined); } });
+    resolveClose();
+    await holding;
+    expect(waited).toEqual([30 * 60_000]);
+  });
+
+  it("FR-059 and #222: the page ends on a ready card whose commands work as shown, and the outcome does not repeat it (spec 048 FR-058)", async () => {
     const h = await harness();
     const { code, operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     expect(code).toBe(0);
     const last = operator.states.at(-1);
     const ready = last?.cards?.find((card) => card.id === "ready");
-    expect(ready?.lines[0]).toBe("AgentX environment staging is ready.");
+    expect(ready?.lines).toEqual([
+      "Try it: in #payments, mention @agentx and ask it something.",
+      "Send your developers the sign-in command below. They run it once, then use AgentX from Claude Code, Codex or Cursor.",
+      "The AgentX CLI is not published yet, so this command works on this computer. Other computers need their own copy of the AgentX CLI first.",
+      "No issue trackers connected yet.",
+      `Everything here is also in ${initLogPath(h.home, "staging")}.`,
+    ]);
+    expect(ready?.commands).toEqual([
+      { label: "Developer sign-in", command: "node /opt/agentx/dist/main.js login https://abc123.execute-api.us-east-1.amazonaws.com", group: "Invite your developers" },
+      { label: "Check the install", command: "node /opt/agentx/dist/main.js --env staging doctor", group: "Look after it" },
+      { label: "Connect an issue tracker", command: "node /opt/agentx/dist/main.js --env staging connector add linear --project payments-api", group: "Look after it" },
+      { label: "Add a project", command: "node /opt/agentx/dist/main.js --env staging project add", group: "Look after it" },
+      { label: "Send a test alert", command: "node /opt/agentx/dist/main.js --env staging alerts test", group: "Look after it" },
+      { label: "Remove AgentX", command: "node /opt/agentx/dist/main.js --env staging destroy", group: "Look after it" },
+    ]);
     expect(ready?.link?.url).toBe("https://slack.com/app_redirect?team=T0TEAM&channel=C0PAY00001");
-    const later = ready?.lines.indexOf("Later, if you want more:") ?? -1;
-    expect(later).toBeGreaterThan(0);
-    expect(ready?.lines.slice(0, later).some((line) => line.includes("agentx --env"))).toBe(false);
-    // The phase 1 outcome is unchanged: the same summary the terminal prints.
-    expect(last?.outcome).toContain("AgentX environment staging is ready.");
+    // FR-058: the outcome is the fixed line, never the ready card's own words repeated.
+    expect(last?.outcome).toBe(READY_OUTCOME);
+    expect(last?.phase).toBe("finished");
+    expect(last?.journey.current).toBe("finish");
+    expect(last?.journey.phases.map((phase) => phase.statusWord)).toEqual(["Done", "Done", "Done", "Done", "Done"]);
+    expect(last?.journey.timeLeftText).toBe("Done");
+  });
+
+  it("spec 048 FR-059: a run paused waiting on a Slack admin's approval shows the plain outcome, a continue command, and the same reason in the terminal", async () => {
+    const h = await harness();
+    const operator = fakeWizardOperator([...FIRST_RUN, "approval"]);
+    const code = await h.run(["--ui"], { openBrowser: operator.open });
+    await operator.settled();
+    expect(code).toBe(0);
+    const last = operator.states.at(-1);
+    expect(last?.outcome).toBe("The install is paused. Your progress is saved.");
+    expect(last?.commands).toEqual([{ label: "Continue later with", command: "node /opt/agentx/dist/main.js --env staging init --region us-east-1" }]);
+    expect(h.err.join("").trimEnd().split("\n").at(-1)).toEqual(
+      `[4/5] Stopped: Waiting for a Slack admin to approve the app. Details in the browser and in ${initLogPath(h.home, "staging")}.`,
+    );
+    // A paused run is not drawn as finished: the waiting step's phase waits for you, and the time
+    // left is what the install still has to do.
+    expect(last?.phase).toBe("paused");
+    expect(last?.journey.current).toBe("connect-slack");
+    expect(last?.journey.stepNumber).toBe(4);
+    expect(last?.journey.phases.map((phase) => phase.statusWord)).toEqual(["Done", "Done", "Done", "Waiting for you", "Coming up"]);
+    expect(last?.journey.timeLeftText).toBe("About 16 minutes left");
+  });
+
+  it("spec 048 FR-059: a run paused waiting on the alert subscription shows its own plain reason", async () => {
+    const h = await harness();
+    const alerts = fakeAlerts({ confirmAfterPolls: 1_000, budgetUsd: FIRST_RUN_BUDGET_USD });
+    const operator = fakeWizardOperator([...FIRST_RUN, ...SLACK, ...SIGNIN, ADMIN_EMAIL, "acme/payments-api", "", true, "payments", false, false, false, false]);
+    const code = await h.run(["--ui"], { openBrowser: operator.open, setup: { ...h.setup, alerts } });
+    await operator.settled();
+    expect(code).toBe(0);
+    const last = operator.states.at(-1);
+    expect(last?.outcome).toBe("The install is paused. Your progress is saved.");
+    expect(last?.commands).toEqual([{ label: "Continue later with", command: "node /opt/agentx/dist/main.js --env staging init --region us-east-1" }]);
+    expect(h.err.join("").trimEnd().split("\n").at(-1)).toEqual(
+      `[5/5] Stopped: Waiting for the alert subscription to be confirmed. Details in the browser and in ${initLogPath(h.home, "staging")}.`,
+    );
+    expect(last?.phase).toBe("paused");
+    expect(last?.journey.current).toBe("finish");
+    expect(last?.journey.stepNumber).toBe(5);
+    expect(last?.journey.phases.map((phase) => phase.statusWord)).toEqual(["Done", "Done", "Done", "Done", "Waiting for you"]);
+    expect(last?.journey.timeLeftText).toBe("About 2 minutes left");
+  });
+
+  it("--json with the page prints the result without the page's own internal flag", async () => {
+    const h = await harness();
+    const { code } = await h.runUi([...FIRST_RUN], ["--stop-after", "prerequisites", "--json"]);
+    expect(code).toBe(0);
+    const printed = JSON.parse(h.out.join("")) as { ok: boolean; data: Record<string, unknown> };
+    expect(printed.ok).toBe(true);
+    expect(printed.data).toMatchObject({ status: "complete", env: "staging", stoppedAfter: "prerequisites" });
+    expect(printed.data).not.toHaveProperty("pageMode");
   });
 
   it("a run stopped with --stop-after shows no ready card", async () => {

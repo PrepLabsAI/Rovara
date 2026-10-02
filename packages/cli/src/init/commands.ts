@@ -9,12 +9,13 @@ import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SNSClient } from "@aws-sdk/client-sns";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { STSClient } from "@aws-sdk/client-sts";
-import { agentXError, environmentOperatorRoleName, environmentStackName } from "@agentx/contracts";
+import { AgentXError, agentXError, environmentOperatorRoleName, environmentStackName } from "@agentx/contracts";
 import { authorizeCredential, secretsManagerAuthorizeSecrets } from "../admin/authorize.js";
 import { loginWithPkce, openSystemBrowser } from "../auth.js";
 import { cliErrorFor, cloudFormationOutputsReader, prepareDeployment, realCommandRunner, type DeployCliDependencies, type PreparedDeployment, type Writer } from "../deploy/commands.js";
 import { readBundleAnswers, type BundleAnswers } from "../deploy/export-bundle.js";
 import { assertSourceAtRelease } from "../deploy/cdk-engine.js";
+import { installOrder } from "../deploy/parameters.js";
 import { assertReleaseCoversRegion, loadRelease, type LoadedRelease } from "../deploy/release.js";
 import { stsCallerIdentity } from "../environments/adopt.js";
 import type { LockRecord } from "../environments/lock.js";
@@ -33,6 +34,7 @@ import {
   assertResumeFlagsMatch, checkAlertWebhook, collectInitAnswers, openRouterSecretName, persistInitAnswers, readOpenRouterKeyAnswer, storeAlertWebhook,
   webhookDisplay, webhookFlagDisplay, type CollectedAnswers, type InitFlags,
 } from "./answers.js";
+import { cliCommandLine, currentCliInvocation, type CliInvocation } from "./cli-command.js";
 import {
   cloudFormationStatusReader, secretsManagerInitSecrets, type FinishFlags, type InitContext, type InitSecrets, type PreMadeGitHubApp, type SecretFlags, type StackStatusReader,
 } from "./context.js";
@@ -41,17 +43,21 @@ import { finishSteps, readSettingsOrThrow, readyText } from "./finish-steps.js";
 import { githubAppStep, githubRestApi, type GitHubApi } from "./github-app.js";
 import { listAwsProfiles, pickAwsProfile, resolveCaller } from "./aws-account.js";
 import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallProgress, type InitAnswers, type InitStepId } from "./install-state.js";
+import { initLogPath, openInitLog, type InitLog } from "./log-file.js";
 import { confirmInstallPlan } from "./plan.js";
-import { awsPrerequisiteChecks, checkPrerequisites, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
-import { processPrompter, secretFromSource, unattendedPrompter, type Prompter } from "./prompts.js";
+import { awsPrerequisiteChecks, checkPrerequisites, isRootUser, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
+import { askForm, processPrompter, secretFromSource, unattendedPrompter, type FormField, type Prompter, type QuestionHelp } from "./prompts.js";
 import { fetchRelease, sourceRelease } from "./release-fetch.js";
 import { problemText, retryOnPage } from "./retry.js";
 import { developerSignInStep } from "./signin-step.js";
-import { slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
+import { botNameOf, slackAppStep, slackWebApi, verifySlackUrls, type SlackApi } from "./slack-app.js";
+import { isOperatorStop, isWordedOperatorStop } from "./stop.js";
 import { runInitSteps, type InitEvent, type InitRunResult, type InitStep } from "./steps.js";
 import { browserAvailable, NO_BROWSER_LINE, resolveUiMode } from "./ui-mode.js";
 import { prerequisitesCard, readyCard } from "./ui/cards.js";
+import { askFailureAction, failureScreen, isRetryableStep, plainReason, STOPPED_OUTCOME } from "./ui/failure.js";
 import { startInstallWizard, type InstallWizard } from "./ui/index.js";
+import { READY_LINE, stageLine, STEP_PLAN, stoppedLine, terminalStepLine } from "./ui/journey.js";
 import type { WizardResume } from "./ui/protocol.js";
 
 export interface InitCliDependencies {
@@ -80,6 +86,9 @@ export interface InitCliDependencies {
   prepareDeployment?: typeof prepareDeployment;
   /** Overrides the finishing steps' services (phase 15d2); every field not given is the real one. */
   setup?: Partial<SetupServices>;
+  /** The command this CLI runs as, for the page's "Continue later with" command (tests pin it; the
+   * real one is currentCliInvocation()). */
+  cliInvocation?: CliInvocation;
 }
 
 export interface InitOptions {
@@ -112,11 +121,45 @@ export interface InitOptions {
 }
 
 /** `ready` is the message a finished install ends with (readyText). */
-export type InitResult = InitRunResult & { env: string; resumed: boolean; controlPlaneUrl?: string; ready?: string; stoppedAfter?: InitStepId };
+export type InitResult = InitRunResult & {
+  env: string; resumed: boolean; controlPlaneUrl?: string; ready?: string; stoppedAfter?: InitStepId;
+  /** With the page open, the terminal already has every line it needs (FR-070): `main.ts` prints
+   * nothing more for it. */
+  pageMode?: true;
+};
 
 /** True when `callerArn` is a session of this environment's AgentX operator role (FR-019). */
 export function isOperatorRole(callerArn: string, env: string): boolean {
   return new RegExp(`:assumed-role/${environmentOperatorRoleName(env)}/`).test(callerArn);
+}
+
+/** FR-058 and FR-059: the ready screen stays up, so the page's outcome names nothing the ready
+ * card already says in full (the card is the one place the developer sign-in and day-two commands
+ * live); the terminal still gets READY_LINE and the full readyText goes to the log file. */
+export const READY_OUTCOME = "AgentX is installed.";
+
+/** FR-059: how long the ready screen stays up on its own, once the install is complete. */
+export const READY_HOLD_MS = 30 * 60_000;
+
+/** The plain words for a run that stopped waiting on someone else (a workspace admin, an alert
+ * subscription), shown as the terminal's one-line summary in place of the raw step message, which
+ * carries its own (terminal-only) rerun instruction. */
+export const WAITING_STEP_PLAIN: Partial<Record<InitStepId, string>> = {
+  "slack-app": "Waiting for a Slack admin to approve the app.",
+  alerts: "Waiting for the alert subscription to be confirmed.",
+};
+
+/** FR-059: the ready screen stays until the page asks to close (Plan ruling 3: a page button, not
+ * a question), or for READY_HOLD_MS, whichever comes first; a real run clears its own timer the
+ * moment either happens, so the process exits as soon as Close installer is pressed. */
+export async function holdReadyScreen(input: { closeRequested: Promise<void>; ms: number; sleep?: (ms: number) => Promise<void> }): Promise<void> {
+  if (input.sleep !== undefined) {
+    await Promise.race([input.closeRequested, input.sleep(input.ms)]);
+    return;
+  }
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([input.closeRequested, new Promise<void>((resolvePromise) => { timer = setTimeout(resolvePromise, input.ms); })]);
+  clearTimeout(timer);
 }
 
 export const OPERATOR_ACCESS_REFUSAL =
@@ -128,7 +171,7 @@ export const PLATFORM_TEAM_ACCESS_NOTE = "deployed by your platform team from th
 /** The access stack's deploy step, refused up front under the operator role: the operator role
  * cannot create IAM roles, so the deploy would only fail later on IAM. */
 function accessStep(): InitStep<InitContext> {
-  const deploy = deployStep({ id: "access", title: "Deploy the access stack (IAM roles, artifact bucket, image cache)" });
+  const deploy = deployStep({ id: "access", title: STEP_PLAN.access.title });
   return {
     ...deploy,
     async run(context, progress) {
@@ -142,29 +185,30 @@ export function initSteps(input: { github: GitHubApi; slack: SlackApi }): InitSt
   return [
     {
       id: "prerequisites",
-      title: "Check prerequisites",
+      title: STEP_PLAN.prerequisites.title,
       async run(context) {
         if (!context.prerequisitesPassed) await context.runPrerequisites();
         return { status: "done" };
       },
     },
     accessStep(),
-    deployStep({ id: "core", title: "Deploy the foundation and identity stacks" }),
+    deployStep({ id: "core", title: STEP_PLAN.core.title }),
     githubAppStep(input.github),
-    deployStep({ id: "control-plane", title: "Deploy the control plane and runtime" }),
+    deployStep({ id: "control-plane", title: STEP_PLAN["control-plane"].title }),
     slackAppStep(input.slack),
-    deployStep({ id: "slack-service", title: "Deploy the Slack service", after: verifySlackUrls }),
+    deployStep({ id: "slack-service", title: STEP_PLAN["slack-service"].title, after: verifySlackUrls }),
     developerSignInStep({ slack: input.slack }),
     ...finishSteps(),
   ];
 }
 
-function eventLine(event: InitEvent): string {
+function eventLine(event: InitEvent): string | undefined {
   switch (event.kind) {
     case "step-skipped": return `already done: ${event.title}`;
     case "step-started": return `==> ${event.title}`;
     case "step-done": return `done: ${event.title}`;
     case "step-waiting": return `waiting: ${event.title}`;
+    case "step-failed": return undefined;
   }
 }
 
@@ -234,28 +278,109 @@ function neverThrowingBrowser(open: (url: string) => Promise<unknown>, write: (l
  * with the run whichever way it ends (FR-002). */
 interface InitSession {
   wizard?: InstallWizard;
-  /** A property, not a method, so `init` can pass it on as `write` without rebinding it. */
+  /** Task 14: the page-mode log file, opened before the wizard and closed with it. Holds what the
+   * terminal no longer shows, and never a secret or the session token (FR-070, FR-071). */
+  log?: InitLog;
+  /** A property, not a method, so `init` can pass it on as `write` without rebinding it.
+   * A progress line: the terminal without the page; the log file and the page's technical log
+   * with it. */
   write: (line: string) => void;
+  /** The terminal always, and the log: with the page, only the start lines, one line per step,
+   * and the last line. */
+  say: (line: string) => void;
+  /** Child process output and the plan's text: the terminal without the page, the log file with it. */
+  output: Writer;
+  /** The prompter in use, once chosen: the catch below asks on it when no step hook already did. */
+  prompter?: Prompter;
+  /** Once known: names the region in a failure shown before a step runs. */
+  region?: string;
+  /** Set once `onStepFailure` already showed the screen for the error now being thrown, so the
+   * catch below does not show a second one for the same failure (Plan ruling 8). */
+  failureShown?: boolean;
+  /** The command this CLI runs as, for the "Continue later with" command on a failure screen. */
+  invocation: CliInvocation;
 }
 
 export async function runInit(options: InitOptions, deps: InitCliDependencies, services: { stderr: Writer; home: string }): Promise<InitResult> {
   const session: InitSession = {
-    write: (line) => { services.stderr.write(`${line}\n`); session.wizard?.log(line); },
+    invocation: deps.cliInvocation ?? currentCliInvocation(),
+    write: (line) => {
+      if (session.wizard === undefined) { services.stderr.write(`${line}\n`); return; }
+      session.log?.write(`${line}\n`);
+      session.wizard.log(line);
+    },
+    say: (line) => { services.stderr.write(`${line}\n`); session.log?.write(`${line}\n`); },
+    output: { write: (text: string) => (session.wizard === undefined ? services.stderr.write(text) : session.log?.write(text)) },
   };
   try {
     const result = await init(options, deps, services, session);
-    // A finished run ends the page on the same summary the terminal ends on: where to talk to
-    // AgentX, the developer sign-in command, and the day-2 commands (readyText).
-    session.wizard?.finish(result.status !== "complete" ? result.message
-      : result.stoppedAfter !== undefined ? `Stopped after the ${result.stoppedAfter} step, as --stop-after asked.`
-        : result.ready ?? `AgentX environment ${result.env} is installed.`);
+    const wizard = session.wizard;
+    if (wizard !== undefined) {
+      const complete = result.status === "complete" && result.stoppedAfter === undefined;
+      // FR-058 and FR-059: the page's outcome never repeats what the ready card already says (its
+      // commands and day-two advice); a paused run (waiting on a Slack admin, an alert
+      // subscription) gets the same plain form, with the continue command instead of a line
+      // naming the terminal; --stop-after keeps its own text.
+      if (complete) {
+        wizard.finish(READY_OUTCOME);
+      } else if (result.stoppedAfter !== undefined) {
+        wizard.finish(`Stopped after the ${result.stoppedAfter} step, as --stop-after asked.`);
+      } else {
+        const region = session.region ?? options.region ?? "<region>";
+        wizard.finish("The install is paused. Your progress is saved.", "paused", [
+          { label: "Continue later with", command: cliCommandLine(session.invocation, `--env ${options.env} init --region ${region}`) },
+        ]);
+      }
+      // FR-070 and FR-071: the full ready summary goes to the log file, never the terminal; the
+      // terminal gets the one fixed line below (Task 15's own finish work says READY_LINE too, per
+      // the controller ruling that moved it here so this task's terminal-lines test passes).
+      if (result.ready !== undefined) session.log?.write(`${result.ready}\n`);
+      if (complete) {
+        session.say(READY_LINE);
+        // FR-059: the page stays open (Close installer, or 30 minutes) only once the install is
+        // actually done; a paused or stopped-after run ends the page right away, as before.
+        await holdReadyScreen({ closeRequested: wizard.closeRequested(), ms: READY_HOLD_MS, ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }) });
+      } else if (result.status === "waiting") {
+        // The step itself names its own phase, the same one the page's rail shows as waiting.
+        session.say(stoppedLine({
+          phase: STEP_PLAN[result.step].phase,
+          problem: WAITING_STEP_PLAIN[result.step] ?? "The install is paused.",
+          logPath: session.log?.path ?? "the log",
+        }));
+      }
+    }
     return result;
   } catch (error) {
     const mapped = cliErrorFor(error);
-    session.wizard?.finish(mapped instanceof Error ? mapped.message : String(mapped), "failed");
+    const wizard = session.wizard;
+    if (wizard !== undefined) {
+      const region = session.region ?? options.region ?? "<region>";
+      // Spec 048 FR-060: a failure outside a step (or a step's own hook never ran, or already
+      // showed its screen) still gets the screen here, unless the operator chose to stop
+      // themselves (declining the plan, the root warning, or a "check again" question): that is
+      // not a failure, so no screen is shown for it (Plan ruling 8).
+      if (session.failureShown !== true && !isOperatorStop(error)) {
+        wizard.showFailure(failureScreen({ env: options.env, region, error, ...(wizard.logPath === undefined ? {} : { logPath: wizard.logPath }) }));
+        await askFailureAction(session.prompter ?? wizard.prompter, { retry: false });
+      }
+      // Only a stop with its own words (declining the plan, the root warning) tells them; any other
+      // stop, such as declining a check-again question, ends on the fixed words.
+      const outcome = isWordedOperatorStop(error) ? (plainReason(error) ?? STOPPED_OUTCOME) : STOPPED_OUTCOME;
+      wizard.finish(outcome, "failed", [{ label: "Continue later with", command: cliCommandLine(session.invocation, `--env ${options.env} init --region ${region}`) }]);
+      // FR-070: a real failure (not a stop the operator chose) collapses to one terminal line;
+      // the full error still goes to the log file. An operator stop keeps throwing `mapped` as
+      // before (unchanged for FR-005's declined-plan and FR-023's declined-recheck messages).
+      if (!isOperatorStop(error)) {
+        session.log?.write(`${mapped instanceof Error ? mapped.message : String(mapped)}\n`);
+        const what = wizard.hub.state().failure?.what ?? plainReason(error) ?? "The install could not go on.";
+        const line = stoppedLine({ phase: wizard.hub.state().journey.current, problem: what, logPath: session.log?.path ?? "the log" });
+        throw Object.assign(mapped instanceof AgentXError ? agentXError(mapped.code, line) : new Error(line), { cause: error });
+      }
+    }
     throw mapped;
   } finally {
     await session.wizard?.close();
+    await session.log?.close();
   }
 }
 
@@ -271,13 +396,16 @@ async function resumeScreen(store: ParameterStore, env: string, steps: ReadonlyA
   };
 }
 
-/** Answers "is the Slack app installed?" from --slack-install; every other question goes to `inner`. */
-function answeringSlackInstall(inner: Prompter, answer: "installed" | "approval"): Prompter {
+/** Answers "is the Slack app installed?" from --slack-install; every other question goes to `inner`,
+ * the page's form included when `inner` has one. Exported for its test. */
+export function answeringSlackInstall(inner: Prompter, answer: "installed" | "approval"): Prompter {
   return {
+    // askForm asks through inner's own form, which is there whenever this key is.
+    ...(inner.form === undefined ? {} : { form: (title: string, fields: readonly FormField[], options: { help?: QuestionHelp }) => askForm(inner, title, fields, options) }),
     ask: (question, options) => inner.ask(question, options),
     confirm: (question, options) => inner.confirm(question, options),
     secret: (question, options) => inner.secret(question, options),
-    async choose<T extends string>(question: string, choices: ReadonlyArray<{ value: T; label: string }>, options: { flag: string; defaultValue: T; unattendedRefusal?: string }): Promise<T> {
+    async choose<T extends string>(question: string, choices: ReadonlyArray<{ value: T; label: string }>, options: { flag: string; defaultValue: T; unattendedRefusal?: string; help?: QuestionHelp }): Promise<T> {
       const match = options.flag === "--slack-install" ? choices.find((choice) => choice.value === answer) : undefined;
       return match === undefined ? inner.choose(question, choices, options) : match.value;
     },
@@ -352,7 +480,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   if (options.yes && options.region === undefined && bundle === undefined) {
     throw agentXError("CONFIG_INVALID", "agentx init needs to know the AWS region; with --yes, pass --region <region>");
   }
-  const runner = deployDeps.commandRunner ?? realCommandRunner(services.stderr);
+  const runner = deployDeps.commandRunner ?? realCommandRunner(session.output);
 
   // The release comes first: a CLI built from source is told to pass --release before anything else.
   const version = deps.releaseVersion === undefined ? RELEASE_VERSION : deps.releaseVersion ?? undefined;
@@ -391,12 +519,19 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   let prompter: Prompter;
   if (uiMode.mode === "page") {
     if (options.yes) throw agentXError("CONFIG_INVALID", "agentx init --ui asks its questions on a page; --yes answers them without asking. Use one or the other");
+    // Task 14: opened before the wizard, so its address and the log's own path are both ready for
+    // the wizard's start lines (FR-070); the token is hidden from it the moment the server has one.
+    session.log = await openInitLog(initLogPath(services.home, env), { onError: (line) => services.stderr.write(`${line}\n`) });
     const wizard = await startInstallWizard({
-      env, write,
+      env,
+      write: (line) => services.stderr.write(`${line}\n`),
+      logPath: session.log.path,
       ...(options.browser ? { openBrowser: neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) } : {}),
     });
+    session.log.hide(wizard.token);
     session.wizard = wizard;
     prompter = deps.prompter ?? wizard.prompter;
+    session.say(stageLine("get-started"));
   } else if (deps.prompter !== undefined) {
     prompter = deps.prompter;
   } else if (options.yes) {
@@ -409,6 +544,8 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     prompter = processPrompter(services.stderr);
   }
   if (options.slackInstall !== undefined) prompter = answeringSlackInstall(prompter, options.slackInstall);
+  // Spec 048 FR-060: once chosen, so a failure outside any step still has someone to ask.
+  session.prompter = prompter;
   // Built once: the wizard shows the checklist from it before the first step runs, and the resume
   // screen names its titles.
   const steps = initSteps({ github: deps.github ?? githubRestApi(fetchImplementation), slack: deps.slack ?? slackWebApi(fetchImplementation) });
@@ -436,6 +573,8 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   const region = options.region ?? bundle?.region ?? (releaseRegions === undefined
     ? configuredRegion(configured, write)
     : await prompter.choose<string>("AWS region", choices.map((value) => ({ value, label: value })), { flag: "--region", defaultValue: environmentRegion ?? choices[0] ?? "us-east-1" }));
+  // Spec 048 FR-060: once known, so a failure before the caller is resolved still names the region.
+  session.region = region;
   if (bundle !== undefined && bundle.region !== region) throw agentXError("CONFIG_INVALID", `the bundle is for region ${bundle.region}; pass --region ${bundle.region}`);
   // The cdk engine synthesizes its own templates for any region; only the templates engine needs the release to cover it.
   if (options.flags.engine !== "cdk") assertReleaseCoversRegion(release, region);
@@ -446,13 +585,15 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   // is signed in again instead of ending the run. The terminal path throws as before.
   const caller = await resolveCaller({
     identity: () => deployDeps.identity ?? stsCallerIdentity(new STSClient({ region })),
-    region, prompter, runner,
+    region, prompter, runner, write,
     ...(session.wizard === undefined ? {} : { surface: session.wizard.surface }),
     ...(awsProfile === undefined ? {} : { profile: awsProfile }),
   });
   if (options.account !== undefined && options.account !== caller.account) {
     throw agentXError("CONFIG_INVALID", `--account ${options.account} does not match your AWS credentials, which are for account ${caller.account}; use credentials for ${options.account}, or leave --account off`);
   }
+  // Spec 048 FR-001: the header's account and region, once the caller is known and checked.
+  session.wizard?.setPlace({ account: caller.account, region });
   const checks = deps.checks ?? awsPrerequisiteChecks({ region, account: caller.account, store, runner, fetch: fetchImplementation });
   const stackStatus = deps.stackStatus ?? cloudFormationStatusReader(new CloudFormationClient({ region }));
   if (bundle !== undefined) await assertBundleResumable({ bundle, bundleDir: options.fromBundle ?? "", account: caller.account, releaseVersion: release.manifest.version, stackStatus });
@@ -490,6 +631,9 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     if (first !== undefined) throw agentXError("CONFIG_INVALID", `agentx init --yes needs ${first[0]} (${first[1]}); pass it, or run agentx init without --yes to be asked`);
   }
 
+  // Spec 048 FR-001: the questions (a first run) and the resume screen (a resume) are both "Your choices".
+  session.wizard?.setStage("your-choices");
+  if (session.wizard !== undefined) session.say(stageLine("your-choices"));
   let collected: CollectedAnswers | undefined;
   let answers: InitAnswers;
   if (stored === undefined) {
@@ -540,6 +684,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
         await checkPrerequisites({
           answers: finalAnswers, release, caller, checks, prompter: activePrompter, write,
           onCheck: (check) => { found.push(check); show("running"); },
+          images: release.manifest.images, audience: surface === undefined ? "terminal" : "page",
           ...(pendingKey === undefined ? {} : { openRouterKey: pendingKey }),
         });
       } catch (error) {
@@ -562,7 +707,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     // is the review screen, and its confirm is a button.
     await confirmInstallPlan({
       answers: collected.answers, notes: collected.notes, prompter,
-      write: (text) => { services.stderr.write(text); session.wizard?.plan(text); },
+      write: (text) => { session.output.write(text); session.wizard?.plan(text); },
       extras: { storesOpenRouterKey: collected.openRouterKey !== undefined, ...(collected.openRouterProviders === undefined ? {} : { openRouterProviders: collected.openRouterProviders }) },
     });
   } else {
@@ -636,13 +781,19 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     // Built once and reused by every deploy step. The caller identity is the one already checked
     // against the answers' account, and no partition is passed, so prepareDeployment's "answers
     // file" account and partition errors cannot arise here.
+    // A preparation that failed (npm ci, build or synth) is forgotten, so "Try this step again"
+    // prepares it again instead of failing the same way forever.
     deployment: () => {
-      deployment ??= (deps.prepareDeployment ?? prepareDeployment)({
-        engine: finalAnswers.engine, env, region, account: finalAnswers.account, identityMode: finalAnswers.identity.mode, release,
-        ...(options.source === undefined ? {} : { source: options.source }),
-        deps: { ...deployDeps, store, secrets, identity: { get: async () => caller } },
-        stderr: services.stderr,
-      });
+      if (deployment === undefined) {
+        const preparing = (deps.prepareDeployment ?? prepareDeployment)({
+          engine: finalAnswers.engine, env, region, account: finalAnswers.account, identityMode: finalAnswers.identity.mode, release,
+          ...(options.source === undefined ? {} : { source: options.source }),
+          deps: { ...deployDeps, store, secrets, identity: { get: async () => caller } },
+          stderr: session.output,
+        });
+        deployment = preparing;
+        preparing.catch(() => { if (deployment === preparing) deployment = undefined; });
+      }
       return deployment;
     },
     stackStatus,
@@ -652,6 +803,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     setup,
     adminSession,
     flags: options.finishFlags,
+    cliInvocation: session.invocation,
   };
 
   try {
@@ -659,7 +811,14 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
       env, region, store, holder: caller.arn, context, now,
       steps: runSteps,
       beforeSteps: saveAnswers,
-      onEvent: (event) => { write(eventLine(event)); session.wizard?.event(event); },
+      onEvent: (event) => {
+        const line = eventLine(event);
+        if (line !== undefined) write(line);
+        // FR-070: with the page open, the one line a step gets in the terminal; everything else
+        // this event produced above already went to the log file and the page's technical log.
+        if (session.wizard !== undefined && event.kind === "step-started") session.say(terminalStepLine(event.id));
+        session.wizard?.event(event);
+      },
       // A takeover is never behind --yes, which answers every confirm with yes.
       ...(options.yes ? {} : {
         confirmTakeover: (held: LockRecord) => activePrompter.confirm(
@@ -669,22 +828,52 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
           { defaultValue: false },
         ),
       }),
+      // Spec 048 FR-060: on the page only. The terminal path keeps throwing a step's error as before.
+      ...(session.wizard === undefined ? {} : {
+        onStepFailure: async ({ id, title, error }: { id: InitStepId; title: string; error: unknown }) => {
+          const wizard = session.wizard;
+          if (wizard === undefined) return "stop";
+          // Plan ruling 8: a stop the person already chose inside the step (declining a "check
+          // again" question, say) is not a failure; show no screen and no second question for it.
+          if (isOperatorStop(error)) return "stop";
+          wizard.showFailure(failureScreen({ env, region, stepTitle: title, stepId: id, error, ...(wizard.logPath === undefined ? {} : { logPath: wizard.logPath }) }));
+          const action = await askFailureAction(activePrompter, { retry: isRetryableStep(id) });
+          if (action === "retry") {
+            wizard.clearFailure();
+            return "retry";
+          }
+          session.failureShown = true;
+          return "stop";
+        },
+      }),
     });
     // A run --stop-after cut short is not installed, so it has no ready text.
     if (options.stopAfter !== undefined && result.status === "complete") {
-      return { ...result, env, resumed: stored !== undefined, stoppedAfter: options.stopAfter };
+      return { ...result, env, resumed: stored !== undefined, stoppedAfter: options.stopAfter, ...(session.wizard === undefined ? {} : { pageMode: true as const }) };
     }
     const settings = result.status === "complete" ? await readEnvironmentSettings(store, env) : undefined;
     const progress = result.status === "complete" ? await readInstallProgress(store, env) : undefined;
-    // FR-052: the page's last card says what works now; the terminal and the page's outcome keep
-    // readyText.
+    // FR-058 and FR-059: the page's last card says what works now, and gives every command in a
+    // form that works as shown; the terminal and the log file keep readyText, the same facts.
     if (surface !== undefined && settings !== undefined && progress !== undefined) {
-      surface.card(readyCard({ env, controlPlaneUrl: settings.controlPlaneUrl, progress }));
+      surface.card(readyCard({
+        env, controlPlaneUrl: settings.controlPlaneUrl, progress,
+        botName: botNameOf(progress, finalAnswers.slack.appName), invocation: session.invocation,
+        root: isRootUser(caller.arn), alertsOn: finalAnswers.alert.kind !== "none",
+        created: installOrder(finalAnswers.identity.mode).map((part) => environmentStackName(env, part)),
+        ...(session.log === undefined ? {} : { logPath: session.log.path }),
+      }));
     }
     return {
       ...result, env, resumed: stored !== undefined,
       ...(settings === undefined ? {} : { controlPlaneUrl: settings.controlPlaneUrl }),
-      ...(settings === undefined || progress === undefined ? {} : { ready: readyText({ env, controlPlaneUrl: settings.controlPlaneUrl, progress }) }),
+      ...(settings === undefined || progress === undefined ? {} : {
+        ready: readyText({
+          env, controlPlaneUrl: settings.controlPlaneUrl, progress,
+          botName: botNameOf(progress, finalAnswers.slack.appName), invocation: session.invocation,
+        }),
+      }),
+      ...(session.wizard === undefined ? {} : { pageMode: true as const }),
     };
   } finally {
     // Whether init succeeded or failed; a deployment that failed to build has nothing to clean up.

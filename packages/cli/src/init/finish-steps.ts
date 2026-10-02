@@ -15,12 +15,14 @@ import { addProject } from "../setup/project-add.js";
 import { installationToken } from "../setup/project-files.js";
 import { REPLY_WAIT_MS, waitForThreadedReply } from "../setup/reply-watch.js";
 import { BUDGET_TAG_NOTE, checkAlertWebhook } from "./answers.js";
+import { cliCommandLine, type CliInvocation } from "./cli-command.js";
 import type { InitContext } from "./context.js";
 import { CONNECTOR_LABELS, CONNECTOR_TYPES, type ConnectorType, type InstallProgress } from "./install-state.js";
 import { problemText, retryOnPage } from "./retry.js";
-import { readSlackBotToken } from "./slack-app.js";
+import { botNameOf, readSlackBotToken } from "./slack-app.js";
 import type { InitStep } from "./steps.js";
 import { adminCard, alertsCard, channelCard, connectorsCard, projectCard, replyCard, type AdminCardInput, type ReplyCardInput } from "./ui/cards.js";
+import { STEP_PLAN } from "./ui/journey.js";
 
 /** The environment's settings, which the Slack service step writes; every finishing step and the
  * admin session need them (F21: one message, used by both). */
@@ -47,7 +49,7 @@ function oidcAdminName(accessToken: string): string {
 export function adminUserStep(): InitStep<InitContext> {
   return {
     id: "admin-user",
-    title: "Create the admin user and sign in",
+    title: STEP_PLAN["admin-user"].title,
     async run(context, progress) {
       const settings = await requireSettings(context);
       const recorded = progress.current().admin;
@@ -111,7 +113,7 @@ export function adminUserStep(): InitStep<InitContext> {
 export function firstProjectStep(): InitStep<InitContext> {
   return {
     id: "first-project",
-    title: "Set up the first project and its channel",
+    title: STEP_PLAN["first-project"].title,
     async run(context, progress) {
       const session = await context.adminSession();
       let project = progress.current().project;
@@ -147,7 +149,7 @@ export function firstProjectStep(): InitStep<InitContext> {
             prompter: context.prompter, write: context.write, sleep: context.sleep, now: context.now, services: context.setup, flags: context.flags,
             onWaiting: (channelName) => {
               waitingFor = channelName;
-              context.surface?.card(channelCard({ stage: "waiting", channelName, botUserId: slack.botUserId }));
+              context.surface?.card(channelCard({ stage: "waiting", channelName, botName: botNameOf(progress.current(), context.answers.slack.appName) }));
             },
           });
         } catch (error) {
@@ -188,7 +190,7 @@ export function parseConnectorsFlag(value: string): Set<ConnectorType> {
 export function connectorsStep(): InitStep<InitContext> {
   return {
     id: "connectors",
-    title: "Offer the Linear, Jira and Asana connectors",
+    title: STEP_PLAN.connectors.title,
     async run(context, progress) {
       const wanted = context.flags.connectors === undefined ? undefined : parseConnectorsFlag(context.flags.connectors);
       const project = progress.current().project;
@@ -227,7 +229,7 @@ export function connectorsStep(): InitStep<InitContext> {
 export function alertsStep(): InitStep<InitContext> {
   return {
     id: "alerts",
-    title: "Subscribe alerts, check the budget, and send a test alarm",
+    title: STEP_PLAN.alerts.title,
     async run(context, progress) {
       const { answers } = context;
       const settings = await requireSettings(context);
@@ -293,7 +295,7 @@ async function requireWebhook(context: InitContext, name: string): Promise<strin
 export function e2eStep(): InitStep<InitContext> {
   return {
     id: "e2e",
-    title: "Check that AgentX answers in Slack",
+    title: STEP_PLAN.e2e.title,
     async run(context, progress) {
       const { project, slack } = progress.current();
       if (project?.channelId === undefined || project.channelName === undefined || slack === undefined) {
@@ -308,7 +310,7 @@ export function e2eStep(): InitStep<InitContext> {
         surface: context.surface, prompter: context.prompter, question: "Watch for the reply again?",
         failed: (problem) => show({ stage: "failed", ...where, problem }),
         run: async () => {
-          show({ stage: "waiting", ...where, botUserId: slack.botUserId, minutes: Math.round(REPLY_WAIT_MS / 60_000) });
+          show({ stage: "waiting", ...where, botName: botNameOf(progress.current(), context.answers.slack.appName), minutes: Math.round(REPLY_WAIT_MS / 60_000) });
           return waitForThreadedReply({
             env: context.env, session: await context.adminSession(), fetch: context.setup.fetch, teamId: slack.teamId, channelId: where.channelId,
             channelName: where.channelName, botUserId: slack.botUserId, rerun: `agentx --env ${context.env} init`, write: context.write, sleep: context.sleep, now: context.now,
@@ -328,23 +330,26 @@ export function finishSteps(): InitStep<InitContext>[] {
 }
 
 /** The message a finished agentx init ends with: where to talk to AgentX, how developers sign in,
- * and the day-2 commands. */
-export function readyText(input: { env: string; controlPlaneUrl: string; progress: InstallProgress }): string {
+ * and the day-2 commands. FR-058, FR-059 and #222: the bot is named by its handle, never a raw
+ * Slack mention, and every command is built from the CLI's own invocation, so it works as shown. */
+export function readyText(input: { env: string; controlPlaneUrl: string; progress: InstallProgress; botName: string; invocation: CliInvocation }): string {
   const { env, progress } = input;
-  const cli = `agentx --env ${env}`;
-  const { project, slack } = progress;
+  const cli = (args: string) => cliCommandLine(input.invocation, `--env ${env} ${args}`);
+  const { project } = progress;
   const connectors = progress.connectors ?? [];
   const connected = connectors.map((entry) => CONNECTOR_LABELS[entry.type]);
   return [
     `AgentX environment ${env} is ready.`,
-    ...(project?.channelName === undefined || slack === undefined ? [] : [`  Talk to it: mention <@${slack.botUserId}> in #${project.channelName} (project ${project.name}, revision ${project.revision}).`]),
+    ...(project?.channelName === undefined ? [] : [`  Talk to it: mention @${input.botName} in #${project.channelName} (project ${project.name}).`]),
     // Repeated here: the developer-signin step prints it only on the run that executes it, and a
     // resume (after the alert confirmation wait, say) finishes without that step.
-    `  Developers sign in with: npx @charterarc/agentx login ${input.controlPlaneUrl}`,
-    ...(project === undefined ? [] : [`  ${connected.length === 0 ? "No connectors yet." : `Connected: ${connected.join(", ")}.`} Add ${connected.length === 0 ? "one" : "more"} with ${cli} connector add linear|jira|asana --project ${project.name}.`]),
+    `  Developers sign in with: ${cliCommandLine(input.invocation, `login ${input.controlPlaneUrl}`)}`,
+    ...(project === undefined ? [] : [`  ${connected.length === 0 ? "No connectors yet." : `Connected: ${connected.join(", ")}.`} Add ${connected.length === 0 ? "one" : "more"} with ${cli(`connector add linear|jira|asana --project ${project.name}`)}.`]),
     // Owner decision 6: a connector saved with a warning says so again at the end.
     ...connectors.flatMap((entry) => (entry.warning === undefined ? [] : [`  Warning (${CONNECTOR_LABELS[entry.type]}): ${entry.warning}.`])),
-    `  More projects: ${cli} project add, then ${cli} channel add.`,
-    `  Send a test alarm any time: ${cli} alerts test.`,
+    `  More projects: ${cli("project add")}, then ${cli("channel add")}.`,
+    `  Send a test alarm any time: ${cli("alerts test")}.`,
+    // The plan points here for removing everything, on the terminal path (--no-ui, --yes) too.
+    `  Remove it: ${cli("destroy")}. It deletes the coding machines' disks too.`,
   ].join("\n");
 }

@@ -7,6 +7,13 @@
 //
 // Every same-origin asset this page links to must carry the session token in its URL: the server
 // refuses any request without it (tests/contract/local-page-assets.test.ts).
+//
+// Spec 048 FR-001, FR-003, FR-004, FR-006, FR-008 and FR-011: the page shell. A slim header (where
+// the install is), a progress rail of the five phases (journey.ts), and one panel that shows only
+// the current step: the welcome text, a resume notice, a failure screen, the connect and finishing
+// cards, the one question waiting on the operator, and the plan and the full log behind collapsed
+// details so they never crowd the current step out.
+import { CARD_PHASES, STEP_STATUS_WORDS } from "./journey.js";
 import { WIZARD_TOKEN_HEADER, WIZARD_TOKEN_QUERY } from "./protocol.js";
 
 export const WIZARD_CSP = [
@@ -36,305 +43,401 @@ export function wizardHtml(token: string): string {
 <link rel="stylesheet" href="${stylesheet}">
 </head>
 <body>
-<header><h1>Install AgentX</h1><p id="subtitle">Connecting to the installer&hellip;</p></header>
-<main>
-  <section id="resume" class="card hidden"><h2>Continuing an install</h2><div id="resume-body"></div></section>
-  <section id="plan" class="card hidden"><h2>Review</h2><pre id="plan-body"></pre></section>
-  <section id="next" class="card hidden"><h2>Next</h2><div id="next-link"></div></section>
-  <div id="cards"></div>
-  <section id="question" class="card hidden"><h2 id="question-text"></h2><div id="question-body"></div><p id="question-error" class="error hidden"></p></section>
-  <section id="outcome" class="card hidden"><h2>Finished</h2><p id="outcome-body"></p></section>
-  <section class="card"><h2>Steps</h2><ol id="steps"></ol></section>
-  <section class="card"><h2>Log</h2><pre id="log"></pre></section>
-</main>
+<header class="top">
+  <div><h1>Install AgentX</h1><p id="place">Connecting to the installer&hellip;</p></div>
+  <p id="time-left" class="time-left"></p>
+</header>
+<div class="layout">
+  <nav class="rail" aria-label="Install progress"><ol id="phases"></ol></nav>
+  <main id="panel" aria-live="polite">
+    <p id="step-of" class="step-of"></p>
+    <section id="welcome" class="card hidden"><h2>Before you start</h2><div id="welcome-body"></div></section>
+    <section id="resume" class="card hidden"><h2>Welcome back</h2><div id="resume-body"></div></section>
+    <section id="failure" class="card status failed hidden" role="alert">
+      <h2 id="failure-title"></h2>
+      <h3>What happened</h3><p id="failure-what"></p>
+      <h3>What to do</h3><p id="failure-next"></p>
+      <div id="failure-actions"></div>
+      <details><summary>Technical details</summary><div id="failure-details"></div></details>
+    </section>
+    <div id="cards"></div>
+    <section id="next" class="card hidden"><h2>Open this</h2><div id="next-link"></div></section>
+    <section id="question" class="card question hidden">
+      <h2 id="question-text"></h2>
+      <p id="question-why" class="why hidden"></p>
+      <p id="question-example" class="hint hidden"></p>
+      <div id="question-body"></div>
+      <p id="question-error" class="error hidden" role="alert"></p>
+    </section>
+    <section id="outcome" class="card hidden"><h2 id="outcome-title"></h2><p id="outcome-body"></p><div id="outcome-commands"></div></section>
+    <details id="plan" class="card hidden"><summary>View the plan</summary><pre id="plan-body"></pre></details>
+    <details id="log-box" class="card"><summary>Show technical log</summary><pre id="log"></pre></details>
+    <p id="closed-note" class="note hidden"></p>
+  </main>
+</div>
 <script type="module" src="${script}"></script>
 </body>
 </html>
 `;
 }
 
-export const WIZARD_CSS = `:root { color-scheme: light dark; }
-body { font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; margin: 0 auto; max-width: 52rem; padding: 1.5rem 1rem 4rem; }
-h1 { font-size: 1.4rem; margin: 0 0 .25rem; }
-h2 { font-size: .85rem; letter-spacing: .06em; margin: 0 0 .75rem; text-transform: uppercase; opacity: .7; }
-header p { margin: 0 0 1.5rem; opacity: .75; }
-.card { border: 1px solid rgba(128,128,128,.35); border-radius: .5rem; margin-bottom: 1rem; padding: 1rem; }
-.hidden { display: none; }
-pre { font: 13px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; margin: 0; max-height: 26rem; overflow: auto; white-space: pre-wrap; word-break: break-word; }
-#log { max-height: 18rem; opacity: .85; }
-#outcome-body { white-space: pre-wrap; }
-ol#steps { list-style: none; margin: 0; padding: 0; }
-ol#steps li { display: flex; gap: .6rem; padding: .2rem 0; }
-ol#steps li .mark { flex: none; width: 1.3rem; text-align: center; }
-li.pending { opacity: .5; }
-li.running { font-weight: 600; }
-li.waiting { color: #b06000; }
-li.done .mark, li.skipped .mark { color: #2e7d32; }
-li .note { display: block; font-size: .85rem; opacity: .8; }
-label { display: block; margin-bottom: .5rem; }
-input[type=text], input[type=password], textarea, select { border: 1px solid rgba(128,128,128,.5); border-radius: .35rem; box-sizing: border-box; font: inherit; padding: .45rem .6rem; width: 100%; }
-textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; min-height: 8rem; }
-.choices { display: grid; gap: .35rem; margin-bottom: .75rem; }
-.choices label { align-items: baseline; display: flex; gap: .5rem; margin: 0; }
-.buttons { display: flex; gap: .5rem; margin-top: .75rem; }
-button { border: 1px solid rgba(128,128,128,.5); border-radius: .35rem; cursor: pointer; font: inherit; padding: .45rem 1rem; }
-button.primary { background: #1a56db; border-color: #1a56db; color: #fff; }
-button[disabled] { cursor: progress; opacity: .6; }
-.error { color: #c62828; margin: .6rem 0 0; }
-.hint { font-size: .85rem; margin: .35rem 0 0; opacity: .7; }
-a.button { border: 1px solid rgba(128,128,128,.5); border-radius: .35rem; display: inline-block; font: inherit; margin-top: .5rem; padding: .45rem 1rem; text-decoration: none; }
-a.button.primary { background: #1a56db; border-color: #1a56db; color: #fff; }
-.card.status p { margin: 0 0 .35rem; }
-.card.status.ok { border-color: #2e7d32; }
-.card.status.waiting { border-color: #b06000; }
-.card.status.failed { border-color: #c62828; }
-ul.checks { list-style: none; margin: .5rem 0 0; padding: 0; }
-ul.checks li { display: flex; gap: .6rem; padding: .15rem 0; }
-ul.checks li.ok .mark { color: #2e7d32; }
-ul.checks li.failed .mark { color: #c62828; }
-`;
-
-const MARKS: Record<string, string> = { pending: "·", running: "•", done: "✓", skipped: "✓", waiting: "…" };
+// The installer's design system (type scale, spacing, color tokens and component classes) now
+// lives in design.ts; re-exported here so server.ts keeps its existing import unchanged.
+export { WIZARD_CSS } from "./design.js";
 
 /** The page's module. It is plain browser JavaScript held as text, not TypeScript: nothing here is
  * compiled, imported by Node, or type-checked with the rest of the CLI. */
-export const WIZARD_JS = `// AgentX install wizard. Served from 127.0.0.1 by \`agentx init --ui\`; loopback only.
+export const WIZARD_JS = `// AgentX install wizard. Served from 127.0.0.1 by the AgentX installer; loopback only.
 const token = new URL(import.meta.url).searchParams.get(${JSON.stringify(WIZARD_TOKEN_QUERY)}) ?? "";
 const TOKEN_HEADER = ${JSON.stringify(WIZARD_TOKEN_HEADER)};
-const MARKS = ${JSON.stringify(MARKS)};
+const CARD_PHASES = ${JSON.stringify(CARD_PHASES)};
+const STEP_WORDS = ${JSON.stringify(STEP_STATUS_WORDS)};
 const byId = (id) => document.getElementById(id);
 const show = (id, on) => { byId(id).classList.toggle("hidden", !on); };
+const el = (tag, className, text) => {
+  const node = document.createElement(tag);
+  if (className) node.className = className;
+  if (text !== undefined) node.textContent = text;
+  return node;
+};
+const setText = (id, text) => { byId(id).textContent = text ?? ""; show(id, Boolean(text)); };
 
 let renderedQuestion = null;
 let sending = false;
+let lastState = null;
+let installerClosed = false;
 
-function renderSteps(steps) {
-  const list = byId("steps");
+function post(path, body) {
+  return fetch(path, { method: "POST", headers: { "content-type": "application/json", [TOKEN_HEADER]: token }, body: JSON.stringify(body ?? {}) });
+}
+
+function clockText(seconds) {
+  return Math.floor(seconds / 60) + ":" + String(seconds % 60).padStart(2, "0");
+}
+
+function elapsedText(node) {
+  const seconds = Math.max(0, Math.floor((Date.now() - Date.parse(node.dataset.started)) / 1000));
+  const usual = Number(node.dataset.usual);
+  return " (" + clockText(seconds) + " so far, " + (seconds > usual ? "taking longer than usual" : node.dataset.usualText) + ")";
+}
+
+function linkBlock(link) {
+  const wrap = el("p");
+  const anchor = el("a", "button primary", link.label);
+  anchor.href = link.url;
+  anchor.target = "_blank";
+  anchor.rel = "noopener noreferrer";
+  wrap.append(anchor);
+  if (link.note) wrap.append(el("span", "hint", " " + link.note));
+  return wrap;
+}
+
+function commandRow(command) {
+  const row = el("div", "command");
+  const copy = el("button", "", "Copy");
+  copy.type = "button";
+  copy.addEventListener("click", () => {
+    const done = () => { copy.textContent = "Copied"; };
+    const failed = () => { copy.textContent = "Select it and copy"; };
+    if (navigator.clipboard) navigator.clipboard.writeText(command.command).then(done, failed); else failed();
+  });
+  row.append(el("span", "", command.label + ":"), el("code", "", command.command), copy);
+  return row;
+}
+
+function detailsBlock(lines) {
+  const details = el("details");
+  details.append(el("summary", "", "Technical details"));
+  for (const line of lines) details.append(el("p", "", line));
+  return details;
+}
+
+function renderRail(state) {
+  const list = byId("phases");
   list.replaceChildren();
-  for (const step of steps) {
-    const item = document.createElement("li");
-    item.className = step.status;
-    const mark = document.createElement("span");
-    mark.className = "mark";
-    mark.textContent = MARKS[step.status] ?? "\\u00b7";
-    const title = document.createElement("span");
-    title.textContent = step.title;
-    if (step.message) {
-      const note = document.createElement("span");
-      note.className = "note";
-      note.textContent = step.message;
-      title.append(note);
+  for (const phase of state.journey.phases) {
+    const item = el("li", "phase " + phase.status);
+    if (phase.id === state.journey.current) item.setAttribute("aria-current", "step");
+    item.append(el("span", "phase-title", phase.title), el("span", "phase-status", phase.statusWord), el("span", "phase-time", phase.timeText));
+    const steps = state.steps.filter((step) => step.phase === phase.id);
+    if (phase.id === state.journey.current && steps.length > 0) {
+      const ul = el("ul", "steps");
+      for (const step of steps) {
+        const li = el("li", "step " + step.status, step.title + ": " + (STEP_WORDS[step.status] ?? ""));
+        if (step.status === "running" && step.startedAt) {
+          const time = el("span", "elapsed");
+          time.dataset.started = step.startedAt;
+          time.dataset.usual = String(step.usualSeconds);
+          time.dataset.usualText = step.usualText;
+          time.textContent = elapsedText(time);
+          li.append(time);
+        }
+        ul.append(li);
+      }
+      item.append(ul);
+    } else if (phase.status === "done") {
+      const finished = steps.filter((step) => step.status === "done" || step.status === "skipped");
+      const cards = (state.cards ?? []).filter((card) => CARD_PHASES[card.id] === phase.id && card.status === "ok" && card.id !== "ready");
+      if (finished.length + cards.length > 0) {
+        const details = el("details");
+        details.append(el("summary", "", "Details"));
+        for (const step of finished) details.append(el("p", "", step.title + (step.tookSeconds === undefined ? ": done" : ": took " + clockText(step.tookSeconds))));
+        for (const card of cards) for (const line of card.lines) details.append(el("p", "", line));
+        item.append(details);
+      }
     }
-    item.append(mark, title);
     list.append(item);
   }
 }
 
-function renderResume(resume) {
-  show("resume", Boolean(resume));
-  if (!resume) return;
-  const body = byId("resume-body");
-  body.replaceChildren();
-  const done = document.createElement("p");
-  done.textContent = resume.completed.length > 0
-    ? "Already done: " + resume.completed.join(", ")
-    : "Nothing has finished yet.";
-  body.append(done);
-  const next = document.createElement("p");
-  next.textContent = resume.continueFrom ? "Continuing from: " + resume.continueFrom : "Every step is already done.";
-  body.append(next);
+function renderCard(card) {
+  const section = el("section", "card status " + card.status);
+  section.append(el("h2", "", card.title));
+  for (const line of card.lines) section.append(el("p", "", line));
+  if (card.checks) {
+    const list = el("ul", "checks");
+    for (const check of card.checks) list.append(el("li", check.ok ? "ok" : "failed", (check.ok ? "Ready: " : "Not ready: ") + check.label + ". " + check.detail));
+    section.append(list);
+  }
+  if (card.link) section.append(linkBlock(card.link));
+  let group;
+  for (const command of card.commands ?? []) {
+    if (command.group && command.group !== group) section.append(el("h3", "", command.group));
+    group = command.group;
+    section.append(commandRow(command));
+  }
+  if (card.id === "ready" && !installerClosed) {
+    const buttons = el("div", "buttons");
+    const close = el("button", "primary", "Close installer");
+    close.type = "button";
+    close.addEventListener("click", () => { close.disabled = true; post("/close"); });
+    buttons.append(close);
+    section.append(buttons);
+  }
+  if (card.details && card.details.length > 0) section.append(detailsBlock(card.details));
+  return section;
 }
 
-function linkButton(link) {
-  const anchor = document.createElement("a");
-  anchor.className = "button primary";
-  anchor.href = link.url;
-  anchor.target = "_blank";
-  anchor.rel = "noopener noreferrer";
-  anchor.textContent = link.label;
-  return anchor;
-}
-
-function renderCards(cards, link) {
+function renderPanelCards(state) {
   const holder = byId("cards");
   holder.replaceChildren();
   const offered = new Set();
-  for (const card of cards ?? []) {
-    const section = document.createElement("section");
-    section.className = "card status " + card.status;
-    const title = document.createElement("h2");
-    title.textContent = card.title;
-    section.append(title);
-    for (const line of card.lines) {
-      const paragraph = document.createElement("p");
-      paragraph.textContent = line;
-      section.append(paragraph);
-    }
-    if (card.checks) {
-      const list = document.createElement("ul");
-      list.className = "checks";
-      for (const check of card.checks) {
-        const item = document.createElement("li");
-        item.className = check.ok ? "ok" : "failed";
-        const mark = document.createElement("span");
-        mark.className = "mark";
-        mark.textContent = check.ok ? "\\u2713" : "\\u2717";
-        const text = document.createElement("span");
-        text.textContent = check.label + ": " + check.detail;
-        item.append(mark, text);
-        list.append(item);
-      }
-      section.append(list);
-    }
-    if (card.link) {
-      section.append(linkButton(card.link));
-      offered.add(card.link.url);
-    }
-    holder.append(section);
+  // Every card's link counts as offered, not only a rendered one's: a card collapsed into its
+  // phase's Details (status ok, not the current phase) could in principle still carry the run's
+  // own link (state.ts only clears it when a replacing card's link actually differs), and the
+  // bottom "Open this" button must not repeat a link a card already gave, shown or not.
+  for (const card of state.cards ?? []) if (card.link) offered.add(card.link.url);
+  for (const card of state.cards ?? []) {
+    const current = CARD_PHASES[card.id] === state.journey.current;
+    if (card.status === "ok" && !current && card.id !== "ready") continue;
+    // FR-060: while the failure panel is up, it is the one place the failure is told; the failed
+    // step's own card would only repeat it (its problem is in the panel's technical details).
+    if (state.failure && card.status === "failed" && CARD_PHASES[card.id] === state.journey.current) continue;
+    holder.append(renderCard(card));
   }
-  // The run's own "open this" address, unless a card already offers the same one.
-  const next = link && !offered.has(link.url) ? link : null;
+  const next = state.link && !offered.has(state.link.url) ? state.link : null;
   show("next", Boolean(next));
-  const slot = byId("next-link");
-  slot.replaceChildren();
-  if (next) slot.append(linkButton(next));
+  byId("next-link").replaceChildren(...(next ? [linkBlock(next)] : []));
+}
+
+function renderFailure(failure) {
+  show("failure", Boolean(failure));
+  if (!failure) return;
+  byId("failure-title").textContent = failure.title;
+  byId("failure-what").textContent = failure.what;
+  byId("failure-next").textContent = failure.next;
+  const details = byId("failure-details");
+  details.replaceChildren(...failure.details.map((line) => el("p", "", line)));
+  if (failure.link) details.append(linkBlock(failure.link));
 }
 
 function submit(id, value) {
   if (sending) return;
   sending = true;
-  for (const button of document.querySelectorAll("#question button")) button.disabled = true;
-  fetch("/answer", {
-    method: "POST",
-    headers: { "content-type": "application/json", [TOKEN_HEADER]: token },
-    body: JSON.stringify({ id, value }),
-  }).then((response) => response.json()).then((reply) => {
-    // A refusal arrives as a fresh question with the message on it, so only a transport failure
-    // needs saying here.
+  for (const button of document.querySelectorAll("#question button, #failure-actions button")) button.disabled = true;
+  post("/answer", { id, value }).then((response) => response.json()).then((reply) => {
     if (!reply.ok) sending = false;
   }).catch((error) => {
     sending = false;
-    const field = byId("question-error");
-    field.textContent = "could not reach the installer: " + error;
-    field.classList.remove("hidden");
+    setText("question-error", "Could not reach the installer: " + error);
   });
+}
+
+function buttonRow(question) {
+  const row = el("div", "buttons");
+  for (const choice of question.buttons ?? []) {
+    const button = el("button", choice.primary ? "primary" : "", choice.label);
+    button.type = "button";
+    button.addEventListener("click", () => submit(question.id, choice.value));
+    row.append(button);
+  }
+  return row;
+}
+
+function sendButton(onSend) {
+  const row = el("div", "buttons");
+  const send = el("button", "primary", "Continue");
+  send.type = "button";
+  send.addEventListener("click", onSend);
+  row.append(send);
+  return row;
+}
+
+function hideFromPasswordManagers(field) {
+  field.autocomplete = "off";
+  field.spellcheck = false;
+  field.setAttribute("data-1p-ignore", "");
+  field.setAttribute("data-lpignore", "true");
+  field.setAttribute("data-bwignore", "");
+}
+
+function buildForm(question, body) {
+  const inputs = [];
+  for (const field of question.fields ?? []) {
+    const id = "field-" + field.name;
+    const wrap = el("div", "field");
+    const label = el("label", "field-label", field.label);
+    label.htmlFor = id;
+    const input = el("input");
+    input.id = id;
+    input.type = field.masked ? "password" : "text";
+    if (field.masked) hideFromPasswordManagers(input);
+    if (field.value && !field.masked) input.value = field.value;
+    const notes = [];
+    for (const [suffix, text, className] of [["why", field.why, "hint"], ["example", field.example ? "For example: " + field.example : undefined, "hint"], ["hint", field.hint, "hint"], ["error", field.error, "error"]]) {
+      if (!text) continue;
+      const note = el("p", className, text);
+      note.id = id + "-" + suffix;
+      notes.push(note);
+    }
+    if (field.error) input.setAttribute("aria-invalid", "true");
+    input.setAttribute("aria-describedby", notes.map((note) => note.id).join(" "));
+    wrap.append(label, input, ...notes);
+    body.append(wrap);
+    inputs.push([field, input]);
+  }
+  body.append(sendButton(() => {
+    const values = Object.fromEntries(inputs.map(([field, input]) => [field.name, input.value]));
+    if (!sending) for (const [field, input] of inputs) if (field.masked) input.value = "";
+    submit(question.id, JSON.stringify(values));
+  }));
 }
 
 function buildQuestion(question) {
   const body = byId("question-body");
   body.replaceChildren();
-  byId("question-text").textContent = question.text;
-  const error = byId("question-error");
-  error.textContent = question.error ?? "";
-  show("question-error", Boolean(question.error));
-
-  if (question.kind === "confirm") {
-    const buttons = document.createElement("div");
-    buttons.className = "buttons";
-    for (const choice of [{ value: "yes", label: "Yes" }, { value: "no", label: "No" }]) {
-      const button = document.createElement("button");
-      button.type = "button";
-      button.textContent = choice.label;
-      const isDefault = question.defaultConfirm === (choice.value === "yes");
-      if (isDefault) button.className = "primary";
-      button.addEventListener("click", () => submit(question.id, choice.value));
-      buttons.append(button);
-    }
-    body.append(buttons);
-    return;
+  byId("question-text").textContent = question.label ?? question.text;
+  setText("question-why", question.why);
+  setText("question-example", question.example ? "For example: " + question.example : undefined);
+  setText("question-error", question.error);
+  if (question.learnMoreUrl) {
+    const more = el("a", "", "Learn more");
+    more.href = question.learnMoreUrl;
+    more.target = "_blank";
+    more.rel = "noopener noreferrer";
+    body.append(el("p", "hint"));
+    body.lastChild.append(more, " (opens in a new tab)");
   }
-
+  if (question.kind === "confirm" || question.kind === "actions") { body.append(buttonRow(question)); return; }
+  if (question.kind === "form") { buildForm(question, body); return; }
+  const described = ["question-why", "question-example", "question-error"].filter((id) => !byId(id).classList.contains("hidden"));
   let read;
   if (question.kind === "choose") {
-    const group = document.createElement("div");
-    group.className = "choices";
-    const name = "choice-" + question.id;
+    const group = el("div", "choices");
+    group.setAttribute("role", "radiogroup");
+    group.setAttribute("aria-labelledby", "question-text");
     for (const choice of question.choices ?? []) {
-      const label = document.createElement("label");
-      const radio = document.createElement("input");
+      const label = el("label");
+      const radio = el("input");
       radio.type = "radio";
-      radio.name = name;
+      radio.name = "choice-" + question.id;
       radio.value = choice.value;
       radio.checked = choice.value === question.defaultValue;
-      const text = document.createElement("span");
-      text.textContent = choice.label;
-      label.append(radio, text);
+      label.append(radio, el("span", "", choice.label));
       group.append(label);
     }
     body.append(group);
-    read = () => {
-      const picked = group.querySelector("input:checked");
-      return picked ? picked.value : "";
-    };
+    read = () => { const picked = group.querySelector("input:checked"); return picked ? picked.value : ""; };
   } else {
-    const field = question.multiline ? document.createElement("textarea") : document.createElement("input");
+    const field = question.multiline ? el("textarea") : el("input");
+    field.id = "answer-field";
     if (!question.multiline) field.type = question.masked ? "password" : "text";
-    field.autocomplete = question.masked ? "off" : "on";
-    if (question.masked) {
-      field.spellcheck = false;
-      // Q4: ask password managers neither to fill nor to save a secret.
-      field.setAttribute("data-1p-ignore", "");
-      field.setAttribute("data-lpignore", "true");
-      field.setAttribute("data-bwignore", "");
-    }
-    if (question.defaultValue !== undefined && !question.masked) field.placeholder = question.defaultValue;
+    if (question.masked) hideFromPasswordManagers(field); else field.autocomplete = "on";
+    field.setAttribute("aria-labelledby", "question-text");
+    if (question.defaultValue && !question.masked) field.placeholder = question.defaultValue;
     body.append(field);
-    if (question.defaultValue !== undefined && !question.masked) {
-      const hint = document.createElement("p");
-      hint.className = "hint";
-      hint.textContent = "Leave empty for " + question.defaultValue;
+    if (question.hint) {
+      const hint = el("p", "hint", question.hint);
+      hint.id = "question-hint";
+      described.push(hint.id);
       body.append(hint);
     }
+    field.setAttribute("aria-describedby", described.join(" "));
+    if (question.error) field.setAttribute("aria-invalid", "true");
     read = () => {
       const value = field.value;
-      // A press while an answer is in flight sends nothing (submit ignores it), so the field keeps
-      // what was typed.
       if (sending) return value;
-      // Q4: a secret leaves the field the moment it is sent; a refused one is pasted again.
       if (question.masked) field.value = "";
       return value;
     };
-    if (!question.multiline) {
-      field.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); submit(question.id, read()); } });
-    }
+    if (!question.multiline) field.addEventListener("keydown", (event) => { if (event.key === "Enter") { event.preventDefault(); submit(question.id, read()); } });
     queueMicrotask(() => field.focus());
   }
-
-  const buttons = document.createElement("div");
-  buttons.className = "buttons";
-  const send = document.createElement("button");
-  send.type = "button";
-  send.className = "primary";
-  send.textContent = "Continue";
-  send.addEventListener("click", () => submit(question.id, read()));
-  buttons.append(send);
-  body.append(buttons);
+  body.append(sendButton(() => submit(question.id, read())));
 }
 
 function render(state) {
-  byId("subtitle").textContent = state.phase === "running"
-    ? "Installing environment " + state.env + ". Keep this tab open until it finishes."
-    : "Environment " + state.env + ": " + state.phase + ".";
-  renderSteps(state.steps);
-  renderResume(state.resume);
-  renderCards(state.cards, state.link);
+  lastState = state;
+  document.title = state.pageTitle;
+  const where = [state.header.installName, state.header.account ? "AWS account " + state.header.account : "", state.header.region ?? ""].filter(Boolean);
+  byId("place").textContent = "Install name: " + where.join(", ");
+  byId("time-left").textContent = state.journey.timeLeftText;
+  const current = state.journey.phases.find((phase) => phase.id === state.journey.current);
+  byId("step-of").textContent = "Step " + state.journey.stepNumber + " of " + state.journey.stepCount + (current ? ": " + current.title : "");
+  renderRail(state);
+  show("welcome", Boolean(state.welcome));
+  byId("welcome-body").replaceChildren(...(state.welcome ?? []).map((line) => el("p", "", line)));
+  show("resume", Boolean(state.resume));
+  if (state.resume) {
+    byId("resume-body").replaceChildren(
+      el("p", "", state.resume.continueFrom ? "Welcome back. Continuing with: " + state.resume.continueFrom + "." : "Welcome back. Every step is already done."),
+      el("p", "", state.resume.completed.length > 0 ? "Already done: " + state.resume.completed.join(", ") + "." : "Nothing has finished yet."),
+    );
+  }
+  renderFailure(state.failure);
+  renderPanelCards(state);
   show("plan", Boolean(state.plan));
-  if (state.plan) byId("plan-body").textContent = state.plan;
-  show("outcome", Boolean(state.outcome));
-  if (state.outcome) byId("outcome-body").textContent = state.outcome;
+  if (state.plan) {
+    byId("plan-body").textContent = state.plan;
+    byId("plan").open = state.steps.every((step) => step.status === "pending");
+  }
+  const hasReady = (state.cards ?? []).some((card) => card.id === "ready");
+  show("outcome", Boolean(state.outcome) && !hasReady);
+  if (state.outcome) {
+    byId("outcome-title").textContent = state.phase === "failed" ? "The install stopped" : "The install is paused";
+    byId("outcome-body").textContent = state.outcome;
+    byId("outcome-commands").replaceChildren(...(state.commands ?? []).map(commandRow));
+  }
   if (!state.question) {
     renderedQuestion = null;
     sending = false;
     byId("question-body").replaceChildren();
+    byId("failure-actions").replaceChildren();
     show("question", false);
     return;
   }
-  show("question", true);
-  // Only rebuild on a new question, so a state push cannot wipe what is being typed.
-  if (state.question.id !== renderedQuestion) {
-    renderedQuestion = state.question.id;
+  // FR-060: the failure's own question (Try this step again, Stop for now) is the failure panel's
+  // buttons, not a second card under it.
+  const failureQuestion = Boolean(state.failure && state.question && state.question.kind === "actions");
+  const renderKey = state.question.id + (failureQuestion ? " in failure" : "");
+  show("question", !failureQuestion);
+  if (renderKey !== renderedQuestion) {
+    renderedQuestion = renderKey;
     sending = false;
-    buildQuestion(state.question);
+    byId("question-body").replaceChildren();
+    byId("failure-actions").replaceChildren();
+    if (failureQuestion) byId("failure-actions").replaceChildren(buttonRow(state.question));
+    else buildQuestion(state.question);
   }
 }
 
@@ -344,6 +447,8 @@ function appendLog(line) {
   pane.append(line + "\\n");
   if (atBottom) pane.scrollTop = pane.scrollHeight;
 }
+
+setInterval(() => { for (const node of document.querySelectorAll("[data-started]")) node.textContent = elapsedText(node); }, 1000);
 
 const source = new EventSource("/events?" + ${JSON.stringify(WIZARD_TOKEN_QUERY)} + "=" + encodeURIComponent(token));
 source.addEventListener("snapshot", (event) => {
@@ -355,10 +460,17 @@ source.addEventListener("state", (event) => render(JSON.parse(event.data)));
 source.addEventListener("log", (event) => appendLog(JSON.parse(event.data)));
 source.addEventListener("closed", () => {
   source.close();
-  byId("subtitle").textContent = "The installer has stopped. You can close this tab.";
+  installerClosed = true;
   show("question", false);
+  const ready = lastState && (lastState.cards ?? []).some((card) => card.id === "ready");
+  const logPath = lastState && lastState.logPath ? lastState.logPath : "the install log";
+  byId("closed-note").textContent = ready ? "The installer has closed. Everything on this page is also in " + logPath + "." : "The installer has stopped. You can close this tab.";
+  show("closed-note", true);
+  if (lastState) render(lastState);
 });
 source.addEventListener("error", () => {
-  if (source.readyState === EventSource.CLOSED) byId("subtitle").textContent = "Lost the connection to the installer. Check the terminal.";
+  if (source.readyState !== EventSource.CLOSED || installerClosed) return;
+  byId("closed-note").textContent = "Lost the connection to the installer. If it stopped, start the install again in a terminal; it continues where it left off.";
+  show("closed-note", true);
 });
 `;

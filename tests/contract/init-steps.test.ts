@@ -3,8 +3,12 @@
 // failed step (so the next run retries it), and records but stops on a waiting step (FR-035).
 import { describe, expect, it, vi } from "vitest";
 import { agentXError } from "@agentx/contracts";
-import { installProgressParameterName, readInstallProgress, type InitStepId } from "../../packages/cli/src/init/install-state.js";
+import { initSteps } from "../../packages/cli/src/init/commands.js";
+import { installProgressParameterName, INIT_STEP_IDS, readInstallProgress, type InitStepId } from "../../packages/cli/src/init/install-state.js";
 import { runInitSteps, type InitEvent, type InitStep, type StepOutcome } from "../../packages/cli/src/init/steps.js";
+import { isOperatorStop, markOperatorStop } from "../../packages/cli/src/init/stop.js";
+import { STEP_PLAN } from "../../packages/cli/src/init/ui/journey.js";
+import { fakeGitHubApi, fakeSlackApi } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 const ENV = "staging";
@@ -168,5 +172,43 @@ describe("init step runner", () => {
     expect(never.run).not.toHaveBeenCalled();
     expect(failing.values.has(LOCK)).toBe(false);
     expect(failing.values.has(installProgressParameterName(ENV))).toBe(false);
+  });
+
+  it("spec 048 FR-060: a failed step is reported, then run again when onStepFailure says retry", async () => {
+    let runs = 0;
+    const events: string[] = [];
+    const flaky: InitStep<null> = { id: "access", title: "Set up AWS permissions", run: async () => { runs += 1; if (runs === 1) throw new Error("Rate exceeded"); return { status: "done" }; } };
+    const result = await runInitSteps({
+      env: "staging", region: "us-east-1", store: new MemoryParameterStore(), holder: HOLDER, steps: [flaky], context: null,
+      onEvent: (event) => events.push(`${event.kind} ${event.id}`),
+      onStepFailure: async ({ id, error }) => { events.push(`asked ${id} ${(error as Error).message}`); return "retry"; },
+    });
+    expect(result).toMatchObject({ status: "complete", ran: ["access"] });
+    expect(events).toEqual(["step-started access", "step-failed access", "asked access Rate exceeded", "step-started access", "step-done access"]);
+  });
+
+  it("spec 048 FR-060: stop throws the same error the run always threw", async () => {
+    const failing: InitStep<null> = { id: "access", title: "Set up AWS permissions", run: async () => { throw new Error("Rate exceeded"); } };
+    await expect(runInitSteps({ env: "staging", region: "us-east-1", store: new MemoryParameterStore(), holder: HOLDER, steps: [failing], context: null, onStepFailure: async () => "stop" }))
+      .rejects.toThrow('init stopped at "Set up AWS permissions": Rate exceeded. Run agentx init --env staging --region us-east-1 again to continue from this step.');
+  });
+
+  // Fix round 1 (Plan ruling 8): a stop the step's own run chose (declining a "check again"
+  // question inside it, say) keeps that status through the wrap initStepFailure builds, so a
+  // catch further up (runInit's) still reads it as a stop, not a new failure, however
+  // onStepFailure answers.
+  it("spec 048 FR-060 fix: a stop the step's run already chose keeps that status through the thrown error", async () => {
+    const stopping: InitStep<null> = { id: "access", title: "Set up AWS permissions", run: async () => { throw markOperatorStop(new Error("said no to continuing")); } };
+    const thrown = await runInitSteps({ env: "staging", region: "us-east-1", store: new MemoryParameterStore(), holder: HOLDER, steps: [stopping], context: null, onStepFailure: async () => "stop" })
+      .then(() => undefined, (error: unknown) => error);
+    expect(isOperatorStop(thrown)).toBe(true);
+    expect(thrown).toMatchObject({ message: expect.stringContaining("said no to continuing") as unknown });
+  });
+});
+
+describe("step names", () => {
+  it("spec 048 FR-080: every step is named in plain words, from the journey's one list", () => {
+    expect(initSteps({ github: fakeGitHubApi(), slack: fakeSlackApi() }).map((step) => [step.id, step.title]))
+      .toEqual(INIT_STEP_IDS.map((id) => [id, STEP_PLAN[id].title]));
   });
 });

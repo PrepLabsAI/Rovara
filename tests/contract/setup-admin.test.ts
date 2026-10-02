@@ -290,7 +290,7 @@ describe("the admin session", () => {
     });
     const message = "the AgentX sign-in did not finish within 10 minutes; run agentx init again and finish signing in as the admin user in the browser";
     await expect(failure).rejects.toThrow(message);
-    const shown = initStepFailure("Create the admin user and sign in", await failure.catch((error: unknown) => error), { env: "staging", region: "us-east-1" }) as Error;
+    const shown = initStepFailure("Sign in to AgentX", await failure.catch((error: unknown) => error), { env: "staging", region: "us-east-1" }) as Error;
     expect(shown.message).toContain(message);
     expect(shown.message).not.toContain("Refresh your AWS session");
   });

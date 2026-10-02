@@ -40,11 +40,62 @@ export type OpenRouterCheckConfig = Partial<NonNullable<ModelsAnswers["openRoute
 /** An OpenRouter key collected by init's questions, not yet stored in Secrets Manager. */
 export interface PendingOpenRouterKey { key: string; providers?: readonly string[] }
 /** One prerequisite's result, for the page's checklist (spec 040 FR-023). `detail` is the ok line
- * without its "ok " prefix, or the problem exactly as the error lists it. */
-export interface PrerequisiteCheck { label: string; ok: boolean; detail: string }
+ * without its "ok " prefix, or the problem exactly as the error lists it. `technical` is extra raw
+ * detail (an error code, an ARN) the page keeps collapsed rather than putting in `detail` (spec 048
+ * FR-027, FR-060); Task 12 is the first to fill it in. */
+export interface PrerequisiteCheck { label: string; ok: boolean; detail: string; technical?: string }
 
-export const DEDICATED_ACCOUNT_NOTE =
-  "AgentX recommends a dedicated AWS account for each install: environments that share an account are not a security boundary against each other.";
+/** Who init's prerequisite problems are being written for: the terminal's flags and commands, or
+ * the page's own words and buttons (spec 048 FR-065, FR-027, FR-080). */
+export type CheckAudience = "page" | "terminal";
+/** The release's own images (spec 048 FR-065): installed by pulling through this install's image
+ * cache rather than building locally, so each must already be public on Amazon ECR Public and
+ * pinned to a digest before anything is created, unless the answers name an image of their own. */
+export interface ReleaseImages { worker?: string | undefined; slack?: string | undefined }
+
+const IMAGE_WORDS = { worker: "coding", slack: "Slack connection" } as const;
+const IMAGE_FLAGS = { worker: "--worker-image", slack: "--slack-image" } as const;
+
+/** Spec 048 FR-065 and SC-009: each image the release deploys must be one AWS pulls through this
+ * install's image cache (public.ecr.aws, pinned to a digest), unless the answers name their own.
+ * The live check of 2026-10-01 met this only 15 minutes into the build. */
+export function releaseImageChecks(input: { version: string; images: ReleaseImages; overrides?: ReleaseImages; audience: CheckAudience }): PrerequisiteCheck[] {
+  return (["worker", "slack"] as const).map((which): PrerequisiteCheck => {
+    const label = `The ${IMAGE_WORDS[which]} image`;
+    const override = input.overrides?.[which];
+    if (override !== undefined) return { label, ok: true, detail: "uses the image address you gave", technical: override };
+    const ref = input.images[which];
+    // Narrowed here (rather than computed as a fourth, "no problem" branch below) so the ok
+    // return can write `technical: ref` directly: once ref passes every check it is never
+    // undefined, so a conditional spread for it on this path was dead code.
+    if (ref !== undefined && ref.startsWith("public.ecr.aws/") && /@sha256:[a-f0-9]{64}$/.test(ref)) {
+      return { label, ok: true, detail: "AWS can pull it", technical: ref };
+    }
+    const problem = ref === undefined ? "missing" : !ref.startsWith("public.ecr.aws/") ? "not-public" : "not-pinned";
+    const words = IMAGE_WORDS[which];
+    const flag = `${IMAGE_FLAGS[which]} <repository@sha256:...>`;
+    const detail = input.audience === "page"
+      ? {
+        missing: `This release has no ${words} image. Use a published AgentX release.`,
+        "not-public": `This release's ${words} image is not on Amazon ECR Public, so AWS cannot pull it. Use a published AgentX release, or start the install again with an image address AWS can reach.`,
+        "not-pinned": `This release's ${words} image is not pinned to one exact version, so AWS cannot pull it safely. Use a published AgentX release.`,
+      }[problem]
+      : {
+        missing: `release ${input.version} has no ${which} image digest; use a published release, or pass ${flag}`,
+        "not-public": `release ${input.version}'s ${which} image ${ref ?? ""} is not a public.ecr.aws/ reference, so the install would fail after about 15 minutes; use a published release, or pass ${flag} with an image AWS can pull`,
+        "not-pinned": `release ${input.version}'s ${which} image ${ref ?? ""} is not pinned to a digest; use a published release, or pass ${flag}`,
+      }[problem];
+    return { label, ok: false, detail, ...(ref === undefined ? {} : { technical: ref }) };
+  });
+}
+
+/** FR-017: shown once, on the account card. */
+export const DEDICATED_ACCOUNT_NOTE = "Tip: a separate AWS account just for AgentX keeps its costs and permissions apart from your other work.";
+/** FR-016. */
+export const ROOT_WARNING = "You are signed in as the AWS root user. AgentX works, but AWS advises an admin user instead.";
+/** AWS's guide to an IAM user with admin rights. Confirm it loads before committing (curl -sI); if AWS moved it, use the IAM User Guide page on creating an administrative user. */
+export const ADMIN_USER_GUIDE_URL = "https://docs.aws.amazon.com/IAM/latest/UserGuide/getting-started-account-iam.html";
+export const isRootUser = (arn: string): boolean => /^arn:aws[a-z-]*:iam::\d{12}:root$/.test(arn);
 
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "");
 const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
@@ -80,6 +131,8 @@ function inferenceProfileHint(modelId: string, region: string, change: string): 
  * flags; agentx doctor names agentx config set (a model is changed there after install). */
 export interface ModelProblemWording { changeModel: string; rerun: string; region: string }
 const initWording = (role: ModelRole): ModelProblemWording => ({ changeModel: `--${role}-model`, rerun: "run agentx init again", region: "choose another region with --region" });
+/** How a model problem reads on the page: what to do there, not a flag (spec 048 FR-027, FR-080). */
+const pageWording = (): ModelProblemWording => ({ changeModel: "the model question", rerun: "choose Check again", region: "start again in another region" });
 
 /** Turns a failed one-token Converse call into a message that says what to change, for the
  * failures a new account hits in practice (Review Focus 5): the Anthropic one-time usage form, a
@@ -136,15 +189,25 @@ export async function checkPrerequisites(input: {
   answers: InitAnswers; release: ReleaseCoverage; caller: { account: string; arn: string };
   checks: PrerequisiteChecks; prompter: Prompter; write: (line: string) => void;
   openRouterKey?: PendingOpenRouterKey;
+  /** The release's own images (FR-065); checked only when given, so a caller with no release
+   * images to check (most existing callers and tests) sees no change at all. */
+  images?: ReleaseImages;
+  /** Who the problems collected below are written for. Default "terminal": the terminal's own
+   * problems, flags and commands, exactly as before this spec. */
+  audience?: CheckAudience;
   onCheck?: (check: PrerequisiteCheck) => void;
 }): Promise<void> {
   const { answers, checks, write } = input;
   const { region } = answers;
+  const audience: CheckAudience = input.audience ?? "terminal";
   const problems: string[] = [];
   // Each check is reported as it finishes (the page's checklist); the lines written and the
   // problems collected are exactly what they were before.
   const passed = (label: string, line: string) => { write(line); input.onCheck?.({ label, ok: true, detail: line.replace(/^ok /, "") }); };
-  const failed = (label: string, problem: string) => { problems.push(problem); input.onCheck?.({ label, ok: false, detail: problem }); };
+  const failed = (label: string, problem: string, technical?: string) => {
+    problems.push(problem);
+    input.onCheck?.({ label, ok: false, detail: problem, ...(technical === undefined ? {} : { technical }) });
+  };
   write(`AWS account ${input.caller.account} as ${input.caller.arn}`);
   write(DEDICATED_ACCOUNT_NOTE);
 
@@ -153,6 +216,15 @@ export async function checkPrerequisites(input: {
   if (answers.engine === "templates") {
     const regionProblem = releaseRegionProblem(input.release, region);
     if (regionProblem !== undefined) failed("Region", regionProblem); else input.onCheck?.({ label: "Region", ok: true, detail: `${region} is covered by this release` });
+  }
+
+  // FR-065, SC-009: the release's own images, checked before anything else that would create
+  // something, so a release that cannot be pulled is refused alongside every other problem.
+  if (input.images !== undefined) {
+    for (const check of releaseImageChecks({ version: input.release.manifest.version, images: input.images, ...(answers.images === undefined ? {} : { overrides: answers.images }), audience })) {
+      if (check.ok) input.onCheck?.(check);
+      else failed(check.label, check.detail, check.technical);
+    }
   }
 
   try {
@@ -170,9 +242,13 @@ export async function checkPrerequisites(input: {
     if (!Number.isFinite(quota) || !Number.isFinite(allocated)) throw new Error("the Elastic IP quota or address count did not return a number");
     const free = Math.max(0, quota - allocated);
     if (free < NAT_ELASTIC_IPS) {
-      failed("Elastic IPs", `this environment needs ${NAT_ELASTIC_IPS} Elastic IPs for its NAT gateways, but ${allocated} of the ${quota} allowed in ${region} are already allocated. `
-        + `Release addresses you no longer use, or raise the EC2-VPC Elastic IPs quota (L-0263D0A3) in Service Quotas: `
-        + `aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-0263D0A3 --desired-value ${allocated + NAT_ELASTIC_IPS} --region ${region}`);
+      const command = `aws service-quotas request-service-quota-increase --service-code ec2 --quota-code L-0263D0A3 --desired-value ${allocated + NAT_ELASTIC_IPS} --region ${region}`;
+      if (audience === "page") {
+        failed("Elastic IPs", `this install needs ${NAT_ELASTIC_IPS} Elastic IPs for its network, but ${allocated} of the ${quota} allowed in ${region} are already in use. Release addresses you no longer use, or ask AWS for more EC2-VPC Elastic IPs in Service Quotas.`, command);
+      } else {
+        failed("Elastic IPs", `this environment needs ${NAT_ELASTIC_IPS} Elastic IPs for its NAT gateways, but ${allocated} of the ${quota} allowed in ${region} are already allocated. `
+          + `Release addresses you no longer use, or raise the EC2-VPC Elastic IPs quota (L-0263D0A3) in Service Quotas: ${command}`);
+      }
     } else passed("Elastic IPs", `ok ${free} of ${quota} EC2-VPC Elastic IPs free in ${region}; this environment needs ${NAT_ELASTIC_IPS}`);
   } catch (error) {
     failed("Elastic IPs", `could not check Elastic IPs in ${region}: ${errorMessage(error)}; check EC2 DescribeAddresses and Service Quotas read permission and your network`);
@@ -209,7 +285,7 @@ export async function checkPrerequisites(input: {
             seen.add(fallbackKey);
             passed(`Model ${identifier}`, `ok ${identifier}: OpenRouter secret missing; using default ${fallback.provider}/${fallback.modelId}`);
           } catch (fallbackError) {
-            failed(`Model ${fallback.modelId}`, modelCheckProblem({ modelId: fallback.modelId, role, region, error: fallbackError }));
+            failed(`Model ${fallback.modelId}`, modelCheckProblem({ modelId: fallback.modelId, role, region, error: fallbackError, ...(audience === "page" ? { wording: pageWording() } : {}) }));
           }
         } else {
           failed(`Model ${identifier}`, `${identifier}: OpenRouter preflight failed; check the model's tool support, secret read permission, key credits and routing allowlist`);
@@ -228,10 +304,13 @@ export async function checkPrerequisites(input: {
       }
       passed(`Model ${modelId}`, `ok ${modelId} answers`);
     } catch (error) {
-      failed(`Model ${modelId}`, modelCheckProblem({ modelId, role, region, error }));
+      failed(`Model ${modelId}`, modelCheckProblem({ modelId, role, region, error, ...(audience === "page" ? { wording: pageWording() } : {}) }));
     }
   }
 
+  // On the page, "check --oidc-issuer" names a terminal flag nobody can type there; the page's own
+  // words say where to fix it instead (spec 048 FR-027, FR-080).
+  const forAudience = (message: string) => (audience === "page" ? message.replace(/; check --oidc-issuer$/, "; check the sign-in issuer address") : message);
   if (answers.identity.mode === "oidc") {
     const issuer = answers.identity.issuer.replace(/\/$/, "");
     const url = `${issuer}/.well-known/openid-configuration`;
@@ -239,13 +318,13 @@ export async function checkPrerequisites(input: {
       const document = (await checks.oidcDiscovery(answers.identity.issuer)) as { issuer?: unknown };
       const named = typeof document.issuer === "string" ? document.issuer.replace(/\/$/, "") : undefined;
       // Item 6: name a next step for a mismatched issuer too.
-      if (named !== issuer) failed("OIDC discovery", `the OIDC discovery document at ${url} names issuer ${named ?? "nothing"}, not ${issuer}; check --oidc-issuer`);
+      if (named !== issuer) failed("OIDC discovery", forAudience(`the OIDC discovery document at ${url} names issuer ${named ?? "nothing"}, not ${issuer}; check --oidc-issuer`));
       else passed("OIDC discovery", `ok OIDC discovery at ${url}`);
     } catch (error) {
       // Item 3: awsPrerequisiteChecks' own oidcDiscovery already builds a complete message (naming
       // the issuer/URL and saying to check --oidc-issuer) for every failure it can throw, so it is
       // reported as-is rather than wrapped a second time.
-      failed("OIDC discovery", errorMessage(error));
+      failed("OIDC discovery", forAudience(errorMessage(error)));
     }
   }
 
@@ -281,6 +360,8 @@ export async function checkPrerequisites(input: {
     if (await input.prompter.confirm(`Run cdk bootstrap ${target} now?`, { defaultValue: false })) {
       await checks.runCdkBootstrap();
       passed("CDK bootstrap", `ok CDK bootstrapped in ${region}`);
+    } else if (audience === "page") {
+      failed("CDK bootstrap", "This region is not prepared for deploying from source code. Prepare it, or deploy with published templates, which need no preparation.");
     } else {
       failed("CDK bootstrap", `CDK is not bootstrapped in ${region}; run npx cdk bootstrap ${target}, or use --engine templates, which needs no bootstrap`);
     }

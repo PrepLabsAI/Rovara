@@ -14,8 +14,9 @@ the install, [docs/day-two.md](day-two.md) covers running it.
 
 You need:
 
-- **An AWS account.** AgentX recommends a dedicated AWS account for each install: environments
-  that share an account are not a security boundary against each other.
+- **An AWS account.** A separate AWS account just for AgentX keeps its costs and permissions apart
+  from your other work. Give each install its own: environments that share an account are not a
+  security boundary against each other.
 - **Admin credentials in that account for the first run** (for example `aws login` or an SSO
   profile). The platform team path needs them only on the platform team's side. Later, day-2
   commands use the narrower operator role that the install creates.
@@ -82,18 +83,29 @@ npx @charterarc/agentx --env <env> init --region <region>
 ### The install page
 
 In a terminal on your own computer, `init` opens a page in your browser, served from this computer
-only (`127.0.0.1`). Everything `init` asks is asked there: which AWS profile and account it installs
-into (with a Sign in choice when your session has expired), the prerequisites as a checklist, the
-plan and its monthly cost with Yes and No buttons to create it or not, then each step with its
-status. The GitHub App and the Slack app are made from buttons on the page, and the page moves on
-by itself once GitHub sends you back. Secrets (the Slack token and signing secret, connector keys)
-are typed into hidden fields. Each goes straight to AWS Secrets Manager and is never shown again,
-and the field is emptied as soon as it is sent. The install ends on the page once AgentX replies
-in your channel for the first time.
+only (`127.0.0.1`). The page shows the five parts of the install (Get started, Your choices, Build
+in AWS, Connect Slack, Finish), how long each usually takes, which one you are in, and the time
+left. The browser tab's title reads "(Action needed) Install AgentX" whenever the install waits for
+you. Everything `init` asks is asked there, each question with a line on why it is asked: which AWS
+profile and account it installs into (with a Sign in choice when your session has expired, and a
+warning if you are signed in as the AWS root user), the account checks as a checklist, the plan and
+its monthly cost with Create AgentX and Cancel the install buttons, then each step. The GitHub app
+and the Slack app are made from link buttons on the page, and the page moves on by itself once
+GitHub sends you back. Secrets (the Slack token and signing secret, connector keys) are typed into
+hidden fields. Each goes straight to AWS Secrets Manager and is never shown again, and the field is
+emptied as soon as it is sent. If a deploy step fails, the page says what happened and offers
+Try this step again; Stop for now shows the command that continues later. The install ends on a
+ready screen with the commands for your team, which stays open until you press Close installer, or
+for 30 minutes.
 
-Keep the tab open until the install finishes. If the tab is closed, `init` keeps waiting and,
-after a minute, prints the address again in the terminal. Open it to carry on, or press Ctrl-C
-and run `init` again later (it continues where it stopped).
+While the page is open, the terminal prints the page's address, how long the install takes, the
+path of the full log (`~/.agentx/logs/init-<env>.log`), then one line per step. Everything else
+(the plan, the deploy output, the output of the tools `init` runs) goes to that log file and to the
+page's technical log. The log file never holds the page's access token.
+
+Keep the terminal open and your computer awake until the install finishes. If the tab is closed,
+`init` keeps waiting and, after a minute, prints the address again in the terminal. Open it to
+carry on, or press Ctrl-C and run `init` again later (it continues where it stopped).
 
 `--no-ui` asks every question in this terminal instead. `--yes` also uses the terminal, and
 answers every question for you. A CI run has no one to type answers, so it needs `--yes` (or
