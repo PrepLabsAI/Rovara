@@ -175,7 +175,8 @@ export function createOrchestrationTools(
       name: "agentx_create_pull_request",
       label: "Create pull request",
       description:
-        "Explicitly validate and publish one changed registered repository as a ready-for-review pull request. " +
+        "Explicitly validate and publish one changed registered repository as a pull request. " +
+        "AgentX opens it as a draft when a check fails, and the result says draft. " +
         "Call this only when the user clearly asks to create or raise a pull request.",
       parameters: Type.Object({
         repository: Type.String({ minLength: 1, maxLength: 63 }),

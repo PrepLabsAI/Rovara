@@ -5,6 +5,9 @@ import { buildAgentXApp } from "../../infra/lib/app.js";
 import { operatorRoleStatements } from "../../infra/lib/access-policies.js";
 import { environmentNaming, legacyNaming, namingFromContext } from "../../infra/lib/naming.js";
 import { ProductionFoundationStack } from "../../infra/lib/production-foundation.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 function productionStacks(app: App): Stack[] {
   return app.node.children.filter((child): child is Stack => Stack.isStack(child))

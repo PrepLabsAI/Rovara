@@ -1,6 +1,7 @@
 import {
   CLOSED_SHARED_NOTICE,
   VIEW_ONLY_NOTICE,
+  checksReplyPrefix,
   detailsButtonValue,
   detailsReplyBlocks,
   slackThreadSubject,
@@ -16,6 +17,7 @@ import {
   type ActionPolicy,
   type PendingConfirmation,
   type TurnObservation,
+  type CheckReport,
   type TurnRecord,
   type ModelIdentifier,
   type ProjectModelOptions,
@@ -50,7 +52,7 @@ export interface ThreadServiceApi {
   completeClose(requestId: string, operationId: string): Promise<SlackWorkspaceCloseCompleteResult>;
   waitForOperation(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; error?: string | undefined; result?: unknown }>;
   /** Issue 157: waits for a worker task and returns its final response; without it, a resumed turn posts the status alone. */
-  taskResult?(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; response?: string | undefined; error?: string | undefined }>;
+  taskResult?(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; response?: string | undefined; error?: string | undefined; checks?: CheckReport | undefined }>;
   /**
    * Issue 167: asks the worker to cancel a task (a finished one is left as it is). Called only when
    * a Slack turn gives up for good, so nobody will ever read the task's result.
@@ -215,11 +217,9 @@ export async function processSlackRequest(
   const subject = slackThreadSubject(message.thread);
   const log: ServiceLog = dependencies.log ?? (() => undefined);
   const startedAt = new Date();
-  // Only a configured sink or refresh store gets a recorder, so a service without either runs the
-  // turn exactly as before.
-  const recorder = dependencies.turnRecords === undefined && dependencies.threads.saveRefreshConnectors === undefined
-    ? undefined
-    : new TurnRecorder();
+  // Spec 051 FR-009: every turn has a recorder, because the reply leads with the check report of the
+  // tasks it ran. Writing a record, a refresh list or a details button still needs its own sink.
+  const recorder = new TurnRecorder();
   const draft: TurnDraft = { disposition: "abandoned" };
   let lastPosted = "";
   // Issue 157: set the moment this attempt is handed off. From then on the new task owns the
@@ -297,7 +297,7 @@ export async function processSlackRequest(
     const waiting = api.taskResult === undefined
       ? api.waitForOperation(active.workspaceId, active.operationId, waitStop.signal)
       : api.taskResult(active.workspaceId, active.operationId, waitStop.signal);
-    let result: { status: string; response?: string | undefined; error?: string | undefined };
+    let result: { status: string; response?: string | undefined; error?: string | undefined; checks?: CheckReport | undefined };
     try {
       result = await untilHandoff(waiting, options.handoff);
     } catch (error) {
@@ -322,8 +322,14 @@ export async function processSlackRequest(
       status: result.status,
       ...(typeof result.response === "string" ? { response: result.response } : {}),
       ...(result.error === undefined ? {} : { error: result.error }),
+      ...(result.checks === undefined ? {} : { checks: result.checks }),
     }));
-    draft.responseText = text;
+    // As on a normal turn, the record keeps the model-side text, without AgentX's verdict prefix.
+    draft.responseText = slackReplyText(resumedResultText({
+      status: result.status,
+      ...(typeof result.response === "string" ? { response: result.response } : {}),
+      ...(result.error === undefined ? {} : { error: result.error }),
+    }));
     for (const chunk of splitSlackMessage(text)) await post(chunk);
     // The interrupted turn's session was not saved: the next turn's model reads this instead.
     if (dependencies.threads.saveTurnNote !== undefined) {
@@ -787,14 +793,17 @@ export async function processSlackRequest(
     if (!quiet) {
       // C13: in a continue thread, the reply names the teammate it answers.
       const mention = shared === undefined ? "" : `<@${message.userId}> `;
-      const chunks = splitSlackMessage(`${mention}${slackReplyText(response)}`);
+      // Spec 051 FR-009: AgentX's check verdict leads, and the model's text follows as the agent's account.
+      // A turn with no report gives "", so its reply is exactly the model's text.
+      const verdict = checksReplyPrefix(recorder.checkReports(), { draftPullRequest: recorder.draftPullRequest() });
+      const chunks = splitSlackMessage(`${mention}${verdict}${slackReplyText(response)}`);
       const details = replyDetails(dependencies, recorder, message);
       for (const [index, chunk] of chunks.entries()) {
         if (details !== undefined && index === chunks.length - 1) await postWithDetails(details, chunk);
         else await post(chunk);
       }
     }
-    if (recorder !== undefined) await rememberRefresh(dependencies, log, subject, message.eventId, state.refreshConnectors ?? [], recorder);
+    await rememberRefresh(dependencies, log, subject, message.eventId, state.refreshConnectors ?? [], recorder);
     // Only once the member has the reply: a failed post before this is redelivered and resumes.
     if (remembered !== undefined || waitingOn !== undefined) await forgetActiveTurn();
     // The model has read the note from a resumed turn, and a turn that answered saved its session,
@@ -906,9 +915,9 @@ function untilHandoff<T>(work: Promise<T>, handoff: AbortSignal | undefined): Pr
  * and its record will be written (a sink and a recorder exist), so the button always names a record
  * the service tries to save. The value derives from the Slack event, as the record's key does.
  */
-function replyDetails(dependencies: ProcessorDependencies, recorder: TurnRecorder | undefined, message: SlackRequestMessage): ReplyDetails | undefined {
+function replyDetails(dependencies: ProcessorDependencies, recorder: TurnRecorder, message: SlackRequestMessage): ReplyDetails | undefined {
   const postWithBlocks = dependencies.postWithBlocks;
-  if (postWithBlocks === undefined || dependencies.turnRecords === undefined || recorder === undefined) return undefined;
+  if (postWithBlocks === undefined || dependencies.turnRecords === undefined) return undefined;
   let calls: number;
   try {
     calls = recorder.observation().calls.length;

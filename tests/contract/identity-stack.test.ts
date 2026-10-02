@@ -5,6 +5,9 @@ import { buildAgentXApp } from "../../infra/lib/app.js";
 import { ADMIN_GROUP, CLI_CALLBACK_URL, IdentityStack } from "../../infra/lib/identity.js";
 import { environmentNaming } from "../../infra/lib/naming.js";
 import { DEFAULT_CALLBACK_PORT } from "../../packages/cli/src/main.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 function identityTemplate(env = "staging"): Template {
   const app = new App();

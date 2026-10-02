@@ -964,3 +964,21 @@ describe("showing the turn is alive (#173)", () => {
   });
 });
 
+
+describe("a resumed turn's reply carries the check result (spec 051)", () => {
+  it("leads with the verdict and then the agent's account", async () => {
+    const checks = {
+      status: "verified", source: "project", preambleVersion: "1", preambleSha256: "a".repeat(64),
+      checks: [{ id: "readiness:0", label: "npm test", source: "project", before: "passed", after: "passed", class: "passing", output: "ok", durationMs: 1 }],
+      extraTry: "not_needed", agentClaim: "success",
+    };
+    const { posts, dependencies, meta } = harness(async () => "unused", {
+      taskResult: async () => ({ status: "SUCCEEDED", response: "Fixed it.", checks } as never),
+    });
+    meta.activeTurn = { eventId: "EvWORK000099", workspaceId, operationId: OPERATION };
+    await processSlackRequest(slackMessage("EvWORK000099", "fix the bug"), dependencies, { finalAttempt: false, redelivered: true });
+    expect(posts).toEqual([
+      `Checks passed (1 project check).\n\n*Agent's account:*\nThe task that was running when AgentX restarted has finished:\nFixed it.\n\n${CONTINUE_TEXT}`,
+    ]);
+  });
+});

@@ -573,6 +573,76 @@ describe("a task in a workspace with a devcontainer", () => {
   });
 });
 
+// Minor 11 (spec 051): the agent's shell is the container's, where the repository is at /workspaces/sample.
+describe("a task's test commands, written with the container's paths", () => {
+  /** Runs a task whose agent ran `commands` in the container, then settled; the report and the container's exec calls. */
+  async function taskThatRan(commands: string[], prepare: (checkout: string) => Promise<void> = async () => undefined) {
+    const { root, project, materializer } = await fixture();
+    await prepareWorkspace({ rootPath: root, project, materializer, devcontainerCli: fakeCli().cli });
+    const checkout = join(await realpath(root), "repo/sample");
+    await prepare(checkout);
+    const { cli, calls } = fakeCli();
+    const adapter: PiSessionAdapter = {
+      async create(input) {
+        const handlers = new Map<string, Array<(event: unknown, context?: unknown) => unknown>>();
+        const pi = { on: (name: string, handler: (event: unknown, context?: unknown) => unknown) => { handlers.set(name, [...(handlers.get(name) ?? []), handler]); } };
+        for (const extension of (input.extensionFactories ?? []) as unknown as Array<{ factory: (pi: unknown) => void }>) extension.factory(pi);
+        const fire = async (name: string, event: unknown, context?: unknown) => { for (const handler of handlers.get(name) ?? []) await handler(event, context); };
+        const sessionFile = join(input.sessionDirectory, "session.jsonl");
+        await writeFile(sessionFile, "");
+        return {
+          conversationId: "c", sessionFile,
+          prompt: async () => {
+            for (const [index, command] of commands.entries()) {
+              const call = { toolCallId: `call-${index}`, toolName: "bash", input: { command } };
+              await fire("tool_call", call, { signal: new AbortController().signal });
+              await fire("tool_result", { ...call, isError: false, content: [{ type: "text", text: "ok" }] });
+              await fire("tool_execution_end", call);
+              await fire("turn_end", {});
+            }
+            await fire("agent_before_settle", { outcome: "completed", entries: [] });
+          },
+          abort: async () => undefined,
+          getModel: () => ({ provider: "fixture", modelId: "m" }),
+          getSessionStats: () => ({ sessionFile, sessionId: "c", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0, totalMessages: 2, tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 }),
+          subscribe: () => () => undefined, dispose: () => undefined,
+        };
+      },
+    };
+    const result = await runTaskInvocation(taskInvocation(), {
+      rootPath: root, model: { provider: "fixture", modelId: "m" }, piAdapter: adapter, devcontainerCli: cli,
+      eventSink: async () => undefined, artifactSink: async () => undefined,
+    });
+    const replays = calls.filter((args) => args[0] === "exec").flatMap((args) => (args.some((arg) => arg.includes("npm test")) ? [args.join(" ")] : []));
+    return { checks: result.checks, replays, checkout };
+  }
+
+  it("records and replays `cd /workspaces/sample && npm test` from the host folder, in the container", async () => {
+    const { checks, replays, checkout } = await taskThatRan(["cd /workspaces/sample && npm test", "cd /workspaces/sample/src && npm test"], (dir) => mkdir(join(dir, "src")));
+    expect(checks.checks.map((entry) => ({ label: entry.label, after: entry.after }))).toEqual([
+      { label: "cd repo/sample && npm test", after: "passed" },
+      { label: "cd repo/sample/src && npm test", after: "passed" },
+    ]);
+    expect(replays).toHaveLength(2);
+    expect(replays[0]).toContain(checkout);
+  });
+
+  it("neither records nor runs a cd that leaves the repository, is absolute elsewhere, or only looks like it", async () => {
+    const { checks, replays } = await taskThatRan([
+      "cd /workspaces/../x && npm test", "cd /workspaces/sample/../x && npm test", "cd /elsewhere && npm test", "cd /workspaces/sampleX && npm test",
+    ]);
+    expect(replays).toEqual([]);
+    expect(checks).toMatchObject({ status: "not_verified", notVerifiedReason: "no_checks", checks: [] });
+  });
+
+  it("refuses at replay a sub path that is a link out of the workspace, and runs nothing for it", async () => {
+    const outside = await mkdtemp(join(tmpdir(), "agentx-devcontainer-outside-"));
+    const { checks, replays } = await taskThatRan(["cd /workspaces/sample/escape && npm test"], (dir) => symlink(outside, join(dir, "escape")));
+    expect(checks.checks).toEqual([expect.objectContaining({ after: "not_run" })]);
+    expect(replays).toEqual([]);
+  });
+});
+
 function sampleProject(url: string): ProjectDefinition {
   return {
     name: "sample",

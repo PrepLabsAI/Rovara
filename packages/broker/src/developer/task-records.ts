@@ -143,7 +143,7 @@ export function taskOwnerKey(developerId: string, taskId: string): string {
   return createHash("sha256").update(DEVELOPER_TASK_OWNER_ISSUER).update("\0").update(taskOwnerSubject(developerId, taskId)).digest("hex");
 }
 
-export interface OperationFacts { id: string; kind: string; status: string; error?: string | undefined; createdAt: string; fence?: number | undefined }
+export interface OperationFacts { id: string; kind: string; status: string; error?: string | undefined; createdAt: string; updatedAt?: string | undefined; fence?: number | undefined }
 
 const LIVE = new Set(["ACCEPTED", "DISPATCHING", "RUNNING", "CANCEL_REQUESTED"]);
 
@@ -193,6 +193,8 @@ export interface DerivedStatus {
   failure?: DeveloperTaskFailure;
   closing: boolean;
   current?: OperationFacts;
+  /** #225: the prepare whose failure the task reads as: its events and its last change are the task's. */
+  failedPrepare?: OperationFacts;
 }
 
 /** R4's table. */
@@ -209,7 +211,7 @@ export function deriveTaskStatus(input: {
   if (input.pointer?.cancelledAt !== undefined && current === undefined) return { status: "CANCELLED", closing };
   if (input.workspaceStatus === "PREPARATION_FAILED") {
     const prepare = input.operations.filter((operation) => operation.kind === "prepare").sort(byCreated).at(-1);
-    return { status: "FAILED", closing, failure: failureOf("prepare", prepare?.status ?? "FAILED", prepare?.error) };
+    return { status: "FAILED", closing, failure: failureOf("prepare", prepare?.status ?? "FAILED", prepare?.error), ...(prepare === undefined ? {} : { failedPrepare: prepare }) };
   }
   if (input.pointer?.pendingPrompt !== undefined || input.workspaceStatus === "PREPARING" || current === undefined) return { status: "STARTING", closing };
   if (LIVE.has(current.status)) return { status: "RUNNING", closing, current };

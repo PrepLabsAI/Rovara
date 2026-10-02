@@ -3,6 +3,9 @@ import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { ENVIRONMENT_PLACEHOLDER } from "@agentx/contracts";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 const stacksOf = (app: App) => app.node.children.filter((c): c is Stack => Stack.isStack(c));
 function statements(stack: Stack): Array<{ Action: string | string[]; Resource: unknown }> {

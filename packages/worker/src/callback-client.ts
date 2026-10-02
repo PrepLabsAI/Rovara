@@ -1,6 +1,7 @@
 import {
   CodeBuildCheckResultSchema,
   agentXError,
+  type CheckEntry,
   type WorkerInvocation,
 } from "@agentx/contracts";
 import type { ArtifactSink } from "./artifacts.js";
@@ -18,12 +19,19 @@ export interface PullRequestCallbackInput {
   commit: string;
   title: string;
   body?: string;
+  /**
+   * Spec 051 (D-7): publish's readiness checks, each judged against its before. Sent only when the publish payload
+   * asks for them (reportChecks), so a broker built before it never sees the field.
+   */
+  checks?: CheckEntry[];
 }
 
 export interface PullRequestCallbackResult {
   number: number;
   url: string;
   reconciled: boolean;
+  /** Spec 051 Ruling Z: the pull request opened as a draft. A broker built before it omits this. */
+  draft?: boolean;
 }
 
 export type PullRequestSink = (input: PullRequestCallbackInput) => Promise<PullRequestCallbackResult>;
@@ -117,6 +125,7 @@ export function createWorkerCallbackSinks(input: {
         number: result.number as number,
         url: result.url,
         reconciled: result.reconciled,
+        ...(typeof result.draft === "boolean" ? { draft: result.draft } : {}),
       };
     },
     pullRequestUpdateSink: async (request) => {

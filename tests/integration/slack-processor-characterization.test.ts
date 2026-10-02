@@ -78,8 +78,9 @@ describe("processing a thread's workspace result (characterization)", () => {
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
     const turn = h.turns[0]!;
     expect(Object.keys(turn).sort()).toEqual([
+      // Spec 051 FR-009: the recorder is always handed in, so the reply can lead with the check report.
       // Spec 014 final fix I1: a runnable workspace also tells the gate its compute is prepared (D5).
-      "computePrepared", "connectors", "conversationId", "message", "orchestratorInstructions", "recoverableOperations", "repositories", "requestId", "subject", "workspaceId",
+      "computePrepared", "connectors", "conversationId", "message", "orchestratorInstructions", "recorder", "recoverableOperations", "repositories", "requestId", "subject", "workspaceId",
     ]);
     expect(turn).toMatchObject({ computePrepared: true, connectors, repositories: ["demo"], recoverableOperations: [operationId], workspaceId, conversationId });
   });
@@ -87,6 +88,76 @@ describe("processing a thread's workspace result (characterization)", () => {
   it("hands the turn no routing field the workspace did not send", async () => {
     const h = harness(workspace());
     await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
-    expect(Object.keys(h.turns[0]!).sort()).toEqual(["computePrepared", "conversationId", "message", "orchestratorInstructions", "requestId", "subject", "workspaceId"]);
+    expect(Object.keys(h.turns[0]!).sort()).toEqual(["computePrepared", "conversationId", "message", "orchestratorInstructions", "recorder", "requestId", "subject", "workspaceId"]);
+  });
+});
+
+// Spec 051 Task 6 (FR-009): AgentX's check verdict leads the reply, and the agent's account follows.
+describe("the reply leads with AgentX's check result (spec 051)", () => {
+  const report = (overrides: Record<string, unknown>) => ({
+    status: "regression", source: "project", preambleVersion: "1", preambleSha256: "a".repeat(64),
+    checks: [{ id: "readiness:0", label: "npm test", source: "project", before: "passed", after: "failed", class: "regression", output: "x", durationMs: 1 }],
+    extraTry: "not_needed", agentClaim: "success", ...overrides,
+  });
+  const taskCall = (input: TurnInput, name: string, result: unknown, id: string) => {
+    input.recorder!.toolStarted({ toolCallId: id, toolName: name, args: {} });
+    input.recorder!.toolEnded({ toolCallId: id, toolName: name, isError: false, result: { content: [{ type: "text", text: JSON.stringify(result) }] } });
+  };
+
+  it("puts the regression first and labels the model's text as the agent's account", async () => {
+    const h = harness(workspace());
+    h.dependencies.runTurn = async (input) => {
+      taskCall(input, "agentx_submit_task", { operationId, status: "SUCCEEDED", response: "All good.", checks: report({}) }, "1");
+      return "All good.";
+    };
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
+    expect(h.posts).toEqual([WORKING, "Not done: npm test passed before and fails now.\n\n*Agent's account:*\nAll good."]);
+  });
+
+  // Ruling Z (I-1): a turn that only publishes runs no task, so its verdict comes from the publish result.
+  const prResult = (draft: boolean | undefined) => ({
+    operationId, status: "SUCCEEDED",
+    result: { repository: "demo", number: 7, url: "https://github.com/example/demo/pull/7", ...(draft === undefined ? {} : { draft }) },
+  });
+
+  it("says the pull request opened as a draft in a turn that only publishes", async () => {
+    const h = harness(workspace());
+    h.dependencies.runTurn = async (input) => {
+      taskCall(input, "agentx_create_pull_request", prResult(true), "1");
+      return "Opened https://github.com/example/demo/pull/7.";
+    };
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
+    expect(h.posts).toEqual([WORKING, "Opened as a draft: AgentX's checks found failures.\n\n*Agent's account:*\nOpened <https://github.com/example/demo/pull/7>."]);
+  });
+
+  it.each([[false], [undefined]])("adds no line when the pull request is not a draft (draft: %s)", async (draft) => {
+    const h = harness(workspace());
+    h.dependencies.runTurn = async (input) => {
+      taskCall(input, "agentx_create_pull_request", prResult(draft), "1");
+      return "Opened it.";
+    };
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
+    expect(h.posts).toEqual([WORKING, "Opened it."]);
+  });
+
+  it("leads with the task's verdict and then the draft line when a turn runs a task and publishes", async () => {
+    const h = harness(workspace());
+    h.dependencies.runTurn = async (input) => {
+      taskCall(input, "agentx_submit_task", { operationId, status: "SUCCEEDED", response: "Fixed.", checks: report({ status: "verified", checks: [] }) }, "1");
+      taskCall(input, "agentx_create_pull_request", prResult(true), "2");
+      return "Fixed and opened.";
+    };
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
+    expect(h.posts[1]).toBe("No regression found, but no check passes yet.\nOpened as a draft: AgentX's checks found failures.\n\n*Agent's account:*\nFixed and opened.");
+  });
+
+  it("leaves a turn with no check report exactly as before", async () => {
+    const h = harness(workspace());
+    h.dependencies.runTurn = async (input) => {
+      taskCall(input, "agentx_submit_task", { operationId, status: "SUCCEEDED", response: "Done." }, "1");
+      return "Done.";
+    };
+    await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
+    expect(h.posts).toEqual([WORKING, "Done."]);
   });
 });

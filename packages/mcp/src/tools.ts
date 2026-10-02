@@ -8,6 +8,7 @@ import {
 import { z } from "zod";
 import type { AdminControlPlaneClient } from "./admin-client.js";
 import type { ControlPlaneClient } from "./client.js";
+import { isExpiredNotice } from "./admin-expiry.js";
 import { adminApiFits, type Compatibility } from "./compatibility.js";
 import { ToolError, plainText } from "./errors.js";
 import type { RequestIdMemory } from "./request-ids.js";
@@ -19,6 +20,11 @@ export interface ToolContext {
   serverVersion: string;
   /** Owner decision 7: this computer holds an unexpired admin sign-in for the environment. */
   adminSignedIn(): Promise<boolean>;
+  /**
+   * Issue #218: a sentence saying the stored admin sign-in expired (when, and the command), or
+   * expires within a few minutes; undefined otherwise, or when the server cannot tell.
+   */
+  adminSignInNotice?(): Promise<string | undefined>;
   compatibility(): Promise<Compatibility>;
   now(): number;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
@@ -213,6 +219,13 @@ async function afterAction(context: ToolContext, call: ToolCall, tool: string, t
   return { structured: { ...result.structured, request_id: requestId }, text: result.text };
 }
 
+/** Whoami's sentence on the admin sign-in: held or not, with #218's expiry notice when there is one. */
+function adminSentence(admin: boolean, notice: string | undefined): string {
+  // Only the expired notice replaces "holds no": one about to expire raced the held check.
+  if (!admin) return notice !== undefined && isExpiredNotice(notice) ? notice : "This computer holds no admin sign-in.";
+  return `This computer also holds an unexpired admin sign-in.${notice === undefined ? "" : ` ${notice}`}`;
+}
+
 export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_whoami",
@@ -225,7 +238,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       server_version: z.string(), control_plane_api_version: z.string(), upgrade_notice: z.string().optional(),
     },
     async handler(context) {
-      const [compatibility, projects, admin] = await Promise.all([context.compatibility(), context.client.projects(), context.adminSignedIn()]);
+      const [compatibility, projects, admin, notice] = await Promise.all([context.compatibility(), context.client.projects(), context.adminSignedIn(), context.adminSignInNotice?.()]);
       const { developer } = projects;
       const method = developer.provider === "slack" ? "Slack" : "your company sign-in";
       return {
@@ -236,7 +249,8 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
           ...(compatibility.notice === undefined ? {} : { upgrade_notice: compatibility.notice }),
         },
         // Spec 025 A1: an admin whose AgentX lacks a fitting admin API learns why no admin tool shows.
-        text: `Signed in to AgentX ${compatibility.env} as ${developer.name} with ${method}. This computer ${admin ? "also holds an unexpired" : "holds no"} admin sign-in.${compatibility.notice === undefined ? "" : ` Note: ${compatibility.notice}.`}${admin && adminApiFits(compatibility.adminApiVersion) !== "fits" ? " AgentX has no admin tools yet; ask your AgentX admin to upgrade AgentX." : ""}`,
+        // Issue #218: an expired admin sign-in says so and when, never "holds no"; one about to expire says when.
+        text: `Signed in to AgentX ${compatibility.env} as ${developer.name} with ${method}. ${adminSentence(admin, notice)}${compatibility.notice === undefined ? "" : ` Note: ${compatibility.notice}.`}${admin && adminApiFits(compatibility.adminApiVersion) !== "fits" ? " AgentX has no admin tools yet; ask your AgentX admin to upgrade AgentX." : ""}`,
       };
     },
   },

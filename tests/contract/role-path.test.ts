@@ -2,6 +2,9 @@ import { Stack, type App } from "aws-cdk-lib";
 import { Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { buildAgentXApp } from "../../infra/lib/app.js";
+import { skipLambdaBundling } from "../support/skip-bundling.js";
+
+skipLambdaBundling();
 
 const stacksOf = (app: App) => app.node.children.filter((c): c is Stack => Stack.isStack(c));
 const rolesOf = (stack: Stack) =>

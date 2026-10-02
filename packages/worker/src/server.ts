@@ -155,7 +155,7 @@ async function executeInBackground(invocation: WorkerInvocation, state: WorkerSe
   } catch (error) {
     if (error instanceof WorkerOperationCancelledError) {
       await state.journal.transition(invocation.operationId, "CANCELLED", error.message);
-      terminal = { operationId: invocation.operationId, status: "CANCELLED", error: error.message };
+      terminal = { operationId: invocation.operationId, status: "CANCELLED", error: error.message, ...checksResult(error) };
     } else {
       // Redacted before the journal stores it on disk or the terminal callback sends it: an error
       // can carry a command's or Git's output (#170).
@@ -165,12 +165,21 @@ async function executeInBackground(invocation: WorkerInvocation, state: WorkerSe
         "FAILED",
         message,
       );
-      terminal = { operationId: invocation.operationId, status: "FAILED", error: message };
+      terminal = { operationId: invocation.operationId, status: "FAILED", error: message, ...checksResult(error) };
     }
   } finally {
     state.activeOperations.delete(invocation.operationId);
   }
   await reportTerminal(state, terminal!, invocation);
+}
+
+/**
+ * Spec 051 Ruling Y: a task that ends failed or cancelled with a regression AgentX found carries its report, so the
+ * broker keeps the regression standing. No other failure sends a result.
+ */
+function checksResult(error: unknown): { result?: { checks: unknown } } {
+  const checks = typeof error === "object" && error !== null && "checks" in error ? error.checks : undefined;
+  return checks === undefined ? {} : { result: { checks } };
 }
 
 async function reportTerminal(
