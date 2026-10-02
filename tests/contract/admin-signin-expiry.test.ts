@@ -24,7 +24,6 @@ import { toolError } from "../support/mcp-tool-error.js";
 const URL_BASE = "https://abc123.execute-api.us-east-1.amazonaws.com";
 const ISSUER = `${URL_BASE}/v1/auth`;
 const ADMIN_TOKEN = "admin-access-token-planted-218";
-const pad = (value: number) => String(value).padStart(2, "0");
 
 describe("the admin sign-in's expiry, in words (#218)", () => {
   it("names a time today by its local hour and minute, and another day's with its date", () => {
@@ -58,8 +57,7 @@ describe("agentx admin commands with an expired admin sign-in (#218)", () => {
     const expiresAt = Date.now() - 60_000;
     const { code, err } = await run({ expiresAt });
     expect(code).toBe(3);
-    const at = new Date(expiresAt);
-    expect(err).toBe(`AgentX error [AUTH_REQUIRED]: Your admin sign-in for staging expired at ${pad(at.getHours())}:${pad(at.getMinutes())}. Run agentx --env staging login --admin.\n`);
+    expect(err).toBe(`AgentX error [AUTH_REQUIRED]: Your admin sign-in for staging expired at ${localClockTime(expiresAt, Date.now())}. Run agentx --env staging login --admin.\n`);
     expect(err).not.toContain(ADMIN_TOKEN);
   });
 
@@ -112,8 +110,8 @@ describe("agentx mcp with an expired admin sign-in (#218)", () => {
   it("answers ADMIN_REQUIRED saying it expired and when, with the exact command, and whoami says the same", async () => {
     const expiresAt = Date.now() - 60_000;
     const { client, stop } = await cli({ expiresAt });
-    const at = new Date(expiresAt);
-    const time = `${pad(at.getHours())}:${pad(at.getMinutes())}`;
+    // The format itself is checked above; this stays right across local midnight.
+    const time = localClockTime(expiresAt, Date.now());
     const whoami = await client.callTool({ name: "agentx_whoami", arguments: {} });
     // A direct call to the hidden tool is answered with the offer's refusal, once its first check has answered.
     const refusal = async () => toolError((await client.callTool({ name: "agentx_admin_list_projects", arguments: {} })) as Parameters<typeof toolError>[0]);
@@ -151,8 +149,7 @@ describe("an admin sign-in about to expire (#218)", () => {
     const expiresAt = Date.now() + 120_000;
     const client = await server(expiresAt);
     await expect.poll(async () => (await client.listTools()).tools.some((tool) => tool.name === "agentx_admin_list_projects")).toBe(true);
-    const at = new Date(expiresAt);
-    const warning = `Your admin sign-in for staging expires at ${pad(at.getHours())}:${pad(at.getMinutes())}; run agentx --env staging login --admin to sign in again.`;
+    const warning = `Your admin sign-in for staging expires at ${localClockTime(expiresAt, Date.now())}; run agentx --env staging login --admin to sign in again.`;
     const result = await client.callTool({ name: "agentx_admin_list_projects", arguments: {} });
     expect(result.isError).not.toBe(true);
     expect(result.structuredContent).toEqual({ projects: [] });

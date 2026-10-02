@@ -220,7 +220,8 @@ async function afterAction(context: ToolContext, call: ToolCall, tool: string, t
 
 /** Whoami's sentence on the admin sign-in: held or not, with #218's expiry notice when there is one. */
 function adminSentence(admin: boolean, notice: string | undefined): string {
-  if (!admin) return notice ?? "This computer holds no admin sign-in.";
+  // Only the expired notice replaces "holds no": one about to expire raced the held check.
+  if (!admin) return notice?.includes(" expired at ") === true ? notice : "This computer holds no admin sign-in.";
   return `This computer also holds an unexpired admin sign-in.${notice === undefined ? "" : ` ${notice}`}`;
 }
 

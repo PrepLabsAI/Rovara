@@ -58,6 +58,9 @@ export async function appendOperationEvent(
   }
 }
 
+/** How a prepare that did not succeed reads to the developer, by its status. */
+const SETUP_ENDED: Readonly<Record<string, string>> = { FAILED: "Workspace setup failed", INTERRUPTED: "Workspace setup was interrupted", CANCELLED: "Workspace setup was cancelled" };
+
 /**
  * #225: one event on a developer task's prepare that did not succeed, saying so with the first line
  * of its error (the task view redacts and caps it), at the time it ended. Once per prepare, however
@@ -67,10 +70,10 @@ export async function appendOperationEvent(
 export async function recordPrepareFailureEvent(
   documentClient: Pick<DynamoDBDocumentClient, "send">,
   tableName: string,
-  input: { workspaceId: string; operationId: string; fence: number; status: string; error: string | undefined; at: string },
+  input: { workspaceId: string; operationId: string; fence: number; status: string; error: string | undefined; at: string; lead?: string },
 ): Promise<void> {
   const first = (input.error ?? "").split(/\r?\n/, 1)[0]?.trim() ?? "";
-  const said = input.status === "FAILED" ? "Workspace setup failed" : `Workspace setup ended ${input.status}`;
+  const said = input.lead ?? SETUP_ENDED[input.status] ?? `Workspace setup ended ${input.status}`;
   try {
     await appendOperationEvent(documentClient, tableName, {
       workspaceId: input.workspaceId, operationId: input.operationId, fence: input.fence, onceKey: "prepare-result",

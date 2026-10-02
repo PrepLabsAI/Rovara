@@ -57,4 +57,15 @@ describe("a worker's setup error at the broker (#154)", () => {
     const view = (await dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`)).body as { task: { events: unknown[] } };
     expect(view.task.events).toHaveLength(1);
   });
+
+  it("records the failure event on a repeated result when the first result's event write did not land (#225 review)", async () => {
+    const { db, dev, finish, taskId, workspaceId, prepareId } = await startedTask();
+    await finish(workspaceId, prepareId, "FAILED", { error: "setup step 0 (npm ci in repo/app) exited 1" });
+    // As if the first event write had failed: none of its transaction committed.
+    for (const item of db.find((entry) => entry.pk === `OPERATION#${prepareId}`)) db.delete(String(item.pk), String(item.sk));
+    db.set({ ...db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${prepareId}`)!, eventSequence: 0 });
+    await finish(workspaceId, prepareId, "FAILED", { error: "setup step 0 (npm ci in repo/app) exited 1" });
+    const view = (await dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`)).body as { task: { events: Array<{ text: string }> } };
+    expect(view.task.events.map((event) => event.text)).toEqual(["Workspace setup failed: setup step 0 (npm ci in repo/app) exited 1"]);
+  });
 });

@@ -309,7 +309,7 @@ export async function taskView(
     ...(derived.closing ? { closing: true } : {}),
     createdAt: task.createdAt,
     // #225: a failed setup's task changed when its prepare ended, not when it was made.
-    updatedAt: derived.failedPrepare?.updatedAt ?? derived.current?.createdAt ?? task.updatedAt,
+    updatedAt: derived.failedPrepare?.updatedAt !== undefined && derived.failedPrepare.updatedAt > task.updatedAt ? derived.failedPrepare.updatedAt : derived.current?.createdAt ?? task.updatedAt,
     events,
     ...details,
     ...(channelTurns === undefined ? {} : { channelTurns }),
