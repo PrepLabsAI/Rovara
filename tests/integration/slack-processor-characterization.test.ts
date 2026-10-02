@@ -114,17 +114,6 @@ describe("the reply leads with AgentX's check result (spec 051)", () => {
     expect(h.posts).toEqual([WORKING, "Not done: npm test passed before and fails now.\n\n*Agent's account:*\nAll good."]);
   });
 
-  it("adds the draft PR sentence only when the turn published a pull request", async () => {
-    const h = harness(workspace());
-    h.dependencies.runTurn = async (input) => {
-      taskCall(input, "agentx_submit_task", { operationId, status: "SUCCEEDED", checks: report({}) }, "1");
-      taskCall(input, "agentx_create_pull_request", { operationId: conversationId, status: "SUCCEEDED" }, "2");
-      return "Raised it.";
-    };
-    await processSlackRequest(message(), h.dependencies, { finalAttempt: false });
-    expect(h.posts.at(-1)).toBe("Not done: npm test passed before and fails now.\nThe draft PR lists the failures.\n\n*Agent's account:*\nRaised it.");
-  });
-
   it("leaves a turn with no check report exactly as before", async () => {
     const h = harness(workspace());
     h.dependencies.runTurn = async (input) => {

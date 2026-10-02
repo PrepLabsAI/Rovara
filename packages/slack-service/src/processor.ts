@@ -309,7 +309,12 @@ export async function processSlackRequest(
       ...(result.error === undefined ? {} : { error: result.error }),
       ...(result.checks === undefined ? {} : { checks: result.checks }),
     }));
-    draft.responseText = text;
+    // As on a normal turn, the record keeps the model-side text, without AgentX's verdict prefix.
+    draft.responseText = slackReplyText(resumedResultText({
+      status: result.status,
+      ...(typeof result.response === "string" ? { response: result.response } : {}),
+      ...(result.error === undefined ? {} : { error: result.error }),
+    }));
     for (const chunk of splitSlackMessage(text)) await post(chunk);
     // The interrupted turn's session was not saved: the next turn's model reads this instead.
     if (dependencies.threads.saveTurnNote !== undefined) {
@@ -747,7 +752,7 @@ export async function processSlackRequest(
       const mention = shared === undefined ? "" : `<@${message.userId}> `;
       // Spec 051 FR-009: AgentX's check verdict leads, and the model's text follows as the agent's account.
       // A turn with no report gives "", so its reply is exactly the model's text.
-      const verdict = checksReplyPrefix(recorder.checkReports(), { pullRequestPublished: recorder.pullRequestPublished() });
+      const verdict = checksReplyPrefix(recorder.checkReports());
       const chunks = splitSlackMessage(`${mention}${verdict}${slackReplyText(response)}`);
       const details = replyDetails(dependencies, recorder, message);
       for (const [index, chunk] of chunks.entries()) {
@@ -755,7 +760,7 @@ export async function processSlackRequest(
         else await post(chunk);
       }
     }
-    if (recorder !== undefined) await rememberRefresh(dependencies, log, subject, message.eventId, state.refreshConnectors ?? [], recorder);
+    await rememberRefresh(dependencies, log, subject, message.eventId, state.refreshConnectors ?? [], recorder);
     // Only once the member has the reply: a failed post before this is redelivered and resumes.
     if (remembered !== undefined || waitingOn !== undefined) await forgetActiveTurn();
     // The model has read the note from a resumed turn, and a turn that answered saved its session,
@@ -865,9 +870,9 @@ function untilHandoff<T>(work: Promise<T>, handoff: AbortSignal | undefined): Pr
  * and its record will be written (a sink and a recorder exist), so the button always names a record
  * the service tries to save. The value derives from the Slack event, as the record's key does.
  */
-function replyDetails(dependencies: ProcessorDependencies, recorder: TurnRecorder | undefined, message: SlackRequestMessage): ReplyDetails | undefined {
+function replyDetails(dependencies: ProcessorDependencies, recorder: TurnRecorder, message: SlackRequestMessage): ReplyDetails | undefined {
   const postWithBlocks = dependencies.postWithBlocks;
-  if (postWithBlocks === undefined || dependencies.turnRecords === undefined || recorder === undefined) return undefined;
+  if (postWithBlocks === undefined || dependencies.turnRecords === undefined) return undefined;
   let calls: number;
   try {
     calls = recorder.observation().calls.length;

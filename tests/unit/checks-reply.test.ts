@@ -19,21 +19,21 @@ describe("checksReplyPrefix (FR-009)", () => {
     expect(checksReplyPrefix([])).toBe("");
   });
 
-  it("names each regression, then the draft PR only when one was published", () => {
+  it("names each regression", () => {
     const r = report({ status: "regression", checks: [
       entry({ label: "npm test", class: "regression", after: "failed" }),
       entry({ id: "readiness:1", label: "npm run lint", class: "regression", after: "failed" }),
     ] });
     const sentences = "Not done: npm test passed before and fails now.\nNot done: npm run lint passed before and fails now.";
-    expect(checksReplyPrefix([r], { pullRequestPublished: true })).toBe(`${sentences}\nThe draft PR lists the failures.${TAIL}`);
     expect(checksReplyPrefix([r])).toBe(`${sentences}${TAIL}`);
   });
 
   it("counts project checks and the agent's own commands when verified", () => {
     const two = [entry({}), entry({ id: "readiness:1", label: "lint" })];
     expect(checksReplyPrefix([report({ checks: two })])).toBe(`Checks passed (2 project checks).${TAIL}`);
+    expect(checksReplyPrefix([report({ checks: [entry({})] })])).toBe(`Checks passed (1 project check).${TAIL}`);
     expect(checksReplyPrefix([report({ source: "agent_commands", checks: [entry({ source: "agent_commands" })] })]))
-      .toBe(`Checks passed (1 of the agent's own test commands, rerun by AgentX).${TAIL}`);
+      .toBe(`Checks passed (1 of the agent's own test command, rerun by AgentX).${TAIL}`);
   });
 
   it("says why nothing was verified", () => {
@@ -52,13 +52,21 @@ describe("checksReplyPrefix (FR-009)", () => {
       entry({ id: "readiness:2", label: "types", before: "unknown", after: "failed", class: "failing_no_before" }),
     ] });
     expect(checksReplyPrefix([r])).toBe(
-      `Checks passed (3 project checks).\nAlready failing before this change: e2e.\nFails now, with no earlier result: types.${TAIL}`,
+      `Checks passed (1 project check).\nAlready failing before this change: e2e.\nFails now, with no earlier result: types.${TAIL}`,
     );
   });
 
-  it("gives each report of a turn its own lines, in order", () => {
-    const a = report({ checks: [entry({})] });
-    const b = report({ status: "not_verified", notVerifiedReason: "stopped" });
-    expect(checksReplyPrefix([a, b])).toBe(`Checks passed (1 project checks).\nNot verified: the task stopped before AgentX could check it.${TAIL}`);
+  it("counts only passing and fixed checks as passed", () => {
+    const r = report({ checks: [entry({ class: "fixed", before: "failed" }), entry({ id: "readiness:1", label: "types", before: "unknown", after: "failed", class: "failing_no_before" })] });
+    expect(checksReplyPrefix([r])).toBe(`Checks passed (1 project check).\nFails now, with no earlier result: types.${TAIL}`);
+    expect(checksReplyPrefix([report({ checks: [entry({ label: "types", before: "unknown", after: "failed", class: "failing_no_before" })] })]))
+      .toBe(`Checks passed (0 project checks).\nFails now, with no earlier result: types.${TAIL}`);
+  });
+
+  it("uses only the last report of a turn, so a stale verdict never leads", () => {
+    const stale = report({ status: "regression", checks: [entry({ class: "regression", after: "failed" })] });
+    const latest = report({ checks: [entry({})] });
+    expect(checksReplyPrefix([stale, latest])).toBe(`Checks passed (1 project check).${TAIL}`);
+    expect(checksReplyPrefix([latest, stale])).toBe(`Not done: npm test passed before and fails now.${TAIL}`);
   });
 });

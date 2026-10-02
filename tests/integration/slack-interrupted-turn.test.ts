@@ -978,7 +978,7 @@ describe("a resumed turn's reply carries the check result (spec 051)", () => {
     meta.activeTurn = { eventId: "EvWORK000099", workspaceId, operationId: OPERATION };
     await processSlackRequest(slackMessage("EvWORK000099", "fix the bug"), dependencies, { finalAttempt: false, redelivered: true });
     expect(posts).toEqual([
-      `Checks passed (1 project checks).\n\n*Agent's account:*\nThe task that was running when AgentX restarted has finished:\nFixed it.\n\n${CONTINUE_TEXT}`,
+      `Checks passed (1 project check).\n\n*Agent's account:*\nThe task that was running when AgentX restarted has finished:\nFixed it.\n\n${CONTINUE_TEXT}`,
     ]);
   });
 });

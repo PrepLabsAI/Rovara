@@ -56,7 +56,6 @@ export class TurnRecorder {
   private readonly gates = new Map<string, TurnGate>();
   /** Spec 051: each worker task's check report, by operation id (or by call when it has none), in the order seen. */
   private readonly reports = new Map<string, CheckReport>();
-  private published = false;
   private stopReason: string | undefined;
   private emptyResponse = false;
   private usage: TaskUsageTelemetry | undefined;
@@ -153,7 +152,6 @@ export class TurnRecorder {
   private keepReport(toolCallId: string, pending: PendingCall, event: { result: unknown; isError: boolean }): void {
     if (event.isError) return;
     const parsed = parseObject(resultText(event.result));
-    if (pending.name === "agentx_create_pull_request" && parsed.status === "SUCCEEDED") this.published = true;
     const checks = taskResultChecks(parsed);
     if (checks === undefined) return;
     const key = typeof parsed.operationId === "string" ? parsed.operationId : toolCallId;
@@ -163,11 +161,6 @@ export class TurnRecorder {
   /** Spec 051 FR-009: the check reports of the worker tasks this turn ran, each once, for the Slack reply. */
   checkReports(): CheckReport[] {
     return [...this.reports.values()];
-  }
-
-  /** True once the turn's pull request publication succeeded (a remaining regression is then a draft PR). */
-  pullRequestPublished(): boolean {
-    return this.published;
   }
 
   agentEnded(messages: readonly unknown[]): void {

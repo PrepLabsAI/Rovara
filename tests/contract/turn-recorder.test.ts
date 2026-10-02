@@ -216,7 +216,7 @@ describe("turn recorder check reports (spec 051)", () => {
     status: "verified", source: "project", preambleVersion: "1", preambleSha256: "a".repeat(64),
     checks: [], extraTry: "not_needed", agentClaim: "none",
   };
-  it("keeps each worker operation's report, and whether a pull request was published", () => {
+  it("keeps each worker operation's report once", () => {
     const turn = recorder();
     expect(turn.checkReports()).toEqual([]);
     turn.toolStarted({ toolCallId: "1", toolName: "agentx_submit_task", args: {} });
@@ -224,10 +224,6 @@ describe("turn recorder check reports (spec 051)", () => {
     turn.toolStarted({ toolCallId: "2", toolName: "agentx_task_result", args: {} });
     turn.toolEnded({ toolCallId: "2", toolName: "agentx_task_result", isError: false, result: text({ operationId: operation, status: "SUCCEEDED", checks }) });
     expect(turn.checkReports()).toEqual([checks]);
-    expect(turn.pullRequestPublished()).toBe(false);
-    turn.toolStarted({ toolCallId: "3", toolName: "agentx_create_pull_request", args: {} });
-    turn.toolEnded({ toolCallId: "3", toolName: "agentx_create_pull_request", isError: false, result: text({ operationId: "x", status: "SUCCEEDED" }) });
-    expect(turn.pullRequestPublished()).toBe(true);
   });
 
   it("ignores a report that does not parse", () => {
