@@ -31,8 +31,11 @@ export interface VerificationOptions {
   recorder: CommandRecorder;
   /** AgentX's result. Called again if Pi settles again later (a queued message); the last call is the result. */
   onReport: (report: CheckReport) => void;
-  /** Called when the agent is given its extra try, so a run stopped during that turn still says so. */
-  onExtraTry?: () => void;
+  /**
+   * Called when the agent is given its extra try, with the first round's report (`regression`, extraTry `given`). It is
+   * the result if no second settle follows and the signal did not fire (Ruling N); a stopped run reports stopped.
+   */
+  onExtraTry?: (firstRound: CheckReport) => void;
   /** Where a fault in the extension itself is reported. Messages arrive redacted by the session's sink. */
   onDiagnostic?: (message: string) => void;
 }
@@ -98,19 +101,7 @@ export function verificationExtension(options: VerificationOptions): InlineExten
             return report(notVerifiedReport("stopped", { source: plan.source, checks: round.entries, extraTry, agentClaim: claim }));
           }
           const status = reportStatus(round.entries);
-          if (status === "regression" && extraTry === "not_needed") {
-            extraTry = "given";
-            options.onExtraTry?.();
-            const message: CustomMessageEntryDraft = {
-              type: "custom_message",
-              customType: CHECKS_MESSAGE_TYPE,
-              content: checksFeedback(round.entries),
-              display: false,
-            };
-            // A custom message reaches the model as a user message, so Pi can run the extra turn (canContinue).
-            return { entries: [...event.entries, message], continue: true };
-          }
-          return report({
+          const roundReport = (): CheckReport => ({
             status,
             ...(status === "not_verified" ? { notVerifiedReason: "no_checks" as const } : {}),
             source: plan.source,
@@ -120,6 +111,19 @@ export function verificationExtension(options: VerificationOptions): InlineExten
             extraTry,
             agentClaim: claim,
           });
+          if (status === "regression" && extraTry === "not_needed") {
+            extraTry = "given";
+            options.onExtraTry?.(roundReport());
+            const message: CustomMessageEntryDraft = {
+              type: "custom_message",
+              customType: CHECKS_MESSAGE_TYPE,
+              content: checksFeedback(round.entries),
+              display: false,
+            };
+            // A custom message reaches the model as a user message, so Pi can run the extra turn (canContinue).
+            return { entries: [...event.entries, message], continue: true };
+          }
+          return report(roundReport());
         } catch (error) {
           try {
             options.onDiagnostic?.(`AgentX could not check the agent's work: ${error instanceof Error ? error.message : String(error)}`);

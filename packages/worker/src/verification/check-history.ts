@@ -8,7 +8,8 @@ import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
 import { resolve } from "node:path";
 import type { CheckEntry, CheckOutcome, ProjectCommand } from "@agentx/contracts";
 
-const HISTORY_PATH = ".agentx/last-checks.json";
+export const CHECK_HISTORY_PATH = ".agentx/last-checks.json";
+const HISTORY_PATH = CHECK_HISTORY_PATH;
 /** The outcomes worth keeping: a real result, not `unknown` or `not_run`. */
 type KnownOutcome = "passed" | "failed" | "timed_out";
 const KNOWN: readonly string[] = ["passed", "failed", "timed_out"];

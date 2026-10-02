@@ -6,7 +6,7 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
-import type { BashOperations } from "@earendil-works/pi-coding-agent";
+import type { BashOperations, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
 import {
   agentxPreambleSha256,
@@ -95,6 +95,8 @@ async function runTask(options: {
   cancellation?: WorkerCancellationController;
   operationId?: string;
   rootPath?: string;
+  /** Extensions loaded after AgentX's own, as a later handler on the same hook. */
+  extraExtensions?: InlineExtension[];
 }) {
   const { modelRuntime, faux } = await fauxModelRuntime();
   const requests: Request[] = [];
@@ -105,7 +107,9 @@ async function runTask(options: {
   const base = createDefaultPiSessionAdapter({ modelRuntime: async () => ({ runtime: modelRuntime, model: FAUX_MODEL }) });
   const shell = options.shell ?? scriptedShell();
   // Keeps run-task's own extensionFactories (the verification extension); only the shell is swapped.
-  const piAdapter: PiSessionAdapter = { create: (input) => base.create({ ...input, bashOperations: shell.operations }) };
+  const piAdapter: PiSessionAdapter = { create: (input) => base.create({
+    ...input, bashOperations: shell.operations, extensionFactories: [...(input.extensionFactories ?? []), ...(options.extraExtensions ?? [])],
+  }) };
   const invocation: Extract<WorkerInvocation, { kind: "task" }> = {
     protocolVersion: 1, kind: "task", operationId: options.operationId ?? randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1,
     callbackCapability: "c".repeat(64),
@@ -389,5 +393,41 @@ describe("the report as the task result carries it", () => {
     expect(Buffer.byteLength(JSON.stringify(compact))).toBeLessThan(200 * 1024);
     const small = { ...report, checks: [{ ...entry, label: "pytest", output: "1 failed" }] };
     expect(compactCheckReport(small)).toEqual(small);
+  });
+});
+
+describe("an extra try with no second settle (Ruling N)", () => {
+  it("reports the first round's regression, extraTry given, when Pi cannot run the extra turn", async () => {
+    // A later handler drops AgentX's message and keeps continue: Pi has no runnable context and settles.
+    const stub: InlineExtension = { name: "agentx-test-stub", factory: (pi) => { pi.on("agent_before_settle", () => ({ entries: [] })); } };
+    const fake = fakeRunners({ agent: [failedRun("1 failed")] });
+    const run = await runTask({
+      steps: [bash("pytest", "c1"), write("src.py", "broken\n", "c2"), fauxAssistantMessage(`Done.\n${DONE}`)],
+      runners: fake.runners, shell: scriptedShell({ pytest: { exitCode: 0, output: "3 passed\n" } }), extraExtensions: [stub],
+    });
+    expect(run.failure).toBeUndefined();
+    expect(fake.agentCalls).toEqual(["pytest"]);
+    expect(run.requests).toHaveLength(3);
+    expect(run.report).toMatchObject({ status: "regression", extraTry: "given", agentClaim: "success" });
+    expect(run.report!.checks).toEqual([expect.objectContaining({ before: "passed", after: "failed", class: "regression" })]);
+    expect(run.result!.checks).toEqual(run.report);
+  });
+
+  it("is stopped when the signal aborted during the extra turn", async () => {
+    const cancellation = new WorkerCancellationController();
+    const operationId = randomUUID();
+    const shell = scriptedShell({ pytest: { exitCode: 0, output: "3 passed\n" } }, async (command) => {
+      if (command !== "sleep 5") return;
+      void cancellation.cancel(operationId);
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    });
+    const fake = fakeRunners({ agent: [failedRun("1 failed")] });
+    const run = await runTask({
+      steps: [bash("pytest", "c1"), write("src.py", "broken\n", "c2"), fauxAssistantMessage("Done."), bash("sleep 5", "c3"), fauxAssistantMessage("Fixed.")],
+      runners: fake.runners, shell, cancellation, operationId,
+    });
+    expect(run.failure).toBeInstanceOf(WorkerOperationCancelledError);
+    expect(fake.agentCalls).toEqual(["pytest"]);
+    expect(run.report).toMatchObject({ status: "not_verified", notVerifiedReason: "stopped", extraTry: "given" });
   });
 });

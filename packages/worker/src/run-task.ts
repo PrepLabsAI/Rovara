@@ -126,7 +126,8 @@ export async function runTaskInvocation(
   });
   let checkPlan: CheckPlan | undefined;
   let reportedChecks: CheckReport | undefined;
-  let extraTryGiven = false;
+  // The first round's report when the extra try was given (Ruling N).
+  let firstRoundChecks: CheckReport | undefined;
   const verification = verificationExtension({
     // Review Focus 5: a broker that sends no readiness leaves the agent's own commands.
     plan: () => (checkPlan = planChecks(readiness, recorder, checkHistory)),
@@ -138,7 +139,7 @@ export async function runTaskInvocation(
     signal: verificationStop.signal,
     recorder,
     onReport: (report) => { reportedChecks = report; },
-    onExtraTry: () => { extraTryGiven = true; },
+    onExtraTry: (firstRound) => { firstRoundChecks = firstRound; },
     onDiagnostic,
   });
 
@@ -224,11 +225,14 @@ export async function runTaskInvocation(
       await events.append("progress", { message: `AgentX could not save ${name} for this task.` }).catch(() => undefined);
     };
     // P-4: Pi skips agent_before_settle after an abort, so a stopped run has no report from the extension.
+    // Ruling N: an extra try with no second settle and no stop keeps the first round's regression.
     // A cancelled model call also ends with stopReason "error", so the stop is read first.
-    const finalChecks = (): CheckReport => reportedChecks ?? notVerifiedReport(
-      !verificationStop.signal.aborted && lastAssistant?.stopReason === "error" ? "error" : "stopped",
-      { extraTry: extraTryGiven ? "given" : "not_needed", agentClaim: parseAgentClaim(finalText) },
-    );
+    const finalChecks = (): CheckReport => reportedChecks
+      ?? (firstRoundChecks !== undefined && !verificationStop.signal.aborted && lastAssistant?.stopReason !== "error" ? firstRoundChecks : undefined)
+      ?? notVerifiedReport(
+        !verificationStop.signal.aborted && lastAssistant?.stopReason === "error" ? "error" : "stopped",
+        { extraTry: firstRoundChecks === undefined ? "not_needed" : "given", agentClaim: parseAgentClaim(finalText) },
+      );
     let checksAttempted = false;
     const publishChecks = async (): Promise<void> => {
       checksAttempted = true;

@@ -1,4 +1,5 @@
 import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -148,6 +149,56 @@ describe("workspace preparation", () => {
     expect(manifest.complete).toBe(true);
     const history = await readCheckHistory(root, manifest);
     expect(history.lastOutcomes).toEqual({ [key]: "passed", [other]: "failed" });
+  });
+
+  it("does not fail preparation when the check history cannot be written: it removes the history and reports it redacted (Ruling N)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const source = await createGitFixture("history-blocked");
+    const readiness = [{ cwd: "repo/history-blocked", executable: "fixture-check", args: ["a"], timeoutSeconds: 2 }];
+    const project = { ...fixtureProject([{ name: "history-blocked", commit: source.commit }]), readiness } satisfies ProjectDefinition;
+    // A non-empty directory where the history goes: the write (a rename) fails, the removal does not.
+    const awsKey = "AKIAIOSFODNN7EXAMPLE";
+    await mkdir(join(root, ".agentx/last-checks.json", awsKey), { recursive: true });
+    const diagnostics: string[] = [];
+    const manifest = await prepareWorkspace({
+      rootPath: root,
+      project,
+      materializer: async (_repository, destination) => {
+        await run("git", ["clone", "--quiet", source.directory, destination]);
+      },
+      commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      onDiagnostic: (message) => { diagnostics.push(message); },
+    });
+    expect(manifest.complete).toBe(true);
+    expect(existsSync(join(root, ".agentx/last-checks.json"))).toBe(false);
+    expect(diagnostics).toHaveLength(1);
+    expect(diagnostics[0]).toContain("check history");
+    expect(diagnostics[0]).not.toContain(awsKey);
+  });
+
+  it("fails preparation when the check history can neither be written nor removed (Ruling N)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "agentx-workspace-"));
+    const source = await createGitFixture("history-stuck");
+    const readiness = [{ cwd: "repo/history-stuck", executable: "fixture-check", args: ["a"], timeoutSeconds: 2 }];
+    const project = { ...fixtureProject([{ name: "history-stuck", commit: source.commit }]), readiness } satisfies ProjectDefinition;
+    // A directory the worker cannot empty: nothing stale may survive, so preparation fails.
+    const locked = join(root, ".agentx/last-checks.json/locked");
+    await mkdir(locked, { recursive: true });
+    await writeFile(join(locked, "stale"), "failed");
+    await chmod(locked, 0o500);
+    try {
+      await expect(prepareWorkspace({
+        rootPath: root,
+        project,
+        materializer: async (_repository, destination) => {
+          await run("git", ["clone", "--quiet", source.directory, destination]);
+        },
+        commandRunner: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+        onDiagnostic: () => undefined,
+      })).rejects.toThrow(/check history/);
+    } finally {
+      await chmod(locked, 0o700);
+    }
   });
 
   it("ignores an inaccessible filesystem-owned lost+found directory at the workspace root", async () => {

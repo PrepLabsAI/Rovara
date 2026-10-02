@@ -7,6 +7,7 @@ import {
   readdir,
   realpath,
   rename,
+  rm,
   stat,
   writeFile,
 } from "node:fs/promises";
@@ -30,7 +31,7 @@ import { runCollected, type CollectedProcess } from "./collected-process.js";
 import { describeCommandFailure } from "./command-failure.js";
 import { evaluateReadiness, type CommandResult } from "./readiness.js";
 import { gitSafeEnvironment } from "./git.js";
-import { projectCheckKey, recordPreparedOutcomes } from "./verification/check-history.js";
+import { CHECK_HISTORY_PATH, projectCheckKey, recordPreparedOutcomes } from "./verification/check-history.js";
 import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
 import type {
   RepositoryCloneCredential,
@@ -110,6 +111,8 @@ export interface PrepareWorkspaceOptions {
   credentialProvider?: RepositoryCredentialProvider;
   commandRunner?: PreparationCommandRunner;
   devcontainerCli?: DevcontainerCli;
+  /** Where preparation reports what it does not fail on. Messages arrive redacted. Default: the worker's log. */
+  onDiagnostic?: (message: string) => void;
 }
 
 export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promise<PreparationManifest> {
@@ -211,7 +214,7 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
     );
     const readinessFailure = readiness.ready ? undefined : describeReadinessFailure(project.readiness, readiness.results);
     // Spec 051 Ruling M: before the workspace is READY, so a task never plans from an outcome this preparation replaced.
-    if (readiness.ready) await recordPreparedOutcomes(canonicalRoot, project.readiness);
+    if (readiness.ready) await resetCheckHistory(canonicalRoot, project.readiness, options.onDiagnostic ?? logPreparationDiagnostic);
     const readinessManifest: PreparationManifest = {
       ...manifest,
       readinessResults: readiness.results,
@@ -231,6 +234,39 @@ export async function prepareWorkspace(options: PrepareWorkspaceOptions): Promis
     await writeManifest(canonicalRoot, { ...manifest, complete: false, failure: redactText(message) });
     throw error;
   }
+}
+
+/**
+ * Spec 051 Ruling N: a history that cannot be written must not outlive preparation, or its stale outcomes would set a
+ * later task's before. So a failed write removes the file and is reported; only a failed removal fails preparation.
+ */
+async function resetCheckHistory(rootPath: string, readiness: readonly ProjectCommand[], onDiagnostic: (message: string) => void): Promise<void> {
+  try {
+    await recordPreparedOutcomes(rootPath, readiness);
+    return;
+  } catch (error) {
+    try {
+      // Recursive: the path may not be a file. rm removes a symbolic link itself, never its target.
+      await rm(resolve(rootPath, CHECK_HISTORY_PATH), { recursive: true, force: true });
+    } catch (removalError) {
+      throw new Error(redactText(
+        `AgentX could neither write nor remove the workspace's check history (${CHECK_HISTORY_PATH}): ${errorMessage(removalError)}`,
+      ), { cause: removalError });
+    }
+    try {
+      onDiagnostic(redactText(
+        `AgentX could not write the workspace's check history, so it removed it; the next task's checks start without earlier results: ${errorMessage(error)}`,
+      ));
+    } catch { /* Reporting must not fail preparation. */ }
+  }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function logPreparationDiagnostic(message: string): void {
+  console.log(JSON.stringify({ component: "worker", event: "prepare.diagnostic", message }));
 }
 
 /** #154: the first failed readiness check, and how many more failed. */
