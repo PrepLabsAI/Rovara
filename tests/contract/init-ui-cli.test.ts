@@ -25,6 +25,7 @@ import { fakeWizardOperator, snapshotOnReconnect } from "../support/wizard-brows
 import { SIGN_IN_PARAMETERS, fakeCloudFormation } from "../support/fake-cloudformation.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { ADMIN_EMAIL, FOUNDATION_OUTPUTS, fakeAlerts, fakeControlPlane, fakeRepositories, fakeSlackChannels, setupServices, turn } from "../support/setup-fakes.js";
+import { markOperatorStop } from "../../packages/cli/src/init/stop.js";
 import type { WizardSnapshot } from "../../packages/cli/src/init/ui/protocol.js";
 
 const dirs: string[] = [];
@@ -365,6 +366,24 @@ describe("agentx init --ui", () => {
     expect(failing?.failure?.what).toBe("The install could not go on.");
     expect(failing?.failure?.details[0]).toContain("--account 999999999999 does not match your AWS credentials");
     expect(failing?.question?.buttons?.map((button) => button.label)).toEqual(["Stop for now"]);
+  });
+
+  // Fix round 1 (Plan ruling 8): a step's own run throwing a stop the person already chose (a
+  // deploy step marked with markOperatorStop, the same way a declined "check again" question
+  // inside a step marks its error) is not a failure; the page shows no failure screen and asks no
+  // second question for it.
+  it("spec 048 FR-060 fix: a stop the deploy step itself chose shows no failure screen or question", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), markOperatorStop(new Error("the person chose not to continue")));
+    const operator = fakeWizardOperator([...FIRST_RUN]);
+    expect(await h.run(["--ui"], { openBrowser: operator.open })).not.toBe(0);
+    await operator.settled();
+    expect(operator.remaining()).toBe(0);
+    expect(operator.states.every((state) => state.failure === undefined)).toBe(true);
+    expect(operator.asked).not.toContain("The install stopped. What next?");
+    const last = operator.states.at(-1);
+    expect(last).toMatchObject({ phase: "failed" });
+    expect(last?.commands).toEqual([{ label: "Continue later with", command: "node /opt/agentx/dist/main.js --env staging init --region us-east-1" }]);
   });
 
   it("Q5: every other site is a button on the page, and the installer opens only the page itself", async () => {

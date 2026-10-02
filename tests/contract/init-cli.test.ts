@@ -17,6 +17,7 @@ import { INIT_STEP_IDS, installAnswersParameterName, installProgressParameterNam
 import { DEFAULT_CLASSIFIER_MODEL, DEFAULT_ORCHESTRATOR_MODEL, DEFAULT_WORKER_MODEL } from "../../packages/cli/src/init/answers.js";
 import { initSteps, type InitCliDependencies } from "../../packages/cli/src/init/commands.js";
 import { estimateMonthlyCost, suggestedBudgetUsd } from "../../packages/cli/src/init/cost.js";
+import { markOperatorStop } from "../../packages/cli/src/init/stop.js";
 import {
   allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, fakeSlackApi, HOLDER, memoryInitSecrets, passingChecks, scriptedDeployer, scriptedPrompter,
   slackIngressFetch, T0, TEST_BOT_TOKEN, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET,
@@ -284,6 +285,16 @@ describe("agentx init", () => {
     expect(h.printed()).toContain("Resuming the install of environment staging.");
     expect(h.github.conversions).toHaveLength(1);
     expect(h.deployer.requests.map((request) => request.part)).toEqual(["control-plane", "runtime", "slack"]);
+  });
+
+  // Fix round 1: the terminal path has no page and no onStepFailure hook, so a step's own stop
+  // (markOperatorStop) prints and stops exactly as any other step error does; only the page's
+  // own onStepFailure/runInit catch treat it differently (spec 048 FR-060 fix, Plan ruling 8).
+  it("spec 048 FR-060 fix: the terminal path is unaffected by a step's own stop", async () => {
+    const h = await harness();
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), markOperatorStop(new Error("the person chose not to continue")));
+    expect(await h.run([], { prompter: scriptedPrompter(FIRST_RUN) })).not.toBe(0);
+    expect(h.printed()).toContain('init stopped at "Start the AgentX service": the person chose not to continue. Run agentx init --env staging --region us-east-1 again to continue from this step.');
   });
 
   it("changes nothing when run again after it finished", async () => {

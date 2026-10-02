@@ -7,6 +7,7 @@ import { cliErrorFor } from "../deploy/commands.js";
 import { withEnvironmentLock, type LockRecord } from "../environments/lock.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { emptyProgress, readInstallProgress, writeInstallProgress, type InitStepId, type InstallProgress } from "./install-state.js";
+import { isOperatorStop, markOperatorStop } from "./stop.js";
 
 export type StepOutcome = { status: "done"; note?: string } | { status: "waiting"; message: string };
 
@@ -40,11 +41,15 @@ export function initStepFailure(title: string, error: unknown, where: { env: str
   const mapped = cliErrorFor(error);
   const message = mapped instanceof Error ? mapped.message.replace(/^[A-Z_]+: /, "") : String(mapped);
   const text = `init stopped at "${title}": ${message}. Run agentx init --env ${where.env} --region ${where.region} again to continue from this step.`;
+  // Fix round 1 (Plan ruling 8): a stop the step's own run already chose keeps that status
+  // through this wrap, so a catch further up (runInit's) still reads it as a stop, not a new
+  // failure, whatever onStepFailure answered.
+  const keepStop = <T>(wrapped: T): T => (isOperatorStop(error) ? markOperatorStop(wrapped) : wrapped);
   if (mapped instanceof AgentXError) {
     const refresh = mapped.code === "AUTH_REQUIRED" ? " Refresh your AWS session first (for example aws sso login or aws login)." : "";
-    return Object.assign(agentXError(mapped.code, `${text}${refresh}`), { cause: error });
+    return keepStop(Object.assign(agentXError(mapped.code, `${text}${refresh}`), { cause: error }));
   }
-  return new Error(text, { cause: error });
+  return keepStop(new Error(text, { cause: error }));
 }
 
 export async function runInitSteps<C>(input: {

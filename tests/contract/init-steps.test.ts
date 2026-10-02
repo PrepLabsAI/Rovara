@@ -6,6 +6,7 @@ import { agentXError } from "@agentx/contracts";
 import { initSteps } from "../../packages/cli/src/init/commands.js";
 import { installProgressParameterName, INIT_STEP_IDS, readInstallProgress, type InitStepId } from "../../packages/cli/src/init/install-state.js";
 import { runInitSteps, type InitEvent, type InitStep, type StepOutcome } from "../../packages/cli/src/init/steps.js";
+import { isOperatorStop, markOperatorStop } from "../../packages/cli/src/init/stop.js";
 import { STEP_PLAN } from "../../packages/cli/src/init/ui/journey.js";
 import { fakeGitHubApi, fakeSlackApi } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
@@ -190,6 +191,18 @@ describe("init step runner", () => {
     const failing: InitStep<null> = { id: "access", title: "Set up AWS permissions", run: async () => { throw new Error("Rate exceeded"); } };
     await expect(runInitSteps({ env: "staging", region: "us-east-1", store: new MemoryParameterStore(), holder: HOLDER, steps: [failing], context: null, onStepFailure: async () => "stop" }))
       .rejects.toThrow('init stopped at "Set up AWS permissions": Rate exceeded. Run agentx init --env staging --region us-east-1 again to continue from this step.');
+  });
+
+  // Fix round 1 (Plan ruling 8): a stop the step's own run chose (declining a "check again"
+  // question inside it, say) keeps that status through the wrap initStepFailure builds, so a
+  // catch further up (runInit's) still reads it as a stop, not a new failure, however
+  // onStepFailure answers.
+  it("spec 048 FR-060 fix: a stop the step's run already chose keeps that status through the thrown error", async () => {
+    const stopping: InitStep<null> = { id: "access", title: "Set up AWS permissions", run: async () => { throw markOperatorStop(new Error("said no to continuing")); } };
+    const thrown = await runInitSteps({ env: "staging", region: "us-east-1", store: new MemoryParameterStore(), holder: HOLDER, steps: [stopping], context: null, onStepFailure: async () => "stop" })
+      .then(() => undefined, (error: unknown) => error);
+    expect(isOperatorStop(thrown)).toBe(true);
+    expect(thrown).toMatchObject({ message: expect.stringContaining("said no to continuing") as unknown });
   });
 });
 

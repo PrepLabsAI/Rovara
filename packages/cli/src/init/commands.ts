@@ -714,6 +714,9 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
         onStepFailure: async ({ id, title, error }: { id: InitStepId; title: string; error: unknown }) => {
           const wizard = session.wizard;
           if (wizard === undefined) return "stop";
+          // Plan ruling 8: a stop the person already chose inside the step (declining a "check
+          // again" question, say) is not a failure; show no screen and no second question for it.
+          if (isOperatorStop(error)) return "stop";
           wizard.showFailure(failureScreen({ env, region, stepTitle: title, stepId: id, error, ...(wizard.logPath === undefined ? {} : { logPath: wizard.logPath }) }));
           const action = await askFailureAction(activePrompter, { retry: isRetryableStep(id) });
           if (action === "retry") {
