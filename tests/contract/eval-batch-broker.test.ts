@@ -812,6 +812,30 @@ describe("run ends and the single infrastructure retry (spec 052 FR-008, FR-010)
     expect(summarize(measures)).toEqual([expect.objectContaining({ runs: 0, failed: 1, retried: 1, resolved: 0, rate: null })]);
   });
 
+  it("charges $0 for a reported usage of no tokens, even with no cost, so a zero-token model error retried costs nothing (Ruling 33)", async () => {
+    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    await topUpBatches(h.dependencies);
+    // OpenRouter reports a null cost when the session cost nothing: a first call refused, no tokens.
+    const noTokens = { ...usage(null), tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 }, cacheReadRatio: 0 };
+    const refused = { ...graded(0, false), stopReason: "model_error", stopDetail: "OpenRouter: no allowed providers are available", patchBytes: 0, usage: noTokens };
+    await finish(h, evalBatchRunId(batch.batchId, 0, 1), refused);
+    await finish(h, evalBatchRunId(batch.batchId, 0, 2), refused);
+    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "DONE", spentUsd: 0, counts: { failed: 1 } });
+    const rows = await listBatchMeasures(h.dependencies, batch.batchId);
+    expect(rows.map((row) => [row.outcome, row.costUsd, row.chargedUsd, row.costEstimated ?? false]).sort()).toEqual([["FAILED", 0, 0, false], ["RETRIED", 0, 0, false]]);
+    await expectChargesMatchSpend(h, batch.batchId);
+  });
+
+  it("still charges the ceiling, estimated, for a usage with tokens but no cost (Ruling 33)", async () => {
+    const h = await harness({ maxConcurrentEvals: 2, maxCostUsd: 10 });
+    const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]], models: [cheap] }));
+    await topUpBatches(h.dependencies);
+    await finish(h, evalBatchRunId(batch.batchId, 0, 1), { ...graded(0), usage: usage(null) });
+    expect(await getBatch(h.dependencies, batch.batchId)).toMatchObject({ status: "DONE", spentUsd: 10 });
+    expect(await listBatchMeasures(h.dependencies, batch.batchId)).toEqual([expect.objectContaining({ outcome: "GRADED", costUsd: null, chargedUsd: 10, costEstimated: true })]);
+  });
+
   it("never retries a graded run that stopped for any reason but a model error (Ruling 27)", async () => {
     const h = await harness({ maxConcurrentEvals: 3 });
     const batch = await createBatch(h.dependencies, h.context, file({ tasks: [tasks[0]] }));

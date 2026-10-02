@@ -118,9 +118,11 @@ Every step writes to the AWS account; an administrator runs them.
    then `eval/runner-features`: the run fields that image parses. The broker sends a model's thinking
    level (spec 053) only to a runner image recorded there, so rebuild the runner image after a release
    for runs to use the approved levels. Run it again to ship a runner change; the broker reads the
-   parameters per run. The other direction is also safe: a runner image rebuilt before the control
-   plane puts the level it ran at in the result callback's `usage` only when the run config carried a
-   level, which only a control plane that parses it sends. `result.json` always records it.
+   parameters per run. Build it only **after** the control plane release it was built with: since spec 052
+   the runner's graded result carries `toolCalls`, which an older broker refuses (400), and the runner
+   treats that answer as final, so the graded result is lost and the run ends FAILED. The same holds after
+   a control-plane rollback: roll the runner image back first. (Spec 053's thinking level alone was safe in
+   that direction, since the runner reports it only when the run config carried it.)
 4. **Enable a channel**: `agentx admin eval enable --team <T…> --channel <C…> [--max-cost-usd 10]`.
    The channel must already be bound to a project. `agentx admin eval show` and `disable` read and
    remove the setting.
@@ -257,12 +259,15 @@ charges that do not sum to the spend) it says the results are incomplete, and th
 ### Releasing spec 052
 
 The release (`npm run release:prod`) updates the control plane (broker, tick and alarms) and then the
-Slack service. Two steps are outside it, and both are needed before the first paid batch:
+Slack service. Two steps are outside it, and both are needed before the first paid batch, in this order,
+each after the release:
 
 1. **Redeploy AgentXEval by hand** (the `cdk deploy AgentXEval …` command under [Installing](#installing)).
    The new state machine's EndRun releases the run's slot, and fails the execution at
    `SlotReleaseFailed` when it cannot. Until then, the old EndRun leaves each ended run's slot for the
    tick to release, up to 2 minutes later; single runs keep working.
-2. **Rebuild the runner image** (`npm run swebench:runner-image`). The new runner counts the agent's
+2. **Rebuild the runner image** (`npm run swebench:runner-image`), only once the release above has
+   deployed the broker that accepts `toolCalls`; an older broker refuses the new runner's graded
+   results, and those runs are lost as FAILED. The new runner counts the agent's
    tool calls for `results.csv` and stops before its agent starts when the broker answers its
    `started` with a 409. An older image's rows leave `toolCalls` empty.

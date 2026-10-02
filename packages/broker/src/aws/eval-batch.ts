@@ -719,13 +719,17 @@ function recordedEnd(record: EvalBatchRecord, run: SwebenchRun, charge: Charge):
   return undefined;
 }
 
-/** Ruling 4: the run's reported cost; else 0 for an end that used no tokens; else the per-run ceiling, marked estimated. */
+/** Ruling 4: the run's reported cost; else 0 for an end that used no tokens (Ruling 33: or reported none); else the per-run ceiling, marked estimated. */
 function chargeOf(run: SwebenchRun, ceiling: number): Charge {
   const reported = run.result?.usage.costUsd ?? run.usage?.costUsd ?? null;
   // Ruling 17: rounded once, as spend is, so the rows' charges sum exactly to the spend. The row
   // keeps the reported cost as it came.
   if (reported !== null) return { costUsd: reported, chargedUsd: roundUsd(reported), costEstimated: false };
-  const usedNoTokens = (run.status === "CANCELLED" && run.runnerStartedAt === undefined)
+  // Ruling 33: a usage that reports no tokens used none, whatever its cost says; OpenRouter reports a
+  // null cost for a session that cost nothing, such as a first call refused for model access.
+  const reportedTokens = (run.result?.usage ?? run.usage)?.tokens.total;
+  const usedNoTokens = reportedTokens === 0
+    || (run.status === "CANCELLED" && run.runnerStartedAt === undefined)
     || (run.status === "FAILED" && NO_TOKEN_FAILURES.some((pattern) => pattern.test(run.error ?? "")));
   if (usedNoTokens) return { costUsd: 0, chargedUsd: 0, costEstimated: false };
   return { costUsd: null, chargedUsd: roundUsd(ceiling), costEstimated: true };

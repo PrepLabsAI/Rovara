@@ -201,7 +201,12 @@ and batch runs share one limit on how many evals run at once, so nobody is locke
   run is unchanged: its record and its thread keep the graded result with its stop reason.
 - **D-16 (2026-10-02, Ruling 28):** The runner's graded result carries an optional `toolCalls`, the tool calls the
   agent started, counted by its tool-loop guard. The broker copies it into the run's measure and `results.csv`. A
-  runner image older than this change leaves it empty; the image is rebuilt before the campaign.
+  runner image older than this change leaves it empty; the image is rebuilt before the campaign, and only after the
+  control-plane release, since an older broker's strict result schema refuses `toolCalls` (re-review N-2).
+- **D-17 (2026-10-02, Ruling 33):** A run whose reported usage has `tokens.total` 0 used no tokens and is charged $0,
+  not estimated, even when its cost is null: OpenRouter reports a null cost for a session that cost nothing, such as a
+  first call refused for model access, which Ruling 27 now retries. A usage with tokens and no cost is still charged
+  its ceiling, estimated (D-5).
 
 ## Success Criteria
 
