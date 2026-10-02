@@ -114,7 +114,9 @@ export interface WizardHeader { installName: string; account?: string; region?: 
 /** FR-060: a failure in three parts. The actions are the question asked with it. */
 export interface WizardFailure { title: string; what: string; next: string; details: string[]; link?: WizardLink }
 
-export type WizardPhase = "running" | "finished" | "failed";
+/** "paused": the run ended on a step that waits on someone (a Slack admin's approval, an alert
+ * subscription); it is neither finished nor failed, and its step is drawn as waiting. */
+export type WizardPhase = "running" | "finished" | "paused" | "failed";
 
 export interface WizardState {
   env: string;

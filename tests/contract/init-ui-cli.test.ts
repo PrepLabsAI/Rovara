@@ -282,6 +282,9 @@ describe("agentx init --ui", () => {
     expect(last).toMatchObject({ phase: "failed", outcome: "The install stopped. Your progress is saved." });
     expect(last?.commands).toEqual([{ label: "Continue later with", command: "node /opt/agentx/dist/main.js --env staging init --region us-east-1" }]);
     expect(`${last?.outcome ?? ""} ${last?.failure?.what ?? ""}`).not.toMatch(/Finished|INTERNAL_ERROR|CONFIG_INVALID/);
+    expect(last?.journey.current).toBe("build");
+    expect(last?.journey.phases.map((phase) => phase.statusWord)).toEqual(["Done", "Done", "Stopped", "Coming up", "Coming up"]);
+    expect(last?.journey.timeLeftText).toBe("About 29 minutes left");
   });
 
   it("spec 048 FR-060: a failure outside a step still shows the screen, with Stop for now only", async () => {
@@ -640,6 +643,10 @@ describe("agentx init --ui", () => {
     expect(ready?.link?.url).toBe("https://slack.com/app_redirect?team=T0TEAM&channel=C0PAY00001");
     // FR-058: the outcome is the fixed line, never the ready card's own words repeated.
     expect(last?.outcome).toBe(READY_OUTCOME);
+    expect(last?.phase).toBe("finished");
+    expect(last?.journey.current).toBe("finish");
+    expect(last?.journey.phases.map((phase) => phase.statusWord)).toEqual(["Done", "Done", "Done", "Done", "Done"]);
+    expect(last?.journey.timeLeftText).toBe("Done");
   });
 
   it("spec 048 FR-059: a run paused waiting on a Slack admin's approval shows the plain outcome, a continue command, and the same reason in the terminal", async () => {
@@ -654,6 +661,13 @@ describe("agentx init --ui", () => {
     expect(h.err.join("").trimEnd().split("\n").at(-1)).toEqual(
       `[4/5] Stopped: Waiting for a Slack admin to approve the app. Details in the browser and in ${initLogPath(h.home, "staging")}.`,
     );
+    // A paused run is not drawn as finished: the waiting step's phase waits for you, and the time
+    // left is what the install still has to do.
+    expect(last?.phase).toBe("paused");
+    expect(last?.journey.current).toBe("connect-slack");
+    expect(last?.journey.stepNumber).toBe(4);
+    expect(last?.journey.phases.map((phase) => phase.statusWord)).toEqual(["Done", "Done", "Done", "Waiting for you", "Coming up"]);
+    expect(last?.journey.timeLeftText).toBe("About 16 minutes left");
   });
 
   it("spec 048 FR-059: a run paused waiting on the alert subscription shows its own plain reason", async () => {
@@ -669,6 +683,11 @@ describe("agentx init --ui", () => {
     expect(h.err.join("").trimEnd().split("\n").at(-1)).toEqual(
       `[5/5] Stopped: Waiting for the alert subscription to be confirmed. Details in the browser and in ${initLogPath(h.home, "staging")}.`,
     );
+    expect(last?.phase).toBe("paused");
+    expect(last?.journey.current).toBe("finish");
+    expect(last?.journey.stepNumber).toBe(5);
+    expect(last?.journey.phases.map((phase) => phase.statusWord)).toEqual(["Done", "Done", "Done", "Done", "Waiting for you"]);
+    expect(last?.journey.timeLeftText).toBe("About 2 minutes left");
   });
 
   it("a run stopped with --stop-after shows no ready card", async () => {

@@ -149,16 +149,17 @@ export function createWizardHub(env: string, options: { now?: () => number; logP
   const closeRequest = new Promise<void>((resolvePromise) => { closeWanted = resolvePromise; });
 
   // A question, a link, a waiting card or a failure: the operator has something to do before the
-  // run goes on (FR-005).
-  const waitingOnYou = (): boolean =>
-    question !== undefined || link !== undefined || failure !== undefined || cards.some((card) => card.status === "waiting");
+  // run goes on (FR-005). Once the run has ended there is nothing left to answer on the page.
+  const waitingOnYou = (): boolean => phase === "running" && !closed
+    && (question !== undefined || link !== undefined || failure !== undefined || cards.some((card) => card.status === "waiting"));
 
   const state = (): WizardState => {
     const waiting = waitingOnYou();
     const journey = journeyOf({
       stage,
       steps: steps.map((step) => ({ id: step.id, status: step.status, ...(step.startedAt === undefined ? {} : { startedAtMs: Date.parse(step.startedAt) }) })),
-      waitingOnYou: waiting,
+      // A paused run ended on a step that waits on someone: its phase says so, not Done.
+      waitingOnYou: waiting || phase === "paused",
       stopped: failure !== undefined || phase === "failed",
       finished: phase === "finished",
       nowMs: now(),

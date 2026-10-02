@@ -75,6 +75,18 @@ describe("the hub's journey", () => {
     expect(hub.state().pageTitle).toBe(ACTION_NEEDED_TITLE);
   });
 
+  it("FR-005: once the run has ended, the tab title no longer asks for action", () => {
+    const { hub } = clocked();
+    hub.showCard({ id: "slack", title: "Slack app", status: "waiting", lines: ["Waiting for a Slack admin."] });
+    hub.showLink({ url: "https://api.slack.com/apps", label: "Open Slack" });
+    expect(hub.state().waitingOnYou).toBe(true);
+    hub.finish("The install is paused. Your progress is saved.", "paused");
+    expect(hub.state().waitingOnYou).toBe(false);
+    expect(hub.state().pageTitle).toBe("Install AgentX (step 1 of 5)");
+    hub.close();
+    expect(hub.state().waitingOnYou).toBe(false);
+  });
+
   it("drops a failure's link it cannot check, and keeps the rest of the failure", () => {
     const { hub } = clocked();
     hub.showFailure({ title: "The install stopped", what: "Set up AWS permissions did not finish.", next: "Try this step again.", details: ["bad input"], link: { url: "javascript:alert(1)", label: "Fix it" } });

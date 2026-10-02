@@ -327,7 +327,7 @@ export async function runInit(options: InitOptions, deps: InitCliDependencies, s
         wizard.finish(`Stopped after the ${result.stoppedAfter} step, as --stop-after asked.`);
       } else {
         const region = session.region ?? options.region ?? "<region>";
-        wizard.finish("The install is paused. Your progress is saved.", undefined, [
+        wizard.finish("The install is paused. Your progress is saved.", "paused", [
           { label: "Continue later with", command: cliCommandLine(session.invocation, `--env ${options.env} init --region ${region}`) },
         ]);
       }
@@ -341,9 +341,7 @@ export async function runInit(options: InitOptions, deps: InitCliDependencies, s
         // actually done; a paused or stopped-after run ends the page right away, as before.
         await holdReadyScreen({ closeRequested: wizard.closeRequested(), ms: READY_HOLD_MS, ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }) });
       } else if (result.status === "waiting") {
-        // The step itself names its own phase: reading it from the hub here would always answer
-        // "finish" (wizard.finish, just above, already set the hub's phase to "finished", and
-        // journeyOf treats a finished run as past every phase, whichever step actually stopped it).
+        // The step itself names its own phase, the same one the page's rail shows as waiting.
         session.say(stoppedLine({
           phase: STEP_PLAN[result.step].phase,
           problem: WAITING_STEP_PLAIN[result.step] ?? "The install is paused.",
