@@ -20,6 +20,22 @@ const turn = (receivedAt: string, eventId: string, withUsage: boolean) => ({
 });
 
 describe("GET /v1/admin/usage (FR-030, A9)", () => {
+  it.each([
+    { input: 3, cacheRead: 900, cacheWrite: 70, expected: 973 },
+    { input: 0, cacheRead: 900, cacheWrite: 0, expected: 900 },
+    { input: 0, cacheRead: 0, cacheWrite: 70, expected: 70 },
+    { input: 3, cacheRead: 0, cacheWrite: 0, expected: 3 },
+  ])("includes cached input once for a Slack turn: $input/$cacheRead/$cacheWrite", async ({ input, cacheRead, cacheWrite, expected }) => {
+    const { db, admin } = await createAdminReadBroker();
+    const at = new Date(Date.now() - 3_600_000).toISOString();
+    const record = turn(at, "EvCACHE000001", true);
+    db.set({ ...record, usage: { ...record.usage, tokens: { input, output: 5, cacheRead, cacheWrite, total: expected + 5 } } });
+    const answer = await admin("GET", "/v1/admin/usage?group_by=origin");
+    expect(answer.body.groups).toEqual([
+      { key: "slack", turns: 1, tasks: 0, taskDurationMs: 0, inputTokens: expected, outputTokens: 5, costUsd: 0.01, costUnknown: 0 },
+    ]);
+  });
+
   it("adds up worker tasks and Slack turns per project", async () => {
     const { db, admin } = await createAdminReadBroker();
     const at = (hoursAgo: number) => new Date(Date.now() - hoursAgo * 3_600_000).toISOString();
