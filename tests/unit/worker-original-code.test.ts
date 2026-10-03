@@ -5,7 +5,7 @@ import { realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { AgentFilesRestoreError, gitOriginalCode, ORIGINAL_CODE_REF, recoverAgentFiles } from "../../packages/worker/src/verification/original-code.js";
+import { AgentFilesRestoreError, git as runGit, gitOriginalCode, ORIGINAL_CODE_REF, recoverAgentFiles } from "../../packages/worker/src/verification/original-code.js";
 
 const IDENTITY = { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" };
 const git = (directory: string, ...args: string[]) =>
@@ -123,6 +123,13 @@ describe("gitOriginalCode", () => {
     expect(() => git(directory, "rev-parse", "--verify", "--quiet", ORIGINAL_CODE_REF)).toThrow();
     // Nothing left to recover.
     expect(await recoverAgentFiles([directory])).toEqual([]);
+  });
+
+  it("survives Git exiting before its standard input is written (EPIPE), which would otherwise crash the worker", async () => {
+    // `git --version` never reads its input: 10 MB cannot fit the pipe, so the write fails with EPIPE after Git exits.
+    const { directory } = await agentRepository();
+    await expect(runGit(directory, ["--version"], {}, true, "x".repeat(10_000_000))).resolves.toMatch(/^git version/);
+    await expect(runGit(directory, ["rev-parse", "--is-inside-work-tree"])).resolves.toBe("true");
   });
 
   it("fails with AgentFilesRestoreError, keeping the ref, when a repository cannot be restored", async () => {

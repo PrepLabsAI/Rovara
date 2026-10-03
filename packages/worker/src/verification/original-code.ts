@@ -181,14 +181,22 @@ async function withTemporaryIndex<T>(
   }
 }
 
-async function git(directory: string, args: string[], env: Record<string, string> = {}, trim = true, input?: string): Promise<string> {
+/** Runs Git in `directory` with the worker's safe-directory setting. Exported for tests. */
+export async function git(directory: string, args: string[], env: Record<string, string> = {}, trim = true, input?: string): Promise<string> {
   const child = execFileAsync("git", ["-C", directory, ...args], {
     timeout: GIT_TIMEOUT_MS,
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
     env: { ...gitSafeEnvironment(directory), ...env },
   });
-  // Only checkout-index reads standard input; every other command gets it closed.
-  child.child.stdin?.end(input ?? "");
+  const stdin = child.child.stdin;
+  if (stdin !== null) {
+    // A Git command can exit before its standard input is written or closed (every command but checkout-index ignores
+    // it). The pipe's EPIPE then arrives as an error event, which, unhandled, would crash the worker. Git's own exit
+    // status still decides the result below.
+    stdin.on("error", () => undefined);
+    if (input === undefined) stdin.end();
+    else stdin.end(input);
+  }
   const { stdout } = await child;
   return trim ? stdout.trim() : stdout;
 }
