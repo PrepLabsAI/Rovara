@@ -22,7 +22,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
 import { createModelRuntimeWithFallback } from "@agentx/model-runtime";
-import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, agentXError, redactText, ThinkingLevelSchema, type ThinkingLevel } from "@agentx/contracts";
+import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, agentXError, isPipedTestCommand, redactText, ThinkingLevelSchema, type ThinkingLevel } from "@agentx/contracts";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import {
@@ -367,12 +367,21 @@ export function agentShellTool(cwd: string, operations?: BashOperations): ToolDe
   // The typed definition's render callbacks are narrower than customTools' generic slot.
   return createBashToolDefinition(cwd, {
     ...(operations === undefined ? {} : { operations }),
-    spawnHook: withAgentXGitIdentity,
+    spawnHook: agentShellSpawn,
   }) as unknown as ToolDefinition;
 }
 
-function withAgentXGitIdentity(context: BashSpawnContext): BashSpawnContext {
-  return { ...context, env: { ...context.env, ...AGENTX_GIT_IDENTITY_ENVIRONMENT } };
+/**
+ * AgentX's git identity in the environment, and `pipefail` for a test command piped into `tail`, so its exit code
+ * is the test's: the recorder takes that run as a before result (spec 051), and the agent sees the same status.
+ * Every agent shell is bash (Pi's local shell, and runInContainerGroup in a container).
+ */
+export function agentShellSpawn(context: BashSpawnContext): BashSpawnContext {
+  return {
+    ...context,
+    ...(isPipedTestCommand(context.command) ? { command: `set -o pipefail; ${context.command}` } : {}),
+    env: { ...context.env, ...AGENTX_GIT_IDENTITY_ENVIRONMENT },
+  };
 }
 
 export function executionRoleBedrockProvider(): ReturnType<typeof amazonBedrockProvider> {

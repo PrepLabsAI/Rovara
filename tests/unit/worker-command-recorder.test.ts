@@ -69,9 +69,19 @@ describe("CommandRecorder", () => {
     ]);
   });
 
-  it("never records a piped command or a non-test command, nor another tool's result", async () => {
+  it("records a test command piped into tail -N as its bare command, with the run's exit code (pipefail)", async () => {
+    const { bash, runs } = harness();
+    await bash("python -m pytest a/test_x.py -q 2>&1 | tail -20", { exitCode: 1 });
+    await bash("python -m pytest a/test_x.py -q", { exitCode: 0 });
+    expect((await runs()).map(({ command, replay, exitCode, afterFirstEdit }) => ({ command, replay, exitCode, afterFirstEdit }))).toEqual([
+      { command: "python -m pytest a/test_x.py -q 2>&1 | tail -20", replay: "python -m pytest a/test_x.py -q", exitCode: 1, afterFirstEdit: false },
+    ]);
+  });
+
+  it("never records any other pipe, a non-test command, or another tool's result", async () => {
     const { recorder, bash, runs } = harness();
     await bash("pytest | tail");
+    await bash("pytest | head -5");
     await bash("npm install");
     recorder.observe({ toolCallId: "r", toolName: "read", input: { command: "pytest" }, isError: false, content: [{ type: "text", text: "x" }] });
     recorder.observe({ toolCallId: "b", toolName: "bash", input: {}, isError: false, content: [] });

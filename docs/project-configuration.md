@@ -340,7 +340,14 @@ with a relative `cd <path> &&` (no `..`, no absolute path), then `NAME=value` as
 optional `timeout <n>`. Anything else is never replayed, because replaying an arbitrary command
 could change the workspace: pipes, `;`, `&&` chains, `||`, `&`, redirection, quotes,
 `$`, backticks, globs, `~`, absolute paths and `..`. So `cd pkg && npm test -- -t foo` and
-`FOO=1 python -m pytest -k x` count, while `pytest | tail -5` and `npm test; echo done` do not.
+`FOO=1 python -m pytest -k x` count, while `pytest | head -5` and `npm test; echo done` do not.
+
+One exception: a trailing `2>&1` and `| tail -N` (or `tail -n N`), which only trim what the agent
+reads. `python -m pytest -q 2>&1 | tail -20` counts, and AgentX replays the bare
+`python -m pytest -q`. A pipeline's exit code is normally `tail`'s, which is 0 even when the tests
+fail, so the agent's shell runs exactly these commands with `set -o pipefail`: the exit code is
+the test's, and the run can serve as the "before" result. `head` is not accepted, because it stops
+reading early and can cut the test run short.
 
 ### Rollout
 

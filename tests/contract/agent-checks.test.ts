@@ -2,8 +2,8 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  AGENTX_PREAMBLE, AGENTX_PREAMBLE_VERSION, AGENTX_WORKER_PROMPT, agentxPreambleSha256, CheckReportSchema,
-  classifyCheck, matchTestCommand, parseAgentClaim, reportStatus, taskResultChecks,
+  AGENTX_PREAMBLE, AGENTX_PREAMBLE_VERSION, AGENTX_WORKER_PROMPT, agentxPreambleSha256, CheckReportSchema, isPipedTestCommand,
+  classifyCheck, matchTestCommand, parseAgentClaim, reportStatus, taskResultChecks, withoutOutputTail,
 } from "@agentx/contracts";
 
 describe("the AgentX preamble (spec 051 FR-001)", () => {
@@ -34,11 +34,20 @@ describe("matchTestCommand (FR-003, P-6)", () => {
     ["timeout 600 pytest", "timeout 600 pytest"],
     ["  pytest  ", "pytest"],
     ["pytest --junitxml=out/report.xml", "pytest --junitxml=out/report.xml"],
+    // An output tail is allowed and left out of the replay.
+    ["python -m pytest a/test_x.py -x -q 2>&1 | tail -30", "python -m pytest a/test_x.py -x -q"],
+    ["pytest -q 2>&1 | tail -n 20", "pytest -q"],
+    ["cd pkg && npm test 2>&1 | tail -n50", "cd pkg && npm test"],
+    ["go test ./... | tail -5", "go test ./..."],
+    ["pytest|tail -5", "pytest"],
+    ["cargo test 2>&1", "cargo test"],
   ])("replays %j", (command, replay) => {
     expect(matchTestCommand(command)).toBe(replay);
   });
   it.each([
-    "pytest | tail -5", "npm test; echo done", "npm test || true", "npm test > out.txt", "npm test &",
+    "pytest | tail", "pytest | tail -f", "pytest | head -5", "pytest | grep x", "pytest | tail -5 | grep x",
+    "pytest 2>&1 | tail -5 > out.txt", "pytest > out.txt 2>&1", "pytest 2>/dev/null | tail -5", "pytest | tail -5 &",
+    "npm test; echo x | tail -5", "npm install 2>&1 | tail -5", "echo $(pytest) | tail -5", "npm test; echo done", "npm test || true", "npm test > out.txt", "npm test &",
     "echo $(pytest)", "`pytest`", "git stash && pytest", "npm install", "npm run build", "python setup.py test",
     "cd a && cd b && pytest", "pytest-xdist", "", "   ",
     "pytest\nrm -rf .", "pytest\r\nrm x", "pytest\tfoo", "pytest\u0000", "cd a\n&& pytest", "pytest\n",
@@ -48,6 +57,31 @@ describe("matchTestCommand (FR-003, P-6)", () => {
     "pytest --junitxml=/etc/x", "FOO=/etc/x pytest", "make test -C /", "pytest --basetemp=../x", "npm test --prefix=/tmp",
   ])("does not treat %j as a check", (command) => {
     expect(matchTestCommand(command)).toBeUndefined();
+  });
+});
+
+describe("withoutOutputTail and isPipedTestCommand (pipefail for a piped test command)", () => {
+  it.each([
+    ["pytest -q 2>&1 | tail -20", { command: "pytest -q", piped: true }],
+    ["pytest -q | tail -n 5", { command: "pytest -q", piped: true }],
+    ["pytest -q 2>&1", { command: "pytest -q", piped: false }],
+    ["pytest -q", { command: "pytest -q", piped: false }],
+    ["pytest | head -5", { command: "pytest | head -5", piped: false }],
+  ])("splits %j", (command, expected) => {
+    expect(withoutOutputTail(command)).toEqual(expected);
+  });
+  it.each([
+    "pytest | tail -5", "python -m pytest a/test_x.py -q 2>&1 | tail -30",
+    // The cd target is not checked: an eval's container path is still a test command for pipefail.
+    "cd /testbed && python -m pytest a/test_x.py -q 2>&1 | tail -20",
+  ])("runs %j with pipefail", (command) => {
+    expect(isPipedTestCommand(command)).toBe(true);
+  });
+  it.each([
+    "pytest", "pytest 2>&1", "pytest | head -5", "echo hi | tail -5", "npm install | tail -5",
+    "pytest; rm x | tail -5", "grep -r x . | tail -5", "cd a && cd b && pytest | tail -5",
+  ])("leaves %j as it is", (command) => {
+    expect(isPipedTestCommand(command)).toBe(false);
   });
 });
 
