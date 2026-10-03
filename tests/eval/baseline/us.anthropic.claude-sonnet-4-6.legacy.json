@@ -1,0 +1,1640 @@
+{
+  "provider": "amazon-bedrock",
+  "model": "us.anthropic.claude-sonnet-4-6",
+  "presentation": "legacy",
+  "repeat": 3,
+  "generatedAt": "2026-10-03T11:59:38.511Z",
+  "caseSetHash": "127edac6f231287f4bdb1e9c51d4ccbb038ff74ae4c2a9abda2be6b7a97be0d8",
+  "cases": [
+    {
+      "id": "asana-vs-github",
+      "caseHash": "a6df8657576e581b2cb75c312c8ad49288f15f33dfdab771b4201f194e57b3b6",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "github__list_issues",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__list_issues",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__list_issues",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "channel-which-project",
+      "caseHash": "e4a3821aba6922f6b1886dbaf571c2245c01db1866100b1fc58a0ccbfa122b79",
+      "passed": true,
+      "runs": [
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": true,
+          "refusalOk": null,
+          "containsOk": true,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": true,
+          "refusalOk": null,
+          "containsOk": true,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": true,
+          "refusalOk": null,
+          "containsOk": true,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "channel-github-tools",
+      "caseHash": "e68ae383c63fe1a93612e1e7aeada3b7497a0fde04421259bbebb74d8ca4ad2d",
+      "passed": true,
+      "runs": [
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": true,
+          "refusalOk": null,
+          "containsOk": true,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": true,
+          "refusalOk": null,
+          "containsOk": true,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": true,
+          "refusalOk": null,
+          "containsOk": true,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "channel-list-files",
+      "caseHash": "50cf0a0d84a88294901322678b5ce8b6476af4fe8b146c828e3aec722d3eaf47",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "channel-test-page-pr",
+      "caseHash": "7308658eccf0587f07654762d446927bec7af63e98bd5e0a26e75222f883fbb6",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "channel-test-page-pr-tested",
+      "caseHash": "10fb6f876a8d1b9820d881f77380d56d22e9384e78372a632f14b467883462ca",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "channel-summarize",
+      "caseHash": "6a9e17ead705c9cf942852b14334a0e423a1b58a0ce10a7541aa2f84709f1ef5",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "channel-inspect",
+      "caseHash": "c1d2f3097dee615511ec94e61cfe9e9c02d95969a9ade065d1f916d4969a9ed9",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "channel-exact-reply",
+      "caseHash": "df9a4d0b9ab74fa193910b45b2c284c4856fef98e011351a476f9ee1d2d51e6e",
+      "passed": true,
+      "runs": [
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": true,
+          "refusalOk": null,
+          "containsOk": true,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": true,
+          "refusalOk": null,
+          "containsOk": true,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": true,
+          "refusalOk": null,
+          "containsOk": true,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "command-close-workspace",
+      "caseHash": "db305ba493c85a522ceeea8862ebaf9af35f0473d6e31c0265b5edd06e93c55a",
+      "passed": false,
+      "runs": [
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": null,
+          "containsOk": false,
+          "siteOk": true,
+          "notContainsOk": true,
+          "replyLines": 9,
+          "linesOk": false
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": null,
+          "containsOk": false,
+          "siteOk": true,
+          "notContainsOk": true,
+          "replyLines": 7,
+          "linesOk": false
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": null,
+          "containsOk": false,
+          "siteOk": true,
+          "notContainsOk": true,
+          "replyLines": 7,
+          "linesOk": false
+        }
+      ]
+    },
+    {
+      "id": "command-close-workspace-please",
+      "caseHash": "a472c8d2068866ec9a2dc8c9785ab626520fdc274ee0f0eee3c1a45a83d4d664",
+      "passed": false,
+      "runs": [
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": true,
+          "refusalOk": null,
+          "containsOk": true,
+          "siteOk": true,
+          "notContainsOk": true,
+          "replyLines": 5,
+          "linesOk": false
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": true,
+          "refusalOk": null,
+          "containsOk": true,
+          "siteOk": true,
+          "notContainsOk": true,
+          "replyLines": 5,
+          "linesOk": false
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": true,
+          "refusalOk": null,
+          "containsOk": true,
+          "siteOk": true,
+          "notContainsOk": true,
+          "replyLines": 4,
+          "linesOk": false
+        }
+      ]
+    },
+    {
+      "id": "command-close-workspace-shutdown",
+      "caseHash": "9077e76fcf267074c9f9c9d495c670208fe7adda46ff917c932c3f7700c624f5",
+      "passed": false,
+      "runs": [
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": null,
+          "containsOk": false,
+          "siteOk": true,
+          "notContainsOk": true,
+          "replyLines": 6,
+          "linesOk": false
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": null,
+          "containsOk": false,
+          "siteOk": true,
+          "notContainsOk": true,
+          "replyLines": 6,
+          "linesOk": false
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": null,
+          "containsOk": false,
+          "siteOk": true,
+          "notContainsOk": true,
+          "replyLines": 6,
+          "linesOk": false
+        }
+      ]
+    },
+    {
+      "id": "command-model-sonnet",
+      "caseHash": "19b08d9a9ad9330521f53d59807fbe7244b6e8dea21b5178e5bccfee84e22923",
+      "passed": false,
+      "runs": [
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": false,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": null,
+          "containsOk": false,
+          "siteOk": true,
+          "notContainsOk": false,
+          "replyLines": 1,
+          "linesOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": false,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": null,
+          "containsOk": false,
+          "siteOk": true,
+          "notContainsOk": true,
+          "replyLines": 2,
+          "linesOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": false,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": null,
+          "containsOk": false,
+          "siteOk": true,
+          "notContainsOk": true,
+          "replyLines": 2,
+          "linesOk": true
+        }
+      ]
+    },
+    {
+      "id": "command-model-opus",
+      "caseHash": "76e54079739f07217b6597ac5775e2239c2296c214b40ecfcea1e311d1b70df8",
+      "passed": false,
+      "runs": [
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": false,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": null,
+          "containsOk": false,
+          "siteOk": true,
+          "notContainsOk": true,
+          "replyLines": 4,
+          "linesOk": false
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": false,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": null,
+          "containsOk": false,
+          "siteOk": true,
+          "notContainsOk": true,
+          "replyLines": 5,
+          "linesOk": false
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": false,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": null,
+          "containsOk": false,
+          "siteOk": true,
+          "notContainsOk": false,
+          "replyLines": 5,
+          "linesOk": false
+        }
+      ]
+    },
+    {
+      "id": "files-not-pr",
+      "caseHash": "0dfc7df77878761e676edac6ed894db36656810ba0dcd1e39df2658becdc47d1",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "jira-not-connected",
+      "caseHash": "7a5071652dd2efaffcf1ec42e9bc69988d589e1a0f6d4797b068723764f165a7",
+      "passed": false,
+      "runs": [
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "append-pr",
+      "caseHash": "7fc26306d043a622f4f2974932cf4e4a4b144ca485cfa7666f70ab5696fb7daf",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "jira-vs-github",
+      "caseHash": "f9b41dd00d47dbf29321472af4be9f01d1296b66c3786837d4f8e8b2262d85ac",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "github__list_issues",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__list_issues",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__list_issues",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "github-not-linear",
+      "caseHash": "d0e310b77323ee2bfe6d85d142829edd07e195ba8f277634c747786bcee1657c",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "github__list_issues",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__list_issues",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__list_issues",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "files-not-linear",
+      "caseHash": "19903a7dc0215b90ac580800417b3f20e2f68a53f5b5e89d319ce1fc512f3a9a",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "linear-not-connected",
+      "caseHash": "3c56c3d6ed9d7d47d42842dd35e6e870c9129736890b82866964cbc0a3611785",
+      "passed": false,
+      "runs": [
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "run-tests",
+      "caseHash": "2257c58a4f7113091e181914b027f5c6093ee71aa9cc535686b05d5a78214736",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "explain-code",
+      "caseHash": "7ae175f9b094e741206dc191a7019f0de308af2a27a9e8edd3dd96521d56ea82",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "fix-typo",
+      "caseHash": "8e7720897013565516f83a75d5c484728d396ce19f9ab23e98c8db61828fc42a",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "list-issues",
+      "caseHash": "5afcd0ee859e501c254446503c6a526fc210a960f030785730238bcbc4da73f8",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "github__list_issues",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__list_issues",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__list_issues",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "labelled-issues",
+      "caseHash": "6c18bd982a3e0ba9f241697fbf415d639a457d20296dc17239e25c8e2c9a7318",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "github__list_issues",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__list_issues",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__list_issues",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "read-issue",
+      "caseHash": "daf8719cca43451b1fe7c832677d43442847652cae4131292be80d2c4cdc8177",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "github__issue_read",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__issue_read",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__issue_read",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "create-issue",
+      "caseHash": "d2fcf0f9dc45fa418d3f02e5d6b18eb7e5c422eb9769e1f77d8ea842e94bd487",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "github__issue_write",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__issue_write",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__issue_write",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "comment-issue",
+      "caseHash": "d247b6dc99c27769447a113f3a41097d6371a310f905f81d5d55c88e8babd6da",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "github__add_issue_comment",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__add_issue_comment",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__add_issue_comment",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "close-this-issue",
+      "caseHash": "851b270b6235a1fd94b139e79fd62848a991ef7ebf01f67e661548cd9cf54b09",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "github__issue_write",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__issue_write",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__issue_write",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "create-pr",
+      "caseHash": "e9476d11cc8252dc546a2089efcd8a304fa671e7c3941a276b1045f89715b021",
+      "passed": false,
+      "runs": [
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": false,
+          "argsOk": false,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": false,
+          "argsOk": false,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": false,
+          "argsOk": false,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "sync-pr",
+      "caseHash": "9b366cb004cd9ae8c5664d98c0662f3d7f08382562242d2ce39c926da20cc5fc",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "edit-pr",
+      "caseHash": "874c68ce60fa217f19abf4a70eb22c06e42a697868a89f2c1d1f1db6729a75d5",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "close-pr",
+      "caseHash": "e5bf3502635649fa9c6a7c9c3446038fe5e5021b264bfa8aea2bb8d2424f2ef1",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "reopen-pr",
+      "caseHash": "529433faad652b35cb86c24c47fb97ae0daeb379977450bfe1227742d9fc567f",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "replace-pr",
+      "caseHash": "ff39b687b03bbf73379de04518d25629e4afb996be8be2d150d8376021e5d977",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "revert-pr",
+      "caseHash": "26cfaaf2bdac86490438a8da3f5a546ae6f3327950a2f84626f2fea62a357a17",
+      "passed": true,
+      "runs": [
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_manage_pull_request",
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": null,
+          "refusalOk": null,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "linear-read-unconfigured",
+      "caseHash": "20309f0e0f1e18ea5322bf8aa2dc3635e944d6b4b6d5077824d823267c4ce677",
+      "passed": false,
+      "runs": [
+        {
+          "tool": "github__list_issues",
+          "toolOk": false,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__list_issues",
+          "toolOk": false,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "github__list_issues",
+          "toolOk": false,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "linear-write-unconfigured",
+      "caseHash": "62bee05fa414ba735b8c121d4b6c4871099754b1d72194291b6e259bad220ffc",
+      "passed": false,
+      "runs": [
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "asana-not-connected",
+      "caseHash": "175a2b41d3340f2fabfb753dfb501a430ec22fa58d6c8d7e8a246282b8b6f13a",
+      "passed": false,
+      "runs": [
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "github-not-configured",
+      "caseHash": "d31aa3ebf6a76c59f1d76e2266ba26ac9d14db066899a1718264484ebfa2c979",
+      "passed": false,
+      "runs": [
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": false,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": false,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": false,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "github-credential-missing",
+      "caseHash": "987218c29533a5cb316b2df8567fcf80393a506a0046637a56aa7c3a1720cfcb",
+      "passed": false,
+      "runs": [
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": false,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": false,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        },
+        {
+          "tool": "agentx_submit_task",
+          "toolOk": false,
+          "argsOk": true,
+          "phraseOk": false,
+          "refusalOk": false,
+          "containsOk": null,
+          "siteOk": true
+        }
+      ]
+    },
+    {
+      "id": "out-of-scope",
+      "caseHash": "53c0dc3acebda2ae235812ecf5e950f567f5adf6c7cc09e4e30390dd90763365",
+      "passed": true,
+      "runs": [
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": true,
+          "refusalOk": null,
+          "containsOk": true,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": true,
+          "refusalOk": null,
+          "containsOk": true,
+          "siteOk": true
+        },
+        {
+          "tool": null,
+          "toolOk": true,
+          "argsOk": true,
+          "phraseOk": true,
+          "refusalOk": null,
+          "containsOk": true,
+          "siteOk": true
+        }
+      ]
+    }
+  ],
+  "notApplicable": [
+    {
+      "id": "asana-list-open",
+      "reason": "needs connector asana (type asana), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "asana-read-one",
+      "reason": "needs connector asana (type asana), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "asana-create",
+      "reason": "needs connector asana (type asana), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "asana-comment",
+      "reason": "needs connector asana (type asana), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "asana-complete",
+      "reason": "needs connector asana (type asana), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "gate-placeholder-target",
+      "reason": "needs connector linear (type linear), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "gate-clear-create",
+      "reason": "needs connector linear (type linear), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "gate-clear-change",
+      "reason": "needs connector linear (type linear), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "gate-close-always-asks",
+      "reason": "needs connector linear (type linear), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "gate-jira-transition",
+      "reason": "needs connector jira (type jira), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "gate-jira-clear-edit",
+      "reason": "needs connector jira (type jira), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "gate-jira-clear-create",
+      "reason": "needs connector jira (type jira), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "gate-admin-deny",
+      "reason": "needs connector linear (type linear), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "jira-list-open",
+      "reason": "needs connector jira (type jira), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "jira-read-one",
+      "reason": "needs connector jira (type jira), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "jira-create",
+      "reason": "needs connector jira (type jira), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "jira-create-nosite",
+      "reason": "needs connector jira (type jira), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "jira-comment",
+      "reason": "needs connector jira (type jira), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "linear-open-issues",
+      "reason": "needs connector linear (type linear), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "linear-create-issue",
+      "reason": "needs connector linear (type linear), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "linear-update-issue",
+      "reason": "needs connector linear (type linear), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "linear-comment",
+      "reason": "needs connector linear (type linear), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "linear-read-issue",
+      "reason": "needs connector linear (type linear), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "reply-linear-create",
+      "reason": "needs connector linear (type linear), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "reply-linear-change",
+      "reason": "needs connector linear (type linear), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "reply-jira-create",
+      "reason": "needs connector jira (type jira), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "reply-jira-comment",
+      "reason": "needs connector jira (type jira), which the legacy presentation cannot offer"
+    },
+    {
+      "id": "recover-operation",
+      "reason": "needs a recoverable operation ID, which the legacy presentation cannot receive"
+    }
+  ],
+  "summary": {
+    "cases": 43,
+    "passed": 30,
+    "errors": 0,
+    "notApplicable": 28,
+    "toolAccuracy": 0.8604651162790697,
+    "refusalCases": 7,
+    "refusalAccuracy": 0
+  }
+}
