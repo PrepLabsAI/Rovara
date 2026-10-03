@@ -34,7 +34,7 @@ export function sampleAnswers(overrides: Partial<InitAnswers> = {}): InitAnswers
     engine: "templates",
     releaseVersion: "1.2.3",
     identity: { mode: "cognito" },
-    models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "amazon.nova-lite-v1:0", worker: "amazon.nova-pro-v1:0" },
+    models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
     alert: { kind: "email", address: "ops@example.com" },
     github: { account: "acme", accountType: "organization", appName: "AgentX acme (staging)" },
     slack: { appName: "AgentX acme (staging)", appPostedMessages: "accept" },

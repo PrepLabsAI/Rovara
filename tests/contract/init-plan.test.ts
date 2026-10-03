@@ -18,28 +18,28 @@ describe("cost estimate", () => {
       ["Kept workspaces", 16],
       ["API Gateway, Lambda, DynamoDB, SQS, Secrets Manager, KMS (including the invocation-signing key) and CloudWatch", 10],
       ["Main model (Claude Sonnet 4.6)", 25],
-      ["Safety check model (Amazon Nova Lite)", 0.15],
-      ["Coding model (Amazon Nova Pro)", 19.2],
+      ["Safety check model (Claude Haiku 4.5)", 2.5],
+      ["Coding model (Claude Sonnet 4.6)", 75],
     ]);
     // 60 machine-hours x 30 GiB x ($0.08/GB-month / 730 hours/month) = $0.1972..., rounded to $0.20.
-    expect(estimate.totalUsd).toBe(152.98);
+    expect(estimate.totalUsd).toBe(211.13);
     expect(estimate.unpriced).toEqual([]);
   });
 
   it("marks the Claude Haiku 4.5 classifier price as assumed, and only that one", () => {
-    const estimate = estimateMonthlyCost({ ...sampleAnswers().models, classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0" });
+    const estimate = estimateMonthlyCost(sampleAnswers().models);
     const classifier = estimate.lines.find((line) => line.item.startsWith("Safety check model"));
     expect(classifier?.usd).toBe(2.5);
     expect(classifier?.basis).toBe("1,000 checks at about $0.0025 each, assumed: no confirmed Bedrock rate");
-    expect(estimateMonthlyCost(sampleAnswers().models).lines.filter((line) => line.basis.includes("assumed"))).toEqual([]);
+    expect(estimate.lines.filter((line) => line.basis.includes("assumed"))).toEqual([classifier]);
   });
 
   it("prices GLM 4.7 lower, and names a model it has no price for instead of guessing", () => {
-    expect(estimateMonthlyCost({ ...sampleAnswers().models, orchestrator: "zai.glm-4.7" }).totalUsd).toBe(134.98);
-    const custom = estimateMonthlyCost({ ...sampleAnswers().models, worker: "us.amazon.nova-premier-v1:0" });
-    expect(custom.unpriced).toEqual(["us.amazon.nova-premier-v1:0"]);
+    expect(estimateMonthlyCost({ ...sampleAnswers().models, orchestrator: "zai.glm-4.7" }).totalUsd).toBe(193.13);
+    const custom = estimateMonthlyCost({ ...sampleAnswers().models, worker: "us.anthropic.claude-opus-4-1-20250805-v1:0" });
+    expect(custom.unpriced).toEqual(["us.anthropic.claude-opus-4-1-20250805-v1:0"]);
     expect(custom.lines.find((line) => line.item.startsWith("Coding model"))?.usd).toBeUndefined();
-    expect(custom.totalUsd).toBe(133.78);
+    expect(custom.totalUsd).toBe(136.13);
   });
 
   it("prices the coding machine disk at the same usage as the coding machines, separately from the kept workspaces", () => {
@@ -65,9 +65,9 @@ describe("install plan", () => {
       "In GitHub: an app named \"AgentX acme (staging)\" owned by acme, with read and write access to contents, pull requests and issues, and read access to metadata. No webhook.",
       "In Slack: an app named \"AgentX acme (staging)\".",
       "- Alerts: email to ops@example.com, subscribed and tested at the end of the install",
-      "- Models: main model Claude Sonnet 4.6 (Amazon Bedrock), safety check model Amazon Nova Lite (Amazon Bedrock), coding model Amazon Nova Pro (Amazon Bedrock)",
+      "- Models: main model Claude Sonnet 4.6 (Amazon Bedrock), safety check model Claude Haiku 4.5 (Amazon Bedrock), coding model Claude Sonnet 4.6 (Amazon Bedrock)",
       "AgentX never answers itself or other bots. Messages other apps post for people: answered.",
-      "Estimated monthly total: $152.98 at 1,000 turns, 100 coding sessions and 60 machine-hours a month",
+      "Estimated monthly total: $211.13 at 1,000 turns, 100 coding sessions and 60 machine-hours a month",
       "To remove everything later, use the remove command in the ready summary. It deletes the coding machines' disks too.",
       "Coding machine disks (30 GiB gp3)",
       "KMS (including the invocation-signing key)",

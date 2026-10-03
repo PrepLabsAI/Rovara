@@ -116,7 +116,7 @@ function answersJson(overrides: Record<string, unknown> = {}): Record<string, un
     env: ENV,
     region: REGION,
     account: ACCOUNT,
-    models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "amazon.nova-lite-v1:0", worker: "amazon.nova-pro-v1:0" },
+    models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
     identity: { mode: "cognito" },
     github: { account: "acme", appId: "123", installationId: "456", privateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf" },
     // Testing-only override (parameters.ts): lets stackParameters resolve runtime/slack's image

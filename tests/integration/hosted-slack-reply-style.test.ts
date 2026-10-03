@@ -16,7 +16,7 @@ describe("hosted Slack runtime reply style", () => {
       conversationId: "33333333-3333-4333-8333-333333333333",
       orchestratorInstructions: "Delegate work.",
       requestId: () => "44444444-4444-4444-8444-444444444444",
-    }, { stateDirectory: await createFixtureDirectory("agentx-slack-style-"), api: api as never, model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" } });
+    }, { stateDirectory: await createFixtureDirectory("agentx-slack-style-"), api: api as never, model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" } });
     try {
       for (const line of SLACK_REPLY_INSTRUCTIONS) expect(runtime.session.systemPrompt).toContain(line);
     } finally { await runtime.dispose(); }

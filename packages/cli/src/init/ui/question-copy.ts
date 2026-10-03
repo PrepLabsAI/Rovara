@@ -30,7 +30,7 @@ export const QUESTION_COPY: readonly QuestionCopyEntry[] = [
   { kind: "choose", flag: "--orchestrator-model", help: { label: "Main model", why: "The main model reads each Slack message and decides what to do." } },
   { kind: "choose", flag: "--classifier-model", help: { label: "Safety check model", why: "The safety check model looks at every action before AgentX takes it." } },
   { kind: "ask", flag: "--orchestrator-model", help: { label: "Main model id", why: "The model id exactly as your provider lists it.", example: "us.anthropic.claude-sonnet-4-6" } },
-  { kind: "ask", flag: "--classifier-model", help: { label: "Safety check model id", why: "The model id exactly as your provider lists it.", example: "amazon.nova-lite-v1:0" } },
+  { kind: "ask", flag: "--classifier-model", help: { label: "Safety check model id", why: "The model id exactly as your provider lists it.", example: "us.anthropic.claude-haiku-4-5-20251001-v1:0" } },
   { kind: "choose", flag: "--worker-model", help: { label: "Coding model", why: "The coding model writes and tests code in your repositories." } },
   { kind: "ask", flag: "--worker-model", help: { label: "Coding model", why: "The coding model writes and tests code in your repositories.", example: "us.anthropic.claude-sonnet-4-6", defaultText: "Claude Sonnet 4.6" } },
   { kind: "ask", flag: "--permission-boundary", help: { label: "Permission boundary (advanced)", why: "Only if your company requires every IAM role to carry its own boundary policy. Your platform team gives you its address." } },

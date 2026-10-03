@@ -32,7 +32,7 @@ describe("connector tools in the real Pi runtime", () => {
     const runtime = await createOrchestratorRuntime({
       stateDirectory: await createFixtureDirectory("agentx-mcp-runtime-"), projectInstructions: "Delegate coding.",
       api, context: { workspaceId, conversationId: randomUUID() },
-      model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
+      model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" },
       repositories: ["demo"],
       connectors: [{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true }],
     });
@@ -68,7 +68,7 @@ describe("connector tools in the real Pi runtime", () => {
     const runtime = await createOrchestratorRuntime({
       stateDirectory: await createFixtureDirectory("agentx-mcp-runtime-"), projectInstructions: "Delegate coding.",
       api, context: { workspaceId, conversationId: randomUUID() },
-      model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
+      model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" },
       connectors: [{ name: "tracker", type: "tracker", label: "Tracker issues", scopes: ["payments"], connected: true }],
     });
     try {
@@ -97,7 +97,7 @@ describe("connector tools in the real Pi runtime", () => {
     const runtime = await createOrchestratorRuntime({
       stateDirectory: await createFixtureDirectory("agentx-mcp-runtime-"), projectInstructions: "Delegate coding.",
       api, context: { workspaceId, conversationId: randomUUID() },
-      model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
+      model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" },
       repositories: ["demo"],
       connectors: [{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true }],
       onConnectorUnavailable,
@@ -126,7 +126,7 @@ describe("connector tools in the real Pi runtime", () => {
     const runtime = await createOrchestratorRuntime({
       stateDirectory: await createFixtureDirectory("agentx-mcp-runtime-"), projectInstructions: "Delegate coding.",
       api, context: { workspaceId, conversationId: randomUUID() },
-      model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
+      model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" },
       repositories: ["demo"],
       connectors: [{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true }],
       onConnectorUnavailable,
@@ -162,7 +162,7 @@ describe("connector tools in the real Pi runtime", () => {
       await createOrchestratorRuntime({
         stateDirectory: await createFixtureDirectory("agentx-mcp-runtime-"), projectInstructions: "Delegate coding.",
         api, context: { workspaceId, conversationId: randomUUID() },
-        model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
+        model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" },
         repositories: ["demo"],
         connectors: [{ name: "github", type: "github", label: "GitHub issues", scopes: ["demo"], connected: true }],
       });
@@ -180,7 +180,7 @@ describe("connector tools in the real Pi runtime", () => {
     const create = async (recoverableOperations?: string[]) => createOrchestratorRuntime({
       stateDirectory: await createFixtureDirectory("agentx-mcp-runtime-"), projectInstructions: "Delegate coding.",
       api, context: { workspaceId, conversationId: randomUUID() },
-      model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" }, repositories: ["demo"],
+      model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" }, repositories: ["demo"],
       ...(recoverableOperations === undefined ? {} : { recoverableOperations }),
     });
     const idle = await create();

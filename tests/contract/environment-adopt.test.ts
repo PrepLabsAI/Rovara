@@ -11,13 +11,13 @@ import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 const liveStacks: Record<string, { outputs: Record<string, string>; parameters: Record<string, string>; status: string }> = {
   AgentXProductionFoundation: { outputs: {}, parameters: {}, status: "UPDATE_COMPLETE" },
-  AgentXProductionRuntime: { outputs: {}, parameters: { ModelId: "amazon.nova-pro-v1:0" }, status: "UPDATE_COMPLETE" },
+  AgentXProductionRuntime: { outputs: {}, parameters: { ModelId: "us.anthropic.claude-sonnet-4-6" }, status: "UPDATE_COMPLETE" },
   AgentXControlPlane: {
     outputs: { ApiEndpoint: "https://abc.execute-api.us-east-1.amazonaws.com" },
     parameters: { OidcIssuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_x", OidcAudience: "client123" },
     status: "UPDATE_COMPLETE",
   },
-  AgentXSlackOrchestrator: { outputs: {}, parameters: { ModelId: "amazon.nova-pro-v1:0", GateClassifierModelId: "amazon.nova-lite-v1:0" }, status: "UPDATE_COMPLETE" },
+  AgentXSlackOrchestrator: { outputs: {}, parameters: { ModelId: "us.anthropic.claude-sonnet-4-6", GateClassifierModelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0" }, status: "UPDATE_COMPLETE" },
 };
 
 function reader(stacks: typeof liveStacks, log: string[] = []): StackReader {
@@ -76,7 +76,7 @@ describe("agentx env adopt", () => {
       stacks: { foundation: "AgentXProductionFoundation", runtime: "AgentXProductionRuntime", "control-plane": "AgentXControlPlane", slack: "AgentXSlackOrchestrator" },
       controlPlaneUrl: "https://abc.execute-api.us-east-1.amazonaws.com",
       identity: { mode: "cognito", issuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_x", audience: "client123", clientId: "client123" },
-      models: { orchestrator: "amazon.nova-pro-v1:0", classifier: "amazon.nova-lite-v1:0", worker: "amazon.nova-pro-v1:0" },
+      models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
       updatedAt: "2026-09-26T00:00:00.000Z",
     });
     expect(await readEnvironmentSettings(store, "production")).toEqual(settings);

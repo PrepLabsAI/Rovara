@@ -18,7 +18,7 @@ const everyFlag: InitFlags = {
   engine: "templates", identity: "cognito", permissionBoundary: "", operatorPrincipal: "", alertEmail: "ops@example.com", budget: "0",
   githubAccount: "acme", githubAccountType: "organization", githubAppName: "AgentX acme staging", slackAppName: "AgentX", slackAppPostedMessages: "accept",
 };
-const bedrockModels: InitFlags = { orchestratorModel: "us.anthropic.claude-sonnet-4-6", classifierModel: "amazon.nova-lite-v1:0", workerModel: "us.anthropic.claude-sonnet-4-6" };
+const bedrockModels: InitFlags = { orchestratorModel: "us.anthropic.claude-sonnet-4-6", classifierModel: "us.anthropic.claude-haiku-4-5-20251001-v1:0", workerModel: "us.anthropic.claude-sonnet-4-6" };
 /** Spec 048: the settings form answered as a run with these flags would answer it in the terminal. */
 const collectWithFlags = (input: Omit<Parameters<typeof collectInitAnswers>[0], "prompter">) =>
   collectInitAnswers({ ...input, prompter: scriptedPrompter(settingsScript({ flags: input.flags })) });

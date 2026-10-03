@@ -35,18 +35,15 @@ const PRICES = {
 };
 // The Sonnet 4.6 and GLM 4.7 figures come from the spec's 2026-09-25 evaluation (do not change).
 const ORCHESTRATOR_PER_TURN: Record<string, number> = { "us.anthropic.claude-sonnet-4-6": 0.025, "zai.glm-4.7": 0.007 };
-/** About 2,000 input and 100 output tokens per check. Nova Lite: $0.06/1M input, $0.24/1M output
- * (AWS Bedrock pricing, corroborated by AWS's own Nova fine-tuning cost-analysis worked example).
- * Claude Haiku 4.5 is assumed to price on Bedrock the same as Anthropic's own list price
+/** About 2,000 input and 100 output tokens per check. Claude Haiku 4.5 is assumed to price on Bedrock the same as Anthropic's own list price
  * ($1/1M input, $5/1M output); this is an assumption, not a confirmed Bedrock rate. */
-const CLASSIFIER_PER_CHECK: Record<string, number> = { "amazon.nova-lite-v1:0": 0.00015, "us.anthropic.claude-haiku-4-5-20251001-v1:0": 0.0025 };
+const CLASSIFIER_PER_CHECK: Record<string, number> = { "us.anthropic.claude-haiku-4-5-20251001-v1:0": 0.0025 };
 /** The model ids whose price above is an assumption, not a confirmed Bedrock rate: the printed plan says so. */
 const ASSUMED_PRICES: ReadonlySet<string> = new Set(["us.anthropic.claude-haiku-4-5-20251001-v1:0"]);
-/** About 200,000 input and 10,000 output tokens per session. Nova Pro: $0.8/1M input, $3.2/1M
- * output (AWS Bedrock pricing). Claude Sonnet 4.6 on Bedrock: $3/1M input and $15/1M output, the
+/** About 200,000 input and 10,000 output tokens per session. Claude Sonnet 4.6 on Bedrock: $3/1M input and $15/1M output, the
  * same as Anthropic's list price, so $0.60 + $0.15 = $0.75 a session (spec 048 gap 16: the default
  * coding model had no price, so the plan left out its biggest cost). */
-const WORKER_PER_SESSION: Record<string, number> = { "amazon.nova-pro-v1:0": 0.192, "us.anthropic.claude-sonnet-4-6": 0.75 };
+const WORKER_PER_SESSION: Record<string, number> = { "us.anthropic.claude-sonnet-4-6": 0.75 };
 
 /** Tokens per use behind the direct providers' prices (spec 054 FR-016). The orchestrator's match the
  * evaluated $0.025 a turn for Sonnet 4.6 at Anthropic's list price; the others are the assumptions
@@ -72,8 +69,8 @@ const UNIT: Readonly<Record<ModelRole, string>> = { orchestrator: "a turn", clas
 /** FR-080: the plain names of the three models. */
 export const ROLE_NAMES: Readonly<Record<ModelRole, string>> = { orchestrator: "Main model", classifier: "Safety check model", worker: "Coding model" };
 export const MODEL_NAMES: Readonly<Record<string, string>> = {
-  "us.anthropic.claude-sonnet-4-6": "Claude Sonnet 4.6", "zai.glm-4.7": "GLM 4.7", "amazon.nova-lite-v1:0": "Amazon Nova Lite",
-  "us.anthropic.claude-haiku-4-5-20251001-v1:0": "Claude Haiku 4.5", "amazon.nova-pro-v1:0": "Amazon Nova Pro",
+  "us.anthropic.claude-sonnet-4-6": "Claude Sonnet 4.6", "zai.glm-4.7": "GLM 4.7",
+  "us.anthropic.claude-haiku-4-5-20251001-v1:0": "Claude Haiku 4.5",
   // Spec 054 D3's suggestions for the direct providers.
   "claude-sonnet-4-6": "Claude Sonnet 4.6", "claude-haiku-4-5": "Claude Haiku 4.5", "gpt-5.4": "GPT-5.4", "gpt-5.4-mini": "GPT-5.4 mini",
 };

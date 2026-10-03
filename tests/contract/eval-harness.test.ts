@@ -31,7 +31,7 @@ function expected(evalCase: EvalCase) {
 
 function liveReport(overrides: Partial<EvalReport> = {}): EvalReport {
   return {
-    provider: "amazon-bedrock", model: "amazon.nova-pro-v1:0", presentation: "new", repeat: 3, generatedAt: "2026-09-25T00:00:00.000Z",
+    provider: "amazon-bedrock", model: "us.anthropic.claude-sonnet-4-6", presentation: "new", repeat: 3, generatedAt: "2026-09-25T00:00:00.000Z",
     cases: [{ id: "files-not-pr", passed: true, runs: [{ tool: "agentx_submit_task", toolOk: true, argsOk: true, phraseOk: null, refusalOk: null, containsOk: null }] }],
     summary: { cases: 1, passed: 1, errors: 0, toolAccuracy: 1, refusalCases: 0, refusalAccuracy: 1 },
     ...overrides,
@@ -232,7 +232,7 @@ describe("evaluation harness, offline", () => {
     expect(report.summary.timeouts).toBeUndefined();
     const root = await temporaryDirectory();
     try {
-      expect(await recordLiveReport({ ...report, provider: "amazon-bedrock", model: "amazon.nova-pro-v1:0" }, { updateBaseline: true, root })).toMatchObject({ exitCode: 1 });
+      expect(await recordLiveReport({ ...report, provider: "amazon-bedrock", model: "us.anthropic.claude-sonnet-4-6" }, { updateBaseline: true, root })).toMatchObject({ exitCode: 1 });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -262,10 +262,10 @@ describe("evaluation harness, offline", () => {
     expect(report.stopped).toBeUndefined();
     const root = await temporaryDirectory();
     try {
-      const live = { ...report, provider: "amazon-bedrock", model: "amazon.nova-pro-v1:0" };
+      const live = { ...report, provider: "amazon-bedrock", model: "us.anthropic.claude-sonnet-4-6" };
       expect(await recordLiveReport(live, { updateBaseline: false, root })).toMatchObject({ exitCode: 0 });
-      expect(await recordLiveReport(live, { updateBaseline: true, root })).toEqual({ exitCode: 0, lines: [`Baseline written: ${reportPath("baseline", "amazon.nova-pro-v1:0", "new", root)}`] });
-      expect(JSON.parse(await readFile(reportPath("baseline", "amazon.nova-pro-v1:0", "new", root), "utf8"))).toMatchObject({ summary: { errors: 0, timeouts: 1 } });
+      expect(await recordLiveReport(live, { updateBaseline: true, root })).toEqual({ exitCode: 0, lines: [`Baseline written: ${reportPath("baseline", "us.anthropic.claude-sonnet-4-6", "new", root)}`] });
+      expect(JSON.parse(await readFile(reportPath("baseline", "us.anthropic.claude-sonnet-4-6", "new", root), "utf8"))).toMatchObject({ summary: { errors: 0, timeouts: 1 } });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -282,7 +282,7 @@ describe("evaluation harness, offline", () => {
       });
       const outcome = await recordLiveReport(report, { updateBaseline: true, root });
       expect(outcome).toEqual({ exitCode: 1, lines: ["Baseline not written: 1 case errored. Rerun once the errors are resolved."] });
-      await expect(readFile(reportPath("baseline", "amazon.nova-pro-v1:0", "new", root), "utf8")).rejects.toThrow(/ENOENT/);
+      await expect(readFile(reportPath("baseline", "us.anthropic.claude-sonnet-4-6", "new", root), "utf8")).rejects.toThrow(/ENOENT/);
       expect((await recordLiveReport(report, { updateBaseline: false, root })).exitCode).toBe(1);
     } finally {
       await rm(root, { recursive: true, force: true });
@@ -385,8 +385,8 @@ describe("evaluation harness, offline", () => {
   }, 60_000);
 
   it("keeps results and baselines per model and presentation", () => {
-    expect(reportPath("results", "amazon.nova-pro-v1:0", "new")).toBe(`${EVAL_ROOT}/results/amazon.nova-pro-v1_0.json`);
-    expect(reportPath("baseline", "amazon.nova-pro-v1:0", "legacy")).toBe(`${EVAL_ROOT}/baseline/amazon.nova-pro-v1_0.legacy.json`);
+    expect(reportPath("results", "us.anthropic.claude-sonnet-4-6", "new")).toBe(`${EVAL_ROOT}/results/us.anthropic.claude-sonnet-4-6.json`);
+    expect(reportPath("baseline", "us.anthropic.claude-sonnet-4-6", "legacy")).toBe(`${EVAL_ROOT}/baseline/us.anthropic.claude-sonnet-4-6.legacy.json`);
   });
 });
 
@@ -411,7 +411,7 @@ describe("SC-004 comparison", () => {
     const { fresh, legacy } = sc004Reports();
     // Counting the Linear case would make the new tool accuracy 3/4; on the shared cases it is 2/3.
     expect(compareSc004(fresh, legacy)).toEqual({
-      model: "amazon.nova-pro-v1:0", cases: 3, notApplicable: ["linear"],
+      model: "us.anthropic.claude-sonnet-4-6", cases: 3, notApplicable: ["linear"],
       new: { passed: 2, toolAccuracy: 2 / 3, refusalCases: 1, refusalAccuracy: 1 },
       legacy: { passed: 1, toolAccuracy: 1 / 3, refusalCases: 1, refusalAccuracy: 1 },
       met: true,
@@ -425,7 +425,7 @@ describe("SC-004 comparison", () => {
   it("refuses reports that differ in model, cover different cases, errored or are swapped", () => {
     const { fresh, legacy } = sc004Reports();
     expect(() => compareSc004(legacy, fresh)).toThrow(/new presentation first/);
-    expect(() => compareSc004(fresh, { ...legacy, model: "amazon.nova-lite-v1:0" })).toThrow(/same provider, model and repeat/);
+    expect(() => compareSc004(fresh, { ...legacy, model: "us.anthropic.claude-haiku-4-5-20251001-v1:0" })).toThrow(/same provider, model and repeat/);
     expect(() => compareSc004(fresh, { ...legacy, notApplicable: [] })).toThrow(/different cases: linear/);
     expect(() => compareSc004({ ...fresh, summary: { ...fresh.summary, errors: 1 } }, legacy)).toThrow(/new report has errors/);
     expect(() => compareSc004(fresh, { ...legacy, stopped: "stuck", notRun: [] })).toThrow(/legacy report has errors or stopped early/);
@@ -446,20 +446,20 @@ describe("SC-004 comparison", () => {
     const root = await temporaryDirectory();
     try {
       const { fresh, legacy } = sc004Reports();
-      await expect(runEvalCli(["--sc004"], { root, env: {} })).rejects.toThrow(/no baseline .*amazon\.nova-pro-v1_0\.json/);
+      await expect(runEvalCli(["--sc004"], { root, env: {} })).rejects.toThrow(/no baseline .*us\.anthropic\.claude-sonnet-4-6\.json/);
       await recordLiveReport(fresh, { updateBaseline: true, root });
       await recordLiveReport(legacy, { updateBaseline: true, root });
       const outcome = await runEvalCli(["--sc004"], { root, env: {} });
       expect(outcome.exitCode).toBe(0);
       expect(outcome.lines).toEqual([
-        "SC-004 on amazon-bedrock/amazon.nova-pro-v1:0 over 3 cases both presentations express (1 not applicable to legacy: linear):",
+        "SC-004 on amazon-bedrock/us.anthropic.claude-sonnet-4-6 over 3 cases both presentations express (1 not applicable to legacy: linear):",
         "  new presentation: 2/3 cases passed; tool accuracy 66.7%; refusal accuracy 100.0% over 1 cases",
         "  legacy presentation: 1/3 cases passed; tool accuracy 33.3%; refusal accuracy 100.0% over 1 cases",
         "  Result: met (the new tool accuracy must be higher and the new refusal accuracy at least 90%)",
       ]);
       expect(() => parseEvalArguments(["--sc004", "--live"])).toThrow(/--sc004/);
       expect(() => parseEvalArguments(["--sc004", "--update-baseline"])).toThrow(/--sc004/);
-      expect(parseEvalArguments(["--sc004", "--model", "amazon.nova-lite-v1:0"], {})).toMatchObject({ sc004: true, live: false, model: { provider: "amazon-bedrock", modelId: "amazon.nova-lite-v1:0" } });
+      expect(parseEvalArguments(["--sc004", "--model", "us.anthropic.claude-haiku-4-5-20251001-v1:0"], {})).toMatchObject({ sc004: true, live: false, model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0" } });
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -480,7 +480,7 @@ describe("evaluation command, live safety", () => {
     // The spy throws on any model lookup, so even a missing guard stops here without reaching a network.
     let lookups = 0;
     modelRuntime.getModel = () => { lookups += 1; throw new Error("model lookup reached"); };
-    await expect(runEvaluation(cases, { model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" }, modelRuntime, presentation: "new", repeat: 1 }))
+    await expect(runEvaluation(cases, { model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" }, modelRuntime, presentation: "new", repeat: 1 }))
       .rejects.toThrow("offline runs use the faux provider agentx-faux; amazon-bedrock needs live: true (calls a paid model)");
     expect(lookups).toBe(0);
   });
@@ -491,9 +491,9 @@ describe("evaluation command, live safety", () => {
       const outcome = await recordLiveReport(liveReport({ cases: erroredCases, summary: erroredSummary }), { updateBaseline: true, root });
       expect(outcome.exitCode).toBe(1);
       expect(outcome.lines.join("\n")).toContain("Baseline not written: 1 case errored");
-      await expect(readFile(reportPath("baseline", "amazon.nova-pro-v1:0", "new", root), "utf8")).rejects.toThrow(/ENOENT/);
+      await expect(readFile(reportPath("baseline", "us.anthropic.claude-sonnet-4-6", "new", root), "utf8")).rejects.toThrow(/ENOENT/);
       expect(await recordLiveReport(liveReport(), { updateBaseline: true, root })).toMatchObject({ exitCode: 0 });
-      expect(JSON.parse(await readFile(reportPath("baseline", "amazon.nova-pro-v1:0", "new", root), "utf8"))).toEqual(liveReport());
+      expect(JSON.parse(await readFile(reportPath("baseline", "us.anthropic.claude-sonnet-4-6", "new", root), "utf8"))).toEqual(liveReport());
     } finally {
       await rm(root, { recursive: true, force: true });
     }
@@ -514,13 +514,13 @@ describe("evaluation command, live safety", () => {
   it("treats a malformed baseline or one for another model, provider or presentation as an error", async () => {
     const root = await temporaryDirectory();
     try {
-      const path = reportPath("baseline", "amazon.nova-pro-v1:0", "new", root);
+      const path = reportPath("baseline", "us.anthropic.claude-sonnet-4-6", "new", root);
       await recordLiveReport(liveReport(), { updateBaseline: true, root });
       await writeFile(path, "{ not json");
       await expect(recordLiveReport(liveReport(), { updateBaseline: false, root })).rejects.toThrow(/baseline .* is malformed/);
       await writeFile(path, JSON.stringify({ ...liveReport(), cases: "none" }));
       await expect(recordLiveReport(liveReport(), { updateBaseline: false, root })).rejects.toThrow(/baseline .* is malformed/);
-      for (const other of [{ provider: "other-provider" }, { model: "amazon.nova-lite-v1:0" }, { presentation: "legacy" as const }]) {
+      for (const other of [{ provider: "other-provider" }, { model: "us.anthropic.claude-haiku-4-5-20251001-v1:0" }, { presentation: "legacy" as const }]) {
         await writeFile(path, JSON.stringify(liveReport(other)));
         await expect(recordLiveReport(liveReport(), { updateBaseline: false, root })).rejects.toThrow(/does not match this run/);
       }
@@ -533,10 +533,10 @@ describe("evaluation command, live safety", () => {
 
   it("runs offline on the faux provider by default and needs --live for a real model or a baseline", () => {
     expect(parseEvalArguments([])).toMatchObject({ live: false, model: FAUX_MODEL, repeat: 1, presentation: "new", updateBaseline: false });
-    expect(parseEvalArguments(["--live"], {})).toMatchObject({ live: true, model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" }, repeat: 3 });
+    expect(parseEvalArguments(["--live"], {})).toMatchObject({ live: true, model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" }, repeat: 3 });
     expect(parseEvalArguments(["--live", "--provider", "p", "--model", "m", "--repeat", "2", "--presentation", "legacy"], {}))
       .toMatchObject({ live: true, model: { provider: "p", modelId: "m" }, repeat: 2, presentation: "legacy" });
-    expect(() => parseEvalArguments(["--model", "amazon.nova-pro-v1:0"])).toThrow(/--live/);
+    expect(() => parseEvalArguments(["--model", "us.anthropic.claude-sonnet-4-6"])).toThrow(/--live/);
     expect(() => parseEvalArguments(["--provider", "amazon-bedrock"])).toThrow(/--live/);
     expect(() => parseEvalArguments(["--update-baseline"])).toThrow(/--live/);
     expect(() => parseEvalArguments(["--repeat", "0"])).toThrow(/--repeat/);

@@ -8484,7 +8484,7 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
       "Type": "String",
     },
     "GateClassifierModelId": {
-      "Default": "amazon.nova-lite-v1:0",
+      "Default": "us.anthropic.claude-haiku-4-5-20251001-v1:0",
       "Description": "Small model the action gate asks whether a member asked for a change",
       "Type": "String",
     },
@@ -8499,7 +8499,7 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
       "Type": "String",
     },
     "ModelId": {
-      "Default": "amazon.nova-pro-v1:0",
+      "Default": "us.anthropic.claude-sonnet-4-6",
       "Type": "String",
     },
     "ModelProvider": {

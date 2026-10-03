@@ -20,11 +20,11 @@ function call(overrides: Record<string, unknown> = {}) {
 const base = {
   eventId: "EvTURN00001", subject: "T0BSHLLUGBD/C0123456789/1695500000.000001", receivedAt: "2026-09-24T10:00:00.000Z",
   requestedBy: { teamId: "T0BSHLLUGBD", userId: "U0123456789" }, disposition: "answered", durationMs: 12_300,
-  model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
+  model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" },
   offeredTools: [{ name: "tracker__list_items", descriptionHash: "a".repeat(64) }, { name: "tracker__close_item", descriptionHash: "c".repeat(64) }],
   calls: [call()], emptyResponse: false,
   usage: {
-    schemaVersion: 1, outcome: "SUCCEEDED", provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0", cacheRetention: "short",
+    schemaVersion: 1, outcome: "SUCCEEDED", provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6", cacheRetention: "short",
     tokens: { input: 12_345, output: 678, cacheRead: 1_000, cacheWrite: 0, total: 14_023 }, cacheReadRatio: 0.07, costUsd: 0.0123,
   },
 };
@@ -58,7 +58,7 @@ describe("the Details modal (spec 014 FR-024)", () => {
     expect(all).toContain("*Requested by* <@U0123456789>");
     expect(all).toContain("*Received* <!date^1790244000^{date_short_pretty} at {time}|2026-09-24T10:00:00.000Z>");
     expect(all).toContain("*Result* answered, in 12.3 s");
-    expect(all).toContain("*Model* amazon-bedrock / amazon.nova-pro-v1:0");
+    expect(all).toContain("*Model* amazon-bedrock / us.anthropic.claude-sonnet-4-6");
     expect(all).toContain("*Tools offered* 2");
     expect(all).toContain("*Tool calls* 1");
     expect(all).toContain("*Usage* 12,345 input, 678 output, 1,000 cache-read tokens; $0.0123");

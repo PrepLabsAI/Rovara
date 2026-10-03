@@ -436,7 +436,7 @@ describe("fix round 1", () => {
 
   it("item 6: Bedrock not available in the region (model check) says to choose another region", () => {
     const problem = modelCheckProblem({
-      modelId: "amazon.nova-lite-v1:0", role: "classifier", region: "eu-north-1",
+      modelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0", role: "classifier", region: "eu-north-1",
       error: Object.assign(new Error("getaddrinfo ENOTFOUND bedrock-runtime.eu-north-1.amazonaws.com"), { code: "ENOTFOUND" }),
     });
     expect(problem).toBe("Amazon Bedrock is not available in eu-north-1; choose another region with --region");

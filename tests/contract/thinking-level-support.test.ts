@@ -5,7 +5,7 @@ import { thinkingLevelRefusal, thinkingLevelSupport, unsupportedThinkingLevels }
 
 const glm = { provider: "openrouter", modelId: "z-ai/glm-5.3" };
 const sonnet = { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" };
-const novaLite = { provider: "amazon-bedrock", modelId: "amazon.nova-lite-v1:0" };
+const llama = { provider: "amazon-bedrock", modelId: "meta.llama3-3-70b-instruct-v1:0" };
 
 describe("thinkingLevelSupport", () => {
   it("refuses medium on GLM 5.3 and lists the levels the catalog supports", () => {
@@ -34,8 +34,8 @@ describe("thinkingLevelSupport", () => {
   });
 
   it("refuses a reasoning level on a non-reasoning model, which supports only off", () => {
-    expect(thinkingLevelSupport(novaLite, "high")).toEqual({ ok: false, supported: ["off"] });
-    expect(thinkingLevelSupport(novaLite, "off")).toEqual({ ok: true });
+    expect(thinkingLevelSupport(llama, "high")).toEqual({ ok: false, supported: ["off"] });
+    expect(thinkingLevelSupport(llama, "off")).toEqual({ ok: true });
   });
 
   it("accepts a model the catalog does not know, leaving the check to first use", () => {
@@ -52,11 +52,11 @@ describe("unsupportedThinkingLevels", () => {
       approved: [
         { ...sonnet, thinkingLevel: "medium", label: "Sonnet" },
         { ...glm, thinkingLevel: "medium", label: "GLM 5.3" },
-        { ...novaLite, thinkingLevel: "low" },
+        { ...llama, thinkingLevel: "low" },
       ],
     })).toEqual([
       'GLM 5.3 (z-ai/glm-5.3) does not support thinking level "medium"; supported: low, high',
-      'amazon.nova-lite-v1:0 does not support thinking level "low"; supported: off',
+      'meta.llama3-3-70b-instruct-v1:0 does not support thinking level "low"; supported: off',
     ]);
   });
 

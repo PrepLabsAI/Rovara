@@ -552,7 +552,7 @@ describe("the hosted Slack runtime", () => {
 });
 
 describe("the hosted classifier at startup", () => {
-  const model = { provider: "amazon-bedrock", modelId: "amazon.nova-lite-v1:0" };
+  const model = { provider: "amazon-bedrock", modelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0" };
   const input: ClassifierInput = { memberMessages: ["close TRK-9"], call: { tool: "tracker__close_item", arguments: { id: "TRK-9" }, summary: "close" } };
 
   it("returns the configured model's classifier", async () => {
@@ -575,7 +575,7 @@ describe("the hosted classifier at startup", () => {
     expect(hosted.available).toBe(false);
     // The runtime module is built, so its ClassifierError is the built class: compare by name.
     await expect(hosted.classifier(input)).rejects.toMatchObject({ name: new ClassifierError("x").name, message: "the classifier is unavailable" });
-    expect(logs).toEqual([{ event: "gate.classifier_unavailable", fields: { provider: "amazon-bedrock", model: "amazon.nova-lite-v1:0", errorName: "CredentialsProviderError" } }]);
+    expect(logs).toEqual([{ event: "gate.classifier_unavailable", fields: { provider: "amazon-bedrock", model: "us.anthropic.claude-haiku-4-5-20251001-v1:0", errorName: "CredentialsProviderError" } }]);
   });
 
   it("treats a model the runtime does not know as unavailable at startup", async () => {

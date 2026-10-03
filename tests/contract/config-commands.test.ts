@@ -134,16 +134,16 @@ describe("agentx config set", () => {
   it("updates the model's stack parameter and the settings when the model answers", async () => {
     const store = await seeded();
     const checks = passingChecks();
-    await runConfigSet(services({ store, checks: () => checks, cloudFormation: fakeCloudFormation({ parameters: { ModelId: "amazon.nova-pro-v1:0" } }) }), ENV, { key: "models.worker", value: "amazon.nova-premier-v1:0", yes: true });
-    expect(checks.models).toEqual(["amazon.nova-premier-v1:0"]);
-    expect((await readEnvironmentSettings(store, ENV))?.models.worker).toBe("amazon.nova-premier-v1:0");
+    await runConfigSet(services({ store, checks: () => checks, cloudFormation: fakeCloudFormation({ parameters: { ModelId: "us.anthropic.claude-sonnet-4-6" } }) }), ENV, { key: "models.worker", value: "zai.glm-4.7", yes: true });
+    expect(checks.models).toEqual(["zai.glm-4.7"]);
+    expect((await readEnvironmentSettings(store, ENV))?.models.worker).toBe("zai.glm-4.7");
   });
 
   it("records a model change in the install answers, which upgrades rebuild ModelId from (F18)", async () => {
     const store = await seeded();
     await writeInstallAnswers(store, sampleAnswers());
-    await runConfigSet(services({ store, cloudFormation: fakeCloudFormation({ parameters: { ModelId: "amazon.nova-pro-v1:0" } }) }), ENV, { key: "models.worker", value: "amazon.nova-premier-v1:0", yes: true });
-    expect((await readInstallAnswers(store, ENV))?.models.worker).toBe("amazon.nova-premier-v1:0");
+    await runConfigSet(services({ store, cloudFormation: fakeCloudFormation({ parameters: { ModelId: "us.anthropic.claude-sonnet-4-6" } }) }), ENV, { key: "models.worker", value: "zai.glm-4.7", yes: true });
+    expect((await readInstallAnswers(store, ENV))?.models.worker).toBe("zai.glm-4.7");
   });
 
   it("leaves the install answers alone for a non-model key, which upgrades keep from the stack (F18)", async () => {
@@ -162,22 +162,22 @@ describe("agentx config set", () => {
     await writeInstallAnswers(store, sampleAnswers());
     store.failNext = true;
     store.calls.length = 0;
-    const cloudFormation = fakeCloudFormation({ parameters: { ModelId: "amazon.nova-pro-v1:0" } });
-    const error = await runConfigSet(services({ store, cloudFormation }), ENV, { key: "models.worker", value: "amazon.nova-premier-v1:0", yes: true }).catch((caught: unknown) => caught);
-    expect((error as Error).message).toContain("stack agentx-staging-runtime now uses amazon.nova-premier-v1:0, but the install answers were not updated; run the same agentx config set again to record it");
+    const cloudFormation = fakeCloudFormation({ parameters: { ModelId: "us.anthropic.claude-sonnet-4-6" } });
+    const error = await runConfigSet(services({ store, cloudFormation }), ENV, { key: "models.worker", value: "zai.glm-4.7", yes: true }).catch((caught: unknown) => caught);
+    expect((error as Error).message).toContain("stack agentx-staging-runtime now uses zai.glm-4.7, but the install answers were not updated; run the same agentx config set again to record it");
     expect(((error as Error).cause as Error).message).toBe("Rate exceeded");
-    expect(cloudFormation.parameters.ModelId).toBe("amazon.nova-premier-v1:0");
-    expect((await readInstallAnswers(store, ENV))?.models.worker).toBe("amazon.nova-pro-v1:0");
+    expect(cloudFormation.parameters.ModelId).toBe("zai.glm-4.7");
+    expect((await readInstallAnswers(store, ENV))?.models.worker).toBe("us.anthropic.claude-sonnet-4-6");
     expect(lockOps(store)).toEqual(["put", "get", "delete"]);
 
     store.calls.length = 0;
-    const rerunStack = fakeCloudFormation({ parameters: { ModelId: "amazon.nova-premier-v1:0" } });
-    const rerun = services({ store, cloudFormation: rerunStack, stacks: stacks({ "agentx-staging-runtime": { ModelId: "amazon.nova-premier-v1:0" } }) });
-    const result = await runConfigSet(rerun, ENV, { key: "models.worker", value: "amazon.nova-premier-v1:0", yes: true });
+    const rerunStack = fakeCloudFormation({ parameters: { ModelId: "zai.glm-4.7" } });
+    const rerun = services({ store, cloudFormation: rerunStack, stacks: stacks({ "agentx-staging-runtime": { ModelId: "zai.glm-4.7" } }) });
+    const result = await runConfigSet(rerun, ENV, { key: "models.worker", value: "zai.glm-4.7", yes: true });
     expect(result.changed).toBe(true);
     expect(rerunStack.calls.filter((call) => call.name === "CreateChangeSetCommand")).toEqual([]);
-    expect((await readInstallAnswers(store, ENV))?.models.worker).toBe("amazon.nova-premier-v1:0");
-    expect((await readEnvironmentSettings(store, ENV))?.models.worker).toBe("amazon.nova-premier-v1:0");
+    expect((await readInstallAnswers(store, ENV))?.models.worker).toBe("zai.glm-4.7");
+    expect((await readEnvironmentSettings(store, ENV))?.models.worker).toBe("zai.glm-4.7");
     expect(lockOps(store)).toEqual(["put", "get", "delete"]);
   });
 
@@ -186,16 +186,16 @@ describe("agentx config set", () => {
     await writeEnvironmentSettings(store, { ...STAGING_SETTINGS, access: { artifactBucket: "b", cloudFormationRoleArn: ROLE, operatorRoleArn: "arn:aws:iam::123456789012:role/agentx-staging-operator", pullThroughPrefix: "agentx-staging" } });
     await writeInstallAnswers(store, sampleAnswers());
     store.failNext = true;
-    const error = await runConfigSet(services({ store, cloudFormation: fakeCloudFormation({ parameters: { ModelId: "amazon.nova-pro-v1:0" } }) }), ENV, { key: "models.worker", value: "amazon.nova-premier-v1:0", yes: true }).catch((caught: unknown) => caught);
-    expect((error as Error).message).toContain("stack agentx-staging-runtime now uses amazon.nova-premier-v1:0, but the settings were not updated; run the same agentx config set again to record it");
+    const error = await runConfigSet(services({ store, cloudFormation: fakeCloudFormation({ parameters: { ModelId: "us.anthropic.claude-sonnet-4-6" } }) }), ENV, { key: "models.worker", value: "zai.glm-4.7", yes: true }).catch((caught: unknown) => caught);
+    expect((error as Error).message).toContain("stack agentx-staging-runtime now uses zai.glm-4.7, but the settings were not updated; run the same agentx config set again to record it");
     expect(((error as Error).cause as Error).message).toBe("Rate exceeded");
-    expect((await readInstallAnswers(store, ENV))?.models.worker).toBe("amazon.nova-pro-v1:0");
+    expect((await readInstallAnswers(store, ENV))?.models.worker).toBe("us.anthropic.claude-sonnet-4-6");
   });
 
   it("says nothing changed for a model already recorded everywhere, and takes no lock", async () => {
     const store = await seeded();
     await writeInstallAnswers(store, sampleAnswers());
-    const result = await runConfigSet(services({ store }), ENV, { key: "models.worker", value: "amazon.nova-pro-v1:0", yes: true });
+    const result = await runConfigSet(services({ store }), ENV, { key: "models.worker", value: "us.anthropic.claude-sonnet-4-6", yes: true });
     expect(result.changed).toBe(false);
     expect(lockOps(store)).toEqual([]);
   });
@@ -204,9 +204,9 @@ describe("agentx config set", () => {
     const store = await seeded("eu-west-1");
     const regions: string[] = [];
     const checks = passingChecks();
-    await runConfigSet(services({ store, checks: (region) => { regions.push(region); return checks; }, cloudFormation: fakeCloudFormation({ parameters: { ModelId: "amazon.nova-pro-v1:0" } }) }), ENV, { key: "models.worker", value: "amazon.nova-premier-v1:0", yes: true });
+    await runConfigSet(services({ store, checks: (region) => { regions.push(region); return checks; }, cloudFormation: fakeCloudFormation({ parameters: { ModelId: "us.anthropic.claude-sonnet-4-6" } }) }), ENV, { key: "models.worker", value: "zai.glm-4.7", yes: true });
     expect(regions).toEqual(["eu-west-1"]);
-    expect(checks.models).toEqual(["amazon.nova-premier-v1:0"]);
+    expect(checks.models).toEqual(["zai.glm-4.7"]);
   });
 
   it("says nothing changed when the value is already set, and takes no lock", async () => {

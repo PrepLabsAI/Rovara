@@ -31,7 +31,7 @@ export function healthyStacks(): Record<string, DoctorStack> {
     [environmentStackName(ENV, "access")]: stack({ OperatorPrincipalArn: "" }),
     [environmentStackName(ENV, "foundation")]: stack({}, { Ec2WorkerLaunchTemplateId: "lt-0123456789abcdef0" }),
     [environmentStackName(ENV, "identity")]: stack(),
-    [environmentStackName(ENV, "runtime")]: stack({ WorkerImageUri: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/agentx/agentx-worker@${WORKER_DIGEST}`, ModelId: "amazon.nova-pro-v1:0" }),
+    [environmentStackName(ENV, "runtime")]: stack({ WorkerImageUri: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-staging/agentx/agentx-worker@${WORKER_DIGEST}`, ModelId: "us.anthropic.claude-sonnet-4-6" }),
     [environmentStackName(ENV, "control-plane")]: stack(
       { AssetHash: ASSET, BudgetMonthlyUsd: "100", BudgetScope: "tag" },
       { SlackEventsUrl: "https://cp.example.test/slack/events", SlackInteractivityUrl: "https://cp.example.test/slack/interactivity", OperatorAlertsTopicArn: "arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts", ApiEndpoint: "https://cp.example.test" },

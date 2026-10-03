@@ -24,7 +24,7 @@ function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "
     workerSettings: async () => ({
       workerImage: `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production@sha256:${"a".repeat(64)}`,
       modelProvider: "amazon-bedrock",
-      modelId: "amazon.nova-pro-v1:0",
+      modelId: "us.anthropic.claude-sonnet-4-6",
       promptCacheRetention: "long",
       openRouterSecretArn: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/openrouter-AbCdEf",
       openRouterProviders: "anthropic,amazon-bedrock",
@@ -54,7 +54,7 @@ describe("session steps", () => {
     expect(userData).toContain(`export AGENTX_WORKSPACE_ID='${workspaceId}'`);
     expect(userData).toContain("export AGENTX_SESSION_GENERATION='2'");
     expect(userData).toContain("export AGENTX_EXPECT_NEW_VOLUME='false'");
-    expect(userData).toContain("export AGENTX_MODEL_ID='amazon.nova-pro-v1:0'");
+    expect(userData).toContain("export AGENTX_MODEL_ID='us.anthropic.claude-sonnet-4-6'");
     expect(userData).toContain("export AGENTX_LOG_GROUP='/agentx/production/worker'");
     expect(userData).toContain('main "$@"');
     expect(userData).toBe(ec2WorkerBootScript({
@@ -66,7 +66,7 @@ describe("session steps", () => {
       invokePublicKey: `MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE${"A".repeat(88)}`,
       controlPlaneUrl: "https://abc.execute-api.us-east-1.amazonaws.com",
       modelProvider: "amazon-bedrock",
-      modelId: "amazon.nova-pro-v1:0",
+      modelId: "us.anthropic.claude-sonnet-4-6",
       promptCacheRetention: "long",
       openRouterSecretArn: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/openrouter-AbCdEf",
       openRouterProviders: "anthropic,amazon-bedrock",

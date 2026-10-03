@@ -63,7 +63,7 @@ describe("the settings form", () => {
 
   it("FR-020: says the recommended settings in plain words", () => {
     expect(recommendedSummary({ estimateUsd: 211.4, suggestedBudgetUsd: 260 })).toEqual([
-      "Models: Claude Sonnet 4.6 on Amazon Bedrock for the main and coding models, Amazon Nova Lite for the safety check.",
+      "Models: Claude Sonnet 4.6 on Amazon Bedrock for the main and coding models, Claude Haiku 4.5 for the safety check.",
       "Sign-in: AgentX's own sign-in for you, Sign in with Slack for developers.",
       "Budget alert: $260 a month for the whole account (the estimate is about $211.40).",
       "Alerts go to: your email.",
@@ -71,7 +71,7 @@ describe("the settings form", () => {
   });
 
   it("FR-021 and FR-082: offers the coding model as a choice, every choice priced", () => {
-    expect(WORKER_MODEL_CHOICES.map((choice) => choice.value)).toEqual([DEFAULT_WORKER_MODEL, "amazon.nova-pro-v1:0"]);
+    expect(WORKER_MODEL_CHOICES.map((choice) => choice.value)).toEqual([DEFAULT_WORKER_MODEL]);
     for (const choice of WORKER_MODEL_CHOICES) expect(choice.label).not.toContain(PRICE_NOT_ON_FILE);
   });
 });

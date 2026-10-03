@@ -112,7 +112,7 @@ describe("which in-house tools need the worker", () => {
     const access = worker(false, refusal);
     const runtime = await createOrchestratorRuntime({
       stateDirectory: await createFixtureDirectory("agentx-worker-access-"), projectInstructions: "Delegate.", api, context,
-      model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" }, worker: access,
+      model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" }, worker: access,
     });
     try {
       const result = await runtime.session.getToolDefinition("agentx_submit_task")!.execute("call-1", { prompt: "list" }, undefined, undefined, {} as never);

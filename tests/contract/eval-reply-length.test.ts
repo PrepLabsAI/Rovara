@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, getCurrentSystemPrompt, type JsonObject } from "@earendil-works/pi-ai";
 import { createHash } from "node:crypto";
@@ -57,9 +57,11 @@ describe("reply length in the evaluation (spec 014 SC-006)", () => {
     expect(report.cases.find((result) => result.id === "reply-jira-create")!.runs[0]).toMatchObject({ replyLines: 1, linesOk: true });
   }, 60_000);
 
-  it("keeps every case the committed SC-004 baselines scored, and their case-set hashes, unchanged", async () => {
+  it("keeps every case the committed baselines scored, and their case-set hashes, unchanged", async () => {
     const current = new Map((await loadCases()).map((entry) => [entry.id, entry]));
-    for (const file of ["amazon.nova-pro-v1_0.json", "amazon.nova-pro-v1_0.legacy.json"]) {
+    // Issue 272 removed the old default model's baselines; a baseline committed later is checked here again.
+    const committed = await readdir(join(EVAL_ROOT, "baseline")).catch((error: NodeJS.ErrnoException) => { if (error.code === "ENOENT") return []; throw error; });
+    for (const file of committed.filter((name) => name.endsWith(".json"))) {
       const baseline = EvalReportSchema.parse(JSON.parse(await readFile(join(EVAL_ROOT, "baseline", file), "utf8")));
       for (const result of baseline.cases) expect(caseHash(current.get(result.id)!), `${file}: ${result.id}`).toBe(result.caseHash);
       const pairs = baseline.cases.map((result) => [result.id, caseHash(current.get(result.id)!)]).sort();

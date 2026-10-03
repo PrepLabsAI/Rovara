@@ -62,7 +62,7 @@ describe("hosted Slack processor and MCP runtime", () => {
       runTurn: async (input) => {
         const runtime = await createHostedSlackRuntime(input, {
           stateDirectory: await createFixtureDirectory("agentx-slack-mcp-"), api,
-          model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
+          model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" },
         });
         try {
           expect(runtime.session.getActiveToolNames()).toEqual([...ORCHESTRATION_TOOL_NAMES.filter((name) => !(RECOVERY_TOOL_NAMES as readonly string[]).includes(name)), ...(enabled ? ["github__new_issue_tool"] : [])]);
@@ -113,7 +113,7 @@ describe("hosted Slack processor and MCP runtime", () => {
       runTurn: async (input) => {
         const runtime = await createHostedSlackRuntime(input, {
           stateDirectory: await createFixtureDirectory("agentx-slack-recovery-"), api,
-          model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
+          model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" },
         });
         try {
           observed = { tools: runtime.session.getActiveToolNames(), prompt: runtime.session.systemPrompt };

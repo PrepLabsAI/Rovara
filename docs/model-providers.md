@@ -136,7 +136,7 @@ exposure. See [OpenRouter model access](openrouter.md#workspace-credential-expos
 
 The rule is the same as OpenRouter's. When the ARN is empty, the secret does not exist, or its value is
 empty, the role runs on its default Bedrock model. The worker uses the deployment's Bedrock worker model if
-it has one, or Claude Sonnet 4.6. The classifier uses Nova Lite. The logs record `model_fallback` with the
+it has one, or Claude Sonnet 4.6. The classifier uses Claude Haiku 4.5. The logs record `model_fallback` with the
 reason `anthropic_secret_missing` or `openai_secret_missing`. Access denied, a malformed key, rate limits and
 inference errors fail the request instead. An installation without Bedrock model access sees the Bedrock
 error, not a silent change of provider.

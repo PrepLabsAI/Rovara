@@ -47,7 +47,7 @@ const stateDirectory = process.env.STATE_DIRECTORY ?? "/tmp/agentx-slack";
 const concurrency = Number.parseInt(process.env.SLACK_CONCURRENCY ?? "4", 10);
 const model = {
   provider: process.env.AGENTX_ORCHESTRATOR_PROVIDER ?? "amazon-bedrock",
-  modelId: process.env.AGENTX_ORCHESTRATOR_MODEL ?? "amazon.nova-pro-v1:0",
+  modelId: process.env.AGENTX_ORCHESTRATOR_MODEL ?? "us.anthropic.claude-sonnet-4-6",
 };
 
 const credentials = defaultProvider();
@@ -68,7 +68,7 @@ const log: ServiceLog = (event, fields) => {
 // classifierAvailable: false in its start log, and every change no rule settles asks.
 const classifierModel = {
   provider: process.env.AGENTX_GATE_CLASSIFIER_PROVIDER ?? "amazon-bedrock",
-  modelId: process.env.AGENTX_GATE_CLASSIFIER_MODEL ?? "amazon.nova-lite-v1:0",
+  modelId: process.env.AGENTX_GATE_CLASSIFIER_MODEL ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0",
 };
 const gateClassifierTimeoutMs = classifierTimeoutMs(process.env.AGENTX_GATE_CLASSIFIER_TIMEOUT_MS);
 const { classifier, available: classifierAvailable } = await createHostedClassifier({

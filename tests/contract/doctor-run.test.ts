@@ -9,10 +9,13 @@ import { fakeSlackApi, memoryInitSecrets, passingChecks, sampleAnswers, TEST_BOT
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 import { fakeAlerts } from "../support/setup-fakes.js";
 
+// The worker gets a model no other role uses, so a failure is the worker's alone.
+const DISTINCT_WORKER = { ...SETTINGS, models: { ...SETTINGS.models, worker: "zai.glm-4.7" } };
+
 describe("doctor: models (FR-050)", () => {
   it("tests each distinct model once and fails one the account cannot use, with the config command to change it", async () => {
-    const checks = passingChecks({ converse: async (id) => { if (id === "amazon.nova-pro-v1:0") throw Object.assign(new Error("no access"), { name: "AccessDeniedException" }); } });
-    const found = await modelChecks(doctorContext({ services: doctorServices({ checks }) }));
+    const checks = passingChecks({ converse: async (id) => { if (id === "zai.glm-4.7") throw Object.assign(new Error("no access"), { name: "AccessDeniedException" }); } });
+    const found = await modelChecks(doctorContext({ settings: DISTINCT_WORKER, services: doctorServices({ checks }) }));
     expect(found.map((entry) => [entry.name, entry.status])).toEqual([["orchestrator", "ok"], ["classifier", "ok"], ["worker", "fail"]]);
     expect(found[2]!.fix).toBe("choose another model with agentx --env staging config set models.worker <model id>");
   });
@@ -21,10 +24,10 @@ describe("doctor: models (FR-050)", () => {
 describe("doctor: models (Task 8 polish)", () => {
   it("calls each distinct model once, however many roles share it", async () => {
     const checks = passingChecks();
-    const settings = { ...SETTINGS, models: { ...SETTINGS.models, classifier: "amazon.nova-pro-v1:0", worker: "amazon.nova-pro-v1:0" } };
+    const settings = { ...SETTINGS, models: { ...SETTINGS.models, classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-haiku-4-5-20251001-v1:0" } };
     const found = await modelChecks(doctorContext({ settings, services: doctorServices({ checks }) }));
     expect(found.map((entry) => entry.status)).toEqual(["ok", "ok", "ok"]);
-    expect(checks.models).toEqual(["us.anthropic.claude-sonnet-4-6", "amazon.nova-pro-v1:0"]);
+    expect(checks.models).toEqual(["us.anthropic.claude-sonnet-4-6", "us.anthropic.claude-haiku-4-5-20251001-v1:0"]);
   });
 
   it("words a failed model in doctor's terms: agentx config set, never init's flags", async () => {
@@ -37,15 +40,15 @@ describe("doctor: models (Task 8 polish)", () => {
       new Error("socket hang up"),
       Object.assign(new Error("getaddrinfo ENOTFOUND bedrock-runtime.us-east-1.amazonaws.com"), { code: "ENOTFOUND" }),
     ]) {
-      const checks = passingChecks({ converse: async (id) => { if (id === "amazon.nova-pro-v1:0") throw error; } });
-      const worker = (await modelChecks(doctorContext({ services: doctorServices({ checks }) })))[2]!;
+      const checks = passingChecks({ converse: async (id) => { if (id === "zai.glm-4.7") throw error; } });
+      const worker = (await modelChecks(doctorContext({ settings: DISTINCT_WORKER, services: doctorServices({ checks }) })))[2]!;
       expect(worker.status).toBe("fail");
       expect(worker.detail).not.toContain("--worker-model");
       expect(worker.detail).not.toContain("agentx init");
       expect(worker.detail).not.toContain("--region");
     }
-    const denied = passingChecks({ converse: async (id) => { if (id === "amazon.nova-pro-v1:0") throw Object.assign(new Error("no access"), { name: "AccessDeniedException" }); } });
-    expect((await modelChecks(doctorContext({ services: doctorServices({ checks: denied }) })))[2]!.detail).toContain("agentx --env staging config set models.worker <model id>");
+    const denied = passingChecks({ converse: async (id) => { if (id === "zai.glm-4.7") throw Object.assign(new Error("no access"), { name: "AccessDeniedException" }); } });
+    expect((await modelChecks(doctorContext({ settings: DISTINCT_WORKER, services: doctorServices({ checks: denied }) })))[2]!.detail).toContain("agentx --env staging config set models.worker <model id>");
   });
 });
 

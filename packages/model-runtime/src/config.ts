@@ -6,7 +6,7 @@ export type ModelRole = "worker" | "orchestrator" | "classifier";
 export const DEFAULT_BEDROCK_MODELS = {
   worker: "us.anthropic.claude-sonnet-4-6",
   orchestrator: "us.anthropic.claude-sonnet-4-6",
-  classifier: "amazon.nova-lite-v1:0",
+  classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
 } as const;
 
 /** Init's suggested models when one direct provider runs every role (spec 054, D3). OpenRouter has none. */

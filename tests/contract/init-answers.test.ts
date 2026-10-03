@@ -16,7 +16,7 @@ const base = { env: "staging", region: "us-east-1", account: "123456789012", rel
 
 const everyFlag: InitFlags = {
   engine: "templates", identity: "cognito",
-  orchestratorModel: "us.anthropic.claude-sonnet-4-6", classifierModel: "amazon.nova-lite-v1:0", workerModel: "amazon.nova-pro-v1:0",
+  orchestratorModel: "us.anthropic.claude-sonnet-4-6", classifierModel: "us.anthropic.claude-haiku-4-5-20251001-v1:0", workerModel: "us.anthropic.claude-sonnet-4-6",
   permissionBoundary: "", operatorPrincipal: "",
   alertEmail: "ops@example.com",
   budget: "0",
@@ -68,11 +68,11 @@ describe("init questions", () => {
     expect(prompter.remaining()).toBe(0);
     expect(prompter.asked).toEqual([...FORM_QUESTIONS, "Is acme an organization or a personal account?"]);
     expect(alertWebhook).toBeUndefined();
-    expect(notes).toEqual([]);
+    expect(notes).toEqual([HAIKU_NOTE]);
     expect(answers).toEqual({
       schemaVersion: 1, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates", releaseVersion: "1.2.3",
       identity: { mode: "cognito" },
-      models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "amazon.nova-lite-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
+      models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
       alert: { kind: "email", address: "ops@example.com" },
       budget: { monthlyUsd: 260, scope: "account" },
       github: { account: "acme", accountType: "organization", appName: "AgentX acme (staging)" },
@@ -93,7 +93,7 @@ describe("init questions", () => {
       // Spec 048 FR-023: empty is the estimate of the models chosen, plus 20%, so the field's own default is
       // empty; the suggested amount is in the terminal's question and the page's hint.
       question: "Monthly AWS budget for this environment, in US dollars (0 for none; empty for the estimate plus 20%, $260)", defaultValue: "",
-      why: "AgentX's estimate is about $208.78 a month. The suggested budget is the estimate plus 20%. AWS emails you when this month's costs pass 80% of it. 0 turns it off.",
+      why: "AgentX's estimate is about $211.13 a month. The suggested budget is the estimate plus 20%. AWS emails you when this month's costs pass 80% of it. 0 turns it off.",
       hint: "Optional. Leave empty to use the estimate plus 20% ($260).",
     });
     expect(collected.notes).not.toContain(BUDGET_TAG_NOTE);
@@ -115,10 +115,10 @@ describe("init questions", () => {
 
   it("accepts another Bedrock model id for the orchestrator", async () => {
     const flags = { ...everyFlag, orchestratorModel: undefined } as InitFlags;
-    const prompter = scriptedPrompter([...settingsScript({ flags, advanced: { orchestratorModel: "other" } }), "us.amazon.nova-premier-v1:0"]);
+    const prompter = scriptedPrompter([...settingsScript({ flags, advanced: { orchestratorModel: "other" } }), "us.anthropic.claude-opus-4-1-20250805-v1:0"]);
     const { answers } = await collectInitAnswers({ ...base, flags, prompter });
     expect(prompter.asked.at(-1)).toBe("Orchestrator model id");
-    expect(answers.models.orchestrator).toBe("us.amazon.nova-premier-v1:0");
+    expect(answers.models.orchestrator).toBe("us.anthropic.claude-opus-4-1-20250805-v1:0");
   });
 
   it("collects your own OIDC provider's issuer, audience, client and admin claim", async () => {
@@ -320,7 +320,7 @@ describe("OpenRouter from init", () => {
     const flags: InitFlags = { ...everyFlag, modelProvider: "openrouter", classifierProvider: "amazon-bedrock", orchestratorModel: "a/b", workerModel: "a/b", openrouterKey: { envName: "OR_KEY" } };
     const { answers } = await collectWithFlags({ ...base, processEnv: { OR_KEY: OPENROUTER_KEY }, flags });
     expect(answers.models.providers).toEqual({ orchestrator: "openrouter", classifier: "amazon-bedrock", worker: "openrouter" });
-    expect(answers.models.classifier).toBe("amazon.nova-lite-v1:0");
+    expect(answers.models.classifier).toBe("us.anthropic.claude-haiku-4-5-20251001-v1:0");
   });
 
   it("writes no answers when the key cannot be stored, and never names the key in the error", async () => {

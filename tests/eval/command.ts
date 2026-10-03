@@ -45,7 +45,7 @@ export function parseEvalArguments(argv: readonly string[], env: NodeJS.ProcessE
     if (others.length > 0) throw new Error(`--sc004 reads the committed baselines and takes only --model, not ${others.join(", ")}. Usage: ${EVAL_USAGE}`);
     return {
       live: false, presentation: "new", repeat: 1, updateBaseline: false, sc004: true,
-      model: { provider: env.AGENTX_ORCHESTRATOR_PROVIDER ?? "amazon-bedrock", modelId: values.model ?? env.AGENTX_ORCHESTRATOR_MODEL ?? "amazon.nova-pro-v1:0" },
+      model: { provider: env.AGENTX_ORCHESTRATOR_PROVIDER ?? "amazon-bedrock", modelId: values.model ?? env.AGENTX_ORCHESTRATOR_MODEL ?? "us.anthropic.claude-sonnet-4-6" },
     };
   }
   const presentation = values.presentation ?? "new";
@@ -57,7 +57,7 @@ export function parseEvalArguments(argv: readonly string[], env: NodeJS.ProcessE
   if (!Number.isInteger(repeat) || repeat < 1 || repeat > 10) throw new Error("--repeat must be from 1 through 10");
   if (presentation !== "new" && presentation !== "legacy") throw new Error("--presentation must be new or legacy");
   const model = values.live
-    ? { provider: values.provider ?? env.AGENTX_ORCHESTRATOR_PROVIDER ?? "amazon-bedrock", modelId: values.model ?? env.AGENTX_ORCHESTRATOR_MODEL ?? "amazon.nova-pro-v1:0" }
+    ? { provider: values.provider ?? env.AGENTX_ORCHESTRATOR_PROVIDER ?? "amazon-bedrock", modelId: values.model ?? env.AGENTX_ORCHESTRATOR_MODEL ?? "us.anthropic.claude-sonnet-4-6" }
     : FAUX_MODEL;
   return {
     live: values.live,
@@ -70,9 +70,9 @@ export function parseEvalArguments(argv: readonly string[], env: NodeJS.ProcessE
   };
 }
 
-/** The classifier model a live run gives the action gate: the deployment setting's default, Amazon Nova Lite, unless the environment names another (spec 014 R5). */
+/** The classifier model a live run gives the action gate: the deployment setting's default, Claude Haiku 4.5, unless the environment names another (spec 014 R5). */
 export function gateClassifierModel(env: NodeJS.ProcessEnv = process.env): { provider: string; modelId: string } {
-  return { provider: env.AGENTX_GATE_CLASSIFIER_PROVIDER ?? "amazon-bedrock", modelId: env.AGENTX_GATE_CLASSIFIER_MODEL ?? "amazon.nova-lite-v1:0" };
+  return { provider: env.AGENTX_GATE_CLASSIFIER_PROVIDER ?? "amazon-bedrock", modelId: env.AGENTX_GATE_CLASSIFIER_MODEL ?? "us.anthropic.claude-haiku-4-5-20251001-v1:0" };
 }
 
 /**
