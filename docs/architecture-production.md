@@ -360,7 +360,8 @@ as it finishes:
 10. **first-project**: pick a repository the GitHub App sees; confirm or edit the proposed setup and
     test commands; the project runs on EC2 workers; pick its Slack channel (a private one needs
     `/invite @<bot>`).
-11. **connectors**: Linear, Jira and Asana are each offered; say no to add them later.
+11. **connectors**: Linear, Jira and Asana are each offered; say no to add them later. Any other MCP
+    server is added after the install with `connector add mcp`.
 12. **alerts**: confirm the AWS Notifications email (a PagerDuty or Opsgenie address confirms on its
     own); a test alarm is sent and you are asked whether it arrived.
 13. **e2e**: mention the bot in the channel; init ends when AgentX replies in the thread.
@@ -429,7 +430,8 @@ references. `agentx connector add` reads this file and registers its next revisi
 After the install, day-2 work runs with the operator role that `init` created: `agentx --env <env>
 project add` registers another project the same way; `agentx --env <env> channel add --project
 <name>` binds another channel; `agentx --env <env> connector add linear|jira|asana --project <name>`
-adds a connector later; `agentx --env <env> alerts test` sends another test alarm.
+adds a connector later, and `connector add mcp` connects any other MCP server; `agentx --env <env>
+alerts test` sends another test alarm.
 
 For a platform team that must deploy the access stack itself, `agentx init --export <dir>` writes a
 bundle instead of deploying anything; it changes nothing in AWS and makes only two read-only calls
