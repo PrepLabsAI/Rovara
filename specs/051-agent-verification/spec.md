@@ -197,6 +197,13 @@ These may come later (spec 053 or after).
   task in the turn. The headline "Checks passed (...)" is used only when every check AgentX reran passes now; otherwise
   it is "Checks: <p> of <n> pass." followed by the per-check lines. The orchestrator model's task results carry the
   report's status, labels and classes, not the check outputs.
+- **D-14 (2026-10-03, amends D-11):** A trailing `2>&1` and `| tail -N` (or `tail -n N`) are allowed on an agent's test
+  command and left out of its replay, so AgentX still replays only the bare test command. In the first SWE-bench run
+  on preamble version 2 (`astropy__astropy-13398`), every pytest command the agent ran ended in `2>&1 | tail -N`, so
+  none was recorded and the report was "not verified: no checks". The agent's shell runs exactly these commands with
+  `set -o pipefail` (`agentShellSpawn`), because a pipeline's status is otherwise `tail`'s, 0 even when the tests
+  fail, and such a run would be taken as a passing before result and turn an already failing test into a false
+  regression. `head` stays refused: it stops reading early and can cut the run short.
 
 ## Success Criteria
 

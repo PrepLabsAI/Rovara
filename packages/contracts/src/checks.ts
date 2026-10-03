@@ -99,10 +99,29 @@ function escapesWorkspace(word: string): boolean {
   );
 }
 
-/** The command to replay if `command` is a simple test command (P-6), else undefined. */
+/**
+ * A trailing `| tail -N` (or `-n N`, `-nN`), and a `2>&1` before it or on its own: they only shape what the agent
+ * reads. `tail` reads all of its input, so the test still runs to its end; `head` stops early and is not accepted.
+ */
+const OUTPUT_TAIL = /^(.*?) *\| *tail +-(?:n *)?\d+ *$/s;
+const MERGED_STDERR = /^(.*?) +2>&1 *$/s;
+
+/** `command` without its output tail (OUTPUT_TAIL), and whether it was piped into `tail`. */
+export function withoutOutputTail(command: string): { command: string; piped: boolean } {
+  const piped = OUTPUT_TAIL.exec(command);
+  const rest = piped === null ? command : piped[1]!;
+  const merged = MERGED_STDERR.exec(rest);
+  return { command: merged === null ? rest : merged[1]!, piped: piped !== null };
+}
+
+/**
+ * The command to replay if `command` is a simple test command (P-6), else undefined. A trailing `2>&1` and
+ * `| tail -N` are allowed and left out of the replay, which AgentX runs for its exit code alone.
+ */
 export function matchTestCommand(command: string): string | undefined {
-  const cd = /^ *cd +(\S+) +&& +(.+)$/s.exec(command);
-  const rest = (cd === null ? command : cd[2]!).replace(/^ +| +$/g, "");
+  const bare = withoutOutputTail(command).command;
+  const cd = /^ *cd +(\S+) +&& +(.+)$/s.exec(bare);
+  const rest = (cd === null ? bare : cd[2]!).replace(/^ +| +$/g, "");
   if (rest.length === 0 || !ALLOWED.test(rest)) return undefined;
   if (cd !== null && (!ALLOWED.test(cd[1]!) || !safeCdPath(cd[1]!))) return undefined;
   const words = rest.split(/ +/);
@@ -113,6 +132,20 @@ export function matchTestCommand(command: string): string | undefined {
   const tail = words.slice(index);
   const matches = TEST_HEADS.some((head) => head.every((word, position) => tail[position] === word));
   return matches ? (cd === null ? rest : `cd ${cd[1]} && ${rest}`) : undefined;
+}
+
+/**
+ * True for a test command piped into `tail`. The agent's shell runs it with `pipefail`, so its exit code is the
+ * test's rather than tail's, which is always 0, and the recorder can take that run as a before result. The cd
+ * target is not checked: pipefail changes nothing else, and an eval's container paths only become workspace paths
+ * for the matcher.
+ */
+export function isPipedTestCommand(command: string): boolean {
+  const { command: bare, piped } = withoutOutputTail(command);
+  if (!piped) return false;
+  const cd = /^ *cd +\S+ +&& +(.+)$/s.exec(bare);
+  const rest = cd === null ? bare : cd[1]!;
+  return !/^ *cd /.test(rest) && matchTestCommand(rest) !== undefined;
 }
 
 export function classifyCheck(before: CheckOutcome, after: CheckOutcome): CheckClass {
