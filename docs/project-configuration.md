@@ -293,6 +293,12 @@ reads exactly as before.
    The text lives in `packages/contracts/src/checks.ts` (`AGENTX_PREAMBLE`). Changing it means a
    new `AGENTX_PREAMBLE_VERSION`. The agent's claim is read from that last line: `success`,
    `failure`, or `none` when the line is missing.
+
+   Since version 2, AgentX's own worker prompt (`AGENTX_WORKER_PROMPT`, in the same file) also
+   replaces Pi's built-in system prompt. Pi's is written for a person at a terminal and points at
+   Pi's documentation. AgentX's tells the agent that it works alone and its changes may become a
+   pull request, and covers how to work, which file tools to use, and what its final message must
+   contain. The recorded SHA-256 covers both texts, so changing either means a new version.
 2. **AgentX reruns the checks** when the agent tries to finish. A check that passed before and
    fails now is a regression. A check that failed before and still fails is "already failing" and
    is not the agent's regression.

@@ -22,7 +22,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
 import { createModelRuntimeWithFallback } from "@agentx/model-runtime";
-import { AGENTX_PREAMBLE, agentXError, redactText, ThinkingLevelSchema, type ThinkingLevel } from "@agentx/contracts";
+import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, agentXError, redactText, ThinkingLevelSchema, type ThinkingLevel } from "@agentx/contracts";
 import { devcontainerContextFile, hostPath, type DevcontainerPaths } from "./devcontainer.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import {
@@ -331,9 +331,9 @@ function conversationStats(stats: SessionStats, entries: readonly SessionEntry[]
 /**
  * The worker's Pi settings and resources. Pi trusts its working folder by default: a `.pi/SYSTEM.md` there replaces
  * the system prompt, `.pi/settings.json` changes the default model and thinking level, and skills load from the
- * folder and from the home directory. The worker trusts none of it and loads no skills; AgentX passes the context
- * files itself, after the AgentX preamble (spec 051), and loads only the inline extensions it is given. One settings
- * manager serves the loader and the session, which would otherwise make its own trusted one.
+ * folder and from the home directory. The worker trusts none of it and loads no skills; it uses AgentX's own worker
+ * prompt, passes the context files itself, after the AgentX preamble (spec 051), and loads only the inline extensions
+ * it is given. One settings manager serves the loader and the session, which would otherwise make its own trusted one.
  */
 export async function createWorkerResources(
   input: Pick<PiSessionInput, "cwd" | "agentDirectory" | "contextFiles" | "extensionFactories">,
@@ -353,6 +353,9 @@ export async function createWorkerResources(
     noPromptTemplates: true,
     noThemes: true,
     agentsFilesOverride: appendRepositoryContextFiles(input.contextFiles),
+    // AgentX's own prompt in place of Pi's, whatever a SYSTEM.md would have given. Pi then leaves out its tool list,
+    // tool rules and documentation pointers; its addendum, project context and cwd sections are unchanged.
+    systemPromptOverride: () => AGENTX_WORKER_PROMPT,
     // Spec 051 FR-001/FR-010: the same preamble for coding tasks and eval runs, rendered as Pi's <addendum>.
     appendSystemPrompt: [AGENTX_PREAMBLE],
   });

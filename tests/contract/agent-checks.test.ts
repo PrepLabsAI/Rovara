@@ -2,14 +2,14 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
-  AGENTX_PREAMBLE, AGENTX_PREAMBLE_VERSION, agentxPreambleSha256, CheckReportSchema,
+  AGENTX_PREAMBLE, AGENTX_PREAMBLE_VERSION, AGENTX_WORKER_PROMPT, agentxPreambleSha256, CheckReportSchema,
   classifyCheck, matchTestCommand, parseAgentClaim, reportStatus, taskResultChecks,
 } from "@agentx/contracts";
 
 describe("the AgentX preamble (spec 051 FR-001)", () => {
-  it("is versioned and hashed", () => {
-    expect(AGENTX_PREAMBLE_VERSION).toBe("1");
-    expect(agentxPreambleSha256()).toBe(createHash("sha256").update(AGENTX_PREAMBLE).digest("hex"));
+  it("is versioned and hashed together with the worker prompt", () => {
+    expect(AGENTX_PREAMBLE_VERSION).toBe("2");
+    expect(agentxPreambleSha256()).toBe(createHash("sha256").update(`${AGENTX_WORKER_PROMPT}\n\n${AGENTX_PREAMBLE}`).digest("hex"));
   });
   it("tells the agent each rule, and the final line (P-5)", () => {
     for (const phrase of ["Reproduce the problem", "before and after", "your own regression", "never claim", "AgentX result: done", "AgentX result: not done"]) {

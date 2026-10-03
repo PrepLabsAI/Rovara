@@ -12,7 +12,7 @@ import { basename, dirname, join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, getCurrentSystemPrompt, getCurrentTools, type Context, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
 import type { BashOperations, ExtensionFactory, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { describe, expect, it } from "vitest";
-import { AGENTX_PREAMBLE, type WorkerInvocation } from "../../packages/contracts/src/index.js";
+import { AGENTX_PREAMBLE, AGENTX_WORKER_PROMPT, type WorkerInvocation } from "../../packages/contracts/src/index.js";
 import { WorkerCancellationController, WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";
 import type { DevcontainerPaths } from "../../packages/worker/src/devcontainer.js";
 import { redactCredentials, type WorkerEvent } from "../../packages/worker/src/events.js";
@@ -230,15 +230,16 @@ describe("the worker's Pi session, as pinned on Pi 0.85.1", () => {
         "PINNED: run npm test before committing.",
       ].join("\n"));
       expect(prompts[0]!.split("<project_context>")).toHaveLength(2);
-      expect(prompts[0]!.startsWith("You are an expert coding assistant operating inside pi, a coding agent harness.")).toBe(true);
+      // AgentX's worker prompt replaces Pi's preamble, so Pi's <tools>, <rules> and <docs> sections are gone.
+      expect(prompts[0]!.startsWith(`${AGENTX_WORKER_PROMPT}\n\n<addendum>`)).toBe(true);
       // The prompt's section boundaries in order (headings ending in a colon, XML-ish tags, the working
       // directory line), so a section 0.99 inserts anywhere is caught. The temp root reads <ROOT>.
       const boundaries = prompts[0]!.split(root).join("<ROOT>").split("\n")
         .filter((line) => /^<\/?[a-z_]+( .*)?>$/.test(line) || /^[A-Z][^.]*:$/.test(line) || line.startsWith("Current working directory: "));
-      // Ruling A (Pi 0.86+): the headings became tagged sections (<tools>, <rules>, <docs>, <cwd>); the order is unchanged.
+      // Ruling A (Pi 0.86+): the headings became tagged sections (<addendum>, <project_context>, <cwd>).
       expect(boundaries).toEqual([
-        "<tools>", "</tools>", "<rules>", "</rules>", "<docs>",
-        "Pi documentation (read only when the user asks about pi itself, its SDK, extensions, themes, skills, or TUI):", "</docs>",
+        // AgentX's worker prompt (preamble version 2), in place of Pi's <tools>, <rules> and <docs>.
+        "How to work:", "Tools:", "Final message:",
         // Spec 051 FR-001 appends the AgentX preamble.
         "<addendum>", "</addendum>",
         "<project_context>", "Project-specific instructions and guidelines:",
