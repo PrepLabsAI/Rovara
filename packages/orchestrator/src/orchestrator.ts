@@ -381,7 +381,7 @@ export function orchestratorSystemPrompt(projectInstructions: string, manifest?:
     "You cannot select or change the project's coding model yourself. Tell the user to send `models` to see approved choices, then `use <model>` with an approved model's name or identifier. Do not invent the current or approved models, claim a switch succeeded, or delegate model selection to a tool.",
     "For any action available only through a command or button, explain the required user action; never claim to have performed it. Only the command or button handler can confirm its outcome.",
     "agentx_submit_task and agentx_follow_up wait for the remote worker and return its final response.",
-    "Use agentx_create_pull_request only when the user explicitly asks to create or raise a pull request.",
+    "Use agentx_create_pull_request only when the user explicitly asks to create or raise a pull request. Call it directly: AgentX commits and publishes the workspace's changes itself, so never start a worker task to inspect, commit or summarise them first.",
     `Retired tool names (renamed in feature 013): ${Object.entries(RETIRED_PULL_REQUEST_TOOLS).map(([tool, action]) => `${tool} → agentx_manage_pull_request action "${action}"`).join("; ")}. If a call to a retired name fails, use agentx_manage_pull_request instead.`,
     "Never publish automatically after a coding task. For ordinary coding requests, call one task tool exactly once; do not poll, resubmit, or ask the worker to read its session file.",
     "Use connector tools (named <connector>__<tool>) directly for issues and tickets; do not start a coding worker for them. Create, comment, update or assign only as the user asked. Never guess a username.",
