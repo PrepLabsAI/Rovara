@@ -381,10 +381,12 @@ connector's own flags (`--linear-key-file` or `-env` and `--linear-team`; `--jir
 and `--jira-token-file` or `-env`; `--asana-client-id`, `--asana-client-secret-file` or `-env`,
 `--asana-bot-email` and `--asana-project`).
 
-The model questions start with the provider: Amazon Bedrock (the default) or OpenRouter
-(`--model-provider`). OpenRouter asks for the orchestrator, classifier and worker model ids, then the
-OpenRouter API key in a hidden prompt (`--openrouter-key-file` or `--openrouter-key-env` with `--yes`).
-See [OpenRouter model access](openrouter.md).
+The model questions start with the provider: Amazon Bedrock (the default), OpenRouter, the Anthropic API
+or the OpenAI API (`--model-provider`). OpenRouter asks for the orchestrator, classifier and worker model
+ids, then the OpenRouter API key in a hidden prompt (`--openrouter-key-file` or `--openrouter-key-env` with
+`--yes`). Anthropic and OpenAI suggest a model for each role, then ask for that provider's API key the same
+way (`--anthropic-key-file`, `--openai-key-env` and so on). See [OpenRouter model access](openrouter.md) and
+[Your own Anthropic or OpenAI API key](model-providers.md).
 
 `init` also asks for a monthly AWS budget (`--budget <usd>`, default 100; `0` for none) and its scope
 (`--budget-scope tag`, the default, or `--budget-scope account`). The budget counts costs tagged
@@ -415,7 +417,8 @@ secret) and `/agentx/<env>/install/progress` (step outcomes and the GitHub and S
 far). `/agentx/<env>/settings` is written only once the Slack stack exists. Secrets go straight into
 Secrets Manager: `agentx/<env>/github-app`, `agentx/<env>/slack`, for a webhook alert address
 `agentx/<env>/alert-endpoint`, and, for OpenRouter without `--openrouter-secret-arn`,
-`agentx/<env>/openrouter` (the raw key; the answers hold only its ARN). The alert and OpenRouter secrets
+`agentx/<env>/openrouter` (the raw key; the answers hold only its ARN), and likewise
+`agentx/<env>/anthropic` and `agentx/<env>/openai` for those providers' keys. The alert and model-key secrets
 are stored just before the answers are saved, so a secret that fails to store leaves no answers and the
 next run asks again; once the answers are saved, a rerun resumes without asking.
 
@@ -560,9 +563,9 @@ flow-log group, and the KMS workspace key (schedule deletion; 7 days minimum). T
 stacks: `agentx/<env>/callback-signing-key` (created by the CLI) and `agentx/<env>/slack`; delete both with
 `--force-delete-without-recovery` so a new install can reuse the names. An install made with `agentx init`
 also has the secrets init stored itself: `agentx/<env>/github-app`, `agentx/<env>/alert-endpoint` (a
-webhook alert address only) and `agentx/<env>/openrouter` (OpenRouter without `--openrouter-secret-arn`
-only); delete them the same way. Revoke the OpenRouter key in OpenRouter too. A secret you made yourself
-for `--openrouter-secret-arn` is yours to keep or delete.
+webhook alert address only) and `agentx/<env>/openrouter`, `agentx/<env>/anthropic` and
+`agentx/<env>/openai` (each only when init stored that key); delete them the same way. Revoke those keys at
+the provider too. A secret you made yourself for a `--…-secret-arn` flag is yours to keep or delete.
 In a named environment the retained resources are kept on a delete and on a replacing update, but a failed
 first create removes them (`RetainExceptOnCreate`), so "delete the stack and rerun" works; only an identity
 stack's user pool is left behind by a failed create. The export bundle's README lists the exact command for

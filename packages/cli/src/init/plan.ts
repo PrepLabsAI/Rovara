@@ -3,8 +3,9 @@
 // list prices checked on the date in PRICES_CHECKED; the orchestrator per-turn figures come from the
 // 2026-09-25 evaluation in the spec's Decisions.
 import {
-  defaultBoundaryName, environmentCloudFormationRoleName, environmentOperatorRoleName, environmentRolePath, environmentStackName,
+  keyedProviderSecretName, KEYED_MODEL_PROVIDERS, defaultBoundaryName, environmentCloudFormationRoleName, environmentOperatorRoleName, environmentRolePath, environmentStackName,
 } from "@agentx/contracts";
+import type { DirectProvider } from "../deploy/answer-schemas.js";
 import { installOrder } from "../deploy/parameters.js";
 import { callbackSigningKeySecretName } from "../deploy/signing-key.js";
 import { openRouterSecretName } from "./answers.js";
@@ -17,8 +18,8 @@ import type { WizardPlan } from "./ui/protocol.js";
 
 export { estimateMonthlyCost, STATED_USAGE, type CostEstimate, type CostLine } from "./cost.js";
 
-/** What the plan must say beyond the answers: an OpenRouter key init stores itself has no ARN yet. */
-export interface PlanExtras { storesOpenRouterKey?: boolean; openRouterProviders?: readonly string[] }
+/** What the plan must say beyond the answers: a key init stores itself has no ARN yet. */
+export interface PlanExtras { storesOpenRouterKey?: boolean; openRouterProviders?: readonly string[]; storesProviderKeys?: readonly DirectProvider[] }
 
 export function installPlanText(answers: InitAnswers, estimate: CostEstimate, notes: readonly string[], extras: PlanExtras = {}): string {
   const { env } = answers;
@@ -28,6 +29,7 @@ export function installPlanText(answers: InitAnswers, estimate: CostEstimate, no
     callbackSigningKeySecretName(env), `agentx/${env}/github-app`, `agentx/${env}/slack`,
     ...(answers.alert.kind === "webhook" ? [answers.alert.secretName] : []),
     ...(extras.storesOpenRouterKey === true ? [openRouterSecretName(env)] : []),
+    ...(extras.storesProviderKeys ?? []).map((provider) => keyedProviderSecretName(env, provider)),
   ];
   const routing = (providers: readonly string[] | undefined) => `provider allowlist ${providers?.join(", ") ?? "router-selected"}; fallbacks disabled, data_collection=deny`;
   const alerts = answers.alert.kind === "email"
@@ -48,7 +50,13 @@ export function installPlanText(answers: InitAnswers, estimate: CostEstimate, no
     `- Models: main model ${modelName(answers.models.orchestrator)} (${provider("orchestrator")}), safety check model ${modelName(answers.models.classifier)} (${provider("classifier")}), coding model ${modelName(answers.models.worker)} (${provider("worker")})`,
     ...(answers.models.openRouter ? [`- OpenRouter: read existing secret ${answers.models.openRouter.secretArn}; ${routing(answers.models.openRouter.providers)}`] : []),
     ...(extras.storesOpenRouterKey === true ? [`- OpenRouter: your API key is stored in the new secret ${openRouterSecretName(env)}; ${routing(extras.openRouterProviders)}`] : []),
-    `- Alerts: ${alerts}${answers.alert.kind === "none" ? "" : ", subscribed and tested at the end of the install"}`,
+    ...(["anthropic", "openai"] as const).flatMap((provider) => {
+      const { label } = KEYED_MODEL_PROVIDERS[provider];
+      const existing = answers.models[provider]?.secretArn;
+      if (existing !== undefined) return [`- ${label}: read existing secret ${existing}`];
+      return extras.storesProviderKeys?.includes(provider) === true ? [`- ${label}: your API key is stored in the new secret ${keyedProviderSecretName(env, provider)}`] : [];
+    }),
+        `- Alerts: ${alerts}${answers.alert.kind === "none" ? "" : ", subscribed and tested at the end of the install"}`,
     answers.budget === undefined
       ? "- Budget: none"
       : `- Budget agentx-${env}-monthly: $${answers.budget.monthlyUsd} a month for ${answers.budget.scope === "tag" ? `costs tagged agentx:env=${env}` : "the whole account"}, alerting at 80% spent and 100% forecast`,

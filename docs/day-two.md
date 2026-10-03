@@ -40,7 +40,8 @@ checks, in order:
   package hashes and image digests), was deployed by the engine the settings name, and its last
   drift result.
 - **secrets**: every secret exists and has the right shape. Values are read only to check their
-  shape, and never printed. An OpenRouter key in a secret you made yourself is shown as "skip":
+  shape, and never printed. An Anthropic or OpenAI key init stored must start with that provider's
+  prefix. An OpenRouter, Anthropic or OpenAI key in a secret you made yourself is shown as "skip":
   doctor's role cannot read it, so check it yourself.
 - **slack**: the bot token works, both Request URLs answer a signed request (the same check
   `init` makes), and the bot is in the channel `init` bound.

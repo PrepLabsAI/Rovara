@@ -19,6 +19,9 @@ export async function modelChecks(context: DoctorContext): Promise<DoctorCheck[]
         if (provider === "openrouter") {
           if (services.checks.openRouter === undefined) throw new Error("this agentx cannot check OpenRouter models");
           await services.checks.openRouter(modelId, settings.models.openRouter ?? {});
+        } else if (provider === "anthropic" || provider === "openai") {
+          if (services.checks.directProvider === undefined) throw new Error(`this agentx cannot check ${provider} models`);
+          await services.checks.directProvider(provider, modelId, settings.models[provider] ?? {});
         } else {
           await services.checks.converse(modelId);
         }

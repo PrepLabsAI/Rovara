@@ -3,6 +3,30 @@
 exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
 {
   "Conditions": {
+    "AnthropicEnabled": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "AnthropicSecretArn",
+            },
+            "",
+          ],
+        },
+      ],
+    },
+    "OpenAIEnabled": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "OpenAISecretArn",
+            },
+            "",
+          ],
+        },
+      ],
+    },
     "OpenRouterEnabled": {
       "Fn::Not": [
         {
@@ -145,6 +169,12 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Description": "JSON string array of claim values that grant AgentX administrator access",
       "Type": "String",
     },
+    "AnthropicSecretArn": {
+      "AllowedPattern": "^$|^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$",
+      "Default": "",
+      "Description": "Optional Secrets Manager ARN containing the raw Anthropic API key",
+      "Type": "String",
+    },
     "BootstrapVersion": {
       "Default": "/cdk-bootstrap/hnb659fds/version",
       "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
@@ -183,6 +213,12 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "String",
     },
     "OidcIssuer": {
+      "Type": "String",
+    },
+    "OpenAISecretArn": {
+      "AllowedPattern": "^$|^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$",
+      "Default": "",
+      "Description": "Optional Secrets Manager ARN containing the raw OpenAI API key",
       "Type": "String",
     },
     "OpenRouterSecretArn": {
@@ -233,6 +269,43 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
     },
   },
   "Resources": {
+    "AnthropicSecretRead": {
+      "Condition": "AnthropicEnabled",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "AnthropicSecretArn",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "AnthropicSecretRead",
+        "Roles": [
+          {
+            "Ref": "SlackOrchestratorTaskRole2372FE40",
+          },
+          {
+            "Fn::Select": [
+              1,
+              {
+                "Fn::Split": [
+                  "/",
+                  {
+                    "Ref": "Ec2WorkerInstanceRoleArn",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
     "Artifacts82DD59A1": {
       "DeletionPolicy": "Retain",
       "Properties": {
@@ -879,6 +952,46 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                         "Ref": "AWS::AccountId",
                       },
                       ":parameter/agentx/production/worker-openrouter-providers",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/production/worker-anthropic-secret-arn",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/production/worker-openai-secret-arn",
                     ],
                   ],
                 },
@@ -1763,6 +1876,46 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                     ],
                   ],
                 },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/production/worker-anthropic-secret-arn",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/production/worker-openai-secret-arn",
+                    ],
+                  ],
+                },
               ],
               "Sid": "ReadEvalSettings",
             },
@@ -2023,6 +2176,43 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "Name": "agentx-jwt",
       },
       "Type": "AWS::ApiGatewayV2::Authorizer",
+    },
+    "OpenAISecretRead": {
+      "Condition": "OpenAIEnabled",
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "secretsmanager:GetSecretValue",
+              "Effect": "Allow",
+              "Resource": {
+                "Ref": "OpenAISecretArn",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "OpenAISecretRead",
+        "Roles": [
+          {
+            "Ref": "SlackOrchestratorTaskRole2372FE40",
+          },
+          {
+            "Fn::Select": [
+              1,
+              {
+                "Fn::Split": [
+                  "/",
+                  {
+                    "Ref": "Ec2WorkerInstanceRoleArn",
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
     },
     "OpenRouterSecretRead": {
       "Condition": "OpenRouterEnabled",
@@ -4727,6 +4917,46 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                     ],
                   ],
                 },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/production/worker-anthropic-secret-arn",
+                    ],
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":ssm:",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ":",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":parameter/agentx/production/worker-openai-secret-arn",
+                    ],
+                  ],
+                },
               ],
             },
             {
@@ -7035,6 +7265,30 @@ exports[`legacy production templates > AgentXProductionFoundation is unchanged 1
 exports[`legacy production templates > AgentXProductionRuntime is unchanged 1`] = `
 {
   "Conditions": {
+    "HasAnthropicSecret": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "AnthropicSecretArn",
+            },
+            "",
+          ],
+        },
+      ],
+    },
+    "HasOpenAISecret": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "OpenAISecretArn",
+            },
+            "",
+          ],
+        },
+      ],
+    },
     "HasOpenRouterProviders": {
       "Fn::Not": [
         {
@@ -7062,6 +7316,12 @@ exports[`legacy production templates > AgentXProductionRuntime is unchanged 1`] 
   },
   "Description": "AgentX worker image and model settings for EC2 workers",
   "Parameters": {
+    "AnthropicSecretArn": {
+      "AllowedPattern": "^$|^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$",
+      "Default": "",
+      "Description": "Optional Secrets Manager ARN containing the raw Anthropic API key",
+      "Type": "String",
+    },
     "BootstrapVersion": {
       "Default": "/cdk-bootstrap/hnb659fds/version",
       "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
@@ -7074,6 +7334,12 @@ exports[`legacy production templates > AgentXProductionRuntime is unchanged 1`] 
     "ModelProvider": {
       "Default": "amazon-bedrock",
       "Description": "pi model provider identifier",
+      "Type": "String",
+    },
+    "OpenAISecretArn": {
+      "AllowedPattern": "^$|^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$",
+      "Default": "",
+      "Description": "Optional Secrets Manager ARN containing the raw OpenAI API key",
       "Type": "String",
     },
     "OpenRouterProviders": {
@@ -7104,6 +7370,23 @@ exports[`legacy production templates > AgentXProductionRuntime is unchanged 1`] 
     },
   },
   "Resources": {
+    "WorkerAnthropicSecretParameterFA40843B": {
+      "Properties": {
+        "Description": "AgentX worker anthropicSecretArn for EC2 workers",
+        "Name": "/agentx/production/worker-anthropic-secret-arn",
+        "Type": "String",
+        "Value": {
+          "Fn::If": [
+            "HasAnthropicSecret",
+            {
+              "Ref": "AnthropicSecretArn",
+            },
+            "none",
+          ],
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
     "WorkerImageParameter7CA9ADBB": {
       "Properties": {
         "Description": "AgentX worker image URI pinned by digest, for EC2 workers",
@@ -7133,6 +7416,23 @@ exports[`legacy production templates > AgentXProductionRuntime is unchanged 1`] 
         "Type": "String",
         "Value": {
           "Ref": "ModelProvider",
+        },
+      },
+      "Type": "AWS::SSM::Parameter",
+    },
+    "WorkerOpenAISecretParameter5EF1F8B6": {
+      "Properties": {
+        "Description": "AgentX worker openaiSecretArn for EC2 workers",
+        "Name": "/agentx/production/worker-openai-secret-arn",
+        "Type": "String",
+        "Value": {
+          "Fn::If": [
+            "HasOpenAISecret",
+            {
+              "Ref": "OpenAISecretArn",
+            },
+            "none",
+          ],
         },
       },
       "Type": "AWS::SSM::Parameter",
@@ -8168,6 +8468,12 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
     },
   },
   "Parameters": {
+    "AnthropicSecretArn": {
+      "AllowedPattern": "^$|^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$",
+      "Default": "",
+      "Description": "Optional Secrets Manager ARN containing the raw Anthropic API key",
+      "Type": "String",
+    },
     "BootstrapVersion": {
       "Default": "/cdk-bootstrap/hnb659fds/version",
       "Description": "Version of the CDK Bootstrap resources in this environment, automatically retrieved from SSM Parameter Store. [cdk:skip]",
@@ -8186,6 +8492,8 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
       "AllowedValues": [
         "amazon-bedrock",
         "openrouter",
+        "anthropic",
+        "openai",
       ],
       "Default": "amazon-bedrock",
       "Type": "String",
@@ -8196,6 +8504,12 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
     },
     "ModelProvider": {
       "Default": "amazon-bedrock",
+      "Type": "String",
+    },
+    "OpenAISecretArn": {
+      "AllowedPattern": "^$|^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:[A-Za-z0-9/_+=.@-]+$",
+      "Default": "",
+      "Description": "Optional Secrets Manager ARN containing the raw OpenAI API key",
       "Type": "String",
     },
     "OpenRouterProviders": {
@@ -8599,6 +8913,18 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
                 "Name": "AGENTX_OPENROUTER_SECRET_ARN",
                 "Value": {
                   "Ref": "OpenRouterSecretArn",
+                },
+              },
+              {
+                "Name": "AGENTX_ANTHROPIC_SECRET_ARN",
+                "Value": {
+                  "Ref": "AnthropicSecretArn",
+                },
+              },
+              {
+                "Name": "AGENTX_OPENAI_SECRET_ARN",
+                "Value": {
+                  "Ref": "OpenAISecretArn",
                 },
               },
               {

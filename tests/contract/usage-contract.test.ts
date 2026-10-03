@@ -14,6 +14,11 @@ describe("shared usage contract", () => {
     expect(TaskUsageTelemetrySchema.parse(unknown)).toMatchObject({ costUsd: null, costSource: "unknown" });
     expect(createTaskUsageTelemetry(stats, { provider: "openrouter", modelId: "model" }, "SUCCEEDED")).toMatchObject({ costUsd: 0.25, costSource: "estimated" });
   });
+  it.each(["anthropic", "openai"])("labels %s list prices and unknown cost", (provider) => {
+    const listed = createTaskUsageTelemetry(stats, { provider, modelId: "model" }, "SUCCEEDED");
+    expect(TaskUsageTelemetrySchema.parse(listed)).toMatchObject({ costUsd: 0.25, costSource: "list-price" });
+    expect(createTaskUsageTelemetry({ ...stats, cost: 0 }, { provider, modelId: "model" }, "SUCCEEDED")).toMatchObject({ costUsd: null, costSource: "unknown" });
+  });
   it("builds the feature 011 shape from session totals", () => {
     const usage = createTaskUsageTelemetry(stats, { provider: "amazon-bedrock", modelId: "model", cacheRetention: "long" }, "SUCCEEDED");
     expect(usage).toEqual({

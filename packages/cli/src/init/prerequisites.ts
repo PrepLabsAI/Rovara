@@ -1,5 +1,5 @@
-import { readOpenRouterKey, openRouterRouting, openRouterModel, MissingOpenRouterSecret, defaultBedrockModel } from "@agentx/model-runtime/config";
-import type { ModelsAnswers } from "../deploy/answer-schemas.js";
+import { readOpenRouterKey, readProviderKey, openRouterRouting, openRouterModel, requireKeyedModel, MissingProviderSecret, defaultBedrockModel } from "@agentx/model-runtime/config";
+import type { DirectProvider, ModelsAnswers } from "../deploy/answer-schemas.js";
 // FR-015: everything init checks before it creates anything. Every problem is collected and
 // reported together, with what to change; cdk bootstrap (which creates the CDKToolkit stack) is
 // offered only when every other check has passed.
@@ -7,7 +7,7 @@ import { DescribeAddressesCommand, EC2Client } from "@aws-sdk/client-ec2";
 import { ServiceQuotasClient, GetServiceQuotaCommand } from "@aws-sdk/client-service-quotas";
 import { BedrockRuntimeClient, ConverseCommand } from "@aws-sdk/client-bedrock-runtime";
 import { NodeHttpHandler } from "@smithy/node-http-handler";
-import { agentXError, AgentXError } from "@agentx/contracts";
+import { agentXError, AgentXError, KEYED_MODEL_PROVIDERS } from "@agentx/contracts";
 import { assertCdkBootstrapped, type CommandRunner } from "../deploy/cdk-engine.js";
 import { releaseRegionProblem, type ReleaseCoverage } from "../deploy/release.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
@@ -20,6 +20,10 @@ export interface PrerequisiteChecks {
   /** Checks an OpenRouter model. `key`, when given, is the key init collected but has not stored
    * yet (the secret is created only after the plan); otherwise the key is read from config.secretArn. */
   openRouter?(modelId: string, config: OpenRouterCheckConfig, key?: string): Promise<void>;
+  /** Checks an Anthropic or OpenAI model with one small tool-carrying request (spec 054 FR-013).
+   * `key`, when given, is a key init collected but has not stored yet; otherwise it is read from
+   * config.secretArn. A failure's message is safe to show: it never holds the key or a provider body. */
+  directProvider?(provider: DirectProvider, modelId: string, config: { secretArn?: string }, key?: string): Promise<void>;
   /** Regional on-demand Standard EC2 vCPU quota. */
   ec2Quota(): Promise<number>;
   /** The regional EC2-VPC Elastic IP quota (L-0263D0A3) and how many addresses are allocated now. */
@@ -271,6 +275,8 @@ export async function checkPrerequisites(input: {
   answers: InitAnswers; release: ReleaseCoverage; caller: { account: string; arn: string };
   checks: PrerequisiteChecks; prompter: Prompter; write: (line: string) => void;
   openRouterKey?: PendingOpenRouterKey;
+  /** Anthropic and OpenAI keys collected by init's questions, not yet stored in Secrets Manager. */
+  directKeys?: Partial<Record<DirectProvider, string>>;
   /** The release's own images (FR-065); checked only when given, so a caller with no release
    * images to check (most existing callers and tests) sees no change at all. */
   images?: ReleaseImages;
@@ -336,6 +342,19 @@ export async function checkPrerequisites(input: {
     ["worker", answers.models.worker],
   ];
   const seen = new Set<string>();
+  // A keyed provider without a configured or stored key runs on the role's Bedrock default (specs
+  // 032 and 054), so that is the model checked.
+  const checkFallback = async (role: ModelRole, identifier: string, label: string) => {
+    const fallback = defaultBedrockModel(role);
+    try {
+      const fallbackKey = `${fallback.provider}/${fallback.modelId}`;
+      if (!seen.has(fallbackKey)) await checks.converse(fallback.modelId);
+      seen.add(fallbackKey);
+      passed(`Model ${identifier}`, `ok ${identifier}: ${label} secret missing; using default ${fallback.provider}/${fallback.modelId}`);
+    } catch (fallbackError) {
+      failed(`Model ${fallback.modelId}`, modelCheckProblem({ modelId: fallback.modelId, role, region, error: fallbackError, ...(audience === "page" ? { wording: pageWording() } : {}) }));
+    }
+  };
   for (const [role, modelId] of roles) {
     const provider = answers.models.providers?.[role] ?? "amazon-bedrock";
     const identifier = `${provider}/${modelId}`;
@@ -345,7 +364,7 @@ export async function checkPrerequisites(input: {
         const pending = input.openRouterKey;
         if (!answers.models.openRouter && pending === undefined) {
           openRouterModel(modelId);
-          throw new MissingOpenRouterSecret();
+          throw new MissingProviderSecret("openrouter");
         }
         if (!checks.openRouter) throw new Error("OpenRouter check is not configured");
         if (answers.models.openRouter) await checks.openRouter(modelId, answers.models.openRouter);
@@ -353,19 +372,27 @@ export async function checkPrerequisites(input: {
         seen.add(identifier);
         passed(`Model ${identifier}`, `ok ${identifier} supports tools and answers`);
       } catch (error) {
-        if (error instanceof MissingOpenRouterSecret) {
-          const fallback = defaultBedrockModel(role);
-          try {
-            const fallbackKey = `${fallback.provider}/${fallback.modelId}`;
-            if (!seen.has(fallbackKey)) await checks.converse(fallback.modelId);
-            seen.add(fallbackKey);
-            passed(`Model ${identifier}`, `ok ${identifier}: OpenRouter secret missing; using default ${fallback.provider}/${fallback.modelId}`);
-          } catch (fallbackError) {
-            failed(`Model ${fallback.modelId}`, modelCheckProblem({ modelId: fallback.modelId, role, region, error: fallbackError, ...(audience === "page" ? { wording: pageWording() } : {}) }));
-          }
-        } else {
-          failed(`Model ${identifier}`, `${identifier}: OpenRouter preflight failed; check the model's tool support, secret read permission, key credits and routing allowlist`);
+        if (error instanceof MissingProviderSecret) await checkFallback(role, identifier, "OpenRouter");
+        else failed(`Model ${identifier}`, `${identifier}: OpenRouter preflight failed; check the model's tool support, secret read permission, key credits and routing allowlist`);
+      }
+      continue;
+    }
+    if (provider === "anthropic" || provider === "openai") {
+      const { label } = KEYED_MODEL_PROVIDERS[provider];
+      try {
+        const pending = input.directKeys?.[provider];
+        const stored = answers.models[provider];
+        if (stored === undefined && pending === undefined) {
+          requireKeyedModel(provider, modelId);
+          throw new MissingProviderSecret(provider);
         }
+        if (!checks.directProvider) throw new Error(`the ${label} check is not configured`);
+        await checks.directProvider(provider, modelId, stored ?? {}, stored === undefined ? pending : undefined);
+        seen.add(identifier);
+        passed(`Model ${identifier}`, `ok ${identifier} supports tools and answers`);
+      } catch (error) {
+        if (error instanceof MissingProviderSecret) await checkFallback(role, identifier, label);
+        else failed(`Model ${identifier}`, `${identifier}: ${label} preflight failed: ${errorMessage(error).replace(/^[A-Z_]+: /, "")}`);
       }
       continue;
     }
@@ -516,6 +543,11 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
         if (result.error || !result.choices?.length) throw new Error("model returned no completion");
       }, CONVERSE_DEADLINE_MS, "OpenRouter preflight timed out");
     },
+    async directProvider(provider, modelId, config, suppliedKey) {
+      requireKeyedModel(provider, modelId);
+      const key = suppliedKey ?? await readProviderKey(provider, config.secretArn ?? "");
+      await withDeadline((signal) => directProviderCheck({ provider, modelId, key, fetch: input.fetch, signal }), CONVERSE_DEADLINE_MS, `the ${KEYED_MODEL_PROVIDERS[provider].label} check did not finish within ${CONVERSE_DEADLINE_MS / 1000}s; check your network, or try again`);
+    },
     converse,
     /** Spec 048 FR-018: only a missing endpoint means no Bedrock here; any other refusal (access
      * denied, a bad model id) is the model checks' own to report, not this account-level check's. */
@@ -588,4 +620,36 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
     },
     sleep: (ms) => new Promise((resolvePromise) => setTimeout(resolvePromise, ms)),
   };
+}
+
+/** What a direct provider's HTTP status says to fix, in words that never quote the provider's body. */
+function directProviderStatusProblem(status: number): string {
+  if (status === 401 || status === 403) return "the API key was refused; check it, and that it may use this model";
+  if (status === 404) return "the model is not available to this key's organization; check the model ID";
+  if (status === 402 || status === 429) return "rate limited or out of credits; check the key's usage limits and billing";
+  if (status >= 500) return "the provider is unavailable; try again";
+  return `the provider answered HTTP ${status}; check the model ID`;
+}
+
+/** One model lookup, then one completion of at most 16 output tokens with a tool attached (spec 054 FR-013). */
+export async function directProviderCheck(input: { provider: DirectProvider; modelId: string; key: string; fetch: typeof fetch; signal: AbortSignal }): Promise<void> {
+  const { provider, modelId, key, signal } = input;
+  const anthropic = provider === "anthropic";
+  const base = anthropic ? "https://api.anthropic.com/v1" : "https://api.openai.com/v1";
+  const headers: Record<string, string> = anthropic
+    ? { "x-api-key": key, "anthropic-version": "2023-06-01", "Content-Type": "application/json" }
+    : { Authorization: `Bearer ${key}`, "Content-Type": "application/json" };
+  const lookup = await input.fetch(`${base}/models/${encodeURIComponent(modelId)}`, { headers, signal });
+  if (!lookup.ok) throw new Error(directProviderStatusProblem(lookup.status));
+  const body = anthropic
+    ? { model: modelId, max_tokens: 16, messages: [{ role: "user", content: "Reply OK." }],
+      tools: [{ name: "ping", description: "Return OK", input_schema: { type: "object", properties: {} } }] }
+    : { model: modelId, max_output_tokens: 16, input: "Reply OK.", store: false,
+      tools: [{ type: "function", name: "ping", description: "Return OK", parameters: { type: "object", properties: {} } }] };
+  const response = await input.fetch(`${base}/${anthropic ? "messages" : "responses"}`, { method: "POST", headers, signal, body: JSON.stringify(body) });
+  if (!response.ok) throw new Error(directProviderStatusProblem(response.status));
+  const result = await response.json() as { content?: unknown[]; output?: unknown[]; status?: string };
+  // A reasoning model can spend all 16 tokens thinking; OpenAI then answers "incomplete", which still proves access.
+  const answered = anthropic ? Array.isArray(result.content) : Array.isArray(result.output) && (result.status === "completed" || result.status === "incomplete");
+  if (!answered) throw new Error("the model returned no completion");
 }

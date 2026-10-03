@@ -1,6 +1,8 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { amazonBedrockProvider } from "@earendil-works/pi-ai/providers/amazon-bedrock";
 import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
+import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
+import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import type { ModelIdentifier } from "@agentx/contracts";
 
 let catalogs: Map<string, ReadonlyMap<string, Model<Api>>> | undefined;
@@ -13,6 +15,8 @@ export function catalogModel(model: ModelIdentifier): Model<Api> | undefined {
   catalogs ??= new Map([
     ["openrouter", new Map(openrouterProvider().getModels().map((entry) => [entry.id, entry as Model<Api>]))],
     ["amazon-bedrock", new Map(amazonBedrockProvider().getModels().map((entry) => [entry.id, entry as Model<Api>]))],
+    ["anthropic", new Map(anthropicProvider().getModels().map((entry) => [entry.id, entry as Model<Api>]))],
+    ["openai", new Map(openaiProvider().getModels().map((entry) => [entry.id, entry as Model<Api>]))],
   ]);
   return catalogs.get(model.provider)?.get(model.modelId);
 }

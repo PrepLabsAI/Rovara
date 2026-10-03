@@ -1,4 +1,4 @@
-import { grantOpenRouterSecret } from "./openrouter.js";
+import { grantProviderKeySecrets } from "./model-keys.js";
 import { resolve } from "node:path";
 import {
   ArnFormat,
@@ -746,7 +746,7 @@ export class ControlPlaneStack extends Stack {
     if (naming.env !== undefined) sessions.connectUnwaitedTaskBackstop(slackThreads, slackSecret, callbackSigningKey.valueAsString);
     // Own both attachments in this releasable stack. Secret changes must never mutate the
     // protected foundation template or require a separate foundation change set.
-    grantOpenRouterSecret(this, [slackOrchestratorRole.roleName, sessions.instanceRoleName]);
+    grantProviderKeySecrets(this, [slackOrchestratorRole.roleName, sessions.instanceRoleName]);
     sessions.steps.addEnvironment("CONTROL_PLANE_URL", api.attrApiEndpoint);
     sessions.connectDispatcher(dispatcher);
     sessions.connectBroker(broker);

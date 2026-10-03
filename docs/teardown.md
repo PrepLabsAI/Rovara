@@ -174,7 +174,8 @@ aws secretsmanager delete-secret --secret-id <name> --force-delete-without-recov
 ```
 
 Repeat `delete-secret` for each name the listing shows. A secret you made yourself for
-`--openrouter-secret-arn` is yours to keep or delete. Revoke the OpenRouter key in OpenRouter too.
+`--openrouter-secret-arn`, `--anthropic-secret-arn` or `--openai-secret-arn` is yours to keep or delete.
+Revoke the OpenRouter, Anthropic or OpenAI key at the provider too.
 
 **8. Delete every parameter under `/agentx/<env>/`**, the settings and the lock last:
 

@@ -9,7 +9,8 @@ import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SNSClient } from "@aws-sdk/client-sns";
 import { SSMClient } from "@aws-sdk/client-ssm";
 import { STSClient } from "@aws-sdk/client-sts";
-import { AgentXError, agentXError, environmentOperatorRoleName, environmentStackName } from "@agentx/contracts";
+import { AgentXError, agentXError, environmentOperatorRoleName, environmentStackName, keyedProviderSecretName } from "@agentx/contracts";
+import type { DirectProvider } from "../deploy/answer-schemas.js";
 import { authorizeCredential, secretsManagerAuthorizeSecrets } from "../admin/authorize.js";
 import { loginWithPkce, openSystemBrowser } from "../auth.js";
 import { cliErrorFor, cloudFormationOutputsReader, prepareDeployment, realCommandRunner, type DeployCliDependencies, type PreparedDeployment, type Writer } from "../deploy/commands.js";
@@ -31,7 +32,7 @@ import type { SigninFlags } from "../signin/collect.js";
 import { SystemCredentialTokenStore, type TokenStore } from "../token-store.js";
 import { isPrereleaseVersion, RELEASE_VERSION } from "../version.js";
 import {
-  assertResumeFlagsMatch, checkAlertWebhook, collectInitAnswers, openRouterSecretName, persistInitAnswers, readOpenRouterKeyAnswer, storeAlertWebhook,
+  assertResumeFlagsMatch, checkAlertWebhook, collectInitAnswers, openRouterSecretName, persistInitAnswers, readOpenRouterKeyAnswer, readProviderKeyAnswer, resumedKeySources, storeAlertWebhook,
   webhookDisplay, webhookFlagDisplay, type CollectedAnswers, type InitFlags,
 } from "./answers.js";
 import { clashChecks } from "./clash-checks.js";
@@ -458,6 +459,15 @@ async function resumedOpenRouterKey(input: { flags: InitFlags; processEnv: NodeJ
   return readOpenRouterKeyAnswer({ source: input.flags.openrouterKey, processEnv: input.processEnv, prompter: input.prompter });
 }
 
+/** The same for --anthropic-key-file/--anthropic-key-env and the --openai-… pair (spec 054). */
+async function resumedDirectKeys(input: { flags: InitFlags; processEnv: NodeJS.ProcessEnv; prompter: Prompter }): Promise<Array<[DirectProvider, string]>> {
+  const keys: Array<[DirectProvider, string]> = [];
+  for (const [provider, source] of resumedKeySources(input.flags)) {
+    keys.push([provider, await readProviderKeyAnswer(provider, { source, processEnv: input.processEnv, prompter: input.prompter })]);
+  }
+  return keys;
+}
+
 /** A bundle resume goes on only in the bundle's own account and release, once the platform team's
  * access stack exists and finished. */
 async function assertBundleResumable(input: { bundle: BundleAnswers; bundleDir: string; account: string; releaseVersion: string; stackStatus: StackStatusReader }): Promise<void> {
@@ -812,6 +822,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
           skipAccount: prereqOptions.skipAccount === true,
           ...(prereqOptions.extraChecks === undefined ? {} : { extraChecks: prereqOptions.extraChecks }),
           ...(pendingKey === undefined ? {} : { openRouterKey: pendingKey }),
+          ...(collected?.directKeys === undefined ? {} : { directKeys: collected.directKeys }),
         });
       } catch (error) {
         // A failure no check reported (a cdk bootstrap that fails after yes, say) is still listed,
@@ -826,6 +837,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   let prerequisitesPassed = false;
   let rotatedWebhook: string | undefined;
   let rotatedOpenRouterKey: string | undefined;
+  let rotatedDirectKeys: Array<[DirectProvider, string]> = [];
   if (collected !== undefined) {
     // FR-018: the account and region were already checked, right after the region was chosen.
     // Spec 048 FR-028: on the page, a failed check offers Change answers, and the settings come
@@ -846,7 +858,11 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
           answers: collected.answers, notes: collected.notes, prompter, page: session.wizard !== undefined,
           write: (text) => session.output.write(text),
           ...(session.wizard === undefined ? {} : { show: (plan: WizardPlan) => session.wizard?.plan(plan) }),
-          extras: { storesOpenRouterKey: collected.openRouterKey !== undefined, ...(collected.openRouterProviders === undefined ? {} : { openRouterProviders: collected.openRouterProviders }) },
+          extras: {
+            storesOpenRouterKey: collected.openRouterKey !== undefined,
+            ...(collected.openRouterProviders === undefined ? {} : { openRouterProviders: collected.openRouterProviders }),
+            storesProviderKeys: Object.keys(collected.directKeys ?? {}) as DirectProvider[],
+          },
         });
         if (action === "change") {
           collected = await collect(collected.settings);
@@ -868,6 +884,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     if (session.wizard !== undefined) session.wizard.resume(await resumeScreen(store, env, steps));
     rotatedWebhook = await resumedAlertWebhook({ answers: finalAnswersRef.current, flags: options.flags, processEnv, prompter });
     rotatedOpenRouterKey = await resumedOpenRouterKey({ flags: options.flags, processEnv, prompter });
+    rotatedDirectKeys = await resumedDirectKeys({ flags: options.flags, processEnv, prompter });
   }
 
   const finalAnswers = finalAnswersRef.current;
@@ -885,6 +902,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     } else {
       if (rotatedWebhook !== undefined && finalAnswers.alert.kind === "webhook") await storeAlertWebhook(secrets, finalAnswers.alert.secretName, rotatedWebhook);
       if (rotatedOpenRouterKey !== undefined) await secrets.put(openRouterSecretName(env), rotatedOpenRouterKey);
+      for (const [provider, key] of rotatedDirectKeys) await secrets.put(keyedProviderSecretName(env, provider), key);
     }
     // On every bundle run, not only the first: a run that stopped between saving the answers and
     // this write would otherwise leave access pending, and the operator role refused on it.

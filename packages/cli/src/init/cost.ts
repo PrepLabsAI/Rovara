@@ -4,6 +4,7 @@
 // openRouterSecretName, which would import plan.ts back). Prices are us-east-1 list prices checked
 // on the date in PRICES_CHECKED; the orchestrator per-turn figures come from the 2026-09-25
 // evaluation in the spec's Decisions.
+import { listPricesPerMillion } from "@agentx/model-runtime/catalog";
 import type { InitAnswers } from "./install-state.js";
 import type { ModelRole } from "./prerequisites.js";
 
@@ -47,6 +48,16 @@ const ASSUMED_PRICES: ReadonlySet<string> = new Set(["us.anthropic.claude-haiku-
  * coding model had no price, so the plan left out its biggest cost). */
 const WORKER_PER_SESSION: Record<string, number> = { "amazon.nova-pro-v1:0": 0.192, "us.anthropic.claude-sonnet-4-6": 0.75 };
 
+/** Tokens per use behind the direct providers' prices (spec 054 FR-016). The orchestrator's match the
+ * evaluated $0.025 a turn for Sonnet 4.6 at Anthropic's list price; the others are the assumptions
+ * stated above. */
+const TOKENS_PER_USE: Readonly<Record<ModelRole, { input: number; output: number }>> = {
+  orchestrator: { input: 7_000, output: 300 },
+  classifier: { input: 2_000, output: 100 },
+  worker: { input: 200_000, output: 10_000 },
+};
+const LIST_PRICE_LABELS: Readonly<Record<string, string>> = { anthropic: "Anthropic list price", openai: "OpenAI list price" };
+
 export const STATED_USAGE = { turnsPerMonth: 1000, workerSessionsPerMonth: 100, workerInstanceHoursPerMonth: 60, keptWorkspaces: 10 };
 
 export interface CostLine { item: string; usd: number | undefined; basis: string }
@@ -63,14 +74,26 @@ export const ROLE_NAMES: Readonly<Record<ModelRole, string>> = { orchestrator: "
 export const MODEL_NAMES: Readonly<Record<string, string>> = {
   "us.anthropic.claude-sonnet-4-6": "Claude Sonnet 4.6", "zai.glm-4.7": "GLM 4.7", "amazon.nova-lite-v1:0": "Amazon Nova Lite",
   "us.anthropic.claude-haiku-4-5-20251001-v1:0": "Claude Haiku 4.5", "amazon.nova-pro-v1:0": "Amazon Nova Pro",
+  // Spec 054 D3's suggestions for the direct providers.
+  "claude-sonnet-4-6": "Claude Sonnet 4.6", "claude-haiku-4-5": "Claude Haiku 4.5", "gpt-5.4": "GPT-5.4", "gpt-5.4-mini": "GPT-5.4 mini",
 };
 export const PRICE_NOT_ON_FILE = "price not on file";
 export const modelName = (id: string): string => MODEL_NAMES[id] ?? id;
 
 /** One use of a model, in US dollars, or undefined when its price is not on file. OpenRouter's
- * prices are not on file. The plan's estimate and the choices' labels both read it. */
-const pricePerUse = (role: ModelRole, id: string, provider: string | undefined): number | undefined =>
-  (provider === "openrouter" ? undefined : TABLES[role][id]);
+ * prices are not on file. An Anthropic or OpenAI model is priced from the installed Pi catalog's list
+ * prices at TOKENS_PER_USE, to two significant digits. The plan's estimate and the choices' labels
+ * both read it. */
+function pricePerUse(role: ModelRole, id: string, provider: string | undefined): number | undefined {
+  if (provider === "openrouter") return undefined;
+  if (provider !== undefined && LIST_PRICE_LABELS[provider] !== undefined) {
+    const prices = listPricesPerMillion({ provider, modelId: id });
+    if (prices === undefined) return undefined;
+    const tokens = TOKENS_PER_USE[role];
+    return Number(((tokens.input * prices.input + tokens.output * prices.output) / 1_000_000).toPrecision(2));
+  }
+  return TABLES[role][id];
+}
 
 /** FR-024: a model's price as the choice that offers it shows it. */
 export function modelPriceLabel(role: ModelRole, id: string, provider = "amazon-bedrock"): string {
@@ -89,7 +112,8 @@ export function estimateMonthlyCost(models: InitAnswers["models"], usage = STATE
       unpriced.push(id);
       return { item, usd: undefined, basis: `not priced: ${PRICE_NOT_ON_FILE} for ${id}` };
     }
-    const assumed = ASSUMED_PRICES.has(id) ? ", assumed: no confirmed Bedrock rate" : "";
+    const listed = LIST_PRICE_LABELS[models.providers?.[role] ?? ""];
+    const assumed = listed !== undefined ? `, ${listed}` : ASSUMED_PRICES.has(id) ? ", assumed: no confirmed Bedrock rate" : "";
     return priced(item, each * uses, `${count(uses)} ${what} at about $${each} each${assumed}`);
   };
   const lines: CostLine[] = [
