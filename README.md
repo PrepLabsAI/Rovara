@@ -29,7 +29,8 @@ EC2 project revision for new work.
 What is built today:
 
 - **The installer.** `agentx init` installs a complete environment in your own AWS account. Then
-  `project add`, `channel add` and `connector add` add more projects, channels and connectors.
+  `project add`, `channel add` and `connector add` add more projects, channels and connectors:
+  Linear, Jira, Asana, or any other remote MCP server.
 - **Day-2 commands.** `agentx config`, `doctor`, `upgrade` (and `upgrade --export` for a platform
   team's pipeline) and `destroy` run and remove an installed environment.
 - **Developer sign-in.** Developers sign in with Slack, your company's sign-in, or both, with
@@ -100,7 +101,8 @@ its request path, and how environments are installed and torn down.
 
 `agentx init` installs a complete AgentX environment in your own AWS account, step by step: its
 stacks, its own GitHub App and Slack app, developer sign-in, your first project and its Slack
-channel, and, if you want them now, the Linear, Jira and Asana connectors. It prints everything it
+channel, and, if you want them now, the Linear, Jira and Asana connectors (any other MCP server is
+added afterwards with `connector add mcp`). It prints everything it
 will create and an estimated monthly cost before it creates anything, and running it again resumes
 where it stopped.
 
@@ -150,7 +152,7 @@ node packages/cli/dist/bin.js --env <name> init --region us-east-1 --release ./r
 7. sets up developer sign-in: Slack, your company's sign-in (OIDC), or both;
 8. creates your admin user and signs you in;
 9. sets up your first project (on EC2 workers) and its Slack channel;
-10. offers the Linear, Jira and Asana connectors;
+10. offers the Linear, Jira and Asana connectors (other MCP servers are added after the install);
 11. subscribes alerts, sets the monthly budget and sends a test alarm;
 12. ends once a person mentions the bot in the channel and gets a threaded reply, and prints the
     command developers use to sign in.
@@ -181,6 +183,8 @@ After the install, day-2 work runs with the operator role that `init` created:
 - `agentx --env <name> project add` and `agentx --env <name> channel add` add another project and
   channel (the worker image has Python 3 and uv for Python projects).
 - `agentx --env <name> connector add linear|jira|asana` adds a connector later, and
+  `agentx --env <name> connector add mcp` connects any other remote MCP server, such as Sentry or
+  PagerDuty ([docs/connectors/custom-mcp.md](docs/connectors/custom-mcp.md)), and
   `agentx --env <name> alerts test` sends another test alarm.
 - `agentx --env <name> doctor` checks every part of the environment and says how to fix what is
   wrong.
@@ -317,7 +321,7 @@ agentx --env <name> admin task share-mode --task <task-id> --mode view|continue
 Run `agentx --help` or `agentx <command> --help` for the complete surface: `init`, `deploy`,
 `upgrade`, `config list|get|set`, `doctor`, `destroy`, `env list|use|adopt`,
 `signin show|enable|disable|check`, `project add`, `channel add`,
-`connector add linear|jira|asana`, `alerts test`, `login`, `logout`, `whoami`, `workspaces`,
+`connector add linear|jira|asana|mcp`, `alerts test`, `login`, `logout`, `whoami`, `workspaces`,
 `mcp`, `mcp install`, `admin project register`, `admin workspace cancel|stop`,
 `admin slack bind|unbind`, `admin credential register|authorize|list`, `admin turns export`, and
 `admin task share-mode`. Developer commands are `login <url>`, `whoami`, `workspaces`, `logout`,
@@ -400,7 +404,9 @@ unchanged. A request that supplies a bound argument itself is refused.
 
 In an installed environment, `agentx --env <name> connector add linear|jira|asana` stores the
 credential under `agentx/<env>/connectors/<type>` (for example `agentx/prod/connectors/linear`)
-and registers it for you, so you can skip the manual steps below. They are for the maintainers'
+and registers it for you, so you can skip the manual steps below. `connector add mcp` does the same
+for any other MCP server, under `agentx/<env>/connectors/mcp-<name>`, with the credential pinned to
+the server's host. They are for the maintainers'
 deployment, whose secrets use `agentx/connectors/<name>`.
 
 Connectors other than GitHub read their credential from an AWS Secrets Manager secret named

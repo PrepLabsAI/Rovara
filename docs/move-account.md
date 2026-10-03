@@ -61,7 +61,11 @@ project, add them again:
 
 ```sh
 agentx --env <new env> connector add linear|jira|asana --project <name>
+agentx --env <new env> connector add mcp --project <name> --endpoint <url> --name <name>
 ```
+
+An `mcp` connector's credential is pinned to its server's host, so the new account registers it
+again with the same pin.
 
 ## 5. What does not move
 

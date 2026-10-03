@@ -47,7 +47,8 @@ checks, in order:
   `init` makes), and the bot is in the channel `init` bound.
 - **github**: the GitHub App's installation and its repository access.
 - **connectors**: for each connector in this environment's project files, the credential exists
-  and, for Linear and Jira, still works. Saved warnings (such as a Jira account that can see
+  and, for Linear, Jira and an `mcp` connector's API key, still works (an `mcp` key must still reach
+  every approved tool). Saved warnings (such as a Jira account that can see
   other projects) show here.
 - **models**: each model answers a one-token call.
 - **alerts**: the alert subscription is confirmed, and the budget matches its setting.
@@ -238,6 +239,10 @@ save. `doctor` reads the secret itself, so it checks the new token at once.
   invites the bot, and waits for a mention to get a threaded reply (`--no-check` skips the wait).
 - `agentx --env <env> connector add linear|jira|asana --project <name>`: adds a connector, tests a
   read, and registers the project's next revision.
+- `agentx --env <env> connector add mcp --project <name> --endpoint <url>`: connects any other
+  remote MCP server with an API key or an OAuth sign-in, lists its tools as the test read, and
+  registers the project's next revision with the tools you approve
+  ([connectors/custom-mcp.md](connectors/custom-mcp.md)).
 - `agentx --env <env> alerts test`: sends a test alarm to the alert address and asks whether it
   arrived.
 
