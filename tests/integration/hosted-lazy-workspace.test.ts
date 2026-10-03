@@ -104,7 +104,7 @@ async function turnIn(s: Scenario, n: number, text: string, work: { coding: bool
         pullRequestResult: (request, options) => base.pullRequestResult(request, options),
       };
       const runtime = await createHostedSlackRuntime(input, {
-        stateDirectory: await createFixtureDirectory("agentx-hosted-lazy-"), api, model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
+        stateDirectory: await createFixtureDirectory("agentx-hosted-lazy-"), api, model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" },
       });
       try {
         const listed = await runtime.session.getToolDefinition("github__list_issues")!.execute(`list-${message.eventId}`, {}, undefined, undefined, {} as never);

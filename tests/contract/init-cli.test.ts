@@ -1030,7 +1030,7 @@ async function bundleDir(overrides: Record<string, unknown> = {}): Promise<strin
   const dir = await tmp("agentx-bundle-");
   await writeFile(join(dir, "init-answers.json"), JSON.stringify({
     schemaVersion: 1, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates", releaseVersion: "1.2.3",
-    identity: { mode: "cognito" }, models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "amazon.nova-lite-v1:0", worker: "amazon.nova-pro-v1:0" },
+    identity: { mode: "cognito" }, models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
     ...overrides,
   }));
   return dir;
@@ -1064,7 +1064,7 @@ describe("init --resume --from-bundle (FR-026)", () => {
     expect(h.deployer.requests).toEqual([]);
     const saved = await readInstallAnswers(h.store, "staging");
     expect(saved).toMatchObject({ engine: "templates", identity: { mode: "cognito" }, github: { account: "acme" }, alert: { kind: "email", address: "ops@example.com" } });
-    expect(saved?.models.worker).toBe("amazon.nova-pro-v1:0");
+    expect(saved?.models.worker).toBe("us.anthropic.claude-sonnet-4-6");
   });
 
   it("records access as done on a rerun whose first run saved the answers but stopped before the progress", async () => {

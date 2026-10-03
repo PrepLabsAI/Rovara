@@ -65,10 +65,10 @@ export class SlackOrchestratorStack extends Stack {
     const openRouterProviders = openRouterRoutingParameter(this);
     const classifierProvider = new CfnParameter(this, "GateClassifierProvider", { type: "String", default: "amazon-bedrock", allowedValues: ["amazon-bedrock", "openrouter"] });
     const modelProvider = new CfnParameter(this, "ModelProvider", { type: "String", default: "amazon-bedrock" });
-    const modelId = new CfnParameter(this, "ModelId", { type: "String", default: "amazon.nova-pro-v1:0" });
+    const modelId = new CfnParameter(this, "ModelId", { type: "String", default: "us.anthropic.claude-sonnet-4-6" });
     const gateClassifierModelId = new CfnParameter(this, "GateClassifierModelId", {
       type: "String",
-      default: "amazon.nova-lite-v1:0",
+      default: "us.anthropic.claude-haiku-4-5-20251001-v1:0",
       description: "Small model the action gate asks whether a member asked for a change",
     });
 

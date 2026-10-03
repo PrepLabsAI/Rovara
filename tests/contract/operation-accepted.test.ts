@@ -99,7 +99,7 @@ describe("onOperationAttached (#173)", () => {
       recoverableOperations: [OPERATION],
       requestId: () => "44444444-4444-4444-8444-444444444444",
       onOperationAttached: attached,
-    }, { stateDirectory: await createFixtureDirectory("agentx-attached-"), api: fakeApi([]), model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" } });
+    }, { stateDirectory: await createFixtureDirectory("agentx-attached-"), api: fakeApi([]), model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" } });
     try {
       await runtime.session.getToolDefinition("agentx_task_result")!.execute("result-1", { operationId: OPERATION }, undefined, undefined, {} as never);
     } finally {
@@ -123,7 +123,7 @@ describe("the hosted Slack runtime", () => {
       computePrepared: true,
       requestId: () => "44444444-4444-4444-8444-444444444444",
       onOperationAccepted: accepted,
-    }, { stateDirectory: await createFixtureDirectory("agentx-accepted-"), api: fakeApi([]), model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" } });
+    }, { stateDirectory: await createFixtureDirectory("agentx-accepted-"), api: fakeApi([]), model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" } });
     try {
       await runtime.session.getToolDefinition("agentx_submit_task")!.execute("submit-1", { prompt: "fix it" }, undefined, undefined, {} as never);
     } finally {

@@ -726,8 +726,8 @@ What decides that a call is destructive or changes an item, so you can approve t
   its own rules decide. The built-in GitHub, Linear, Jira and Asana connectors all declare them.
 
 The model that checks changes is a deployment setting: the `AgentXSlackOrchestrator` parameter
-`GateClassifierModelId`, default Amazon Nova Lite (`amazon.nova-lite-v1:0`). Claude Haiku 4.5
-(`us.anthropic.claude-haiku-4-5-20251001-v1:0`) is an alternative. In an installed environment,
+`GateClassifierModelId`, default Claude Haiku 4.5 (`us.anthropic.claude-haiku-4-5-20251001-v1:0`),
+which needs the one-time Anthropic use-case form in the Bedrock console. In an installed environment,
 `agentx init` asks for it (`--classifier-model`), and `agentx --env <name> config set
 models.classifier <id>` changes it later, after testing the model with one call. If the model is
 unavailable, errors, gives an answer that is not a plain verdict, or does not answer in time, AgentX asks. The time limit is 8

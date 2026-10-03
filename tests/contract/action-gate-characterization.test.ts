@@ -10,7 +10,7 @@ import { createHostedSlackRuntime } from "../../packages/slack-service/src/runti
 import { createFixtureDirectory } from "../fixtures/index.js";
 
 const context = { workspaceId: "11111111-1111-4111-8111-111111111111", conversationId: "22222222-2222-4222-8222-222222222222" };
-const model = { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" };
+const model = { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" };
 const catalog: ConnectorCatalog = {
   connector: "tracker", skipped: [],
   tools: [

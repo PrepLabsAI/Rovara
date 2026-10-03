@@ -130,13 +130,13 @@ describe("agentx env", () => {
 describe("agentx env adopt", () => {
   const liveStacks: Record<string, { outputs: Record<string, string>; parameters: Record<string, string>; status: string }> = {
     AgentXProductionFoundation: { outputs: {}, parameters: {}, status: "UPDATE_COMPLETE" },
-    AgentXProductionRuntime: { outputs: {}, parameters: { ModelId: "amazon.nova-pro-v1:0" }, status: "UPDATE_COMPLETE" },
+    AgentXProductionRuntime: { outputs: {}, parameters: { ModelId: "us.anthropic.claude-sonnet-4-6" }, status: "UPDATE_COMPLETE" },
     AgentXControlPlane: {
       outputs: { ApiEndpoint: "https://abc.execute-api.us-east-1.amazonaws.com" },
       parameters: { OidcIssuer: "https://cognito-idp.us-east-1.amazonaws.com/us-east-1_x", OidcAudience: "client123" },
       status: "UPDATE_COMPLETE",
     },
-    AgentXSlackOrchestrator: { outputs: {}, parameters: { ModelId: "amazon.nova-pro-v1:0", GateClassifierModelId: "amazon.nova-lite-v1:0" }, status: "UPDATE_COMPLETE" },
+    AgentXSlackOrchestrator: { outputs: {}, parameters: { ModelId: "us.anthropic.claude-sonnet-4-6", GateClassifierModelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0" }, status: "UPDATE_COMPLETE" },
   };
   const stacks: StackReader = { describe: async (name) => liveStacks[name] };
   const identity: CallerIdentity = { get: async () => ({ account: "944937319445", arn: "arn:aws:iam::944937319445:user/admin" }) };

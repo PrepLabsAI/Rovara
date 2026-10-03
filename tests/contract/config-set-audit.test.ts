@@ -38,7 +38,7 @@ async function configOver(harness: Harness, overrides: Partial<ConfigServices> =
     adminSession: async () => SESSION,
     fetch: brokerFetch(harness),
     cloudFormation,
-    stacks: stacks({ "agentx-staging-control-plane": { McpConfirmElicitation: mcp, SlackThreadTurnsPerMinute: "6" }, "agentx-staging-slack": { SlowTurnMinutes: "5", ModelId: "us.anthropic.claude-sonnet-4-6" }, "agentx-staging-runtime": { ModelId: "amazon.nova-pro-v1:0" } }),
+    stacks: stacks({ "agentx-staging-control-plane": { McpConfirmElicitation: mcp, SlackThreadTurnsPerMinute: "6" }, "agentx-staging-slack": { SlowTurnMinutes: "5", ModelId: "us.anthropic.claude-sonnet-4-6" }, "agentx-staging-runtime": { ModelId: "us.anthropic.claude-sonnet-4-6" } }),
     ...overrides,
   });
   return { services, cloudFormation };
@@ -231,10 +231,10 @@ describe("agentx config set records stack-parameter changes in the admin change 
   it.each([
     ["alerts.slowTurnMinutes", "9", "5", "stack parameter SlowTurnMinutes on agentx-staging-slack"],
     ["limits.threadTurnsPerMinute", "12", "6", "stack parameter SlackThreadTurnsPerMinute on agentx-staging-control-plane"],
-    ["models.worker", "amazon.nova-premier-v1:0", "amazon.nova-pro-v1:0", "stack parameter ModelId on agentx-staging-runtime"],
+    ["models.worker", "zai.glm-4.7", "us.anthropic.claude-sonnet-4-6", "stack parameter ModelId on agentx-staging-runtime"],
   ])("records %s, which shares the stack-parameter path", async (key, value, before, target) => {
     const harness = await createAdminChangeBroker();
-    const cloudFormation = fakeCloudFormation({ parameters: { SlowTurnMinutes: "5", SlackThreadTurnsPerMinute: "6", ModelId: "amazon.nova-pro-v1:0" } });
+    const cloudFormation = fakeCloudFormation({ parameters: { SlowTurnMinutes: "5", SlackThreadTurnsPerMinute: "6", ModelId: "us.anthropic.claude-sonnet-4-6" } });
     const { services } = await configOver(harness, { cloudFormation });
     await runConfigSet(services, "staging", { key, value, yes: true });
     expect(audits(harness)).toEqual([expect.objectContaining({ kind: "set_config", status: "applied", change: { kind: "set_config", key, target, before, after: value } })]);

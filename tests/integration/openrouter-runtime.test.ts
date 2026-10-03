@@ -57,7 +57,7 @@ describe("OpenRouter through the installed Pi transport", () => {
 
   it("uses the configured worker default for a nonexistent or empty secret, but refuses access-denied fallback", async () => {
     const log = vi.spyOn(console, "info").mockImplementation(() => {});
-    const env = { ...environment, AGENTX_MODEL_PROVIDER: "amazon-bedrock", AGENTX_MODEL_ID: "amazon.nova-lite-v1:0" };
+    const env = { ...environment, AGENTX_MODEL_PROVIDER: "amazon-bedrock", AGENTX_MODEL_ID: "us.anthropic.claude-haiku-4-5-20251001-v1:0" };
     try {
       for (const readSecret of [async () => undefined, async () => { throw Object.assign(new Error("missing"), { name: "ResourceNotFoundException" }); }]) {
         const resolved = await createModelRuntimeWithFallback(selected, "worker", { environment: env, readSecret });

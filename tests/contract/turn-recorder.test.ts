@@ -14,7 +14,7 @@ function recorder() {
     manifest: "What this channel can do:",
     tools: [{ name: "agentx_submit_task", description: "Run work." }, { name: "github__list_issues", description: "List issues." }],
     connectorOf: new Map([["github__list_issues", "github"]]),
-    model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
+    model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" },
   });
   return turn;
 }
@@ -22,7 +22,7 @@ function recorder() {
 describe("turn recorder", () => {
   it("records what was offered as hashes, never the text", () => {
     const observation = recorder().observation();
-    expect(observation.model).toEqual({ provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" });
+    expect(observation.model).toEqual({ provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" });
     expect(observation.manifestHash).toMatch(/^[a-f0-9]{64}$/);
     expect(observation.offeredTools.map((tool) => tool.name)).toEqual(["agentx_submit_task", "github__list_issues"]);
     expect(JSON.stringify(observation)).not.toContain("List issues.");

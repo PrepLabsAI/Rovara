@@ -43,7 +43,7 @@ describe("hosted Slack turn with Linear", () => {
         api: () => ({ ensureWorkspace: async () => ({ ...(resolved as object), status: "READY" }) as never, createConversation: async () => randomUUID(), waitForOperation: vi.fn(), startClose: vi.fn(), completeClose: vi.fn() }),
         threads: { load: async () => ({ workspaceId, conversationId: "11111111-1111-4111-8111-111111111111" }), saveConversation: vi.fn(), saveSettingsRevision: vi.fn(), close: vi.fn(), finish: vi.fn() },
         runTurn: async (input) => {
-          const runtime = await createHostedSlackRuntime(input, { stateDirectory: await createFixtureDirectory("agentx-slack-linear-"), api, model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" } });
+          const runtime = await createHostedSlackRuntime(input, { stateDirectory: await createFixtureDirectory("agentx-slack-linear-"), api, model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" } });
           try {
             expect(runtime.session.getActiveToolNames()).toEqual(expect.arrayContaining(["linear__list_issues", "linear__get_issue", "linear__save_issue", "linear__save_comment"]));
             const list = runtime.session.getToolDefinition("linear__list_issues")!;

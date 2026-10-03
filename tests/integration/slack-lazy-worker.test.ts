@@ -351,7 +351,7 @@ describe("the hosted runtime and the lazy worker", () => {
     const api = { submitTask: vi.fn(), taskStatus: vi.fn(), taskResult: vi.fn(), followUp: vi.fn(), createPullRequest: vi.fn(), managePullRequest: vi.fn(), pullRequestResult: vi.fn() };
     const runtime = await createHostedSlackRuntime(
       { message: message(), subject: "T0BSHLLUGBD/C0123456789/1695500000.000001", workspaceId, conversationId, orchestratorInstructions: "Delegate.", requestId: () => operationId, worker: access },
-      { stateDirectory: await createFixtureDirectory("agentx-lazy-runtime-"), api, model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" } },
+      { stateDirectory: await createFixtureDirectory("agentx-lazy-runtime-"), api, model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" } },
     );
     try {
       const result = await runtime.session.getToolDefinition("agentx_submit_task")!.execute("call-1", { prompt: "list" }, undefined, undefined, {} as never);

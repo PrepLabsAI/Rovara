@@ -283,7 +283,7 @@ describe("agentx init --ui", () => {
     const dir = await tmp("agentx-init-ui-bundle-");
     await writeFile(join(dir, "init-answers.json"), JSON.stringify({
       schemaVersion: 1, env: "staging", region: "us-east-1", account: "123456789012", engine: "templates", releaseVersion: "1.2.3",
-      identity: { mode: "cognito" }, models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "amazon.nova-lite-v1:0", worker: "amazon.nova-pro-v1:0" },
+      identity: { mode: "cognito" }, models: { orchestrator: "us.anthropic.claude-sonnet-4-6", classifier: "us.anthropic.claude-haiku-4-5-20251001-v1:0", worker: "us.anthropic.claude-sonnet-4-6" },
     }));
     // A bundle for another environment is refused before the wizard starts: no page is opened.
     const wrong = await tmp("agentx-init-ui-bundle-dev-");

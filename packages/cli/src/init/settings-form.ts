@@ -27,8 +27,6 @@ export const SETTINGS_FIELD = {
 export type SettingsFieldName = (typeof SETTINGS_FIELD)[keyof typeof SETTINGS_FIELD];
 
 const GLM = "zai.glm-4.7";
-const HAIKU = "us.anthropic.claude-haiku-4-5-20251001-v1:0";
-const NOVA_PRO = "amazon.nova-pro-v1:0";
 const DEFAULT = DEFAULT_BEDROCK_MODELS;
 
 export const ORCHESTRATOR_MODEL_CHOICES: ReadonlyArray<{ value: string; label: string }> = [
@@ -36,13 +34,11 @@ export const ORCHESTRATOR_MODEL_CHOICES: ReadonlyArray<{ value: string; label: s
   { value: GLM, label: `GLM 4.7 (lower cost; ${modelPriceLabel("orchestrator", GLM)})` },
 ];
 export const CLASSIFIER_MODEL_CHOICES: ReadonlyArray<{ value: string; label: string }> = [
-  { value: DEFAULT.classifier, label: `Amazon Nova Lite (recommended; ${modelPriceLabel("classifier", DEFAULT.classifier)})` },
-  { value: HAIKU, label: `Claude Haiku 4.5 (${modelPriceLabel("classifier", HAIKU)}; needs a one-time Anthropic form in Bedrock)` },
+  { value: DEFAULT.classifier, label: `Claude Haiku 4.5 (recommended; ${modelPriceLabel("classifier", DEFAULT.classifier)}; needs a one-time Anthropic form in Bedrock)` },
 ];
 /** FR-021: the coding model is a choice too. */
 export const WORKER_MODEL_CHOICES: ReadonlyArray<{ value: string; label: string }> = [
   { value: DEFAULT.worker, label: `Claude Sonnet 4.6 (recommended; ${modelPriceLabel("worker", DEFAULT.worker)})` },
-  { value: NOVA_PRO, label: `Amazon Nova Pro (lower cost; ${modelPriceLabel("worker", NOVA_PRO)})` },
 ];
 const OTHER_MODEL = { value: "other", label: "Another Bedrock model id" };
 

@@ -47,7 +47,7 @@ function turn(overrides: Partial<TurnRecord> = {}): TurnRecord {
     eventId: "EvTURN00001", subject, receivedAt, requestedBy: { teamId: thread.teamId, userId: requester },
     disposition: "answered", startedAt: receivedAt, finishedAt: "2026-09-24T10:00:12.300Z", durationMs: 12_300,
     requestText: "close TRK-9, the secret plan", responseText: "Closed TRK-9, private answer",
-    model: { provider: "amazon-bedrock", modelId: "amazon.nova-pro-v1:0" },
+    model: { provider: "amazon-bedrock", modelId: "us.anthropic.claude-sonnet-4-6" },
     offeredTools: [{ name: "tracker__close_item", descriptionHash: "a".repeat(64) }],
     calls: [{ name: "tracker__close_item", connector: "tracker", arguments: "{\"id\":\"TRK-9\"}", argumentsFingerprint: "b".repeat(32), validation: "ok", outcome: "SUCCEEDED", durationMs: 800 }],
     emptyResponse: false, workerOperations: [], workspaceId: "11111111-1111-4111-8111-111111111111",

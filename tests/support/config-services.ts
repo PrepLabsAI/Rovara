@@ -63,8 +63,8 @@ export function services(overrides: Partial<ConfigServices> & { store: MemoryPar
   return {
     lines,
     secrets: memoryInitSecrets(),
-    cloudFormation: fakeCloudFormation({ parameters: { SlackThreadTurnsPerMinute: "6", BudgetMonthlyUsd: "100", ModelId: "amazon.nova-pro-v1:0" } }),
-    stacks: stacks({ "agentx-staging-control-plane": { SlackThreadTurnsPerMinute: "6", BudgetMonthlyUsd: "100", BudgetScope: "tag", SlackAppPostedMessages: "accept", SlackMemberWorkspaceLimit: "3", SlackOrganizationWorkspaceLimit: "20" }, "agentx-staging-slack": { ModelId: "us.anthropic.claude-sonnet-4-6", GateClassifierModelId: "amazon.nova-lite-v1:0", SlowTurnMinutes: "5" }, "agentx-staging-runtime": { ModelId: "amazon.nova-pro-v1:0" } }),
+    cloudFormation: fakeCloudFormation({ parameters: { SlackThreadTurnsPerMinute: "6", BudgetMonthlyUsd: "100", ModelId: "us.anthropic.claude-sonnet-4-6" } }),
+    stacks: stacks({ "agentx-staging-control-plane": { SlackThreadTurnsPerMinute: "6", BudgetMonthlyUsd: "100", BudgetScope: "tag", SlackAppPostedMessages: "accept", SlackMemberWorkspaceLimit: "3", SlackOrganizationWorkspaceLimit: "20" }, "agentx-staging-slack": { ModelId: "us.anthropic.claude-sonnet-4-6", GateClassifierModelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0", SlowTurnMinutes: "5" }, "agentx-staging-runtime": { ModelId: "us.anthropic.claude-sonnet-4-6" } }),
     identity: { get: async () => ({ account: "123456789012", arn: "arn:aws:sts::123456789012:assumed-role/agentx-staging-operator/alice" }) },
     checks: () => passingChecks(),
     alerts: fakeAlerts({ confirmAfterPolls: 0 }),

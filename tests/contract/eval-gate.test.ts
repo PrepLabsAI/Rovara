@@ -65,8 +65,8 @@ describe("gate evaluation cases (spec 014 SC-004, SC-005)", () => {
     expect(legacy.cases).toEqual([]);
   }, 60_000);
 
-  it("gives a live run the deployment's classifier model, Amazon Nova Lite unless overridden", () => {
-    expect(gateClassifierModel({})).toEqual({ provider: "amazon-bedrock", modelId: "amazon.nova-lite-v1:0" });
+  it("gives a live run the deployment's classifier model, Claude Haiku 4.5 unless overridden", () => {
+    expect(gateClassifierModel({})).toEqual({ provider: "amazon-bedrock", modelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0" });
     expect(gateClassifierModel({ AGENTX_GATE_CLASSIFIER_MODEL: "us.anthropic.claude-haiku-4-5-20251001-v1:0", AGENTX_GATE_CLASSIFIER_PROVIDER: "amazon-bedrock" }))
       .toEqual({ provider: "amazon-bedrock", modelId: "us.anthropic.claude-haiku-4-5-20251001-v1:0" });
   });

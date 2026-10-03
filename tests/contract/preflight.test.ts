@@ -15,7 +15,7 @@ describe("EC2 worker preflight (#87)", () => {
     workerSettings: {
       workerImage: `111122223333.dkr.ecr.us-east-1.amazonaws.com/agentx-worker-production@sha256:${"a".repeat(64)}`,
       modelProvider: "amazon-bedrock",
-      modelId: "amazon.nova-pro-v1:0",
+      modelId: "us.anthropic.claude-sonnet-4-6",
       promptCacheRetention: "long",
     },
     stateMachines: [{ name: "provisioner", status: "ACTIVE" }, { name: "deleter", status: "ACTIVE" }],
