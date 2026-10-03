@@ -139,7 +139,8 @@ async function usageItem(store: IndexStore, event: Record<string, unknown>): Pro
     operationId, workspaceId, project: context.project, origin: context.origin,
     requester: requesterOf(operation?.requestedBy, context.developerName), ...link(context),
     at, durationMs: Math.max(0, Date.parse(at) - (Number.isFinite(created) ? created : Date.parse(at))),
-    inputTokens: telemetry.data.tokens.input, outputTokens: telemetry.data.tokens.output, costUsd: telemetry.data.costUsd,
+    inputTokens: telemetry.data.tokens.input + telemetry.data.tokens.cacheRead + telemetry.data.tokens.cacheWrite,
+    outputTokens: telemetry.data.tokens.output, costUsd: telemetry.data.costUsd,
   };
   if (!UsageIndexRecordSchema.safeParse(indexed).success) return "invalid";
   return { ...usageIndexKey(at, operationId), entityType: "USAGE_INDEX", [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(at), ...indexed };

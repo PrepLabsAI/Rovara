@@ -454,7 +454,8 @@ async function usageEntries(deps: AdminReadDependencies, window: { since: string
         entries.push({
           project: (workspaceId === undefined ? undefined : projects.get(workspaceId)) ?? "unknown", origin: "slack", requester: requesterKey(item.requestedBy),
           day: String(item.receivedAt).slice(0, 10), turn: true, task: false, durationMs: 0,
-          input: known?.tokens.input ?? 0, output: known?.tokens.output ?? 0,
+          input: known === undefined ? 0 : known.tokens.input + known.tokens.cacheRead + known.tokens.cacheWrite,
+          output: known?.tokens.output ?? 0,
           // No usage at all is a known zero (R14); usage that no longer parses is an unknown cost.
           cost: telemetry === undefined ? 0 : known === undefined ? null : known.costUsd,
         });

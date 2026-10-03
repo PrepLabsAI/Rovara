@@ -125,6 +125,7 @@ export const UsageIndexRecordSchema = z.object({
   ...IndexIdentity,
   at: z.string().regex(ISO),
   durationMs: z.number().int().nonnegative(),
+  /** Includes cache reads and writes for newly indexed usage (#220); older rows retain their stored total. */
   inputTokens: z.number().int().nonnegative(),
   outputTokens: z.number().int().nonnegative(),
   /** spec 011: null when the provider gave no cost. */
