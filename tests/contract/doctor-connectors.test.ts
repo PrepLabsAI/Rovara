@@ -200,3 +200,41 @@ describe("doctor: connectors (Task 7 re-review)", () => {
     expect(checks.find((entry) => entry.name === "project files")).toMatchObject({ status: "warn", detail: "agentx init added Linear, but the only project files found for environment staging could not be used (see the warnings above)" });
   });
 });
+
+describe("doctor: generic mcp connectors (spec 055 phase 3)", () => {
+  const MCP_KEY = "sntrys_SECRETmcpKEY0123";
+  const sentry = {
+    name: "sentry", type: "mcp", endpoint: "https://mcp.sentry.dev/mcp", vendor: "Sentry", label: "Sentry", credentialRef: "mcp-sentry",
+    scopes: [{ alias: "sentry", values: {} }], scoping: { mode: "credential" }, tools: [{ name: "get_issue", access: "read" }],
+  };
+  const withKey = { ...connectorSecrets, "agentx/staging/connectors/mcp-sentry": JSON.stringify({ apiKey: MCP_KEY }) };
+
+  it("passes when the stored key still reaches every approved tool, never showing the key", async () => {
+    const vendors = fakeVendors();
+    const checks = await run({ connectors: [sentry], secrets: withKey, vendors });
+    expect(checks).toContainEqual(expect.objectContaining({ name: "Sentry (project payments)", status: "ok", detail: "the key reaches 2 tools, including every approved one" }));
+    expect(vendors.mcpCalls).toEqual([{ endpoint: "https://mcp.sentry.dev/mcp", token: MCP_KEY, auth: undefined }]);
+    expect(JSON.stringify(checks)).not.toMatch(/SECRET/);
+  });
+
+  it("warns when an approved tool is no longer offered, and fails a refused key or a missing secret", async () => {
+    const gone = await run({ connectors: [{ ...sentry, tools: [{ name: "get_issue", access: "read" }, { name: "retired_tool", access: "read" }] }], secrets: withKey });
+    expect(gone).toContainEqual(expect.objectContaining({ name: "Sentry (project payments)", status: "warn", detail: "the key works, but mcp.sentry.dev no longer offers retired_tool" }));
+    const refusedKey = await run({ connectors: [sentry], secrets: withKey, vendors: fakeVendors({ mcpRefuses: true }) });
+    expect(refusedKey).toContainEqual(expect.objectContaining({ status: "fail", detail: "mcp.sentry.dev refused the stored key: it expired or was revoked" }));
+    const missing = await run({ connectors: [sentry] });
+    expect(missing).toContainEqual(expect.objectContaining({
+      status: "fail", detail: "credentials missing: no secret agentx/staging/connectors/mcp-sentry",
+      fix: "agentx --env staging connector add mcp --project payments --endpoint https://mcp.sentry.dev/mcp --name sentry",
+    }));
+  });
+
+  it("does not refresh a stored OAuth sign-in, and skips a credential registered by hand", async () => {
+    const vendors = fakeVendors();
+    const oauth = await run({ connectors: [sentry], vendors, secrets: { ...connectorSecrets, "agentx/staging/connectors/mcp-sentry": JSON.stringify({ clientId: "c", refreshToken: "SECRETrefresh" }) } });
+    expect(oauth).toContainEqual(expect.objectContaining({ name: "Sentry (project payments)", status: "ok" }));
+    expect(vendors.calls).toEqual([]);
+    const byHand = await run({ connectors: [{ ...sentry, credentialRef: "sentry-prod" }] });
+    expect(byHand).toContainEqual(expect.objectContaining({ status: "skip", detail: "credential sentry-prod was registered by hand, so its secret is not known here" }));
+  });
+});

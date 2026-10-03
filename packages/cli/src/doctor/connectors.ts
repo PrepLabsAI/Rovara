@@ -2,7 +2,8 @@
 // connector in this environment's project files, the credential exists with the right shape and,
 // for Linear and Jira, still works. Asana is not refreshed here: a refresh rotates the token the
 // control plane holds (question 10). A vendor's own words never reach a check: they may repeat the key.
-import { OAuthRefreshTokenSecretSchema, StaticSecretSchema } from "@agentx/contracts";
+import { environmentConnectorSecretPrefix, OAuthRefreshTokenSecretSchema, StaticSecretSchema, type McpAuth } from "@agentx/contracts";
+import { mcpCredentialRef } from "../setup/connectors/mcp.js";
 import { connectorSecretName } from "../setup/connectors/revision.js";
 import { environmentProjectFiles } from "../setup/project-add.js";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
@@ -61,6 +62,52 @@ async function connectorCheck(context: DoctorContext, project: string, connector
   return empty.length > 0 ? check("connectors", name, "warn", `the API token works, but finds no issue in ${empty.join(", ")}`, "check that the Jira service account can still browse the project") : check("connectors", name, "ok", "the API token finds issues in the connected project");
 }
 
+/** A generic MCP connector's entry, as far as doctor reads it (spec 055 phase 3). */
+interface McpEntry { name: string; vendor?: unknown; endpoint?: unknown; credentialRef?: unknown; auth?: McpAuth; tools?: Array<{ name?: unknown }> }
+
+/**
+ * A generic connector set up by connector add mcp: its secret exists with a known shape and, for an
+ * API key, the server still lists every approved tool to it. An OAuth sign-in is not refreshed here,
+ * for the reason Asana's is not: a refresh rotates the token the control plane holds.
+ */
+async function mcpConnectorCheck(context: DoctorContext, project: string, entry: McpEntry): Promise<DoctorCheck> {
+  const { env, services } = context;
+  const vendor = typeof entry.vendor === "string" ? entry.vendor : entry.name;
+  const label = `${vendor} (project ${project})`;
+  const ref = mcpCredentialRef(entry.name);
+  if (entry.credentialRef !== ref) return check("connectors", label, "skip", `credential ${String(entry.credentialRef)} was registered by hand, so its secret is not known here`);
+  if (typeof entry.endpoint !== "string") return check("connectors", label, "skip", "the connector entry has no endpoint");
+  const again = `agentx --env ${env} connector add mcp --project ${project} --endpoint ${entry.endpoint} --name ${entry.name}`;
+  const secretName = `${environmentConnectorSecretPrefix(env)}${ref}`;
+  let raw: string | undefined;
+  try {
+    raw = await services.secrets.get(secretName);
+  } catch (error) {
+    return check("connectors", label, "fail", `could not read secret ${secretName} (${error instanceof Error ? error.name : "unknown error"})`, "check that your AWS role can read it, then run agentx doctor again");
+  }
+  if (raw === undefined) return check("connectors", label, "fail", `credentials missing: no secret ${secretName}`, again);
+  const value = parseJson(raw);
+  if (OAuthRefreshTokenSecretSchema.safeParse(value).success) {
+    return check("connectors", label, "ok", "the bot's sign-in is stored; not tested live, since a test refresh would rotate the token the control plane holds");
+  }
+  const secret = StaticSecretSchema.safeParse(value);
+  if (!secret.success) return check("connectors", label, "fail", `the secret ${secretName} has the wrong shape`, again);
+  const host = new URL(entry.endpoint).host;
+  let offered: string[];
+  try {
+    offered = (await services.vendors.mcpTools({ endpoint: entry.endpoint, token: secret.data.apiKey, auth: entry.auth })).map((tool) => tool.name);
+  } catch (error) {
+    return refused(error)
+      ? check("connectors", label, "fail", `${host} refused the stored key: it expired or was revoked`, again)
+      : check("connectors", label, "fail", `could not reach ${host} to test the key`, `check this computer's network access to ${host}, then run agentx doctor again`);
+  }
+  const approved = (entry.tools ?? []).flatMap((tool) => (typeof tool.name === "string" ? [tool.name] : []));
+  const missing = approved.filter((name) => !offered.includes(name));
+  return missing.length > 0
+    ? check("connectors", label, "warn", `the key works, but ${host} no longer offers ${missing.join(", ")}`, `remove those tools from the project, or check the key's permissions, then run ${again}`)
+    : check("connectors", label, "ok", `the key reaches ${offered.length} tools, including every approved one`);
+}
+
 export async function connectorChecks(context: DoctorContext): Promise<DoctorCheck[]> {
   const { env, progress, services } = context;
   const found = await environmentProjectFiles(services.configDir, env);
@@ -77,6 +124,11 @@ export async function connectorChecks(context: DoctorContext): Promise<DoctorChe
       checks.push(check("connectors", `project ${file.name}`, "warn", "uses the older integrations.githubMcp setting", "move it to integrations.connectors (specs/013-connector-gateway/contracts/project-config.md), then register the project again"));
     }
     for (const entry of integrations.connectors ?? []) {
+      if ((entry as { type?: unknown }).type === "mcp") {
+        const mcp = entry as McpEntry;
+        checks.push(typeof mcp.name === "string" ? await mcpConnectorCheck(context, file.name, mcp) : check("connectors", `MCP connector (project ${file.name})`, "skip", "the connector entry has no name"));
+        continue;
+      }
       const connector = entry as Partial<KnownConnector> & { type?: string };
       if (connector.type !== "linear" && connector.type !== "jira" && connector.type !== "asana") continue;
       const label = `${LABEL[connector.type]} (project ${file.name})`;

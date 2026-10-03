@@ -27,8 +27,8 @@ export class McpUnauthorized extends Error {
   constructor() { super("MCP server rejected the credential"); this.name = "McpUnauthorized"; }
 }
 
-/** Server-owned endpoint/credentials only. Never expose these options to the model. */
-export async function connectMcp(options: {
+/** How to reach one MCP server with one credential. Server-owned endpoint/credentials only. */
+interface McpConnectOptions {
   endpoint: URL;
   token: string;
   tools: readonly string[];
@@ -36,13 +36,30 @@ export async function connectMcp(options: {
   /** Spec 055: the header the token goes in and the text before it; defaults to `Authorization: Bearer`. */
   auth?: { header?: string | undefined; prefix?: string | undefined };
   fetchImplementation?: typeof fetch;
-}): Promise<McpConnection> {
+}
+
+/** Server-owned endpoint/credentials only. Never expose these options to the model. */
+export async function connectMcp(options: McpConnectOptions): Promise<McpConnection> {
+  return openMcp(options);
+}
+
+/**
+ * Spec 055 phase 3: every tool the server lists to this credential, connected only for the listing.
+ * The setup wizard's test read and doctor use it; the gateway itself only ever connects to approved tools.
+ */
+export async function listMcpTools(options: Omit<McpConnectOptions, "tools">): Promise<McpConnection["tools"]> {
+  const connection = await openMcp({ ...options, tools: "all" });
+  try { return connection.tools; } finally { await connection.close().catch(() => undefined); }
+}
+
+/** Connects and discovers the given tools, or with "all" every tool the server lists. */
+async function openMcp(options: Omit<McpConnectOptions, "tools"> & { tools: readonly string[] | "all" }): Promise<McpConnection> {
   const fetchImplementation = options.fetchImplementation ?? fetch;
   const authHeader = options.auth?.header ?? "Authorization";
   const authValue = `${options.auth?.prefix ?? "Bearer "}${options.token}`;
   let unauthorized = false;
   const transport = new StreamableHTTPClientTransport(options.endpoint, {
-    requestInit: { headers: { [authHeader]: authValue, "X-MCP-Tools": options.tools.join(",") } },
+    requestInit: { headers: { [authHeader]: authValue, ...(options.tools === "all" ? {} : { "X-MCP-Tools": options.tools.join(",") }) } },
     reconnectionOptions: { maxRetries: 0, maxReconnectionDelay: 0, initialReconnectionDelay: 0, reconnectionDelayGrowFactor: 1 },
     fetch: async (url, init) => {
       const response = await fetchImplementation(url, {
@@ -72,7 +89,7 @@ export async function connectMcp(options: {
     let cursor: string | undefined;
     for (let page = 0; page < 10; page += 1) {
       const listing = await client.listTools(cursor ? { cursor } : {}, requestOptions);
-      listing.tools.forEach((tool) => { if (options.tools.includes(tool.name)) discovered.push(tool); });
+      listing.tools.forEach((tool) => { if (options.tools === "all" || options.tools.includes(tool.name)) discovered.push(tool); });
       cursor = listing.nextCursor;
       if (!cursor) break;
     }

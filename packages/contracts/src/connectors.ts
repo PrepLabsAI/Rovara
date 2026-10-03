@@ -157,7 +157,7 @@ const OneLineSchema = (max: number) => z.string().min(1).max(max).refine(isOneLi
 export const McpScopeSchema = z.object({
   alias: ConnectorAliasSchema,
   values: z.record(ScopeValueNameSchema, OneLineSchema(256))
-    .refine((values) => Object.keys(values).length >= 1 && Object.keys(values).length <= 16, "a scope has 1 to 16 values"),
+    .refine((values) => Object.keys(values).length <= 16, "a scope has at most 16 values"),
 }).strict();
 
 /**

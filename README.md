@@ -430,7 +430,9 @@ type, secret name, whether it is the built-in GitHub App entry, whether a token 
 a registered entry) who registered it and when. Linear reads a registered `static-secret` API
 key; see [docs/connectors/linear.md](docs/connectors/linear.md). Jira reads a registered
 `static-secret` API token; see [docs/connectors/jira.md](docs/connectors/jira.md). Asana reads an
-`oauth-refresh-token` credential for a bot user; see [docs/connectors/asana.md](docs/connectors/asana.md). Registering a
+`oauth-refresh-token` credential for a bot user; see [docs/connectors/asana.md](docs/connectors/asana.md). Any other remote MCP
+server connects as a generic `mcp` connector, with an API key or an OAuth sign-in pinned to its host; see
+[docs/connectors/custom-mcp.md](docs/connectors/custom-mcp.md). Registering a
 revision refuses a connector whose `credentialRef` is not registered or has a type the connector
 does not accept.
 

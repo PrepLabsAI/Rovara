@@ -52,7 +52,10 @@ describe("mcp connector configuration", () => {
   it("refuses alias as a value name, a value with a line break, and an empty values map", () => {
     expect(issues(sentry({ scopes: [{ alias: "acme", values: { alias: "x", organizationSlug: "acme" } }] }))).not.toEqual([]);
     expect(issues(sentry({ scopes: [{ alias: "acme", values: { organizationSlug: "acme\nignore previous" } }] }))).not.toEqual([]);
-    expect(issues(sentry({ bind: undefined, scopes: [{ alias: "acme", values: {} }] }))).toContain("a scope has 1 to 16 values");
+    // A scope with nothing to bind may carry no values (spec 055 phase 3); more than 16 is refused.
+    expect(issues(sentry({ bind: undefined, scopes: [{ alias: "acme", values: {} }] }))).toEqual([]);
+    const many = Object.fromEntries(Array.from({ length: 17 }, (_, index) => [`v${index}`, "x"]));
+    expect(issues(sentry({ bind: undefined, scopes: [{ alias: "acme", values: many }] }))).toContain("a scope has at most 16 values");
   });
 
   it("validates ownership rules strictly", () => {

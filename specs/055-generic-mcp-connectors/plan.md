@@ -65,10 +65,25 @@
 - `oauth-client-credentials` on `mcp` connectors works through `register --token-url`. Nothing discovers it
   (there is no browser step).
 
-## Phase 3: admin experience
+## Phase 3: admin experience (`feat/055-mcp-admin-experience`)
 
-- `agentx connector add mcp`: endpoint and credential, `tools/list`, choosing tools and access, choosing
-  scoping, and preflight.
-- `doctor` support for `mcp` connectors, and `docs/connectors/custom-mcp.md` with Sentry and PagerDuty
-  examples.
-- A live smoke test (SC-004).
+| Layer | Change |
+|---|---|
+| gateway | `connectMcp` takes `tools: "all"` for a full listing, and sends no `X-MCP-Tools` header then. |
+| contracts | A generic scope may carry no values (0 to 16), for a connector with nothing to bind. |
+| cli | `setup/connectors/mcp.ts` is the wizard (FR-014), with `connector add mcp` in `setup/cli.ts`. `vendors.ts` gains `mcpTools` and `oauthAccessToken`. `doctor/connectors.ts` gains mcp checks (FR-015). |
+| docs | `docs/connectors/custom-mcp.md`, linked from `project-configuration.md` and the README. |
+
+### Decisions
+
+- **No browser is opened for an OAuth sign-in**, as for Asana. The engineer opens the address in a private
+  window as the bot.
+- **The credential reference is `mcp-<name>`**, so an mcp connector named `linear` never overwrites the
+  Linear connector's secret.
+- **Ownership rules come only through `--config-file`.** A rule is a reviewed document, not something to
+  build answer by answer in a prompt.
+
+### Remaining
+
+- A live smoke test (SC-004) against a real server, with an API key and with OAuth discovery, then a Slack
+  call.
