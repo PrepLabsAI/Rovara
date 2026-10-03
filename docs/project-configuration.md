@@ -279,17 +279,21 @@ reads exactly as before.
 ### How the checks work
 
 1. **The agent is told the rules.** AgentX appends a fixed preamble to the agent's system prompt
-   for every coding task and every eval run. Its SHA-256 is recorded with each result. Version 1:
+   for every coding task and every eval run. Its SHA-256 is recorded with each result. Version 3:
 
    ```text
    AgentX checks your work after you finish. Work this way:
    1. Reproduce the problem before changing code, and say how you reproduced it.
    2. Run the relevant tests before and after your change.
    3. A test that passed before your change and fails after it is your own regression. Fix it; never call it unrelated.
-   4. Report the commands you ran and their results.
-   5. You must never claim a test passed unless you saw it pass.
-   End your final message with exactly one line: "AgentX result: done" if the work is complete and every test you ran passes, otherwise "AgentX result: not done".
+   4. The one exception is a test that checks the old behaviour the task asks you to change. Update it to the new behaviour; if you were told not to modify tests, leave it. Either way, name it in your final message and say why it changed.
+   5. Report the commands you ran and their results.
+   6. You must never claim a test passed unless you saw it pass.
+   End your final message with exactly one line: "AgentX result: done" if the work is complete and every test you ran passes, apart from tests you named under rule 4, otherwise "AgentX result: not done".
    ```
+
+   Rule 4 is new in version 3 (#290): without it, the agent reported correct work as "not done"
+   whenever the task changed behaviour that existing tests still checked.
 
    The text lives in `packages/contracts/src/checks.ts` (`AGENTX_PREAMBLE`). Changing it means a
    new `AGENTX_PREAMBLE_VERSION`. The agent's claim is read from that last line: `success`,
@@ -324,23 +328,36 @@ suite, a type check, a lint. They are the best checks, for three reasons:
 A project **without** readiness checks is checked by rerunning the agent's own simple test
 commands instead. That is weaker: the agent chooses what to run, and may run nothing, in which
 case the reply says "Not verified: no checks ran". For each such command, the "before" is the
-agent's first run in that task, counted only if no file had changed yet; otherwise the before is
-unknown. A failure is remembered across tasks (above), so the next task cannot lose it.
+agent's first run in that task, when no file had changed yet. When the agent changed files
+first, AgentX measures the before itself (#290): it puts each repository's files back to the
+commit the workspace was prepared at, runs the command, and restores the agent's files exactly.
+Only the files are swapped: Git's index, HEAD, branches and stash are never touched, and ignored
+files (built extensions, `node_modules`, virtual environments) stay as they are, so the command
+runs in the same environment as the agent's. While the original code is shown, the agent's
+files are kept under the ref `refs/agentx/agent-files`; if a worker stops mid-way, the next
+task puts them back before it starts. The before runs use at most half of the round's budget.
+A failure is remembered across tasks (above), so the next task cannot lose it.
 
 In a project with a dev container, the agent's shell is the container's, so it writes
 `cd /workspaces/<repo> && npm test`. AgentX reads a leading `cd` to that exact folder (or a
-folder inside it) as the repository's folder in the workspace, records it and replays it there,
-in the container. Any other absolute path, a `..`, a look-alike folder, and a link that leads out
+folder inside it), or to the same repository's folder on the worker, as the repository's folder
+in the workspace, records it and replays it there, in the container. Any other absolute path, a `..`, a look-alike folder, and a link that leads out
 of the workspace are still refused.
 
 Only these commands count, each with its arguments: `npm test`, `npm run test`, `pnpm test`,
-`yarn test`, `pytest`, `python -m pytest`, `go test`, `cargo test`, `make test`, `mvn test`,
-`gradle test`, `./gradlew test`, `bundle exec rspec`, `phpunit` and `tox`. The command may start
-with a relative `cd <path> &&` (no `..`, no absolute path), then `NAME=value` assignments, then an
-optional `timeout <n>`. Anything else is never replayed, because replaying an arbitrary command
-could change the workspace: pipes, `;`, `&&` chains, `||`, `&`, redirection, quotes,
-`$`, backticks, globs, `~`, absolute paths and `..`. So `cd pkg && npm test -- -t foo` and
-`FOO=1 python -m pytest -k x` count, while `pytest | head -5` and `npm test; echo done` do not.
+`yarn test`, `pytest`, `python -m pytest`, `python3 -m pytest`, `jest`, `npx jest`, `yarn jest`,
+`pnpm jest`, `vitest`, `npx vitest`, `yarn vitest`, `pnpm vitest`, `go test`, `cargo test`,
+`make test`, `mvn test`, `gradle test`, `./gradlew test`, `bundle exec rspec`, `phpunit` and
+`tox`. The command may start with a relative `cd <path> &&` (no `..`, no absolute path), then
+`NAME=value` assignments, then an optional `timeout <n>`. An argument may be quoted, with single
+or double quotes, as long as the quoted text holds no `$`, backtick or backslash, so the shell
+reads it literally: `yarn jest --testPathPattern="RoomView|RoomViewStore"` counts. Arguments
+that would change files or never end when replayed are refused: `-u`, `--updateSnapshot`,
+`--update-snapshots`, `--update`, `--snapshot-update` and any `--watch` option. Anything else is
+never replayed, because replaying an arbitrary command could change the workspace: pipes, `;`,
+`&&` chains, `||`, `&`, redirection, unquoted `$`, backticks, globs, `~`, absolute paths and
+`..`. So `cd pkg && npm test -- -t foo` and `FOO=1 python -m pytest -k x` count, while
+`pytest | head -5` and `npm test; echo done` do not.
 
 One exception: a trailing `2>&1` and `| tail -N` (or `tail -n N`), which only trim what the agent
 reads. `python -m pytest -q 2>&1 | tail -20` counts, and AgentX replays the bare

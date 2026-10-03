@@ -9,11 +9,14 @@ import {
   parseAgentClaim,
   reportStatus,
   type CheckEntry,
+  type CheckOutcome,
   type CheckReport,
 } from "@agentx/contracts";
 import type { CustomMessageEntryDraft, InlineExtension } from "@earendil-works/pi-coding-agent";
 import { redactedTail } from "../collected-process.js";
-import { runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
+import { ownBefore, runChecks, type CheckPlan, type CheckRunners } from "./checks.js";
+import { AgentFilesRestoreError, type OriginalCode } from "./original-code.js";
+import type { RecordedCommand } from "./recorder.js";
 import type { CommandRecorder } from "./recorder.js";
 
 export const VERIFICATION_EXTENSION_NAME = "agentx-verification";
@@ -38,7 +41,15 @@ export interface VerificationOptions {
   onExtraTry?: (firstRound: CheckReport) => void;
   /** Where a fault in the extension itself is reported. Messages arrive redacted by the session's sink. */
   onDiagnostic?: (message: string) => void;
+  /**
+   * D-16 (#290): the code as it was before the task. With it, an agent command that has no before result of its own is
+   * also run there, so AgentX knows whether it passed before the change. Without it, such a command's before is unknown.
+   */
+  originalCode?: OriginalCode;
 }
+
+/** The share of a round's budget the before runs may use, so the after runs always have time left. */
+const BEFORE_BUDGET_SHARE = 0.5;
 
 /** A report for a run AgentX could not check: stopped (P-4), a model error, or nothing to check. */
 export function notVerifiedReport(
@@ -106,6 +117,8 @@ export function verificationExtension(options: VerificationOptions): InlineExten
       };
       // Only the last assistant message counts: after the extra try, the extra turn's own message (Review Focus 4).
       let finalText: string | undefined;
+      // D-16: before results measured on the original code, kept for the extra try's round.
+      const measuredBefore = new Map<string, CheckOutcome>();
 
       pi.on("tool_call", async (event, context) => { await recorder.observeCall(event, context.signal); });
       pi.on("tool_result", (event) => { recorder.observe(event); });
@@ -130,7 +143,16 @@ export function verificationExtension(options: VerificationOptions): InlineExten
           await recorder.settled();
           const plan = options.plan();
           if (plan.source === "none") return report(unverified("no_checks", claim));
-          const round = await runChecks(plan, options.runners, { budgetMs: options.budgetMs(), signal: options.signal });
+          const budgetMs = options.budgetMs();
+          const started = Date.now();
+          if (plan.source === "agent_commands" && options.originalCode !== undefined) {
+            await measureBefore(plan.agentRuns ?? [], measuredBefore, options, options.originalCode, budgetMs * BEFORE_BUDGET_SHARE);
+          }
+          const round = await runChecks(
+            measuredBefore.size === 0 ? plan : { ...plan, measuredBefore },
+            options.runners,
+            { budgetMs: Math.max(0, budgetMs - (Date.now() - started)), signal: options.signal },
+          );
           if (round.stopped || options.signal.aborted) {
             return report(unverified("stopped", claim, { source: plan.source, checks: round.entries }));
           }
@@ -173,6 +195,37 @@ export function verificationExtension(options: VerificationOptions): InlineExten
 }
 
 /**
+ * D-16 (#290): runs each agent command that has no before result of its own on the original code, and records the
+ * outcome. A failure to show the original code leaves those commands without a before result and is reported; a failure
+ * to restore the agent's files is not survivable and is rethrown, so the settle reports an error.
+ */
+async function measureBefore(
+  runs: readonly RecordedCommand[],
+  measured: Map<string, CheckOutcome>,
+  options: VerificationOptions,
+  originalCode: OriginalCode,
+  budgetMs: number,
+): Promise<void> {
+  const missing = runs.filter((run) => ownBefore(run) === "unknown" && !measured.has(run.replay));
+  if (missing.length === 0 || options.signal.aborted) return;
+  try {
+    const round = await originalCode.run(() => runChecks(
+      { source: "agent_commands", agentRuns: missing },
+      options.runners,
+      { budgetMs, signal: options.signal },
+    ));
+    round.entries.forEach((entry, index) => {
+      if (entry.after !== "not_run") measured.set(missing[index]!.replay, entry.after);
+    });
+  } catch (error) {
+    if (error instanceof AgentFilesRestoreError) throw error;
+    try {
+      options.onDiagnostic?.(`AgentX could not run the agent's test commands on the original code, so they have no before result: ${error instanceof Error ? error.message : String(error)}`);
+    } catch { /* Reporting must not break the settle. */ }
+  }
+}
+
+/**
  * Ruling O (I-2): a check that was a regression in the round that gave the extra try, and that this round did not rerun
  * (the budget, or a refusal), keeps that round's entry. AgentX saw it regress and never saw it fixed.
  */
@@ -194,6 +247,7 @@ export function checksFeedback(entries: readonly CheckEntry[]): string {
   const lines = [
     "AgentX reran the checks when you finished, and found a regression: a check that passed before your change fails now.",
     "You have one more turn. Fix the regression, run the check again, and then finish. AgentX reruns the checks once more after this turn.",
+    "If a failing test checks the old behaviour the task asked you to change, it is not a regression: update the test to the new behaviour, or, if you were told not to modify tests, leave it and name it in your final message.",
     "End your final message with the AgentX result line, as before.",
   ];
   let used = 0;

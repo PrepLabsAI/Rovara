@@ -25,6 +25,7 @@ import { runTaskInvocation, type TaskInvocationResult } from "../../packages/wor
 import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 import { createCheckRunners, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
 import { CHECKS_MESSAGE_TYPE, checksArtifactContent, compactCheckReport } from "../../packages/worker/src/verification/extension.js";
+import { AgentFilesRestoreError, type OriginalCode } from "../../packages/worker/src/verification/original-code.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
 import { FAUX_MODEL, fauxModelRuntime } from "../support/faux-model.js";
 
@@ -106,6 +107,8 @@ async function runTask(options: {
   budgets?: number[];
   /** An artifact name whose upload fails, so the task throws after the agent finished. */
   failArtifact?: string;
+  /** D-16: the original code AgentX measures before results on. Default: none (the fixture has no repositories). */
+  originalCode?: OriginalCode;
 }) {
   const { modelRuntime, faux } = await fauxModelRuntime();
   const requests: Request[] = [];
@@ -136,6 +139,7 @@ async function runTask(options: {
       ...(options.runners === undefined ? {} : { checkRunners: options.runners }),
       ...(options.budgets === undefined ? {} : { checkBudgetMs: budgetSequence(options.budgets) }),
       ...(options.cancellation === undefined ? {} : { cancellationController: options.cancellation }),
+      ...(options.originalCode === undefined ? {} : { originalCode: options.originalCode }),
       eventSink: async (batch) => { events.push(...batch); },
       artifactSink: async (artifact) => {
         if (artifact.name === options.failArtifact) throw new Error(`upload of ${artifact.name} failed`);
@@ -669,5 +673,83 @@ describe("the report's size limits (M-4, M-5)", () => {
     expect(CheckReportSchema.parse(JSON.parse(content)).checks).toHaveLength(64);
     const small = report("pytest", "1 failed");
     expect(JSON.parse(checksArtifactContent(small))).toEqual(small);
+  });
+});
+
+describe("AgentX measures the before result on the original code (spec 051 D-16, #290)", () => {
+  /** An original code that only says when it is shown; the runner answers by it. Real Git is in worker-original-code.test.ts. */
+  function fakeOriginalCode(failure?: Error) {
+    const state = { showing: false, runs: 0 };
+    const originalCode: OriginalCode = {
+      async run(work) {
+        state.runs += 1;
+        if (failure !== undefined) throw failure;
+        state.showing = true;
+        try { return await work(); } finally { state.showing = false; }
+      },
+    };
+    return { originalCode, state };
+  }
+  /** A runner whose result depends on whether the original code is shown. */
+  function byCode(state: { showing: boolean }, onOriginal: AgentResult, onAgent: AgentResult) {
+    const calls: Array<{ replay: string; original: boolean }> = [];
+    const runners: CheckRunners = {
+      async runAgentCommand(replay) { calls.push({ replay, original: state.showing }); return state.showing ? onOriginal : onAgent; },
+      async runProjectCommand() { throw new Error("no readiness"); },
+    };
+    return { runners, calls };
+  }
+  const progress = (events: WorkerEvent[]) => events.flatMap((event) => (event.type === "progress" ? [String((event.payload as { message?: unknown }).message)] : []));
+
+  it("catches a regression when the agent edited before its first test run, and gives the extra try", async () => {
+    const { originalCode, state } = fakeOriginalCode();
+    const { runners, calls } = byCode(state, passedRun, failedRun("1 failed\n"));
+    const run = await runTask({
+      steps: [write("src.py", "changed\n", "c1"), bash("pytest -k x 2>&1 | tail -20", "c2"), fauxAssistantMessage(`Done.\n${DONE}`), fauxAssistantMessage("It checks the old behaviour.\nAgentX result: not done")],
+      runners, originalCode,
+    });
+    expect(run.failure).toBeUndefined();
+    expect(calls[0]).toEqual({ replay: "pytest -k x", original: true });
+    expect(calls.slice(1).every((call) => !call.original)).toBe(true);
+    expect(run.report).toMatchObject({ status: "regression", extraTry: "given" });
+    expect(run.report!.checks[0]).toMatchObject({ before: "passed", after: "failed", class: "regression" });
+    // Measured once: the extra try's round reuses it.
+    expect(state.runs).toBe(1);
+    const feedback = checksMessages(run.requests.at(-1)!).join("\n");
+    expect(feedback).toContain("checks the old behaviour the task asked you to change, it is not a regression");
+  });
+
+  it("counts a test that also fails on the original code as already failing, not the agent's regression", async () => {
+    const { originalCode, state } = fakeOriginalCode();
+    const { runners } = byCode(state, failedRun("X11 connection broke\n"), failedRun("X11 connection broke\n"));
+    const run = await runTask({ steps: [write("src.py", "changed\n", "c1"), bash("pytest", "c2"), fauxAssistantMessage(`Done.\n${DONE}`)], runners, originalCode });
+    expect(run.report).toMatchObject({ status: "verified", extraTry: "not_needed" });
+    expect(run.report!.checks[0]).toMatchObject({ before: "failed", after: "failed", class: "already_failing" });
+  });
+
+  it("does not run the original code when the agent's own run before its edit is the before result", async () => {
+    const { originalCode, state } = fakeOriginalCode();
+    const { runners } = byCode(state, passedRun, passedRun);
+    const shell = scriptedShell({ pytest: { exitCode: 0, output: "1 passed\n" } });
+    const run = await runTask({ steps: [bash("pytest", "c1"), write("src.py", "changed\n", "c2"), fauxAssistantMessage(`Done.\n${DONE}`)], runners, originalCode, shell });
+    expect(state.runs).toBe(0);
+    expect(run.report!.checks[0]).toMatchObject({ before: "passed", after: "passed", class: "passing" });
+  });
+
+  it("reports when the original code cannot be shown, and goes on without a before result", async () => {
+    const { originalCode } = fakeOriginalCode(new Error("bad object 1234"));
+    const { runners } = byCode({ showing: false }, passedRun, failedRun("1 failed\n"));
+    const run = await runTask({ steps: [write("src.py", "changed\n", "c1"), bash("pytest", "c2"), fauxAssistantMessage(`Done.\n${DONE}`)], runners, originalCode });
+    expect(run.failure).toBeUndefined();
+    expect(run.report!.checks[0]).toMatchObject({ before: "unknown", after: "failed", class: "failing_no_before" });
+    expect(progress(run.events).some((message) => message.includes("could not run the agent's test commands on the original code"))).toBe(true);
+  });
+
+  it("reports an error, naming where the agent's files are kept, when they cannot be restored", async () => {
+    const { originalCode } = fakeOriginalCode(new AgentFilesRestoreError("AgentX could not restore the agent's files; they are kept under refs/agentx/agent-files."));
+    const { runners } = byCode({ showing: false }, passedRun, passedRun);
+    const run = await runTask({ steps: [write("src.py", "changed\n", "c1"), bash("pytest", "c2"), fauxAssistantMessage(`Done.\n${DONE}`)], runners, originalCode });
+    expect(run.report).toMatchObject({ status: "not_verified", notVerifiedReason: "error" });
+    expect(progress(run.events).some((message) => message.includes("refs/agentx/agent-files"))).toBe(true);
   });
 });

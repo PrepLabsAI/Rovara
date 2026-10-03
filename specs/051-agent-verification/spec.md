@@ -204,6 +204,33 @@ These may come later (spec 053 or after).
   `set -o pipefail` (`agentShellSpawn`), because a pipeline's status is otherwise `tail`'s, 0 even when the tests
   fail, and such a run would be taken as a passing before result and turn an already failing test into a false
   regression. `head` stays refused: it stops reading early and can cut the run short.
+- **D-15 (2026-10-03, #290, amends D-11):** More runners and literal quoted arguments. `python3 -m pytest`, `jest`,
+  `npx jest`, `yarn jest`, `pnpm jest`, `vitest`, `npx vitest`, `yarn vitest` and `pnpm vitest` are test commands.
+  An argument may be single- or double-quoted when the quoted text is printable and holds no `$`, backtick, backslash
+  or quote, so the shell reads it literally (`--testPathPattern="RoomView|RoomViewStore"`); the runner, assignments and
+  `timeout` must still be unquoted. Replays that would write files or never end are refused: `-u`, `--updateSnapshot`,
+  `--update-snapshots`, `--update`, `--snapshot-update`, `--ci=false` and any `--watch` option. A leading `cd` to the
+  repository's host folder reads as its workspace folder, as the container folder already did (Ruling X):
+  `devcontainerContextFile` tells the agent to prefer the host path, and it does. In the 30-task Pro batch of
+  2026-10-03, these gaps left 12 of 30 solved tasks with no check at all.
+- **D-16 (2026-10-03, #290, amends FR-003):** AgentX measures an agent command's before result itself when the agent's
+  own first run cannot serve (it came after an edit, or has no exit code). At settle, before the after runs, it shows
+  each repository's original code (the preparation commit's `resolvedCommit`; an eval's base commit), runs those
+  commands, and restores the agent's files. Only working-tree files that differ are written, from Git's object store
+  through a temporary index; the repository's index, HEAD, branches and stash are never touched, and ignored files stay,
+  so the before runs share the agent's environment. The agent's files are kept as a tree under `refs/agentx/agent-files`
+  until the restore is checked to be exact; a task that finds the ref puts the files back before it starts, and fails
+  rather than start on the wrong files. The before runs use at most half of the round's budget, and are measured once
+  per command (the extra try's round reuses them). A failure to show the original code leaves those commands' before
+  unknown and is reported; a failure to restore is reported as an error, naming the ref. A workspace whose manifest
+  lacks a commit for any repository measures nothing, rather than mix states. Reason: in that batch the agent edited
+  before its first test run in almost every task, so the regression rule rarely had a before result.
+- **D-17 (2026-10-03, #290):** Preamble version 3. A test that checks the old behaviour the task asks the agent to change
+  is not its regression: the agent updates it to the new behaviour, or leaves it when told not to modify tests, and names
+  it either way; the done line allows such named tests. The extra try's message says the same. Reason: in that batch the
+  agent reported 5 correct, graded-as-resolved tasks as not done, each time because the repository's old tests asserted
+  the behaviour the task changed. The check report itself is unchanged: such a test still shows as a regression in an
+  eval, where tests may not be modified.
 
 ## Success Criteria
 

@@ -52,6 +52,16 @@ export interface CheckPlan {
   /** Per readiness command, its before (Ruling J): last known outcome, else passed at preparation, else unknown. */
   projectBefore?: CheckOutcome[];
   agentRuns?: RecordedCommand[];
+  /**
+   * D-16 (#290): the before result AgentX measured itself, on the original code, for an agent command whose own run
+   * cannot serve as one. Keyed by the command's replay.
+   */
+  measuredBefore?: ReadonlyMap<string, CheckOutcome>;
+}
+
+/** FR-003: an agent command's own before result, or unknown when its first run came after an edit or has no exit code. */
+export function ownBefore(run: Pick<RecordedCommand, "afterFirstEdit" | "exitCode">): CheckOutcome {
+  return run.afterFirstEdit || run.exitCode === undefined ? "unknown" : run.exitCode === 0 ? "passed" : "failed";
 }
 
 export interface CheckRound {
@@ -209,8 +219,9 @@ function plannedChecks(plan: CheckPlan, runners: CheckRunners): PlannedCheck[] {
       id: `agent:${index}`,
       label: cut(redactText(run.replay), CHECK_LABEL_MAX),
       source: "agent_commands",
-      // FR-003: a first run made after an edit, or whose exit code is unknown, has no before result.
-      before: run.afterFirstEdit || run.exitCode === undefined ? "unknown" : run.exitCode === 0 ? "passed" : "failed",
+      // FR-003: a first run made after an edit, or whose exit code is unknown, has no before result of its own; D-16:
+      // then the one AgentX measured on the original code, when it has one.
+      before: ownBefore(run) !== "unknown" ? ownBefore(run) : plan.measuredBefore?.get(run.replay) ?? "unknown",
       ownTimeoutMs: AGENT_CHECK_TIMEOUT_MS,
       run: (timeoutMs, signal) => runners.runAgentCommand(run.replay, timeoutMs, signal),
     }));

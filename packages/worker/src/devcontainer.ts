@@ -88,11 +88,17 @@ export function devcontainerPaths(target: DevcontainerTarget, started: Devcontai
 export function workspaceRelativeCommand(command: string, paths: DevcontainerPaths, root: string): string {
   const base = relative(root, paths.hostFolder);
   if (base === ".." || base.startsWith(`..${sep}`) || isAbsolute(base)) return command;
-  const escaped = paths.containerFolder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return command.replace(new RegExp(`^( *)cd +${escaped}(?=/| )(/?\\S*)( +&& +)`, "s"), (_match, lead: string, sub: string, join: string) => {
-    const target = `${base}${sub}`;
-    return target === "" ? lead : `${lead}cd ${target}${join}`;
-  });
+  // D-15 (#290): the host folder too. devcontainerContextFile tells the agent both paths name the same files and to
+  // prefer the host one, so `cd <hostFolder> && pytest` must count as the same check.
+  for (const folder of [paths.containerFolder, paths.hostFolder]) {
+    const escaped = folder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const rewritten = command.replace(new RegExp(`^( *)cd +${escaped}(?=/| )(/?\\S*)( +&& +)`, "s"), (_match, lead: string, sub: string, join: string) => {
+      const target = `${base}${sub}`;
+      return target === "" ? lead : `${lead}cd ${target}${join}`;
+    });
+    if (rewritten !== command) return rewritten;
+  }
+  return command;
 }
 
 /** A path under the container folder, as the same file under the host folder; any other path as given. */

@@ -8,11 +8,11 @@ import {
 
 describe("the AgentX preamble (spec 051 FR-001)", () => {
   it("is versioned and hashed together with the worker prompt", () => {
-    expect(AGENTX_PREAMBLE_VERSION).toBe("2");
+    expect(AGENTX_PREAMBLE_VERSION).toBe("3");
     expect(agentxPreambleSha256()).toBe(createHash("sha256").update(`${AGENTX_WORKER_PROMPT}\n\n${AGENTX_PREAMBLE}`).digest("hex"));
   });
   it("tells the agent each rule, and the final line (P-5)", () => {
-    for (const phrase of ["Reproduce the problem", "before and after", "your own regression", "never claim", "AgentX result: done", "AgentX result: not done"]) {
+    for (const phrase of ["Reproduce the problem", "before and after", "your own regression", "old behaviour the task asks you to change", "never claim", "AgentX result: done", "AgentX result: not done"]) {
       expect(AGENTX_PREAMBLE).toContain(phrase);
     }
   });
@@ -41,6 +41,14 @@ describe("matchTestCommand (FR-003, P-6)", () => {
     ["go test ./... | tail -5", "go test ./..."],
     ["pytest|tail -5", "pytest"],
     ["cargo test 2>&1", "cargo test"],
+    // D-15 (#290): runners agents use directly, and literal quoted arguments.
+    ["python3 -m pytest openlibrary/tests/catalog/test_utils.py -k format_lang -v", "python3 -m pytest openlibrary/tests/catalog/test_utils.py -k format_lang -v"],
+    ['yarn jest --testPathPattern="RoomViewStore|RoomView" --no-coverage 2>&1 | tail -30', 'yarn jest --testPathPattern="RoomViewStore|RoomView" --no-coverage'],
+    ["npx jest src/a.test.ts", "npx jest src/a.test.ts"], ["jest --runInBand", "jest --runInBand"], ["pnpm jest", "pnpm jest"],
+    ["npx vitest run src", "npx vitest run src"], ["vitest run", "vitest run"], ["yarn vitest run", "yarn vitest run"],
+    ['python -m pytest tests -k "not slow and (config or qtargs)"', 'python -m pytest tests -k "not slow and (config or qtargs)"'],
+    ["pytest -k 'test_a or test_b'", "pytest -k 'test_a or test_b'"],
+    ['pytest "-k x"', 'pytest "-k x"'], ["pytest 'x'", "pytest 'x'"],
   ])("replays %j", (command, replay) => {
     expect(matchTestCommand(command)).toBe(replay);
   });
@@ -52,8 +60,13 @@ describe("matchTestCommand (FR-003, P-6)", () => {
     "cd a && cd b && pytest", "pytest-xdist", "", "   ",
     "pytest\nrm -rf .", "pytest\r\nrm x", "pytest\tfoo", "pytest\u0000", "cd a\n&& pytest", "pytest\n",
     "FOO=$X pytest", "pytest ${X}", "cd $HOME && pytest", "pytest *", "cd .. && pytest", "cd /etc && pytest",
-    "cd ~ && pytest", "cd -- && pytest", "cd a/../.. && pytest", 'cd "a b" && pytest', 'pytest "-k x"',
-    "pytest 'x'", "pytest ~/x", "pytest !x", "pytest a\\b", "pytest {a,b}", "pytest [a]", "pytest ?",
+    "cd ~ && pytest", "cd -- && pytest", "cd a/../.. && pytest", 'cd "a b" && pytest',
+    "pytest ~/x", "pytest !x", "pytest a\\b", "pytest {a,b}", "pytest [a]", "pytest ?",
+    // D-15: quotes that a shell would still expand, unclosed or escaping, a quoted runner or path, and replays that
+    // write files or never end (snapshot updates, watch modes).
+    'pytest -k "$X"', "pytest -k \"`id`\"", 'pytest -k "a\\b"', 'pytest -k "a', '"pytest" -k x',
+    'pytest --rootdir="/etc"', "pytest -k '../x'", "jest -u", "yarn jest --updateSnapshot", "npx vitest run -u",
+    "npx vitest --update", "jest --watch", "jest --watchAll", "pytest --snapshot-update", "python3 -m pip install x",
     "pytest --junitxml=/etc/x", "FOO=/etc/x pytest", "make test -C /", "pytest --basetemp=../x", "npm test --prefix=/tmp",
   ])("does not treat %j as a check", (command) => {
     expect(matchTestCommand(command)).toBeUndefined();
