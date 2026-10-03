@@ -9,6 +9,23 @@ import { executeCli } from "../../packages/cli/src/main.js";
 import { InMemoryTokenStore } from "../../packages/cli/src/token-store.js";
 
 describe("AgentX administration workflow", () => {
+  it("lists admin workspaces with each person's stable identity", async () => {
+    const context = await administratorContext("agentx-cli-list-workspaces-");
+    const workspaceId = randomUUID();
+    const owner = { slackTeamId: "T0123456789", slackUserId: "U0123456789", slackName: "Priya Shah" };
+    const fetchImplementation = vi.fn<typeof fetch>(async (input, init) => {
+      expect(new URL(requestUrl(input)).pathname).toBe("/v1/admin/workspaces");
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer access-secret");
+      return Response.json({ workspaces: [{ id: workspaceId, project: "payments", origin: "slack", owner, status: "READY", busy: false, lastActivityAt: "2026-10-02T12:00:00.000Z" }], limits: { perPerson: 3, perOrganization: 20, source: "parameters" }, counts: { organization: 1 }, truncated: false });
+    });
+    for (const json of [false, true]) {
+      let output = "";
+      const exitCode = await executeCli([...context.globals, ...(json ? ["--json"] : []), "admin", "workspace", "list"], { fetchImplementation, tokenStore: context.tokens, stdout: { write(text) { output += text; } }, stderr: { write() {} } });
+      expect(exitCode).toBe(0);
+      if (json) expect((JSON.parse(output) as { data: { workspaces: Array<{ owner: unknown }> } }).data.workspaces[0]?.owner).toEqual(owner);
+      else { expect(output).toContain("Priya Shah"); expect(output).toContain("U0123456789"); }
+    }
+  });
   it("stops a workspace through the administrator route", async () => {
     const context = await administratorContext("agentx-cli-stop-");
     const workspaceId = randomUUID();

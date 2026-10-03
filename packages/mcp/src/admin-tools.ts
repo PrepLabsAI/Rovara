@@ -211,14 +211,14 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_admin_list_workspaces",
     title: "List AgentX workspaces",
-    description: "Lists workspaces, newest activity first: the ID, project, origin, owner (a Slack thread link, or the developer who started the task), status and last activity, with the current workspace limits and counts. Closed workspaces are left out unless status is CLOSED. A task's title and results stay private to its developer. Use it when a developer or the organization hits the workspace limit; then look at a workspace's turns with agentx_admin_turns.",
+    description: "Lists workspaces, newest activity first: the ID, project, origin, owner (Slack user ID and captured name, or developer ID and name), thread link or task ID, status and last activity, with the current workspace limits and counts. A Slack owner is the charged starter, or the creator before preparation. Missing identity or name is unknown, never guessed. Closed workspaces are left out unless status is CLOSED. A task's title and results stay private to its developer. Use it when a developer or the organization hits the workspace limit; then look at a workspace's turns with agentx_admin_turns.",
     inputSchema: {
       project: projectInput,
       status: WorkspaceStatusSchema.optional().describe("only workspaces with this status"),
       limit: limitInput(ADMIN_WORKSPACES_DEFAULT_LIMIT),
     },
     outputSchema: {
-      workspaces: z.array(z.object({ id: z.string(), project: z.string(), origin: z.string(), owner: z.object({ thread_url: z.string().optional(), task_id: z.string().optional(), developer: z.string().optional() }), status: z.string(), busy: z.boolean(), last_activity_at: z.string() })),
+      workspaces: z.array(z.object({ id: z.string(), project: z.string(), origin: z.string(), owner: z.object({ thread_url: z.string().optional(), task_id: z.string().optional(), developer: z.string().optional(), developer_id: z.string().optional(), slack_team_id: z.string().optional(), slack_user_id: z.string().optional(), slack_name: z.string().optional() }), status: z.string(), busy: z.boolean(), last_activity_at: z.string() })),
       limits: z.object({ per_person: z.number(), per_organization: z.number(), source: z.string() }),
       counts: z.object({ organization: z.number(), developer_organization: z.number().optional() }),
       truncated: z.boolean(),
@@ -229,7 +229,7 @@ export const ADMIN_READ_TOOLS: readonly ToolDefinition[] = [
         structured: {
           workspaces: answer.workspaces.map((workspace) => ({
             id: workspace.id, project: workspace.project, origin: workspace.origin,
-            owner: given({ thread_url: workspace.owner.threadUrl, task_id: workspace.owner.taskId, developer: workspace.owner.developerName === undefined ? undefined : inertName(workspace.owner.developerName) }),
+            owner: given({ thread_url: workspace.owner.threadUrl, task_id: workspace.owner.taskId, developer: workspace.owner.developerName === undefined ? undefined : inertName(workspace.owner.developerName), developer_id: workspace.owner.developerId, slack_team_id: workspace.owner.slackTeamId, slack_user_id: workspace.owner.slackUserId, slack_name: workspace.owner.slackName === undefined ? undefined : inertName(workspace.owner.slackName) }),
             status: workspace.status, busy: workspace.busy, last_activity_at: workspace.lastActivityAt,
           })),
           limits: { per_person: answer.limits.perPerson, per_organization: answer.limits.perOrganization, source: answer.limits.source },

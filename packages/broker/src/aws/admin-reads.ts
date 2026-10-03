@@ -15,6 +15,7 @@ import {
   INDEX_EXPIRY_ATTRIBUTE,
   PROJECT_CATALOG_PK,
   SlackTeamIdSchema,
+  SlackUserIdSchema,
   TaskUsageTelemetrySchema,
   UsageIndexRecordSchema,
   WORKSPACE_PROJECT_INDEX,
@@ -522,17 +523,22 @@ export async function projectWorkspaceRows(deps: AdminReadDependencies, project:
   return { rows: rows.slice(0, cap), truncated };
 }
 
-/** A10: a task's ID and developer name, or a Slack thread's link; never a task's title (D22). */
-export async function workspaceOwner(deps: AdminReadDependencies, workspace: WorkspaceInstance): Promise<{ origin: "slack" | "ai_tool"; owner: { threadUrl?: string; taskId?: string; developerName?: string } }> {
+/** A10, #214: the charged starter (or unprepared creator), never the latest requester or task title. */
+export async function workspaceOwner(deps: AdminReadDependencies, workspace: WorkspaceInstance): Promise<Pick<AdminWorkspacesResponse["workspaces"][number], "origin" | "owner">> {
   const pointer = await getStateItem(deps, taskPointerKey(workspace.id));
   if (typeof pointer?.taskId === "string") {
     const task = await getStateItem(deps, taskKey(pointer.taskId));
-    return { origin: "ai_tool", owner: { taskId: pointer.taskId, ...(typeof task?.developerName === "string" ? { developerName: displayName(task.developerName) } : {}) } };
+    return { origin: "ai_tool", owner: { taskId: pointer.taskId, ...(typeof task?.developerId === "string" && /^[a-f0-9]{64}$/.test(task.developerId) ? { developerId: task.developerId } : {}), ...(typeof task?.developerName === "string" ? { developerName: displayName(task.developerName) } : {}) } };
   }
   const thread = await getStateItem(deps, { pk: `SLACK_THREAD#${workspace.ownerKey}`, sk: "META" });
   if (typeof thread?.thread === "string") {
     try {
-      return { origin: "slack", owner: { threadUrl: slackThreadUrl(parseSlackThreadSubject(thread.thread)) } };
+      const subject = parseSlackThreadSubject(thread.thread);
+      const creator = thread.creator as { userId?: unknown; name?: unknown } | undefined;
+      const starter = thread.starter as { userId?: unknown; name?: unknown } | undefined;
+      const user = SlackUserIdSchema.safeParse(thread.starterUserId ?? creator?.userId);
+      const name = thread.starterUserId === undefined ? creator?.name : starter?.userId === thread.starterUserId ? starter.name : undefined;
+      return { origin: "slack", owner: { threadUrl: slackThreadUrl(subject), ...(user.success ? { slackTeamId: subject.teamId, slackUserId: user.data, ...(typeof name === "string" ? { slackName: displayName(name) } : {}) } : {}) } };
     } catch {
       // An unreadable subject is shown as no owner, never echoed.
     }

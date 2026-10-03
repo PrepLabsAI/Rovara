@@ -151,11 +151,16 @@ describe("the admin read tools (FR-030)", () => {
   it("marks a workspace owner's developer name inert", async () => {
     const client = await connect({
       workspaces: async () => ({
-        workspaces: [{ id: "22222222-2222-4222-8222-222222222222", project: "payments", origin: "ai_tool" as const, owner: { taskId: "33333333-3333-4333-8333-333333333333", developerName: "Maya Chen" }, status: "READY" as const, busy: false, lastActivityAt: "t" }],
+        workspaces: [{ id: "22222222-2222-4222-8222-222222222222", project: "payments", origin: "ai_tool" as const, owner: { taskId: "33333333-3333-4333-8333-333333333333", developerId: "d".repeat(64), developerName: "Maya Chen" }, status: "READY" as const, busy: false, lastActivityAt: "t" }],
         limits: { perPerson: 3, perOrganization: 20, source: "setting" as const }, counts: { organization: 1 }, truncated: false,
       }),
     });
-    expect((await client.callTool({ name: "agentx_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({ workspaces: [{ owner: { task_id: "33333333-3333-4333-8333-333333333333", developer: "`Maya Chen`" } }] });
+    expect((await client.callTool({ name: "agentx_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({ workspaces: [{ owner: { task_id: "33333333-3333-4333-8333-333333333333", developer_id: "d".repeat(64), developer: "`Maya Chen`" } }] });
+  });
+
+  it("shows a Slack workspace owner's identity and keeps their name inert", async () => {
+    const client = await connect({ workspaces: async () => ({ workspaces: [{ id: "22222222-2222-4222-8222-222222222222", project: "payments", origin: "slack", owner: { slackTeamId: "T0123456789", slackUserId: "U0123456789", slackName: "Priya Shah" }, status: "READY", busy: false, lastActivityAt: "t" }], limits: { perPerson: 3, perOrganization: 20, source: "setting" }, counts: { organization: 1 }, truncated: false }) });
+    expect((await client.callTool({ name: "agentx_admin_list_workspaces", arguments: {} })).structuredContent).toMatchObject({ workspaces: [{ owner: { slack_team_id: "T0123456789", slack_user_id: "U0123456789", slack_name: "`Priya Shah`" } }] });
   });
 
   it("each description says when to use the tool and what to do next", () => {

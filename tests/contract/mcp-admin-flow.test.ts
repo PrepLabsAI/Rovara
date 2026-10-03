@@ -57,7 +57,12 @@ describe("an admin looks at AgentX from an AI tool (US5)", () => {
       developer_tasks: { enabled: true, share: "optional", share_mode: { default: "view", allow_continue: true }, channel_members_may_use: true },
     }] });
     expect(normalized((await mcp.tool("agentx_admin_list_channels")).value)).toEqual({ bindings: [{ channel_id: "C0123456789", channel_name: "`payments-dev`", private: false, project: "payments", updated_at: "<time>" }], notices: [] });
-    expect(normalized((await mcp.tool("agentx_admin_list_workspaces")).value)).toEqual({
+    const workspaceAnswer = (await mcp.tool("agentx_admin_list_workspaces")).value;
+    const workspaceRows = workspaceAnswer.workspaces as Array<{ owner: Record<string, unknown> }>;
+    expect(workspaceRows.map((row) => row.owner.developer_id)).toStrictEqual([MAYA.developerId]);
+    // #214's additive identity is checked above; the committed legacy result stays unchanged.
+    const legacyWorkspaceAnswer = { ...workspaceAnswer, workspaces: workspaceRows.map((row) => ({ ...row, owner: Object.fromEntries(Object.entries(row.owner).filter(([key]) => key !== "developer_id")) })) };
+    expect(normalized(legacyWorkspaceAnswer)).toEqual({
       workspaces: [{ id: "<uuid>", project: "payments", origin: "ai_tool", owner: { task_id: "<uuid>", developer: "`Maya Chen`" }, status: "PREPARATION_FAILED", busy: false, last_activity_at: "<time>" }],
       // #213: a workspace whose setup failed no longer counts toward the limits.
       limits: { per_person: 3, per_organization: 20, source: "parameters" }, counts: { organization: 0 }, truncated: false,
