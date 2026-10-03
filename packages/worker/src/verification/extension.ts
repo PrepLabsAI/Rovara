@@ -247,7 +247,7 @@ export function checksFeedback(entries: readonly CheckEntry[]): string {
   const lines = [
     "AgentX reran the checks when you finished, and found a regression: a check that passed before your change fails now.",
     "You have one more turn. Fix the regression, run the check again, and then finish. AgentX reruns the checks once more after this turn.",
-    "If a failing test checks the old behaviour the task asked you to change, it is not a regression: update the test to the new behaviour, or, if you were told not to modify tests, leave it and name it in your final message.",
+    "If a failing test checks the old behaviour the task asked you to change, it is not a regression: leave the test as it is and name it in your final message. Never edit or delete a test to make it pass, unless the task explicitly asks you to change tests.",
     "End your final message with the AgentX result line, as before.",
   ];
   let used = 0;

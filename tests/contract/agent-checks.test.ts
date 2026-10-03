@@ -8,11 +8,11 @@ import {
 
 describe("the AgentX preamble (spec 051 FR-001)", () => {
   it("is versioned and hashed together with the worker prompt", () => {
-    expect(AGENTX_PREAMBLE_VERSION).toBe("3");
+    expect(AGENTX_PREAMBLE_VERSION).toBe("4");
     expect(agentxPreambleSha256()).toBe(createHash("sha256").update(`${AGENTX_WORKER_PROMPT}\n\n${AGENTX_PREAMBLE}`).digest("hex"));
   });
   it("tells the agent each rule, and the final line (P-5)", () => {
-    for (const phrase of ["Reproduce the problem", "before and after", "your own regression", "old behaviour the task asks you to change", "never claim", "AgentX result: done", "AgentX result: not done"]) {
+    for (const phrase of ["Reproduce the problem", "before and after", "your own regression", "old behaviour the task asks you to change", "Never edit or delete a test to make it pass", "Fix your change, not the test", "never claim", "AgentX result: done", "AgentX result: not done"]) {
       expect(AGENTX_PREAMBLE).toContain(phrase);
     }
   });
@@ -49,6 +49,9 @@ describe("matchTestCommand (FR-003, P-6)", () => {
     ['python -m pytest tests -k "not slow and (config or qtargs)"', 'python -m pytest tests -k "not slow and (config or qtargs)"'],
     ["pytest -k 'test_a or test_b'", "pytest -k 'test_a or test_b'"],
     ['pytest "-k x"', 'pytest "-k x"'], ["pytest 'x'", "pytest 'x'"],
+    // #292: mocha, as the agent ran it on NodeBB.
+    ["npx mocha test/template-helpers.js --timeout 10000 2>&1 | tail -20", "npx mocha test/template-helpers.js --timeout 10000"],
+    ["mocha test", "mocha test"], ["yarn mocha", "yarn mocha"], ["pnpm mocha test/a.js", "pnpm mocha test/a.js"],
   ])("replays %j", (command, replay) => {
     expect(matchTestCommand(command)).toBe(replay);
   });
@@ -66,7 +69,7 @@ describe("matchTestCommand (FR-003, P-6)", () => {
     // write files or never end (snapshot updates, watch modes).
     'pytest -k "$X"', "pytest -k \"`id`\"", 'pytest -k "a\\b"', 'pytest -k "a', '"pytest" -k x',
     'pytest --rootdir="/etc"', "pytest -k '../x'", "jest -u", "yarn jest --updateSnapshot", "npx vitest run -u",
-    "npx vitest --update", "jest --watch", "jest --watchAll", "pytest --snapshot-update", "python3 -m pip install x",
+    "npx vitest --update", "jest --watch", "jest --watchAll", "npx mocha --watch", "pytest --snapshot-update", "python3 -m pip install x",
     "pytest --junitxml=/etc/x", "FOO=/etc/x pytest", "make test -C /", "pytest --basetemp=../x", "npm test --prefix=/tmp",
   ])("does not treat %j as a check", (command) => {
     expect(matchTestCommand(command)).toBeUndefined();

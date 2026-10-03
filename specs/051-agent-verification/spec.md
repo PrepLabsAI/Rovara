@@ -231,6 +231,15 @@ These may come later (spec 053 or after).
   agent reported 5 correct, graded-as-resolved tasks as not done, each time because the repository's old tests asserted
   the behaviour the task changed. The check report itself is unchanged: such a test still shows as a regression in an
   eval, where tests may not be modified.
+- **D-18 (2026-10-03, amends D-17):** Preamble version 4. A test that checks the old behaviour the task changes is left
+  as it is and named; the agent never edits or deletes a test to make it pass unless the task explicitly asks for test
+  changes, and rule 3 says to fix the change, not the test. The extra try's message says the same. Reason: in the
+  10-task check of #291 (batch `1f8652a8`), version 3's "update it to the new behaviour" led the agent to edit tests in
+  3 of the 4 tasks with such a test, although each task said "Do not modify, add or delete tests". In one
+  (`ansible-a1569ea4`) it edited the tests to match a half-finished fix and claimed done; the grader failed it, and
+  AgentX's check passed because it ran the edited tests. The one task where the agent left the test and named it was
+  solved with a correct claim. Also from that check (#292): `mocha`, `npx mocha`, `yarn mocha` and `pnpm mocha` are
+  test commands (D-15).
 
 ## Success Criteria
 
