@@ -11635,7 +11635,7 @@ exports[`named environment templates > agentx-staging-identity is unchanged 1`] 
     },
     "UserPoolCli46B5F57F": {
       "Properties": {
-        "AccessTokenValidity": 60,
+        "AccessTokenValidity": 360,
         "AllowedOAuthFlows": [
           "code",
         ],
@@ -11652,7 +11652,7 @@ exports[`named environment templates > agentx-staging-identity is unchanged 1`] 
           "ALLOW_REFRESH_TOKEN_AUTH",
         ],
         "GenerateSecret": false,
-        "IdTokenValidity": 60,
+        "IdTokenValidity": 360,
         "LogoutURLs": [
           "http://127.0.0.1:8765/callback",
         ],

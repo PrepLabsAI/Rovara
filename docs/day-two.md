@@ -156,6 +156,11 @@ agentx --env <env> config get <key> --region <region>
 agentx --env <env> config set <key> <value> --region <region>
 ```
 
+The admin sign-in (`agentx --env <env> login --admin`) lasts 6 hours and is never refreshed: after
+that, every `agentx admin` command asks you to sign in again. An environment whose identity
+stack is not managed by AgentX (one that brings its own OIDC provider) sets this on its own app
+client, as the access and ID token validity.
+
 `set` shows the change and asks first (`--yes` skips the question). With this computer's admin
 sign-in (`agentx --env <env> login --admin`), every change `set` makes is recorded in the admin
 change history (`agentx --env <env> admin changes`) with the admin who made it, the `cli` client,
