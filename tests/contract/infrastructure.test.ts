@@ -266,9 +266,11 @@ describe("production foundation and worker settings", () => {
     // The live stack's logical IDs, so CloudFormation updates these parameters in place; a new ID
     // would try to create a second parameter with the same name and fail the release (#117).
     expect(Object.entries(resources).filter(([, resource]) => resource.Type !== "AWS::CDK::Metadata").map(([id, resource]) => [id, resource.Type]).sort()).toEqual([
+      [expect.stringMatching(/^WorkerAnthropicSecretParameter/), "AWS::SSM::Parameter"],
       ["WorkerImageParameter7CA9ADBB", "AWS::SSM::Parameter"],
       ["WorkerModelIdParameter02DE997A", "AWS::SSM::Parameter"],
       ["WorkerModelProviderParameterFBA25A19", "AWS::SSM::Parameter"],
+      [expect.stringMatching(/^WorkerOpenAISecretParameter/), "AWS::SSM::Parameter"],
       [expect.stringMatching(/^WorkerOpenRouterProvidersParameter/), "AWS::SSM::Parameter"],
       [expect.stringMatching(/^WorkerOpenRouterSecretParameter/), "AWS::SSM::Parameter"],
       ["WorkerPromptCacheRetentionParameter7E1031C3", "AWS::SSM::Parameter"],

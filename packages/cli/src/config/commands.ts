@@ -26,7 +26,7 @@ export interface ConfigServices {
   stacks: StackReader;
   identity: CallerIdentity;
   /** Built for the environment's own region, once its settings are read (the model test call runs there). */
-  checks: (region: string) => Pick<PrerequisiteChecks, "converse" | "openRouter">;
+  checks: (region: string) => Pick<PrerequisiteChecks, "converse" | "openRouter" | "directProvider">;
   alerts: AlertsApi;
   prompter: Prompter;
   processEnv: NodeJS.ProcessEnv;
@@ -100,9 +100,13 @@ export async function runConfigGet(services: ConfigServices, env: string, key: s
 async function checkModel(services: ConfigServices, env: string, settings: EnvironmentSettings, role: ModelRole, modelId: string): Promise<void> {
   const checks = services.checks(settings.region);
   try {
-    if (settings.models.providers?.[role] === "openrouter") {
+    const provider = settings.models.providers?.[role];
+    if (provider === "openrouter") {
       if (checks.openRouter === undefined) throw new Error("this agentx cannot check OpenRouter models");
       await checks.openRouter(modelId, settings.models.openRouter ?? {});
+    } else if (provider === "anthropic" || provider === "openai") {
+      if (checks.directProvider === undefined) throw new Error(`this agentx cannot check ${provider} models`);
+      await checks.directProvider(provider, modelId, settings.models[provider] ?? {});
     } else {
       await checks.converse(modelId);
     }

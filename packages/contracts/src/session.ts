@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { gzipSync } from "node:zlib";
 import { z } from "zod";
+import { KEYED_MODEL_PROVIDERS, SECRET_ARN_MAX_LENGTH, SECRET_ARN_PATTERN } from "./model-providers.js";
 
 // Contracts for ec2-ebs workspaces, whose compute the Session Manager provisions on self-managed
 // EC2 instances with one EBS volume per workspace (design in issue #76).
@@ -160,6 +161,8 @@ export const WORKER_SETTING_PARAMETERS = {
   promptCacheRetention: "worker-prompt-cache-retention",
   openRouterSecretArn: "worker-openrouter-secret-arn",
   openRouterProviders: "worker-openrouter-providers",
+  anthropicSecretArn: "worker-anthropic-secret-arn",
+  openaiSecretArn: "worker-openai-secret-arn",
 } as const;
 
 /**
@@ -243,8 +246,10 @@ export const Ec2WorkerBootConfigSchema = z
     modelProvider: z.string().min(1).max(128).regex(SHELL_SAFE, "model provider has unsafe characters"),
     /** AGENTX_MODEL_ID */
     modelId: z.string().min(1).max(256).regex(SHELL_SAFE, "model ID has unsafe characters"),
-    openRouterSecretArn: z.string().max(2_048).regex(/^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+$/).optional(),
+    openRouterSecretArn: z.string().max(2_048).regex(SECRET_ARN_PATTERN).optional(),
     openRouterProviders: z.string().max(512).regex(/^[a-z0-9][a-z0-9_/-]{0,79}(?:,[a-z0-9][a-z0-9_/-]{0,79})*$/).optional(),
+    anthropicSecretArn: z.string().max(SECRET_ARN_MAX_LENGTH).regex(SECRET_ARN_PATTERN).optional(),
+    openaiSecretArn: z.string().max(SECRET_ARN_MAX_LENGTH).regex(SECRET_ARN_PATTERN).optional(),
     /** PI_CACHE_RETENTION */
     promptCacheRetention: z.enum(["short", "long"]),
     /** AGENTX_LOG_GROUP: the CloudWatch Logs group the worker container writes to. */
@@ -273,6 +278,8 @@ export function ec2WorkerBootScript(config: Ec2WorkerBootConfig, bootScript: str
   ];
   if (parsed.openRouterSecretArn) variables.push(["AGENTX_OPENROUTER_SECRET_ARN", parsed.openRouterSecretArn]);
   if (parsed.openRouterProviders) variables.push(["AGENTX_OPENROUTER_PROVIDERS", parsed.openRouterProviders]);
+  if (parsed.anthropicSecretArn) variables.push([KEYED_MODEL_PROVIDERS.anthropic.secretArnVariable, parsed.anthropicSecretArn]);
+  if (parsed.openaiSecretArn) variables.push([KEYED_MODEL_PROVIDERS.openai.secretArnVariable, parsed.openaiSecretArn]);
   const body = bootScript.replace(/^#!.*\n/, "");
   return [
     "#!/bin/bash",

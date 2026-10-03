@@ -1,4 +1,6 @@
-import { openRouterParameters, openRouterRoutingParameter } from "./openrouter.js";
+import { MODEL_PROVIDERS, KEYED_MODEL_PROVIDERS, KEYED_PROVIDER_IDS } from "@agentx/contracts";
+import { providerKeyParameters } from "./model-keys.js";
+import { openRouterRoutingParameter } from "./openrouter.js";
 import {
   Aws,
   CfnCondition,
@@ -61,9 +63,9 @@ export class SlackOrchestratorStack extends Stack {
       type: "List<AWS::EC2::Subnet::Id>",
       description: "Private subnets with NAT egress, such as AgentXProductionFoundation's PrivateSubnetIds",
     });
-    const openRouter = openRouterParameters(this);
+    const providerKeys = providerKeyParameters(this);
     const openRouterProviders = openRouterRoutingParameter(this);
-    const classifierProvider = new CfnParameter(this, "GateClassifierProvider", { type: "String", default: "amazon-bedrock", allowedValues: ["amazon-bedrock", "openrouter"] });
+    const classifierProvider = new CfnParameter(this, "GateClassifierProvider", { type: "String", default: "amazon-bedrock", allowedValues: [...MODEL_PROVIDERS] });
     const modelProvider = new CfnParameter(this, "ModelProvider", { type: "String", default: "amazon-bedrock" });
     const modelId = new CfnParameter(this, "ModelId", { type: "String", default: "us.anthropic.claude-sonnet-4-6" });
     const gateClassifierModelId = new CfnParameter(this, "GateClassifierModelId", {
@@ -257,7 +259,7 @@ export class SlackOrchestratorStack extends Stack {
           { name: "SLACK_SECRET_ARN", value: secretArn.valueAsString },
           { name: "AGENTX_ORCHESTRATOR_PROVIDER", value: modelProvider.valueAsString },
           { name: "AGENTX_ORCHESTRATOR_MODEL", value: modelId.valueAsString },
-          { name: "AGENTX_OPENROUTER_SECRET_ARN", value: openRouter.secretArn.valueAsString },
+          ...KEYED_PROVIDER_IDS.map((provider) => ({ name: KEYED_MODEL_PROVIDERS[provider].secretArnVariable, value: providerKeys[provider].valueAsString })),
           { name: "AGENTX_OPENROUTER_PROVIDERS", value: openRouterProviders.valueAsString },
           { name: "AGENTX_GATE_CLASSIFIER_PROVIDER", value: classifierProvider.valueAsString },
           { name: "AGENTX_GATE_CLASSIFIER_MODEL", value: gateClassifierModelId.valueAsString },

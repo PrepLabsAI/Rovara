@@ -55,7 +55,12 @@ const SIGNIN_CHOICES = [
   { value: "oidc", label: "Your company's sign-in (OIDC)" },
   { value: "both", label: "Both" },
 ];
-const PROVIDER_CHOICES = [{ value: "amazon-bedrock", label: "Amazon Bedrock (recommended)" }, { value: "openrouter", label: "OpenRouter" }];
+const PROVIDER_CHOICES = [
+  { value: "amazon-bedrock", label: "Amazon Bedrock (recommended)" },
+  { value: "openrouter", label: "OpenRouter" },
+  { value: "anthropic", label: "Anthropic API (your own API key)" },
+  { value: "openai", label: "OpenAI API (your own API key)" },
+];
 const BUDGET_SCOPE_CHOICES = [
   { value: "account", label: "The whole account (recommended)" },
   { value: "tag", label: "Only this environment's (tagged agentx:env; the tag must be activated in Billing)" },

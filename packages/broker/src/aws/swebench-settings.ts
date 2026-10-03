@@ -29,6 +29,8 @@ export async function swebenchDeploymentFromParameters(
     promptCacheRetention: name(WORKER_SETTING_PARAMETERS.promptCacheRetention),
     openRouterSecretArn: name(WORKER_SETTING_PARAMETERS.openRouterSecretArn),
     openRouterProviders: name(WORKER_SETTING_PARAMETERS.openRouterProviders),
+    anthropicSecretArn: name(WORKER_SETTING_PARAMETERS.anthropicSecretArn),
+    openaiSecretArn: name(WORKER_SETTING_PARAMETERS.openaiSecretArn),
   };
   const values = await read(Object.values(names));
   const settingsValue = values.get(names.settings);
@@ -47,6 +49,10 @@ export async function swebenchDeploymentFromParameters(
   if (secret && secret !== "none") environment.AGENTX_OPENROUTER_SECRET_ARN = secret;
   const providers = values.get(names.openRouterProviders);
   if (providers && providers !== "none") environment.AGENTX_OPENROUTER_PROVIDERS = providers;
+  const anthropic = values.get(names.anthropicSecretArn);
+  if (anthropic && anthropic !== "none") environment.AGENTX_ANTHROPIC_SECRET_ARN = anthropic;
+  const openai = values.get(names.openaiSecretArn);
+  if (openai && openai !== "none") environment.AGENTX_OPENAI_SECRET_ARN = openai;
   return { settings, runnerImage, defaultModel: { provider, modelId }, environment, runnerFeatures: runnerFeatures(values.get(names.runnerFeatures), runnerImage) };
 }
 

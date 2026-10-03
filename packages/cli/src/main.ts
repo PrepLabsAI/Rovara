@@ -12,9 +12,11 @@ import {
   ENVIRONMENT_PLACEHOLDER,
   EnvironmentNameSchema,
   WorkspaceDeploymentModeSchema,
+  MODEL_PROVIDERS,
   agentXError,
   type ProjectDefinition,
 } from "@agentx/contracts";
+import { DEFAULT_DIRECT_MODELS } from "@agentx/model-runtime/config";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SSMClient } from "@aws-sdk/client-ssm";
@@ -946,14 +948,20 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--admin-values <values>", "comma-separated values of --admin-claim that mark an administrator")
     .option("--permission-boundary <arn>", "IAM permissions boundary ARN applied to every role AgentX creates")
     .option("--operator-principal <arn>", "IAM principal ARN allowed to assume the AgentX operator role")
-    .addOption(new Option("--model-provider <provider>", "model provider for the orchestrator, classifier and worker; a per-component provider flag wins over it").choices(["amazon-bedrock", "openrouter"]))
-    .option("--orchestrator-provider <provider>", "amazon-bedrock (default) or openrouter")
-    .option("--classifier-provider <provider>", "amazon-bedrock (default) or openrouter")
-    .option("--worker-provider <provider>", "amazon-bedrock (default) or openrouter")
+    .addOption(new Option("--model-provider <provider>", "model provider for the orchestrator, classifier and worker; a per-component provider flag wins over it").choices([...MODEL_PROVIDERS]))
+    .option("--orchestrator-provider <provider>", "amazon-bedrock (default), openrouter, anthropic or openai")
+    .option("--classifier-provider <provider>", "amazon-bedrock (default), openrouter, anthropic or openai")
+    .option("--worker-provider <provider>", "amazon-bedrock (default), openrouter, anthropic or openai")
     .option("--openrouter-key-file <path>", "file holding the OpenRouter API key; init stores it in agentx/<env>/openrouter")
     .option("--openrouter-key-env <NAME>", "environment variable holding the OpenRouter API key; init stores it in agentx/<env>/openrouter")
     .option("--openrouter-secret-arn <arn>", "a Secrets Manager secret you made yourself holding the raw OpenRouter key; init then asks for no key")
     .option("--openrouter-providers <slugs>", "comma-separated OpenRouter provider allowlist")
+    .option("--anthropic-key-file <path>", "file holding your Anthropic API key; init stores it in agentx/<env>/anthropic")
+    .option("--anthropic-key-env <NAME>", "environment variable holding your Anthropic API key; init stores it in agentx/<env>/anthropic")
+    .option("--anthropic-secret-arn <arn>", "a Secrets Manager secret you made yourself holding the raw Anthropic API key; init then asks for no key")
+    .option("--openai-key-file <path>", "file holding your OpenAI API key; init stores it in agentx/<env>/openai")
+    .option("--openai-key-env <NAME>", "environment variable holding your OpenAI API key; init stores it in agentx/<env>/openai")
+    .option("--openai-secret-arn <arn>", "a Secrets Manager secret you made yourself holding the raw OpenAI API key; init then asks for no key")
     .option("--orchestrator-model <id>", "Provider model id for the Slack orchestrator", DEFAULT_ORCHESTRATOR_MODEL)
     .option("--classifier-model <id>", "Provider model id for the gate classifier", DEFAULT_CLASSIFIER_MODEL)
     .option("--worker-model <id>", "Provider model id for the runtime worker", DEFAULT_WORKER_MODEL)
@@ -1051,7 +1059,17 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
       if (options.openrouterKeyFile !== undefined || options.openrouterKeyEnv !== undefined) {
         throw agentXError("CONFIG_INVALID", "--export stores no secret, so it takes no OpenRouter key; create the secret yourself and pass --openrouter-secret-arn");
       }
+      for (const [label, flag, file, env] of [["Anthropic", "anthropic", options.anthropicKeyFile, options.anthropicKeyEnv], ["OpenAI", "openai", options.openaiKeyFile, options.openaiKeyEnv]] as const) {
+        if (file !== undefined || env !== undefined) throw agentXError("CONFIG_INVALID", `--export stores no secret, so it takes no ${label} key; create the secret yourself and pass --${flag}-secret-arn`);
+      }
       const exportProvider = (component?: string) => component ?? options.modelProvider;
+      // A direct provider's role takes its suggested model unless one was typed: the commander
+      // default is a Bedrock model ID.
+      const exportModel = (role: "orchestrator" | "classifier" | "worker", component?: string): string => {
+        const provider = exportProvider(component);
+        const typedModel = command.getOptionValueSource(`${role}Model`) === "cli";
+        return !typedModel && (provider === "anthropic" || provider === "openai") ? DEFAULT_DIRECT_MODELS[provider][role] : options[`${role}Model`];
+      };
       const result = await runInitExport(
         {
           env: globals.env,
@@ -1059,14 +1077,16 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
           region: options.region,
           releaseDir: options.release,
           identity: options.identity,
-          orchestratorModel: options.orchestratorModel,
-          classifierModel: options.classifierModel,
-          workerModel: options.workerModel,
+          orchestratorModel: exportModel("orchestrator", options.orchestratorProvider),
+          classifierModel: exportModel("classifier", options.classifierProvider),
+          workerModel: exportModel("worker", options.workerProvider),
           ...(exportProvider(options.orchestratorProvider) ? { orchestratorProvider: exportProvider(options.orchestratorProvider) } : {}),
           ...(exportProvider(options.classifierProvider) ? { classifierProvider: exportProvider(options.classifierProvider) } : {}),
           ...(exportProvider(options.workerProvider) ? { workerProvider: exportProvider(options.workerProvider) } : {}),
           ...(options.openrouterSecretArn ? { openrouterSecretArn: options.openrouterSecretArn } : {}),
           ...(options.openrouterProviders ? { openrouterProviders: options.openrouterProviders } : {}),
+          ...(options.anthropicSecretArn ? { anthropicSecretArn: options.anthropicSecretArn } : {}),
+          ...(options.openaiSecretArn ? { openaiSecretArn: options.openaiSecretArn } : {}),
           ...(options.account === undefined ? {} : { account: options.account }),
           ...(options.oidcIssuer === undefined ? {} : { oidcIssuer: options.oidcIssuer }),
           ...(options.oidcAudience === undefined ? {} : { oidcAudience: options.oidcAudience }),
@@ -1229,6 +1249,8 @@ interface InitCommandOptions extends SignInCommandOptions {
   identity: "cognito" | "oidc"; oidcIssuer?: string; oidcAudience?: string; oidcClientId?: string; adminClaim?: string; adminValues?: string;
   modelProvider?: string; orchestratorProvider?: string; classifierProvider?: string; workerProvider?: string; openrouterSecretArn?: string; openrouterProviders?: string;
   openrouterKeyFile?: string; openrouterKeyEnv?: string;
+  anthropicSecretArn?: string; anthropicKeyFile?: string; anthropicKeyEnv?: string;
+  openaiSecretArn?: string; openaiKeyFile?: string; openaiKeyEnv?: string;
   permissionBoundary?: string; operatorPrincipal?: string; orchestratorModel: string; classifierModel: string; workerModel: string;
   alertEmail?: string; alertWebhookFile?: string; alertWebhookEnv?: string; alerts: boolean;
   budget?: string; budgetScope?: "tag" | "account";
@@ -1278,6 +1300,8 @@ function initOptions(globals: GlobalOptions, options: InitCommandOptions, comman
     orchestratorProvider: options.orchestratorProvider, classifierProvider: options.classifierProvider, workerProvider: options.workerProvider,
     openrouterSecretArn: options.openrouterSecretArn, openrouterProviders: options.openrouterProviders,
     openrouterKey: secretSource(options.openrouterKeyFile, options.openrouterKeyEnv),
+    anthropicSecretArn: options.anthropicSecretArn, anthropicKey: secretSource(options.anthropicKeyFile, options.anthropicKeyEnv),
+    openaiSecretArn: options.openaiSecretArn, openaiKey: secretSource(options.openaiKeyFile, options.openaiKeyEnv),
     permissionBoundary: options.permissionBoundary, operatorPrincipal: options.operatorPrincipal,
     alertEmail: options.alertEmail,
     alertWebhook: secretSource(options.alertWebhookFile, options.alertWebhookEnv),

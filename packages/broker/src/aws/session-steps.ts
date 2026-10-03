@@ -46,6 +46,8 @@ export interface WorkerSettings {
   promptCacheRetention: "short" | "long";
   openRouterSecretArn?: string;
   openRouterProviders?: string;
+  anthropicSecretArn?: string;
+  openaiSecretArn?: string;
 }
 
 export interface SessionStepsDependencies {
@@ -124,6 +126,8 @@ export function createSessionStepsHandler(dependencies: SessionStepsDependencies
           promptCacheRetention: settings.promptCacheRetention,
           ...(settings.openRouterSecretArn ? { openRouterSecretArn: settings.openRouterSecretArn } : {}),
           ...(settings.openRouterProviders ? { openRouterProviders: settings.openRouterProviders } : {}),
+          ...(settings.anthropicSecretArn ? { anthropicSecretArn: settings.anthropicSecretArn } : {}),
+          ...(settings.openaiSecretArn ? { openaiSecretArn: settings.openaiSecretArn } : {}),
           logGroupName: dependencies.logGroupName,
         }, dependencies.bootScript());
         // Already base64 gzip, the form RunInstances takes (#229).
@@ -187,11 +191,12 @@ export const handler = createSessionStepsHandler({
     };
     const promptCacheRetention = setting("promptCacheRetention");
     if (promptCacheRetention !== "short" && promptCacheRetention !== "long") throw new Error("worker prompt cache retention must be short or long");
-    const optional = (key: "openRouterSecretArn" | "openRouterProviders") => {
+    // Absent from SSM (a release before the setting existed) or "none" both mean not configured.
+    const optional = (key: "openRouterSecretArn" | "openRouterProviders" | "anthropicSecretArn" | "openaiSecretArn") => {
       const value = values.get(names[key]);
       return value && value !== "none" ? { [key]: value } : {};
     };
-    return { ...optional("openRouterSecretArn"), ...optional("openRouterProviders"), workerImage: setting("workerImage"), modelProvider: setting("modelProvider"), modelId: setting("modelId"), promptCacheRetention };
+    return { ...optional("openRouterSecretArn"), ...optional("openRouterProviders"), ...optional("anthropicSecretArn"), ...optional("openaiSecretArn"), workerImage: setting("workerImage"), modelProvider: setting("modelProvider"), modelId: setting("modelId"), promptCacheRetention };
   },
   invokePublicKey() {
     // The key never changes, so one read per container.

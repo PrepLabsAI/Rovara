@@ -1,5 +1,6 @@
 import { CfnCondition, Fn } from "aws-cdk-lib";
-import { openRouterParameters, openRouterRoutingParameter } from "./openrouter.js";
+import { providerKeyParameters } from "./model-keys.js";
+import { openRouterRoutingParameter } from "./openrouter.js";
 import { CfnParameter, Stack, type StackProps, aws_ssm as ssm } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 import { WORKER_SETTING_PARAMETERS } from "@agentx/contracts";
@@ -45,12 +46,16 @@ export class WorkerSettingsStack extends Stack {
       stringValue: imageUri.valueAsString,
       description: "AgentX worker image URI pinned by digest, for EC2 workers",
     });
-    const { secretArn } = openRouterParameters(this);
+    const keys = providerKeyParameters(this);
     const providers = openRouterRoutingParameter(this);
-    const hasSecret = new CfnCondition(this, "HasOpenRouterSecret", { expression: Fn.conditionNot(Fn.conditionEquals(secretArn.valueAsString, "")) });
+    const hasSecret = new CfnCondition(this, "HasOpenRouterSecret", { expression: Fn.conditionNot(Fn.conditionEquals(keys.openrouter.valueAsString, "")) });
+    const hasAnthropicSecret = new CfnCondition(this, "HasAnthropicSecret", { expression: Fn.conditionNot(Fn.conditionEquals(keys.anthropic.valueAsString, "")) });
+    const hasOpenAISecret = new CfnCondition(this, "HasOpenAISecret", { expression: Fn.conditionNot(Fn.conditionEquals(keys.openai.valueAsString, "")) });
     const hasProviders = new CfnCondition(this, "HasOpenRouterProviders", { expression: Fn.conditionNot(Fn.conditionEquals(providers.valueAsString, "")) });
     const workerSettings: Array<[string, keyof typeof WORKER_SETTING_PARAMETERS, string]> = [
-      ["WorkerOpenRouterSecretParameter", "openRouterSecretArn", Fn.conditionIf(hasSecret.logicalId, secretArn.valueAsString, "none").toString()],
+      ["WorkerOpenRouterSecretParameter", "openRouterSecretArn", Fn.conditionIf(hasSecret.logicalId, keys.openrouter.valueAsString, "none").toString()],
+      ["WorkerAnthropicSecretParameter", "anthropicSecretArn", Fn.conditionIf(hasAnthropicSecret.logicalId, keys.anthropic.valueAsString, "none").toString()],
+      ["WorkerOpenAISecretParameter", "openaiSecretArn", Fn.conditionIf(hasOpenAISecret.logicalId, keys.openai.valueAsString, "none").toString()],
       ["WorkerOpenRouterProvidersParameter", "openRouterProviders", Fn.conditionIf(hasProviders.logicalId, providers.valueAsString, "none").toString()],
       ["WorkerModelProviderParameter", "modelProvider", modelProvider.valueAsString],
       ["WorkerModelIdParameter", "modelId", modelId.valueAsString],

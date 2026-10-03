@@ -689,7 +689,7 @@ it again: it continues where it stopped. The steps below are the same work by ha
      \`\`\`
    - **Every secret under \`agentx/${env}/\`**: \`callback-signing-key\` (created by \`agentx deploy\`,
      outside any stack), \`slack\`, and those \`agentx init\` stored (\`github-app\`, \`alert-endpoint\`,
-     \`openrouter\`, \`developer-oidc\`, \`connectors/...\`). List them, then delete each one without a
+     \`openrouter\`, \`anthropic\`, \`openai\`, \`developer-oidc\`, \`connectors/...\`). List them, then delete each one without a
      recovery window, so the names can be reused by a new install:
      \`\`\`
      aws secretsmanager list-secrets --region ${region} --filters Key=name,Values=agentx/${env}/ --query "SecretList[].Name" --output text

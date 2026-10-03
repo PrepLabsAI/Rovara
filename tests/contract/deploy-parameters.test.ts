@@ -67,6 +67,24 @@ describe("deploy parameters", () => {
       if (part === "slack") expect(params.GateClassifierProvider).toBe("amazon-bedrock");
     }
   });
+  it("passes Anthropic and OpenAI secret references to the stacks that declare them, and nothing when unset (spec 054)", () => {
+    const configured = answers();
+    configured.models.providers = { orchestrator: "anthropic", classifier: "anthropic", worker: "openai" };
+    configured.models.anthropic = { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/anthropic-AbCdEf" };
+    configured.models.openai = { secretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/openai-AbCdEf" };
+    for (const part of ["control-plane", "runtime", "slack"] as const) {
+      const params = stackParameters(part, configured, outputs, { packages: true });
+      expect(params).toMatchObject({ AnthropicSecretArn: configured.models.anthropic.secretArn, OpenAISecretArn: configured.models.openai.secretArn });
+      expect(params).not.toHaveProperty("OpenRouterSecretArn");
+      expect(Object.keys(params).filter((name) => !(name in templates.get(part)!.Parameters!))).toEqual([]);
+    }
+    expect(stackParameters("runtime", configured, outputs, { packages: true }).ModelProvider).toBe("openai");
+    expect(stackParameters("slack", configured, outputs, { packages: true })).toMatchObject({ ModelProvider: "anthropic", GateClassifierProvider: "anthropic" });
+    expect(stackParameters("foundation", configured, outputs, { packages: true })).not.toHaveProperty("AnthropicSecretArn");
+    for (const part of ["control-plane", "runtime", "slack"] as const) {
+      expect(Object.keys(stackParameters(part, answers(), outputs, { packages: true }))).not.toEqual(expect.arrayContaining(["AnthropicSecretArn"]));
+    }
+  });
   it("passes the alert topic to the Slack stack, and the budget to the control plane only when there is one", () => {
     expect(stackParameters("slack", answers(), outputs, { packages: true }).OperatorAlertsTopicArn).toBe(outputs["control-plane"].OperatorAlertsTopicArn);
     expect(stackParameters("control-plane", answers(), outputs, { packages: true }).BudgetMonthlyUsd).toBeUndefined();

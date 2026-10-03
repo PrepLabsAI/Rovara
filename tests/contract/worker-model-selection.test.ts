@@ -11,6 +11,11 @@ describe("worker task model resolution", () => {
     expect(resolveTaskModel({ provider: "amazon-bedrock", modelId: "m", thinkingLevel: "off" }, {})).toMatchObject({ thinkingLevel: "off" });
   });
 
+  it.each([["anthropic", "claude-sonnet-4-6"], ["openai", "gpt-4o"]])("lets the session choose the level from the catalog for a %s model", (provider, modelId) => {
+    expect(resolveTaskModel({ provider, modelId }, {})).not.toHaveProperty("thinkingLevel");
+    expect(resolveTaskModel(undefined, { AGENTX_MODEL_PROVIDER: provider, AGENTX_MODEL_ID: modelId })).not.toHaveProperty("thinkingLevel");
+  });
+
   it("uses the broker-resolved model while keeping deployment-owned session settings", () => {
     expect(resolveTaskModel(
       { provider: "amazon-bedrock", modelId: "project-model" },

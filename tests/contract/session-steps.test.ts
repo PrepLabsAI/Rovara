@@ -28,6 +28,8 @@ function setup(ping: SessionStepsDependencies["ping"] = async () => ({ status: "
       promptCacheRetention: "long",
       openRouterSecretArn: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/openrouter-AbCdEf",
       openRouterProviders: "anthropic,amazon-bedrock",
+      anthropicSecretArn: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/anthropic-AbCdEf",
+      openaiSecretArn: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/openai-AbCdEf",
     }),
     // Full length, as KMS returns a P-256 public key, so the user data size check is realistic.
     invokePublicKey: async () => `MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE${"A".repeat(88)}`,
@@ -68,8 +70,12 @@ describe("session steps", () => {
       promptCacheRetention: "long",
       openRouterSecretArn: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/openrouter-AbCdEf",
       openRouterProviders: "anthropic,amazon-bedrock",
+      anthropicSecretArn: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/anthropic-AbCdEf",
+      openaiSecretArn: "arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/openai-AbCdEf",
       logGroupName: "/agentx/production/worker",
     }, bootScript));
+    expect(userData).toContain("export AGENTX_ANTHROPIC_SECRET_ARN='arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/anthropic-AbCdEf'");
+    expect(userData).toContain("export AGENTX_OPENAI_SECRET_ARN='arn:aws:secretsmanager:us-east-1:111122223333:secret:agentx/production/openai-AbCdEf'");
   });
 
   it("records the volume and instance, and marks the session ready, failed or deleted", async () => {

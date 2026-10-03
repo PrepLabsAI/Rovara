@@ -30,7 +30,7 @@ export interface DoctorServices {
   /** The release manifest for a version: the local release cache, else the published release.json;
    * undefined when neither can be read. */
   releaseManifest: (version: string) => Promise<ReleaseManifest | undefined>;
-  checks: Pick<PrerequisiteChecks, "converse" | "openRouter" | "ec2Quota" | "elasticIps">;
+  checks: Pick<PrerequisiteChecks, "converse" | "openRouter" | "directProvider" | "ec2Quota" | "elasticIps">;
   slackApi: SlackApi;
   slackChannels: SlackChannelApi;
   github: GitHubApi;

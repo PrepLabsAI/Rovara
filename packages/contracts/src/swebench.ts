@@ -2,6 +2,7 @@
 // task instance, on its own x86 instance, outside any workspace.
 import { z } from "zod";
 import { ModelSelectionSchema } from "./models.js";
+import { SECRET_ARN_PATTERN } from "./model-providers.js";
 import { SlackRequesterSchema, SlackThreadSchema, SlackChannelIdSchema, SlackTeamIdSchema } from "./slack.js";
 import { CheckReportSchema } from "./checks.js";
 import { TaskUsageTelemetrySchema } from "./usage.js";
@@ -313,11 +314,13 @@ export const SwebenchSettingsSchema = z.object({
 export const SwebenchLaunchSchema = z.object({
   runnerImage: z.string().regex(/^\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com\/[a-z0-9]+(?:[._/-][a-z0-9]+)*@sha256:[0-9a-f]{64}$/, "runner image must be an ECR image pinned by digest"),
   logGroupName: z.string().regex(/^[A-Za-z0-9._/-]{1,512}$/),
-  /** Extra worker environment: the prompt cache retention and OpenRouter settings. */
+  /** Extra worker environment: the prompt cache retention and the keyed providers' settings. */
   environment: z.object({
     PI_CACHE_RETENTION: z.enum(["short", "long"]).optional(),
     AGENTX_OPENROUTER_SECRET_ARN: z.string().regex(/^arn:aws[a-z-]*:secretsmanager:[a-z0-9-]+:\d{12}:secret:[A-Za-z0-9/_+=.@-]+$/).optional(),
     AGENTX_OPENROUTER_PROVIDERS: z.string().regex(/^[a-z0-9][a-z0-9_/-]{0,79}(?:,[a-z0-9][a-z0-9_/-]{0,79})*$/).optional(),
+    AGENTX_ANTHROPIC_SECRET_ARN: z.string().regex(SECRET_ARN_PATTERN).optional(),
+    AGENTX_OPENAI_SECRET_ARN: z.string().regex(SECRET_ARN_PATTERN).optional(),
   }).strict(),
   run: SwebenchRunnerConfigSchema,
 }).strict();

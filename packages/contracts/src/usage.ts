@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { isKeyedModelProvider } from "./model-providers.js";
 import { ThinkingLevelSchema, type ThinkingLevel } from "./models.js";
 
 export type PiCacheRetention = "short" | "long";
@@ -20,7 +21,8 @@ export interface TaskUsageTelemetry {
   };
   cacheReadRatio: number;
   costUsd: number | null;
-  costSource?: "estimated" | "unknown";
+  /** Set for keyed providers: OpenRouter prices are estimates, direct providers' are Pi's list prices. */
+  costSource?: "estimated" | "list-price" | "unknown";
 }
 
 /** The part of Pi's SessionStats usage telemetry reads; SessionStats is assignable to it. */
@@ -41,7 +43,7 @@ export const TaskUsageTelemetrySchema = z.object({
   tokens: z.object({ input: TokenCount, output: TokenCount, cacheRead: TokenCount, cacheWrite: TokenCount, total: TokenCount }).strict(),
   cacheReadRatio: z.number().min(0).max(1),
   costUsd: z.number().nonnegative().nullable(),
-  costSource: z.enum(["estimated", "unknown"]).optional(),
+  costSource: z.enum(["estimated", "list-price", "unknown"]).optional(),
 }).strict();
 
 export function effectiveCacheRetention(value: unknown): PiCacheRetention {
@@ -71,9 +73,14 @@ export function createTaskUsageTelemetry(
     cacheRetention: effectiveCacheRetention(model.cacheRetention),
     tokens,
     cacheReadRatio: inputSideTokens === 0 ? 0 : tokens.cacheRead / inputSideTokens,
-    costUsd: model.provider === "openrouter" && stats.cost === 0 ? null : nonNegativeNumber(stats.cost, "session cost"),
-    ...(model.provider === "openrouter" ? { costSource: stats.cost > 0 ? "estimated" as const : "unknown" as const } : {}),
+    costUsd: isKeyedModelProvider(model.provider) && stats.cost === 0 ? null : nonNegativeNumber(stats.cost, "session cost"),
+    ...(isKeyedModelProvider(model.provider) ? { costSource: costSource(model.provider, stats.cost) } : {}),
   };
+}
+
+function costSource(provider: string, cost: number): "estimated" | "list-price" | "unknown" {
+  if (cost <= 0) return "unknown";
+  return provider === "openrouter" ? "estimated" : "list-price";
 }
 
 function nonNegativeInteger(value: number, label: string): number {

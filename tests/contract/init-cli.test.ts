@@ -926,6 +926,41 @@ function recordingOpenRouterChecks() {
   return { calls, checks: passingChecks({ openRouter: async (modelId, config, key) => { calls.push({ modelId, ...(config.secretArn === undefined ? {} : { secretArn: config.secretArn }), ...(key === undefined ? {} : { key }) }); } }) };
 }
 
+describe("agentx init with an Anthropic API key (spec 054)", () => {
+  const ANTHROPIC_KEY = "sk-ant-api03-0123456789abcdefKEYSECRET";
+  const ANTHROPIC_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/anthropic-AbCdEf";
+
+  it("stores the key before any stack, checks the models with it, passes only the ARN on, and a resume with --anthropic-key-env rotates it", async () => {
+    const h = await harness();
+    const calls: Array<{ provider: string; modelId: string; key?: string }> = [];
+    const checks = passingChecks({ directProvider: async (provider, modelId, _config, key) => { calls.push({ provider, modelId, ...(key === undefined ? {} : { key }) }); } });
+    h.deployer.fail.set(environmentStackName("staging", "control-plane"), new Error("Resource limit exceeded"));
+    const argv = [...UNATTENDED, "--alert-email", "ops@example.com", "--model-provider", "anthropic", "--anthropic-key-env", "ANTHROPIC_KEY_FOR_AGENTX"];
+    expect(await h.run(argv, { processEnv: { ...UNATTENDED_ENV, ANTHROPIC_KEY_FOR_AGENTX: ANTHROPIC_KEY }, checks })).not.toBe(0);
+    expect(h.secrets.values.get("agentx/staging/anthropic")).toBe(ANTHROPIC_KEY);
+    expect(checks.models).toEqual([]);
+    expect(calls).toEqual([
+      { provider: "anthropic", modelId: "claude-sonnet-4-6", key: ANTHROPIC_KEY },
+      { provider: "anthropic", modelId: "claude-haiku-4-5", key: ANTHROPIC_KEY },
+    ]);
+    const saved = (await readInstallAnswers(h.store, "staging"))?.models;
+    expect(saved).toMatchObject({ orchestrator: "claude-sonnet-4-6", classifier: "claude-haiku-4-5", worker: "claude-sonnet-4-6", anthropic: { secretArn: ANTHROPIC_ARN } });
+
+    h.deployer.fail.clear();
+    const rotated = ANTHROPIC_KEY.replace("0123456789", "9876543210");
+    expect(await h.run(argv, { processEnv: { ...UNATTENDED_ENV, ANTHROPIC_KEY_FOR_AGENTX: rotated }, checks })).toBe(0);
+    expect(h.secrets.values.get("agentx/staging/anthropic")).toBe(rotated);
+    const withArn = h.deployer.requests.filter((request) => "AnthropicSecretArn" in request.parameters);
+    expect([...new Set(withArn.map((request) => request.part))]).toEqual(["control-plane", "runtime", "slack"]);
+    expect(withArn.every((request) => request.parameters.AnthropicSecretArn === ANTHROPIC_ARN)).toBe(true);
+    const everywhere = await everywhereButSecrets(h);
+    for (const key of [ANTHROPIC_KEY, rotated]) {
+      expect(everywhere).not.toContain(key);
+      expect(JSON.stringify(h.deployer.requests.map((request) => request.parameters))).not.toContain(key);
+    }
+  });
+});
+
 describe("agentx init with OpenRouter", () => {
   it("asks for the key hidden, stores it raw in agentx/<env>/openrouter before any stack, and passes only its ARN on", async () => {
     const h = await harness();
