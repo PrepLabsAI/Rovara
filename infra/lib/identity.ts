@@ -66,8 +66,9 @@ export class IdentityStack extends Stack {
       },
       supportedIdentityProviders: [cognito.UserPoolClientIdentityProvider.COGNITO],
       preventUserExistenceErrors: true,
-      accessTokenValidity: Duration.hours(1),
-      idTokenValidity: Duration.hours(1),
+      // The admin sign-in is never refreshed (spec 025 Q4), so this is how long `agentx login --admin` lasts.
+      accessTokenValidity: Duration.hours(6),
+      idTokenValidity: Duration.hours(6),
       refreshTokenValidity: Duration.days(30),
     });
 
