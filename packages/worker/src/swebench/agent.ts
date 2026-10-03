@@ -7,6 +7,7 @@ import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, 
 import { ToolLoopGuard } from "../tool-loop-guard.js";
 import { createCheckRunners, planChecks, type CheckRunners } from "../verification/checks.js";
 import { assistantText, finalCheckReport, verificationExtension } from "../verification/extension.js";
+import { gitOriginalCode } from "../verification/original-code.js";
 import { CommandRecorder } from "../verification/recorder.js";
 
 export interface AgentRun {
@@ -40,6 +41,8 @@ export interface AgentRunInput {
   piAdapter?: PiSessionAdapter;
   /** The runners AgentX's checks use; tests supply fakes. Default: the container's own bash operations. */
   checkRunners?: CheckRunners;
+  /** D-16 (#290): the testbed's starting commit, so AgentX measures before results on the original code. */
+  baseCommit?: string;
   now?: () => number;
 }
 
@@ -89,6 +92,7 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
     onReport: (report) => { reportedChecks = report; },
     onExtraTry: (firstRound) => { firstRoundChecks = firstRound; reportedChecks = undefined; },
     onDiagnostic,
+    ...(input.baseCommit === undefined ? {} : { originalCode: gitOriginalCode([{ directory: input.paths.hostFolder, commit: input.baseCommit }]) }),
   });
   const session = await createWorkspacePiSession({
     onDiagnostic,

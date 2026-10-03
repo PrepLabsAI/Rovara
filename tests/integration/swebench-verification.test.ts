@@ -133,7 +133,8 @@ async function swebenchRun(options: { commands?: string[]; links?: Record<string
   const result = await runSwebench(swebenchConfig(), {
     rootPath, model: { provider: "amazon-bedrock", modelId: "fixture-model" }, docker, reporter: recorded.reporter, log: () => undefined,
     dataset: { fetch: async () => new Response(JSON.stringify({ rows: [{ row: instance }] })) },
-    piAdapter: agentAdapter(agentSteps(testbed, options.finalText, options.commands)),
+    // <TESTBED> in a command stands for the testbed's host folder, which only exists once the run has a root.
+    piAdapter: agentAdapter(agentSteps(testbed, options.finalText, options.commands?.map((command) => command.split("<TESTBED>").join(testbed)))),
     ...(options.useContainerRunners === true ? {} : { checkRunners: replays.runners }),
     grade: async () => ({ resolved: true, failToPass: { passed: 1, total: 1 }, passToPass: options.passToPass, files: [] }),
   });
@@ -231,6 +232,12 @@ describe("the agent's commands as the container writes them (spec 051 Ruling X)"
     const { replays, artifacts } = await swebenchRun({ finalText: "AgentX result: done", passToPass: { passed: 1, total: 1 }, commands: ["cd /testbed && pytest", "cd /testbed/pkg && pytest -k x"] });
     expect(replays).toEqual(["cd testbed && pytest", "cd testbed/pkg && pytest -k x"]);
     expect(checkIds(artifacts)).toHaveLength(2);
+  });
+
+  it("replays `cd <host testbed> && pytest`, the path AgentX tells the agent to prefer, as `cd testbed ...` (#290)", async () => {
+    const { replays, artifacts } = await swebenchRun({ finalText: "AgentX result: done", passToPass: { passed: 1, total: 1 }, commands: ["cd <TESTBED> && python3 -m pytest -q 2>&1 | tail -20"] });
+    expect(replays).toEqual(["cd testbed && python3 -m pytest -q"]);
+    expect(checkIds(artifacts)).toHaveLength(1);
   });
 
   it("neither records nor runs a cd that leaves the testbed or only looks like it", async () => {

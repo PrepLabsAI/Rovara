@@ -28,6 +28,7 @@ import { WorkerOperationCancelledError, type WorkerCancellationController } from
 import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, verificationExtension } from "./verification/extension.js";
+import { gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
 import { CommandRecorder } from "./verification/recorder.js";
 import {
   createTaskUsageTelemetry,
@@ -58,6 +59,8 @@ export async function runTaskInvocation(
     checkRunners?: CheckRunners;
     /** Each check round's budget; tests supply short ones. Default: CHECK_ROUND_BUDGET_MS (P-3). */
     checkBudgetMs?: () => number;
+    /** D-16: the original code for before results; tests supply a fake. Default: each repository's preparation commit. */
+    originalCode?: OriginalCode;
   },
 ): Promise<TaskInvocationResult> {
   const invocation = WorkerInvocationSchema.parse(untrustedInvocation);
@@ -116,6 +119,17 @@ export async function runTaskInvocation(
   }
   for (const message of modelChangeDiagnostics(registered, dependencies.model)) onDiagnostic(message);
 
+  // D-16 (#290): files an earlier task left while AgentX ran the original code (its worker stopped mid-check) go back
+  // before this task starts. If they cannot, the task does not start on the wrong files.
+  const repositoryDirectories = manifest.repositories.map((repository) => resolve(canonicalRoot, repository.path));
+  try {
+    for (const directory of await recoverAgentFiles(repositoryDirectories)) {
+      onDiagnostic(`AgentX restored the files in ${relative(canonicalRoot, directory) || "."} that an earlier task left while AgentX was checking them against the original code.`);
+    }
+  } catch (error) {
+    throw agentXError("RUNTIME_UNAVAILABLE", `AgentX could not restore the files an earlier task left while it was checking them against the original code: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   // Spec 051: AgentX checks the agent's work when it finishes (FR-002 to FR-007). The stop fires on a cancel or the
   // loop guard's stop, so a running check ends with the task rather than at its own timeout (Review Focus 1).
   const verificationStop = new AbortController();
@@ -147,6 +161,7 @@ export async function runTaskInvocation(
     // I-3: an earlier settle's report is stale once the agent has a regression to fix.
     onExtraTry: (firstRound) => { firstRoundChecks = firstRound; reportedChecks = undefined; },
     onDiagnostic,
+    ...(dependencies.originalCode === undefined ? defaultOriginalCode(manifest, canonicalRoot) : { originalCode: dependencies.originalCode }),
   });
 
   let session: PiSessionHandle;
@@ -574,4 +589,14 @@ function eventType(event: unknown): "progress" | "tool_start" | "tool_end" {
     if (type === "tool_execution_end" || type === "tool_result") return "tool_end";
   }
   return "progress";
+}
+
+/**
+ * D-16 (#290): every repository at the commit preparation recorded. When any repository has no usable commit (an old
+ * manifest), there is no original code to show, so AgentX measures no before results rather than mixing states.
+ */
+function defaultOriginalCode(manifest: PreparationManifest, root: string): { originalCode?: OriginalCode } {
+  const repositories = manifest.repositories.map((repository) => ({ directory: resolve(root, repository.path), commit: repository.resolvedCommit }));
+  if (repositories.length === 0 || repositories.some(({ commit }) => !/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(commit ?? ""))) return {};
+  return { originalCode: gitOriginalCode(repositories) };
 }

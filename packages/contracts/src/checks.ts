@@ -3,8 +3,11 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-/** Covers AGENTX_WORKER_PROMPT and AGENTX_PREAMBLE: changing either means a new version. 1 had only the preamble. */
-export const AGENTX_PREAMBLE_VERSION = "2";
+/**
+ * Covers AGENTX_WORKER_PROMPT and AGENTX_PREAMBLE: changing either means a new version. 1 had only the preamble; 3 adds
+ * the rule for tests that check the old behaviour a task changes (D-17, #290).
+ */
+export const AGENTX_PREAMBLE_VERSION = "3";
 
 /**
  * Replaces Pi's own system prompt preamble for every coding task and eval run. Pi's is written for a person at a
@@ -34,9 +37,10 @@ export const AGENTX_PREAMBLE = [
   "1. Reproduce the problem before changing code, and say how you reproduced it.",
   "2. Run the relevant tests before and after your change.",
   "3. A test that passed before your change and fails after it is your own regression. Fix it; never call it unrelated.",
-  "4. Report the commands you ran and their results.",
-  "5. You must never claim a test passed unless you saw it pass.",
-  "End your final message with exactly one line: \"AgentX result: done\" if the work is complete and every test you ran passes, otherwise \"AgentX result: not done\".",
+  "4. The one exception is a test that checks the old behaviour the task asks you to change. Update it to the new behaviour; if you were told not to modify tests, leave it. Either way, name it in your final message and say why it changed.",
+  "5. Report the commands you ran and their results.",
+  "6. You must never claim a test passed unless you saw it pass.",
+  "End your final message with exactly one line: \"AgentX result: done\" if the work is complete and every test you ran passes, apart from tests you named under rule 4, otherwise \"AgentX result: not done\".",
 ].join("\n");
 
 /** Recorded as `preambleSha256` with each result. From version 2 it hashes the worker prompt and the preamble together. */
@@ -81,9 +85,62 @@ const TEST_HEADS: readonly (readonly string[])[] = [
   ["npm", "test"], ["npm", "run", "test"], ["pnpm", "test"], ["yarn", "test"], ["pytest"],
   ["python", "-m", "pytest"], ["go", "test"], ["cargo", "test"], ["make", "test"], ["mvn", "test"],
   ["gradle", "test"], ["./gradlew", "test"], ["bundle", "exec", "rspec"], ["phpunit"], ["tox"],
+  // D-15 (#290): runners agents use directly.
+  ["python3", "-m", "pytest"], ["jest"], ["npx", "jest"], ["yarn", "jest"], ["pnpm", "jest"],
+  ["vitest"], ["npx", "vitest"], ["yarn", "vitest"], ["pnpm", "vitest"],
 ];
 /** Only a plain space and these characters may appear: no quoting, expansion, globbing, redirection or control characters. */
 const ALLOWED = /^[A-Za-z0-9_@%+=:,./ -]*$/;
+/** One unquoted character of a word. */
+const UNQUOTED = /^[A-Za-z0-9_@%+=:,./-]$/;
+/**
+ * D-15: what a quoted argument may hold (a test name pattern such as "RoomView|RoomViewStore"): printable characters
+ * other than those a shell still reads inside quotes ($, `, \) and the quotes themselves, so the text stays literal.
+ */
+const QUOTED = /^[\x20-\x7e]*$/;
+const QUOTED_SPECIAL = /[$`\\"']/;
+/** Arguments that change files or never end when replayed: snapshot updates and watch modes. */
+const REFUSED_ARGUMENTS = new Set(["-u", "--updateSnapshot", "--update-snapshots", "--update", "--snapshot-update", "--ci=false"]);
+
+/**
+ * The command's words, each as written (`raw`, quotes included) and as the shell reads it (`value`), or undefined when
+ * any character is outside UNQUOTED, or a quote is unclosed or holds a character outside QUOTED.
+ */
+function shellWords(text: string): { raw: string; value: string }[] | undefined {
+  const words: { raw: string; value: string }[] = [];
+  let raw = "";
+  let value = "";
+  let quoted = false;
+  const flush = () => {
+    if (raw !== "") words.push({ raw, value });
+    raw = "";
+    value = "";
+    quoted = false;
+  };
+  for (let index = 0; index < text.length;) {
+    const character = text[index]!;
+    if (character === " ") {
+      flush();
+      index += 1;
+    } else if (character === "\"" || character === "'") {
+      const end = text.indexOf(character, index + 1);
+      if (end === -1) return undefined;
+      const inner = text.slice(index + 1, end);
+      if (!QUOTED.test(inner) || QUOTED_SPECIAL.test(inner)) return undefined;
+      raw += text.slice(index, end + 1);
+      value += inner;
+      quoted = true;
+      index = end + 1;
+    } else {
+      if (!UNQUOTED.test(character)) return undefined;
+      raw += character;
+      value += character;
+      index += 1;
+    }
+  }
+  if (quoted || raw !== "") flush();
+  return words;
+}
 const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=\S*$/;
 
 /** A cd target must stay inside the workspace: relative, not an option, no `..` segment. */
@@ -122,10 +179,13 @@ export function matchTestCommand(command: string): string | undefined {
   const bare = withoutOutputTail(command).command;
   const cd = /^ *cd +(\S+) +&& +(.+)$/s.exec(bare);
   const rest = (cd === null ? bare : cd[2]!).replace(/^ +| +$/g, "");
-  if (rest.length === 0 || !ALLOWED.test(rest)) return undefined;
+  if (rest.length === 0) return undefined;
   if (cd !== null && (!ALLOWED.test(cd[1]!) || !safeCdPath(cd[1]!))) return undefined;
-  const words = rest.split(/ +/);
-  if (words.some(escapesWorkspace)) return undefined;
+  const parsed = shellWords(rest);
+  if (parsed === undefined || parsed.length === 0) return undefined;
+  if (parsed.some(({ value }) => escapesWorkspace(value) || REFUSED_ARGUMENTS.has(value) || value.startsWith("--watch"))) return undefined;
+  // Assignments, `timeout` and the runner itself are matched as written: quoting is allowed in arguments only.
+  const words = parsed.map(({ raw }) => raw);
   let index = 0;
   while (index < words.length && ASSIGNMENT.test(words[index]!)) index += 1;
   if (words[index] === "timeout" && /^\d+[smh]?$/.test(words[index + 1] ?? "")) index += 2;

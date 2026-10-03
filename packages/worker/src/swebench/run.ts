@@ -120,6 +120,7 @@ export async function runSwebench(config: SwebenchRunnerConfig, dependencies: Sw
       model: dependencies.model,
       bashOperations: containerBashOperations(taskContainerExec(docker, container)),
       paths: { hostFolder: testbed, containerFolder: repository },
+      baseCommit: imageHead,
       problemStatement: proTask?.instruction ?? instance.problem_statement,
       maxCostUsd: config.maxCostUsd,
       timeLimitMs: dependencies.timeLimitMs ?? limits.timeLimitSeconds * 1_000,
