@@ -46,7 +46,7 @@ describe("the docs-only check (CI skips the heavy steps for a Markdown-only pull
     expect(steps.some((step) => step.run === "npm ci")).toBe(false);
   });
 
-  it("guards every heavy job with the check, so a push to mainline or a manual run always runs them", async () => {
+  it("guards every heavy job with the check, so a manual run always runs them", async () => {
     const workflow = YAML.parse(await readFile(".github/workflows/ci.yml", "utf8")) as Workflow;
     const heavySteps = (job: string) => workflow.jobs[job]!.steps.filter((step) => step.run !== undefined).map((step) => step.name ?? step.run);
     expect(heavySteps("checks")).toEqual(["npm ci", "npm run typecheck", "npm run typecheck:all", "npm run lint"]);

@@ -1,13 +1,14 @@
 name: CI
 
+# Pull requests and manual runs only, to save Actions minutes. A merge to mainline does not run CI
+# again: its pull request's run already tested the change. A draft pull request runs nothing until it
+# is marked ready for review.
 on:
   workflow_dispatch:
   pull_request:
-  push:
-    branches: [mainline]
+    types: [opened, synchronize, reopened, ready_for_review]
 
-# Pushing to a pull request again supersedes its run in progress. A push to mainline is never
-# cancelled: every merge keeps its own result.
+# Pushing to a pull request again supersedes its run in progress. A manual run is never cancelled.
 concurrency:
   group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -16,8 +17,10 @@ concurrency:
 # job called `local` waits for all of them and is the one check a pull request needs (scripts/ci-gate.ts).
 jobs:
   # A pull request that changes only Markdown under specs/ or docs/, which no test reads, skips the
-  # jobs below (scripts/ci-docs-only.ts). Pushes and manual runs always run them.
+  # jobs below (scripts/ci-docs-only.ts). Manual runs always run them. A draft skips every job,
+  # `local` included, so it shows no failed check.
   scope:
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
@@ -111,7 +114,7 @@ jobs:
   # The one check a pull request needs. It runs even when a job before it failed or was cancelled.
   local:
     needs: [scope, checks, test, release]
-    if: always()
+    if: always() && github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
