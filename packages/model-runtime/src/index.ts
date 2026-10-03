@@ -1,6 +1,6 @@
 import { MissingProviderSecret, defaultBedrockModel, type ModelRole } from "./config.js";
-import { catalogModel, openRouterRouting, readProviderKey } from "./config.js";
-export { readOpenRouterKey, readProviderKey, openRouterRouting, openRouterModel, catalogModel } from "./config.js";
+import { openRouterRouting, readProviderKey, requireKeyedModel } from "./config.js";
+export { readOpenRouterKey, readProviderKey, openRouterRouting, openRouterModel, requireKeyedModel } from "./config.js";
 import { KEYED_MODEL_PROVIDERS, agentXError, isKeyedModelProvider, type KeyedModelProvider, type ModelIdentifier } from "@agentx/contracts";
 import { InMemoryCredentialStore, createAssistantMessageEventStream, type Api, type Model, type SimpleStreamOptions, type TranscriptContext, type AssistantMessage, type AssistantMessageEventStream, type AnthropicMessagesCompat, type OpenAICompletionsCompat, type OpenAIResponsesCompat } from "@earendil-works/pi-ai";
 import { streamSimple as openAICompletionsStream } from "@earendil-works/pi-ai/api/openai-completions";
@@ -46,7 +46,7 @@ export async function createConfiguredModelRuntime(selected: ModelIdentifier & {
   const environment = options.environment ?? process.env;
   const routing = provider === "openrouter" ? openRouterRouting(environment) : undefined;
   const runtime = await ModelRuntime.create({ refreshOnCreate: false, modelsPath: null, credentials: new InMemoryCredentialStore() });
-  const model = catalogModel(provider, selected.modelId);
+  const model = requireKeyedModel(provider, selected.modelId);
   if (!model.reasoning && selected.thinkingLevel && selected.thinkingLevel !== "off") throw agentXError("CONFIG_INVALID", "the selected model does not support reasoning; set thinkingLevel to off");
   const key = await readProviderKey(provider, environment[secretArnVariable] ?? "", options.readSecret);
   const { api, baseUrl } = TRANSPORTS[provider];

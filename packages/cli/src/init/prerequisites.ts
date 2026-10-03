@@ -1,4 +1,4 @@
-import { readOpenRouterKey, readProviderKey, openRouterRouting, openRouterModel, catalogModel, MissingProviderSecret, defaultBedrockModel } from "@agentx/model-runtime/config";
+import { readOpenRouterKey, readProviderKey, openRouterRouting, openRouterModel, requireKeyedModel, MissingProviderSecret, defaultBedrockModel } from "@agentx/model-runtime/config";
 import type { DirectProvider, ModelsAnswers } from "../deploy/answer-schemas.js";
 // FR-015: everything init checks before it creates anything. Every problem is collected and
 // reported together, with what to change; cdk bootstrap (which creates the CDKToolkit stack) is
@@ -383,7 +383,7 @@ export async function checkPrerequisites(input: {
         const pending = input.directKeys?.[provider];
         const stored = answers.models[provider];
         if (stored === undefined && pending === undefined) {
-          catalogModel(provider, modelId);
+          requireKeyedModel(provider, modelId);
           throw new MissingProviderSecret(provider);
         }
         if (!checks.directProvider) throw new Error(`the ${label} check is not configured`);
@@ -544,7 +544,7 @@ export function awsPrerequisiteChecks(input: { region: string; account: string; 
       }, CONVERSE_DEADLINE_MS, "OpenRouter preflight timed out");
     },
     async directProvider(provider, modelId, config, suppliedKey) {
-      catalogModel(provider, modelId);
+      requireKeyedModel(provider, modelId);
       const key = suppliedKey ?? await readProviderKey(provider, config.secretArn ?? "");
       await withDeadline((signal) => directProviderCheck({ provider, modelId, key, fetch: input.fetch, signal }), CONVERSE_DEADLINE_MS, `the ${KEYED_MODEL_PROVIDERS[provider].label} check did not finish within ${CONVERSE_DEADLINE_MS / 1000}s; check your network, or try again`);
     },

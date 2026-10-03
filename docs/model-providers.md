@@ -100,8 +100,8 @@ Add approved pairs to the project's `approvedModels`, as for any provider:
 
 `@agentx use Opus 5 (Anthropic)` switches the project's coding model, and the next turn calls Anthropic
 directly. SWE-bench and SEC-bench runs take the same labels (`… model Opus 5 (Anthropic)`). A model must be
-in the Pi catalog that AgentX pins; a newer model (for example `claude-opus-5-5` on Pi 0.85.1) needs an
-AgentX release with a newer Pi. An unknown model is refused when it is first used, with "not in the
+in the Pi catalog that AgentX pins (Pi 1.0.0 includes `claude-opus-5-5`); a model newer than that
+catalog needs an AgentX release with a newer Pi. An unknown model is refused when it is first used, with "not in the
 installed Pi catalog".
 
 ## How the key is handled
@@ -119,6 +119,10 @@ installed Pi catalog".
   classifier reads it when the Slack service starts. AgentX never sets `ANTHROPIC_API_KEY`,
   `ANTHROPIC_AUTH_TOKEN` or `OPENAI_API_KEY`, and a configured key wins over those variables if they are
   present. Restart the Slack service after rotating a key; workers pick it up at their next session.
+- Anthropic never answers with a different model: Pi's catalog lists server-side fallback models for some
+  Claude models (Fable 5 falls back to Opus 4.8 and Opus 5), and AgentX removes them from the request.
+  Like OpenRouter (spec 050), each request carries the current prompt once, at the start, rather than
+  prompt changes as mid-conversation system messages.
 - Provider errors are replaced with a diagnostic chosen from the HTTP status (key, model access, rate limit
   or credits, overloaded, unavailable) before they reach the transcript or logs.
 

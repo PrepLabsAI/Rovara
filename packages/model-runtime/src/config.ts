@@ -1,8 +1,6 @@
-import { openrouterProvider } from "@earendil-works/pi-ai/providers/openrouter";
-import { anthropicProvider } from "@earendil-works/pi-ai/providers/anthropic";
-import { openaiProvider } from "@earendil-works/pi-ai/providers/openai";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { KEYED_MODEL_PROVIDERS, SECRET_ARN_PATTERN, agentXError, type KeyedModelProvider } from "@agentx/contracts";
+import { catalogModel } from "./catalog.js";
 
 export type ModelRole = "worker" | "orchestrator" | "classifier";
 export const DEFAULT_BEDROCK_MODELS = {
@@ -93,14 +91,12 @@ export function openRouterRouting(environment: NodeJS.ProcessEnv): Record<string
   return { allow_fallbacks: false, require_parameters: true, data_collection: "deny", ...(only.length ? { only, order: only } : {}) };
 }
 
-const CATALOGS = { openrouter: openrouterProvider, anthropic: anthropicProvider, openai: openaiProvider } as const;
-
 /** Use the pinned catalog's limits/reasoning metadata; never guess limits for an unknown ID. */
-export function catalogModel(provider: KeyedModelProvider, modelId: string) {
+export function requireKeyedModel(provider: KeyedModelProvider, modelId: string) {
   if (provider === "openrouter" && modelId.startsWith("openrouter/")) {
     throw agentXError("CONFIG_INVALID", "automatic OpenRouter routers are not supported; approve a specific model ID");
   }
-  const model = CATALOGS[provider]().getModels().find((entry) => entry.id === modelId);
+  const model = catalogModel({ provider, modelId });
   if (!model || model.contextWindow <= 0 || model.maxTokens <= 0) {
     throw agentXError("CONFIG_INVALID", `${KEYED_MODEL_PROVIDERS[provider].label} model is not in the installed Pi catalog; choose a supported model or update AgentX`);
   }
@@ -108,5 +104,5 @@ export function catalogModel(provider: KeyedModelProvider, modelId: string) {
 }
 
 export function openRouterModel(modelId: string) {
-  return catalogModel("openrouter", modelId);
+  return requireKeyedModel("openrouter", modelId);
 }

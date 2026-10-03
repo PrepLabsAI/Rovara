@@ -19,7 +19,7 @@ Anthropic or OpenAI directly cannot use that account:
 - **Existing spend and limits stay in one place.** Teams with an Anthropic or OpenAI organization keep their
   rate limits, invoices, zero-data-retention arrangements and spending caps.
 
-The pinned Pi SDK (0.85.1) already ships an `anthropic` provider (Messages API) and an `openai` provider
+The pinned Pi SDK (1.0.0 since spec 050; 0.85.1 when this spec was written) already ships an `anthropic` provider (Messages API) and an `openai` provider
 (Responses API, sent with `store: false`). Both come with model catalogs that include limits, reasoning support
 and list prices. Most of the work is configuration, credentials and checks, following the path OpenRouter
 already established.
@@ -62,11 +62,12 @@ same flags. `agentx doctor` reports a missing or empty key secret and gives the 
 - **FR-002:** A model ID must be in the installed Pi catalog for its provider, with a positive context window and
   output limit. Otherwise the configuration is refused with "not in the installed Pi catalog; choose a supported
   model or update AgentX". This is the rule OpenRouter already uses, and it means AgentX never guesses limits. A
-  model newer than the pinned Pi (for example `claude-opus-5-5` on 0.85.1) needs the Pi upgrade (spec 050).
+  model newer than the pinned Pi needs a Pi upgrade. Pi 1.0.0 (spec 050) includes `claude-opus-5-5`.
 - **FR-003:** Requests use Pi's own transports for each provider: Anthropic Messages for `anthropic` and OpenAI
   Responses for `openai`. Streaming, tool calls, tool-result replay, cancellation, resumption and model switching
   behave as they do for Bedrock. The existing `PI_CACHE_RETENTION` setting applies, and Pi maps it to each API's
-  prompt caching.
+  prompt caching. No server-side fallback model is ever requested (Pi 1.0 lists some for Claude models), and
+  prompt changes are not sent as mid-conversation system messages, as spec 050 Ruling 7 does for OpenRouter.
 - **FR-004:** The thinking level follows the Bedrock rule: `medium` for a model that supports reasoning, `off`
   otherwise. When spec 053 lands, its per-model level applies here too. Refuse an explicit level other than `off`
   on a model without reasoning support, as OpenRouter does.
@@ -155,7 +156,7 @@ same flags. `agentx doctor` reports a missing or empty key secret and gives the 
   that fallback, not a silent change of provider.
 - **D3: Defaults for the one-question install (to confirm).** Anthropic: `claude-sonnet-4-6` for the orchestrator and
   worker and `claude-haiku-4-5` for the classifier, which mirrors the Bedrock defaults. OpenAI: `gpt-5.4` for the
-  orchestrator and worker and `gpt-5.4-mini` for the classifier. All are in Pi 0.85.1's catalog with prices.
+  orchestrator and worker and `gpt-5.4-mini` for the classifier. All are in the Pi catalog with prices.
 - **D4: Document the workspace exposure; don't solve it here.** Code running in a worker workspace can reach IMDS
   and read any key the worker role can read. The docs require a dedicated key per installation with a hard
   spending limit (an Anthropic workspace or OpenAI project key), as spec 032 does.

@@ -219,6 +219,28 @@ describe.each(cases)("$label through the installed Pi transport", (provider) => 
 });
 
 describe("direct provider keys", () => {
+  it("never lets Anthropic serve a fallback model, and sends one current prompt (spec 050 Ruling 7)", async () => {
+    const requests: Array<Record<string, unknown>> = [];
+    const transport: typeof fetch = async (_input, init) => {
+      if (typeof init?.body !== "string") throw new Error("expected a JSON request body");
+      requests.push(JSON.parse(init.body) as Record<string, unknown>);
+      return anthropicText("Done");
+    };
+    // Pi's catalog lists server-side fallbacks (Opus 4.8, Opus 5) for this model.
+    const result = await createConfiguredModelRuntime({ provider: "anthropic", modelId: "claude-fable-5" }, { environment, readSecret, fetch: transport, onUsage: () => {} });
+    const model = result.getModel("anthropic", "claude-fable-5")!;
+    expect(model.compat).not.toHaveProperty("allowedFallbackModels");
+    expect(model.compat).toMatchObject({ supportsMidConvoSystemMessages: false });
+    await result.completeSimple(model, context);
+    expect(requests[0]).toMatchObject({ model: "claude-fable-5" });
+    expect(requests[0]).not.toHaveProperty("fallbacks");
+    for (const [provider, modelId] of [["openai", "gpt-5.4"], ["anthropic", "claude-sonnet-4-6"]] as const) {
+      const runtime = await createConfiguredModelRuntime({ provider, modelId }, { environment, readSecret });
+      expect(runtime.getModel(provider, modelId)?.compat).toMatchObject({ supportsMidConvoSystemMessages: false });
+    }
+  });
+
+
   it("refuses reasoning on a model without reasoning support", async () => {
     await expect(createConfiguredModelRuntime({ provider: "openai", modelId: "gpt-4o", thinkingLevel: "high" }, { environment, readSecret })).rejects.toThrow("does not support reasoning");
   });

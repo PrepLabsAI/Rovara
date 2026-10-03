@@ -1,10 +1,26 @@
 # Verification
 
-## Automated (2026-10-01, branch `feat/054-direct-provider-keys`)
+## Automated (2026-10-03, after rebasing onto `mainline` at `a7f55c90`, with Pi 1.0.0)
 
-- `npm test`: 374 files and 6,306 tests passed, 20 skipped, 0 failed.
+- `npm test`: 426 files and 7,530 tests passed, 20 skipped, 0 failed (Node 22.23).
 - `npm run typecheck`: clean. `npm run typecheck:all`: 191 errors in 64 files, the same as the baseline (no new errors).
 - `npm run lint`: clean.
+- Template snapshots differ from `mainline` by additions only (658 lines added, none removed).
+
+The first run (2026-10-01, on Pi 0.85.1 before the rebase) passed 6,306 tests.
+
+### Rebase onto Pi 1.0 (spec 050) and the settings form (spec 048)
+
+- The runtime keeps spec 050's OpenRouter compat and applies the same rule to the direct providers: prompt
+  changes are not sent as mid-conversation system messages. Pi 1.0's Anthropic catalog lists server-side
+  fallback models for `claude-fable-5` (Opus 4.8, Opus 5); AgentX removes them, so another model never answers
+  for the one requested. A test checks both.
+- Spec 053 already made the worker's thinking level provider-independent, so this branch no longer changes
+  `task-model.ts`.
+- Init's provider question is now a choice in spec 048's settings form. A direct-provider role asks a follow-up
+  for its model (suggesting D3's defaults), as OpenRouter's roles do. Prices moved to `cost.ts` with mainline's
+  pricing and come from the shared `@agentx/model-runtime/catalog`, which now includes the Anthropic and OpenAI
+  catalogs (so spec 052's batch estimates and spec 053's save-time level checks cover them too).
 
 New coverage:
 
