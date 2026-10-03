@@ -1,10 +1,20 @@
 # AgentX
 
-A software factory with a hosted pi-based orchestrator in Slack and remote pi coding workers
-on Amazon EC2 with persistent EBS storage. Administrators prepare shared product definitions and fixed
-development images. Every Slack thread, and every task a developer hands to AgentX from an AI
-tool, owns an isolated persistent workspace instance. A task from an AI tool can also be shared into
-the project's Slack channel.
+AgentX is QEDly Code, the first product from [QEDly](https://qedly.github.io): an AI coding agent
+that has to prove its work. You ask for a change in Slack, or hand a task over from Claude Code,
+Codex or Cursor. It works in your own AWS account, runs the checks you configure on the exact
+commit, and opens a pull request only when every one passes. A person merges.
+
+Source-available under [FSL-1.1-ALv2](LICENSE): every line is readable, and each release becomes
+Apache 2.0 two years after it ships. Docs: [qedly.github.io/docs](https://qedly.github.io/docs/).
+To report a vulnerability, see [SECURITY.md](SECURITY.md). To contribute, see
+[CONTRIBUTING.md](CONTRIBUTING.md).
+
+How it runs: a hosted Pi orchestrator in Slack and remote Pi coding workers on Amazon EC2 with
+persistent EBS storage. Every Slack thread, and every task a developer hands over from an AI tool,
+gets its own isolated, persistent workspace. A task from an AI tool can also be shared into the
+project's Slack channel. Administrators prepare shared product definitions and fixed development
+images.
 
 ## Current status
 

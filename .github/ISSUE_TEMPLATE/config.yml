@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/PrepLabsAI/AgentX/security/advisories/new
+    about: Report security problems privately. Please do not open a public issue.
+  - name: Documentation
+    url: https://qedly.github.io/docs/
+    about: Install, run and troubleshoot AgentX.
