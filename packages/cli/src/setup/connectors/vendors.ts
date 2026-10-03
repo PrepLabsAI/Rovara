@@ -1,7 +1,7 @@
 // The one real read each connector's test needs (FR-038), behind one interface so tests fake it.
 // Nothing here reaches the control plane; only the vendor's own API.
-import { agentXError, OAUTH_AUTHORIZATION_PROFILES } from "@agentx/contracts";
-import { connectMcp, McpUnauthorized } from "@agentx/gateway";
+import { agentXError, OAUTH_AUTHORIZATION_PROFILES, type McpAuth } from "@agentx/contracts";
+import { connectMcp, listMcpTools, McpUnauthorized } from "@agentx/gateway";
 
 export interface LinearTeam { id: string; key: string; name: string }
 export interface VendorApi {
@@ -15,6 +15,22 @@ export interface VendorApi {
   asanaAccessToken(input: { clientId: string; clientSecret: string; refreshToken: string }): Promise<{ accessToken: string; refreshToken?: string }>;
   /** get_project through Asana MCP: the project's name, or undefined when the bot cannot see it. */
   asanaProject(input: { accessToken: string; projectGid: string }): Promise<{ name: string } | undefined>;
+  /** Spec 055 phase 3: tools/list through a generic MCP server, the test read of connector add mcp
+   * and doctor. Throws VendorRefused when the server answers 401. */
+  mcpTools(input: { endpoint: string; token: string; auth?: McpAuth | undefined }): Promise<McpToolSummary[]>;
+  /** Spec 055 phase 3: one refresh at a generic token URL; the refresh token back when it rotated. */
+  oauthAccessToken(input: { tokenUrl: string; clientId: string; clientSecret?: string | undefined; refreshToken: string; resource?: string | undefined }): Promise<{ accessToken: string; refreshToken?: string }>;
+}
+
+/** A tool as the setup wizard shows it: its name, a short description, and the vendor's hints. */
+export interface McpToolSummary { name: string; description: string; readOnly?: boolean; destructive?: boolean }
+
+const MAX_SHOWN_DESCRIPTION = 120;
+
+/** Printable characters only, at most MAX_SHOWN_DESCRIPTION, from the first line: a vendor's text is shown on a terminal. */
+function shownDescription(text: string | undefined): string {
+  const firstLine = (text ?? "").split("\n").find((line) => line.trim() !== "") ?? "";
+  return Array.from(firstLine.replace(/[\p{C}]/gu, "")).slice(0, MAX_SHOWN_DESCRIPTION).join("").trim();
 }
 
 /** The project's name from get_project's text: `data.name` (the owner and members carry names of
@@ -91,6 +107,39 @@ export function vendorApi(fetchImplementation: typeof fetch): VendorApi {
       if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `Asana's token endpoint answered HTTP ${response.status}; try again in a minute`);
       const body = (await response.json()) as { access_token?: unknown; refresh_token?: unknown };
       if (typeof body.access_token !== "string" || body.access_token === "") throw new VendorRefused("Asana");
+      const next = typeof body.refresh_token === "string" ? body.refresh_token : "";
+      return { accessToken: body.access_token, ...(next !== "" && next !== refreshToken ? { refreshToken: next } : {}) };
+    },
+    async mcpTools({ endpoint, token, auth }) {
+      const host = new URL(endpoint).host;
+      let tools;
+      try {
+        tools = await listMcpTools({ endpoint: new URL(endpoint), token, signal: AbortSignal.timeout(30_000), fetchImplementation, ...(auth ? { auth } : {}) });
+      } catch (error) {
+        if (error instanceof McpUnauthorized) throw new VendorRefused(host);
+        throw agentXError("RUNTIME_UNAVAILABLE", `could not list the tools of ${host} (${error instanceof Error ? error.name : "unknown error"}); check the endpoint and this computer's network access`);
+      }
+      return tools.map((tool) => ({
+        name: tool.name,
+        description: shownDescription(tool.description),
+        ...(typeof tool.annotations?.readOnlyHint === "boolean" ? { readOnly: tool.annotations.readOnlyHint } : {}),
+        ...(typeof tool.annotations?.destructiveHint === "boolean" ? { destructive: tool.annotations.destructiveHint } : {}),
+      }));
+    },
+    async oauthAccessToken({ tokenUrl, clientId, clientSecret, refreshToken, resource }) {
+      const host = new URL(tokenUrl).host;
+      const response = await fetchImplementation(tokenUrl, {
+        method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000),
+        headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
+        body: new URLSearchParams({
+          grant_type: "refresh_token", refresh_token: refreshToken, client_id: clientId,
+          ...(clientSecret === undefined ? {} : { client_secret: clientSecret }), ...(resource === undefined ? {} : { resource }),
+        }).toString(),
+      });
+      if (response.status === 400 || response.status === 401) throw new VendorRefused(host);
+      if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `the token endpoint at ${host} answered HTTP ${response.status}; try again in a minute`);
+      const body = (await response.json()) as { access_token?: unknown; refresh_token?: unknown };
+      if (typeof body.access_token !== "string" || body.access_token === "") throw new VendorRefused(host);
       const next = typeof body.refresh_token === "string" ? body.refresh_token : "";
       return { accessToken: body.access_token, ...(next !== "" && next !== refreshToken ? { refreshToken: next } : {}) };
     },

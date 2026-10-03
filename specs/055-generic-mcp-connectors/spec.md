@@ -2,7 +2,7 @@
 
 **Feature Branch**: `feat/055-generic-mcp-connectors`
 **Created**: 2026-10-03
-**Status**: Phase 1 in PR #279 (`feat/055-generic-mcp-connectors`); Phase 2 implemented on `feat/055-generic-oauth`; Phase 3 not started
+**Status**: Phase 1 merged (#279); Phase 2 merged (#282); Phase 3 implemented on `feat/055-mcp-admin-experience`; live check (SC-004) pending
 **Issue**: #275 (covers #138 design needs 2 and 4)
 **Input**: "How do we allow AgentX to connect to any external provider without writing any additional code in the
 main repository?" Clarified on 2026-10-03: build a generic connector type and port Linear, Jira and Asana onto
@@ -58,7 +58,7 @@ the generic path.
   - `name`, `tools` and `attribution`, as for every connector.
   - `endpoint`, `label` (1–64), `vendor` (1–32), `scopeNoun` (1–32, default `scope`), `credentialRef`.
   - Optional `auth`, `bind`, `itemArguments`, `attributionKeys` and `permissionsHint`.
-  - `scopes`: 1 to 32 entries of `{ alias, values }`. `values` maps 1 to 16 names to strings of up to 256
+  - `scopes`: 1 to 32 entries of `{ alias, values }`. `values` maps up to 16 names to strings of up to 256
     characters. A name matches `^[A-Za-z_][A-Za-z0-9_]{0,63}$` and is never `alias`.
   - `scoping`: required (FR-006).
 - **FR-002:** `endpoint` must be an `https:` URL with no username, password, query or fragment. Its host must be
@@ -160,10 +160,28 @@ the generic path.
 - **FR-013a:** The broker refreshes at the credential's `tokenUrl`, sends `resource` when the credential has one,
   and omits `client_secret` for a public client.
 
-### Phase 3 (not in this change)
+### Admin experience (phase 3)
 
-- **FR-014:** `agentx connector add mcp` connects, lists tools, picks tools and access, and runs preflight.
-  `doctor` checks `mcp` connectors, and `docs/connectors/custom-mcp.md` explains setup.
+- **FR-014:** `agentx connector add mcp --project <name>` sets up a generic connector:
+  - **Endpoint and names.** It takes the endpoint, the name (default from the host) and the vendor.
+  - **Credential.** Either an API key (`--auth key`, with `--key-file`, `--key-env` or a hidden prompt, plus
+    optional `--auth-header` and `--auth-prefix`), or an OAuth sign-in (`--auth oauth`, through FR-013's
+    `authorize --endpoint`, with `--register-client` or `--client-id`; no browser is opened).
+  - **Test read.** The server's `tools/list`. A 401 stores and registers nothing.
+  - **Tool approvals.** `--tools a,b:write`, defaulting to the tools the server marks read-only. Access
+    defaults from the read-only hint. Credential scoping with any write tool needs
+    `--acknowledge-unscoped-writes` or a confirmation.
+  - **`--config-file`.** A JSON file supplies any other field: scopes, bind, an ownership rule, item
+    arguments, attribution keys.
+  - **Registration.** The whole connector validates before anything is stored. The credential is
+    `mcp-<name>`, at `agentx/<env>/connectors/mcp-<name>`, registered with `host`. The revision passes only on
+    a `connected` preflight.
+  - **Names.** A name already used by a connector of another type is refused.
+- **FR-015:** `agentx doctor` checks each `mcp` connector it set up. An API key must still reach every
+  approved tool (a missing tool is a warning). An OAuth sign-in only has to be stored, not refreshed. A
+  credential registered by hand is skipped.
+- **FR-016:** `docs/connectors/custom-mcp.md` covers endpoints, credentials, host pinning, both scoping modes
+  with an ownership-rule example, `doctor`, and setting up by hand.
 
 ## Success Criteria
 

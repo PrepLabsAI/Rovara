@@ -35,7 +35,7 @@ export function connectorRerun(input: Pick<ConnectorAddInput, "env" | "projectNa
 
 /** The project file project add (or agentx init) wrote. It lives only on the machine that ran it,
  * in that run's --config-dir, so a missing one says where to find it. */
-async function loadProjectFile(input: { projectName: string; configDir: string; rerun: string }): Promise<ProjectDefinition> {
+export async function loadProjectFile(input: { projectName: string; configDir: string; rerun: string }): Promise<ProjectDefinition> {
   const exists = await stat(projectFilePath(input.configDir, input.projectName)).then(() => true, () => false);
   if (!exists) {
     throw agentXError(

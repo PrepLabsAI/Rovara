@@ -163,7 +163,7 @@ level that is set, for example `Sonnet (thinking: medium)`.
 ### Integrations
 
 Use either `integrations.githubMcp` or `integrations.connectors`, not both. Each connector entry
-names its type (`github`, `linear`, `jira` or `asana`), its scope and the tools the orchestrator
+names its type (`github`, `linear`, `jira`, `asana`, or `mcp` for any other MCP server), its scope and the tools the orchestrator
 is offered. A `github` connector's `scopes` is `all-repositories` or a list of registered
 repository names. Setup and examples for each vendor:
 
@@ -171,6 +171,7 @@ repository names. Setup and examples for each vendor:
 - [Linear](connectors/linear.md)
 - [Jira](connectors/jira.md)
 - [Asana](connectors/asana.md)
+- [Any other MCP server](connectors/custom-mcp.md)
 
 ### Action policy
 

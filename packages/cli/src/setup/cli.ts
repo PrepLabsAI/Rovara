@@ -10,6 +10,7 @@ import type { SetupCommandContext } from "./command-context.js";
 import { addAsana } from "./connectors/asana.js";
 import { addJira } from "./connectors/jira.js";
 import { addLinear } from "./connectors/linear.js";
+import { addMcp, type McpAddFlags } from "./connectors/mcp.js";
 import type { ConnectorAddInput } from "./connectors/revision.js";
 import { addProject } from "./project-add.js";
 import { installationToken } from "./project-files.js";
@@ -71,8 +72,8 @@ export function registerSetupCommands(program: Command, context: SetupCommandCon
       run.print({ ...bound, projectName }, `Bound #${bound.channelName} to ${projectName}\n`);
     });
 
-  // agentx connector add linear|jira|asana, the words FR-036 uses.
-  const connector = program.command("connector").description("connect a project to Linear, Jira or Asana");
+  // agentx connector add linear|jira|asana, the words FR-036 uses, and mcp for any other server (spec 055).
+  const connector = program.command("connector").description("connect a project to Linear, Jira, Asana or any MCP server");
   const connectorAdd = connector.command("add").description("add a connector to a project");
   withRegion(connectorAdd.command("linear"))
     .description("add Linear to a project: guide, key, test read, team, new revision")
@@ -122,6 +123,45 @@ export function registerSetupCommands(program: Command, context: SetupCommandCon
       });
       const result = await addAsana({ env: run.env, session: run.session, projectName, secrets: run.secrets, prompter: run.prompter, processEnv: process.env, write: run.write, services: run.services, flags });
       run.print(result, `Asana connected to ${projectName} (revision ${result.revision})\n`);
+    });
+
+  withRegion(connectorAdd.command("mcp"))
+    .description("add any remote MCP server to a project: endpoint, API key or OAuth sign-in, its tool list as the test read, approved tools, new revision")
+    .option("--endpoint <url>", "the server's MCP endpoint, https://...")
+    .option("--name <name>", "the connector's name; its tools are shown to the model as <name>__<tool>")
+    .option("--vendor <name>", "the vendor's name in messages (default: from the endpoint's host)")
+    .option("--label <text>", "how threads name the connector (default: the vendor)")
+    .option("--auth <kind>", "key (an API key or token) or oauth (a bot user signs in once)")
+    .option("--key-file <path>", "with --auth key: file holding the key")
+    .option("--key-env <NAME>", "with --auth key: environment variable holding the key")
+    .option("--auth-header <name>", "with --auth key: the header the key goes in (default Authorization)")
+    .option("--auth-prefix <text>", "with --auth key: the text before the key (default \"Bearer \"; \"\" for none)")
+    .option("--register-client", "with --auth oauth: register AgentX as the server's OAuth client")
+    .option("--client-id <id>", "with --auth oauth: your OAuth app's client ID")
+    .option("--client-secret-file <path>", "with --auth oauth: file holding the app's client secret, if it has one")
+    .option("--client-secret-env <NAME>", "with --auth oauth: environment variable holding the app's client secret")
+    .option("--scope <scopes>", "with --auth oauth: space-separated scopes to ask for")
+    .option("--bot-email <email>", "with --auth oauth: refuse a sign-in by any other account, when the server reports it")
+    .option("--tools <list>", "comma-separated tools to approve, each optionally :read or :write")
+    .option("--acknowledge-unscoped-writes", "approve write tools without an ownership rule; they reach everything the credential can")
+    .option("--config-file <path>", "a JSON file with further connector fields: scopes, bind, scoping (an ownership rule), itemArguments, attributionKeys")
+    .action(async (options: {
+      endpoint?: string; name?: string; vendor?: string; label?: string; auth?: string; keyFile?: string; keyEnv?: string; authHeader?: string; authPrefix?: string;
+      registerClient?: boolean; clientId?: string; clientSecretFile?: string; clientSecretEnv?: string; scope?: string; botEmail?: string; tools?: string;
+      acknowledgeUnscopedWrites?: boolean; configFile?: string;
+    }, command: Command) => {
+      const projectName = projectOption(command, "the project to connect the MCP server to");
+      const authKind = options.auth === "key" || options.auth === "oauth" ? options.auth : undefined;
+      if (options.auth !== undefined && authKind === undefined) throw agentXError("CONFIG_INVALID", `--auth ${options.auth} must be key or oauth`);
+      const run = await context.open(command);
+      const flags = definedEntries<McpAddFlags>({
+        endpoint: options.endpoint, name: options.name, vendor: options.vendor, label: options.label, auth: authKind,
+        key: secretSource(options.keyFile, options.keyEnv), authHeader: options.authHeader, authPrefix: options.authPrefix,
+        registerClient: options.registerClient, clientId: options.clientId, clientSecret: secretSource(options.clientSecretFile, options.clientSecretEnv),
+        scope: options.scope, botEmail: options.botEmail, tools: options.tools, acknowledgeUnscopedWrites: options.acknowledgeUnscopedWrites, configFile: options.configFile,
+      });
+      const result = await addMcp({ env: run.env, session: run.session, projectName, secrets: run.secrets, prompter: run.prompter, processEnv: process.env, write: run.write, services: run.services, flags });
+      run.print(result, `${result.name} connected to ${projectName} with ${result.tools} tools (revision ${result.revision})\n`);
     });
 
   // FR-046: needs no admin session, only AWS (SetAlarmState on this one alarm, Task 1), so openAws.

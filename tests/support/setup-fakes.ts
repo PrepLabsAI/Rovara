@@ -7,7 +7,7 @@ import type { EnvironmentSettings } from "../../packages/cli/src/environments/se
 import type { StoredTokens, TokenStore } from "../../packages/cli/src/token-store.js";
 import type { AlertsApi, Subscription } from "../../packages/cli/src/setup/alerts.js";
 import type { CognitoAdmin, SetupServices } from "../../packages/cli/src/setup/services.js";
-import type { LinearTeam, VendorApi } from "../../packages/cli/src/setup/connectors/vendors.js";
+import type { LinearTeam, McpToolSummary, VendorApi } from "../../packages/cli/src/setup/connectors/vendors.js";
 import type { GitHubRepositoryApi } from "../../packages/cli/src/setup/project-files.js";
 import { SlackRateLimitedError, type SlackChannel, type SlackChannelApi } from "../../packages/cli/src/setup/channel-add.js";
 import { fakeGitHubApi } from "./init-fakes.js";
@@ -170,14 +170,35 @@ export function fakeSlackChannels(channels: SlackChannel[], options: { visibleAf
  * `vendors.asanaProject` (pass `undefined` for a project the bot cannot see; absent means Payments);
  * `asanaRotates` is the refresh token `asanaAccessToken` returns as rotated; `asanaRefuses` makes the
  * refresh or the project read throw VendorRefused; `asanaReadError` makes the project read throw a
- * plain Error with that message, as a raw SDK or MCP client error would. */
+ * plain Error with that message, as a raw SDK or MCP client error would. `mcpTools` answers
+ * `vendors.mcpTools` (absent: a read-only and a write tool); `mcpRefuses` makes it throw
+ * VendorRefused; `oauthRotates` is the refresh token `oauthAccessToken` returns as rotated, and
+ * `oauthRefuses` makes it throw VendorRefused. */
 export function fakeVendors(options: {
   linearTeams?: LinearTeam[]; linearRefuses?: boolean; jiraCloudId?: string; jiraInside?: string[]; jiraOutside?: string[]; jiraRefuses?: boolean;
   asanaProject?: { name: string } | undefined; asanaRotates?: string; asanaRefuses?: "refresh" | "read"; asanaReadError?: string;
-} = {}): VendorApi & { calls: string[] } {
+  mcpTools?: McpToolSummary[]; mcpRefuses?: boolean; oauthRotates?: string; oauthRefuses?: boolean;
+} = {}): VendorApi & { calls: string[]; mcpCalls: Array<Record<string, unknown>> } {
+  const mcpCalls: Array<Record<string, unknown>> = [];
   const calls: string[] = [];
   return {
     calls,
+    mcpCalls,
+    async mcpTools(input) {
+      calls.push(`mcpTools ${input.endpoint}`);
+      mcpCalls.push({ ...input });
+      if (options.mcpRefuses === true) throw Object.assign(new Error("401"), { name: "VendorRefused" });
+      return options.mcpTools ?? [
+        { name: "get_issue", description: "Read an issue", readOnly: true },
+        { name: "update_issue", description: "Change an issue", readOnly: false },
+      ];
+    },
+    async oauthAccessToken(input) {
+      calls.push(`oauthAccessToken ${input.tokenUrl}`);
+      mcpCalls.push({ refresh: input });
+      if (options.oauthRefuses === true) throw Object.assign(new Error("400"), { name: "VendorRefused" });
+      return { accessToken: "mcp-access", ...(options.oauthRotates === undefined ? {} : { refreshToken: options.oauthRotates }) };
+    },
     async linearTeams() {
       calls.push("linearTeams");
       if (options.linearRefuses === true) throw Object.assign(new Error("401"), { name: "VendorRefused" });
