@@ -51,6 +51,24 @@ jobs:
             echo "::error::release.yml requires a tag name of the form vX.Y.Z, not $GITHUB_REF_NAME" >&2
             exit 1
           fi
+      # A version tag on a commit that never reached mainline (a feature branch, an unmerged PR)
+      # would otherwise publish unreviewed code, and npm never takes a version number back. The
+      # compare API answers "identical" or "behind" exactly when the tagged commit is mainline's
+      # tip or one of its ancestors. This catches mistakes only: the workflow that runs is the
+      # tagged commit's own copy, so someone who can push tags could remove this step; the v* tag
+      # ruleset in docs/releases.md is what restricts who can tag.
+      - name: Require the tagged commit to be on mainline
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! status=$(gh api "repos/$GITHUB_REPOSITORY/compare/mainline...$GITHUB_SHA" --jq .status); then
+            echo "::error::could not compare $GITHUB_REF_NAME ($GITHUB_SHA) with mainline" >&2
+            exit 1
+          fi
+          if [[ "$status" != identical && "$status" != behind ]]; then
+            echo "::error::$GITHUB_REF_NAME points at $GITHUB_SHA, which is not on mainline (compare status: $status). Tag a commit on mainline." >&2
+            exit 1
+          fi
       - uses: actions/checkout@v5
         with: { persist-credentials: false }
       - uses: aws-actions/configure-aws-credentials@v5

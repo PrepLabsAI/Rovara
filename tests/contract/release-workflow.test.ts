@@ -164,6 +164,24 @@ describe("release workflow", () => {
     expect(credentialsIndex).toBeGreaterThan(guardIndex);
   });
 
+  it("refuses to publish a tag whose commit is not on mainline, before checkout or any AWS action runs", async () => {
+    const wf = await workflow();
+    const steps = wf.jobs.images!.steps;
+    // A vX.Y.Z tag on a feature branch's commit would otherwise publish unreviewed code. The
+    // compare API's "identical" or "behind" means the tagged commit is mainline's tip or an ancestor.
+    const guardIndex = steps.findIndex((s) => (s.run ?? "").includes("/compare/mainline..."));
+    expect(guardIndex).toBeGreaterThanOrEqual(0);
+    const guard = steps[guardIndex]!;
+    expect(guard.env?.GH_TOKEN).toBe("${{ github.token }}");
+    expect(guard.run).toContain("repos/$GITHUB_REPOSITORY/compare/mainline...$GITHUB_SHA");
+    expect(guard.run).toMatch(/!= identical && "\$status" != behind/);
+    expect(guard.run).toMatch(/exit 1/);
+    const checkoutIndex = steps.findIndex((s) => s.uses?.startsWith("actions/checkout"));
+    expect(checkoutIndex).toBeGreaterThan(guardIndex);
+    const credentialsIndex = steps.findIndex((s) => s.uses?.startsWith("aws-actions/configure-aws-credentials"));
+    expect(credentialsIndex).toBeGreaterThan(guardIndex);
+  });
+
   it("publishes npm with trusted publishing (OIDC): no stored token, npm upgraded to 11 first, no --provenance (private repo)", async () => {
     const text = await workflowText();
     expect(text).not.toMatch(/NPM_TOKEN/);
