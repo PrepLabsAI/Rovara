@@ -15,27 +15,38 @@ export const DnsHostSchema = z.string().max(253)
 const LOCAL_SUFFIXES = [".localhost", ".local", ".internal", ".localdomain", ".home.arpa"] as const;
 
 /**
- * Why an MCP endpoint cannot be used, or undefined. https only; no credentials, query or fragment
- * in the URL; and a public-looking DNS name, never an IP literal or a local name. The broker also
- * checks the addresses the name resolves to before each connection (FR-010).
+ * Why a URL AgentX sends a credential to cannot be used, or undefined; `label` names it in the
+ * message. https only; no credentials, query or fragment in the URL; and a public-looking DNS name,
+ * never an IP literal or a local name. The broker also checks the addresses an MCP endpoint resolves
+ * to before each connection (FR-010).
  */
-export function mcpEndpointProblem(value: string): string | undefined {
+export function publicHttpsUrlProblem(value: string, label: string): string | undefined {
   let url: URL;
-  try { url = new URL(value); } catch { return "endpoint must be an absolute URL"; }
-  if (url.protocol !== "https:") return "endpoint must use https";
-  if (url.username !== "" || url.password !== "") return "endpoint must not carry a username or password";
-  if (url.search !== "" || url.hash !== "") return "endpoint must not have a query or fragment";
+  try { url = new URL(value); } catch { return `${label} must be an absolute URL`; }
+  if (url.protocol !== "https:") return `${label} must use https`;
+  if (url.username !== "" || url.password !== "") return `${label} must not carry a username or password`;
+  if (url.search !== "" || url.hash !== "") return `${label} must not have a query or fragment`;
   const host = url.hostname;
-  if (host.startsWith("[") || /^\d+(?:\.\d+){3}$/.test(host)) return "endpoint host must be a DNS name, not an IP address";
-  if (!DnsHostSchema.safeParse(host).success) return "endpoint host must be a DNS name with at least one dot";
-  if (LOCAL_SUFFIXES.some((suffix) => host.endsWith(suffix))) return `endpoint host ${host} is a local name`;
+  if (host.startsWith("[") || /^\d+(?:\.\d+){3}$/.test(host)) return `${label} host must be a DNS name, not an IP address`;
+  if (!DnsHostSchema.safeParse(host).success) return `${label} host must be a DNS name with at least one dot`;
+  if (LOCAL_SUFFIXES.some((suffix) => host.endsWith(suffix))) return `${label} host ${host} is a local name`;
   return undefined;
 }
 
-export const McpEndpointSchema = z.string().max(2_048).superRefine((value, context) => {
-  const problem = mcpEndpointProblem(value);
-  if (problem !== undefined) context.addIssue({ code: "custom", message: problem });
-});
+/** Why an MCP endpoint cannot be used, or undefined. */
+export function mcpEndpointProblem(value: string): string | undefined {
+  return publicHttpsUrlProblem(value, "endpoint");
+}
+
+/** A public https URL, refused for the reasons publicHttpsUrlProblem gives. */
+export function publicHttpsUrlSchema(label: string) {
+  return z.string().max(2_048).superRefine((value, context) => {
+    const problem = publicHttpsUrlProblem(value, label);
+    if (problem !== undefined) context.addIssue({ code: "custom", message: problem });
+  });
+}
+
+export const McpEndpointSchema = publicHttpsUrlSchema("endpoint");
 
 /** Headers the MCP transport sets itself, which a connector must never override. */
 const RESERVED_HEADERS = new Set([

@@ -4,10 +4,11 @@ import {
   GetSecretValueCommand, PutSecretValueCommand, TagResourceCommand, type SecretsManagerClient,
 } from "@aws-sdk/client-secrets-manager";
 import {
-  AgentXError, CredentialRegistrationSchema, OAUTH_AUTHORIZATION_PROFILES, OAuthAppSecretSchema, agentXError, oauthProfile,
+  AgentXError, CredentialRegistrationSchema, OAUTH_AUTHORIZATION_PROFILES, OAuthAppSecretSchema, agentXError, mcpEndpointProblem, oauthProfile,
 } from "@agentx/contracts";
 import { createPkceParameters } from "../auth.js";
 import { registerCredential } from "./credential.js";
+import { discoverOAuth, registerClient } from "./oauth-discovery.js";
 
 /** The tag the broker role's PutSecretValue grant requires (infra/lib/control-plane.ts). */
 export const WRITABLE_TAG = { Key: "agentx-writable", Value: "refresh-token" } as const;
@@ -15,6 +16,8 @@ const SIGN_IN_TIMEOUT_MS = 300_000;
 const TOKEN_TIMEOUT_MS = 10_000;
 const MAX_ACCOUNT_FIELD = 128;
 const APP_SECRET_SHAPE = '{"clientId": "...", "clientSecret": "..."}';
+/** The redirect a generic (`--endpoint`) sign-in listens on; the OAuth app, or a registered client, must allow it. */
+export const GENERIC_REDIRECT_URI = "http://localhost:8765/callback";
 
 /** What `authorize` needs from Secrets Manager, with the administrator's own AWS credentials. */
 export interface AuthorizeSecrets {
@@ -30,8 +33,20 @@ export interface AuthorizeInput {
   accessToken: string;
   ref: string;
   secretName: string;
-  /** A key of OAUTH_AUTHORIZATION_PROFILES, such as "asana". */
-  provider: string;
+  /** A key of OAUTH_AUTHORIZATION_PROFILES, such as "asana". Exactly one of provider and endpoint. */
+  provider?: string;
+  /**
+   * Spec 055 phase 2: a generic MCP server's endpoint. Its sign-in is discovered (RFC 9728, RFC 8414)
+   * unless authorizeUrl and tokenUrl are both given, and the credential is registered pinned to its
+   * host with the token URL and resource.
+   */
+  endpoint?: string;
+  authorizeUrl?: string;
+  tokenUrl?: string;
+  /** Space-separated scopes to ask for; defaults to what the server asks for or lists. */
+  scope?: string;
+  /** Register AgentX as the server's client (RFC 7591) instead of reading one from the secret. */
+  registerClient?: boolean;
   secrets: AuthorizeSecrets;
   /** Opens the sign-in URL in a browser; when absent (`--no-browser`), the URL is only shown. */
   openBrowser?: (url: string) => Promise<void>;
@@ -92,24 +107,34 @@ export function secretsManagerAuthorizeSecrets(client: Pick<SecretsManagerClient
  */
 export async function authorizeCredential(input: AuthorizeInput): Promise<unknown> {
   const expectedEmail = expectedAccountEmail(input.expectAccount);
-  const registration = CredentialRegistrationSchema.safeParse({ ref: input.ref, type: "oauth-refresh-token", secretName: input.secretName });
+  const signIn = await resolveSignIn(input);
+  const generic = signIn.generic;
+  const registrationFields = { ref: input.ref, type: "oauth-refresh-token", secretName: input.secretName, ...(generic ?? {}) } as const;
+  // Checked before the browser opens, so a discovered URL AgentX would refuse fails first.
+  const registration = CredentialRegistrationSchema.safeParse(registrationFields);
   if (!registration.success) throw agentXError("CONFIG_INVALID", `invalid credential registration: ${registration.error.issues[0]?.message}`);
-  const profile = oauthProfile(input.provider);
-  if (!profile) throw agentXError("CONFIG_INVALID", `no browser sign-in for provider ${input.provider}; known providers: ${Object.keys(OAUTH_AUTHORIZATION_PROFILES).join(", ")}`);
 
   const raw = await input.secrets.read(input.secretName);
-  if (raw === undefined) throw agentXError("CONFIG_INVALID", `secret ${input.secretName} was not found; create it as JSON ${APP_SECRET_SHAPE} first`);
-  let json: unknown;
-  try { json = JSON.parse(raw); } catch { json = undefined; }
-  const app = OAuthAppSecretSchema.safeParse(json);
-  if (!app.success) throw agentXError("CONFIG_INVALID", `secret ${input.secretName} must be JSON ${APP_SECRET_SHAPE}`);
-  const { clientId, clientSecret } = app.data;
+  let client: { clientId: string; clientSecret?: string | undefined };
+  if (input.registerClient) {
+    if (raw === undefined) throw agentXError("CONFIG_INVALID", `secret ${input.secretName} was not found; create it first (its value can be {}), then run the command again`);
+    if (signIn.registrationUrl === undefined) throw agentXError("CONFIG_INVALID", `${signIn.vendor} does not offer client registration; create an OAuth app, store ${APP_SECRET_SHAPE} in ${input.secretName}, and run the command again without --register-client`);
+    client = await registerClient(signIn.registrationUrl, signIn.redirectUri, input.fetchImplementation ?? fetch);
+  } else {
+    if (raw === undefined) throw agentXError("CONFIG_INVALID", `secret ${input.secretName} was not found; create it as JSON ${APP_SECRET_SHAPE} first`);
+    let json: unknown;
+    try { json = JSON.parse(raw); } catch { json = undefined; }
+    const app = OAuthAppSecretSchema.safeParse(json);
+    if (!app.success) throw agentXError("CONFIG_INVALID", `secret ${input.secretName} must be JSON ${APP_SECRET_SHAPE}`);
+    client = { clientId: app.data.clientId, clientSecret: app.data.clientSecret };
+  }
+  const { clientId, clientSecret } = client;
 
-  const vendor = `${input.provider.charAt(0).toUpperCase()}${input.provider.slice(1)}`;
-  const redirectRequirement = `(the ${vendor} app's redirect URL must be exactly ${profile.redirectUri})`;
+  const vendor = signIn.vendor;
+  const redirectRequirement = `(the ${vendor} app's redirect URL must be exactly ${signIn.redirectUri})`;
   const pkce = createPkceParameters();
   const callback = await listenForCallback({
-    redirectUri: new URL(profile.redirectUri),
+    redirectUri: new URL(signIn.redirectUri),
     redirectRequirement,
     state: pkce.state,
     timeoutMilliseconds: input.timeoutMilliseconds ?? SIGN_IN_TIMEOUT_MS,
@@ -118,14 +143,15 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
   let code: string;
   try {
     input.onListening?.(callback.port);
-    const authorize = new URL(profile.authorizeUrl);
+    const authorize = new URL(signIn.authorizeUrl);
     authorize.searchParams.set("response_type", "code");
     authorize.searchParams.set("client_id", clientId);
-    authorize.searchParams.set("redirect_uri", profile.redirectUri);
+    authorize.searchParams.set("redirect_uri", signIn.redirectUri);
     authorize.searchParams.set("state", pkce.state);
     authorize.searchParams.set("code_challenge", pkce.challenge);
     authorize.searchParams.set("code_challenge_method", "S256");
-    if (profile.resource !== undefined) authorize.searchParams.set("resource", profile.resource);
+    if (signIn.scopes.length > 0) authorize.searchParams.set("scope", signIn.scopes.join(" "));
+    if (signIn.resource !== undefined) authorize.searchParams.set("resource", signIn.resource);
     input.showUrl(authorize.href, redirectRequirement);
     // The printed URL still works when no browser can be opened here.
     await input.openBrowser?.(authorize.href).catch(() => undefined);
@@ -135,8 +161,9 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
   }
 
   const { refreshToken, account } = await exchangeCode({
-    tokenUrl: new URL(profile.tokenUrl), code, verifier: pkce.verifier, redirectUri: profile.redirectUri, clientId, clientSecret,
-    fetchImplementation: input.fetchImplementation ?? fetch,
+    tokenUrl: new URL(signIn.tokenUrl), code, verifier: pkce.verifier, redirectUri: signIn.redirectUri, clientId, clientSecret,
+    // Only a generic sign-in names the resource on the token request; the Asana profile never has (unchanged).
+    resource: generic?.resource, fetchImplementation: input.fetchImplementation ?? fetch,
   });
   const shown = account?.shown;
   input.showAccount?.(`${shown === undefined ? `Signed in to ${vendor} (the account could not be shown)` : `Signed in to ${vendor} as ${shown}`}. This must be the connector's bot user; if it is not, run the command again with the sign-in URL opened in a private window signed in as the bot user.`);
@@ -145,17 +172,19 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
     throw agentXError("AUTH_REQUIRED", `the sign-in was for ${shown ?? "an account that could not be shown"}, not ${expectedEmail}; nothing was stored or registered. `
       + `Run the command again with --no-browser and open the sign-in URL in a private window signed in as ${expectedEmail}`);
   }
-  await input.secrets.write(input.secretName, JSON.stringify({ clientId, clientSecret, refreshToken })).catch((error: unknown) => {
+  const stored = { clientId, ...(clientSecret === undefined ? {} : { clientSecret }), refreshToken };
+  await input.secrets.write(input.secretName, JSON.stringify(stored)).catch((error: unknown) => {
     throw agentXError("CONFIG_INVALID", `could not store the refresh token in secret ${input.secretName} with your AWS credentials (${errorName(error)}); nothing was registered, run the command again`);
   });
   await input.secrets.tag(input.secretName).catch((error: unknown) => {
     throw agentXError("CONFIG_INVALID", `stored the refresh token in secret ${input.secretName} but could not tag it ${WRITABLE_TAG.Key}=${WRITABLE_TAG.Value} with your AWS credentials (${errorName(error)}); nothing was registered, run the command again`);
   });
   try {
-    return await registerCredential({ controlPlaneUrl: input.controlPlaneUrl, accessToken: input.accessToken, ref: input.ref, type: "oauth-refresh-token", secretName: input.secretName }, input.fetchImplementation);
+    return await registerCredential({ controlPlaneUrl: input.controlPlaneUrl, accessToken: input.accessToken, ...registrationFields }, input.fetchImplementation);
   } catch (error) {
     // The sign-in already succeeded: say how to finish without signing in again.
-    const register = `finish with \`agentx admin credential register --ref ${input.ref} --type oauth-refresh-token --secret ${input.secretName}\` (no new sign-in needed)`;
+    const flags = generic === undefined ? "" : ` --host ${generic.host} --token-url ${generic.tokenUrl}${generic.resource === undefined ? "" : ` --resource ${generic.resource}`}`;
+    const register = `finish with \`agentx admin credential register --ref ${input.ref} --type oauth-refresh-token --secret ${input.secretName}${flags}\` (no new sign-in needed)`;
     // The control plane refusing the secret itself (CONFIG_INVALID) is most often a secret written in
     // another region than the control plane's, where registering again would only fail the same way.
     const wrongRegion = error instanceof AgentXError && error.code === "CONFIG_INVALID";
@@ -163,6 +192,52 @@ export async function authorizeCredential(input: AuthorizeInput): Promise<unknow
       ? `the refresh token is stored and tagged in secret ${input.secretName} in ${input.region ?? "your default AWS region"}, but the control plane reads secrets in its own AWS region: if that is a different region, run the command again with --region set to the control plane's region; otherwise ${register}`
       : `the refresh token is stored and tagged in secret ${input.secretName}; ${register}`);
   }
+}
+
+/** One sign-in's endpoints and, for a generic MCP server, what its credential is registered with. */
+interface SignIn {
+  vendor: string;
+  authorizeUrl: string;
+  tokenUrl: string;
+  redirectUri: string;
+  resource?: string | undefined;
+  scopes: string[];
+  registrationUrl?: string | undefined;
+  generic?: { host: string; tokenUrl: string; resource?: string } | undefined;
+}
+
+/** The built-in provider's profile, or the generic endpoint's sign-in: given, or discovered from the server. */
+async function resolveSignIn(input: AuthorizeInput): Promise<SignIn> {
+  if ((input.provider === undefined) === (input.endpoint === undefined)) {
+    throw agentXError("CONFIG_INVALID", `give exactly one of --provider (${Object.keys(OAUTH_AUTHORIZATION_PROFILES).join(", ")}) and --endpoint <mcp url>`);
+  }
+  const scopes = input.scope === undefined ? undefined : input.scope.split(" ").filter((scope) => scope !== "");
+  if (input.provider !== undefined) {
+    if (input.authorizeUrl !== undefined || input.tokenUrl !== undefined || input.registerClient) {
+      throw agentXError("CONFIG_INVALID", "--authorize-url, --token-url and --register-client go with --endpoint, not --provider");
+    }
+    const profile = oauthProfile(input.provider);
+    if (!profile) throw agentXError("CONFIG_INVALID", `no browser sign-in for provider ${input.provider}; known providers: ${Object.keys(OAUTH_AUTHORIZATION_PROFILES).join(", ")}`);
+    return {
+      vendor: `${input.provider.charAt(0).toUpperCase()}${input.provider.slice(1)}`,
+      authorizeUrl: profile.authorizeUrl, tokenUrl: profile.tokenUrl, redirectUri: profile.redirectUri,
+      resource: "resource" in profile ? profile.resource : undefined, scopes: scopes ?? [],
+    };
+  }
+  const endpoint = input.endpoint!;
+  const problem = mcpEndpointProblem(endpoint);
+  if (problem !== undefined) throw agentXError("CONFIG_INVALID", `--endpoint: ${problem}`);
+  const url = new URL(endpoint);
+  if ((input.authorizeUrl === undefined) !== (input.tokenUrl === undefined)) throw agentXError("CONFIG_INVALID", "give both --authorize-url and --token-url, or neither to discover them");
+  const discovered = input.authorizeUrl !== undefined && input.tokenUrl !== undefined
+    ? { authorizeUrl: input.authorizeUrl, tokenUrl: input.tokenUrl, resource: url.href, scopes: [] as string[], registrationUrl: undefined }
+    : await discoverOAuth(url, input.fetchImplementation ?? fetch);
+  return {
+    vendor: url.host,
+    authorizeUrl: discovered.authorizeUrl, tokenUrl: discovered.tokenUrl, redirectUri: GENERIC_REDIRECT_URI,
+    resource: discovered.resource, scopes: scopes ?? discovered.scopes, registrationUrl: discovered.registrationUrl,
+    generic: { host: url.hostname, tokenUrl: discovered.tokenUrl, resource: discovered.resource },
+  };
 }
 
 /**
@@ -180,7 +255,8 @@ function withRecovery(error: unknown, recovery: string): Error {
 }
 
 async function exchangeCode(input: {
-  tokenUrl: URL; code: string; verifier: string; redirectUri: string; clientId: string; clientSecret: string; fetchImplementation: typeof fetch;
+  tokenUrl: URL; code: string; verifier: string; redirectUri: string; clientId: string; clientSecret: string | undefined;
+  resource: string | undefined; fetchImplementation: typeof fetch;
 }): Promise<{ refreshToken: string; account: Account | undefined }> {
   const response = await input.fetchImplementation(input.tokenUrl, {
     method: "POST",
@@ -189,7 +265,10 @@ async function exchangeCode(input: {
     headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
     body: new URLSearchParams({
       grant_type: "authorization_code", code: input.code, redirect_uri: input.redirectUri, code_verifier: input.verifier,
-      client_id: input.clientId, client_secret: input.clientSecret,
+      client_id: input.clientId,
+      // A public client has no secret: PKCE alone binds the code to this sign-in.
+      ...(input.clientSecret === undefined ? {} : { client_secret: input.clientSecret }),
+      ...(input.resource === undefined ? {} : { resource: input.resource }),
     }).toString(),
   }).catch((error: unknown) => {
     throw agentXError("AUTH_REQUIRED", `could not reach the token endpoint (${errorName(error)}); nothing was stored`);

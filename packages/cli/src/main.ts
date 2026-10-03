@@ -672,12 +672,16 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .requiredOption("--type <type>", "static-secret, oauth-client-credentials or oauth-refresh-token")
     .requiredOption("--secret <name>", "Secrets Manager secret name, agentx/connectors/<name> or agentx/<env>/connectors/<name>")
     .option("--host <host>", "the one MCP host this credential may be sent to, such as mcp.sentry.dev; required by a generic mcp connector")
-    .action(async (options: { ref: string; type: string; secret: string; host?: string }, command: Command) => {
+    .option("--token-url <url>", "an OAuth credential's token endpoint, for a generic mcp connector")
+    .option("--resource <url>", "the RFC 8707 resource an OAuth credential's tokens are for, for a generic mcp connector")
+    .action(async (options: { ref: string; type: string; secret: string; host?: string; tokenUrl?: string; resource?: string }, command: Command) => {
       const globals = globalOptions(command);
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
       services.stdout.write(formatSuccess(await registerCredential({
         controlPlaneUrl: settings.controlPlaneUrl, accessToken, ref: options.ref, type: options.type, secretName: options.secret,
         ...(options.host === undefined ? {} : { host: options.host }),
+        ...(options.tokenUrl === undefined ? {} : { tokenUrl: options.tokenUrl }),
+        ...(options.resource === undefined ? {} : { resource: options.resource }),
       }, services.fetchImplementation), globals.json));
     });
   adminCredential
@@ -685,11 +689,19 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .description("sign the connector's bot user in once in a browser, store its refresh token in the secret, and register it as oauth-refresh-token")
     .requiredOption("--ref <reference>", "credential reference used by connectors' credentialRef")
     .requiredOption("--secret <name>", "Secrets Manager secret holding the app's {\"clientId\", \"clientSecret\"}, agentx/connectors/<name> or agentx/<env>/connectors/<name>")
-    .requiredOption("--provider <name>", "whose sign-in page to use: asana")
+    .option("--provider <name>", "a built-in sign-in page: asana")
+    .option("--endpoint <url>", "a generic MCP server's endpoint: discover its sign-in, and register the credential pinned to its host")
+    .option("--authorize-url <url>", "with --endpoint: the authorization endpoint, when the server does not publish OAuth metadata")
+    .option("--token-url <url>", "with --endpoint: the token endpoint, when the server does not publish OAuth metadata")
+    .option("--scope <scopes>", "space-separated scopes to ask for; defaults to what the server asks for")
+    .option("--register-client", "with --endpoint: register AgentX as the server's OAuth client instead of reading one from the secret")
     .option("--region <region>", "AWS region of the secret; defaults to your AWS configuration")
     .option("--no-browser", "do not open a browser; only print the sign-in URL, to open in a private window signed in as the bot user")
     .option("--expect-account <email>", "the bot user's email; refuse, storing nothing, when another account signs in")
-    .action(async (options: { ref: string; secret: string; provider: string; region?: string; browser: boolean; expectAccount?: string }, command: Command) => {
+    .action(async (options: {
+      ref: string; secret: string; provider?: string; endpoint?: string; authorizeUrl?: string; tokenUrl?: string; scope?: string; registerClient?: boolean;
+      region?: string; browser: boolean; expectAccount?: string;
+    }, command: Command) => {
       const globals = globalOptions(command);
       // A blank --expect-account fails before logging in or reading the secret.
       expectedAccountEmail(options.expectAccount);
@@ -700,7 +712,12 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         accessToken,
         ref: options.ref,
         secretName: options.secret,
-        provider: options.provider,
+        ...(options.provider === undefined ? {} : { provider: options.provider }),
+        ...(options.endpoint === undefined ? {} : { endpoint: options.endpoint }),
+        ...(options.authorizeUrl === undefined ? {} : { authorizeUrl: options.authorizeUrl }),
+        ...(options.tokenUrl === undefined ? {} : { tokenUrl: options.tokenUrl }),
+        ...(options.scope === undefined ? {} : { scope: options.scope }),
+        ...(options.registerClient === true ? { registerClient: true } : {}),
         secrets: overrides.secrets ?? secretsManagerAuthorizeSecrets(new SecretsManagerClient(options.region ? { region: options.region } : {})),
         ...(options.browser ? { openBrowser: overrides.openBrowser ?? openSystemBrowser } : {}),
         ...(options.expectAccount === undefined ? {} : { expectAccount: options.expectAccount }),

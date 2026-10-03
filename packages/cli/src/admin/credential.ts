@@ -15,6 +15,9 @@ interface RegisterCredentialInput extends CredentialAdminInput {
   secretName: string;
   /** Spec 055: the one MCP host the credential may be sent to. */
   host?: string;
+  /** Spec 055 phase 2: an OAuth credential's token URL and RFC 8707 resource, for a generic mcp connector. */
+  tokenUrl?: string;
+  resource?: string;
 }
 
 export async function registerCredential(
@@ -26,6 +29,8 @@ export async function registerCredential(
     type: input.type,
     secretName: input.secretName,
     ...(input.host === undefined ? {} : { host: input.host }),
+    ...(input.tokenUrl === undefined ? {} : { tokenUrl: input.tokenUrl }),
+    ...(input.resource === undefined ? {} : { resource: input.resource }),
   });
   if (!parsed.success) {
     throw agentXError("CONFIG_INVALID", `invalid credential registration: ${parsed.error.issues[0]?.message}`);
