@@ -42,7 +42,8 @@ directly for that environment name would have produced (FR-012).
 
 ## Cutting a release
 
-1. Tag a commit on mainline `vX.Y.Z` (for example `v1.2.3`) and push the tag.
+1. Tag a commit on mainline `vX.Y.Z` (for example `v1.2.3`) and push the tag. A tag on a commit
+   that is not on mainline stops the workflow before it publishes anything.
 2. That triggers the `Release` GitHub Actions workflow (`.github/workflows/release.yml`). It always
    runs the test job first: typecheck, the stricter type check (`typecheck:all`), lint, build, the
    full test suite, and `infra:synth`.
@@ -113,11 +114,14 @@ deployment.
    Secrets and variables → Actions → Variables, saving the last one for last:
    `AGENTX_PUBLISH_ROLE_ARN`, `AGENTX_ECR_PUBLIC_ALIAS`, `AGENTX_NPM_PACKAGE`, then
    `AGENTX_PUBLISH_ENABLED=true`.
-7. **A tag protection ruleset: recommended.** The workflow only checks that a tag's *name* matches
-   `vX.Y.Z`; it does not check who pushed it or what commit it points at. Anyone who can push a
-   matching tag can trigger a real publish. Add a repository ruleset (Settings → Rules → Rulesets →
-   New tag ruleset) targeting `v*` that restricts tag creation to repository owners/admins, so an
-   accidental or malicious `v*` tag from anyone else can't publish.
+7. **A tag protection ruleset: recommended.** The workflow checks that a tag's *name* matches
+   `vX.Y.Z` and that its commit is on mainline; it does not check who pushed it. That mainline
+   check only catches mistakes: GitHub runs the tagged commit's own copy of the workflow, so
+   someone who can push a tag could also remove the check on a branch and tag that. Anyone who can
+   push a matching tag can therefore trigger a real publish. Add a repository ruleset (Settings →
+   Rules → Rulesets → New tag ruleset) targeting `v*` that restricts creating, updating and
+   deleting those tags to repository owners/admins, so a `v*` tag from anyone else can't publish.
+   Rulesets need a public repository or GitHub Pro (see item 5).
 
 ## If a release fails partway
 

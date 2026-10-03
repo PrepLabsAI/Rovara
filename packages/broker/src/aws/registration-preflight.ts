@@ -2,7 +2,7 @@ import { AgentXError, itemPathProblems, type ConnectorPreflight, type ProjectDef
 import { ConnectorNotConnected, isObject, presentCatalog, TARGET_CONFLICT_REASON, type CatalogTool, type GuardedItemTools, type SkippedTool } from "@agentx/gateway";
 import { discoverScope, stripCode, type ConnectorContextBase, type ScopeDiscovery } from "./connector-routes.js";
 import type { ResolvedConnector } from "./connector-types.js";
-import { credentialSetupCommand, type CredentialRegistry } from "./credentials.js";
+import { credentialSetupCommand, hostPinProblem, type CredentialRegistry } from "./credentials.js";
 
 const MAX_SKIPPED = 64;
 const MAX_PROBLEM = 512;
@@ -139,6 +139,10 @@ export async function credentialRefusals(connectors: readonly ResolvedConnector[
     const type = await registry.typeOf(credential.ref);
     if (type === undefined) refusals.push(`connector ${connector.name}: credential ${credential.ref} is not registered; run ${credentialSetupCommand(credential.accepts)} first`);
     else if (!credential.accepts.includes(type)) refusals.push(`connector ${connector.name}: credential ${credential.ref} is ${type}; ${/^[AEIOU]/.test(connector.vendor) ? "an" : "a"} ${connector.vendor} connector needs ${credential.accepts.join(" or ")}`);
+    else {
+      const pinned = hostPinProblem(credential.ref, (await registry.registration(credential.ref))?.host, credential.pin);
+      if (pinned !== undefined) refusals.push(`connector ${connector.name}: ${pinned}`);
+    }
   }
   return refusals;
 }

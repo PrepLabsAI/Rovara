@@ -200,7 +200,7 @@ describe("connector resolution", () => {
 
   it("has a built-in entry for every type ConnectorConfigSchema accepts, so none is silently dropped", () => {
     const schemaTypes = ConnectorConfigSchema.options.map((option) => option.shape.type.value as string);
-    expect(schemaTypes).toEqual(["github", "linear", "jira", "asana"]);
+    expect(schemaTypes).toEqual(["github", "linear", "jira", "asana", "mcp"]);
     for (const type of schemaTypes) {
       expect(Object.hasOwn(BUILT_IN_CONNECTOR_TYPES, type)).toBe(true);
     }

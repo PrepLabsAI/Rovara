@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { EnvironmentNameSchema } from "./environments.js";
+import { DnsHostSchema } from "./mcp-connector.js";
 import { AGENTX_NAME_PATTERN } from "./names.js";
 
 /** Every provider type. github-app is built in; per-user is reserved for a later release. */
@@ -33,6 +34,11 @@ export const CredentialRegistrationSchema = z.object({
   ref: z.string().regex(AGENTX_NAME_PATTERN),
   type: RegistrableCredentialTypeSchema,
   secretName: SecretNameSchema,
+  /**
+   * Spec 055: the one MCP host this credential may be sent to. A generic `mcp` connector requires it
+   * to equal its endpoint's host; a built-in connector refuses a credential pinned anywhere else.
+   */
+  host: DnsHostSchema.optional(),
 }).strict();
 
 export const CredentialRecordSchema = CredentialRegistrationSchema.extend({
@@ -44,6 +50,7 @@ export const CredentialListEntrySchema = z.object({
   ref: z.string(),
   type: CredentialTypeSchema,
   secretName: z.string(),
+  host: z.string().optional(),
   builtIn: z.boolean(),
   tokenCached: z.boolean(),
   registeredBy: z.string().optional(),

@@ -33,12 +33,16 @@ export async function connectMcp(options: {
   token: string;
   tools: readonly string[];
   signal: AbortSignal;
+  /** Spec 055: the header the token goes in and the text before it; defaults to `Authorization: Bearer`. */
+  auth?: { header?: string | undefined; prefix?: string | undefined };
   fetchImplementation?: typeof fetch;
 }): Promise<McpConnection> {
   const fetchImplementation = options.fetchImplementation ?? fetch;
+  const authHeader = options.auth?.header ?? "Authorization";
+  const authValue = `${options.auth?.prefix ?? "Bearer "}${options.token}`;
   let unauthorized = false;
   const transport = new StreamableHTTPClientTransport(options.endpoint, {
-    requestInit: { headers: { Authorization: `Bearer ${options.token}`, "X-MCP-Tools": options.tools.join(",") } },
+    requestInit: { headers: { [authHeader]: authValue, "X-MCP-Tools": options.tools.join(",") } },
     reconnectionOptions: { maxRetries: 0, maxReconnectionDelay: 0, initialReconnectionDelay: 0, reconnectionDelayGrowFactor: 1 },
     fetch: async (url, init) => {
       const response = await fetchImplementation(url, {

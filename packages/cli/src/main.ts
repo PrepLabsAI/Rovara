@@ -671,10 +671,14 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .requiredOption("--ref <reference>", "credential reference used by connectors' credentialRef")
     .requiredOption("--type <type>", "static-secret, oauth-client-credentials or oauth-refresh-token")
     .requiredOption("--secret <name>", "Secrets Manager secret name, agentx/connectors/<name> or agentx/<env>/connectors/<name>")
-    .action(async (options: { ref: string; type: string; secret: string }, command: Command) => {
+    .option("--host <host>", "the one MCP host this credential may be sent to, such as mcp.sentry.dev; required by a generic mcp connector")
+    .action(async (options: { ref: string; type: string; secret: string; host?: string }, command: Command) => {
       const globals = globalOptions(command);
       const { settings, accessToken } = await authenticate(globals, services.tokenStore);
-      services.stdout.write(formatSuccess(await registerCredential({ controlPlaneUrl: settings.controlPlaneUrl, accessToken, ref: options.ref, type: options.type, secretName: options.secret }, services.fetchImplementation), globals.json));
+      services.stdout.write(formatSuccess(await registerCredential({
+        controlPlaneUrl: settings.controlPlaneUrl, accessToken, ref: options.ref, type: options.type, secretName: options.secret,
+        ...(options.host === undefined ? {} : { host: options.host }),
+      }, services.fetchImplementation), globals.json));
     });
   adminCredential
     .command("authorize")

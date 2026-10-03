@@ -191,6 +191,23 @@ export class DynamoRefreshLease implements RefreshLease {
   }
 }
 
+/** The host a connector's credential must be pinned to (spec 055 FR-009). */
+export interface HostPin {
+  /** The endpoint's host. */
+  host: string;
+  /** True for a generic `mcp` connector: an unpinned credential is refused too. */
+  required: boolean;
+}
+
+/** Why a credential's pinned host does not allow sending it to this connector, or undefined. */
+export function hostPinProblem(ref: string, recordHost: string | undefined, pin: HostPin | undefined): string | undefined {
+  if (pin === undefined) return undefined;
+  if (recordHost === undefined) {
+    return pin.required ? `credential ${ref} is not pinned to a host; register it again with --host ${pin.host}` : undefined;
+  }
+  return recordHost === pin.host ? undefined : `credential ${ref} is pinned to ${recordHost}, not ${pin.host}, so AgentX does not send it there`;
+}
+
 /**
  * The command that creates a credential of the type a connector needs: an oauth-refresh-token
  * credential comes from a bot user's one-time sign-in (authorize); every other type is registered
@@ -304,7 +321,7 @@ export class CredentialRegistry {
   }
 
   /** Phase 5 entry point: a provider that resolves the record on each issue, so re-registration takes effect. */
-  provider(ref: string, options: { tokenEndpoint?: URL; accepts?: readonly CredentialType[] } = {}): CredentialProvider<unknown> {
+  provider(ref: string, options: { tokenEndpoint?: URL; accepts?: readonly CredentialType[]; pin?: HostPin } = {}): CredentialProvider<unknown> {
     const memoKey = `${ref}\u0000${options.tokenEndpoint?.href ?? ""}`;
     return {
       issue: async (scope, access, actor) => {
@@ -313,6 +330,9 @@ export class CredentialRegistry {
         }
         const record = await this.readRecord(ref);
         if (!record) throw new CredentialUnavailable(`credential ${ref} is not registered; run ${credentialSetupCommand(options.accepts)}`);
+        // Spec 055: checked on every issue, so a re-registration or an edited endpoint can never send it elsewhere.
+        const pinned = hostPinProblem(ref, record.host, options.pin);
+        if (pinned !== undefined) throw new CredentialUnavailable(pinned);
         // registeredAt alone has millisecond resolution, so two registrations in the same
         // millisecond are told apart by what they point at.
         const registration = JSON.stringify([record.registeredAt, record.type, record.secretName]);
@@ -442,5 +462,5 @@ function recordOf(item: Record<string, unknown>): CredentialRecord | undefined {
 }
 
 function listEntry(record: CredentialRecord, tokenCached: boolean): CredentialListEntry {
-  return { ref: record.ref, type: record.type, secretName: record.secretName, builtIn: false, tokenCached, registeredBy: record.registeredBy, registeredAt: record.registeredAt };
+  return { ref: record.ref, type: record.type, secretName: record.secretName, ...(record.host === undefined ? {} : { host: record.host }), builtIn: false, tokenCached, registeredBy: record.registeredBy, registeredAt: record.registeredAt };
 }

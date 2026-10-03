@@ -3,7 +3,8 @@ import { githubConnector, type ConnectorDefinition, type ConnectorPolicy, type P
 import type { GitHubMcpDependencies } from "../github-mcp.js";
 import { GITHUB_LEDGER } from "./connector-ledger.js";
 import { asanaConnectorType } from "./asana-connector-type.js";
-import type { CredentialRegistry } from "./credentials.js";
+import { mcpConnectorType } from "./connector-presets.js";
+import type { CredentialRegistry, HostPin } from "./credentials.js";
 import { jiraConnectorType } from "./jira-connector-type.js";
 import { linearConnectorType } from "./linear-connector-type.js";
 
@@ -22,8 +23,11 @@ export interface ResolvedConnector<Scope = unknown> {
   approvals: readonly PresentationApproval[];
   attribution: boolean;
   ledger: { prefix: string; entityType: string };
-  /** The registry credential this connector reads and the provider types it accepts; absent for github. */
-  credential?: { ref: string; accepts: readonly CredentialType[] };
+  /**
+   * The registry credential this connector reads, the provider types it accepts and the host it must
+   * be pinned to (spec 055); absent for github.
+   */
+  credential?: { ref: string; accepts: readonly CredentialType[]; pin?: HostPin };
   /** Whether this deployment can reach the connector at all; cheap, used at thread setup. */
   configured(): Promise<boolean>;
   /** The engine definition, or why the connector is not connected in this deployment. */
@@ -91,7 +95,9 @@ export const githubConnectorType: ConnectorType = {
  * name its own map. A type added to `ConnectorConfigSchema` without an entry here would resolve
  * as unknown and be silently dropped; a contract test checks every schema option has one.
  */
-export const BUILT_IN_CONNECTOR_TYPES: Readonly<Record<string, ConnectorType>> = { github: githubConnectorType, linear: linearConnectorType, jira: jiraConnectorType, asana: asanaConnectorType };
+export const BUILT_IN_CONNECTOR_TYPES: Readonly<Record<string, ConnectorType>> = {
+  github: githubConnectorType, linear: linearConnectorType, jira: jiraConnectorType, asana: asanaConnectorType, mcp: mcpConnectorType,
+};
 
 /**
  * Every connector the project configures that this broker can serve, in definition order. The
