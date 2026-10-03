@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { ItemPathSchema } from "./item-paths.js";
 import { GitHubMcpResultSchema, McpToolNameSchema, ToolApprovalListSchema } from "./github-mcp.js";
+import { ArgumentNameSchema, isOneLine, McpAuthSchema, McpEndpointSchema, ScopeValueNameSchema, ScopingSchema } from "./mcp-connector.js";
 import { AGENTX_NAME_PATTERN } from "./names.js";
 
 /** Becomes the tool prefix `<name>__<tool>`, so it is short and lowercase. */
@@ -150,7 +151,65 @@ export const AsanaConnectorSchema = z.object({
   }
 });
 
-export const ConnectorConfigSchema = z.discriminatedUnion("type", [GitHubConnectorSchema, LinearConnectorSchema, JiraConnectorSchema, AsanaConnectorSchema]);
+const OneLineSchema = (max: number) => z.string().min(1).max(max).refine(isOneLine, "must be one line");
+
+/** One scope of a generic connector: the alias the model sees and the values the binder and guard read. */
+export const McpScopeSchema = z.object({
+  alias: ConnectorAliasSchema,
+  values: z.record(ScopeValueNameSchema, OneLineSchema(256))
+    .refine((values) => Object.keys(values).length >= 1 && Object.keys(values).length <= 16, "a scope has 1 to 16 values"),
+}).strict();
+
+/**
+ * Spec 055: any remote MCP server, described entirely by data. The credential must be pinned to the
+ * endpoint's host (credential `host`), and `scoping` says what keeps a call inside its scope: the
+ * credential's own reach, or a declarative ownership rule.
+ */
+export const McpConnectorSchema = z.object({
+  name: ConnectorNameSchema,
+  type: z.literal("mcp"),
+  endpoint: McpEndpointSchema,
+  /** Thread and manifest label, for example "Sentry issues". */
+  label: OneLineSchema(64),
+  /** Vendor name in messages and descriptions, for example "Sentry". */
+  vendor: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9 .&+-]{0,31}$/),
+  scopeNoun: z.string().regex(/^[A-Za-z][A-Za-z0-9 -]{0,31}$/).optional(),
+  /** What an administrator should check when the vendor refuses the credential. */
+  permissionsHint: OneLineSchema(256).optional(),
+  credentialRef: z.string().regex(AGENTX_NAME_PATTERN),
+  auth: McpAuthSchema.optional(),
+  scopes: z.array(McpScopeSchema).min(1).max(32),
+  bind: z.object({
+    required: z.record(ArgumentNameSchema, ScopeValueNameSchema).optional(),
+    optional: z.record(ArgumentNameSchema, ScopeValueNameSchema).optional(),
+  }).strict().optional(),
+  itemArguments: z.array(ItemPathSchema).min(1).max(16).optional(),
+  attributionKeys: z.array(ArgumentNameSchema).min(1).max(8).optional(),
+  scoping: ScopingSchema,
+  tools: ToolApprovalListSchema,
+  attribution: z.boolean().optional(),
+}).strict().superRefine((connector, context) => {
+  const issue = (message: string) => context.addIssue({ code: "custom", message: `connector ${connector.name}: ${message}` });
+  if (new Set(connector.scopes.map((scope) => scope.alias)).size !== connector.scopes.length) issue("scope aliases must be unique");
+  const everyScopeHas = (name: string) => connector.scopes.every((scope) => Object.hasOwn(scope.values, name));
+  const required = connector.bind?.required ?? {};
+  const optional = connector.bind?.optional ?? {};
+  for (const [argument, value] of [...Object.entries(required), ...Object.entries(optional)]) {
+    if (!everyScopeHas(value)) issue(`bind ${argument} reads ${value}, which every scope must set`);
+  }
+  for (const argument of Object.keys(required)) if (Object.hasOwn(optional, argument)) issue(`bind ${argument} is both required and optional`);
+  const scoping = connector.scoping;
+  if (scoping.mode === "credential") {
+    const writes = connector.tools.filter((tool) => tool.access === "write").map((tool) => tool.name);
+    if (writes.length > 0 && scoping.acknowledgeUnscopedWrites !== true) {
+      issue(`write tools ${writes.join(", ")} would reach everything the credential can; set scoping.acknowledgeUnscopedWrites: true, or use an ownership rule`);
+    }
+  } else if (!everyScopeHas(scoping.equals)) {
+    issue(`scoping.equals reads ${scoping.equals}, which every scope must set`);
+  }
+});
+
+export const ConnectorConfigSchema = z.discriminatedUnion("type", [GitHubConnectorSchema, LinearConnectorSchema, JiraConnectorSchema, AsanaConnectorSchema, McpConnectorSchema]);
 
 const KNOWN_CONNECTOR_TYPES = new Set(ConnectorConfigSchema.options.map((option) => option.shape.type.value as string));
 
@@ -256,6 +315,8 @@ export type GitHubConnectorConfig = z.infer<typeof GitHubConnectorSchema>;
 export type JiraConnectorConfig = z.infer<typeof JiraConnectorSchema>;
 export type LinearConnectorConfig = z.infer<typeof LinearConnectorSchema>;
 export type AsanaConnectorConfig = z.infer<typeof AsanaConnectorSchema>;
+export type McpConnectorConfig = z.infer<typeof McpConnectorSchema>;
+export type McpScope = z.infer<typeof McpScopeSchema>;
 export type ConnectorConfig = z.infer<typeof ConnectorConfigSchema>;
 
 /** Six in-house tools when recovery tools are shown; kept equal to ORCHESTRATION_TOOL_NAMES by a test. */

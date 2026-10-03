@@ -110,6 +110,13 @@ export interface ConnectorDefinition<Scope> {
    * one of `targetArguments`, since nothing checks the item it names.
    */
   guardedItemTools?: GuardedItemTools;
+  /** Spec 055: how the token is sent. Absent means `Authorization: Bearer <token>`. */
+  auth?: { header?: string | undefined; prefix?: string | undefined };
+  /**
+   * Spec 055: runs before any credential is issued; throws to refuse the endpoint (EndpointRefused,
+   * a CredentialUnavailable, reads as not connected). Generic connectors check resolved addresses.
+   */
+  verifyEndpoint?: () => Promise<void>;
 }
 
 /** The tools a connector's guard covers, and the argument names that address an item (issue #49). */

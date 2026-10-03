@@ -112,7 +112,8 @@ describe("the setup command named for an unregistered credential", () => {
     const provider = vi.spyOn(credentials, "provider");
     const [connector] = resolveConnectors(ProjectDefinitionSchema.parse(project([asana()])), { credentialRegistry: credentials });
     await connector!.definition();
-    expect(provider).toHaveBeenCalledWith("asana-bot", { tokenEndpoint: ASANA_TOKEN_ENDPOINT, accepts: ["oauth-refresh-token"] });
+    // Spec 055: a built-in connector also refuses a credential pinned to a host other than its endpoint's.
+    expect(provider).toHaveBeenCalledWith("asana-bot", { tokenEndpoint: ASANA_TOKEN_ENDPOINT, accepts: ["oauth-refresh-token"], pin: { host: "mcp.asana.com", required: false } });
     await expect(registry().provider("asana-bot", { tokenEndpoint: ASANA_TOKEN_ENDPOINT, accepts: ["oauth-refresh-token"] }).issue(undefined, "read"))
       .rejects.toThrow(new CredentialUnavailable("credential asana-bot is not registered; run agentx admin credential authorize"));
     await expect(registry().provider("linear-key", { accepts: ["static-secret"] }).issue(undefined, "read"))
