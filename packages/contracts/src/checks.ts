@@ -3,7 +3,30 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 
-export const AGENTX_PREAMBLE_VERSION = "1";
+/** Covers AGENTX_WORKER_PROMPT and AGENTX_PREAMBLE: changing either means a new version. 1 had only the preamble. */
+export const AGENTX_PREAMBLE_VERSION = "2";
+
+/**
+ * Replaces Pi's own system prompt preamble for every coding task and eval run. Pi's is written for a person at a
+ * terminal and points at Pi's documentation; the worker runs alone and its changes may become a pull request.
+ * Pi's tool list and tool rules go with it: the tool definitions still reach the model, and the two rules worth
+ * keeping are here. Eval runs see it too, so it does not say where the task came from.
+ */
+export const AGENTX_WORKER_PROMPT = [
+  "You are the AgentX coding worker. AgentX gave you a software task to carry out in a prepared workspace. You work alone: nobody can answer questions while you work, and your changes may become a pull request that people review.",
+  "",
+  "How to work:",
+  "- Find the relevant code before changing it, and read a file before you edit it.",
+  "- Make the smallest change that fully does what was asked, in the style of the code around it. Don't refactor, rename or reformat code the task doesn't need changed, and keep existing comments and logging.",
+  "- When something is unclear, take the most reasonable reading, carry on, and say what you assumed in your final message.",
+  "- If the same error comes back after two attempts at a fix, stop repeating it. Re-read the error, note what you have tried, and test a different explanation.",
+  "",
+  "Tools:",
+  "- Use read to look at files rather than cat or sed. Use edit to change existing files, and write only for new files or complete rewrites.",
+  "",
+  "Final message:",
+  "Keep it short. Say what you changed and why, name the files, give the commands you ran with their results, and list any assumptions or anything left undone.",
+].join("\n");
 
 /** Appended to Pi's system prompt for every coding task and eval run (FR-001). Changing it means a new version. */
 export const AGENTX_PREAMBLE = [
@@ -16,8 +39,9 @@ export const AGENTX_PREAMBLE = [
   "End your final message with exactly one line: \"AgentX result: done\" if the work is complete and every test you ran passes, otherwise \"AgentX result: not done\".",
 ].join("\n");
 
+/** Recorded as `preambleSha256` with each result. From version 2 it hashes the worker prompt and the preamble together. */
 export function agentxPreambleSha256(): string {
-  return createHash("sha256").update(AGENTX_PREAMBLE).digest("hex");
+  return createHash("sha256").update(`${AGENTX_WORKER_PROMPT}\n\n${AGENTX_PREAMBLE}`).digest("hex");
 }
 
 export const CheckOutcomeSchema = z.enum(["passed", "failed", "timed_out", "unknown", "not_run"]);

@@ -170,7 +170,7 @@ The grade is still the benchmark's own grader. `result.json` also records:
 | `checks` | AgentX's check report: `status` (`verified`, `regression` or `not_verified`), `source`, each check with `before`, `after` and `class`, `extraTry`, and the preamble version. A run from a runner older than spec 051 has none |
 | `agentClaim` | What the agent's last line said: `success` (`AgentX result: done`), `failure` (`AgentX result: not done`) or `none`. A stopped run claims nothing |
 | `disagreement` | `claimedSuccess`, `checkRegression`, `graderBrokenPassToPass` (null for SEC-bench, which has no PASS_TO_PASS) and `disagrees`: the agent claimed success and AgentX found a regression, or the grader found a broken PASS_TO_PASS test |
-| `preambleSha256` | The SHA-256 of the preamble the agent ran with |
+| `preambleSha256` | The SHA-256 of the preamble the agent ran with. From preamble version 2 it covers the AgentX worker prompt and the preamble together, so it differs from every version 1 run |
 
 SWE-bench commands such as `cd /testbed && pytest ...` are recorded and replayed from the run root
 inside the container; paths outside it are still refused. Production tasks in a dev container get
