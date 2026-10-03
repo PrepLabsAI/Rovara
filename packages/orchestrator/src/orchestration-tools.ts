@@ -177,6 +177,10 @@ export function createOrchestrationTools(
       description:
         "Explicitly validate and publish one changed registered repository as a pull request. " +
         "AgentX opens it as a draft when a check fails, and the result says draft. " +
+        "AgentX itself commits every change in this thread's workspace for the repository, committed or not, into one commit on a new branch, " +
+        "and the result says so when there is nothing to publish. Do not run agentx_submit_task or agentx_follow_up first to inspect, " +
+        "commit or summarise the changes. Write the title and body from what this thread already says the work changed; when it says " +
+        "nothing, use a short title naming the repository. " +
         "Call this only when the user clearly asks to create or raise a pull request.",
       parameters: Type.Object({
         repository: Type.String({ minLength: 1, maxLength: 63 }),
