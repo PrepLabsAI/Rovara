@@ -197,10 +197,13 @@ export async function openConnection<Scope>(
   // Tracked so a second rejection can tell the administrator the cache never got a chance to hold
   // a fresh credential; the invalidate error's own text never surfaces (it could carry secrets).
   let invalidateFailed = false;
+  // Spec 055: an endpoint is refused before any credential is issued, so no token is minted or sent.
+  if (connector.verifyEndpoint) await withDeadline(connector.verifyEndpoint(), signal);
   for (let attempt = 0; ; attempt += 1) {
     const credential = await withDeadline(connector.credentials.issue(context.scope, access, context.requestedBy), signal);
     try {
-      return { credential, connection: await (options.connect ?? connectMcp)({ endpoint: connector.endpoint, token: credential.token, tools, signal }) };
+      const target = { endpoint: connector.endpoint, token: credential.token, tools, signal, ...(connector.auth ? { auth: connector.auth } : {}) };
+      return { credential, connection: await (options.connect ?? connectMcp)(target) };
     } catch (error) {
       if (!(error instanceof McpUnauthorized)) throw error;
       if (attempt > 0) {

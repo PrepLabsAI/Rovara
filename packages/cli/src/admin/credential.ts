@@ -13,6 +13,8 @@ interface RegisterCredentialInput extends CredentialAdminInput {
   ref: string;
   type: string;
   secretName: string;
+  /** Spec 055: the one MCP host the credential may be sent to. */
+  host?: string;
 }
 
 export async function registerCredential(
@@ -23,6 +25,7 @@ export async function registerCredential(
     ref: input.ref,
     type: input.type,
     secretName: input.secretName,
+    ...(input.host === undefined ? {} : { host: input.host }),
   });
   if (!parsed.success) {
     throw agentXError("CONFIG_INVALID", `invalid credential registration: ${parsed.error.issues[0]?.message}`);
