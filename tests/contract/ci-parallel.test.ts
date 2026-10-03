@@ -12,6 +12,7 @@ interface Job {
   steps: Array<{ name?: string; run?: string; uses?: string; env?: Record<string, string> }>;
 }
 interface Workflow {
+  on?: unknown;
   concurrency?: { group?: string; "cancel-in-progress"?: string | boolean };
   jobs: Record<string, Job>;
 }
@@ -38,7 +39,16 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     }
   });
 
-  it("supersedes a pull request's run in progress when it is pushed again, and never cancels a mainline run", async () => {
+  it("runs on pull requests and by hand only, never on a push to mainline, and skips a draft until it is ready", async () => {
+    const parsed = await workflow();
+    expect(parsed.on).toEqual({
+      workflow_dispatch: null,
+      pull_request: { types: ["opened", "synchronize", "reopened", "ready_for_review"] },
+    });
+    expect(parsed.jobs.scope!.if).toBe("github.event.pull_request.draft != true");
+  });
+
+  it("supersedes a pull request's run in progress when it is pushed again, and never cancels a manual run", async () => {
     const { concurrency } = await workflow();
     expect(concurrency?.group).toContain("github.ref");
     expect(concurrency?.["cancel-in-progress"]).toBe("${{ github.event_name == 'pull_request' }}");
@@ -48,7 +58,7 @@ describe("CI runs its checks side by side (a Markdown-only change skips them all
     const { jobs } = await workflow();
     const gate = jobs.local!;
     expect(gate.name).toBeUndefined();
-    expect(gate.if).toBe("always()");
+    expect(gate.if).toBe("always() && github.event.pull_request.draft != true");
     const others = Object.keys(jobs).filter((name) => name !== "local" && name !== "live-aws").sort();
     expect([...(gate.needs as string[])].sort()).toEqual(others);
     const run = gate.steps.map((step) => step.run ?? "").join("\n");
@@ -97,11 +107,11 @@ describe("the gate behind the local check", () => {
       release: { result: "success", outputs: {} },
     });
     expect(needsVerdict(needs).ok).toBe(true);
-    const skippedOnPush = JSON.stringify({
+    const manualRun = JSON.stringify({
       scope: { result: "success", outputs: {} },
       checks: { result: "success", outputs: {} },
     });
-    expect(needsVerdict(skippedOnPush).ok).toBe(true);
+    expect(needsVerdict(manualRun).ok).toBe(true);
     expect(needsVerdict("not json").ok).toBe(false);
     expect(needsVerdict(JSON.stringify({ checks: { result: "success", outputs: {} } })).ok).toBe(false);
   });
