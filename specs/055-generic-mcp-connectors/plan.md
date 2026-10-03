@@ -38,13 +38,32 @@
   hook. That would be a new dependency.
 - **`agentx doctor` and `agentx destroy`** do not know `mcp` connectors yet (Phase 3).
 
-## Phase 2: generic OAuth
+## Phase 2: generic OAuth (`feat/055-generic-oauth`, stacked on Phase 1)
 
-- Credential record: add `tokenUrl`, required for `oauth-*` types on `mcp` connectors.
-- `admin credential authorize --endpoint`: RFC 9728 and RFC 8414 discovery, optional RFC 7591 registration,
-  PKCE. Store `host` and `tokenUrl`, and keep the Asana profile as a preset.
-- `MCP_PRESET.accepts` adds `oauth-refresh-token` and `oauth-client-credentials`. The token endpoint comes from
-  the record, and its host is checked against the credential's pin.
+| Layer | Change |
+|---|---|
+| contracts | Credential registrations and records gain `tokenUrl` and `resource`, for OAuth types only. `publicHttpsUrlProblem` is shared with endpoints. `OAuthRefreshTokenSecretSchema.clientSecret` is optional, for public clients. `register_credential` accepts `tokenUrl` and `resource`. |
+| gateway | The refresh provider sends `resource` and omits `client_secret` when the secret has none. |
+| broker | `buildProvider` uses the type's token endpoint, else the record's `tokenUrl`, and refuses a mismatch (`tokenUrlProblem`). The preset resolver reports a missing token URL for an `mcp` OAuth credential. `MCP_PRESET.accepts` covers all three registrable types. |
+| cli | `oauth-discovery.ts` handles discovery (RFC 9728 and RFC 8414) and client registration (RFC 7591). `authorize --endpoint`, `--authorize-url`, `--token-url`, `--scope` and `--register-client`. `register --token-url` and `--resource`. |
+
+### Decisions
+
+- **Public clients are allowed.** Many MCP servers' dynamic registration issues no secret. PKCE protects the
+  sign-in, and the refresh token is the grant. An empty `clientSecret` is still refused.
+- **The Asana flow is byte-for-byte unchanged.** Its token exchange and refresh still send no `resource`; only
+  generic sign-ins do.
+- **Discovered URLs are kept exactly as the server spelled them.** Issuer and resource comparisons are exact, and
+  URL normalisation would add a trailing slash.
+
+### Known gaps
+
+- Token URLs are not address-checked at refresh time. The schema still refuses IP literals and local names. An
+  administrator sets the token URL at registration, never through the connector config.
+- A client registered with `--register-client` is left behind if the sign-in then fails. Most servers expire
+  unused clients.
+- `oauth-client-credentials` on `mcp` connectors works through `register --token-url`. Nothing discovers it
+  (there is no browser step).
 
 ## Phase 3: admin experience
 

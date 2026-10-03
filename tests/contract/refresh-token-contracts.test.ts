@@ -16,7 +16,10 @@ describe("oauth-refresh-token secrets and sign-in profiles (phase 7)", () => {
     expect(OAuthAppSecretSchema.parse({ clientId: "1234567890", clientSecret: "s" })).toEqual({ clientId: "1234567890", clientSecret: "s" });
     expect(OAuthAppSecretSchema.safeParse({ clientId: "1234567890", clientSecret: "s", refreshToken: "r" }).success).toBe(true);
     expect(OAuthAppSecretSchema.safeParse({ clientId: "1234567890", clientSecret: "s", redirectUri: "https://evil.test" }).success).toBe(false);
-    expect(OAuthAppSecretSchema.safeParse({ clientId: "1234567890" }).success).toBe(false);
+    // Spec 055 phase 2: a public client (one a server registered dynamically) has no secret; an empty one is still refused.
+    expect(OAuthAppSecretSchema.safeParse({ clientId: "1234567890" }).success).toBe(true);
+    expect(OAuthAppSecretSchema.safeParse({ clientId: "1234567890", clientSecret: "" }).success).toBe(false);
+    expect(OAuthAppSecretSchema.safeParse({ clientSecret: "s" }).success).toBe(false);
   });
 
   it("carries Asana's sign-in endpoints, proven live on 2026-09-24, and no profile for other types", () => {

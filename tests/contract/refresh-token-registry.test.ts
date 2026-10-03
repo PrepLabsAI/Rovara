@@ -39,11 +39,11 @@ describe("oauth-refresh-token in the credential registry", () => {
     expect(JSON.stringify(listed.body)).not.toContain(endpoint.accessTokens[0]);
   });
 
-  it("needs a token endpoint from the connector type, and a store that can write", async () => {
+  it("needs a token endpoint from the connector type or the credential, and a store that can write", async () => {
     const secrets = memorySecretStore({ [SECRET]: JSON.stringify({ ...CLIENT, refreshToken: REFRESH }) });
     const { handler, registry } = await createAdminBroker({ connectorCredentials: { secrets, githubApp } });
     await register(handler, { ref: "asana-bot", type: "oauth-refresh-token", secretName: SECRET });
-    await expect(registry!.provider("asana-bot").issue(undefined, "read")).rejects.toThrow(new CredentialUnavailable("credential asana-bot needs a token endpoint from its connector type"));
+    await expect(registry!.provider("asana-bot").issue(undefined, "read")).rejects.toThrow(new CredentialUnavailable("credential asana-bot has no token URL; sign in again with agentx admin credential authorize --ref asana-bot --endpoint <mcp url>, or register it with --token-url"));
 
     const readOnly = { read: vi.fn(async (name: string) => secrets.values[name]) };
     const second = await createAdminBroker({ connectorCredentials: { secrets: readOnly, githubApp } });

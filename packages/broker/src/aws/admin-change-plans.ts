@@ -29,7 +29,7 @@ export interface AdminChangeHandlers {
   checkRevision(identity: AuthenticatedIdentity, definition: unknown, runtimeBinding: unknown, options?: { preflight?: boolean }): Promise<{ definition: ProjectDefinition; warnings: string[] }>;
   /** Registers a checked revision without running the vendor preflight again (C8). */
   registerRevision(identity: AuthenticatedIdentity, definition: ProjectDefinition, runtimeBinding: unknown): Promise<Record<string, unknown>>;
-  registerCredential(identity: AuthenticatedIdentity, registration: { ref: string; type: string; secretName: string; host?: string | undefined }): Promise<Record<string, unknown>>;
+  registerCredential(identity: AuthenticatedIdentity, registration: { ref: string; type: string; secretName: string; host?: string | undefined; tokenUrl?: string | undefined; resource?: string | undefined }): Promise<Record<string, unknown>>;
   cancelWorkspaceTask(identity: AuthenticatedIdentity, workspaceId: string): Promise<Record<string, unknown>>;
 }
 export interface PlanDependencies {
@@ -249,8 +249,13 @@ const planCredential: Planner = async (deps, identity, input) => {
   if (deps.credentials === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "connector credentials are not configured in this deployment; ask whoever deploys AgentX to set them up");
   const credentials = deps.credentials;
   // FR-030: refuse anything that looks like a secret value before it is read, shown or stored.
-  if ([input.ref, input.type, input.secretName, ...(input.host === undefined ? [] : [input.host])].some(looksLikeSecret)) throw agentXError("CONFIG_INVALID", `that input looks like a secret value; give the secret's name under ${deps.connectorSecretPrefix}, never its value`);
-  const parsed = CredentialRegistrationSchema.safeParse({ ref: input.ref, type: input.type, secretName: input.secretName, ...(input.host === undefined ? {} : { host: input.host }) });
+  if ([input.ref, input.type, input.secretName, ...[input.host, input.tokenUrl, input.resource].filter((value) => value !== undefined)].some(looksLikeSecret)) throw agentXError("CONFIG_INVALID", `that input looks like a secret value; give the secret's name under ${deps.connectorSecretPrefix}, never its value`);
+  const parsed = CredentialRegistrationSchema.safeParse({
+    ref: input.ref, type: input.type, secretName: input.secretName,
+    ...(input.host === undefined ? {} : { host: input.host }),
+    ...(input.tokenUrl === undefined ? {} : { tokenUrl: input.tokenUrl }),
+    ...(input.resource === undefined ? {} : { resource: input.resource }),
+  });
   if (!parsed.success) {
     const issue = parsed.error.issues[0];
     throw agentXError("CONFIG_INVALID", `the credential is invalid: ${issue?.path.join(".") || "input"}: ${issue?.message ?? "invalid"}; fix it and plan again`);
@@ -275,9 +280,10 @@ const planCredential: Planner = async (deps, identity, input) => {
   }[check];
   const replaces = current === undefined ? "It is a new registration." : `It replaces the registration from ${current.registeredAt}, which read ${current.secretName} as ${current.type}.`;
   return {
-    effect: `Register credential ${registration.ref} as ${registration.type}, read from ${registration.secretName}${registration.host === undefined ? "" : `, sent only to ${registration.host}`}. ${secretText} ${users.length === 0 ? `No project names ${registration.ref} today.` : `Projects naming it: ${users.join(", ")}.`} ${replaces}`,
+    effect: `Register credential ${registration.ref} as ${registration.type}, read from ${registration.secretName}${registration.host === undefined ? "" : `, sent only to ${registration.host}`}${registration.tokenUrl === undefined ? "" : `, refreshed at ${registration.tokenUrl}`}. ${secretText} ${users.length === 0 ? `No project names ${registration.ref} today.` : `Projects naming it: ${users.join(", ")}.`} ${replaces}`,
     // C7: no key redactSecrets would blank (secret, credential, credentialRef...).
-    details: { ref: registration.ref, type: registration.type, secretName: registration.secretName, ...(registration.host === undefined ? {} : { host: registration.host }), check, projects: users, replaces: current === undefined ? null : { type: current.type, secretName: current.secretName, registeredAt: current.registeredAt } },
+    details: { ref: registration.ref, type: registration.type, secretName: registration.secretName, ...(registration.host === undefined ? {} : { host: registration.host }),
+      ...(registration.tokenUrl === undefined ? {} : { tokenUrl: registration.tokenUrl }), ...(registration.resource === undefined ? {} : { resource: registration.resource }), check, projects: users, replaces: current === undefined ? null : { type: current.type, secretName: current.secretName, registeredAt: current.registeredAt } },
     snapshot: { registration: current === undefined ? null : { type: current.type, secretName: current.secretName, registeredAt: current.registeredAt } },
     apply: (applier) => deps.handlers.registerCredential(applier, registration),
   };

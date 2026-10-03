@@ -63,6 +63,8 @@ export function oauthRefreshTokenProvider(options: {
   tokens: TokenCache;
   lease: RefreshLease;
   tokenEndpoint: URL;
+  /** Spec 055 phase 2: the RFC 8707 resource indicator, sent with each refresh when the credential names one. */
+  resource?: string | undefined;
   fetchImplementation?: typeof fetch;
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -121,7 +123,12 @@ export function oauthRefreshTokenProvider(options: {
       redirect: "error",
       signal: AbortSignal.timeout(TOKEN_TIMEOUT_MS),
       headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
-      body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: refreshToken, client_id: client.clientId, client_secret: client.clientSecret }).toString(),
+      // A public client (no secret) proves nothing more than its client_id here; the refresh token is the grant.
+      body: new URLSearchParams({
+        grant_type: "refresh_token", refresh_token: refreshToken, client_id: client.clientId,
+        ...(client.clientSecret === undefined ? {} : { client_secret: client.clientSecret }),
+        ...(options.resource === undefined ? {} : { resource: options.resource }),
+      }).toString(),
     });
     const text = await readLimitedText(response, MAX_TOKEN_RESPONSE);
     let body: unknown;

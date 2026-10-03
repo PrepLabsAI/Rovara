@@ -2,7 +2,7 @@
 
 **Feature Branch**: `feat/055-generic-mcp-connectors`
 **Created**: 2026-10-03
-**Status**: Phase 1 implemented on `feat/055-generic-mcp-connectors`; Phases 2 and 3 not started
+**Status**: Phase 1 in PR #279 (`feat/055-generic-mcp-connectors`); Phase 2 implemented on `feat/055-generic-oauth`; Phase 3 not started
 **Issue**: #275 (covers #138 design needs 2 and 4)
 **Input**: "How do we allow AgentX to connect to any external provider without writing any additional code in the
 main repository?" Clarified on 2026-10-03: build a generic connector type and port Linear, Jira and Asana onto
@@ -126,8 +126,10 @@ the generic path.
 
   The residual risk is DNS rebinding between this check and the connection, because the transport resolves the
   name again. That is recorded as a follow-up.
-- **FR-011:** Phase 1 `mcp` connectors accept `static-secret` credentials only. OAuth (`oauth-refresh-token`,
-  `oauth-client-credentials`) arrives in Phase 2, with the token URL stored on the credential record (FR-013).
+- **FR-011:** An `mcp` connector accepts `static-secret`, `oauth-refresh-token` and `oauth-client-credentials`
+  credentials. An OAuth credential must carry its own `tokenUrl` (FR-013), because a generic connector names no
+  token endpoint of its own. A preset with its own token endpoint refuses a credential registered for a
+  different one.
 
 ### Port
 
@@ -139,11 +141,27 @@ the generic path.
   - Jira's and Asana's guards are referenced as code.
   - Every existing contract test passes unchanged, except tests that list the schema's types (they gain `mcp`).
 
-### Phase 2 and 3 (not in this change)
+### Generic OAuth (phase 2)
 
-- **FR-013:** `agentx admin credential authorize --endpoint <url>` discovers OAuth endpoints (RFC 9728, then RFC
-  8414) and optionally registers a client (RFC 7591). It stores `tokenUrl` and `host` on the credential, and the
-  broker refreshes against the record's `tokenUrl`.
+- **FR-013:** A credential registration may carry `tokenUrl` and `resource`, both public https URLs (FR-002's
+  rules), and only for OAuth types. `admin credential register` takes `--token-url` and `--resource`.
+  `admin credential authorize --endpoint <url>` replaces `--provider` for a generic server:
+  - **Discovery.** It sends an unauthenticated `initialize` and reads the 401's `resource_metadata` and `scope`,
+    or falls back to RFC 9728's well-known locations (path-inserted first). The metadata's `resource` must have
+    the endpoint's origin and prefix its URL. It then reads the first authorization server's RFC 8414 metadata,
+    or OpenID configuration. The `issuer` must match, and the server must list PKCE S256. Every fetch refuses
+    redirects and is size- and time-limited. `--authorize-url` and `--token-url` together skip discovery.
+  - **Client.** With `--register-client`, it registers AgentX by RFC 7591 for `http://localhost:8765/callback`.
+    The client may be public (no secret). Otherwise the client comes from the secret, as for Asana.
+  - **Sign-in.** It asks for `scope` (from `--scope`, the challenge, or the metadata) and `resource`, and sends
+    `resource` on the code exchange.
+  - **Registration.** It registers the credential with `host` (the endpoint's), `tokenUrl` and `resource`. The
+    `--provider asana` flow is unchanged.
+- **FR-013a:** The broker refreshes at the credential's `tokenUrl`, sends `resource` when the credential has one,
+  and omits `client_secret` for a public client.
+
+### Phase 3 (not in this change)
+
 - **FR-014:** `agentx connector add mcp` connects, lists tools, picks tools and access, and runs preflight.
   `doctor` checks `mcp` connectors, and `docs/connectors/custom-mcp.md` explains setup.
 

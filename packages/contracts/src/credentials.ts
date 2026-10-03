@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { EnvironmentNameSchema } from "./environments.js";
-import { DnsHostSchema } from "./mcp-connector.js";
+import { DnsHostSchema, publicHttpsUrlSchema } from "./mcp-connector.js";
 import { AGENTX_NAME_PATTERN } from "./names.js";
 
 /** Every provider type. github-app is built in; per-user is reserved for a later release. */
@@ -30,7 +30,7 @@ const SecretNameSchema = z.string().refine((name) => {
   return match !== null && EnvironmentNameSchema.safeParse(match[1]).success;
 }, SECRET_NAME_MESSAGE);
 
-export const CredentialRegistrationSchema = z.object({
+const CredentialRegistrationFields = z.object({
   ref: z.string().regex(AGENTX_NAME_PATTERN),
   type: RegistrableCredentialTypeSchema,
   secretName: SecretNameSchema,
@@ -39,18 +39,37 @@ export const CredentialRegistrationSchema = z.object({
    * to equal its endpoint's host; a built-in connector refuses a credential pinned anywhere else.
    */
   host: DnsHostSchema.optional(),
-}).strict();
+  /**
+   * Spec 055 phase 2: where an OAuth credential is refreshed or minted, for a connector whose type
+   * names no token endpoint of its own (a generic `mcp` connector). Discovered by `authorize --endpoint`.
+   */
+  tokenUrl: publicHttpsUrlSchema("tokenUrl").optional(),
+  /** Spec 055 phase 2: the RFC 8707 resource indicator sent with every token request, as MCP requires. */
+  resource: publicHttpsUrlSchema("resource").optional(),
+});
 
-export const CredentialRecordSchema = CredentialRegistrationSchema.extend({
+/** tokenUrl and resource belong to OAuth credentials only. */
+function oauthFieldsOnly(registration: { type: string; tokenUrl?: string | undefined; resource?: string | undefined }, context: z.RefinementCtx): void {
+  if (registration.type !== "static-secret") return;
+  for (const field of ["tokenUrl", "resource"] as const) {
+    if (registration[field] !== undefined) context.addIssue({ code: "custom", path: [field], message: `${field} applies only to OAuth credentials` });
+  }
+}
+
+export const CredentialRegistrationSchema = CredentialRegistrationFields.strict().superRefine(oauthFieldsOnly);
+
+export const CredentialRecordSchema = CredentialRegistrationFields.extend({
   registeredBy: z.string().min(1).max(256),
   registeredAt: z.iso.datetime(),
-}).strict();
+}).strict().superRefine(oauthFieldsOnly);
 
 export const CredentialListEntrySchema = z.object({
   ref: z.string(),
   type: CredentialTypeSchema,
   secretName: z.string(),
   host: z.string().optional(),
+  tokenUrl: z.string().optional(),
+  resource: z.string().optional(),
   builtIn: z.boolean(),
   tokenCached: z.boolean(),
   registeredBy: z.string().optional(),
@@ -70,7 +89,8 @@ export const OAuthClientCredentialsSecretSchema = z.object({
  */
 export const OAuthRefreshTokenSecretSchema = z.object({
   clientId: z.string().min(1).max(1_024),
-  clientSecret: z.string().min(1).max(8_192),
+  /** Absent for a public client (spec 055 phase 2), such as one a server registered dynamically: PKCE protects its sign-in. */
+  clientSecret: z.string().min(1).max(8_192).optional(),
   refreshToken: z.string().min(1).max(8_192),
 }).strict();
 

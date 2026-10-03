@@ -51,7 +51,7 @@ describe("mcp connector type", () => {
     expect(connector).toMatchObject({
       name: "sentry", type: "mcp", label: "Sentry issues", vendor: "Sentry", scopeNoun: "organization", attribution: true,
       ledger: { prefix: "CONNECTOR#sentry#", entityType: "CONNECTOR_INVOCATION" },
-      credential: { ref: "sentry-bot", accepts: ["static-secret"], pin: { host: "mcp.sentry.dev", required: true } },
+      credential: { ref: "sentry-bot", accepts: ["static-secret", "oauth-refresh-token", "oauth-client-credentials"], pin: { host: "mcp.sentry.dev", required: true } },
     });
     expect(connector.scopes).toEqual([{ alias: "acme", scope: { alias: "acme", organizationSlug: "acme" } }]);
     expect(connector.approvals).toEqual([{ name: "get_issue_details", access: "read" }]);
@@ -63,7 +63,7 @@ describe("mcp connector type", () => {
     expect(await connector.configured()).toBe(false);
     expect(await connector.definition()).toEqual({ notConnected: "credential sentry-bot is not registered" });
     put({ ref: "sentry-bot", type: "oauth-refresh-token", host: "mcp.sentry.dev" });
-    expect(await connector.definition()).toEqual({ notConnected: "credential sentry-bot is oauth-refresh-token; an mcp connector needs a static-secret credential" });
+    expect(await connector.definition()).toEqual({ notConnected: "credential sentry-bot has no token URL; sign in with agentx admin credential authorize --ref sentry-bot --endpoint https://mcp.sentry.dev/mcp, or register it with --token-url" });
     put({ ref: "sentry-bot", type: "static-secret" });
     expect(await connector.configured()).toBe(false);
     expect(await connector.definition()).toEqual({ notConnected: "credential sentry-bot is not pinned to a host; register it again with --host mcp.sentry.dev" });
@@ -139,5 +139,46 @@ describe("credential registration with a host", () => {
     expect((await registry.list(admin)).credentials).toContainEqual(expect.objectContaining({ ref: "sentry-bot", host: "mcp.sentry.dev" }));
     await expect(registry.register(admin, { ref: "sentry-bot", type: "static-secret", secretName: "agentx/connectors/sentry-bot", host: "https://mcp.sentry.dev" }))
       .rejects.toThrow("invalid credential registration");
+  });
+});
+
+describe("OAuth credentials on generic connectors (phase 2)", () => {
+  const TOKEN_URL = "https://auth.sentry.example/oauth/token";
+  function oauthSetup(record: Record<string, unknown>) {
+    const db = new FakeDynamoDb();
+    db.set({ pk: "CREDENTIALS", sk: `REF#${String(record.ref)}`, entityType: "CREDENTIAL", secretName: `agentx/connectors/${String(record.ref)}`, registeredBy: "admin", registeredAt: "2026-10-03T00:00:00.000Z", ...record });
+    const refreshes: Array<{ url: string; body: Record<string, string> }> = [];
+    const fetchImplementation = vi.fn<typeof fetch>(async (url, init) => {
+      refreshes.push({ url: url instanceof Request ? url.url : url instanceof URL ? url.href : url, body: Object.fromEntries(new URLSearchParams(init?.body as string)) });
+      return Response.json({ access_token: "fresh-access", refresh_token: "rotated", expires_in: 3600 });
+    });
+    const secrets = { read: vi.fn(async () => JSON.stringify({ clientId: "dyn-client", refreshToken: "r-1" })), write: vi.fn(async () => undefined) };
+    const registry = new CredentialRegistry({
+      secrets, githubApp: { ref: "github-app", secretName: "agentx/connectors/github-app" }, documentClient: db as never, tableName: "state", fetchImplementation,
+    });
+    const resolve = (connector: unknown) => resolveConnectors(ProjectDefinitionSchema.parse(project([connector])), { credentialRegistry: registry })[0]!;
+    return { resolve, refreshes, secrets };
+  }
+
+  it("refreshes at the credential's token URL with its resource, as a public client", async () => {
+    const { resolve, refreshes, secrets } = oauthSetup({ ref: "sentry-bot", type: "oauth-refresh-token", host: "mcp.sentry.dev", tokenUrl: TOKEN_URL, resource: "https://mcp.sentry.dev/mcp" });
+    const connector = resolve(sentry());
+    expect(await connector.configured()).toBe(true);
+    const definition = await connector.definition();
+    if ("notConnected" in definition) throw new Error(definition.notConnected);
+    expect(await definition.credentials.issue(connector.scopes[0]!.scope, "read")).toMatchObject({ token: "fresh-access" });
+    expect(refreshes).toEqual([{ url: TOKEN_URL, body: { grant_type: "refresh_token", refresh_token: "r-1", client_id: "dyn-client", resource: "https://mcp.sentry.dev/mcp" } }]);
+    expect(secrets.write).toHaveBeenCalledWith("agentx/connectors/sentry-bot", JSON.stringify({ clientId: "dyn-client", refreshToken: "rotated" }));
+  });
+
+  it("refuses a preset credential registered for another token URL", async () => {
+    const asana = {
+      name: "asana", type: "asana", credentialRef: "asana-bot", scopes: [{ alias: "payments", projectGid: "1210000000000010" }],
+      tools: [{ name: "get_task", access: "read" }],
+    };
+    const { resolve, refreshes } = oauthSetup({ ref: "asana-bot", type: "oauth-refresh-token", tokenUrl: TOKEN_URL });
+    const connector = resolve(asana);
+    expect(await connector.definition()).toEqual({ notConnected: `credential asana-bot is registered for token URL ${TOKEN_URL}, not https://app.asana.com/-/oauth_token, so AgentX does not send it there` });
+    expect(refreshes).toEqual([]);
   });
 });

@@ -3,7 +3,7 @@ import { genericScopes, mcpConnector, type ConnectorDefinition, type CredentialP
 import type { z } from "zod";
 import { connectorLedgerKeys } from "./connector-ledger.js";
 import type { ConnectorScope, ConnectorType, ResolvedConnector } from "./connector-types.js";
-import { hostPinProblem, type HostPin } from "./credentials.js";
+import { hostPinProblem, tokenUrlProblem, type HostPin } from "./credentials.js";
 
 /**
  * Spec 055: every connector type except github is a preset over one generic resolver. A preset maps
@@ -72,7 +72,14 @@ export function presetConnectorType<Config extends PresetConfig, Scope>(preset: 
         const type = record?.type ?? await registry.typeOf(ref);
         if (type === undefined) return `credential ${ref} is not registered`;
         if (!described.accepts.includes(type)) return described.wrongType(ref, type);
-        return hostPinProblem(ref, record?.host, pin);
+        const pinned = hostPinProblem(ref, record?.host, pin);
+        if (pinned !== undefined) return pinned;
+        if (type === "static-secret" || record === undefined) return undefined;
+        // OAuth: the token endpoint is the type's own, or for a generic connector the credential's.
+        if (described.tokenEndpoint === undefined && record.tokenUrl === undefined) {
+          return `credential ${ref} has no token URL; sign in with agentx admin credential authorize --ref ${ref} --endpoint ${described.endpoint.href}, or register it with --token-url`;
+        }
+        return tokenUrlProblem(ref, record.tokenUrl, described.tokenEndpoint);
       };
       const connector: ResolvedConnector<Scope> = {
         name: stored.name,
@@ -103,8 +110,8 @@ export function presetConnectorType<Config extends PresetConfig, Scope>(preset: 
 }
 
 /**
- * Spec 055: any remote MCP server described by its configuration. Phase 1 serves static-secret
- * credentials only, pinned to the endpoint's host.
+ * Spec 055: any remote MCP server described by its configuration. Its credential is pinned to the
+ * endpoint's host; an OAuth credential also carries its own token URL (phase 2).
  */
 export const MCP_PRESET: ConnectorPreset<McpConnectorConfig, GenericScope> = {
   type: "mcp",
@@ -117,8 +124,8 @@ export const MCP_PRESET: ConnectorPreset<McpConnectorConfig, GenericScope> = {
       scopes: genericScopes(config),
       endpoint: new URL(config.endpoint),
       requireHostPin: true,
-      accepts: ["static-secret"],
-      wrongType: (ref, type) => `credential ${ref} is ${type}; an mcp connector needs a static-secret credential`,
+      accepts: ["static-secret", "oauth-refresh-token", "oauth-client-credentials"],
+      wrongType: (ref, type) => `credential ${ref} is ${type}; an mcp connector needs static-secret, oauth-refresh-token or oauth-client-credentials`,
       definition: (credentials) => mcpConnector(config, credentials),
     };
   },

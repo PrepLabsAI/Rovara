@@ -209,6 +209,15 @@ export function hostPinProblem(ref: string, recordHost: string | undefined, pin:
 }
 
 /**
+ * Why a credential registered for one token URL cannot serve a connector type that names another,
+ * or undefined. Either side may be absent.
+ */
+export function tokenUrlProblem(ref: string, recordTokenUrl: string | undefined, typeEndpoint: URL | undefined): string | undefined {
+  if (recordTokenUrl === undefined || typeEndpoint === undefined) return undefined;
+  return new URL(recordTokenUrl).href === typeEndpoint.href ? undefined : `credential ${ref} is registered for token URL ${recordTokenUrl}, not ${typeEndpoint.href}, so AgentX does not send it there`;
+}
+
+/**
  * The command that creates a credential of the type a connector needs: an oauth-refresh-token
  * credential comes from a bot user's one-time sign-in (authorize); every other type is registered
  * from an existing secret. An unstated need keeps the register hint.
@@ -335,7 +344,7 @@ export class CredentialRegistry {
         if (pinned !== undefined) throw new CredentialUnavailable(pinned);
         // registeredAt alone has millisecond resolution, so two registrations in the same
         // millisecond are told apart by what they point at.
-        const registration = JSON.stringify([record.registeredAt, record.type, record.secretName]);
+        const registration = JSON.stringify([record.registeredAt, record.type, record.secretName, record.tokenUrl ?? null, record.resource ?? null]);
         const current = this.delegates.get(memoKey);
         let delegate = current?.registration === registration ? current.provider : undefined;
         if (!delegate) {
@@ -350,10 +359,15 @@ export class CredentialRegistry {
     };
   }
 
-  private buildProvider(record: CredentialRecord, tokenEndpoint: URL | undefined): CredentialProvider<unknown> {
+  private buildProvider(record: CredentialRecord, typeEndpoint: URL | undefined): CredentialProvider<unknown> {
     const base = { ref: record.ref, secretName: record.secretName, secrets: this.options.secrets, now: this.now };
     if (record.type === "static-secret") return staticSecretProvider(base);
-    if (!tokenEndpoint) throw new CredentialUnavailable(`credential ${record.ref} needs a token endpoint from its connector type`);
+    // Spec 055 phase 2: a connector type's own token endpoint wins; a generic connector uses the
+    // one registered with the credential. A credential registered for another endpoint is refused.
+    const mismatch = tokenUrlProblem(record.ref, record.tokenUrl, typeEndpoint);
+    if (mismatch !== undefined) throw new CredentialUnavailable(mismatch);
+    const tokenEndpoint = typeEndpoint ?? (record.tokenUrl === undefined ? undefined : new URL(record.tokenUrl));
+    if (!tokenEndpoint) throw new CredentialUnavailable(`credential ${record.ref} has no token URL; sign in again with agentx admin credential authorize --ref ${record.ref} --endpoint <mcp url>, or register it with --token-url`);
     if (record.type === "oauth-refresh-token") {
       const secrets = this.options.secrets;
       if (!("write" in secrets)) throw new CredentialUnavailable(`credential ${record.ref}: this deployment cannot save a rotated refresh token`);
@@ -363,6 +377,7 @@ export class CredentialRegistry {
         tokens: new DynamoTokenCache(this.documentClient, this.tableName, record.ref),
         lease: new DynamoRefreshLease(this.documentClient, this.tableName, record.ref, this.now),
         tokenEndpoint,
+        ...(record.resource === undefined ? {} : { resource: record.resource }),
         // The reason is an error class name, "LeaseDeadlineExceeded" or "SecretChanged", never the token.
         onRotationUnsaved: (reason) => {
           console.log(JSON.stringify({ component: "broker", event: "connector.refresh_token_unsaved", credential: record.ref, reason }));
@@ -462,5 +477,6 @@ function recordOf(item: Record<string, unknown>): CredentialRecord | undefined {
 }
 
 function listEntry(record: CredentialRecord, tokenCached: boolean): CredentialListEntry {
-  return { ref: record.ref, type: record.type, secretName: record.secretName, ...(record.host === undefined ? {} : { host: record.host }), builtIn: false, tokenCached, registeredBy: record.registeredBy, registeredAt: record.registeredAt };
+  return { ref: record.ref, type: record.type, secretName: record.secretName, ...(record.host === undefined ? {} : { host: record.host }),
+    ...(record.tokenUrl === undefined ? {} : { tokenUrl: record.tokenUrl }), ...(record.resource === undefined ? {} : { resource: record.resource }), builtIn: false, tokenCached, registeredBy: record.registeredBy, registeredAt: record.registeredAt };
 }

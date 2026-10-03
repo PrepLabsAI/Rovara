@@ -49,7 +49,7 @@ export const AdminChangeInputSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("register_project_revision"), definition: z.record(z.string(), z.unknown()) }).strict(),
   z.object({ kind: z.literal("bind_channel"), channel: Channel, project: AgentXNameSchema }).strict(),
   z.object({ kind: z.literal("unbind_channel"), channel: Channel }).strict(),
-  z.object({ kind: z.literal("register_credential"), ref: z.string().min(1).max(63), type: z.string().min(1).max(64), secretName: z.string().min(1).max(512), host: z.string().min(1).max(253).optional() }).strict(),
+  z.object({ kind: z.literal("register_credential"), ref: z.string().min(1).max(63), type: z.string().min(1).max(64), secretName: z.string().min(1).max(512), host: z.string().min(1).max(253).optional(), tokenUrl: z.string().min(1).max(2_048).optional(), resource: z.string().min(1).max(2_048).optional() }).strict(),
   z.object({ kind: z.literal("stop_workspace"), workspaceId: Uuid }).strict(),
   z.object({ kind: z.literal("grant_project_access"), project: AgentXNameSchema, developer: DeveloperRef }).strict(),
   z.object({ kind: z.literal("revoke_project_access"), project: AgentXNameSchema, developer: DeveloperRef }).strict(),
