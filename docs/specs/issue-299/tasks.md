@@ -46,13 +46,13 @@ overrides: {}
   - _Test:_ T3 — the `isPipedTestCommand` rows (the `cd /testbed;` case true, chains false; the
     existing rows unchanged), and T2 — `agent-shell-pipefail.test.ts`,
     `Scenario: the agent shell runs cd <dir>; <test> | tail with pipefail` (red→green)
-- [ ] 5. Per-`cd` path mapping: `workspaceRelativeCdTarget`, `testbedRelativeCdTarget`
+- [x] 5. Per-`cd` path mapping: `workspaceRelativeCdTarget`, `testbedRelativeCdTarget`
   - Replace `workspaceRelativeCommand` and `testbedRelativeCommand`. Same folder rule; `""` for
     the root; a host folder outside the root maps nothing.
   - _Depends on:_ none
   - _Requirements:_ R6.1, R6.2
   - _Test:_ T1 — `tests/unit/devcontainer-cd-target.test.ts` (red→green)
-- [ ] 6. `CommandRecorder` on the scan: `cdTarget` option, one run per found test, `exitCode`
+- [x] 6. `CommandRecorder` on the scan: `cdTarget` option, one run per found test, `exitCode`
   withheld unless `ownRunIsBefore`, `mayChange` from `othersMayChange`. Wire `cdTarget` in
   `run-task.ts` and `swebench/agent.ts`.
   - _Depends on:_ 3, 5

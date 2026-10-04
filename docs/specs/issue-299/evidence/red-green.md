@@ -25,3 +25,46 @@ Command: `npx vitest run tests/contract/agent-checks.test.ts tests/integration/a
  Test Files  2 passed (2)
       Tests  274 passed (274)
 ```
+
+## Task 5: per-cd path mapping
+
+Command: `npx vitest run tests/unit/devcontainer-cd-target.test.ts`
+
+### Red (`workspaceRelativeCdTarget` and `testbedRelativeCdTarget` not yet defined)
+
+```text
+⎯⎯⎯⎯⎯⎯ Failed Tests 19 ⎯⎯⎯⎯⎯⎯⎯
+      Tests  19 failed (19)
+```
+
+### Green
+
+```text
+      Tests  19 passed (19)
+```
+
+## Task 6: CommandRecorder on the scan
+
+Command: `npx vitest run tests/unit/worker-command-recorder.test.ts`
+
+### Red
+
+```text
+     × records each test in a chain, without the chain's exit code, which is not the test's 3ms
+     × records a test piped into another filter, or chained with || true, without its exit code 0ms
+     × keeps the run's exit code for cd <dir>; <test>, the same command as cd <dir> && <test> 0ms
+     × marks a chained test run after a bash command that changed the workspace as after an edit (Ruling E) 1ms
+     × maps every cd target and keeps the agent's own text as the command 0ms
+     × voids the before of a test run batched with a chained test that also changes files, either order (#299, abuse case 7) 0ms
+     × keeps the before valid in a batch of tests whose chains hold only tests, cd and filters 0ms
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 7 ⎯⎯⎯⎯⎯⎯⎯
+      Tests  7 failed | 25 passed (32)
+```
+
+### Green (with task 5's file)
+
+Command: `npx vitest run tests/unit/worker-command-recorder.test.ts tests/unit/devcontainer-cd-target.test.ts`
+
+```text
+      Tests  51 passed (51)
+```

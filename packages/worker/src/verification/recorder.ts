@@ -1,6 +1,6 @@
-// Spec 051: what the agent ran. Fed Pi's extension `tool_call` and `tool_result` events, it keeps each simple test
-// command the agent ran (contracts' matchTestCommand), with its exit code and whether the workspace had changed first.
-import { matchTestCommand } from "@agentx/contracts";
+// Spec 051: what the agent ran. Fed Pi's extension `tool_call` and `tool_result` events, it keeps each test command the
+// agent ran (contracts' scanTestCommands, #299), with its exit code and whether the workspace had changed first.
+import { scanTestCommands, type TestCommandScan } from "@agentx/contracts";
 
 export interface RecordedCommand {
   order: number;
@@ -29,10 +29,11 @@ export interface CommandRecorderOptions {
   fingerprint: (signal?: AbortSignal) => Promise<string>;
   onDiagnostic?: (message: string) => void;
   /**
-   * Rewrites a command before the test-command matcher reads it, for a shell whose paths differ from the workspace's
-   * (an eval's container). Only the matcher's input changes; the stored command is the agent's own text.
+   * Maps a cd target for the test-command scan, for a shell whose paths differ from the workspace's (an eval's or a
+   * devcontainer's): a workspace-relative path, "" for the root, or undefined to leave it. Only the scan's reading
+   * changes; the stored command is the agent's own text.
    */
-  canonicalCommand?: (command: string) => string;
+  cdTarget?: (target: string) => string | undefined;
 }
 
 const EXIT_MARKER = /Command exited with code (\d+)/g;
@@ -74,15 +75,16 @@ export class CommandRecorder {
    */
   async observeCall(event: RecorderToolCall, signal?: AbortSignal): Promise<void> {
     this.#baseline ??= this.#capture(signal);
-    const replay = bashReplay(event, this.#options.canonicalCommand);
-    const mayChange = replay === undefined && (event.toolName === "bash" || event.toolName === "edit" || event.toolName === "write");
+    const scan = bashScan(event, this.#options.cdTarget);
+    const test = scan !== undefined && scan.tests.length > 0;
+    // #299: a chain that holds a test and anything else (sed -i … && pytest) may change files too.
+    const mayChange = event.toolName === "edit" || event.toolName === "write" || (event.toolName === "bash" && (!test || scan.othersMayChange));
     if (mayChange) {
       for (const [id, call] of this.#inFlight) if (call.test) this.#overlapped.add(id);
-    } else if (replay !== undefined && [...this.#inFlight.values()].some((call) => call.mayChange)) {
-      this.#overlapped.add(event.toolCallId);
     }
-    this.#inFlight.set(event.toolCallId, { mayChange, test: replay !== undefined });
-    if (replay === undefined) {
+    if (test && [...this.#inFlight.values()].some((call) => call.mayChange)) this.#overlapped.add(event.toolCallId);
+    this.#inFlight.set(event.toolCallId, { mayChange, test });
+    if (!test) {
       await this.#baseline;
       return;
     }
@@ -122,8 +124,8 @@ export class CommandRecorder {
       this.#edited = true;
       return;
     }
-    const replay = bashReplay(event, this.#options.canonicalCommand);
-    if (replay === undefined) return;
+    const tests = bashScan(event, this.#options.cdTarget)?.tests ?? [];
+    if (tests.length === 0) return;
     const command = event.input.command as string;
     // A result whose call was never seen has an unknown before.
     const changed = this.#calls.get(event.toolCallId) ?? Promise.resolve(true);
@@ -133,7 +135,10 @@ export class CommandRecorder {
     const exit = exitCode(event, output);
     this.#chain = this.#chain.then(async () => {
       const afterFirstEdit = editedAtResult || await changed;
-      this.#record({ command, replay, exitCode: exit, afterFirstEdit, output });
+      // #299: only a simple test command's exit code is the test's; any other run's before is measured (D-16).
+      for (const { replay, ownRunIsBefore } of tests) {
+        this.#record({ command, replay, exitCode: ownRunIsBefore ? exit : undefined, afterFirstEdit, output });
+      }
     });
   }
 
@@ -181,10 +186,10 @@ export class CommandRecorder {
   }
 }
 
-function bashReplay(event: RecorderToolCall, canonical?: (command: string) => string): string | undefined {
+function bashScan(event: RecorderToolCall, cdTarget?: (target: string) => string | undefined): TestCommandScan | undefined {
   if (event.toolName !== "bash") return undefined;
   const command = event.input.command;
-  return typeof command === "string" ? matchTestCommand(canonical === undefined ? command : canonical(command)) : undefined;
+  return typeof command === "string" ? scanTestCommands(command, cdTarget === undefined ? {} : { cdTarget }) : undefined;
 }
 
 function exitCode(event: RecorderToolResult, output: string): number | undefined {

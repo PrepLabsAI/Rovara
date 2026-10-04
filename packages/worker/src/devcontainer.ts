@@ -79,26 +79,24 @@ export function devcontainerPaths(target: DevcontainerTarget, started: Devcontai
 
 /**
  * The agent's shell is the container's, so it writes `cd /workspaces/repo && npm test`, a path only the container has.
- * AgentX replays from the workspace root, where that folder is `<host folder relative to root>`, so a leading
- * `cd <containerFolder>[/sub] &&` reads as `cd <relative>[/sub] &&` (spec 051 Ruling X, and the same for coding tasks).
- * Only that exact folder, then a `/` or a space, so `/workspaces/repoX` stays out. The test-command matcher then
- * applies its own safe-path rule to what is left (no `..`, no absolute path), and the replay's realpath containment
- * refuses a link out of the workspace. A host folder outside `root` is never rewritten.
+ * AgentX replays from the workspace root, where that folder is `<host folder relative to root>`, so a cd target of
+ * `<containerFolder>[/sub]` reads as `<relative>[/sub]`, and "" for the root (spec 051 Ruling X, and the same for coding
+ * tasks). #299: the test-command scan asks this for every cd in a command, not only a leading `cd … &&`. Only that exact
+ * folder, then a `/` or nothing, so `/workspaces/repoX` stays out. The scan then applies its own safe-path rule (no
+ * `..`, no absolute path), and the replay's realpath containment refuses a link out of the workspace. A host folder
+ * outside `root` maps nothing.
  */
-export function workspaceRelativeCommand(command: string, paths: DevcontainerPaths, root: string): string {
+export function workspaceRelativeCdTarget(target: string, paths: DevcontainerPaths, root: string): string | undefined {
   const base = relative(root, paths.hostFolder);
-  if (base === ".." || base.startsWith(`..${sep}`) || isAbsolute(base)) return command;
+  if (base === ".." || base.startsWith(`..${sep}`) || isAbsolute(base)) return undefined;
   // D-15 (#290): the host folder too. devcontainerContextFile tells the agent both paths name the same files and to
   // prefer the host one, so `cd <hostFolder> && pytest` must count as the same check.
   for (const folder of [paths.containerFolder, paths.hostFolder]) {
-    const escaped = folder.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const rewritten = command.replace(new RegExp(`^( *)cd +${escaped}(?=/| )(/?\\S*)( +&& +)`, "s"), (_match, lead: string, sub: string, join: string) => {
-      const target = `${base}${sub}`;
-      return target === "" ? lead : `${lead}cd ${target}${join}`;
-    });
-    if (rewritten !== command) return rewritten;
+    if (target !== folder && !target.startsWith(`${folder}/`)) continue;
+    const sub = target.slice(folder.length);
+    return base === "" ? sub.replace(/^\/+/, "") : `${base}${sub}`;
   }
-  return command;
+  return undefined;
 }
 
 /** A path under the container folder, as the same file under the host folder; any other path as given. */
