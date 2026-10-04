@@ -129,21 +129,22 @@ Cases from the ticket to use as contract-table rows:
 
 ## Open questions
 
-1. **Is `cd X; <test>` (nothing else in it) a simple command whose own run counts as a
-   before, exactly like `cd X && <test>`?** The ticket's point 1 says "same command for the
-   matcher". The difference: if `cd` fails, `;` still runs the test from the wrong
-   directory. Leaning: yes, count it — the cd target is checked to exist inside the workspace
-   when replayed, and a failing `cd` in the agent's shell almost always means a typo the
-   agent sees immediately.
-2. **Filters and other chain parts: allowlist, or "anything that tokenises"?** Leaning as in
-   Options above: read-only allowlist for filters; anything for other parts except
-   environment changers, which refuse the command.
-3. **Can the 29 commands from batch `744df9ec` be attached to the ticket (or committed as a
-   fixture)?** They would make the contract table complete and let verification re-run the
-   replay count the ticket describes (target: most of the 28 misses recognised, every
-   refusal justified).
-4. **`git stash`:** refuse the whole command whenever any part is `git stash …` (simplest),
-   rather than only the parts between `stash` and `stash pop`. Leaning: refuse the whole.
+Resolved on the ticket: @ps06756 answered "defaults are fine"
+([comment](https://github.com/PrepLabsAI/AgentX/issues/299#issuecomment-5983296084)), so each
+question takes the default proposed in the
+[question](https://github.com/PrepLabsAI/AgentX/issues/299#issuecomment-5983277554).
+
+1. **`cd X; <test>` with nothing else** counts like `cd X && <test>`: the agent's own run is
+   a usable before.
+2. **Around the test:** filters after `|` from a read-only allowlist (`tail`, `head`,
+   `grep`/`egrep`, `sed` without `-i`, `cut`, `sort`, `uniq`, `wc`, `cat`); other chain parts
+   may be any simple command, except an environment changer before the test (`export`,
+   `source`/`.`, `set`, `unset`, `alias`, `pushd`/`popd`, `shopt`, `ulimit`, `umask`), which
+   refuses the whole command.
+3. **The 29 batch commands:** not attached (the question had no default). The contract table
+   uses the commands quoted in the ticket; re-running the batch's replay count is out of this
+   item's verification unless they are supplied later.
+4. **`git stash`:** any part that is `git stash …` refuses the whole command.
 
 ## Leaning / working hypothesis
 
