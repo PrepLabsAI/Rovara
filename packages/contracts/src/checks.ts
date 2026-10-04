@@ -346,6 +346,7 @@ function scan(command: string, options: ScanOptions): { result: TestCommandScan;
   let environmentChanged = false;
   let othersMayChange = false;
   let cds = 0;
+  let lastTest = -1;
   for (const [index, pipeline] of pipelines.entries()) {
     if (pipeline.some(({ words }) => words[0]!.raw === "git" && words.slice(1).some(({ value }) => value === "stash"))) return undefined;
     const [first, ...filters] = pipeline as [ShellCommand, ...ShellCommand[]];
@@ -367,13 +368,14 @@ function scan(command: string, options: ScanOptions): { result: TestCommandScan;
       const test = command.slice(first.words[0]!.start, first.words.at(-1)!.end);
       const replay = dir === "" ? test : `cd ${dir} && ${test}`;
       if (!replays.includes(replay)) replays.push(replay);
+      lastTest = index;
     } else {
       othersMayChange = true;
     }
   }
   // The agent's own run reports the test's exit code only as `[cd <dir> (&& or ;)] <test> [2>&1] [| tail -N]`.
   const last = pipelines.at(-1)!;
-  const simple = replays.length === 1 && !othersMayChange && !split.trailingSemicolon
+  const simple = replays.length === 1 && !othersMayChange && !split.trailingSemicolon && lastTest === pipelines.length - 1
     && pipelines.length === cds + 1 && cds <= 1 && joins.every((join) => join === "&&" || join === ";")
     && (last.length === 1 || (last.length === 2 && tailFilter(last[1]!)));
   return {

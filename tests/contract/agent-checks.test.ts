@@ -155,6 +155,10 @@ describe("scanTestCommands: tests inside chains and filters (#299)", () => {
     ["pytest; rm -rf build", [rerun("pytest")]],
     // Abuse case 5: an exit code that is not the test's never serves as a before.
     ["pytest; true", [rerun("pytest")]],
+    // Self-review 1.1: a cd after the test leaves the run's exit code the cd's, so the run is no before.
+    ["pytest; cd a", [rerun("pytest")]],
+    ["pytest | tail -5; cd a", [rerun("pytest")]],
+    ["pytest && cd a", [rerun("pytest")]],
     // A test that is not first in its pipeline is not recorded (Requirement 3.5).
     ["cat x | pytest", []],
     ["npm install", []],
