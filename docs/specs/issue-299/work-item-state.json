@@ -1,7 +1,7 @@
 {
   "version": 1,
   "workItem": "issue-299",
-  "currentNode": "design",
+  "currentNode": "tasks-breakdown",
   "nodes": {
     "phase-selection": {
       "attempts": 1,
@@ -37,8 +37,40 @@
     },
     "design": {
       "attempts": 1,
-      "outcome": "",
+      "outcome": "pass",
       "enteredAt": "2026-10-04T19:05:06+00:00",
+      "exitedAt": "2026-10-04T19:08:25+00:00",
+      "lastBlock": "",
+      "forced": false
+    },
+    "design-critic-review": {
+      "attempts": 0,
+      "outcome": "skipped",
+      "enteredAt": "2026-10-04T19:08:25+00:00",
+      "exitedAt": "2026-10-04T19:08:25+00:00",
+      "lastBlock": "",
+      "forced": false
+    },
+    "test-planning": {
+      "attempts": 1,
+      "outcome": "pass",
+      "enteredAt": "2026-10-04T19:08:25+00:00",
+      "exitedAt": "2026-10-04T19:09:19+00:00",
+      "lastBlock": "",
+      "forced": false
+    },
+    "design-approval": {
+      "attempts": 1,
+      "outcome": "approved",
+      "enteredAt": "2026-10-04T19:09:19+00:00",
+      "exitedAt": "2026-10-04T19:12:13+00:00",
+      "lastBlock": "",
+      "forced": false
+    },
+    "tasks-breakdown": {
+      "attempts": 1,
+      "outcome": "",
+      "enteredAt": "2026-10-04T19:12:13+00:00",
       "exitedAt": "",
       "lastBlock": "",
       "forced": false
@@ -216,6 +248,14 @@
     "requirements-definition": {
       "at": "2026-10-04T18:59:08+00:00",
       "by": "cli"
+    },
+    "design": {
+      "at": "2026-10-04T19:08:25+00:00",
+      "by": "cli"
+    },
+    "test-planning": {
+      "at": "2026-10-04T19:09:19+00:00",
+      "by": "cli"
     }
   },
   "skips": {},
@@ -228,5 +268,5 @@
   "repos": [],
   "pullRequests": [],
   "loop": "pdlc-work-item-loop",
-  "phase": "design"
+  "phase": "tasks-breakdown"
 }

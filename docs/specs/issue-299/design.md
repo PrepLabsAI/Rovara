@@ -2,8 +2,8 @@
 type: design
 phase: design
 workItem: issue-299
-status: draft
-approvedBy: []
+status: approved
+approvedBy: ["ps06756"]
 overrides: {}
 ---
 
@@ -310,3 +310,9 @@ existing worker verification suite. The test matrix, environment and evidence be
 None.
 
 ## Review comments
+
+### 2026-10-04 — approved
+
+**@ps06756** wrote:
+
+approved
