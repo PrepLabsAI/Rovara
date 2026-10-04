@@ -1,0 +1,26 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/MadaraUchiha-314/the-loop/main/.the-loop/collaborators.schema.json
+# .the-loop/collaborators.yaml
+# Validated against ${CLAUDE_PLUGIN_ROOT}/.the-loop/collaborators.schema.json — the
+# schema ships with the plugin rather than being copied here (issue-220). The first
+# line points your editor at the published copy of it.
+#
+# The stewards of the repository (CODEOWNERS-like) and the SINGLE source of truth
+# for WHO collaborates on this project and in which ROLES (issue-82, decision-035).
+# Collaborators may be individuals or groups; a user can hold multiple roles. All
+# collaboration happens through ticket/PR comments — the paper trail.
+#
+# This file declares no DELIVERY (issue-304). Roles are what everything else
+# targets: the loop pulls a phase's required reviewers and approvers from here
+# (no event → role filter exists any more — issue-352). The notification itself goes to a CHANNEL — one Slack bot for the whole
+# daemon, configured under `channels.slack` in cli-config.yaml and subscribed to
+# the events you want by name. Per-person routing is not built.
+#
+# The CLI daemon never reads this file: it watches many repositories and belongs
+# to none of them.
+
+version: "0.2.0"
+
+collaborators:
+  - handle: "@ps06756"
+    kind: individual              # individual | group
+    roles: [product-manager, architect, engineer, reviewer, approver]

@@ -4,7 +4,13 @@ build/
 coverage/
 cdk.out/
 .release-synth/
-docs/
+# docs/ stays ignored except the trees the-loop records into (they must be committed).
+docs/*
+!docs/specs/
+!docs/decisions/
+!docs/learnings/
+!docs/capabilities/
+!docs/architecture/
 .DS_Store
 Thumbs.db
 *.log
@@ -22,3 +28,16 @@ Thumbs.db
 
 # Evaluation results stay local; only baselines are committed.
 tests/eval/results/
+
+# the-loop: generated state under state.root (.the-loop). Local handles never leave
+# the machine; .the-loop/portable/ travels with the work, so it is tracked.
+.the-loop/local/
+.the-loop/logs/
+.the-loop/*.pid
+.the-loop/poll-status.json
+.the-loop/self-diagnosis.json*
+.the-loop/channels/
+.the-loop/portable/*.tmp
+.the-loop/learnings-pending/
+work-item-state.lock
+graph-state.lock

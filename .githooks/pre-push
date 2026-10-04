@@ -1,0 +1,7 @@
+#!/bin/sh
+# the-loop: local parity with CI (.github/workflows/ci.yml) — the same root commands.
+# Activate with: git config core.hooksPath .githooks
+set -e
+[ -d /opt/homebrew/opt/node@22/bin ] && PATH="/opt/homebrew/opt/node@22/bin:$PATH"
+npm run --silent build
+npm test
