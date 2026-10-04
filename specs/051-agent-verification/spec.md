@@ -248,12 +248,13 @@ These may come later (spec 053 or after).
   `cut`, `sort`, `uniq`, `wc` or `cat`, which the replay leaves out. `cd <dir>; <test>` is the same command as
   `cd <dir> && <test>`. The agent's own run serves as a before result only for a simple test command, optionally after
   `cd <dir> &&` or `cd <dir>;` and before `| tail -N`, and gets `pipefail` as D-14 says. For every other shape the exit
-  code is not the test's, so D-16 measures the before. A chain holding anything but tests, `cd` and those filters may
-  change files, for Ruling G. A command yields no test when it has a subshell, `$(`, a backtick, a background `&`, a
+  code is not the test's, so D-16 measures the before. A chain holding anything but tests, `cd` and the read-only
+  filters may change files, for Ruling G; `sed`, `sort` and `uniq` count as changing files, since they can write one. A command yields no test when it has a subshell, `$(`, a backtick, a background `&`, a
   heredoc, any other redirection, a newline or control character, `git stash`, a `cd` joined by `||` or leaving the
   workspace, a filter outside the list, or an environment changer before the test (`export`, `source`, `.`, `set`, `unset`,
-  `alias`, `pushd`, `popd`, `shopt`, `ulimit`, `umask`, `eval`, `exec`, `declare`, `typeset`, `readonly`, or a bare
-  `NAME=value`). The replay itself is unchanged: AgentX runs only what `matchTestCommand` maps to itself, in a contained
+  `alias`, `pushd`, `popd`, `shopt`, `ulimit`, `umask`, `eval`, `exec`, `declare`, `typeset`, `readonly`, `builtin`,
+  `command`, or a bare `NAME=value`). A command's name is read after its leading `NAME=value` words, so they hide
+  neither a `cd` (refused) nor `git stash`. The replay itself is unchanged: AgentX runs only what `matchTestCommand` maps to itself, in a contained
   directory. A cd target that maps to a sub-folder of a workspace whose repository is the root now reads as that
   sub-folder; it used to keep a leading `/`, and was refused. Reason: in batch `744df9ec` (#297, Sonnet 5.5, 30 tasks)
   the agent ran tests 29 times in 12 runs, and the matcher recognised 1; 29 of 30 runs ended `not_verified`. Sonnet 5.5
