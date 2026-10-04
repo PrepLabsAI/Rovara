@@ -77,7 +77,7 @@ overrides: {}
   - _Requirements:_ R8.1, R8.2
   - _Test:_ R8.1 verification activity (diff read); T12 — the existing preamble version test
     keeps `"4"`
-- [ ] 9. Whole-suite regression
+- [x] 9. Whole-suite regression
   - _Depends on:_ 4, 6, 7, 8
   - _Requirements:_ R7.3, R8.2
   - _Test:_ T12 — `npm run build && npm test`, `npm run typecheck:all` (at baseline),
