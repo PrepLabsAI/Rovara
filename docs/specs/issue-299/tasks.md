@@ -70,7 +70,7 @@ overrides: {}
   - _Test:_ T2 —
     `Scenario: a test run inside a chain is rerun, with its before measured on the original code`
     (red→green)
-- [ ] 8. Spec 051 D-19
+- [x] 8. Spec 051 D-19
   - Add D-19 (2026-10-04, #299, amends P-6, D-11 and D-14) to `specs/051-agent-verification/spec.md`.
     The preamble is untouched.
   - _Depends on:_ 3, 6
