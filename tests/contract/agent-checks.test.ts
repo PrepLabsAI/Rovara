@@ -139,6 +139,8 @@ describe("scanTestCommands: tests inside chains and filters (#299)", () => {
     ["cd x && cd /app && pytest", [rerun("pytest")]],
     ["cd pkg && npm install && npm test -- -t foo", [rerun("cd pkg && npm test -- -t foo")]],
     ["make build; pytest", [rerun("pytest")]],
+    ["X=1 make build; pytest", [rerun("pytest")]],
+    ["git status; pytest", [rerun("pytest")]],
     ["pytest; export X=1", [rerun("pytest")]],
     ["pytest;", [rerun("pytest")]],
     ["npm test || true", [rerun("npm test")]],
@@ -184,6 +186,10 @@ describe("scanTestCommands: tests inside chains and filters (#299)", () => {
     "set -e; pytest", "unset X; pytest", "alias pytest=true; pytest", "pushd a && pytest", "popd; pytest", "shopt -s x; pytest",
     "ulimit -n 10; pytest", "umask 0; pytest", "eval x; pytest", "exec 3>x; pytest", "declare -x X=1; pytest",
     "typeset X=1; pytest", "readonly X=1; pytest",
+    // Self-review 1.2: leading assignments do not hide the command name, a quoted value does not hide an assignment.
+    "X=1 export Y=2; pytest", "X=1 cd a; pytest", 'X="a b"; pytest', "X='a' Y=2; pytest", "builtin export X=1; pytest",
+    "command cd a; pytest", "X=1 git stash; pytest", "env git stash; pytest", "timeout 5 git stash && pytest",
+    "command git stash; pytest", "git -c x=y stash push; pytest",
     // Requirement 4.1: groups, substitutions, background, heredocs, redirections, control characters.
     "(pytest)", "{ pytest; }", "pytest &", "pytest & pytest", "pytest |& tail -5", "pytest <<EOF", "pytest < in.txt",
     "pytest > out", "pytest 2>/dev/null", "pytest 2>&1 > out", "pytest 1>&2", "pytest x2>&1", "pytest 2>&12",

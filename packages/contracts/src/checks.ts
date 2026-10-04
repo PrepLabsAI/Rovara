@@ -267,8 +267,10 @@ export interface ScanOptions {
 /** Commands that change the shell's environment, so that a test after them is not the bare test AgentX would replay. */
 const ENVIRONMENT_CHANGERS = new Set([
   "export", "source", ".", "set", "unset", "alias", "pushd", "popd", "shopt", "ulimit", "umask", "eval", "exec", "declare",
-  "typeset", "readonly",
+  "typeset", "readonly", "builtin", "command",
 ]);
+/** A leading `NAME=value` word, as written: the name unquoted, the value anything that tokenised (`X="a b"`). */
+const LEADING_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 /** Commands that only read the output piped into them; their arguments are never replayed. */
 const OUTPUT_FILTERS = new Set(["tail", "head", "grep", "egrep", "sed", "cut", "sort", "uniq", "wc", "cat"]);
 
@@ -348,19 +350,26 @@ function scan(command: string, options: ScanOptions): { result: TestCommandScan;
   let cds = 0;
   let lastTest = -1;
   for (const [index, pipeline] of pipelines.entries()) {
-    if (pipeline.some(({ words }) => words[0]!.raw === "git" && words.slice(1).some(({ value }) => value === "stash"))) return undefined;
+    // `git stash` anywhere in a command, also behind assignments, `env`, `timeout` or `command`.
+    if (pipeline.some(({ words }) => words.some(({ value }, at) => /(?:^|\/)git$/.test(value) && words.slice(at + 1).some((word) => word.value === "stash")))) {
+      return undefined;
+    }
     const [first, ...filters] = pipeline as [ShellCommand, ...ShellCommand[]];
-    const head = first.words[0]!.raw;
+    // The command's name comes after its leading assignments; a command of assignments alone sets shell variables.
+    const named = first.words.findIndex(({ raw }) => !LEADING_ASSIGNMENT.test(raw));
+    const head = named === -1 ? undefined : first.words[named]!.raw;
     if (head === "cd") {
       const target = first.words[1];
-      if (pipeline.length !== 1 || first.merge || first.words.length !== 2 || target === undefined || target.raw !== target.value) return undefined;
+      if (named !== 0 || pipeline.length !== 1 || first.merge || first.words.length !== 2 || target === undefined || target.raw !== target.value) {
+        return undefined;
+      }
       if (joins[index - 1] === "||" || joins[index] === "||") return undefined;
       const mapped = options.cdTarget?.(target.raw);
       if (mapped === undefined && !safeCdPath(target.raw)) return undefined;
       dir = mapped ?? (dir === "" ? target.raw : `${dir.replace(/\/+$/, "")}/${target.raw}`);
       if (dir !== "" && !safeCdPath(dir)) return undefined;
       cds += 1;
-    } else if (ENVIRONMENT_CHANGERS.has(head) || first.words.every(({ raw }) => ASSIGNMENT.test(raw))) {
+    } else if (head === undefined || ENVIRONMENT_CHANGERS.has(head)) {
       environmentChanged = true;
       othersMayChange = true;
     } else if (simpleTest(first.words)) {
