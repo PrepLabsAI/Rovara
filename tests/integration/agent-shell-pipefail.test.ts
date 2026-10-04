@@ -29,6 +29,23 @@ describe("the agent's shell and a test command piped into tail", () => {
     expect(piped.isError).toBe(true);
   });
 
+  /**
+   * Feature: AgentX checks the agent's test commands (spec 051, #299)
+   * Scenario: the agent shell runs cd <dir>; <test> | tail with pipefail
+   *   Given a workspace whose `make test` fails, in a sub-folder
+   *   When the agent runs `cd sub; make test 2>&1 | tail -5`
+   *   Then the run's exit code is the test's, not tail's
+   * Requirement: docs/specs/issue-299/requirements.md#requirement-1-cd-dir-test-reads-as-cd-dir--test (1.3)
+   */
+  it("reports the failing test's exit code for cd <dir>; <test> | tail, as for cd <dir> && (#299)", async () => {
+    const run = await shell();
+    const piped = await run("t3", { command: "mkdir -p sub && cp Makefile sub/" });
+    expect(piped.structuredContent?.exit_code ?? 0).toBe(0);
+    const result = await run("t4", { command: "cd sub; make test 2>&1 | tail -5" });
+    expect(result.structuredContent?.exit_code).not.toBe(0);
+    expect(result.isError).toBe(true);
+  });
+
   it("leaves any other pipe to the shell's default, where tail's status is the pipeline's", async () => {
     const run = await shell();
     const other = await run("t2", { command: "false | tail -5" });
@@ -42,7 +59,8 @@ describe("the agent's shell and a test command piped into tail", () => {
       command: "set -o pipefail; cd /testbed && python -m pytest a -q 2>&1 | tail -20",
       env: { PATH: "/bin", ...AGENTX_GIT_IDENTITY_ENVIRONMENT },
     });
-    for (const command of ["pytest -q", "make test | head -5", "ls | tail -5"]) {
+    expect(agentShellSpawn({ ...context, command: "cd /testbed; pytest -q | tail -5" }).command).toBe("set -o pipefail; cd /testbed; pytest -q | tail -5");
+    for (const command of ["pytest -q", "make test | head -5", "ls | tail -5", "make build && make test | tail -5"]) {
       expect(agentShellSpawn({ ...context, command }).command).toBe(command);
     }
   });

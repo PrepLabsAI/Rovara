@@ -15,7 +15,7 @@ overrides: {}
 
 ## Task list
 
-- [ ] 1. Factor `simpleTest(words)` out of `matchTestCommand`
+- [x] 1. Factor `simpleTest(words)` out of `matchTestCommand`
   - Move the per-word rules (refused arguments, `--watch`, workspace escapes, assignments,
     `timeout`, `TEST_HEADS`) into a private helper. `matchTestCommand`'s behaviour stays
     byte-identical.
@@ -23,7 +23,7 @@ overrides: {}
   - _Requirements:_ R7.1, R7.3
   - _Test:_ T3 — the existing `matchTestCommand` table in `tests/contract/agent-checks.test.ts`
     stays green (a pure refactor, so no red step; the table is the guard)
-- [ ] 2. Lexer: tokens for words, `&&`, `||`, `;`, `|`, `2>&1`, refusing everything else
+- [x] 2. Lexer: tokens for words, `&&`, `||`, `;`, `|`, `2>&1`, refusing everything else
   - Extend `shellWords` into a token lexer with source spans. Quoted operators stay inside
     words, and any character outside the design's lexer table refuses.
   - _Depends on:_ 1
@@ -31,7 +31,7 @@ overrides: {}
   - _Test:_ T3/T8 — scan table rows for abuse cases 2 and 3, plus the R4.1 refusals (`(pytest)`,
     `{ pytest; }`, `pytest &`, `pytest <<EOF`, `pytest > out`, `pytest 2>/dev/null`, newline)
     (red→green, written with task 3's entry point)
-- [ ] 3. `scanTestCommands`: walk, `cd` tracking and composition, filters, environment changers,
+- [x] 3. `scanTestCommands`: walk, `cd` tracking and composition, filters, environment changers,
   `git stash`, dedupe, `ownRunIsBefore`
   - Export `scanTestCommands`, `FoundTestCommand`, `TestCommandScan` and `ScanOptions` from
     contracts.
@@ -40,7 +40,7 @@ overrides: {}
   - _Test:_ T3/T8 — the scan table (every #299 command, the R2/R3/R4 rows of the trace, abuse
     cases 1, 4, 5, 6, 8, 9), the "existing rows unchanged" property test (R7.3), the R7.4 table, and
     "every replay is a `matchTestCommand` fixpoint" (R7.1) (red→green)
-- [ ] 4. `isPipedTestCommand` on the scan, accepting `cd X; … | tail -N`
+- [x] 4. `isPipedTestCommand` on the scan, accepting `cd X; … | tail -N`
   - _Depends on:_ 3
   - _Requirements:_ R1.3
   - _Test:_ T3 — the `isPipedTestCommand` rows (the `cd /testbed;` case true, chains false; the
