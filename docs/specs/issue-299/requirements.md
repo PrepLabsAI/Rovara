@@ -2,8 +2,8 @@
 type: requirements
 phase: requirements-definition
 workItem: issue-299
-status: draft
-approvedBy: []
+status: approved
+approvedBy: ["ps06756"]
 collaborators: [engineer, architect, reviewer, approver]
 overrides: {}
 ---
@@ -268,3 +268,9 @@ Requirement 4.3 extends the agreed list of environment changers with `eval`, `ex
 the requirements gate is where to object.
 
 ## Review comments
+
+### 2026-10-04 — approved
+
+**@ps06756** wrote:
+
+approved

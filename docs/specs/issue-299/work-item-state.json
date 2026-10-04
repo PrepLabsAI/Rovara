@@ -1,7 +1,7 @@
 {
   "version": 1,
   "workItem": "issue-299",
-  "currentNode": "brainstorming",
+  "currentNode": "design",
   "nodes": {
     "phase-selection": {
       "attempts": 1,
@@ -13,8 +13,32 @@
     },
     "brainstorming": {
       "attempts": 1,
-      "outcome": "",
+      "outcome": "pass",
       "enteredAt": "2026-10-04T18:51:57+00:00",
+      "exitedAt": "2026-10-04T18:56:59+00:00",
+      "lastBlock": "",
+      "forced": false
+    },
+    "requirements-definition": {
+      "attempts": 1,
+      "outcome": "pass",
+      "enteredAt": "2026-10-04T18:56:59+00:00",
+      "exitedAt": "2026-10-04T18:59:08+00:00",
+      "lastBlock": "`validate-artifacts` did not pass:\n- required artifact is missing \u2014 write one of: requirements.md, bugfix.md (docs/specs/issue-299)",
+      "forced": false
+    },
+    "requirements-approval": {
+      "attempts": 1,
+      "outcome": "approved",
+      "enteredAt": "2026-10-04T18:59:08+00:00",
+      "exitedAt": "2026-10-04T19:05:06+00:00",
+      "lastBlock": "",
+      "forced": false
+    },
+    "design": {
+      "attempts": 1,
+      "outcome": "",
+      "enteredAt": "2026-10-04T19:05:06+00:00",
       "exitedAt": "",
       "lastBlock": "",
       "forced": false
@@ -188,7 +212,12 @@
   },
   "forced": [],
   "parked": null,
-  "completions": {},
+  "completions": {
+    "requirements-definition": {
+      "at": "2026-10-04T18:59:08+00:00",
+      "by": "cli"
+    }
+  },
   "skips": {},
   "optIns": {},
   "surface": "work-item",
@@ -199,5 +228,5 @@
   "repos": [],
   "pullRequests": [],
   "loop": "pdlc-work-item-loop",
-  "phase": "brainstorming"
+  "phase": "design"
 }
