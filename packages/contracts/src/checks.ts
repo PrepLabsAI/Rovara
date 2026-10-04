@@ -252,7 +252,10 @@ export interface FoundTestCommand {
 
 export interface TestCommandScan {
   tests: FoundTestCommand[];
-  /** True when any part or pipeline command is neither a test, a `cd`, nor an allowed filter: it may change files. */
+  /**
+   * True when any part or pipeline command is neither a test, a `cd`, nor a read-only filter (`sed`, `sort` and `uniq`
+   * can write files): it may change files.
+   */
   othersMayChange: boolean;
 }
 
@@ -273,6 +276,8 @@ const ENVIRONMENT_CHANGERS = new Set([
 const LEADING_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 /** Commands that only read the output piped into them; their arguments are never replayed. */
 const OUTPUT_FILTERS = new Set(["tail", "head", "grep", "egrep", "sed", "cut", "sort", "uniq", "wc", "cat"]);
+/** Of those, the ones that can still write a file (`sed 'w out'`, `sort -o out`, `uniq in out`): they may change files. */
+const FILE_WRITING_FILTERS = new Set(["sed", "sort", "uniq"]);
 
 interface ShellCommand { words: ShellWord[]; merge: boolean }
 
@@ -374,6 +379,7 @@ function scan(command: string, options: ScanOptions): { result: TestCommandScan;
       othersMayChange = true;
     } else if (simpleTest(first.words)) {
       if (environmentChanged || !filters.every(outputFilter)) return undefined;
+      if (filters.some(({ words }) => FILE_WRITING_FILTERS.has(words[0]!.raw))) othersMayChange = true;
       const test = command.slice(first.words[0]!.start, first.words.at(-1)!.end);
       const replay = dir === "" ? test : `cd ${dir} && ${test}`;
       if (!replays.includes(replay)) replays.push(replay);

@@ -205,6 +205,13 @@ describe("scanTestCommands: tests inside chains and filters (#299)", () => {
     expect(scanTestCommands("pytest").othersMayChange).toBe(false);
     expect(scanTestCommands("sed -i s/x/y/ a.py && pytest").othersMayChange).toBe(true);
     expect(scanTestCommands("pytest; export X=1").othersMayChange).toBe(true);
+    // Self-review 1.3: sed, sort and uniq can write files (w, -o, an output operand); the other filters cannot.
+    for (const filter of ["sort -o x", "uniq a b", "sed -n 'w out'"]) {
+      expect(scanTestCommands(`pytest | ${filter}`), filter).toEqual({ tests: [rerun("pytest")], othersMayChange: true });
+    }
+    for (const filter of ["tail", "head -3", "grep x", "egrep 'a|b'", "cut -c1-9", "wc -l", "cat"]) {
+      expect(scanTestCommands(`pytest | ${filter}`).othersMayChange, filter).toBe(false);
+    }
   });
 
   it("maps every cd target, and leaves an unmapped one as written", () => {
