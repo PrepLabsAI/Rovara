@@ -4,10 +4,11 @@ import { createHash } from "node:crypto";
 import { z } from "zod";
 
 /**
- * Covers AGENTX_WORKER_PROMPT and AGENTX_PREAMBLE: changing either means a new version. 1 had only the preamble; 3 adds
- * the rule for tests that check the old behaviour a task changes (D-17, #290).
+ * Covers AGENTX_WORKER_PROMPT and AGENTX_PREAMBLE: changing either means a new version. 1 had only the preamble; 3 added
+ * the rule for tests that check the old behaviour a task changes (D-17, #290); 4 forbids editing tests to make them
+ * pass unless the task asks for test changes (D-18).
  */
-export const AGENTX_PREAMBLE_VERSION = "3";
+export const AGENTX_PREAMBLE_VERSION = "4";
 
 /**
  * Replaces Pi's own system prompt preamble for every coding task and eval run. Pi's is written for a person at a
@@ -36,8 +37,8 @@ export const AGENTX_PREAMBLE = [
   "AgentX checks your work after you finish. Work this way:",
   "1. Reproduce the problem before changing code, and say how you reproduced it.",
   "2. Run the relevant tests before and after your change.",
-  "3. A test that passed before your change and fails after it is your own regression. Fix it; never call it unrelated.",
-  "4. The one exception is a test that checks the old behaviour the task asks you to change. Update it to the new behaviour; if you were told not to modify tests, leave it. Either way, name it in your final message and say why it changed.",
+  "3. A test that passed before your change and fails after it is your own regression. Fix your change, not the test; never call it unrelated.",
+  "4. The one exception is a test that checks the old behaviour the task asks you to change. Leave it as it is and name it in your final message, with the behaviour it checks. Never edit or delete a test to make it pass, unless the task explicitly asks you to change tests.",
   "5. Report the commands you ran and their results.",
   "6. You must never claim a test passed unless you saw it pass.",
   "End your final message with exactly one line: \"AgentX result: done\" if the work is complete and every test you ran passes, apart from tests you named under rule 4, otherwise \"AgentX result: not done\".",
@@ -85,9 +86,10 @@ const TEST_HEADS: readonly (readonly string[])[] = [
   ["npm", "test"], ["npm", "run", "test"], ["pnpm", "test"], ["yarn", "test"], ["pytest"],
   ["python", "-m", "pytest"], ["go", "test"], ["cargo", "test"], ["make", "test"], ["mvn", "test"],
   ["gradle", "test"], ["./gradlew", "test"], ["bundle", "exec", "rspec"], ["phpunit"], ["tox"],
-  // D-15 (#290): runners agents use directly.
+  // D-15 (#290): runners agents use directly; mocha since #292.
   ["python3", "-m", "pytest"], ["jest"], ["npx", "jest"], ["yarn", "jest"], ["pnpm", "jest"],
   ["vitest"], ["npx", "vitest"], ["yarn", "vitest"], ["pnpm", "vitest"],
+  ["mocha"], ["npx", "mocha"], ["yarn", "mocha"], ["pnpm", "mocha"],
 ];
 /** Only a plain space and these characters may appear: no quoting, expansion, globbing, redirection or control characters. */
 const ALLOWED = /^[A-Za-z0-9_@%+=:,./ -]*$/;

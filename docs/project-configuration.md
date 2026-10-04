@@ -279,21 +279,25 @@ reads exactly as before.
 ### How the checks work
 
 1. **The agent is told the rules.** AgentX appends a fixed preamble to the agent's system prompt
-   for every coding task and every eval run. Its SHA-256 is recorded with each result. Version 3:
+   for every coding task and every eval run. Its SHA-256 is recorded with each result. Version 4:
 
    ```text
    AgentX checks your work after you finish. Work this way:
    1. Reproduce the problem before changing code, and say how you reproduced it.
    2. Run the relevant tests before and after your change.
-   3. A test that passed before your change and fails after it is your own regression. Fix it; never call it unrelated.
-   4. The one exception is a test that checks the old behaviour the task asks you to change. Update it to the new behaviour; if you were told not to modify tests, leave it. Either way, name it in your final message and say why it changed.
+   3. A test that passed before your change and fails after it is your own regression. Fix your change, not the test; never call it unrelated.
+   4. The one exception is a test that checks the old behaviour the task asks you to change. Leave it as it is and name it in your final message, with the behaviour it checks. Never edit or delete a test to make it pass, unless the task explicitly asks you to change tests.
    5. Report the commands you ran and their results.
    6. You must never claim a test passed unless you saw it pass.
    End your final message with exactly one line: "AgentX result: done" if the work is complete and every test you ran passes, apart from tests you named under rule 4, otherwise "AgentX result: not done".
    ```
 
-   Rule 4 is new in version 3 (#290): without it, the agent reported correct work as "not done"
-   whenever the task changed behaviour that existing tests still checked.
+   Rule 4 came in version 3 (#290): without it, the agent reported correct work as "not done"
+   whenever the task changed behaviour that existing tests still checked. Version 3 told the
+   agent to update such tests, and it then edited tests even when told not to, once to cover a
+   half-finished fix; version 4 has it leave them and name them. A task that changes tested
+   behaviour can therefore end with a named failing test, which AgentX reports as a regression
+   and the reviewer decides on.
 
    The text lives in `packages/contracts/src/checks.ts` (`AGENTX_PREAMBLE`). Changing it means a
    new `AGENTX_PREAMBLE_VERSION`. The agent's claim is read from that last line: `success`,
@@ -346,7 +350,8 @@ of the workspace are still refused.
 
 Only these commands count, each with its arguments: `npm test`, `npm run test`, `pnpm test`,
 `yarn test`, `pytest`, `python -m pytest`, `python3 -m pytest`, `jest`, `npx jest`, `yarn jest`,
-`pnpm jest`, `vitest`, `npx vitest`, `yarn vitest`, `pnpm vitest`, `go test`, `cargo test`,
+`pnpm jest`, `vitest`, `npx vitest`, `yarn vitest`, `pnpm vitest`, `mocha`, `npx mocha`,
+`yarn mocha`, `pnpm mocha`, `go test`, `cargo test`,
 `make test`, `mvn test`, `gradle test`, `./gradlew test`, `bundle exec rspec`, `phpunit` and
 `tox`. The command may start with a relative `cd <path> &&` (no `..`, no absolute path), then
 `NAME=value` assignments, then an optional `timeout <n>`. An argument may be quoted, with single

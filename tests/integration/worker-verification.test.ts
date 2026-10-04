@@ -717,6 +717,10 @@ describe("AgentX measures the before result on the original code (spec 051 D-16,
     expect(state.runs).toBe(1);
     const feedback = checksMessages(run.requests.at(-1)!).join("\n");
     expect(feedback).toContain("checks the old behaviour the task asked you to change, it is not a regression");
+    // D-18: the message never invites the agent to edit the test.
+    expect(feedback).toContain("leave the test as it is and name it in your final message");
+    expect(feedback).toContain("Never edit or delete a test to make it pass");
+    expect(feedback).not.toContain("update the test");
   });
 
   it("counts a test that also fails on the original code as already failing, not the agent's regression", async () => {
