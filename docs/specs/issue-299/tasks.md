@@ -62,7 +62,7 @@ overrides: {}
     abuse case 7 (`sed -i … && pytest` voids a batched simple call's before, either order);
     a chained call after a bash edit is `afterFirstEdit`; the existing recorder cases stay green
     (red→green)
-- [ ] 7. End-to-end scenario: a chained test is rerun with its before measured on the original code
+- [x] 7. End-to-end scenario: a chained test is rerun with its before measured on the original code
   - Add a case to the D-16 suite in `tests/integration/worker-verification.test.ts`, with a
     Gherkin docstring.
   - _Depends on:_ 6

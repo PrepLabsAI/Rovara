@@ -68,3 +68,28 @@ Command: `npx vitest run tests/unit/worker-command-recorder.test.ts tests/unit/d
 ```text
       Tests  51 passed (51)
 ```
+
+## Task 7: end-to-end scenario, a chained test rerun with a D-16 before
+
+Command: `npx vitest run tests/integration/worker-verification.test.ts -t chain`
+
+### Red (contracts, recorder and path mapping from `5ae36536`: the chain is not recognised, so nothing is rerun)
+
+```text
+     × reruns a test the agent ran inside a chain, with its before measured on the original code (#299) 44ms
+⎯⎯⎯⎯⎯⎯⎯ Failed Tests 1 ⎯⎯⎯⎯⎯⎯⎯
+AssertionError: expected undefined to deeply equal { replay: 'go test ./x', …(1) }
+      Tests  1 failed | 37 skipped (38)
+```
+
+### Green
+
+```text
+      Tests  1 passed | 37 skipped (38)
+```
+
+Whole file: `npx vitest run tests/integration/worker-verification.test.ts`
+
+```text
+      Tests  38 passed (38)
+```
