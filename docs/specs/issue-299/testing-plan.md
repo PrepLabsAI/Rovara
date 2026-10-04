@@ -94,20 +94,29 @@ there are no hostnames or tokens in this suite's output.
 
 ## Verification activities
 
-- [ ] T3 — `npx vitest run tests/contract/agent-checks.test.ts`
-- [ ] T1 — `npx vitest run tests/unit/worker-command-recorder.test.ts tests/unit/devcontainer-cd-target.test.ts`
-- [ ] T2 — `npx vitest run tests/integration/agent-shell-pipefail.test.ts tests/integration/worker-verification.test.ts`
-- [ ] T8 — abuse cases 1–9 present and passing in the T3 and T1 output (one named case each)
-- [ ] T12 — `npm run build && npm test`, `npm run typecheck:all`, `npm run lint`
-- [ ] R8.1 — spec 051 carries D-19 amending P-6, D-11 and D-14 (diff read)
+- [x] T3 — `npx vitest run tests/contract/agent-checks.test.ts`
+- [x] T1 — `npx vitest run tests/unit/worker-command-recorder.test.ts tests/unit/devcontainer-cd-target.test.ts`
+- [x] T2 — `npx vitest run tests/integration/agent-shell-pipefail.test.ts tests/integration/worker-verification.test.ts`
+- [x] T8 — abuse cases 1–9 present and passing in the T3 and T1 output (one named case each)
+- [x] T12 — `npm run build && npm test`, `npm run typecheck:all`, `npm run lint`
+- [x] R8.1 — spec 051 carries D-19 amending P-6, D-11 and D-14 (diff read)
 
 ## Verification results
 
-_Not yet executed._
+Executed 2026-10-04 on branch `the-loop/issue-299` (Node 22.23.2, after `npm ci && npm run build`). Every activity ran and
+passed. Red→green for each task is in [`evidence/red-green.md`](evidence/red-green.md).
 
 | Activity | Command / procedure | Outcome | Evidence |
 |----------|--------------------|---------|----------|
-| | | | |
+| T3 | `npx vitest run tests/contract/agent-checks.test.ts` | pass: 270/270. Every #299 command, the R7.4 table, every existing row unchanged (R7.3), every replay a `matchTestCommand` fixpoint (R7.1) | [`contract.md`](evidence/contract.md) |
+| T1 | `npx vitest run tests/unit/worker-command-recorder.test.ts tests/unit/devcontainer-cd-target.test.ts` | pass: 51/51 | [`unit.md`](evidence/unit.md) |
+| T2 | `npx vitest run tests/integration/agent-shell-pipefail.test.ts tests/integration/worker-verification.test.ts` | pass: 42/42, including both new scenarios | [`integration.md`](evidence/integration.md) |
+| T8 | abuse cases 1–6, 8, 9 in T3; abuse case 7 in T1 | pass: each has a named, passing negative test | [`contract.md`](evidence/contract.md), [`unit.md`](evidence/unit.md) |
+| T12 | `npm run build && npm test`; `npm run typecheck:all`; `npm run lint` | pass: 7867 passed, 20 skipped (existing env-gated live suites); 191 errors in 64 files, equal to the baseline; lint exit 0 | [`regression.md`](evidence/regression.md) |
+| R8.1 | read the diff of `specs/051-agent-verification/spec.md` | pass: D-19 (2026-10-04, #299) amends P-6, D-11 and D-14 and cites batch `744df9ec`. `AGENTX_PREAMBLE_VERSION` is still `"4"` (R8.2; the preamble test in T3 passes) | commit `docs(specs): spec 051 D-19 …` |
+
+**Not executed:** none. T11 (re-running batch `744df9ec`'s replay count) was planned as `n/a` because the 29 commands
+were not supplied.
 
 ## Review comments
 
