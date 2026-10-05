@@ -1,8 +1,9 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { dismissDeletedWorkflowFeedback, observeWorkflowPullRequest, requestWorkflowFeedback, type WorkflowSnapshot } from "@agentx/contracts";
+import { WorkflowFeedbackBundleSchema, WorkflowFeedbackBundleRefSchema, WorkflowSnapshotSchema, collectWorkflowFeedbackBundles, type WorkflowFeedbackBundle, type WorkflowFeedbackBundleRef, type WorkflowFeedbackThreadObservation, dismissDeletedWorkflowFeedback, observeWorkflowPullRequest, requestWorkflowFeedback, type WorkflowSnapshot } from "@agentx/contracts";
 import { githubWorkflowPullRequestKey, type GithubWorkflowPullRequestRecord } from "../developer/task-records.js";
+import { parseGitHubRepository, type GitHubPullRequestFeedback } from "../github-app.js";
 import { isConditional } from "./broker-shared.js";
 
 const DELIVERY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -156,6 +157,115 @@ export async function reconcileGithubWorkflowPullRequest(input: {
   await input.saveWorkflow(linked.taskId, workflow.revision, next);
   return true;
 }
+
+export interface ReconcileTaskPullRequestFeedbackInput {
+  documentClient: { send(command: unknown): Promise<unknown> }; tableName: string;
+  repositoryFullName: string; number: number; deliveryId: string;
+  loadTask(taskId: string): Promise<{ project: string; startingRevision: number; workflow?: WorkflowSnapshot } | undefined>;
+  repositoryUrl(project: string, revision: number, repositoryId: string): Promise<string | undefined>;
+  getCurrentFeedback(repositoryUrl: string, number: number): Promise<GitHubPullRequestFeedback>;
+  /** Writes exact payload bytes to immutable content-addressed storage; never overwrites an artifact. */
+  persistBundle(bundle: WorkflowFeedbackBundle, bytes: string, sha256: string): Promise<string>;
+  saveWorkflow(taskId: string, expectedRevision: number, workflow: WorkflowSnapshot): Promise<void>;
+  now: string;
+}
+
+/** Event payloads are hints only. Recollect all linked PRs on every CAS retry. */
+export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullRequestFeedbackInput): Promise<boolean> {
+  const linked = await findLinkedGithubWorkflowPullRequest(input);
+  if (!linked) throw new GithubWebhookRefusal("GitHub pull request is not linked to an AgentX workflow");
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const task = await input.loadTask(linked.taskId);
+    const current = task?.workflow;
+    if (!task || !current || current.candidate?.digest !== linked.candidateDigest
+      || !current.pullRequests?.some(pr => pr.repositoryId === linked.repositoryId && pr.number === linked.number
+        && pr.url === linked.url && pr.candidateDigest === linked.candidateDigest)
+      || (current.stage !== "WAIT_FOR_MERGE" && current.stage !== "MERGED")) {
+      throw new GithubWebhookRefusal("linked workflow no longer matches the PR candidate");
+    }
+    const reads: Array<{ pr: NonNullable<WorkflowSnapshot["pullRequests"]>[number]; feedback: GitHubPullRequestFeedback }> = [];
+    for (const pr of [...(current.pullRequests ?? [])].sort((a, b) => a.repositoryId.localeCompare(b.repositoryId) || a.number - b.number)) {
+      const url = await input.repositoryUrl(task.project, task.startingRevision, pr.repositoryId);
+      if (!url) throw new GithubWebhookRefusal("linked PR repository is missing from the pinned project");
+      const parsed = parseGitHubRepository(url);
+      const fullName = `${parsed.owner}/${parsed.name}`;
+      const index = await findLinkedGithubWorkflowPullRequest({ ...input, repositoryFullName: fullName, number: pr.number });
+      if (!index || index.taskId !== linked.taskId || index.repositoryId !== pr.repositoryId
+        || index.url !== pr.url || index.candidateDigest !== current.candidate.digest
+        || pr.url !== `https://github.com/${fullName}/pull/${pr.number}`) throw new GithubWebhookRefusal("linked task PR scope mismatch");
+      const feedback = await input.getCurrentFeedback(url, pr.number);
+      if (feedback.pullRequest.number !== pr.number || feedback.pullRequest.url !== pr.url
+        || feedback.comments.some(comment => !comment.url.startsWith(`${pr.url}#`))) throw new GithubWebhookRefusal("current GitHub feedback scope mismatch");
+      reads.push({ pr, feedback });
+    }
+    let next = current;
+    for (const { pr, feedback } of reads) {
+      const state = feedback.pullRequest.state === "merged" ? "MERGED" : feedback.pullRequest.state === "closed" ? "CLOSED" : "OPEN";
+      if (pr.state !== state) next = observeWorkflowPullRequest(next, { repositoryId: pr.repositoryId, number: pr.number,
+        candidateDigest: pr.candidateDigest, state, source: "GITHUB_API", observedAt: input.now }, input.now);
+    }
+    const open = reads.filter(r => r.feedback.pullRequest.state === "open");
+    const changedHead = open.some(({ pr, feedback }) => !current.candidate!.repositories.some(repo => repo.repositoryId === pr.repositoryId && repo.commitSha === feedback.pullRequest.headCommit));
+    if (changedHead || open.length === 0) {
+      if (!current.feedbackReview && !current.feedback && next === current
+        && (!changedHead || current.state === "BLOCKED")) return false;
+      const previousReport = current.feedbackReview?.reviewRef;
+      const history = [...(current.feedbackReviewHistory ?? [])];
+      if (previousReport && !history.some(r => r.sha256 === previousReport.sha256)) history.push(previousReport);
+      next = WorkflowSnapshotSchema.parse({ ...next, revision: next.revision + 1,
+        ...(changedHead ? { state: "BLOCKED", blockReason: "GitHub PR head changed; candidate verification and feedback review must be refreshed" } : {}),
+        feedback: undefined, feedbackReview: undefined, feedbackReviewHistory: history, updatedAt: input.now });
+    } else {
+      const observations: WorkflowFeedbackThreadObservation[] = [];
+      const bundles = open.map(({ pr, feedback }): WorkflowFeedbackBundle => {
+        const comments = feedback.comments.map(c => ({ ...c, bodyDigest: digest(c.body), bodyBytes: Buffer.byteLength(c.body, "utf8") }));
+        const eligible = new Set(comments.filter(c => c.kind !== "REVIEW_COMMENT").map(c => c.id));
+        const threadIds = new Set<string>();
+        for (const thread of feedback.threads) {
+          if (threadIds.has(thread.id)) throw new GithubWebhookRetryableError("duplicate thread state");
+          threadIds.add(thread.id);
+          const members = thread.commentIds.map(id => comments.find(c => c.id === id && c.threadId === thread.id));
+          if (members.some(c => c === undefined) || new Set(thread.commentIds).size !== thread.commentIds.length) throw new GithubWebhookRetryableError("thread comment state is incomplete");
+          const prior = current.feedbackReview?.threadObservations?.find(t => t.repositoryId === pr.repositoryId && t.number === pr.number && t.threadId === thread.id);
+          const ids = members.flatMap(comment => {
+            if (!comment) return [];
+            if (!thread.resolved) return [comment.id];
+            // A resolved thread starts excluded. Once observed resolved, new/edited feedback remains eligible across retries.
+            const previous = prior?.comments.find(c => c.id === comment.id);
+            return prior?.resolved && (!previous || previous.updatedAt !== comment.updatedAt || previous.bodyDigest !== comment.bodyDigest
+              || prior.eligibleCommentIds.includes(comment.id)) ? [comment.id] : [];
+          });
+          ids.forEach(id => eligible.add(id));
+          observations.push({ repositoryId: pr.repositoryId, number: pr.number, threadId: thread.id, resolved: thread.resolved,
+            comments: members.map(c => ({ id: c!.id, updatedAt: c!.updatedAt, bodyDigest: c!.bodyDigest })).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0), eligibleCommentIds: ids.sort() });
+        }
+        if (comments.some(c => c.kind === "REVIEW_COMMENT" && (!c.threadId || !threadIds.has(c.threadId)))) throw new GithubWebhookRetryableError("inline thread state is incomplete");
+        // Approval authorizes future work. It does not establish that GitHub feedback was addressed.
+        const selected = comments.filter(c => eligible.has(c.id)).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+        return WorkflowFeedbackBundleSchema.parse({ schemaVersion: 1, taskId: current.taskId, repositoryId: pr.repositoryId, number: pr.number,
+          headSha: feedback.pullRequest.headCommit, candidateDigest: current.candidate!.digest, commentSetDigest: digest(JSON.stringify(selected)),
+          producer: "agentx-github-reconciler", version: "1", recordedAt: input.now, comments: selected, sourceDeliveryIds: [input.deliveryId] });
+      });
+      observations.sort((a, b) => a.repositoryId.localeCompare(b.repositoryId) || a.number - b.number || a.threadId.localeCompare(b.threadId));
+      const prior = current.feedbackReview;
+      const same = prior && prior.bundleRefs.length === bundles.length && bundles.every(b => prior.bundleRefs.some(p =>
+        p.repositoryId === b.repositoryId && p.number === b.number && p.headSha === b.headSha && p.candidateDigest === b.candidateDigest && p.commentSetDigest === b.commentSetDigest));
+      if (same && JSON.stringify(prior.threadObservations ?? []) === JSON.stringify(observations) && next === current) return false;
+      const refs: WorkflowFeedbackBundleRef[] = [];
+      for (const bundle of bundles) {
+        const bytes = JSON.stringify(bundle); const sha256 = digest(bytes);
+        const objectKey = await input.persistBundle(bundle, bytes, sha256);
+        const { sourceDeliveryIds: _deliveryIds, comments, ...metadata } = bundle;
+        refs.push(WorkflowFeedbackBundleRefSchema.parse({ ...metadata, sha256, objectKey, comments: comments.map(({ body: _body, ...ref }) => ref) }));
+      }
+      next = collectWorkflowFeedbackBundles(next, { bundleRefs: refs, threadObservations: observations }, input.now);
+    }
+    try { await input.saveWorkflow(linked.taskId, current.revision, next); return true; }
+    catch (error) { if (!isConditional(error)) throw error; }
+  }
+  throw new GithubWebhookRetryableError("workflow kept changing during feedback reconciliation");
+}
+function digest(value: string): string { return createHash("sha256").update(value, "utf8").digest("hex"); }
 
 /** Persists linked PR comments as an owner decision; deliveries can never start implementation. */
 export async function recordLinkedGithubWorkflowFeedback(input: {
@@ -438,7 +548,7 @@ export async function processGithubWebhookDelivery(input: {
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
   received: ReceivedGithubWebhook;
-  process(event: ReceivedGithubWebhook["event"]): Promise<void>;
+  process(event: ReceivedGithubWebhook["event"], deliveryId: string): Promise<void>;
   now(): string;
 }): Promise<"PROCESSED" | "DUPLICATE" | "IN_PROGRESS"> {
   if (input.received.delivery === "DUPLICATE") return "DUPLICATE";
@@ -453,7 +563,7 @@ export async function processGithubWebhookDelivery(input: {
   });
   if (!claimed) return "IN_PROGRESS";
   try {
-    await input.process(input.received.event);
+    await input.process(input.received.event, input.received.deliveryId);
     await completeGithubWebhookDelivery({
       documentClient: input.documentClient,
       tableName: input.tableName,
@@ -480,7 +590,7 @@ export async function handleGithubWebhook(input: {
   headers: Record<string, string | undefined>;
   secret: string;
   authorizeRepository: ReceiveGithubWebhookInput["authorizeRepository"];
-  process(event: ReceivedGithubWebhook["event"]): Promise<void>;
+  process(event: ReceivedGithubWebhook["event"], deliveryId: string): Promise<void>;
   now(): string;
 }): Promise<{ status: "ACCEPTED" | "DUPLICATE" | "IN_PROGRESS"; deliveryId: string }> {
   const received = await receiveGithubWebhook({
@@ -499,7 +609,7 @@ export async function handleGithubWebhook(input: {
     documentClient: input.documentClient,
     tableName: input.tableName,
     received,
-    process: (event) => input.process(event),
+    process: (event, deliveryId) => input.process(event, deliveryId),
     now: () => input.now(),
   });
   return {

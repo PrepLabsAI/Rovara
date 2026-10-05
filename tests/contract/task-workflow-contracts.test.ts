@@ -1,3 +1,4 @@
+import * as workflowContracts from "../../packages/contracts/src/task-workflow.js";
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
@@ -352,6 +353,18 @@ describe("immutable multi-PR feedback reviews", () => {
       proposalDigest: reviewRef.proposalDigest, bundleDigests: reviewRef.bundleDigests, selectedFindingIds: ["finding-0"], decision: "APPROVE" as const };
     return { current, bundleRefs, reviewRef, request };
   }
+  it("persists collected bundles before a reviewer exists and fences old approvals", () => {
+    const { current, bundleRefs, reviewRef, request } = fixture();
+    expect(workflowContracts.collectWorkflowFeedbackBundles).toBeTypeOf("function");
+    const reviewed = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef }, now);
+    const collected = workflowContracts.collectWorkflowFeedbackBundles(reviewed, { bundleRefs, threadObservations: [] }, now);
+    expect(collected.feedbackReview).toMatchObject({ status: "COLLECTING", bundleRefs });
+    expect(collected.feedbackReview?.reviewRef).toBeUndefined();
+    expect(collected.feedbackReviewHistory).toEqual([reviewRef]);
+    expect(collected.stage).toBe("WAIT_FOR_MERGE");
+    expect(() => decideWorkflowFeedbackFindings(collected, { ...request, expectedRevision: collected.revision }, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+    expect(() => workflowContracts.collectWorkflowFeedbackBundles(current, { bundleRefs: [bundleRefs[0]], threadObservations: [] }, now)).toThrow();
+  });
   it("serializes artifact bodies before hashing and validates storage envelopes after round-trip", () => {
     const { bundleRefs, reviewRef } = fixture();
     const { sha256: _bundleDigest, objectKey: _bundleKey, ...bundleMetadata } = bundleRefs[0]!;

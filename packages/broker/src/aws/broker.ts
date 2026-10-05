@@ -131,7 +131,7 @@ import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKe
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { appIdFromSecret, GitHubAppCredentialProvider, privateKeyFromSecret, webhookSecretFromSecret } from "../github-app.js";
-import { GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, buildGithubFeedbackPlan, findLinkedGithubWorkflowPullRequest, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileGithubWorkflowPullRequest, recordLinkedGithubWorkflowFeedback, type ReceivedGithubWebhook } from "./github-webhooks.js";
+import { GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, buildGithubFeedbackPlan, findLinkedGithubWorkflowPullRequest, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileGithubWorkflowPullRequest, reconcileTaskPullRequestFeedback, recordLinkedGithubWorkflowFeedback, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
 import { unsupportedThinkingLevels } from "@agentx/model-runtime/thinking-levels";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
@@ -267,7 +267,7 @@ interface AwsBrokerDependencies {
   adminValues: readonly string[];
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
-  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getPullRequestChangedFiles">>;
+  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getPullRequestChangedFiles" | "getPullRequestFeedback">>;
   /** Reads the GitHub webhook HMAC key from the configured GitHub App secret. */
   githubWebhookSecret?: () => Promise<string>;
   /** Refuses, with CONFIG_INVALID, a repository its credential cannot reach; checked at registration. */
@@ -655,7 +655,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
               },
               verifyRepository: (repositoryUrl, webhookScope) => dependencies.githubPullRequests.verifyWebhookRepository(repositoryUrl, webhookScope),
             }),
-            process: (workflowEvent) => processGithubWorkflowEvent(dependencies, workflowEvent),
+            process: (workflowEvent, deliveryId) => processGithubWorkflowEvent(dependencies, workflowEvent, deliveryId),
             now: () => new Date().toISOString(),
           });
           if (result.status === "IN_PROGRESS") return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId, 503);
@@ -4294,56 +4294,43 @@ async function completedTurnItems(
   return [{ Put: { TableName: table, Item: item, ConditionExpression: "attribute_not_exists(pk)" } }];
 }
 
-/** A plan is qualified by the control plane from the saved artifact bytes, never by worker claims. */
-/** Reconcile every PR webhook to GitHub's current API state; event ordering is never trusted. */
-async function processGithubWorkflowEvent(dependencies: AwsBrokerDependencies, event: ReceivedGithubWebhook["event"]): Promise<void> {
-  if (event.kind === "PR_COMMENT") {
-    if (event.comment === undefined) throw new GithubWebhookRefusal("PR feedback comment is missing");
-    const linked = await findLinkedGithubWorkflowPullRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, repositoryFullName: event.fullName, number: event.number });
-    if (linked === undefined) throw new GithubWebhookRefusal("GitHub pull request is not linked to an AgentX workflow");
-    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(linked.taskId));
-    if (task?.workflow?.candidate?.digest !== linked.candidateDigest) throw new GithubWebhookRefusal("linked workflow no longer matches the pull request candidate");
-    const project = await requireProject(dependencies, task.project, task.startingRevision);
-    const repository = project.definition.repositories.find((candidate) => candidate.name === linked.repositoryId);
-    if (repository === undefined) throw new GithubWebhookRefusal("linked pull request repository is no longer registered");
-    const changedFiles = await dependencies.githubPullRequests.getPullRequestChangedFiles?.(repository.url, event.number) ?? [];
-    const proposedPlan = buildGithubFeedbackPlan(event.comment, changedFiles);
-    await recordLinkedGithubWorkflowFeedback({
-      documentClient: dependencies.documentClient, tableName: dependencies.tableName,
-      repositoryFullName: event.fullName, number: event.number, action: event.action, comment: event.comment,
-      proposedPlan,
-      loadWorkflow: async (taskId) => (await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)))?.workflow,
-      now: new Date().toISOString(),
-    });
-    return;
-  }
-  await reconcileGithubWorkflowPullRequest({
-    documentClient: dependencies.documentClient,
-    tableName: dependencies.tableName,
-    repositoryFullName: event.fullName,
-    number: event.number,
+/** Reconcile every PR webhook against GitHub; comments and delivery order never grant authority. */
+export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependencies, event: ReceivedGithubWebhook["event"], deliveryId: string): Promise<void> {
+  const getFeedback = dependencies.githubPullRequests.getPullRequestFeedback;
+  if (getFeedback === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "current GitHub feedback collection is not configured");
+  await reconcileTaskPullRequestFeedback({
+    documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+    repositoryFullName: event.fullName, number: event.number, deliveryId,
     loadTask: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
     repositoryUrl: async (projectName, revision, repositoryId) => {
       const project = await requireProject(dependencies, projectName, revision);
-      return project.definition.repositories.find((repository) => repository.name === repositoryId)?.url;
+      return project.definition.repositories.find(repository => repository.name === repositoryId)?.url;
     },
-    getCurrentState: async (repositoryUrl, number) => {
-      const current = await dependencies.githubPullRequests.getPullRequest(repositoryUrl, number);
-      return current.state === "merged" ? "MERGED" : current.state === "closed" ? "CLOSED" : "OPEN";
+    getCurrentFeedback: (url, number) => getFeedback.call(dependencies.githubPullRequests, url, number),
+    persistBundle: async (bundle, bytes, sha256) => {
+      const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(bundle.taskId));
+      if (!task) throw new GithubWebhookRefusal("linked feedback task no longer exists");
+      const objectKey = `private/${task.ownerKey}/${task.workspaceId}/feedback/${sha256}.json`;
+      try {
+        await dependencies.s3.send(new PutObjectCommand({ Bucket: dependencies.artifactBucketName, Key: objectKey,
+          Body: bytes, ContentType: "application/json", IfNoneMatch: "*" }));
+      } catch (error) {
+        if (!(error instanceof Error) || error.name !== "PreconditionFailed") throw error;
+        const existing = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: objectKey }));
+        const existingBytes = await existing.Body?.transformToString();
+        if (existingBytes === undefined || createHash("sha256").update(existingBytes, "utf8").digest("hex") !== sha256) {
+          throw agentXError("RUNTIME_UNAVAILABLE", "immutable feedback artifact failed digest validation");
+        }
+      }
+      return objectKey;
     },
     saveWorkflow: async (taskId, expectedRevision, workflow) => {
-      try {
-        await dependencies.documentClient.send(new UpdateCommand({
-          TableName: dependencies.tableName,
-          Key: taskKey(taskId),
-          UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-          ConditionExpression: "workflow.revision = :revision AND attribute_not_exists(closedAt)",
-          ExpressionAttributeValues: { ":workflow": workflow, ":now": workflow.updatedAt, ":revision": expectedRevision },
-        }));
-      } catch (error) {
-        if (isConditional(error)) throw agentXError("RUNTIME_UNAVAILABLE", "workflow changed while reconciling the GitHub pull request");
-        throw error;
-      }
+      await dependencies.documentClient.send(new UpdateCommand({
+        TableName: dependencies.tableName, Key: taskKey(taskId),
+        UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+        ConditionExpression: "workflow.revision = :revision AND attribute_not_exists(closedAt)",
+        ExpressionAttributeValues: { ":workflow": workflow, ":now": workflow.updatedAt, ":revision": expectedRevision },
+      }));
     },
     now: new Date().toISOString(),
   });
@@ -4380,7 +4367,7 @@ async function retryDueGithubWebhookEvents(dependencies: AwsBrokerDependencies):
           if (!await githubEventStillAuthorized(dependencies, event)) {
             throw new GithubWebhookRefusal("linked GitHub pull request is no longer authorized");
           }
-          await processGithubWorkflowEvent(dependencies, event);
+          await processGithubWorkflowEvent(dependencies, event, delivery.deliveryId);
         },
         now: () => new Date().toISOString(),
       });

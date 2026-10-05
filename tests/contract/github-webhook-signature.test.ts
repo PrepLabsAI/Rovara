@@ -373,3 +373,118 @@ describe("GitHub webhook signature verification", () => {
   });
 
 });
+
+describe("task-wide current PR feedback reconciliation", () => {
+  async function fixture() {
+    const module = await import("../../packages/broker/src/aws/github-webhooks.js");
+    const taskId = "550e8400-e29b-41d4-a716-446655440012";
+    const now = "2026-10-05T12:00:00.000Z";
+    const candidate = createCandidateManifest(["api", "ui"].map(repositoryId => ({ repositoryId, commitSha: "a".repeat(40), treeSha: "b".repeat(40) })));
+    let workflow: any = { ...createWorkflowSnapshot({ taskId, ownerId: "a".repeat(64), now }), candidate,
+      stage: "WAIT_FOR_MERGE", state: "WAITING", verification: { candidateDigest: candidate.digest, producer: "broker", environmentId: "fixture", recordedAt: now, results: [{ checkId: "unit", status: "PASS" }] },
+      reviews: ["CRITIC", "SECURITY"].map(role => ({ operationId: taskId, candidateDigest: candidate.digest, role, provider: "fixture", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now })),
+      pullRequests: ["api", "ui"].map((repositoryId, i) => ({ repositoryId, number: i + 1, url: `https://github.com/acme/${repositoryId}/pull/${i + 1}`, candidateDigest: candidate.digest, required: true, state: i ? "UNKNOWN" : "OPEN" })) };
+    const rows = new Map(["api", "ui"].map((repositoryId, i) => [`GITHUB_PR#acme/${repositoryId}`, { entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: `acme/${repositoryId}`, repositoryId, number: i + 1, url: `https://github.com/acme/${repositoryId}/pull/${i + 1}`, taskId, workspaceId: "workspace", candidateDigest: candidate.digest }]));
+    let currentBody = "current authoritative body";
+    let inlineIds = ["review_comment:4"];
+    let resolved = true;
+    let conflict = false;
+    let wrongScope = false;
+    const artifacts: Array<{ bundle: any; bytes: string }> = [];
+    const reads: string[] = [];
+    const input = {
+      documentClient: { send: async (command: any) => ({ Item: rows.get(command.input.Key.pk) }) }, tableName: "state", repositoryFullName: "acme/api", number: 1, deliveryId: "delivery-1",
+      loadTask: async () => ({ project: "fixture", startingRevision: 1, workflow }),
+      repositoryUrl: async (_project: string, _revision: number, repositoryId: string) => `https://github.com/acme/${repositoryId}.git`,
+      getCurrentFeedback: async (url: string, number: number) => {
+        reads.push(url);
+        const repo = number === 1 ? "api" : "ui";
+        const comment = (id: string) => ({ id, kind: id.startsWith("review_comment") ? "REVIEW_COMMENT" : id.startsWith("review:") ? "REVIEW" : "DISCUSSION", author: "reviewer", url: `https://github.com/acme/${repo}/pull/${number}#comment`, updatedAt: now, body: currentBody, ...(id.startsWith("review_comment") ? { threadId: "thread-1" } : {}) });
+        return { pullRequest: { number, url: `https://github.com/${wrongScope ? "other" : "acme"}/${repo}/pull/${number}`, state: "open", headCommit: "a".repeat(40) },
+          comments: number === 1 ? [comment("review:1"), ...inlineIds.map(comment)] : [comment("discussion:3")], threads: number === 1 ? [{ id: "thread-1", resolved, commentIds: inlineIds }] : [] };
+      },
+      persistBundle: async (bundle: any, bytes: string, sha256: string) => { artifacts.push({ bundle, bytes }); return `tasks/${taskId}/feedback/${sha256}.json`; },
+      saveWorkflow: async (_taskId: string, revision: number, next: any) => {
+        if (conflict) { conflict = false; workflow = { ...workflow, revision: workflow.revision + 1 }; currentBody = "newer edit after race"; throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" }); }
+        if (revision !== workflow.revision) throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" });
+        workflow = next;
+      }, now,
+    };
+    return { module, input, artifacts, reads, workflow: () => workflow, edit: (body: string) => { currentBody = body; }, addInline: () => { inlineIds.push("review_comment:5"); }, reopen: () => { resolved = false; }, deleteInline: () => { inlineIds = []; }, conflict: () => { conflict = true; }, wrongScope: () => { wrongScope = true; } };
+  }
+  it("persists both current PR bundles and ignores duplicate or delayed event bodies", async () => {
+    const f = await fixture();
+    expect(f.module.reconcileTaskPullRequestFeedback).toBeTypeOf("function");
+    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
+    expect(f.workflow().feedbackReview.status).toBe("COLLECTING");
+    expect(f.workflow().feedbackReview.bundleRefs.map((b: any) => b.repositoryId)).toEqual(["api", "ui"]);
+    expect(f.artifacts[0]?.bundle.comments.map((c: any) => c.id)).toEqual(["review:1"]);
+    expect(f.artifacts[1]?.bundle.comments[0].body).toBe("current authoritative body");
+    const revision = f.workflow().revision;
+    expect(await f.module.reconcileTaskPullRequestFeedback({ ...f.input, deliveryId: "delayed-old-event" })).toBe(false);
+    expect(f.workflow().revision).toBe(revision);
+    f.edit("edited current body");
+    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
+    expect(f.artifacts.at(-1)?.bundle.comments[0].body).toBe("edited current body");
+  });
+  it("includes new activity on a resolved thread, reopened threads, and observes deletions", async () => {
+    const f = await fixture(); expect(f.module.reconcileTaskPullRequestFeedback).toBeTypeOf("function");
+    await f.module.reconcileTaskPullRequestFeedback(f.input);
+    f.addInline(); await f.module.reconcileTaskPullRequestFeedback(f.input);
+    expect(f.artifacts.at(-2)?.bundle.comments.map((c: any) => c.id)).toEqual(["review:1", "review_comment:5"]);
+    const revision = f.workflow().revision;
+    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(false);
+    expect(f.workflow().revision).toBe(revision);
+    f.reopen(); await f.module.reconcileTaskPullRequestFeedback(f.input);
+    expect(f.artifacts.at(-2)?.bundle.comments.map((c: any) => c.id)).toEqual(["review:1", "review_comment:4", "review_comment:5"]);
+    f.deleteInline(); await f.module.reconcileTaskPullRequestFeedback(f.input);
+    expect(f.artifacts.at(-2)?.bundle.comments.map((c: any) => c.id)).toEqual(["review:1"]);
+  });
+  it("recollects authoritative data after a concurrent revision conflict", async () => {
+    const f = await fixture(); expect(f.module.reconcileTaskPullRequestFeedback).toBeTypeOf("function"); f.conflict();
+    await f.module.reconcileTaskPullRequestFeedback(f.input);
+    expect(f.artifacts.at(-1)?.bundle.comments[0].body).toBe("newer edit after race");
+    expect(f.reads).toHaveLength(4);
+  });
+  it("keeps delayed events idempotent after every linked PR is observed merged", async () => {
+    const f = await fixture();
+    const getCurrentFeedback = f.input.getCurrentFeedback;
+    const input = { ...f.input, getCurrentFeedback: async (url: string, number: number) => ({ ...(await getCurrentFeedback(url, number)), pullRequest: { ...(await getCurrentFeedback(url, number)).pullRequest, state: "merged" as const } }) };
+    expect(await f.module.reconcileTaskPullRequestFeedback(input)).toBe(true);
+    expect(f.workflow().stage).toBe("MERGED");
+    const revision = f.workflow().revision;
+    expect(await f.module.reconcileTaskPullRequestFeedback(input)).toBe(false);
+    expect(f.workflow().revision).toBe(revision);
+  });
+  it("routes broker feedback events into immutable bundles before saving the collection", async () => {
+    const f = await fixture();
+    await (await import("../support/slack-broker.js")).loadSlackBroker();
+    const broker = await import("../../packages/broker/src/aws/broker.js");
+    expect(broker.processGithubWorkflowEvent).toBeTypeOf("function");
+    const stored = new Map<string, string>();
+    const dependencies = {
+      tableName: "state", artifactBucketName: "artifacts",
+      documentClient: { send: async (command: any) => {
+        if (command.constructor.name === "UpdateCommand") {
+          await f.input.saveWorkflow("task", command.input.ExpressionAttributeValues[":revision"], command.input.ExpressionAttributeValues[":workflow"]); return {};
+        }
+        if (command.input.Key.pk.startsWith("DEVTASK#")) return { Item: { ...(await f.input.loadTask()), ownerKey: "owner", workspaceId: "workspace" } };
+        if (command.input.Key.pk.startsWith("PROJECT#")) return { Item: { definition: { repositories: ["api", "ui"].map(name => ({ name, url: `https://github.com/acme/${name}.git` })) } } };
+        return f.input.documentClient.send(command);
+      } },
+      s3: { send: async (command: any) => { expect(command.input.IfNoneMatch).toBe("*"); stored.set(command.input.Key, command.input.Body); return {}; } },
+      githubPullRequests: { getPullRequestFeedback: f.input.getCurrentFeedback },
+    };
+    await broker.processGithubWorkflowEvent(dependencies as never, { kind: "PR_COMMENT", action: "edited", installationId: 7, repositoryId: 9,
+      fullName: "acme/api", number: 1, comment: { id: 999, source: "review", body: "stale webhook body", truncated: false, url: "https://github.com/acme/api/pull/1#pullrequestreview-999", author: "reviewer" } }, "delivery-1");
+    expect(f.workflow().feedbackReview.bundleRefs).toHaveLength(2);
+    expect(f.workflow().feedback).toBeUndefined();
+    expect(stored.size).toBe(2);
+    expect([...stored.values()].every(bytes => !bytes.includes("stale webhook body"))).toBe(true);
+  });
+  it("refuses current API results outside the pinned task PR scope without publishing bundles", async () => {
+    const f = await fixture(); expect(f.module.reconcileTaskPullRequestFeedback).toBeTypeOf("function"); f.wrongScope();
+    await expect(f.module.reconcileTaskPullRequestFeedback(f.input)).rejects.toThrow(/scope/);
+    expect(f.artifacts).toHaveLength(0);
+  });
+});

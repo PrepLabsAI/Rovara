@@ -209,6 +209,152 @@ export class GitHubAppCredentialProvider {
     });
   }
 
+  /** Current authoritative feedback, including thread resolution, read with a repository-scoped token. */
+  async getPullRequestFeedback(repositoryUrl: string, number: number): Promise<GitHubPullRequestFeedback> {
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl));
+    const token = await this.createInstallationToken(repository, { contents: "read", pull_requests: "read", issues: "read" });
+    const prUrl = pullRequestUrl(repository, number);
+    const before = await this.getPullRequestWithToken(repository, number, token);
+    if (before.number !== number) throw feedbackReadError("PR scope mismatch");
+    const root = prUrl.replace(/\/pulls\/\d+$/, "");
+    const comments: GitHubFeedbackComment[] = [];
+    for (const [path, kind] of [[`${prUrl}/reviews`, "REVIEW"], [`${prUrl}/comments`, "REVIEW_COMMENT"], [`${root}/issues/${number}/comments`, "DISCUSSION"]] as const) {
+      for (const value of await this.feedbackPages(path, token)) {
+        const record = feedbackRecord(value);
+        if (kind === "REVIEW" && record.state === "PENDING") continue;
+        const parsed = parseFeedbackComment(record, repository, number, kind);
+        if (kind !== "REVIEW" || parsed.body.trim()) comments.push(parsed);
+      }
+    }
+    // REST reviews expose submitted_at rather than the current edit time. Bind their bytes to GraphQL updatedAt.
+    let reviewCursor: string | null = null;
+    const reviewCursors = new Set<string>();
+    const currentReviewIds = new Set<string>();
+    do {
+      const data = await this.feedbackGraphql(token, `query($owner:String!,$name:String!,$number:Int!,$cursor:String) {
+        repository(owner:$owner,name:$name) { nameWithOwner pullRequest(number:$number) { number headRefOid
+          reviews(first:100,after:$cursor) { nodes { fullDatabaseId updatedAt url body } pageInfo { hasNextPage endCursor } }
+        } }
+      }`, { owner: repository.owner, name: repository.name, number, cursor: reviewCursor });
+      const repo = feedbackRecord(data.repository); const pr = feedbackRecord(repo.pullRequest);
+      if (repo.nameWithOwner !== `${repository.owner}/${repository.name}` || pr.number !== number || pr.headRefOid !== before.headCommit) throw feedbackReadError("review scope or head changed");
+      const connection = feedbackConnection(pr.reviews);
+      for (const value of connection.nodes) {
+        const review = feedbackRecord(value);
+        const id = `review:${review.fullDatabaseId}`;
+        const comment = comments.find(c => c.id === id && c.kind === "REVIEW");
+        if (!comment) continue; // Blank bodies and unpublished draft reviews were excluded by REST.
+        if (currentReviewIds.has(id) || comment.url !== review.url || comment.body !== review.body
+          || typeof review.updatedAt !== "string" || !Number.isFinite(Date.parse(review.updatedAt))) throw feedbackReadError("review changed during collection");
+        currentReviewIds.add(id); comment.updatedAt = new Date(review.updatedAt).toISOString();
+      }
+      reviewCursor = nextFeedbackCursor(connection, reviewCursors);
+    } while (reviewCursor !== null);
+    if (comments.some(c => c.kind === "REVIEW" && !currentReviewIds.has(c.id))) throw feedbackReadError("review set changed during collection");
+    const threads: GitHubFeedbackThread[] = [];
+    let cursor: string | null = null;
+    const seenCursors = new Set<string>();
+    do {
+      const data = await this.feedbackGraphql(token, `query($owner:String!,$name:String!,$number:Int!,$cursor:String) {
+        repository(owner:$owner,name:$name) { nameWithOwner pullRequest(number:$number) { number headRefOid
+          reviewThreads(first:100,after:$cursor) { nodes { ${FEEDBACK_THREAD_FIELDS} } pageInfo { hasNextPage endCursor } }
+        } }
+      }`, { owner: repository.owner, name: repository.name, number, cursor });
+      const repo = feedbackRecord(data.repository);
+      const pr = feedbackRecord(repo.pullRequest);
+      if (repo.nameWithOwner !== `${repository.owner}/${repository.name}` || pr.number !== number || pr.headRefOid !== before.headCommit) throw feedbackReadError("PR scope or head changed");
+      const connection = feedbackConnection(pr.reviewThreads);
+      for (const value of connection.nodes) {
+        const thread = feedbackRecord(value);
+        validateFeedbackThread(thread, repository, number);
+        const ids: string[] = [];
+        let threadComments = feedbackConnection(thread.comments);
+        const commentCursors = new Set<string>();
+        for (;;) {
+          for (const comment of threadComments.nodes) {
+            const id = feedbackRecord(comment).fullDatabaseId;
+            if ((typeof id !== "string" && typeof id !== "number") || !/^[1-9][0-9]*$/.test(String(id))
+              || (typeof id === "number" && !Number.isSafeInteger(id))) throw feedbackReadError("invalid thread comment ID");
+            ids.push(`review_comment:${id}`);
+          }
+          const next = nextFeedbackCursor(threadComments, commentCursors);
+          if (next === null) break;
+          const more = await this.feedbackGraphql(token, `query($threadId:ID!,$cursor:String) { node(id:$threadId) { ... on PullRequestReviewThread {
+            id isResolved repository { nameWithOwner } pullRequest { number }
+            comments(first:100,after:$cursor) { nodes { fullDatabaseId } pageInfo { hasNextPage endCursor } }
+          } } }`, { threadId: thread.id, cursor: next });
+          const node = feedbackRecord(more.node);
+          validateFeedbackThread(node, repository, number);
+          if (node.id !== thread.id || node.isResolved !== thread.isResolved) throw feedbackReadError("thread state changed during pagination");
+          threadComments = feedbackConnection(node.comments);
+        }
+        threads.push({ id: thread.id as string, resolved: thread.isResolved as boolean, commentIds: ids });
+      }
+      cursor = nextFeedbackCursor(connection, seenCursors);
+    } while (cursor !== null);
+    const assignments = new Map<string, string>();
+    const threadIds = new Set<string>();
+    for (const thread of threads) {
+      if (threadIds.has(thread.id)) throw feedbackReadError("duplicate thread in current state");
+      threadIds.add(thread.id);
+      for (const id of thread.commentIds) {
+        if (assignments.has(id)) throw feedbackReadError("duplicate thread comment in current state");
+        assignments.set(id, thread.id);
+      }
+    }
+    const commentIds = new Set<string>();
+    for (const comment of comments) {
+      if (commentIds.has(comment.id)) throw feedbackReadError("duplicate comment in current state");
+      commentIds.add(comment.id);
+      if (comment.kind === "REVIEW_COMMENT") {
+        const threadId = assignments.get(comment.id);
+        if (!threadId) throw feedbackReadError("inline comment thread state is incomplete");
+        comment.threadId = threadId;
+      }
+    }
+    if ([...assignments.keys()].some(id => !commentIds.has(id))) throw feedbackReadError("thread and REST comment sets changed during collection");
+    const after = await this.getPullRequestWithToken(repository, number, token);
+    if (after.number !== number || after.headCommit !== before.headCommit || after.state !== before.state) throw feedbackReadError("PR head or state changed during collection");
+    return { pullRequest: after, comments, threads };
+  }
+
+  private async feedbackPages(path: string, token: string): Promise<unknown[]> {
+    const values: unknown[] = [];
+    let next: string | undefined = `${path}?per_page=100&page=1`;
+    const seen = new Set<string>();
+    while (next) {
+      if (seen.has(next)) throw feedbackReadError("pagination did not advance");
+      seen.add(next);
+      const response = await this.fetchImplementation(next, { headers: githubHeaders(token), redirect: "error", signal: AbortSignal.timeout(8_000) });
+      if (!response.ok) throw feedbackReadError(`comment lookup HTTP ${response.status}`);
+      const page: unknown = await response.json();
+      if (!Array.isArray(page)) throw feedbackReadError("invalid comment page");
+      values.push(...page);
+      const link = response.headers.get("link");
+      const linked = link?.split(",").map(part => /^\s*<([^>]+)>;\s*rel="next"\s*$/.exec(part)).find(match => match)?.[1];
+      if (linked) {
+        const url = new URL(linked);
+        if (`${url.origin}${url.pathname}` !== path || url.username || url.password || url.hash
+          || [...url.searchParams.keys()].some(key => key !== "per_page" && key !== "page")
+          || url.searchParams.get("per_page") !== "100" || !/^[1-9][0-9]*$/.test(url.searchParams.get("page") ?? "")) throw feedbackReadError("pagination scope mismatch");
+        next = url.href;
+      } else if (!link && page.length === 100) {
+        const url: URL = new URL(next); url.searchParams.set("page", String(Number(url.searchParams.get("page")) + 1)); next = url.href;
+      } else next = undefined;
+    }
+    return values;
+  }
+
+  private async feedbackGraphql(token: string, query: string, variables: Record<string, unknown>): Promise<Record<string, unknown>> {
+    const response = await this.fetchImplementation("https://api.github.com/graphql", {
+      method: "POST", headers: githubHeaders(token), body: JSON.stringify({ query, variables }), redirect: "error", signal: AbortSignal.timeout(8_000),
+    });
+    if (!response.ok) throw feedbackReadError(`thread lookup HTTP ${response.status}`);
+    const body = feedbackRecord(await response.json());
+    if (body.errors !== undefined) throw feedbackReadError("thread lookup incomplete");
+    return feedbackRecord(body.data);
+  }
+
   async updatePullRequest(
     repositoryUrl: string,
     number: number,
@@ -392,6 +538,56 @@ export class GitHubAppCredentialProvider {
   }
 }
 
+export interface GitHubFeedbackComment {
+  id: string; threadId?: string; kind: "REVIEW" | "REVIEW_COMMENT" | "DISCUSSION";
+  url: string; author: string; updatedAt: string; body: string; path?: string; line?: number;
+}
+export interface GitHubFeedbackThread { id: string; resolved: boolean; commentIds: string[] }
+export interface GitHubPullRequestFeedback {
+  pullRequest: GitHubPullRequestDetails; comments: GitHubFeedbackComment[]; threads: GitHubFeedbackThread[];
+}
+const FEEDBACK_THREAD_FIELDS = `id isResolved repository { nameWithOwner } pullRequest { number }
+  comments(first:100) { nodes { fullDatabaseId } pageInfo { hasNextPage endCursor } }`;
+function feedbackReadError(reason: string): AgentXError { return agentXError("RUNTIME_UNAVAILABLE", `GitHub feedback read refused: ${reason}`); }
+function feedbackRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw feedbackReadError("invalid record");
+  return value as Record<string, unknown>;
+}
+function feedbackConnection(value: unknown): { nodes: unknown[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } {
+  const record = feedbackRecord(value); const info = feedbackRecord(record.pageInfo);
+  if (!Array.isArray(record.nodes) || typeof info.hasNextPage !== "boolean" || (info.endCursor !== null && typeof info.endCursor !== "string")) throw feedbackReadError("invalid pagination state");
+  return { nodes: record.nodes, pageInfo: { hasNextPage: info.hasNextPage, endCursor: info.endCursor as string | null } };
+}
+function nextFeedbackCursor(connection: ReturnType<typeof feedbackConnection>, seen: Set<string>): string | null {
+  if (!connection.pageInfo.hasNextPage) return null;
+  const cursor = connection.pageInfo.endCursor;
+  if (!cursor || seen.has(cursor)) throw feedbackReadError("pagination did not advance");
+  seen.add(cursor); return cursor;
+}
+function validateFeedbackThread(thread: Record<string, unknown>, repo: InstalledRepository, number: number): void {
+  if (typeof thread.id !== "string" || !thread.id || typeof thread.isResolved !== "boolean"
+    || feedbackRecord(thread.repository).nameWithOwner !== `${repo.owner}/${repo.name}`
+    || feedbackRecord(thread.pullRequest).number !== number) throw feedbackReadError("thread scope mismatch");
+}
+function parseFeedbackComment(record: Record<string, unknown>, repository: InstalledRepository, number: number, kind: GitHubFeedbackComment["kind"]): GitHubFeedbackComment {
+  const prefix = kind === "REVIEW" ? "review" : kind === "REVIEW_COMMENT" ? "review_comment" : "discussion";
+  const anchor = kind === "REVIEW" ? "pullrequestreview-" : kind === "REVIEW_COMMENT" ? "discussion_r" : "issuecomment-";
+  if (!Number.isSafeInteger(record.id) || (record.id as number) < 1) throw feedbackReadError("invalid comment ID");
+  const expected = `https://github.com/${repository.owner}/${repository.name}/pull/${number}#${anchor}${record.id}`;
+  const api = `https://api.github.com/repos/${repository.owner}/${repository.name}`;
+  const user = feedbackRecord(record.user);
+  const timestamp = record.updated_at ?? record.submitted_at;
+  if (record.html_url !== expected || (kind === "REVIEW_COMMENT" && record.pull_request_url !== `${api}/pulls/${number}`)
+    || (kind === "DISCUSSION" && record.issue_url !== `${api}/issues/${number}`)) throw feedbackReadError("comment scope mismatch: non-canonical URL");
+  if ((record.body !== null && typeof record.body !== "string") || typeof user.login !== "string" || !user.login || user.login.length > 100
+    || typeof timestamp !== "string" || !/^\d{4}-\d\d-\d\dT/.test(timestamp) || !Number.isFinite(Date.parse(timestamp))) throw feedbackReadError("invalid comment content");
+  if (record.path !== undefined && (typeof record.path !== "string" || record.path.length > 1024)) throw feedbackReadError("invalid comment path");
+  if (record.line !== undefined && record.line !== null && (!Number.isSafeInteger(record.line) || (record.line as number) < 1)) throw feedbackReadError("invalid comment line");
+  return { id: `${prefix}:${record.id}`, kind, url: expected, author: user.login, updatedAt: new Date(timestamp).toISOString(), body: (record.body as string | null) ?? "",
+    ...(kind === "REVIEW_COMMENT" && typeof record.path === "string" ? { path: record.path } : {}),
+    ...(kind === "REVIEW_COMMENT" && typeof record.line === "number" ? { line: record.line } : {}) };
+}
+
 function pullRequestUrl(repository: InstalledRepository, number: number): string {
   if (!Number.isInteger(number) || number < 1) throw agentXError("CONFIG_INVALID", "pull request number is invalid");
   return `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/pulls/${number}`;
@@ -530,7 +726,7 @@ export function webhookSecretFromSecret(secret: string): string {
   throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App secret does not contain a valid webhook secret");
 }
 
-function parseGitHubRepository(repositoryUrl: string): { owner: string; name: string } {
+export function parseGitHubRepository(repositoryUrl: string): { owner: string; name: string } {
   let url: URL;
   try {
     url = new URL(repositoryUrl);

@@ -173,7 +173,7 @@ export const WorkflowFeedbackDecisionSchema = z.object({
   }
 });
 export type WorkflowFeedbackDecision = z.infer<typeof WorkflowFeedbackDecisionSchema>;
-const WorkflowFeedbackReviewSchema = z.object({
+const ReviewedWorkflowFeedbackSchema = z.object({
   bundleRefs: z.array(WorkflowFeedbackBundleRefSchema).min(1).max(32), reviewRef: WorkflowFeedbackReviewRefSchema,
   status: z.enum(["PENDING", "APPROVED", "CHANGES_REQUESTED", "DISMISSED"]),
 }).strict().superRefine((review, context) => {
@@ -193,6 +193,26 @@ const WorkflowFeedbackReviewSchema = z.object({
     }
   }
 });
+
+export const WorkflowFeedbackThreadObservationSchema = z.object({
+  repositoryId: z.string().min(1).max(200), number: z.number().int().positive(),
+  threadId: FeedbackIdSchema, resolved: z.boolean(),
+  comments: z.array(z.object({ id: FeedbackIdSchema, updatedAt: z.string().datetime(), bodyDigest: DigestSchema }).strict()).max(128),
+  eligibleCommentIds: z.array(FeedbackIdSchema).max(128),
+}).strict();
+export type WorkflowFeedbackThreadObservation = z.infer<typeof WorkflowFeedbackThreadObservationSchema>;
+const FeedbackThreadObservationsSchema = z.array(WorkflowFeedbackThreadObservationSchema).max(4096);
+const WorkflowFeedbackReviewSchema = z.union([
+  z.object({ status: z.literal("COLLECTING"), bundleRefs: z.array(WorkflowFeedbackBundleRefSchema).min(1).max(32),
+    threadObservations: FeedbackThreadObservationsSchema,
+    reviewRef: z.undefined().optional(),
+  }).strict().superRefine((review, ctx) => {
+    if (new Set(review.bundleRefs.map(b => `${b.repositoryId}:${b.number}`)).size !== review.bundleRefs.length) {
+      ctx.addIssue({ code: "custom", message: "collected bundles must name unique PRs" });
+    }
+  }),
+  ReviewedWorkflowFeedbackSchema.safeExtend({ threadObservations: FeedbackThreadObservationsSchema.optional() }),
+]);
 
 /** Creates AgentX's canonical candidate identity; callers cannot supply or override its digest. */
 export function createCandidateManifest(input: readonly CandidateRepository[]): CandidateManifest {
@@ -298,15 +318,19 @@ export const WorkflowSnapshotSchema = z.object({
   pullRequests: z.array(WorkflowPullRequestSchema).max(32).optional(),
   feedback: WorkflowFeedbackSchema.optional(),
   feedbackReview: WorkflowFeedbackReviewSchema.optional(),
+  feedbackReviewHistory: z.array(WorkflowFeedbackReviewRefSchema).max(100).optional(),
   feedbackDecisions: z.array(WorkflowFeedbackDecisionSchema).max(100).optional(),
   feedbackNotes: z.array(WorkflowFeedbackNoteSchema).max(100).optional(),
 }).superRefine((workflow, context) => {
-  const feedbackMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackNotes: workflow.feedbackNotes };
+  const feedbackMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory };
   if (Buffer.byteLength(JSON.stringify(feedbackMetadata), "utf8") > 262_144) {
     context.addIssue({ code: "custom", message: "feedback metadata exceeds the task snapshot storage budget" });
   }
-  if (workflow.feedbackReview?.reviewRef.taskId !== undefined && workflow.feedbackReview.reviewRef.taskId !== workflow.taskId) {
+  if (workflow.feedbackReview?.reviewRef?.taskId !== undefined && workflow.feedbackReview.reviewRef.taskId !== workflow.taskId) {
     context.addIssue({ code: "custom", message: "feedback review must belong to this task" });
+  }
+  if (workflow.feedbackReview?.bundleRefs.some(b => b.taskId !== workflow.taskId)) {
+    context.addIssue({ code: "custom", message: "collected bundles must belong to this task" });
   }
   if (workflow.path === "FULL" && workflow.reviewPhase === undefined) {
     context.addIssue({ code: "custom", path: ["reviewPhase"], message: "full workflow must name the current approval phase" });
@@ -591,10 +615,33 @@ export function decideWorkflowFeedback(currentInput: unknown, input: {
   });
 }
 
+/** Saves recoverable review input without inventing an independent report or code authority. */
+export function collectWorkflowFeedbackBundles(currentInput: unknown, input: {
+  bundleRefs: unknown; threadObservations: unknown;
+}, now: string): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  const collected = WorkflowFeedbackReviewSchema.safeParse({ ...input, status: "COLLECTING" });
+  if (!collected.success || collected.data.status !== "COLLECTING"
+    || current.stage !== "WAIT_FOR_MERGE" || current.state !== "WAITING"
+    || current.pullRequests?.some(pr => (pr.state === "OPEN" || pr.state === "UNKNOWN")
+      && !collected.data.bundleRefs.some(b => b.repositoryId === pr.repositoryId && b.number === pr.number))
+    || collected.data.bundleRefs.some(b => b.taskId !== current.taskId || b.candidateDigest !== current.candidate?.digest
+      || !current.candidate.repositories.some(r => r.repositoryId === b.repositoryId && r.commitSha === b.headSha)
+      || !current.pullRequests?.some(pr => pr.repositoryId === b.repositoryId && pr.number === b.number
+        && pr.candidateDigest === b.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN")))) {
+    throw new WorkflowTransitionError("collected feedback does not match the current linked PR set");
+  }
+  const previousReport = current.feedbackReview?.reviewRef;
+  const history = [...(current.feedbackReviewHistory ?? [])];
+  if (previousReport && !history.some(r => r.sha256 === previousReport.sha256)) history.push(previousReport);
+  return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, feedback: undefined,
+    feedbackReview: collected.data, feedbackReviewHistory: history, updatedAt: now });
+}
+
 /** Registers immutable reconciled inputs and an independently produced report; never starts code. */
 export function requestWorkflowFeedbackReview(currentInput: unknown, input: { bundleRefs: unknown; reviewRef: unknown }, now: string): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
-  const review = WorkflowFeedbackReviewSchema.safeParse({ ...input, status: "PENDING" });
+  const review = ReviewedWorkflowFeedbackSchema.safeParse({ ...input, status: "PENDING" });
   if (!review.success || current.stage !== "WAIT_FOR_MERGE" || current.state !== "WAITING"
     || review.data.reviewRef.taskId !== current.taskId
     || (review.data.reviewRef.status === "COMPLETE" && current.pullRequests?.some(pr =>
@@ -607,7 +654,7 @@ export function requestWorkflowFeedbackReview(currentInput: unknown, input: { bu
         && pr.candidateDigest === bundle.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN")))) {
     throw new WorkflowTransitionError("feedback review does not match current linked PR candidates or comment set");
   }
-  return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, feedbackReview: review.data, updatedAt: now });
+  return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, feedbackReview: { ...review.data, threadObservations: current.feedbackReview?.threadObservations }, updatedAt: now });
 }
 
 /** Requires fresh bindings supplied by the reconciler; dispatch must independently reconcile again. */
