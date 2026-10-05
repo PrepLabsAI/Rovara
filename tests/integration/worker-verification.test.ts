@@ -226,7 +226,7 @@ function feedbackReviewerAdapter(response: string, beforePrompt?: () => Promise<
   };
 }
 
-describe("independent PR feedback critic", () => {
+describe("AI-generated PR feedback advisory", () => {
   it("reviews every supplied bundle comment on the exact candidate in a read-only session and persists a digested report", async () => {
     const fixture = await feedbackReviewFixture();
     const finding = {
@@ -244,13 +244,17 @@ describe("independent PR feedback critic", () => {
       create: async (input) => { sessionMode = input.workflowMode; return base.create(input); },
     };
     const review = await runWorkflowFeedbackReview({
-      operationId: randomUUID(), taskId: fixture.taskId, taskRequirements: "Return a safe result for empty input.",
+      operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7,
+      taskRequirements: "Return a safe result for empty input.",
       rootPath: fixture.rootPath, model: FAUX_MODEL, candidate: fixture.candidate, repositories: fixture.repositories,
       bundles: [{ ref: fixture.bundleRef, bytes: fixture.bytes }], piAdapter: adapter,
       artifactSink: async (artifact) => { capturedArtifacts.push(artifact); },
     });
     expect(sessionMode).toBe("REVIEW");
     expect(review.report.status).toBe("COMPLETE");
+    expect(review.report).toMatchObject({ workflowRevision: 7, operationMode: "FEEDBACK_REVIEW", qualification: "AI_GENERATED_ADVISORY" });
+    expect(review.report).not.toHaveProperty("reviewerId");
+    expect(review.report).not.toHaveProperty("readOnly");
     expect(review.report.findings).toHaveLength(1);
     expect(review.report.findings[0]?.commentIds).toEqual(["review-comment-1"]);
     expect(review.report.bundleDigests).toEqual([fixture.bundleRef.sha256]);

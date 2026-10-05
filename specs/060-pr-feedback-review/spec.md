@@ -36,7 +36,10 @@ each PR and its exact head visible. Resolved GitHub review threads are excluded 
 new comments; ordinary PR discussion comments remain eligible until an owner records a disposition.
 A separate read-only reviewer compares each comment with the code and task requirements. It may
 recommend that an item is stale, already addressed, mistaken, out of scope, or actionable, but it
-must explain its reasoning and show uncertainty. It never hides a comment or changes code.
+must explain its reasoning and show uncertainty. This is an AI-generated advisory from a separate
+operation, not independent or authoritative evidence. AgentX validates its task, operation, revision,
+candidate, and input bindings; only an explicit owner approval can authorize code changes. It never
+hides a comment or changes code.
 
 **Independent Test:** Deliver several duplicate, conflicting, stale, actionable, and incorrect PR
 comments across two linked PRs. Verify that one task review contains every comment, groups duplicates
@@ -135,8 +138,12 @@ review content in Slack notifications or operational logs.
   exact head SHA, candidate digest, comment-set digest, producer/version, and timestamp.
 - **FR-004:** A separate critic review MUST inspect the exact candidate read-only, with no workspace
   write, shell mutation, GitHub write, or workflow-state authority. It MUST run as a separate
-  operation from code generation and MUST NOT review its own execution output. Reviewer identity,
-  model or implementation version, operation ID, input digests, and output digest MUST be recorded.
+  operation from code generation and MUST NOT review its own execution output. Its findings are an
+  AI-generated advisory, not independent or authoritative evidence; no reviewer identity or
+  self-reported read-only flag may establish trust. The broker MUST bind the operation ID, mode,
+  task, workflow revision, input digests, and output digest to authoritative operation and workflow
+  state. Model/provider details MAY be retained as worker-reported diagnostics. Only explicit owner
+  approval may authorize code changes.
 - **FR-005:** The review MUST account for every collected comment and keep **priority** separate
   from **AgentX's assessment**. Priority MUST distinguish `MUST_FIX`, `SHOULD_FIX`, and `OPTIONAL`.
   Assessment MUST distinguish `ACTIONABLE`, `ALREADY_ADDRESSED`, `STALE`, `TECHNICALLY_INCORRECT`,

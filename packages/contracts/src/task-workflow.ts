@@ -135,10 +135,12 @@ const WorkflowFeedbackCandidateBindingSchema = z.object({
 }).strict();
 const WorkflowFeedbackReviewMetadataSchema = z.object({
   schemaVersion: z.literal(1), taskId: z.string().uuid(),
+  workflowRevision: z.number().int().positive(), operationMode: z.literal("FEEDBACK_REVIEW"),
+  qualification: z.literal("AI_GENERATED_ADVISORY"),
   proposalDigest: DigestSchema, taskRequirementsDigest: DigestSchema,
   candidateBindings: z.array(WorkflowFeedbackCandidateBindingSchema).min(1).max(32),
-  operationId: z.string().uuid(), reviewerId: z.string().trim().min(1).max(120),
-  provider: z.string().trim().min(1).max(120), version: z.string().trim().min(1).max(120), readOnly: z.literal(true),
+  operationId: z.string().uuid(),
+  provider: z.string().trim().min(1).max(120), version: z.string().trim().min(1).max(120),
   status: z.enum(["COMPLETE", "BLOCKED", "FAILED", "INTERRUPTED", "UNKNOWN"]),
   blockReason: z.string().trim().min(1).max(1000).optional(),
   bundleDigests: z.array(DigestSchema).min(1).max(32).refine(ids => new Set(ids).size === ids.length),
@@ -657,7 +659,7 @@ export function collectWorkflowFeedbackBundles(currentInput: unknown, input: {
     feedbackReview: collected.data, feedbackReviewHistory: history, updatedAt: now });
 }
 
-/** Registers immutable reconciled inputs and an independently produced report; never starts code. */
+/** Registers immutable reconciled inputs and a separate AI advisory report; never starts code. */
 export function requestWorkflowFeedbackReview(currentInput: unknown, input: { bundleRefs: unknown; reviewRef: unknown }, now: string): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
   const review = ReviewedWorkflowFeedbackSchema.safeParse({ bundleRefs: input.bundleRefs, reviewRef: input.reviewRef, status: "PENDING" });

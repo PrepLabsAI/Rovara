@@ -3,10 +3,11 @@ import { describe, expect, it } from "vitest";
 import { createCandidateManifest, requestWorkflowFeedback } from "../../packages/contracts/src/task-workflow.js";
 import { collectWorkflowFeedbackBundles, createWorkflowSnapshot, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema } from "@agentx/contracts";
 import { developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
+import { startTaskWorkflowFeedbackReviewFromWebhook } from "../../packages/broker/src/aws/developer-tasks.js";
 import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 
 describe("native developer task workflow", () => {
-  it("limits feedback bundle reads to the active critic operation and stores its validated report", async () => {
+  it("launches one feedback critic from current collection, limits its reads, and stores only an advisory report", async () => {
     const harness = await createDeveloperTaskBroker();
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
       requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true,
@@ -45,17 +46,19 @@ describe("native developer task workflow", () => {
     const { sourceDeliveryIds: _deliveryIds, comments, ...metadata } = bundle;
     const bundleRef = { ...metadata, sha256: bundleDigest, objectKey: bundleKey, comments };
     workflow = collectWorkflowFeedbackBundles(workflow, { bundleRefs: [bundleRef], threadObservations: [] }, now);
-    const runningWorkflow = { ...workflow, revision: workflow.revision + 1, state: "RUNNING" as const, updatedAt: now };
     harness.db.set({ ...task, workflow, updatedAt: now });
-    const binding = { taskId, workflowRevision: runningWorkflow.revision, candidateDigest: candidate.digest };
-    const accepted = await harness.actions.acceptTask(developerTaskIdentity(task as never), workspaceId,
-      { requestId: randomUUID(), conversationId: task.conversationId, prompt: "Read-only linked PR feedback review." }, operation => [{ Update: {
-        TableName: "state", Key: { pk: `DEVTASK#${taskId}`, sk: "META" },
-        UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-        ConditionExpression: "workflow.revision = :revision AND workflow.feedbackReview.#status = :collecting",
-        ExpressionAttributeNames: { "#status": "status" },
-        ExpressionAttributeValues: { ":workflow": runningWorkflow, ":now": now, ":revision": workflow.revision, ":collecting": "COLLECTING" },
-      } }], { workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReview: binding });
+    const routeDeps = { documentClient: harness.db, tableName: "state", actions: harness.actions,
+      checkAccess: async () => ({ revision: 1, policy: {} as never, access: "granted" as const, channelIds: [] }),
+      projectChannelIds: async () => [], now: () => Date.parse(now) };
+    expect(await startTaskWorkflowFeedbackReviewFromWebhook(routeDeps as never, taskId)).toBe(true);
+    // A duplicate delivery or stale callback sees RUNNING and cannot enqueue a second critic.
+    expect(await startTaskWorkflowFeedbackReviewFromWebhook(routeDeps as never, taskId)).toBe(false);
+    const accepted = { operation: harness.db.find(item => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION")
+      .find(item => item.workflowMode === "FEEDBACK_REVIEW")! };
+    expect(accepted.operation).toBeDefined();
+    expect(harness.db.find(item => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION")
+      .filter(item => item.workflowMode === "FEEDBACK_REVIEW")).toHaveLength(1);
+    const binding = accepted.operation.workflowFeedbackReview as { taskId: string; workflowRevision: number; candidateDigest: string };
     const readBundles = (input: Record<string, unknown>) => harness.callback(workspaceId, accepted.operation.id, "feedback-bundles", input);
     await expect(readBundles({ ...binding, taskId: randomUUID() })).rejects.toThrow();
     await expect(readBundles({ ...binding, workflowRevision: binding.workflowRevision + 1 })).rejects.toThrow();
@@ -72,9 +75,10 @@ describe("native developer task workflow", () => {
     const requirementsDigest = createHash("sha256").update(material.taskRequirements).digest("hex");
     const candidateBinding = { repositoryId: "demo", number: 7, headSha: "a".repeat(40), candidateDigest: candidate.digest, commentSetDigest, bundleDigest };
     const findingRefs: never[] = [];
-    const output = JSON.stringify({ schemaVersion: 1, taskId, proposalDigest: "c".repeat(64), taskRequirementsDigest: requirementsDigest,
-      candidateBindings: [candidateBinding], operationId: accepted.operation.id, reviewerId: "pi-read-only-critic", provider: "test", version: "1",
-      readOnly: true, status: "COMPLETE", bundleDigests: [bundleDigest], findingRefs, findings: [], recordedAt: now });
+    const output = JSON.stringify({ schemaVersion: 1, taskId, workflowRevision: binding.workflowRevision, operationMode: "FEEDBACK_REVIEW",
+      qualification: "AI_GENERATED_ADVISORY", proposalDigest: "c".repeat(64), taskRequirementsDigest: requirementsDigest,
+      candidateBindings: [candidateBinding], operationId: accepted.operation.id, provider: "test", version: "1",
+      status: "COMPLETE", bundleDigests: [bundleDigest], findingRefs, findings: [], recordedAt: now });
     const outputDigest = createHash("sha256").update(output).digest("hex");
     const artifactName = `workflow-feedback-review-${outputDigest}.json`;
     await harness.artifact(workspaceId, accepted.operation.id, artifactName, output);
@@ -83,6 +87,7 @@ describe("native developer task workflow", () => {
     } } });
     const saved = harness.db.get(`DEVTASK#${taskId}`, "META")?.workflow as Record<string, unknown>;
     expect(saved).toMatchObject({ state: "WAITING", feedbackReview: { status: "PENDING", reviewRef: { operationId: accepted.operation.id, sha256: outputDigest } } });
+    expect(saved).not.toMatchObject({ feedbackReview: { decision: "APPROVE" } });
     await expect(readBundles(binding)).rejects.toThrow();
 
     const ordinary = await harness.actions.acceptTask(developerTaskIdentity(task as never), workspaceId,

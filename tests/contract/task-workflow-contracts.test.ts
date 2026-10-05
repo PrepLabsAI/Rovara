@@ -35,6 +35,17 @@ const plan = {
 };
 
 describe("native task workflow contracts", () => {
+  it("rejects worker-authored claims that its feedback review is independent or read-only evidence", () => {
+    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
+    const report = { schemaVersion: 1, taskId, workflowRevision: 4, operationMode: "FEEDBACK_REVIEW", qualification: "AI_GENERATED_ADVISORY",
+      proposalDigest: "c".repeat(64), taskRequirementsDigest: "d".repeat(64), candidateBindings: [{ repositoryId: "demo", number: 1,
+        headSha: "a".repeat(40), candidateDigest: candidate.digest, commentSetDigest: "e".repeat(64), bundleDigest: "f".repeat(64) }],
+      operationId: "11111111-1111-4111-8111-111111111111", provider: "scripted", version: "1", status: "COMPLETE",
+      bundleDigests: ["f".repeat(64)], findingRefs: [], findings: [], recordedAt: "2026-10-05T12:00:00.000Z" };
+    expect(WorkflowFeedbackReviewReportSchema.safeParse({ ...report, reviewerId: "independent-reviewer", readOnly: true }).success).toBe(false);
+    expect(WorkflowFeedbackReviewReportSchema.safeParse({ ...report, qualification: "INDEPENDENT_EVIDENCE" }).success).toBe(false);
+    expect(WorkflowFeedbackReviewReportSchema.safeParse({ ...report, operationMode: "IMPLEMENT" }).success).toBe(false);
+  });
   it("computes a stable candidate digest from sorted repository identities and exact commits", () => {
     const left = { repositoryId: "repo-b", commitSha: "b".repeat(40), treeSha: "2".repeat(40) };
     const right = { repositoryId: "repo-a", commitSha: "a".repeat(40), treeSha: "1".repeat(40) };
@@ -341,12 +352,13 @@ describe("immutable multi-PR feedback reviews", () => {
     const findingRefs = bundleRefs.map((bundle, index) => ({ id: `finding-${index}`, bundleDigest: bundle.sha256,
       commentIds: bundle.comments.map(c => c.id), priority: "MUST_FIX" as const,
       assessment: "ACTIONABLE" as const, recommended: true }));
-    const reviewRef = { schemaVersion: 1 as const, taskId, sha256: hash("b"), objectKey: `tasks/${taskId}/reviews/${hash("b")}.json`,
+    const reviewRef = { schemaVersion: 1 as const, taskId, workflowRevision: 4, operationMode: "FEEDBACK_REVIEW" as const,
+      qualification: "AI_GENERATED_ADVISORY" as const, sha256: hash("b"), objectKey: `tasks/${taskId}/reviews/${hash("b")}.json`,
       proposalDigest: hash("c"), taskRequirementsDigest: hash("a"),
       candidateBindings: bundleRefs.map(b => ({ repositoryId: b.repositoryId, number: b.number, headSha: b.headSha,
         candidateDigest: b.candidateDigest, commentSetDigest: b.commentSetDigest, bundleDigest: b.sha256 })),
-      operationId: uuid, reviewerId: "separate-critic", provider: "scripted", version: "1",
-      readOnly: true as const, status: "COMPLETE" as const, bundleDigests: bundleRefs.map(b => b.sha256), findingRefs, recordedAt: now };
+      operationId: uuid, provider: "scripted", version: "1",
+      status: "COMPLETE" as const, bundleDigests: bundleRefs.map(b => b.sha256), findingRefs, recordedAt: now };
     const current = WorkflowSnapshotSchema.parse({ ...createWorkflowSnapshot({ taskId, ownerId, now }), candidate,
       stage: "WAIT_FOR_MERGE", state: "WAITING",
       verification: { candidateDigest: candidate.digest, producer: "broker", environmentId: "test", recordedAt: now, results: [{ checkId: "unit", status: "PASS" }] },
@@ -440,8 +452,10 @@ describe("immutable multi-PR feedback reviews", () => {
   it("refuses approval when a linked PR becomes open after complete review registration", () => {
     const { current, bundleRefs, reviewRef, request } = fixture();
     const closed = { ...current, pullRequests: current.pullRequests!.map(pr => pr.repositoryId === "ui" ? { ...pr, state: "CLOSED" } : pr) };
+    const onlyApiReview = { ...reviewRef, bundleDigests: [bundleRefs[0]!.sha256],
+      candidateBindings: [reviewRef.candidateBindings[0]!], findingRefs: [reviewRef.findingRefs[0]!] };
     const reviewed = requestWorkflowFeedbackReview(closed, { bundleRefs: [bundleRefs[0]],
-      reviewRef: { ...reviewRef, bundleDigests: [bundleRefs[0]!.sha256], findingRefs: [reviewRef.findingRefs[0]!] } }, now);
+      reviewRef: onlyApiReview }, now);
     const reopened = { ...reviewed, revision: reviewed.revision + 1, pullRequests: current.pullRequests };
     expect(() => decideWorkflowFeedbackFindings(reopened, { ...request, expectedRevision: reopened.revision, bundleDigests: [bundleRefs[0]!.sha256] },
       { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
@@ -454,7 +468,8 @@ describe("immutable multi-PR feedback reviews", () => {
     expect(result.feedbackReview?.bundleRefs[0]?.comments).toEqual([]);
     const { sha256: _digest, objectKey: _key, ...emptyPayload } = bundles[0]!;
     expect(WorkflowFeedbackBundleSchema.safeParse({ ...emptyPayload, commentSetDigest: createHash("sha256").update("[]", "utf8").digest("hex"), sourceDeliveryIds: [] }).success).toBe(true);
-    const omitted = { ...reviewRef, bundleDigests: [bundleRefs[0]!.sha256], findingRefs: [reviewRef.findingRefs[0]!] };
+    const omitted = { ...reviewRef, bundleDigests: [bundleRefs[0]!.sha256], candidateBindings: [reviewRef.candidateBindings[0]!],
+      findingRefs: [reviewRef.findingRefs[0]!] };
     expect(() => requestWorkflowFeedbackReview(current, { bundleRefs: [bundleRefs[0]], reviewRef: omitted }, now)).toThrow();
     const emptyReview = requestWorkflowFeedbackReview(current, { bundleRefs: bundleRefs.map(b => ({ ...b, comments: [] })), reviewRef: { ...reviewRef, findingRefs: [] } }, now);
     expect(emptyReview.feedbackReview?.reviewRef.findingRefs).toEqual([]);
@@ -480,7 +495,9 @@ describe("immutable multi-PR feedback reviews", () => {
         expect(WorkflowFeedbackFindingSchema.safeParse({ ...finding, priority, assessment }).success).toBe(true);
     expect(WorkflowFeedbackFindingSchema.safeParse({ ...finding, priority: "ACTIONABLE" }).success).toBe(false);
     expect(WorkflowFeedbackFindingSchema.safeParse({ ...finding, commentIds: [] }).success).toBe(false);
-    expect(WorkflowFeedbackBundleSchema.safeParse({ ...bundlePayload, comments: bundleRefs[0]!.comments.map(c => ({ ...c, body: "comment" })), sourceDeliveryIds: ["delivery-1"] }).success).toBe(true);
+    const commentsWithBodies = bundleRefs[0]!.comments.map(c => ({ ...c, body: "comment" }));
+    expect(WorkflowFeedbackBundleSchema.safeParse({ ...bundlePayload, comments: commentsWithBodies,
+      commentSetDigest: createHash("sha256").update(JSON.stringify(commentsWithBodies), "utf8").digest("hex"), sourceDeliveryIds: ["delivery-1"] }).success).toBe(true);
     expect(WorkflowFeedbackBundleSchema.safeParse({ ...bundlePayload, comments: bundleRefs[0]!.comments.map(c => ({ ...c, body: "edited" })), sourceDeliveryIds: ["delivery-1"] }).success).toBe(false);
     expect(WorkflowFeedbackReviewReportSchema.safeParse({ ...reviewPayload, findings: [finding] }).success).toBe(false);
     expect(WorkflowFeedbackReviewReportSchema.safeParse({ ...reviewPayload, findings: [finding, { ...finding, ...reviewRef.findingRefs[1] }] }).success).toBe(true);

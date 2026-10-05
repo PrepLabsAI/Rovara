@@ -97,7 +97,8 @@ export async function runTaskInvocation(
       await events.append("progress", { message: "AgentX is reviewing the latest feedback on the linked pull requests." });
       const collected = await dependencies.feedbackBundleReader(binding);
       const execution = await runWorkflowFeedbackReview({
-        operationId: invocation.operationId, taskId: binding.taskId, taskRequirements: collected.taskRequirements,
+        operationId: invocation.operationId, taskId: binding.taskId, workflowRevision: binding.workflowRevision,
+        taskRequirements: collected.taskRequirements,
         rootPath: dependencies.rootPath, model: dependencies.model, candidate: candidateRepositories,
         repositories: repositoryInputs, bundles: collected.bundles, artifactSink: dependencies.artifactSink,
         ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,

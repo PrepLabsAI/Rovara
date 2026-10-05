@@ -4674,7 +4674,9 @@ async function completedWorkflowItems(
         const inputs = await readFeedbackBundlesForCritic(dependencies, operation, binding);
         const requirementsDigest = createHash("sha256").update(inputs.taskRequirements, "utf8").digest("hex");
         const refs = current.feedbackReview.bundleRefs.map(ref => WorkflowFeedbackBundleRefSchema.parse(ref));
-        if (report.operationId !== operation.id || report.taskId !== current.taskId
+        if (operation.workflowMode !== "FEEDBACK_REVIEW" || report.operationMode !== operation.workflowMode
+          || report.operationId !== operation.id || report.taskId !== current.taskId
+          || report.workflowRevision !== binding.workflowRevision || report.qualification !== "AI_GENERATED_ADVISORY"
           || report.taskRequirementsDigest !== requirementsDigest || report.status !== resultRecord.status
           || refs.length !== report.bundleDigests.length || !refs.every(ref => report.bundleDigests.includes(ref.sha256))
           || refs.length !== report.candidateBindings.length || refs.some(ref => !report.candidateBindings.some(candidate =>

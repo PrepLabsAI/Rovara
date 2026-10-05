@@ -10,7 +10,7 @@ describe("worker tools for native workflow stages", () => {
     });
   });
 
-  it("gives each reviewer a separate read-only tool session", () => {
+  it("gives candidate and feedback reviewers only read tools at the runner boundary", () => {
     expect(piTaskToolCapabilities("REVIEW")).toEqual({
       tools: ["read", "grep", "find", "ls"],
       customFileTools: false,

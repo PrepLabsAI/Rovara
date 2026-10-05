@@ -37,6 +37,7 @@ export interface WorkflowFeedbackReviewExecution {
 export async function runWorkflowFeedbackReview(input: {
   operationId: string;
   taskId: string;
+  workflowRevision: number;
   taskRequirements: string;
   rootPath: string;
   model: WorkspaceModelConfiguration;
@@ -52,6 +53,7 @@ export async function runWorkflowFeedbackReview(input: {
 }): Promise<WorkflowFeedbackReviewExecution> {
   const taskId = input.taskId;
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskId)
+    || !Number.isInteger(input.workflowRevision) || input.workflowRevision < 1
     || input.taskRequirements.trim().length === 0 || Buffer.byteLength(input.taskRequirements, "utf8") > 16_000
     || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.operationId)
     || input.bundles.length === 0 || input.bundles.length > 32) {
@@ -69,7 +71,6 @@ export async function runWorkflowFeedbackReview(input: {
     .sort((left, right) => left.repositoryId.localeCompare(right.repositoryId) || left.number - right.number);
   const bundleDigests = bundles.map(({ ref }) => ref.sha256).sort();
   const taskRequirementsDigest = sha256(Buffer.from(input.taskRequirements, "utf8"));
-  const reviewerId = "agentx-feedback-critic";
   const recordedAt = (input.now ?? (() => new Date().toISOString()))();
   let provider = input.model.provider;
   let version = input.model.modelId;
@@ -152,8 +153,9 @@ export async function runWorkflowFeedbackReview(input: {
   const proposalDigest = sha256(Buffer.from(JSON.stringify({ taskRequirementsDigest, candidateBindings, findings }), "utf8"));
   const findingRefs = findings.map(finding => ({ id: finding.id, bundleDigest: finding.bundleDigest,
     commentIds: finding.commentIds, priority: finding.priority, assessment: finding.assessment, recommended: finding.recommended }));
-  const report = WorkflowFeedbackReviewReportSchema.parse({ schemaVersion: 1, taskId, proposalDigest, taskRequirementsDigest,
-    candidateBindings, operationId: input.operationId, reviewerId, provider, version, readOnly: true,
+  const report = WorkflowFeedbackReviewReportSchema.parse({ schemaVersion: 1, taskId, workflowRevision: input.workflowRevision,
+    operationMode: "FEEDBACK_REVIEW", qualification: "AI_GENERATED_ADVISORY", proposalDigest, taskRequirementsDigest,
+    candidateBindings, operationId: input.operationId, provider, version,
     status, ...(blockReason === undefined ? {} : { blockReason }), bundleDigests, findingRefs, findings, recordedAt });
   const content = JSON.stringify(report);
   const outputDigest = sha256(Buffer.from(content, "utf8"));
