@@ -68,7 +68,7 @@ const WorkflowFeedbackSchema = z.object({
   repositoryId: z.string().trim().min(1).max(200),
   number: z.number().int().positive(),
   candidateDigest: DigestSchema,
-  comments: z.array(z.object({ id: z.string().trim().min(1).max(80), url: z.string().url().max(2048), author: z.string().trim().min(1).max(100), body: z.string().max(8_000) }).strict()).min(1).max(20),
+  comments: z.array(z.object({ id: z.string().trim().min(1).max(80), url: z.string().url().max(2048), author: z.string().trim().min(1).max(100), body: z.string().max(8_000), updatedAt: z.string().datetime().optional() }).strict()).min(1).max(20),
   proposedPlan: z.string().trim().min(1).max(2_000),
   planDigest: DigestSchema,
   status: z.enum(["PENDING", "APPROVED", "DISMISSED"]),

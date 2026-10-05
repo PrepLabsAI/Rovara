@@ -1,6 +1,6 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createCandidateManifest, createWorkflowSnapshot, recordExpectedWorkflowPullRequests } from "../../packages/contracts/src/task-workflow.js";
+import { createCandidateManifest, createWorkflowSnapshot, recordExpectedWorkflowPullRequests, requestWorkflowFeedback } from "../../packages/contracts/src/task-workflow.js";
 import { claimGithubWebhookDelivery, completeGithubWebhookDelivery, findLinkedGithubWorkflowPullRequest, processGithubWebhookDelivery, receiveGithubWebhook, reconcileGithubWorkflowPullRequest, recordLinkedGithubWorkflowFeedback, reserveGithubWebhookDelivery, verifyGithubWebhookSignature } from "../../packages/broker/src/aws/github-webhooks.js";
 
 describe("GitHub webhook signature verification", () => {
@@ -59,10 +59,20 @@ describe("GitHub webhook signature verification", () => {
       { repositoryId: "demo", number: 42, url: "https://github.com/acme/demo/pull/42", candidateDigest: candidate.digest, required: true },
     ], "2026-10-05T12:03:00.000Z");
     const index = { pk: "GITHUB_PR#acme/demo", sk: "PR#0000000042", entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: "acme/demo", repositoryId: "demo", number: 42, url: "https://github.com/acme/demo/pull/42", taskId, workspaceId: "workspace-1", candidateDigest: candidate.digest };
+    let conflictNextUpdate = false;
     const documentClient = { send: async (command: { constructor: { name: string }; input: Record<string, unknown> }) => {
       if (command.constructor.name === "GetCommand") return { Item: index };
       if (command.constructor.name === "UpdateCommand") {
         const values = command.input.ExpressionAttributeValues as Record<string, unknown>;
+        if (conflictNextUpdate) {
+          conflictNextUpdate = false;
+          workflow = requestWorkflowFeedback(workflow, {
+            feedbackId: "f".repeat(64), repositoryId: "demo", number: 42, candidateDigest: candidate.digest,
+            comments: [...(workflow.feedback?.comments ?? []), { id: "3", url: "https://github.com/acme/demo/pull/42#discussion_r3", author: "reviewer", body: "Concurrent feedback" }],
+            proposedPlan: "Review the latest feedback and ask its owner before coding.",
+          }, "2026-10-05T12:07:30.000Z");
+          throw Object.assign(new Error("conditional conflict"), { name: "ConditionalCheckFailedException" });
+        }
         workflow = values[":workflow"] as typeof workflow;
         return {};
       }
@@ -70,7 +80,7 @@ describe("GitHub webhook signature verification", () => {
     } };
     await recordLinkedGithubWorkflowFeedback({
       documentClient, tableName: "state", repositoryFullName: "acme/demo", number: 42, action: "created",
-      comment: { id: 1, body: "Handle null input", url: "https://github.com/acme/demo/pull/42#discussion_r1", author: "reviewer" },
+      comment: { id: 1, body: "Handle null input", url: "https://github.com/acme/demo/pull/42#discussion_r1", author: "reviewer", updatedAt: "2026-10-05T12:04:00.000Z" },
       loadWorkflow: async () => workflow, now: "2026-10-05T12:04:00.000Z",
     });
     await recordLinkedGithubWorkflowFeedback({
@@ -79,6 +89,20 @@ describe("GitHub webhook signature verification", () => {
       loadWorkflow: async () => workflow, now: "2026-10-05T12:05:00.000Z",
     });
     expect(workflow.feedback?.comments.map((comment) => comment.id)).toEqual(["1", "2"]);
+    const currentFeedback = workflow.feedback;
+    await expect(recordLinkedGithubWorkflowFeedback({
+      documentClient, tableName: "state", repositoryFullName: "acme/demo", number: 42, action: "edited",
+      comment: { id: 1, body: "stale text from an older edit", url: "https://github.com/acme/demo/pull/42#discussion_r1", author: "reviewer", updatedAt: "2026-10-05T12:03:00.000Z" },
+      loadWorkflow: async () => workflow, now: "2026-10-05T12:07:00.000Z",
+    })).resolves.toBe(false);
+    expect(workflow.feedback).toEqual(currentFeedback);
+    conflictNextUpdate = true;
+    await expect(recordLinkedGithubWorkflowFeedback({
+      documentClient, tableName: "state", repositoryFullName: "acme/demo", number: 42, action: "created",
+      comment: { id: 4, body: "Independent concurrent comment", url: "https://github.com/acme/demo/pull/42#discussion_r4", author: "reviewer" },
+      loadWorkflow: async () => workflow, now: "2026-10-05T12:08:00.000Z",
+    })).resolves.toBe(true);
+    expect(workflow.feedback?.comments.map((comment) => comment.id)).toEqual(["1", "2", "3", "4"]);
     const beforeDelete = workflow;
     await recordLinkedGithubWorkflowFeedback({
       documentClient, tableName: "state", repositoryFullName: "acme/demo", number: 42, action: "deleted",

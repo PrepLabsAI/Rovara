@@ -12,8 +12,8 @@ const GitHubWebhookPayloadSchema = z.object({
   repository: z.object({ id: z.number().int().positive(), full_name: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).max(300) }).passthrough(),
   issue: z.object({ number: z.number().int().positive(), state: z.enum(["open", "closed"]).optional(), pull_request: z.object({ url: z.string().url() }).passthrough().optional() }).passthrough().optional(),
   pull_request: z.object({ number: z.number().int().positive(), state: z.enum(["open", "closed"]).optional(), merged: z.boolean().optional() }).passthrough().optional(),
-  review: z.object({ id: z.number().int().positive(), body: z.string().max(65_536).nullable().optional(), html_url: z.string().url(), user: z.object({ login: z.string().min(1).max(100) }).passthrough() }).passthrough().optional(),
-  comment: z.object({ id: z.number().int().positive(), body: z.string().max(65_536).nullable().optional(), html_url: z.string().url(), user: z.object({ login: z.string().min(1).max(100) }).passthrough() }).passthrough().optional(),
+  review: z.object({ id: z.number().int().positive(), body: z.string().max(65_536).nullable().optional(), html_url: z.string().url(), updated_at: z.string().datetime().optional(), user: z.object({ login: z.string().min(1).max(100) }).passthrough() }).passthrough().optional(),
+  comment: z.object({ id: z.number().int().positive(), body: z.string().max(65_536).nullable().optional(), html_url: z.string().url(), updated_at: z.string().datetime().optional(), user: z.object({ login: z.string().min(1).max(100) }).passthrough() }).passthrough().optional(),
 }).passthrough();
 
 const COMMENT_ACTIONS = new Set(["created", "edited", "deleted"]);
@@ -25,6 +25,14 @@ export class GithubWebhookRefusal extends Error {
   constructor(message: string) {
     super(message);
     this.name = "GithubWebhookRefusal";
+  }
+}
+
+/** Transient delivery conflicts must receive a retryable response, not an authorization refusal. */
+export class GithubWebhookRetryableError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "GithubWebhookRetryableError";
   }
 }
 
@@ -46,7 +54,7 @@ export interface ReceivedGithubWebhook {
     repositoryId: number;
     fullName: string;
     number: number;
-    comment?: { id: number; body: string; truncated: boolean; url: string; author: string; source: "review" | "review_comment" | "pr_discussion" };
+    comment?: { id: number; body: string; truncated: boolean; url: string; author: string; updatedAt?: string; source: "review" | "review_comment" | "pr_discussion" };
   };
 }
 
@@ -153,53 +161,60 @@ export async function recordLinkedGithubWorkflowFeedback(input: {
   repositoryFullName: string;
   number: number;
   action: string;
-  comment: { id: number; body: string; url: string; author: string };
+  comment: { id: number; body: string; url: string; author: string; updatedAt?: string };
   loadWorkflow(taskId: string): Promise<WorkflowSnapshot | undefined>;
   now: string;
 }): Promise<boolean> {
   const linked = await findLinkedGithubWorkflowPullRequest(input);
   if (linked === undefined) throw new GithubWebhookRefusal("GitHub pull request is not linked to an AgentX workflow");
-  const current = await input.loadWorkflow(linked.taskId);
-  if (current === undefined || current.candidate?.digest !== linked.candidateDigest
-    || !current.pullRequests?.some((pullRequest) => pullRequest.repositoryId === linked.repositoryId && pullRequest.number === linked.number
-      && pullRequest.candidateDigest === linked.candidateDigest && pullRequest.state !== "MERGED")) {
-    throw new GithubWebhookRefusal("linked PR feedback no longer matches an open task candidate");
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const current = await input.loadWorkflow(linked.taskId);
+    if (current === undefined || current.candidate?.digest !== linked.candidateDigest
+      || !current.pullRequests?.some((pullRequest) => pullRequest.repositoryId === linked.repositoryId && pullRequest.number === linked.number
+        && pullRequest.candidateDigest === linked.candidateDigest && pullRequest.state !== "MERGED")) {
+      throw new GithubWebhookRefusal("linked PR feedback no longer matches an open task candidate");
+    }
+    let next: WorkflowSnapshot;
+    if (input.action === "deleted") {
+      next = dismissDeletedWorkflowFeedback(current, String(input.comment.id), input.now);
+      if (next === current) return false;
+    } else {
+      const priorComments = current.feedback?.status === "PENDING" && current.feedback.repositoryId === linked.repositoryId
+        && current.feedback.number === input.number && current.feedback.candidateDigest === linked.candidateDigest
+        ? current.feedback.comments : [];
+      const existing = priorComments.find((comment) => comment.id === String(input.comment.id));
+      if (existing?.updatedAt !== undefined && input.comment.updatedAt !== undefined
+        && Date.parse(input.comment.updatedAt) < Date.parse(existing.updatedAt)) return false;
+      const comments = [...priorComments.filter((comment) => comment.id !== String(input.comment.id)), {
+        id: String(input.comment.id), url: input.comment.url, author: input.comment.author, body: input.comment.body,
+        ...(input.comment.updatedAt === undefined ? {} : { updatedAt: input.comment.updatedAt }),
+      }].slice(-20);
+      const feedbackId = createHash("sha256").update(JSON.stringify({
+        taskId: linked.taskId, repositoryId: linked.repositoryId, number: input.number,
+        candidateDigest: linked.candidateDigest, comments: [...comments].sort((left, right) => left.id.localeCompare(right.id)),
+      })).digest("hex");
+      if (current.feedback?.status === "PENDING" && current.feedback.feedbackId === feedbackId) return false;
+      next = requestWorkflowFeedback(current, {
+        feedbackId, repositoryId: linked.repositoryId, number: input.number, candidateDigest: linked.candidateDigest,
+        comments,
+        proposedPlan: "Review the comment in context, update the code to address it, rerun the required checks and reviews, then report back. AgentX will not reply on GitHub.",
+      }, input.now);
+    }
+    try {
+      await input.documentClient.send(new UpdateCommand({
+        TableName: input.tableName,
+        Key: { pk: `DEVTASK#${linked.taskId}`, sk: "META" },
+        UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+        ConditionExpression: "workflow.revision = :revision AND attribute_not_exists(closedAt)",
+        ExpressionAttributeValues: { ":workflow": next, ":now": input.now, ":revision": current.revision },
+      }));
+      return true;
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+      // A distinct PR event advanced the workflow. Reload and merge this comment on the next pass.
+    }
   }
-  let next: WorkflowSnapshot;
-  if (input.action === "deleted") {
-    next = dismissDeletedWorkflowFeedback(current, String(input.comment.id), input.now);
-    if (next === current) return false;
-  } else {
-    const priorComments = current.feedback?.status === "PENDING" && current.feedback.repositoryId === linked.repositoryId
-      && current.feedback.number === input.number && current.feedback.candidateDigest === linked.candidateDigest
-      ? current.feedback.comments : [];
-    const comments = [...priorComments.filter((comment) => comment.id !== String(input.comment.id)), {
-      id: String(input.comment.id), url: input.comment.url, author: input.comment.author, body: input.comment.body,
-    }].slice(-20);
-    const feedbackId = createHash("sha256").update(JSON.stringify({
-      taskId: linked.taskId, repositoryId: linked.repositoryId, number: input.number,
-      candidateDigest: linked.candidateDigest, comments: [...comments].sort((left, right) => left.id.localeCompare(right.id)),
-    })).digest("hex");
-    if (current.feedback?.status === "PENDING" && current.feedback.feedbackId === feedbackId) return false;
-    next = requestWorkflowFeedback(current, {
-      feedbackId, repositoryId: linked.repositoryId, number: input.number, candidateDigest: linked.candidateDigest,
-      comments,
-      proposedPlan: "Review the comment in context, update the code to address it, rerun the required checks and reviews, then report back. AgentX will not reply on GitHub.",
-    }, input.now);
-  }
-  try {
-    await input.documentClient.send(new UpdateCommand({
-      TableName: input.tableName,
-      Key: { pk: `DEVTASK#${linked.taskId}`, sk: "META" },
-      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-      ConditionExpression: "workflow.revision = :revision AND attribute_not_exists(closedAt)",
-      ExpressionAttributeValues: { ":workflow": next, ":now": input.now, ":revision": current.revision },
-    }));
-  } catch (error) {
-    if (isConditional(error)) throw new GithubWebhookRefusal("workflow changed while recording PR feedback");
-    throw error;
-  }
-  return true;
+  throw new GithubWebhookRetryableError("workflow kept changing while recording PR feedback; retry this GitHub delivery");
 }
 
 export async function reserveGithubWebhookDelivery(input: {
@@ -485,7 +500,7 @@ export async function receiveGithubWebhook(input: ReceiveGithubWebhookInput): Pr
   };
 }
 
-function toComment(input: { id: number; body?: string | null | undefined; html_url: string; user: { login: string } }, source: NonNullable<ReceivedGithubWebhook["event"]["comment"]>["source"]): NonNullable<ReceivedGithubWebhook["event"]["comment"]> {
+function toComment(input: { id: number; body?: string | null | undefined; html_url: string; updated_at?: string | undefined; user: { login: string } }, source: NonNullable<ReceivedGithubWebhook["event"]["comment"]>["source"]): NonNullable<ReceivedGithubWebhook["event"]["comment"]> {
   let url: URL;
   try {
     url = new URL(input.html_url);
@@ -502,6 +517,7 @@ function toComment(input: { id: number; body?: string | null | undefined; html_u
     truncated: body.length > MAX_REVIEW_COMMENT_CHARS,
     url: url.toString(),
     author: input.user.login,
+    ...(input.updated_at === undefined ? {} : { updatedAt: input.updated_at }),
     source,
   };
 }
