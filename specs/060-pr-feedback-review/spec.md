@@ -13,8 +13,8 @@ The current proposal is based on the incoming comment and PR diff; it does not i
 the code, aggregate all current comments, or explain which comments appear valid. Slack currently
 hosts plan canvases and workflow actions, while AgentX's control plane stores the canonical task
 workflow. This feature adds an authenticated AgentX browser view for detailed PR-feedback decisions,
-an independent read-only review of the exact candidate, and a closeout path that preserves the full
-record in AgentX before deleting the Slack Canvas.
+a separate read-only AI advisory review of the exact candidate, and a closeout path that preserves
+the full record in AgentX before deleting the Slack Canvas.
 
 The user's job in this flow is simple: understand what reviewers want, decide what AgentX should
 change, and know that nothing will change until the owner approves it. The interface should answer
@@ -34,7 +34,7 @@ When comments arrive on any AgentX-linked PR for a task, AgentX gathers new or n
 feedback across that task's open PRs, groups duplicates, and orders findings by impact while keeping
 each PR and its exact head visible. Resolved GitHub review threads are excluded unless they receive
 new comments; ordinary PR discussion comments remain eligible until an owner records a disposition.
-A separate read-only reviewer compares each comment with the code and task requirements. It may
+A separate read-only AI advisory operation compares each comment with the code and task requirements. It may
 recommend that an item is stale, already addressed, mistaken, out of scope, or actionable, but it
 must explain its reasoning and show uncertainty. This is an AI-generated advisory from a separate
 operation, not independent or authoritative evidence. AgentX validates its task, operation, revision,
@@ -89,7 +89,7 @@ decisions cannot dispatch work.
 5. Given a user opens the link while signed out, when they authenticate with the Slack identity
    configured for AgentX, then AgentX returns them to the same review and checks task authorization
    before showing its contents.
-6. Given the independent review fails or cannot confidently assess a comment, when the page opens,
+6. Given the AI advisory review fails or cannot confidently assess a comment, when the page opens,
    then AgentX says which comments still need human review and offers a safe next step without
    presenting an incomplete result as a complete review.
 7. Given a Slack approval button, when it is pressed, then the button names the batch it approves,
