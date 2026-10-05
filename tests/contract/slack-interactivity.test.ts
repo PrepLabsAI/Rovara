@@ -3,6 +3,11 @@ import { createHmac } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CONFIRMATION_TTL_MS,
+  createWorkflowSnapshot,
+  createCandidateManifest,
+  requestWorkflowFeedback,
+  WorkflowSnapshotSchema,
+  submitWorkflowArtifact,
   answeredConfirmationBlocks,
   confirmationBlocks,
   confirmationClickEventId,
@@ -18,6 +23,7 @@ import {
   type ConfirmationClickDependencies,
   type SlackActionHandler,
   type SlackBlockAction,
+  workflowSlackHandlers,
 } from "../../packages/broker/src/aws/slack-interactivity.js";
 
 const signingSecret = "8f742231b10e8888abcd99yyyzzz85a5";
@@ -248,6 +254,77 @@ describe("Slack interactivity request URL (spec 014 D2)", () => {
     const tampered = { ...good, body: good.body.replace(requester, other) };
     expect((await handler(tampered)).statusCode).toBe(401);
     expect(queue).toHaveLength(0);
+  });
+});
+
+describe("Slack native workflow review controls", () => {
+  const taskId = "44444444-4444-5444-8444-444444444444";
+  const digest = "a".repeat(64);
+  const workflow = submitWorkflowArtifact(createWorkflowSnapshot({
+    taskId, ownerId: "b".repeat(64), now: new Date(nowSeconds * 1_000).toISOString(),
+    checkPolicy: {
+      required: [{ id: "required-1", label: "npm test", command: { cwd: "workspace", executable: "npm", args: ["test"], timeoutSeconds: 120 } }],
+      optional: [{ id: "coverage", label: "Coverage report", command: { cwd: "workspace", executable: "npm", args: ["run", "coverage"], timeoutSeconds: 120 } }], selectedOptionalIds: [],
+    },
+  }), { expectedRevision: 1, now: new Date(nowSeconds * 1_000).toISOString(), artifact: {
+    id: "plan-1", type: "plan", version: 1, sha256: digest, producer: "agentx-plan", objectKey: "private/owner/workspace/op/plan.md", createdAt: new Date(nowSeconds * 1_000).toISOString(),
+  } });
+  const task = { taskId, slackUserId: requester, share: thread, workflow };
+
+  it("shows locked required checks and only project-approved optional checks, then submits the selected IDs with the exact plan revision", async () => {
+    let opened: Record<string, unknown> | undefined;
+    const submitted: Array<Record<string, unknown>> = [];
+    const handlers = workflowSlackHandlers({ loadTask: async () => task, openView: async (_trigger, view) => { opened = view; }, submit: async (input) => { submitted.push(input); } });
+    await handlers.handleAction({ actionId: "agentx_workflow_approve", value: JSON.stringify({ taskId, revision: workflow.revision, digest, decision: "APPROVE" }), userId: requester, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "", requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: "plan", responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" });
+    expect(opened).toMatchObject({ callback_id: "agentx_workflow_review_submission" });
+    const blocks = opened?.blocks as Array<Record<string, unknown>>;
+    expect(JSON.stringify(blocks)).toContain("Always run:");
+    expect(JSON.stringify(blocks)).toContain("Coverage report");
+    expect(JSON.stringify(blocks)).not.toContain("required-1");
+    await handlers.handleSubmission({ user: { id: requester }, view: {
+      private_metadata: (opened?.private_metadata),
+      state: { values: { workflow_checks: { selected_options: { selected_options: [{ value: "coverage" }, { value: "forged" }] } } } },
+    } });
+    expect(submitted[0]).toMatchObject({ taskId, userId: requester, thread, expectedRevision: workflow.revision, artifactDigest: digest, decision: "APPROVE", selectedOptionalCheckIds: ["coverage"] });
+  });
+
+  it("refuses another Slack member and refuses a stale plan button", async () => {
+    const handlers = workflowSlackHandlers({ loadTask: async () => task, openView: async () => undefined, submit: async () => undefined });
+    const action = { actionId: "agentx_workflow_approve", value: JSON.stringify({ taskId, revision: workflow.revision, digest, decision: "APPROVE" }), userId: other, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "", requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: "plan", responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" };
+    await expect(handlers.handleAction(action)).rejects.toThrow();
+    await expect(handlers.handleAction({ ...action, userId: requester, value: JSON.stringify({ taskId, revision: workflow.revision - 1, digest, decision: "APPROVE" }) })).rejects.toThrow();
+  });
+
+  it("lets only the owner approve the current PR feedback and candidate in the same task thread", async () => {
+    const candidate = createCandidateManifest([{ repositoryId: "payments", commitSha: "a".repeat(40), treeSha: "1".repeat(40) }]);
+    const now = new Date(nowSeconds * 1_000).toISOString();
+    const waiting = WorkflowSnapshotSchema.parse({
+      ...workflow, revision: workflow.revision + 1, stage: "WAIT_FOR_MERGE", state: "WAITING", candidate,
+      verification: { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now, results: [{ checkId: "unit", status: "PASS" }] },
+      reviews: [
+        { candidateDigest: candidate.digest, role: "CRITIC", provider: "scripted", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now },
+        { candidateDigest: candidate.digest, role: "SECURITY", provider: "scripted", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now },
+      ],
+      pullRequests: [{ repositoryId: "payments", number: 11, url: "https://github.com/acme/payments/pull/11", candidateDigest: candidate.digest, required: true, state: "OPEN", observedAt: now }],
+    });
+    const withFeedback = requestWorkflowFeedback(waiting, {
+      feedbackId: "f".repeat(64), repositoryId: "payments", number: 11, candidateDigest: candidate.digest,
+      comments: [{ id: "4321", url: "https://github.com/acme/payments/pull/11#discussion_r4321", author: "reviewer", body: "Handle the edge case" }],
+      proposedPlan: "Review the comment in context and address it.",
+    }, now);
+    const submitted: Array<Record<string, unknown>> = [];
+    const feedbackTask = { ...task, workflow: withFeedback };
+    const handlers = workflowSlackHandlers({ loadTask: async () => feedbackTask, openView: async () => undefined, submit: async () => undefined, submitFeedback: async (input) => { submitted.push(input); } });
+    const action = {
+      actionId: "agentx_github_feedback_approve",
+      value: JSON.stringify({ taskId, revision: withFeedback.revision, feedbackId: "f".repeat(64), candidateDigest: candidate.digest, decision: "APPROVE" }),
+      userId: requester, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "",
+      requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: "feedback", responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "",
+    };
+    await handlers.handleAction(action);
+    expect(submitted[0]).toMatchObject({ taskId, userId: requester, thread, expectedRevision: withFeedback.revision, feedbackId: "f".repeat(64), candidateDigest: candidate.digest, decision: "APPROVE" });
+    await expect(handlers.handleAction({ ...action, userId: other })).rejects.toThrow(/Only/);
+    await expect(handlers.handleAction({ ...action, value: JSON.stringify({ taskId, revision: withFeedback.revision - 1, feedbackId: "f".repeat(64), candidateDigest: candidate.digest, decision: "APPROVE" }) })).rejects.toThrow(/changed/);
   });
 });
 

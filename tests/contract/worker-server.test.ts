@@ -53,7 +53,7 @@ describe("worker HTTP contract", () => {
     // Spec 053: what this build parses, so the dispatcher sends the thinking level only to it; spec 051 adds readiness,
     // and publish's reportChecks (P-2), so only this build is asked to publish despite a failing check.
     await expect((await handleWorkerRequest(new Request("http://worker/ping"), state)).json())
-      .resolves.toMatchObject({ invocationFeatures: ["model.thinkingLevel", "task.readiness", "publish.reportChecks"] });
+      .resolves.toMatchObject({ invocationFeatures: ["model.thinkingLevel", "task.readiness", "task.workflowMode", "publish.reportChecks"] });
   });
 
   // The journal reads SUCCEEDED a moment before the operation leaves the active set: the write lands,

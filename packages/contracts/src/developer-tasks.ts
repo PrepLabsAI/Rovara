@@ -6,6 +6,7 @@ import { cleanDisplayName } from "./display-name.js";
 import { OperationStatusSchema } from "./operation.js";
 import { DeveloperShareModeSchema } from "./project.js";
 import { sharedNoticeKey, slackThreadSubject, type SlackThread } from "./slack.js";
+import { WORKFLOW_PLAN_MAX_BYTES, WorkflowSnapshotSchema } from "./task-workflow.js";
 
 export const DEVELOPER_TASK_OWNER_ISSUER = "agentx-developer-task";
 export const DEVELOPER_INSTRUCTIONS_MAX_BYTES = 65_536;
@@ -169,6 +170,8 @@ export const StartDeveloperTaskRequestSchema = z
     shareToChannel: z.boolean().optional(),
     shareMode: DeveloperShareModeSchema.optional(),
     channel: z.string().min(1).max(80).optional(),
+    /** Opts this task into the native human-gated task-to-PR workflow. */
+    workflow: z.literal(true).optional(),
   })
   .strict();
 export type StartDeveloperTaskRequest = z.infer<typeof StartDeveloperTaskRequestSchema>;
@@ -213,6 +216,7 @@ export const DeveloperTaskViewSchema = z.object({
   title: z.string(),
   project: z.string(),
   status: DeveloperTaskStatusSchema,
+  workflow: WorkflowSnapshotSchema.extend({ planContent: z.string().max(WORKFLOW_PLAN_MAX_BYTES).optional() }).optional(),
   failure: DeveloperTaskFailureSchema.optional(),
   startingRevision: z.number().int().positive(),
   client: z.string(),

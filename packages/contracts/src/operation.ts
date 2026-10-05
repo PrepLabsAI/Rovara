@@ -203,6 +203,8 @@ export const OperationSchema = z
     workspaceId: z.string().uuid(),
     conversationId: z.string().uuid().optional(),
     kind: OperationKindSchema,
+    /** Server-selected task mode; absent on legacy operations and non-task operations. */
+    workflowMode: z.enum(["PLAN", "IMPLEMENT"]).optional(),
     requestId: z.string().uuid(),
     payloadHash: z.string().regex(/^[a-f0-9]{64}$/),
     status: OperationStatusSchema,

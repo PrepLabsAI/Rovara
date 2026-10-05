@@ -40,8 +40,8 @@ describe("the tool list (FR-027, FR-028, SC-010)", () => {
     const { tools } = await (await connect({})).listTools();
     expect(tools.map((tool) => tool.name)).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));
     expect(tools.map((tool) => tool.name)).toEqual([
-      "agentx_whoami", "agentx_list_projects", "agentx_start_task", "agentx_get_task", "agentx_wait_for_task",
-      "agentx_list_tasks", "agentx_continue_task", "agentx_cancel_task", "agentx_close_task", "agentx_share_task", "agentx_open_pull_request",
+      "agentx_whoami", "agentx_list_projects", "agentx_start_task", "agentx_start_workflow", "agentx_get_task", "agentx_wait_for_task",
+      "agentx_list_tasks", "agentx_continue_task", "agentx_decide_workflow", "agentx_retry_workflow", "agentx_cancel_task", "agentx_close_task", "agentx_share_task", "agentx_open_pull_request",
     ]);
     for (const tool of tools) expect(tool.outputSchema, tool.name).toBeDefined();
     expect(JSON.stringify(tools)).not.toContain("\u2014");
@@ -232,6 +232,13 @@ describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 
     expect(new Set([...starts, continues[0]]).size).toBe(5);
     expect(continues[1]).toBe(continues[0]);
     expect(continued.structuredContent).toMatchObject({ request_id: continues[0] });
+  });
+
+  it("starts the native workflow only through its explicit tool", async () => {
+    const startTask = vi.fn(async () => view("STARTING"));
+    const mcp = await connect({ startTask }, { newRequestId: counter() });
+    await mcp.callTool({ name: "agentx_start_workflow", arguments: { project: "payments", instructions: "Fix retry handling" } });
+    expect(startTask).toHaveBeenCalledWith(expect.objectContaining({ project: "payments", workflow: true }));
   });
 
   it("repeats an identical pull request call with the same requestId, and returns it", async () => {

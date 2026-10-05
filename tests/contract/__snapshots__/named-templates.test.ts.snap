@@ -1754,6 +1754,22 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         "Ref": "DispatchDeadLetterQueue3E30F4B8",
       },
     },
+    "GithubWebhookUrl": {
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            {
+              "Fn::GetAtt": [
+                "HttpApi",
+                "ApiEndpoint",
+              ],
+            },
+            "/v1/github/webhooks",
+          ],
+        ],
+      },
+    },
     "InvokeSigningKeyArn": {
       "Value": {
         "Fn::GetAtt": [
@@ -3727,6 +3743,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         "Environment": {
           "Variables": {
             "AGENTX_METRICS_NAMESPACE": "AgentX/staging",
+            "ARTIFACT_BUCKET_NAME": {
+              "Ref": "Artifacts82DD59A1",
+            },
             "NOTICE_QUEUE_URL": {
               "Ref": "DeveloperTaskNotifierNoticeQueue56CA42FC",
             },
@@ -3861,6 +3880,24 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Effect": "Allow",
               "Resource": {
                 "Ref": "SlackSecretEA96F13F",
+              },
+            },
+            {
+              "Action": "s3:GetObject",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/private/*/*/*/*",
+                  ],
+                ],
               },
             },
             {
@@ -5380,6 +5417,27 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         "TreatMissingData": "notBreaching",
       },
       "Type": "AWS::CloudWatch::Alarm",
+    },
+    "GithubWebhookRoute": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "POST /v1/github/webhooks",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
     },
     "HttpApi": {
       "Properties": {
@@ -9300,6 +9358,38 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
                   "dynamodb:LeadingKeys": [
                     "SHARED_TASK#*",
                   ],
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "slackUserId",
+                    "share",
+                    "workflow",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "DEVTASK#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
                 },
               },
               "Effect": "Allow",

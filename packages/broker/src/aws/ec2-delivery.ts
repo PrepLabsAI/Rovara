@@ -89,8 +89,9 @@ async function forWorker(
 ): Promise<WorkerInvocation> {
   const requestedThinkingLevel = carriedThinkingLevel(invocation);
   const carriesReadiness = invocation.kind === "task" && invocation.payload.readiness !== undefined;
+  const carriesWorkflowMode = invocation.kind === "task" && invocation.payload.workflowMode !== undefined;
   const carriesReportChecks = invocation.kind === "publish" && invocation.payload.reportChecks !== undefined;
-  if (requestedThinkingLevel === undefined && !carriesReadiness && !carriesReportChecks) return invocation;
+  if (requestedThinkingLevel === undefined && !carriesReadiness && !carriesWorkflowMode && !carriesReportChecks) return invocation;
   let features: readonly string[] = [];
   if (workerFeatures !== undefined) {
     try {
@@ -98,6 +99,9 @@ async function forWorker(
     } catch (error) {
       throw agentXError("RUNTIME_UNAVAILABLE", `could not ask the EC2 worker which invocation fields it parses: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512));
     }
+  }
+  if (carriesWorkflowMode && !features.includes("task.workflowMode")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "AgentX workflow mode requires a compatible worker that advertises the read-only tool boundary");
   }
   const reason = workerFeatures === undefined ? "no-probe" : "worker-lacks-feature";
   const leveled = withoutUnparsedFields(invocation, features);

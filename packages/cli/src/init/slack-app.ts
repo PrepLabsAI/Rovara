@@ -17,9 +17,11 @@ import { SLACK_APPS_URL, slackAppCard, type SlackCardInput, slackUrlsCard, type 
 import { STEP_PLAN } from "./ui/journey.js";
 import { checkSlackClientId, checkSlackClientSecret, hasStoredSlackClient, SIGNIN_FLAG_NAMES, slackClientIdProblem, type SigninFlags } from "../signin/collect.js";
 
-// channels:join, channels:read and groups:read serve 15d2's `channel add`; users:read.email and
-// im:write serve developer sign-in (spec 025 FR-044). Adding scopes later forces a reinstall (R10).
-export const SLACK_BOT_SCOPES: readonly string[] = ["app_mentions:read", "channels:join", "channels:read", "chat:write", "groups:read", "im:write", "users:read", "users:read.email"];
+// canvases:write creates task detail Canvases; files:read resolves each Canvas permalink. These
+// links appear in Slack workflow messages. channels:join, channels:read and groups:read serve
+// `channel add`; users:read.email and im:write serve developer sign-in (spec 025 FR-044). Adding
+// scopes later forces a reinstall (R10).
+export const SLACK_BOT_SCOPES: readonly string[] = ["app_mentions:read", "canvases:write", "channels:join", "channels:read", "chat:write", "files:read", "groups:read", "im:write", "users:read", "users:read.email"];
 /** Sign in with Slack (OpenID Connect). */
 export const SLACK_USER_SCOPES: readonly string[] = ["email", "openid", "profile"];
 /** What developer sign-in needs of the bot token: users.info, users.lookupByEmail, conversations.members, and 25e's DMs. */

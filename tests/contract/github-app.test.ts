@@ -5,6 +5,7 @@ import {
   appIdFromSecret,
   createGitHubAppJwt,
   privateKeyFromSecret,
+  webhookSecretFromSecret,
 } from "../../packages/broker/src/github-app.js";
 
 /** A provider whose installation lookups GitHub answers for any owner, as installation 163046162. */
@@ -406,6 +407,27 @@ describe("GitHub App repository credentials", () => {
     expect(fetchImplementation).toHaveBeenCalledTimes(2);
   });
 
+  it("matches a webhook repository against its registered URL, App installation and GitHub numeric ID", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const requests: string[] = [];
+    const fetchImplementation = vi.fn(async (url: string | URL | Request) => {
+      const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+      requests.push(requestUrl);
+      if (requestUrl.endsWith("/installation")) return new Response(JSON.stringify({ id: 555, account: { login: "Example" } }), { status: 200 });
+      if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "fixture-token" }), { status: 201 });
+      return new Response(JSON.stringify({ id: 1234, full_name: "Example/Demo" }), { status: 200 });
+    });
+    const provider = new GitHubAppCredentialProvider({ credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem, fetchImplementation });
+    const repositoryUrl = "https://github.com/Example/Demo.git";
+
+    await expect(provider.verifyWebhookRepository(repositoryUrl, { installationId: 555, repositoryId: 1234, fullName: "example/demo" })).resolves.toBe(true);
+    await expect(provider.verifyWebhookRepository(repositoryUrl, { installationId: 556, repositoryId: 1234, fullName: "example/demo" })).resolves.toBe(false);
+    await expect(provider.verifyWebhookRepository(repositoryUrl, { installationId: 555, repositoryId: 9999, fullName: "example/demo" })).resolves.toBe(false);
+    await expect(provider.verifyWebhookRepository(repositoryUrl, { installationId: 555, repositoryId: 1234, fullName: "other/demo" })).resolves.toBe(false);
+    expect(requests).toContain("https://api.github.com/repos/Example/Demo");
+  });
+
   it("looks the installation up again when the App was reinstalled", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
@@ -452,6 +474,9 @@ describe("GitHub App repository credentials", () => {
     const pem = "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----";
     expect(privateKeyFromSecret(pem)).toBe(pem);
     expect(privateKeyFromSecret(JSON.stringify({ privateKey: pem }))).toBe(pem);
+    const webhookSecret = "hook-secret-fixture-value-32-characters";
+    expect(webhookSecretFromSecret(JSON.stringify({ privateKey: pem, webhookSecret }))).toBe(webhookSecret);
+    expect(() => webhookSecretFromSecret(pem)).toThrow(/webhook secret/i);
     expect(() => privateKeyFromSecret("sensitive-invalid-value")).toThrow(/not a PEM/i);
     expect(() => createGitHubAppJwt("5002502", "sensitive-invalid-value", Date.now())).toThrow(
       /could not sign/i,

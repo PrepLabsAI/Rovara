@@ -48,6 +48,12 @@ export interface GitHubPullRequestUpdate {
   state?: "open" | "closed";
 }
 
+export interface GitHubWebhookRepositoryScope {
+  installationId: number;
+  repositoryId: number;
+  fullName: string;
+}
+
 /** A repository the App can reach: its installation, and the owner as GitHub spells it. */
 interface InstalledRepository {
   owner: string;
@@ -88,6 +94,29 @@ export class GitHubAppCredentialProvider {
   async checkRepository(repository: { credentialRef: string; url: string }): Promise<void> {
     if (repository.credentialRef !== this.options.credentialRef) return;
     await this.installed(parseGitHubRepository(repository.url));
+  }
+
+  /** Confirms a signed webhook's repository identity against the App's current installation and GitHub API. */
+  async verifyWebhookRepository(repositoryUrl: string, scope: GitHubWebhookRepositoryScope): Promise<boolean> {
+    const parsed = parseGitHubRepository(repositoryUrl);
+    const expectedFullName = `${parsed.owner}/${parsed.name}`.toLowerCase();
+    if (scope.fullName.toLowerCase() !== expectedFullName) return false;
+    const installed = await this.installed(parsed);
+    if (installed.installationId !== scope.installationId) return false;
+    const token = await this.createInstallationToken(installed, { contents: "read" });
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(installed.owner)}/${encodeURIComponent(installed.name)}`,
+      { headers: githubHeaders(token), signal: AbortSignal.timeout(5_000), redirect: "error" },
+    );
+    if (response.status === 404) return false;
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub repository lookup failed with HTTP ${response.status}`);
+    const body: unknown = await response.json();
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid repository response");
+    }
+    const record = body as Record<string, unknown>;
+    return Number.isSafeInteger(record.id) && record.id === scope.repositoryId
+      && typeof record.full_name === "string" && record.full_name.toLowerCase() === expectedFullName;
   }
 
   async issueCredentials(
@@ -456,6 +485,20 @@ export function appIdFromSecret(secret: string): string {
     // Report one stable error below without reflecting secret contents.
   }
   throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App secret holds no appId; set the control plane's GitHubAppId parameter");
+}
+
+/** Reads the optional webhook HMAC secret from the same protected App secret JSON object. */
+export function webhookSecretFromSecret(secret: string): string {
+  try {
+    const value = JSON.parse(secret.trim()) as unknown;
+    if (value && typeof value === "object" && "webhookSecret" in value && typeof value.webhookSecret === "string") {
+      const webhookSecret = value.webhookSecret.trim();
+      if (webhookSecret.length >= 32 && Buffer.byteLength(webhookSecret, "utf8") <= 4_096) return webhookSecret;
+    }
+  } catch {
+    // Do not include secret material in errors.
+  }
+  throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App secret does not contain a valid webhook secret");
 }
 
 function parseGitHubRepository(repositoryUrl: string): { owner: string; name: string } {

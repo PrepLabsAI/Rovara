@@ -3,8 +3,10 @@
 // notifier's own queue; the queue brings each notice back, and it is posted once. Logs carry event
 // names, IDs, notice kinds and Slack error codes only: never a token, a post's text or a task's text.
 // Spec 025 E13: it also posts an admin change's Slack Confirm message, and edits it when the change ends.
+import { createHash } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { INDEX_EXPIRY_ATTRIBUTE, AdminChangePendingRecordSchema, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, adminChangeKey, indexExpiresAt, lastAssistantResponse, sharedTaskKey, type PendingChange } from "@agentx/contracts";
@@ -15,7 +17,7 @@ import { deriveTaskStatus, failureCategory, taskKey, taskPointerKey, type Develo
 import { isConditional } from "./broker-shared.js";
 import { requiredEnvironment } from "./lambda.js";
 import { parseSlackSecrets } from "./slack-ingress.js";
-import { SlackPostError, chatPostMessage, chatUpdate, postMayHaveLanded } from "./slack-web.js";
+import { SlackPostError, chatPostMessage, chatUpdate, createTaskPlanCanvas, postMayHaveLanded } from "./slack-web.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
@@ -30,6 +32,10 @@ export interface NotifierDependencies {
   retryLater(receiptHandle: string, seconds: number): Promise<void>;
   /** The answer's channel is the direct message's own ID when the post went to a user (E13). */
   post(input: PostInput): Promise<{ ts: string; channel?: string }>;
+  /** Reads the plan through its recorded object key; callers verify its digest before linking it. */
+  readArtifact?(key: string): Promise<string>;
+  /** Creates a channel-readable detail page and returns Slack's verified link. */
+  createPlanCanvas?(input: { channel: string; taskId: string; title: string; version: number; markdown: string }): Promise<{ canvasId: string; permalink: string }>;
   /** Spec 025 E13: chat.update, to edit an admin change's message when it ends. */
   update?(input: UpdateInput): Promise<void>;
   now(): number;
@@ -49,7 +55,7 @@ class StartPending extends Error {
 /** 30, 60, 120, 240, 480, then 900 seconds, by the delivery attempt that failed. */
 export const retryDelaySeconds = (attempt: number): number => Math.min(900, 30 * 2 ** Math.max(0, Math.min(attempt - 1, 5)));
 
-const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "admin_change_dm", "admin_change_outcome", "admin_change_expiry"]);
+const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "workflow", "github_feedback", "admin_change_dm", "admin_change_outcome", "admin_change_expiry"]);
 
 /**
  * #217: how long after a change's expiry its message is edited. The broker refuses a claim at or
@@ -59,6 +65,7 @@ const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "
 export const ADMIN_CHANGE_EXPIRY_GRACE_MS = 5_000;
 /** SQS's longest per-message delay. */
 const MAX_DELAY_SECONDS = 900;
+const slackText = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 
 /** #217: the queue delay for a notice the notifier scheduled: until its `notBefore`, within SQS's 15 minutes. */
 export function noticeDelaySeconds(notice: Notice, now: number): number {
@@ -223,9 +230,69 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
       const published = PullRequestResultSchema.safeParse((await operation())?.result);
       return published.success ? pullRequestReply(published.data.url) : undefined;
     }
+    case "workflow": {
+      const workflow = task.workflow;
+      if (workflow === undefined) return undefined;
+      if (workflow.feedback?.status === "APPROVED") return "Approved. AgentX is addressing the PR feedback and will rerun required checks and reviews.";
+      if (workflow.feedback?.status === "DISMISSED") return "Dismissed. AgentX made no code changes for this feedback.";
+      if (workflow.stage === "PLAN" && workflow.state === "RUNNING") return "Thanks. AgentX is revising the plan based on your feedback. It will post the updated plan here for review.";
+      if (workflow.stage === "IMPLEMENT" && workflow.state === "RUNNING") return "Plan approved. AgentX is starting the implementation.";
+      if (workflow.stage === "MERGED" && workflow.state === "COMPLETE") {
+        const total = workflow.pullRequests?.filter((pullRequest) => pullRequest.required).length ?? 0;
+        return total > 0 ? `GitHub confirms all ${total} required pull requests are merged. The task is complete.` : undefined;
+      }
+      if (workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING") {
+        const required = workflow.pullRequests?.filter((pullRequest) => pullRequest.required) ?? [];
+        if (required.length === 0) return undefined;
+        const merged = required.filter((pullRequest) => pullRequest.state === "MERGED").length;
+        const waiting = required.filter((pullRequest) => pullRequest.state !== "MERGED");
+        const progress = `GitHub update: ${merged} of ${required.length} pull requests ${merged === 1 ? "is" : "are"} merged.`;
+        const remaining = waiting.map((pullRequest) => ` <${pullRequest.url}|PR #${pullRequest.number}> is still ${pullRequest.state === "CLOSED" ? "closed" : "open"}.`).join("");
+        return `${progress}${remaining}`;
+      }
+      if (workflow.state === "COMPLETE") return "This workflow is closed. No more work will run from this plan.";
+      if (workflow.state === "BLOCKED") return "The workflow is blocked. AgentX has stopped and needs attention before it can continue.";
+      return undefined;
+    }
+    case "github_feedback": {
+      const feedback = task.workflow?.feedback;
+      if (feedback?.status !== "PENDING" || feedback.feedbackId !== notice.id.split(":").at(-1)) return undefined;
+      const comment = feedback.comments.at(-1);
+      if (comment === undefined) return undefined;
+      const excerpt = comment.body.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
+      const more = comment.body.trim().length > 180 ? "…" : "";
+      return `PR #${feedback.number} feedback from ${slackText(comment.author)}: “${slackText(excerpt)}${more}” <${comment.url}|open comment>. Proposed: ${feedback.proposedPlan}`;
+    }
     case "ended": {
       const ended = await operation();
       if (ended === undefined || !ENDED_STATUSES.has(ended.status)) return undefined;
+      if (task.workflow?.stage === "PLAN_REVIEW" && task.workflow.state === "WAITING") {
+        const plan = task.workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
+        if (plan === undefined || deps.readArtifact === undefined || deps.createPlanCanvas === undefined) {
+          return "The plan is ready for review, but AgentX couldn't prepare its Slack details link. No code changes have started. Ask an administrator to check the Slack Canvas setup.";
+        }
+        const markdown = await deps.readArtifact(plan.objectKey);
+        if (createHash("sha256").update(markdown, "utf8").digest("hex") !== plan.sha256) {
+          return "The plan is ready, but its saved copy failed an integrity check. No code changes have started. Ask an administrator to investigate.";
+        }
+        let canvas: { canvasId: string; permalink: string };
+        try {
+          canvas = await deps.createPlanCanvas({ channel: task.share.channelId, taskId: task.taskId, title: task.title, version: plan.version, markdown });
+        } catch (error) {
+          if (error instanceof SlackPostError && [
+            "missing_scope", "not_allowed_token_type", "feature_not_enabled", "method_not_supported_for_channel_type",
+            "canvas_disabled_user_team", "canvas_disabled_file_team", "canvas_globally_disabled",
+            "free_teams_cannot_create_standalone_canvases", "team_tier_cannot_create_channel_canvases",
+          ].includes(error.slackError)) {
+            return "The plan is ready, but Slack couldn't open its detail page. Ask an administrator to enable Canvas access for AgentX. No code changes have started.";
+          }
+          throw error;
+        }
+        return `The plan is ready. No code changes have started. <${canvas.permalink}|Read the plan and checks>.`;
+      }
+      if (task.workflow?.stage === "VERIFY" && task.workflow.state === "BLOCKED") {
+        return "AgentX finished implementation, but the task is blocked until candidate-bound checks and review are available. The pull request has not been opened.";
+      }
       const failed = ended.status === "FAILED" || ended.status === "INTERRUPTED";
       let summary: string | undefined;
       if (ended.kind === "task") {
@@ -537,7 +604,28 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
   if (text === undefined) return "stale";
   // Accepted: a close that commits while this reply is being posted can put this one reply after
   // "closed". The checks above read the task before the post; at most one reply per notice lands late.
-  await deps.post({ channel: share.channelId, threadTs: share.threadTs, text });
+  const workflow = task.workflow;
+  const plan = workflow?.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
+  const feedback = workflow?.feedback;
+  const feedbackNotice = notice.kind === "github_feedback" && feedback?.status === "PENDING" && feedback.feedbackId === notice.id.split(":").at(-1);
+  const blocks = feedbackNotice && feedback !== undefined
+    ? [
+        { type: "section", text: { type: "mrkdwn", text } },
+        { type: "actions", elements: [
+          { type: "button", action_id: "agentx_github_feedback_approve", style: "primary", text: { type: "plain_text", text: "Approve and address" }, value: JSON.stringify({ taskId: task.taskId, revision: workflow!.revision, feedbackId: feedback.feedbackId, candidateDigest: feedback.candidateDigest, decision: "APPROVE" }) },
+          { type: "button", action_id: "agentx_github_feedback_dismiss", text: { type: "plain_text", text: "Dismiss" }, value: JSON.stringify({ taskId: task.taskId, revision: workflow!.revision, feedbackId: feedback.feedbackId, candidateDigest: feedback.candidateDigest, decision: "REQUEST_CHANGES" }) },
+        ] },
+      ]
+    : notice.kind === "ended" && workflow?.stage === "PLAN_REVIEW" && workflow.state === "WAITING" && plan !== undefined
+    ? [
+        { type: "section", text: { type: "mrkdwn", text } },
+        { type: "actions", elements: [
+          { type: "button", action_id: "agentx_workflow_approve", style: "primary", text: { type: "plain_text", text: "Approve plan" }, value: JSON.stringify({ taskId: task.taskId, revision: workflow.revision, digest: plan.sha256, decision: "APPROVE" }) },
+          { type: "button", action_id: "agentx_workflow_changes", text: { type: "plain_text", text: "Request changes" }, value: JSON.stringify({ taskId: task.taskId, revision: workflow.revision, digest: plan.sha256, decision: "REQUEST_CHANGES" }) },
+        ] },
+      ]
+    : undefined;
+  await deps.post({ channel: share.channelId, threadTs: share.threadTs, text, ...(blocks === undefined ? {} : { blocks }) });
   await putMarker(deps, marker);
   return "posted";
 }
@@ -646,6 +734,7 @@ function createAwsNotifierHandler() {
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(awsClientConfiguration), { marshallOptions: { removeUndefinedValues: true } });
   const sqs = new SQSClient(awsClientConfiguration);
   const secretsManager = new SecretsManagerClient(awsClientConfiguration);
+  const s3 = new S3Client(awsClientConfiguration);
   const queueUrl = () => requiredEnvironment("NOTICE_QUEUE_URL");
   const slack = cachedSlackClient(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
     .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken));
@@ -671,6 +760,15 @@ function createAwsNotifierHandler() {
       await sqs.send(new ChangeMessageVisibilityCommand({ QueueUrl: queueUrl(), ReceiptHandle: receiptHandle, VisibilityTimeout: seconds }));
     },
     post: slack.post,
+    async readArtifact(key) {
+      const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));
+      if (response.Body === undefined) throw new Error("workflow plan artifact has no body");
+      return response.Body.transformToString("utf8");
+    },
+    createPlanCanvas(input) {
+      return cachedBotToken(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
+        .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken))((token) => createTaskPlanCanvas(token, input));
+    },
     update: slack.update,
     now: Date.now,
     log: (entry) => console.log(JSON.stringify({ component: "developer-task-notifier", ...entry })),

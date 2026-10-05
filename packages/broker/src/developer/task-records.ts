@@ -24,6 +24,7 @@ import {
   type DeveloperTaskShare,
   type DeveloperTaskStatus,
   type Operation,
+  type WorkflowSnapshot,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import type { ShareDecision } from "./share.js";
@@ -57,6 +58,7 @@ export interface DeveloperTaskRecord {
   createdAt: string;
   updatedAt: string;
   closedAt?: string;
+  workflow?: WorkflowSnapshot;
 }
 
 /** C1: a shared task's thread, as the task record keeps it. */
@@ -127,13 +129,35 @@ export interface DeveloperTaskPointerRecord {
   firstRequestId: string;
   /** The first instructions, until the prepare's result queues them (R3). */
   pendingPrompt?: string;
+  /** The first plan-only operation is selected by the broker, never by the request. */
+  pendingWorkflowMode?: "PLAN" | "IMPLEMENT";
   /** Set when the task was cancelled before its instructions ran (R16). */
   cancelledAt?: string;
+}
+
+/** GITHUB_PR#<owner/repo> / PR#<number>: exact reverse link from a published PR to its task. */
+export interface GithubWorkflowPullRequestRecord {
+  pk: string;
+  sk: string;
+  entityType: "GITHUB_WORKFLOW_PR";
+  repositoryFullName: string;
+  repositoryId: string;
+  number: number;
+  url: string;
+  taskId: string;
+  workspaceId: string;
+  candidateDigest: string;
+  createdAt: string;
 }
 
 export const taskKey = (taskId: string) => ({ pk: `DEVTASK#${taskId}`, sk: "META" as const });
 export const taskIndexKey = (developerId: string, createdAt: string, taskId: string) => ({ pk: `DEVELOPER#${developerId}`, sk: `TASK#${createdAt}#${taskId}` });
 export const taskPointerKey = (workspaceId: string) => ({ pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK" as const });
+export function githubWorkflowPullRequestKey(repositoryFullName: string, number: number) {
+  const match = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(repositoryFullName);
+  if (!match || !Number.isSafeInteger(number) || number < 1) throw new Error("GitHub pull request identity is invalid");
+  return { pk: `GITHUB_PR#${repositoryFullName.toLowerCase()}`, sk: `PR#${String(number).padStart(10, "0")}` };
+}
 export const startIdempotencyKey = (developerId: string, requestId: string) => ({ pk: `IDEMPOTENCY#${developerId}#DEVTASK`, sk: `REQUEST#${requestId}` });
 
 export const taskOwnerSubject = (developerId: string, taskId: string): string => `${developerId}/${taskId}`;

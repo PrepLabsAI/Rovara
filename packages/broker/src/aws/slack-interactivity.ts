@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { DeleteCommand, DynamoDBDocumentClient, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
@@ -13,7 +13,9 @@ import {
   SlackMessageTimestampSchema,
   SlackRequestMessageSchema,
   SlackTeamIdSchema,
+  SlackThreadSchema,
   SlackUserIdSchema,
+  WorkflowSnapshotSchema,
   answeredConfirmationBlocks,
   confirmationClickEventId,
   confirmationKey,
@@ -85,6 +87,10 @@ export interface SlackInteractivityDependencies {
     /** The change's trace ID, for the log line only. */
     traceOf?(changeId: string): Promise<string | undefined>;
   };
+  workflow?: {
+    handleAction(action: SlackBlockAction): Promise<void>;
+    handleSubmission(payload: Record<string, unknown>): Promise<void>;
+  };
 }
 
 /** What an admin hears, privately, once a Confirm press is handed to the broker (spec 025 E14). */
@@ -138,6 +144,16 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
       log("interaction.rejected", { reason: "malformed_payload" });
       return respond(400, { error: "interaction payload is not JSON" });
     }
+    if (payload.type === "view_submission" && dependencies.workflow !== undefined) {
+      if (asRecord(payload.view).callback_id !== "agentx_workflow_review_submission") return respond(200, { response_action: "clear" });
+      try {
+        await dependencies.workflow.handleSubmission(payload);
+        return respond(200, { response_action: "clear" });
+      } catch (error) {
+        log("workflow.submission_failed", { errorName: errorName(error) });
+        return respond(200, { response_action: "errors", errors: { workflow_feedback: "I couldn't save this decision. Close this form and try again." } });
+      }
+    }
     if (payload.type !== "block_actions") {
       log("interaction.ignored", { reason: "not_block_actions" });
       return respond(200, { ok: true });
@@ -174,7 +190,10 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
       return respond(200, { ok: true });
     }
     for (const action of actions.actions) {
-      const handler = dependencies.handlers.find((entry) => entry.matches(action.actionId));
+      const handler = dependencies.workflow && (action.actionId === "agentx_workflow_approve" || action.actionId === "agentx_workflow_changes"
+        || action.actionId === "agentx_github_feedback_approve" || action.actionId === "agentx_github_feedback_dismiss")
+        ? { matches: () => true, handle: (value: SlackBlockAction) => dependencies.workflow!.handleAction(value) }
+        : dependencies.handlers.find((entry) => entry.matches(action.actionId));
       if (!handler) {
         log("interaction.ignored", { reason: "unknown_action", actionId: action.actionId.slice(0, 64) });
         try {
@@ -191,7 +210,12 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
         // after its claim), so the member can safely press again.
         log("interaction.failed", { actionId: action.actionId.slice(0, 64), errorName: errorName(error) });
         try {
-          await dependencies.respondEphemeral?.(action.responseUrl, CLICK_FAILED_TEXT);
+          const workflowButton = action.actionId === "agentx_workflow_approve" || action.actionId === "agentx_workflow_changes"
+            || action.actionId === "agentx_github_feedback_approve" || action.actionId === "agentx_github_feedback_dismiss";
+          const message = error instanceof WorkflowInteractionRefusal ? error.message
+            : workflowButton ? "I couldn't open those plan controls. Use the latest plan message and try again."
+            : CLICK_FAILED_TEXT;
+          await dependencies.respondEphemeral?.(action.responseUrl, message);
         } catch (respondError) {
           log("interaction.respond_failed", { errorName: errorName(respondError) });
         }
@@ -416,6 +440,8 @@ export function createAwsSlackInteractivityHandler() {
   const secretArn = requiredEnvironment("SLACK_SECRET_ARN");
   // Optional: only the Details button reads it, so a missing variable must not break Approve/Cancel.
   const turnRecordsTableName = process.env.TURN_RECORDS_TABLE_NAME;
+  const stateTableName = process.env.STATE_TABLE_NAME;
+  const brokerFunctionName = process.env.BROKER_FUNCTION_NAME;
   let cached: { secrets: Promise<SlackSecrets>; loadedAt: number } | undefined;
   const secrets = (): Promise<SlackSecrets> => {
     if (!cached || Date.now() - cached.loadedAt > SECRET_CACHE_MILLISECONDS) {
@@ -433,10 +459,32 @@ export function createAwsSlackInteractivityHandler() {
   // Spec 025 E14 (C14): named environments only (D14). The legacy deployment sets no ADMIN_CHANGES,
   // so its interactivity handling, and every variable and grant it reads, is unchanged.
   const adminChange = process.env.ADMIN_CHANGES === "enabled" ? awsAdminChangePress(clientConfiguration, documentClient) : undefined;
+  const workflow = stateTableName && brokerFunctionName ? workflowSlackHandlers({
+    async loadTask(taskId) {
+      const response = await documentClient.send(new GetCommand({ TableName: stateTableName, Key: { pk: `DEVTASK#${taskId}`, sk: "META" }, ConsistentRead: true, ProjectionExpression: "pk, sk, slackUserId, #share, workflow", ExpressionAttributeNames: { "#share": "share" } })) as { Item?: Record<string, unknown> };
+      return response.Item;
+    },
+    openView: async (triggerId, view) => slackApi((await secrets()).botToken, "views.open", { trigger_id: triggerId, view }),
+    async submit(input) {
+      await new LambdaClient(clientConfiguration).send(new InvokeCommand({
+        FunctionName: brokerFunctionName,
+        InvocationType: "Event",
+        Payload: Buffer.from(JSON.stringify({ source: "agentx.slack-ingress", action: "workflow-decision", ...input })),
+      }));
+    },
+    async submitFeedback(input) {
+      await new LambdaClient(clientConfiguration).send(new InvokeCommand({
+        FunctionName: brokerFunctionName,
+        InvocationType: "Event",
+        Payload: Buffer.from(JSON.stringify({ source: "agentx.slack-ingress", action: "workflow-feedback-decision", ...input })),
+      }));
+    },
+  }) : undefined;
   return createSlackInteractivityHandler({
     secrets,
     log,
     ...(adminChange === undefined ? {} : { adminChange }),
+    ...(workflow === undefined ? {} : { workflow }),
     // The module's own respondEphemeral, for a button no handler knows.
     respondEphemeral,
     handlers: [confirmationActionHandler({
@@ -485,6 +533,130 @@ export function createAwsSlackInteractivityHandler() {
       log,
     })],
   });
+}
+
+interface WorkflowActionValue { taskId: string; revision: number; digest: string; decision: "APPROVE" | "REQUEST_CHANGES" }
+
+class WorkflowInteractionRefusal extends Error {
+  constructor(message: string) { super(message); this.name = "WorkflowInteractionRefusal"; }
+}
+
+function workflowActionValue(value: string): WorkflowActionValue | undefined {
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    if (typeof parsed.taskId !== "string" || !CHANGE_ID.test(parsed.taskId) || !Number.isInteger(parsed.revision)
+      || typeof parsed.digest !== "string" || !/^[a-f0-9]{64}$/.test(parsed.digest)
+      || (parsed.decision !== "APPROVE" && parsed.decision !== "REQUEST_CHANGES")) return undefined;
+    return { taskId: parsed.taskId, revision: parsed.revision as number, digest: parsed.digest, decision: parsed.decision };
+  } catch { return undefined; }
+}
+
+export function workflowSlackHandlers(deps: {
+  loadTask(taskId: string): Promise<Record<string, unknown> | undefined>;
+  openView(triggerId: string, view: Record<string, unknown>): Promise<void>;
+  submit(input: Record<string, unknown>): Promise<void>;
+  submitFeedback?(input: Record<string, unknown>): Promise<void>;
+}) {
+  const currentReview = async (value: WorkflowActionValue, userId: string, thread: SlackThread) => {
+    const task = await deps.loadTask(value.taskId);
+    if (!task || task.slackUserId !== userId) {
+      const owner = SlackUserIdSchema.safeParse(task?.slackUserId);
+      throw new WorkflowInteractionRefusal(owner.success ? `Only <@${owner.data}> can decide this plan.` : "Only the task owner can decide this plan.");
+    }
+    const share = asRecord(task.share);
+    if (share.teamId !== thread.teamId || share.channelId !== thread.channelId || share.threadTs !== thread.threadTs) throw new WorkflowInteractionRefusal("This plan belongs to another Slack thread.");
+    const parsed = WorkflowSnapshotSchema.safeParse(task.workflow);
+    if (!parsed.success || parsed.data.revision !== value.revision || parsed.data.stage !== "PLAN_REVIEW" || parsed.data.state !== "WAITING") throw new WorkflowInteractionRefusal("This plan has changed. Use the latest plan message.");
+    const plan = parsed.data.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
+    if (!plan || plan.sha256 !== value.digest) throw new WorkflowInteractionRefusal("This plan has changed. Use the latest plan message.");
+    return { task, workflow: parsed.data };
+  };
+  return {
+    async handleAction(action: SlackBlockAction) {
+      if (action.actionId === "agentx_github_feedback_approve" || action.actionId === "agentx_github_feedback_dismiss") {
+        let feedbackAction: Record<string, unknown>;
+        try { feedbackAction = asRecord(JSON.parse(action.value)); } catch { throw new Error("invalid PR feedback action"); }
+        const taskId = typeof feedbackAction.taskId === "string" && CHANGE_ID.test(feedbackAction.taskId) ? feedbackAction.taskId : undefined;
+        const revision = feedbackAction.revision;
+        const feedbackId = feedbackAction.feedbackId;
+        const candidateDigest = feedbackAction.candidateDigest;
+        const decision = action.actionId === "agentx_github_feedback_approve" ? "APPROVE" : "REQUEST_CHANGES";
+        if (taskId === undefined || !Number.isInteger(revision) || typeof feedbackId !== "string" || !/^[a-f0-9]{64}$/.test(feedbackId)
+          || typeof candidateDigest !== "string" || !/^[a-f0-9]{64}$/.test(candidateDigest) || feedbackAction.decision !== decision) {
+          throw new Error("invalid PR feedback action");
+        }
+        const task = await deps.loadTask(taskId);
+        if (!task || task.slackUserId !== action.userId) {
+          const owner = SlackUserIdSchema.safeParse(task?.slackUserId);
+          throw new WorkflowInteractionRefusal(owner.success ? `Only <@${owner.data}> can decide this PR feedback.` : "Only the task owner can decide this PR feedback.");
+        }
+        const share = asRecord(task.share);
+        if (share.teamId !== action.thread.teamId || share.channelId !== action.thread.channelId || share.threadTs !== action.thread.threadTs) throw new WorkflowInteractionRefusal("This PR feedback belongs to another Slack thread.");
+        const parsed = WorkflowSnapshotSchema.safeParse(task.workflow);
+        const feedback = parsed.success ? parsed.data.feedback : undefined;
+        if (!parsed.success || parsed.data.revision !== revision || parsed.data.stage !== "WAIT_FOR_MERGE" || parsed.data.state !== "WAITING"
+          || feedback?.status !== "PENDING" || feedback.feedbackId !== feedbackId || feedback.candidateDigest !== candidateDigest
+          || parsed.data.candidate?.digest !== candidateDigest) throw new WorkflowInteractionRefusal("This PR feedback changed. Use the latest AgentX message.");
+        if (deps.submitFeedback === undefined) throw new Error("PR feedback decisions are not configured");
+        await deps.submitFeedback({ taskId, userId: action.userId, thread: action.thread, requestId: randomUUID(), expectedRevision: revision, feedbackId, candidateDigest, decision });
+        return;
+      }
+      const value = workflowActionValue(action.value);
+      if (!value || action.triggerId === "") throw new Error("invalid workflow action");
+      const { workflow } = await currentReview(value, action.userId, action.thread);
+      const requiredText = workflow.checkPolicy?.required.length
+        ? `Always run:\n${workflow.checkPolicy.required.map((check) => `• ${check.label}`).join("\n")}`
+        : "No required project checks are configured.";
+      const blocks: Array<Record<string, unknown>> = [{ type: "section", text: { type: "mrkdwn", text: requiredText } }];
+      if (value.decision === "APPROVE") {
+        const optional = workflow.checkPolicy?.optional ?? [];
+        blocks.push({ type: "section", text: { type: "mrkdwn", text: optional.length ? "Choose any extra checks to run:" : "No extra project-approved checks are available." } });
+        if (optional.length) blocks.push({ type: "input", block_id: "workflow_checks", optional: true, label: { type: "plain_text", text: "Extra checks" }, element: {
+          type: "checkboxes", action_id: "selected_options", options: optional.map((check) => ({ text: { type: "plain_text", text: check.label }, value: check.id })),
+        } });
+      } else {
+        blocks.push({ type: "input", block_id: "workflow_feedback", label: { type: "plain_text", text: "What should change?" }, element: { type: "plain_text_input", action_id: "reason", multiline: true, max_length: 500 } });
+      }
+      const privateMetadata = JSON.stringify({ ...value, thread: action.thread });
+      await deps.openView(action.triggerId, {
+        type: "modal", callback_id: "agentx_workflow_review_submission", private_metadata: privateMetadata,
+        title: { type: "plain_text", text: value.decision === "APPROVE" ? "Approve plan" : "Request changes" },
+        submit: { type: "plain_text", text: value.decision === "APPROVE" ? "Approve and start" : "Send feedback" },
+        close: { type: "plain_text", text: "Cancel" }, blocks,
+      });
+    },
+    async handleSubmission(payload: Record<string, unknown>) {
+      const view = asRecord(payload.view);
+      let metadata: Record<string, unknown>;
+      try { metadata = asRecord(JSON.parse(typeof view.private_metadata === "string" ? view.private_metadata : "")); }
+      catch { throw new Error("invalid workflow modal metadata"); }
+      const value = workflowActionValue(JSON.stringify({ taskId: metadata.taskId, revision: metadata.revision, digest: metadata.digest, decision: metadata.decision }));
+      const thread = SlackThreadSchema.safeParse(metadata.thread);
+      const userId = SlackUserIdSchema.safeParse(asRecord(payload.user).id);
+      if (!value || !thread.success || !userId.success) throw new Error("invalid workflow modal submission");
+      const { workflow } = await currentReview(value, userId.data, thread.data);
+      const state = asRecord(view.state);
+      const values = asRecord(state.values);
+      let reason = "Approved in Slack.";
+      let selectedOptionalCheckIds: string[] = [];
+      if (value.decision === "REQUEST_CHANGES") {
+        const feedback = asRecord(asRecord(values.workflow_feedback).reason).value;
+        if (typeof feedback !== "string" || !feedback.trim()) throw new Error("workflow feedback is required");
+        reason = feedback.trim().slice(0, 500);
+      } else {
+        const selections = asRecord(asRecord(values.workflow_checks).selected_options).selected_options;
+        if (Array.isArray(selections)) selectedOptionalCheckIds = selections.flatMap((entry) => {
+          const id = asRecord(entry).value;
+          return typeof id === "string" && workflow.checkPolicy?.optional.some((check) => check.id === id) ? [id] : [];
+        });
+      }
+      await deps.submit({
+        taskId: value.taskId, userId: userId.data, thread: thread.data,
+        expectedRevision: value.revision, artifactDigest: value.digest, decision: value.decision,
+        reason, selectedOptionalCheckIds, requestId: randomUUID(),
+      });
+    },
+  };
 }
 
 /** The broker's press event (E14), exactly what `isAdminChangePressEvent` accepts. */

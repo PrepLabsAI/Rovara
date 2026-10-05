@@ -38,6 +38,7 @@ export interface OperationRecord extends Operation {
   targetOperationId?: string;
   /** The project revision whose non-disk settings applied, which may be newer than the workspace's. */
   settingsRevision?: number;
+  workflowMode?: "PLAN" | "IMPLEMENT" | undefined;
   publication?: {
     repository: string;
     repositoryUrl: string;
@@ -114,6 +115,7 @@ export function publicOperation(record: OperationRecord): Operation {
     id: record.id,
     workspaceId: record.workspaceId,
     kind: record.kind,
+    ...(record.workflowMode === undefined ? {} : { workflowMode: record.workflowMode }),
     requestId: record.requestId,
     payloadHash: record.payloadHash,
     status: record.status,

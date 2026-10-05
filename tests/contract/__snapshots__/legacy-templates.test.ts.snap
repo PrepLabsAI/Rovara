@@ -60,6 +60,22 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "Ref": "DispatchDeadLetterQueue3E30F4B8",
       },
     },
+    "GithubWebhookUrl": {
+      "Value": {
+        "Fn::Join": [
+          "",
+          [
+            {
+              "Fn::GetAtt": [
+                "HttpApi",
+                "ApiEndpoint",
+              ],
+            },
+            "/v1/github/webhooks",
+          ],
+        ],
+      },
+    },
     "InvokeSigningKeyArn": {
       "Value": {
         "Fn::GetAtt": [
@@ -2078,6 +2094,27 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
         "TreatMissingData": "notBreaching",
       },
       "Type": "AWS::CloudWatch::Alarm",
+    },
+    "GithubWebhookRoute": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "POST /v1/github/webhooks",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
     },
     "HttpApi": {
       "Properties": {

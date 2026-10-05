@@ -76,6 +76,20 @@ describe("ec2-ebs delivery", () => {
     }
     const postedPayload = (post: ReturnType<typeof delivery>["post"]) => (JSON.parse(post.mock.calls[0]![1].body) as { payload: Record<string, unknown> }).payload;
 
+    it("sends a workflow mode only to a worker that advertises the read-only tool boundary", async () => {
+      const { deliver, post } = delivery({ workerFeatures: async () => ["task.workflowMode"] });
+      const record = taskRecord({ workflowMode: "PLAN" });
+      expect(await deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(post).workflowMode).toBe("PLAN");
+    });
+
+    it("refuses workflow dispatch when a worker cannot prove it enforces the requested tool boundary", async () => {
+      const { deliver, post } = delivery({ workerFeatures: async () => [] });
+      const record = taskRecord({ workflowMode: "PLAN" });
+      await expect(deliver(record, record.invocation)).rejects.toThrow(/workflow mode requires a compatible worker/);
+      expect(post).not.toHaveBeenCalled();
+    });
+
     it("keeps the readiness for a worker whose /ping lists it", async () => {
       const workerFeatures = vi.fn<NonNullable<Ec2DeliveryDependencies["workerFeatures"]>>(async () => ["task.readiness"]);
       const { deliver, post } = delivery({ workerFeatures });

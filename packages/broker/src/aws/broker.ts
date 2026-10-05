@@ -32,6 +32,13 @@ import {
   checksSection,
   nextStandingFailures,
   type StandingFailure,
+  submitWorkflowArtifact,
+  blockWorkflow,
+  createCandidateManifest,
+  recordWorkflowVerification,
+  submitWorkflowReview,
+  registerWorkflowPullRequest,
+  decideWorkflowFeedback,
   taskResultChecks,
   type CheckEntry,
   type LatestChecks,
@@ -80,6 +87,7 @@ import {
   type CodeBuildCheckResult,
   type CodeBuildGateDefinition,
   type ProjectDefinition,
+  type ProjectCommand,
   type RegistrationPreflight,
   type PullRequestLifecycleResult,
   type SlackChannelBinding,
@@ -92,6 +100,9 @@ import {
   type ThreadConnector,
   type WorkerInvocation,
   type WorkspaceInstance,
+  type WorkflowSnapshot,
+  type CandidateRepository,
+  WORKFLOW_PLAN_MAX_BYTES,
   cleanDisplayName,
   redactAndCap,
   redactText,
@@ -120,7 +131,8 @@ import { recordPrepareFailureEvent } from "./operation-events.js";
 import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js";
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
-import { appIdFromSecret, GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
+import { appIdFromSecret, GitHubAppCredentialProvider, privateKeyFromSecret, webhookSecretFromSecret } from "../github-app.js";
+import { GithubWebhookRefusal, authorizeLinkedGithubWebhook, handleGithubWebhook, reconcileGithubWorkflowPullRequest, recordLinkedGithubWorkflowFeedback, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
 import { unsupportedThinkingLevels } from "@agentx/model-runtime/thinking-levels";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
@@ -134,12 +146,12 @@ import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
   type CallbackClaims, type OperationRecord,
 } from "./cancellation.js";
-import { aiToolTurn, completedTurn, developerFooter, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type StoredEvent } from "../developer/task-records.js";
+import { aiToolTurn, completedTurn, developerFooter, githubWorkflowPullRequestKey, inertName, OUTCOME, partyOfTask, taskKey, taskOwnerKey, taskOwnerSubject, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type GithubWorkflowPullRequestRecord, type StoredEvent } from "../developer/task-records.js";
 import { readWorkspaceLimits } from "../developer/limits.js";
 import { AWS_TEMPORARY_MESSAGE, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, workerPrompt } from "./broker-shared.js";
-import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration } from "./developer-routes.js";
+import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { adminShareMode, finishTaskClose } from "./developer-tasks.js";
+import { adminShareMode, finishTaskClose, routeDeveloperTaskRequest } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -256,7 +268,9 @@ interface AwsBrokerDependencies {
   adminValues: readonly string[];
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
-  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest">;
+  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository">;
+  /** Reads the GitHub webhook HMAC key from the configured GitHub App secret. */
+  githubWebhookSecret?: () => Promise<string>;
   /** Refuses, with CONFIG_INVALID, a repository its credential cannot reach; checked at registration. */
   checkRepositoryAccess?: (repository: { credentialRef: string; url: string }) => Promise<void>;
   codeBuild: CodeBuildGateway;
@@ -558,7 +572,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent | AdminChangePressEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | AdminChangePressEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
@@ -579,6 +593,31 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
+    if (isSlackWorkflowStartEvent(event)) {
+      try {
+        const task = await startSlackWorkflow(dependencies, tasks, event);
+        return json({ taskId: task.task.taskId }, "slack-ingress");
+      } catch (error) {
+        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
+        return unexpectedErrorAnswer(error, "slack-ingress");
+      }
+    }
+    if (isSlackWorkflowDecisionEvent(event)) {
+      try {
+        return json(await decideSlackWorkflow(dependencies, tasks, event), "slack-ingress");
+      } catch (error) {
+        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
+        return unexpectedErrorAnswer(error, "slack-ingress");
+      }
+    }
+    if (isSlackWorkflowFeedbackDecisionEvent(event)) {
+      try {
+        return json(await decideSlackWorkflowFeedback(dependencies, tasks, event), "slack-ingress");
+      } catch (error) {
+        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
+        return unexpectedErrorAnswer(error, "slack-ingress");
+      }
+    }
     const request = adaptHttpApiEvent(event);
     try {
       // Checked on the raw path, before URL parsing normalizes it: /v1/dev/../v1/admin/x reaches
@@ -587,6 +626,40 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       const url = new URL(request.path, "https://agentx.invalid");
       // The /v1/dev route has no API Gateway authorizer, so what it carries goes to the developer API or nowhere.
       if (event.routeKey === DEVELOPER_ROUTE_KEY && !url.pathname.startsWith("/v1/dev/")) throw agentXError("NOT_FOUND", "route not found");
+      if (url.pathname === "/v1/github/webhooks") {
+        if (request.method !== "POST") return json({ error: { code: "NOT_FOUND", message: "route not found" } }, request.requestId, 404);
+        if (request.body === undefined || dependencies.githubWebhookSecret === undefined) {
+          return json({ error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook handling is not configured" } }, request.requestId, 503);
+        }
+        try {
+          const result = await handleGithubWebhook({
+            documentClient: dependencies.documentClient,
+            tableName: dependencies.tableName,
+            rawBody: request.body,
+            headers: request.headers,
+            secret: await dependencies.githubWebhookSecret(),
+            authorizeRepository: (scope) => authorizeLinkedGithubWebhook({
+              documentClient: dependencies.documentClient,
+              tableName: dependencies.tableName,
+              scope,
+              loadTask: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
+              repositoryUrl: async (projectName, revision, repositoryId) => {
+                const project = await requireProject(dependencies, projectName, revision);
+                return project.definition.repositories.find((repository) => repository.name === repositoryId)?.url;
+              },
+              verifyRepository: (repositoryUrl, webhookScope) => dependencies.githubPullRequests.verifyWebhookRepository(repositoryUrl, webhookScope),
+            }),
+            process: (workflowEvent) => processGithubWorkflowEvent(dependencies, workflowEvent),
+            now: () => new Date().toISOString(),
+          });
+          if (result.status === "IN_PROGRESS") return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId, 503);
+          return json({ delivery: result.status, deliveryId: result.deliveryId }, request.requestId);
+        } catch (error) {
+          if (error instanceof GithubWebhookRefusal) return json({ error: { code: "FORBIDDEN", message: error.message } }, request.requestId, 403);
+          if (error instanceof AgentXError && error.code === "RUNTIME_UNAVAILABLE") return json({ error: { code: error.code, message: "GitHub webhook processing will be retried" } }, request.requestId, 503);
+          throw error;
+        }
+      }
       // Spec 043: an eval runner's callbacks, authorized by the run's own capability.
       const evalCallback = isSwebenchCallbackPath(url.pathname);
       if (request.method === "POST" && evalCallback !== undefined) {
@@ -2550,7 +2623,7 @@ async function createConversation(
 async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean },
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; workflowMode?: "PLAN" | "IMPLEMENT"; readiness?: ProjectCommand[] },
   now: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -2562,6 +2635,7 @@ async function taskOperationParts(
     workspaceId: workspace.id,
     conversationId: input.conversationId,
     kind: "task",
+    ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
     requestId: input.requestId,
     payloadHash: hashJson({ conversationId: input.conversationId, prompt: input.prompt }),
     status: "ACCEPTED",
@@ -2572,7 +2646,10 @@ async function taskOperationParts(
   });
   operation.settingsRevision = settings.definition.revision;
   // 25c note 1: the hash above is the request's own; only the worker's copy gets the re-read line.
-  const prompt = workerPrompt(input.prompt, input.shared === true);
+  const selectedPrompt = input.workflowMode === "PLAN"
+    ? `Planning phase only. Do not edit, write, or create files. Inspect the request and repository. Return a short, plain-language plan (at most 180 words) with only these headings: Goal; What will change; Checks; Risks or questions. Name the relevant files or areas and exact checks where known. Include only material risks or genuine unanswered questions. Avoid generic introductions, repeated context, filler, and boilerplate conclusions. This plan will be shown as a linked detail page; the Slack message will contain only a short summary. A person must approve this exact plan before any code changes.\n\nRequest:\n${input.prompt}`
+    : input.prompt;
+  const prompt = workerPrompt(selectedPrompt, input.shared === true);
   if (input.shared === true && prompt === input.prompt) {
     console.log(JSON.stringify({ component: "broker", event: "developer.shared_reread_omitted", operationId }));
   }
@@ -2588,11 +2665,12 @@ async function taskOperationParts(
       conversationId: input.conversationId,
       prompt,
       conversationStarted: input.conversationStarted,
+      ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
       ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
       ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
       // Spec 051 (P-1): the checks the worker reruns when the agent finishes. The latest revision's readiness, as
       // publicationProject merges it, since that is what publication gates on. None when the project has none.
-      ...(settings.definition.readiness.length === 0 ? {} : { readiness: settings.definition.readiness }),
+      ...((input.readiness ?? settings.definition.readiness).length === 0 ? {} : { readiness: input.readiness ?? settings.definition.readiness }),
     },
   };
   return { operation, outbox: outboxRecord(workspace, invocation), fence };
@@ -2604,7 +2682,7 @@ async function acceptTask(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
-  options: { sharedTask?: boolean } = {},
+  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT"; readiness?: ProjectCommand[] } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
@@ -2640,6 +2718,8 @@ async function acceptTask(
     requester: requesterOf(identity),
     // 25c note 1: a turn from an open shared thread, or the developer's own turn on a shared task.
     shared: identity.sharedTask?.state === "continue" || options.sharedTask === true,
+    ...(options.workflowMode === undefined ? {} : { workflowMode: options.workflowMode }),
+    ...(options.readiness === undefined ? {} : { readiness: options.readiness }),
   }, now);
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
@@ -3161,6 +3241,142 @@ export interface SlackStopTaskEvent {
   action: "stop-task";
   thread: SlackThread;
   userId: string;
+}
+
+export interface SlackWorkflowStartEvent {
+  source: "agentx.slack-ingress";
+  action: "start-workflow";
+  thread: SlackThread;
+  userId: string;
+  instructions: string;
+  requestId: string;
+}
+
+export interface SlackWorkflowDecisionEvent {
+  source: "agentx.slack-ingress";
+  action: "workflow-decision";
+  taskId: string;
+  userId: string;
+  thread: SlackThread;
+  requestId: string;
+  expectedRevision: number;
+  artifactDigest: string;
+  decision: "APPROVE" | "REQUEST_CHANGES";
+  reason: string;
+  selectedOptionalCheckIds: string[];
+}
+
+export interface SlackWorkflowFeedbackDecisionEvent {
+  source: "agentx.slack-ingress";
+  action: "workflow-feedback-decision";
+  taskId: string;
+  userId: string;
+  thread: SlackThread;
+  requestId: string;
+  expectedRevision: number;
+  feedbackId: string;
+  candidateDigest: string;
+  decision: "APPROVE" | "REQUEST_CHANGES";
+}
+
+export function isSlackWorkflowStartEvent(event: unknown): event is SlackWorkflowStartEvent {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  return value.source === "agentx.slack-ingress" && value.action === "start-workflow" && value.requestContext === undefined
+    && typeof value.instructions === "string" && value.instructions.trim().length > 0
+    && typeof value.requestId === "string";
+}
+
+async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowStartEvent) {
+  if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
+  const thread = SlackThreadSchema.parse(event.thread);
+  const userId = SlackRequesterSchema.shape.userId.parse(event.userId);
+  const requestId = randomUUIDSchema.parse(event.requestId);
+  const instructions = event.instructions.trim();
+  if (!instructions || Buffer.byteLength(instructions, "utf8") > 65_536) throw agentXError("CONFIG_INVALID", "workflow request is empty or too long");
+  if (dependencies.developer.slackTeamId !== thread.teamId) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks");
+  const binding = await getSlackBinding(dependencies, thread.teamId, thread.channelId);
+  if (binding === undefined) throw agentXError("FORBIDDEN", "Slack channel is not bound to a project");
+  const existingWorkflowThread = await getItem(dependencies, sharedTaskKey(thread));
+  const threadOwnerKey = ownerKeyForSubject(SLACK_THREAD_OWNER_ISSUER, slackThreadSubject(thread));
+  const existingThreadTask = await getItem<{ workspaceId?: string; closedAt?: string }>(dependencies, slackThreadKey(threadOwnerKey));
+  if (existingWorkflowThread !== undefined || (typeof existingThreadTask?.workspaceId === "string" && existingThreadTask.closedAt === undefined)) {
+    throw agentXError("WORKSPACE_BUSY", "this Slack thread already has a task; start the workflow in a new thread");
+  }
+  const caller: DeveloperCaller = { developerId: userId, sessionId: "slack-workflow", amr: "slack", name: `Slack user ${userId}`, slackUserId: userId };
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller, thread);
+  const request = {
+    method: "POST", path: "/v1/dev/tasks", headers: {}, requestId,
+    body: JSON.stringify({ requestId, project: binding.projectName, instructions, client: "slack", workflow: true, shareToChannel: true, channel: thread.channelId }),
+  };
+  return await routeDeveloperTaskRequest(routeDeps, caller, request, new URL(request.path, "https://agentx.invalid")) as { task: { taskId: string } };
+}
+
+const randomUUIDSchema = { parse(value: string): string { if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)) throw agentXError("CONFIG_INVALID", "workflow request ID is invalid"); return value; } };
+
+export function isSlackWorkflowDecisionEvent(event: unknown): event is SlackWorkflowDecisionEvent {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  return value.source === "agentx.slack-ingress" && value.action === "workflow-decision" && value.requestContext === undefined
+    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
+    && Number.isInteger(value.expectedRevision) && typeof value.artifactDigest === "string"
+    && (value.decision === "APPROVE" || value.decision === "REQUEST_CHANGES") && typeof value.reason === "string"
+    && Array.isArray(value.selectedOptionalCheckIds);
+}
+
+async function decideSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowDecisionEvent) {
+  if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
+  const thread = SlackThreadSchema.parse(event.thread);
+  const userId = SlackRequesterSchema.shape.userId.parse(event.userId);
+  const taskId = randomUUIDSchema.parse(event.taskId);
+  const requestId = randomUUIDSchema.parse(event.requestId);
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  if (task === undefined || task.slackUserId !== userId) throw agentXError("FORBIDDEN", "only the task owner can decide this plan");
+  if (task.share?.teamId !== thread.teamId || task.share.channelId !== thread.channelId || task.share.threadTs !== thread.threadTs) {
+    throw agentXError("FORBIDDEN", "this plan belongs to another Slack thread");
+  }
+  const caller: DeveloperCaller = { developerId: userId, sessionId: "slack-workflow", amr: "slack", name: task.developerName, slackUserId: userId };
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
+  const body = JSON.stringify({
+    requestId, expectedRevision: event.expectedRevision, artifactDigest: event.artifactDigest,
+    decision: event.decision, reason: event.reason, selectedOptionalCheckIds: event.selectedOptionalCheckIds,
+  });
+  return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path: `/v1/dev/tasks/${taskId}/workflow/decision`, headers: {}, requestId, body }, new URL(`/v1/dev/tasks/${taskId}/workflow/decision`, "https://agentx.invalid"));
+}
+
+export function isSlackWorkflowFeedbackDecisionEvent(event: unknown): event is SlackWorkflowFeedbackDecisionEvent {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  return value.source === "agentx.slack-ingress" && value.action === "workflow-feedback-decision" && value.requestContext === undefined
+    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
+    && Number.isInteger(value.expectedRevision) && typeof value.feedbackId === "string" && /^[a-f0-9]{64}$/.test(value.feedbackId)
+    && typeof value.candidateDigest === "string" && /^[a-f0-9]{64}$/.test(value.candidateDigest)
+    && (value.decision === "APPROVE" || value.decision === "REQUEST_CHANGES");
+}
+
+async function decideSlackWorkflowFeedback(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowFeedbackDecisionEvent) {
+  if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
+  const thread = SlackThreadSchema.parse(event.thread);
+  const userId = SlackRequesterSchema.shape.userId.parse(event.userId);
+  const taskId = randomUUIDSchema.parse(event.taskId);
+  const requestId = randomUUIDSchema.parse(event.requestId);
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  if (task === undefined || task.slackUserId !== userId) throw agentXError("FORBIDDEN", "only the task owner can decide this PR feedback");
+  if (task.share?.teamId !== thread.teamId || task.share.channelId !== thread.channelId || task.share.threadTs !== thread.threadTs) {
+    throw agentXError("FORBIDDEN", "this PR feedback belongs to another Slack thread");
+  }
+  const feedback = task.workflow?.feedback;
+  if (feedback?.status !== "PENDING" || feedback.feedbackId !== event.feedbackId || feedback.candidateDigest !== event.candidateDigest
+    || task.workflow?.revision !== event.expectedRevision || task.workflow.candidate?.digest !== event.candidateDigest) {
+    throw agentXError("CONFIG_INVALID", "this PR feedback changed; use the latest AgentX message");
+  }
+  const caller: DeveloperCaller = { developerId: userId, sessionId: "slack-workflow", amr: "slack", name: task.developerName, slackUserId: userId };
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
+  const body = JSON.stringify({
+    requestId, expectedRevision: event.expectedRevision, feedbackId: event.feedbackId,
+    candidateDigest: event.candidateDigest, decision: event.decision,
+  });
+  return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path: `/v1/dev/tasks/${taskId}/workflow/feedback-decision`, headers: {}, requestId, body }, new URL(`/v1/dev/tasks/${taskId}/workflow/feedback-decision`, "https://agentx.invalid"));
 }
 
 export function isSlackStopTaskEvent(event: unknown): event is SlackStopTaskEvent {
@@ -3752,6 +3968,9 @@ async function putArtifact(
   if (Buffer.byteLength(input.content, "utf8") > MAX_ARTIFACT_BYTES) {
     throw agentXError("CONFIG_INVALID", "artifact exceeds the 5 MB demo limit");
   }
+  if (operation.workflowMode === "PLAN" && input.name === "plan.md" && Buffer.byteLength(input.content, "utf8") > WORKFLOW_PLAN_MAX_BYTES) {
+    throw agentXError("CONFIG_INVALID", "plan artifact exceeds the workflow plan size limit");
+  }
   const workspace = await requireWorkspace(dependencies, operation.workspaceId);
   const artifactId = randomUUID();
   const objectKey = `private/${workspace.ownerKey}/${workspace.id}/${operation.id}/${artifactId}`;
@@ -3800,6 +4019,7 @@ async function queuedFirstTask(
     prompt: pointer.pendingPrompt,
     conversationStarted: false,
     requester: { requestedBy: pointer.requester },
+    workflowMode: pointer.pendingWorkflowMode ?? "IMPLEMENT",
   }, now);
   return {
     workspaceUpdate: { Update: {
@@ -3825,7 +4045,7 @@ async function queuedFirstTask(
       { Update: {
         TableName: dependencies.tableName,
         Key: taskPointerKey(workspace.id),
-        UpdateExpression: "REMOVE pendingPrompt",
+        UpdateExpression: "REMOVE pendingPrompt, pendingWorkflowMode",
         ConditionExpression: "attribute_exists(pendingPrompt) AND attribute_not_exists(cancelledAt)",
       } },
     ],
@@ -3867,7 +4087,7 @@ async function sendTerminalResult(
   const withoutTask: TransactItems = pointer === undefined ? transactItems : [...transactItems, { Update: {
     TableName: dependencies.tableName,
     Key: taskPointerKey(workspace.id),
-    UpdateExpression: "REMOVE pendingPrompt",
+    UpdateExpression: "REMOVE pendingPrompt, pendingWorkflowMode",
     ConditionExpression: "attribute_exists(pk)",
   } }];
   let queued: Awaited<ReturnType<typeof queuedFirstTask>> | undefined;
@@ -3953,7 +4173,7 @@ function failedPrepareItems(dependencies: AwsBrokerDependencies, workspace: Work
     { Update: {
       TableName: dependencies.tableName,
       Key: taskPointerKey(workspace.id),
-      UpdateExpression: "REMOVE pendingPrompt",
+      UpdateExpression: "REMOVE pendingPrompt, pendingWorkflowMode",
       ConditionExpression: "attribute_exists(pk)",
     } },
   ];
@@ -4048,6 +4268,198 @@ async function completedTurnItems(
     throw error;
   }
   return [{ Put: { TableName: table, Item: item, ConditionExpression: "attribute_not_exists(pk)" } }];
+}
+
+/** A plan is qualified by the control plane from the saved artifact bytes, never by worker claims. */
+/** Reconcile every PR webhook to GitHub's current API state; event ordering is never trusted. */
+async function processGithubWorkflowEvent(dependencies: AwsBrokerDependencies, event: ReceivedGithubWebhook["event"]): Promise<void> {
+  if (event.kind === "PR_COMMENT") {
+    if (event.comment === undefined) throw new GithubWebhookRefusal("PR feedback comment is missing");
+    await recordLinkedGithubWorkflowFeedback({
+      documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+      repositoryFullName: event.fullName, number: event.number, action: event.action, comment: event.comment,
+      loadWorkflow: async (taskId) => (await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)))?.workflow,
+      now: new Date().toISOString(),
+    });
+    return;
+  }
+  await reconcileGithubWorkflowPullRequest({
+    documentClient: dependencies.documentClient,
+    tableName: dependencies.tableName,
+    repositoryFullName: event.fullName,
+    number: event.number,
+    loadTask: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
+    repositoryUrl: async (projectName, revision, repositoryId) => {
+      const project = await requireProject(dependencies, projectName, revision);
+      return project.definition.repositories.find((repository) => repository.name === repositoryId)?.url;
+    },
+    getCurrentState: async (repositoryUrl, number) => {
+      const current = await dependencies.githubPullRequests.getPullRequest(repositoryUrl, number);
+      return current.state === "merged" ? "MERGED" : current.state === "closed" ? "CLOSED" : "OPEN";
+    },
+    saveWorkflow: async (taskId, expectedRevision, workflow) => {
+      try {
+        await dependencies.documentClient.send(new UpdateCommand({
+          TableName: dependencies.tableName,
+          Key: taskKey(taskId),
+          UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+          ConditionExpression: "workflow.revision = :revision AND attribute_not_exists(closedAt)",
+          ExpressionAttributeValues: { ":workflow": workflow, ":now": workflow.updatedAt, ":revision": expectedRevision },
+        }));
+      } catch (error) {
+        if (isConditional(error)) throw agentXError("RUNTIME_UNAVAILABLE", "workflow changed while reconciling the GitHub pull request");
+        throw error;
+      }
+    },
+    now: new Date().toISOString(),
+  });
+}
+
+async function completedWorkflowItems(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  pointer: DeveloperTaskPointerRecord | undefined,
+  terminalStatus: OperationStatus,
+  now: string,
+  result: unknown,
+): Promise<TransactItems> {
+  if (pointer === undefined) return [];
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
+  if (task?.workflow === undefined) return [];
+  if (operation.kind === "publish") {
+    if (terminalStatus !== "SUCCEEDED" || task.workflow.stage !== "PULL_REQUEST" || task.workflow.state !== "READY" || task.workflow.candidate === undefined) return [];
+    const published = PullRequestResultSchema.safeParse(result);
+    if (!published.success) throw agentXError("CONFIG_INVALID", "workflow pull request result is invalid");
+    const project = await requireProject(dependencies, task.project, task.startingRevision);
+    const repository = project.definition.repositories.find((entry) => entry.name === published.data.repository);
+    if (repository === undefined) throw agentXError("CONFIG_INVALID", "published pull request repository is not part of the task's registered project revision");
+    const repositoryFullName = githubRepositoryFullName(repository.url);
+    if (!pullRequestMatchesRepository(published.data.url, repositoryFullName, published.data.number)) {
+      throw agentXError("CONFIG_INVALID", "published pull request URL does not match the task's registered repository");
+    }
+    const indexKey = githubWorkflowPullRequestKey(repositoryFullName, published.data.number);
+    const existingIndex = await getItem<GithubWorkflowPullRequestRecord>(dependencies, indexKey);
+    const indexRecord: GithubWorkflowPullRequestRecord = {
+      ...indexKey,
+      entityType: "GITHUB_WORKFLOW_PR",
+      repositoryFullName,
+      repositoryId: published.data.repository,
+      number: published.data.number,
+      url: published.data.url,
+      taskId: task.taskId,
+      workspaceId: task.workspaceId,
+      candidateDigest: task.workflow.candidate.digest,
+      createdAt: now,
+    };
+    if (existingIndex !== undefined && (existingIndex.taskId !== indexRecord.taskId
+      || existingIndex.candidateDigest !== indexRecord.candidateDigest
+      || existingIndex.url !== indexRecord.url)) {
+      throw agentXError("CONFIG_INVALID", "this pull request is already linked to another task or candidate");
+    }
+    const next = registerWorkflowPullRequest(task.workflow, {
+      repositoryId: published.data.repository,
+      number: published.data.number,
+      url: published.data.url,
+      candidateDigest: task.workflow.candidate.digest,
+      required: true,
+    }, now);
+    return [{ Update: {
+      TableName: dependencies.tableName,
+      Key: taskKey(task.taskId),
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ConditionExpression: "workflow.revision = :revision AND workflow.stage = :stage AND workflow.state = :ready",
+      ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": "PULL_REQUEST", ":ready": "READY" },
+    } }, ...(existingIndex === undefined ? [{ Put: {
+      TableName: dependencies.tableName,
+      Item: indexRecord,
+      ConditionExpression: "attribute_not_exists(pk)",
+    } }] : [])];
+  }
+  if (operation.kind !== "task" || operation.workflowMode === undefined || task.workflow.state !== "RUNNING") return [];
+  let next: WorkflowSnapshot;
+  if (operation.workflowMode === "IMPLEMENT") {
+    if (terminalStatus !== "SUCCEEDED") {
+      next = blockWorkflow(task.workflow, `implementation operation ended ${terminalStatus.toLowerCase()}`, now);
+    } else {
+      const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
+      const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];
+      const checkedRepositories = Array.isArray(reported.workflowCheckCandidateRepositories) ? reported.workflowCheckCandidateRepositories : [];
+      const checks = CheckReportSchema.safeParse(reported.checks);
+      const verifying = { ...blockWorkflow(task.workflow, "candidate checks are being recorded", now), stage: "VERIFY" as const };
+      try {
+        const project = await requireProject(dependencies, task.project, task.startingRevision);
+        const expectedRepositoryIds = project.definition.repositories.map((repository) => repository.name).sort();
+        const candidateInput = repositories as CandidateRepository[];
+        const candidate = createCandidateManifest(candidateInput);
+        const checkedCandidate = createCandidateManifest(checkedRepositories as CandidateRepository[]);
+        if (candidate.repositories.map((repository) => repository.repositoryId).sort().join("\n") !== expectedRepositoryIds.join("\n")
+          || checkedCandidate.digest !== candidate.digest || !checks.success) {
+          throw new Error("candidate or checks are incomplete");
+        }
+        const selectedChecks = task.workflow.checkPolicy === undefined ? [] : [
+          ...task.workflow.checkPolicy.required,
+          ...task.workflow.checkPolicy.optional.filter((check) => task.workflow?.checkPolicy?.selectedOptionalIds.includes(check.id)),
+        ];
+        const results = selectedChecks.length > 0
+          ? selectedChecks.map((check, index) => ({ checkId: check.id, status: checks.data.status === "verified" && checks.data.checks[index]?.after === "passed" ? "PASS" as const : checks.data.checks[index] === undefined ? "UNKNOWN" as const : "FAILED" as const }))
+          : checks.data.checks.map((check) => ({ checkId: check.id, status: checks.data.status === "verified" && check.after === "passed" ? "PASS" as const : check.after === "not_run" ? "UNKNOWN" as const : "FAILED" as const }));
+        next = recordWorkflowVerification(verifying, {
+          candidate,
+          checks: {
+            candidateDigest: candidate.digest,
+            producer: "agentx-worker-checks",
+            environmentId: task.workspaceId,
+            recordedAt: now,
+            results,
+          },
+          now,
+        });
+        if (next.stage === "REVIEW" && Array.isArray(reported.workflowReviews)) {
+          for (const review of reported.workflowReviews) {
+            try {
+              next = submitWorkflowReview(next, review, now);
+            } catch {
+              next = blockWorkflow(next, "a candidate review report was invalid or stale", now);
+              break;
+            }
+          }
+        }
+      } catch {
+        next = blockWorkflow(verifying, "implementation finished without complete candidate-bound check evidence", now);
+      }
+    }
+  } else if (task.workflow.stage !== "PLAN") {
+    return [];
+  } else if (terminalStatus === "SUCCEEDED") {
+    const artifacts = (await queryAllItems(dependencies, `WORKSPACE#${operation.workspaceId}`, "ARTIFACT#"))
+      .filter((item) => item.operationId === operation.id && item.name === "plan.md")
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
+    const artifact = artifacts.at(-1);
+    if (artifact === undefined) {
+      next = blockWorkflow(task.workflow, "planning run succeeded without a saved plan artifact", now);
+    } else {
+      const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: String(artifact.objectKey) }));
+      const content = object.Body ? await object.Body.transformToString("utf8") : "";
+      const sha256 = createHash("sha256").update(content, "utf8").digest("hex");
+      next = submitWorkflowArtifact(task.workflow, {
+        expectedRevision: task.workflow.revision,
+        now,
+        artifact: {
+          id: String(artifact.id), type: "plan", version: task.workflow.artifacts.filter((entry) => entry.type === "plan").length + 1,
+          sha256, producer: "agentx-worker-untrusted", objectKey: String(artifact.objectKey), createdAt: String(artifact.createdAt),
+        },
+      });
+    }
+  } else {
+    next = blockWorkflow(task.workflow, `planning operation ended ${terminalStatus.toLowerCase()}`, now);
+  }
+  return [{ Update: {
+    TableName: dependencies.tableName,
+    Key: taskKey(task.taskId),
+    UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+    ConditionExpression: "workflow.revision = :revision AND workflow.stage = :stage AND workflow.state = :running",
+    ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": task.workflow.stage, ":running": "RUNNING" },
+  } }];
 }
 
 const TERMINAL_ERROR_MAX = 16_384;
@@ -4175,7 +4587,8 @@ async function recordTerminalResult(
         : undefined;
       taskPointer = pointer;
       const completed = await completedTurnItems(dependencies, operation, pointer, terminalStatus, { result, error }, now);
-      recordedStatus = await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now, [...transactItems, ...completed], workspaceUpdate, send);
+      const workflow = await completedWorkflowItems(dependencies, operation, pointer, terminalStatus, now, result);
+      recordedStatus = await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now, [...transactItems, ...completed, ...workflow], workspaceUpdate, send);
     };
     try {
       await decideAndSend();
@@ -4830,6 +5243,32 @@ function projectKey(nameValue: string, revision: number) {
   return { pk: `PROJECT#${nameValue}`, sk: `REV#${String(revision).padStart(12, "0")}` };
 }
 
+function githubRepositoryFullName(repositoryUrl: string): string {
+  let url: URL;
+  try { url = new URL(repositoryUrl); } catch { throw agentXError("CONFIG_INVALID", "registered repository URL is invalid for GitHub PR tracking"); }
+  const segments = url.pathname.split("/").filter(Boolean);
+  const name = segments[1]?.endsWith(".git") ? segments[1].slice(0, -4) : segments[1];
+  if (url.protocol !== "https:" || url.hostname.toLowerCase() !== "github.com" || url.port !== ""
+    || url.username !== "" || url.password !== "" || url.search !== "" || url.hash !== ""
+    || segments.length !== 2 || segments.some((segment) => segment.includes("%"))
+    || !segments[0] || !name || !/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,38})$/.test(segments[0])
+    || !/^[A-Za-z0-9_.-]{1,100}$/.test(name)) {
+    throw agentXError("CONFIG_INVALID", "registered repository URL is not a canonical GitHub repository");
+  }
+  return `${segments[0]}/${name}`;
+}
+
+function pullRequestMatchesRepository(pullRequestUrl: string, repositoryFullName: string, number: number): boolean {
+  try {
+    const url = new URL(pullRequestUrl);
+    return url.protocol === "https:" && url.hostname.toLowerCase() === "github.com" && url.port === ""
+      && url.username === "" && url.password === "" && url.search === "" && url.hash === ""
+      && url.pathname.toLowerCase() === `/${repositoryFullName.toLowerCase()}/pull/${number}`;
+  } catch {
+    return false;
+  }
+}
+
 function workspaceKey(id: string) {
   return { pk: `WORKSPACE#${id}`, sk: "META" };
 }
@@ -5043,13 +5482,10 @@ const ec2Sessions = new SessionManager({
   },
 });
 const githubPrivateKeySecretArn = requiredEnvironment("GITHUB_APP_PRIVATE_KEY_SECRET_ARN");
-// An empty GITHUB_APP_ID (an install whose control plane deployed before its GitHub App) means
-// the id is the secret's appId. The secret is empty until `agentx init` creates the App: a failed
-// read is not cached, so the next request reads it again.
 const githubAppIdSetting = process.env.GITHUB_APP_ID ?? "";
-let githubApp: Promise<{ appId: string; privateKey: string }> | undefined;
-const loadGitHubApp = (): Promise<{ appId: string; privateKey: string }> => {
-  githubApp ??= secretsManager.send(new GetSecretValueCommand({
+let githubAppSecret: Promise<string> | undefined;
+const loadGitHubAppSecret = (): Promise<string> => {
+  githubAppSecret ??= secretsManager.send(new GetSecretValueCommand({
     SecretId: githubPrivateKeySecretArn,
   })).then((response) => {
     const secret = response.SecretString ?? (
@@ -5058,21 +5494,34 @@ const loadGitHubApp = (): Promise<{ appId: string; privateKey: string }> => {
         : Buffer.from(response.SecretBinary).toString("utf8")
     );
     if (!secret) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App private-key secret is empty");
-    return { appId: githubAppIdSetting !== "" ? githubAppIdSetting : appIdFromSecret(secret), privateKey: privateKeyFromSecret(secret) };
+    return secret;
   }).catch((error: unknown) => {
-    githubApp = undefined;
-    // A secret created without a value (before the App exists) has no current version.
+    githubAppSecret = undefined;
+    // The secret has no version until `agentx init` creates the GitHub App.
     if (error instanceof Error && error.name === "ResourceNotFoundException") {
       throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App private-key secret is empty; finish agentx init to create the GitHub App");
     }
     throw error;
   });
+  return githubAppSecret;
+};
+let githubApp: Promise<{ appId: string; privateKey: string }> | undefined;
+const loadGitHubApp = (): Promise<{ appId: string; privateKey: string }> => {
+  githubApp ??= loadGitHubAppSecret().then((secret) => ({
+    appId: githubAppIdSetting !== "" ? githubAppIdSetting : appIdFromSecret(secret),
+    privateKey: privateKeyFromSecret(secret),
+  })).catch((error: unknown) => {
+    githubApp = undefined;
+    throw error;
+  });
   return githubApp;
 };
+const loadGitHubPrivateKey = (): Promise<string> => loadGitHubAppSecret().then(privateKeyFromSecret);
+const loadGitHubWebhookSecret = (): Promise<string> => loadGitHubAppSecret().then(webhookSecretFromSecret);
 const githubCredentials = new GitHubAppCredentialProvider({
   credentialRef: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"),
   appId: githubAppIdSetting !== "" ? githubAppIdSetting : async () => (await loadGitHubApp()).appId,
-  getPrivateKey: async () => (await loadGitHubApp()).privateKey,
+  getPrivateKey: loadGitHubPrivateKey,
 });
 const repositoryGrantSigningKey = createHmac("sha256", requiredEnvironment("CALLBACK_SIGNING_KEY"))
   .update("agentx:repository-grants:v3")
@@ -5127,6 +5576,7 @@ export const handler = createAwsBrokerHandler({
   callbackSigningKey: requiredEnvironment("CALLBACK_SIGNING_KEY"),
   repositoryGrants,
   githubPullRequests: githubCredentials,
+  githubWebhookSecret: loadGitHubWebhookSecret,
   checkRepositoryAccess: (repository) => githubCredentials.checkRepository(repository),
   githubMcp: { credentials: (repository, access) => githubCredentials.issueCredentials(repository, access) },
   connectorCredentials: {

@@ -11,7 +11,7 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "publish.reportChecks"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "publish.reportChecks"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number];
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
@@ -44,6 +44,8 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         prompt: z.string().min(1).max(65_536),
         /** The control plane's record that this conversation already owns a saved session. */
         conversationStarted: z.boolean().optional(),
+        /** The broker-selected tool boundary for the current native workflow stage (spec 056). */
+        workflowMode: z.enum(["PLAN", "IMPLEMENT"]).optional(),
         model: ModelSelectionSchema.optional(),
         modelSelectionDiagnostic: z.string().min(1).max(512).optional(),
         /**

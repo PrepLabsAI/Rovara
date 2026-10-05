@@ -632,6 +632,13 @@ export class ControlPlaneStack extends Stack {
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
+    // GitHub signs webhook bodies itself; the broker verifies its HMAC and linked repository scope.
+    new apigwv2.CfnRoute(this, "GithubWebhookRoute", {
+      apiId: api.ref,
+      routeKey: "POST /v1/github/webhooks",
+      target: `integrations/${integration.ref}`,
+      authorizationType: "NONE",
+    });
     const defaultStage = new apigwv2.CfnStage(this, "DefaultStage", {
       apiId: api.ref,
       stageName: "$default",
@@ -686,7 +693,7 @@ export class ControlPlaneStack extends Stack {
         naming, env: naming.env, api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
       });
       // Spec 025 phase 25c: sharing, named environments only (D14).
-      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, state, slackSecret, notifyOperator });
+      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, state, artifactBucket: artifacts, slackSecret, notifyOperator });
       // Spec 025 A13: the admin health route reads the environment's alarms, by name, and
       // the depths of its dead-letter queues. Read-only, and on exactly these resources.
       const alarmPrefix = naming.alarmName("");
@@ -714,6 +721,17 @@ export class ControlPlaneStack extends Stack {
         actions: ["dynamodb:GetItem"],
         resources: [state.tableArn],
         conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SHARED_TASK#*"] } },
+      }));
+      // Slack plan buttons read only the task owner, share binding, and saved workflow policy by key.
+      slackIngress.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["dynamodb:GetItem"],
+        resources: [state.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVTASK#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "slackUserId", "share", "workflow"] },
+          StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+          Null: { "dynamodb:Attributes": "false" },
+        },
       }));
       // Spec 025 E14 (C14): the interactivity route hands Slack Confirm and Cancel presses to the broker.
       slackIngress.addEnvironment("ADMIN_CHANGES", "enabled");
@@ -849,6 +867,7 @@ export class ControlPlaneStack extends Stack {
     new CfnOutput(this, "ArtifactBucketName", { value: artifacts.bucketName });
     new CfnOutput(this, "DispatchDeadLetterQueueUrl", { value: deadLetterQueue.queueUrl });
     new CfnOutput(this, "SlackEventsUrl", { value: `${api.attrApiEndpoint}/v1/slack/events` });
+    new CfnOutput(this, "GithubWebhookUrl", { value: `${api.attrApiEndpoint}/v1/github/webhooks` });
     new CfnOutput(this, "SlackInteractivityUrl", { value: `${api.attrApiEndpoint}/v1/slack/interactions` });
     new CfnOutput(this, "SlackSecretArn", { value: slackSecret.secretArn });
     new CfnOutput(this, "SlackRequestQueueUrl", { value: slackRequestQueue.queueUrl });

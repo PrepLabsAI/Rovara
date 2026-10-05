@@ -83,6 +83,7 @@ const TaskShape = {
   artifacts: z.array(z.object({ name: z.string(), size: z.number().optional() })).optional(),
   pull_requests: z.array(z.object({ repository: z.string(), number: z.number(), url: z.string(), state: z.string() })).optional(),
   unpublished: z.array(z.object({ repository: z.string(), reasons: z.array(z.string()) })).optional(),
+  workflow: z.object({ stage: z.string(), state: z.string(), revision: z.number(), block_reason: z.string().optional(), plan: z.object({ sha256: z.string(), version: z.number(), content: z.string().optional() }).optional() }).optional(),
   /** Only on start, continue and wait, which may wait (R21). */
   timed_out: z.boolean().optional(),
   /** A wait that stopped early because checking on the task failed; not a timeout. */
@@ -118,12 +119,26 @@ function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string,
     ...(task.artifacts === undefined ? {} : { artifacts: task.artifacts }),
     ...(task.pullRequests === undefined ? {} : { pull_requests: task.pullRequests }),
     ...(task.unpublished === undefined ? {} : { unpublished: task.unpublished }),
+    ...(task.workflow === undefined ? {} : {
+      workflow: {
+        stage: task.workflow.stage, state: task.workflow.state, revision: task.workflow.revision,
+        ...(task.workflow.blockReason === undefined ? {} : { block_reason: task.workflow.blockReason }),
+        ...(task.workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1) === undefined ? {} : {
+          plan: { sha256: task.workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1)!.sha256, version: task.workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1)!.version, ...(task.workflow.planContent === undefined ? {} : { content: task.workflow.planContent }) },
+        }),
+      },
+    }),
     ...(timedOut === undefined ? {} : { timed_out: timedOut }),
   };
 }
 
 /** What the AI tool can do next with a task in this state. */
 function nextFor(task: DeveloperTaskView): string {
+  if (task.workflow?.state === "WAITING" && task.workflow.stage === "PLAN_REVIEW") {
+    return "Review the attached plan, then use agentx_decide_workflow with its exact plan sha256 and expected revision before any code implementation starts.";
+  }
+  if (task.workflow?.state === "BLOCKED" && task.workflow.stage === "PLAN") return `The plan run was interrupted or could not save its plan. To recover, use agentx_retry_workflow to start another read-only planning run.`;
+  if (task.workflow?.state === "BLOCKED") return `The workflow is blocked: ${task.workflow.blockReason ?? "required evidence is missing"}. Review it before continuing.`;
   if (task.closing === true) return "It is closing: check with agentx_get_task, which shows CLOSED when done.";
   switch (task.status) {
     case "STARTING":
@@ -322,10 +337,39 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     },
   },
   {
+    name: "agentx_start_workflow",
+    title: "Start a human-gated AgentX delivery workflow",
+    description: "Starts a native AgentX task-to-PR workflow. AgentX first inspects the request with read-only tools and saves a plan. The task owner reviews the complete plan and approves its exact digest and workflow revision with agentx_decide_workflow before implementation. Interrupted planning can be retried with agentx_retry_workflow. After implementation, AgentX blocks before PR publication until candidate-bound verification and review are qualified. Use agentx_start_task for the existing task flow.",
+    inputSchema: {
+      project: z.string().min(1).max(200).describe("the project's exact name, from agentx_list_projects"),
+      instructions: instructionsInput,
+      title: z.string().max(120).optional(),
+      share_to_channel: z.boolean().optional(),
+      share_mode: z.enum(["view", "continue"]).optional(),
+      channel: z.string().min(1).max(80).optional(),
+      wait_seconds: waitInput(0).optional(),
+      request_id: requestIdInput,
+    },
+    outputSchema: ActionShape,
+    async handler(context, input, call) {
+      const text = instructions(input.instructions);
+      const id = requestIdFor(context, call, input, ["agentx_start_workflow", input.project, text, optional(input.title), optional(input.share_to_channel), optional(input.share_mode), optional(input.channel)]);
+      const task = await context.client.startTask({
+        requestId: id, project: input.project as string, instructions: text, workflow: true,
+        ...(input.title === undefined ? {} : { title: input.title as string }),
+        ...(context.clientName === undefined ? {} : { client: context.clientName.slice(0, 200) }),
+        ...(input.share_to_channel === undefined ? {} : { shareToChannel: input.share_to_channel as boolean }),
+        ...(input.share_mode === undefined ? {} : { shareMode: input.share_mode as "view" | "continue" }),
+        ...(input.channel === undefined ? {} : { channel: input.channel as string }),
+      });
+      return afterAction(context, call, "agentx_start_workflow", task, (input.wait_seconds as number | undefined) ?? 0, id);
+    },
+  },
+  {
     name: "agentx_get_task",
     title: "Check an AgentX task",
     description:
-      "Shows one of your tasks: its status (STARTING, RUNNING, SUCCEEDED, FAILED, CANCELLED, INTERRUPTED or CLOSED), any failure, and its latest progress. Once the task ends it also shows the worker's summary, the changed files with line counts, artifacts, and pull requests with their URLs. Use it to check on a task, to find a pull request's URL after agentx_open_pull_request, and to see how agentx_close_task went: status CLOSED when done, or unpublished listing each repository and why it was not closed. For a shared task it shows the channel, the mode, the thread link once posted, and in continue mode the channel's turns.",
+      "Shows one of your tasks, its latest progress, and any native workflow stage. For an agentx_start_workflow task, it includes the complete current plan, its sha256 digest and workflow revision while the owner review gate is open. After work ends it shows the worker's summary, changed files, artifacts and any pull requests. For a shared task it shows the channel, sharing mode, thread link and channel turns.",
     inputSchema: { task_id: taskIdInput, events: eventsInput },
     outputSchema: TaskShape,
     async handler(context, input) {
@@ -386,6 +430,43 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       // A new turn runs: a cancel after it must stop it, not repeat the cancel before it.
       call.requestIds?.forget(cancelContent(input.task_id));
       return afterAction(context, call, "agentx_continue_task", task, (input.wait_seconds as number | undefined) ?? 0, id);
+    },
+  },
+  {
+    name: "agentx_decide_workflow",
+    title: "Approve or respond to an AgentX plan",
+    description: "Records your decision on the current plan. APPROVE starts implementation only when the exact plan sha256 and workflow revision match. REQUEST_CHANGES asks AgentX to replace the plan without editing files. REJECT closes this workflow. SKIP is refused unless the project explicitly allows it. Use the plan digest and revision shown by agentx_get_task.",
+    inputSchema: {
+      task_id: taskIdInput,
+      request_id: z.string().uuid().describe("UUID for safe retry; repeat the same request unchanged if the call times out"),
+      expected_revision: z.number().int().positive(),
+      decision: z.enum(["APPROVE", "REQUEST_CHANGES", "REJECT", "SKIP"]),
+      reason: z.string().trim().min(1).max(500),
+      artifact_digest: z.string().regex(/^[a-f0-9]{64}$/),
+    },
+    outputSchema: ActionShape,
+    async handler(context, input) {
+      const task = await context.client.decideWorkflowTask(input.task_id as string, {
+        requestId: input.request_id as string,
+        expectedRevision: input.expected_revision as number,
+        decision: input.decision as "APPROVE" | "REQUEST_CHANGES" | "REJECT" | "SKIP",
+        reason: input.reason as string,
+        ...(input.artifact_digest === undefined ? {} : { artifactDigest: input.artifact_digest as string }),
+      });
+      return { structured: { ...taskOutput(task), request_id: input.request_id }, text: `${taskText(task)} ${nextFor(task)}` };
+    },
+  },
+  {
+    name: "agentx_retry_workflow",
+    title: "Retry a blocked AgentX plan",
+    description: "Restarts a blocked planning stage using the instructions you provide. AgentX keeps this run read-only. Use it after agentx_get_task shows a blocked PLAN stage; the operation starts again only if the workspace is ready.",
+    inputSchema: { task_id: taskIdInput, request_id: requestIdInput, instructions: instructionsInput },
+    outputSchema: ActionShape,
+    async handler(context, input, call) {
+      const instructions = input.instructions as string;
+      const id = requestIdFor(context, call, input, ["agentx_retry_workflow", input.task_id, instructions]);
+      const task = await context.client.retryWorkflowTask(input.task_id as string, { requestId: id, instructions });
+      return afterAction(context, call, "agentx_retry_workflow", task, 0, id);
     },
   },
   {

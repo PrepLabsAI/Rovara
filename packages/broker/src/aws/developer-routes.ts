@@ -35,7 +35,7 @@ import {
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { DeveloperTaskActions } from "./developer-task-actions.js";
-import { routeDeveloperTaskRequest } from "./developer-tasks.js";
+import { routeDeveloperTaskRequest, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 
 export interface DeveloperApiConfiguration {
@@ -539,6 +539,37 @@ async function listWorkspaces(deps: DeveloperRouteDependencies, caller: Develope
   return { ...listing, workspaces };
 }
 
+export function developerTaskRouteDependencies(
+  deps: DeveloperRouteDependencies,
+  caller: DeveloperCaller,
+  initialSlackThread?: { teamId: string; channelId: string; threadTs: string },
+): DeveloperTaskRouteDependencies {
+  return {
+    documentClient: deps.documentClient,
+    tableName: deps.tableName,
+    ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
+    actions: deps.tasks!,
+    ...(initialSlackThread === undefined ? {} : { initialSlackThread }),
+    checkAccess: (project) => checkProjectAccess(deps, caller, project),
+    channelMember: async (slackUserId, channelId) => {
+      const answer = await safeChannelMembers(deps)({ kind: "channel-members", slackUserId, channelIds: [channelId] });
+      if (!answer.ok) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your membership of that channel; try again shortly");
+      return answer.memberOf.includes(channelId);
+    },
+    projectChannelIds: async (project) => (await bindingsOf(deps)).filter((binding) => binding.projectName === project).map((binding) => binding.channelId).sort(),
+    ...(deps.developer.channelInfo === undefined ? {} : {
+      boundChannels: async (channelIds: readonly string[]) => {
+        const known = await channelNames(deps, channelIds);
+        return channelIds.map((channelId) => {
+          const channel = known.get(channelId);
+          return channel === undefined ? { channelId } : { channelId, name: channel.name, isPrivate: channel.isPrivate };
+        });
+      },
+    }),
+    now: deps.now,
+  };
+}
+
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
   const caller = await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(request.headers.authorization));
@@ -546,30 +577,7 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
   if (request.method === "GET" && url.pathname === "/v1/dev/workspaces") return listWorkspaces(deps, caller);
   if (url.pathname === "/v1/dev/tasks" || url.pathname.startsWith("/v1/dev/tasks/")) {
     if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
-    return routeDeveloperTaskRequest({
-      documentClient: deps.documentClient,
-      tableName: deps.tableName,
-      ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
-      actions: deps.tasks,
-      checkAccess: (project) => checkProjectAccess(deps, caller, project),
-      channelMember: async (slackUserId, channelId) => {
-        const answer = await safeChannelMembers(deps)({ kind: "channel-members", slackUserId, channelIds: [channelId] });
-        if (!answer.ok) throw agentXError("SLACK_UNAVAILABLE", "Slack could not be reached to check your membership of that channel; try again shortly");
-        return answer.memberOf.includes(channelId);
-      },
-      projectChannelIds: async (project) => (await bindingsOf(deps)).filter((binding) => binding.projectName === project).map((binding) => binding.channelId).sort(),
-      // Only where channel-info is configured: without it no privacy can be known (Q10's message says so).
-      ...(deps.developer.channelInfo === undefined ? {} : {
-        boundChannels: async (channelIds: readonly string[]) => {
-          const known = await channelNames(deps, channelIds);
-          return channelIds.map((channelId) => {
-            const channel = known.get(channelId);
-            return channel === undefined ? { channelId } : { channelId, name: channel.name, isPrivate: channel.isPrivate };
-          });
-        },
-      }),
-      now: deps.now,
-    }, caller, request, url);
+    return routeDeveloperTaskRequest(developerTaskRouteDependencies(deps, caller), caller, request, url);
   }
   throw agentXError("NOT_FOUND", "route not found");
 }

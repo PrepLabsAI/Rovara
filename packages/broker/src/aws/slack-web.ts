@@ -46,6 +46,64 @@ async function callSlack(method: string, botToken: string, body: Record<string, 
   return result;
 }
 
+async function callSlackGet(method: string, botToken: string, query: Record<string, string>, fetchImplementation: typeof fetch): Promise<Record<string, unknown>> {
+  const url = new URL(`https://slack.com/api/${method}`);
+  for (const [key, value] of Object.entries(query)) url.searchParams.set(key, value);
+  const response = await fetchImplementation(url, {
+    method: "GET",
+    headers: { authorization: `Bearer ${botToken}` },
+    signal: AbortSignal.timeout(10_000),
+  }).catch((error: unknown) => {
+    if (typeof error === "object" && error !== null) unanswered.add(error);
+    throw error;
+  });
+  let result: Record<string, unknown> = {};
+  try {
+    result = await response.json() as Record<string, unknown>;
+  } catch {
+    // An unreadable answer is reported by its HTTP status below.
+  }
+  if (!response.ok || result.ok !== true) {
+    const code = typeof result.error === "string" && /^[a-z_]{1,64}$/.test(result.error) ? result.error : `http_${response.status}`;
+    throw new SlackPostError(code, method);
+  }
+  return result;
+}
+
+/** Creates an immutable task/version Canvas, grants channel read access and returns Slack's own permalink. */
+export async function createTaskPlanCanvas(
+  botToken: string,
+  input: { channel: string; taskId: string; title: string; version: number; markdown: string },
+  fetchImplementation: typeof fetch = fetch,
+): Promise<{ canvasId: string; permalink: string }> {
+  if (!/^[CG][A-Z0-9]{8,}$/.test(input.channel) || !/^[A-Za-z0-9_-]{1,100}$/.test(input.taskId)
+    || input.title.trim() === "" || !Number.isSafeInteger(input.version) || input.version < 1 || input.markdown.trim() === ""
+    || Buffer.byteLength(input.markdown, "utf8") > 32_768) {
+    throw new Error("task plan Canvas input is invalid");
+  }
+  const created = await callSlack("canvases.create", botToken, {
+    title: `Plan: ${input.title.slice(0, 120)} (v${input.version})`,
+    document_content: { type: "markdown", markdown: input.markdown },
+  }, fetchImplementation);
+  const canvasId = created.canvas_id;
+  if (typeof canvasId !== "string" || !/^F[A-Z0-9]{8,}$/.test(canvasId)) throw new SlackPostError("invalid_canvas_id", "canvases.create");
+  await callSlack("canvases.access.set", botToken, { canvas_id: canvasId, access_level: "read", channel_ids: [input.channel] }, fetchImplementation);
+  const info = await callSlackGet("files.info", botToken, { file: canvasId }, fetchImplementation);
+  const file = info.file && typeof info.file === "object" ? info.file as Record<string, unknown> : {};
+  const permalink = file.permalink;
+  let parsed: URL | undefined;
+  try {
+    if (typeof permalink === "string") parsed = new URL(permalink);
+  } catch {
+    parsed = undefined;
+  }
+  if (parsed === undefined || parsed.protocol !== "https:" || parsed.username !== "" || parsed.password !== ""
+    || !(parsed.hostname === "slack.com" || parsed.hostname.endsWith(".slack.com") || parsed.hostname === "slack-gov.com" || parsed.hostname.endsWith(".slack-gov.com"))) {
+    throw new Error("Slack files.info returned an invalid Canvas link");
+  }
+  return { canvasId, permalink: parsed.toString() };
+}
+
 export async function chatPostMessage(
   botToken: string,
   input: { channel: string; threadTs?: string | undefined; text: string; blocks?: unknown[] | undefined },

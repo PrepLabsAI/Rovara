@@ -28,9 +28,11 @@ function harness(options: {
   failRelease?: number;
   failDecrement?: number;
   stop?: { outcome?: "CANCEL_REQUESTED" | "NOTHING_RUNNING"; throws?: boolean };
+  workflowStart?: { throws?: boolean };
   shared?: { threads: Record<string, { mode: "view" | "continue"; closed?: boolean }>; lookupThrows?: boolean; claimThrows?: boolean };
 } = {}) {
   const stopCalls: Array<{ thread: unknown; userId: string }> = [];
+  const workflowStarts: Array<{ thread: unknown; userId: string; instructions: string; requestId: string }> = [];
   const memberChecks: string[] = [];
   const clock = { seconds: nowSeconds };
   const turnWindows: Array<{ subject: string; windowStart: number; expiresAt: number }> = [];
@@ -110,6 +112,12 @@ function harness(options: {
         return options.stop?.outcome ?? "CANCEL_REQUESTED";
       },
     }),
+    ...(options.workflowStart === undefined ? {} : {
+      startWorkflow: async (input: { thread: unknown; userId: string; instructions: string; requestId: string }) => {
+        workflowStarts.push(input);
+        if (options.workflowStart?.throws) throw new Error("broker unavailable");
+      },
+    }),
     ...(options.turnsPerMinute === undefined ? {} : {
       turnLimit: {
         perMinute: options.turnsPerMinute,
@@ -145,7 +153,7 @@ function harness(options: {
       },
     }),
   });
-  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls, noticedAt };
+  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls, workflowStarts, noticedAt };
 }
 
 function sharedNoticeKeyItem(table: FakeDynamoDb, subject: string): { noticedAt?: unknown } | undefined {
@@ -697,6 +705,16 @@ describe("the stop command (#126)", () => {
     const { handler, queue } = harness();
     await send(handler, stopMention("stop"));
     expect(queue.map((entry) => entry.message.text)).toEqual(["stop"]);
+  });
+
+  it("starts an explicit workflow in the bound Slack thread and leaves ordinary mentions on the existing path", async () => {
+    const { handler, queue, posts, workflowStarts } = harness({ workflowStart: {} });
+    await send(handler, signedEvent(mention({ eventId: "EvWorkflow001", event: { text: `<@${bot}> workflow: Add password reset to the account page` } })));
+    expect(workflowStarts).toEqual([{ thread: { teamId: team, channelId: channel, threadTs: "1695500000.000001" }, userId: pratik, instructions: "Add password reset to the account page", requestId: "EvWorkflow001" }]);
+    expect(posts.at(-1)?.text).toContain("No code changes start until you approve it.");
+    expect(queue).toHaveLength(0);
+    await send(handler, signedEvent(mention({ eventId: "EvWorkflow002", event: { text: `<@${bot}> fix the navigation bug` } })));
+    expect(queue.map((entry) => entry.message.text)).toEqual(["fix the navigation bug"]);
   });
 });
 

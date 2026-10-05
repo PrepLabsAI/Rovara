@@ -58,6 +58,15 @@ describe("hosted Slack control-plane infrastructure", () => {
     });
   });
 
+  it("exposes a broker-verified GitHub webhook endpoint without a user JWT", () => {
+    template.hasResourceProperties("AWS::ApiGatewayV2::Route", {
+      RouteKey: "POST /v1/github/webhooks",
+      AuthorizationType: "NONE",
+      Target: { "Fn::Join": ["", ["integrations/", { Ref: Match.stringLikeRegexp("^BrokerIntegration") }]] },
+    });
+    template.hasOutput("GithubWebhookUrl", {});
+  });
+
   it("queues Slack requests in a FIFO queue with a dead-letter queue after five receives", () => {
     template.hasResourceProperties("AWS::SQS::Queue", {
       FifoQueue: true,

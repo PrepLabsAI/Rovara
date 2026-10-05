@@ -86,6 +86,26 @@ describe("notices from the stream (C7, C8)", () => {
     expect([first[0]!.id, second[0]!.id]).toEqual([`${task.taskId}:mode:e5`, `${task.taskId}:mode:e6`]);
   });
 
+  it("notifies the shared thread when an owner approves the plan or requests changes", () => {
+    const taskId = randomUUID();
+    const waiting = { entityType: "DEVELOPER_TASK", taskId, workflow: { revision: 2, state: "WAITING", stage: "PLAN_REVIEW" } };
+    const approved = { ...waiting, workflow: { revision: 3, state: "RUNNING", stage: "IMPLEMENT" } };
+    expect(noticesOf(waiting, approved, "2026-10-05T12:00:00.000Z", "approve")).toEqual([
+      { id: `${taskId}:workflow:3`, kind: "workflow", taskId, at: "2026-10-05T12:00:00.000Z" },
+    ]);
+    expect(noticesOf(waiting, { ...waiting, workflow: { revision: 3, state: "RUNNING", stage: "PLAN" } }, "2026-10-05T12:00:00.000Z", "changes")[0]?.kind).toBe("workflow");
+  });
+
+  it("notifies the task thread for a new pending PR feedback plan", () => {
+    const taskId = randomUUID();
+    const feedbackId = "f".repeat(64);
+    const before = { entityType: "DEVELOPER_TASK", taskId, workflow: { revision: 8, state: "WAITING", stage: "WAIT_FOR_MERGE" } };
+    const after = { ...before, workflow: { revision: 9, state: "WAITING", stage: "WAIT_FOR_MERGE", feedback: { feedbackId, status: "PENDING" } } };
+    expect(noticesOf(before, after, "2026-10-05T12:00:00.000Z", "feedback")).toEqual([
+      { id: `${taskId}:github_feedback:${feedbackId}`, kind: "github_feedback", taskId, at: "2026-10-05T12:00:00.000Z" },
+    ]);
+  });
+
   it("records no stream event for deleting an item that does not exist", async () => {
     const { db, stream } = await started({});
     stream.take();

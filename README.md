@@ -339,6 +339,17 @@ In the bound channel:
 @AgentX close this workspace
 ```
 
+For the native plan-first workflow, mention AgentX with `workflow:` followed by the request:
+
+```text
+@AgentX workflow: Add password reset to the account page
+```
+
+AgentX replies in the thread, prepares a plan, and posts a short link to the complete details. The
+task owner can choose extra project-approved checks, then approve the plan or request a change.
+Required project readiness checks are always included. Ordinary mentions continue using the usual
+Slack task flow.
+
 From your own machine (no AWS credentials needed):
 
 ```bash

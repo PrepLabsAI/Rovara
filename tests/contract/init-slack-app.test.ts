@@ -61,7 +61,7 @@ describe("Slack app manifest", () => {
       oauth_config: {
         redirect_urls: [SIGNIN],
         scopes: {
-          bot: ["app_mentions:read", "channels:join", "channels:read", "chat:write", "groups:read", "im:write", "users:read", "users:read.email"],
+          bot: ["app_mentions:read", "canvases:write", "channels:join", "channels:read", "chat:write", "files:read", "groups:read", "im:write", "users:read", "users:read.email"],
           user: ["email", "openid", "profile"],
         },
       },

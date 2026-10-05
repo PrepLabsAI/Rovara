@@ -2,7 +2,7 @@
 // Spec 025 FR-032, FR-034, C7 to C9: the notifier, fed from the fake table's writes, posting to a
 // fake Slack. The queue is an array; a failed notice stays in it with its attempt count.
 import { randomUUID } from "node:crypto";
-import { TransactWriteCommand } from "@aws-sdk/lib-dynamodb";
+import { TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import { indexExpiresAt } from "@agentx/contracts";
 import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
@@ -20,11 +20,16 @@ type Post = (input: { channel: string; threadTs?: string; text: string }) => Pro
 
 type Client = { send(command: unknown): Promise<unknown> };
 
-async function notifierHarness(body: Record<string, unknown> = { shareToChannel: true }, options: { post?: Post; documentClient?: (db: FakeDynamoDb) => Client } = {}) {
+async function notifierHarness(body: Record<string, unknown> = { shareToChannel: true }, options: {
+  post?: Post;
+  documentClient?: (db: FakeDynamoDb) => Client;
+  readArtifact?: (key: string) => Promise<string>;
+  createPlanCanvas?: (input: { channel: string; taskId: string; title: string; version: number; markdown: string }) => Promise<{ canvasId: string; permalink: string }>;
+} = {}) {
   const harness = await createDeveloperTaskBroker();
   const postOverride = options.post;
   const stream = recordStream(harness.db);
-  const posts: Array<{ channel: string; threadTs?: string; text: string }> = [];
+  const posts: Array<{ channel: string; threadTs?: string; text: string; blocks?: unknown[] }> = [];
   const queue: Array<{ notice: Notice; attempt: number }> = [];
   const logs: Array<Record<string, unknown>> = [];
   let clock = Date.now();
@@ -43,6 +48,8 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
       const text = String(ts);
       return { ts: `${text.slice(0, 10)}.${text.slice(10)}` };
     }),
+    ...(options.readArtifact === undefined ? {} : { readArtifact: options.readArtifact }),
+    ...(options.createPlanCanvas === undefined ? {} : { createPlanCanvas: options.createPlanCanvas }),
     now: () => clock, log: (entry) => logs.push(entry), deliveryFailed,
   });
   /** Stream to queue, then every queued notice once; failed ones stay queued. */
@@ -64,6 +71,93 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
 }
 
 describe("the shared thread (FR-032, US3 scenario 1)", () => {
+  it("posts a short plan-ready note with a link to the saved Canvas details", async () => {
+    const plan = "# Goal\nFix retry handling.\n\n## Checks\nRun the retry regression test.";
+    const createPlanCanvas = vi.fn(async () => ({ canvasId: "F12345678", permalink: "https://acme.slack.com/docs/T123/F12345678" }));
+    const h = await notifierHarness({ shareToChannel: true, workflow: true }, {
+      readArtifact: async () => plan,
+      createPlanCanvas,
+    });
+    await h.pump();
+    const preparation = h.active();
+    await h.finish(h.workspaceId, preparation, "SUCCEEDED");
+    await h.pump();
+    const planning = h.active();
+    await h.artifact(h.workspaceId, planning, "plan.md", plan);
+    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await h.pump();
+
+    const message = h.posts.at(-1)!;
+    expect(createPlanCanvas).toHaveBeenCalledWith(expect.objectContaining({ channel: SLACK_CHANNEL, taskId: h.taskId, title: "Fix the flaky retry test", version: 1, markdown: plan }));
+    expect(message.text).toBe("The plan is ready. No code changes have started. <https://acme.slack.com/docs/T123/F12345678|Read the plan and checks>.");
+    expect(message.text).not.toContain("Fix retry handling");
+    expect(message.blocks).toHaveLength(2);
+    const actions = (message.blocks?.[1] as { elements: Array<{ action_id: string; value: string }> }).elements;
+    expect(actions.map((button) => button.action_id)).toEqual(["agentx_workflow_approve", "agentx_workflow_changes"]);
+    expect(JSON.parse(actions[0]!.value)).toMatchObject({ taskId: h.taskId, revision: 2, decision: "APPROVE", digest: expect.stringMatching(/^[a-f0-9]{64}$/) });
+  });
+
+  it("posts concise Slack updates as GitHub merges each required pull request", async () => {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true });
+    await h.pump();
+    h.advance(10_000);
+    const taskKey = `DEVTASK#${h.taskId}`;
+    const saveWorkflow = async (workflow: Record<string, unknown>) => h.db.send(new UpdateCommand({
+      TableName: "state", Key: { pk: taskKey, sk: "META" }, UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ExpressionAttributeValues: { ":workflow": workflow, ":now": new Date(h.now()).toISOString() },
+    }));
+    const first = {
+      stage: "WAIT_FOR_MERGE", state: "WAITING", revision: 1,
+      artifacts: [],
+      pullRequests: [
+        { repositoryId: "api", number: 12, url: "https://github.com/example/api/pull/12", required: true, state: "UNKNOWN", candidateDigest: "a".repeat(64) },
+        { repositoryId: "web", number: 13, url: "https://github.com/example/web/pull/13", required: true, state: "UNKNOWN", candidateDigest: "a".repeat(64) },
+      ],
+    };
+    await saveWorkflow(first);
+    await h.pump();
+    await saveWorkflow({ ...first, revision: 2, pullRequests: first.pullRequests.map((pr, index) => ({ ...pr, state: index === 0 ? "MERGED" : "OPEN" })) });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toContain("GitHub update: 1 of 2 pull requests is merged.");
+    expect(h.posts.at(-1)!.text).toContain("<https://github.com/example/web/pull/13|PR #13> is still open.");
+    await saveWorkflow({ ...first, revision: 3, stage: "MERGED", state: "COMPLETE", outcome: "MERGED", pullRequests: first.pullRequests.map((pr) => ({ ...pr, state: "MERGED" })) });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toBe("GitHub confirms all 2 required pull requests are merged. The task is complete.");
+  });
+
+  it("posts short PR feedback details and owner approval buttons in the existing task thread", async () => {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true });
+    await h.pump();
+    h.advance(10_000);
+    const taskKey = `DEVTASK#${h.taskId}`;
+    const candidateDigest = "a".repeat(64);
+    const saveWorkflow = async (workflow: Record<string, unknown>) => h.db.send(new UpdateCommand({
+      TableName: "state", Key: { pk: taskKey, sk: "META" }, UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ExpressionAttributeValues: { ":workflow": workflow, ":now": new Date(h.now()).toISOString() },
+    }));
+    await saveWorkflow({ stage: "WAIT_FOR_MERGE", state: "WAITING", revision: 1, artifacts: [], candidate: { digest: candidateDigest }, pullRequests: [
+      { repositoryId: "payments", number: 11, url: "https://github.com/acme/payments/pull/11", required: true, state: "OPEN", candidateDigest },
+    ] });
+    await h.pump();
+    const feedbackId = "f".repeat(64);
+    await saveWorkflow({ stage: "WAIT_FOR_MERGE", state: "WAITING", revision: 2, artifacts: [], candidate: { digest: candidateDigest }, pullRequests: [
+      { repositoryId: "payments", number: 11, url: "https://github.com/acme/payments/pull/11", required: true, state: "OPEN", candidateDigest },
+    ], feedback: {
+      feedbackId, status: "PENDING", repositoryId: "payments", number: 11, candidateDigest,
+      comments: [{ id: "4321", url: "https://github.com/acme/payments/pull/11#discussion_r4321", author: "reviewer", body: "Handle this edge case" }],
+      proposedPlan: "Review the comment in context, update code, and rerun checks and reviews.", planDigest: "b".repeat(64),
+    } });
+    await h.pump();
+    const message = h.posts.at(-1)!;
+    expect(message.text).toContain("PR #11 feedback from reviewer");
+    expect(message.text).toContain("open comment");
+    expect(message.text).toContain("Handle this edge case");
+    expect(message.text).toContain("Review the comment in context");
+    const actions = (message.blocks?.[1] as { elements: Array<{ action_id: string; value: string }> }).elements;
+    expect(actions.map((button) => button.action_id)).toEqual(["agentx_github_feedback_approve", "agentx_github_feedback_dismiss"]);
+    expect(JSON.parse(actions[0]!.value)).toMatchObject({ taskId: h.taskId, revision: 2, feedbackId, candidateDigest, decision: "APPROVE" });
+  });
+
   it("posts the start message in the channel and records the thread", async () => {
     const { db, posts, pump, taskId } = await notifierHarness({ shareToChannel: true, shareMode: "continue" });
     await pump();

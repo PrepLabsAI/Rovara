@@ -199,12 +199,20 @@ developerTasks:
     default: view          # or continue
     allowContinue: true
   channelMembersMayUse: true
+  optionalWorkflowChecks:
+    - id: coverage
+      label: Coverage report
+      command:
+        cwd: repo/payments-api
+        executable: npm
+        args: [run, coverage]
+        timeoutSeconds: 600
 ```
 
 Every field is optional; the values above are the defaults, and a project without the block uses
 them.
 
-- `enabled`: whether developers may start tasks on this project from an AI tool.
+- `enabled`: whether developers may start tasks on this project from an AI tool or Slack workflow.
 - `channelMembersMayUse`: whether members of the project's bound Slack channels may use it from
   an AI tool. With `false`, only people an admin granted access to the project directly may.
   Direct grants arrive with spec 025 phase 25e (the admin tool `agentx_admin_grant_project_access`);
@@ -212,6 +220,10 @@ them.
 - `share`: with `required`, every task is shared into a bound channel when it starts.
 - `shareMode.default`: the mode a shared task gets when none is asked for.
 - `shareMode.allowContinue`: with `false`, every shared task is view only.
+- `optionalWorkflowChecks`: up to 20 named, project-approved extra commands. In a Slack workflow,
+  the task owner can choose among these when approving the plan. Project `readiness` checks are
+  always included and cannot be turned off. The chosen optional IDs are saved with the plan
+  decision, and a new plan starts with no optional checks selected.
 
 See [Sharing a task to Slack](mcp-install.md#sharing-a-task-to-slack).
 

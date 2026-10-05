@@ -33,7 +33,7 @@ export interface VerificationOptions {
   signal: AbortSignal;
   recorder: CommandRecorder;
   /** AgentX's result. Called again if Pi settles again later (a queued message); the last call is the result. */
-  onReport: (report: CheckReport) => void;
+  onReport: (report: CheckReport) => void | Promise<void>;
   /**
    * Called when the agent is given its extra try, with the first round's report (`regression`, extraTry `given`). It is
    * the result if no second settle follows and the signal did not fire (Ruling N); a stopped run reports stopped.
@@ -130,8 +130,8 @@ export function verificationExtension(options: VerificationOptions): InlineExten
 
       pi.on("agent_before_settle", async (event) => {
         const claim = parseAgentClaim(finalText);
-        const report = (value: CheckReport): Record<string, never> => {
-          options.onReport(value);
+        const report = async (value: CheckReport): Promise<Record<string, never>> => {
+          await options.onReport(value);
           return {};
         };
         try {

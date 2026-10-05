@@ -21,6 +21,7 @@ import {
   type DeveloperTaskView,
   type ShareDeveloperTaskRequest,
   type StartDeveloperTaskRequest,
+  type WorkflowDecisionRequest,
 } from "@agentx/contracts";
 import { z } from "zod";
 import { CLOSE_BUSY_STEP, NEXT_STEPS, SHARE_BUSY_STEP, START_BUSY_STEP, ToolError, isMeaningfulCode, plainText, signInStep, toolErrorFromResponse } from "./errors.js";
@@ -43,6 +44,8 @@ export interface ControlPlaneClient {
   getTask(taskId: string, events: number, options?: CallOptions): Promise<DeveloperTaskView>;
   listTasks(query: { project?: string; status?: DeveloperTaskStatus; limit: number }): Promise<DeveloperTaskListItem[]>;
   continueTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
+  decideWorkflowTask(taskId: string, request: WorkflowDecisionRequest): Promise<DeveloperTaskView>;
+  retryWorkflowTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
   cancelTask(taskId: string, requestId: string): Promise<DeveloperTaskView>;
   closeTask(taskId: string, requestId: string): Promise<DeveloperCloseResponse>;
   openPullRequest(taskId: string, request: DeveloperPullRequestRequest): Promise<DeveloperPullRequestResponse>;
@@ -213,6 +216,8 @@ export function httpControlPlaneClient(options: {
       return (await call(DeveloperTaskListResponseSchema, "GET", `/v1/dev/tasks?${search.toString()}`)).tasks;
     },
     continueTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/continue"), request)),
+    decideWorkflowTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/decision"), request)),
+    retryWorkflowTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/retry"), request)),
     cancelTask: async (taskId, requestId) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/cancel"), { requestId })),
     closeTask: (taskId, requestId) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId }, true, { busyStep: CLOSE_BUSY_STEP }),
     openPullRequest: (taskId, request) => call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request),
