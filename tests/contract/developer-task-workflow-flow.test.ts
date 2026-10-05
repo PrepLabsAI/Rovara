@@ -14,6 +14,39 @@ describe("native developer task workflow", () => {
     expect(harness.db.get(`DEVTASK#${task.taskId}`, "META")).not.toHaveProperty("workflow");
   });
 
+  it("runs Full requirements, design, and coding-plan reviews before implementation", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
+      requestId: randomUUID(), project: "payments", instructions: "Add password reset", client: "test-client", workflow: true, workflowPath: "FULL",
+    });
+    const task = started.body.task as { taskId: string; workflow: { path: string; reviewPhase: string; revision: number } };
+    expect(task.workflow).toMatchObject({ path: "FULL", reviewPhase: "REQUIREMENTS" });
+    const workspaceId = String(harness.db.get(`DEVTASK#${task.taskId}`, "META")?.workspaceId);
+    const finishPhase = async (content: string, phase: string, nextPhase?: string) => {
+      const operations = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION");
+      const active = operations.find((item) => item.workflowMode === "PLAN" && item.status === "ACCEPTED");
+      expect(active).toBeDefined();
+      await harness.artifact(workspaceId, String(active?.id), "plan.md", content);
+      await harness.finish(workspaceId, String(active?.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+      const waiting = (await harness.dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body.task as { workflow: { revision: number; reviewPhase: string; artifacts: Array<{ sha256: string }> } };
+      expect(waiting.workflow.reviewPhase).toBe(phase);
+      const digest = createHash("sha256").update(content).digest("hex");
+      await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/workflow/decision`, {
+        requestId: randomUUID(), expectedRevision: waiting.workflow.revision, decision: "APPROVE", reason: "Approved", artifactDigest: digest,
+      });
+      const saved = harness.db.get(`DEVTASK#${task.taskId}`, "META")?.workflow as { reviewPhase?: string; stage: string; state: string };
+      if (nextPhase !== undefined) expect(saved).toMatchObject({ reviewPhase: nextPhase, stage: "PLAN", state: "RUNNING" });
+      else expect(saved).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING" });
+    };
+    const prepare = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.kind === "prepare");
+    await harness.finish(workspaceId, String(prepare?.id), "SUCCEEDED");
+    await finishPhase("Goal: Add password reset. Scope: account page.", "REQUIREMENTS", "DESIGN");
+    await finishPhase("Approach: tokenized reset link with expiration.", "DESIGN", "IMPLEMENTATION_PLAN");
+    await finishPhase("1. Add reset request UI. 2. Add expiry test.", "IMPLEMENTATION_PLAN");
+    const implementation = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.workflowMode === "IMPLEMENT");
+    expect(implementation).toBeDefined();
+  });
+
   it("stores a control-plane-digested plan and only queues implementation after owner approval", async () => {
     const harness = await createDeveloperTaskBroker();
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {

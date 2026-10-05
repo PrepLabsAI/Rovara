@@ -61,7 +61,7 @@ export interface SlackIngressDependencies {
    */
   stopTask?: (thread: SlackThread, userId: string) => Promise<"CANCEL_REQUESTED" | "NOTHING_RUNNING">;
   /** Explicit `workflow: ...` mentions start the native human-gated workflow in this exact thread. */
-  startWorkflow?: (input: { thread: SlackThread; userId: string; instructions: string; requestId: string }) => Promise<void>;
+  startWorkflow?: (input: { thread: SlackThread; userId: string; instructions: string; workflowPath: "QUICK" | "FULL"; requestId: string }) => Promise<void>;
   /**
    * Spec 025 FR-035: shared task threads. Absent (the legacy deployment): every thread is ordinary.
    * `lookup` gives the thread's mode, or undefined for an ordinary thread, and throws when it cannot
@@ -240,11 +240,14 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       }
       // Nothing is running: the request goes to the orchestrator like any other.
     }
-    const workflowRequest = /^workflow\s*:\s*([\s\S]+)$/i.exec(text);
+    const workflowRequest = /^workflow(?:\s+(quick|full))?\s*:\s*([\s\S]+)$/i.exec(text);
     if (workflowRequest && dependencies.startWorkflow) {
       try {
-        await dependencies.startWorkflow({ thread, userId: mention.userId, instructions: workflowRequest[1]!.trim(), requestId: mention.eventId });
-        await post(dependencies, log, thread, "Got it. I’ll prepare a plan here first. No code changes start until you approve it.", "workflow.start_notice_failed");
+        const workflowPath = workflowRequest[1]?.toUpperCase() === "FULL" ? "FULL" : "QUICK";
+        await dependencies.startWorkflow({ thread, userId: mention.userId, instructions: workflowRequest[2]!.trim(), workflowPath, requestId: mention.eventId });
+        await post(dependencies, log, thread, workflowPath === "FULL"
+          ? "Got it. I’ll prepare requirements, design, and coding steps for your review before work starts."
+          : "Got it. I’ll prepare a plan here first. No code changes start until you approve it.", "workflow.start_notice_failed");
       } catch {
         log("workflow.start_failed", { eventId: mention.eventId });
         await post(dependencies, log, thread, "I couldn't start that workflow. Check that this channel is bound to a project and try again.", "workflow.start_failure_notice_failed");

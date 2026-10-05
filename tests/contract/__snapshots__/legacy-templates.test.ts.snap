@@ -2095,6 +2095,94 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       },
       "Type": "AWS::CloudWatch::Alarm",
     },
+    "GithubWebhookRecoveryRoleD4894C8E": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "scheduler.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "GithubWebhookRecoveryRoleDefaultPolicyDC13C89E": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "BrokerE1355FD6",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "BrokerE1355FD6",
+                          "Arn",
+                        ],
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "GithubWebhookRecoveryRoleDefaultPolicyDC13C89E",
+        "Roles": [
+          {
+            "Ref": "GithubWebhookRecoveryRoleD4894C8E",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "GithubWebhookRecoverySchedule": {
+      "Properties": {
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "ScheduleExpression": "rate(1 minute)",
+        "State": "ENABLED",
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BrokerE1355FD6",
+              "Arn",
+            ],
+          },
+          "Input": "{"source":"agentx.github-webhook-recovery"}",
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 300,
+            "MaximumRetryAttempts": 2,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "GithubWebhookRecoveryRoleD4894C8E",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
+    },
     "GithubWebhookRoute": {
       "Properties": {
         "ApiId": {
@@ -5911,6 +5999,14 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "AttributeName": "workspaceCreatedAt",
             "AttributeType": "S",
           },
+          {
+            "AttributeName": "webhookRecoveryPk",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "webhookRecoverySk",
+            "AttributeType": "S",
+          },
         ],
         "BillingMode": "PAY_PER_REQUEST",
         "GlobalSecondaryIndexes": [
@@ -5939,6 +6035,22 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
               },
               {
                 "AttributeName": "workspaceCreatedAt",
+                "KeyType": "RANGE",
+              },
+            ],
+            "Projection": {
+              "ProjectionType": "ALL",
+            },
+          },
+          {
+            "IndexName": "github-webhook-recovery",
+            "KeySchema": [
+              {
+                "AttributeName": "webhookRecoveryPk",
+                "KeyType": "HASH",
+              },
+              {
+                "AttributeName": "webhookRecoverySk",
                 "KeyType": "RANGE",
               },
             ],

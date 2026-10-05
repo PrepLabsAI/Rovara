@@ -111,7 +111,7 @@ export type WorkflowState = z.infer<typeof WorkflowStateSchema>;
 
 export const WorkflowArtifactSchema = z.object({
   id: z.string().min(1).max(128),
-  type: z.enum(["requirements", "plan", "test_plan", "review_report"]),
+  type: z.enum(["requirements", "design", "plan", "test_plan", "review_report"]),
   version: z.number().int().positive(),
   sha256: DigestSchema,
   producer: z.string().min(1).max(120),
@@ -152,12 +152,19 @@ export const WorkflowCheckPolicySchema = z.object({
 });
 export type WorkflowCheckPolicy = z.infer<typeof WorkflowCheckPolicySchema>;
 
+export const WorkflowPathSchema = z.enum(["QUICK", "FULL"]);
+export const WorkflowReviewPhaseSchema = z.enum(["REQUIREMENTS", "DESIGN", "IMPLEMENTATION_PLAN"]);
+export type WorkflowPath = z.infer<typeof WorkflowPathSchema>;
+export type WorkflowReviewPhase = z.infer<typeof WorkflowReviewPhaseSchema>;
+
 export const WorkflowSnapshotSchema = z.object({
   schemaVersion: z.literal(1),
   definitionId: z.literal("agentx-task-to-pr"),
   definitionVersion: z.literal("1.0.0"),
   taskId: z.string().uuid(),
   ownerId: ActorIdSchema,
+  path: WorkflowPathSchema.default("QUICK"),
+  reviewPhase: WorkflowReviewPhaseSchema.optional(),
   revision: z.number().int().positive(),
   stage: WorkflowStageSchema,
   state: WorkflowStateSchema,
@@ -174,6 +181,9 @@ export const WorkflowSnapshotSchema = z.object({
   pullRequests: z.array(WorkflowPullRequestSchema).max(32).optional(),
   feedback: WorkflowFeedbackSchema.optional(),
 }).superRefine((workflow, context) => {
+  if (workflow.path === "FULL" && workflow.reviewPhase === undefined) {
+    context.addIssue({ code: "custom", path: ["reviewPhase"], message: "full workflow must name the current approval phase" });
+  }
   const atOrAfterPrReady = ["PULL_REQUEST", "WAIT_FOR_MERGE", "MERGED"].includes(workflow.stage);
   if (atOrAfterPrReady) {
     const currentDigest = workflow.candidate?.digest;
@@ -460,13 +470,15 @@ function validSnapshot(input: unknown): WorkflowSnapshot {
   return parsed.data;
 }
 
-export function createWorkflowSnapshot(input: { taskId: string; ownerId: string; now: string; checkPolicy?: WorkflowCheckPolicy }): WorkflowSnapshot {
+export function createWorkflowSnapshot(input: { taskId: string; ownerId: string; now: string; path?: WorkflowPath; checkPolicy?: WorkflowCheckPolicy }): WorkflowSnapshot {
   const parsed = WorkflowSnapshotSchema.safeParse({
     schemaVersion: 1,
     definitionId: "agentx-task-to-pr",
     definitionVersion: "1.0.0",
     taskId: input.taskId,
     ownerId: input.ownerId,
+    path: input.path ?? "QUICK",
+    ...(input.path === "FULL" ? { reviewPhase: "REQUIREMENTS" as const } : {}),
     revision: 1,
     stage: "PLAN",
     state: "RUNNING",
@@ -488,8 +500,10 @@ export function submitWorkflowArtifact(
   const artifact = WorkflowArtifactSchema.safeParse(input.artifact);
   if (!artifact.success) throw new WorkflowTransitionError("workflow artifact is invalid");
   if (current.revision !== input.expectedRevision) throw new WorkflowTransitionError("workflow revision is stale");
-  if (current.stage !== "PLAN" || current.state !== "RUNNING" || artifact.data.type !== "plan") {
-    throw new WorkflowTransitionError("a plan artifact is not expected in the current workflow stage");
+  const expectedType = current.path === "QUICK" || current.reviewPhase === "IMPLEMENTATION_PLAN" ? "plan"
+    : current.reviewPhase === "REQUIREMENTS" ? "requirements" : "design";
+  if (current.stage !== "PLAN" || current.state !== "RUNNING" || artifact.data.type !== expectedType) {
+    throw new WorkflowTransitionError("the current workflow phase is not expecting this artifact");
   }
   const next = WorkflowSnapshotSchema.parse({
     ...current,
@@ -542,7 +556,7 @@ export function decideWorkflow(
   if (actor.role === "TASK_OWNER" && actor.actorId !== current.ownerId) {
     throw new WorkflowTransitionError("only the task owner may decide this workflow stage");
   }
-  const currentPlan = current.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
+  const currentPlan = current.artifacts.filter((artifact) => artifact.type === (current.path === "QUICK" || current.reviewPhase === "IMPLEMENTATION_PLAN" ? "plan" : current.reviewPhase === "REQUIREMENTS" ? "requirements" : "design")).at(-1);
   if (currentPlan === undefined || request.data.artifactDigest !== currentPlan.sha256) {
     throw new WorkflowTransitionError("decision must name the current plan digest");
   }
@@ -563,19 +577,24 @@ export function decideWorkflow(
   });
   if (current.decisions.length >= 100) throw new WorkflowTransitionError("workflow decision history is full");
 
+  const nextFullPhase = current.path === "FULL" && request.data.decision === "APPROVE"
+    ? current.reviewPhase === "REQUIREMENTS" ? "DESIGN" as const
+      : current.reviewPhase === "DESIGN" ? "IMPLEMENTATION_PLAN" as const : undefined
+    : undefined;
   const nextStage: WorkflowStage = request.data.decision === "REJECT" ? "CLOSED"
     : request.data.decision === "REQUEST_CHANGES" ? "PLAN"
-      : "IMPLEMENT";
-  const outcome = request.data.decision === "APPROVE" ? "PASSED"
+      : nextFullPhase !== undefined ? "PLAN" : "IMPLEMENT";
+  const outcome = request.data.decision === "APPROVE" && nextFullPhase === undefined ? "PASSED"
     : request.data.decision === "REQUEST_CHANGES" ? "CHANGES_REQUESTED"
       : request.data.decision === "REJECT" ? "REJECTED"
-        : "SKIPPED";
+        : request.data.decision === "SKIP" ? "SKIPPED" : undefined;
   return WorkflowSnapshotSchema.parse({
     ...current,
     revision: current.revision + 1,
     stage: nextStage,
     state: request.data.decision === "REJECT" ? "COMPLETE" : "READY",
-    outcome,
+    ...(nextFullPhase === undefined ? {} : { reviewPhase: nextFullPhase }),
+    ...(outcome === undefined ? {} : { outcome }),
     updatedAt: options.now,
     decisions: [...current.decisions, decision],
     ...(current.checkPolicy === undefined ? {} : { checkPolicy: { ...current.checkPolicy, selectedOptionalIds: selectedOptionalCheckIds } }),

@@ -38,7 +38,6 @@ import {
   recordWorkflowVerification,
   submitWorkflowReview,
   registerWorkflowPullRequest,
-  decideWorkflowFeedback,
   taskResultChecks,
   type CheckEntry,
   type LatestChecks,
@@ -132,7 +131,7 @@ import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKe
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { appIdFromSecret, GitHubAppCredentialProvider, privateKeyFromSecret, webhookSecretFromSecret } from "../github-app.js";
-import { GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, handleGithubWebhook, reconcileGithubWorkflowPullRequest, recordLinkedGithubWorkflowFeedback, type ReceivedGithubWebhook } from "./github-webhooks.js";
+import { GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, buildGithubFeedbackPlan, findLinkedGithubWorkflowPullRequest, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileGithubWorkflowPullRequest, recordLinkedGithubWorkflowFeedback, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
 import { unsupportedThinkingLevels } from "@agentx/model-runtime/thinking-levels";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
@@ -268,7 +267,7 @@ interface AwsBrokerDependencies {
   adminValues: readonly string[];
   callbackSigningKey: string;
   repositoryGrants: RepositoryGrantService;
-  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository">;
+  githubPullRequests: Pick<GitHubAppCredentialProvider, "reconcilePullRequest" | "getPullRequest" | "updatePullRequest" | "verifyWebhookRepository"> & Partial<Pick<GitHubAppCredentialProvider, "getPullRequestChangedFiles">>;
   /** Reads the GitHub webhook HMAC key from the configured GitHub App secret. */
   githubWebhookSecret?: () => Promise<string>;
   /** Refuses, with CONFIG_INVALID, a repository its credential cannot reach; checked at registration. */
@@ -572,7 +571,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | AdminChangePressEvent): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
@@ -581,6 +580,13 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       } catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "admin_change.press_failed", changeId: event.changeId, error: error instanceof AgentXError ? error.code : error instanceof Error ? error.name : "unknown" }));
         return json({ outcome: "failed", changeId: event.changeId }, "slack-ingress", 500);
+      }
+    }
+    if (isGithubWebhookRecoveryEvent(event)) {
+      try { return json(await retryDueGithubWebhookEvents(dependencies), "github-webhook-recovery"); }
+      catch (error) {
+        console.log(JSON.stringify({ component: "broker", event: "github.webhook_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
+        return json({ error: "recovery_failed" }, "github-webhook-recovery", 500);
       }
     }
     if (isSlackStopTaskEvent(event)) {
@@ -758,6 +764,10 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         adminClaim: dependencies.adminClaim,
         adminValues: dependencies.adminValues,
       });
+      const webhookRetry = /^\/v1\/admin\/github\/webhook-deliveries\/([0-9a-f-]{36})\/retry$/.exec(url.pathname);
+      if (request.method === "POST" && webhookRetry?.[1]) {
+        return json(await retryGithubWebhookAsAdministrator(dependencies, identity, webhookRetry[1]), request.requestId, 202);
+      }
       const body = parseBody(request.body);
       // Spec 025 phase 25e: admin changes (FR-039 to FR-041, FR-052).
       const changed = await routeAdminChange(adminChanges, identity, { method: request.method, headers: request.headers, body }, url);
@@ -2624,7 +2634,7 @@ async function createConversation(
 async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW"; readiness?: ProjectCommand[] },
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[] },
   now: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -2647,8 +2657,15 @@ async function taskOperationParts(
   });
   operation.settingsRevision = settings.definition.revision;
   // 25c note 1: the hash above is the request's own; only the worker's copy gets the re-read line.
+  const phaseInstructions = input.workflowPhase === "REQUIREMENTS"
+    ? "Prepare a concise requirements brief with Goal, Scope, Non-goals, Acceptance criteria, and Assumptions. Do not design implementation or edit files."
+    : input.workflowPhase === "DESIGN"
+      ? "Prepare a concise design proposal with Proposed approach, Affected areas, Risks, and Alternatives. Do not edit files."
+      : input.workflowPhase === "IMPLEMENTATION_PLAN"
+        ? "Prepare an ordered coding plan with Goal, Files or areas, Steps, Checks, and Risks. Do not edit files."
+        : "Return a concise plan with Goal, What will change, Checks, and Risks or questions. Name relevant files and exact checks where known.";
   const selectedPrompt = input.workflowMode === "PLAN"
-    ? `Planning phase only. Do not edit, write, or create files. Inspect the request and repository. Return a short, plain-language plan (at most 180 words) with only these headings: Goal; What will change; Checks; Risks or questions. Name the relevant files or areas and exact checks where known. Include only material risks or genuine unanswered questions. Avoid generic introductions, repeated context, filler, and boilerplate conclusions. This plan will be shown as a linked detail page; the Slack message will contain only a short summary. A person must approve this exact plan before any code changes.\n\nRequest:\n${input.prompt}`
+    ? `Planning phase only. Do not edit, write, or create files. Inspect the request and repository. ${phaseInstructions} Avoid filler and include only material risks or genuine unanswered questions. This linked detail is shown to the owner for approval before the next phase or code changes.\n\nRequest:\n${input.prompt}`
     : input.workflowMode === "REVIEW"
       ? `Review the current code read-only for the current task. Do not edit files or run commands that modify the workspace. Return concise critic and security review findings. The broker will bind your reports to this operation and candidate.\n\n${input.prompt}`
       : input.prompt;
@@ -2685,7 +2702,7 @@ async function acceptTask(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
-  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW"; readiness?: ProjectCommand[] } = {},
+  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[] } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
@@ -2722,6 +2739,7 @@ async function acceptTask(
     // 25c note 1: a turn from an open shared thread, or the developer's own turn on a shared task.
     shared: identity.sharedTask?.state === "continue" || options.sharedTask === true,
     ...(options.workflowMode === undefined ? {} : { workflowMode: options.workflowMode }),
+    ...(options.workflowPhase === undefined ? {} : { workflowPhase: options.workflowPhase }),
     ...(options.readiness === undefined ? {} : { readiness: options.readiness }),
   }, now);
   try {
@@ -3252,6 +3270,7 @@ export interface SlackWorkflowStartEvent {
   thread: SlackThread;
   userId: string;
   instructions: string;
+  workflowPath?: "QUICK" | "FULL";
   requestId: string;
 }
 
@@ -3287,7 +3306,7 @@ export function isSlackWorkflowStartEvent(event: unknown): event is SlackWorkflo
   const value = event as Record<string, unknown>;
   return value.source === "agentx.slack-ingress" && value.action === "start-workflow" && value.requestContext === undefined
     && typeof value.instructions === "string" && value.instructions.trim().length > 0
-    && typeof value.requestId === "string";
+    && typeof value.requestId === "string" && (value.workflowPath === undefined || value.workflowPath === "QUICK" || value.workflowPath === "FULL");
 }
 
 async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowStartEvent) {
@@ -3310,7 +3329,7 @@ async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: De
   const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller, thread);
   const request = {
     method: "POST", path: "/v1/dev/tasks", headers: {}, requestId,
-    body: JSON.stringify({ requestId, project: binding.projectName, instructions, client: "slack", workflow: true, shareToChannel: true, channel: thread.channelId }),
+    body: JSON.stringify({ requestId, project: binding.projectName, instructions, client: "slack", workflow: true, workflowPath: event.workflowPath ?? "QUICK", shareToChannel: true, channel: thread.channelId }),
   };
   return await routeDeveloperTaskRequest(routeDeps, caller, request, new URL(request.path, "https://agentx.invalid")) as { task: { taskId: string } };
 }
@@ -4016,6 +4035,7 @@ async function queuedFirstTask(
   pointer: DeveloperTaskPointerRecord & { pendingPrompt: string },
   now: string,
 ): Promise<{ workspaceUpdate: TransactItems[number]; items: TransactItems }> {
+  const task = pointer.pendingWorkflowMode === "PLAN" ? await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId)) : undefined;
   const { operation, outbox, fence } = await taskOperationParts(dependencies, workspace, {
     requestId: pointer.firstRequestId,
     conversationId: pointer.conversationId,
@@ -4023,6 +4043,7 @@ async function queuedFirstTask(
     conversationStarted: false,
     requester: { requestedBy: pointer.requester },
     workflowMode: pointer.pendingWorkflowMode ?? "IMPLEMENT",
+    ...(task?.workflow?.reviewPhase === undefined ? {} : { workflowPhase: task.workflow.reviewPhase }),
   }, now);
   return {
     workspaceUpdate: { Update: {
@@ -4278,9 +4299,19 @@ async function completedTurnItems(
 async function processGithubWorkflowEvent(dependencies: AwsBrokerDependencies, event: ReceivedGithubWebhook["event"]): Promise<void> {
   if (event.kind === "PR_COMMENT") {
     if (event.comment === undefined) throw new GithubWebhookRefusal("PR feedback comment is missing");
+    const linked = await findLinkedGithubWorkflowPullRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, repositoryFullName: event.fullName, number: event.number });
+    if (linked === undefined) throw new GithubWebhookRefusal("GitHub pull request is not linked to an AgentX workflow");
+    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(linked.taskId));
+    if (task?.workflow?.candidate?.digest !== linked.candidateDigest) throw new GithubWebhookRefusal("linked workflow no longer matches the pull request candidate");
+    const project = await requireProject(dependencies, task.project, task.startingRevision);
+    const repository = project.definition.repositories.find((candidate) => candidate.name === linked.repositoryId);
+    if (repository === undefined) throw new GithubWebhookRefusal("linked pull request repository is no longer registered");
+    const changedFiles = await dependencies.githubPullRequests.getPullRequestChangedFiles?.(repository.url, event.number) ?? [];
+    const proposedPlan = buildGithubFeedbackPlan(event.comment, changedFiles);
     await recordLinkedGithubWorkflowFeedback({
       documentClient: dependencies.documentClient, tableName: dependencies.tableName,
       repositoryFullName: event.fullName, number: event.number, action: event.action, comment: event.comment,
+      proposedPlan,
       loadWorkflow: async (taskId) => (await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)))?.workflow,
       now: new Date().toISOString(),
     });
@@ -4316,6 +4347,75 @@ async function processGithubWorkflowEvent(dependencies: AwsBrokerDependencies, e
     },
     now: new Date().toISOString(),
   });
+}
+
+async function githubEventStillAuthorized(dependencies: AwsBrokerDependencies, event: ReceivedGithubWebhook["event"]): Promise<boolean> {
+  return authorizeLinkedGithubWebhook({
+    documentClient: dependencies.documentClient,
+    tableName: dependencies.tableName,
+    scope: { installationId: event.installationId, repositoryId: event.repositoryId, fullName: event.fullName, pullRequestNumber: event.number },
+    loadTask: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
+    repositoryUrl: async (projectName, revision, repositoryId) => {
+      const project = await requireProject(dependencies, projectName, revision);
+      return project.definition.repositories.find((repository) => repository.name === repositoryId)?.url;
+    },
+    verifyRepository: (repositoryUrl, scope) => dependencies.githubPullRequests.verifyWebhookRepository(repositoryUrl, scope),
+  });
+}
+
+async function retryDueGithubWebhookEvents(dependencies: AwsBrokerDependencies): Promise<{ attempted: number; processed: number; delayed: number }> {
+  const now = new Date().toISOString();
+  const due = await listDueGithubWebhookDeliveries({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now, limit: 25 });
+  let processed = 0;
+  let delayed = 0;
+  for (const delivery of due) {
+    try {
+      const result = await processGithubWebhookDelivery({
+        documentClient: dependencies.documentClient,
+        tableName: dependencies.tableName,
+        received: { delivery: "ACCEPTED", deliveryId: delivery.deliveryId, event: delivery.event },
+        process: async (event) => {
+          // Revalidate under the delivery lease. Revoked scope is terminal; transient GitHub/API
+          // errors consume the ordinary bounded retry budget instead of leaving a hot due row.
+          if (!await githubEventStillAuthorized(dependencies, event)) {
+            throw new GithubWebhookRefusal("linked GitHub pull request is no longer authorized");
+          }
+          await processGithubWorkflowEvent(dependencies, event);
+        },
+        now: () => new Date().toISOString(),
+      });
+      if (result === "PROCESSED") processed += 1;
+      else delayed += 1;
+    } catch (error) {
+      console.log(JSON.stringify({ component: "broker", event: "github.webhook_retry_failed", deliveryId: delivery.deliveryId, error: error instanceof Error ? error.name : "unknown" }));
+    }
+  }
+  return { attempted: due.length, processed, delayed };
+}
+
+async function retryGithubWebhookAsAdministrator(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, deliveryId: string) {
+  if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(deliveryId)) throw agentXError("NOT_FOUND", "webhook delivery not found");
+  const key = { pk: `GITHUB_DELIVERY#${deliveryId}`, sk: "META" };
+  const stored = await getItem<Record<string, unknown>>(dependencies, key);
+  if (stored === undefined || (stored.status !== "RETRYABLE" && stored.status !== "DEAD") || stored.event === undefined) throw agentXError("CONFIG_INVALID", "only a failed GitHub delivery can be retried");
+  const event = stored.event as ReceivedGithubWebhook["event"];
+  if (!await githubEventStillAuthorized(dependencies, event)) throw agentXError("FORBIDDEN", "linked GitHub pull request is no longer authorized");
+  const now = new Date().toISOString();
+  await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
+    { Update: { TableName: dependencies.tableName, Key: key,
+      UpdateExpression: "SET #status = :received, updatedAt = :now, nextAttemptAt = :now, webhookRecoveryPk = :pk, webhookRecoverySk = :sk REMOVE leaseToken, leaseExpiresAt, attempts",
+      ConditionExpression: "#status = :retryable OR #status = :dead",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: { ":received": "RECEIVED", ":retryable": "RETRYABLE", ":dead": "DEAD", ":now": now, ":pk": "GITHUB_WEBHOOK_RECOVERY", ":sk": `${now}#${deliveryId}` },
+    } },
+    { Put: { TableName: dependencies.tableName, Item: { pk: `GITHUB_DELIVERY#${deliveryId}`, sk: `RETRY#${now}`, entityType: "GITHUB_WEBHOOK_RETRY_AUDIT", deliveryId, actor: identity.subject, at: now }, ConditionExpression: "attribute_not_exists(pk)" } },
+  ] }));
+  return { deliveryId, status: "RETRY_QUEUED" as const };
+}
+
+function isGithubWebhookRecoveryEvent(event: unknown): event is { source: "agentx.github-webhook-recovery" } {
+  return event !== null && typeof event === "object" && (event as { source?: unknown }).source === "agentx.github-webhook-recovery";
 }
 
 async function completedWorkflowItems(
@@ -4454,11 +4554,13 @@ async function completedWorkflowItems(
       const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: String(artifact.objectKey) }));
       const content = object.Body ? await object.Body.transformToString("utf8") : "";
       const sha256 = createHash("sha256").update(content, "utf8").digest("hex");
+      const artifactType = task.workflow.path === "FULL" && task.workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
+        : task.workflow.path === "FULL" && task.workflow.reviewPhase === "DESIGN" ? "design" : "plan";
       next = submitWorkflowArtifact(task.workflow, {
         expectedRevision: task.workflow.revision,
         now,
         artifact: {
-          id: String(artifact.id), type: "plan", version: task.workflow.artifacts.filter((entry) => entry.type === "plan").length + 1,
+          id: String(artifact.id), type: artifactType, version: task.workflow.artifacts.filter((entry) => entry.type === artifactType).length + 1,
           sha256, producer: "agentx-worker-untrusted", objectKey: String(artifact.objectKey), createdAt: String(artifact.createdAt),
         },
       });

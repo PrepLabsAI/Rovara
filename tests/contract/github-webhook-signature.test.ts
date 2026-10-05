@@ -1,7 +1,7 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createCandidateManifest, createWorkflowSnapshot, recordExpectedWorkflowPullRequests, requestWorkflowFeedback } from "../../packages/contracts/src/task-workflow.js";
-import { claimGithubWebhookDelivery, completeGithubWebhookDelivery, findLinkedGithubWorkflowPullRequest, processGithubWebhookDelivery, receiveGithubWebhook, reconcileGithubWorkflowPullRequest, recordLinkedGithubWorkflowFeedback, reserveGithubWebhookDelivery, verifyGithubWebhookSignature } from "../../packages/broker/src/aws/github-webhooks.js";
+import { buildGithubFeedbackPlan, claimGithubWebhookDelivery, completeGithubWebhookDelivery, findLinkedGithubWorkflowPullRequest, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, receiveGithubWebhook, reconcileGithubWorkflowPullRequest, recordLinkedGithubWorkflowFeedback, reserveGithubWebhookDelivery, verifyGithubWebhookSignature } from "../../packages/broker/src/aws/github-webhooks.js";
 
 describe("GitHub webhook signature verification", () => {
   it("resolves only PRs already linked to a workflow task", async () => {
@@ -286,6 +286,7 @@ describe("GitHub webhook signature verification", () => {
       installationId: 777,
       repositoryId: 1234,
       eventHash: "a".repeat(64),
+      event: { kind: "PULL_REQUEST" as const, action: "closed", installationId: 777, repositoryId: 1234, fullName: "acme/payments", number: 9 },
       now: "2026-10-05T12:00:00.000Z",
     };
     expect(await reserveGithubWebhookDelivery(delivery)).toBe("reserved");
@@ -311,7 +312,8 @@ describe("GitHub webhook signature verification", () => {
         }
         const record = records.get(key);
         if (!record) throw new Error("missing record");
-        const values = value.input.ExpressionAttributeValues;
+        if (value.constructor.name === "GetCommand") return { Item: record };
+        const values = value.input.ExpressionAttributeValues ?? {};
         if (values[":completed"] !== undefined) {
           if (record.status !== "PROCESSING" || record.leaseToken !== values[":leaseToken"]) throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" });
           record.status = "COMPLETED";
@@ -327,15 +329,15 @@ describe("GitHub webhook signature verification", () => {
       },
     };
     const deliveryId = "550e8400-e29b-41d4-a716-446655440010";
-    await reserveGithubWebhookDelivery({ documentClient, tableName: "state", deliveryId, installationId: 777, repositoryId: 1234, eventHash: "d".repeat(64), now: "2026-10-05T12:00:00.000Z" });
     const event = { delivery: "ACCEPTED" as const, deliveryId, event: { kind: "PULL_REQUEST" as const, action: "closed", installationId: 777, repositoryId: 1234, fullName: "acme/payments", number: 9 } };
+    await reserveGithubWebhookDelivery({ documentClient, tableName: "state", deliveryId, installationId: 777, repositoryId: 1234, eventHash: "d".repeat(64), event: event.event, now: "2026-10-05T12:00:00.000Z" });
     let attempts = 0;
     await expect(processGithubWebhookDelivery({
       documentClient, tableName: "state", received: event, now: () => "2026-10-05T12:00:01.000Z",
       process: async () => { attempts += 1; throw new Error("transient GitHub API failure"); },
     })).rejects.toThrow(/transient/);
     await expect(processGithubWebhookDelivery({
-      documentClient, tableName: "state", received: event, now: () => "2026-10-05T12:00:02.000Z",
+      documentClient, tableName: "state", received: event, now: () => "2026-10-05T12:01:02.000Z",
       process: async () => { attempts += 1; },
     })).resolves.toBe("PROCESSED");
     await expect(processGithubWebhookDelivery({
@@ -343,6 +345,31 @@ describe("GitHub webhook signature verification", () => {
       process: async () => { attempts += 1; },
     })).resolves.toBe("DUPLICATE");
     expect(attempts).toBe(2);
+  });
+
+  it("builds the owner proposal from the commented file and current PR diff", () => {
+    const plan = buildGithubFeedbackPlan({ body: "Handle the empty-input case", path: "src/retry.ts", line: 22 }, [
+      { filename: "src/retry.ts", status: "modified", additions: 12, deletions: 3, patch: "@@ -20,2 +20,5 @@\n+return input.length ? run(input) : []" },
+      { filename: "README.md", status: "modified", additions: 2, deletions: 1 },
+    ]);
+    expect(plan).toContain("`src/retry.ts` near line 22");
+    expect(plan).toContain("Current PR diff files");
+    expect(plan).toContain("Relevant diff excerpt");
+    expect(plan).toContain("Handle the empty-input case");
+  });
+
+  it("lists persisted webhook events when their retry due time arrives", async () => {
+    const event = { kind: "PULL_REQUEST" as const, action: "closed", installationId: 777, repositoryId: 1234, fullName: "acme/payments", number: 9 };
+    let queryInput: Record<string, unknown> | undefined;
+    const documentClient = { async send(command: unknown) {
+      const value = command as { constructor: { name: string }; input: Record<string, unknown> };
+      if (value.constructor.name === "QueryCommand") { queryInput = value.input; return { Items: [{ deliveryId: "550e8400-e29b-41d4-a716-446655440010", status: "RETRYABLE", event }] }; }
+      return {};
+    } };
+    await expect(listDueGithubWebhookDeliveries({ documentClient, tableName: "state", now: "2026-10-05T12:02:00.000Z" })).resolves.toEqual([
+      { deliveryId: "550e8400-e29b-41d4-a716-446655440010", event },
+    ]);
+    expect(queryInput).toMatchObject({ IndexName: "github-webhook-recovery", Limit: 25 });
   });
 
 });

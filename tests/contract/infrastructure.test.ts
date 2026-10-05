@@ -67,6 +67,20 @@ describe("hosted Slack control-plane infrastructure", () => {
     template.hasOutput("GithubWebhookUrl", {});
   });
 
+  it("indexes due GitHub webhook retries and invokes the broker from a bounded recovery schedule", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      GlobalSecondaryIndexes: Match.arrayWith([Match.objectLike({
+        IndexName: "github-webhook-recovery",
+        KeySchema: [{ AttributeName: "webhookRecoveryPk", KeyType: "HASH" }, { AttributeName: "webhookRecoverySk", KeyType: "RANGE" }],
+      })]),
+    });
+    template.hasResourceProperties("AWS::Scheduler::Schedule", {
+      ScheduleExpression: "rate(1 minute)",
+      FlexibleTimeWindow: { Mode: "OFF" },
+      Target: Match.objectLike({ Input: '{"source":"agentx.github-webhook-recovery"}', RetryPolicy: { MaximumRetryAttempts: 2, MaximumEventAgeInSeconds: 300 } }),
+    });
+  });
+
   it("queues Slack requests in a FIFO queue with a dead-letter queue after five receives", () => {
     template.hasResourceProperties("AWS::SQS::Queue", {
       FifoQueue: true,

@@ -295,6 +295,24 @@ describe("Slack native workflow review controls", () => {
     await expect(handlers.handleAction({ ...action, userId: requester, value: JSON.stringify({ taskId, revision: workflow.revision - 1, digest, decision: "APPROVE" }) })).rejects.toThrow();
   });
 
+  it("binds a Full path approval button to the current requirements artifact", async () => {
+    const now = new Date(nowSeconds * 1_000).toISOString();
+    const fullRequirementsDigest = "c".repeat(64);
+    const fullWorkflow = submitWorkflowArtifact(createWorkflowSnapshot({
+      taskId, ownerId: "b".repeat(64), now, path: "FULL",
+    }), { expectedRevision: 1, now, artifact: {
+      id: "requirements-1", type: "requirements", version: 1, sha256: fullRequirementsDigest,
+      producer: "agentx-plan", objectKey: "private/owner/workspace/op/requirements.md", createdAt: now,
+    } });
+    const fullTask = { ...task, workflow: fullWorkflow };
+    let opened: Record<string, unknown> | undefined;
+    const handlers = workflowSlackHandlers({ loadTask: async () => fullTask, openView: async (_trigger, view) => { opened = view; }, submit: async () => undefined });
+    const action = { actionId: "agentx_workflow_approve", value: JSON.stringify({ taskId, revision: fullWorkflow.revision, digest: fullRequirementsDigest, decision: "APPROVE" }), userId: requester, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "", requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: "requirements", responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" };
+    await handlers.handleAction(action);
+    expect(opened).toMatchObject({ callback_id: "agentx_workflow_review_submission" });
+    await expect(handlers.handleAction({ ...action, value: JSON.stringify({ taskId, revision: fullWorkflow.revision, digest, decision: "APPROVE" }) })).rejects.toThrow(/changed/);
+  });
+
   it("lets only the owner approve the current PR feedback and candidate in the same task thread", async () => {
     const candidate = createCandidateManifest([{ repositoryId: "payments", commitSha: "a".repeat(40), treeSha: "1".repeat(40) }]);
     const now = new Date(nowSeconds * 1_000).toISOString();

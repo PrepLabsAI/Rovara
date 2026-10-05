@@ -248,6 +248,13 @@ export class ControlPlaneStack extends Stack {
       sortKey: { name: WORKSPACE_PROJECT_INDEX.sortKey, type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
+    // Sparse due-time index: only received, retryable, or leased GitHub deliveries carry these keys.
+    state.addGlobalSecondaryIndex({
+      indexName: "github-webhook-recovery",
+      partitionKey: { name: "webhookRecoveryPk", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "webhookRecoverySk", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
     // The dispatcher signs each invocation to an EC2 worker; workers verify with the public key
     // alone (#80). Only the dispatcher may sign: the key policy denies kms:Sign to every other
     // principal, whatever its IAM policy grants.
@@ -638,6 +645,21 @@ export class ControlPlaneStack extends Stack {
       routeKey: "POST /v1/github/webhooks",
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
+    });
+    const githubRecoveryRole = new iam.Role(this, "GithubWebhookRecoveryRole", {
+      assumedBy: new iam.ServicePrincipal("scheduler.amazonaws.com"),
+    });
+    broker.grantInvoke(githubRecoveryRole);
+    new scheduler.CfnSchedule(this, "GithubWebhookRecoverySchedule", {
+      flexibleTimeWindow: { mode: "OFF" },
+      scheduleExpression: "rate(1 minute)",
+      state: "ENABLED",
+      target: {
+        arn: broker.functionArn,
+        roleArn: githubRecoveryRole.roleArn,
+        input: JSON.stringify({ source: "agentx.github-webhook-recovery" }),
+        retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 300 },
+      },
     });
     const defaultStage = new apigwv2.CfnStage(this, "DefaultStage", {
       apiId: api.ref,

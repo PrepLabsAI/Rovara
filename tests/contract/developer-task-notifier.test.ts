@@ -89,12 +89,38 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
 
     const message = h.posts.at(-1)!;
     expect(createPlanCanvas).toHaveBeenCalledWith(expect.objectContaining({ channel: SLACK_CHANNEL, taskId: h.taskId, title: "Fix the flaky retry test", version: 1, markdown: plan }));
-    expect(message.text).toBe("The plan is ready. No code changes have started. <https://acme.slack.com/docs/T123/F12345678|Read the plan and checks>.");
+    expect(message.text).toBe("The coding plan is ready. No code changes have started. <https://acme.slack.com/docs/T123/F12345678|Read and approve this step>.");
     expect(message.text).not.toContain("Fix retry handling");
     expect(message.blocks).toHaveLength(2);
     const actions = (message.blocks?.[1] as { elements: Array<{ action_id: string; value: string }> }).elements;
     expect(actions.map((button) => button.action_id)).toEqual(["agentx_workflow_approve", "agentx_workflow_changes"]);
     expect(JSON.parse(actions[0]!.value)).toMatchObject({ taskId: h.taskId, revision: 2, decision: "APPROVE", digest: expect.stringMatching(/^[a-f0-9]{64}$/) });
+  });
+
+  it("shows the current requirements document in the Full path approval message", async () => {
+    const requirements = "# Requirements\nAdd password reset.\n";
+    const createPlanCanvas = vi.fn(async () => ({ canvasId: "F22345678", permalink: "https://acme.slack.com/docs/T123/F22345678" }));
+    const h = await notifierHarness({ shareToChannel: true, workflow: true }, {
+      readArtifact: async () => requirements,
+      createPlanCanvas,
+    });
+    await h.pump();
+    const taskKey = `DEVTASK#${h.taskId}`;
+    const task = h.db.get(taskKey, "META") as { workflow: Record<string, unknown> };
+    h.db.set({ pk: taskKey, sk: "META", ...task, workflow: { ...task.workflow, path: "FULL", reviewPhase: "REQUIREMENTS" } });
+    const preparation = h.active();
+    await h.finish(h.workspaceId, preparation, "SUCCEEDED");
+    await h.pump();
+    const planning = h.active();
+    await h.artifact(h.workspaceId, planning, "plan.md", requirements);
+    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await h.pump();
+
+    const message = h.posts.at(-1)!;
+    expect(createPlanCanvas).toHaveBeenCalledWith(expect.objectContaining({ markdown: requirements }));
+    expect(message.text).toBe("The requirements document is ready. No code changes have started. <https://acme.slack.com/docs/T123/F22345678|Read and approve this step>.");
+    const actions = (message.blocks?.[1] as { elements: Array<{ text: { text: string } }> }).elements;
+    expect(actions[0]?.text.text).toBe("Approve this step");
   });
 
   it("posts concise Slack updates as GitHub merges each required pull request", async () => {

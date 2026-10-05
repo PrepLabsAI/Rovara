@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   WorkflowTransitionError,
@@ -212,6 +213,10 @@ describe("native task workflow contracts", () => {
       repositoryId: "payments-ui", number: 12, url: "https://github.com/acme/ui/pull/12", candidateDigest: candidate.digest, required: true,
     }, "2026-10-05T12:05:00.000Z");
     expect(completeSet).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", pullRequests: [{ repositoryId: "payments-api" }, { repositoryId: "payments-ui" }] });
+    const oneMerged = observeWorkflowPullRequest(completeSet, { repositoryId: "payments-api", number: 11, candidateDigest: candidate.digest, state: "MERGED", source: "GITHUB_API", observedAt: "2026-10-05T12:06:00.000Z" }, "2026-10-05T12:06:00.000Z");
+    expect(oneMerged).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    const allMerged = observeWorkflowPullRequest(oneMerged, { repositoryId: "payments-ui", number: 12, candidateDigest: candidate.digest, state: "MERGED", source: "GITHUB_API", observedAt: "2026-10-05T12:07:00.000Z" }, "2026-10-05T12:07:00.000Z");
+    expect(allMerged).toMatchObject({ stage: "MERGED", state: "COMPLETE", outcome: "MERGED" });
   });
 
   it("rejects persisted PR-ready or merged stages without their required evidence", () => {
@@ -253,6 +258,35 @@ describe("native task workflow contracts", () => {
     expect(approved.state).toBe("READY");
     expect(approved.decisions[0]).toMatchObject({ decision: "APPROVE", actorId: ownerId, artifactDigest: plan.sha256 });
     expect(decideWorkflow(approved, approvalRequest, actor, options)).toEqual(approved);
+  });
+
+  it("requires requirements, design, and implementation-plan approvals on the Full path", () => {
+    let workflow = createWorkflowSnapshot({ taskId, ownerId, now: "2026-10-05T12:00:00.000Z", path: "FULL" });
+    const phases = [
+      { type: "requirements" as const, content: "Goal: fix retries.\nScope: payments API." },
+      { type: "design" as const, content: "Approach: bounded retry with backoff." },
+      { type: "plan" as const, content: "1. Update retry helper.\n2. Add test." },
+    ];
+    for (const [index, phase] of phases.entries()) {
+      if (index > 0) workflow = WorkflowSnapshotSchema.parse({ ...workflow, revision: workflow.revision + 1, state: "RUNNING" });
+      const artifact = {
+        id: `full-phase-${index + 1}`, type: phase.type, version: 1,
+        sha256: createHash("sha256").update(phase.content).digest("hex"), producer: "agentx-worker-untrusted",
+        objectKey: `tasks/${taskId}/${phase.type}.md`, createdAt: `2026-10-05T12:0${index + 1}:00.000Z`,
+      };
+      workflow = submitWorkflowArtifact(workflow, { expectedRevision: workflow.revision, artifact, now: artifact.createdAt });
+      expect(workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+      const decision = decideWorkflow(workflow, {
+        requestId: `d532a6e0-3de1-44e3-a6d2-e8c635d77f2${index}`,
+        expectedRevision: workflow.revision,
+        decision: "APPROVE",
+        artifactDigest: artifact.sha256,
+        reason: "Approved",
+      }, { actorId: ownerId, role: "TASK_OWNER" }, { now: `2026-10-05T12:1${index}:00.000Z`, allowedSkipStages: [] });
+      workflow = decision;
+      if (index < 2) expect(workflow).toMatchObject({ path: "FULL", stage: "PLAN", state: "READY", reviewPhase: ["DESIGN", "IMPLEMENTATION_PLAN"][index] });
+      else expect(workflow).toMatchObject({ path: "FULL", stage: "IMPLEMENT", state: "READY" });
+    }
   });
 
   it("refuses stale revision, unauthorized actor and a skip the workflow policy did not allow", () => {

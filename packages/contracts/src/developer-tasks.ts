@@ -7,6 +7,7 @@ import { OperationStatusSchema } from "./operation.js";
 import { DeveloperShareModeSchema } from "./project.js";
 import { sharedNoticeKey, slackThreadSubject, type SlackThread } from "./slack.js";
 import { WORKFLOW_PLAN_MAX_BYTES, WorkflowSnapshotSchema } from "./task-workflow.js";
+import { WorkflowPathSchema } from "./task-workflow.js";
 
 export const DEVELOPER_TASK_OWNER_ISSUER = "agentx-developer-task";
 export const DEVELOPER_INSTRUCTIONS_MAX_BYTES = 65_536;
@@ -172,8 +173,12 @@ export const StartDeveloperTaskRequestSchema = z
     channel: z.string().min(1).max(80).optional(),
     /** Opts this task into the native human-gated task-to-PR workflow. */
     workflow: z.literal(true).optional(),
+    /** Selects the approval sequence for a native workflow; QUICK is used when omitted. */
+    workflowPath: WorkflowPathSchema.optional(),
   })
-  .strict();
+  .strict().superRefine((request, context) => {
+    if (request.workflowPath !== undefined && request.workflow !== true) context.addIssue({ code: "custom", path: ["workflowPath"], message: "workflowPath requires workflow: true" });
+  });
 export type StartDeveloperTaskRequest = z.infer<typeof StartDeveloperTaskRequestSchema>;
 
 export const ContinueDeveloperTaskRequestSchema = z.object({ requestId: RequestIdSchema, instructions: DeveloperInstructionsSchema }).strict();

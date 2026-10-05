@@ -1,5 +1,5 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import { GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
 import { dismissDeletedWorkflowFeedback, observeWorkflowPullRequest, requestWorkflowFeedback, type WorkflowSnapshot } from "@agentx/contracts";
 import { githubWorkflowPullRequestKey, type GithubWorkflowPullRequestRecord } from "../developer/task-records.js";
@@ -13,13 +13,16 @@ const GitHubWebhookPayloadSchema = z.object({
   issue: z.object({ number: z.number().int().positive(), state: z.enum(["open", "closed"]).optional(), pull_request: z.object({ url: z.string().url() }).passthrough().optional() }).passthrough().optional(),
   pull_request: z.object({ number: z.number().int().positive(), state: z.enum(["open", "closed"]).optional(), merged: z.boolean().optional() }).passthrough().optional(),
   review: z.object({ id: z.number().int().positive(), body: z.string().max(65_536).nullable().optional(), html_url: z.string().url(), updated_at: z.string().datetime().optional(), user: z.object({ login: z.string().min(1).max(100) }).passthrough() }).passthrough().optional(),
-  comment: z.object({ id: z.number().int().positive(), body: z.string().max(65_536).nullable().optional(), html_url: z.string().url(), updated_at: z.string().datetime().optional(), user: z.object({ login: z.string().min(1).max(100) }).passthrough() }).passthrough().optional(),
+  comment: z.object({ id: z.number().int().positive(), body: z.string().max(65_536).nullable().optional(), html_url: z.string().url(), updated_at: z.string().datetime().optional(), path: z.string().max(500).optional(), line: z.number().int().positive().optional(), diff_hunk: z.string().max(8_000).optional(), user: z.object({ login: z.string().min(1).max(100) }).passthrough() }).passthrough().optional(),
 }).passthrough();
 
 const COMMENT_ACTIONS = new Set(["created", "edited", "deleted"]);
 const PULL_REQUEST_ACTIONS = new Set(["opened", "reopened", "edited", "closed", "synchronize", "ready_for_review", "converted_to_draft"]);
 const REVIEW_ACTIONS = new Set(["submitted", "edited", "dismissed"]);
 const MAX_REVIEW_COMMENT_CHARS = 8_000;
+export const GITHUB_WEBHOOK_RECOVERY_INDEX = "github-webhook-recovery";
+const GITHUB_WEBHOOK_RECOVERY_PK = "GITHUB_WEBHOOK_RECOVERY";
+const MAX_WEBHOOK_ATTEMPTS = 8;
 
 export class GithubWebhookRefusal extends Error {
   constructor(message: string) {
@@ -41,7 +44,7 @@ export interface ReceiveGithubWebhookInput {
   headers: Record<string, string | undefined>;
   secret: string;
   authorizeRepository(scope: { installationId: number; repositoryId: number; fullName: string; pullRequestNumber: number }): Promise<boolean>;
-  reserveDelivery(delivery: { deliveryId: string; installationId: number; repositoryId: number; eventHash: string }): Promise<"reserved" | "retry" | "duplicate" | "conflict">;
+  reserveDelivery(delivery: { deliveryId: string; installationId: number; repositoryId: number; eventHash: string; event: ReceivedGithubWebhook["event"] }): Promise<"reserved" | "retry" | "duplicate" | "conflict">;
 }
 
 export interface ReceivedGithubWebhook {
@@ -54,7 +57,7 @@ export interface ReceivedGithubWebhook {
     repositoryId: number;
     fullName: string;
     number: number;
-    comment?: { id: number; body: string; truncated: boolean; url: string; author: string; updatedAt?: string; source: "review" | "review_comment" | "pr_discussion" };
+    comment?: { id: number; body: string; truncated: boolean; url: string; author: string; updatedAt?: string; path?: string; line?: number; diffHunk?: string; source: "review" | "review_comment" | "pr_discussion" };
   };
 }
 
@@ -161,7 +164,8 @@ export async function recordLinkedGithubWorkflowFeedback(input: {
   repositoryFullName: string;
   number: number;
   action: string;
-  comment: { id: number; body: string; url: string; author: string; updatedAt?: string };
+  comment: { id: number; body: string; url: string; author: string; updatedAt?: string; path?: string; line?: number; diffHunk?: string };
+  proposedPlan?: string;
   loadWorkflow(taskId: string): Promise<WorkflowSnapshot | undefined>;
   now: string;
 }): Promise<boolean> {
@@ -197,7 +201,7 @@ export async function recordLinkedGithubWorkflowFeedback(input: {
       next = requestWorkflowFeedback(current, {
         feedbackId, repositoryId: linked.repositoryId, number: input.number, candidateDigest: linked.candidateDigest,
         comments,
-        proposedPlan: "Review the comment in context, update the code to address it, rerun the required checks and reviews, then report back. AgentX will not reply on GitHub.",
+        proposedPlan: input.proposedPlan ?? buildGithubFeedbackPlan(input.comment, []),
       }, input.now);
     }
     try {
@@ -217,6 +221,27 @@ export async function recordLinkedGithubWorkflowFeedback(input: {
   throw new GithubWebhookRetryableError("workflow kept changing while recording PR feedback; retry this GitHub delivery");
 }
 
+export function buildGithubFeedbackPlan(
+  comment: { body: string; path?: string; line?: number; diffHunk?: string },
+  changedFiles: ReadonlyArray<{ filename: string; status: string; additions: number; deletions: number; patch?: string }>,
+): string {
+  const target = comment.path === undefined ? undefined : changedFiles.find((file) => file.filename === comment.path);
+  const files = target === undefined ? changedFiles.slice(0, 8) : [target];
+  const diff = target?.patch ?? comment.diffHunk;
+  const safeBody = removeControlCharacters(comment.body).trim().slice(0, 500);
+  const changed = files.length === 0 ? "No changed-file data was available; inspect the linked PR before choosing files." : files
+    .map((file) => `- \`${file.filename}\` (${file.status}, +${file.additions}/-${file.deletions})`).join("\n");
+  const excerpt = diff === undefined ? "The PR did not provide a diff excerpt for this comment." : `Relevant diff excerpt:\n\`\`\`diff\n${removeControlCharacters(diff).slice(0, 500)}\n\`\`\``;
+  return `Proposed fix for owner review\n\nFeedback: ${safeBody || "(comment has no text)"}\nTarget: ${comment.path === undefined ? "review the changed files below" : `\`${comment.path}\`${comment.line === undefined ? "" : ` near line ${comment.line}`}`}\n\nCurrent PR diff files:\n${changed}\n\n${excerpt}\n\nAfter approval, inspect the surrounding code, make the smallest change that addresses the feedback, add or update a focused regression test, then rerun the project-required checks and candidate-bound reviews. AgentX will not reply on GitHub.`.slice(0, 1_900);
+}
+
+function removeControlCharacters(value: string): string {
+  return [...value].map((character) => {
+    const code = character.codePointAt(0) ?? 0;
+    return code < 0x20 && code !== 0x09 && code !== 0x0a && code !== 0x0d || code === 0x7f ? " " : character;
+  }).join("");
+}
+
 export async function reserveGithubWebhookDelivery(input: {
   documentClient: { send(command: unknown): Promise<unknown> };
   tableName: string;
@@ -224,6 +249,7 @@ export async function reserveGithubWebhookDelivery(input: {
   installationId: number;
   repositoryId: number;
   eventHash: string;
+  event: ReceivedGithubWebhook["event"];
   now: string;
 }): Promise<"reserved" | "retry" | "duplicate" | "conflict"> {
   if (!DELIVERY_ID.test(input.deliveryId) || !/^[a-f0-9]{64}$/.test(input.eventHash)
@@ -241,6 +267,10 @@ export async function reserveGithubWebhookDelivery(input: {
     eventHash: input.eventHash,
     status: "RECEIVED",
     receivedAt: input.now,
+    event: input.event,
+    nextAttemptAt: input.now,
+    webhookRecoveryPk: GITHUB_WEBHOOK_RECOVERY_PK,
+    webhookRecoverySk: `${input.now}#${input.deliveryId}`,
   };
   try {
     await input.documentClient.send(new PutCommand({
@@ -276,7 +306,7 @@ export async function completeGithubWebhookDelivery(input: {
     await input.documentClient.send(new UpdateCommand({
       TableName: input.tableName,
       Key: { pk: `GITHUB_DELIVERY#${input.deliveryId}`, sk: "META" },
-      UpdateExpression: "SET #status = :completed, completedAt = :now",
+      UpdateExpression: "SET #status = :completed, completedAt = :now REMOVE leaseToken, leaseExpiresAt, webhookRecoveryPk, webhookRecoverySk, nextAttemptAt",
       ConditionExpression: "#status = :processing AND leaseToken = :leaseToken",
       ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: { ":processing": "PROCESSING", ":leaseToken": input.leaseToken, ":completed": "COMPLETED", ":now": input.now },
@@ -306,12 +336,14 @@ export async function claimGithubWebhookDelivery(input: {
     await input.documentClient.send(new UpdateCommand({
       TableName: input.tableName,
       Key: { pk: `GITHUB_DELIVERY#${input.deliveryId}`, sk: "META" },
-      UpdateExpression: "SET #status = :processing, leaseToken = :leaseToken, leaseExpiresAt = :leaseExpiresAt, updatedAt = :now ADD attempts :one",
-      ConditionExpression: "#status = :received OR #status = :retryable OR (#status = :processing AND leaseExpiresAt <= :now)",
+      UpdateExpression: "SET #status = :processing, leaseToken = :leaseToken, leaseExpiresAt = :leaseExpiresAt, webhookRecoveryPk = :recoveryPk, webhookRecoverySk = :recoverySk, updatedAt = :now REMOVE nextAttemptAt ADD attempts :one",
+      ConditionExpression: "((#status = :received OR #status = :retryable) AND (attribute_not_exists(nextAttemptAt) OR nextAttemptAt <= :now)) OR (#status = :processing AND leaseExpiresAt <= :now)",
       ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: {
         ":processing": "PROCESSING", ":received": "RECEIVED", ":retryable": "RETRYABLE", ":leaseToken": input.leaseToken,
         ":leaseExpiresAt": new Date(now + leaseMs).toISOString(), ":now": input.now, ":one": 1,
+        ":recoveryPk": GITHUB_WEBHOOK_RECOVERY_PK,
+        ":recoverySk": `${new Date(now + leaseMs).toISOString()}#${input.deliveryId}`,
       },
     }));
     return true;
@@ -329,19 +361,76 @@ export async function retryGithubWebhookDelivery(input: {
   leaseToken: string;
   now: string;
 }): Promise<void> {
+  const existing = await input.documentClient.send(new GetCommand({
+    TableName: input.tableName,
+    Key: { pk: `GITHUB_DELIVERY#${input.deliveryId}`, sk: "META" },
+    ConsistentRead: true,
+  })) as { Item?: { attempts?: number } };
+  const attempts = typeof existing.Item?.attempts === "number" ? existing.Item.attempts : 1;
+  const terminal = attempts >= MAX_WEBHOOK_ATTEMPTS;
+  const delayMs = Math.min(60_000 * (2 ** Math.max(0, attempts - 1)), 60 * 60_000);
+  const nextAttemptAt = new Date(Date.parse(input.now) + delayMs).toISOString();
   try {
     await input.documentClient.send(new UpdateCommand({
       TableName: input.tableName,
       Key: { pk: `GITHUB_DELIVERY#${input.deliveryId}`, sk: "META" },
-      UpdateExpression: "SET #status = :retryable, updatedAt = :now REMOVE leaseToken, leaseExpiresAt",
+      UpdateExpression: terminal
+        ? "SET #status = :dead, updatedAt = :now REMOVE leaseToken, leaseExpiresAt, webhookRecoveryPk, webhookRecoverySk, nextAttemptAt"
+        : "SET #status = :retryable, updatedAt = :now, nextAttemptAt = :nextAttemptAt, webhookRecoveryPk = :recoveryPk, webhookRecoverySk = :recoverySk REMOVE leaseToken, leaseExpiresAt",
       ConditionExpression: "#status = :processing AND leaseToken = :leaseToken",
       ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":processing": "PROCESSING", ":retryable": "RETRYABLE", ":leaseToken": input.leaseToken, ":now": input.now },
+      ExpressionAttributeValues: {
+        ":processing": "PROCESSING", ":retryable": "RETRYABLE", ":dead": "DEAD", ":leaseToken": input.leaseToken, ":now": input.now,
+        ...(terminal ? {} : { ":nextAttemptAt": nextAttemptAt, ":recoveryPk": GITHUB_WEBHOOK_RECOVERY_PK, ":recoverySk": `${nextAttemptAt}#${input.deliveryId}` }),
+      },
     }));
   } catch (error) {
     if (isConditional(error)) throw new GithubWebhookRefusal("GitHub delivery claim is no longer owned by this worker");
     throw error;
   }
+}
+
+/** Permanently refused events leave the retry index; transient failures use the backoff path. */
+export async function rejectGithubWebhookDelivery(input: {
+  documentClient: { send(command: unknown): Promise<unknown> };
+  tableName: string;
+  deliveryId: string;
+  leaseToken: string;
+  now: string;
+}): Promise<void> {
+  try {
+    await input.documentClient.send(new UpdateCommand({
+      TableName: input.tableName,
+      Key: { pk: `GITHUB_DELIVERY#${input.deliveryId}`, sk: "META" },
+      UpdateExpression: "SET #status = :dead, updatedAt = :now REMOVE leaseToken, leaseExpiresAt, webhookRecoveryPk, webhookRecoverySk, nextAttemptAt",
+      ConditionExpression: "#status = :processing AND leaseToken = :leaseToken",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: { ":processing": "PROCESSING", ":dead": "DEAD", ":leaseToken": input.leaseToken, ":now": input.now },
+    }));
+  } catch (error) {
+    if (isConditional(error)) throw new GithubWebhookRefusal("GitHub delivery claim is no longer owned by this worker");
+    throw error;
+  }
+}
+
+/** Reads only due delivery rows through the sparse recovery index. */
+export async function listDueGithubWebhookDeliveries(input: {
+  documentClient: { send(command: unknown): Promise<unknown> };
+  tableName: string;
+  now: string;
+  limit?: number;
+}): Promise<Array<{ deliveryId: string; event: ReceivedGithubWebhook["event"] }>> {
+  const response = await input.documentClient.send(new QueryCommand({
+    TableName: input.tableName,
+    IndexName: GITHUB_WEBHOOK_RECOVERY_INDEX,
+    KeyConditionExpression: "webhookRecoveryPk = :pk AND webhookRecoverySk <= :sk",
+    ExpressionAttributeValues: { ":pk": GITHUB_WEBHOOK_RECOVERY_PK, ":sk": `${input.now}#~` },
+    Limit: Math.min(Math.max(input.limit ?? 25, 1), 100),
+  })) as { Items?: Array<Record<string, unknown>> };
+  return (response.Items ?? []).flatMap((item) => typeof item.deliveryId === "string" && item.event !== undefined
+    && item.status !== "COMPLETED" && item.status !== "DEAD"
+    ? [{ deliveryId: item.deliveryId, event: item.event as ReceivedGithubWebhook["event"] }]
+    : []);
 }
 
 /** Processes one reserved event under a lease; provider failure leaves a durable retry state. */
@@ -374,13 +463,11 @@ export async function processGithubWebhookDelivery(input: {
     });
     return "PROCESSED";
   } catch (error) {
-    await retryGithubWebhookDelivery({
-      documentClient: input.documentClient,
-      tableName: input.tableName,
-      deliveryId: input.received.deliveryId,
-      leaseToken,
-      now: input.now(),
-    });
+    if (error instanceof GithubWebhookRefusal) {
+      await rejectGithubWebhookDelivery({ documentClient: input.documentClient, tableName: input.tableName, deliveryId: input.received.deliveryId, leaseToken, now: input.now() });
+    } else {
+      await retryGithubWebhookDelivery({ documentClient: input.documentClient, tableName: input.tableName, deliveryId: input.received.deliveryId, leaseToken, now: input.now() });
+    }
     throw error;
   }
 }
@@ -412,8 +499,8 @@ export async function handleGithubWebhook(input: {
     documentClient: input.documentClient,
     tableName: input.tableName,
     received,
-    process: input.process,
-    now: input.now,
+    process: (event) => input.process(event),
+    now: () => input.now(),
   });
   return {
     status: processed === "PROCESSED" ? "ACCEPTED" : processed,
@@ -478,29 +565,32 @@ export async function receiveGithubWebhook(input: ReceiveGithubWebhookInput): Pr
     pullRequestNumber: number,
   };
   if (!await input.authorizeRepository(scope)) throw new GithubWebhookRefusal("GitHub webhook repository is outside the registered installation and repository scope");
+  const event: ReceivedGithubWebhook["event"] = {
+    kind: comment === undefined ? "PULL_REQUEST" : "PR_COMMENT",
+    action: object.action,
+    installationId: scope.installationId,
+    repositoryId: scope.repositoryId,
+    fullName: scope.fullName,
+    number,
+    ...(comment === undefined ? {} : { comment }),
+  };
   const reserved = await input.reserveDelivery({
     deliveryId,
     ...scope,
     // GitHub signs the body, not X-GitHub-Event; bind the unsigned dispatch header into the
     // idempotency identity so a reused delivery cannot be reinterpreted as another event type.
     eventHash: createHash("sha256").update(eventName, "utf8").update("\0").update(input.rawBody, "utf8").digest("hex"),
+    event,
   });
   if (reserved === "conflict") throw new GithubWebhookRefusal("GitHub delivery ID was reused with different content");
-  const { pullRequestNumber: _pullRequestNumber, ...eventScope } = scope;
   return {
     delivery: reserved === "duplicate" ? "DUPLICATE" : "ACCEPTED",
     deliveryId,
-    event: {
-      kind: comment === undefined ? "PULL_REQUEST" : "PR_COMMENT",
-      action: object.action,
-      ...eventScope,
-      number,
-      ...(comment === undefined ? {} : { comment }),
-    },
+    event,
   };
 }
 
-function toComment(input: { id: number; body?: string | null | undefined; html_url: string; updated_at?: string | undefined; user: { login: string } }, source: NonNullable<ReceivedGithubWebhook["event"]["comment"]>["source"]): NonNullable<ReceivedGithubWebhook["event"]["comment"]> {
+function toComment(input: { id: number; body?: string | null | undefined; html_url: string; updated_at?: string | undefined; path?: string | undefined; line?: number | undefined; diff_hunk?: string | undefined; user: { login: string } }, source: NonNullable<ReceivedGithubWebhook["event"]["comment"]>["source"]): NonNullable<ReceivedGithubWebhook["event"]["comment"]> {
   let url: URL;
   try {
     url = new URL(input.html_url);
@@ -510,7 +600,7 @@ function toComment(input: { id: number; body?: string | null | undefined; html_u
   if (url.protocol !== "https:" || url.hostname !== "github.com" || url.username !== "" || url.password !== "") {
     throw new GithubWebhookRefusal("GitHub PR comment URL is outside the GitHub web origin");
   }
-  const body = (input.body ?? "").replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g, "");
+  const body = removeControlCharacters(input.body ?? "");
   return {
     id: input.id,
     body: body.slice(0, MAX_REVIEW_COMMENT_CHARS),
@@ -518,6 +608,9 @@ function toComment(input: { id: number; body?: string | null | undefined; html_u
     url: url.toString(),
     author: input.user.login,
     ...(input.updated_at === undefined ? {} : { updatedAt: input.updated_at }),
+    ...(input.path === undefined ? {} : { path: input.path }),
+    ...(input.line === undefined ? {} : { line: input.line }),
+    ...(input.diff_hunk === undefined ? {} : { diffHunk: input.diff_hunk.slice(0, 4_000) }),
     source,
   };
 }

@@ -561,14 +561,16 @@ export function workflowSlackHandlers(deps: {
     const task = await deps.loadTask(value.taskId);
     if (!task || task.slackUserId !== userId) {
       const owner = SlackUserIdSchema.safeParse(task?.slackUserId);
-      throw new WorkflowInteractionRefusal(owner.success ? `Only <@${owner.data}> can decide this plan.` : "Only the task owner can decide this plan.");
+      throw new WorkflowInteractionRefusal(owner.success ? `Only <@${owner.data}> can approve this step.` : "Only the task owner can approve this step.");
     }
     const share = asRecord(task.share);
-    if (share.teamId !== thread.teamId || share.channelId !== thread.channelId || share.threadTs !== thread.threadTs) throw new WorkflowInteractionRefusal("This plan belongs to another Slack thread.");
+    if (share.teamId !== thread.teamId || share.channelId !== thread.channelId || share.threadTs !== thread.threadTs) throw new WorkflowInteractionRefusal("This approval belongs to another Slack thread.");
     const parsed = WorkflowSnapshotSchema.safeParse(task.workflow);
-    if (!parsed.success || parsed.data.revision !== value.revision || parsed.data.stage !== "PLAN_REVIEW" || parsed.data.state !== "WAITING") throw new WorkflowInteractionRefusal("This plan has changed. Use the latest plan message.");
-    const plan = parsed.data.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
-    if (!plan || plan.sha256 !== value.digest) throw new WorkflowInteractionRefusal("This plan has changed. Use the latest plan message.");
+    if (!parsed.success || parsed.data.revision !== value.revision || parsed.data.stage !== "PLAN_REVIEW" || parsed.data.state !== "WAITING") throw new WorkflowInteractionRefusal("This approval has changed. Use the latest AgentX message.");
+    const artifactType = parsed.data.path === "FULL" && parsed.data.reviewPhase === "REQUIREMENTS" ? "requirements"
+      : parsed.data.path === "FULL" && parsed.data.reviewPhase === "DESIGN" ? "design" : "plan";
+    const plan = parsed.data.artifacts.filter((artifact) => artifact.type === artifactType).at(-1);
+    if (!plan || plan.sha256 !== value.digest) throw new WorkflowInteractionRefusal("This approval has changed. Use the latest AgentX message.");
     return { task, workflow: parsed.data };
   };
   return {

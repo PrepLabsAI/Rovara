@@ -710,11 +710,18 @@ describe("the stop command (#126)", () => {
   it("starts an explicit workflow in the bound Slack thread and leaves ordinary mentions on the existing path", async () => {
     const { handler, queue, posts, workflowStarts } = harness({ workflowStart: {} });
     await send(handler, signedEvent(mention({ eventId: "EvWorkflow001", event: { text: `<@${bot}> workflow: Add password reset to the account page` } })));
-    expect(workflowStarts).toEqual([{ thread: { teamId: team, channelId: channel, threadTs: "1695500000.000001" }, userId: pratik, instructions: "Add password reset to the account page", requestId: "EvWorkflow001" }]);
+    expect(workflowStarts).toEqual([{ thread: { teamId: team, channelId: channel, threadTs: "1695500000.000001" }, userId: pratik, instructions: "Add password reset to the account page", workflowPath: "QUICK", requestId: "EvWorkflow001" }]);
     expect(posts.at(-1)?.text).toContain("No code changes start until you approve it.");
     expect(queue).toHaveLength(0);
     await send(handler, signedEvent(mention({ eventId: "EvWorkflow002", event: { text: `<@${bot}> fix the navigation bug` } })));
     expect(queue.map((entry) => entry.message.text)).toEqual(["fix the navigation bug"]);
+  });
+
+  it("lets the requester choose Full review explicitly in Slack", async () => {
+    const { handler, posts, workflowStarts } = harness({ workflowStart: {} });
+    await send(handler, signedEvent(mention({ eventId: "EvWorkflowFull1", event: { text: `<@${bot}> workflow full: Add password reset` } })));
+    expect(workflowStarts).toEqual([{ thread: { teamId: team, channelId: channel, threadTs: "1695500000.000001" }, userId: pratik, instructions: "Add password reset", workflowPath: "FULL", requestId: "EvWorkflowFull1" }]);
+    expect(posts.at(-1)?.text).toContain("requirements, design, and coding steps");
   });
 });
 

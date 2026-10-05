@@ -83,7 +83,7 @@ const TaskShape = {
   artifacts: z.array(z.object({ name: z.string(), size: z.number().optional() })).optional(),
   pull_requests: z.array(z.object({ repository: z.string(), number: z.number(), url: z.string(), state: z.string() })).optional(),
   unpublished: z.array(z.object({ repository: z.string(), reasons: z.array(z.string()) })).optional(),
-  workflow: z.object({ stage: z.string(), state: z.string(), revision: z.number(), block_reason: z.string().optional(), plan: z.object({ sha256: z.string(), version: z.number(), content: z.string().optional() }).optional() }).optional(),
+  workflow: z.object({ stage: z.string(), state: z.string(), revision: z.number(), path: z.enum(["QUICK", "FULL"]).optional(), review_phase: z.string().optional(), block_reason: z.string().optional(), approval_document: z.object({ type: z.string(), sha256: z.string(), version: z.number(), content: z.string().optional() }).optional(), plan: z.object({ sha256: z.string(), version: z.number(), content: z.string().optional() }).optional() }).optional(),
   /** Only on start, continue and wait, which may wait (R21). */
   timed_out: z.boolean().optional(),
   /** A wait that stopped early because checking on the task failed; not a timeout. */
@@ -95,6 +95,10 @@ const RETRY = "If the call fails or times out, send your own request_id, or repe
 
 /** The one place a wire view (camelCase) becomes a tool output (snake_case). */
 function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string, unknown> {
+  const activeArtifactType = task.workflow?.path === "FULL" && task.workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
+    : task.workflow?.path === "FULL" && task.workflow.reviewPhase === "DESIGN" ? "design" : "plan";
+  const activeArtifact = task.workflow?.artifacts.filter((artifact) => artifact.type === activeArtifactType).at(-1);
+  const planArtifact = task.workflow?.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
   return {
     task_id: task.taskId, title: task.title, project: task.project, status: task.status,
     ...(task.failure === undefined ? {} : { failure: task.failure }),
@@ -122,9 +126,14 @@ function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string,
     ...(task.workflow === undefined ? {} : {
       workflow: {
         stage: task.workflow.stage, state: task.workflow.state, revision: task.workflow.revision,
+        path: task.workflow.path,
+        ...(task.workflow.reviewPhase === undefined ? {} : { review_phase: task.workflow.reviewPhase }),
         ...(task.workflow.blockReason === undefined ? {} : { block_reason: task.workflow.blockReason }),
-        ...(task.workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1) === undefined ? {} : {
-          plan: { sha256: task.workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1)!.sha256, version: task.workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1)!.version, ...(task.workflow.planContent === undefined ? {} : { content: task.workflow.planContent }) },
+        ...(activeArtifact === undefined ? {} : {
+          approval_document: { type: activeArtifact.type, sha256: activeArtifact.sha256, version: activeArtifact.version, ...(task.workflow.planContent === undefined ? {} : { content: task.workflow.planContent }) },
+        }),
+        ...(planArtifact === undefined ? {} : {
+          plan: { sha256: planArtifact.sha256, version: planArtifact.version, ...(planArtifact.type === activeArtifactType && task.workflow.planContent !== undefined ? { content: task.workflow.planContent } : {}) },
         }),
       },
     }),
@@ -135,7 +144,7 @@ function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string,
 /** What the AI tool can do next with a task in this state. */
 function nextFor(task: DeveloperTaskView): string {
   if (task.workflow?.state === "WAITING" && task.workflow.stage === "PLAN_REVIEW") {
-    return "Review the attached plan, then use agentx_decide_workflow with its exact plan sha256 and expected revision before any code implementation starts.";
+    return "Review the current approval_document, then use agentx_decide_workflow with its exact sha256 and expected revision. Quick has one approval; Full has requirements, design, and coding-plan approvals before implementation.";
   }
   if (task.workflow?.state === "BLOCKED" && task.workflow.stage === "PLAN") return `The plan run was interrupted or could not save its plan. To recover, use agentx_retry_workflow to start another read-only planning run.`;
   if (task.workflow?.state === "BLOCKED") return `The workflow is blocked: ${task.workflow.blockReason ?? "required evidence is missing"}. Review it before continuing.`;
@@ -347,15 +356,17 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       share_to_channel: z.boolean().optional(),
       share_mode: z.enum(["view", "continue"]).optional(),
       channel: z.string().min(1).max(80).optional(),
+      workflow_path: z.enum(["quick", "full"]).default("quick").describe("approval sequence: quick asks once for the coding plan; full asks separately for requirements, design, and coding steps"),
       wait_seconds: waitInput(0).optional(),
       request_id: requestIdInput,
     },
     outputSchema: ActionShape,
     async handler(context, input, call) {
       const text = instructions(input.instructions);
-      const id = requestIdFor(context, call, input, ["agentx_start_workflow", input.project, text, optional(input.title), optional(input.share_to_channel), optional(input.share_mode), optional(input.channel)]);
+      const workflowPath = input.workflow_path === "full" ? "FULL" : "QUICK";
+      const id = requestIdFor(context, call, input, ["agentx_start_workflow", input.project, text, workflowPath, optional(input.title), optional(input.share_to_channel), optional(input.share_mode), optional(input.channel)]);
       const task = await context.client.startTask({
-        requestId: id, project: input.project as string, instructions: text, workflow: true,
+        requestId: id, project: input.project as string, instructions: text, workflow: true, workflowPath,
         ...(input.title === undefined ? {} : { title: input.title as string }),
         ...(context.clientName === undefined ? {} : { client: context.clientName.slice(0, 200) }),
         ...(input.share_to_channel === undefined ? {} : { shareToChannel: input.share_to_channel as boolean }),
@@ -369,7 +380,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     name: "agentx_get_task",
     title: "Check an AgentX task",
     description:
-      "Shows one of your tasks, its latest progress, and any native workflow stage. For an agentx_start_workflow task, it includes the complete current plan, its sha256 digest and workflow revision while the owner review gate is open. After work ends it shows the worker's summary, changed files, artifacts and any pull requests. For a shared task it shows the channel, sharing mode, thread link and channel turns.",
+      "Shows one of your tasks, its latest progress, and any native workflow stage. For an agentx_start_workflow task, it includes the current approval document and digest while a review gate is open. After work ends it shows the worker's summary, changed files, artifacts and any pull requests. For a shared task it shows the channel, sharing mode, thread link and channel turns.",
     inputSchema: { task_id: taskIdInput, events: eventsInput },
     outputSchema: TaskShape,
     async handler(context, input) {
@@ -435,7 +446,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_decide_workflow",
     title: "Approve or respond to an AgentX plan",
-    description: "Records your decision on the current plan. APPROVE starts implementation only when the exact plan sha256 and workflow revision match. REQUEST_CHANGES asks AgentX to replace the plan without editing files. REJECT closes this workflow. SKIP is refused unless the project explicitly allows it. Use the plan digest and revision shown by agentx_get_task.",
+    description: "Records your decision on the current approval document. APPROVE advances Quick or Full to its next stage only when the exact document sha256 and workflow revision match. REQUEST_CHANGES asks AgentX to replace the document without editing files. REJECT closes this workflow. SKIP is refused unless the project explicitly allows it. Use the approval_document digest and revision shown by agentx_get_task.",
     inputSchema: {
       task_id: taskIdInput,
       request_id: z.string().uuid().describe("UUID for safe retry; repeat the same request unchanged if the call times out"),

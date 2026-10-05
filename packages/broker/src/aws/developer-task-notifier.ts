@@ -267,13 +267,15 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
       const ended = await operation();
       if (ended === undefined || !ENDED_STATUSES.has(ended.status)) return undefined;
       if (task.workflow?.stage === "PLAN_REVIEW" && task.workflow.state === "WAITING") {
-        const plan = task.workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
+        const artifactType = task.workflow.path === "FULL" && task.workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
+          : task.workflow.path === "FULL" && task.workflow.reviewPhase === "DESIGN" ? "design" : "plan";
+        const plan = task.workflow.artifacts.filter((artifact) => artifact.type === artifactType).at(-1);
         if (plan === undefined || deps.readArtifact === undefined || deps.createPlanCanvas === undefined) {
-          return "The plan is ready for review, but AgentX couldn't prepare its Slack details link. No code changes have started. Ask an administrator to check the Slack Canvas setup.";
+          return "The approval document is ready, but AgentX couldn't prepare its Slack details link. No code changes have started. Ask an administrator to check the Slack Canvas setup.";
         }
         const markdown = await deps.readArtifact(plan.objectKey);
         if (createHash("sha256").update(markdown, "utf8").digest("hex") !== plan.sha256) {
-          return "The plan is ready, but its saved copy failed an integrity check. No code changes have started. Ask an administrator to investigate.";
+          return "The approval document is ready, but its saved copy failed an integrity check. No code changes have started. Ask an administrator to investigate.";
         }
         let canvas: { canvasId: string; permalink: string };
         try {
@@ -284,11 +286,12 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
             "canvas_disabled_user_team", "canvas_disabled_file_team", "canvas_globally_disabled",
             "free_teams_cannot_create_standalone_canvases", "team_tier_cannot_create_channel_canvases",
           ].includes(error.slackError)) {
-            return "The plan is ready, but Slack couldn't open its detail page. Ask an administrator to enable Canvas access for AgentX. No code changes have started.";
+            return "The approval document is ready, but Slack couldn't open its detail page. Ask an administrator to enable Canvas access for AgentX. No code changes have started.";
           }
           throw error;
         }
-        return `The plan is ready. No code changes have started. <${canvas.permalink}|Read the plan and checks>.`;
+        const documentName = artifactType === "plan" ? "coding plan" : `${artifactType} document`;
+        return `The ${documentName} is ready. No code changes have started. <${canvas.permalink}|Read and approve this step>.`;
       }
       if (task.workflow?.stage === "VERIFY" && task.workflow.state === "BLOCKED") {
         return "AgentX finished implementation, but the task is blocked until candidate-bound checks and review are available. The pull request has not been opened.";
@@ -605,7 +608,9 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
   // Accepted: a close that commits while this reply is being posted can put this one reply after
   // "closed". The checks above read the task before the post; at most one reply per notice lands late.
   const workflow = task.workflow;
-  const plan = workflow?.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
+  const artifactType = workflow?.path === "FULL" && workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
+    : workflow?.path === "FULL" && workflow.reviewPhase === "DESIGN" ? "design" : "plan";
+  const plan = workflow?.artifacts.filter((artifact) => artifact.type === artifactType).at(-1);
   const feedback = workflow?.feedback;
   const feedbackNotice = notice.kind === "github_feedback" && feedback?.status === "PENDING" && feedback.feedbackId === notice.id.split(":").at(-1);
   const blocks = feedbackNotice && feedback !== undefined
@@ -620,7 +625,7 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
     ? [
         { type: "section", text: { type: "mrkdwn", text } },
         { type: "actions", elements: [
-          { type: "button", action_id: "agentx_workflow_approve", style: "primary", text: { type: "plain_text", text: "Approve plan" }, value: JSON.stringify({ taskId: task.taskId, revision: workflow.revision, digest: plan.sha256, decision: "APPROVE" }) },
+          { type: "button", action_id: "agentx_workflow_approve", style: "primary", text: { type: "plain_text", text: "Approve this step" }, value: JSON.stringify({ taskId: task.taskId, revision: workflow.revision, digest: plan.sha256, decision: "APPROVE" }) },
           { type: "button", action_id: "agentx_workflow_changes", text: { type: "plain_text", text: "Request changes" }, value: JSON.stringify({ taskId: task.taskId, revision: workflow.revision, digest: plan.sha256, decision: "REQUEST_CHANGES" }) },
         ] },
       ]

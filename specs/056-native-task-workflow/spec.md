@@ -73,8 +73,10 @@ changes using Slack controls. AgentX records the decision and exact plan version
 record before dispatching code changes.
 
 To start this path, a member mentions AgentX with `workflow: <request>`, for example
-`@AgentX workflow: Add password reset to the account page`. AgentX starts the task in that Slack
-thread. The plan message has an **Approve plan** button and a **Request changes** button. Approval
+`@AgentX workflow: Add password reset to the account page`. The requester may choose the Full path
+with `@AgentX workflow full: Add password reset to the account page`; omitting the path selects
+Quick. AgentX starts the task in that Slack thread. Each approval message has an **Approve** button
+and a **Request changes** button. Approval
 opens a small Slack form showing project-required checks as always on and optional project checks as
 checkboxes. Request changes opens a short feedback form. The broker checks the owner's identity,
 thread, plan revision and digest before recording either choice.

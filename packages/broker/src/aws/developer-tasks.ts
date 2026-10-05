@@ -320,7 +320,9 @@ export async function taskView(
   const unpublished = lastClose?.status === "SUCCEEDED" && !derived.closing && derived.status !== "CLOSED" && !workedSince ? unpublishedOf(lastClose.result) : undefined;
   let workflow: DeveloperTaskView["workflow"] = task.workflow;
   if (options.details && workflow?.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {
-    const planArtifact = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
+    const activeArtifactType = workflow.path === "FULL" && workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
+      : workflow.path === "FULL" && workflow.reviewPhase === "DESIGN" ? "design" : "plan";
+    const planArtifact = workflow.artifacts.filter((artifact) => artifact.type === activeArtifactType).at(-1);
     if (planArtifact !== undefined) {
       const planContent = await deps.actions.readArtifact(planArtifact.objectKey, WORKFLOW_PLAN_MAX_BYTES);
       const digest = createHash("sha256").update(planContent, "utf8").digest("hex");
@@ -452,7 +454,7 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
   const payloadHash = hashJson({
     project: request.project, instructions: request.instructions, title: request.title ?? null,
     shareToChannel: request.shareToChannel ?? null, shareMode: request.shareMode ?? null, channel: request.channel ?? null,
-    ...(request.workflow === true ? { workflow: true } : {}),
+    ...(request.workflow === true ? { workflow: true, ...(request.workflowPath === undefined ? {} : { workflowPath: request.workflowPath }) } : {}),
   });
   const idempotencyKey = startIdempotencyKey(caller.developerId, request.requestId);
   // loadOwnedTask is the ownership check before taskView's reads. Access is not checked again: a
@@ -521,7 +523,7 @@ async function startTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     client, project: request.project, title, workspaceId, ownerKey: identity.ownerKey, conversationId, startingRevision: revision,
     charge, shared: share !== undefined, ...(share === undefined ? {} : { share, shareVersion: 1 }),
     createdAt: receivedAt, updatedAt: receivedAt,
-    ...(request.workflow === true ? { workflow: createWorkflowSnapshot({ taskId, ownerId: identity.ownerKey, now: receivedAt, checkPolicy: taskWorkflowCheckPolicy(project.definition) }) } : {}),
+    ...(request.workflow === true ? { workflow: createWorkflowSnapshot({ taskId, ownerId: identity.ownerKey, now: receivedAt, path: request.workflowPath ?? "QUICK", checkPolicy: taskWorkflowCheckPolicy(project.definition) }) } : {}),
   };
   const index: DeveloperTaskIndexRecord = {
     ...taskIndexKey(caller.developerId, receivedAt, taskId), entityType: "DEVELOPER_TASK_INDEX", taskId, project: request.project, title, client,
@@ -815,15 +817,20 @@ async function decideTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: 
     return { task: await taskView(deps, fresh, { events: 0, details: false }) };
   }
   await actionableWorkspace(deps, task);
-  const currentPlan = task.workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
-  if (currentPlan === undefined) throw agentXError("WORKSPACE_NOT_READY", "the current plan artifact is missing");
+  const currentArtifactType = task.workflow.path === "FULL" && task.workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
+    : task.workflow.path === "FULL" && task.workflow.reviewPhase === "DESIGN" ? "design" : "plan";
+  const currentPlan = task.workflow.artifacts.filter((artifact) => artifact.type === currentArtifactType).at(-1);
+  if (currentPlan === undefined) throw agentXError("WORKSPACE_NOT_READY", "the current approval document is missing");
   const plan = await deps.actions.readArtifact(currentPlan.objectKey, 1_000_000);
   const actualDigest = createHash("sha256").update(plan, "utf8").digest("hex");
-  if (actualDigest !== currentPlan.sha256) throw agentXError("WORKSPACE_NOT_READY", "the current plan artifact failed its digest check");
-  const mode = request.decision === "REQUEST_CHANGES" ? "PLAN" as const : "IMPLEMENT" as const;
+  if (actualDigest !== currentPlan.sha256) throw agentXError("WORKSPACE_NOT_READY", "the current approval document failed its digest check");
+  const mode = request.decision === "REQUEST_CHANGES" || next.stage === "PLAN" ? "PLAN" as const : "IMPLEMENT" as const;
+  const nextPhase = next.reviewPhase;
   const prompt = request.decision === "REQUEST_CHANGES"
-    ? `Revise the existing plan using the requested changes. Return a complete replacement plan in Markdown. Do not edit files.\n\nRequested changes: ${request.reason}\n\nPrevious plan:\n${plan}`
-    : `Implement the human-approved plan below. Follow its ordered steps, run the listed checks, and report results and limitations.\n\nApproved plan (sha256 ${currentPlan.sha256}):\n${plan}`;
+    ? `Revise the current ${currentArtifactType} document using the requested changes. Return a complete replacement document in Markdown. Do not edit files.\n\nRequested changes: ${request.reason}\n\nPrevious document:\n${plan}`
+    : mode === "PLAN"
+      ? `Prepare the next owner-review document for this request. The owner approved the ${currentArtifactType} document below. Create the ${nextPhase?.toLowerCase().replaceAll("_", " ")} document requested by the planning instructions. Do not edit files.\n\nApproved ${currentArtifactType} (sha256 ${currentPlan.sha256}):\n${plan}`
+      : `Implement the human-approved plan below. Follow its ordered steps, run the listed checks, and report results and limitations.\n\nApproved plan (sha256 ${currentPlan.sha256}):\n${plan}`;
   next = { ...next, revision: next.revision + 1, state: "RUNNING", updatedAt: receivedAt };
   const selectedReadiness = next.checkPolicy === undefined ? undefined : [
     ...next.checkPolicy.required.map((check) => check.command),
@@ -841,7 +848,7 @@ async function decideTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: 
         party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
         request: request.reason, response: `Workflow ${request.decision.toLowerCase().replaceAll("_", " ")} accepted as operation ${operation.id}.`, operationId: operation.id,
       })),
-    ], { sharedTask: task.shared === true, workflowMode: mode, ...(selectedReadiness === undefined ? {} : { readiness: selectedReadiness }) });
+    ], { sharedTask: task.shared === true, workflowMode: mode, ...(mode === "PLAN" && nextPhase !== undefined ? { workflowPhase: nextPhase } : {}), ...(selectedReadiness === undefined ? {} : { readiness: selectedReadiness }) });
   } catch (error) {
     return busyOrClosing(deps, task, error);
   }
