@@ -1,12 +1,14 @@
 # AgentX
 
-AgentX is QEDly Code, the first product from [QEDly](https://qedly.github.io): an AI coding agent
-that has to prove its work. You ask for a change in Slack, or hand a task over from Claude Code,
-Codex or Cursor. It works in your own AWS account, runs the checks you configure on the exact
-commit, and opens a pull request only when every one passes. A person merges.
+AgentX is a coding-agent runtime and task workflow. Start a task in Slack or hand one over
+from Claude Code, Codex, or Cursor. A remote coding agent works in a persistent, isolated EC2
+workspace in your AWS account. When a run reaches its finish check, AgentX reports which checks
+passed, failed, or could not be verified. It can open a pull request for a person to review and
+merge; AgentX has no merge path.
 
-Source-available under [FSL-1.1-ALv2](LICENSE): every line is readable, and each release becomes
-Apache 2.0 two years after it ships. Docs: [qedly.github.io/docs](https://qedly.github.io/docs/).
+Source-available under [FSL-1.1-ALv2](LICENSE), not open source under the OSI definition: each
+release becomes Apache 2.0 two years after it ships. The [AgentX field guide](https://rovara-dev.github.io/docs/index.html)
+explains the current setup and release boundary.
 To report a vulnerability, see [SECURITY.md](SECURITY.md). To contribute, see
 [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -15,6 +17,22 @@ persistent EBS storage. Every Slack thread, and every task a developer hands ove
 gets its own isolated, persistent workspace. A task from an AI tool can also be shared into the
 project's Slack channel. Administrators prepare shared product definitions and fixed development
 images.
+
+## What the check report means
+
+The worker installs AgentX's verification extension in both new and resumed coding sessions.
+When the coding agent finishes normally, AgentX reruns configured project readiness checks; if
+there are none, it may replay recognized test commands the agent ran. A regression can receive
+one additional coding attempt. The report distinguishes checks that passed, failed, timed out, or
+could not be verified. A task with no usable checks, or one that stops before reaching verification,
+is not described as verified. This is a report about those checks, not proof that the change is
+correct.
+
+At pull-request creation, the current reporting-enabled broker path can include readiness results
+and open a draft PR when checks fail. A broker that does not send the reporting flag still refuses
+failed readiness checks before opening a PR. Configured CodeBuild gates run against the candidate
+commit; this does not mean every task-time check is rerun against the exact PR commit. AgentX
+cannot merge a pull request.
 
 ## Current status
 
