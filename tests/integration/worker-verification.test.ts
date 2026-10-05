@@ -740,6 +740,33 @@ describe("AgentX measures the before result on the original code (spec 051 D-16,
     expect(run.report!.checks[0]).toMatchObject({ before: "passed", after: "passed", class: "passing" });
   });
 
+  /**
+   * Feature: AgentX checks the agent's test commands (spec 051, #299)
+   * Scenario: a test run inside a chain is rerun, with its before measured on the original code
+   *   Given the agent runs `go build ./... && go test ./x 2>&1 | tail -20` before any edit, and its run exits 0
+   *   And `go test ./x` fails on the original code and passes on the agent's
+   *   When the agent finishes
+   *   Then AgentX reruns `go test ./x`, measures its before on the original code rather than taking the chain's exit code,
+   *   And reports the test as fixed
+   * Requirement: docs/specs/issue-299/requirements.md#requirement-2-tests-inside-chains (2.1, 2.3; 5.2)
+   */
+  it("reruns a test the agent ran inside a chain, with its before measured on the original code (#299)", async () => {
+    const { originalCode, state } = fakeOriginalCode();
+    const { runners, calls } = byCode(state, failedRun("1 failed\n"), passedRun);
+    const shell = scriptedShell();
+    const run = await runTask({
+      steps: [bash("go build ./... && go test ./x 2>&1 | tail -20", "c1"), write("x.go", "changed\n", "c2"), fauxAssistantMessage(`Done.\n${DONE}`)],
+      runners, originalCode, shell,
+    });
+    expect(run.failure).toBeUndefined();
+    expect(shell.commands).toEqual(["go build ./... && go test ./x 2>&1 | tail -20"]);
+    expect(calls[0]).toEqual({ replay: "go test ./x", original: true });
+    expect(state.runs).toBe(1);
+    expect(run.report).toMatchObject({ status: "verified", source: "agent_commands" });
+    expect(run.report!.checks).toHaveLength(1);
+    expect(run.report!.checks[0]).toMatchObject({ label: "go test ./x", before: "failed", after: "passed", class: "fixed" });
+  });
+
   it("reports when the original code cannot be shown, and goes on without a before result", async () => {
     const { originalCode } = fakeOriginalCode(new Error("bad object 1234"));
     const { runners } = byCode({ showing: false }, passedRun, failedRun("1 failed\n"));

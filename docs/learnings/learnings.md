@@ -6,3 +6,4 @@ the next work item is done.
 
 | Learning | Lesson |
 |---|---|
+| [001](learning-001.md) | Tests import `@agentx/contracts` from its `dist`: rebuild contracts before any red or green run of a contracts change. |

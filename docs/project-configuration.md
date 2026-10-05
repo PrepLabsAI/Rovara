@@ -343,33 +343,49 @@ task puts them back before it starts. The before runs use at most half of the ro
 A failure is remembered across tasks (above), so the next task cannot lose it.
 
 In a project with a dev container, the agent's shell is the container's, so it writes
-`cd /workspaces/<repo> && npm test`. AgentX reads a leading `cd` to that exact folder (or a
+`cd /workspaces/<repo> && npm test`. AgentX reads every `cd` to that exact folder (or a
 folder inside it), or to the same repository's folder on the worker, as the repository's folder
 in the workspace, records it and replays it there, in the container. Any other absolute path, a `..`, a look-alike folder, and a link that leads out
 of the workspace are still refused.
 
-Only these commands count, each with its arguments: `npm test`, `npm run test`, `pnpm test`,
+Only these commands count as tests, each with its arguments: `npm test`, `npm run test`, `pnpm test`,
 `yarn test`, `pytest`, `python -m pytest`, `python3 -m pytest`, `jest`, `npx jest`, `yarn jest`,
 `pnpm jest`, `vitest`, `npx vitest`, `yarn vitest`, `pnpm vitest`, `mocha`, `npx mocha`,
 `yarn mocha`, `pnpm mocha`, `go test`, `cargo test`,
 `make test`, `mvn test`, `gradle test`, `./gradlew test`, `bundle exec rspec`, `phpunit` and
-`tox`. The command may start with a relative `cd <path> &&` (no `..`, no absolute path), then
-`NAME=value` assignments, then an optional `timeout <n>`. An argument may be quoted, with single
-or double quotes, as long as the quoted text holds no `$`, backtick or backslash, so the shell
-reads it literally: `yarn jest --testPathPattern="RoomView|RoomViewStore"` counts. Arguments
-that would change files or never end when replayed are refused: `-u`, `--updateSnapshot`,
-`--update-snapshots`, `--update`, `--snapshot-update` and any `--watch` option. Anything else is
-never replayed, because replaying an arbitrary command could change the workspace: pipes, `;`,
-`&&` chains, `||`, `&`, redirection, unquoted `$`, backticks, globs, `~`, absolute paths and
-`..`. So `cd pkg && npm test -- -t foo` and `FOO=1 python -m pytest -k x` count, while
-`pytest | head -5` and `npm test; echo done` do not.
+`tox`. A test may start with `NAME=value` assignments, then an optional `timeout <n>`. An argument
+may be quoted, with single or double quotes, as long as the quoted text holds no `$`, backtick or
+backslash, so the shell reads it literally: `yarn jest --testPathPattern="RoomView|RoomViewStore"`
+counts. Arguments that would change files or never end when replayed are refused: `-u`,
+`--updateSnapshot`, `--update-snapshots`, `--update`, `--snapshot-update` and any `--watch` option.
 
-One exception: a trailing `2>&1` and `| tail -N` (or `tail -n N`), which only trim what the agent
-reads. `python -m pytest -q 2>&1 | tail -20` counts, and AgentX replays the bare
-`python -m pytest -q`. A pipeline's exit code is normally `tail`'s, which is 0 even when the tests
-fail, so the agent's shell runs exactly these commands with `set -o pipefail`: the exit code is
-the test's, and the run can serve as the "before" result. `head` is not accepted, because it stops
-reading early and can cut the test run short.
+AgentX finds a test inside a longer command too (#299). It splits the command at `&&`, `||`, `;`
+and `|` outside quotes, and replays each test it finds as `cd <dir> && <test>`. Here `<dir>`
+follows every relative `cd` before the test (no `..`, no absolute path): `cd a && cd b && pytest`
+replays `cd a/b && pytest`. A test may be followed by `2>&1` and by `tail`, `head`, `grep`,
+`egrep`, `sed` (not in place), `cut`, `sort`, `uniq`, `wc` or `cat`. The replay leaves those out.
+So `go build ./... && go test ./scanner 2>&1 | tail -20` replays `go test ./scanner`, and
+`pytest -q 2>&1 | grep -E "^E" | head` replays `pytest -q`. AgentX only ever replays the test
+itself, never the rest of the command.
+
+A whole command is never used when it holds something whose effect the bare replay would not
+reproduce, or that AgentX cannot read safely:
+- a subshell, `$(…)`, a backtick or a background `&`;
+- a heredoc, or any redirection other than `2>&1`;
+- a newline, an unquoted `$`, a glob, or `~`;
+- `git stash`;
+- a `cd` joined by `||`;
+- a filter outside that list;
+- before the test, a command that changes the shell's environment (`export`, `source`, `set`,
+  `pushd`, a bare `NAME=value` and the like).
+
+One part of this is stricter: the agent's own run counts as the "before" result only when the
+command is just the test. That is the test, optionally after `cd <dir> &&` or `cd <dir>;`, and
+optionally followed by `2>&1` and `| tail -N` (or `tail -n N`). Anywhere else, the command's exit
+code is not the test's (it may be `head`'s, or the last command's in a chain), so AgentX measures
+the before itself on the original code, as above. A pipeline's exit code is normally `tail`'s,
+which is 0 even when the tests fail. So the agent's shell runs the `| tail -N` shape with
+`set -o pipefail`, and the exit code is the test's.
 
 ### Rollout
 

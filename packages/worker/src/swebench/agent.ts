@@ -2,7 +2,7 @@ import { dirname } from "node:path";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { parseAgentClaim, redactText, type CheckReport, type SwebenchStopReason } from "@agentx/contracts";
 import { recorderFingerprint } from "../artifacts.js";
-import { workspaceRelativeCommand, type DevcontainerPaths } from "../devcontainer.js";
+import { workspaceRelativeCdTarget, type DevcontainerPaths } from "../devcontainer.js";
 import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, type WorkspaceModelConfiguration } from "../pi-session.js";
 import { ToolLoopGuard } from "../tool-loop-guard.js";
 import { createCheckRunners, planChecks, type CheckRunners } from "../verification/checks.js";
@@ -76,7 +76,7 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
   const recorder = new CommandRecorder({
     fingerprint: (signal) => recorderFingerprint([{ name: "testbed", directory: input.paths.hostFolder }], signal),
     onDiagnostic,
-    canonicalCommand: (command) => testbedRelativeCommand(command, input.paths),
+    cdTarget: (target) => testbedRelativeCdTarget(target, input.paths),
   });
   const runners = input.checkRunners ?? createCheckRunners({ rootPath: input.rootPath, bashOperations: input.bashOperations });
   let reportedChecks: CheckReport | undefined;
@@ -166,11 +166,11 @@ export async function runSwebenchAgent(input: AgentRunInput): Promise<AgentRun> 
 
 /**
  * The agent writes `cd /testbed && pytest`, a path only the container has. The run's root, where the agent's shell
- * starts, holds the testbed as `testbed`, so a leading `cd <containerFolder>[/sub] &&` reads as `cd testbed[/sub] &&`
- * (Ruling X); the rewrite is the one a coding task's devcontainer gets.
+ * starts, holds the testbed as `testbed`, so a cd target of `<containerFolder>[/sub]` reads as `testbed[/sub]`
+ * (Ruling X, and every cd since #299); the mapping is the one a coding task's devcontainer gets.
  */
-export function testbedRelativeCommand(command: string, paths: Pick<DevcontainerPaths, "hostFolder" | "containerFolder">): string {
-  return workspaceRelativeCommand(command, paths, dirname(paths.hostFolder));
+export function testbedRelativeCdTarget(target: string, paths: Pick<DevcontainerPaths, "hostFolder" | "containerFolder">): string | undefined {
+  return workspaceRelativeCdTarget(target, paths, dirname(paths.hostFolder));
 }
 
 function assistantEnd(event: unknown): { stopReason: string; errorMessage?: string } | undefined {

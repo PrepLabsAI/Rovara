@@ -14,12 +14,13 @@ const bashResult = (toolCallId: string, command: string, options: { exitCode?: n
 });
 
 /** A recorder over a fake workspace whose state the test changes, as a bash command would. */
-function harness(fingerprint?: (signal?: AbortSignal) => Promise<string>) {
+function harness(fingerprint?: (signal?: AbortSignal) => Promise<string>, cdTarget?: (target: string) => string | undefined) {
   const workspace = { state: "clean" };
   const diagnostics: string[] = [];
   const recorder = new CommandRecorder({
     fingerprint: fingerprint ?? (async () => workspace.state),
     onDiagnostic: (message) => { diagnostics.push(message); },
+    ...(cdTarget === undefined ? {} : { cdTarget }),
   });
   /** One bash call: tool_call (awaited, as Pi awaits the handler), then the command's effect, then tool_result. */
   const bash = async (command: string, options: Parameters<typeof bashResult>[2] & { effect?: () => void } = {}) => {
@@ -78,10 +79,10 @@ describe("CommandRecorder", () => {
     ]);
   });
 
-  it("never records any other pipe, a non-test command, or another tool's result", async () => {
+  it("never records a refused pipe, a non-test command, or another tool's result", async () => {
     const { recorder, bash, runs } = harness();
-    await bash("pytest | tail");
-    await bash("pytest | head -5");
+    await bash("pytest | tee out.txt");
+    await bash("pytest > out.txt");
     await bash("npm install");
     recorder.observe({ toolCallId: "r", toolName: "read", input: { command: "pytest" }, isError: false, content: [{ type: "text", text: "x" }] });
     recorder.observe({ toolCallId: "b", toolName: "bash", input: {}, isError: false, content: [] });
@@ -126,6 +127,60 @@ describe("CommandRecorder", () => {
     await recorder.observeCall({ toolCallId: "cd", toolName: "bash", input: { command: "cd pkg && npm test -- -t foo" } });
     recorder.observe({ ...bashResult("cd", "cd pkg && npm test -- -t foo"), content: [{ type: "text", text: "line 1\n" }, { type: "image" }, { type: "text", text: "line 2\n" }] });
     expect((await runs())[0]).toMatchObject({ command: "cd pkg && npm test -- -t foo", replay: "cd pkg && npm test -- -t foo", output: "line 1\nline 2\n" });
+  });
+});
+
+describe("CommandRecorder: tests inside chains and filters (#299)", () => {
+  it("records each test in a chain, without the chain's exit code, which is not the test's", async () => {
+    const { bash, runs } = harness();
+    await bash("pytest a; pytest b", { exitCode: 1, text: "1 failed" });
+    expect(await runs()).toEqual([
+      { order: 0, command: "pytest a; pytest b", replay: "pytest a", exitCode: undefined, afterFirstEdit: false, output: "1 failed" },
+      { order: 1, command: "pytest a; pytest b", replay: "pytest b", exitCode: undefined, afterFirstEdit: false, output: "1 failed" },
+    ]);
+  });
+
+  it("records a test piped into another filter, or chained with || true, without its exit code", async () => {
+    const { bash, runs } = harness();
+    await bash("pytest | tail", { exitCode: 0 });
+    await bash('python -m pytest -q 2>&1 | grep -E "^E" | head', { exitCode: 0 });
+    await bash("npm test || true", { exitCode: 0 });
+    expect((await runs()).map(({ replay, exitCode }) => ({ replay, exitCode }))).toEqual([
+      { replay: "pytest", exitCode: undefined },
+      { replay: "python -m pytest -q", exitCode: undefined },
+      { replay: "npm test", exitCode: undefined },
+    ]);
+  });
+
+  it("keeps the run's exit code for cd <dir>; <test>, the same command as cd <dir> && <test>", async () => {
+    const { bash, runs } = harness();
+    await bash("cd pkg; npm test 2>&1 | tail -5", { exitCode: 1 });
+    expect((await runs()).map(({ replay, exitCode }) => ({ replay, exitCode }))).toEqual([{ replay: "cd pkg && npm test", exitCode: 1 }]);
+  });
+
+  it("lets a later simple run, made before any edit, supply the before a chained run could not", async () => {
+    const { bash, runs } = harness();
+    await bash("go build ./... && go test ./x 2>&1 | tail -20", { exitCode: 0 });
+    await bash("go test ./x", { exitCode: 1 });
+    expect((await runs()).map(({ command, replay, exitCode }) => ({ command, replay, exitCode })))
+      .toEqual([{ command: "go test ./x", replay: "go test ./x", exitCode: 1 }]);
+  });
+
+  it("marks a chained test run after a bash command that changed the workspace as after an edit (Ruling E)", async () => {
+    const h = harness();
+    await h.bash("sed -i s/a/b/ src.py", { effect: () => { h.workspace.state = "sed"; } });
+    await h.bash("make build && pytest");
+    expect((await h.runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: true });
+  });
+
+  it("maps every cd target and keeps the agent's own text as the command", async () => {
+    const { bash, runs } = harness(undefined, (target) => (target === "/app" ? "" : target.startsWith("/app/") ? target.slice(5) : undefined));
+    await bash("cd /app/sub; cd x && pytest -q");
+    await bash("cd /app; npm test");
+    expect((await runs()).map(({ command, replay }) => ({ command, replay }))).toEqual([
+      { command: "cd /app/sub; cd x && pytest -q", replay: "cd sub/x && pytest -q" },
+      { command: "cd /app; npm test", replay: "npm test" },
+    ]);
   });
 });
 
@@ -210,6 +265,24 @@ describe("CommandRecorder: a parallel batch (Ruling G)", () => {
     await batch(k, [{ toolName: "bash", command: "pytest" }, { toolName: "write" }]);
     expect((await h.runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: true });
     expect((await k.runs())[0]).toMatchObject({ replay: "pytest", afterFirstEdit: true });
+  });
+
+  it("voids the before of a test run batched with a chained test that also changes files, either order (#299, abuse case 7)", async () => {
+    const h = harness();
+    await batch(h, [{ toolName: "bash", command: "sed -i s/x/y/ src/a.py && pytest", effect: () => { h.workspace.state = "sed"; } }, { toolName: "bash", command: "npm test" }]);
+    const k = harness();
+    await batch(k, [{ toolName: "bash", command: "npm test" }, { toolName: "bash", command: "sed -i s/x/y/ src/a.py && pytest", effect: () => { k.workspace.state = "sed"; } }]);
+    expect((await h.runs()).map(({ replay, exitCode, afterFirstEdit }) => ({ replay, exitCode, afterFirstEdit }))).toEqual([
+      { replay: "pytest", exitCode: undefined, afterFirstEdit: false },
+      { replay: "npm test", exitCode: 0, afterFirstEdit: true },
+    ]);
+    expect((await k.runs()).find(({ replay }) => replay === "npm test")).toMatchObject({ exitCode: 0, afterFirstEdit: true });
+  });
+
+  it("keeps the before valid in a batch of tests whose chains hold only tests, cd and filters", async () => {
+    const h = harness();
+    await batch(h, [{ toolName: "bash", command: "cd a && pytest | grep x" }, { toolName: "bash", command: "npm test" }]);
+    expect((await h.runs()).find(({ replay }) => replay === "npm test")).toMatchObject({ afterFirstEdit: false });
   });
 
   it("keeps the before valid in a batch of test commands and reads", async () => {
