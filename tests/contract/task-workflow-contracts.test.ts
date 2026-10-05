@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
+  WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema, WorkflowFeedbackFindingSchema,
+  requestWorkflowFeedbackReview, decideWorkflowFeedbackFindings,
   WorkflowTransitionError,
   createCandidateManifest,
   CandidateManifestSchema,
@@ -311,5 +313,99 @@ describe("native task workflow contracts", () => {
       decision: "SKIP",
       artifactDigest: undefined,
     }, { actorId: ownerId, role: "TASK_OWNER" }, { now: "2026-10-05T12:02:00.000Z", allowedSkipStages: [] })).toThrow(WorkflowTransitionError);
+  });
+});
+
+
+describe("immutable multi-PR feedback reviews", () => {
+  const now = "2026-10-05T12:00:00.000Z";
+  const uuid = "11111111-1111-4111-8111-111111111111";
+  const hash = (letter: string) => letter.repeat(64);
+  function fixture() {
+    const candidate = createCandidateManifest([
+      { repositoryId: "api", commitSha: "a".repeat(40), treeSha: "1".repeat(40) },
+      { repositoryId: "ui", commitSha: "b".repeat(40), treeSha: "2".repeat(40) },
+    ]);
+    const bundleRefs = candidate.repositories.map((repo, index) => ({
+      schemaVersion: 1 as const, taskId, repositoryId: repo.repositoryId, number: index + 1,
+      headSha: repo.commitSha, candidateDigest: candidate.digest,
+      commentSetDigest: hash(index === 0 ? "c" : "d"), sha256: hash(index === 0 ? "e" : "f"),
+      objectKey: `tasks/${taskId}/feedback/${hash(index === 0 ? "e" : "f")}.json`,
+      producer: "github-reconciler", version: "1", recordedAt: now,
+      comments: [0, 1].map(i => ({ id: `${repo.repositoryId}-${i}`, threadId: `thread-${repo.repositoryId}`,
+        kind: "REVIEW_COMMENT" as const, url: `https://github.com/acme/${repo.repositoryId}/pull/${index + 1}#comment-${i}`,
+        author: "reviewer", updatedAt: now, bodyDigest: createHash("sha256").update("comment").digest("hex"), bodyBytes: 7 })),
+    }));
+    const findingRefs = bundleRefs.map((bundle, index) => ({ id: `finding-${index}`, bundleDigest: bundle.sha256,
+      commentIds: bundle.comments.map(c => c.id), priority: "MUST_FIX" as const,
+      assessment: "ACTIONABLE" as const, recommended: true }));
+    const reviewRef = { schemaVersion: 1 as const, taskId, sha256: hash("b"), objectKey: `tasks/${taskId}/reviews/${hash("b")}.json`,
+      proposalDigest: hash("c"), operationId: uuid, reviewerId: "separate-critic", provider: "scripted", version: "1",
+      readOnly: true as const, status: "COMPLETE" as const, bundleDigests: bundleRefs.map(b => b.sha256), findingRefs, recordedAt: now };
+    const current = WorkflowSnapshotSchema.parse({ ...createWorkflowSnapshot({ taskId, ownerId, now }), candidate,
+      stage: "WAIT_FOR_MERGE", state: "WAITING",
+      verification: { candidateDigest: candidate.digest, producer: "broker", environmentId: "test", recordedAt: now, results: [{ checkId: "unit", status: "PASS" }] },
+      reviews: ["CRITIC", "SECURITY"].map(role => ({ operationId: uuid, candidateDigest: candidate.digest, role, provider: "scripted", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now })),
+      pullRequests: bundleRefs.map(b => ({ repositoryId: b.repositoryId, number: b.number, candidateDigest: b.candidateDigest, required: true, state: "OPEN", url: `https://github.com/acme/${b.repositoryId}/pull/${b.number}` })),
+    });
+    const request = { requestId: uuid, expectedRevision: current.revision + 1, reviewDigest: reviewRef.sha256,
+      proposalDigest: reviewRef.proposalDigest, bundleDigests: reviewRef.bundleDigests, selectedFindingIds: ["finding-0"], decision: "APPROVE" as const };
+    return { current, bundleRefs, reviewRef, request };
+  }
+  it("retains two exact heads and grouped source IDs while excluding full bodies from snapshot references", () => {
+    const { current, bundleRefs, reviewRef } = fixture();
+    const reviewed = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef }, now);
+    expect(reviewed.feedbackReview?.bundleRefs.map(b => b.headSha)).toEqual(["a".repeat(40), "b".repeat(40)]);
+    expect(reviewed.feedbackReview?.reviewRef.findingRefs[0]?.commentIds).toEqual(["api-0", "api-1"]);
+    expect(reviewed.feedbackReview?.bundleRefs[0]?.comments[0]?.threadId).toBe("thread-api");
+    expect(JSON.stringify(reviewed)).not.toContain('"body":');
+    expect(() => requestWorkflowFeedbackReview(current, { bundleRefs: [{ ...bundleRefs[0], comments: [{ ...bundleRefs[0]!.comments[0], body: "large comment" }] }, bundleRefs[1]], reviewRef }, now)).toThrow();
+  });
+  it("validates all priorities separately from all seven assessments and full artifact evidence", () => {
+    const { bundleRefs, reviewRef } = fixture();
+    const finding = { ...reviewRef.findingRefs[0], evidence: [{ source: "code", reference: "api/file.ts:1" }], rationale: "Empty input causes failure.", confidence: { level: "HIGH", reason: "Reproduced in candidate code" }, proposedDisposition: "IMPLEMENT" };
+    for (const priority of ["MUST_FIX", "SHOULD_FIX", "OPTIONAL"])
+      for (const assessment of ["ACTIONABLE", "ALREADY_ADDRESSED", "STALE", "TECHNICALLY_INCORRECT", "OUT_OF_SCOPE", "CONFLICTING", "NEEDS_OWNER_DECISION"])
+        expect(WorkflowFeedbackFindingSchema.safeParse({ ...finding, priority, assessment }).success).toBe(true);
+    expect(WorkflowFeedbackFindingSchema.safeParse({ ...finding, priority: "ACTIONABLE" }).success).toBe(false);
+    expect(WorkflowFeedbackFindingSchema.safeParse({ ...finding, commentIds: [] }).success).toBe(false);
+    expect(WorkflowFeedbackBundleSchema.safeParse({ ...bundleRefs[0], comments: bundleRefs[0]!.comments.map(c => ({ ...c, body: "comment" })), sourceDeliveryIds: ["delivery-1"] }).success).toBe(true);
+    expect(WorkflowFeedbackBundleSchema.safeParse({ ...bundleRefs[0], comments: bundleRefs[0]!.comments.map(c => ({ ...c, body: "edited" })), sourceDeliveryIds: ["delivery-1"] }).success).toBe(false);
+    expect(WorkflowFeedbackReviewReportSchema.safeParse({ ...reviewRef, findings: [finding] }).success).toBe(false);
+    expect(WorkflowFeedbackReviewReportSchema.safeParse({ ...reviewRef, findings: [finding, { ...finding, ...reviewRef.findingRefs[1] }] }).success).toBe(true);
+  });
+  it("approves a strict subset with immutable decision bindings and keeps every unselected finding", () => {
+    const { current, bundleRefs, reviewRef, request } = fixture();
+    const reviewed = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef }, now);
+    const approved = decideWorkflowFeedbackFindings(reviewed, request, { actorId: ownerId, role: "TASK_OWNER" }, now);
+    expect(approved).toMatchObject({ stage: "IMPLEMENT", state: "READY" });
+    expect(approved.feedbackDecisions?.[0]).toMatchObject({ selectedFindingIds: ["finding-0"], selectedCommentIds: ["api-0", "api-1"], reviewDigest: reviewRef.sha256, proposalDigest: reviewRef.proposalDigest, actorId: ownerId });
+    expect(approved.feedbackDecisions?.[0]?.candidates).toEqual([{ repositoryId: "api", number: 1, headSha: "a".repeat(40), candidateDigest: current.candidate!.digest, commentSetDigest: hash("c"), bundleDigest: hash("e") }]);
+    expect(approved.feedbackReview?.reviewRef.findingRefs).toHaveLength(2);
+    expect(approved.pullRequests).toEqual(current.pullRequests);
+    expect(() => decideWorkflowFeedbackFindings(approved, request, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+  });
+  it("rejects stale or invalid digests, unknown selections, incomplete reports and cross-candidate groups", () => {
+    const { current, bundleRefs, reviewRef, request } = fixture();
+    const reviewed = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef }, now);
+    for (const patch of [{ reviewDigest: hash("f") }, { proposalDigest: "invalid" }, { bundleDigests: [hash("a")] }, { expectedRevision: 99 }, { selectedFindingIds: [] }, { selectedFindingIds: ["unknown"] }, { selectedFindingIds: ["finding-0", "finding-0"] }])
+      expect(() => decideWorkflowFeedbackFindings(reviewed, { ...request, ...patch }, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+    expect(() => decideWorkflowFeedbackFindings(reviewed, request, { actorId: hash("f"), role: "TASK_OWNER" }, now)).toThrow();
+    expect(() => requestWorkflowFeedbackReview(current, { bundleRefs: [{ ...bundleRefs[0], headSha: "f".repeat(40) }, bundleRefs[1]], reviewRef }, now)).toThrow();
+    expect(() => requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef: { ...reviewRef, findingRefs: [{ ...reviewRef.findingRefs[0], commentIds: ["ui-0"] }, reviewRef.findingRefs[1]] } }, now)).toThrow();
+    const blocked = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef: { ...reviewRef, status: "BLOCKED" } }, now);
+    expect(() => decideWorkflowFeedbackFindings(blocked, request, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+  });
+  it("records attributed change notes and dismissal reasons without resolving GitHub comments", () => {
+    const { current, bundleRefs, reviewRef, request } = fixture();
+    const reviewed = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef }, now);
+    for (const decision of ["REQUEST_CHANGES", "DISMISS"] as const) {
+      expect(() => decideWorkflowFeedbackFindings(reviewed, { ...request, decision, selectedFindingIds: [] }, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+      const decided = decideWorkflowFeedbackFindings(reviewed, { ...request, decision, selectedFindingIds: [], ownerNote: "Please explain the edge case." }, { actorId: ownerId, role: "TASK_OWNER" }, now);
+      expect(decided.stage).toBe("WAIT_FOR_MERGE");
+      expect(decided.feedbackNotes?.[0]).toMatchObject({ actorId: ownerId, text: "Please explain the edge case.", source: decision });
+      expect(decided.pullRequests).toEqual(current.pullRequests);
+    }
+    expect(WorkflowSnapshotSchema.safeParse(createWorkflowSnapshot({ taskId, ownerId, now })).success).toBe(true);
   });
 });
