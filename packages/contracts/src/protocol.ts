@@ -11,7 +11,7 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "publish.reportChecks"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowFeedbackReview", "publish.reportChecks"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number];
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
@@ -45,7 +45,8 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         /** The control plane's record that this conversation already owns a saved session. */
         conversationStarted: z.boolean().optional(),
         /** The broker-selected tool boundary for the current native workflow stage (spec 056). */
-        workflowMode: z.enum(["PLAN", "IMPLEMENT", "REVIEW"]).optional(),
+        workflowMode: z.enum(["PLAN", "IMPLEMENT", "REVIEW", "FEEDBACK_REVIEW"]).optional(),
+        workflowFeedbackReview: z.object({ taskId: z.string().uuid(), workflowRevision: z.number().int().positive(), candidateDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
         model: ModelSelectionSchema.optional(),
         modelSelectionDiagnostic: z.string().min(1).max(512).optional(),
         /**
@@ -55,7 +56,11 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          */
         readiness: z.array(ProjectCommandSchema).max(64).optional(),
       })
-      .strict(),
+      .strict().superRefine((payload, context) => {
+        if ((payload.workflowMode === "FEEDBACK_REVIEW") !== (payload.workflowFeedbackReview !== undefined)) {
+          context.addIssue({ code: "custom", path: ["workflowFeedbackReview"], message: "feedback review mode requires its exact task workflow binding" });
+        }
+      }),
   }).strict(),
   InvocationBaseSchema.extend({
     kind: z.literal("publish"),

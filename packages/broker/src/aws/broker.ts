@@ -34,6 +34,7 @@ import {
   type StandingFailure,
   submitWorkflowArtifact,
   blockWorkflow,
+  completeWorkflowFeedbackReview,
   createCandidateManifest,
   recordWorkflowVerification,
   submitWorkflowReview,
@@ -102,6 +103,10 @@ import {
   type WorkflowSnapshot,
   type CandidateRepository,
   WORKFLOW_PLAN_MAX_BYTES,
+  WorkflowFeedbackBundleRefSchema,
+  WorkflowFeedbackBundleSchema,
+  WorkflowFeedbackReviewReportSchema,
+  WorkflowFeedbackReviewRefSchema,
   cleanDisplayName,
   redactAndCap,
   redactText,
@@ -150,7 +155,7 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { AWS_TEMPORARY_MESSAGE, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, workerPrompt } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { adminShareMode, finishTaskClose, routeDeveloperTaskRequest } from "./developer-tasks.js";
+import { adminShareMode, finishTaskClose, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -673,7 +678,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json(await handleSwebenchCallback(swebenchDependencies(dependencies), request.headers["x-agentx-callback-capability"], evalCallback.runId, evalCallback.action, parseBody(request.body)), request.requestId);
       }
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|pull-request|pull-request-update|codebuild)$/.exec(
+      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|feedback-bundles|pull-request|pull-request-update|codebuild)$/.exec(
         url.pathname,
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
@@ -2634,7 +2639,7 @@ async function createConversation(
 async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[] },
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string } },
   now: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -2647,6 +2652,7 @@ async function taskOperationParts(
     conversationId: input.conversationId,
     kind: "task",
     ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
+    ...(input.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: input.workflowFeedbackReview }),
     requestId: input.requestId,
     payloadHash: hashJson({ conversationId: input.conversationId, prompt: input.prompt }),
     status: "ACCEPTED",
@@ -2680,12 +2686,13 @@ async function taskOperationParts(
     workspaceId: workspace.id,
     fence,
     projectRevision: workspace.projectRevision,
-    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence),
+    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence, false, input.workflowMode === "FEEDBACK_REVIEW"),
     payload: {
       conversationId: input.conversationId,
       prompt,
       conversationStarted: input.conversationStarted,
       ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
+      ...(input.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: input.workflowFeedbackReview }),
       ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
       ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
       // Spec 051 (P-1): the checks the worker reruns when the agent finishes. The latest revision's readiness, as
@@ -2702,7 +2709,7 @@ async function acceptTask(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
-  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[] } = {},
+  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string } } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
@@ -2740,6 +2747,7 @@ async function acceptTask(
     shared: identity.sharedTask?.state === "continue" || options.sharedTask === true,
     ...(options.workflowMode === undefined ? {} : { workflowMode: options.workflowMode }),
     ...(options.workflowPhase === undefined ? {} : { workflowPhase: options.workflowPhase }),
+    ...(options.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: options.workflowFeedbackReview }),
     ...(options.readiness === undefined ? {} : { readiness: options.readiness }),
   }, now);
   try {
@@ -3479,6 +3487,9 @@ async function handleCallback(
     const artifactId = await putArtifact(dependencies, operation, body);
     return json({ artifactId }, request.requestId);
   }
+  if (action === "feedback-bundles") {
+    return json(await readFeedbackBundlesForCritic(dependencies, operation, body), request.requestId);
+  }
   if (action === "pull-request") {
     const pullRequest = await reconcilePullRequest(dependencies, operation, body);
     return json(pullRequest, request.requestId);
@@ -3493,6 +3504,93 @@ async function handleCallback(
   }
   const result = await recordTerminalResult(dependencies, operation, body);
   return json({ operation: publicOperation(result) }, request.requestId);
+}
+
+const FEEDBACK_BUNDLE_MAX_BYTES = 1_000_000;
+const FEEDBACK_BUNDLE_TOTAL_MAX_BYTES = 4_000_000;
+const FEEDBACK_REQUIREMENTS_MAX_BYTES = 16_384;
+
+/** Reads only the exact immutable bundle set captured by the active COLLECTING workflow. */
+async function readFeedbackBundlesForCritic(
+  dependencies: AwsBrokerDependencies,
+  operation: OperationRecord,
+  value: unknown,
+): Promise<{ taskRequirements: string; bundles: Array<{ ref: ReturnType<typeof WorkflowFeedbackBundleRefSchema.parse>; bytesBase64: string }> }> {
+  const input = object(value, "feedback bundle request");
+  const taskId = input.taskId;
+  const workflowRevision = input.workflowRevision;
+  const candidateDigest = input.candidateDigest;
+  if (Object.keys(input).sort().join(",") !== "candidateDigest,taskId,workflowRevision") {
+    throw agentXError("CALLBACK_FORBIDDEN", "feedback bundle request contains unsupported scope fields");
+  }
+  const binding = operation.workflowFeedbackReview;
+  if (operation.kind !== "task" || operation.workflowMode !== "FEEDBACK_REVIEW" || binding === undefined
+    || taskId !== binding.taskId || workflowRevision !== binding.workflowRevision || candidateDigest !== binding.candidateDigest) {
+    throw agentXError("CALLBACK_FORBIDDEN", "feedback bundle request is outside the critic operation binding");
+  }
+  const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId));
+  if (pointer?.taskId !== binding.taskId) throw agentXError("CALLBACK_FORBIDDEN", "feedback bundle task does not own this workspace");
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(binding.taskId));
+  const workflow = task?.workflow;
+  if (task?.workspaceId !== operation.workspaceId || task.closedAt !== undefined || workflow === undefined
+    || workflow.revision !== binding.workflowRevision || workflow.stage !== "WAIT_FOR_MERGE" || workflow.state !== "RUNNING"
+    || workflow.candidate?.digest !== binding.candidateDigest || workflow.feedbackReview?.status !== "COLLECTING") {
+    throw agentXError("STALE_FENCE", "feedback collection is no longer current");
+  }
+  const approvedDigests = new Set(workflow.decisions.filter(decision => decision.decision === "APPROVE" && decision.artifactDigest !== undefined)
+    .map(decision => decision.artifactDigest));
+  const requirements = (["requirements", "design", "plan"] as const).flatMap(type => {
+    const approvedVersions = workflow.artifacts.filter(artifact => artifact.type === type && approvedDigests.has(artifact.sha256));
+    const latest = approvedVersions.sort((left, right) => right.version - left.version)[0];
+    return latest === undefined ? [] : [latest];
+  });
+  if (requirements.length === 0) throw agentXError("CONFIG_INVALID", "feedback critic has no owner-approved task requirements");
+  const approved: string[] = [];
+  for (const artifact of requirements) {
+    if (!artifact.objectKey.startsWith(`private/${task.ownerKey}/${task.workspaceId}/`)) throw agentXError("CALLBACK_FORBIDDEN", "approved requirement artifact is outside this task's private storage");
+    const response = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: artifact.objectKey }));
+    if (response.ContentLength === undefined || response.ContentLength > FEEDBACK_REQUIREMENTS_MAX_BYTES) throw agentXError("CONFIG_INVALID", "approved task requirement exceeds the critic input limit");
+    const bytes = response.Body ? Buffer.from(await response.Body.transformToByteArray()) : Buffer.alloc(0);
+    if (bytes.byteLength > FEEDBACK_REQUIREMENTS_MAX_BYTES || createHash("sha256").update(bytes).digest("hex") !== artifact.sha256) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "approved task requirements failed size or digest validation");
+    }
+    approved.push(artifact.type.toUpperCase() + " (sha256 " + artifact.sha256 + "):\n" + bytes.toString("utf8"));
+  }
+  const taskRequirements = approved.join("\n\n");
+  if (Buffer.byteLength(taskRequirements, "utf8") > FEEDBACK_REQUIREMENTS_MAX_BYTES) throw agentXError("CONFIG_INVALID", "approved task requirements exceed the critic input limit");
+  const bundles: Array<{ ref: ReturnType<typeof WorkflowFeedbackBundleRefSchema.parse>; bytesBase64: string }> = [];
+  let totalBytes = Buffer.byteLength(taskRequirements, "utf8");
+  for (const rawRef of workflow.feedbackReview.bundleRefs) {
+    const ref = WorkflowFeedbackBundleRefSchema.parse(rawRef);
+    if (ref.taskId !== task.taskId || ref.candidateDigest !== binding.candidateDigest
+      || !ref.objectKey.startsWith(`private/${task.ownerKey}/${task.workspaceId}/feedback/`)
+      || !workflow.candidate.repositories.some(repository => repository.repositoryId === ref.repositoryId && repository.commitSha === ref.headSha)
+      || !workflow.pullRequests?.some(pr => pr.repositoryId === ref.repositoryId && pr.number === ref.number
+        && pr.candidateDigest === binding.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN"))) {
+      throw agentXError("STALE_FENCE", "feedback bundle no longer matches the linked candidate");
+    }
+    const response = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: ref.objectKey }));
+    if (response.ContentLength === undefined || response.ContentLength > FEEDBACK_BUNDLE_MAX_BYTES) {
+      throw agentXError("CONFIG_INVALID", "feedback bundle exceeds the critic input limit");
+    }
+    const bytes = response.Body ? Buffer.from(await response.Body.transformToByteArray()) : Buffer.alloc(0);
+    totalBytes += bytes.byteLength;
+    if (bytes.byteLength !== response.ContentLength || totalBytes > FEEDBACK_BUNDLE_TOTAL_MAX_BYTES
+      || createHash("sha256").update(bytes).digest("hex") !== ref.sha256) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "feedback bundle bytes failed size or digest validation");
+    }
+    const bundle = WorkflowFeedbackBundleSchema.parse(JSON.parse(bytes.toString("utf8")));
+    if (bundle.taskId !== ref.taskId || bundle.repositoryId !== ref.repositoryId || bundle.number !== ref.number
+      || bundle.headSha !== ref.headSha || bundle.candidateDigest !== ref.candidateDigest
+      || bundle.commentSetDigest !== ref.commentSetDigest || bundle.recordedAt !== ref.recordedAt
+      || bundle.producer !== ref.producer || bundle.version !== ref.version
+      || JSON.stringify(bundle.comments.map(({ body: _body, ...comment }) => comment)) !== JSON.stringify(ref.comments)) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "feedback bundle metadata does not match its immutable reference");
+    }
+    bundles.push({ ref, bytesBase64: bytes.toString("base64") });
+  }
+  if (bundles.length !== workflow.feedbackReview.bundleRefs.length) throw agentXError("RUNTIME_UNAVAILABLE", "feedback bundle set is incomplete");
+  return { taskRequirements, bundles };
 }
 
 async function handleCodeBuild(
@@ -3995,7 +4093,16 @@ async function putArtifact(
   }
   const workspace = await requireWorkspace(dependencies, operation.workspaceId);
   const artifactId = randomUUID();
-  const objectKey = `private/${workspace.ownerKey}/${workspace.id}/${operation.id}/${artifactId}`;
+  const feedbackReportMatch = operation.workflowMode === "FEEDBACK_REVIEW"
+    ? /^workflow-feedback-review-([a-f0-9]{64})\.json$/.exec(input.name) : undefined;
+  const feedbackReportDigest = feedbackReportMatch?.[1];
+  if (operation.workflowMode === "FEEDBACK_REVIEW" && (feedbackReportDigest === undefined
+    || createHash("sha256").update(input.content, "utf8").digest("hex") !== feedbackReportDigest)) {
+    throw agentXError("CONFIG_INVALID", "feedback critic report artifact name must match its content digest");
+  }
+  const objectKey = feedbackReportDigest === undefined
+    ? `private/${workspace.ownerKey}/${workspace.id}/${operation.id}/${artifactId}`
+    : `private/${workspace.ownerKey}/${workspace.id}/feedback-reviews/${feedbackReportDigest}.json`;
   await dependencies.s3.send(new PutObjectCommand({
     Bucket: dependencies.artifactBucketName,
     Key: objectKey,
@@ -4334,6 +4441,18 @@ export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependen
     },
     now: new Date().toISOString(),
   });
+  const linked = await getItem<GithubWorkflowPullRequestRecord>(dependencies, githubWorkflowPullRequestKey(event.fullName, event.number));
+  if (linked !== undefined) {
+    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(linked.taskId));
+    if (task !== undefined && dependencies.developer !== undefined) {
+      const caller = { developerId: task.developerId, sessionId: "github-webhook", amr: task.provider, name: task.developerName };
+      const routeDependencies = developerTaskRouteDependencies({
+        documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer,
+        now: Date.now, tasks: developerTaskActions(dependencies),
+      }, caller);
+      await startTaskWorkflowFeedbackReviewFromWebhook(routeDependencies, task.taskId);
+    }
+  }
 }
 
 async function githubEventStillAuthorized(dependencies: AwsBrokerDependencies, event: ReceivedGithubWebhook["event"]): Promise<boolean> {
@@ -4526,6 +4645,51 @@ async function completedWorkflowItems(
         for (const review of reviews) next = submitWorkflowReview(next, review, now);
       } catch {
         next = blockWorkflow(task.workflow, "independent candidate review was invalid, incomplete, or stale", now);
+      }
+    }
+  } else if (operation.workflowMode === "FEEDBACK_REVIEW") {
+    const binding = operation.workflowFeedbackReview;
+    const current = task.workflow;
+    if (binding === undefined || current.stage !== "WAIT_FOR_MERGE" || current.state !== "RUNNING"
+      || current.revision !== binding.workflowRevision || current.taskId !== binding.taskId
+      || current.candidate?.digest !== binding.candidateDigest || current.feedbackReview?.status !== "COLLECTING") return [];
+    if (terminalStatus !== "SUCCEEDED") {
+      next = blockWorkflow(current, "PR feedback review operation ended " + terminalStatus.toLowerCase(), now);
+    } else {
+      try {
+        const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
+        const feedbackResult = reported.workflowFeedbackReviewResult;
+        if (feedbackResult === null || typeof feedbackResult !== "object" || Array.isArray(feedbackResult)) throw new Error("feedback review result is missing");
+        const resultRecord = feedbackResult as Record<string, unknown>;
+        if (resultRecord.taskId !== binding.taskId || resultRecord.workflowRevision !== binding.workflowRevision
+          || resultRecord.candidateDigest !== binding.candidateDigest || typeof resultRecord.outputDigest !== "string"
+          || typeof resultRecord.artifactName !== "string" || typeof resultRecord.status !== "string") throw new Error("feedback review result does not match its operation binding");
+        const artifacts = (await queryAllItems(dependencies, "WORKSPACE#" + operation.workspaceId, "ARTIFACT#"))
+          .filter(item => item.operationId === operation.id && item.name === resultRecord.artifactName);
+        if (artifacts.length !== 1 || typeof artifacts[0]?.objectKey !== "string") throw new Error("critic report artifact is missing or ambiguous");
+        const object = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: String(artifacts[0].objectKey) }));
+        const reportBytes = object.Body ? Buffer.from(await object.Body.transformToByteArray()) : Buffer.alloc(0);
+        if (reportBytes.byteLength > 1_000_000 || createHash("sha256").update(reportBytes).digest("hex") !== resultRecord.outputDigest) throw new Error("critic report bytes failed digest validation");
+        const report = WorkflowFeedbackReviewReportSchema.parse(JSON.parse(reportBytes.toString("utf8")));
+        const inputs = await readFeedbackBundlesForCritic(dependencies, operation, binding);
+        const requirementsDigest = createHash("sha256").update(inputs.taskRequirements, "utf8").digest("hex");
+        const refs = current.feedbackReview.bundleRefs.map(ref => WorkflowFeedbackBundleRefSchema.parse(ref));
+        if (report.operationId !== operation.id || report.taskId !== current.taskId
+          || report.taskRequirementsDigest !== requirementsDigest || report.status !== resultRecord.status
+          || refs.length !== report.bundleDigests.length || !refs.every(ref => report.bundleDigests.includes(ref.sha256))
+          || refs.length !== report.candidateBindings.length || refs.some(ref => !report.candidateBindings.some(candidate =>
+            candidate.repositoryId === ref.repositoryId && candidate.number === ref.number && candidate.headSha === ref.headSha
+              && candidate.candidateDigest === ref.candidateDigest && candidate.commentSetDigest === ref.commentSetDigest && candidate.bundleDigest === ref.sha256))) {
+          throw new Error("critic report provenance does not match the exact collected inputs");
+        }
+        const { findings: _findings, ...metadata } = report;
+        const reviewRef = WorkflowFeedbackReviewRefSchema.parse({ ...metadata, sha256: resultRecord.outputDigest, objectKey: String(artifacts[0].objectKey) });
+        next = completeWorkflowFeedbackReview(current, {
+          expectedRevision: binding.workflowRevision, taskId: binding.taskId, candidateDigest: binding.candidateDigest,
+          operationId: operation.id, bundleRefs: refs, reviewRef,
+        }, now);
+      } catch {
+        next = blockWorkflow(current, "PR feedback review report was invalid, incomplete, or stale", now);
       }
     }
   } else if (task.workflow.stage !== "PLAN") {

@@ -926,6 +926,45 @@ async function startTaskWorkflowReview(deps: DeveloperTaskRouteDependencies, cal
   return { task: view };
 }
 
+/** A linked PR event may enqueue a read-only critic only for the exact current COLLECTING snapshot. */
+export async function startTaskWorkflowFeedbackReviewFromWebhook(
+  deps: DeveloperTaskRouteDependencies,
+  taskId: string,
+): Promise<boolean> {
+  const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
+  const workflow = task?.workflow;
+  if (task === undefined || task.closedAt !== undefined || workflow === undefined || workflow.stage !== "WAIT_FOR_MERGE"
+    || workflow.state !== "WAITING" || workflow.candidate === undefined || workflow.feedbackReview?.status !== "COLLECTING") return false;
+  const workspace = await deps.actions.workspace(task.workspaceId);
+  if (workspace.ownerKey !== developerTaskIdentity(task).ownerKey || !["READY", "STOPPED"].includes(workspace.status)) return false;
+  const now = iso(deps);
+  const next: WorkflowSnapshot = { ...workflow, revision: workflow.revision + 1, state: "RUNNING", updatedAt: now };
+  const binding = { taskId, workflowRevision: next.revision, candidateDigest: workflow.candidate.digest };
+  const requestId = randomUUID();
+  try {
+    await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, {
+      requestId, conversationId: task.conversationId,
+      prompt: "Review the current linked pull request feedback against the exact candidate. Produce a read-only, evidence-backed proposal. Do not edit code or send replies.",
+    }, operation => [
+      { Update: {
+        TableName: deps.tableName, Key: taskKey(taskId),
+        UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+        ConditionExpression: "workflow.revision = :revision AND workflow.stage = :stage AND workflow.state = :waiting AND workflow.feedbackReview.#status = :collecting AND workflow.candidate.digest = :candidate AND attribute_not_exists(closedAt)",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": workflow.revision, ":stage": "WAIT_FOR_MERGE", ":waiting": "WAITING", ":collecting": "COLLECTING", ":candidate": binding.candidateDigest },
+      } },
+      { Put: { TableName: turnTable(deps), Item: aiToolTurn({
+        party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt: now, finishedAt: iso(deps),
+        request: "Review linked PR feedback", response: "Read-only PR feedback review started as operation " + operation.id + ".", operationId: operation.id,
+      }), ConditionExpression: "attribute_not_exists(pk)" } },
+    ], { sharedTask: task.shared === true, workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReview: binding });
+    return true;
+  } catch (error) {
+    if (error instanceof AgentXError && ["WORKSPACE_BUSY", "WORKSPACE_NOT_READY", "IDEMPOTENCY_CONFLICT"].includes(error.code)) return false;
+    throw error;
+  }
+}
+
 async function decideTaskFeedback(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(WorkflowFeedbackDecisionRequestSchema, value, deps, "workflow-feedback-decision");
   const task = await loadOwnedTask(deps, caller, taskId);

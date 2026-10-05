@@ -90,6 +90,7 @@ async function forWorker(
   const requestedThinkingLevel = carriedThinkingLevel(invocation);
   const carriesReadiness = invocation.kind === "task" && invocation.payload.readiness !== undefined;
   const carriesWorkflowMode = invocation.kind === "task" && invocation.payload.workflowMode !== undefined;
+  const carriesFeedbackReview = invocation.kind === "task" && invocation.payload.workflowMode === "FEEDBACK_REVIEW";
   const carriesReportChecks = invocation.kind === "publish" && invocation.payload.reportChecks !== undefined;
   if (requestedThinkingLevel === undefined && !carriesReadiness && !carriesWorkflowMode && !carriesReportChecks) return invocation;
   let features: readonly string[] = [];
@@ -105,6 +106,9 @@ async function forWorker(
   }
   if (invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW" && !features.includes("task.workflowReview")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "independent workflow review requires a compatible worker");
+  }
+  if (carriesFeedbackReview && !features.includes("task.workflowFeedbackReview")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "PR feedback critic requires a compatible worker");
   }
   const reason = workerFeatures === undefined ? "no-probe" : "worker-lacks-feature";
   const leveled = withoutUnparsedFields(invocation, features);

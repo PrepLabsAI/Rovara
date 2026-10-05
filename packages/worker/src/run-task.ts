@@ -1,6 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { WorkerInvocationSchema, WORKFLOW_PLAN_MAX_BYTES, agentXError, createCandidateManifest, parseAgentClaim, redactText, type CheckReport, type CandidateRepository, type WorkflowReviewReport, type WorkerInvocation } from "@agentx/contracts";
+import { WorkerInvocationSchema, WORKFLOW_PLAN_MAX_BYTES, agentXError, createCandidateManifest, parseAgentClaim, redactText, type CheckReport, type CandidateRepository, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, recorderFingerprint, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
@@ -25,9 +25,10 @@ import {
 } from "./pi-session.js";
 import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
+import type { FeedbackBundleReader } from "./callback-client.js";
 import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
 import { readCandidateRepositories } from "./verification/candidate.js";
-import { runWorkflowReviews } from "./verification/review.js";
+import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, verificationExtension } from "./verification/extension.js";
 import { gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
@@ -45,12 +46,13 @@ export interface TaskInvocationResult {
   reopened: boolean;
   /** Spec 051 FR-007: AgentX's check of the agent's work, with outputs cut to fit (compactCheckReport). */
   checks?: CheckReport;
-  workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW";
+  workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "FEEDBACK_REVIEW";
   /** Worker-reported Git object identities; the broker recomputes and stores the canonical digest. */
   workflowCandidateRepositories?: Array<{ repositoryId: string; commitSha: string; treeSha: string }>;
   /** Repository identities captured when the final successful check round ended. */
   workflowCheckCandidateRepositories?: Array<{ repositoryId: string; commitSha: string; treeSha: string }>;
   workflowReviews?: WorkflowReviewReport[];
+  workflowFeedbackReviewResult?: { taskId: string; workflowRevision: number; candidateDigest: string; outputDigest: string; artifactName: string; status: WorkflowFeedbackReviewReport["status"] };
 }
 
 export async function runTaskInvocation(
@@ -60,6 +62,7 @@ export async function runTaskInvocation(
     model: WorkspaceModelConfiguration;
     eventSink: EventBatchSink;
     artifactSink: ArtifactSink;
+    feedbackBundleReader?: FeedbackBundleReader;
     piAdapter?: PiSessionAdapter;
     cancellationController?: WorkerCancellationController;
     devcontainerCli?: DevcontainerCli;
@@ -78,6 +81,42 @@ export async function runTaskInvocation(
   ) as PreparationManifest;
   if (!manifest.complete || manifest.projectRevision !== invocation.projectRevision) {
     throw agentXError("WORKSPACE_NOT_READY", "workspace manifest is incomplete or revision-mismatched");
+  }
+  if (invocation.payload.workflowMode === "FEEDBACK_REVIEW") {
+    const binding = invocation.payload.workflowFeedbackReview!;
+    if (dependencies.feedbackBundleReader === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the worker cannot read the task's approved feedback bundles");
+    const root = await realpath(resolve(dependencies.rootPath));
+    const repositoryInputs = manifest.repositories.map(repository => ({ repositoryId: repository.name, directory: resolve(root, repository.path) }));
+    const candidateRepositories = await readCandidateRepositories(repositoryInputs);
+    const candidate = createCandidateManifest(candidateRepositories);
+    if (candidate.digest !== binding.candidateDigest) throw agentXError("OPERATION_INTERRUPTED", "the candidate changed before PR feedback review");
+    const stop = new AbortController();
+    const unregister = dependencies.cancellationController?.register(invocation.operationId, { abort: async () => stop.abort() });
+    const events = new EventBatcher(dependencies.eventSink);
+    try {
+      await events.append("progress", { message: "AgentX is reviewing the latest feedback on the linked pull requests." });
+      const collected = await dependencies.feedbackBundleReader(binding);
+      const execution = await runWorkflowFeedbackReview({
+        operationId: invocation.operationId, taskId: binding.taskId, taskRequirements: collected.taskRequirements,
+        rootPath: dependencies.rootPath, model: dependencies.model, candidate: candidateRepositories,
+        repositories: repositoryInputs, bundles: collected.bundles, artifactSink: dependencies.artifactSink,
+        ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,
+        onProgress: message => { void events.append("progress", { message }).catch(() => undefined); },
+      });
+      const workflowFeedbackReviewResult = {
+        taskId: binding.taskId, workflowRevision: binding.workflowRevision, candidateDigest: binding.candidateDigest,
+        outputDigest: execution.outputDigest, artifactName: execution.artifactName, status: execution.report.status,
+      };
+      await events.append("result", { status: "SUCCEEDED", workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult });
+      await events.flush();
+      return { conversationId: invocation.payload.conversationId, reopened: false, workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult };
+    } catch (error) {
+      await events.append("error", { message: redactText(error instanceof Error ? error.message : "feedback review failed") }).catch(() => undefined);
+      await events.flush().catch(() => undefined);
+      throw error;
+    } finally {
+      unregister?.();
+    }
   }
 
   // The agent's shell runs in the project's devcontainer (#121), started first: on a resumed

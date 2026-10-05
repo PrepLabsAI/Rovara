@@ -242,9 +242,12 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
         if (comments.some(c => c.kind === "REVIEW_COMMENT" && (!c.threadId || !threadIds.has(c.threadId)))) throw new GithubWebhookRetryableError("inline thread state is incomplete");
         // Approval authorizes future work. It does not establish that GitHub feedback was addressed.
         const selected = comments.filter(c => eligible.has(c.id)).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
-        return WorkflowFeedbackBundleSchema.parse({ schemaVersion: 1, taskId: current.taskId, repositoryId: pr.repositoryId, number: pr.number,
-          headSha: feedback.pullRequest.headCommit, candidateDigest: current.candidate!.digest, commentSetDigest: digest(JSON.stringify(selected)),
+        const normalized = WorkflowFeedbackBundleSchema.parse({ schemaVersion: 1, taskId: current.taskId, repositoryId: pr.repositoryId, number: pr.number,
+          headSha: feedback.pullRequest.headCommit, candidateDigest: current.candidate!.digest, commentSetDigest: "0".repeat(64),
           producer: "agentx-github-reconciler", version: "1", recordedAt: input.now, comments: selected, sourceDeliveryIds: [input.deliveryId] });
+        // Digest the schema-normalized representation that is actually serialized to S3. Zod's
+        // field order can differ from the GitHub adapter's object insertion order.
+        return WorkflowFeedbackBundleSchema.parse({ ...normalized, commentSetDigest: digest(JSON.stringify(normalized.comments)) });
       });
       observations.sort((a, b) => a.repositoryId.localeCompare(b.repositoryId) || a.number - b.number || a.threadId.localeCompare(b.threadId));
       const prior = current.feedbackReview;

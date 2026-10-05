@@ -1,0 +1,84 @@
+# SDD ledger — plan: docs/superpowers/plans/2026-10-05-agentx-pr-feedback-review.md
+
+Objective pin: MSDLC-OBJ-001@0.4, SHA-256 707543b940253c8e068da55af87b81b4c57dd8d0e82f83436be13f5391cdf0c2.
+Worktree: codex/agentx-native-workflow, initial HEAD af7836d9e0fe809c716bed526437372482c2a967. Supported runtime installed at /private/tmp/node-v22.23.0-darwin-arm64/bin/node (Node v22.23.0); repo requires >=22.19.0 <23.
+Authority: implement owner-approved native AgentX PR-feedback review and Canvas closeout design only. No CharterArc integration, issue-triggered starts, live Slack deletion, push, merge, deployment, release, or production authority.
+Plan scope: authenticated browser page, multi-PR feedback aggregation, separate read-only reviewer, exact owner approval, Slack summary/comment capture, recovery, privacy-safe aggregate measures, verification.
+
+## Preflight: task-pair interface scan
+
+| Tasks | Shared file/interface | Finding / ruling |
+|---|---|---|
+| 1→2 | `WorkflowFeedbackBundleRef`; `task-workflow.ts` | T1 schemas/ref contract must be stable before T2 reconciliation; no conflict. |
+| 1→3 | `WorkflowFeedbackReviewRef`, finding schema | T3 emits complete report that T1 validates; provenance is immutable. |
+| 1→4 | review refs and workflow snapshot | T4 consumes owner-readable projections; raw S3 bodies stay server-side. |
+| 1→5 | decision schema and transition | T5 dispatch binds exact T1 fields; same schema must gate Slack and web. |
+| 1→6 | attributed-note contract and review summary | T6 uses only short summary and note API; Slack text must not contain comment/diff/proposal bodies. |
+| 2→3 | immutable bundle refs | Critic reads reconciled bundle(s), not webhook payloads. |
+| 2→5 | GitHub reconciliation | Approval requires fresh head/comment state before accept and dispatch. |
+| 2→7 | comment/head source record | Journey tests use authoritative reconciled fixture state. |
+| 3→4 | report artifact/ref | Detail page displays only validated report; blocked/partial review is explicit. |
+| 3→5 | exact review digest | Owner decision/dispatch binds report digest. |
+| 3→6 | summary counts/highest item | Slack uses redacted summary projection only. |
+| 3→7 | operation provenance and results | Recovery tests prove timeout/restart and completeness. |
+| 4→5 | authenticated decision endpoint | Both page and Slack use same owner-only decision transition. |
+| 4→6 | secure link/actions | Slack link resolves to same-origin review page, never bearer authorization. |
+| 4→7 | review web journey | Browser journey tests authentication and UX. |
+| 5→6 | action IDs/payload binding | Slack actions bind batch/revision/digests and preserve explicit approval. |
+| 5→7 | stale-state + dispatch behavior | End-to-end suite verifies races and partial multi-PR completion. |
+| 6→7 | notice/note records | Journey verifies concise Slack and attributed comments. |
+
+## Per-task self-consistency scan
+
+| Task | Files/tests/interfaces consistent? | Finding / ruling |
+|---|---|---|
+| 1 | Yes; contract tests cover new schemas and transitions. | None. |
+| 2 | Yes; GitHub App and webhook tests exercise pagination/reconciliation. | GraphQL pagination for resolved thread state is required by spec; retain source IDs. |
+| 3 | Yes; worker critic, operation binding, broker callback, event trigger, report validation and focused fixture are connected. | Scoped independent review remains pending; live broker/S3/GitHub/Slack path remains unverified. |
+| 4 | Yes; auth/routes/browser/infra tests listed. | Auth is security-sensitive; preserve existing Slack identity and owner policy; no bearer URL. |
+| 5 | Yes; API/Slack action tests cover freshness and authority. | Verify atomic dispatch transaction can recheck GitHub at dispatch; if impossible, use durable fenced state and record ruling. |
+| 6 | Yes; notifier/interactivity tests listed. | Slack thread replies must be ingested only from verified Slack events, idempotently. |
+| 7 | Yes; end-to-end and full-suite baseline listed. | Full suite failures must be classified against baseline, not claimed passing. |
+
+## Rulings
+
+- Ruling: plan Task 2/5 GitHub App source path — changed `packages/broker/src/aws/github-app.ts` to the observed `packages/broker/src/github-app.ts` because the former does not exist and the latter owns `GitHubAppCredentialProvider` — cost if wrong: the brief would send an implementer to a nonexistent path; the correction is directly verified with `rg --files` and symbol search.
+
+## Tasks
+
+- Task 1: pending
+- Task 2: complete
+- Task 3: pending
+- Task 4: pending
+- Task 5: pending
+- Task 6: pending
+- Task 7: pending
+
+Task 1 implementation commits: `638371bb` initial contract work; `c474a8c8` correction round.
+Task 1 task review: initial review found three Important issues: self-referential artifact hash fields, all owner decisions blocked on incomplete report, and incomplete/empty comment bundle coverage. Correction tests covered each and fixes are committed. Scoped re-review pending.
+Focused evidence: 39 tests passed across task-workflow, candidate, and webhook suites on Node 22.23.0; `packages/contracts` TypeScript build passed; `git diff --check` passed. Full repo suite running in `/private/tmp/task-1-full-suite.log`; no result claimed yet.
+Ruling: content-addressed full artifact payload is stored separately from its reference envelope — hash serialized payload bytes before adding digest/object key to refs — because self-including digest is impossible; cost if wrong: persisted bytes and references could diverge, preventing reliable reads.
+Ruling: owner may request changes or dismiss an incomplete report, but only a COMPLETE report may be approved — allows safe exit from failed review without authorizing code — cost if wrong: owner could close out feedback from a review that missed comments; approval remains blocked.
+Ruling: every OPEN or UNKNOWN linked PR must be represented in a completed review; empty-comment bundles are valid, and decision rechecks this set — complete means no open PR was skipped — cost if wrong: empty/uncertain PRs can delay decisions or stale approvals can slip through.
+Task 1 status: waiting for scoped re-review and full-suite classification; not yet complete.
+Task 1 scoped re-review: PASS for compliance and quality on `638371bb..c474a8c8`; reviewer found no remaining Critical/Important/Minor issues in fix. It explicitly leaves exact S3 byte hashing and current GitHub state reconciliation to integration tasks.
+Task 1 full repository suite (Node 22.23.0) result: 48 files failed, 394 passed, 4 skipped; 400 tests failed, 7556 passed, 20 skipped; 6 runtime errors. Failures observed in Pi/integration/CLI/login/loopback-dependent suites; loopback listener failures report `EPERM 127.0.0.1`, and Pi credential access fails. No changed workflow contract suite failed. This is not yet baseline-classified; Task 7 will compare candidate and base to separate regressions from environment/baseline failures.
+Task 1: complete (commits `af7836d9..c474a8c8`; tests: `PATH=/private/tmp/node-v22.23.0-darwin-arm64/bin:$PATH npm test -- tests/contract/task-workflow-contracts.test.ts tests/contract/workflow-candidate.test.ts tests/contract/github-webhook-signature.test.ts` → 3 files, 39 passed; contracts TypeScript build → pass; scoped independent review → pass).
+
+Ruling: include the approved `specs/060-pr-feedback-review/spec.md` in the eventual implementation change — it is the source contract for the behavior and must accompany code for reviewers and future maintainers — cost if wrong: implementation and approved requirements could drift apart; plans remain local ignored review artifacts.
+
+- Task 2: in_progress (base `c474a8c89e1da16ca1018d51d90a81e218acb9a9`)
+
+Task 2 interface ruling: extend the existing `feedbackReview` with `COLLECTING` (immutable bundleRefs and bounded threadObservations; no reviewRef yet), rather than add parallel collection state. `collectWorkflowFeedbackBundles` rejects missing open/UNKNOWN PRs and candidate mismatches, clears legacy event feedback, and keeps superseded immutable report refs in `feedbackReviewHistory`. `requestWorkflowFeedbackReview` retains thread observations when the separate critic attaches its report. Cost if wrong: schema consumers must handle COLLECTING explicitly; a second representation would create conflicting recovery and approval state.
+Task 2 reconciliation ruling: webhook bodies are hints only; every CAS retry re-fetches all linked PRs through pinned repository URLs and linked-PR rows. Current read-only installation token permissions are contents, pull_requests, issues; REST pagination and GraphQL review/thread/nested-comment cursor pagination are exhaustive and scoped. Exact REST review bodies bind to GraphQL edit timestamps. Immutable artifact bytes are written before workflow CAS using IfNoneMatch, and existing bytes are hash-verified on storage retries.
+Task 2 thread ruling: first observation of an already-resolved thread establishes an excluded baseline; subsequent new/edited current comments remain eligible until resolution changes, and reopened threads are included. GitHub does not expose a resolution timestamp on this API, so activity before the first baseline cannot be independently ordered against resolution; delayed webhook bodies never establish that ordering. Cost if wrong: a first-observation resolved thread may need owner inspection; current new activity after baseline is not discarded.
+Task 2 disposition boundary: an approval authorizes future code work; a proposal dismissal does not resolve GitHub feedback. Task 1 has no explicit per-comment completed/skip disposition. Ordinary comments remain eligible; later disposition handling must not infer disposal from critic recommendations or pre-implementation approvals. Cost if wrong: repeated comments can return for review rather than being silently lost.
+Task 2 verification: focused GitHub/provider/workflow/developer-flow suites pass on Node 22.23.0; full TypeScript build and diff whitespace checks pass. Full repository suite was started, then interrupted at parent request (exit 130); observed CLI/Pi/setup failures are preserved in task-2-report.md and /private/tmp/task2-full.log, without a pass or baseline classification claim.
+
+Task 2 local commit: `6b642b00` — `feat: reconcile feedback across linked pull requests`; 7 source/test files committed. Final focused run: 4 files / 70 tests passed; full build pass. Independent review: APPROVE; no Critical or Important issues; reviewer independently traced webhook→current GitHub data→multi-PR validation→immutable artifacts→workflow CAS and ran 65 focused tests. Reviewer notes Task 5 must refresh GitHub comments and heads before dispatch. Status: complete.
+
+- Task 3: complete locally; scoped independent review pending (base `6b642b00a2ce4ae4966650e61c8c860ccc655644`)
+
+Task 3 boundary ruling: PR webhook reconciliation may start only a `FEEDBACK_REVIEW` operation for a task already in `WAIT_FOR_MERGE/WAITING/COLLECTING`; this is a read-only analysis operation and does not dispatch code. Its signed callback is scoped to operation/fence and exact task/revision/candidate/current bundle refs. Bundle bodies stay out of SQS; the broker reads task-owned private S3 keys, validates lengths, bytes, digests and metadata in process, then returns bounded base64 content to the worker. No worker S3 authority or bearer URL is added. Cost if wrong: the callback adds a broker read path whose abuse or response-limit handling must remain covered by authorization tests and conservative bounds.
+Task 3 artifact ruling: only artifacts whose digest appears in a recorded APPROVE decision are critic requirements; stale/rejected proposals are excluded. Critic report bytes are stored through the existing artifact callback at a digest-addressed private key. Completion rechecks operation/task/revision/candidate, approved-requirements digest and the exact current PR bundle set before moving the workflow to `WAITING/PENDING`. Invalid/stale evidence blocks; PENDING approval is not code dispatch.
+Task 3 verification: Node 22.23.0 build passed; focused filtered tests passed (4 tests across developer-task workflow, workflow contracts, invocation contracts, and worker verification; 67 unrelated cases skipped); `git diff --check` passed. Full repository suite intentionally not run. Broker fixture proves accepted critic callback success and denial for mismatched task/revision/candidate, caller key/digest fields, corrupted artifact bytes, terminal operation and non-feedback operation. Live Slack/GitHub/AWS behavior is unverified. See `task-3-report.md`.

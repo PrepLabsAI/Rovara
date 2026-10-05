@@ -2,7 +2,8 @@
 // extra try on a regression, and puts its report in the task result. Every task runs runTaskInvocation on the worker's
 // real Pi session (createDefaultPiSessionAdapter) on the faux model, so the real extension and Pi's real
 // agent_before_settle hook run. Only the check runners are fakes, except where a test says otherwise. Offline.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { chmod, mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fauxAssistantMessage, fauxToolCall, type FauxResponseStep, type TranscriptContext } from "@earendil-works/pi-ai";
@@ -12,10 +13,14 @@ import {
   agentxPreambleSha256,
   AGENTX_PREAMBLE_VERSION,
   CheckReportSchema,
+  createCandidateManifest,
   lastAssistantResponse,
   type CheckReport,
   type ProjectCommand,
   type WorkerInvocation,
+  type WorkflowFeedbackBundle,
+  type WorkflowFeedbackBundleRef,
+  WorkflowFeedbackBundleSchema,
 } from "../../packages/contracts/src/index.js";
 import type { WorkerArtifact } from "../../packages/worker/src/artifacts.js";
 import { WorkerCancellationController, WorkerOperationCancelledError } from "../../packages/worker/src/cancel.js";
@@ -24,6 +29,8 @@ import { createDefaultPiSessionAdapter, type PiSessionAdapter } from "../../pack
 import { runTaskInvocation, type TaskInvocationResult } from "../../packages/worker/src/run-task.js";
 import { projectCheckKey } from "../../packages/worker/src/verification/check-history.js";
 import { createCheckRunners, type CheckRunners } from "../../packages/worker/src/verification/checks.js";
+import { runWorkflowFeedbackReview } from "../../packages/worker/src/verification/review.js";
+import { readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
 import { CHECKS_MESSAGE_TYPE, checksArtifactContent, compactCheckReport } from "../../packages/worker/src/verification/extension.js";
 import { AgentFilesRestoreError, type OriginalCode } from "../../packages/worker/src/verification/original-code.js";
 import { createFixtureDirectory } from "../fixtures/index.js";
@@ -167,6 +174,91 @@ function checksMessages(request: Request): string[] {
 const failedRun = (output: string): AgentResult => ({ exitCode: 1, timedOut: false, output });
 const passedRun: AgentResult = { exitCode: 0, timedOut: false, output: "1 passed\n" };
 const lint: ProjectCommand = { cwd: "app", executable: "npm", args: ["run", "lint"], timeoutSeconds: 60 };
+
+async function feedbackReviewFixture() {
+  const rootPath = await createFixtureDirectory("agentx-feedback-review-");
+  const repository = join(rootPath, "app");
+  await mkdir(repository, { recursive: true });
+  await writeFile(join(repository, "src.ts"), "export function parse(input: string) { return input.trim(); }\n");
+  execFileSync("git", ["init", "-q", repository]);
+  execFileSync("git", ["-C", repository, "-c", "user.name=AgentX Test", "-c", "user.email=test@example.invalid", "add", "."]);
+  execFileSync("git", ["-C", repository, "-c", "user.name=AgentX Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"]);
+  const repositories = [{ repositoryId: "app", directory: repository }];
+  const candidate = await readCandidateRepositories(repositories);
+  const body = "Handle empty input before trimming.";
+  const bodyDigest = createHash("sha256").update(body).digest("hex");
+  const bundle: WorkflowFeedbackBundle = {
+    schemaVersion: 1, taskId: randomUUID(), repositoryId: "app", number: 42,
+    headSha: candidate[0]!.commitSha, candidateDigest: createCandidateManifest(candidate).digest,
+    commentSetDigest: "a".repeat(64), producer: "agentx-github-reconciler", version: "1", recordedAt: new Date().toISOString(),
+    comments: [{ id: "review-comment-1", threadId: "thread-1", kind: "REVIEW_COMMENT", url: "https://github.com/acme/app/pull/42#discussion_r1",
+      author: "reviewer", updatedAt: new Date().toISOString(), bodyDigest, bodyBytes: Buffer.byteLength(body), path: "src.ts", line: 1, body }],
+    sourceDeliveryIds: ["delivery-1"],
+  };
+  const normalized = WorkflowFeedbackBundleSchema.parse({ ...bundle, commentSetDigest: createHash("sha256").update(JSON.stringify(bundle.comments), "utf8").digest("hex") });
+  Object.assign(bundle, normalized);
+  const bytes = JSON.stringify(bundle);
+  const sha256 = createHash("sha256").update(bytes).digest("hex");
+  const { sourceDeliveryIds: _deliveryIds, comments, ...metadata } = bundle;
+  const bundleRef: WorkflowFeedbackBundleRef = {
+    ...metadata, sha256, objectKey: `feedback/${sha256}.json`,
+    comments: comments.map(({ body: _body, ...comment }) => comment),
+  };
+  return { rootPath, repositories, candidate, bundle, bundleRef, bytes, taskId: bundle.taskId };
+}
+
+function feedbackReviewerAdapter(response: string, beforePrompt?: () => Promise<void> | void): PiSessionAdapter {
+  return {
+    async create(input) {
+      let notify: ((event: unknown) => void) | undefined;
+      return {
+        conversationId: randomUUID(), sessionFile: join(input.sessionDirectory, "feedback-review.json"),
+        async prompt(_prompt) {
+          await beforePrompt?.();
+          notify?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: response }] } });
+        }, async abort() {},
+        getModel: () => ({ provider: "test-provider", modelId: "read-only-critic-v1" }),
+        getSessionStats: () => ({ totalMessages: 2, inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, cost: 0 }),
+        subscribe(listener) { notify = listener; return () => { notify = undefined; }; },
+        dispose() {},
+      };
+    },
+  };
+}
+
+describe("independent PR feedback critic", () => {
+  it("reviews every supplied bundle comment on the exact candidate in a read-only session and persists a digested report", async () => {
+    const fixture = await feedbackReviewFixture();
+    const finding = {
+      id: "finding-1", bundleDigest: fixture.bundleRef.sha256, commentIds: ["review-comment-1"],
+      priority: "MUST_FIX", assessment: "ACTIONABLE", recommended: true,
+      evidence: [{ source: "candidate", reference: "app/src.ts:1" }],
+      rationale: "The implementation calls trim without handling an empty value as requested.",
+      confidence: { level: "HIGH", reason: "The comment and implementation identify the same missing behavior." },
+      proposedDisposition: "IMPLEMENT",
+    };
+    const capturedArtifacts: WorkerArtifact[] = [];
+    let sessionMode: string | undefined;
+    const base = feedbackReviewerAdapter(JSON.stringify({ findings: [finding] }));
+    const adapter: PiSessionAdapter = {
+      create: async (input) => { sessionMode = input.workflowMode; return base.create(input); },
+    };
+    const review = await runWorkflowFeedbackReview({
+      operationId: randomUUID(), taskId: fixture.taskId, taskRequirements: "Return a safe result for empty input.",
+      rootPath: fixture.rootPath, model: FAUX_MODEL, candidate: fixture.candidate, repositories: fixture.repositories,
+      bundles: [{ ref: fixture.bundleRef, bytes: fixture.bytes }], piAdapter: adapter,
+      artifactSink: async (artifact) => { capturedArtifacts.push(artifact); },
+    });
+    expect(sessionMode).toBe("REVIEW");
+    expect(review.report.status).toBe("COMPLETE");
+    expect(review.report.findings).toHaveLength(1);
+    expect(review.report.findings[0]?.commentIds).toEqual(["review-comment-1"]);
+    expect(review.report.bundleDigests).toEqual([fixture.bundleRef.sha256]);
+    expect(review.outputDigest).toMatch(/^[a-f0-9]{64}$/);
+    expect(capturedArtifacts.some((artifact) => artifact.name === review.artifactName
+      && createHash("sha256").update(artifact.content, "utf8").digest("hex") === review.outputDigest)).toBe(true);
+  });
+});
 
 describe("AgentX checks the agent's work when it finishes (spec 051 Task 4)", () => {
   it("1. pass: the agent's pytest failed before its edit and the rerun passes; verified, no extra try, one request after the edit", async () => {
