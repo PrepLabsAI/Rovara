@@ -87,17 +87,19 @@ const FeedbackCommentRefSchema = z.object({
   updatedAt: z.string().datetime(), bodyDigest: DigestSchema, bodyBytes: z.number().int().nonnegative().max(1_000_000),
   path: z.string().max(1024).optional(), line: z.number().int().positive().optional(),
 }).strict();
-export const WorkflowFeedbackBundleRefSchema = z.object({
+const WorkflowFeedbackBundleMetadataSchema = z.object({
   schemaVersion: z.literal(1), taskId: z.string().uuid(), repositoryId: z.string().trim().min(1).max(200),
   number: z.number().int().positive(), headSha: z.string().regex(/^[a-f0-9]{40}$/), candidateDigest: DigestSchema,
-  commentSetDigest: DigestSchema, sha256: DigestSchema, objectKey: FeedbackObjectKeySchema,
+  commentSetDigest: DigestSchema,
   producer: z.string().trim().min(1).max(120), version: z.string().trim().min(1).max(120), recordedAt: z.string().datetime(),
-  comments: z.array(FeedbackCommentRefSchema).min(1).max(128),
-}).strict().refine(b => new Set(b.comments.map(c => c.id)).size === b.comments.length, "comment IDs must be unique within a bundle")
-  .refine(b => b.objectKey.includes(b.sha256), "feedback artifact key must contain its content digest");
+  comments: z.array(FeedbackCommentRefSchema).max(128),
+}).strict().refine(b => new Set(b.comments.map(c => c.id)).size === b.comments.length, "comment IDs must be unique within a bundle");
+export const WorkflowFeedbackBundleRefSchema = WorkflowFeedbackBundleMetadataSchema.safeExtend({
+  sha256: DigestSchema, objectKey: FeedbackObjectKeySchema,
+}).refine(b => b.objectKey.includes(b.sha256), "feedback artifact key must contain its content digest");
 export type WorkflowFeedbackBundleRef = z.infer<typeof WorkflowFeedbackBundleRefSchema>;
-export const WorkflowFeedbackBundleSchema = WorkflowFeedbackBundleRefSchema.safeExtend({
-  comments: z.array(FeedbackCommentRefSchema.extend({ body: z.string().max(1_000_000) })).min(1).max(128),
+export const WorkflowFeedbackBundleSchema = WorkflowFeedbackBundleMetadataSchema.safeExtend({
+  comments: z.array(FeedbackCommentRefSchema.extend({ body: z.string().max(1_000_000) })).max(128),
   sourceDeliveryIds: z.array(FeedbackIdSchema).max(100),
 }).superRefine((bundle, context) => {
   bundle.comments.forEach((comment, index) => {
@@ -123,18 +125,20 @@ export const WorkflowFeedbackFindingSchema = WorkflowFeedbackFindingRefSchema.ex
   proposedDisposition: z.enum(["IMPLEMENT", "SKIP", "OWNER_DECISION"]),
 });
 export type WorkflowFeedbackFinding = z.infer<typeof WorkflowFeedbackFindingSchema>;
-export const WorkflowFeedbackReviewRefSchema = z.object({
-  schemaVersion: z.literal(1), taskId: z.string().uuid(), sha256: DigestSchema, objectKey: FeedbackObjectKeySchema,
+const WorkflowFeedbackReviewMetadataSchema = z.object({
+  schemaVersion: z.literal(1), taskId: z.string().uuid(),
   proposalDigest: DigestSchema, operationId: z.string().uuid(), reviewerId: z.string().trim().min(1).max(120),
   provider: z.string().trim().min(1).max(120), version: z.string().trim().min(1).max(120), readOnly: z.literal(true),
   status: z.enum(["COMPLETE", "BLOCKED", "FAILED", "INTERRUPTED", "UNKNOWN"]),
   bundleDigests: z.array(DigestSchema).min(1).max(32).refine(ids => new Set(ids).size === ids.length),
   findingRefs: z.array(WorkflowFeedbackFindingRefSchema).max(128), recordedAt: z.string().datetime(),
-}).strict().refine(r => r.objectKey.includes(r.sha256), "review artifact key must contain its content digest")
-  .refine(r => new Set(r.findingRefs.map(f => f.id)).size === r.findingRefs.length, "finding IDs must be unique")
+}).strict().refine(r => new Set(r.findingRefs.map(f => f.id)).size === r.findingRefs.length, "finding IDs must be unique")
   .refine(r => r.findingRefs.every(f => r.bundleDigests.includes(f.bundleDigest)), "findings must name one input bundle");
+export const WorkflowFeedbackReviewRefSchema = WorkflowFeedbackReviewMetadataSchema.safeExtend({
+  sha256: DigestSchema, objectKey: FeedbackObjectKeySchema,
+}).refine(r => r.objectKey.includes(r.sha256), "review artifact key must contain its content digest");
 export type WorkflowFeedbackReviewRef = z.infer<typeof WorkflowFeedbackReviewRefSchema>;
-export const WorkflowFeedbackReviewReportSchema = WorkflowFeedbackReviewRefSchema.safeExtend({
+export const WorkflowFeedbackReviewReportSchema = WorkflowFeedbackReviewMetadataSchema.safeExtend({
   findings: z.array(WorkflowFeedbackFindingSchema).max(128),
 }).superRefine((report, context) => {
   if (report.findings.length !== report.findingRefs.length || report.findings.some((finding, index) =>
@@ -592,7 +596,11 @@ export function requestWorkflowFeedbackReview(currentInput: unknown, input: { bu
   const current = validSnapshot(currentInput);
   const review = WorkflowFeedbackReviewSchema.safeParse({ ...input, status: "PENDING" });
   if (!review.success || current.stage !== "WAIT_FOR_MERGE" || current.state !== "WAITING"
-    || review.data.reviewRef.taskId !== current.taskId || review.data.bundleRefs.some(bundle =>
+    || review.data.reviewRef.taskId !== current.taskId
+    || (review.data.reviewRef.status === "COMPLETE" && current.pullRequests?.some(pr =>
+      (pr.state === "OPEN" || pr.state === "UNKNOWN") && !review.data.bundleRefs.some(bundle =>
+        bundle.repositoryId === pr.repositoryId && bundle.number === pr.number)))
+    || review.data.bundleRefs.some(bundle =>
       bundle.taskId !== current.taskId || bundle.candidateDigest !== current.candidate?.digest
       || !current.candidate.repositories.some(repo => repo.repositoryId === bundle.repositoryId && repo.commitSha === bundle.headSha)
       || !current.pullRequests?.some(pr => pr.repositoryId === bundle.repositoryId && pr.number === bundle.number
@@ -613,7 +621,10 @@ export function decideWorkflowFeedbackFindings(currentInput: unknown, input: {
     throw new WorkflowTransitionError("only the task owner can decide PR feedback findings");
   }
   if (current.stage !== "WAIT_FOR_MERGE" || current.state !== "WAITING" || current.revision !== input.expectedRevision
-    || review === undefined || review.status !== "PENDING" || review.reviewRef.status !== "COMPLETE"
+    || review === undefined || review.status !== "PENDING" || (input.decision === "APPROVE" && review.reviewRef.status !== "COMPLETE")
+    || (review.reviewRef.status === "COMPLETE" && current.pullRequests?.some(pr =>
+      (pr.state === "OPEN" || pr.state === "UNKNOWN") && !review.bundleRefs.some(bundle =>
+        bundle.repositoryId === pr.repositoryId && bundle.number === pr.number)))
     || review.reviewRef.sha256 !== input.reviewDigest || review.reviewRef.proposalDigest !== input.proposalDigest
     || input.bundleDigests.length !== review.bundleRefs.length || new Set(input.bundleDigests).size !== input.bundleDigests.length
     || !review.bundleRefs.every(b => input.bundleDigests.includes(b.sha256) && b.candidateDigest === current.candidate?.digest
