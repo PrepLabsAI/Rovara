@@ -68,7 +68,17 @@ describe("native developer task workflow", () => {
       workflowReviews: ["CRITIC", "SECURITY"].map((role) => ({ candidateDigest: candidate.digest, role, provider: "test-model", version: "test-model-v1", status: "PASS", findings: [], readOnly: true, recordedAt: "2026-10-05T12:00:00.000Z" })),
     } });
     const verifiedCandidate = (await harness.dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body.task as { workflow: { stage: string; state: string; candidate?: { digest: string }; verification?: { candidateDigest: string; results: Array<{ status: string }> }; reviews?: Array<{ role: string; candidateDigest: string }> } };
-    expect(verifiedCandidate.workflow).toMatchObject({ stage: "PULL_REQUEST", state: "READY", candidate: { digest: candidate.digest }, verification: { candidateDigest: candidate.digest, results: [{ status: "PASS" }] }, reviews: [{ candidateDigest: candidate.digest }, { candidateDigest: candidate.digest }] });
+    expect(verifiedCandidate.workflow).toMatchObject({ stage: "REVIEW", state: "WAITING", candidate: { digest: candidate.digest }, verification: { candidateDigest: candidate.digest, results: [{ status: "PASS" }] } });
+    const reviewStart = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/workflow/review`, { requestId: randomUUID(), instructions: "Check for edge cases and security issues." });
+    expect(reviewStart.status).toBe(200);
+    const reviewOperation = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.workflowMode === "REVIEW") as { id?: string; workflowMode?: string } | undefined;
+    expect(reviewOperation).toBeDefined();
+    await harness.finish(workspaceId, String(reviewOperation?.id), "SUCCEEDED", { result: {
+      workflowCandidateRepositories: candidate.repositories,
+      workflowReviews: ["CRITIC", "SECURITY"].map((role) => ({ operationId: reviewOperation?.id, candidateDigest: candidate.digest, role, provider: "test-model", version: "test-model-v1", status: "PASS", findings: [], readOnly: true, recordedAt: "2026-10-05T12:00:00.000Z" })),
+    } });
+    const reviewComplete = (await harness.dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body.task as { workflow: { stage: string; state: string; candidate?: { digest: string }; reviews?: Array<{ operationId: string; role: string; candidateDigest: string }> } };
+    expect(reviewComplete.workflow).toMatchObject({ stage: "PULL_REQUEST", state: "READY", candidate: { digest: candidate.digest }, reviews: [{ operationId: reviewOperation?.id, candidateDigest: candidate.digest }, { operationId: reviewOperation?.id, candidateDigest: candidate.digest }] });
     const pullRequest = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/pull-requests`, { requestId: randomUUID(), title: "Fix retry" });
     expect(pullRequest.status).toBe(200);
     expect(pullRequest.body).toHaveProperty("operationId");

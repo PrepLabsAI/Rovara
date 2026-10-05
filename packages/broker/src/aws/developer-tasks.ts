@@ -883,6 +883,42 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
   return { task: view };
 }
 
+async function startTaskWorkflowReview(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
+  const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "workflow-review");
+  const task = await loadOwnedTask(deps, caller, taskId);
+  const workflow = task.workflow;
+  if (workflow === undefined || workflow.stage !== "REVIEW" || workflow.state !== "WAITING"
+    || workflow.candidate === undefined || workflow.verification?.candidateDigest !== workflow.candidate.digest
+    || workflow.verification.results.some((result) => result.status !== "PASS")) {
+    throw agentXError("CONFIG_INVALID", "independent review is available only after checks pass for the current candidate");
+  }
+  await actionableWorkspace(deps, task);
+  const receivedAt = iso(deps);
+  const candidateDigest = workflow.candidate.digest;
+  const next: WorkflowSnapshot = { ...workflow, revision: workflow.revision + 1, state: "RUNNING", updatedAt: receivedAt };
+  const prompt = `Perform the required read-only critic and security reviews for the task. The current verified candidate digest is ${candidateDigest}. Do not edit files. Reviewer findings must be concise and refer to code evidence. Owner note: ${request.instructions}`;
+  try {
+    await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, { requestId: request.requestId, conversationId: task.conversationId, prompt }, (operation) => [
+      { Update: {
+        TableName: deps.tableName, Key: taskKey(taskId),
+        UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+        ConditionExpression: "workflow.revision = :revision AND workflow.stage = :review AND workflow.state = :waiting AND workflow.candidate.digest = :candidate",
+        ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": workflow.revision, ":review": "REVIEW", ":waiting": "WAITING", ":candidate": candidateDigest },
+      } },
+      putNew(turnTable(deps), aiToolTurn({
+        party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
+        request: "Run independent candidate reviews", response: `Independent code and security reviews started as operation ${operation.id}.`, operationId: operation.id,
+      })),
+    ], { sharedTask: task.shared === true, workflowMode: "REVIEW" });
+  } catch (error) {
+    return busyOrClosing(deps, task, error);
+  }
+  const fresh = await loadOwnedTask(deps, caller, taskId);
+  const view = await taskView(deps, fresh, { events: 0, details: false });
+  await syncIndex(deps, fresh, view.status, view.updatedAt);
+  return { task: view };
+}
+
 async function decideTaskFeedback(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(WorkflowFeedbackDecisionRequestSchema, value, deps, "workflow-feedback-decision");
   const task = await loadOwnedTask(deps, caller, taskId);
@@ -1497,7 +1533,7 @@ export async function adminShareMode(deps: ShareModeDependencies, admin: ShareAd
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
   if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|workflow\/decision|workflow\/feedback-decision|workflow\/retry))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|workflow\/decision|workflow\/feedback-decision|workflow\/retry|workflow\/review))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
@@ -1505,6 +1541,7 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/decision") return decideTaskWorkflow(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/feedback-decision") return decideTaskFeedback(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/retry") return retryTaskWorkflow(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/review") return startTaskWorkflowReview(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "cancel") return cancelTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "close") return closeTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "pull-requests") return openPullRequest(deps, caller, taskId, body(request));

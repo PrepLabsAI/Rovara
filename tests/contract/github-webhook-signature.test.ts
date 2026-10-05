@@ -28,7 +28,7 @@ describe("GitHub webhook signature verification", () => {
       state: "WAITING" as const,
       candidate,
       verification: { candidateDigest: candidate.digest, producer: "agentx", environmentId: "ci", recordedAt: "2026-10-05T12:01:00.000Z", results: [{ checkId: "unit", status: "PASS" as const }] },
-      reviews: ["CRITIC", "SECURITY"].map((role) => ({ candidateDigest: candidate.digest, role: role as "CRITIC" | "SECURITY", provider: "reviewer", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:02:00.000Z" })),
+      reviews: ["CRITIC", "SECURITY"].map((role) => ({ operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role: role as "CRITIC" | "SECURITY", provider: "reviewer", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:02:00.000Z" })),
       pullRequests: [{ repositoryId: "demo", number: 42, url: "https://github.com/acme/demo/pull/42", candidateDigest: candidate.digest, required: true, state: "UNKNOWN" as const }],
     };
     const index = { pk: "GITHUB_PR#acme/demo", sk: "PR#0000000042", entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: "acme/demo", repositoryId: "demo", number: 42, url: "https://github.com/acme/demo/pull/42", taskId, workspaceId: "workspace-1", candidateDigest: candidate.digest };
@@ -53,7 +53,7 @@ describe("GitHub webhook signature verification", () => {
       ...createWorkflowSnapshot({ taskId, ownerId, now: "2026-10-05T12:00:00.000Z" }),
       stage: "PULL_REQUEST" as const, state: "READY" as const, candidate,
       verification: { candidateDigest: candidate.digest, producer: "agentx", environmentId: "ci", recordedAt: "2026-10-05T12:01:00.000Z", results: [{ checkId: "unit", status: "PASS" as const }] },
-      reviews: ["CRITIC", "SECURITY"].map((role) => ({ candidateDigest: candidate.digest, role: role as "CRITIC" | "SECURITY", provider: "reviewer", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:02:00.000Z" })),
+      reviews: ["CRITIC", "SECURITY"].map((role) => ({ operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role: role as "CRITIC" | "SECURITY", provider: "reviewer", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:02:00.000Z" })),
     };
     let workflow = recordExpectedWorkflowPullRequests(ready, [
       { repositoryId: "demo", number: 42, url: "https://github.com/acme/demo/pull/42", candidateDigest: candidate.digest, required: true },

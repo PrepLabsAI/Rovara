@@ -302,8 +302,8 @@ describe("Slack native workflow review controls", () => {
       ...workflow, revision: workflow.revision + 1, stage: "WAIT_FOR_MERGE", state: "WAITING", candidate,
       verification: { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: now, results: [{ checkId: "unit", status: "PASS" }] },
       reviews: [
-        { candidateDigest: candidate.digest, role: "CRITIC", provider: "scripted", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now },
-        { candidateDigest: candidate.digest, role: "SECURITY", provider: "scripted", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now },
+        { operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role: "CRITIC", provider: "scripted", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now },
+        { operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role: "SECURITY", provider: "scripted", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now },
       ],
       pullRequests: [{ repositoryId: "payments", number: 11, url: "https://github.com/acme/payments/pull/11", candidateDigest: candidate.digest, required: true, state: "OPEN", observedAt: now }],
     });

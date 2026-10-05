@@ -8,6 +8,7 @@ import { createWorkspacePiSession, type PiSessionAdapter, type PiSessionHandle, 
 export { parseWorkflowReviewerResponse };
 
 export async function runWorkflowReviews(input: {
+  operationId: string;
   rootPath: string;
   model: WorkspaceModelConfiguration;
   candidate: readonly CandidateRepository[];
@@ -103,6 +104,7 @@ export async function runWorkflowReviews(input: {
       parsed = { status: "UNKNOWN", findings: [] };
     }
     reports.push(WorkflowReviewReportSchema.parse({
+      operationId: input.operationId,
       candidateDigest: manifest.digest,
       role,
       provider,

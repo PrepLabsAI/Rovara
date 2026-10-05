@@ -45,7 +45,7 @@ export interface TaskInvocationResult {
   reopened: boolean;
   /** Spec 051 FR-007: AgentX's check of the agent's work, with outputs cut to fit (compactCheckReport). */
   checks?: CheckReport;
-  workflowMode?: "PLAN" | "IMPLEMENT";
+  workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW";
   /** Worker-reported Git object identities; the broker recomputes and stores the canonical digest. */
   workflowCandidateRepositories?: Array<{ repositoryId: string; commitSha: string; treeSha: string }>;
   /** Repository identities captured when the final successful check round ended. */
@@ -143,6 +143,7 @@ export async function runTaskInvocation(
   const verificationStop = new AbortController();
   const readiness = invocation.payload.readiness;
   const planning = invocation.payload.workflowMode === "PLAN";
+  const reviewing = invocation.payload.workflowMode === "REVIEW";
   const recorder = new CommandRecorder({
     fingerprint: (signal) => recorderFingerprint(
       manifest.repositories.map((repository) => ({ name: repository.name, directory: resolve(canonicalRoot, repository.path) })),
@@ -195,7 +196,7 @@ export async function runTaskInvocation(
         conversationId,
         sessionFile: registered.sessionFile,
         onDiagnostic,
-        extensionFactories: planning ? [] : [verification],
+        extensionFactories: planning || reviewing ? [] : [verification],
         ...(bashOperations === undefined ? {} : { bashOperations }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
       },
@@ -205,7 +206,7 @@ export async function runTaskInvocation(
     session = await createWorkspacePiSession(
       {
         rootPath: dependencies.rootPath, model: dependencies.model, workflowMode: invocation.payload.workflowMode ?? "IMPLEMENT", conversationId, onDiagnostic,
-        extensionFactories: planning ? [] : [verification],
+        extensionFactories: planning || reviewing ? [] : [verification],
         ...(bashOperations === undefined ? {} : { bashOperations }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
       },
@@ -350,6 +351,42 @@ export async function runTaskInvocation(
         outcome = "SUCCEEDED";
         await events.append("result", { status: "SUCCEEDED", conversationId, workflowMode: "PLAN" });
         taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "PLAN" };
+      } else if (reviewing) {
+        const repositories = manifest.repositories.map((repository) => ({
+          repositoryId: repository.name,
+          directory: resolve(canonicalRoot, repository.path),
+        }));
+        const beforeReview = createCandidateManifest(await readCandidateRepositories(repositories));
+        let reports = await runWorkflowReviews({
+          operationId: invocation.operationId,
+          rootPath: canonicalRoot,
+          model: session.getModel(),
+          candidate: beforeReview.repositories,
+          repositories,
+          signal: verificationStop.signal,
+          ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }),
+          onProgress: (message) => { void events.append("progress", { message }).catch(() => undefined); },
+          onUsage: async ({ role, stats, model, outcome }) => {
+            const usage = createTaskUsageTelemetry(stats, { ...model, ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) }, outcome);
+            const redactedUsage = redactCredentials(usage);
+            await events.append("usage", usageForControlPlane(redactedUsage, dependencies.model));
+            await dependencies.artifactSink({ name: `workflow-review-${role.toLowerCase()}-usage.json`, mediaType: "application/json", content: JSON.stringify(redactedUsage, null, 2) });
+          },
+        });
+        try {
+          const afterReview = createCandidateManifest(await readCandidateRepositories(repositories));
+          if (afterReview.digest !== beforeReview.digest) reports = reports.map((report) => ({ ...report, status: "UNKNOWN", findings: [] }));
+        } catch {
+          reports = reports.map((report) => ({ ...report, status: "UNKNOWN", findings: [] }));
+        }
+        await publishEvidence();
+        outcome = "SUCCEEDED";
+        await events.append("result", {
+          status: "SUCCEEDED", conversationId, workflowMode: "REVIEW",
+          workflowCandidateRepositories: beforeReview.repositories,
+          workflowReviews: reports,
+        });
+        taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "REVIEW", workflowCandidateRepositories: beforeReview.repositories, workflowReviews: reports };
       } else {
       diffAttempted = true;
       const { changed: dirty } = await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
@@ -377,35 +414,6 @@ export async function runTaskInvocation(
       const workflowCandidateRepositories = invocation.payload.workflowMode === "IMPLEMENT"
         ? await readCandidateRepositories(workflowRepositories)
         : undefined;
-      let workflowReviews: WorkflowReviewReport[] | undefined;
-      if (workflowCandidateRepositories !== undefined && checks.status === "verified") {
-        const candidate = createCandidateManifest(workflowCandidateRepositories as CandidateRepository[]);
-        const checkedCandidate = reportedChecksCandidate === undefined
-          ? undefined
-          : createCandidateManifest(reportedChecksCandidate);
-        if (checkedCandidate?.digest === candidate.digest) workflowReviews = await runWorkflowReviews({
-          rootPath: canonicalRoot,
-          model: session.getModel(),
-          candidate: candidate.repositories,
-          repositories: workflowRepositories,
-          signal: verificationStop.signal,
-          ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }),
-          onProgress: (message) => { void events.append("progress", { message }).catch(() => undefined); },
-          onUsage: async ({ role, stats, model, outcome }) => {
-            const usage = createTaskUsageTelemetry(stats, { ...model, ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) }, outcome);
-            const redactedUsage = redactCredentials(usage);
-            await events.append("usage", usageForControlPlane(redactedUsage, dependencies.model));
-            await dependencies.artifactSink({ name: `workflow-review-${role.toLowerCase()}-usage.json`, mediaType: "application/json", content: JSON.stringify(redactedUsage, null, 2) });
-          },
-        });
-        else workflowReviews = [];
-        try {
-          const afterReviews = createCandidateManifest(await readCandidateRepositories(workflowRepositories));
-          if (afterReviews.digest !== candidate.digest) workflowReviews = workflowReviews.map((report) => ({ ...report, status: "UNKNOWN", findings: [] }));
-        } catch {
-          workflowReviews = workflowReviews.map((report) => ({ ...report, status: "UNKNOWN", findings: [] }));
-        }
-      }
       await events.append("result", {
         status: "SUCCEEDED",
         conversationId,
@@ -413,13 +421,11 @@ export async function runTaskInvocation(
         checks,
         ...(workflowCandidateRepositories === undefined ? {} : { workflowCandidateRepositories }),
         ...(workflowCandidateRepositories === undefined || reportedChecksCandidate === undefined ? {} : { workflowCheckCandidateRepositories: reportedChecksCandidate }),
-        ...(workflowReviews === undefined ? {} : { workflowReviews }),
       });
       taskResult = {
         conversationId, reopened: registered !== undefined, checks,
         ...(workflowCandidateRepositories === undefined ? {} : { workflowCandidateRepositories }),
         ...(workflowCandidateRepositories === undefined || reportedChecksCandidate === undefined ? {} : { workflowCheckCandidateRepositories: reportedChecksCandidate }),
-        ...(workflowReviews === undefined ? {} : { workflowReviews }),
       };
       }
     } catch (error) {

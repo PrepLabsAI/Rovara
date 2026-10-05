@@ -19,6 +19,7 @@ describe("workflow-mode worker invocation", () => {
   it("accepts the broker-selected read-only planning mode and the post-approval coding mode", () => {
     expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode: "PLAN" } }).success).toBe(true);
     expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode: "IMPLEMENT" } }).success).toBe(true);
+    expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode: "REVIEW" } }).success).toBe(true);
   });
 
   it("keeps legacy task payloads valid and rejects unknown modes", () => {

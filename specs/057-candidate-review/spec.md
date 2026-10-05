@@ -41,7 +41,9 @@ and confirm it is denied; interrupt one reviewer and confirm the stage stays unr
 - **FR-003:** Any candidate or material test-plan change MUST invalidate dependent check results,
   reviewer reports, and approvals and return the workflow to the earliest affected stage.
 - **FR-004:** Critic and security reviewers MUST be separate, read-only executions over the exact
-  candidate. Reviewer output MUST be labelled as a claim and MUST NOT qualify itself as evidence.
+  candidate, in a separate broker-issued review operation from implementation. The broker MUST
+  bind each report to that operation and the exact candidate. Reviewer output MUST be labelled as a
+  claim and MUST NOT qualify itself as evidence.
 - **FR-005:** A review is `PASS`, `FINDINGS`, `FAILED`, `INTERRUPTED`, or `UNKNOWN`; missing,
   timed-out, interrupted, stale, or malformed output MUST NOT count as pass.
 - **FR-006:** A required failed check or blocking review finding MUST prevent `PULL_REQUEST_READY`;

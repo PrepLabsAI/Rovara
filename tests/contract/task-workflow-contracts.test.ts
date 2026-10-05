@@ -75,11 +75,13 @@ describe("native task workflow contracts", () => {
     }, "2026-10-05T12:03:00.000Z")).toThrow(WorkflowTransitionError);
 
     const criticReviewed = submitWorkflowReview(reviewed, {
+      operationId: "11111111-1111-4111-8111-111111111111",
       candidateDigest: candidate.digest, role: "CRITIC", provider: "scripted", version: "1",
       status: "PASS", findings: [], readOnly: true, recordedAt: "2026-10-05T12:03:00.000Z",
     }, "2026-10-05T12:03:00.000Z");
     expect(criticReviewed).toMatchObject({ stage: "REVIEW", state: "WAITING" });
     const ready = submitWorkflowReview(criticReviewed, {
+      operationId: "11111111-1111-4111-8111-111111111111",
       candidateDigest: candidate.digest, role: "SECURITY", provider: "scripted", version: "1",
       status: "PASS", findings: [], readOnly: true, recordedAt: "2026-10-05T12:04:00.000Z",
     }, "2026-10-05T12:04:00.000Z");
@@ -114,8 +116,8 @@ describe("native task workflow contracts", () => {
       candidate,
       verification: { candidateDigest, producer: "agentx-broker", environmentId: "ci", recordedAt: "2026-10-05T12:01:00.000Z", results: [{ checkId: "unit", status: "PASS" as const }] },
       reviews: [
-        { candidateDigest, role: "CRITIC" as const, provider: "scripted", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:02:00.000Z" },
-        { candidateDigest, role: "SECURITY" as const, provider: "scripted", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:03:00.000Z" },
+        { operationId: "11111111-1111-4111-8111-111111111111", candidateDigest, role: "CRITIC" as const, provider: "scripted", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:02:00.000Z" },
+        { operationId: "11111111-1111-4111-8111-111111111111", candidateDigest, role: "SECURITY" as const, provider: "scripted", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:03:00.000Z" },
       ],
     };
     const waiting = recordExpectedWorkflowPullRequests(current, [
@@ -149,8 +151,8 @@ describe("native task workflow contracts", () => {
       candidate,
       verification: { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: "2026-10-05T12:01:00.000Z", results: [{ checkId: "unit", status: "PASS" as const }] },
       reviews: [
-        { candidateDigest: candidate.digest, role: "CRITIC" as const, provider: "scripted", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:02:00.000Z" },
-        { candidateDigest: candidate.digest, role: "SECURITY" as const, provider: "scripted", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:03:00.000Z" },
+        { operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role: "CRITIC" as const, provider: "scripted", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:02:00.000Z" },
+        { operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role: "SECURITY" as const, provider: "scripted", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:03:00.000Z" },
       ],
     };
     const waiting = recordExpectedWorkflowPullRequests(ready, [
@@ -198,8 +200,8 @@ describe("native task workflow contracts", () => {
       candidate,
       verification: { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "ci", recordedAt: "2026-10-05T12:01:00.000Z", results: [{ checkId: "unit", status: "PASS" as const }] },
       reviews: [
-        { candidateDigest: candidate.digest, role: "CRITIC" as const, provider: "scripted", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:02:00.000Z" },
-        { candidateDigest: candidate.digest, role: "SECURITY" as const, provider: "scripted", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:03:00.000Z" },
+        { operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role: "CRITIC" as const, provider: "scripted", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:02:00.000Z" },
+        { operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role: "SECURITY" as const, provider: "scripted", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:03:00.000Z" },
       ],
     };
     const first = registerWorkflowPullRequest(current, {

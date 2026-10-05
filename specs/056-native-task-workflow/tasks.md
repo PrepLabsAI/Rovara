@@ -24,8 +24,10 @@
   thread, show plan approve/change controls, and collect optional project-approved checks in a modal.
   Broker transitions recheck the Slack task owner, exact thread, plan revision and digest.
 - [ ] 9. Extend the sample flow through independent candidate checks, read-only review, PR-ready
-  state and GitHub reconciliation. Candidate-bound checks and read-only review now reach PR-ready
-  and start PR creation locally; GitHub webhook ingress and merge reconciliation remain open.
+  state and GitHub reconciliation. Candidate-bound checks complete locally. Review reports now
+  require a separate owner-authorized REVIEW operation and are bound to that operation and
+  candidate; the Slack/MCP review controls, automatic review scheduling, GitHub webhook ingress and
+  merge reconciliation remain open.
 - [ ] 10. Run the full repository suite and interruption/recovery matrix. The TypeScript build and
   focused GitHub webhook tests pass under Node 24.19.0, outside the declared Node 22.19.0 range.
   The full suite under Node 24.19.0 ended with 48 failed files and sandbox permission errors; Node

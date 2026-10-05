@@ -80,6 +80,7 @@ describe("workflow reviewer output", () => {
       const repositories = [{ repositoryId: "payments", directory: repositoryDirectory }];
       const candidate = await readCandidateRepositories(repositories);
       const reports = await runWorkflowReviews({
+        operationId: "11111111-1111-4111-8111-111111111111",
         rootPath,
         model: { provider: "test", modelId: "review-v1" },
         candidate,
@@ -98,11 +99,13 @@ describe("workflow reviewer output", () => {
       expect(usage).toEqual([{ role: "CRITIC", outcome: "SUCCEEDED" }, { role: "SECURITY", outcome: "SUCCEEDED" }]);
 
       const timeoutReports = await runWorkflowReviews({
+        operationId: "11111111-1111-4111-8111-111111111111",
         rootPath, model: { provider: "test", modelId: "review-v1" }, candidate, repositories,
         piAdapter: reviewerAdapter(() => new Promise(() => undefined)), timeoutMs: 5,
       });
       expect(timeoutReports.map((report) => report.status)).toEqual(["UNKNOWN", "UNKNOWN"]);
       const unresponsiveAbortReports = await runWorkflowReviews({
+        operationId: "11111111-1111-4111-8111-111111111111",
         rootPath, model: { provider: "test", modelId: "review-v1" }, candidate, repositories,
         piAdapter: reviewerAdapter(() => new Promise(() => undefined), () => new Promise(() => undefined)), timeoutMs: 5,
       });
@@ -113,6 +116,7 @@ describe("workflow reviewer output", () => {
       const reviewStarted = new Promise<void>((resolve) => { started = resolve; });
       let abortCalls = 0;
       const interrupted = runWorkflowReviews({
+        operationId: "11111111-1111-4111-8111-111111111111",
         rootPath, model: { provider: "test", modelId: "review-v1" }, candidate, repositories,
         piAdapter: reviewerAdapter(async () => { started(); await new Promise(() => undefined); }, () => { abortCalls += 1; }),
         signal: interruption.signal, timeoutMs: 60_000,

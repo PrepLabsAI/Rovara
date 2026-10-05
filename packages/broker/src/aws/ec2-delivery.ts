@@ -103,6 +103,9 @@ async function forWorker(
   if (carriesWorkflowMode && !features.includes("task.workflowMode")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "AgentX workflow mode requires a compatible worker that advertises the read-only tool boundary");
   }
+  if (invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW" && !features.includes("task.workflowReview")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "independent workflow review requires a compatible worker");
+  }
   const reason = workerFeatures === undefined ? "no-probe" : "worker-lacks-feature";
   const leveled = withoutUnparsedFields(invocation, features);
   if (leveled !== invocation) {

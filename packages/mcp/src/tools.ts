@@ -457,6 +457,19 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     },
   },
   {
+    name: "agentx_review_workflow_candidate",
+    title: "Run independent code and security reviews",
+    description: "Starts a separate read-only review operation after checks pass. It reviews the current candidate and cannot edit it. Use only when agentx_get_task shows stage REVIEW and state WAITING.",
+    inputSchema: { task_id: taskIdInput, request_id: requestIdInput, instructions: instructionsInput },
+    outputSchema: ActionShape,
+    async handler(context, input, call) {
+      const instructions = input.instructions as string;
+      const id = requestIdFor(context, call, input, ["agentx_review_workflow_candidate", input.task_id, instructions]);
+      const task = await context.client.startWorkflowReviewTask(input.task_id as string, { requestId: id, instructions });
+      return afterAction(context, call, "agentx_review_workflow_candidate", task, 0, id);
+    },
+  },
+  {
     name: "agentx_retry_workflow",
     title: "Retry a blocked AgentX plan",
     description: "Restarts a blocked planning stage using the instructions you provide. AgentX keeps this run read-only. Use it after agentx_get_task shows a blocked PLAN stage; the operation starts again only if the workspace is ready.",

@@ -2624,7 +2624,7 @@ async function createConversation(
 async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; workflowMode?: "PLAN" | "IMPLEMENT"; readiness?: ProjectCommand[] },
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW"; readiness?: ProjectCommand[] },
   now: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -2649,7 +2649,9 @@ async function taskOperationParts(
   // 25c note 1: the hash above is the request's own; only the worker's copy gets the re-read line.
   const selectedPrompt = input.workflowMode === "PLAN"
     ? `Planning phase only. Do not edit, write, or create files. Inspect the request and repository. Return a short, plain-language plan (at most 180 words) with only these headings: Goal; What will change; Checks; Risks or questions. Name the relevant files or areas and exact checks where known. Include only material risks or genuine unanswered questions. Avoid generic introductions, repeated context, filler, and boilerplate conclusions. This plan will be shown as a linked detail page; the Slack message will contain only a short summary. A person must approve this exact plan before any code changes.\n\nRequest:\n${input.prompt}`
-    : input.prompt;
+    : input.workflowMode === "REVIEW"
+      ? `Review the current code read-only for the current task. Do not edit files or run commands that modify the workspace. Return concise critic and security review findings. The broker will bind your reports to this operation and candidate.\n\n${input.prompt}`
+      : input.prompt;
   const prompt = workerPrompt(selectedPrompt, input.shared === true);
   if (input.shared === true && prompt === input.prompt) {
     console.log(JSON.stringify({ component: "broker", event: "developer.shared_reread_omitted", operationId }));
@@ -2683,7 +2685,7 @@ async function acceptTask(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
-  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT"; readiness?: ProjectCommand[] } = {},
+  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW"; readiness?: ProjectCommand[] } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
@@ -4415,18 +4417,28 @@ async function completedWorkflowItems(
           },
           now,
         });
-        if (next.stage === "REVIEW" && Array.isArray(reported.workflowReviews)) {
-          for (const review of reported.workflowReviews) {
-            try {
-              next = submitWorkflowReview(next, review, now);
-            } catch {
-              next = blockWorkflow(next, "a candidate review report was invalid or stale", now);
-              break;
-            }
-          }
-        }
       } catch {
         next = blockWorkflow(verifying, "implementation finished without complete candidate-bound check evidence", now);
+      }
+    }
+  } else if (operation.workflowMode === "REVIEW") {
+    if (terminalStatus !== "SUCCEEDED") {
+      next = blockWorkflow(task.workflow, `independent review operation ended ${terminalStatus.toLowerCase()}`, now);
+    } else {
+      const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
+      const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];
+      const reviews = Array.isArray(reported.workflowReviews) ? reported.workflowReviews : [];
+      try {
+        const candidate = createCandidateManifest(repositories as CandidateRepository[]);
+        if (task.workflow.stage !== "REVIEW" || task.workflow.candidate?.digest !== candidate.digest
+          || reviews.length !== 2
+          || reviews.some((review) => review === null || typeof review !== "object" || (review as Record<string, unknown>).operationId !== operation.id)) {
+          throw new Error("review result is stale, incomplete, or came from another operation");
+        }
+        next = task.workflow;
+        for (const review of reviews) next = submitWorkflowReview(next, review, now);
+      } catch {
+        next = blockWorkflow(task.workflow, "independent candidate review was invalid, incomplete, or stale", now);
       }
     }
   } else if (task.workflow.stage !== "PLAN") {

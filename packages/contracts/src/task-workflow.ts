@@ -41,6 +41,7 @@ const VerificationResultsSchema = z.object({
 export type WorkflowVerificationResults = z.infer<typeof VerificationResultsSchema>;
 
 export const WorkflowReviewReportSchema = z.object({
+  operationId: z.string().uuid(),
   candidateDigest: DigestSchema,
   role: z.enum(["CRITIC", "SECURITY"]),
   provider: z.string().trim().min(1).max(120),

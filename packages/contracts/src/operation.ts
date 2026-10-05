@@ -204,7 +204,7 @@ export const OperationSchema = z
     conversationId: z.string().uuid().optional(),
     kind: OperationKindSchema,
     /** Server-selected task mode; absent on legacy operations and non-task operations. */
-    workflowMode: z.enum(["PLAN", "IMPLEMENT"]).optional(),
+    workflowMode: z.enum(["PLAN", "IMPLEMENT", "REVIEW"]).optional(),
     requestId: z.string().uuid(),
     payloadHash: z.string().regex(/^[a-f0-9]{64}$/),
     status: OperationStatusSchema,
