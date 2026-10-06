@@ -5,6 +5,7 @@ import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import { AccessStack } from "./access.js";
 import { ControlPlaneStack } from "./control-plane.js";
 import { IdentityStack } from "./identity.js";
+import { InstallerStack } from "./installer.js";
 import { namingFromContext } from "./naming.js";
 import { applyPermissionsBoundaryParameter } from "./permissions-boundary.js";
 import { ProductionFoundationStack } from "./production-foundation.js";
@@ -154,6 +155,14 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
     naming,
     ...(naming.env === undefined ? {} : { stackName: naming.stackName("slack") }),
   });
+  // The Launch in AWS installer, only when asked for (-c agentxInstaller=enabled); no release
+  // deploys it, and the environment it installs is never part of it.
+  if (app.node.tryGetContext("agentxInstaller") === "enabled") {
+    new InstallerStack(app, "AgentXInstaller", {
+      description: "AgentX installer: installs an AgentX environment from its setup page, with no terminal",
+      env: { region: deploymentRegion ?? "us-east-1" },
+    });
+  }
   // Spec 043: the SWE-bench eval stack, only when asked for; no release deploys it.
   if (app.node.tryGetContext("agentxEval") === "enabled") {
     new SwebenchEvalStack(app, "AgentXEval", {
