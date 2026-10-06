@@ -7524,7 +7524,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
     },
     "GitHubConnectionArn": {
       "AllowedPattern": "^arn:aws(-[a-z]+)?:(codeconnections|codestar-connections):[a-z0-9-]+:[0-9]{12}:connection/[0-9a-f-]{36}$",
-      "Description": "Authorized CodeConnections GitHub connection for PrepLabsAI/AgentX",
+      "Description": "Authorized CodeConnections GitHub connection for PrepLabsAI/Rovara",
       "Type": "String",
     },
   },
@@ -7643,7 +7643,7 @@ exports[`legacy production templates > AgentXReleasePipeline is unchanged 1`] = 
                   "ConnectionArn": {
                     "Ref": "GitHubConnectionArn",
                   },
-                  "FullRepositoryId": "PrepLabsAI/AgentX",
+                  "FullRepositoryId": "PrepLabsAI/Rovara",
                   "OutputArtifactFormat": "CODEBUILD_CLONE_REF",
                 },
                 "Name": "GitHub",
