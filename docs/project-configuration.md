@@ -66,7 +66,7 @@ worker image.
 | `path` | Where the repository is checked out, relative to the workspace root. Paths may not overlap. |
 | `defaultBranch` | The branch pull requests target. |
 | `credentialRef` | The GitHub App credential reference configured on the control plane. The file never holds a key or token. |
-| `codeBuildGates` | Optional. Up to 8 CodeBuild gates, each with a `name`, a `projectName` matching the deployment's allowed prefix, and `timeoutMinutes` from 5 to 420. The total timeout per repository is at most 420 minutes. See [Configure CodeBuild gates](../README.md#configure-codebuild-gates). |
+| `codeBuildGates` | Optional. Up to 8 CodeBuild gates, each with a `name`, a `projectName` matching the deployment's allowed prefix, and `timeoutMinutes` from 5 to 420. The total timeout per repository is at most 420 minutes. See [Configure CodeBuild gates](pull-requests.md#configure-codebuild-gates). |
 
 ### Commands
 
@@ -167,7 +167,7 @@ names its type (`github`, `linear`, `jira`, `asana`, or `mcp` for any other MCP 
 is offered. A `github` connector's `scopes` is `all-repositories` or a list of registered
 repository names. Setup and examples for each vendor:
 
-- [GitHub MCP through hosted Slack](../README.md#github-mcp-through-hosted-slack)
+- [GitHub MCP through hosted Slack](slack.md#github-mcp-through-hosted-slack)
 - [Linear](connectors/linear.md)
 - [Jira](connectors/jira.md)
 - [Asana](connectors/asana.md)
@@ -187,7 +187,7 @@ Up to 64 rules. Each rule has a `tool` pattern (letters, digits, `_`, `-` and at
 an optional `connector` and `whenArguments`, a `reason`, and exactly one of `outcome` (`allow`,
 `ask` or `deny`) or `treatAs` (`read`, `create`, `change` or `destructive`). How rules combine
 with AgentX's built-in confirmations is described in
-[Actions that need your confirmation](../README.md#actions-that-need-your-confirmation).
+[Actions that need your confirmation](slack.md#actions-that-need-your-confirmation).
 
 ### Developer tasks
 
@@ -405,7 +405,7 @@ a draft, because any failing check there does.
 
 Registration needs the deployment's worker settings as well as the file (deployment mode, launch
 template and subnets). The full command, and the channel binding that follows it, are in
-[Register a project and bind its Slack channel](../README.md#2-register-a-project-and-bind-its-slack-channel).
+[Register a project and bind its Slack channel](administration.md#2-register-a-project-and-bind-its-slack-channel).
 For an environment installed with `agentx init`, add `--env <name>` to each command. The channel
 binding names only the project, so a newly registered revision reaches every new thread without
 binding again.
