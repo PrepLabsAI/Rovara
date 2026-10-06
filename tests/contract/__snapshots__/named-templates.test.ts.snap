@@ -247,37 +247,15 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
                 },
                 {
                   "Action": [
-                    "events:DeleteRule",
-                    "events:DescribeRule",
-                    "events:DisableRule",
-                    "events:EnableRule",
-                    "events:ListTagsForResource",
-                    "events:ListTargetsByRule",
-                    "events:PutRule",
-                    "events:PutTargets",
-                    "events:RemoveTargets",
-                    "events:TagResource",
-                    "events:UntagResource",
+                    "events:*",
                   ],
                   "Effect": "Allow",
                   "Resource": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "arn:",
-                        {
-                          "Ref": "AWS::Partition",
-                        },
-                        ":events:",
-                        {
-                          "Ref": "AWS::Region",
-                        },
-                        ":",
-                        {
-                          "Ref": "AWS::AccountId",
-                        },
-                        ":rule/agentx-staging-*-service-failures",
-                      ],
+                    "Fn::Sub": [
+                      "arn:\${AWS::Partition}:events:\${AWS::Region}:\${AWS::AccountId}:rule/agentx-\${Environment}-*-service-failures",
+                      {
+                        "Environment": "staging",
+                      },
                     ],
                   },
                   "Sid": "EcsFailureEventsRule",
@@ -551,37 +529,15 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
             },
             {
               "Action": [
-                "events:DeleteRule",
-                "events:DescribeRule",
-                "events:DisableRule",
-                "events:EnableRule",
-                "events:ListTagsForResource",
-                "events:ListTargetsByRule",
-                "events:PutRule",
-                "events:PutTargets",
-                "events:RemoveTargets",
-                "events:TagResource",
-                "events:UntagResource",
+                "events:*",
               ],
               "Effect": "Allow",
               "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
-                    },
-                    ":events:",
-                    {
-                      "Ref": "AWS::Region",
-                    },
-                    ":",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":rule/agentx-staging-*-service-failures",
-                  ],
+                "Fn::Sub": [
+                  "arn:\${AWS::Partition}:events:\${AWS::Region}:\${AWS::AccountId}:rule/agentx-\${Environment}-*-service-failures",
+                  {
+                    "Environment": "staging",
+                  },
                 ],
               },
               "Sid": "EcsFailureEventsRule",
@@ -985,33 +941,6 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
                     },
                   ],
                   "Sid": "Stacks",
-                },
-                {
-                  "Action": [
-                    "cloudformation:DescribeEvents",
-                  ],
-                  "Effect": "Allow",
-                  "Resource": {
-                    "Fn::Join": [
-                      "",
-                      [
-                        "arn:",
-                        {
-                          "Ref": "AWS::Partition",
-                        },
-                        ":cloudformation:",
-                        {
-                          "Ref": "AWS::Region",
-                        },
-                        ":",
-                        {
-                          "Ref": "AWS::AccountId",
-                        },
-                        ":changeSet/agentx-*/*",
-                      ],
-                    ],
-                  },
-                  "Sid": "ChangeSetEvents",
                 },
                 {
                   "Action": [

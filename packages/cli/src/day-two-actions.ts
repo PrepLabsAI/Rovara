@@ -32,7 +32,7 @@ export const DOCTOR_AWS_ACTIONS: readonly string[] = [
 export const UPGRADE_AWS_ACTIONS: readonly string[] = [
   "sts:GetCallerIdentity",
   "ssm:GetParameter", "ssm:PutParameter", "ssm:DeleteParameter", "ssm:GetParametersByPath",
-  "cloudformation:DescribeStacks", "cloudformation:DescribeStackEvents", "cloudformation:DescribeEvents", "cloudformation:GetTemplate",
+  "cloudformation:DescribeStacks", "cloudformation:DescribeStackEvents", "cloudformation:GetTemplate",
   "cloudformation:CreateChangeSet", "cloudformation:DescribeChangeSet", "cloudformation:ExecuteChangeSet", "cloudformation:DeleteChangeSet",
   "cloudformation:UpdateTerminationProtection", "iam:PassRole",
   "s3:GetObject", "s3:PutObject",

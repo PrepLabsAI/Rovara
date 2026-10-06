@@ -134,7 +134,7 @@ describe("access stack", () => {
     expect(allowedServices.has("iam")).toBe(false);
     // The service role creates resources of these services, and the roles call them.
     const neededServices = new Set([...resourceTypeServices(), ...Object.values(MANAGED_POLICY_SERVICES).flat().filter((s) => s !== "iam")]);
-    expect([...neededServices].filter((service) => !allowedServices.has(service) && !(service === "events" && allowed.has("events:DescribeRule")))).toEqual([]);
+    expect([...neededServices].filter((service) => !allowedServices.has(service) && !(service === "events" && allowed.has("events:*")))).toEqual([]);
     // Every action a role uses is allowed by its service's wildcard or by name (IAM, STS and
     // Service Quotas only by name: servicequotas:GetServiceQuota is the operator's one scoped
     // quota read, never servicequotas:*).

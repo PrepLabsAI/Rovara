@@ -20,7 +20,7 @@ describe("service role policy", () => {
     expect(statement).toEqual({
       Sid: "EcsFailureEventsRule",
       Effect: "Allow",
-      Action: ["events:DeleteRule", "events:DescribeRule", "events:DisableRule", "events:EnableRule", "events:ListTagsForResource", "events:ListTargetsByRule", "events:PutRule", "events:PutTargets", "events:RemoveTargets", "events:TagResource", "events:UntagResource"],
+      Action: ["events:*"],
       Resource: "arn:aws:events:us-east-1:123456789012:rule/agentx-staging-*-service-failures",
     });
   });
@@ -239,7 +239,7 @@ describe("default permission boundary", () => {
     expect(allows.find((s) => s.Sid === "EcsFailureEventsRule")).toEqual({
       Sid: "EcsFailureEventsRule",
       Effect: "Allow",
-      Action: ["events:DeleteRule", "events:DescribeRule", "events:DisableRule", "events:EnableRule", "events:ListTagsForResource", "events:ListTargetsByRule", "events:PutRule", "events:PutTargets", "events:RemoveTargets", "events:TagResource", "events:UntagResource"],
+      Action: ["events:*"],
       Resource: "arn:aws:events:us-east-1:123456789012:rule/agentx-staging-*-service-failures",
     });
     expect(allows.find((s) => s.Sid === "Services")!.Action).not.toContain("events:*");
