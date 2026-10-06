@@ -34,7 +34,7 @@ jobs:
       worker: ${{ steps.push.outputs.worker }}
       slack: ${{ steps.push.outputs.slack }}
     steps:
-      # AGENTX_PUBLISH_ROLE_ARN's trust policy only allows repo:PrepLabsAI/AgentX:ref:refs/tags/v*,
+      # AGENTX_PUBLISH_ROLE_ARN's trust policy only allows this repository's v* tags (by immutable ID),
       # so a workflow_dispatch run must be re-run from the tag ref itself; fail clearly here instead
       # of letting configure-aws-credentials fail later with an opaque AssumeRoleWithWebIdentity
       # error. GITHUB_REF/GITHUB_REF_NAME are the runner's own default environment variables, read
@@ -169,7 +169,6 @@ jobs:
             echo "$NAME@$VERSION is already published; skipping npm publish"
             exit 0
           fi
-          # PrepLabsAI/AgentX is private today, and npm provenance attestation fails for private
-          # repositories, so the provenance flag stays off here. Trusted publishing adds it
-          # automatically once the repo is public; nothing here needs to change when that happens.
+          # No provenance flag needed: npm trusted publishing adds provenance automatically for
+          # this public repository.
           npm publish "$RUNNER_TEMP"/cli/*.tgz --access public

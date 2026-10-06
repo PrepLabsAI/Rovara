@@ -131,8 +131,8 @@ function github(files: Record<string, Buffer | string>): typeof fetch & { reques
 describe("fetching the release for this CLI", () => {
   it("names the GitHub release assets", () => {
     expect(releaseAssetUrls("1.2.3")).toEqual({
-      tarball: "https://github.com/PrepLabsAI/AgentX/releases/download/v1.2.3/agentx-1.2.3.tar.gz",
-      manifest: "https://github.com/PrepLabsAI/AgentX/releases/download/v1.2.3/release.json",
+      tarball: "https://github.com/PrepLabsAI/Rovara/releases/download/v1.2.3/agentx-1.2.3.tar.gz",
+      manifest: "https://github.com/PrepLabsAI/Rovara/releases/download/v1.2.3/release.json",
     });
   });
 
@@ -248,7 +248,7 @@ describe("fetching the release for this CLI", () => {
 
   it("names the address when the release is not published", async () => {
     await expect(fetchRelease({ version: "9.9.9", home: await tmp("agentx-home-"), fetch: github({}), runner, write: () => undefined }))
-      .rejects.toThrow("release 9.9.9 was not found at https://github.com/PrepLabsAI/AgentX/releases/download/v9.9.9/release.json; check the version is published, or pass --release <dir>");
+      .rejects.toThrow("release 9.9.9 was not found at https://github.com/PrepLabsAI/Rovara/releases/download/v9.9.9/release.json; check the version is published, or pass --release <dir>");
   });
 
   // Issue 152 replaces live check L7's refusal: --engine cdk --source now needs no release at all
@@ -346,7 +346,7 @@ describe("sourceRelease (issue 152)", () => {
   it("refuses when the tag has no published release.json and an image flag is missing, naming both flags", async () => {
     const error = await sourceRelease({ runner: tagged, source: "/src", fetch: github({}) }).catch((caught: unknown) => caught);
     expect(error).toBeInstanceOf(AgentXError);
-    expect((error as Error).message).toContain("release 1.4.0 has no published release.json at https://github.com/PrepLabsAI/AgentX/releases/download/v1.4.0/release.json, so its images are unknown; pass --worker-image and --slack-image, or --release <dir>");
+    expect((error as Error).message).toContain("release 1.4.0 has no published release.json at https://github.com/PrepLabsAI/Rovara/releases/download/v1.4.0/release.json, so its images are unknown; pass --worker-image and --slack-image, or --release <dir>");
   });
 
   it("with missingReleaseJson allow, goes on with no images and no region list when the tag has no release.json (review I2)", async () => {

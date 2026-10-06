@@ -48,7 +48,7 @@ describe("GitHub App manifest", () => {
   it("asks for exactly the permissions AgentX uses, no webhook and no events", () => {
     expect(githubAppManifest({ appName: "AgentX acme (staging)", redirectUrl: "http://127.0.0.1:50123/github/created" })).toEqual({
       name: "AgentX acme (staging)",
-      url: "https://github.com/PrepLabsAI/AgentX",
+      url: "https://github.com/PrepLabsAI/Rovara",
       redirect_url: "http://127.0.0.1:50123/github/created",
       public: false,
       default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },

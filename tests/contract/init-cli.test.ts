@@ -672,7 +672,7 @@ describe("agentx init", () => {
     const WORKER = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx/worker@sha256:${"d".repeat(64)}`;
     const SLACK_IMAGE = `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx/slack@sha256:${"e".repeat(64)}`;
     const IMAGES = ["--worker-image", WORKER, "--slack-image", SLACK_IMAGE];
-    const MANIFEST_URL = "https://github.com/PrepLabsAI/AgentX/releases/download/v1.4.0/release.json";
+    const MANIFEST_URL = "https://github.com/PrepLabsAI/Rovara/releases/download/v1.4.0/release.json";
     /** A clean checkout at tag v1.4.0. */
     const taggedSource = { async run(_command: string, args: string[]) {
       if (args[0] === "status") return { stdout: "" };
@@ -684,7 +684,7 @@ describe("agentx init", () => {
       const requested: string[] = [];
       const handler = async (url: Parameters<typeof fetch>[0], init?: RequestInit) => {
         const target = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
-        if (!target.startsWith("https://github.com/PrepLabsAI/AgentX/releases/")) return inner(url, init);
+        if (!target.startsWith("https://github.com/PrepLabsAI/Rovara/releases/")) return inner(url, init);
         requested.push(target);
         return target === MANIFEST_URL && manifest !== undefined ? new Response(manifest, { status: 200 }) : new Response("Not Found", { status: 404 });
       };

@@ -13,7 +13,7 @@ import { operatorStop } from "./stop.js";
 import { githubCard, type GitHubCardInput } from "./ui/cards.js";
 import { STEP_PLAN } from "./ui/journey.js";
 
-export const AGENTX_HOMEPAGE = "https://github.com/PrepLabsAI/AgentX";
+export const AGENTX_HOMEPAGE = "https://github.com/PrepLabsAI/Rovara";
 export const GITHUB_WAIT_MS = 15 * 60 * 1000;
 const POLL_MS = 5_000;
 /** An installation token is renewed this long before it expires. */

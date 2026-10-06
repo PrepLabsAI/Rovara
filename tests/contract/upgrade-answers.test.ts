@@ -99,11 +99,11 @@ describe("the target release", () => {
 
   it("reads the release's notes from GitHub, and says where to look when it cannot", async () => {
     const fetched: string[] = [];
-    const notes = await releaseNotes({ version: "1.3.0", fetch: (async (url: string) => { fetched.push(url); return new Response(JSON.stringify({ body: "Fixes.\nMore fixes.", html_url: "https://github.com/PrepLabsAI/AgentX/releases/tag/v1.3.0" }), { status: 200 }); }) as never });
-    expect(fetched).toEqual(["https://api.github.com/repos/PrepLabsAI/AgentX/releases/tags/v1.3.0"]);
+    const notes = await releaseNotes({ version: "1.3.0", fetch: (async (url: string) => { fetched.push(url); return new Response(JSON.stringify({ body: "Fixes.\nMore fixes.", html_url: "https://github.com/PrepLabsAI/Rovara/releases/tag/v1.3.0" }), { status: 200 }); }) as never });
+    expect(fetched).toEqual(["https://api.github.com/repos/PrepLabsAI/Rovara/releases/tags/v1.3.0"]);
     expect(notesText(notes, "1.3.0")).toBe("Release notes for 1.3.0:\n  Fixes.\n  More fixes.");
     expect(await releaseNotes({ version: "1.3.0", fetch: async () => new Response("", { status: 404 }) })).toBeUndefined();
-    expect(notesText(undefined, "1.3.0")).toBe("No release notes could be read for 1.3.0; see https://github.com/PrepLabsAI/AgentX/releases/tag/v1.3.0");
+    expect(notesText(undefined, "1.3.0")).toBe("No release notes could be read for 1.3.0; see https://github.com/PrepLabsAI/Rovara/releases/tag/v1.3.0");
   });
 
   it("strips control characters from the notes, keeping lines, and says so plainly when they are empty", () => {

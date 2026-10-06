@@ -144,7 +144,7 @@ describe("release workflow", () => {
   it("refuses to run the images job's publishing steps unless the ref is a version tag matching vX.Y.Z", async () => {
     const wf = await workflow();
     const steps = wf.jobs.images!.steps;
-    // The publish role's trust policy only allows repo:PrepLabsAI/AgentX:ref:refs/tags/v*, so a
+    // The publish role's trust policy only allows this repository's v* tags, so a
     // workflow_dispatch run started from a branch would otherwise fail deep inside
     // configure-aws-credentials with an opaque AssumeRoleWithWebIdentity error. Guard first, and
     // fail clearly, before checkout or any AWS action runs. GITHUB_REF/GITHUB_REF_NAME are the
@@ -182,7 +182,7 @@ describe("release workflow", () => {
     expect(credentialsIndex).toBeGreaterThan(guardIndex);
   });
 
-  it("publishes npm with trusted publishing (OIDC): no stored token, npm upgraded to 11 first, no --provenance (private repo)", async () => {
+  it("publishes npm with trusted publishing (OIDC): no stored token, npm upgraded to 11 first, no --provenance flag (trusted publishing adds it)", async () => {
     const text = await workflowText();
     expect(text).not.toMatch(/NPM_TOKEN/);
     expect(text).not.toMatch(/NODE_AUTH_TOKEN/);
@@ -194,8 +194,7 @@ describe("release workflow", () => {
     expect(upgradeIndex).toBeGreaterThanOrEqual(0);
     expect(publishIndex).toBeGreaterThan(upgradeIndex);
     expect(npmSteps[publishIndex]!.run).toContain("--access public");
-    // PrepLabsAI/AgentX is private today, and npm provenance attestation fails for private repos;
-    // trusted publishing adds provenance automatically once the repo goes public.
+    // Trusted publishing adds provenance automatically for this public repository; no flag needed.
     expect(npmSteps[publishIndex]!.run).not.toContain("--provenance");
   });
 
