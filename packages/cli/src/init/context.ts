@@ -1,10 +1,10 @@
 // What every init step receives. Every AWS, vendor, browser, clock and prompt dependency is here,
 // so tests replace all of them and nothing reaches AWS, GitHub or Slack.
 import { DescribeStacksCommand, type CloudFormationClient } from "@aws-sdk/client-cloudformation";
-import { DescribeSecretCommand, PutSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
+import { CreateSecretCommand, DescribeSecretCommand, PutSecretValueCommand, type SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import type { PreparedDeployment } from "../deploy/commands.js";
 import type { LoadedRelease } from "../deploy/release.js";
-import { secretsManagerValueStore, type SecretValueStore } from "../deploy/signing-key.js";
+import { secretsManagerValueStore, secretTags, type SecretValueStore } from "../deploy/signing-key.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import type { AdminSession, SetupServices } from "../setup/services.js";
 import type { SigninFlags } from "../signin/collect.js";
@@ -18,25 +18,44 @@ export interface InitSecrets extends SecretValueStore {
   put(name: string, value: string): Promise<void>;
   /** The secret's full ARN, or undefined when it does not exist. */
   arn(name: string): Promise<string | undefined>;
+  /** The secret's full ARN, creating it with no value first when it does not exist. `get` reads a
+   * secret with no value as missing; `put` gives it one. */
+  reserve(name: string): Promise<string>;
 }
 
 const errorName = (error: unknown) => (error instanceof Error ? error.name : undefined);
 
 export function secretsManagerInitSecrets(client: SecretsManagerClient): InitSecrets {
   const base = secretsManagerValueStore(client);
+  const arn = async (name: string): Promise<string | undefined> => {
+    try {
+      return (await client.send(new DescribeSecretCommand({ SecretId: name }))).ARN;
+    } catch (error) {
+      if (errorName(error) === "ResourceNotFoundException") return undefined;
+      throw error;
+    }
+  };
   return {
     get: (name) => base.get(name),
     create: (name, value) => base.create(name, value),
     async put(name, value) {
       await client.send(new PutSecretValueCommand({ SecretId: name, SecretString: value }));
     },
-    async arn(name) {
+    arn,
+    async reserve(name) {
+      const existing = await arn(name);
+      if (existing !== undefined) return existing;
       try {
-        return (await client.send(new DescribeSecretCommand({ SecretId: name }))).ARN;
+        const tags = secretTags(name);
+        const created = await client.send(new CreateSecretCommand({ Name: name, ...(tags.length === 0 ? {} : { Tags: tags }) }));
+        if (created.ARN !== undefined) return created.ARN;
       } catch (error) {
-        if (errorName(error) === "ResourceNotFoundException") return undefined;
-        throw error;
+        // Another run created it between the check and the create.
+        if (errorName(error) !== "ResourceExistsException") throw error;
       }
+      const raced = await arn(name);
+      if (raced === undefined) throw new Error(`secret ${name} was just created but cannot be described`);
+      return raced;
     },
   };
 }

@@ -17,24 +17,25 @@ const withStatus = (changes: Partial<Record<(typeof INIT_STEP_IDS)[number], Jour
 
 describe("the journey", () => {
   it("has five phases, in order, with plain titles", () => {
-    expect(JOURNEY_PHASE_IDS.map((id) => PHASE_TITLES[id])).toEqual(["Get started", "Your choices", "Build in AWS", "Connect Slack", "Finish"]);
+    expect(JOURNEY_PHASE_IDS.map((id) => PHASE_TITLES[id])).toEqual(["Get started", "Your choices", "Build in AWS", "Connect GitHub and Slack", "Finish"]);
   });
 
   it("gives every step a phase, a plain title and a usual time", () => {
     expect(INSTALL_STEP_ORDER.map((id) => STEP_PLAN[id].title)).toEqual([
-      "Check your account and choices", "Create the GitHub app", "Set up AWS permissions", "Build the network and sign-in",
-      "Start the AgentX service", "Create the Slack app", "Start the Slack connection", "Turn on developer sign-in",
+      "Check your account and choices", "Set up AWS permissions", "Build the network and sign-in", "Start the AgentX service",
+      "Start the Slack connection", "Create the GitHub app", "Create the Slack app", "Check that Slack reaches AgentX", "Turn on developer sign-in",
       "Sign in to AgentX", "Set up your first project", "Connect your issue trackers", "Turn on alerts", "Get a first reply in Slack",
     ]);
     for (const id of INSTALL_STEP_ORDER) expect(STEP_PLAN[id].usualSeconds).toBeGreaterThan(0);
   });
 
   it("adds the phases up to the total, and says how long the user is needed", () => {
-    expect(JOURNEY_PHASE_IDS.reduce((sum, id) => sum + phaseSeconds(id), 0)).toBe(2610);
-    expect(phaseSeconds("your-choices")).toBe(450);
-    expect(phaseSeconds("build")).toBe(1080);
-    expect(totalMinutes()).toBe(44);
-    expect(needsYouMinutes()).toBe(23);
+    expect(JOURNEY_PHASE_IDS.reduce((sum, id) => sum + phaseSeconds(id), 0)).toBe(2670);
+    expect(phaseSeconds("your-choices")).toBe(330);
+    expect(phaseSeconds("build")).toBe(1260);
+    expect(phaseSeconds("connect")).toBe(540);
+    expect(totalMinutes()).toBe(45);
+    expect(needsYouMinutes()).toBe(21);
     expect(usualText(780)).toBe("usually 13 minutes");
     expect(usualText(30)).toBe("usually under a minute");
   });
@@ -44,14 +45,14 @@ describe("the journey", () => {
     expect(view.stepNumber).toBe(1);
     expect(view.stepCount).toBe(5);
     expect(view.phases.map((phase) => phase.statusWord)).toEqual(["Waiting for you", "Coming up", "Coming up", "Coming up", "Coming up"]);
-    expect(view.timeLeftText).toBe("About 44 minutes left");
+    expect(view.timeLeftText).toBe("About 45 minutes left");
   });
 
   it("follows the running step, and marks earlier phases Done", () => {
     const view = journeyOf({
       stage: "your-choices",
       steps: withStatus({
-        prerequisites: { id: "prerequisites", status: "done" }, "github-app": { id: "github-app", status: "done" },
+        prerequisites: { id: "prerequisites", status: "done" },
         access: { id: "access", status: "done" }, core: { id: "core", status: "running", startedAtMs: T - 60_000 },
       }),
       waitingOnYou: false, stopped: false, finished: false, nowMs: T,
@@ -59,9 +60,9 @@ describe("the journey", () => {
     expect(view.current).toBe("build");
     expect(view.stepNumber).toBe(3);
     expect(view.phases.map((phase) => phase.status)).toEqual(["done", "done", "now", "coming", "coming"]);
-    // core has 180 of its 240 seconds left, then control-plane (780), then Connect Slack (540) and
-    // Finish (420): 1920 seconds.
-    expect(view.timeLeftText).toBe("About 32 minutes left");
+    // core has 180 of its 240 seconds left, then control-plane (780) and slack-service (180), then
+    // Connect GitHub and Slack (540) and Finish (420): 2100 seconds.
+    expect(view.timeLeftText).toBe("About 35 minutes left");
     expect(view.overdue).toBe(false);
   });
 
@@ -70,14 +71,13 @@ describe("the journey", () => {
       stage: "your-choices",
       steps: withStatus({
         prerequisites: { id: "prerequisites", status: "done" }, access: { id: "access", status: "done" }, core: { id: "core", status: "done" },
-        "github-app": { id: "github-app", status: "done" },
         "control-plane": { id: "control-plane", status: "running", startedAtMs: T - 3_600_000 },
       }),
       waitingOnYou: false, stopped: false, finished: false, nowMs: T,
     });
     expect(view.overdue).toBe(true);
-    // After this step: Connect Slack (540) and Finish (420), 960 seconds.
-    expect(view.timeLeftText).toBe("Taking longer than usual. About 16 minutes after this step.");
+    // After this step: slack-service (180), Connect GitHub and Slack (540) and Finish (420), 1140 seconds.
+    expect(view.timeLeftText).toBe("Taking longer than usual. About 19 minutes after this step.");
     expect(view.timeLeftText).not.toMatch(/\b0 minutes|-\d/);
   });
 
@@ -96,7 +96,7 @@ describe("the journey", () => {
     const failed = journeyOf({
       stage: "your-choices",
       steps: withStatus({
-        prerequisites: { id: "prerequisites", status: "done" }, "github-app": { id: "github-app", status: "done" }, access: { id: "access", status: "failed" },
+        prerequisites: { id: "prerequisites", status: "done" }, access: { id: "access", status: "failed" },
       }),
       waitingOnYou: true, stopped: true, finished: false, nowMs: T,
     });
@@ -113,10 +113,10 @@ describe("the journey", () => {
     expect(stopped.timeLeftText).toBe("Stopped");
     expect(stopped.timeLeftText).not.toMatch(/left/);
     // A resumed retry (the same steps, no longer stopped) shows the usual estimate again.
-    // access (60) + core (240) + github-app (120) + control-plane (780), then Connect Slack
-    // (540) and Finish (420): 2160 seconds.
+    // access (60) + core (240) + control-plane (780) + slack-service (180), then Connect GitHub
+    // and Slack (540) and Finish (420): 2220 seconds.
     const resumed = journeyOf({ ...input, stopped: false });
-    expect(resumed.timeLeftText).toBe("About 36 minutes left");
+    expect(resumed.timeLeftText).toBe("About 37 minutes left");
   });
 
   it("a step overdue when the run stops says Stopped, not Taking longer than usual", () => {
@@ -133,11 +133,11 @@ describe("the journey", () => {
     expect(welcomeLines()).toEqual([
       "AgentX installs into your AWS account and connects to GitHub and Slack, in five parts:",
       "Get started: about 2 minutes.",
-      "Your choices: about 8 minutes.",
-      "Build in AWS: about 18 minutes.",
-      "Connect Slack: about 9 minutes.",
+      "Your choices: about 6 minutes.",
+      "Build in AWS: about 21 minutes.",
+      "Connect GitHub and Slack: about 9 minutes.",
       "Finish: about 7 minutes.",
-      "In all, about 44 minutes. You are needed for about 23 of them, and this page tells you when.",
+      "In all, about 45 minutes. You are needed for about 21 of them, and this page tells you when.",
       "Keep the terminal open and your computer awake until the install is done.",
       "You can close this tab and open the same address again at any time.",
     ]);
@@ -145,7 +145,7 @@ describe("the journey", () => {
 
   it("writes one terminal line per step, and one each for a wait, the end and a stop", () => {
     expect(terminalStepLine("control-plane")).toBe("[3/5] Build in AWS: Start the AgentX service (about 13 minutes)");
-    expect(terminalStepLine("slack-app")).toBe("[4/5] Connect Slack: Create the Slack app. Waiting for you in the browser.");
+    expect(terminalStepLine("slack-app")).toBe("[4/5] Connect GitHub and Slack: Create the Slack app. Waiting for you in the browser.");
     expect(stageLine("your-choices")).toBe("[2/5] Your choices: waiting for you in the browser");
     expect(READY_LINE).toBe("[5/5] Finish: done. AgentX is ready. The browser has the next steps.");
     expect(stoppedLine({ phase: "build", problem: "Start the AgentX service did not finish.", logPath: "/home/a/.agentx/logs/init-staging.log" }))
@@ -153,31 +153,31 @@ describe("the journey", () => {
   });
 });
 
-describe("spec 048 phase 2: the run order", () => {
-  it("FR-031: runs the GitHub app before the build, and lists every step once", () => {
+describe("the run order: every stack first, then the GitHub and Slack apps", () => {
+  it("deploys every stack before the GitHub app, and lists every step once", () => {
     expect(INSTALL_STEP_ORDER).toEqual([
-      "prerequisites", "github-app", "access", "core", "control-plane", "slack-app", "slack-service", "developer-signin",
+      "prerequisites", "access", "core", "control-plane", "slack-service", "github-app", "slack-app", "slack-check", "developer-signin",
       "admin-user", "first-project", "connectors", "alerts", "e2e",
     ]);
     expect([...INSTALL_STEP_ORDER].sort()).toEqual([...INIT_STEP_IDS].sort());
     expect(initSteps({ github: fakeGitHubApi(), slack: fakeSlackApi() }).map((step) => step.id)).toEqual([...INSTALL_STEP_ORDER]);
   });
 
-  it("FR-031 and FR-032: the GitHub app is part of Your choices", () => {
-    expect(STEP_PLAN["github-app"].phase).toBe("your-choices");
-    expect(terminalStepLine("github-app")).toBe("[2/5] Your choices: Create the GitHub app. Waiting for you in the browser.");
+  it("the GitHub app is part of Connect GitHub and Slack, after the build", () => {
+    expect(STEP_PLAN["github-app"].phase).toBe("connect");
+    expect(terminalStepLine("github-app")).toBe("[4/5] Connect GitHub and Slack: Create the GitHub app. Waiting for you in the browser.");
   });
 
-  it("FR-035 and SC-006: once the build starts, only Connect Slack and Finish need the user", () => {
+  it("FR-035 and SC-006: once the build starts, only Connect GitHub and Slack and Finish need the user", () => {
     const fromBuild = INSTALL_STEP_ORDER.slice(INSTALL_STEP_ORDER.indexOf("access"));
     for (const id of fromBuild) {
-      if (STEP_PLAN[id].needsYou) expect({ id, phase: STEP_PLAN[id].phase }).toMatchObject({ phase: expect.stringMatching(/^(connect-slack|finish)$/) as unknown });
+      if (STEP_PLAN[id].needsYou) expect({ id, phase: STEP_PLAN[id].phase }).toMatchObject({ phase: expect.stringMatching(/^(connect|finish)$/) as unknown });
     }
     expect(fromBuild.filter((id) => STEP_PLAN[id].phase === "build").every((id) => !STEP_PLAN[id].needsYou)).toBe(true);
   });
 
   it("FR-030: turning on developer sign-in asks nothing of the user", () => {
     expect(STEP_PLAN["developer-signin"].needsYou).toBe(false);
-    expect(terminalStepLine("developer-signin")).toBe("[4/5] Connect Slack: Turn on developer sign-in (about 2 minutes)");
+    expect(terminalStepLine("developer-signin")).toBe("[4/5] Connect GitHub and Slack: Turn on developer sign-in (about 2 minutes)");
   });
 });

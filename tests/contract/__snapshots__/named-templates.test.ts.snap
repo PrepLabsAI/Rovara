@@ -1964,6 +1964,8 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "Type": "String",
     },
     "GitHubAppId": {
+      "Default": "",
+      "Description": "GitHub App id; empty reads it from the private-key secret's appId",
       "Type": "String",
     },
     "GitHubAppPrivateKeySecretArn": {

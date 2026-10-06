@@ -30,8 +30,10 @@ export async function upgradeAnswers(input: { settings: EnvironmentSettings; sta
     identity = { mode: "oidc", issuer: settings.identity.issuer, audience: settings.identity.audience, clientId: settings.identity.clientId, adminClaim: parameter("AdminClaim"), adminValues: adminValues as string[] };
   }
   const credentialRef = controlPlane.parameters.GitHubAppCredentialRef;
-  const appId = parameter("GitHubAppId");
-  if (!/^\d+$/.test(appId)) throw agentXError("CONFIG_INVALID", `stack ${controlPlaneName}'s GitHubAppId parameter is not a GitHub App id (a number); run agentx doctor, and agentx init --resume if the install never finished`);
+  // Empty is an install's own: its control plane deployed before the GitHub App, and reads the id
+  // from the private-key secret. The upgrade keeps it empty.
+  const appId = controlPlane.parameters.GitHubAppId === "" ? "" : parameter("GitHubAppId");
+  if (appId !== "" && !/^\d+$/.test(appId)) throw agentXError("CONFIG_INVALID", `stack ${controlPlaneName}'s GitHubAppId parameter is not a GitHub App id (a number); run agentx doctor, and agentx init --resume if the install never finished`);
   const privateKeySecretArn = parameter("GitHubAppPrivateKeySecretArn");
   if (!privateKeySecretArn.startsWith("arn:")) throw agentXError("CONFIG_INVALID", `stack ${controlPlaneName}'s GitHubAppPrivateKeySecretArn parameter is not an ARN; run agentx doctor, and agentx init --resume if the install never finished`);
   // An access stack the settings name but that is gone is refused, never read as "no operator

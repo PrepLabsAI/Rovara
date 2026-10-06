@@ -104,7 +104,7 @@ describe("agentx init --ui", () => {
     const lines = h.err.join("").trimEnd().split("\n");
     expect(lines[0]).toMatch(/^The AgentX installer is open in your browser: http:\/\/127\.0\.0\.1:\d+\/\?t=/);
     expect(lines.slice(1)).toEqual([
-      "Keep this terminal open and your computer awake (about 44 minutes).",
+      "Keep this terminal open and your computer awake (about 45 minutes).",
       `Full log: ${initLogPath(h.home, "staging")}`,
       stageLine("get-started"),
       stageLine("your-choices"),
@@ -219,12 +219,11 @@ describe("agentx init --ui", () => {
     const resume = operator.states.find((state) => state.resume !== undefined)?.resume;
     expect(resume?.completed).toEqual([
       "Check your account and choices",
-      "Create the GitHub app",
       "Set up AWS permissions",
       "Build the network and sign-in",
     ]);
     expect(resume?.continueFrom).toBe("Start the AgentX service");
-    // The resumed run reuses the app the first one made, exactly as the terminal path does.
+    // The first run stopped before the GitHub app step, so the app is made once, by the resumed run.
     expect(h.github.conversions).toHaveLength(1);
   });
 

@@ -100,7 +100,13 @@ export class ControlPlaneStack extends Stack {
       default: "github-agentx-sdlc",
     });
     // No account or installation: the broker looks up the App's installation per repository owner (#123).
-    const githubAppId = new CfnParameter(this, "GitHubAppId", { type: "String" });
+    // Empty: the broker reads the id from the private-key secret's appId. agentx init deploys the
+    // control plane before it creates the GitHub App, so it has no id to pass yet.
+    const githubAppId = new CfnParameter(this, "GitHubAppId", {
+      type: "String",
+      default: "",
+      description: "GitHub App id; empty reads it from the private-key secret's appId",
+    });
     const githubAppPrivateKeySecretArn = new CfnParameter(this, "GitHubAppPrivateKeySecretArn", {
       type: "String",
       description: "Complete Secrets Manager ARN containing the GitHub App private key PEM",

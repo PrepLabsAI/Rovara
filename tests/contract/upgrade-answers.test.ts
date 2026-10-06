@@ -40,7 +40,12 @@ describe("upgradeAnswers: everything from the environment itself, nothing asked"
 
   it("refuses when the control-plane stack is gone or lacks the GitHub App", async () => {
     await expect(upgradeAnswers({ settings: SETTINGS, stacks: stacks({}) })).rejects.toThrow("stack agentx-staging-control-plane does not exist; agentx doctor says what else is missing");
-    await expect(upgradeAnswers({ settings: SETTINGS, stacks: stacks({ "agentx-staging-control-plane": { GitHubAppId: "" } }) })).rejects.toThrow("stack agentx-staging-control-plane has no GitHubAppId parameter");
+    await expect(upgradeAnswers({ settings: SETTINGS, stacks: stacks({ "agentx-staging-control-plane": {} }) })).rejects.toThrow("stack agentx-staging-control-plane has no GitHubAppId parameter");
+  });
+
+  it("keeps an empty GitHub App id: the control plane deployed before the app reads it from the secret", async () => {
+    const answers = await upgradeAnswers({ settings: SETTINGS, stacks: stacks({ ...noOperator, "agentx-staging-control-plane": { ...controlPlane, GitHubAppId: "" } }) });
+    expect(answers.github).toMatchObject({ appId: "", privateKeySecretArn: KEY_ARN });
   });
 
   it("refuses a GitHub App id that is not a number, or a private key that is not an ARN", async () => {

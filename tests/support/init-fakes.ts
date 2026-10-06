@@ -148,15 +148,23 @@ export const NPX_CLI_INVOCATION: CliInvocation = { ...INSTALLED_CLI_INVOCATION, 
  * failed after the app was made on GitHub would. */
 export function memoryInitSecrets(initial: Record<string, string> = {}, options: { failCreate?: boolean } = {}): InitSecrets & { values: Map<string, string> } {
   const values = new Map(Object.entries(initial));
+  /** Secrets created with no value (`reserve`): they exist, but `get` reads them as missing. */
+  const reserved = new Set<string>();
+  const exists = (name: string) => values.has(name) || reserved.has(name);
+  const arnOf = (name: string) => `arn:aws:secretsmanager:us-east-1:123456789012:secret:${name}-AbCdEf`;
   return {
     values,
     async get(name) { return values.get(name); },
     async create(name, value) {
       if (options.failCreate === true) throw Object.assign(new Error("test setup: secret creation refused"), { name: "AccessDeniedException" });
-      if (values.has(name)) throw new SecretAlreadyExistsError(name); values.set(name, value);
+      if (exists(name)) throw new SecretAlreadyExistsError(name); values.set(name, value);
     },
-    async put(name, value) { if (!values.has(name)) throw Object.assign(new Error(`Secrets Manager can't find ${name}`), { name: "ResourceNotFoundException" }); values.set(name, value); },
-    async arn(name) { return values.has(name) ? `arn:aws:secretsmanager:us-east-1:123456789012:secret:${name}-AbCdEf` : undefined; },
+    async put(name, value) {
+      if (options.failCreate === true && reserved.has(name)) throw Object.assign(new Error("test setup: secret write refused"), { name: "AccessDeniedException" });
+      if (!exists(name)) throw Object.assign(new Error(`Secrets Manager can't find ${name}`), { name: "ResourceNotFoundException" }); values.set(name, value);
+    },
+    async arn(name) { return exists(name) ? arnOf(name) : undefined; },
+    async reserve(name) { if (!exists(name)) reserved.add(name); return arnOf(name); },
   };
 }
 

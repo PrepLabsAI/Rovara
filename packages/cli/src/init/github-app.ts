@@ -349,7 +349,10 @@ async function runGitHubAppStep(context: InitContext, progress: ProgressHandle, 
     // between here and the store can still find the app and offer to finish with it or replace it.
     await progress.update({ githubPending: { account, appId: created.appId, slug: created.slug } });
     try {
-      await context.secrets.create(name, JSON.stringify({ appId: created.appId, slug: created.slug, account, privateKey: created.privateKey }));
+      const value = JSON.stringify({ appId: created.appId, slug: created.slug, account, privateKey: created.privateKey });
+      // The control-plane step created the secret with no value; an install that has not reached it creates it here.
+      if (await context.secrets.arn(name) === undefined) await context.secrets.create(name, value);
+      else await context.secrets.put(name, value);
     } catch (error) {
       // Only the error's name: never its message or cause, which could echo the request.
       const reason = error instanceof Error ? error.name : "unknown error";

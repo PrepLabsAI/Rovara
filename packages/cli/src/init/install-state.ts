@@ -11,6 +11,8 @@ export const INIT_STEP_IDS = [
   "prerequisites", "access", "core", "github-app", "control-plane", "slack-app", "slack-service", "developer-signin",
   // Phase 15d2, appended so no earlier id moves (resume skips done steps in this order).
   "admin-user", "first-project", "connectors", "alerts", "e2e",
+  // Appended for the same reason: the Slack URL check, its own step since the Slack service deploys before the Slack app.
+  "slack-check",
 ] as const;
 export type InitStepId = (typeof INIT_STEP_IDS)[number];
 

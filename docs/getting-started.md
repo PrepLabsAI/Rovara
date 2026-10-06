@@ -38,18 +38,18 @@ To install with the CDK, through a platform team, or from a source checkout, see
 `init` asks its questions (every one has a flag, and `--yes` runs it unattended), then:
 
 1. checks prerequisites: the region, model access and EC2 quota;
-2. deploys the access, foundation and identity stacks;
+2. deploys every stack, unattended: access, foundation and identity, the control plane and runtime,
+   and the Slack service;
 3. creates the GitHub App from a pre-filled page (one click), and you choose its repositories;
-4. deploys the control plane and runtime;
-5. creates the Slack app from Rovara's manifest; you install it and paste its tokens into hidden
+4. creates the Slack app from Rovara's manifest; you install it and paste its tokens into hidden
    prompts;
-6. deploys the Slack service and checks that Slack can reach it;
-7. sets up developer sign-in: Slack, your company's sign-in (OIDC), or both;
-8. creates your admin user and signs you in;
-9. sets up your first project (on EC2 workers) and its Slack channel;
-10. offers the Linear, Jira and Asana connectors (other MCP servers are added after the install);
-11. subscribes alerts, sets the monthly budget and sends a test alarm;
-12. ends once a person mentions the bot in the channel and gets a threaded reply, and prints the
+5. checks that Slack can reach Rovara;
+6. sets up developer sign-in: Slack, your company's sign-in (OIDC), or both;
+7. creates your admin user and signs you in;
+8. sets up your first project (on EC2 workers) and its Slack channel;
+9. offers the Linear, Jira and Asana connectors (other MCP servers are added after the install);
+10. subscribes alerts, sets the monthly budget and sends a test alarm;
+11. ends once a person mentions the bot in the channel and gets a threaded reply, and prints the
     command developers use to sign in.
 
 `init` deploys published CloudFormation templates by default; `--engine cdk --source <checkout>`

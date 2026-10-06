@@ -198,12 +198,21 @@ export function initSteps(input: { github: GitHubApi; slack: SlackApi }): InitSt
         return { status: "done" };
       },
     },
-    githubAppStep(input.github),
+    // Every stack first, in one unattended stretch; then the GitHub and Slack apps, which need a person.
     accessStep(),
     deployStep({ id: "core", title: STEP_PLAN.core.title }),
     deployStep({ id: "control-plane", title: STEP_PLAN["control-plane"].title, after: subscribeAlertsAfterDeploy }),
+    deployStep({ id: "slack-service", title: STEP_PLAN["slack-service"].title }),
+    githubAppStep(input.github),
     slackAppStep(input.slack),
-    deployStep({ id: "slack-service", title: STEP_PLAN["slack-service"].title, after: verifySlackUrls }),
+    {
+      id: "slack-check",
+      title: STEP_PLAN["slack-check"].title,
+      async run(context, progress) {
+        await verifySlackUrls(context, progress);
+        return { status: "done" };
+      },
+    },
     developerSignInStep({ slack: input.slack }),
     ...finishSteps(),
   ];
