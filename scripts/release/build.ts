@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { ENVIRONMENT_PLACEHOLDER, STACK_PARTS, environmentStackName } from "@agentx/contracts";
@@ -283,6 +283,18 @@ export async function buildRelease(input: BuildReleaseInput): Promise<ReleaseMan
       });
     }
 
+    // Include the license and the immediate grant for earlier versions in the release artifact,
+    // and checksum them in release.json like every other shipped file.
+    const legalDir = join(input.out, "legal");
+    await mkdir(legalDir, { recursive: true });
+    const legalDocuments: NonNullable<ReleaseManifest["legalDocuments"]> = [];
+    for (const name of ["LICENSE", "RELICENSED.md"] as const) {
+      const file = `legal/${name}`;
+      await copyFile(join(REPO_ROOT, name), join(input.out, file));
+      const content = await readFile(join(input.out, file));
+      legalDocuments.push({ file, sha256: sha256Hex(content) });
+    }
+
     // Write release.json as validated, pretty JSON.
     const manifest = ReleaseManifestSchema.parse({
       schemaVersion: 1,
@@ -291,6 +303,7 @@ export async function buildRelease(input: BuildReleaseInput): Promise<ReleaseMan
       environmentPlaceholder: ENVIRONMENT_PLACEHOLDER,
       templates,
       packages,
+      legalDocuments,
       images,
     } satisfies ReleaseManifest);
     await writeFile(join(input.out, "release.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");

@@ -28,10 +28,10 @@ describe("publishable CLI package", () => {
       name: "@preplabsai/rovara-code",
       version: "1.2.3",
       bin: { rovara: "bin/agentx.mjs", agentx: "bin/agentx.mjs" },
-      license: "FSL-1.1-ALv2",
+      license: "Apache-2.0",
     });
     expect(manifest.dependencies).toBeUndefined();
-    expect(manifest.files).toEqual(["bin", "README.md", "LICENSE", "THIRD_PARTY_NOTICES"]);
+    expect(manifest.files).toEqual(["bin", "README.md", "LICENSE", "RELICENSED.md", "THIRD_PARTY_NOTICES"]);
     expect(manifest.description).toBe("Rovara Code installer and administration CLI");
     expect(manifest.repository).toEqual({ type: "git", url: "git+https://github.com/PrepLabsAI/Rovara.git" });
 
@@ -74,10 +74,11 @@ describe("publishable CLI package", () => {
     expect(bundle).toContain("x-agentx-wizard-token");
     expect(bundle).toContain("renderPanelCards(state);");
 
-    // The owners' license ruling (FSL-1.1-ALv2) travels with the installed package, not just the
-    // staged one packCli wrote before running `npm pack`.
+    // The current license and the immediate grant for earlier releases travel with the installed package.
     const installedLicense = await readFile(join(project, "node_modules", "@preplabsai", "rovara-code", "LICENSE"), "utf8");
     expect(installedLicense).toBe(await readFile(join(repoRoot, "LICENSE"), "utf8"));
+    const installedRelicense = await readFile(join(project, "node_modules", "@preplabsai", "rovara-code", "RELICENSED.md"), "utf8");
+    expect(installedRelicense).toBe(await readFile(join(repoRoot, "RELICENSED.md"), "utf8"));
     // The bundled packages' notices travel with the installed package too (MIT and BSD require them).
     const installedNotices = await readFile(join(project, "node_modules", "@preplabsai", "rovara-code", "THIRD_PARTY_NOTICES"), "utf8");
     expect(installedNotices).toBe(await readFile(join(out, "package", "THIRD_PARTY_NOTICES"), "utf8"));
