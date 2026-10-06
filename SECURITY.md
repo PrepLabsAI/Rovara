@@ -41,8 +41,6 @@ this repository.
 
 Out of scope:
 
-- the limits Rovara already documents in
-  [What Rovara does not protect against](docs/security.md#what-agentx-does-not-protect-against);
 - vulnerabilities in AWS, Slack, GitHub, model providers or other third-party services themselves;
 - problems that need the AWS account's administrator credentials, which already control the whole
   installation.
