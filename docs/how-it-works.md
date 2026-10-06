@@ -99,8 +99,6 @@ Not built yet:
 - Admin tools for AI tools: reading Rovara's state (spec 025 phase 25d) and making confirmed
   changes (phase 25e).
 
-No Rovara release is published yet; see [releases](releases.md).
-
 ## Stack names
 
 An installed environment's stacks are named `agentx-<env>-access`, `-foundation`, `-identity`,

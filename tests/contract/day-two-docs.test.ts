@@ -32,8 +32,9 @@ describe("the guides (FR-054)", () => {
   });
 
   it("has an install guide for each path, and a move guide that links #67", () => {
-    const install = read("docs/install.md");
-    for (const heading of ["## With published templates (recommended)", "## With cdk", "## Through your platform team (export)"]) expect(install).toContain(heading);
+    expect(read("docs/install.md")).toContain("## Install");
+    const other = read("docs/install-advanced.md");
+    for (const heading of ["## With cdk", "## Through your platform team (export)", "## From a source checkout"]) expect(other).toContain(heading);
     expect(read("docs/move-account.md")).toContain("https://github.com/PrepLabsAI/Rovara/issues/67");
   });
 
@@ -57,6 +58,6 @@ describe("the guides (FR-054)", () => {
   });
 
   it("uses no em dash in any guide", () => {
-    for (const path of ["docs/install.md", "docs/day-two.md", "docs/teardown.md", "docs/move-account.md"]) expect(read(path), path).not.toContain("\u2014");
+    for (const path of ["docs/install.md", "docs/install-advanced.md", "docs/day-two.md", "docs/teardown.md", "docs/move-account.md"]) expect(read(path), path).not.toContain("\u2014");
   });
 });
