@@ -68,9 +68,11 @@ export interface SlackIngressDependencies {
    * tell. `claimNotice` answers true for at most one caller per thread per hour.
    */
   sharedTask?: {
-    lookup: (thread: SlackThread) => Promise<{ mode: "view" | "continue"; closed: boolean } | undefined>;
+    lookup: (thread: SlackThread) => Promise<{ mode: "view" | "continue"; closed: boolean; taskId?: string } | undefined>;
     claimNotice: (threadSubject: string, nowSeconds: number, kind: "view" | "closed") => Promise<boolean>;
   };
+  /** Captures an explicit, signed @AgentX reply only for a task the current owner can access. */
+  captureFeedbackNote?: (input: { taskId: string; thread: SlackThread; userId: string; eventId: string; messageTs: string; text: string }) => Promise<{ captured: boolean }>;
   now?: () => number;
   log?: SlackIngressLog;
   /**
@@ -103,6 +105,8 @@ interface Mention {
   thread: SlackThread;
   userId: string;
   text: string;
+  messageTs: string;
+  isThreadReply: boolean;
   botUserId?: string;
   /** The event carries bot_id, app_id or bot_profile: a person's own token through an app, or a bot. */
   appPosted: boolean;
@@ -168,13 +172,30 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
     // queued or counted, so no thread workspace is ever made for it. A continue thread goes on as
     // any thread does. A record that cannot be read fails closed: Slack retries the event.
     if (dependencies.sharedTask) {
-      let shared: { mode: "view" | "continue"; closed: boolean } | undefined;
+      let shared: { mode: "view" | "continue"; closed: boolean; taskId?: string } | undefined;
       try {
         shared = await dependencies.sharedTask.lookup(thread);
       } catch (error) {
         await releaseQuietly(dependencies, log, mention.eventId, "shared_task.release_failed");
         log("shared_task.lookup_failed", { eventId: mention.eventId, errorName: errorName(error) });
         return respond(500, { error: "shared thread could not be checked" });
+      }
+      const replyText = slackRequestText(mention.text, mention.botUserId);
+      if (mention.isThreadReply && shared?.taskId !== undefined && dependencies.captureFeedbackNote !== undefined
+        && memberCheckError === undefined && replyText.length > 0 && Buffer.byteLength(replyText, "utf8") <= 1_000) {
+        try {
+          const result = await dependencies.captureFeedbackNote({ taskId: shared.taskId, thread, userId: mention.userId,
+            eventId: mention.eventId, messageTs: mention.messageTs, text: replyText });
+          if (result.captured) {
+            await post(dependencies, log, thread, "Note saved. Use the AgentX review details link above to choose what happens next.", "feedback_note.acknowledgement_failed");
+            log("feedback_note.captured", { eventId: mention.eventId, taskId: shared.taskId });
+            return respond(200, { ok: true });
+          }
+        } catch (error) {
+          await releaseQuietly(dependencies, log, mention.eventId, "feedback_note.release_failed");
+          log("feedback_note.capture_failed", { eventId: mention.eventId, errorName: errorName(error) });
+          return respond(500, { error: "reply could not be saved" });
+        }
       }
       if (shared !== undefined && (shared.mode === "view" || shared.closed)) {
         let notify = false;
@@ -333,7 +354,8 @@ function parseMention(payload: Record<string, unknown>): Mention | { reason: str
   const channelId = SlackChannelIdSchema.safeParse(event.channel);
   const userId = SlackUserIdSchema.safeParse(event.user);
   const ts = SlackMessageTimestampSchema.safeParse(event.thread_ts ?? event.ts);
-  if (!teamId.success || !userId.success || !ts.success) return { reason: "malformed_event" };
+  const messageTs = SlackMessageTimestampSchema.safeParse(event.ts);
+  if (!teamId.success || !userId.success || !ts.success || !messageTs.success) return { reason: "malformed_event" };
   if (!channelId.success) return { reason: "not_a_channel" };
   const userTeam = event.user_team ?? event.team;
   if (userTeam !== undefined && userTeam !== teamId.data) return { reason: "external_organization_user" };
@@ -343,6 +365,8 @@ function parseMention(payload: Record<string, unknown>): Mention | { reason: str
     thread: { teamId: teamId.data, channelId: channelId.data, threadTs: ts.data },
     userId: userId.data,
     text: event.text,
+    messageTs: messageTs.data,
+    isThreadReply: event.thread_ts !== undefined,
     ...(typeof botUserId === "string" ? { botUserId } : {}),
     // Any app field present, even null, marks the event as app-posted so it gets the member check.
     appPosted: "bot_id" in event || "app_id" in event || "bot_profile" in event,
@@ -562,7 +586,7 @@ function createAwsSlackIngressHandler() {
           if (response.Item === undefined) return undefined;
           // An unreadable record throws, and the handler fails closed.
           const record = SharedTaskRecordSchema.parse(response.Item);
-          return { mode: record.mode, closed: record.closedAt !== undefined };
+          return { mode: record.mode, closed: record.closedAt !== undefined, taskId: record.taskId };
         },
         async claimNotice(threadSubject: string, nowSeconds: number, kind: "view" | "closed") {
           try {
@@ -591,6 +615,18 @@ function createAwsSlackIngressHandler() {
           throw new Error("broker stop failed");
         }
         return body.outcome;
+      },
+      async captureFeedbackNote(input: { taskId: string; thread: SlackThread; userId: string; eventId: string; messageTs: string; text: string }) {
+        const response = await lambda.send(new InvokeCommand({
+          FunctionName: brokerFunctionName,
+          InvocationType: "RequestResponse",
+          Payload: Buffer.from(JSON.stringify({ source: "agentx.slack-ingress", action: "feedback-note", ...input })),
+        }));
+        if (response.FunctionError !== undefined || response.Payload === undefined) throw new Error("broker feedback note failed");
+        const reply = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as { statusCode?: number; body?: string };
+        const body = JSON.parse(reply.body ?? "{}") as { captured?: unknown };
+        if (reply.statusCode !== 200 || typeof body.captured !== "boolean") throw new Error("broker feedback note failed");
+        return { captured: body.captured };
       },
       async startWorkflow(input: { thread: SlackThread; userId: string; instructions: string; requestId: string }) {
         const response = await lambda.send(new InvokeCommand({

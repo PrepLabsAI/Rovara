@@ -7,6 +7,8 @@ import type { AgentXNaming } from "./naming.js";
 
 export interface DeveloperTaskNotifierProps {
   naming: AgentXNaming;
+  /** Same-origin AgentX control plane, used only to construct authenticated review links. */
+  controlPlaneUrl: string;
   /** The concrete Table: its stream ARN is read here. */
   state: dynamodb.Table;
   /** Task plan artifacts are read only to create a Slack detail page after digest verification. */
@@ -61,6 +63,7 @@ export class DeveloperTaskNotifier extends Construct {
       "A batch of state table changes could not be turned into shared task notices, so a thread may have missed updates. Check the developer task notifier logs, and the failure queue for the shard and sequence numbers.");
     this.function = packagedFunction(this, "Function", "packages/broker/src/aws/developer-task-notifier.ts", {
       STATE_TABLE_NAME: props.state.tableName,
+      CONTROL_PLANE_URL: props.controlPlaneUrl,
       ARTIFACT_BUCKET_NAME: props.artifactBucket.bucketName,
       NOTICE_QUEUE_URL: this.queue.queueUrl,
       SLACK_SECRET_ARN: props.slackSecret.secretArn,

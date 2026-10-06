@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   WorkflowFeedbackBundleSchema, WorkflowFeedbackBundleRefSchema, WorkflowFeedbackReviewReportSchema, WorkflowFeedbackReviewRefSchema, WorkflowFeedbackFindingSchema,
+  WorkflowFeedbackNoteSchema,
   requestWorkflowFeedbackReview, decideWorkflowFeedbackFindings,
   completeWorkflowFeedbackReview,
   WorkflowTransitionError,
@@ -339,6 +340,17 @@ describe("native task workflow contracts", () => {
       decision: "SKIP",
       artifactDigest: undefined,
     }, { actorId: ownerId, role: "TASK_OWNER" }, { now: "2026-10-05T12:02:00.000Z", allowedSkipStages: [] })).toThrow(WorkflowTransitionError);
+  });
+});
+
+describe("Slack-attributed PR feedback notes", () => {
+  it("records the verified Slack owner, workspace, thread and source message", () => {
+    const note = WorkflowFeedbackNoteSchema.parse({
+      schemaVersion: 1, requestId: "11111111-1111-4111-8111-111111111111", actorId: ownerId,
+      source: "THREAD_REPLY", sourceId: "Ev0000000001", text: "Please address the second recommendation.", at: "2026-10-05T12:00:00.000Z",
+      slack: { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001", userId: "U0123456789", messageTs: "1695500002.000007", eventId: "Ev0000000001" },
+    });
+    expect(note.slack).toMatchObject({ teamId: "T0BSHLLUGBD", channelId: "C0123456789", userId: "U0123456789", messageTs: "1695500002.000007" });
   });
 });
 

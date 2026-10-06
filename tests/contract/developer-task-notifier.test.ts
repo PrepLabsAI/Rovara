@@ -151,7 +151,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     expect(h.posts.at(-1)!.text).toBe("GitHub confirms all 2 required pull requests are merged. The task is complete.");
   });
 
-  it("posts short PR feedback details and owner approval buttons in the existing task thread", async () => {
+  it("keeps legacy PR feedback notices redacted and does not expose an unbound approval button", async () => {
     const h = await notifierHarness({ shareToChannel: true, workflow: true });
     await h.pump();
     h.advance(10_000);
@@ -175,13 +175,11 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     } });
     await h.pump();
     const message = h.posts.at(-1)!;
-    expect(message.text).toContain("PR #11 feedback from reviewer");
-    expect(message.text).toContain("open comment");
-    expect(message.text).toContain("Handle this edge case");
-    expect(message.text).toContain("Review the comment in context");
-    const actions = (message.blocks?.[1] as { elements: Array<{ action_id: string; value: string }> }).elements;
-    expect(actions.map((button) => button.action_id)).toEqual(["agentx_github_feedback_approve", "agentx_github_feedback_dismiss"]);
-    expect(JSON.parse(actions[0]!.value)).toMatchObject({ taskId: h.taskId, revision: 2, feedbackId, candidateDigest, decision: "APPROVE" });
+    expect(message.text).toContain("PR #11 has reviewer feedback");
+    expect(message.text).toContain("Open the GitHub comment");
+    expect(message.text).not.toContain("Handle this edge case");
+    expect(message.text).not.toContain("Review the comment in context");
+    expect(message.blocks).toBeUndefined();
   });
 
   it("posts the start message in the channel and records the thread", async () => {
@@ -673,5 +671,38 @@ describe("an uncertain start post is logged (25c note 3)", () => {
     await h.pump();
     expect(h.posts).toHaveLength(1);
     expect(uncertain(h.logs)).toEqual([]);
+  });
+});
+
+describe("the PR feedback advisory summary", () => {
+  it("posts a brief, redacted summary with a secure detail link and named actions", async () => {
+    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const message = feedbackReviewSlackMessage({
+      taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
+      reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
+      totalComments: 7, recommendedFindingIds: ["finding-1", "finding-2"], highestPriority: "MUST_FIX",
+      detailUrl: "https://agentx.example/review/11111111-1111-4111-8111-111111111111",
+    });
+    expect(message.text).toContain("7 comments");
+    expect(message.text).toContain("2 recommendations");
+    expect(message.text).toContain("Highest priority: must fix");
+    expect(message.text).toContain("https://agentx.example/review/");
+    expect(message.text).not.toContain("hostile comment");
+    expect(message.text).not.toContain("full fix plan");
+    expect(message.text.length).toBeLessThan(500);
+    const blocks = message.blocks as Array<{ elements?: Array<{ action_id: string; value: string }> }>;
+    const actions = blocks.flatMap(block => block.elements ?? []);
+    expect(actions.map(action => action.action_id)).toEqual([
+      "agentx_feedback_review_recommended", "agentx_feedback_review_changes",
+    ]);
+    expect(JSON.parse(actions[0]!.value)).toMatchObject({
+      selection: "RECOMMENDED", expectedRevision: 8, reviewDigest: "a".repeat(64),
+      proposalDigest: "b".repeat(64), bundleSetDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+    });
+    const maxPrMessage = feedbackReviewSlackMessage({ taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
+      reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: Array.from({ length: 32 }, (_, index) => String(index).padStart(2, "0").repeat(32)),
+      totalComments: 128, recommendedFindingIds: ["finding"], highestPriority: "MUST_FIX", detailUrl: "https://agentx.example/review/11111111-1111-4111-8111-111111111111" });
+    expect(JSON.parse(((maxPrMessage.blocks[1] as { elements: Array<{ value: string }> }).elements[0]!).value)).toMatchObject({ bundleSetDigest: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    expect(((maxPrMessage.blocks[1] as { elements: Array<{ value: string }> }).elements[0]!).value.length).toBeLessThan(2_000);
   });
 });

@@ -1,14 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { createCandidateManifest, requestWorkflowFeedback } from "../../packages/contracts/src/task-workflow.js";
-import { collectWorkflowFeedbackBundles, createWorkflowSnapshot, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema } from "@agentx/contracts";
+import { collectWorkflowFeedbackBundles, createWorkflowSnapshot, sharedTaskKey, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema } from "@agentx/contracts";
 import { developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
+import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
 import { startTaskWorkflowFeedbackReviewFromWebhook } from "../../packages/broker/src/aws/developer-tasks.js";
 import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 
 describe("native developer task workflow", () => {
   it("launches one feedback critic from current collection, limits its reads, and stores only an advisory report", async () => {
-    const harness = await createDeveloperTaskBroker();
+    const currentFeedback = { pullRequest: { number: 7, url: "https://github.com/example/demo/pull/7", state: "open" as const,
+      headBranch: "feature", baseBranch: "main", headCommit: "a".repeat(40), title: "Fix retry", body: "" }, comments: [], threads: [] };
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getPullRequestFeedback: async () => currentFeedback } } });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
       requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true,
     });
@@ -88,6 +91,44 @@ describe("native developer task workflow", () => {
     const saved = harness.db.get(`DEVTASK#${taskId}`, "META")?.workflow as Record<string, unknown>;
     expect(saved).toMatchObject({ state: "WAITING", feedbackReview: { status: "PENDING", reviewRef: { operationId: accepted.operation.id, sha256: outputDigest } } });
     expect(saved).not.toMatchObject({ feedbackReview: { decision: "APPROVE" } });
+
+    const slackThread = { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" };
+    harness.db.set({ ...task, slackUserId: MAYA.slackUserId, share: slackThread, workflow: saved });
+    harness.db.set({ ...sharedTaskKey(slackThread), entityType: "SHARED_TASK", taskId, workspaceId,
+      ownerKey: task.ownerKey, developerId: task.developerId, mode: "FULL", createdAt: now });
+    harness.db.set({ ...githubWorkflowPullRequestKey("example/demo", 7), entityType: "GITHUB_WORKFLOW_PR",
+      repositoryFullName: "example/demo", number: 7, repositoryId: "demo", taskId, workspaceId,
+      candidateDigest: candidate.digest, url: "https://github.com/example/demo/pull/7" });
+    const reply = { thread: slackThread, userId: MAYA.slackUserId!, eventId: "Ev01ABC", messageTs: "1695500002.000001", text: "Please explain the edge case." };
+    const slackReplyEvent = { source: "agentx.slack-ingress", action: "feedback-note", taskId, ...reply };
+    const captured = await harness.handler(slackReplyEvent);
+    expect(JSON.parse(String(captured.body))).toMatchObject({ captured: true });
+    const duplicate = await harness.handler(slackReplyEvent);
+    expect(JSON.parse(String(duplicate.body))).toMatchObject({ captured: true, duplicate: true });
+    const afterReply = harness.db.get(`DEVTASK#${taskId}`, "META")?.workflow as Record<string, unknown>;
+    expect(afterReply.feedbackNotes).toMatchObject([{ source: "THREAD_REPLY", sourceId: "Ev01ABC", text: reply.text,
+      slack: { teamId: slackThread.teamId, channelId: slackThread.channelId, threadTs: slackThread.threadTs,
+        userId: MAYA.slackUserId, messageTs: reply.messageTs, eventId: "Ev01ABC" } }]);
+    expect(afterReply.feedbackDecisions).toBeUndefined();
+    expect((await harness.handler({ ...slackReplyEvent, userId: "U0OTHER001" })).statusCode).toBe(403);
+    expect((await harness.handler({ ...slackReplyEvent,
+      thread: { ...slackThread, threadTs: "1695500000.000009" }, eventId: "Ev01DEF" })).statusCode).toBe(403);
+
+    const currentReview = afterReply.feedbackReview as { reviewRef: { sha256: string; proposalDigest: string }; bundleRefs: Array<{ sha256: string }> };
+    const bundleDigests = currentReview.bundleRefs.map(bundle => bundle.sha256);
+    const decisionRequestId = randomUUID();
+    const decisionResponse = await harness.handler({ source: "agentx.slack-ingress", action: "workflow-feedback-findings-decision",
+      taskId, userId: MAYA.slackUserId, thread: slackThread, requestId: decisionRequestId,
+      expectedRevision: afterReply.revision, reviewDigest: currentReview.reviewRef.sha256,
+      proposalDigest: currentReview.reviewRef.proposalDigest,
+      bundleSetDigest: createHash("sha256").update(JSON.stringify(bundleDigests), "utf8").digest("hex"),
+      selection: "RECOMMENDED", decision: "REQUEST_CHANGES", ownerNote: "Please explain the recommendation." });
+    expect(decisionResponse.statusCode).toBe(200);
+    const decided = harness.db.get(`DEVTASK#${taskId}`, "META")?.workflow as Record<string, unknown>;
+    expect(decided).toMatchObject({ feedbackReview: { status: "CHANGES_REQUESTED" },
+      feedbackDecisions: [{ requestId: decisionRequestId, decision: "REQUEST_CHANGES", actorRole: "TASK_OWNER", ownerNote: "Please explain the recommendation." }] });
+    expect(decided.state).toBe("WAITING");
+
     await expect(readBundles(binding)).rejects.toThrow();
 
     const ordinary = await harness.actions.acceptTask(developerTaskIdentity(task as never), workspaceId,

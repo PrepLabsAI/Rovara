@@ -172,7 +172,16 @@ export const WorkflowFeedbackNoteSchema = z.object({
   schemaVersion: z.literal(1), requestId: z.string().uuid(), actorId: ActorIdSchema,
   source: z.enum(["THREAD_REPLY", "REQUEST_CHANGES", "DISMISS"]), sourceId: FeedbackIdSchema,
   text: z.string().trim().min(1).max(2000), at: z.string().datetime(),
-}).strict();
+  slack: z.object({
+    teamId: z.string().regex(/^[TE][A-Z0-9]{2,31}$/), channelId: z.string().regex(/^[CG][A-Z0-9]{2,31}$/),
+    threadTs: z.string().regex(/^\d{10}\.\d{6}$/), userId: z.string().regex(/^[UW][A-Z0-9]{2,31}$/),
+    messageTs: z.string().regex(/^\d{10}\.\d{6}$/), eventId: FeedbackIdSchema,
+  }).strict().optional(),
+}).strict().superRefine((note, context) => {
+  if (note.source === "THREAD_REPLY" && note.slack === undefined) {
+    context.addIssue({ code: "custom", path: ["slack"], message: "Slack thread notes require verified message provenance" });
+  }
+});
 export type WorkflowFeedbackNote = z.infer<typeof WorkflowFeedbackNoteSchema>;
 export const WorkflowFeedbackDecisionSchema = z.object({
   schemaVersion: z.literal(1), requestId: z.string().uuid(), workflowRevision: z.number().int().positive(),

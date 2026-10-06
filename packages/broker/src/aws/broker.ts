@@ -158,7 +158,7 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { AWS_TEMPORARY_MESSAGE, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, workerPrompt } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { adminShareMode, finishTaskClose, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook } from "./developer-tasks.js";
+import { adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, getWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, submitWorkflowFeedbackDecision } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -628,6 +628,22 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
     if (isSlackWorkflowFeedbackDecisionEvent(event)) {
       try {
         return json(await decideSlackWorkflowFeedback(dependencies, tasks, event), "slack-ingress");
+      } catch (error) {
+        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
+        return unexpectedErrorAnswer(error, "slack-ingress");
+      }
+    }
+    if (isSlackWorkflowFeedbackFindingsDecisionEvent(event)) {
+      try {
+        return json(await decideSlackWorkflowFeedbackFindings(dependencies, tasks, event), "slack-ingress");
+      } catch (error) {
+        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
+        return unexpectedErrorAnswer(error, "slack-ingress");
+      }
+    }
+    if (isSlackWorkflowFeedbackNoteEvent(event)) {
+      try {
+        return json(await captureSlackWorkflowFeedbackNote(dependencies, tasks, event), "slack-ingress");
       } catch (error) {
         if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
         return unexpectedErrorAnswer(error, "slack-ingress");
@@ -3324,6 +3340,19 @@ export interface SlackWorkflowFeedbackDecisionEvent {
   decision: "APPROVE" | "REQUEST_CHANGES";
 }
 
+export interface SlackWorkflowFeedbackFindingsDecisionEvent {
+  source: "agentx.slack-ingress";
+  action: "workflow-feedback-findings-decision";
+  taskId: string; userId: string; thread: SlackThread; requestId: string; expectedRevision: number;
+  reviewDigest: string; proposalDigest: string; bundleSetDigest: string; selection: "RECOMMENDED";
+  decision: "APPROVE" | "REQUEST_CHANGES"; ownerNote?: string;
+}
+
+export interface SlackWorkflowFeedbackNoteEvent {
+  source: "agentx.slack-ingress"; action: "feedback-note"; taskId: string; userId: string; thread: SlackThread;
+  eventId: string; messageTs: string; text: string;
+}
+
 export function isSlackWorkflowStartEvent(event: unknown): event is SlackWorkflowStartEvent {
   if (!event || typeof event !== "object") return false;
   const value = event as Record<string, unknown>;
@@ -3397,6 +3426,76 @@ export function isSlackWorkflowFeedbackDecisionEvent(event: unknown): event is S
     && Number.isInteger(value.expectedRevision) && typeof value.feedbackId === "string" && /^[a-f0-9]{64}$/.test(value.feedbackId)
     && typeof value.candidateDigest === "string" && /^[a-f0-9]{64}$/.test(value.candidateDigest)
     && (value.decision === "APPROVE" || value.decision === "REQUEST_CHANGES");
+}
+
+export function isSlackWorkflowFeedbackFindingsDecisionEvent(event: unknown): event is SlackWorkflowFeedbackFindingsDecisionEvent {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  return value.source === "agentx.slack-ingress" && value.action === "workflow-feedback-findings-decision" && value.requestContext === undefined
+    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
+    && Number.isInteger(value.expectedRevision) && typeof value.reviewDigest === "string" && /^[a-f0-9]{64}$/.test(value.reviewDigest)
+    && typeof value.proposalDigest === "string" && /^[a-f0-9]{64}$/.test(value.proposalDigest)
+    && typeof value.bundleSetDigest === "string" && /^[a-f0-9]{64}$/.test(value.bundleSetDigest)
+    && value.selection === "RECOMMENDED" && (value.decision === "APPROVE" || value.decision === "REQUEST_CHANGES")
+    && (value.ownerNote === undefined || typeof value.ownerNote === "string");
+}
+
+export function isSlackWorkflowFeedbackNoteEvent(event: unknown): event is SlackWorkflowFeedbackNoteEvent {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  return value.source === "agentx.slack-ingress" && value.action === "feedback-note" && value.requestContext === undefined
+    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.eventId === "string"
+    && value.eventId.length > 0 && value.eventId.length <= 128 && typeof value.messageTs === "string"
+    && typeof value.text === "string" && value.text.trim().length > 0 && value.text.trim().length <= 500
+    && typeof value.thread === "object" && value.thread !== null;
+}
+
+async function decideSlackWorkflowFeedbackFindings(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowFeedbackFindingsDecisionEvent) {
+  if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
+  const thread = SlackThreadSchema.parse(event.thread);
+  const userId = SlackRequesterSchema.shape.userId.parse(event.userId);
+  const taskId = randomUUIDSchema.parse(event.taskId);
+  const requestId = randomUUIDSchema.parse(event.requestId);
+  if (dependencies.developer.slackTeamId !== thread.teamId) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks");
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  if (task === undefined || task.slackUserId !== userId) throw agentXError("FORBIDDEN", "only the task owner can decide this PR feedback");
+  if (task.share?.teamId !== thread.teamId || task.share.channelId !== thread.channelId || task.share.threadTs !== thread.threadTs) throw agentXError("FORBIDDEN", "this PR feedback belongs to another Slack thread");
+  const workflow = task.workflow;
+  const review = workflow?.feedbackReview;
+  const bundleDigests = review?.bundleRefs.map(bundle => bundle.sha256) ?? [];
+  const bundleSetDigest = createHash("sha256").update(JSON.stringify(bundleDigests), "utf8").digest("hex");
+  if (workflow?.revision !== event.expectedRevision || workflow.stage !== "WAIT_FOR_MERGE" || workflow.state !== "WAITING"
+    || review?.status !== "PENDING" || review.reviewRef.sha256 !== event.reviewDigest || review.reviewRef.proposalDigest !== event.proposalDigest
+    || bundleSetDigest !== event.bundleSetDigest) throw agentXError("CONFIG_INVALID", "this review changed; reopen the AgentX review details");
+  if (event.decision === "REQUEST_CHANGES" && (typeof event.ownerNote !== "string" || event.ownerNote.trim().length === 0 || event.ownerNote.trim().length > 500)) {
+    throw agentXError("CONFIG_INVALID", "add a short note before requesting changes");
+  }
+  const caller: DeveloperCaller = { developerId: task.developerId, sessionId: "slack-workflow", amr: "slack", name: task.developerName, slackUserId: userId };
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+    developer: dependencies.developer, now: Date.now, tasks, refreshTaskFeedback: id => refreshTaskFeedbackForOwnerDecision(dependencies, id) }, caller);
+  const view = await getWorkflowFeedbackReview(routeDeps, caller, taskId);
+  const findings = Array.isArray(view.findings) ? view.findings as Array<Record<string, unknown>> : [];
+  const selectedFindingIds = event.decision === "APPROVE" ? findings.filter(finding => finding.recommended === true).map(finding => String(finding.id)) : [];
+  return submitWorkflowFeedbackDecision(routeDeps, caller, taskId, {
+    requestId, expectedRevision: event.expectedRevision, reviewDigest: event.reviewDigest, proposalDigest: event.proposalDigest,
+    bundleDigests, decision: event.decision, selectedFindingIds, ...(event.ownerNote === undefined ? {} : { ownerNote: event.ownerNote.trim() }),
+  });
+}
+
+async function captureSlackWorkflowFeedbackNote(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowFeedbackNoteEvent) {
+  if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
+  const thread = SlackThreadSchema.parse(event.thread);
+  const userId = SlackRequesterSchema.shape.userId.parse(event.userId);
+  const taskId = randomUUIDSchema.parse(event.taskId);
+  if (dependencies.developer.slackTeamId !== thread.teamId) throw agentXError("FORBIDDEN", "Slack workspace is not enabled for developer tasks");
+  const shared = await getItem<{ taskId?: string; mode?: string; closedAt?: string }>(dependencies, sharedTaskKey(thread));
+  if (shared?.taskId !== taskId || shared.closedAt !== undefined) throw agentXError("FORBIDDEN", "this Slack thread is not linked to the task");
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  if (task === undefined || task.slackUserId !== userId) throw agentXError("FORBIDDEN", "only the task owner can add a note in this PR review");
+  const caller: DeveloperCaller = { developerId: task.developerId, sessionId: "slack-workflow", amr: "slack", name: task.developerName, slackUserId: userId };
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+    developer: dependencies.developer, now: Date.now, tasks }, caller);
+  return captureWorkflowFeedbackNote(routeDeps, caller, taskId, event);
 }
 
 async function decideSlackWorkflowFeedback(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowFeedbackDecisionEvent) {

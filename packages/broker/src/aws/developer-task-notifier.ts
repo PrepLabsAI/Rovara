@@ -9,7 +9,7 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { INDEX_EXPIRY_ATTRIBUTE, AdminChangePendingRecordSchema, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, adminChangeKey, indexExpiresAt, lastAssistantResponse, sharedTaskKey, type PendingChange } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, AdminChangePendingRecordSchema, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, indexExpiresAt, lastAssistantResponse, sharedTaskKey, type PendingChange } from "@agentx/contracts";
 import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
@@ -34,6 +34,8 @@ export interface NotifierDependencies {
   post(input: PostInput): Promise<{ ts: string; channel?: string }>;
   /** Reads the plan through its recorded object key; callers verify its digest before linking it. */
   readArtifact?(key: string): Promise<string>;
+  /** Trusted same-origin API base used for authenticated AgentX task detail links. */
+  reviewUrlBase?: string;
   /** Creates a channel-readable detail page and returns Slack's verified link. */
   createPlanCanvas?(input: { channel: string; taskId: string; title: string; version: number; markdown: string }): Promise<{ canvasId: string; permalink: string }>;
   /** Spec 025 E13: chat.update, to edit an admin change's message when it ends. */
@@ -66,6 +68,39 @@ export const ADMIN_CHANGE_EXPIRY_GRACE_MS = 5_000;
 /** SQS's longest per-message delay. */
 const MAX_DELAY_SECONDS = 900;
 const slackText = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+
+export function feedbackReviewSlackMessage(input: {
+  taskId: string;
+  revision: number;
+  reviewDigest: string;
+  proposalDigest: string;
+  bundleDigests: string[];
+  totalComments: number;
+  recommendedFindingIds: string[];
+  highestPriority: "MUST_FIX" | "SHOULD_FIX" | "OPTIONAL" | undefined;
+  detailUrl: string;
+}): { text: string; blocks: unknown[] } {
+  const url = new URL(input.detailUrl);
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+    throw new Error("feedback review link is not a secure AgentX URL");
+  }
+  const priority = input.highestPriority === "MUST_FIX" ? "must fix" : input.highestPriority === "SHOULD_FIX" ? "should fix"
+    : input.highestPriority === "OPTIONAL" ? "optional" : "none recommended";
+  const text = `PR feedback is ready: ${input.totalComments} comments; ${input.recommendedFindingIds.length} recommendations. Highest priority: ${priority}. <${slackText(url.href)}|Open details>.`;
+  const bundleSetDigest = createHash("sha256").update(JSON.stringify(input.bundleDigests), "utf8").digest("hex");
+  const binding = JSON.stringify({ taskId: input.taskId, expectedRevision: input.revision, reviewDigest: input.reviewDigest,
+    proposalDigest: input.proposalDigest, bundleSetDigest, selection: "RECOMMENDED" });
+  return {
+    text,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text } },
+      { type: "actions", elements: [
+        { type: "button", action_id: "agentx_feedback_review_recommended", style: "primary", text: { type: "plain_text", text: `Approve ${input.recommendedFindingIds.length} recommended` }, value: binding },
+        { type: "button", action_id: "agentx_feedback_review_changes", text: { type: "plain_text", text: "Request changes" }, value: binding },
+      ] },
+    ],
+  };
+}
 
 /** #217: the queue delay for a notice the notifier scheduled: until its `notBefore`, within SQS's 15 minutes. */
 export function noticeDelaySeconds(notice: Notice, now: number): number {
@@ -258,10 +293,7 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
       const feedback = task.workflow?.feedback;
       if (feedback?.status !== "PENDING" || feedback.feedbackId !== notice.id.split(":").at(-1)) return undefined;
       const comment = feedback.comments.at(-1);
-      if (comment === undefined) return undefined;
-      const excerpt = comment.body.replace(/[\u0000-\u001f\u007f]/g, " ").replace(/\s+/g, " ").trim().slice(0, 180);
-      const more = comment.body.trim().length > 180 ? "…" : "";
-      return `PR #${feedback.number} feedback from ${slackText(comment.author)}: “${slackText(excerpt)}${more}” <${comment.url}|open comment>. Proposed: ${feedback.proposedPlan}`;
+      return comment === undefined ? undefined : `PR #${feedback.number} has reviewer feedback. <${slackText(comment.url)}|Open the GitHub comment>. No code changes have started.`;
     }
     case "ended": {
       const ended = await operation();
@@ -315,6 +347,35 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
     }
     default: return undefined;
   }
+}
+
+async function feedbackReviewNotification(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice) {
+  const workflow = task.workflow;
+  const review = workflow?.feedbackReview;
+  const reviewRef = review?.reviewRef;
+  if (notice.kind !== "github_feedback" || review?.status !== "PENDING" || reviewRef?.status !== "COMPLETE"
+    || reviewRef.sha256 !== notice.feedbackReviewDigest) return undefined;
+  if (deps.readArtifact === undefined || deps.reviewUrlBase === undefined) throw new Error("feedback review notice is not configured");
+  const bytes = await deps.readArtifact(reviewRef.objectKey);
+  if (createHash("sha256").update(bytes, "utf8").digest("hex") !== reviewRef.sha256) throw new Error("feedback review artifact integrity check failed");
+  const report = WorkflowFeedbackReviewReportSchema.parse(JSON.parse(bytes));
+  if (report.taskId !== task.taskId || report.status !== "COMPLETE" || report.proposalDigest !== reviewRef.proposalDigest
+    || JSON.stringify(report.bundleDigests) !== JSON.stringify(review.bundleRefs.map(bundle => bundle.sha256))) {
+    throw new Error("feedback review artifact binding failed");
+  }
+  const base = new URL(deps.reviewUrlBase);
+  if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) throw new Error("feedback review base URL is invalid");
+  const findings = report.findings;
+  const highestPriority = findings.some(finding => finding.recommended && finding.priority === "MUST_FIX") ? "MUST_FIX"
+    : findings.some(finding => finding.recommended && finding.priority === "SHOULD_FIX") ? "SHOULD_FIX"
+      : findings.some(finding => finding.recommended && finding.priority === "OPTIONAL") ? "OPTIONAL" : undefined;
+  return feedbackReviewSlackMessage({
+    taskId: task.taskId, revision: workflow!.revision, reviewDigest: reviewRef.sha256, proposalDigest: reviewRef.proposalDigest,
+    bundleDigests: review.bundleRefs.map(bundle => bundle.sha256),
+    totalComments: review.bundleRefs.reduce((total, bundle) => total + bundle.comments.length, 0),
+    recommendedFindingIds: findings.filter(finding => finding.recommended).map(finding => finding.id), highestPriority,
+    detailUrl: new URL(`/review/${encodeURIComponent(task.taskId)}`, base).href,
+  });
 }
 
 type Outcome = "posted" | "recorded" | "not_shared" | "before_share" | "after_close" | "delivered" | "no_thread" | "stale";
@@ -603,7 +664,8 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
     if (share.postFailedAt !== undefined) return "no_thread";
     throw new StartPending();
   }
-  const text = await replyText(deps, { ...task, share }, notice);
+  const feedbackReview = await feedbackReviewNotification(deps, { ...task, share }, notice);
+  const text = feedbackReview?.text ?? await replyText(deps, { ...task, share }, notice);
   if (text === undefined) return "stale";
   // Accepted: a close that commits while this reply is being posted can put this one reply after
   // "closed". The checks above read the task before the post; at most one reply per notice lands late.
@@ -611,17 +673,8 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
   const artifactType = workflow?.path === "FULL" && workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
     : workflow?.path === "FULL" && workflow.reviewPhase === "DESIGN" ? "design" : "plan";
   const plan = workflow?.artifacts.filter((artifact) => artifact.type === artifactType).at(-1);
-  const feedback = workflow?.feedback;
-  const feedbackNotice = notice.kind === "github_feedback" && feedback?.status === "PENDING" && feedback.feedbackId === notice.id.split(":").at(-1);
-  const blocks = feedbackNotice && feedback !== undefined
-    ? [
-        { type: "section", text: { type: "mrkdwn", text } },
-        { type: "actions", elements: [
-          { type: "button", action_id: "agentx_github_feedback_approve", style: "primary", text: { type: "plain_text", text: "Approve and address" }, value: JSON.stringify({ taskId: task.taskId, revision: workflow!.revision, feedbackId: feedback.feedbackId, candidateDigest: feedback.candidateDigest, decision: "APPROVE" }) },
-          { type: "button", action_id: "agentx_github_feedback_dismiss", text: { type: "plain_text", text: "Dismiss" }, value: JSON.stringify({ taskId: task.taskId, revision: workflow!.revision, feedbackId: feedback.feedbackId, candidateDigest: feedback.candidateDigest, decision: "REQUEST_CHANGES" }) },
-        ] },
-      ]
-    : notice.kind === "ended" && workflow?.stage === "PLAN_REVIEW" && workflow.state === "WAITING" && plan !== undefined
+  const blocks = feedbackReview?.blocks
+    ?? (notice.kind === "ended" && workflow?.stage === "PLAN_REVIEW" && workflow.state === "WAITING" && plan !== undefined
     ? [
         { type: "section", text: { type: "mrkdwn", text } },
         { type: "actions", elements: [
@@ -629,7 +682,7 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
           { type: "button", action_id: "agentx_workflow_changes", text: { type: "plain_text", text: "Request changes" }, value: JSON.stringify({ taskId: task.taskId, revision: workflow.revision, digest: plan.sha256, decision: "REQUEST_CHANGES" }) },
         ] },
       ]
-    : undefined;
+    : undefined);
   await deps.post({ channel: share.channelId, threadTs: share.threadTs, text, ...(blocks === undefined ? {} : { blocks }) });
   await putMarker(deps, marker);
   return "posted";
@@ -765,6 +818,7 @@ function createAwsNotifierHandler() {
       await sqs.send(new ChangeMessageVisibilityCommand({ QueueUrl: queueUrl(), ReceiptHandle: receiptHandle, VisibilityTimeout: seconds }));
     },
     post: slack.post,
+    ...(process.env.CONTROL_PLANE_URL === undefined ? {} : { reviewUrlBase: process.env.CONTROL_PLANE_URL }),
     async readArtifact(key) {
       const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));
       if (response.Body === undefined) throw new Error("workflow plan artifact has no body");

@@ -29,10 +29,12 @@ function harness(options: {
   failDecrement?: number;
   stop?: { outcome?: "CANCEL_REQUESTED" | "NOTHING_RUNNING"; throws?: boolean };
   workflowStart?: { throws?: boolean };
-  shared?: { threads: Record<string, { mode: "view" | "continue"; closed?: boolean }>; lookupThrows?: boolean; claimThrows?: boolean };
+  shared?: { threads: Record<string, { mode: "view" | "continue"; closed?: boolean; taskId?: string }>; lookupThrows?: boolean; claimThrows?: boolean };
+  feedbackCapture?: { captured?: boolean; throws?: boolean };
 } = {}) {
   const stopCalls: Array<{ thread: unknown; userId: string }> = [];
   const workflowStarts: Array<{ thread: unknown; userId: string; instructions: string; requestId: string }> = [];
+  const feedbackNotes: Array<Record<string, unknown>> = [];
   const memberChecks: string[] = [];
   const clock = { seconds: nowSeconds };
   const turnWindows: Array<{ subject: string; windowStart: number; expiresAt: number }> = [];
@@ -89,7 +91,7 @@ function harness(options: {
         lookup: async (thread: { threadTs: string }) => {
           if (options.shared?.lookupThrows) throw Object.assign(new Error("DynamoDB unavailable"), { name: "InternalServerError" });
           const found = options.shared?.threads[thread.threadTs];
-          return found === undefined ? undefined : { mode: found.mode, closed: found.closed ?? false };
+          return found === undefined ? undefined : { mode: found.mode, closed: found.closed ?? false, ...(found.taskId === undefined ? {} : { taskId: found.taskId }) };
         },
         claimNotice: async (subject: string, now: number, kind: "view" | "closed") => {
           if (options.shared?.claimThrows) throw Object.assign(new Error("DynamoDB unavailable"), { name: "InternalServerError" });
@@ -116,6 +118,13 @@ function harness(options: {
       startWorkflow: async (input: { thread: unknown; userId: string; instructions: string; requestId: string }) => {
         workflowStarts.push(input);
         if (options.workflowStart?.throws) throw new Error("broker unavailable");
+      },
+    }),
+    ...(options.feedbackCapture === undefined ? {} : {
+      captureFeedbackNote: async (input: Record<string, unknown>) => {
+        feedbackNotes.push(input);
+        if (options.feedbackCapture?.throws) throw new Error("private note body must not appear in this error");
+        return { captured: options.feedbackCapture?.captured ?? true };
       },
     }),
     ...(options.turnsPerMinute === undefined ? {} : {
@@ -153,7 +162,7 @@ function harness(options: {
       },
     }),
   });
-  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls, workflowStarts, noticedAt };
+  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls, workflowStarts, feedbackNotes, noticedAt };
 }
 
 function sharedNoticeKeyItem(table: FakeDynamoDb, subject: string): { noticedAt?: unknown } | undefined {
@@ -231,6 +240,25 @@ describe("Slack request signatures", () => {
 });
 
 describe("Slack mention ingress", () => {
+  it("captures only an owner's explicit AgentX thread reply for the known task and deduplicates delivery", async () => {
+    const taskId = "11111111-1111-4111-8111-111111111111";
+    const h = harness({
+      shared: { threads: { "1695500000.000001": { mode: "continue", taskId } }, },
+      feedbackCapture: { captured: true },
+    });
+    const payload = mention({ event: { thread_ts: "1695500000.000001", ts: "1695500002.000007", text: `<@${bot}> Please address the second recommendation.` } });
+    expect((await send(h.handler, signedEvent(payload))).status).toBe(200);
+    expect((await send(h.handler, signedEvent(payload))).status).toBe(200);
+    expect(h.feedbackNotes).toEqual([expect.objectContaining({
+      taskId, userId: pratik, eventId: "Ev0000000001", messageTs: "1695500002.000007",
+      thread: { teamId: team, channelId: channel, threadTs: "1695500000.000001" },
+      text: "Please address the second recommendation.",
+    })]);
+    expect(h.queue).toHaveLength(0);
+    expect(h.posts.at(-1)?.text).toContain("Note saved");
+    expect(JSON.stringify(h.logs)).not.toContain("second recommendation");
+  });
+
   it("queues a new thread's mention in its thread lane and acknowledges it", async () => {
     const { handler, queue, posts } = harness();
     const response = await send(handler, signedEvent(mention(), { base64: true }));

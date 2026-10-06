@@ -22,6 +22,10 @@ import {
   PullRequestResultSchema,
   ShareDeveloperTaskRequestSchema,
   SlackChannelIdSchema,
+  SlackMessageTimestampSchema,
+  SlackTeamIdSchema,
+  SlackThreadSchema,
+  SlackUserIdSchema,
   StartDeveloperTaskRequestSchema,
   WorkspaceClosePreflightResultSchema,
   agentXError,
@@ -46,6 +50,7 @@ import {
   type WorkflowCheckPolicy,
   WorkflowDecisionRequestSchema,
   WorkflowFeedbackDecisionRequestSchema,
+  WorkflowFeedbackNoteSchema,
   WorkflowFeedbackBundleSchema,
   WorkflowFeedbackReviewReportSchema,
   WorkflowTransitionError,
@@ -1201,6 +1206,66 @@ async function decideTaskFeedback(deps: DeveloperTaskRouteDependencies, caller: 
   const view = await taskView(deps, fresh, { events: 0, details: false });
   await syncIndex(deps, fresh, view.status, view.updatedAt);
   return { task: view };
+}
+
+function slackEventRequestId(eventId: string): string {
+  const digest = createHash("sha256").update(`agentx-slack-feedback-note:${eventId}`, "utf8").digest("hex");
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
+/** Persist an owner's short signed Slack reply as input only; it never submits a decision or starts work. */
+export async function captureWorkflowFeedbackNote(
+  deps: DeveloperTaskRouteDependencies,
+  caller: DeveloperCaller,
+  taskId: string,
+  input: { thread: unknown; userId: string; eventId: string; messageTs: string; text: string },
+): Promise<{ captured: boolean; duplicate?: boolean }> {
+  const thread = SlackThreadSchema.parse(input.thread);
+  const userId = SlackUserIdSchema.parse(input.userId);
+  const messageTs = SlackMessageTimestampSchema.parse(input.messageTs);
+  const eventId = input.eventId.trim();
+  if (!eventId || eventId.length > 128 || input.text.trim().length === 0 || input.text.trim().length > 500
+    || Buffer.byteLength(input.text.trim(), "utf8") > 1_000) throw agentXError("CONFIG_INVALID", "Slack feedback note is empty or too long");
+  const requestId = slackEventRequestId(eventId);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const task = await loadOwnedTask(deps, caller, taskId);
+    if (task.slackUserId !== userId || caller.slackUserId !== userId
+      || task.share?.teamId !== thread.teamId || task.share.channelId !== thread.channelId || task.share.threadTs !== thread.threadTs) {
+      throw agentXError("FORBIDDEN", "only the task owner may add a note in this task thread");
+    }
+    const current = task.workflow;
+    if (current?.stage !== "WAIT_FOR_MERGE" || current.state !== "WAITING" || current.feedbackReview?.status !== "PENDING") {
+      return { captured: false };
+    }
+    const prior = current.feedbackNotes?.find(note => note.requestId === requestId || note.slack?.eventId === eventId);
+    if (prior !== undefined) {
+      if (prior.slack?.eventId !== eventId || prior.slack.userId !== userId || prior.slack.threadTs !== thread.threadTs || prior.text !== input.text.trim()) {
+        throw agentXError("IDEMPOTENCY_CONFLICT", "this Slack reply event was already used");
+      }
+      return { captured: true, duplicate: true };
+    }
+    if ((current.feedbackNotes?.length ?? 0) >= 100) throw agentXError("RUNTIME_UNAVAILABLE", "the feedback note limit has been reached");
+    const now = iso(deps);
+    const note = WorkflowFeedbackNoteSchema.parse({
+      schemaVersion: 1, requestId, actorId: task.ownerKey, source: "THREAD_REPLY", sourceId: eventId,
+      text: input.text.trim(), at: now,
+      slack: { teamId: thread.teamId, channelId: thread.channelId, threadTs: thread.threadTs, userId, messageTs, eventId },
+    });
+    const next = { ...current, revision: current.revision + 1, feedbackNotes: [...(current.feedbackNotes ?? []), note], updatedAt: now };
+    try {
+      await deps.documentClient.send(new UpdateCommand({
+        TableName: deps.tableName, Key: taskKey(taskId),
+        UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+        ConditionExpression: "workflow.revision = :revision AND workflow.feedbackReview.#status = :pending AND attribute_not_exists(closedAt)",
+        ExpressionAttributeNames: { "#status": "status" },
+        ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": current.revision, ":pending": "PENDING" },
+      }));
+      return { captured: true };
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+    }
+  }
+  throw agentXError("RUNTIME_UNAVAILABLE", "the feedback note could not be saved");
 }
 
 /** The payload a cancel's idempotency item holds: a continue or PR with the same requestId conflicts. */

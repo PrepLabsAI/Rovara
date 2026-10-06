@@ -23,6 +23,8 @@ export interface Notice {
   changeId?: string;
   /** #217: the queue holds the notice until this time (at most 15 minutes); set only on a notice the notifier schedules itself. */
   notBefore?: string;
+  /** Active immutable PR-feedback report announced by this notice. */
+  feedbackReviewDigest?: string;
 }
 
 const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
@@ -42,10 +44,20 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
       const afterWorkflow = record(next.workflow);
       const beforeFeedback = record(beforeWorkflow?.feedback);
       const afterFeedback = record(afterWorkflow?.feedback);
+      const beforeReview = record(beforeWorkflow?.feedbackReview);
+      const afterReview = record(afterWorkflow?.feedbackReview);
+      const beforeReviewRef = record(beforeReview?.reviewRef);
+      const afterReviewRef = record(afterReview?.reviewRef);
+      const oldNotes = Array.isArray(beforeWorkflow?.feedbackNotes) ? beforeWorkflow.feedbackNotes.length : 0;
+      const newNotes = Array.isArray(afterWorkflow?.feedbackNotes) ? afterWorkflow.feedbackNotes.length : 0;
       if (afterFeedback?.status === "PENDING" && afterFeedback.feedbackId !== beforeFeedback?.feedbackId) {
         notices.push({ id: `${taskId}:github_feedback:${text(afterFeedback.feedbackId)}`, kind: "github_feedback", taskId, at });
+      } else if (afterReview?.status === "PENDING" && afterReviewRef?.status === "COMPLETE" && typeof afterReviewRef.sha256 === "string"
+        && (afterReviewRef.sha256 !== beforeReviewRef?.sha256 || newNotes !== oldNotes)) {
+        notices.push({ id: `${taskId}:feedback_review:${afterReviewRef.sha256}:${String(afterWorkflow?.revision)}`, kind: "github_feedback", taskId, at,
+          feedbackReviewDigest: afterReviewRef.sha256 });
       } else if (afterWorkflow !== undefined && afterWorkflow.revision !== beforeWorkflow?.revision && beforeWorkflow?.state === "WAITING" && eventId !== "") {
-        notices.push({ id: `${taskId}:workflow:${String(afterWorkflow.revision)}`, kind: "workflow", taskId, at });
+        notices.push({ id: `${taskId}:workflow:${String(afterWorkflow?.revision)}`, kind: "workflow", taskId, at });
       }
       if (after !== undefined && before === undefined) notices.push({ id: `${taskId}:start`, kind: "start", taskId, at });
       // A mode notice is named by its stream event; without one, two changes would collapse into one ID.
