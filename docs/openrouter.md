@@ -1,6 +1,6 @@
 # OpenRouter model access
 
-AgentX can use Bedrock, OpenRouter, or both. Each model is identified by its `provider` and
+Rovara can use Bedrock, OpenRouter, or both. Each model is identified by its `provider` and
 `modelId`. Project approval controls which coding models Slack users can select. The worker,
 Slack orchestrator, and action-gate classifier have independent defaults. To call Anthropic or
 OpenAI directly with your own key, see [Your own Anthropic or OpenAI API key](model-providers.md).
@@ -38,7 +38,7 @@ for the key whenever any provider is `openrouter`.
 To use a secret you made yourself instead, create it with the **raw OpenRouter API key** as its value
 and pass `--openrouter-secret-arn`; init then asks for no key and stores nothing. Use the AWS-managed
 Secrets Manager encryption key. Customer-managed encryption keys require an additional
-administrator-managed `kms:Decrypt` grant and key policy; AgentX does not add that grant.
+administrator-managed `kms:Decrypt` grant and key policy; Rovara does not add that grant.
 
 ```sh
 --orchestrator-provider openrouter --orchestrator-model anthropic/claude-sonnet-4 \
@@ -143,17 +143,17 @@ the approved list or credentials; no key is accepted through this Slack flow.
 
 The installed Pi SDK supplies models, context/output limits, reasoning metadata, streaming,
 tool-call assembly, and tool-result replay. Unknown IDs are refused instead of assigning guessed
-limits. Automatic-router aliases such as `openrouter/auto` are refused. Explicit reasoning on a model without reasoning support is refused. Update AgentX's
+limits. Automatic-router aliases such as `openrouter/auto` are refused. Explicit reasoning on a model without reasoning support is refused. Update Rovara's
 pinned Pi version to use models absent from its catalog.
 
 Requests name one model and set `allow_fallbacks: false`, `require_parameters: true`, and
 `data_collection: "deny"`. An optional provider allowlist supplies both `only` and `order`.
 Without it, OpenRouter chooses an eligible upstream for the requested model. There is no
-AgentX model escalation or fallback to Bedrock on inference errors. A missing secret is the explicit exception described below. The transport performs no automatic HTTP retry;
+Rovara model escalation or fallback to Bedrock on inference errors. A missing secret is the explicit exception described below. The transport performs no automatic HTTP retry;
 Pi's session recovery retains completed tool results instead of starting the task again.
 Unsupported parameters, exhausted credits, and unavailable permitted providers fail the request.
 Each request carries the session's current system prompt once, at the start, even after a resumed
-Slack turn changes it. AgentX does not send Pi's session ID to OpenRouter (no `x-session-id` header),
+Slack turn changes it. Rovara does not send Pi's session ID to OpenRouter (no `x-session-id` header),
 and Pi's prompt-cache warming requests are off.
 
 `data_collection: "deny"` is a provider data-policy filter, **not a guarantee of zero retention

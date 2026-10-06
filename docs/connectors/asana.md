@@ -1,6 +1,6 @@
 # Asana connector
 
-AgentX is open source and self-hosted. There is no shared Asana app. Your organisation creates its
+Rovara is open source and self-hosted. There is no shared Asana app. Your organisation creates its
 own Asana app and its own bot user, stores the app's client secret and the bot user's refresh
 token in your own AWS Secrets Manager, and registers them with `agentx admin credential authorize`.
 This guide walks you through that, end to end, for one Asana project.
@@ -12,7 +12,7 @@ it does, for doing it by hand or understanding it. The command signs the bot in 
 
 ## What you get
 
-AgentX can search, list, read, create, update and comment on Asana tasks in one project from
+Rovara can search, list, read, create, update and comment on Asana tasks in one project from
 Slack. It acts as one Asana user, the bot user. Every task or comment it writes shows that user as
 the author. Every comment is plain text and ends with a footer naming the Slack member who asked
 and linking the thread. The notes of a task it creates or updates carry no footer.
@@ -20,18 +20,18 @@ and linking the thread. The notes of a task it creates or updates carry no foote
 ## How access works
 
 Asana's MCP server, `https://mcp.asana.com/v2/mcp`, accepts only OAuth tokens that act as a
-signed-in user. It takes no API key and no client credentials. So AgentX works as a bot user that
-signs in once in a browser. After that, AgentX renews its access every hour on its own with the
+signed-in user. It takes no API key and no client credentials. So Rovara works as a bot user that
+signs in once in a browser. After that, Rovara renews its access every hour on its own with the
 refresh token from that sign-in.
 
 Two limits apply:
 
 1. **The bot user (mandatory).** An Asana OAuth token has no scopes: it reaches everything the bot
-   user can see. Make the bot user a guest of only the projects AgentX may use (Step 1), and prove
+   user can see. Make the bot user a guest of only the projects Rovara may use (Step 1), and prove
    it (Step 6). That is the limit that counts.
-2. **The project file.** AgentX sets the project on every tool that takes one, and before it reads
+2. **The project file.** Rovara sets the project on every tool that takes one, and before it reads
    or changes an existing task, it checks that the task is in the project. See
-   [What AgentX enforces](#what-agentx-enforces). This is a second line behind Step 1.
+   [What Rovara enforces](#what-rovara-enforces). This is a second line behind Step 1.
 
 ## Before you start
 
@@ -42,7 +42,7 @@ You need:
 - An email address for the bot user that nobody uses for anything else, outside your
   organisation's email domain so the bot user joins as a guest. A plus address on a personal
   mailbox, such as `you+agentx@gmail.com`, works.
-- An AgentX control plane you can reach with `agentx login` as an administrator.
+- A Rovara control plane you can reach with `agentx login` as an administrator.
 - AWS credentials for the control plane's account and region that can create, read, write and tag
   secrets: `secretsmanager:CreateSecret`, `GetSecretValue`, `PutSecretValue` and `TagResource` on
   `agentx/<env>/connectors/*` for a named environment, or `agentx/connectors/*` for the legacy
@@ -52,7 +52,7 @@ You need:
 
 ## Step 1: Create the bot user and share only the project
 
-1. Invite the bot user's email to the Asana project AgentX will use, with **Editor** access, so it
+1. Invite the bot user's email to the Asana project Rovara will use, with **Editor** access, so it
    can create tasks and comment. An address outside your organisation's email domain joins as a
    **guest**: it sees only what is shared with it, which is what you want.
 2. Accept the invitation from the bot user's inbox and set its password.
@@ -102,13 +102,13 @@ On Linux, replace `pbpaste` with `xclip -o -selection clipboard`.
 
 Use the default `aws/secretsmanager` key. If a customer-managed KMS key encrypts the secret
 instead, the broker role must be allowed `kms:Decrypt` and `kms:GenerateDataKey` on it, plus
-`kms:Encrypt` if the key policy requires it, because AgentX writes a rotated refresh token back to
+`kms:Encrypt` if the key policy requires it, because Rovara writes a rotated refresh token back to
 this secret. Your own AWS credentials need the same on that key for Step 4. See the
 `connector.refresh_token_unsaved` entry in [Troubleshooting](#troubleshooting) for how a missing
 grant shows up.
 
-The `agentx-writable` tag lets AgentX write a new refresh token back to this secret if Asana ever
-issues one. AgentX may write only secrets with this tag. Step 4 adds it too, if you left it out.
+The `agentx-writable` tag lets Rovara write a new refresh token back to this secret if Asana ever
+issues one. Rovara may write only secrets with this tag. Step 4 adds it too, if you left it out.
 
 ## Step 4: Sign the bot user in and register the credential
 
@@ -157,7 +157,7 @@ account is refused before anything is stored:
 AgentX error [AUTH_REQUIRED]: the sign-in was for Your Name <you@example.com>, not agentx-bot@example.com; nothing was stored or registered. Run the command again with --no-browser and open the sign-in URL in a private window signed in as agentx-bot@example.com
 ```
 
-Without `--expect-account` nothing checks the account: if the line names you, AgentX would act as
+Without `--expect-account` nothing checks the account: if the line names you, Rovara would act as
 you, with everything you can see, so run the command again as above, which replaces the stored
 sign-in. If Asana's answer carries no account, the line reads "Signed in to Asana (the account
 could not be shown)"; `--expect-account` then refuses the sign-in, and without it nothing proves
@@ -198,14 +198,14 @@ Signed in to Asana as the bot user:
 3. The "Signed in to Asana as" line Step 4 printed named this bot user. That line is what shows
    whose sign-in was stored. If it named someone else, or could not show the account, run Step 4
    again in a private window. Under your profile photo, **Settings > Apps > Authorized apps**
-   listing your AgentX app shows only that the bot user has authorized the app, not that its
+   listing your Rovara app shows only that the bot user has authorized the app, not that its
    sign-in is the one stored.
 
 Checks 1 and 2 test what the bot user can see; they pass even if Step 4 stored another account's
 sign-in, so check 3 matters.
 
 If the bot user sees more, remove it from those projects or teams and check again. Until it
-passes, the check in [What AgentX enforces](#what-agentx-enforces) is the only limit.
+passes, the check in [What Rovara enforces](#what-rovara-enforces) is the only limit.
 
 ## Step 7: Add Asana to the project file
 
@@ -239,7 +239,7 @@ Only these tools can be approved, each with the access shown:
 | `create_tasks`, `update_tasks`, `add_comment` | `write` |
 
 `search_tasks` works only on paid Asana plans (a trial of a paid plan counts). On a free workspace, approve `get_tasks` instead.
-Registration refuses any other Asana tool, because AgentX cannot hold it to a project.
+Registration refuses any other Asana tool, because Rovara cannot hold it to a project.
 
 ## Step 8: Register the project and read the preflight
 
@@ -257,13 +257,13 @@ Step 4.
 In a thread in a channel bound to the project, ask "what's open in Asana?", then "create an Asana
 task titled Test from AgentX". The task appears in the project, created by the bot user.
 
-## What AgentX enforces
+## What Rovara enforces
 
-The project GID is set by AgentX on every tool that takes one (`project`, `project_id`,
+The project GID is set by Rovara on every tool that takes one (`project`, `project_id`,
 `default_project` and `projects_any`). The model cannot choose it; a request that tries is refused
-before AgentX contacts Asana.
+before Rovara contacts Asana.
 
-Before a call reads or changes an existing task, AgentX reads that task with `get_task` and
+Before a call reads or changes an existing task, Rovara reads that task with `get_task` and
 refuses the call unless the task is in the project. A subtask that is in no project itself is
 accepted when its parent, up to three levels up, is in the project. This covers the task a call
 names, and in `create_tasks` and `update_tasks` also every parent and dependency. A call may make
@@ -293,7 +293,7 @@ Task URLs and names are refused; the model must pass the task ID.
 Not covered by these checks, so only Step 1 holds these to the project:
 
 - Reply contents. A task in the project can list subtasks, dependencies or other projects it is
-  also in, and AgentX returns what Asana returns.
+  also in, and Rovara returns what Asana returns.
 - Users, custom fields and followers that a write names.
 - Task links and @-mentions inside `notes`, `html_notes`, comment text and free-text custom field
   values. They can point at tasks in other projects. They do not add a task to the project or
@@ -306,30 +306,30 @@ shapes redacted on a best-effort basis; they are readable only by administrators
 
 ### Confirmations
 
-AgentX creates tasks with `create_tasks` without asking, even tasks created already complete. It
+Rovara creates tasks with `create_tasks` without asking, even tasks created already complete. It
 checks a change to an existing task against what the member asked: an `update_tasks` call, whose
 items name their tasks in `tasks[].task`, and an `add_comment` on a task. It always asks before a
 call that sets `completed`, true or false, anywhere in an `update_tasks` item, and before an
 `update_tasks` or `create_tasks` call with more than 5 tasks. Asana marks `update_tasks`
-destructive; AgentX does not ask for that alone, because it can see the tasks each call names. No
+destructive; Rovara does not ask for that alone, because it can see the tasks each call names. No
 action policy is needed for this.
 
 ## Re-authorizing and disconnecting
 
 If the bot user's access is removed, its password is reset or the app's client secret changes, the
-refresh token stops working. AgentX then answers that Asana is not connected and names the fix:
+refresh token stops working. Rovara then answers that Asana is not connected and names the fix:
 run Step 4 again. If you reset the client secret, first update the secret's `clientSecret` with
 Step 3's pipe, using `aws secretsmanager put-secret-value --secret-id agentx/<env>/connectors/asana-bot`
 in place of `create-secret` and dropping `--tags`, then run Step 4.
 
 Running Step 4 again to re-authorize has a brief rotation window: Asana issues a new refresh token
-and kills the old one the moment the new sign-in exchanges its code, but AgentX writes the new
+and kills the old one the moment the new sign-in exchanges its code, but Rovara writes the new
 token to the secret only after that exchange succeeds. If the broker refreshes the connector's
 access token in that narrow window, it still reads the old, now-dead token from the secret and the
 connector reports not connected until the write lands, normally within a second or two. If it does
 not clear on its own, run Step 4 again.
 
-To disconnect AgentX, signed in as the bot user, remove the app's access in Asana's account
+To disconnect Rovara, signed in as the bot user, remove the app's access in Asana's account
 settings, then delete the secret.
 
 ## Troubleshooting
@@ -364,17 +364,17 @@ settings, then delete the secret.
   window.** You ran it without `--no-browser` and you own the Asana app: it opened your default
   browser, signed in to Asana as you, and Asana approved your own app silently. Run Step 4 again
   with `--no-browser --expect-account <bot user's email>`; the new sign-in replaces the stored one.
-  Then, signed in as yourself, remove the AgentX app from your own authorized apps in Asana's
+  Then, signed in as yourself, remove the Rovara app from your own authorized apps in Asana's
   settings.
 - **"the sign-in was for ..., not ...; nothing was stored or registered".** `--expect-account`
-  refused a sign-in by another account (or by one Asana did not name). AgentX stored and registered
+  refused a sign-in by another account (or by one Asana did not name). Rovara stored and registered
   nothing, but that account has now authorized the app at Asana. Signed in to Asana as that
-  account, remove the AgentX app from its authorized apps (Settings → Apps). Then run Step 4 again
+  account, remove the Rovara app from its authorized apps (Settings → Apps). Then run Step 4 again
   with `--no-browser` and open the URL in a private window signed in only as the bot user.
 - **"Signed in to Asana as" names you, or anyone other than the bot user.** The browser was
   signed in to your own account. Run Step 4 again with the sign-in URL opened in a private window
   signed in as the bot user; the new sign-in replaces the stored one. Then, signed in as yourself,
-  remove the AgentX app from your own authorized apps in Asana's settings.
+  remove the Rovara app from your own authorized apps in Asana's settings.
 - **"secret ... holds binary data, not a JSON string".** The secret was stored as binary. Store it
   again as a JSON string with Step 3's pipe, using `aws secretsmanager put-secret-value --secret-id
   agentx/<env>/connectors/asana-bot` in place of `create-secret` and dropping `--tags`.
@@ -395,7 +395,7 @@ settings, then delete the secret.
 - **Every call fails as not connected, "its KMS key does not allow the AgentX broker" or "cannot
   be decrypted".** If a customer-managed key encrypts the secret, the broker role lacks
   `kms:Decrypt` on it (Step 3). Otherwise check the secret's name and region.
-- **A log line `connector.refresh_token_unsaved`.** Asana issued a new refresh token and AgentX
+- **A log line `connector.refresh_token_unsaved`.** Asana issued a new refresh token and Rovara
   could not save it. In the broker's CloudWatch log group (the control plane stack's `Broker`
   function), search for `connector.refresh_token_unsaved`; the line names the credential and a
   `reason`:
@@ -406,14 +406,14 @@ settings, then delete the secret.
   - `"reason":"LeaseDeadlineExceeded"` means a slow refresh skipped the write; the next refresh
     tries again.
   - `"reason":"SecretChanged"` means the secret's refresh token changed since this refresh read
-    it (usually a new sign-in, from Step 4 run again). AgentX dropped the token it could not save
+    it (usually a new sign-in, from Step 4 run again). Rovara dropped the token it could not save
     and kept the secret's. Nothing to do.
 
   Until the new token is saved, the broker keeps it in memory and retries the write on the next
   refresh. If that copy is lost before it is saved and Asana no longer accepts the old token, calls
   fail as not connected and Step 4 is needed.
 - **"Could not confirm that Asana task ... is in the ... project".** Asana answered `get_task` in a
-  shape AgentX does not accept, so it refused the call rather than guess. Report it with the
+  shape Rovara does not accept, so it refused the call rather than guess. Report it with the
   connector's version.
 - **`search_tasks` fails with a vendor error.** The workspace is on a free plan. Approve
   `get_tasks` instead.

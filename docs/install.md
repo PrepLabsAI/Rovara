@@ -1,20 +1,20 @@
-# Installing AgentX
+# Installing Rovara
 
-This guide installs one AgentX environment in your AWS account. There are three ways to do it:
+This guide installs one Rovara environment in your AWS account. There are three ways to do it:
 
 - **With published templates** (recommended). No source checkout and no CDK bootstrap.
 - **With cdk.** `cdk deploy` from a clean checkout of the release's tag.
 - **Through your platform team.** They deploy the access stack (the IAM roles) from a bundle you
   write; you do the rest with the operator role.
 
-Every way uses the same command, `agentx init`, and ends with AgentX answering in Slack. After
+Every way uses the same command, `agentx init`, and ends with Rovara answering in Slack. After
 the install, [docs/day-two.md](day-two.md) covers running it.
 
 ## Before you start
 
 You need:
 
-- **An AWS account.** A separate AWS account just for AgentX keeps its costs and permissions apart
+- **An AWS account.** A separate AWS account just for Rovara keeps its costs and permissions apart
   from your other work. Give each install its own: environments that share an account are not a
   security boundary against each other.
 - **Admin credentials in that account for the first run** (for example `aws login` or an SSO
@@ -23,7 +23,7 @@ You need:
 - **Node 22.19 or newer (Node 22 LTS recommended).** AWS CloudShell comes with Node 20; see
   [Node 22 in AWS CloudShell](#node-22-in-aws-cloudshell). With an older Node, `agentx` stops
   before it does anything and says what to install.
-- **A GitHub organization or personal account** that will own the AgentX GitHub App.
+- **A GitHub organization or personal account** that will own the Rovara GitHub App.
 - **A Slack workspace where you can create apps.** If new apps need an admin's approval, `init`
   waits for it.
 - **An email address for alerts**, or a PagerDuty or Opsgenie integration address.
@@ -42,7 +42,7 @@ You need:
 
 ### Node 22 in AWS CloudShell
 
-AWS CloudShell has Node 20, and AgentX needs Node 22. `npm install` only warns about it
+AWS CloudShell has Node 20, and Rovara needs Node 22. `npm install` only warns about it
 (`EBADENGINE`); `agentx` itself stops with this command in its message. Run it once in
 CloudShell's default Bash shell:
 
@@ -90,13 +90,13 @@ you.
 
 The page walks you through five parts, and tells you when it needs you:
 
-1. **Get started.** The page opens first and shows AgentX downloading. You pick the AWS profile (only
-   when you have more than one), see the account you are signed in to, and pick the region. AgentX
+1. **Get started.** The page opens first and shows Rovara downloading. You pick the AWS profile (only
+   when you have more than one), see the account you are signed in to, and pick the region. Rovara
    then checks the account: EC2 capacity, Elastic IPs and Amazon Bedrock in that region.
 2. **Your choices.** One settings screen: your email, the GitHub owner, the install name and the app
-   name. Everything else has a recommended value under Advanced settings. AgentX checks your answers
+   name. Everything else has a recommended value under Advanced settings. Rovara checks your answers
    (the models, the release's images, the names, the GitHub owner) before anything is created, then
-   shows the plan with its cost. Press Create AgentX, or Change answers to go back with every answer
+   shows the plan with its cost. Press Create Rovara, or Change answers to go back with every answer
    kept. Then you create and install the GitHub app.
 3. **Build in AWS.** About 18 minutes, unattended. You can leave; the alert confirmation email
    arrives during this part.
@@ -179,7 +179,7 @@ Use this when you want CDK's own diffs. It deploys the same release.
    commit:
 
    ```sh
-   git clone --branch v<version> --depth 1 https://github.com/PrepLabsAI/AgentX.git agentx-<version>
+   git clone --branch v<version> --depth 1 https://github.com/PrepLabsAI/Rovera.git agentx-<version>
    ```
 
    `<version>` is the version of the `agentx` you run (`npx @preplabsai/rovara-code --version`).

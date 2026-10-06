@@ -1,4 +1,4 @@
-<h1 align="center">AgentX</h1>
+<h1 align="center">Rovara</h1>
 
 <p align="center">
   <strong>A remote coding-agent runtime and task workflow, in your own AWS account.</strong>
@@ -26,11 +26,15 @@
 
 Start a task in Slack, or hand one over from Claude Code, Codex or Cursor. A remote
 [Pi](https://github.com/earendil-works/pi) coding agent works on it in a persistent, isolated EC2
-workspace in your AWS account. When it finishes, AgentX reports which checks passed, failed, or
+workspace in your AWS account. When it finishes, Rovara reports which checks passed, failed, or
 could not be verified. When you're ready, it opens a pull request for a person to review and merge.
-AgentX has no merge path.
+Rovara has no merge path.
 
 **Your team delegates from where it already works. Your AWS account runs the work.**
+
+> **Naming:** Rovara was called AgentX. Commands, AWS resource names, paths, tool names and the
+> default Slack app name still use `agentx` or `AgentX` (for example `agentx init`,
+> `AgentXControlPlane`, `~/.agentx` and `@AgentX`), so every command in these docs works as written.
 
 |        | Step                    | Example                                                                                       |
 | ------ | ----------------------- | --------------------------------------------------------------------------------------------- |
@@ -71,7 +75,7 @@ AgentX has no merge path.
 
 <br/>
 
-## AgentX is right for you if
+## Rovara is right for you if
 
 - ✅ You want a coding agent your **whole team can use from Slack**, without anyone's laptop staying on
 - ✅ You want every task to run on **its own isolated machine**, not on a developer's computer
@@ -97,13 +101,13 @@ Files and conversation live on the thread's volume. The idle reaper stops comput
 </td>
 <td align="center" width="33%">
 <h3>📋 Check report</h3>
-When the agent finishes, AgentX reruns the project's readiness checks, or the agent's own test commands, and <a href="docs/how-it-works.md#what-the-check-report-means">reports what passed, failed, or could not be verified</a>.
+When the agent finishes, Rovara reruns the project's readiness checks, or the agent's own test commands, and <a href="docs/how-it-works.md#what-the-check-report-means">reports what passed, failed, or could not be verified</a>.
 </td>
 </tr>
 <tr>
 <td align="center">
 <h3>🔀 Pull requests for review</h3>
-Opens and maintains PRs. Configured <a href="docs/pull-requests.md#configure-codebuild-gates">CodeBuild gates</a> run against the candidate commit. A person merges; AgentX never force-pushes.
+Opens and maintains PRs. Configured <a href="docs/pull-requests.md#configure-codebuild-gates">CodeBuild gates</a> run against the candidate commit. A person merges; Rovara never force-pushes.
 </td>
 <td align="center">
 <h3>🔒 Isolated coding worker</h3>
@@ -121,7 +125,7 @@ GitHub (through GitHub's MCP server), Linear, Jira, Asana, or <a href="docs/conn
 </td>
 <td align="center">
 <h3>🤖 From your AI tool</h3>
-<code>agentx mcp</code> gives Claude Code, Codex or Cursor <a href="docs/mcp-install.md">11 tools</a> to start, check, continue and share AgentX tasks.
+<code>agentx mcp</code> gives Claude Code, Codex or Cursor <a href="docs/mcp-install.md">11 tools</a> to start, check, continue and share Rovara tasks.
 </td>
 <td align="center">
 <h3>🧠 Your choice of model</h3>
@@ -146,27 +150,27 @@ Every turn leaves a record of the tools called and why. A <strong>Details</stron
 
 <br/>
 
-## Problems AgentX solves
+## Problems Rovara solves
 
-| Without AgentX                                                                                       | With AgentX                                                                                                         |
+| Without Rovara                                                                                       | With Rovara                                                                                                         |
 | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
 | ❌ A coding agent only runs while someone's laptop is open, and only that person can see it.          | ✅ It runs in your AWS account. Anyone in the channel can follow the thread and steer it.                            |
 | ❌ Two tasks on one checkout trip over each other's changes.                                          | ✅ Every thread has its own machine and disk.                                                                        |
 | ❌ Picking a task back up next week means rebuilding the context by hand.                             | ✅ The thread's files and conversation are still on its volume. Mention it again and it carries on.                  |
-| ❌ The agent says "all tests pass" and you can't tell whether it ran any.                             | ✅ AgentX reruns the checks itself and reports what passed, failed, or could not be verified.                        |
+| ❌ The agent says "all tests pass" and you can't tell whether it ran any.                             | ✅ Rovara reruns the checks itself and reports what passed, failed, or could not be verified.                        |
 | ❌ Handing an agent your GitHub token and hoping it doesn't close the wrong issue.                    | ✅ Tokens stay in the control plane, and destructive actions wait for the requester to approve them.                 |
 | ❌ Idle cloud machines quietly run up the bill.                                                       | ✅ The idle reaper stops compute and keeps the disk. Per-member and per-organization limits cap open workspaces.     |
 
 <br/>
 
-## Why AgentX is different
+## Why Rovara is different
 
 |                                         |                                                                                                                                         |
 | --------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | **Check outcomes, stated plainly.**     | A run with no usable checks, or one that stops before verification, is reported as not verified, never as passing.                     |
-| **A person merges.**                    | AgentX can open, update, replace and revert pull requests. It has no merge path.                                                        |
+| **A person merges.**                    | Rovara can open, update, replace and revert pull requests. It has no merge path.                                                        |
 | **The orchestrator can't touch code.**  | The hosted Slack agent has orchestration and approved connector tools only. Source, edits and shell live in the remote worker.         |
-| **Credentials never reach the worker.** | The GitHub App key stays in Secrets Manager. AgentX mints short-lived, single-repository tokens for each clone, push and PR.           |
+| **Credentials never reach the worker.** | The GitHub App key stays in Secrets Manager. Rovara mints short-lived, single-repository tokens for each clone, push and PR.           |
 | **Tool output can't approve itself.**   | The model that checks a change sees only the members' messages and the call, never what a tool returned.                                |
 | **Memory fails closed.**                | If a thread's volume is lost, the next request fails with `CONVERSATION_STATE_LOST` instead of starting over on files it doesn't know. |
 | **Fenced closure.**                     | Closing a workspace is refused while it holds uncommitted, untracked or unpushed work.                                                  |
@@ -229,7 +233,7 @@ DynamoDB. [Production architecture](docs/architecture-production.md)
 **Coding worker** (`packages/worker`) — Runs the Pi coding agent on an EC2 instance with an
 encrypted EBS workspace. Loads each repository's `AGENTS.md` or `CLAUDE.md`, runs the
 verification extension that produces the check report, and records usage for every task.
-[How AgentX works](docs/how-it-works.md)
+[How Rovara works](docs/how-it-works.md)
 
 </td>
 <td>
@@ -253,7 +257,7 @@ server-bound arguments and keeps credentials out of the model's reach.
 
 **Developer MCP server** (`packages/mcp`) — `agentx mcp` lets a signed-in developer's AI tool list
 projects, start and continue tasks, share them to Slack and open pull requests.
-[Use AgentX from your AI tool](docs/mcp-install.md)
+[Use Rovara from your AI tool](docs/mcp-install.md)
 
 </td>
 </tr>
@@ -277,13 +281,13 @@ contracts every component validates against.
 
 <br/>
 
-## What AgentX is not
+## What Rovara is not
 
 |                                       |                                                                                                          |
 | ------------------------------------- | -------------------------------------------------------------------------------------------------------- |
 | **Not proof that the code works.**    | The check report says what the available checks showed. It is not proof that a change is correct.       |
 | **Not an auto-merger.**               | It opens and maintains pull requests. A person reviews and merges them.                                  |
-| **Not a hosted service.**             | You install it in your AWS account. There is no AgentX account to sign up for.                           |
+| **Not a hosted service.**             | You install it in your AWS account. There is no Rovara account to sign up for.                           |
 | **Not a local agent.**                | Nothing runs on a developer's machine except the CLI. The old local and Socket Mode modes are retired.   |
 | **Not an agent framework.**           | It runs the Pi coding agent for you. It doesn't ask you to build one.                                    |
 
@@ -291,7 +295,7 @@ contracts every component validates against.
 
 ## Quickstart
 
-> **Status:** no AgentX release is published yet; see [releases](docs/releases.md) and the
+> **Status:** no Rovara release is published yet; see [releases](docs/releases.md) and the
 > [field guide](https://rovara-dev.github.io/docs/index.html). Until then, an install runs from a
 > source checkout and needs container images you have pushed yourself. Once a release is out, the
 > install starts with one command ([npm package](docs/npm-package.md)):
@@ -302,8 +306,8 @@ contracts every component validates against.
 
 ### What you need
 
-- AWS administrator credentials for the first run, ideally in an account used only for AgentX
-- A GitHub organization or personal account to own AgentX's GitHub App
+- AWS administrator credentials for the first run, ideally in an account used only for Rovara
+- A GitHub organization or personal account to own Rovara's GitHub App
 - A Slack workspace where you can create and install apps
 - Model access: Amazon Bedrock in your region, or an OpenRouter, Anthropic or OpenAI API key
 - Node.js 22.19 or newer (Node 22 LTS recommended)
@@ -350,7 +354,7 @@ the environment. See [the install overview](docs/getting-started.md) for the ful
 
 ## FAQ
 
-**Q: Does AgentX verify that the change is correct?**
+**Q: Does Rovara verify that the change is correct?**
 
 **A:** No. It reruns the checks it has (the project's readiness commands, or recognized test
 commands the agent ran) and reports what passed, failed, timed out, or could not be verified. A task
@@ -403,15 +407,15 @@ the `agentx` CLI.
 | Guide                                                         | What it covers                                                                 |
 | ------------------------------------------------------------- | ------------------------------------------------------------------------------ |
 | [Install overview](docs/getting-started.md)                   | `init`, day-2 commands and developer sign-in on one page                       |
-| [Installing AgentX](docs/install.md)                          | Published templates, CDK, platform-team export, CloudShell                     |
-| [Running AgentX](docs/day-two.md)                             | The operator role, `doctor`, `upgrade`, `config`, projects and connectors      |
-| [How AgentX works](docs/how-it-works.md)                      | Request path, the check report, context files, usage records, stack names     |
+| [Installing Rovara](docs/install.md)                          | Published templates, CDK, platform-team export, CloudShell                     |
+| [Running Rovara](docs/day-two.md)                             | The operator role, `doctor`, `upgrade`, `config`, projects and connectors      |
+| [How Rovara works](docs/how-it-works.md)                      | Request path, the check report, context files, usage records, stack names     |
 | [Production architecture](docs/architecture-production.md)    | EC2 workers, EBS, networking, devcontainers, isolation and release             |
 | [Working in Slack](docs/slack.md)                             | Threads, connectors, confirmations, shared tasks, memory, diagnostics         |
 | [Administration client](docs/administration.md)               | Registering projects, binding channels, the full command surface              |
 | [Project configuration](docs/project-configuration.md)        | Every field of a project file, and how the checks work                         |
 | [Pull requests](docs/pull-requests.md)                        | Publication, maintenance, GitHub App permissions, CodeBuild gates              |
-| [Use AgentX from your AI tool](docs/mcp-install.md)           | `agentx mcp` for Claude Code, Codex and Cursor, and sharing to Slack           |
+| [Use Rovara from your AI tool](docs/mcp-install.md)           | `agentx mcp` for Claude Code, Codex and Cursor, and sharing to Slack           |
 | [Model providers](docs/openrouter.md) · [your own key](docs/model-providers.md) | Bedrock, OpenRouter, Anthropic and OpenAI                     |
 | Connectors: [Linear](docs/connectors/linear.md) · [Jira](docs/connectors/jira.md) · [Asana](docs/connectors/asana.md) · [any MCP server](docs/connectors/custom-mcp.md) | Credentials and setup per connector |
 | [SWE-bench evals](docs/swebench-eval.md)                      | Running SWE-bench tasks against the coding agent from Slack                    |
@@ -433,7 +437,7 @@ npm test               # Vitest (no Docker or AWS needed)
 npm run infra:synth    # Synthesize the CDK app
 ```
 
-See [Developing AgentX](docs/development.md) for the typecheck baseline, the spec documents and the
+See [Developing Rovara](docs/development.md) for the typecheck baseline, the spec documents and the
 GitHub Spec Kit setup.
 
 <br/>
@@ -454,7 +458,7 @@ GitHub Spec Kit setup.
 - ✅ Dev containers
 - ✅ Per-project model choice: Bedrock, OpenRouter, Anthropic and OpenAI
 - 🟡 Install page in the browser (phase 1 built; phases 2 to 4 next)
-- ⚪ Admin tools for AI tools: reading AgentX's state (spec 025 phase 25d) and confirmed changes (25e)
+- ⚪ Admin tools for AI tools: reading Rovara's state (spec 025 phase 25d) and confirmed changes (25e)
 - ⚪ Multi-repository change sets that test and publish several repositories together
 - ⚪ First public release on npm and a public image registry
 

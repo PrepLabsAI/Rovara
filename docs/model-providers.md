@@ -1,6 +1,6 @@
 # Your own Anthropic or OpenAI API key
 
-AgentX can call Anthropic's API or OpenAI's API directly, using an API key you supply, instead of (or
+Rovara can call Anthropic's API or OpenAI's API directly, using an API key you supply, instead of (or
 alongside) Amazon Bedrock and OpenRouter. Any role can use it: the Slack orchestrator, the action-gate
 classifier and the coding worker. Projects can also approve these models for Slack's `@agentx use`. The
 key belongs to the installation: only an administrator sets it, through `agentx init`. It is never entered
@@ -31,7 +31,7 @@ Enter to accept):
 
 Init then asks for the **API key** in a hidden prompt. It refuses a key with the wrong prefix for the
 provider (`sk-ant-` for Anthropic; `sk-` for OpenAI, but not an OpenRouter `sk-or-` or Anthropic key). It
-also refuses a Claude Pro/Max subscription token (`sk-ant-oat…`): AgentX uses API keys only. Init stores the
+also refuses a Claude Pro/Max subscription token (`sk-ant-oat…`): Rovara uses API keys only. Init stores the
 raw key, not JSON, in the Secrets Manager secret `agentx/<env>/anthropic` or `agentx/<env>/openai`, with the
 AWS-managed encryption key, just before it saves its answers. The saved answers hold only the secret's ARN.
 The plan lists the secret, and prices each direct-provider role from the provider's list price.
@@ -100,8 +100,8 @@ Add approved pairs to the project's `approvedModels`, as for any provider:
 
 `@agentx use Opus 5 (Anthropic)` switches the project's coding model, and the next turn calls Anthropic
 directly. SWE-bench and SEC-bench runs take the same labels (`… model Opus 5 (Anthropic)`). A model must be
-in the Pi catalog that AgentX pins (Pi 1.0.0 includes `claude-opus-5-5`); a model newer than that
-catalog needs an AgentX release with a newer Pi. An unknown model is refused when it is first used, with "not in the
+in the Pi catalog that Rovara pins (Pi 1.0.0 includes `claude-opus-5-5`); a model newer than that
+catalog needs a Rovara release with a newer Pi. An unknown model is refused when it is first used, with "not in the
 installed Pi catalog".
 
 ## How the key is handled
@@ -116,11 +116,11 @@ installed Pi catalog".
 - Worker settings in SSM (`worker-anthropic-secret-arn`, `worker-openai-secret-arn`), EC2 user data and the
   container environment carry the ARN, never the key.
 - Each worker session and orchestrator turn reads the key into an in-memory credential store; the
-  classifier reads it when the Slack service starts. AgentX never sets `ANTHROPIC_API_KEY`,
+  classifier reads it when the Slack service starts. Rovara never sets `ANTHROPIC_API_KEY`,
   `ANTHROPIC_AUTH_TOKEN` or `OPENAI_API_KEY`, and a configured key wins over those variables if they are
   present. Restart the Slack service after rotating a key; workers pick it up at their next session.
 - Anthropic never answers with a different model: Pi's catalog lists server-side fallback models for some
-  Claude models (Fable 5 falls back to Opus 4.8 and Opus 5), and AgentX removes them from the request.
+  Claude models (Fable 5 falls back to Opus 4.8 and Opus 5), and Rovara removes them from the request.
   Like OpenRouter (spec 050), each request carries the current prompt once, at the start, rather than
   prompt changes as mid-conversation system messages.
 - Provider errors are replaced with a diagnostic chosen from the HTTP status (key, model access, rate limit
@@ -153,7 +153,7 @@ Compare them with the provider's usage dashboard.
 
 Requests go straight from AWS to `api.anthropic.com` or `api.openai.com`. OpenAI requests are sent with
 `store: false`. Each provider's own data-retention policy applies to your organization. Zero data retention
-is an arrangement with the provider, not something AgentX can turn on. Prompt caching follows the
+is an arrangement with the provider, not something Rovara can turn on. Prompt caching follows the
 deployment's `PromptCacheRetention` setting.
 
 ## Rotate, add or remove a key

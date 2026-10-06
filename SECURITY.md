@@ -1,6 +1,6 @@
 # Security policy
 
-AgentX runs in your own AWS account and holds credentials for your GitHub, Slack and connectors,
+Rovara runs in your own AWS account and holds credentials for your GitHub, Slack and connectors,
 so we treat security reports as our first priority.
 
 ## Reporting a vulnerability
@@ -31,7 +31,7 @@ Please include:
 ## Supported versions
 
 We fix security problems in the latest release. Upgrade with `agentx --env <name> upgrade`; see
-[Running AgentX](docs/day-two.md).
+[Running Rovara](docs/day-two.md).
 
 ## Scope
 
@@ -41,8 +41,8 @@ this repository.
 
 Out of scope:
 
-- the limits AgentX already documents in
-  [What AgentX does not protect against](docs/security.md#what-agentx-does-not-protect-against);
+- the limits Rovara already documents in
+  [What Rovara does not protect against](docs/security.md#what-agentx-does-not-protect-against);
 - vulnerabilities in AWS, Slack, GitHub, model providers or other third-party services themselves;
 - problems that need the AWS account's administrator credentials, which already control the whole
   installation.

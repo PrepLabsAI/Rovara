@@ -2,10 +2,10 @@
 
 How the hosted orchestrator handles a Slack thread: connectors, confirmations, shared tasks, what a thread remembers, and diagnostics.
 
-AgentX runs a hosted orchestrator for Slack in the environment's own AWS account, so no developer
-machine has to stay online. Slack calls the AgentX Events API route; an ingress Lambda verifies
+Rovara runs a hosted orchestrator for Slack in the environment's own AWS account, so no developer
+machine has to stay online. Slack calls the Rovara Events API route; an ingress Lambda verifies
 Slack's signature, acknowledges in the thread, and queues the request. An ECS Fargate service runs
-the Pi orchestrator for that thread and posts the result back. It can call AgentX orchestration
+the Pi orchestrator for that thread and posts the result back. It can call Rovara orchestration
 tools and administrator-approved GitHub MCP tools; repository coding work runs in the remote Pi
 worker.
 
@@ -52,7 +52,7 @@ signs). This release uses
 the existing GitHub App installation with repository-scoped **Issues** permissions. Tokens stay
 in the control plane. Existing projects remain disabled until an administrator registers an
 opt-in revision. Arbitrary endpoints, personal OAuth, and other GitHub permission families are
-not included. Existing AgentX coding and validated PR-publication tools remain unchanged.
+not included. Existing Rovara coding and validated PR-publication tools remain unchanged.
 The hosted Slack service discovers tools from the project's latest registered revision on each
 mention. Calls use its IAM service identity and carry the requesting Slack user; tokens remain in
 the broker. Only a prepared thread's checkout (repositories, setup, environment) stays on the
@@ -169,9 +169,9 @@ Then configure the Slack app:
 - Under **Event Subscriptions**, enable events and set the request URL to the `SlackEventsUrl`
   output. Slack verifies the URL immediately, which succeeds only after the secret is stored.
 - Subscribe to the bot event `app_mention`.
-- Bot token scopes: `app_mentions:read`, `chat:write` and `users:read`. AgentX uses `users:read`
+- Bot token scopes: `app_mentions:read`, `chat:write` and `users:read`. Rovara uses `users:read`
   to confirm that a mention posted through another app came from a person, and to show the
-  requester's name in connector write footers. Without it, AgentX does not run mentions posted
+  requester's name in connector write footers. Without it, Rovara does not run mentions posted
   through other apps (it says it could not confirm the sender), and footers show the Slack member
   ID. Reinstall the app after changing scopes.
 - Invite the app to the project channel with `/invite @AgentX`.
@@ -208,7 +208,7 @@ Mention the app in the bound channel for every request, including follow-ups in 
 create a pull request.
 ```
 
-AgentX replies within a few seconds. If earlier requests in the thread are still running, it says
+Rovara replies within a few seconds. If earlier requests in the thread are still running, it says
 how many are ahead, and says "Working on it now" when it starts on the request. A request with
 nothing ahead gets no separate "Working on it now" notice, unless it waits for workspace setup. A
 message that is only an answer to a confirmation (`yes`, `yes to all`, `cancel` and their plain
@@ -218,12 +218,12 @@ the only notice. A
 new thread gets a coding workspace only when a request first needs the remote worker, for example to
 read or change repository files or to run commands. Questions that connectors answer, such as issue
 tracker questions, need no workspace. The first request that needs the worker prepares the workspace
-in the same turn, which takes a few minutes, and AgentX says so in the thread. Messages without a
-mention, edits, bot messages, AgentX's own messages, direct messages, and users from other Slack
+in the same turn, which takes a few minutes, and Rovara says so in the thread. Messages without a
+mention, edits, bot messages, Rovara's own messages, direct messages, and users from other Slack
 organizations are ignored.
 
-A person can also mention AgentX through another tool that posts with their own Slack user token,
-such as Claude Code's Slack access or a script. AgentX checks with Slack that the sender is a
+A person can also mention Rovara through another tool that posts with their own Slack user token,
+such as Claude Code's Slack access or a script. Rovara checks with Slack that the sender is a
 person, then treats the message exactly as if they had typed it. A message posted with a bot token
 is ignored. To answer only typed mentions, set the `AgentXControlPlane` parameter
 `SlackAppPostedMessages` to `ignore` (in an installed environment,
@@ -232,15 +232,15 @@ tool posting "@AgentX yes" counts as that person's confirmation, the same as typ
 pressed in Slack, but a typed or tool-posted `@AgentX yes` still counts, so set
 `SlackAppPostedMessages` to `ignore` if only typed confirmations should count.
 
-A thread that sends AgentX more than 6 requests in a minute is paused: AgentX posts one notice and
-runs nothing more in that thread until the next minute. This stops a tool that answers AgentX's
+A thread that sends Rovara more than 6 requests in a minute is paused: Rovara posts one notice and
+runs nothing more in that thread until the next minute. This stops a tool that answers Rovara's
 replies from looping. The `AgentXControlPlane` parameter `SlackThreadTurnsPerMinute` changes the
 limit (in an installed environment, `agentx --env <name> config set limits.threadTurnsPerMinute
-<n>`). A request that AgentX could not queue is not counted, so Slack's retry of it is not held
+<n>`). A request that Rovara could not queue is not counted, so Slack's retry of it is not held
 against the thread; in the rare case where that happens during a burst at the limit, the thread
 can get a second pause notice in the same minute.
 
-AgentX posts its replies in Slack formatting, with real line breaks and one Slack link per URL.
+Rovara posts its replies in Slack formatting, with real line breaks and one Slack link per URL.
 Text such as `<!channel>` in a reply is shown as text and never notifies anyone.
 
 Pull requests created from a thread end with a link to the thread and the Slack members who made
@@ -249,7 +249,7 @@ requests in it. Every operation records the Slack member who requested it.
 Workspaces are limited to protect cost. Threads whose workspace has been prepared count, and so
 do open tasks from AI tools: both share the same limits. The member whose request first prepares
 a thread's workspace is charged for it. Each member may hold at most 3 workspaces, and the
-organization at most 20. When a request needs a workspace over either limit, AgentX prepares
+organization at most 20. When a request needs a workspace over either limit, Rovara prepares
 nothing and says which limit was reached; for the member limit, it also links that member's
 existing threads and gives their open task count. It still answers any part of the request that
 connectors can answer. In the maintainers' deployment, an administrator changes the limits with the
@@ -259,11 +259,11 @@ limits.workspacesPerMember` (or `limits.workspacesPerOrg`) shows them. To change
 administrator signed in with `agentx --env <name> login --admin` runs `agentx --env <name> config
 set limits.workspacesPerMember <n>` (1 to 50) or `limits.workspacesPerOrg <n>` (1 to 1000), or uses
 the admin tool `agentx_admin_set_workspace_limits`. Either way the change goes through the admin
-change path: AgentX shows who is at or over the new limit, asks "Apply this change?" (`--yes`
+change path: Rovara shows who is at or over the new limit, asks "Apply this change?" (`--yes`
 answers for you), and records the change. Workspaces already open keep running; the next creation
 uses the new limit.
 
-To stop the thread's running coding task, mention AgentX in the thread with just a stop request:
+To stop the thread's running coding task, mention Rovara in the thread with just a stop request:
 
 ```text
 @AgentX stop
@@ -271,10 +271,10 @@ To stop the thread's running coding task, mention AgentX in the thread with just
 
 `abort`, `halt`, `stop it`, `cancel the task` and `please stop` work too; only the whole message counts,
 so `@AgentX stop using tabs` is an ordinary request. A bare `@AgentX cancel` still declines a pending
-confirmation. Any member of the channel can stop the task. AgentX replies that it is stopping, and the
-task ends as cancelled. When nothing is running, the message goes to AgentX like any other request.
+confirmation. Any member of the channel can stop the task. Rovara replies that it is stopping, and the
+task ends as cancelled. When nothing is running, the message goes to Rovara like any other request.
 
-To release a thread workspace, mention AgentX in that thread with an explicit close request:
+To release a thread workspace, mention Rovara in that thread with an explicit close request:
 
 ```text
 @AgentX close this workspace
@@ -286,13 +286,13 @@ the whole message counts, so `@AgentX close the modal` is an ordinary request.
 A thread that never needed the worker has no workspace. A close request there says so and changes
 nothing.
 
-AgentX first fences new work and checks every prepared repository. Uncommitted changes, untracked
-files, an unpushed current commit, or commits on a local-only branch block closure; AgentX lists the
+Rovara first fences new work and checks every prepared repository. Uncommitted changes, untracked
+files, an unpushed current commit, or commits on a local-only branch block closure; Rovara lists the
 affected repositories in the thread and keeps the workspace intact. Publish or remove that work,
 then retry the close request. A running preparation, task, publication, maintenance, resume, or
 cancellation also blocks closure until it finishes.
 
-For a clean production workspace, AgentX terminates its EC2 instance and deletes
+For a clean production workspace, Rovara terminates its EC2 instance and deletes
 the persistent EBS volume, and then confirms completion in the same Slack thread. It
 retains the workspace and operation records as a closed tombstone for audit and retry safety, but
 removes the hosted orchestrator conversation session and releases the organization's quota and that
@@ -302,17 +302,17 @@ workspace; start a new Slack thread for fresh work.
 ## Tasks shared from an AI tool
 
 A developer can share a task they started from their AI tool into one of the project's bound
-channels, with `agentx_share_task` or when starting it. AgentX posts a new thread that names who
+channels, with `agentx_share_task` or when starting it. Rovara posts a new thread that names who
 started the task, from which tool, its title, the project and its status, and keeps the thread up
 to date: when the workspace is ready or could not be set up, when the task ends (with the worker's
-summary), when a pull request opens, when the mode changes, and when the task is closed. AgentX's
+summary), when a pull request opens, when the mode changes, and when the task is closed. Rovara's
 own messages in the thread do not include the developer's instructions. When the developer sends
 more instructions from their AI tool, the thread gets that request's end message and the worker's
 summary, but not the instructions themselves.
 
 - **View only** (`view`): channel members follow the task, and the developer drives it from their
   AI tool. A mention in the thread gets a notice instead of running.
-- **Continue** (`continue`): channel members can also mention AgentX in the thread to steer the
+- **Continue** (`continue`): channel members can also mention Rovara in the thread to steer the
   task on the same workspace, one request at a time, each attributed to the member who sent it.
 
 The project's `developerTasks` settings decide what is allowed: `share: required` shares every
@@ -322,15 +322,15 @@ needs the developer to be a member of it. A shared task's channel cannot change,
 cannot be made private again. An administrator can switch a shared task's mode, within those
 settings, with `agentx --env <name> admin task share-mode --task <task-id> --mode view|continue`.
 Sharing is available only in environments installed with `agentx init`. The developer's side is in
-[Use AgentX from Claude Code, Codex or Cursor](mcp-install.md#sharing-a-task-to-slack).
+[Use Rovara from Claude Code, Codex or Cursor](mcp-install.md#sharing-a-task-to-slack).
 
 A task's workspace setup that is still running after 50 minutes is marked failed; the task then
 reads `setup_failed`, and closing it frees its place in the workspace limits.
 
 ## Actions that need your confirmation
 
-Before any tool runs, AgentX's action gate decides whether to run it, ask, or refuse. It uses
-AgentX's own rules, the same for every connector:
+Before any tool runs, Rovara's action gate decides whether to run it, ask, or refuse. It uses
+Rovara's own rules, the same for every connector:
 
 - Reads run.
 - A call that names no existing item creates one, and runs.
@@ -338,24 +338,24 @@ AgentX's own rules, the same for every connector:
   status, state or resolution, or marks an item completed (`completed` set to true or false), is
   destructive and always asks.
 - A call that changes an existing item runs when your messages in the thread clearly asked for
-  that change on that item; otherwise AgentX asks. A small model makes that check. It sees only the
+  that change on that item; otherwise Rovara asks. A small model makes that check. It sees only the
   members' messages, the call and the item's key, never what a tool returned, so text inside an
   issue cannot approve a change.
 - A write whose arguments hold a list of more than 5 entries, such as 6 tasks, asks.
 
-When AgentX asks, it posts one message listing every action it held back, with **Approve** and
-**Cancel** buttons. That message is the reply: AgentX adds its own answer only when something else
+When Rovara asks, it posts one message listing every action it held back, with **Approve** and
+**Cancel** buttons. That message is the reply: Rovara adds its own answer only when something else
 happened in that turn (a call ran, even if it failed, or an action was refused or could not be
 checked), and that answer does not repeat the question. Only the member who made the request can press them; anyone else is told so
 privately. You can also reply `@AgentX yes` or `@AgentX cancel`. A confirmation counts once, only
-after the question, and for 24 hours. AgentX then runs exactly the listed calls; a call with any
+after the question, and for 24 hours. Rovara then runs exactly the listed calls; a call with any
 other arguments is checked afresh, as a new call. Any other message from you replaces the question.
 
 After a press, the buttons are replaced by who answered and how ("Approved by ... Running it now."
 or "Cancelled by ..."). A second press while the first is still being taken is answered privately
 with "Already received. I'm on it." A `yes` to a question that has expired is told so for 24 hours after the expiry; after
 that it is an ordinary request. If Slack redelivers an approval that an earlier attempt already
-used, AgentX runs nothing again and says "An earlier attempt of this request already used that
+used, Rovara runs nothing again and says "An earlier attempt of this request already used that
 confirmation": the calls may already have run, so ask it to check.
 
 `@AgentX yes to all in this thread` stops the questions that come only from the model's doubt
@@ -363,7 +363,7 @@ confirmation": the calls may already have run, so ask it to check.
 renew it. If a question of yours is pending, it also approves that question. Destructive actions,
 large changes and administrator rules still ask.
 
-Coding work in a thread that has no workspace yet is checked the same way, once, before AgentX
+Coding work in a thread that has no workspace yet is checked the same way, once, before Rovara
 prepares one. In a thread whose workspace is already prepared, starting or following up coding work
 runs without a check and without a model call. A confirmed request to create a pull request in such a thread still answers that there are no
 changes to publish: approval does not create a workspace.
@@ -400,14 +400,14 @@ What decides that a call is destructive or changes an item, so you can approve t
 - A tool that offers no such argument always runs as a create, whatever it writes. GitHub
   `push_files` and Jira `executeWrite` are examples. Approve such tools only if you accept that
   they run without asking, or add an `ask` or `deny` rule for them.
-- For a tool that offers an item argument, AgentX looks for a status, state, resolution,
+- For a tool that offers an item argument, Rovara looks for a status, state, resolution,
   `completed` or similar key anywhere in the arguments, up to level 4. The arguments themselves are
   level 1, and each object or list inside adds one level, so `tasks[].completed` is at level 3 and
   found. For a tool that offers none, only top-level arguments and keys directly inside an object
   argument (such as `fields.status`) are read, so a create of tasks that are already complete stays
   a create.
 - A vendor's own `destructiveHint` makes a call ask only when the connector declares no item
-  arguments. Vendors mark ordinary edits destructive, so where AgentX can see the item a call names,
+  arguments. Vendors mark ordinary edits destructive, so where Rovara can see the item a call names,
   its own rules decide. The built-in GitHub, Linear, Jira and Asana connectors all declare them.
 
 The model that checks changes is a deployment setting: the `AgentXSlackOrchestrator` parameter
@@ -415,7 +415,7 @@ The model that checks changes is a deployment setting: the `AgentXSlackOrchestra
 which needs the one-time Anthropic use-case form in the Bedrock console. In an installed environment,
 `agentx init` asks for it (`--classifier-model`), and `agentx --env <name> config set
 models.classifier <id>` changes it later, after testing the model with one call. If the model is
-unavailable, errors, gives an answer that is not a plain verdict, or does not answer in time, AgentX asks. The time limit is 8
+unavailable, errors, gives an answer that is not a plain verdict, or does not answer in time, Rovara asks. The time limit is 8
 seconds unless the service's `AGENTX_GATE_CLASSIFIER_TIMEOUT_MS` is a whole number of milliseconds
 from 1 to 60,000; the gate then waits exactly that long. Any other value, including a larger one,
 means 8 seconds. A model ID the
@@ -430,7 +430,7 @@ example after a rollback, tells the member who pressed it that it is no longer a
 
 Every decision is logged as `gate.decision` and kept with its call in the turn record: the outcome,
 what decided it (a rule, a default, the model check, a confirmation) and a short reason. The
-reasons AgentX writes name at most an argument, never its value; the model check writes its own
+reasons Rovara writes name at most an argument, never its value; the model check writes its own
 one-sentence reason and is told not to quote the messages.
 
 ## What a thread remembers
@@ -445,9 +445,9 @@ fails with `CONVERSATION_STATE_LOST` rather than starting the thread over on top
 memory of. Start a new thread to continue. There is no promised retention period beyond the life of
 the workspace's EBS volume.
 
-A conversation that was created before AgentX recorded this state has no transcript to reopen, so
+A conversation that was created before Rovara recorded this state has no transcript to reopen, so
 its next request starts one. If the deployed model changes between turns, the thread keeps its
-transcript and AgentX says which model it continues on. Closing a thread's workspace ends its
+transcript and Rovara says which model it continues on. Closing a thread's workspace ends its
 conversation with it.
 
 ## Diagnostics
@@ -460,7 +460,7 @@ has no binding, and `request.rejected reason="invalid_signature"` usually means 
 secret is wrong.
 `event.ignored reason="member_check_failed"` with `slackError="missing_scope"` means the bot token
 lacks `users:read`. `reason="not_a_person"` means a bot posted the mention, `reason="own_message"`
-that AgentX did, and `reason="app_posted_disabled"` that `SlackAppPostedMessages` is `ignore`.
+that Rovara did, and `reason="app_posted_disabled"` that `SlackAppPostedMessages` is `ignore`.
 `reason="no_user"` means the event named no Slack user; every other unparseable event still logs
 `reason="malformed_event"`. A bot's mention used to log `reason="bot_or_edited_message"` no matter
 what; now that reason only covers an edited message, or app-posted messages that are off or not
@@ -528,7 +528,7 @@ view never shows the request or response text, which are already in the thread. 
 Lambda's IAM grant cannot read them: it may `GetItem` one record by key, and only the attributes
 the view shows. Nothing is posted to the thread. If the record is more than 30 days old, was never
 saved, is still being saved, or cannot be read, the view says so. If the view cannot open in time,
-AgentX tells the member privately. Long arguments are cut to fit Slack's limits and end with
+Rovara tells the member privately. Long arguments are cut to fit Slack's limits and end with
 `… [cut to fit]`; `agentx admin turns export` has the full record. The button needs Slack
 Interactivity, which the action gate's confirmation buttons already turned on; it needs no new
 scope.
@@ -564,8 +564,8 @@ and `--state-value OK`. If an alarm stays red, act on what it is telling you: pu
 `AgentXSlackDeadLetters`, and reconnect or disable the connector named in the broker logs to clear
 `AgentXConnectorNotConnected` or a persistent `AgentXConnectorBroken`.
 
-If the orchestrator's turn fails, AgentX posts the failure in the thread. Other failures, such as
-workspace preparation or a Slack API error, are retried; on the fifth attempt AgentX posts the
+If the orchestrator's turn fails, Rovara posts the failure in the thread. Other failures, such as
+workspace preparation or a Slack API error, are retried; on the fifth attempt Rovara posts the
 failure and stops. A retry resumes the operations the earlier attempt started instead of starting
 new ones. A request that the service could not finish handling five times, for example because it
 restarted each time, moves to the `SlackRequestDeadLetterQueueUrl` queue.

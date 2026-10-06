@@ -1,4 +1,4 @@
-# Developing AgentX
+# Developing Rovara
 
 Local validation, the spec documents, and the GitHub Spec Kit setup.
 

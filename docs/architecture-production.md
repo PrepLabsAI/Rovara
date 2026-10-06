@@ -1,4 +1,4 @@
-# AgentX production architecture
+# Rovara production architecture
 
 Every install uses EC2 workers with one isolated, encrypted EBS volume per Slack thread.
 DynamoDB stores platform state; Step Functions manages compute and volume lifecycle.
@@ -62,7 +62,7 @@ reaches only this workspace's volume and the instance role, which the worker hol
 ## Hosted Slack orchestrator
 
 Slack requests are orchestrated in AWS rather than on a developer machine, and since the
-Slack-only retirement this is the only way coding work reaches AgentX. Each Slack thread is its own
+Slack-only retirement this is the only way coding work reaches Rovara. Each Slack thread is its own
 workspace owner, so a thread receives its own EC2 session and EBS volume. Every channel
 member who posts in the thread shares that workspace.
 
@@ -70,7 +70,7 @@ member who posts in the thread shares that workspace.
 flowchart LR
   Slack[Slack Events API]
 
-  subgraph Control[AgentX control plane]
+  subgraph Control[Rovara control plane]
     Route[API Gateway\nPOST /v1/slack/events]
     Ingress[Slack ingress Lambda]
     Fifo[SQS FIFO request queue\none message group per thread]
@@ -80,7 +80,7 @@ flowchart LR
   end
 
   subgraph Orchestrator[Hosted Slack orchestrator]
-    Fargate[ECS Fargate ARM64 service\nPi orchestrator, AgentX tools only]
+    Fargate[ECS Fargate ARM64 service\nPi orchestrator, Rovara tools only]
     Threads[(DynamoDB thread records)]
     Sessions[(S3 Pi session per thread)]
   end
@@ -106,7 +106,7 @@ flowchart LR
 - **Ordering.** The FIFO message group is the thread, so requests in one thread run in order while
   different threads run in parallel. The Slack event ID is the deduplication ID.
 - **Orchestration.** The Fargate service runs the Pi orchestrator from `@agentx/orchestrator`,
-  restricted to AgentX orchestration tools. It restores the thread's Pi session from S3 before each turn and
+  restricted to Rovara orchestration tools. It restores the thread's Pi session from S3 before each turn and
   saves it afterward. Tool request IDs derive from the Slack event ID, so a redelivered request
   resumes the operations it already started instead of creating duplicates.
 - **Service identity.** The orchestrator calls the control plane through an `AWS_IAM` route that
@@ -171,7 +171,7 @@ owns only the ECS service, and receives those values as parameters from the rele
 
 The session provisioner reads them when it boots a worker, so a release reaches each workspace the
 next time its compute starts; a worker already running keeps its image until the idle reaper stops
-it. Normal AgentX releases do not require registration or workspace preparation again.
+it. Normal Rovara releases do not require registration or workspace preparation again.
 
 Worker payloads are parsed strictly, so a newer control plane must not send a field that a worker
 still running an older image cannot parse. Each worker lists the optional invocation fields it
@@ -224,7 +224,7 @@ This policy applies to hosted and self-hosted installs, including `agentx init`.
 
 ## Environments
 
-AgentX can run more than one independent deployment (for example `production` and `staging`) in
+Rovara can run more than one independent deployment (for example `production` and `staging`) in
 the same AWS account and region, selected everywhere with `--env <name>` (default `production`).
 Each gets its own physical names: stacks `agentx-<env>-access/-foundation/-runtime/-control-plane/-slack`,
 alerts topic `agentx-<env>-alerts`, connector secrets
@@ -251,7 +251,7 @@ Every named environment's first stack, `agentx-<env>-access`, deploys with the i
 own AWS rights, because a role cannot deploy the stack that creates it. It holds a private,
 versioned artifact bucket (retained if the stack is ever deleted) for release code packages and
 rendered templates; an ECR pull-through cache rule (prefix `agentx-<env>`, upstream
-`public.ecr.aws`) so the worker and Slack service pull AgentX's public images through private ECR
+`public.ecr.aws`) so the worker and Slack service pull Rovara's public images through private ECR
 in the account (the cache repository is created on first pull); the `agentx-<env>-cloudformation` service role
 that deploys every other stack; and the `agentx-<env>-operator` role for day-to-day `agentx`
 commands, which trusts the account root for 1-hour sessions unless an `OperatorPrincipalArn`
@@ -271,19 +271,19 @@ cannot change or remove a role's boundary once set.
 access stack creates a default boundary, the managed policy `agentx-<env>-boundary` under
 `/agentx/<env>/` (so its ARN is fixed and every other stack can name it), and every environment
 role, the access stack's two roles included, carries it. The `EffectiveBoundaryArn` output names
-whichever boundary is in force. The default boundary allows the AWS services AgentX's roles use
+whichever boundary is in force. The default boundary allows the AWS services Rovara's roles use
 (a generated test keeps that list complete and adds nothing unused), role actions and `PassRole`
 only for roles under `/agentx/<env>/` (plus the service role itself), and a few
 service-linked roles. It explicitly denies Organizations and Account changes, anything on IAM users
 or groups, creating, versioning or deleting managed policies, and changing the boundary itself. A
-company-supplied boundary replaces the default entirely, so it must allow every action AgentX's
+company-supplied boundary replaces the default entirely, so it must allow every action Rovara's
 roles need.
 
 What this does and does not protect, plainly:
 
 - The operator role can deploy CloudFormation through the service role, so it is powerful within
-  the account: it can create and change any resource of the services AgentX uses.
-- The boundary stops it creating roles or policies beyond AgentX's own needs: no IAM users or
+  the account: it can create and change any resource of the services Rovara uses.
+- The boundary stops it creating roles or policies beyond Rovara's own needs: no IAM users or
   groups, no managed-policy management, no Organizations or Account changes, and every role it
   creates carries the boundary.
 - Environments that share one AWS account are **not** a security boundary against each other.
@@ -322,11 +322,11 @@ The step-by-step guide for each way to install is [docs/install.md](install.md);
 environment afterwards is [docs/day-two.md](day-two.md). This section describes how `init` works.
 
 `agentx init --env <name>` (`npx @preplabsai/rovara-code init`) walks an engineer from AWS credentials to a
-deployed AgentX environment with its own GitHub App and Slack app. For this first run it needs AWS admin
+deployed Rovara environment with its own GitHub App and Slack app. For this first run it needs AWS admin
 credentials, a GitHub organization or personal account to own the GitHub App, and a Slack workspace where
 the engineer can create apps. Day-2 commands then use the narrower operator role.
 
-No AgentX release is published yet (see [releases](releases.md)). Until then, run `init` from a source
+No Rovara release is published yet (see [releases](releases.md)). Until then, run `init` from a source
 checkout: build the CLI (`npm ci && npm run build`), build a release with `npm run release:build`, and pass
 it with `--release <dir>`, together with `--worker-image` and `--slack-image` for images you pushed
 yourself. With the cdk engine no release is needed: pass `--engine cdk --source <a clean checkout of a
@@ -345,17 +345,17 @@ as it finishes:
    `--github-installation-id` and `--github-private-key-file` (or `-env`); its private key cannot be
    pasted into a hidden prompt because it spans several lines.
 5. **control-plane**: the control plane and runtime.
-6. **Create the Slack app** (`slack-app`): create it from AgentX's manifest, install it to the workspace, then paste the Bot
+6. **Create the Slack app** (`slack-app`): create it from Rovara's manifest, install it to the workspace, then paste the Bot
    User OAuth Token and the Signing Secret into two hidden prompts.
 7. **slack-service**: the Slack service, a signed self-probe of both Slack URLs, then a request to
    confirm the app's Event Subscriptions page shows "Verified" (Slack has no API that reports this).
-8. **developer-signin**: how developers sign in to AgentX from their own machines. Choose Slack (the
+8. **developer-signin**: how developers sign in to Rovara from their own machines. Choose Slack (the
    default), your company's sign-in (OIDC), or both. For Slack, paste the Slack app's Client ID and Client
    Secret (Basic Information, App Credentials); for company sign-in, give its issuer, client ID and client
    secret, and optionally a claim a person must carry (such as a group). `init` shows the change to the
    control plane and asks before applying it. See [Developer sign-in](#developer-sign-in) below.
 9. **admin-user**: Cognito creates your admin user from your email and emails a temporary password; a
-   browser opens the AgentX sign-in page (127.0.0.1:8765, so over SSH forward that port). Your own
+   browser opens the Rovara sign-in page (127.0.0.1:8765, so over SSH forward that port). Your own
    OIDC provider: sign in; your token must carry the admin claim.
 10. **first-project**: pick a repository the GitHub App sees; confirm or edit the proposed setup and
     test commands; the project runs on EC2 workers; pick its Slack channel (a private one needs
@@ -364,7 +364,7 @@ as it finishes:
     server is added after the install with `connector add mcp`.
 12. **alerts**: confirm the AWS Notifications email (a PagerDuty or Opsgenie address confirms on its
     own); a test alarm is sent and you are asked whether it arrived.
-13. **e2e**: mention the bot in the channel; init ends when AgentX replies in the thread.
+13. **e2e**: mention the bot in the channel; init ends when Rovara replies in the thread.
 
 Every question has a flag (`--engine`, `--identity`, `--orchestrator-model`, `--github-account`, and so
 on). `--yes` answers every question with its default or its flag and accepts every confirmation except a
@@ -393,7 +393,7 @@ way (`--anthropic-key-file`, `--openai-key-env` and so on). See [OpenRouter mode
 (`--budget-scope tag`, the default, or `--budget-scope account`). The budget counts costs tagged
 `agentx:env`. Someone with billing rights must activate that tag once, in Billing, Cost allocation tags;
 it appears there up to 24 hours after the first tagged resource is billed. Until then the budget reads
-$0. For an account used only by AgentX, `--budget-scope account` needs no tag.
+$0. For an account used only by Rovara, `--budget-scope account` needs no tag.
 
 Before creating anything, `init` prints every stack, role, secret and app it will create, and an
 estimated monthly cost for the chosen models at a stated usage (1,000 turns, 100 worker sessions, 60
@@ -467,7 +467,7 @@ npx @preplabsai/rovara-code logout
 
 Tokens are kept in the operating system's credential store; `~/.agentx/developer.yaml` holds only
 addresses. A developer can use a project when an administrator granted access or when they are a member
-of the project's bound Slack channel. To hand tasks to AgentX from an AI tool, a developer runs
+of the project's bound Slack channel. To hand tasks to Rovara from an AI tool, a developer runs
 `agentx mcp install --client claude-code|codex|cursor` once; see [docs/mcp-install.md](mcp-install.md).
 
 ## Deploying an environment
@@ -530,7 +530,7 @@ broader principal, the operator's job. The ECR pull-through rule's create and de
 scoped to a resource, so that statement stays on every resource (`*`). `deploy-access.sh` prompts for
 confirmation before executing (`--yes` skips it, same as `agentx deploy`), and prints the failure reason
 plus the exact recovery command on failure. It does not create the callback signing key; `agentx deploy`
-creates it on its first run. Every later stack is then deployed by the AgentX operator, through the role the
+creates it on its first run. Every later stack is then deployed by the Rovara operator, through the role the
 access stack created, with `agentx init --resume --env <env> --region <region> --from-bundle <bundle dir>`.
 It reads `init-answers.json`, asks only the rest, checks the access stack exists (and was deployed with
 the bundle's permission boundary), records the `access` step as done, and goes on; it never deploys access
