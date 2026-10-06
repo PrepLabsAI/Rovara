@@ -1,15 +1,15 @@
-# Install and run AgentX: overview
+# Install and run Rovara: overview
 
-A one-page tour of `agentx init`, the day-2 commands and developer sign-in. [Installing AgentX](install.md) and [Running AgentX](day-two.md) have the full detail.
+A one-page tour of `agentx init`, the day-2 commands and developer sign-in. [Installing Rovara](install.md) and [Running Rovara](day-two.md) have the full detail.
 
-`agentx init` installs a complete AgentX environment in your own AWS account, step by step: its
+`agentx init` installs a complete Rovara environment in your own AWS account, step by step: its
 stacks, its own GitHub App and Slack app, developer sign-in, your first project and its Slack
 channel, and, if you want them now, the Linear, Jira and Asana connectors (any other MCP server is
 added afterwards with `connector add mcp`). It prints everything it
 will create and an estimated monthly cost before it creates anything, and running it again resumes
 where it stopped.
 
-**Status:** no AgentX release is published yet (the public image registry and the npm package are
+**Status:** no Rovara release is published yet (the public image registry and the npm package are
 waiting on owner setup; see [releases](releases.md)). Until the first release, an install runs
 from a source checkout with a locally built release, and needs container images you have pushed
 yourself. When a release is published, the whole install is one command:
@@ -23,9 +23,9 @@ own. See [docs/install.md](install.md#the-install-page).
 You need:
 
 - AWS administrator credentials for the first run, ideally in an AWS account used only for
-  AgentX (environments that share an account are not a security boundary against each other).
+  Rovara (environments that share an account are not a security boundary against each other).
   Later day-2 commands use a narrower operator role that `init` creates.
-- A GitHub organization or personal account to own AgentX's GitHub App.
+- A GitHub organization or personal account to own Rovara's GitHub App.
 - A Slack workspace where you can create and install apps.
 - Model access: Amazon Bedrock (the default) in the chosen region, or your own OpenRouter, Anthropic or OpenAI API key.
 - Node.js 22.19 or newer (Node 22 LTS recommended). AWS CloudShell comes with Node 20: see
@@ -49,7 +49,7 @@ node packages/cli/dist/bin.js --env <name> init --region us-east-1 --release ./r
 2. deploys the access, foundation and identity stacks;
 3. creates the GitHub App from a pre-filled page (one click), and you choose its repositories;
 4. deploys the control plane and runtime;
-5. creates the Slack app from AgentX's manifest; you install it and paste its tokens into hidden
+5. creates the Slack app from Rovara's manifest; you install it and paste its tokens into hidden
    prompts;
 6. deploys the Slack service and checks that Slack can reach it;
 7. sets up developer sign-in: Slack, your company's sign-in (OIDC), or both;
@@ -97,18 +97,18 @@ After the install, day-2 work runs with the operator role that `init` created:
 Developers then sign in from their own machines with `agentx login <control plane URL>`, with no
 AWS credentials; `agentx whoami` shows which projects they can use, and `agentx workspaces` opens a
 page on `127.0.0.1` showing those projects and the workspaces in them (`--no-ui` prints the same
-list in the terminal). To hand tasks to AgentX from Claude Code, Codex or Cursor, a developer runs
+list in the terminal). To hand tasks to Rovara from Claude Code, Codex or Cursor, a developer runs
 `agentx mcp install --client claude-code|codex|cursor` once.
 
 The guides:
 
-- [Installing AgentX](install.md): each way to install (published templates, cdk, or through
+- [Installing Rovara](install.md): each way to install (published templates, cdk, or through
   a platform team), resuming, unattended installs and the cost estimate.
-- [Running AgentX](day-two.md): the operator role, `doctor`, `upgrade`, `config`, projects,
+- [Running Rovara](day-two.md): the operator role, `doctor`, `upgrade`, `config`, projects,
   channels, connectors and developer sign-in settings (`agentx signin`).
 - [Removing an environment](teardown.md) and
-  [moving AgentX to another AWS account](move-account.md).
-- [Use AgentX from Claude Code, Codex or Cursor](mcp-install.md): the developer's guide to
+  [moving Rovara to another AWS account](move-account.md).
+- [Use Rovara from Claude Code, Codex or Cursor](mcp-install.md): the developer's guide to
   `agentx mcp`, including sharing a task to Slack.
 - [Releases](releases.md): what a release contains, how one is cut, the owner setup still
   open, and the release test.

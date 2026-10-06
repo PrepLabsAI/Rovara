@@ -1,9 +1,9 @@
-# Use AgentX from Claude Code, Codex or Cursor
+# Use Rovara from Claude Code, Codex or Cursor
 
-AgentX runs a small MCP server on your computer. Your AI tool uses it to hand AgentX a coding task
+Rovara runs a small MCP server on your computer. Your AI tool uses it to hand Rovara a coding task
 on a project you may use, check on it, continue it, and open a pull request. You need
-Node 22.19 or newer (Node 22 LTS recommended) and the URL of your company's AgentX (ask your
-AgentX admin).
+Node 22.19 or newer (Node 22 LTS recommended) and the URL of your company's Rovara (ask your
+Rovara admin).
 
 Sign in once, in any terminal:
 
@@ -19,7 +19,7 @@ Your sign-in is kept in your computer's own password store (the macOS keychain, 
 Service on Linux). The setup below never writes a token into your AI tool's settings: the entry
 only runs `npx -y @preplabsai/rovara-code mcp`.
 
-`mcp install` writes the version of AgentX you ran it with into the entry (for example
+`mcp install` writes the version of Rovara you ran it with into the entry (for example
 `@preplabsai/rovara-code@0.4.0`), so your AI tool keeps using that version until you run it again. If
 your admin gave you an environment name, put `--env <name>` before `mcp install`, for example
 `npx @preplabsai/rovara-code --env staging mcp install --client codex`. The entry then passes the same
@@ -37,13 +37,13 @@ Install:
 claude mcp add --scope user agentx -- npx -y @preplabsai/rovara-code mcp
 ```
 
-or let AgentX run that for you, with the version you have: `npx @preplabsai/rovara-code mcp install --client claude-code`.
+or let Rovara run that for you, with the version you have: `npx @preplabsai/rovara-code mcp install --client claude-code`.
 It removes any agentx entry you added for your user before, then adds the new one. If the add
 fails, your old entry is already gone, so it prints the exact command to run yourself.
 
 Claude Code also has local and project entries (`--scope local` and `--scope project`, the second
 kept in a project's `.mcp.json`). An agentx entry there wins over your user entry in that folder, so
-if AgentX behaves oddly in one project, check `claude mcp list` there and remove the extra entry.
+if Rovara behaves oddly in one project, check `claude mcp list` there and remove the extra entry.
 
 Manual setup: the command above is the whole setup. To see the exact command without running it,
 use `npx @preplabsai/rovara-code mcp install --client claude-code --print`.
@@ -107,18 +107,18 @@ Remove it: delete the `agentx` entry under `"mcpServers"` in `~/.cursor/mcp.json
 
 Start a new session of your AI tool and ask, for example:
 
-> Have AgentX fix the flaky retry test in payments-api and tell me when it is done.
+> Have Rovara fix the flaky retry test in payments-api and tell me when it is done.
 
-Your AI tool writes the instructions and calls `agentx_start_task`. AgentX answers at once with a
+Your AI tool writes the instructions and calls `agentx_start_task`. Rovara answers at once with a
 task ID and works in a private workspace of its own; you keep working. Ask "how is my AgentX task
 doing?" to check on it, "continue it and add a test for the timeout" to send more instructions,
 and "open a pull request" when it is ready. For a small task, ask your tool to wait: it can wait up
 to 10 minutes.
 
 If you write your own MCP client, a wait longer than a minute needs your client to accept progress
-updates. AgentX sends one while it waits, but only when the call includes a progress token. With the
+updates. Rovara sends one while it waits, but only when the call includes a progress token. With the
 MCP TypeScript SDK, pass `onprogress` and `resetTimeoutOnProgress: true` in the call's options;
-otherwise the SDK gives up after its default of 60 seconds while AgentX is still waiting. Claude Code,
+otherwise the SDK gives up after its default of 60 seconds while Rovara is still waiting. Claude Code,
 Codex and Cursor handle this themselves.
 
 Tasks from your AI tool are private unless you share them, or the project requires sharing (see
@@ -138,12 +138,12 @@ one channel, say which one.
 There are two modes:
 
 - **View only** (`view`): the channel follows the task, and you keep driving it from your AI tool.
-  If someone mentions AgentX in the thread, AgentX replies with a notice and runs nothing.
-- **Continue** (`continue`): channel members can also mention AgentX in the thread to steer the
+  If someone mentions Rovara in the thread, Rovara replies with a notice and runs nothing.
+- **Continue** (`continue`): channel members can also mention Rovara in the thread to steer the
   task. Their requests run on the task's workspace one at a time, and each names who sent it.
 
-AgentX posts a new thread in the channel within seconds. The thread says who started the task,
-from which AI tool, its title, the project and its status. AgentX then posts there when the
+Rovara posts a new thread in the channel within seconds. The thread says who started the task,
+from which AI tool, its title, the project and its status. Rovara then posts there when the
 workspace is ready, when the task ends (with the worker's summary), when a pull request opens,
 when the mode changes, and when you close the task. Your instructions are not posted. Each time you
 send more instructions from your AI tool, the thread gets that request's end message and the
@@ -172,7 +172,7 @@ agentx --env <env> admin task share-mode --task <task-id> --mode view|continue
 
 ## When something goes wrong
 
-Every AgentX error says what to do next. The common ones:
+Every Rovara error says what to do next. The common ones:
 
 - `SIGN_IN_REQUIRED`: run `npx @preplabsai/rovara-code login <your AgentX URL>`.
 - `PROJECT_ACCESS_DENIED`: join one of the project's Slack channels, or ask an admin.

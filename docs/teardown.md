@@ -1,8 +1,8 @@
 # Removing an environment
 
-This guide removes one AgentX environment from an AWS account: its stacks, its EC2 workers, the
+This guide removes one Rovara environment from an AWS account: its stacks, its EC2 workers, the
 data the stacks keep, its secrets and its settings. Nothing removed here can be brought back.
-It answers [issue #66](https://github.com/PrepLabsAI/AgentX/issues/66).
+It answers [issue #66](https://github.com/PrepLabsAI/Rovera/issues/66).
 
 Both ways below need admin credentials in the environment's account. The operator role cannot
 delete the access stack's IAM roles or the kept data, by design.
@@ -18,7 +18,7 @@ when the environment is not in your AWS configuration's region; `destroy` refuse
 the environment's settings, or this computer's record of it, contradict.
 
 It first reads everything and prints what it will delete. Then it asks you to type the
-environment's name. For an environment named `production`, or one AgentX has no record of
+environment's name. For an environment named `production`, or one Rovara has no record of
 creating, it also asks you to type the AWS account id it shows. No flag skips either question.
 Without a terminal, it reads each answer as a line from stdin, so the exact name is still needed.
 
@@ -58,12 +58,12 @@ stopped.
 left the lock, the next one asks at once whether to take it over; anyone's lock older than 2 hours
 gets the same question. It asks only at a terminal: without one (answers piped on stdin), it
 never takes a lock over, and refuses with the lock's holder and the parameter to delete
-(`/agentx/<env>/lock`) once you are sure no AgentX command is running.
+(`/agentx/<env>/lock`) once you are sure no Rovara command is running.
 
 **Nothing found.** When it finds nothing for the environment, it says so, naming the account and
 region it looked in, and exits 2. If the environment is in another region, pass `--region`.
 
-**What it prints for you to do.** AgentX cannot delete these, so `destroy` prints each step:
+**What it prints for you to do.** Rovara cannot delete these, so `destroy` prints each step:
 
 - Delete the GitHub App, on its settings page, Advanced, Delete GitHub App.
 - Delete the Slack app, at the bottom of its Basic Information page.

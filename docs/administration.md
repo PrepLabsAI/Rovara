@@ -10,7 +10,7 @@ projects they can use and what is running in them. Everything else the `agentx` 
 administration: installing, upgrading and removing environments, registering projects, binding
 Slack channels, choosing how developers sign in, and stopping idle workspaces.
 
-AgentX requires Node.js 22.19 or newer (Node 22 LTS recommended):
+Rovara requires Node.js 22.19 or newer (Node 22 LTS recommended):
 
 ```sh
 npm ci
@@ -113,5 +113,5 @@ Run `agentx --help` or `agentx <command> --help` for the complete surface: `init
 
 A command's exit code names the kind of failure: 2 for invalid input, 3 when login is required, 4
 for forbidden or not found, 5 when the workspace is busy or not ready, 6 when the control plane is
-unavailable, 7 for any other AgentX error, and 1 for an unexpected internal error. `agentx doctor`
+unavailable, 7 for any other Rovara error, and 1 for an unexpected internal error. `agentx doctor`
 exits 2 when any check fails.

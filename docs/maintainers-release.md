@@ -2,7 +2,7 @@
 
 This page describes the maintainers' own deployment and its release pipeline. To move an
 installed environment to a newer release, use `agentx --env <name> upgrade`; see
-[Running AgentX](day-two.md#upgrade).
+[Running Rovara](day-two.md#upgrade).
 
 Registering a project and binding its channel are covered in [Administration client and projects](administration.md#2-register-a-project-and-bind-its-slack-channel). Workspaces are created by
 Slack threads and by tasks from AI tools, never by an administrator.
@@ -128,7 +128,7 @@ Spec 014 phase 14d adds the **Details** button. Operator notes:
 
 - Only the last part of a reply gets the button, and only when that turn made at least one tool
   call and its turn record will be written. Replies without tool calls, confirmation questions and
-  AgentX's own notices have no button. If Slack refuses the button (an API error such as
+  Rovara's own notices have no button. If Slack refuses the button (an API error such as
   `invalid_blocks`), the reply is posted as plain text and the Slack service logs
   `reply.details_failed` with Slack's error code as `slackError`. A network error or timeout is
   logged the same way without a code and is not followed by a text copy, since Slack may already

@@ -1,6 +1,6 @@
 # Jira connector
 
-AgentX is open source and self-hosted. There is no shared Atlassian account. Your organisation
+Rovara is open source and self-hosted. There is no shared Atlassian account. Your organisation
 creates its own Atlassian service account and API token, stores the token in your own AWS Secrets
 Manager, and registers it with `agentx admin credential register`. This guide walks you through
 that, end to end, for one Jira Cloud site and one project.
@@ -11,10 +11,10 @@ does, for doing it by hand or understanding it.
 
 ## What you get
 
-AgentX can search, read, create and comment on Jira issues from Slack. It acts as one Atlassian
+Rovara can search, read, create and comment on Jira issues from Slack. It acts as one Atlassian
 service account. Each create and comment ends with a footer naming the Slack member who asked. You must limit
 the service account to the project in Jira (Step 4) and prove it (Step 8). That limit is the one
-that counts. AgentX also holds the connector to the project you name, as a second line.
+that counts. Rovara also holds the connector to the project you name, as a second line.
 
 ## Before you start
 
@@ -22,7 +22,7 @@ You need:
 
 - An Atlassian organization admin.
 - A Jira Cloud site.
-- An AgentX control plane you can reach with `agentx login` as an administrator.
+- A Rovara control plane you can reach with `agentx login` as an administrator.
 - The AWS CLI with Secrets Manager access in the control plane's account and region.
 - `jq` (included in macOS 15 and later).
 
@@ -30,7 +30,7 @@ You need:
 
 In Atlassian Administration (admin.atlassian.com), open your organization. Open **Apps**, then
 **AI settings**, then **Rovo MCP server** (menu names may differ). Open **Authentication** and turn on **Allow
-API token authentication**. Without this, Atlassian rejects every AgentX call and preflight
+API token authentication**. Without this, Atlassian rejects every Rovara call and preflight
 reports the connector as not connected.
 
 ## Step 2: Create a service account
@@ -49,7 +49,7 @@ This is the access boundary. Do not skip it. A new service account with the Jira
 often browse every project that grants **Browse projects** to all logged-in users. Step 8 checks
 the result.
 
-- In each project AgentX may use: **Project settings**, then **Access** or **People**, add the
+- In each project Rovara may use: **Project settings**, then **Access** or **People**, add the
   service account with a role that can browse, create and comment.
 - Check every other project: the permission scheme must not grant **Browse projects** to **Any
   logged in user**, to a group the service account is in, or to the Jira application role. Fix
@@ -68,7 +68,7 @@ expiry. Choose these scopes: `read:jira-work`, `write:jira-work`, `read:jira-use
 once. It is long (about 192 characters).
 
 Do not create OAuth 2.0 credentials instead. Atlassian's MCP server refuses service-account OAuth
-tokens with "Cloud id isn't explicitly granted", even though Jira's REST API accepts them. AgentX
+tokens with "Cloud id isn't explicitly granted", even though Jira's REST API accepts them. Rovara
 sends the service account's API token as a Bearer token to the MCP server; that is what this guide
 sets up.
 
@@ -78,9 +78,9 @@ revoke it in Atlassian and issue a new one.
 ## Step 6: Find your cloudId
 
 Open `https://<your-site>.atlassian.net/_edge/tenant_info`. It returns `{"cloudId":"..."}`. That
-UUID is your `cloudId`. Write it down lowercase, exactly as returned; AgentX refuses a `cloudId`
+UUID is your `cloudId`. Write it down lowercase, exactly as returned; Rovara refuses a `cloudId`
 that is not lowercase. That same address, `https://<your-site>.atlassian.net` with nothing after
-it, is also your `siteUrl` for Step 10: it gives AgentX's replies the issue's real link instead of
+it, is also your `siteUrl` for Step 10: it gives Rovara's replies the issue's real link instead of
 a guessed one.
 
 ## Step 7: Store the token in Secrets Manager, without cutting it
@@ -109,8 +109,8 @@ number Step 5 gave you.
 ## Step 8: Check what the service account sees (mandatory)
 
 `agentx connector add jira` runs this check itself, as part of testing the credential; the steps
-below are for doing it by hand. Run this from your AgentX checkout after `npm ci && npm run build`.
-Set `JIRA_PROJECTS` to the project keys AgentX may use, comma separated. It reads the token from
+below are for doing it by hand. Run this from your Rovara checkout after `npm ci && npm run build`.
+Set `JIRA_PROJECTS` to the project keys Rovara may use, comma separated. It reads the token from
 Secrets Manager, so the token is never typed or shown:
 
 ```sh
@@ -136,9 +136,9 @@ try {
 
 `inside` must still be more than 0. If it is 0, create one issue in the project and run it again, so
 the check can tell an empty answer from a blind one; a service account that finds no issue in the
-connected project is refused. `outside` no longer has to be 0: when it is more than 0, AgentX still
+connected project is refused. `outside` no longer has to be 0: when it is more than 0, Rovara still
 saves the connector, warns you with the other projects it found (up to 5, then "and N more"), and
-warns that it will be able to read issues in them. Narrow the account until `outside` is 0 if AgentX
+warns that it will be able to read issues in them. Narrow the account until `outside` is 0 if Rovara
 must not read those projects; `agentx init` keeps the warning, and `agentx doctor` shows it again.
 
 ## Step 9: Register the credential
@@ -182,7 +182,7 @@ integrations:
 with the footer, because Jira takes the description inside `fields`.
 
 `siteUrl` is optional, so a connector registered before this field existed keeps working, but
-without it AgentX cannot form a link: it tells the model to give only the issue key and never
+without it Rovara cannot form a link: it tells the model to give only the issue key and never
 write a link, rather than let the model guess a host (a guess is exactly the bug this field fixes).
 It must be exactly `https://<site>.atlassian.net`, with no path and no trailing slash, and it must
 be lowercase.
@@ -203,21 +203,21 @@ rest of the project keeps working; only Jira stops) until you register a revisio
 older broker, the same as any other configuration it cannot validate.
 
 Use your own project key in the `description` override, in place of `PAY` above. Without an
-override, AgentX adds "AgentX limits every search to project PAY; send only the rest of the query."
+override, Rovara adds "AgentX limits every search to project PAY; send only the rest of the query."
 to the search tool's description itself, followed by the link sentence above when `siteUrl` is set.
-With an override, AgentX shows your text as written and adds nothing, so an override should include
+With an override, Rovara shows your text as written and adds nothing, so an override should include
 both the project sentence and, if you set `siteUrl`, the link sentence, as the example above does.
-AgentX refuses a
+Rovara refuses a
 `projectKey` longer than 10 characters. That fails closed: if your key is longer, shorten it or
 split the project, because registration is refused rather than left to run unchecked.
 
 This list is also the recommended set. The guard checks requests, not responses. `getJiraIssue`
-is checked because AgentX looks up the issue's project before the read runs. But its reply can
+is checked because Rovara looks up the issue's project before the read runs. But its reply can
 still include the key, summary and status of linked issues, the parent, the epic or subtasks. If
 the service account can see an issue in another project, that issue's summary can appear in the
 reply. Step 4 is what stops this: a service account that sees only your project gets only your
 project's issues back. `searchJiraIssuesUsingJql` only returns issues in your project, because
-AgentX rewrites the query. The same caveat applies to its replies: a search that asks for the
+Rovara rewrites the query. The same caveat applies to its replies: a search that asks for the
 `issuelinks`, `parent` or `subtasks` fields can return the summaries of issues in other projects
 the service account can see. Step 4 is the control there too.
 
@@ -239,13 +239,13 @@ and you fix it at Atlassian.
 `getConfluenceContent`, `createConfluenceContent`, `updateConfluenceContent`, `searchConfluence`,
 `getLoomVideo`, `getGraphContext`, `getGraphObject`, `addGraphContext`, `search`, `discover`,
 `executeRead`, `executeWrite`, `executeDestructive`, `getAccessibleAtlassianResources`,
-`atlassianUserInfo`. They reach other products or run any Atlassian operation, so AgentX cannot
+`atlassianUserInfo`. They reach other products or run any Atlassian operation, so Rovara cannot
 hold them to a project. With `projectKey` set, registration refuses them. Without `projectKey`,
 only the service account's permissions stop them.
 
-## What AgentX enforces
+## What Rovara enforces
 
-`cloudId` and `projectKey` are set by AgentX; the model cannot choose them. Searches are rewritten
+`cloudId` and `projectKey` are set by Rovara; the model cannot choose them. Searches are rewritten
 to `project = "<KEY>" AND (<query>)`. Reads and writes by issue key first check that the issue is
 in the project. Issue URLs are refused; the model must pass the key. This is a second line behind
 Step 4. On a site where Step 8 does not print `outside: 0`, it is the only line.
@@ -276,12 +276,12 @@ Not covered by the guard, so only Step 4 holds these to the project:
 - Attachment references (`inlineFileId`, `inlineFileCollection`, `inlineFileName`).
 - Reply contents. The guard checks requests, not responses.
 
-AgentX creates Jira issues without asking, checks a change to an existing issue (a call with
+Rovara creates Jira issues without asking, checks a change to an existing issue (a call with
 `issueIdOrKey`, such as `editJiraIssue` or `addOrEditJiraIssueComment`) against what the member
 asked, and always asks before `transitionJiraIssue` and before an edit that sets a status or
 resolution (for example `fields.status`).
 
-Do not approve `executeWrite`: it can run any Atlassian write, and names no issue AgentX can check,
+Do not approve `executeWrite`: it can run any Atlassian write, and names no issue Rovara can check,
 so the action gate would treat it as a create and run it. With `projectKey` set, registration
 refuses it. If a project without `projectKey` has approved it, deny it until it is removed:
 
@@ -298,14 +298,14 @@ actionPolicy:
   not expired; the scopes are the six in Step 5.
 - **Searches and reads work, but every create or comment ends with an unknown outcome.** The token
   is missing `write:jira:agent-interface` (Step 5). Atlassian refuses the write with "Insufficient
-  scopes"; AgentX reports the outcome as unknown because it cannot prove nothing changed. Check Jira,
+  scopes"; Rovara reports the outcome as unknown because it cannot prove nothing changed. Check Jira,
   then issue a token with all six scopes and rotate it (below).
 - **You used `https://mcp.atlassian.com/v1/...` in another tool and it worked with OAuth but not
-  with the token.** v1 ignores API tokens. AgentX always uses `https://mcp.atlassian.com/v2/mcp`.
-- **"Cloud id isn't explicitly granted".** You gave AgentX an OAuth token. Use an API token
+  with the token.** v1 ignores API tokens. Rovara always uses `https://mcp.atlassian.com/v2/mcp`.
+- **"Cloud id isn't explicitly granted".** You gave Rovara an OAuth token. Use an API token
   (Step 5) and `--type static-secret` (Step 9).
 - **Rotating the token.** Put the new value with `aws secretsmanager put-secret-value --secret-id
   agentx/<env>/connectors/jira-agentx-sa --secret-string file:///dev/stdin` (same `jq` pipe as Step 7).
-  No re-registration is needed; AgentX re-reads the secret within five minutes, or at once after
+  No re-registration is needed; Rovara re-reads the secret within five minutes, or at once after
   Atlassian rejects the old one.
 - **An expired token** makes Jira calls fail as not connected until you rotate it.

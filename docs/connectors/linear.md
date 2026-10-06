@@ -1,7 +1,7 @@
 # Connect Linear
 
-This guide connects one AgentX project to Linear. It is written for the administrator of your own
-AgentX deployment. You create the Linear credential in your own Linear workspace.
+This guide connects one Rovara project to Linear. It is written for the administrator of your own
+Rovara deployment. You create the Linear credential in your own Linear workspace.
 
 `agentx connector add linear --project <name>` walks you through this guide, reads the credential
 from a hidden prompt, tests it, and registers the project's next revision. The steps below are what
@@ -9,19 +9,19 @@ it does, for doing it by hand or understanding it.
 
 ## How access works
 
-AgentX calls Linear's hosted MCP server, `https://mcp.linear.app/mcp`, with a Linear API key,
-sent as a Bearer token. The key acts as the Linear user who created it. Every issue or comment AgentX writes shows that
+Rovara calls Linear's hosted MCP server, `https://mcp.linear.app/mcp`, with a Linear API key,
+sent as a Bearer token. The key acts as the Linear user who created it. Every issue or comment Rovara writes shows that
 user as the author, and ends with a footer naming the Slack member who asked and linking the
 thread.
 
-Two limits can apply. You set the first one in Linear; AgentX enforces the second one on its own:
+Two limits can apply. You set the first one in Linear; Rovara enforces the second one on its own:
 
 1. **The key.** Restrict the API key to the one team this connector scopes to. Step 1 below does
    this. A full-access key also works: the project-side guard in point 2 is what actually limits
    every team-scoped call to that team, not the key. Restrict the key anyway, so it cannot reach
-   more than this connector is meant to if it is ever used outside AgentX.
+   more than this connector is meant to if it is ever used outside Rovara.
 2. **The project.** The project file names one or more teams and the tools members may use.
-   AgentX sets the team on every tool that takes one, and refuses a model that tries to choose
+   Rovara sets the team on every tool that takes one, and refuses a model that tries to choose
    another. Before it reads, updates or comments on an existing issue, it checks that the issue is
    in the project's team. This check covers exactly `get_issue`, `save_issue`, `list_comments` and
    `save_comment`. Any other tool that addresses an issue or comment, for example `delete_comment`,
@@ -39,9 +39,9 @@ cannot be limited to one.
 
 - You need a Linear account that can create API keys. Admins always can. Members can only if
   **Settings > Administration > API > Member API keys** allows it.
-- Consider a dedicated Linear user for AgentX, so writes are not shown as a person's. It uses a
+- Consider a dedicated Linear user for Rovara, so writes are not shown as a person's. It uses a
   seat.
-- You need the AgentX administration client (`agentx`) logged in, and AWS credentials that can
+- You need the Rovara administration client (`agentx`) logged in, and AWS credentials that can
   create secrets in the deployment's account and region.
 - `jq` must be installed.
 
@@ -50,7 +50,7 @@ cannot be limited to one.
 1. In Linear, open **Settings > Account > Security & Access**.
 2. Under **Personal API keys**, choose **New API key**. Name it after the project, for example
    `AgentX payments`.
-3. Permissions: grant **Read**. To let AgentX create issues and comments, also grant
+3. Permissions: grant **Read**. To let Rovara create issues and comments, also grant
    **Create issues** and **Create comments**. To let it update existing issues (`save_issue` with
    an `id`), grant **Write** instead of those two.
 4. Team access: choose **only the teams this project may use**. Do not leave it on all teams.
@@ -109,7 +109,7 @@ Do this for any tool you store the key through: a shell tool that silently trunc
 is not limited to the Keychain, so always verify the stored length matches the key you copied.
 
 To rotate the key later, run `aws secretsmanager put-secret-value` with the new key the same way,
-then register the credential again (step 4) so AgentX drops the old one at once.
+then register the credential again (step 4) so Rovara drops the old one at once.
 
 ## 4. Register the credential
 
@@ -157,7 +157,7 @@ integrations:
   fields above are the recommended minimum for writes.
 - `save_issue`'s `labels` replaces the full label set on the issue. A live check creating an issue
   with `labels: ["Bug"]` alongside the team succeeded (Slack, 2026-09-25; see T034 in
-  `quickstart.md`). `allowedArguments` still leaves out `addLabels` and `removeLabels`: AgentX
+  `quickstart.md`). `allowedArguments` still leaves out `addLabels` and `removeLabels`: Rovara
   always sends the team on an update, and Linear's schema says a label change through those two
   fields cannot be combined with a team change; whether that combination actually works has not
   yet been verified live. Add them back once it has been.
@@ -168,11 +168,11 @@ integrations:
 
 ### Confirmations
 
-AgentX creates Linear issues and comments without asking. It checks a change to an existing issue
+Rovara creates Linear issues and comments without asking. It checks a change to an existing issue
 (a `save_issue` or `save_comment` call with an `id`) against what the member asked, and it always
 asks before closing an issue or marking it a duplicate (any call that sets `state` or
 `duplicateOf`, a new issue included) and before `delete_comment`. Linear marks `save_issue`
-destructive; AgentX does not ask for that alone, because it can see the issue each call names. No
+destructive; Rovara does not ask for that alone, because it can see the issue each call names. No
 action policy is needed for this. To always ask before a change, add:
 
 ```yaml
@@ -208,11 +208,11 @@ What the other results mean:
 | `Warning: connector linear: Linear is not connected: Linear rejected the credential twice; check the Linear API key's permissions and team access` | The key is wrong, revoked or lacks permissions. Check steps 1 to 3. |
 | `Warning: connector linear: tool X skipped: not offered by the vendor` | The tool name is wrong or Linear renamed it. Check the name. |
 | `Warning: connector linear: tool X skipped: requires arguments outside allowedArguments` | Add the named arguments to `allowedArguments`. |
-| `Warning: connector linear: tool X names an item (id) the Linear team check does not cover, so it can reach other teams; remove its approval` | The tool addresses an issue or comment that AgentX does not check is in the project's team. Remove it from `tools` and register a new revision. The revision still registers, so the tool works until you do. A tool with no team, such as `get_document`, can also get this warning; keep it only if it is fine for it to reach everything the key reaches. |
+| `Warning: connector linear: tool X names an item (id) the Linear team check does not cover, so it can reach other teams; remove its approval` | The tool addresses an issue or comment that Rovara does not check is in the project's team. Remove it from `tools` and register a new revision. The revision still registers, so the tool works until you do. A tool with no team, such as `get_document`, can also get this warning; keep it only if it is fine for it to reach everything the key reaches. |
 
 ## 7. Try it in Slack
 
 In a thread in the project's channel, ask "what's open for payments in Linear?", then "create a
 Linear issue for the flaky login test". The new issue is in the payments team and ends with the
-AgentX footer. Asking to change an issue in another team gets a plain refusal, and nothing is
+Rovara footer. Asking to change an issue in another team gets a plain refusal, and nothing is
 changed.

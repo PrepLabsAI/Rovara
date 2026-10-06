@@ -1,8 +1,8 @@
 # Connect any MCP server
 
-This guide connects one AgentX project to a remote MCP server that AgentX has no built-in connector
+This guide connects one Rovara project to a remote MCP server that Rovara has no built-in connector
 for, such as Sentry, PagerDuty, Datadog or Confluence. It is written for the administrator of your
-own AgentX deployment. You create the credential in the vendor's own account.
+own Rovara deployment. You create the credential in the vendor's own account.
 
 `agentx connector add mcp --project <name>` walks you through it:
 
@@ -21,20 +21,20 @@ those for them.
   - `https://mcp.pagerduty.com/mcp`
   - `https://mcp.atlassian.com/v2/mcp` (Confluence)
 
-  The host must be a public DNS name. AgentX refuses plain `http`, IP addresses, and local names
+  The host must be a public DNS name. Rovara refuses plain `http`, IP addresses, and local names
   such as `.internal`, and checks before every connection that the name does not resolve to a
   private address.
 - **A credential**, either:
   - an API key or token, sent in a header; or
   - an OAuth sign-in by a dedicated bot user, done once in a browser.
-- The AgentX administration client (`agentx`) logged in, and AWS credentials that can create
+- The Rovara administration client (`agentx`) logged in, and AWS credentials that can create
   secrets in the deployment's account and region.
 
 ## How access works
 
-AgentX calls the MCP server with the credential. The credential is the outer limit: AgentX can never
+Rovara calls the MCP server with the credential. The credential is the outer limit: Rovara can never
 reach more than it does. So make it as narrow as the vendor allows:
-- **An API key:** use one limited to the one project, organization or service this AgentX project
+- **An API key:** use one limited to the one project, organization or service this Rovara project
   needs.
 - **OAuth:** sign in as a dedicated bot user who is a member of only that.
 
@@ -45,11 +45,11 @@ the project:
   everything the credential reaches. This suits read tools and narrowly scoped keys. A tool that
   changes data needs your explicit acknowledgment (`--acknowledge-unscoped-writes`). The wizard asks
   for it.
-- **An ownership rule.** Before a call names an existing item, AgentX reads the item with one of the
+- **An ownership rule.** Before a call names an existing item, Rovara reads the item with one of the
   server's own read tools. It refuses the call unless the item belongs to the project's scope. See
   [Ownership rules](#ownership-rules).
 
-Every connector also keeps AgentX's usual protections:
+Every connector also keeps Rovara's usual protections:
 - Only approved tools are offered.
 - A tool whose definition changes is refused until it is discovered again.
 - Writes are confirmed in Slack, and carry a footer naming the Slack member who asked.
@@ -57,7 +57,7 @@ Every connector also keeps AgentX's usual protections:
 
 ### The credential is pinned to one host
 
-AgentX registers the credential with the endpoint's host, for example `mcp.sentry.dev`. It sends the
+Rovara registers the credential with the endpoint's host, for example `mcp.sentry.dev`. It sends the
 credential only there, and checks this again each time a token is issued. If the project's
 connector entry is later edited to another endpoint, the connector reports as not connected, and no
 request is made with the credential.
@@ -89,7 +89,7 @@ and the text before the key:
 
 ## Connect with an OAuth sign-in
 
-For a server that takes only OAuth, a dedicated bot user signs in once. AgentX then keeps the
+For a server that takes only OAuth, a dedicated bot user signs in once. Rovara then keeps the
 sign-in fresh on its own.
 
 1. Create the bot user in the vendor, and add it only to what this project needs.
@@ -100,9 +100,9 @@ sign-in fresh on its own.
      --endpoint https://mcp.vendor.example/mcp --auth oauth --register-client
    ```
 
-   AgentX reads where to sign in from the server itself: its OAuth protected resource metadata,
+   Rovara reads where to sign in from the server itself: its OAuth protected resource metadata,
    then its authorization server's metadata. It checks that both describe this endpoint, and that
-   the server supports PKCE. With `--register-client`, AgentX registers itself as the server's OAuth
+   the server supports PKCE. With `--register-client`, Rovara registers itself as the server's OAuth
    client.
 
    If the server does not allow that, create an OAuth app in the vendor:
@@ -111,10 +111,10 @@ sign-in fresh on its own.
 3. The wizard prints a sign-in address. Open it in a private browser window **signed in as the bot
    user**. On a machine you reach over SSH, forward the port first:
    `ssh -L 8765:127.0.0.1:8765 <that machine>`.
-4. AgentX stores the refresh token and registers the credential with the server's token URL and
+4. Rovara stores the refresh token and registers the credential with the server's token URL and
    resource. It refreshes once to list the tools, then you approve tools as above.
 
-`--scope "<scopes>"` asks for specific scopes. Without it, AgentX asks for what the server requests
+`--scope "<scopes>"` asks for specific scopes. Without it, Rovara asks for what the server requests
 or lists. A server that publishes no metadata can be given its endpoints directly:
 
 ```sh
@@ -145,7 +145,7 @@ example keeps a Sentry-like connector inside one organization:
 ```
 
 - **`scopes`**: what the model chooses between. Each scope has an alias and named values.
-- **`bind`**: arguments AgentX fills from the scope's values. They are removed from what the model
+- **`bind`**: arguments Rovara fills from the scope's values. They are removed from what the model
   sees, and a model that tries to set one is refused.
   - `required`: every approved tool must take the argument.
   - `optional`: the argument is bound only on tools that have it.
@@ -174,7 +174,7 @@ preflight warns about an approved tool outside the rule whose input names an ite
 `agentx doctor --env <env>` checks every `mcp` connector it set up:
 - **API key:** the secret exists, and the key still reaches every approved tool.
 - **OAuth:** the bot's sign-in is stored. It is not refreshed, since a refresh would rotate the
-  token AgentX holds.
+  token Rovara holds.
 
 ## By hand
 

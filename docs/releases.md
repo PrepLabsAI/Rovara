@@ -1,4 +1,4 @@
-# AgentX releases
+# Rovara releases
 
 A release is a tagged, versioned bundle: the CloudFormation templates the installer deploys, the
 code packages those templates reference, two container images, and the Rovara Code CLI on npm
@@ -73,7 +73,7 @@ directly for that environment name would have produced (FR-012).
 
 ## One-time owner setup
 
-Nothing publishes until an owner does the following, once. None of it touches the live AgentX
+Nothing publishes until an owner does the following, once. None of it touches the live Rovara
 deployment.
 
 1. **ECR Public repositories: done.** `agentx-worker` and `agentx-slack` exist in account
@@ -202,6 +202,6 @@ Some steps need a person, so do these by hand before tagging, in a throwaway acc
 2. `agentx --env <env> alerts test`, and check the alarm arrives.
 3. Remove that environment by hand, following docs/teardown.md's "By hand" section, and check
    nothing is left.
-4. Once, SC-001: a person who has never seen AgentX installs it from docs/install.md, on a clean
+4. Once, SC-001: a person who has never seen Rovara installs it from docs/install.md, on a clean
    computer and a new AWS account, with no help, and gets a Slack reply. Record every place they
    get stuck, and fix it.

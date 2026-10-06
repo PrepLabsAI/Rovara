@@ -1,4 +1,4 @@
-# Running AgentX
+# Running Rovara
 
 This guide covers an installed environment: checking it, upgrading it, changing its settings, and
 adding projects, channels and connectors. [docs/install.md](install.md) covers the install.
@@ -158,14 +158,14 @@ agentx --env <env> config set <key> <value> --region <region>
 
 The admin sign-in (`agentx --env <env> login --admin`) lasts 6 hours and is never refreshed: after
 that, every `agentx admin` command asks you to sign in again. An environment whose identity
-stack is not managed by AgentX (one that brings its own OIDC provider) sets this on its own app
+stack is not managed by Rovara (one that brings its own OIDC provider) sets this on its own app
 client, as the access and ID token validity.
 
 `set` shows the change and asks first (`--yes` skips the question). With this computer's admin
 sign-in (`agentx --env <env> login --admin`), every change `set` makes is recorded in the admin
 change history (`agentx --env <env> admin changes`) with the admin who made it, the `cli` client,
 the key, the value before and after, and when it was asked, applied or failed. It is recorded
-after the yes and before anything changes; if AgentX cannot record it, nothing changes. If the
+after the yes and before anything changes; if Rovara cannot record it, nothing changes. If the
 outcome cannot be recorded, or a stack update may still be running when `set` stops, `set` warns
 and the record stays `applying`. `alerts.address` is recorded only as changed, never its value.
 Without the admin sign-in, the operator role alone can still change a setting, but `set` warns
@@ -264,7 +264,7 @@ managed, so a Python project's setup command should make a virtual environment
 - `agentx --env <env> signin check`: checks every piece sign-in needs, and says what to fix.
 
 Developers need no AWS credentials: they run `npx @preplabsai/rovara-code login <control plane URL>`.
-To hand tasks to AgentX from Claude Code, Codex or Cursor, and to share them to Slack, they follow
+To hand tasks to Rovara from Claude Code, Codex or Cursor, and to share them to Slack, they follow
 [docs/mcp-install.md](mcp-install.md).
 
 ## Shared tasks

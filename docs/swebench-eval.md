@@ -1,13 +1,13 @@
 # SWE-bench runs from Slack
 
-Spec 043. A member of an enabled channel scores the AgentX coding agent on one SWE-bench task:
+Spec 043. A member of an enabled channel scores the Rovara coding agent on one SWE-bench task:
 
 ```
 @agentx eval swebench verified django__django-11099
 @agentx eval swebench lite astropy__astropy-12907 model Fast
 ```
 
-AgentX replies that the run started, and later posts whether the task was resolved, the hidden tests'
+Rovara replies that the run started, and later posts whether the task was resolved, the hidden tests'
 counts, why the agent stopped, how long it took, what it cost and where its artifacts are. `stop` in
 the thread cancels the run. Up to `maxConcurrentEvals` runs (4 by default) run at once per deployment,
 single runs and batch runs together; batches always leave one slot free for single runs (see
@@ -161,23 +161,23 @@ The runner's own log is in the `…/swebench` log group, in a stream named `<run
 
 ### Agent verification fields (spec 051)
 
-Eval runs use the same AgentX preamble and the same rerun of the agent's own test commands as
-production (see [Checks](project-configuration.md#checks-how-agentx-verifies-the-agents-work-spec-051)).
+Eval runs use the same Rovara preamble and the same rerun of the agent's own test commands as
+production (see [Checks](project-configuration.md#checks-how-rovara-verifies-the-agents-work-spec-051)).
 The grade is still the benchmark's own grader. `result.json` also records:
 
 | Field | Contents |
 |---|---|
-| `checks` | AgentX's check report: `status` (`verified`, `regression` or `not_verified`), `source`, each check with `before`, `after` and `class`, `extraTry`, and the preamble version. A run from a runner older than spec 051 has none |
+| `checks` | Rovara's check report: `status` (`verified`, `regression` or `not_verified`), `source`, each check with `before`, `after` and `class`, `extraTry`, and the preamble version. A run from a runner older than spec 051 has none |
 | `agentClaim` | What the agent's last line said: `success` (`AgentX result: done`), `failure` (`AgentX result: not done`) or `none`. A stopped run claims nothing |
-| `disagreement` | `claimedSuccess`, `checkRegression`, `graderBrokenPassToPass` (null for SEC-bench, which has no PASS_TO_PASS) and `disagrees`: the agent claimed success and AgentX found a regression, or the grader found a broken PASS_TO_PASS test |
-| `preambleSha256` | The SHA-256 of the preamble the agent ran with. From preamble version 2 it covers the AgentX worker prompt and the preamble together, so it differs from every version 1 run |
+| `disagreement` | `claimedSuccess`, `checkRegression`, `graderBrokenPassToPass` (null for SEC-bench, which has no PASS_TO_PASS) and `disagrees`: the agent claimed success and Rovara found a regression, or the grader found a broken PASS_TO_PASS test |
+| `preambleSha256` | The SHA-256 of the preamble the agent ran with. From preamble version 2 it covers the Rovara worker prompt and the preamble together, so it differs from every version 1 run |
 
 SWE-bench commands such as `cd /testbed && pytest ...` are recorded and replayed from the run root
 inside the container; paths outside it are still refused. Production tasks in a dev container get
 the same rewrite for their container folder.
 
 If the agent's one extra turn is stopped (a limit, the loop guard, a model error), the report stays
-a regression rather than becoming "not verified", as in production: AgentX saw the regression and
+a regression rather than becoming "not verified", as in production: Rovara saw the regression and
 never saw it fixed. A stopped run still claims nothing.
 
 ## Batches (spec 052)
@@ -272,7 +272,7 @@ charges that do not sum to the spend) it says the results are incomplete, and th
 `EvalBatchTickErrors` alarm fires. A run with no reported cost is charged its ceiling and marked
 `costEstimated`. The `toolCalls` column is empty for runs on a runner image older than spec 052.
 
-`disagreementRate` is the share of runs where the agent claimed success and AgentX's check or the
+`disagreementRate` is the share of runs where the agent claimed success and Rovara's check or the
 grader disagreed. Its denominator is the graded runs with a claim (`success` or `failure`). Three
 kinds of run are left out of it, so read it with the run counts beside it:
 

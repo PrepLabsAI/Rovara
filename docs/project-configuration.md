@@ -45,7 +45,7 @@ orchestratorInstructions: Delegate every repository read, edit, build, and test 
 | `revision` | yes | A positive whole number. Revisions are immutable: increase it before registering a changed file. New threads use the latest registered revision. |
 | `repositories` | yes | 1 to 32 repositories (below). |
 | `setup` | yes | Up to 64 commands run once when a workspace is prepared. May be empty. |
-| `readiness` | yes | Up to 64 commands run in the workspace before any candidate is pushed. A failure opens a new pull request as a draft, with the failing checks listed in its description (spec 051); it still stops an update to an existing pull request. See [Checks](#checks-how-agentx-verifies-the-agents-work-spec-051). May be empty. |
+| `readiness` | yes | Up to 64 commands run in the workspace before any candidate is pushed. A failure opens a new pull request as a draft, with the failing checks listed in its description (spec 051); it still stops an update to an existing pull request. See [Checks](#checks-how-rovara-verifies-the-agents-work-spec-051). May be empty. |
 | `devcontainer` | no | Runs `setup`, `readiness` and the agent's shell inside a repository's dev container (below). |
 | `orchestratorInstructions` | yes | Up to 32,768 characters of project guidance for the orchestrator. |
 | `models` | no | The models a channel may choose from (below). |
@@ -92,7 +92,7 @@ setup:
 - Values are strings (quote `"false"` and numbers in YAML), at most 4,096 characters each, with no
   NUL byte.
 - At most 64 entries and 32,768 bytes per command.
-- AgentX refuses names it or the system relies on, in any letter case: `PATH`, `HOME`, `USER`,
+- Rovara refuses names it or the system relies on, in any letter case: `PATH`, `HOME`, `USER`,
   `LOGNAME`, `SHELL`, `PWD`, `OLDPWD`, `IFS`, `ENV`, `BASH_ENV`, and any name starting with
   `AGENTX_`, `AWS_`, `GIT_`, `LD_`, `DYLD_` or `PI_`. To use a tool that is not on the worker's
   `PATH`, give its full path as `executable`, or set `PATH` in the dev container's own
@@ -102,7 +102,7 @@ setup:
 
 **`env` is not for secrets.** A registered revision is stored and shown in full, and with a dev
 container the values are on the `devcontainer exec` command line while a command runs. At
-registration AgentX refuses:
+registration Rovara refuses:
 
 - names whose last word marks a credential (`TOKEN`, `SECRET`, `PASSWORD`, `PASSWD`, `PASS`,
   `PWD`, `CREDENTIALS`, `CREDS`, `APIKEY`), names ending in `TOKEN`, `SECRET` or `PASSWORD` (such as
@@ -111,7 +111,7 @@ registration AgentX refuses:
 
 A name that only mentions such a word earlier, such as `SECRET_NAME` or `SKIP_TOKEN_CHECK`, is
 allowed. These checks are a guard, not a guarantee: keep every secret in a credential reference,
-never in `env`. AgentX error messages name a variable, never its value.
+never in `env`. Rovara error messages name a variable, never its value.
 
 A worker that predates `env` refuses a revision that uses it. Readiness at publish comes from the
 latest revision, even for a workspace prepared from an older one, so a running workspace on an
@@ -132,7 +132,7 @@ devcontainer:
 or updated, each time inside the dev container when the workspace was prepared with one. A
 workspace prepared without one runs its commands on the worker; adding a dev container in a later
 revision does not move an existing workspace's checks into it. Before the checks run at publication
-or a pull request update, AgentX starts the dev container (this does nothing when it is already
+or a pull request update, Rovara starts the dev container (this does nothing when it is already
 running). If it does not start, nothing is pushed.
 
 ### Models
@@ -186,7 +186,7 @@ actionPolicy:
 Up to 64 rules. Each rule has a `tool` pattern (letters, digits, `_`, `-` and at most four `*`),
 an optional `connector` and `whenArguments`, a `reason`, and exactly one of `outcome` (`allow`,
 `ask` or `deny`) or `treatAs` (`read`, `create`, `change` or `destructive`). How rules combine
-with AgentX's built-in confirmations is described in
+with Rovara's built-in confirmations is described in
 [Actions that need your confirmation](slack.md#actions-that-need-your-confirmation).
 
 ### Developer tasks
@@ -215,25 +215,25 @@ them.
 
 See [Sharing a task to Slack](mcp-install.md#sharing-a-task-to-slack).
 
-## Checks: how AgentX verifies the agent's work (spec 051)
+## Checks: how Rovara verifies the agent's work (spec 051)
 
-The coding agent can say "all tests pass" when they do not. So AgentX does not take its word. When
-the agent tries to finish a coding task, AgentX reruns the project's checks itself, compares each
+The coding agent can say "all tests pass" when they do not. So Rovara does not take its word. When
+the agent tries to finish a coding task, Rovara reruns the project's checks itself, compares each
 with its earlier result, and reports its own result first. The agent's summary comes second.
 
 ### What you see in Slack
 
-The reply starts with AgentX's verdict, then the label `*Agent's account:*`, then the agent's own
+The reply starts with Rovara's verdict, then the label `*Agent's account:*`, then the agent's own
 summary. The verdict lines, word for word:
 
 | Situation | Line |
 |---|---|
 | A check passed before and fails now | `Not done: <check> passed before and fails now.` (one line per such check) |
-| Every check AgentX reran passes | `Checks passed (<n> project check(s)).` or, for a project without readiness checks, `Checks passed (<n> of the agent's own test commands, rerun by AgentX).` |
+| Every check Rovara reran passes | `Checks passed (<n> project check(s)).` or, for a project without readiness checks, `Checks passed (<n> of the agent's own test commands, rerun by AgentX).` |
 | No regression, but a rerun check fails now | `Checks: <p> of <n> pass.` (then one line for each failing check, below). `Checks passed` is never used while a check fails |
 | No regression, but nothing passes yet | `No regression found, but no check passes yet.` |
 | Nothing was checked | `Not verified: no checks ran. Add readiness checks to the project so AgentX can check the agent's work.` |
-| The task was stopped, or errored, before the check, or AgentX had no time to rerun any of the project's checks | `Not verified: the task stopped before AgentX could check it.` (the advice to add readiness checks is only for a project that has none) |
+| The task was stopped, or errored, before the check, or Rovara had no time to rerun any of the project's checks | `Not verified: the task stopped before AgentX could check it.` (the advice to add readiness checks is only for a project that has none) |
 | The pull request this turn opened is a draft | `Opened as a draft: AgentX's checks found failures.` (also when the turn ran no task, such as "open the PR" after an earlier task) |
 | A check was already failing before the change | `Already failing before this change: <check>.` (added to any of the above) |
 | A check fails and has no earlier result | `Fails now, with no earlier result: <check>.` (added to any of the above) |
@@ -254,7 +254,7 @@ reads exactly as before.
   published (this relaxes an earlier rule, where publishing refused on a failing check), or a
   check still fails that an earlier task or the latest one found failing. The work stays visible
   and cannot be merged as finished by mistake. The publish result says `draft`, and the PR tool's
-  description tells the assistant that AgentX opens a draft when a check fails.
+  description tells the assistant that Rovara opens a draft when a check fails.
 - **A failing check is remembered across tasks.** The workspace keeps every check that fails now,
   until a later report shows it passing. So a follow-up task that runs no tests, or reruns a
   broken test and sees it "already failing", cannot hide an earlier regression. A task that ends
@@ -278,7 +278,7 @@ reads exactly as before.
 
 ### How the checks work
 
-1. **The agent is told the rules.** AgentX appends a fixed preamble to the agent's system prompt
+1. **The agent is told the rules.** Rovara appends a fixed preamble to the agent's system prompt
    for every coding task and every eval run. Its SHA-256 is recorded with each result. Version 4:
 
    ```text
@@ -296,23 +296,23 @@ reads exactly as before.
    whenever the task changed behaviour that existing tests still checked. Version 3 told the
    agent to update such tests, and it then edited tests even when told not to, once to cover a
    half-finished fix; version 4 has it leave them and name them. A task that changes tested
-   behaviour can therefore end with a named failing test, which AgentX reports as a regression
+   behaviour can therefore end with a named failing test, which Rovara reports as a regression
    and the reviewer decides on.
 
    The text lives in `packages/contracts/src/checks.ts` (`AGENTX_PREAMBLE`). Changing it means a
    new `AGENTX_PREAMBLE_VERSION`. The agent's claim is read from that last line: `success`,
    `failure`, or `none` when the line is missing.
 
-   Since version 2, AgentX's own worker prompt (`AGENTX_WORKER_PROMPT`, in the same file) also
+   Since version 2, Rovara's own worker prompt (`AGENTX_WORKER_PROMPT`, in the same file) also
    replaces Pi's built-in system prompt. Pi's is written for a person at a terminal and points at
-   Pi's documentation. AgentX's tells the agent that it works alone and its changes may become a
+   Pi's documentation. Rovara's tells the agent that it works alone and its changes may become a
    pull request, and covers how to work, which file tools to use, and what its final message must
    contain. The recorded SHA-256 covers both texts, so changing either means a new version.
-2. **AgentX reruns the checks** when the agent tries to finish. A check that passed before and
+2. **Rovara reruns the checks** when the agent tries to finish. A check that passed before and
    fails now is a regression. A check that failed before and still fails is "already failing" and
    is not the agent's regression.
 3. **One extra try.** On a regression, the agent gets the failing output and exactly one more turn.
-   AgentX then reruns the checks and reports that result. There is never a third round.
+   Rovara then reruns the checks and reports that result. There is never a third round.
 4. **Stopped tasks** (cancelled, or stopped by the loop guard or a limit) are reported "Not
    verified"; no checks run.
 
@@ -327,13 +327,13 @@ suite, a type check, a lint. They are the best checks, for three reasons:
 
 - they are your commands, run the way you run them, in the dev container when there is one;
 - they run when a workspace is prepared, so a failing project is caught before the agent starts;
-- AgentX reruns exactly them after the agent's change.
+- Rovara reruns exactly them after the agent's change.
 
 A project **without** readiness checks is checked by rerunning the agent's own simple test
 commands instead. That is weaker: the agent chooses what to run, and may run nothing, in which
 case the reply says "Not verified: no checks ran". For each such command, the "before" is the
 agent's first run in that task, when no file had changed yet. When the agent changed files
-first, AgentX measures the before itself (#290): it puts each repository's files back to the
+first, Rovara measures the before itself (#290): it puts each repository's files back to the
 commit the workspace was prepared at, runs the command, and restores the agent's files exactly.
 Only the files are swapped: Git's index, HEAD, branches and stash are never touched, and ignored
 files (built extensions, `node_modules`, virtual environments) stay as they are, so the command
@@ -343,7 +343,7 @@ task puts them back before it starts. The before runs use at most half of the ro
 A failure is remembered across tasks (above), so the next task cannot lose it.
 
 In a project with a dev container, the agent's shell is the container's, so it writes
-`cd /workspaces/<repo> && npm test`. AgentX reads every `cd` to that exact folder (or a
+`cd /workspaces/<repo> && npm test`. Rovara reads every `cd` to that exact folder (or a
 folder inside it), or to the same repository's folder on the worker, as the repository's folder
 in the workspace, records it and replays it there, in the container. Any other absolute path, a `..`, a look-alike folder, and a link that leads out
 of the workspace are still refused.
@@ -359,17 +359,17 @@ backslash, so the shell reads it literally: `yarn jest --testPathPattern="RoomVi
 counts. Arguments that would change files or never end when replayed are refused: `-u`,
 `--updateSnapshot`, `--update-snapshots`, `--update`, `--snapshot-update` and any `--watch` option.
 
-AgentX finds a test inside a longer command too (#299). It splits the command at `&&`, `||`, `;`
+Rovara finds a test inside a longer command too (#299). It splits the command at `&&`, `||`, `;`
 and `|` outside quotes, and replays each test it finds as `cd <dir> && <test>`. Here `<dir>`
 follows every relative `cd` before the test (no `..`, no absolute path): `cd a && cd b && pytest`
 replays `cd a/b && pytest`. A test may be followed by `2>&1` and by `tail`, `head`, `grep`,
 `egrep`, `sed` (not in place), `cut`, `sort`, `uniq`, `wc` or `cat`. The replay leaves those out.
 So `go build ./... && go test ./scanner 2>&1 | tail -20` replays `go test ./scanner`, and
-`pytest -q 2>&1 | grep -E "^E" | head` replays `pytest -q`. AgentX only ever replays the test
+`pytest -q 2>&1 | grep -E "^E" | head` replays `pytest -q`. Rovara only ever replays the test
 itself, never the rest of the command.
 
 A whole command is never used when it holds something whose effect the bare replay would not
-reproduce, or that AgentX cannot read safely:
+reproduce, or that Rovara cannot read safely:
 - a subshell, `$(…)`, a backtick or a background `&`;
 - a heredoc, or any redirection other than `2>&1`;
 - a newline, an unquoted `$`, a glob, or `~`;
@@ -382,7 +382,7 @@ reproduce, or that AgentX cannot read safely:
 One part of this is stricter: the agent's own run counts as the "before" result only when the
 command is just the test. That is the test, optionally after `cd <dir> &&` or `cd <dir>;`, and
 optionally followed by `2>&1` and `| tail -N` (or `tail -n N`). Anywhere else, the command's exit
-code is not the test's (it may be `head`'s, or the last command's in a chain), so AgentX measures
+code is not the test's (it may be `head`'s, or the last command's in a chain), so Rovara measures
 the before itself on the original code, as above. A pipeline's exit code is normally `tail`'s,
 which is 0 even when the tests fail. So the agent's shell runs the `| tail -N` shape with
 `set -o pipefail`, and the exit code is the test's.

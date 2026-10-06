@@ -1,6 +1,6 @@
-# Contributing to AgentX
+# Contributing to Rovara
 
-Thank you for helping. AgentX is QEDly Code, the first product from [QEDly](https://qedly.github.io).
+Thank you for helping. Rovara is QEDly Code, the first product from [QEDly](https://qedly.github.io).
 This page says how to propose a change and get it merged.
 
 ## Before you start
@@ -60,11 +60,11 @@ changing a feature, and update it in the same pull request when the behaviour ch
 ## Writing style
 
 Docs and messages use plain words, active voice and short sentences. State what the code does, not
-what it might do. Do not describe AgentX as "open source": it is source-available.
+what it might do. Do not describe Rovara as "open source": it is source-available.
 
 ## License
 
-AgentX is source-available under the [Functional Source License, Version 1.1, ALv2 Future
+Rovara is source-available under the [Functional Source License, Version 1.1, ALv2 Future
 License](LICENSE) (FSL-1.1-ALv2). Each release becomes Apache 2.0 two years after it ships. By
 contributing, you agree that your contribution is licensed under the same terms. [Maintainers to
 decide: whether contributors must sign off each commit (`git commit -s`, the Developer Certificate
