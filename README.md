@@ -1,7 +1,7 @@
 <h1 align="center">Rovara</h1>
 
 <p align="center">
-  <strong>A remote coding-agent runtime and task workflow, in your own AWS account.</strong>
+  <strong>The open-source alternative to Claude Tag!</strong>
 </p>
 
 <p align="center">
@@ -480,5 +480,5 @@ two years after it ships. &copy; 2026 PrepLabs
 ---
 
 <p align="center">
-  <sub>Delegate the task. Read the report. Review the pull request.</sub>
+  <sub>The open-source alternative to Claude Tag!</sub>
 </p>
