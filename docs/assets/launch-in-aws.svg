@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="232" height="52" viewBox="0 0 232 52" role="img" aria-label="Launch in AWS">
+  <title>Launch in AWS</title>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2B3A4D"/>
+      <stop offset="1" stop-color="#1B2532"/>
+    </linearGradient>
+  </defs>
+  <rect x="0.5" y="0.5" width="231" height="51" rx="12" fill="url(#bg)" stroke="#FF9900" stroke-opacity="0.55"/>
+  <g transform="translate(20 14)" fill="none" stroke="#FF9900" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M7 19.5h12.5a5.5 5.5 0 0 0 .7-10.96A7.5 7.5 0 0 0 5.6 10.6 4.5 4.5 0 0 0 7 19.5z"/>
+    <path d="M13 17.5v-7M10 13.2l3-3 3 3"/>
+  </g>
+  <text x="58" y="32.5" fill="#FFFFFF" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="17" font-weight="600" letter-spacing="0.2">Launch in AWS</text>
+  <path d="M203 21l5 5-5 5" fill="none" stroke="#FF9900" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -71,7 +71,9 @@ environment named `production`.
 
 ## Install with the Launch in AWS button (recommended)
 
-[![Launch in AWS](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/quickcreate?templateURL=https%3A%2F%2Frovara-installer-us-east-1.s3.us-east-1.amazonaws.com%2Flatest%2Finstaller.template.json&stackName=agentx-installer)
+<p align="center">
+  <a href="https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/quickcreate?templateURL=https%3A%2F%2Frovara-installer-us-east-1.s3.us-east-1.amazonaws.com%2Flatest%2Finstaller.template.json&amp;stackName=agentx-installer"><img src="assets/launch-in-aws.svg" alt="Launch in AWS" width="232" height="52" /></a>
+</p>
 
 The button opens the AWS console's Create stack page for the Rovara installer, in `us-east-1` (the
 one region Rovara runs in today), with everything filled in but three answers.

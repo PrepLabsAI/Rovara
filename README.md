@@ -20,6 +20,10 @@
   <img src="https://img.shields.io/badge/agent-Pi%201.0-6f42c1" alt="Pi coding agent 1.0" />
 </p>
 
+<p align="center">
+  <a href="https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/quickcreate?templateURL=https%3A%2F%2Frovara-installer-us-east-1.s3.us-east-1.amazonaws.com%2Flatest%2Finstaller.template.json&amp;stackName=agentx-installer"><img src="docs/assets/launch-in-aws.svg" alt="Launch in AWS" width="232" height="52" /></a>
+</p>
+
 <br/>
 
 # The open-source alternative to Claude Tag!
@@ -304,7 +308,9 @@ contracts every component validates against.
 
 ### Install
 
-[![Launch in AWS](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/quickcreate?templateURL=https%3A%2F%2Frovara-installer-us-east-1.s3.us-east-1.amazonaws.com%2Flatest%2Finstaller.template.json&stackName=agentx-installer)
+<p align="center">
+  <a href="https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/quickcreate?templateURL=https%3A%2F%2Frovara-installer-us-east-1.s3.us-east-1.amazonaws.com%2Flatest%2Finstaller.template.json&amp;stackName=agentx-installer"><img src="docs/assets/launch-in-aws.svg" alt="Launch in AWS" width="232" height="52" /></a>
+</p>
 
 Press the button, enter your email, your GitHub owner and an install name, and press Create stack.
 An email with your temporary password and the setup page's address arrives in about five minutes.

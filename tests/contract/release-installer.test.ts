@@ -62,7 +62,8 @@ describe("the published installer", () => {
   });
 
   it("is what the README's and the install guide's button opens", async () => {
-    for (const doc of ["README.md", "docs/install.md"]) expect(await readFile(doc, "utf8"), doc).toContain(`](${launchUrl(BUCKET)})`);
+    for (const doc of ["README.md", "docs/install.md"]) expect(await readFile(doc, "utf8"), doc).toContain(`<a href="${launchUrl(BUCKET).replaceAll("&", "&amp;")}"><img src="`);
+    expect(await readFile("docs/assets/launch-in-aws.svg", "utf8")).toContain("Launch in AWS");
     expect(decodeURIComponent(launchUrl(BUCKET))).toContain(`https://${BUCKET}.s3.us-east-1.amazonaws.com/latest/${INSTALLER_TEMPLATE}`);
   });
 });
