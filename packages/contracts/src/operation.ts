@@ -1,5 +1,6 @@
 import { Buffer } from "node:buffer";
 import { z } from "zod";
+import { WorkflowFeedbackApprovalBindingSchema } from "./task-workflow.js";
 import { SlackRequesterSchema } from "./slack.js";
 
 /** Spec 025 FR-022: an operation a developer started from an AI tool. */
@@ -206,6 +207,7 @@ export const OperationSchema = z
     /** Server-selected task mode; absent on legacy operations and non-task operations. */
     workflowMode: z.enum(["PLAN", "IMPLEMENT", "REVIEW", "FEEDBACK_REVIEW"]).optional(),
     workflowFeedbackReview: z.object({ taskId: z.string().uuid(), workflowRevision: z.number().int().positive(), candidateDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
+    workflowFeedbackApproval: WorkflowFeedbackApprovalBindingSchema.optional(),
     requestId: z.string().uuid(),
     payloadHash: z.string().regex(/^[a-f0-9]{64}$/),
     status: OperationStatusSchema,

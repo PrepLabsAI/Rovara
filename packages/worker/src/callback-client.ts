@@ -1,9 +1,11 @@
 import {
   CodeBuildCheckResultSchema,
   WorkflowFeedbackBundleRefSchema,
+  WorkflowFeedbackApprovalBindingSchema,
   agentXError,
   type CheckEntry,
   type WorkerInvocation,
+  type WorkflowFeedbackApprovalBinding,
 } from "@agentx/contracts";
 import type { ArtifactSink } from "./artifacts.js";
 import type { EventBatchSink } from "./events.js";
@@ -18,6 +20,7 @@ export interface FeedbackBundleReadResult {
 }
 
 export type FeedbackBundleReader = (binding: { taskId: string; workflowRevision: number; candidateDigest: string }) => Promise<FeedbackBundleReadResult>;
+export type FeedbackApprovalAuthorizer = (binding: WorkflowFeedbackApprovalBinding) => Promise<void>;
 
 export interface PullRequestCallbackInput {
   repository: string;
@@ -76,6 +79,7 @@ export function createWorkerCallbackSinks(input: {
   pullRequestUpdateSink: PullRequestUpdateSink;
   codeBuildSink: CodeBuildSink;
   feedbackBundleReader: FeedbackBundleReader;
+  authorizeFeedbackApproval: FeedbackApprovalAuthorizer;
 } {
   const fetchImplementation = input.fetchImplementation ?? fetch;
   const base = input.controlPlaneUrl.replace(/\/$/, "");
@@ -129,6 +133,13 @@ export function createWorkerCallbackSinks(input: {
         return { ref: WorkflowFeedbackBundleRefSchema.parse(item.ref), bytes: bytes.toString("utf8") };
       });
       return { taskRequirements: record.taskRequirements, bundles };
+    },
+    authorizeFeedbackApproval: async (binding) => {
+      const approval = WorkflowFeedbackApprovalBindingSchema.parse(binding);
+      const value = await postForResult("feedback-approval", approval);
+      if (!value || typeof value !== "object" || Array.isArray(value) || (value as Record<string, unknown>).authorized !== true) {
+        throw agentXError("STALE_FENCE", "the owner-approved PR feedback is no longer authorized");
+      }
     },
     pullRequestSink: async (request) => {
       const value = await postForResult("pull-request", request);

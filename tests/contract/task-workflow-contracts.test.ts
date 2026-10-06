@@ -46,6 +46,19 @@ describe("native task workflow contracts", () => {
     expect(WorkflowFeedbackReviewReportSchema.safeParse({ ...report, qualification: "INDEPENDENT_EVIDENCE" }).success).toBe(false);
     expect(WorkflowFeedbackReviewReportSchema.safeParse({ ...report, operationMode: "IMPLEMENT" }).success).toBe(false);
   });
+  it("matches dispatch approval to the exact selected report findings, source comments, PR set, and heads", () => {
+    const binding = { taskId, requestId: "11111111-1111-4111-8111-111111111111", ownerId,
+      decisionWorkflowRevision: 4, activeWorkflowRevision: 6, reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64),
+      bundleDigests: ["c".repeat(64)], candidateDigest: "d".repeat(64), selectedFindingIds: ["finding-1"], selectedCommentIds: ["comment-1"] };
+    const review = { bundleRefs: [{ repositoryId: "demo", number: 42, headSha: "e".repeat(40), candidateDigest: binding.candidateDigest, sha256: binding.bundleDigests[0] }],
+      reviewRef: { sha256: binding.reviewDigest, proposalDigest: binding.proposalDigest, bundleDigests: binding.bundleDigests,
+        candidateBindings: [{ repositoryId: "demo", number: 42, headSha: "e".repeat(40), candidateDigest: binding.candidateDigest, bundleDigest: binding.bundleDigests[0] }],
+        findingRefs: [{ id: "finding-1", bundleDigest: binding.bundleDigests[0], commentIds: ["comment-1"], priority: "MUST_FIX", assessment: "ACTIONABLE", recommended: true }] } };
+    expect(workflowContracts.workflowFeedbackApprovalMatchesReview(binding as never, review as never)).toBe(true);
+    expect(workflowContracts.workflowFeedbackApprovalMatchesReview({ ...binding, selectedCommentIds: ["comment-2"] } as never, review as never)).toBe(false);
+    expect(workflowContracts.workflowFeedbackApprovalMatchesReview({ ...binding, selectedFindingIds: ["finding-1", "finding-2"] } as never, review as never)).toBe(false);
+    expect(workflowContracts.workflowFeedbackApprovalMatchesReview({ ...binding, bundleDigests: ["f".repeat(64)] } as never, review as never)).toBe(false);
+  });
   it("computes a stable candidate digest from sorted repository identities and exact commits", () => {
     const left = { repositoryId: "repo-b", commitSha: "b".repeat(40), treeSha: "2".repeat(40) };
     const right = { repositoryId: "repo-a", commitSha: "a".repeat(40), treeSha: "1".repeat(40) };

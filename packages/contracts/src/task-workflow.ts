@@ -98,8 +98,10 @@ export const WorkflowFeedbackBundleRefSchema = WorkflowFeedbackBundleMetadataSch
   sha256: DigestSchema, objectKey: FeedbackObjectKeySchema,
 }).refine(b => b.objectKey.includes(b.sha256), "feedback artifact key must contain its content digest");
 export type WorkflowFeedbackBundleRef = z.infer<typeof WorkflowFeedbackBundleRefSchema>;
+export const WorkflowFeedbackBundleCommentsSchema = z.array(FeedbackCommentRefSchema.extend({ body: z.string().max(1_000_000) })).max(128)
+  .refine(comments => new Set(comments.map(comment => comment.id)).size === comments.length, "comment IDs must be unique within a bundle");
 export const WorkflowFeedbackBundleSchema = WorkflowFeedbackBundleMetadataSchema.safeExtend({
-  comments: z.array(FeedbackCommentRefSchema.extend({ body: z.string().max(1_000_000) })).max(128),
+  comments: WorkflowFeedbackBundleCommentsSchema,
   sourceDeliveryIds: z.array(FeedbackIdSchema).max(100),
 }).superRefine((bundle, context) => {
   if (createHash("sha256").update(JSON.stringify(bundle.comments), "utf8").digest("hex") !== bundle.commentSetDigest) {
@@ -187,7 +189,41 @@ export const WorkflowFeedbackDecisionSchema = z.object({
     context.addIssue({ code: "custom", message: "feedback decision selection or reason is invalid" });
   }
 });
+
+/** Immutable owner approval carried to the worker and checked again at worker start. */
+export const WorkflowFeedbackApprovalBindingSchema = z.object({
+  taskId: z.string().uuid(), requestId: z.string().uuid(), ownerId: ActorIdSchema,
+  decisionWorkflowRevision: z.number().int().positive(), activeWorkflowRevision: z.number().int().positive(),
+  reviewDigest: DigestSchema, proposalDigest: DigestSchema, bundleDigests: z.array(DigestSchema).min(1).max(32),
+  candidateDigest: DigestSchema, selectedFindingIds: z.array(z.string().min(1).max(128)).min(1).max(100),
+  selectedCommentIds: z.array(z.string().min(1).max(128)).min(1).max(200),
+}).strict();
+export type WorkflowFeedbackApprovalBinding = z.infer<typeof WorkflowFeedbackApprovalBindingSchema>;
 export type WorkflowFeedbackDecision = z.infer<typeof WorkflowFeedbackDecisionSchema>;
+
+/** Proves a durable worker dispatch is limited to findings and PR snapshots in its approved report. */
+export function workflowFeedbackApprovalMatchesReview(
+  approval: WorkflowFeedbackApprovalBinding,
+  reviewInput: { bundleRefs: WorkflowFeedbackBundleRef[]; reviewRef: WorkflowFeedbackReviewRef },
+): boolean {
+  const { bundleRefs, reviewRef } = reviewInput;
+  const sameStrings = (left: string[], right: string[]) => JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
+  const selected = reviewRef.findingRefs.filter(finding => approval.selectedFindingIds.includes(finding.id));
+  const selectedComments = [...new Set(selected.flatMap(finding => finding.commentIds))];
+  return reviewRef.sha256 === approval.reviewDigest && reviewRef.proposalDigest === approval.proposalDigest
+    && sameStrings(bundleRefs.map(bundle => bundle.sha256), approval.bundleDigests)
+    && sameStrings(reviewRef.bundleDigests, approval.bundleDigests)
+    && approval.selectedFindingIds.length === new Set(approval.selectedFindingIds).size
+    && approval.selectedCommentIds.length === new Set(approval.selectedCommentIds).size
+    && selected.length === approval.selectedFindingIds.length
+    && sameStrings(selectedComments, approval.selectedCommentIds)
+    && reviewRef.candidateBindings.length === bundleRefs.length
+    && bundleRefs.every(bundle => bundle.candidateDigest === approval.candidateDigest && reviewRef.candidateBindings.some(candidate => candidate.repositoryId === bundle.repositoryId
+      && candidate.number === bundle.number && candidate.headSha === bundle.headSha
+      && candidate.candidateDigest === bundle.candidateDigest && candidate.commentSetDigest === bundle.commentSetDigest
+      && candidate.bundleDigest === bundle.sha256));
+}
+
 const ReviewedWorkflowFeedbackSchema = z.object({
   bundleRefs: z.array(WorkflowFeedbackBundleRefSchema).min(1).max(32), reviewRef: WorkflowFeedbackReviewRefSchema,
   status: z.enum(["PENDING", "APPROVED", "CHANGES_REQUESTED", "DISMISSED"]),
@@ -341,9 +377,10 @@ export const WorkflowSnapshotSchema = z.object({
   feedbackReview: WorkflowFeedbackReviewSchema.optional(),
   feedbackReviewHistory: z.array(WorkflowFeedbackReviewRefSchema).max(100).optional(),
   feedbackDecisions: z.array(WorkflowFeedbackDecisionSchema).max(100).optional(),
+  feedbackDispatchApproval: WorkflowFeedbackApprovalBindingSchema.optional(),
   feedbackNotes: z.array(WorkflowFeedbackNoteSchema).max(100).optional(),
 }).superRefine((workflow, context) => {
-  const feedbackMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory };
+  const feedbackMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackDispatchApproval: workflow.feedbackDispatchApproval, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory };
   if (Buffer.byteLength(JSON.stringify(feedbackMetadata), "utf8") > 262_144) {
     context.addIssue({ code: "custom", message: "feedback metadata exceeds the task snapshot storage budget" });
   }
@@ -656,7 +693,7 @@ export function collectWorkflowFeedbackBundles(currentInput: unknown, input: {
   const history = [...(current.feedbackReviewHistory ?? [])];
   if (previousReport && !history.some(r => r.sha256 === previousReport.sha256)) history.push(previousReport);
   return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, feedback: undefined,
-    feedbackReview: collected.data, feedbackReviewHistory: history, updatedAt: now });
+    feedbackReview: collected.data, feedbackReviewHistory: history, feedbackDispatchApproval: undefined, updatedAt: now });
 }
 
 /** Registers immutable reconciled inputs and a separate AI advisory report; never starts code. */

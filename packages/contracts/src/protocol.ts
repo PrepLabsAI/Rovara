@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { WorkflowFeedbackApprovalBindingSchema } from "./task-workflow.js";
 import { ProjectCommandSchema, StoredProjectDefinitionSchema } from "./project.js";
 import { ModelSelectionSchema, type ModelSelection } from "./models.js";
 
@@ -47,6 +48,7 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         /** The broker-selected tool boundary for the current native workflow stage (spec 056). */
         workflowMode: z.enum(["PLAN", "IMPLEMENT", "REVIEW", "FEEDBACK_REVIEW"]).optional(),
         workflowFeedbackReview: z.object({ taskId: z.string().uuid(), workflowRevision: z.number().int().positive(), candidateDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
+        workflowFeedbackApproval: WorkflowFeedbackApprovalBindingSchema.optional(),
         model: ModelSelectionSchema.optional(),
         modelSelectionDiagnostic: z.string().min(1).max(512).optional(),
         /**
@@ -59,6 +61,9 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
       .strict().superRefine((payload, context) => {
         if ((payload.workflowMode === "FEEDBACK_REVIEW") !== (payload.workflowFeedbackReview !== undefined)) {
           context.addIssue({ code: "custom", path: ["workflowFeedbackReview"], message: "feedback review mode requires its exact task workflow binding" });
+        }
+        if (payload.workflowFeedbackApproval !== undefined && payload.workflowMode !== "IMPLEMENT") {
+          context.addIssue({ code: "custom", path: ["workflowFeedbackApproval"], message: "feedback approval binding requires implementation mode" });
         }
       }),
   }).strict(),

@@ -5,6 +5,7 @@ import { getWorkflowFeedbackReview, submitWorkflowFeedbackDecision } from "../..
 import { authenticateDeveloperSessionId } from "../../packages/broker/src/aws/developer-routes.js";
 import { createCandidateManifest, createWorkflowSnapshot, requestWorkflowFeedbackReview, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema } from "@agentx/contracts";
 import { createDeveloperTaskBroker, MAYA, OMAR } from "../support/developer-task-broker.js";
+import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
 import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
 
 const taskId = randomUUID();
@@ -159,14 +160,19 @@ describe("authenticated PR feedback review web journey", () => {
 
 describe("broker-backed feedback review data", () => {
   async function preparedReview() {
-    const harness = await createDeveloperTaskBroker();
+    const now = "2026-10-05T12:00:00.000Z";
+    const body = "Handle empty input";
+    const githubFeedback = { pullRequest: { number: 42, url: "https://github.com/example/demo/pull/42", state: "open" as const,
+      headBranch: "feature", baseBranch: "main", headCommit: "c".repeat(40), title: "Handle retries", body: "" },
+      comments: [{ id: "comment-1", threadId: "thread-1", kind: "DISCUSSION" as const,
+        url: "https://github.com/example/demo/pull/42#discussion_r1", author: "reviewer", updatedAt: now, body, path: "src/retry.ts", line: 10 }], threads: [] };
+    const githubRead = vi.fn(async () => githubFeedback);
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getPullRequestFeedback: githubRead } } });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Handle retries", client: "test", workflow: true });
     const taskId = String((started.body.task as { taskId: string }).taskId);
     const task = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { ownerKey: string; workspaceId: string };
     const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "c".repeat(40), treeSha: "e".repeat(40) }]);
-    const now = "2026-10-05T12:00:00.000Z";
     const comment = { id: "comment-1", threadId: "thread-1", kind: "DISCUSSION" as const, author: "reviewer", url: "https://github.com/example/demo/pull/42#discussion_r1", bodyDigest: "f".repeat(64), bodyBytes: 18, updatedAt: now, path: "src/retry.ts", line: 10 };
-    const body = "Handle empty input";
     const commentRef = { ...comment, bodyDigest: createHash("sha256").update(body).digest("hex"), bodyBytes: Buffer.byteLength(body) };
     const validComment = { id: commentRef.id, threadId: commentRef.threadId, kind: commentRef.kind, url: commentRef.url,
       author: commentRef.author, updatedAt: commentRef.updatedAt, bodyDigest: commentRef.bodyDigest, bodyBytes: commentRef.bodyBytes,
@@ -200,9 +206,15 @@ describe("broker-backed feedback review data", () => {
       pullRequests: [{ repositoryId: "demo", number: 42, url: "https://github.com/example/demo/pull/42", candidateDigest: candidate.digest, required: true, state: "OPEN" as const }] };
     const workflow = requestWorkflowFeedbackReview(waiting, { bundleRefs: [bundleRef], reviewRef: reportRef }, now);
     harness.db.set({ ...task, workflow });
+    harness.db.set({ ...githubWorkflowPullRequestKey("example/demo", 42), entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: "example/demo",
+      number: 42, repositoryId: "demo", taskId, workspaceId: task.workspaceId, candidateDigest: candidate.digest,
+      url: "https://github.com/example/demo/pull/42" });
+    const workspace = harness.db.get(`WORKSPACE#${task.workspaceId}`, "META") as Record<string, unknown>;
+    harness.db.set({ ...workspace, status: "READY", activeOperationId: undefined });
     const deps = { documentClient: harness.db, tableName: "state", actions: harness.actions,
-      checkAccess: async () => ({ revision: 1, policy: {} as never, access: "granted" as const, channelIds: [] }), projectChannelIds: async () => [], now: () => Date.parse(now) };
-    return { harness, taskId, deps, workflow, bundleDigest, reviewDigest };
+      checkAccess: async () => ({ revision: 1, policy: {} as never, access: "granted" as const, channelIds: [] }), projectChannelIds: async () => [],
+      refreshTaskFeedback: async () => undefined, now: () => Date.parse(now) };
+    return { harness, taskId, deps, workflow, bundleDigest, reviewDigest, githubRead };
   }
 
   it("loads only the current owner's verified report and comment bundles through broker artifact reads", async () => {
@@ -221,7 +233,73 @@ describe("broker-backed feedback review data", () => {
     });
     expect(result).toMatchObject({ status: "APPROVED", nextAction: "implementation" });
     const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { ownerKey: string };
-    expect(fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META")?.workflow).toMatchObject({ stage: "IMPLEMENT", state: "READY", feedbackDecisions: [{ actorRole: "TASK_OWNER", actorId: task.ownerKey, selectedFindingIds: ["finding-1"] }] });
+    expect(fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META")?.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING", feedbackDecisions: [{ actorRole: "TASK_OWNER", actorId: task.ownerKey, selectedFindingIds: ["finding-1"] }] });
+  });
+
+  it("refreshes GitHub twice and commits approval with one fenced implementation outbox", async () => {
+    const fixture = await preparedReview();
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId };
+    const refresh = vi.fn(async () => undefined);
+    fixture.deps.refreshTaskFeedback = refresh;
+    const requestId = randomUUID();
+    const payload = { requestId, expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: [fixture.bundleDigest], decision: "APPROVE" as const, selectedFindingIds: ["finding-1"] };
+    const result = await submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, payload);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(result).toMatchObject({ status: "APPROVED", nextAction: "implementation" });
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workspaceId: string; workflow: { state: string; feedbackDecisions: Array<{ requestId: string; selectedCommentIds: string[] }> } };
+    expect(task.workflow).toMatchObject({ state: "RUNNING", feedbackDecisions: [{ requestId, selectedCommentIds: ["comment-1"] }] });
+    const operations = fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION");
+    const dispatches = operations.filter(item => item.workflowMode === "IMPLEMENT");
+    expect(dispatches).toHaveLength(1);
+    const invocation = fixture.harness.db.find(item => item.entityType === "OUTBOX" && item.operationId === dispatches[0]?.id)[0]?.invocation as { payload?: { prompt?: string } };
+    expect(invocation.payload?.prompt).toContain("Handle empty input");
+    expect(invocation.payload?.prompt).toContain("finding-1");
+    expect(invocation.payload?.prompt).toContain("do not post or submit a GitHub reply or review");
+    await expect(submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, payload)).resolves.toMatchObject({ status: "APPROVED" });
+    await expect(submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, { ...payload, selectedFindingIds: ["different-finding"] }))
+      .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(operations.filter(item => item.workflowMode === "IMPLEMENT")).toHaveLength(1);
+  });
+
+  it("refuses a queued implementation at the broker worker-start callback after approval is invalidated", async () => {
+    const fixture = await preparedReview();
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId };
+    await submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
+    });
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as Record<string, unknown> & { workspaceId: string; workflow: Record<string, unknown> };
+    const operation = fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION" && item.workflowMode === "IMPLEMENT")[0]!;
+    const outbox = fixture.harness.db.find(item => item.entityType === "OUTBOX" && item.operationId === operation.id)[0]!;
+    const invocation = outbox.invocation as { payload?: { workflowFeedbackApproval?: unknown } };
+    // A GitHub delivery or owner action invalidates the approval after durable queueing but before
+    // the worker's first callback. The queue entry remains; broker authorization must stop it.
+    fixture.harness.db.set({ ...task, workflow: { ...task.workflow, revision: Number(task.workflow.revision) + 1 } });
+    await expect(fixture.harness.callback(task.workspaceId, String(operation.id), "feedback-approval", invocation.payload?.workflowFeedbackApproval))
+      .rejects.toThrow(/feedback approval|GitHub PR feedback changed|no longer current/i);
+    expect(fixture.githubRead).toHaveBeenCalledWith("https://github.com/example/demo.git", 42);
+  });
+
+  it("does not dispatch when the second fresh GitHub read advances the bound workflow", async () => {
+    const fixture = await preparedReview();
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId };
+    let reads = 0;
+    fixture.deps.refreshTaskFeedback = async () => {
+      reads += 1;
+      if (reads === 2) {
+        const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> & { revision: number } };
+        fixture.harness.db.set({ ...task, workflow: { ...task.workflow, revision: task.workflow.revision + 1 } });
+      }
+    };
+    await expect(submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
+    })).rejects.toMatchObject({ code: "CONFIG_INVALID" });
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workspaceId: string; workflow: { feedbackDecisions?: unknown[] } };
+    expect(task.workflow.feedbackDecisions).toBeUndefined();
+    expect(fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION").filter(item => item.workflowMode === "IMPLEMENT")).toHaveLength(0);
   });
 
   it.each([

@@ -88,6 +88,7 @@ import {
   type CodeBuildGateDefinition,
   type ProjectDefinition,
   type ProjectCommand,
+  type WorkflowFeedbackApprovalBinding,
   type RegistrationPreflight,
   type PullRequestLifecycleResult,
   type SlackChannelBinding,
@@ -105,6 +106,8 @@ import {
   WORKFLOW_PLAN_MAX_BYTES,
   WorkflowFeedbackBundleRefSchema,
   WorkflowFeedbackBundleSchema,
+  WorkflowFeedbackApprovalBindingSchema,
+  workflowFeedbackApprovalMatchesReview,
   WorkflowFeedbackReviewReportSchema,
   WorkflowFeedbackReviewRefSchema,
   cleanDisplayName,
@@ -136,7 +139,7 @@ import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKe
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
 import { appIdFromSecret, GitHubAppCredentialProvider, privateKeyFromSecret, webhookSecretFromSecret } from "../github-app.js";
-import { GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, buildGithubFeedbackPlan, findLinkedGithubWorkflowPullRequest, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileGithubWorkflowPullRequest, reconcileTaskPullRequestFeedback, recordLinkedGithubWorkflowFeedback, type ReceivedGithubWebhook } from "./github-webhooks.js";
+import { GithubWebhookRefusal, GithubWebhookRetryableError, authorizeLinkedGithubWebhook, buildGithubFeedbackPlan, findLinkedGithubWorkflowPullRequest, handleGithubWebhook, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, reconcileGithubWorkflowPullRequest, reconcileTaskPullRequestFeedback, recordLinkedGithubWorkflowFeedback, verifyTaskPullRequestFeedbackCurrent, type ReceivedGithubWebhook } from "./github-webhooks.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
 import { unsupportedThinkingLevels } from "@agentx/model-runtime/thinking-levels";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
@@ -640,7 +643,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       // request. Only API Gateway's exact public review route may reach this branch.
       if (event.routeKey === FEEDBACK_REVIEW_ROUTE_KEY) {
         if (!url.pathname.startsWith("/review/") || !dependencies.developer) throw agentXError("NOT_FOUND", "route not found");
-        return await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, request, url) as { statusCode: number; headers: Record<string, string>; body: string };
+        return await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+          refreshTaskFeedback: taskId => refreshTaskFeedbackForOwnerDecision(dependencies, taskId) }, request, url) as { statusCode: number; headers: Record<string, string>; body: string };
       }
       // The /v1/dev route has no API Gateway authorizer, so what it carries goes to the developer API or nowhere.
       if (event.routeKey === DEVELOPER_ROUTE_KEY && !url.pathname.startsWith("/v1/dev/")) throw agentXError("NOT_FOUND", "route not found");
@@ -685,7 +689,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return json(await handleSwebenchCallback(swebenchDependencies(dependencies), request.headers["x-agentx-callback-capability"], evalCallback.runId, evalCallback.action, parseBody(request.body)), request.requestId);
       }
       // Internal worker routes authenticate with operation-scoped capabilities; user JWT auth starts below them.
-      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|feedback-bundles|pull-request|pull-request-update|codebuild)$/.exec(
+      const callback = /^\/v1\/internal\/workspaces\/([0-9a-f-]+)\/operations\/([0-9a-f-]+)\/(events|artifacts|result|feedback-bundles|feedback-approval|pull-request|pull-request-update|codebuild)$/.exec(
         url.pathname,
       );
       if (request.method === "POST" && callback?.[1] && callback[2] && callback[3]) {
@@ -768,7 +772,8 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       // verifies the developer token, then checks the method and session (FR-009).
       if (url.pathname.startsWith("/v1/dev/")) {
         if (!dependencies.developer) throw agentXError("NOT_FOUND", "developer sign-in is not set up in this deployment");
-        return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, request, url), request.requestId);
+        return json(await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks,
+          refreshTaskFeedback: taskId => refreshTaskFeedbackForOwnerDecision(dependencies, taskId) }, request, url), request.requestId);
       }
 
       const identity = identityFromJwtClaims(request.jwtClaims, {
@@ -2646,7 +2651,7 @@ async function createConversation(
 async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string } },
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding },
   now: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -2660,6 +2665,7 @@ async function taskOperationParts(
     kind: "task",
     ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
     ...(input.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: input.workflowFeedbackReview }),
+    ...(input.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: input.workflowFeedbackApproval }),
     requestId: input.requestId,
     payloadHash: hashJson({ conversationId: input.conversationId, prompt: input.prompt }),
     status: "ACCEPTED",
@@ -2693,13 +2699,14 @@ async function taskOperationParts(
     workspaceId: workspace.id,
     fence,
     projectRevision: workspace.projectRevision,
-    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence, false, input.workflowMode === "FEEDBACK_REVIEW"),
+    callbackCapability: issueCapability(dependencies, workspace.id, operationId, fence, false, input.workflowMode === "FEEDBACK_REVIEW", input.workflowFeedbackApproval !== undefined),
     payload: {
       conversationId: input.conversationId,
       prompt,
       conversationStarted: input.conversationStarted,
       ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
       ...(input.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: input.workflowFeedbackReview }),
+      ...(input.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: input.workflowFeedbackApproval }),
       ...(resolvedModel.model === undefined ? {} : { model: resolvedModel.model }),
       ...(resolvedModel.diagnostic === undefined ? {} : { modelSelectionDiagnostic: resolvedModel.diagnostic }),
       // Spec 051 (P-1): the checks the worker reruns when the agent finishes. The latest revision's readiness, as
@@ -2716,7 +2723,7 @@ async function acceptTask(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
-  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string } } = {},
+  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
@@ -2755,6 +2762,7 @@ async function acceptTask(
     ...(options.workflowMode === undefined ? {} : { workflowMode: options.workflowMode }),
     ...(options.workflowPhase === undefined ? {} : { workflowPhase: options.workflowPhase }),
     ...(options.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: options.workflowFeedbackReview }),
+    ...(options.workflowFeedbackApproval === undefined ? {} : { workflowFeedbackApproval: options.workflowFeedbackApproval }),
     ...(options.readiness === undefined ? {} : { readiness: options.readiness }),
   }, now);
   try {
@@ -3497,6 +3505,10 @@ async function handleCallback(
   if (action === "feedback-bundles") {
     return json(await readFeedbackBundlesForCritic(dependencies, operation, body), request.requestId);
   }
+  if (action === "feedback-approval") {
+    await authorizeWorkflowFeedbackApproval(dependencies, operation, body);
+    return json({ authorized: true }, request.requestId);
+  }
   if (action === "pull-request") {
     const pullRequest = await reconcilePullRequest(dependencies, operation, body);
     return json(pullRequest, request.requestId);
@@ -3511,6 +3523,63 @@ async function handleCallback(
   }
   const result = await recordTerminalResult(dependencies, operation, body);
   return json({ operation: publicOperation(result) }, request.requestId);
+}
+
+/** Worker-start linearization point: stale or invalidated feedback approvals cannot start code. */
+async function authorizeWorkflowFeedbackApproval(dependencies: AwsBrokerDependencies, operation: OperationRecord, value: unknown): Promise<void> {
+  const input = WorkflowFeedbackApprovalBindingSchema.parse(value);
+  const binding = operation.workflowFeedbackApproval;
+  if (operation.kind !== "task" || operation.workflowMode !== "IMPLEMENT" || binding === undefined
+    || JSON.stringify(binding) !== JSON.stringify(input)) {
+    throw agentXError("CALLBACK_FORBIDDEN", "feedback approval callback is outside the implementation operation binding");
+  }
+  // Re-fetch every linked PR here as well. A webhook may be delayed while this durable outbox is
+  // waiting; worker startup must not rely on webhook delivery order.
+  if (!await verifyTaskFeedbackForWorkerStart(dependencies, input.taskId)) {
+    throw agentXError("STALE_FENCE", "GitHub PR feedback changed after owner approval");
+  }
+  const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId));
+  if (pointer?.taskId !== input.taskId) throw agentXError("CALLBACK_FORBIDDEN", "feedback approval task does not own this workspace");
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(input.taskId));
+  const workflow = task?.workflow;
+  const review = workflow?.feedbackReview;
+  const decision = workflow?.feedbackDecisions?.find(item => item.requestId === input.requestId);
+  const activePullRequests = workflow?.pullRequests?.filter(pr => pr.state === "OPEN" || pr.state === "UNKNOWN") ?? [];
+  if (task?.workspaceId !== operation.workspaceId || task.ownerKey !== input.ownerId || task.closedAt !== undefined
+    || workflow === undefined || workflow.revision !== input.activeWorkflowRevision || workflow.stage !== "IMPLEMENT" || workflow.state !== "RUNNING"
+    || workflow.candidate?.digest !== input.candidateDigest || workflow.feedbackDispatchApproval === undefined
+    || JSON.stringify(workflow.feedbackDispatchApproval) !== JSON.stringify(input)
+    || review?.status !== "APPROVED" || review.reviewRef.sha256 !== input.reviewDigest
+    || review.reviewRef.proposalDigest !== input.proposalDigest
+    || JSON.stringify(review.bundleRefs.map(ref => ref.sha256)) !== JSON.stringify(input.bundleDigests)
+    || !workflowFeedbackApprovalMatchesReview(input, review)
+    || activePullRequests.length !== review.bundleRefs.length
+    || review.bundleRefs.some(ref => !activePullRequests.some(pr => pr.repositoryId === ref.repositoryId && pr.number === ref.number
+      && pr.candidateDigest === ref.candidateDigest && workflow.candidate?.repositories.some(repo => repo.repositoryId === ref.repositoryId && repo.commitSha === ref.headSha)))
+    || decision?.decision !== "APPROVE" || decision.actorRole !== "TASK_OWNER" || decision.actorId !== task.ownerKey
+    || decision.workflowRevision !== input.decisionWorkflowRevision || decision.reviewDigest !== input.reviewDigest
+    || decision.proposalDigest !== input.proposalDigest || JSON.stringify(decision.bundleDigests) !== JSON.stringify(input.bundleDigests)
+    || JSON.stringify(decision.selectedFindingIds) !== JSON.stringify(input.selectedFindingIds)
+    || JSON.stringify(decision.selectedCommentIds) !== JSON.stringify(input.selectedCommentIds)) {
+    throw agentXError("STALE_FENCE", "the owner-approved PR feedback is no longer current");
+  }
+}
+
+async function verifyTaskFeedbackForWorkerStart(dependencies: AwsBrokerDependencies, taskId: string): Promise<boolean> {
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  const linked = task?.workflow?.pullRequests?.find(pr => pr.state === "OPEN" || pr.state === "UNKNOWN");
+  const parsed = linked === undefined ? undefined : /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)$/.exec(linked.url);
+  const getFeedback = dependencies.githubPullRequests.getPullRequestFeedback;
+  if (!task || !linked || !parsed || getFeedback === undefined) return false;
+  return verifyTaskPullRequestFeedbackCurrent({
+    documentClient: dependencies.documentClient, tableName: dependencies.tableName,
+    repositoryFullName: parsed[1]!, number: Number(parsed[2]), loadTask: id => getItem<DeveloperTaskRecord>(dependencies, taskKey(id)),
+    repositoryUrl: async (projectName, revision, repositoryId) => {
+      const project = await requireProject(dependencies, projectName, revision);
+      return project.definition.repositories.find(repository => repository.name === repositoryId)?.url;
+    },
+    getCurrentFeedback: (url, number) => getFeedback.call(dependencies.githubPullRequests, url, number),
+  });
 }
 
 const FEEDBACK_BUNDLE_MAX_BYTES = 1_000_000;
@@ -4406,6 +4475,22 @@ async function completedTurnItems(
     throw error;
   }
   return [{ Put: { TableName: table, Item: item, ConditionExpression: "attribute_not_exists(pk)" } }];
+}
+
+/** Refresh all linked PRs from the GitHub API before an owner decision (webhook payloads are hints only). */
+async function refreshTaskFeedbackForOwnerDecision(dependencies: AwsBrokerDependencies, taskId: string): Promise<void> {
+  if (dependencies.githubPullRequests.getPullRequestFeedback === undefined) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "current GitHub PR feedback collection is not configured");
+  }
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  const workflow = task?.workflow;
+  const linked = workflow?.pullRequests?.find(pr => pr.state === "OPEN" || pr.state === "UNKNOWN");
+  const parsed = linked === undefined ? undefined : /^https:\/\/github\.com\/([^/]+\/[^/]+)\/pull\/(\d+)$/.exec(linked.url);
+  if (!task || !linked || !parsed) throw agentXError("CONFIG_INVALID", "the task has no verifiable open linked PRs");
+  await processGithubWorkflowEvent(dependencies, {
+    kind: "PULL_REQUEST", action: "synchronize", installationId: 0, repositoryId: 0,
+    fullName: parsed[1]!, number: Number(parsed[2]),
+  }, `owner-decision-${randomUUID()}`);
 }
 
 /** Reconcile every PR webhook against GitHub; comments and delivery order never grant authority. */

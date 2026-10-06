@@ -410,7 +410,7 @@ describe("task-wide current PR feedback reconciliation", () => {
         workflow = next;
       }, now,
     };
-    return { module, input, artifacts, reads, workflow: () => workflow, edit: (body: string) => { currentBody = body; }, addInline: () => { inlineIds.push("review_comment:5"); }, reopen: () => { resolved = false; }, deleteInline: () => { inlineIds = []; }, conflict: () => { conflict = true; }, wrongScope: () => { wrongScope = true; } };
+    return { module, input, artifacts, reads, workflow: () => workflow, setWorkflow: (next: any) => { workflow = next; }, edit: (body: string) => { currentBody = body; }, addInline: () => { inlineIds.push("review_comment:5"); }, reopen: () => { resolved = false; }, deleteInline: () => { inlineIds = []; }, conflict: () => { conflict = true; }, wrongScope: () => { wrongScope = true; } };
   }
   it("persists both current PR bundles and ignores duplicate or delayed event bodies", async () => {
     const f = await fixture();
@@ -455,6 +455,27 @@ describe("task-wide current PR feedback reconciliation", () => {
     const revision = f.workflow().revision;
     expect(await f.module.reconcileTaskPullRequestFeedback(input)).toBe(false);
     expect(f.workflow().revision).toBe(revision);
+  });
+  it("rechecks current PR heads and normalized comment digests at worker start", async () => {
+    const f = await fixture();
+    await f.module.reconcileTaskPullRequestFeedback(f.input);
+    const current = f.workflow();
+    const review = current.feedbackReview;
+    const selectedCommentIds = review.bundleRefs.flatMap((bundle: any) => bundle.comments.map((comment: any) => comment.id));
+    const approval = { taskId: current.taskId, requestId: "550e8400-e29b-41d4-a716-446655440099", ownerId: current.ownerId,
+      decisionWorkflowRevision: current.revision, activeWorkflowRevision: current.revision + 1, reviewDigest: "c".repeat(64),
+      proposalDigest: "d".repeat(64), bundleDigests: review.bundleRefs.map((ref: any) => ref.sha256), candidateDigest: current.candidate.digest,
+      selectedFindingIds: ["finding-1"], selectedCommentIds };
+    f.setWorkflow({ ...current, revision: approval.activeWorkflowRevision, stage: "IMPLEMENT", state: "RUNNING",
+      feedbackReview: { ...review, status: "APPROVED", reviewRef: { sha256: approval.reviewDigest, proposalDigest: approval.proposalDigest } },
+      feedbackDispatchApproval: approval, feedbackDecisions: [{ requestId: approval.requestId, workflowRevision: approval.decisionWorkflowRevision,
+        decision: "APPROVE", actorId: current.ownerId, actorRole: "TASK_OWNER", reviewDigest: approval.reviewDigest,
+        proposalDigest: approval.proposalDigest, bundleDigests: approval.bundleDigests, selectedFindingIds: approval.selectedFindingIds,
+        selectedCommentIds, candidates: [], at: "2026-10-05T12:00:00.000Z" }] });
+    const candidateIsCurrent = await f.module.verifyTaskPullRequestFeedbackCurrent(f.input);
+    expect(candidateIsCurrent).toBe(true);
+    f.edit("changed after approval");
+    expect(await f.module.verifyTaskPullRequestFeedbackCurrent(f.input)).toBe(false);
   });
   it("routes broker feedback events into immutable bundles before saving the collection", async () => {
     const f = await fixture();

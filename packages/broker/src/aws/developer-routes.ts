@@ -67,6 +67,8 @@ export interface DeveloperRouteDependencies {
   now: () => number;
   /** The developer task routes' broker actions; without them /v1/dev/tasks* answers NOT_FOUND. */
   tasks?: DeveloperTaskActions;
+  /** Reconciles all already-linked PRs using GitHub's current API state before owner decisions. */
+  refreshTaskFeedback?(taskId: string): Promise<void>;
 }
 export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string }
 
@@ -566,6 +568,7 @@ export function developerTaskRouteDependencies(
     tableName: deps.tableName,
     ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
     actions: deps.tasks!,
+    ...(deps.refreshTaskFeedback === undefined ? {} : { refreshTaskFeedback: deps.refreshTaskFeedback }),
     ...(initialSlackThread === undefined ? {} : { initialSlackThread }),
     checkAccess: (project) => checkProjectAccess(deps, caller, project),
     channelMember: async (slackUserId, channelId) => {

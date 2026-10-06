@@ -25,7 +25,7 @@ import {
 } from "./pi-session.js";
 import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
-import type { FeedbackBundleReader } from "./callback-client.js";
+import type { FeedbackApprovalAuthorizer, FeedbackBundleReader } from "./callback-client.js";
 import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
 import { readCandidateRepositories } from "./verification/candidate.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
@@ -63,6 +63,7 @@ export async function runTaskInvocation(
     eventSink: EventBatchSink;
     artifactSink: ArtifactSink;
     feedbackBundleReader?: FeedbackBundleReader;
+    authorizeFeedbackApproval?: FeedbackApprovalAuthorizer;
     piAdapter?: PiSessionAdapter;
     cancellationController?: WorkerCancellationController;
     devcontainerCli?: DevcontainerCli;
@@ -76,6 +77,11 @@ export async function runTaskInvocation(
 ): Promise<TaskInvocationResult> {
   const invocation = WorkerInvocationSchema.parse(untrustedInvocation);
   if (invocation.kind !== "task") throw agentXError("CONFIG_INVALID", "runTaskInvocation requires a task");
+  const approval = invocation.payload.workflowFeedbackApproval;
+  if (approval !== undefined) {
+    if (dependencies.authorizeFeedbackApproval === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the worker cannot verify its PR feedback approval");
+    await dependencies.authorizeFeedbackApproval(approval);
+  }
   const manifest = JSON.parse(
     await readFile(resolve(dependencies.rootPath, ".agentx/preparation-manifest.json"), "utf8"),
   ) as PreparationManifest;

@@ -72,7 +72,7 @@ export interface CallbackClaims {
   workspaceId: string;
   operationId: string;
   fence: number;
-  actions: Array<"events" | "artifacts" | "result" | "feedback-bundles" | "pull-request" | "pull-request-update" | "codebuild">;
+  actions: Array<"events" | "artifacts" | "result" | "feedback-bundles" | "feedback-approval" | "pull-request" | "pull-request-update" | "codebuild">;
   expiresAt: number;
 }
 
@@ -170,6 +170,7 @@ export function issueCapability(
   fence: number,
   allowPullRequest = false,
   allowFeedbackBundles = false,
+  allowFeedbackApproval = false,
 ): string {
   const claims: CallbackClaims = {
     workspaceId,
@@ -180,6 +181,7 @@ export function issueCapability(
       "events",
       "result",
       ...(allowFeedbackBundles ? ["feedback-bundles" as const] : []),
+      ...(allowFeedbackApproval ? ["feedback-approval" as const] : []),
       ...(allowPullRequest
         ? ["pull-request" as const, "pull-request-update" as const, "codebuild" as const]
         : []),
