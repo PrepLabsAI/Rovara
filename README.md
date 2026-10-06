@@ -1,7 +1,7 @@
 <h1 align="center">Rovara</h1>
 
 <p align="center">
-  <strong>A remote coding-agent runtime and task workflow, in your own AWS account.</strong>
+  <strong>The open-source alternative to Claude Tag!</strong>
 </p>
 
 <p align="center">
