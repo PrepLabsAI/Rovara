@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-FSL--1.1--ALv2-blue" alt="FSL-1.1-ALv2 License" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache 2.0 License" /></a>
   <img src="https://img.shields.io/badge/node-22.19%2B-339933" alt="Node 22.19+" />
   <img src="https://img.shields.io/badge/runs%20in-your%20AWS%20account-FF9900" alt="Runs in your AWS account" />
   <img src="https://img.shields.io/badge/agent-Pi%201.0-6f42c1" alt="Pi coding agent 1.0" />
@@ -473,9 +473,9 @@ Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). To report a v
 
 ## License
 
-Source-available under the [Functional Source License 1.1, Apache 2.0 Future License](LICENSE)
-(FSL-1.1-ALv2). It is not open source under the OSI definition: each release becomes Apache 2.0
-two years after it ships. &copy; 2026 PrepLabs
+Licensed under the [Apache License 2.0](LICENSE). PrepLabsAI's grant applies to earlier Rovara
+releases too; see [RELICENSED.md](RELICENSED.md). Third-party components retain their own licenses.
+&copy; 2026 PrepLabs
 
 ---
 

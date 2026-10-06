@@ -17,6 +17,10 @@ describe("release builder", () => {
     const out = join(await mkdtemp(join(tmpdir(), "agentx-release-")), "r");
     const manifest = await buildRelease({ version: "1.2.3", out, gitCommit: "b".repeat(40), images: { worker } });
     expect(ReleaseManifestSchema.parse(JSON.parse(await readFile(join(out, "release.json"), "utf8")))).toEqual(manifest);
+    expect(manifest.legalDocuments?.map((document) => document.file)).toEqual([
+      "legal/LICENSE",
+      "legal/RELICENSED.md",
+    ]);
     expect(manifest.templates.map((t) => t.part)).toEqual(["access", "foundation", "identity", "runtime", "control-plane", "slack"]);
     for (const t of manifest.templates) {
       expect(t.region).toBe("us-east-1");
@@ -27,6 +31,9 @@ describe("release builder", () => {
       expect(sha(await readFile(join(out, p.file)))).toBe(p.sha256);
       expect(p.file).toBe(`packages/${p.assetId}.zip`);
       expect(p.keyParameterValue).toBe(`packages/||${p.assetId}.zip`);
+    }
+    for (const document of manifest.legalDocuments ?? []) {
+      expect(sha(await readFile(join(out, document.file)))).toBe(document.sha256);
     }
     expect(manifest.images).toEqual({ worker });
   }, 600_000);

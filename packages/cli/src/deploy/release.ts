@@ -111,6 +111,7 @@ export async function loadRelease(dir: string): Promise<LoadedRelease> {
   const manifest = ReleaseManifestSchema.parse(JSON.parse(await readFile(join(dir, "release.json"), "utf8")));
   await checkFileChecksums(dir, manifest.templates);
   await checkFileChecksums(dir, manifest.packages);
+  await checkFileChecksums(dir, manifest.legalDocuments ?? []);
 
   return {
     manifest,

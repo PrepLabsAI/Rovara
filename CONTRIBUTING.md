@@ -60,15 +60,14 @@ changing a feature, and update it in the same pull request when the behaviour ch
 ## Writing style
 
 Docs and messages use plain words, active voice and short sentences. State what the code does, not
-what it might do. Do not describe Rovara as "open source": it is source-available.
+what it might do.
 
 ## License
 
-Rovara is source-available under the [Functional Source License, Version 1.1, ALv2 Future
-License](LICENSE) (FSL-1.1-ALv2). Each release becomes Apache 2.0 two years after it ships. By
-contributing, you agree that your contribution is licensed under the same terms. [Maintainers to
-decide: whether contributors must sign off each commit (`git commit -s`, the Developer Certificate
-of Origin) or sign a contributor license agreement.]
+Rovara is licensed under the [Apache License 2.0](LICENSE). By submitting a contribution
+intentionally for inclusion, you agree that it is licensed under Apache 2.0, as described in
+section 5 of that license. See [RELICENSED.md](RELICENSED.md) for the grant covering earlier
+releases. Third-party components keep their own licenses.
 
 ## Code of conduct
 

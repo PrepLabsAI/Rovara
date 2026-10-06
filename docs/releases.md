@@ -10,6 +10,8 @@ it is built from the same tagged commit, so a release is always self-consistent.
 A release directory looks like this:
 
 - `release.json`: the manifest: version, git commit, and a checksum for every file below.
+- `legal/LICENSE` and `legal/RELICENSED.md`: the Apache 2.0 terms and the immediate grant for
+  earlier versions, both listed and checksummed in `release.json`.
 - `templates/<region>/<part>.template.json`: one CloudFormation template per stack part
   (`access`, `foundation`, `identity`, `runtime`, `control-plane`, `slack`), for each region the
   release covers. The covered regions are exactly the ones with verified EC2 worker
@@ -120,7 +122,10 @@ place; this records what it is, so a change to any piece can be made deliberatel
   repository admin role. The workflow checks a tag's name and that its commit is on mainline, but
   GitHub runs the tagged commit's own copy of the workflow, so whoever can push a `v*` tag can
   publish. The ruleset is what limits that to admins.
-- **The license.** `LICENSE` (FSL-1.1-ALv2) ships in the npm package and the release tarball.
+- **The license.** `LICENSE` (Apache-2.0) and `RELICENSED.md` ship in the npm package. The v0.3.0
+  GitHub release tarball also includes both files under `legal/`, checksummed in `release.json`.
+  `RELICENSED.md` grants Apache-2.0 rights to all
+  earlier Rovara releases as well. Third-party components keep their own licenses.
 - **The installer bucket** (one-time setup, before the first release with the Launch in AWS
   button). `rovara-installer-us-east-1` in account `944937319445`, `us-east-1`: anyone may read its
   objects (the quick-create template, and the setup page's code, which Lambda reads from the

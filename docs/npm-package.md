@@ -52,12 +52,12 @@ that exists. Kept for a version that must be published outside the workflow:
    ```
 
    The archive is `cli-release/preplabsai-rovara-code-<version>.tgz`. It contains only
-   the two bundled executable files, package manifest, README, current LICENSE and
-   third-party notices. No private workspace dependencies need separate publication.
+   the two bundled executable files, package manifest, README, Apache LICENSE, earlier-release
+   grant (`RELICENSED.md`) and third-party notices. No private workspace dependencies need separate
+   publication.
 4. Review the exact artifact, source/version, distribution rights and matching
    deployment bundle/images with the release owner. The generated package retains
-   the repository's current FSL-1.1-ALv2 license. A brand change does not authorize
-   a license change or establish open-source status.
+   the repository's Apache-2.0 license and earlier-release grant.
 5. After release approval, publish that reviewed archive:
 
    ```sh

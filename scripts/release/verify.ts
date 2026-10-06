@@ -59,6 +59,7 @@ export async function verifyRelease(input: VerifyReleaseInput): Promise<VerifyRe
 
   await checkFileChecksums(dir, manifest.templates, problems);
   await checkFileChecksums(dir, manifest.packages, problems);
+  await checkFileChecksums(dir, manifest.legalDocuments ?? [], problems);
 
   const rebuildParent = await mkdtemp(join(tmpdir(), "agentx-verify-rebuild-"));
   try {
@@ -105,6 +106,14 @@ export async function verifyRelease(input: VerifyReleaseInput): Promise<VerifyRe
       if (!releasePackageIds.has(rebuiltPkg.assetId)) {
         problems.push(`${rebuiltPkg.file}: rebuilding from current source produces a package not present in this release`);
       }
+    }
+    const releaseLegal = new Map((manifest.legalDocuments ?? []).map((document) => [document.file, document.sha256]));
+    const rebuiltLegal = new Map((rebuilt.legalDocuments ?? []).map((document) => [document.file, document.sha256]));
+    for (const [file, sha256] of releaseLegal) {
+      if (rebuiltLegal.get(file) !== sha256) problems.push(`${file}: does not match the current source license document`);
+    }
+    for (const file of rebuiltLegal.keys()) {
+      if (!releaseLegal.has(file)) problems.push(`${file}: missing from release.json`);
     }
   } finally {
     await rm(rebuildParent, { recursive: true, force: true });
