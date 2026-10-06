@@ -28,11 +28,28 @@ describe("the admin user on the page (FR-050)", () => {
     expect(await adminUserStep().run(context, progressHandle())).toEqual({ status: "done", note: `admin ${ADMIN_EMAIL}` });
     expect(surface.cards.map((card) => [card.id, card.status, card.lines])).toEqual([
       ["admin", "waiting", [
-        `AgentX made your admin sign-in for ${ADMIN_EMAIL}. Look for an email with your temporary password; you choose your own when you first sign in.`,
-        `Sign in to AgentX as ${ADMIN_EMAIL} in the tab the Sign in button opens. This page moves on by itself when you have.`,
+        `First, check your email at ${ADMIN_EMAIL} for your temporary password. It comes from no-reply@verificationemail.com with the subject "Your temporary password", can take a few minutes, and often lands in Spam. It works for 7 days.`,
+        `Then press Sign in, enter ${ADMIN_EMAIL} and the temporary password, and choose your own password. This page moves on by itself when you have.`,
       ]],
       ["admin", "ok", [`You are signed in to AgentX as ${ADMIN_EMAIL}.`]],
     ]);
+  });
+
+  it("still says where the temporary password is when a resumed run finds the admin user waiting for its first sign-in", async () => {
+    const surface = page();
+    context = initContext({ prompter: scriptedPrompter([]), surface, setup: setupServices({ cognito: fakeCognito({ [ADMIN_EMAIL]: "FORCE_CHANGE_PASSWORD" }) }), adminSession: async () => session });
+    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
+    const resumed = progressHandle({ ...emptyProgress("staging", T0), admin: { username: ADMIN_EMAIL, mode: "cognito" } });
+    await adminUserStep().run(context, resumed);
+    expect(surface.cards[0]?.lines[0]).toContain(`check your email at ${ADMIN_EMAIL} for your temporary password`);
+  });
+
+  it("leaves the password notice out for an admin user who has signed in before", async () => {
+    const surface = page();
+    context = initContext({ prompter: scriptedPrompter([]), surface, setup: setupServices({ cognito: fakeCognito({ [ADMIN_EMAIL]: "CONFIRMED" }) }), adminSession: async () => session });
+    await writeEnvironmentSettings(context.store, STAGING_SETTINGS);
+    await adminUserStep().run(context, progressHandle({ ...emptyProgress("staging", T0), admin: { username: ADMIN_EMAIL, mode: "cognito" } }));
+    expect(surface.cards[0]?.lines).toEqual([`Sign in to AgentX as ${ADMIN_EMAIL} in the tab the Sign in button opens. This page moves on by itself when you have.`]);
   });
 
   it("Review Focus 5: a sign-in that timed out can be tried again on the page", async () => {

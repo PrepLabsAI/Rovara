@@ -41,16 +41,16 @@ describe("the Cognito admin user (FR-018 step 7)", () => {
   it("creates the user, adds it to agentx-admin and says the temporary password comes by email", async () => {
     const cognito = fakeCognito();
     const lines: string[] = [];
-    expect(await ensureCognitoAdmin({ cognito, poolId: "us-east-1_AbCdEf123", email: ADMIN_EMAIL, write: (line) => lines.push(line), confirm: notAsked })).toEqual({ created: true });
+    expect(await ensureCognitoAdmin({ cognito, poolId: "us-east-1_AbCdEf123", email: ADMIN_EMAIL, write: (line) => lines.push(line), confirm: notAsked })).toEqual({ created: true, temporaryPassword: true });
     expect(cognito.created).toEqual([ADMIN_EMAIL]);
     expect(cognito.grouped).toEqual([`${ADMIN_EMAIL}:agentx-admin`]);
-    expect(lines.join("\n")).toContain(`Cognito emailed a temporary password to ${ADMIN_EMAIL}`);
+    expect(lines.join("\n")).toContain(`Cognito emailed a temporary password to ${ADMIN_EMAIL} from no-reply@verificationemail.com (check Spam)`);
   });
 
   it("never creates an existing user again, and still adds it to the group (Review Focus 1)", async () => {
     const cognito = fakeCognito({ [ADMIN_EMAIL]: "FORCE_CHANGE_PASSWORD" });
     const lines: string[] = [];
-    expect(await ensureCognitoAdmin({ cognito, poolId: "p", email: ADMIN_EMAIL, write: (line) => lines.push(line), confirm: notAsked })).toEqual({ created: false });
+    expect(await ensureCognitoAdmin({ cognito, poolId: "p", email: ADMIN_EMAIL, write: (line) => lines.push(line), confirm: notAsked })).toEqual({ created: false, temporaryPassword: true });
     expect(cognito.created).toEqual([]);
     expect(cognito.grouped).toEqual([`${ADMIN_EMAIL}:agentx-admin`]);
     expect(lines.join("\n")).toContain("use the temporary password from the first email");
@@ -59,7 +59,7 @@ describe("the Cognito admin user (FR-018 step 7)", () => {
   it("says so and adds an existing user of another status to agentx-admin, without asking (fix round 1)", async () => {
     const cognito = fakeCognito({ [ADMIN_EMAIL]: "RESET_REQUIRED" });
     const lines: string[] = [];
-    expect(await ensureCognitoAdmin({ cognito, poolId: "p", email: ADMIN_EMAIL, write: (line) => lines.push(line), confirm: notAsked })).toEqual({ created: false });
+    expect(await ensureCognitoAdmin({ cognito, poolId: "p", email: ADMIN_EMAIL, write: (line) => lines.push(line), confirm: notAsked })).toEqual({ created: false, temporaryPassword: false });
     expect(lines).toEqual([`The user ${ADMIN_EMAIL} already exists (status RESET_REQUIRED); adding it to agentx-admin.`]);
     expect(cognito.grouped).toEqual([`${ADMIN_EMAIL}:agentx-admin`]);
   });
@@ -84,7 +84,7 @@ describe("the Cognito admin user (FR-018 step 7)", () => {
   it("changes nothing and asks nothing for a user already in agentx-admin (fix round 1)", async () => {
     const cognito = fakeCognito({ [ADMIN_EMAIL]: "CONFIRMED" }, [`${ADMIN_EMAIL}:agentx-admin`]);
     const lines: string[] = [];
-    expect(await ensureCognitoAdmin({ cognito, poolId: "p", email: ADMIN_EMAIL, write: (line) => lines.push(line), confirm: notAsked })).toEqual({ created: false });
+    expect(await ensureCognitoAdmin({ cognito, poolId: "p", email: ADMIN_EMAIL, write: (line) => lines.push(line), confirm: notAsked })).toEqual({ created: false, temporaryPassword: false });
     expect(lines).toEqual([]);
     expect(cognito.grouped).toEqual([]);
   });

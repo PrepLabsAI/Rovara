@@ -60,11 +60,11 @@ export function adminUserStep(): InitStep<InitContext> {
       };
       // FR-050 (Q7): on the page, a sign-in that fails or times out can be tried again; the
       // terminal stops, as before. The sign-in page itself is the page's Next button (Q5).
-      const signIn = (who: string, createdEmail?: string) => retryOnPage({
+      const signIn = (who: string, passwordEmail?: string) => retryOnPage({
         surface: context.surface, prompter: context.prompter, question: "Sign in again?",
         failed: (problem) => show({ stage: "failed", problem }),
         run: async () => {
-          show({ stage: "signing-in", who, ...(createdEmail === undefined ? {} : { createdEmail }) });
+          show({ stage: "signing-in", who, ...(passwordEmail === undefined ? {} : { passwordEmail }) });
           return context.adminSession();
         },
       });
@@ -74,15 +74,20 @@ export function adminUserStep(): InitStep<InitContext> {
         const email = recorded?.username ?? context.flags.adminEmail ?? context.answers.adminEmail ?? await context.prompter.ask("Your email address, for your AgentX admin user", {
           flag: "--admin-email", validate: (value) => (AlertEmailSchema.safeParse(value).success ? undefined : "must be an email address"),
         });
-        let created = false;
+        // A user who has not signed in yet (new, or made by an earlier run) signs in with the
+        // temporary password Cognito emailed, so the card says where to find it.
+        let temporaryPassword: boolean;
         if (recorded === undefined) {
-          created = (await ensureCognitoAdmin({
+          temporaryPassword = (await ensureCognitoAdmin({
             cognito: context.setup.cognito, poolId: userPoolId(settings), email, write: context.write,
             confirm: (question) => context.prompter.confirm(question, { defaultValue: false }),
-          })).created;
+          })).temporaryPassword;
           await progress.update({ admin: { username: email, mode: "cognito" } });
+        } else {
+          // A resumed run: the user was made earlier, and may still be waiting for its first sign-in.
+          temporaryPassword = (await context.setup.cognito.userStatus(userPoolId(settings), email)) === "FORCE_CHANGE_PASSWORD";
         }
-        await signIn(email, created ? email : undefined);
+        await signIn(email, temporaryPassword ? email : undefined);
         show({ stage: "done", username: email });
         return { status: "done", note: `admin ${email}` };
       }

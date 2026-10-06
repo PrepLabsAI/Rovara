@@ -4,6 +4,7 @@
 // detail collapsed rather than dropped). Every card is built here, from facts a step already has,
 // so the page's words are tested in one place and the page only lays text out. No builder takes a
 // secret, so no card can carry one (FR-012).
+import { COGNITO_SENDER } from "../../setup/admin-user.js";
 import { cliCommandLine, type CliInvocation } from "../cli-command.js";
 import { CONNECTOR_LABELS, type InstallProgress } from "../install-state.js";
 import { ADMIN_USER_GUIDE_URL, DEDICATED_ACCOUNT_NOTE, ROOT_WARNING, type PrerequisiteCheck } from "../prerequisites.js";
@@ -294,7 +295,8 @@ export function slackChannelLink(teamId: string, channelId: string): string {
 }
 
 export type AdminCardInput =
-  | { stage: "signing-in"; who: string; createdEmail?: string }
+  /** `passwordEmail`: the user has not signed in yet, so Cognito emailed a temporary password there. */
+  | { stage: "signing-in"; who: string; passwordEmail?: string }
   /** `retry: false` when the page cannot offer to sign in again: the problem is shown whole. */
   | { stage: "failed"; problem: string; retry?: false }
   | { stage: "done"; username: string };
@@ -306,10 +308,12 @@ export function adminCard(input: AdminCardInput): WizardCard {
   switch (input.stage) {
     case "signing-in": return {
       ...base, status: "waiting",
-      lines: [
-        ...(input.createdEmail === undefined ? [] : [`AgentX made your admin sign-in for ${input.createdEmail}. Look for an email with your temporary password; you choose your own when you first sign in.`]),
-        `Sign in to AgentX as ${input.who} in the tab the Sign in button opens. This page moves on by itself when you have.`,
-      ],
+      lines: input.passwordEmail === undefined
+        ? [`Sign in to AgentX as ${input.who} in the tab the Sign in button opens. This page moves on by itself when you have.`]
+        : [
+          `First, check your email at ${input.passwordEmail} for your temporary password. It comes from ${COGNITO_SENDER} with the subject "Your temporary password", can take a few minutes, and often lands in Spam. It works for 7 days.`,
+          `Then press Sign in, enter ${input.passwordEmail} and the temporary password, and choose your own password. This page moves on by itself when you have.`,
+        ],
     };
     case "failed": return {
       ...base, status: "failed",
