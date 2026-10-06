@@ -392,6 +392,7 @@ describe("task-wide current PR feedback reconciliation", () => {
     let wrongScope = false;
     const artifacts: Array<{ bundle: any; bytes: string }> = [];
     const reads: string[] = [];
+    const measures: Array<Record<string, unknown>> = [];
     const input = {
       documentClient: { send: async (command: any) => ({ Item: rows.get(command.input.Key.pk) }) }, tableName: "state", repositoryFullName: "acme/api", number: 1, deliveryId: "delivery-1",
       loadTask: async () => ({ project: "fixture", startingRevision: 1, workflow }),
@@ -408,9 +409,9 @@ describe("task-wide current PR feedback reconciliation", () => {
         if (conflict) { conflict = false; workflow = { ...workflow, revision: workflow.revision + 1 }; currentBody = "newer edit after race"; throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" }); }
         if (revision !== workflow.revision) throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" });
         workflow = next;
-      }, now,
+      }, measure: (entry: Record<string, unknown>) => measures.push(entry), now,
     };
-    return { module, input, artifacts, reads, workflow: () => workflow, setWorkflow: (next: any) => { workflow = next; }, edit: (body: string) => { currentBody = body; }, addInline: () => { inlineIds.push("review_comment:5"); }, reopen: () => { resolved = false; }, deleteInline: () => { inlineIds = []; }, conflict: () => { conflict = true; }, wrongScope: () => { wrongScope = true; } };
+    return { module, input, artifacts, reads, measures, workflow: () => workflow, setWorkflow: (next: any) => { workflow = next; }, edit: (body: string) => { currentBody = body; }, addInline: () => { inlineIds.push("review_comment:5"); }, reopen: () => { resolved = false; }, deleteInline: () => { inlineIds = []; }, conflict: () => { conflict = true; }, wrongScope: () => { wrongScope = true; } };
   }
   it("persists both current PR bundles and ignores duplicate or delayed event bodies", async () => {
     const f = await fixture();
@@ -439,6 +440,16 @@ describe("task-wide current PR feedback reconciliation", () => {
     expect(f.artifacts.at(-2)?.bundle.comments.map((c: any) => c.id)).toEqual(["review:1", "review_comment:4", "review_comment:5"]);
     f.deleteInline(); await f.module.reconcileTaskPullRequestFeedback(f.input);
     expect(f.artifacts.at(-2)?.bundle.comments.map((c: any) => c.id)).toEqual(["review:1"]);
+  });
+  it("counts reopened feedback only after a committed reconciliation, without comment or task data", async () => {
+    const f = await fixture();
+    await f.module.reconcileTaskPullRequestFeedback(f.input); // establish the resolved-thread baseline
+    f.addInline();
+    await f.module.reconcileTaskPullRequestFeedback(f.input);
+    expect(f.measures).toEqual([{ event: "feedback_review.measure", measure: "feedback_reopened", count: 1, at: f.input.now }]);
+    expect(JSON.stringify(f.measures)).not.toMatch(/task|reviewer|comment|diff|current authoritative body/i);
+    await f.module.reconcileTaskPullRequestFeedback(f.input); // duplicate/replay does not increment the count
+    expect(f.measures).toHaveLength(1);
   });
   it("recollects authoritative data after a concurrent revision conflict", async () => {
     const f = await fixture(); expect(f.module.reconcileTaskPullRequestFeedback).toBeTypeOf("function"); f.conflict();

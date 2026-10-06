@@ -4630,6 +4630,7 @@ export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependen
         ExpressionAttributeValues: { ":workflow": workflow, ":now": workflow.updatedAt, ":revision": expectedRevision },
       }));
     },
+    measure: (entry) => console.log(JSON.stringify({ component: "broker", ...entry })),
     now: new Date().toISOString(),
   });
   const linked = await getItem<GithubWorkflowPullRequestRecord>(dependencies, githubWorkflowPullRequestKey(event.fullName, event.number));

@@ -3,9 +3,10 @@ import { describe, expect, it, vi } from "vitest";
 import { createFeedbackReviewWeb, type FeedbackReviewWebDependencies } from "../../packages/broker/src/aws/feedback-review-web.js";
 import { getWorkflowFeedbackReview, submitWorkflowFeedbackDecision } from "../../packages/broker/src/aws/developer-tasks.js";
 import { authenticateDeveloperSessionId } from "../../packages/broker/src/aws/developer-routes.js";
-import { createCandidateManifest, createWorkflowSnapshot, requestWorkflowFeedbackReview, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema } from "@agentx/contracts";
+import { createCandidateManifest, createWorkflowSnapshot, requestWorkflowFeedbackReview, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema } from "@agentx/contracts";
 import { createDeveloperTaskBroker, MAYA, OMAR } from "../support/developer-task-broker.js";
 import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
+import { feedbackReviewNoticeId } from "../../packages/broker/src/developer/notifications.js";
 import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
 
 const taskId = randomUUID();
@@ -159,40 +160,54 @@ describe("authenticated PR feedback review web journey", () => {
 });
 
 describe("broker-backed feedback review data", () => {
-  async function preparedReview() {
+  async function preparedReview(prCount = 1) {
     const now = "2026-10-05T12:00:00.000Z";
-    const body = "Handle empty input";
+    const repositories = prCount === 1 ? [{ repositoryId: "demo", number: 42 }] : [
+      { repositoryId: "demo", number: 42 }, { repositoryId: "ui", number: 43 },
+    ];
+    const bodyFor = (index: number) => index === 0 ? "Handle empty input" : "Keep the retry notice accessible";
     const githubFeedback = { pullRequest: { number: 42, url: "https://github.com/example/demo/pull/42", state: "open" as const,
       headBranch: "feature", baseBranch: "main", headCommit: "c".repeat(40), title: "Handle retries", body: "" },
       comments: [{ id: "comment-1", threadId: "thread-1", kind: "DISCUSSION" as const,
-        url: "https://github.com/example/demo/pull/42#discussion_r1", author: "reviewer", updatedAt: now, body, path: "src/retry.ts", line: 10 }], threads: [] };
+        url: "https://github.com/example/demo/pull/42#discussion_r1", author: "reviewer", updatedAt: now, body: bodyFor(0), path: "src/retry.ts", line: 10 }], threads: [] };
     const githubRead = vi.fn(async () => githubFeedback);
     const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getPullRequestFeedback: githubRead } } });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Handle retries", client: "test", workflow: true });
     const taskId = String((started.body.task as { taskId: string }).taskId);
     const task = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { ownerKey: string; workspaceId: string };
-    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "c".repeat(40), treeSha: "e".repeat(40) }]);
-    const comment = { id: "comment-1", threadId: "thread-1", kind: "DISCUSSION" as const, author: "reviewer", url: "https://github.com/example/demo/pull/42#discussion_r1", bodyDigest: "f".repeat(64), bodyBytes: 18, updatedAt: now, path: "src/retry.ts", line: 10 };
-    const commentRef = { ...comment, bodyDigest: createHash("sha256").update(body).digest("hex"), bodyBytes: Buffer.byteLength(body) };
-    const validComment = { id: commentRef.id, threadId: commentRef.threadId, kind: commentRef.kind, url: commentRef.url,
-      author: commentRef.author, updatedAt: commentRef.updatedAt, bodyDigest: commentRef.bodyDigest, bodyBytes: commentRef.bodyBytes,
-      path: commentRef.path, line: commentRef.line, body };
-    const commentSetDigest = createHash("sha256").update(JSON.stringify([validComment])).digest("hex");
-    const bundle = WorkflowFeedbackBundleSchema.parse({ schemaVersion: 1, taskId, repositoryId: "demo", number: 42, headSha: "c".repeat(40), candidateDigest: candidate.digest,
-      commentSetDigest, producer: "test", version: "1", recordedAt: now, comments: [validComment], sourceDeliveryIds: ["delivery-1"] });
-    const bundleBytes = JSON.stringify(bundle);
-    const bundleDigest = (await import("node:crypto")).createHash("sha256").update(bundleBytes).digest("hex");
-    const bundleKey = `private/${task.ownerKey}/${task.workspaceId}/feedback/${bundleDigest}.json`;
-    harness.s3.objects.set(bundleKey, bundleBytes);
-    const { sourceDeliveryIds: _deliveryIds, comments, ...bundleMetadata } = bundle;
-    const bundleRef = { ...bundleMetadata, sha256: bundleDigest, objectKey: bundleKey, comments: [commentRef] };
-    const findingRef = { id: "finding-1", bundleDigest, commentIds: ["comment-1"], priority: "MUST_FIX" as const,
-      assessment: "ACTIONABLE" as const, recommended: true };
-    const finding = { ...findingRef, evidence: [{ source: "code", reference: "src/retry.ts:10" }],
-      rationale: "The input is not guarded.", confidence: { level: "HIGH" as const, reason: "The current branch accepts empty input." }, proposedDisposition: "IMPLEMENT" as const };
+    const candidate = createCandidateManifest(repositories.map(({ repositoryId }) => ({ repositoryId, commitSha: repositoryId === "demo" ? "c".repeat(40) : "a".repeat(40), treeSha: repositoryId === "demo" ? "e".repeat(40) : "b".repeat(40) })));
+    const bundles = await Promise.all(repositories.map(async ({ repositoryId, number }, index) => {
+      const body = bodyFor(index);
+      const commentId = `comment-${index + 1}`;
+      const threadId = `thread-${index + 1}`;
+      const url = `https://github.com/example/${repositoryId}/pull/${number}#discussion_r${index + 1}`;
+      const commentRef = { id: commentId, threadId, kind: "DISCUSSION" as const, url, author: "reviewer",
+        bodyDigest: createHash("sha256").update(body).digest("hex"), bodyBytes: Buffer.byteLength(body), updatedAt: now,
+        path: index === 0 ? "src/retry.ts" : "src/notice.ts", line: 10 };
+      const validComment = WorkflowFeedbackBundleCommentsSchema.parse([{ ...commentRef, body }])[0]!;
+      const commentSetDigest = createHash("sha256").update(JSON.stringify([validComment])).digest("hex");
+      const bundle = WorkflowFeedbackBundleSchema.parse({ schemaVersion: 1, taskId, repositoryId, number,
+        headSha: repositoryId === "demo" ? "c".repeat(40) : "a".repeat(40), candidateDigest: candidate.digest,
+        commentSetDigest, producer: "test", version: "1", recordedAt: now, comments: [validComment], sourceDeliveryIds: ["delivery-1"] });
+      const bundleBytes = JSON.stringify(bundle);
+      const bundleDigest = createHash("sha256").update(bundleBytes).digest("hex");
+      const bundleKey = `private/${task.ownerKey}/${task.workspaceId}/feedback/${bundleDigest}.json`;
+      harness.s3.objects.set(bundleKey, bundleBytes);
+      const { sourceDeliveryIds: _deliveryIds, comments, ...bundleMetadata } = bundle;
+      return { digest: bundleDigest, commentSetDigest, ref: { ...bundleMetadata, sha256: bundleDigest, objectKey: bundleKey, comments: [commentRef] }, findingRef: {
+        id: `finding-${index + 1}`, bundleDigest, commentIds: [commentId], priority: "MUST_FIX" as const,
+        assessment: "ACTIONABLE" as const, recommended: true,
+      }, finding: { id: `finding-${index + 1}`, bundleDigest, commentIds: [commentId], priority: "MUST_FIX" as const,
+        assessment: "ACTIONABLE" as const, recommended: true, evidence: [{ source: "code", reference: `${commentRef.path}:10` }],
+        rationale: index === 0 ? "The input is not guarded." : "The notice can be missed by keyboard users.",
+        confidence: { level: "HIGH" as const, reason: "The linked source supports this finding." }, proposedDisposition: "IMPLEMENT" as const },
+      };
+    }));
     const report = WorkflowFeedbackReviewReportSchema.parse({ schemaVersion: 1, taskId, workflowRevision: 2, operationMode: "FEEDBACK_REVIEW", qualification: "AI_GENERATED_ADVISORY",
-      proposalDigest: "b".repeat(64), taskRequirementsDigest: "d".repeat(64), candidateBindings: [{ repositoryId: "demo", number: 42, headSha: "c".repeat(40), candidateDigest: candidate.digest, commentSetDigest, bundleDigest }],
-      operationId: randomUUID(), provider: "test", version: "1", status: "COMPLETE", bundleDigests: [bundleDigest], findingRefs: [findingRef], findings: [finding], recordedAt: now });
+      proposalDigest: "b".repeat(64), taskRequirementsDigest: "d".repeat(64), candidateBindings: bundles.map(({ ref, commentSetDigest, digest }) => ({ repositoryId: ref.repositoryId, number: ref.number,
+        headSha: ref.headSha, candidateDigest: candidate.digest, commentSetDigest, bundleDigest: digest })),
+      operationId: randomUUID(), provider: "test", version: "1", status: "COMPLETE", bundleDigests: bundles.map(bundle => bundle.digest),
+      findingRefs: bundles.map(bundle => bundle.findingRef), findings: bundles.map(bundle => bundle.finding), recordedAt: now });
     const reportBytes = JSON.stringify(report);
     const reviewDigest = (await import("node:crypto")).createHash("sha256").update(reportBytes).digest("hex");
     const reportKey = `private/${task.ownerKey}/${task.workspaceId}/feedback-reviews/${reviewDigest}.json`;
@@ -203,18 +218,19 @@ describe("broker-backed feedback review data", () => {
     const waiting = { ...base, stage: "WAIT_FOR_MERGE" as const, state: "WAITING" as const, candidate,
       verification: { candidateDigest: candidate.digest, producer: "test", environmentId: "fixture", recordedAt: now, results: [{ checkId: "test", status: "PASS" as const }] },
       reviews: (["CRITIC", "SECURITY"] as const).map(role => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: now })),
-      pullRequests: [{ repositoryId: "demo", number: 42, url: "https://github.com/example/demo/pull/42", candidateDigest: candidate.digest, required: true, state: "OPEN" as const }] };
-    const workflow = requestWorkflowFeedbackReview(waiting, { bundleRefs: [bundleRef], reviewRef: reportRef }, now);
+      pullRequests: repositories.map(({ repositoryId, number }) => ({ repositoryId, number, url: `https://github.com/example/${repositoryId}/pull/${number}`,
+        candidateDigest: candidate.digest, required: true, state: "OPEN" as const })) };
+    const workflow = requestWorkflowFeedbackReview(waiting, { bundleRefs: bundles.map(bundle => bundle.ref), reviewRef: reportRef }, now);
     harness.db.set({ ...task, workflow });
-    harness.db.set({ ...githubWorkflowPullRequestKey("example/demo", 42), entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: "example/demo",
-      number: 42, repositoryId: "demo", taskId, workspaceId: task.workspaceId, candidateDigest: candidate.digest,
-      url: "https://github.com/example/demo/pull/42" });
+    for (const { repositoryId, number } of repositories) harness.db.set({ ...githubWorkflowPullRequestKey(`example/${repositoryId}`, number),
+      entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: `example/${repositoryId}`, number, repositoryId, taskId,
+      workspaceId: task.workspaceId, candidateDigest: candidate.digest, url: `https://github.com/example/${repositoryId}/pull/${number}` });
     const workspace = harness.db.get(`WORKSPACE#${task.workspaceId}`, "META") as Record<string, unknown>;
     harness.db.set({ ...workspace, status: "READY", activeOperationId: undefined });
     const deps = { documentClient: harness.db, tableName: "state", actions: harness.actions,
       checkAccess: async () => ({ revision: 1, policy: {} as never, access: "granted" as const, channelIds: [] }), projectChannelIds: async () => [],
       refreshTaskFeedback: async () => undefined, now: () => Date.parse(now) };
-    return { harness, taskId, deps, workflow, bundleDigest, reviewDigest, githubRead };
+    return { harness, taskId, deps, workflow, bundleDigest: bundles[0]!.digest, bundleDigests: bundles.map(bundle => bundle.digest), reviewDigest, githubRead };
   }
 
   it("loads only the current owner's verified report and comment bundles through broker artifact reads", async () => {
@@ -234,6 +250,27 @@ describe("broker-backed feedback review data", () => {
     expect(result).toMatchObject({ status: "APPROVED", nextAction: "implementation" });
     const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { ownerKey: string };
     expect(fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META")?.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING", feedbackDecisions: [{ actorRole: "TASK_OWNER", actorId: task.ownerKey, selectedFindingIds: ["finding-1"] }] });
+  });
+
+  it("emits only privacy-safe aggregate decision measures after the owner decision commits", async () => {
+    const fixture = await preparedReview();
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId };
+    const events: Array<Record<string, unknown>> = [];
+    fixture.deps.log = (entry: Record<string, unknown>) => events.push(entry);
+    fixture.harness.db.set({ pk: `DEVTASK#${fixture.taskId}`,
+      sk: `NOTICE#${feedbackReviewNoticeId(fixture.taskId, fixture.reviewDigest, fixture.workflow.revision)}`,
+      entityType: "NOTICE", deliveredAt: "2026-10-05T11:30:00.000Z" });
+
+    await submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest,
+      proposalDigest: "b".repeat(64), bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
+    });
+
+    expect(events).toEqual([
+      { event: "feedback_review.measure", measure: "feedback_notice_to_decision_1m_to_1h", count: 1, at: fixture.workflow.updatedAt },
+      { event: "feedback_review.measure", measure: "feedback_recommendation_followed", count: 1, at: fixture.workflow.updatedAt },
+    ]);
+    expect(JSON.stringify(events)).not.toMatch(/task|finding|reviewer|comment|diff|Maya|UOWNER/i);
   });
 
   it("refreshes GitHub twice and commits approval with one fenced implementation outbox", async () => {
@@ -261,6 +298,25 @@ describe("broker-backed feedback review data", () => {
       .rejects.toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     expect(refresh).toHaveBeenCalledTimes(2);
     expect(operations.filter(item => item.workflowMode === "IMPLEMENT")).toHaveLength(1);
+  });
+
+  it("lets the owner approve findings bound to both linked PRs in one decision and dispatches once", async () => {
+    const fixture = await preparedReview(2);
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId };
+    const review = await getWorkflowFeedbackReview(fixture.deps as never, owner, fixture.taskId);
+    expect(review.candidates).toEqual([
+      { repositoryId: "demo", number: 42, headSha: "c".repeat(40) },
+      { repositoryId: "ui", number: 43, headSha: "a".repeat(40) },
+    ]);
+    expect(review.findings.map((finding: { id: string }) => finding.id)).toEqual(["finding-1", "finding-2"]);
+    await expect(submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest,
+      proposalDigest: "b".repeat(64), bundleDigests: fixture.bundleDigests, decision: "APPROVE",
+      selectedFindingIds: ["finding-1", "finding-2"],
+    })).resolves.toMatchObject({ status: "APPROVED", nextAction: "implementation" });
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workspaceId: string; workflow: { feedbackDecisions: Array<{ bundleDigests: string[]; selectedFindingIds: string[] }> } };
+    expect(task.workflow.feedbackDecisions[0]).toMatchObject({ bundleDigests: fixture.bundleDigests, selectedFindingIds: ["finding-1", "finding-2"] });
+    expect(fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION" && item.workflowMode === "IMPLEMENT")).toHaveLength(1);
   });
 
   it("refuses a queued implementation at the broker worker-start callback after approval is invalidated", async () => {

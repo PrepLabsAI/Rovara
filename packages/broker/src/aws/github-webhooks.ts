@@ -5,6 +5,7 @@ import { WorkflowFeedbackBundleSchema, WorkflowFeedbackBundleCommentsSchema, Wor
 import { githubWorkflowPullRequestKey, type GithubWorkflowPullRequestRecord } from "../developer/task-records.js";
 import { parseGitHubRepository, type GitHubPullRequestFeedback } from "../github-app.js";
 import { isConditional } from "./broker-shared.js";
+import { feedbackReopenedMeasure, type FeedbackReviewMeasure } from "../developer/feedback-review-measures.js";
 
 const DELIVERY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GitHubWebhookPayloadSchema = z.object({
@@ -129,6 +130,8 @@ export async function reconcileGithubWorkflowPullRequest(input: {
   repositoryUrl(projectName: string, revision: number, repositoryId: string): Promise<string | undefined>;
   getCurrentState(repositoryUrl: string, number: number): Promise<"OPEN" | "CLOSED" | "MERGED">;
   saveWorkflow(taskId: string, expectedRevision: number, workflow: WorkflowSnapshot): Promise<void>;
+  /** Aggregate-only telemetry callback. Implementations must not add task/comment/user context. */
+  measure?(entry: FeedbackReviewMeasure): void;
   now: string;
 }): Promise<boolean> {
   const linked = await findLinkedGithubWorkflowPullRequest(input);
@@ -167,6 +170,8 @@ export interface ReconcileTaskPullRequestFeedbackInput {
   /** Writes exact payload bytes to immutable content-addressed storage; never overwrites an artifact. */
   persistBundle(bundle: WorkflowFeedbackBundle, bytes: string, sha256: string): Promise<string>;
   saveWorkflow(taskId: string, expectedRevision: number, workflow: WorkflowSnapshot): Promise<void>;
+  /** Aggregate-only telemetry callback; must not add task/comment/user context. */
+  measure?(entry: FeedbackReviewMeasure): void;
   now: string;
 }
 
@@ -206,6 +211,7 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
     }
     const open = reads.filter(r => r.feedback.pullRequest.state === "open");
     const changedHead = open.some(({ pr, feedback }) => !current.candidate!.repositories.some(repo => repo.repositoryId === pr.repositoryId && repo.commitSha === feedback.pullRequest.headCommit));
+    let reopenedFeedback = false;
     if (changedHead || open.length === 0) {
       if (!current.feedbackReview && !current.feedback && next === current
         && (!changedHead || current.state === "BLOCKED")) return false;
@@ -235,6 +241,7 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
             return prior?.resolved && (!previous || previous.updatedAt !== comment.updatedAt || previous.bodyDigest !== comment.bodyDigest
               || prior.eligibleCommentIds.includes(comment.id)) ? [comment.id] : [];
           });
+          if (prior?.resolved && (!thread.resolved || ids.some(id => !prior.eligibleCommentIds.includes(id)))) reopenedFeedback = true;
           ids.forEach(id => eligible.add(id));
           observations.push({ repositoryId: pr.repositoryId, number: pr.number, threadId: thread.id, resolved: thread.resolved,
             comments: members.map(c => ({ id: c!.id, updatedAt: c!.updatedAt, bodyDigest: c!.bodyDigest })).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0), eligibleCommentIds: ids.sort() });
@@ -262,7 +269,14 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
       }
       next = collectWorkflowFeedbackBundles(next, { bundleRefs: refs, threadObservations: observations }, input.now);
     }
-    try { await input.saveWorkflow(linked.taskId, current.revision, next); return true; }
+    try {
+      await input.saveWorkflow(linked.taskId, current.revision, next);
+      if (reopenedFeedback) {
+        const measure = feedbackReopenedMeasure(input.now);
+        if (measure !== undefined) input.measure?.(measure);
+      }
+      return true;
+    }
     catch (error) { if (!isConditional(error)) throw error; }
   }
   throw new GithubWebhookRetryableError("workflow kept changing during feedback reconciliation");

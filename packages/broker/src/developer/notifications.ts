@@ -27,6 +27,10 @@ export interface Notice {
   feedbackReviewDigest?: string;
 }
 
+/** Stable key shared by notice production and the owner-decision latency measurement. */
+export const feedbackReviewNoticeId = (taskId: string, reviewDigest: string, workflowRevision: number): string =>
+  `${taskId}:feedback_review:${reviewDigest}:${workflowRevision}`;
+
 const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 /** Spec 025 E2: the statuses an admin change ends in. */
 const ENDED_CHANGE = new Set(["applied", "declined", "expired", "failed"]);
@@ -54,7 +58,7 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
         notices.push({ id: `${taskId}:github_feedback:${text(afterFeedback.feedbackId)}`, kind: "github_feedback", taskId, at });
       } else if (afterReview?.status === "PENDING" && afterReviewRef?.status === "COMPLETE" && typeof afterReviewRef.sha256 === "string"
         && (afterReviewRef.sha256 !== beforeReviewRef?.sha256 || newNotes !== oldNotes)) {
-        notices.push({ id: `${taskId}:feedback_review:${afterReviewRef.sha256}:${String(afterWorkflow?.revision)}`, kind: "github_feedback", taskId, at,
+        notices.push({ id: feedbackReviewNoticeId(taskId, afterReviewRef.sha256, Number(afterWorkflow?.revision)), kind: "github_feedback", taskId, at,
           feedbackReviewDigest: afterReviewRef.sha256 });
       } else if (afterWorkflow !== undefined && afterWorkflow.revision !== beforeWorkflow?.revision && beforeWorkflow?.state === "WAITING" && eventId !== "") {
         notices.push({ id: `${taskId}:workflow:${String(afterWorkflow?.revision)}`, kind: "workflow", taskId, at });

@@ -90,6 +90,8 @@ import type { DeveloperTaskActions, TransactItems } from "./developer-task-actio
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { setupWatchKey } from "./stuck-setup.js";
+import { feedbackReviewNoticeId } from "../developer/notifications.js";
+import { feedbackNoticeToDecisionMeasure, feedbackRecommendationMeasure } from "../developer/feedback-review-measures.js";
 
 export interface DeveloperTaskRouteDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -319,13 +321,17 @@ export async function submitWorkflowFeedbackDecision(
   task = await loadOwnedTask(deps, caller, taskId);
   current = task.workflow;
   if (current === undefined) throw agentXError("NOT_FOUND", "PR feedback review not found");
+  const reportRef = current.feedbackReview?.reviewRef;
+  const noticeAt = reportRef === undefined ? undefined : await readFeedbackReviewNoticeAt(deps, taskId,
+    feedbackReviewNoticeId(taskId, reportRef.sha256, current.revision));
+  const decidedAt = iso(deps);
   let next: WorkflowSnapshot;
   try {
     next = decideWorkflowFeedbackFindings(current, {
       requestId: input.requestId, expectedRevision: input.expectedRevision, reviewDigest: input.reviewDigest,
       proposalDigest: input.proposalDigest, bundleDigests: input.bundleDigests,
       selectedFindingIds: input.selectedFindingIds, decision: input.decision, ...(input.ownerNote === undefined ? {} : { ownerNote: input.ownerNote }),
-    }, { actorId: task.ownerKey, role: "TASK_OWNER" }, iso(deps));
+    }, { actorId: task.ownerKey, role: "TASK_OWNER" }, decidedAt);
   } catch (error) {
     if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", error.message);
     throw error;
@@ -380,6 +386,7 @@ export async function submitWorkflowFeedbackDecision(
       if (isConditional(error)) throw agentXError("CONFIG_INVALID", "the feedback decision changed before dispatch; reload the review");
       throw error;
     }
+    emitFeedbackDecisionMeasures(deps, current, input, noticeAt, decidedAt);
     return { status: "APPROVED", nextAction: "implementation" };
   }
   try {
@@ -393,7 +400,36 @@ export async function submitWorkflowFeedbackDecision(
     if (isConditional(error)) throw agentXError("CONFIG_INVALID", "the review changed; reload it before deciding");
     throw error;
   }
+  emitFeedbackDecisionMeasures(deps, current, input, noticeAt, decidedAt);
   return { status: input.decision === "REQUEST_CHANGES" ? "CHANGES_REQUESTED" : "DISMISSED", nextAction: "owner_review" };
+}
+
+async function readFeedbackReviewNoticeAt(deps: DeveloperTaskRouteDependencies, taskId: string, noticeId: string): Promise<string | undefined> {
+  try {
+    const result = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName,
+      Key: { pk: `DEVTASK#${taskId}`, sk: `NOTICE#${noticeId}` }, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+    const deliveredAt = result.Item?.deliveredAt;
+    return typeof deliveredAt === "string" && Number.isFinite(Date.parse(deliveredAt)) ? deliveredAt : undefined;
+  } catch {
+    // Measurements are best-effort; a telemetry read must never block an owner decision.
+    log(deps, { event: "feedback_review.measure_unavailable" });
+    return undefined;
+  }
+}
+
+function emitFeedbackDecisionMeasures(
+  deps: DeveloperTaskRouteDependencies,
+  workflow: WorkflowSnapshot,
+  input: { decision: "APPROVE" | "REQUEST_CHANGES" | "DISMISS"; selectedFindingIds: string[] },
+  noticeAt: string | undefined,
+  at: string,
+): void {
+  const recommended = workflow.feedbackReview?.reviewRef?.findingRefs.filter(finding => finding.recommended).map(finding => finding.id) ?? [];
+  const measures = [
+    ...(noticeAt === undefined ? [] : [feedbackNoticeToDecisionMeasure(noticeAt, at)]),
+    feedbackRecommendationMeasure(recommended, input.selectedFindingIds, input.decision, at),
+  ];
+  for (const measure of measures) if (measure !== undefined) log(deps, { ...measure });
 }
 
 const DIFF_READ_BYTES = 1_000_000;
