@@ -133,7 +133,14 @@ export const WorkflowFeedbackFindingSchema = WorkflowFeedbackFindingRefSchema.ex
   rationale: z.string().trim().min(1).max(16_000),
   confidence: z.object({ level: z.enum(["HIGH", "MEDIUM", "LOW", "UNKNOWN"]), reason: z.string().trim().min(1).max(2000) }).strict(),
   proposedDisposition: z.enum(["IMPLEMENT", "SKIP", "OWNER_DECISION"]),
-});
+  fixProposal: z.object({
+    summary: z.string().trim().min(1).max(2000),
+    fileChanges: z.array(z.object({ repositoryId: z.string().trim().min(1).max(200), path: z.string().trim().min(1).max(1000),
+      operation: z.enum(["MODIFY", "ADD"]), change: z.string().trim().min(1).max(4000) }).strict()).min(1).max(32),
+    tests: z.array(z.object({ repositoryId: z.string().trim().min(1).max(200), path: z.string().trim().min(1).max(1000),
+      operation: z.enum(["MODIFY", "ADD"]), behavior: z.string().trim().min(1).max(2000) }).strict()).min(1).max(32),
+  }).strict().optional(),
+}).strict();
 export type WorkflowFeedbackFinding = z.infer<typeof WorkflowFeedbackFindingSchema>;
 const WorkflowFeedbackCandidateBindingSchema = z.object({
   repositoryId: z.string().trim().min(1).max(200), number: z.number().int().positive(),

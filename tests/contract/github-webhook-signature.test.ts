@@ -322,6 +322,12 @@ describe("GitHub webhook signature verification", () => {
     const documentClient = {
       async send(command: unknown) {
         const value = command as { constructor: { name: string }; input: Record<string, unknown> };
+        if (value.constructor.name === "QueryCommand") {
+          const queryValues = objectInput(value.input.ExpressionAttributeValues);
+          const dueAt = stringField(queryValues[":sk"]);
+          return { Items: [...records.values()].filter(record => record.status === "RETRYABLE"
+            && typeof record.webhookRecoverySk === "string" && record.webhookRecoverySk <= dueAt) };
+        }
         const keyData = objectInput(value.input.Key);
         const itemData = objectInput(value.input.Item);
         const key = `${stringField(keyData.pk ?? itemData.pk)}/${stringField(keyData.sk ?? itemData.sk)}`;
@@ -340,10 +346,14 @@ describe("GitHub webhook signature verification", () => {
         } else if (values[":one"] === undefined && values[":retryable"] !== undefined) {
           if (record.status !== "PROCESSING" || record.leaseToken !== values[":leaseToken"]) throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" });
           record.status = "RETRYABLE";
+          record.nextAttemptAt = values[":nextAttemptAt"];
+          record.webhookRecoveryPk = values[":recoveryPk"];
+          record.webhookRecoverySk = values[":recoverySk"];
         } else {
           if (record.status !== "RECEIVED" && record.status !== "RETRYABLE") throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" });
           record.status = "PROCESSING";
           record.leaseToken = values[":leaseToken"];
+          delete record.nextAttemptAt;
         }
         return { Attributes: record };
       },
@@ -356,8 +366,11 @@ describe("GitHub webhook signature verification", () => {
       documentClient, tableName: "state", received: event, now: () => "2026-10-05T12:00:01.000Z",
       process: async () => { attempts += 1; throw new Error("transient GitHub API failure"); },
     })).rejects.toThrow(/transient/);
+    const restartedClient = { send: documentClient.send.bind(documentClient) };
+    await expect(listDueGithubWebhookDeliveries({ documentClient: restartedClient, tableName: "state", now: "2026-10-05T12:01:02.000Z" }))
+      .resolves.toEqual([{ deliveryId, event: event.event }]);
     await expect(processGithubWebhookDelivery({
-      documentClient, tableName: "state", received: event, now: () => "2026-10-05T12:01:02.000Z",
+      documentClient: restartedClient, tableName: "state", received: event, now: () => "2026-10-05T12:01:02.000Z",
       process: async () => { attempts += 1; },
     })).resolves.toBe("PROCESSED");
     await expect(processGithubWebhookDelivery({
@@ -390,6 +403,46 @@ describe("GitHub webhook signature verification", () => {
       { deliveryId: "550e8400-e29b-41d4-a716-446655440010", event },
     ]);
     expect(queryInput).toMatchObject({ IndexName: "github-webhook-recovery", Limit: 25 });
+  });
+
+  it("lets only an administrator requeue a failed delivery after checking its linked PR scope", async () => {
+    await (await import("../support/slack-broker.js")).loadSlackBroker();
+    const broker = await import("../../packages/broker/src/aws/broker.js");
+    const deliveryId = "550e8400-e29b-41d4-a716-446655440030";
+    const taskId = "550e8400-e29b-41d4-a716-446655440031";
+    const workspaceId = "550e8400-e29b-41d4-a716-446655440032";
+    const event = { kind: "PULL_REQUEST" as const, action: "closed", installationId: 777, repositoryId: 1234, fullName: "acme/payments", number: 9 };
+    const candidate = createCandidateManifest([{ repositoryId: "payments", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
+    const url = "https://github.com/acme/payments/pull/9";
+    const task = { project: "test", startingRevision: 1, workflow: { stage: "WAIT_FOR_MERGE", candidate,
+      pullRequests: [{ repositoryId: "payments", number: 9, url, candidateDigest: candidate.digest }] } };
+    let transaction: Record<string, unknown> | undefined;
+    const dependencies = {
+      tableName: "state",
+      documentClient: { async send(command: unknown) {
+        const value = commandInput(command);
+        if (value.constructor.name === "TransactWriteCommand") { transaction = value.input; return {}; }
+        const key = objectInput(value.input.Key);
+        if (key.pk === `GITHUB_DELIVERY#${deliveryId}`) return { Item: { deliveryId, status: "DEAD", event } };
+        if (key.pk === "GITHUB_PR#acme/payments") return { Item: { entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: "acme/payments",
+          repositoryId: "payments", number: 9, url, taskId, workspaceId, candidateDigest: candidate.digest } };
+        if (key.pk === `DEVTASK#${taskId}`) return { Item: task };
+        if (key.pk === "PROJECT#test") return { Item: { definition: { repositories: [
+          { name: "payments", url: "https://github.com/acme/payments.git" },
+        ] } } };
+        return {};
+      } },
+      githubPullRequests: { verifyWebhookRepository: async () => true },
+    };
+    const administrator = { isAdministrator: true, subject: "operator-1" };
+    const member = { isAdministrator: false, subject: "member-1" };
+    await expect(broker.retryGithubWebhookAsAdministrator(dependencies as never, member as never, deliveryId)).rejects.toMatchObject({ code: "FORBIDDEN" });
+    await expect(broker.retryGithubWebhookAsAdministrator(dependencies as never, administrator as never, deliveryId))
+      .resolves.toEqual({ deliveryId, status: "RETRY_QUEUED" });
+    expect(transaction?.TransactItems).toMatchObject([
+      { Update: { ConditionExpression: "#status = :retryable OR #status = :dead" } },
+      { Put: { Item: { actor: "operator-1", deliveryId } } },
+    ]);
   });
 
 });

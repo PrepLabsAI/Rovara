@@ -16,6 +16,9 @@ const finding = {
   priority: "MUST_FIX", assessment: "ACTIONABLE", recommended: true,
   evidence: [{ source: "PR diff", reference: "src/retry.ts:10" }], rationale: "Empty input reaches the retry loop.",
   confidence: { level: "HIGH", reason: "The current code has no empty-input check." }, proposedDisposition: "IMPLEMENT",
+  fixProposal: { summary: "Return safely for empty input.",
+    fileChanges: [{ repositoryId: "payments", path: "src/retry.ts", operation: "MODIFY", change: "Add an empty-input guard." }],
+    tests: [{ repositoryId: "payments", path: "src/retry.test.ts", operation: "ADD", behavior: "Assert empty input returns an empty result." }] },
 };
 
 function request(method: string, path: string, headers: Record<string, string> = {}, body?: unknown): AdaptedHttpRequest {
@@ -79,6 +82,9 @@ describe("authenticated PR feedback review web journey", () => {
     expect(response.body).toContain("1 comment grouped into 1 findings");
     expect(response.body).toContain("Approve recommended fixes");
     expect(response.body).toContain("Choose findings");
+    expect(response.body).toContain("See proposed fix, comments and evidence");
+    expect(response.body).toContain("Return safely for empty input.");
+    expect(response.body).toContain("src/retry.test.ts");
     expect(response.body).not.toContain("session-owner");
     expect(response.body).not.toContain("Bearer ");
     expect(deps.observed.reviewReads[0]?.[0]).toMatchObject({ slackUserId: "UOWNER" });

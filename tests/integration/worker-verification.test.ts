@@ -208,7 +208,7 @@ async function feedbackReviewFixture() {
   return { rootPath, repositories, candidate, bundle, bundleRef, bytes, taskId: bundle.taskId };
 }
 
-function feedbackReviewerAdapter(response: string, beforePrompt?: () => Promise<void> | void): PiSessionAdapter {
+function feedbackReviewerAdapter(response: string, beforePrompt?: () => Promise<void> | void, onPrompt?: (prompt: string) => void): PiSessionAdapter {
   return {
     async create(input) {
       let notify: ((event: unknown) => void) | undefined;
@@ -216,8 +216,8 @@ function feedbackReviewerAdapter(response: string, beforePrompt?: () => Promise<
       return {
         conversationId: randomUUID(), sessionFile,
         async prompt(_prompt) {
-          void _prompt;
           await beforePrompt?.();
+          onPrompt?.(_prompt);
           notify?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: response }] } });
         }, async abort() {},
         getModel: () => ({ provider: "test-provider", modelId: "read-only-critic-v1" }),
@@ -240,10 +240,16 @@ describe("AI-generated PR feedback advisory", () => {
       rationale: "The implementation calls trim without handling an empty value as requested.",
       confidence: { level: "HIGH", reason: "The comment and implementation identify the same missing behavior." },
       proposedDisposition: "IMPLEMENT",
+      fixProposal: {
+        summary: "Return an empty result before trimming empty input.",
+        fileChanges: [{ repositoryId: "app", path: "src.ts", operation: "MODIFY", change: "Add an explicit empty-input branch before calling trim." }],
+        tests: [{ repositoryId: "app", path: "src.test.ts", operation: "ADD", behavior: "Verify empty input returns an empty result without throwing." }],
+      },
     };
     const capturedArtifacts: WorkerArtifact[] = [];
     let sessionMode: string | undefined;
-    const base = feedbackReviewerAdapter(JSON.stringify({ findings: [finding] }));
+    let reviewPrompt = "";
+    const base = feedbackReviewerAdapter(JSON.stringify({ findings: [finding] }), undefined, prompt => { reviewPrompt = prompt; });
     const adapter: PiSessionAdapter = {
       create: async (input) => { sessionMode = input.workflowMode; return base.create(input); },
     };
@@ -255,16 +261,44 @@ describe("AI-generated PR feedback advisory", () => {
       artifactSink: async (artifact) => { capturedArtifacts.push(artifact); },
     });
     expect(sessionMode).toBe("REVIEW");
+    expect(reviewPrompt).toContain("Do not invent paths; inspect the read-only candidate first.");
+    expect(reviewPrompt).toContain("fileChanges");
+    expect(review.report.blockReason).toBeUndefined();
     expect(review.report.status).toBe("COMPLETE");
     expect(review.report).toMatchObject({ workflowRevision: 7, operationMode: "FEEDBACK_REVIEW", qualification: "AI_GENERATED_ADVISORY" });
     expect(review.report).not.toHaveProperty("reviewerId");
     expect(review.report).not.toHaveProperty("readOnly");
     expect(review.report.findings).toHaveLength(1);
     expect(review.report.findings[0]?.commentIds).toEqual(["review-comment-1"]);
+    expect(review.report.findings[0]?.fixProposal).toEqual(finding.fixProposal);
     expect(review.report.bundleDigests).toEqual([fixture.bundleRef.sha256]);
     expect(review.outputDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(capturedArtifacts.some((artifact) => artifact.name === review.artifactName
       && createHash("sha256").update(artifact.content, "utf8").digest("hex") === review.outputDigest)).toBe(true);
+  });
+
+  it("blocks an implementation recommendation that names a file outside the exact candidate tree", async () => {
+    const fixture = await feedbackReviewFixture();
+    const finding = {
+      id: "finding-1", bundleDigest: fixture.bundleRef.sha256, commentIds: ["review-comment-1"],
+      priority: "MUST_FIX", assessment: "ACTIONABLE", recommended: true,
+      evidence: [{ source: "candidate", reference: "app/src.ts:1" }], rationale: "The current function needs an empty-input branch.",
+      confidence: { level: "HIGH", reason: "The code and comment identify the same missing behavior." }, proposedDisposition: "IMPLEMENT",
+      fixProposal: { summary: "Add an empty-input guard.",
+        fileChanges: [{ repositoryId: "app", path: "missing.ts", operation: "MODIFY", change: "Add the missing guard." }],
+        tests: [{ repositoryId: "app", path: "src.test.ts", operation: "ADD", behavior: "Check empty input." }] },
+    };
+    const review = await runWorkflowFeedbackReview({
+      operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7,
+      taskRequirements: "Return a safe result for empty input.", rootPath: fixture.rootPath, model: FAUX_MODEL,
+      candidate: fixture.candidate, repositories: fixture.repositories,
+      bundles: [{ ref: fixture.bundleRef, bytes: fixture.bytes }],
+      piAdapter: feedbackReviewerAdapter(JSON.stringify({ findings: [finding] })),
+      artifactSink: async () => undefined,
+    });
+    expect(review.report.status).toBe("FAILED");
+    expect(review.report.blockReason).toMatch(/malformed|account for every comment/);
+    expect(review.report.findings).toEqual([]);
   });
 });
 

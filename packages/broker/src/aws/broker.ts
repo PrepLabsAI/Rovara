@@ -4693,7 +4693,7 @@ async function retryDueGithubWebhookEvents(dependencies: AwsBrokerDependencies):
   return { attempted: due.length, processed, delayed };
 }
 
-async function retryGithubWebhookAsAdministrator(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, deliveryId: string) {
+export async function retryGithubWebhookAsAdministrator(dependencies: AwsBrokerDependencies, identity: AuthenticatedIdentity, deliveryId: string) {
   if (!identity.isAdministrator) throw agentXError("FORBIDDEN", "administrator claim is required");
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(deliveryId)) throw agentXError("NOT_FOUND", "webhook delivery not found");
   const key = { pk: `GITHUB_DELIVERY#${deliveryId}`, sk: "META" };
