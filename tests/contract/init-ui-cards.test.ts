@@ -445,7 +445,7 @@ describe("spec 048 the ready screen", () => {
       env: "staging", controlPlaneUrl: "https://abc.example.com", progress: READY_PROGRESS, botName: "agentx-acme-staging",
       invocation: { published: true, version: "1.2.3", cliPath: "/x" }, root: false, alertsOn: true, created: [],
     });
-    expect(card.commands?.[0]?.command).toBe("npx @preplabs/rovara-code@1.2.3 login https://abc.example.com");
+    expect(card.commands?.[0]?.command).toBe("npx @preplabsai/rovara-code@1.2.3 login https://abc.example.com");
     expect(card.lines.join(" ")).not.toContain("not published");
   });
 });

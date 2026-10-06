@@ -77,7 +77,7 @@ agentx --env <env> upgrade --region <region> [--to <version>]
 ```
 
 Without `--to`, it upgrades to the release of the `agentx` you run. So
-`npx @preplabs/rovara-code@<version> --env <env> upgrade --region <region>` is the usual form.
+`npx @preplabsai/rovara-code@<version> --env <env> upgrade --region <region>` is the usual form.
 `--release <dir>` uses a release directory instead of downloading one.
 
 It prints the release notes, then deploys each stack in turn. For each stack it shows the change
@@ -263,7 +263,7 @@ managed, so a Python project's setup command should make a virtual environment
   is signed out at once.
 - `agentx --env <env> signin check`: checks every piece sign-in needs, and says what to fix.
 
-Developers need no AWS credentials: they run `npx @preplabs/rovara-code login <control plane URL>`.
+Developers need no AWS credentials: they run `npx @preplabsai/rovara-code login <control plane URL>`.
 To hand tasks to AgentX from Claude Code, Codex or Cursor, and to share them to Slack, they follow
 [docs/mcp-install.md](mcp-install.md).
 

@@ -1,7 +1,7 @@
 // Spec 025 FR-043: add the agentx MCP server to Claude Code, Codex or Cursor without touching
 // any other entry, and say exactly what changed. --print only prints the entry.
 //
-// The entry only runs the published CLI (`npx -y @preplabs/rovara-code@<version> [--env <name>] mcp`);
+// The entry only runs the published CLI (`npx -y @preplabsai/rovara-code@<version> [--env <name>] mcp`);
 // it never holds a token: the MCP server reads the developer sign-in from the system token store.
 import { CLI_PACKAGE_NAME } from "@agentx/contracts";
 import { execFile } from "node:child_process";

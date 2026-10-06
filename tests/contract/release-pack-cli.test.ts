@@ -25,7 +25,7 @@ describe("publishable CLI package", () => {
     const { tarball } = await packCli({ version: "1.2.3", out });
     const manifest = JSON.parse(await readFile(join(out, "package", "package.json"), "utf8")) as Record<string, unknown>;
     expect(manifest).toMatchObject({
-      name: "@preplabs/rovara-code",
+      name: "@preplabsai/rovara-code",
       version: "1.2.3",
       bin: { rovara: "bin/agentx.mjs", agentx: "bin/agentx.mjs" },
       license: "FSL-1.1-ALv2",
@@ -55,7 +55,7 @@ describe("publishable CLI package", () => {
     expect(old!.stdout).toBe("");
     expect(old!.stderr).toBe(`${nodeVersionProblem("20.20.2", { AWS_EXECUTION_ENV: "CloudShell" })}\n`);
     // The executable is a small entry an old Node can parse; the CLI itself is the one bundle next to it.
-    const entry = await readFile(join(project, "node_modules", "@preplabs", "rovara-code", "bin", "agentx.mjs"), "utf8");
+    const entry = await readFile(join(project, "node_modules", "@preplabsai", "rovara-code", "bin", "agentx.mjs"), "utf8");
     expect(() => parse(entry, { ecmaVersion: 2020, sourceType: "module", allowHashBang: true })).not.toThrow();
     expect(entry).toContain("./agentx-cli.mjs");
     expect(entry.length).toBeLessThan(20_000);
@@ -69,17 +69,17 @@ describe("publishable CLI package", () => {
     expect(initHelp).toContain("--ui");
     expect(initHelp).toContain("--no-ui");
     expect(initHelp).toContain("the default in an interactive terminal that can open a browser");
-    const bundle = await readFile(join(project, "node_modules", "@preplabs", "rovara-code", "bin", "agentx-cli.mjs"), "utf8");
+    const bundle = await readFile(join(project, "node_modules", "@preplabsai", "rovara-code", "bin", "agentx-cli.mjs"), "utf8");
     expect(bundle).toContain("<title>Install AgentX</title>");
     expect(bundle).toContain("x-agentx-wizard-token");
     expect(bundle).toContain("renderPanelCards(state);");
 
     // The owners' license ruling (FSL-1.1-ALv2) travels with the installed package, not just the
     // staged one packCli wrote before running `npm pack`.
-    const installedLicense = await readFile(join(project, "node_modules", "@preplabs", "rovara-code", "LICENSE"), "utf8");
+    const installedLicense = await readFile(join(project, "node_modules", "@preplabsai", "rovara-code", "LICENSE"), "utf8");
     expect(installedLicense).toBe(await readFile(join(repoRoot, "LICENSE"), "utf8"));
     // The bundled packages' notices travel with the installed package too (MIT and BSD require them).
-    const installedNotices = await readFile(join(project, "node_modules", "@preplabs", "rovara-code", "THIRD_PARTY_NOTICES"), "utf8");
+    const installedNotices = await readFile(join(project, "node_modules", "@preplabsai", "rovara-code", "THIRD_PARTY_NOTICES"), "utf8");
     expect(installedNotices).toBe(await readFile(join(out, "package", "THIRD_PARTY_NOTICES"), "utf8"));
   }, 300_000);
 

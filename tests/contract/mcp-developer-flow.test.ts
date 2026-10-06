@@ -66,7 +66,7 @@ describe("hand off a task from an AI tool and move on (US1)", () => {
   it("answers SIGN_IN_REQUIRED with the exact command when this computer has no sign-in", async () => {
     const harness = await createDeveloperTaskBroker();
     const { tool } = await signedInClient(harness, undefined);
-    expect(await tool("agentx_list_projects")).toMatchObject({ isError: true, error: { code: "SIGN_IN_REQUIRED", next_step: `run npx @preplabs/rovara-code login ${URL_BASE}` } });
+    expect(await tool("agentx_list_projects")).toMatchObject({ isError: true, error: { code: "SIGN_IN_REQUIRED", next_step: `run npx @preplabsai/rovara-code login ${URL_BASE}` } });
     // The server keeps answering after a sign-in error: it does not crash.
     expect(await tool("agentx_whoami")).toMatchObject({ isError: true, error: { code: "SIGN_IN_REQUIRED" } });
   });

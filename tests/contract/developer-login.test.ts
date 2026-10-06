@@ -121,14 +121,14 @@ describe("agentx login <url> (FR-011)", () => {
     await expect(developerLogin({
       url: URL_, allowLoopback: false, browser: true, home: await home(), tokenStore: new InMemoryTokenStore(), fetch: server(), write: () => undefined, timeoutMs: 50,
       openBrowser: async () => undefined,
-    })).rejects.toThrow(`AUTH_REQUIRED: sign-in timed out; run npx @preplabs/rovara-code login ${URL_} again`);
+    })).rejects.toThrow(`AUTH_REQUIRED: sign-in timed out; run npx @preplabsai/rovara-code login ${URL_} again`);
   });
 
   it("says in developer words when the callback carries neither a code nor an error (fix 2)", async () => {
     await expect(developerLogin({
       url: URL_, allowLoopback: false, browser: true, home: await home(), tokenStore: new InMemoryTokenStore(), fetch: server(), write: () => undefined,
       openBrowser: browser({}),
-    })).rejects.toThrow(`AUTH_REQUIRED: the sign-in came back without an answer; run npx @preplabs/rovara-code login ${URL_} again`);
+    })).rejects.toThrow(`AUTH_REQUIRED: the sign-in came back without an answer; run npx @preplabsai/rovara-code login ${URL_} again`);
   });
 
   it("keeps the admin listener's messages", async () => {

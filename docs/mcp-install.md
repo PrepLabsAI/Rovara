@@ -8,7 +8,7 @@ AgentX admin).
 Sign in once, in any terminal:
 
 ```
-npx @preplabs/rovara-code login https://agentx.example.com
+npx @preplabsai/rovara-code login https://agentx.example.com
 ```
 
 Your browser opens. Sign in with Slack or with your company's sign-in. The terminal then shows who
@@ -17,12 +17,12 @@ days). If your computer has no browser, add `--no-browser` and open the link it 
 
 Your sign-in is kept in your computer's own password store (the macOS keychain, or the Secret
 Service on Linux). The setup below never writes a token into your AI tool's settings: the entry
-only runs `npx -y @preplabs/rovara-code mcp`.
+only runs `npx -y @preplabsai/rovara-code mcp`.
 
 `mcp install` writes the version of AgentX you ran it with into the entry (for example
-`@preplabs/rovara-code@0.4.0`), so your AI tool keeps using that version until you run it again. If
+`@preplabsai/rovara-code@0.4.0`), so your AI tool keeps using that version until you run it again. If
 your admin gave you an environment name, put `--env <name>` before `mcp install`, for example
-`npx @preplabs/rovara-code --env staging mcp install --client codex`. The entry then passes the same
+`npx @preplabsai/rovara-code --env staging mcp install --client codex`. The entry then passes the same
 `--env` to the server. You can run `mcp install` again at any time: it replaces the agentx entry
 and never adds a second one.
 
@@ -34,10 +34,10 @@ so under `sudo` it would change root's settings instead of yours.
 Install:
 
 ```
-claude mcp add --scope user agentx -- npx -y @preplabs/rovara-code mcp
+claude mcp add --scope user agentx -- npx -y @preplabsai/rovara-code mcp
 ```
 
-or let AgentX run that for you, with the version you have: `npx @preplabs/rovara-code mcp install --client claude-code`.
+or let AgentX run that for you, with the version you have: `npx @preplabsai/rovara-code mcp install --client claude-code`.
 It removes any agentx entry you added for your user before, then adds the new one. If the add
 fails, your old entry is already gone, so it prints the exact command to run yourself.
 
@@ -46,7 +46,7 @@ kept in a project's `.mcp.json`). An agentx entry there wins over your user entr
 if AgentX behaves oddly in one project, check `claude mcp list` there and remove the extra entry.
 
 Manual setup: the command above is the whole setup. To see the exact command without running it,
-use `npx @preplabs/rovara-code mcp install --client claude-code --print`.
+use `npx @preplabsai/rovara-code mcp install --client claude-code --print`.
 
 Remove it: `claude mcp remove --scope user agentx`.
 
@@ -55,7 +55,7 @@ Remove it: `claude mcp remove --scope user agentx`.
 Install:
 
 ```
-npx @preplabs/rovara-code mcp install --client codex
+npx @preplabsai/rovara-code mcp install --client codex
 ```
 
 It adds this to `~/.codex/config.toml`, keeps every other entry, and saves the old file as
@@ -68,11 +68,11 @@ yourself:
 ```
 [mcp_servers.agentx]
 command = "npx"
-args = ["-y", "@preplabs/rovara-code", "mcp"]
+args = ["-y", "@preplabsai/rovara-code", "mcp"]
 ```
 
 To see the exact entry without changing anything, use
-`npx @preplabs/rovara-code mcp install --client codex --print`. If you keep Codex's settings
+`npx @preplabsai/rovara-code mcp install --client codex --print`. If you keep Codex's settings
 somewhere other than `~/.codex` (with `CODEX_HOME`), `mcp install` follows it and edits the
 `config.toml` there. Run it in a terminal where `CODEX_HOME` is set the same way it is for Codex.
 
@@ -83,7 +83,7 @@ Remove it: delete the `[mcp_servers.agentx]` table from `~/.codex/config.toml`.
 Install:
 
 ```
-npx @preplabs/rovara-code mcp install --client cursor
+npx @preplabsai/rovara-code mcp install --client cursor
 ```
 
 It adds this to `~/.cursor/mcp.json`, keeps every other server, and saves the old file as
@@ -93,13 +93,13 @@ nothing and shows you the entry to add yourself. Manual setup: add it yourself:
 ```
 {
   "mcpServers": {
-    "agentx": { "command": "npx", "args": ["-y", "@preplabs/rovara-code", "mcp"] }
+    "agentx": { "command": "npx", "args": ["-y", "@preplabsai/rovara-code", "mcp"] }
   }
 }
 ```
 
 To see the exact entry without changing anything, use
-`npx @preplabs/rovara-code mcp install --client cursor --print`.
+`npx @preplabsai/rovara-code mcp install --client cursor --print`.
 
 Remove it: delete the `agentx` entry under `"mcpServers"` in `~/.cursor/mcp.json`.
 
@@ -174,7 +174,7 @@ agentx --env <env> admin task share-mode --task <task-id> --mode view|continue
 
 Every AgentX error says what to do next. The common ones:
 
-- `SIGN_IN_REQUIRED`: run `npx @preplabs/rovara-code login <your AgentX URL>`.
+- `SIGN_IN_REQUIRED`: run `npx @preplabsai/rovara-code login <your AgentX URL>`.
 - `PROJECT_ACCESS_DENIED`: join one of the project's Slack channels, or ask an admin.
 - `WORKSPACE_LIMIT`: close a task you no longer need.
-- `UPGRADE_REQUIRED`: run `npx -y @preplabs/rovara-code@latest mcp install --client <your tool>`.
+- `UPGRADE_REQUIRED`: run `npx -y @preplabsai/rovara-code@latest mcp install --client <your tool>`.

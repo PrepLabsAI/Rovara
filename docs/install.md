@@ -77,7 +77,7 @@ with `--release <dir>`. See [docs/releases.md](releases.md). Everything else bel
 ## With published templates (recommended)
 
 ```sh
-npx @preplabs/rovara-code --env <env> init --region <region>
+npx @preplabsai/rovara-code --env <env> init --region <region>
 ```
 
 ### The install page
@@ -147,7 +147,7 @@ open a browser, it says so and prints the address to open instead.
 Secrets never go in a flag's value: pass a file or an environment variable name. For example:
 
 ```sh
-npx @preplabs/rovara-code --env <env> init --region <region> --yes \
+npx @preplabsai/rovara-code --env <env> init --region <region> --yes \
   --github-account <org> --github-account-type organization \
   --alert-email <address> --budget 100 --budget-scope tag \
   --slack-bot-token-file <file> --slack-signing-secret-file <file> \
@@ -182,12 +182,12 @@ Use this when you want CDK's own diffs. It deploys the same release.
    git clone --branch v<version> --depth 1 https://github.com/PrepLabsAI/AgentX.git agentx-<version>
    ```
 
-   `<version>` is the version of the `agentx` you run (`npx @preplabs/rovara-code --version`).
+   `<version>` is the version of the `agentx` you run (`npx @preplabsai/rovara-code --version`).
 
 3. Run `init` with the cdk engine:
 
    ```sh
-   npx @preplabs/rovara-code --env <env> init --region <region> --engine cdk --source agentx-<version>
+   npx @preplabsai/rovara-code --env <env> init --region <region> --engine cdk --source agentx-<version>
    ```
 
    `init` runs `npm ci` and `npm run build` in the checkout, then `cdk synth` once to read which
@@ -227,7 +227,7 @@ access stack from it with their credentials; you deploy the rest with the operat
    release `v<version>`, and unpack it into a directory. Then:
 
    ```sh
-   npx @preplabs/rovara-code --env <env> init --export <dir> --region <region> \
+   npx @preplabsai/rovara-code --env <env> init --export <dir> --region <region> \
      --release <release dir> --operator-principal <your role or user ARN>
    ```
 
@@ -258,7 +258,7 @@ access stack from it with their credentials; you deploy the rest with the operat
 4. **You continue with the operator role:**
 
    ```sh
-   npx @preplabs/rovara-code --env <env> init --resume --region <region> --from-bundle <dir>
+   npx @preplabsai/rovara-code --env <env> init --resume --region <region> --from-bundle <dir>
    ```
 
    It reads `init-answers.json`, asks only the rest, checks the access stack exists, and runs

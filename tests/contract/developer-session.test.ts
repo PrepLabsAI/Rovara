@@ -112,7 +112,7 @@ describe("developer access tokens on this machine", () => {
   it("deletes the tokens and names the exact login command when the sign-in has ended (US4 scenario 5)", async () => {
     const { home, tokenStore } = await setup({ accessToken: "old", refreshToken: r("a"), expiresAt: T0 - 1 });
     const fetchImpl = vi.fn<typeof fetch>(async () => Response.json({ error: "invalid_grant", error_description: "your AgentX sign-in has ended; run agentx login again" }, { status: 400 }));
-    await expect(developerAccessToken({ home, tokenStore, fetch: fetchImpl, now: () => T0 }, "staging")).rejects.toThrow(`AUTH_REQUIRED: your AgentX sign-in for staging has ended (your AgentX sign-in has ended; run agentx login again); run npx @preplabs/rovara-code login ${URL_}`);
+    await expect(developerAccessToken({ home, tokenStore, fetch: fetchImpl, now: () => T0 }, "staging")).rejects.toThrow(`AUTH_REQUIRED: your AgentX sign-in for staging has ended (your AgentX sign-in has ended; run agentx login again); run npx @preplabsai/rovara-code login ${URL_}`);
     expect(await tokenStore.get(developerTokenKey(ISSUER))).toBeUndefined();
   });
 
@@ -141,7 +141,7 @@ describe("developer access tokens on this machine", () => {
   it("says how to sign in when this machine never signed in to the environment", async () => {
     const home = await mkdtemp(join(tmpdir(), "agentx-dev-session-"));
     dirs.push(home);
-    await expect(developerAccessToken({ home, tokenStore: new InMemoryTokenStore(), fetch: vi.fn<typeof fetch>(), now: () => T0 }, "staging")).rejects.toThrow("AUTH_REQUIRED: this computer is not signed in to AgentX environment staging; run npx @preplabs/rovara-code login <your AgentX URL>");
+    await expect(developerAccessToken({ home, tokenStore: new InMemoryTokenStore(), fetch: vi.fn<typeof fetch>(), now: () => T0 }, "staging")).rejects.toThrow("AUTH_REQUIRED: this computer is not signed in to AgentX environment staging; run npx @preplabsai/rovara-code login <your AgentX URL>");
     expect(await readDeveloperConfig(home)).toEqual({ environments: {} });
   });
   it("refreshes a still-valid token when asked to force it (an access token AgentX refused)", async () => {

@@ -3,7 +3,7 @@
 // and the MCP server share these words.
 //
 // This package never decides whether to show that command as `agentx ...` or as
-// `npx @preplabs/rovara-code@<version> ...` (that depends on the running CLI process, which only
+// `npx @preplabsai/rovara-code@<version> ...` (that depends on the running CLI process, which only
 // packages/cli can see: owner decision 2026-10-02). Every caller here passes a `CommandLineFormatter`
 // that already knows the answer.
 import { ToolError } from "./errors.js";

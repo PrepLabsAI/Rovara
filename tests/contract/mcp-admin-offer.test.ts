@@ -30,7 +30,7 @@ async function connect(offer: { current: AdminOffer }) {
   const names = async () => (await client.listTools()).tools.map((tool) => tool.name);
   return { client, names, changes: () => changes, server };
 }
-const signedOut = { admin: new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for AgentX", "run npx @preplabs/rovara-code login --admin") };
+const signedOut = { admin: new ToolError("ADMIN_REQUIRED", "this computer holds no unexpired admin sign-in for AgentX", "run npx @preplabsai/rovara-code login --admin") };
 
 describe("the admin tool offer (FR-028, A15)", () => {
   it("offers only the developer tools without an admin sign-in", async () => {
@@ -56,7 +56,7 @@ describe("the admin tool offer (FR-028, A15)", () => {
     const { client } = await connect({ current: signedOut });
     const result = await client.callTool({ name: "agentx_admin_probe", arguments: {} });
     expect(result.isError).toBe(true);
-    expect(toolError(result)).toEqual({ code: "ADMIN_REQUIRED", message: "this computer holds no unexpired admin sign-in for AgentX", next_step: "run npx @preplabs/rovara-code login --admin" });
+    expect(toolError(result)).toEqual({ code: "ADMIN_REQUIRED", message: "this computer holds no unexpired admin sign-in for AgentX", next_step: "run npx @preplabsai/rovara-code login --admin" });
   });
 
   it("says UPGRADE_REQUIRED when AgentX is too old for the admin tools", async () => {
@@ -198,7 +198,7 @@ const answer = (error: ToolError) => ({ isError: true, content: [{ type: "text",
 describe("the hidden-tool guard (A15)", () => {
   it("answers a call to a refused tool itself, and passes every other message through unchanged and in order", async () => {
     const { inner, sent, spies } = fakeTransport();
-    const refused = new ToolError("ADMIN_REQUIRED", "no admin sign-in", "run npx @preplabs/rovara-code login --admin");
+    const refused = new ToolError("ADMIN_REQUIRED", "no admin sign-in", "run npx @preplabsai/rovara-code login --admin");
     const guarded = guardTransport(inner, (name) => (name === "agentx_admin_probe" ? refused : undefined), answer);
     const seen: JSONRPCMessage[] = [];
     guarded.onmessage = (message) => { seen.push(message); };

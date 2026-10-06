@@ -77,9 +77,9 @@ describe("the admin client's refusals and outages (A14, secrets)", () => {
 
   it("maps AUTH_REQUIRED to ADMIN_REQUIRED and any other FORBIDDEN to ADMIN_REQUIRED with the sign-in step", async () => {
     const expired = httpAdminClient({ session, fetch: answering(403, { error: { code: "AUTH_REQUIRED", message: "expired" } }) });
-    await expect(expired.me()).rejects.toMatchObject({ code: "ADMIN_REQUIRED", nextStep: "run npx @preplabs/rovara-code login --admin" });
+    await expect(expired.me()).rejects.toMatchObject({ code: "ADMIN_REQUIRED", nextStep: "run npx @preplabsai/rovara-code login --admin" });
     const forbidden = httpAdminClient({ session, fetch: answering(403, { error: { code: "FORBIDDEN", message: "not an admin" } }) });
-    await expect(forbidden.me()).rejects.toMatchObject({ code: "ADMIN_REQUIRED", nextStep: "run npx @preplabs/rovara-code login --admin" });
+    await expect(forbidden.me()).rejects.toMatchObject({ code: "ADMIN_REQUIRED", nextStep: "run npx @preplabsai/rovara-code login --admin" });
   });
 
   it("tries a 5xx again, and gives up after its tries with CONTROL_PLANE_UNAVAILABLE", async () => {
@@ -152,7 +152,7 @@ describe("the admin API version (A1)", () => {
 describe("the configuration's admin API version (A1)", () => {
   it("reads adminApiVersion when the control plane sends it, and leaves it out when it does not", async () => {
     const reading = (body: unknown) => httpControlPlaneClient({
-      session: async () => ({ baseUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", accessToken: "t", signInCommand: "npx @preplabs/rovara-code login x" }),
+      session: async () => ({ baseUrl: "https://abc123.execute-api.us-east-1.amazonaws.com", accessToken: "t", signInCommand: "npx @preplabsai/rovara-code login x" }),
       fetch: answering(200, body),
     });
     expect(await reading({ env: "staging", apiVersion: "1.2", adminApiVersion: "1.0" }).configuration()).toEqual({ env: "staging", apiVersion: "1.2", adminApiVersion: "1.0", baseUrl: "https://abc123.execute-api.us-east-1.amazonaws.com" });

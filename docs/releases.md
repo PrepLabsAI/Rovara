@@ -2,7 +2,7 @@
 
 A release is a tagged, versioned bundle: the CloudFormation templates the installer deploys, the
 code packages those templates reference, two container images, and the Rovara Code CLI on npm
-(`@preplabs/rovara-code`, command `rovara`, compatibility alias `agentx`). All of
+(`@preplabsai/rovara-code`, command `rovara`, compatibility alias `agentx`). All of
 it is built from the same tagged commit, so a release is always self-consistent.
 
 ## What a release contains
@@ -85,7 +85,7 @@ deployment.
    Public itself requires to let anything push at all (`ecr-public:GetAuthorizationToken` and
    `sts:GetServiceBearerToken`).
 3. **The npm package: owner setup required.** The selected package is
-   `@preplabs/rovara-code`. Verify that the release owner controls the `preplabs` npm
+   `@preplabsai/rovara-code`. Verify that the release owner controls the `preplabs` npm
    organization; GitHub organization membership does not grant npm organization access.
    A registry 404 does not reserve a package name. Before turning on
    `AGENTX_PUBLISH_ENABLED` (step 6 below), prepare the first version:
@@ -93,14 +93,14 @@ deployment.
       packages such as `@agentx/contracts` are only importable once built), then
       `npm run release:pack-cli -- --version <x.y.z> --out ./cli-release` (use the exact version
       you are about to tag, for example `0.1.0`). This writes a tarball named
-      `./cli-release/preplabs-rovara-code-<x.y.z>.tgz`.
+      `./cli-release/preplabsai-rovara-code-<x.y.z>.tgz`.
    2. `npm login --registry=https://registry.npmjs.org`, signed in with publishing
       permission for the `preplabs` organization. Check with `npm whoami` and
       `npm org ls preplabs`.
    3. Inspect the packed files and obtain the release owner's approval of the exact
       artifact and version before public publication. Verify the matching deployment
       bundle and images are available to the intended users, then publish with
-      `npm publish ./cli-release/preplabs-rovara-code-<x.y.z>.tgz --access public`.
+      `npm publish ./cli-release/preplabsai-rovara-code-<x.y.z>.tgz --access public`.
    4. On the package's npm page, turn on "Trusted Publisher" (GitHub Actions,
       `PrepLabsAI/AgentX`, `release.yml`), so every later version can publish itself with no
       stored password.
@@ -127,7 +127,7 @@ deployment.
 6. **Repository variables: remaining.** Once the above is settled, set these under Settings →
    Secrets and variables → Actions → Variables, saving the last one for last:
    `AGENTX_PUBLISH_ROLE_ARN`, `AGENTX_ECR_PUBLIC_ALIAS`,
-   `AGENTX_NPM_PACKAGE=@preplabs/rovara-code`, then
+   `AGENTX_NPM_PACKAGE=@preplabsai/rovara-code`, then
    `AGENTX_PUBLISH_ENABLED=true`.
 7. **A tag protection ruleset: recommended.** The workflow checks that a tag's *name* matches
    `vX.Y.Z` and that its commit is on mainline; it does not check who pushed it. That mainline

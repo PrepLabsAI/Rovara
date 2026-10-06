@@ -24,7 +24,7 @@ const SEEDED: Record<string, string> = {
   "error-code": "AgentX error [INTERNAL_ERROR]: the step failed",
   "finished-on-failed-run": "Finished",
   "day-two-without-env": "A test alarm any time: agentx alerts test",
-  "unpublished-package": "Developers sign in with: npx @preplabs/rovara-code login https://abc.example.com",
+  "unpublished-package": "Developers sign in with: npx @preplabsai/rovara-code login https://abc.example.com",
   "terminal-instruction": "Once it is installed, run agentx init --env staging --region us-east-1 again.",
 };
 
@@ -65,9 +65,9 @@ describe("copy-lint rules", () => {
   });
 
   it("allows a versioned published invocation and does not flag it as unpublished", () => {
-    expect(lintCopy([{ where: "details", text: "npx @preplabs/rovara-code@1.2.3 status --env production", context: "details" as const }])).toEqual([]);
+    expect(lintCopy([{ where: "details", text: "npx @preplabsai/rovara-code@1.2.3 status --env production", context: "details" as const }])).toEqual([]);
     // Only the package itself: another package whose name starts the same is not it.
-    expect(lintCopy([{ where: "page", text: "Install @preplabs/rovara-codetools first.", context: "page" as const }])).toEqual([]);
+    expect(lintCopy([{ where: "page", text: "Install @preplabsai/rovara-codetools first.", context: "page" as const }])).toEqual([]);
   });
 
   it("allows a command on Stop for now, the lost connection notice and the ready screen, but never without --env", () => {
