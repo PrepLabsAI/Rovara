@@ -29,10 +29,11 @@ export const WIZARD_CSP = [
 /** The stylesheet and the module each carry the session token in their own URL, because the server
  * refuses every request without it; the module reads it back from `import.meta.url`, so the page
  * needs no inline script to hand it over. */
-export function wizardHtml(token: string): string {
+export function wizardHtml(token: string, options: { poll?: boolean } = {}): string {
   const query = `${WIZARD_TOKEN_QUERY}=${encodeURIComponent(token)}`;
   const stylesheet = `/app.css?${query}`;
-  const script = `/app.js?${query}`;
+  // The page in the cloud polls for the state instead of streaming it (setup-handler.ts).
+  const script = `/app.js?${query}${options.poll === true ? "&poll=1" : ""}`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -542,16 +543,21 @@ setInterval(() => {
   for (const node of document.querySelectorAll("[data-until]")) node.textContent = untilText(node);
 }, 1000);
 
-const source = new EventSource("/events?" + ${JSON.stringify(WIZARD_TOKEN_QUERY)} + "=" + encodeURIComponent(token));
-source.addEventListener("snapshot", (event) => {
-  const snapshot = JSON.parse(event.data);
-  byId("log").replaceChildren(snapshot.log.join("\\n") + (snapshot.log.length > 0 ? "\\n" : ""));
+let shownLog = null;
+function showSnapshot(snapshot) {
+  // Polled every few seconds: the log pane is rebuilt only when it changed, so its scroll stays put.
+  const text = snapshot.log.join("\\n") + (snapshot.log.length > 0 ? "\\n" : "");
+  if (text !== shownLog) {
+    const pane = byId("log");
+    const atBottom = pane.scrollHeight - pane.scrollTop - pane.clientHeight < 40;
+    pane.replaceChildren(text);
+    if (atBottom) pane.scrollTop = pane.scrollHeight;
+    shownLog = text;
+  }
   render(snapshot);
-});
-source.addEventListener("state", (event) => render(JSON.parse(event.data)));
-source.addEventListener("log", (event) => appendLog(JSON.parse(event.data)));
-source.addEventListener("closed", () => {
-  source.close();
+}
+
+function installerHasClosed() {
   installerClosed = true;
   show("question", false);
   const ready = lastState && (lastState.cards ?? []).some((card) => card.id === "ready");
@@ -559,10 +565,41 @@ source.addEventListener("closed", () => {
   byId("closed-note").textContent = ready ? "The installer has closed. Everything on this page is also in " + logPath + "." : "The installer has stopped. You can close this tab.";
   show("closed-note", true);
   if (lastState) render(lastState);
-});
-source.addEventListener("error", () => {
-  if (source.readyState !== EventSource.CLOSED || installerClosed) return;
-  byId("closed-note").textContent = "Lost the connection to the installer. If it stopped, start the install again in a terminal; it continues where it left off.";
-  show("closed-note", true);
-});
+}
+
+// The page in the cloud (?poll=1 on this module's own URL) asks for the state every POLL_MS: the
+// setup page's API cannot hold an event stream open. On this computer, the server streams it.
+const POLL_MS = 2000;
+if (new URL(import.meta.url).searchParams.get("poll") === "1") {
+  const poll = () => {
+    fetch("/state?" + ${JSON.stringify(WIZARD_TOKEN_QUERY)} + "=" + encodeURIComponent(token)).then((response) => {
+      if (!response.ok) throw new Error("HTTP " + response.status);
+      return response.json();
+    }).then((reply) => {
+      show("closed-note", false);
+      showSnapshot(reply);
+      if (reply.installerClosed) installerHasClosed();
+      else setTimeout(poll, POLL_MS);
+    }).catch(() => {
+      byId("closed-note").textContent = "Lost the connection to the installer. Trying again.";
+      show("closed-note", true);
+      setTimeout(poll, POLL_MS);
+    });
+  };
+  poll();
+} else {
+  const source = new EventSource("/events?" + ${JSON.stringify(WIZARD_TOKEN_QUERY)} + "=" + encodeURIComponent(token));
+  source.addEventListener("snapshot", (event) => showSnapshot(JSON.parse(event.data)));
+  source.addEventListener("state", (event) => render(JSON.parse(event.data)));
+  source.addEventListener("log", (event) => appendLog(JSON.parse(event.data)));
+  source.addEventListener("closed", () => {
+    source.close();
+    installerHasClosed();
+  });
+  source.addEventListener("error", () => {
+    if (source.readyState !== EventSource.CLOSED || installerClosed) return;
+    byId("closed-note").textContent = "Lost the connection to the installer. If it stopped, start the install again in a terminal; it continues where it left off.";
+    show("closed-note", true);
+  });
+}
 `;
