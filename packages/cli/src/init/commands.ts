@@ -6,6 +6,7 @@ import { BudgetsClient } from "@aws-sdk/client-budgets";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
 import { CognitoIdentityProviderClient } from "@aws-sdk/client-cognito-identity-provider";
+import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SNSClient } from "@aws-sdk/client-sns";
 import { SSMClient } from "@aws-sdk/client-ssm";
@@ -60,9 +61,10 @@ import { browserAvailable, NO_BROWSER_LINE, resolveUiMode } from "./ui-mode.js";
 import { accountChecksCard, awsSignInCard, prerequisitesCard, readyCard, releaseCard } from "./ui/cards.js";
 import { childActionWatcher } from "./ui/child-actions.js";
 import { askFailureAction, failureScreen, isRetryableStep, plainReason, STOPPED_OUTCOME } from "./ui/failure.js";
-import { startInstallWizard, type InstallWizard } from "./ui/index.js";
+import { startCloudInstallWizard, startInstallWizard, type InstallWizard } from "./ui/index.js";
 import { READY_LINE, stageLine, STEP_PLAN, stoppedLine, terminalStepLine } from "./ui/journey.js";
 import type { WizardPlan, WizardResume } from "./ui/protocol.js";
+import { dynamoSetupStore, type SetupStore } from "./ui/setup-store.js";
 
 export interface InitCliDependencies {
   /** identity, store, deployer, templatesClients, commandRunner: the same seam agentx deploy uses. */
@@ -96,6 +98,10 @@ export interface InitCliDependencies {
   /** Spec 048 FR-015: the AWS account's alias, for the account card. Defaults to `realAccountAlias`
    * (an IAM call); every test injects its own (usually `async () => undefined`) so none reaches IAM. */
   accountAlias?: () => Promise<string | undefined>;
+  /** The setup table's store for --setup-table (tests: memorySetupStore); defaults to DynamoDB. */
+  setupStore?: (table: string) => SetupStore;
+  /** The relay's timers for --setup-table (tests make them short). */
+  setupRelayTiming?: { stateWriteMs: number; pollMs: number };
 }
 
 export interface InitOptions {
@@ -110,6 +116,9 @@ export interface InitOptions {
   /** --ui / --no-ui. Undefined means neither was given: the page in an interactive terminal that
    * can open a browser, else the terminal (resolveUiMode). */
   ui?: boolean;
+  /** --setup-table and --setup-url: the install page is the setup page in the cloud, and its
+   * questions and answers go through this table (the installer job, `agentx init --cloud`). */
+  cloud?: { table: string; url: string };
   resume: boolean;
   flags: InitFlags;
   secretFlags: SecretFlags;
@@ -543,7 +552,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   // FR-001: --ui, --no-ui, or (neither given) the page in an interactive terminal on a machine
   // that can open a browser. --no-browser reads as "no browser here" for the default (Q2).
   const uiMode = resolveUiMode({
-    ui: options.ui, yes: options.yes, injectedPrompter: deps.prompter !== undefined,
+    ui: options.cloud !== undefined ? true : options.ui, yes: options.yes, injectedPrompter: deps.prompter !== undefined,
     interactive: (deps.isInteractive ?? (() => process.stdin.isTTY === true))(),
     browser: options.browser && (deps.browserAvailable ?? (() => browserAvailable({ platform: process.platform, env: processEnv })))(),
   });
@@ -551,13 +560,22 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   if (uiMode.mode === "page") {
     if (options.yes) throw agentXError("CONFIG_INVALID", "agentx init --ui asks its questions on a page; --yes answers them without asking. Use one or the other");
     session.log = await openInitLog(initLogPath(services.home, env), { onError: (line) => services.stderr.write(`${line}\n`) });
-    const wizard = await startInstallWizard({
-      env,
-      write: (line) => services.stderr.write(`${line}\n`),
-      logPath: session.log.path,
-      ...(options.browser ? { openBrowser: neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) } : {}),
-    });
-    session.log.hide(wizard.token);
+    const wizard = options.cloud === undefined
+      ? await startInstallWizard({
+        env,
+        write: (line) => services.stderr.write(`${line}\n`),
+        logPath: session.log.path,
+        ...(options.browser ? { openBrowser: neverThrowingBrowser(deps.openBrowser ?? openSystemBrowser, write) } : {}),
+      })
+      : startCloudInstallWizard({
+        env,
+        store: (deps.setupStore ?? ((table) => dynamoSetupStore({ client: new DynamoDBClient({}), table, env })))(options.cloud.table),
+        url: options.cloud.url,
+        write: (line) => services.stderr.write(`${line}\n`),
+        logPath: session.log.path,
+        ...(deps.setupRelayTiming === undefined ? {} : { timing: deps.setupRelayTiming }),
+      });
+    if (wizard.token !== undefined) session.log.hide(wizard.token);
     session.wizard = wizard;
     session.watcher = childActionWatcher((action) => wizard.surface.card(awsSignInCard(action)));
     prompter = deps.prompter ?? wizard.prompter;

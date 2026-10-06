@@ -962,6 +962,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
     .option("--no-browser", "print every address to open instead of opening a browser, and ask in the terminal unless --ui is given")
     .option("--ui", "ask every question on a page on 127.0.0.1 (the default in an interactive terminal that can open a browser)")
     .option("--no-ui", "ask every question in the terminal")
+    .option("--setup-table <name>", "the installer job in the cloud: ask every question on the setup page, through this DynamoDB table (needs --setup-url)")
+    .option("--setup-url <url>", "the setup page's address, printed for the job's log (with --setup-table)")
     .addOption(new Option("--identity <mode>", "identity provider").choices(["cognito", "oidc"]).default("cognito"))
     .option("--oidc-issuer <url>", "your OIDC provider's issuer URL (required with --identity oidc)")
     .option("--oidc-audience <audience>", "your OIDC provider's audience (required with --identity oidc)")
@@ -1268,6 +1270,7 @@ interface InitCommandOptions extends SignInCommandOptions {
   resume: boolean; yes: boolean; browser: boolean; fromBundle?: string; stopAfter?: string;
   /** --ui / --no-ui. Undefined when neither was given (resolveUiMode decides). */
   ui?: boolean;
+  setupTable?: string; setupUrl?: string;
   identity: "cognito" | "oidc"; oidcIssuer?: string; oidcAudience?: string; oidcClientId?: string; adminClaim?: string; adminValues?: string;
   modelProvider?: string; orchestratorProvider?: string; classifierProvider?: string; workerProvider?: string; openrouterSecretArn?: string; openrouterProviders?: string;
   openrouterKeyFile?: string; openrouterKeyEnv?: string;
@@ -1339,6 +1342,12 @@ function initOptions(globals: GlobalOptions, options: InitCommandOptions, comman
   if (preMadeGiven && (appId === undefined || installationId === undefined || keySource === undefined)) {
     throw agentXError("CONFIG_INVALID", "--github-app-id, --github-installation-id and --github-private-key-file (or --github-private-key-env) go together");
   }
+  if ((options.setupTable === undefined) !== (options.setupUrl === undefined)) {
+    throw agentXError("CONFIG_INVALID", "--setup-table and --setup-url go together");
+  }
+  if (options.setupTable !== undefined && (options.ui === false || options.yes)) {
+    throw agentXError("CONFIG_INVALID", "--setup-table asks every question on the setup page; leave out --no-ui and --yes");
+  }
   const signin = signInFlags(options);
   const secretFlags = definedEntries<SecretFlags>({
     slackBotToken: secretSource(options.slackBotTokenFile, options.slackBotTokenEnv),
@@ -1356,6 +1365,7 @@ function initOptions(globals: GlobalOptions, options: InitCommandOptions, comman
     ...(options.fromBundle === undefined ? {} : { fromBundle: options.fromBundle }),
     yes: options.yes, browser: options.browser, resume: options.resume,
     ...(options.ui === undefined ? {} : { ui: options.ui }),
+    ...(options.setupTable === undefined || options.setupUrl === undefined ? {} : { cloud: { table: options.setupTable, url: options.setupUrl } }),
     flags,
     secretFlags,
     signinFlags: definedEntries<SigninFlags>({ methods: options.signin, ...signin.flags }),

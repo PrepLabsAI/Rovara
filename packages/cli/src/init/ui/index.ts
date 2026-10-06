@@ -5,6 +5,7 @@
 // Nothing about what init does changes here. This module is injected through the seams init already
 // has -- `Prompter`, `onEvent`, `write(line)` and `openBrowser(url)` -- so the terminal path and
 // `--yes` are untouched.
+import { agentXError } from "@agentx/contracts";
 import type { InstallSurface, OpenManifestHost } from "../context.js";
 import type { Prompter } from "../prompts.js";
 import type { InitEvent } from "../steps.js";
@@ -13,7 +14,9 @@ import { linkLabel } from "./cards.js";
 import { minutesText, totalMinutes, type JourneyPhaseId } from "./journey.js";
 import { browserPrompter } from "./prompter.js";
 import type { WizardCommand, WizardFailure, WizardPhase, WizardPlan, WizardResume } from "./protocol.js";
+import { startHubRelay } from "./relay.js";
 import { startWizardServer, type WizardServer } from "./server.js";
+import type { SetupStore } from "./setup-store.js";
 import { createWizardHub, isShowableLink, type WizardHub } from "./state.js";
 
 /** Q3: how long a question, or a page button, may wait with no page connected before the terminal
@@ -51,8 +54,9 @@ export function pageClosedReminder(input: { hub: WizardHub; url: string; write: 
 export interface InstallWizard {
   /** The loopback address the wizard was opened at, session token and all. */
   url: string;
-  /** The session token alone (url already carries it in its query string). */
-  token: string;
+  /** The session token alone (url already carries it in its query string). The page in the cloud
+   * has none of its own here: its function holds it. */
+  token?: string;
   /** Where the full log is, when the run was given one (FR-059, FR-070). */
   logPath?: string;
   prompter: Prompter;
@@ -132,11 +136,57 @@ export async function startInstallWizard(input: {
   const timer = setInterval(() => reminder.check(), REMINDER_CHECK_MS);
   timer.unref();
 
-  let closed = false;
-  return {
+  return wizardOn(hub, {
     url: server.url,
     token: server.token,
     ...(input.logPath === undefined ? {} : { logPath: input.logPath }),
+    manifestHost: async (manifest) => server.mountManifest(manifest),
+    async close() {
+      clearInterval(timer);
+      // The hub first: it sends the page its "closed" event over the streams the server then ends.
+      hub.close();
+      await server.close();
+    },
+  });
+}
+
+/** `agentx init --cloud`: the same wizard, with the page served by the setup page's function and
+ * everything in between through the setup table (relay.ts). Nothing is served from this machine. */
+export function startCloudInstallWizard(input: {
+  env: string;
+  store: SetupStore;
+  /** The setup page's address, printed for the job's log. */
+  url: string;
+  write: (line: string) => void;
+  logPath?: string;
+  /** The relay's timers (tests make them short). */
+  timing?: { stateWriteMs: number; pollMs: number };
+}): InstallWizard {
+  const hub = createWizardHub(input.env, { ...(input.logPath === undefined ? {} : { logPath: input.logPath }) });
+  const relay = startHubRelay({ hub, store: input.store, warn: input.write, ...input.timing });
+  input.write(`The AgentX installer is on its setup page: ${input.url}`);
+  return wizardOn(hub, {
+    url: input.url,
+    ...(input.logPath === undefined ? {} : { logPath: input.logPath }),
+    manifestHost: async () => {
+      throw agentXError("CONFIG_INVALID", "the setup page cannot make the GitHub App yet; pass --github-app-id, --github-installation-id and --github-private-key-file for an app made beforehand");
+    },
+    async close() {
+      hub.close();
+      await relay.stop();
+    },
+  });
+}
+
+/** The wizard around a hub, whichever way its page is served. */
+function wizardOn(hub: WizardHub, transport: {
+  url: string; token?: string; logPath?: string; manifestHost: OpenManifestHost; close(): Promise<void>;
+}): InstallWizard {
+  let closed = false;
+  return {
+    url: transport.url,
+    ...(transport.token === undefined ? {} : { token: transport.token }),
+    ...(transport.logPath === undefined ? {} : { logPath: transport.logPath }),
     hub,
     prompter: browserPrompter(hub),
     surface: { card: (card) => hub.showCard(card), clearLink: () => hub.clearLink() },
@@ -146,7 +196,7 @@ export async function startInstallWizard(input: {
       // would not open does.
       return isShowableLink(url);
     },
-    manifestHost: async (input) => server.mountManifest(input),
+    manifestHost: transport.manifestHost,
     log: (line) => hub.log(line),
     event: (event) => hub.applyEvent(event),
     setSteps: (steps) => hub.setSteps(steps),
@@ -162,10 +212,7 @@ export async function startInstallWizard(input: {
     async close() {
       if (closed) return;
       closed = true;
-      clearInterval(timer);
-      // The hub first: it sends the page its "closed" event over the streams the server then ends.
-      hub.close();
-      await server.close();
+      await transport.close();
     },
   };
 }

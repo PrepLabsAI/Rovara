@@ -23,7 +23,7 @@ import { WIZARD_TOKEN_HEADER, WIZARD_TOKEN_QUERY, type AnswerReply } from "./pro
 import type { WizardHub, WizardListener } from "./state.js";
 
 /** An answer body larger than this is refused unread; the biggest real one is a PEM private key. */
-const MAX_BODY_BYTES = 64 * 1024;
+export const MAX_BODY_BYTES = 64 * 1024;
 /** Keeps a browser from dropping an idle event stream while a deploy step runs for minutes. */
 const HEARTBEAT_MS = 20_000;
 
@@ -65,7 +65,7 @@ export interface WizardServer {
   mountManifest(input: Parameters<OpenManifestHost>[0]): ManifestHost;
 }
 
-const SECURITY_HEADERS: Record<string, string> = {
+export const SECURITY_HEADERS: Record<string, string> = {
   "cache-control": "no-store",
   "content-security-policy": WIZARD_CSP,
   "referrer-policy": "same-origin",
@@ -91,7 +91,7 @@ export function refusalReason(input: {
   host: string | undefined; origin: string | undefined; referer: string | undefined; secFetchSite: string | undefined;
   token: string | undefined; expectedOrigin: string; expectedToken: string;
 }): { status: number; reason: string } | undefined {
-  const expectedHost = input.expectedOrigin.slice("http://".length);
+  const expectedHost = new URL(input.expectedOrigin).host;
   if (input.host !== expectedHost) return { status: 403, reason: "wrong Host" };
   if (input.secFetchSite !== undefined && input.secFetchSite !== "same-origin" && input.secFetchSite !== "none") {
     return { status: 403, reason: "cross-site request" };
