@@ -84,7 +84,7 @@ export async function signedInClient(harness: Harness, who: Developer | undefine
   const client = new Client({ name: "claude-code", version: "2.1.0" });
   await client.connect(clientSide);
   // Ruling F3: listing first makes the client validate every structuredContent it gets back.
-  expect((await client.listTools()).tools).toHaveLength(11);
+  expect((await client.listTools()).tools).toHaveLength(15);
   const answers: string[] = [];
   const tool = async (name: string, args: Record<string, unknown> = {}): Promise<ToolAnswer> => {
     const result = await client.callTool({ name, arguments: args });
