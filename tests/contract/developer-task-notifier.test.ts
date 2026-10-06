@@ -1,7 +1,7 @@
 // tests/contract/developer-task-notifier.test.ts
 // Spec 025 FR-032, FR-034, C7 to C9: the notifier, fed from the fake table's writes, posting to a
 // fake Slack. The queue is an array; a failed notice stays in it with its attempt count.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import { indexExpiresAt } from "@agentx/contracts";
@@ -30,6 +30,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
   documentClient?: (db: FakeDynamoDb) => Client;
   readArtifact?: (key: string) => Promise<string>;
   createPlanCanvas?: (input: { channel: string; taskId: string; title: string; version: number; markdown: string }) => Promise<{ canvasId: string; permalink: string }>;
+  closeTaskCanvases?: (taskId: string, expectedManifestDigest?: string) => Promise<{ status: "COMPLETE" | "ARCHIVE_PENDING"; reason?: string }>;
 } = {}) {
   const harness = await createDeveloperTaskBroker();
   const postOverride = options.post;
@@ -55,6 +56,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
     }),
     ...(options.readArtifact === undefined ? {} : { readArtifact: options.readArtifact }),
     ...(options.createPlanCanvas === undefined ? {} : { createPlanCanvas: options.createPlanCanvas }),
+    ...(options.closeTaskCanvases === undefined ? {} : { closeTaskCanvases: options.closeTaskCanvases }),
     now: () => clock, log: (entry) => logs.push(entry), deliveryFailed,
   });
   /** Stream to queue, then every queued notice once; failed ones stay queued. */
@@ -76,9 +78,34 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
 }
 
 describe("the shared thread (FR-032, US3 scenario 1)", () => {
+  it("retries owner re-drives against the supplied manifest digest until closeout completes", async () => {
+    const manifestDigest = "a".repeat(64);
+    let closeoutAttempt = 0;
+    const closeoutCalls: Array<[string, string | undefined]> = [];
+    const closeTaskCanvases = async (taskId: string, digest?: string) => {
+      closeoutCalls.push([taskId, digest]);
+      closeoutAttempt += 1;
+      return closeoutAttempt === 1 ? { status: "ARCHIVE_PENDING" as const, reason: "timeout" } : { status: "COMPLETE" as const };
+    };
+    const h = await notifierHarness({ shareToChannel: false, workflow: true }, { closeTaskCanvases });
+    const pendingNotice: Notice = { id: `${h.taskId}:canvas_closeout_retry:req`, kind: "canvas_closeout", taskId: h.taskId,
+      at: new Date(h.now() - 2 * 60 * 60 * 1000).toISOString(), manifestDigest };
+    const deliver = async () => h.handle({ Records: [{ eventSource: "aws:sqs", messageId: "closeout", receiptHandle: "receipt",
+      body: JSON.stringify(pendingNotice), attributes: { ApproximateReceiveCount: "1" } }] });
+    const first = await deliver();
+    expect(first.batchItemFailures).toEqual([{ itemIdentifier: "closeout" }]);
+    expect(h.retryLater).toHaveBeenCalledWith("receipt", expect.any(Number));
+    const second = await deliver();
+    expect(second.batchItemFailures).toEqual([]);
+    expect(closeoutCalls).toEqual([[h.taskId, manifestDigest], [h.taskId, manifestDigest]]);
+  });
+
   it("posts a short plan-ready note with a link to the saved Canvas details", async () => {
     const plan = "# Goal\nFix retry handling.\n\n## Checks\nRun the retry regression test.";
-    const createPlanCanvas = vi.fn(async () => ({ canvasId: "F12345678", permalink: "https://acme.slack.com/docs/T123/F12345678" }));
+    const createPlanCanvas = vi.fn(async (_input, onCreated?: (canvasId: string) => Promise<void>) => {
+      await onCreated?.("F12345678");
+      return { canvasId: "F12345678", permalink: "https://acme.slack.com/docs/T123/F12345678" };
+    });
     const h = await notifierHarness({ shareToChannel: true, workflow: true }, {
       readArtifact: async () => plan,
       createPlanCanvas,
@@ -93,7 +120,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.pump();
 
     const message = h.posts.at(-1)!;
-    expect(createPlanCanvas).toHaveBeenCalledWith(expect.objectContaining({ channel: SLACK_CHANNEL, taskId: h.taskId, title: "Fix the flaky retry test", version: 1, markdown: plan }));
+    expect(createPlanCanvas).toHaveBeenCalledWith(expect.objectContaining({ channel: SLACK_CHANNEL, taskId: h.taskId, title: "Fix the flaky retry test", version: 1, markdown: plan }), expect.any(Function));
     expect(message.text).toBe("The coding plan is ready. No code changes have started. <https://acme.slack.com/docs/T123/F12345678|Read and approve this step>.");
     expect(message.text).not.toContain("Fix retry handling");
     expect(message.blocks).toHaveLength(2);
@@ -102,6 +129,14 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     const approvalValue = parseAction(actions[0]!.value);
     expect(approvalValue).toMatchObject({ taskId: h.taskId, revision: 2, decision: "APPROVE" });
     expect(typeof approvalValue.digest === "string" && /^[a-f0-9]{64}$/.test(approvalValue.digest)).toBe(true);
+    const saved = h.db.get(`DEVTASK#${h.taskId}`, "META") as { workflow: { artifacts: Array<{ id: string; objectKey: string; type: string }>; canvasLineage?: Array<Record<string, unknown>> } };
+    const planArtifact = saved.workflow.artifacts?.find((artifact) => artifact.type === "plan");
+    expect(planArtifact).toBeDefined();
+    expect(saved.workflow.canvasLineage).toEqual([expect.objectContaining({
+      key: `PLAN_REVIEW:2:${planArtifact!.id}`, workflowRevision: 2, artifactId: planArtifact!.id, artifactRef: planArtifact!.objectKey,
+      artifactDigest: createHash("sha256").update(plan).digest("hex"), state: "CREATED", canvasId: "F12345678",
+      permalink: "https://acme.slack.com/docs/T123/F12345678",
+    })]);
   });
 
   it("shows the current requirements document in the Full path approval message", async () => {
@@ -124,7 +159,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.pump();
 
     const message = h.posts.at(-1)!;
-    expect(createPlanCanvas).toHaveBeenCalledWith(expect.objectContaining({ markdown: requirements }));
+    expect(createPlanCanvas).toHaveBeenCalledWith(expect.objectContaining({ markdown: requirements }), expect.any(Function));
     expect(message.text).toBe("The requirements document is ready. No code changes have started. <https://acme.slack.com/docs/T123/F22345678|Read and approve this step>.");
     const actions = (message.blocks?.[1] as { elements: Array<{ text: { text: string } }> }).elements;
     expect(actions[0]?.text.text).toBe("Approve this step");

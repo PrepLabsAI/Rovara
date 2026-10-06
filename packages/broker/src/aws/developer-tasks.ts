@@ -7,6 +7,7 @@ import {
   CHANNEL_PRIVACY_NOT_SET_UP,
   PRIVATE_CHANNEL_NOT_A_MEMBER,
   AdminShareModeRequestSchema,
+  CanvasCloseoutRetryRequestSchema,
   AgentXError,
   CHANNEL_TURNS_MAX,
   ContinueDeveloperTaskRequestSchema,
@@ -1150,6 +1151,42 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
   return { task: view };
 }
 
+/** Re-drive only the exact immutable manifest already stored on this owned task. */
+async function retryTaskCanvasCloseout(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ status: "retry_requested"; manifestDigest: string }> {
+  const request = parse(CanvasCloseoutRetryRequestSchema, value, deps, "canvas-closeout-retry");
+  const task = await loadOwnedTask(deps, caller, taskId);
+  const closeout = task.workflow?.canvasCloseout;
+  if (closeout === undefined || closeout.status !== "ARCHIVE_PENDING") {
+    throw agentXError("CONFIG_INVALID", "this task has no retryable Canvas closeout");
+  }
+  if (closeout.manifestDigest !== request.manifestDigest) {
+    throw agentXError("IDEMPOTENCY_CONFLICT", "the requested closeout manifest is not the task's current verified snapshot");
+  }
+  const existing = task.canvasCloseoutRetry;
+  if (existing?.requestId === request.requestId && existing.manifestDigest !== request.manifestDigest) {
+    throw agentXError("IDEMPOTENCY_CONFLICT", "this request_id was already used for a different closeout manifest");
+  }
+  const retry = { requestId: request.requestId, manifestDigest: request.manifestDigest,
+    actorId: task.workflow!.ownerId, requestedAt: iso(deps), dispatchAttempt: (existing?.dispatchAttempt ?? 0) + 1 };
+  try {
+    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: taskKey(taskId),
+      UpdateExpression: "SET canvasCloseoutRetry = :retry",
+      ConditionExpression: "workflow.canvasCloseout.manifestDigest = :digest AND workflow.canvasCloseout.#status = :pending",
+      ExpressionAttributeNames: { "#status": "status" },
+      ExpressionAttributeValues: { ":retry": retry, ":digest": request.manifestDigest, ":pending": "ARCHIVE_PENDING" },
+    }));
+    return { status: "retry_requested", manifestDigest: request.manifestDigest };
+  } catch (error) {
+    if (!isConditional(error)) throw error;
+    const fresh = await loadOwnedTask(deps, caller, taskId);
+    if (fresh.canvasCloseoutRetry?.requestId === request.requestId && fresh.canvasCloseoutRetry.manifestDigest === request.manifestDigest
+      && fresh.canvasCloseoutRetry.dispatchAttempt >= retry.dispatchAttempt) {
+      return { status: "retry_requested", manifestDigest: request.manifestDigest };
+    }
+    throw agentXError("WORKSPACE_BUSY", "the task closeout changed while requesting its retry; refresh the task and try again");
+  }
+}
+
 async function startTaskWorkflowReview(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "workflow-review");
   const task = await loadOwnedTask(deps, caller, taskId);
@@ -1899,7 +1936,7 @@ export async function adminShareMode(deps: ShareModeDependencies, admin: ShareAd
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
   if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|workflow\/decision|workflow\/feedback-decision|workflow\/retry|workflow\/review))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|workflow\/decision|workflow\/feedback-decision|workflow\/retry|workflow\/review|canvas-closeout\/retry))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
@@ -1907,6 +1944,7 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/decision") return decideTaskWorkflow(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/feedback-decision") return decideTaskFeedback(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/retry") return retryTaskWorkflow(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "canvas-closeout/retry") return retryTaskCanvasCloseout(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/review") return startTaskWorkflowReview(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "cancel") return cancelTask(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "close") return closeTask(deps, caller, taskId, body(request));

@@ -75,6 +75,7 @@ export async function createTaskPlanCanvas(
   botToken: string,
   input: { channel: string; taskId: string; title: string; version: number; markdown: string },
   fetchImplementation: typeof fetch = fetch,
+  onCreated?: (canvasId: string) => Promise<void>,
 ): Promise<{ canvasId: string; permalink: string }> {
   if (!/^[CG][A-Z0-9]{8,}$/.test(input.channel) || !/^[A-Za-z0-9_-]{1,100}$/.test(input.taskId)
     || input.title.trim() === "" || !Number.isSafeInteger(input.version) || input.version < 1 || input.markdown.trim() === ""
@@ -87,6 +88,7 @@ export async function createTaskPlanCanvas(
   }, fetchImplementation);
   const canvasId = created.canvas_id;
   if (typeof canvasId !== "string" || !/^F[A-Z0-9]{8,}$/.test(canvasId)) throw new SlackPostError("invalid_canvas_id", "canvases.create");
+  await onCreated?.(canvasId);
   await callSlack("canvases.access.set", botToken, { canvas_id: canvasId, access_level: "read", channel_ids: [input.channel] }, fetchImplementation);
   const info = await callSlackGet("files.info", botToken, { file: canvasId }, fetchImplementation);
   const file = info.file && typeof info.file === "object" ? info.file as Record<string, unknown> : {};
@@ -102,6 +104,22 @@ export async function createTaskPlanCanvas(
     throw new Error("Slack files.info returned an invalid Canvas link");
   }
   return { canvasId, permalink: parsed.toString() };
+}
+
+/** Deletes only a Canvas ID already durably recorded for the task; Slack's not-found is ambiguous. */
+export async function deleteTaskPlanCanvas(
+  botToken: string,
+  canvasId: string,
+  fetchImplementation: typeof fetch = fetch,
+): Promise<"deleted" | "unknown"> {
+  if (!/^F[A-Z0-9]{8,}$/.test(canvasId)) throw new Error("task Canvas ID is invalid");
+  try {
+    await callSlack("canvases.delete", botToken, { canvas_id: canvasId }, fetchImplementation);
+    return "deleted";
+  } catch (error) {
+    if (error instanceof SlackPostError && error.slackError === "canvas_not_found") return "unknown";
+    throw error;
+  }
 }
 
 export async function chatPostMessage(

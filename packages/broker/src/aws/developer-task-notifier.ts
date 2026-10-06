@@ -6,10 +6,10 @@
 import { createHash } from "node:crypto";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
-import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { INDEX_EXPIRY_ATTRIBUTE, AdminChangePendingRecordSchema, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, indexExpiresAt, lastAssistantResponse, sharedTaskKey, type PendingChange } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, AdminChangePendingRecordSchema, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, indexExpiresAt, lastAssistantResponse, sharedTaskKey, type PendingChange, type WorkflowArtifact, type WorkflowCanvasLineage } from "@agentx/contracts";
 import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
@@ -17,7 +17,8 @@ import { deriveTaskStatus, failureCategory, taskKey, taskPointerKey, type Develo
 import { isConditional } from "./broker-shared.js";
 import { requiredEnvironment } from "./lambda.js";
 import { parseSlackSecrets } from "./slack-ingress.js";
-import { SlackPostError, chatPostMessage, chatUpdate, createTaskPlanCanvas, postMayHaveLanded } from "./slack-web.js";
+import { runTaskCanvasCloseout, type CanvasCloseoutStore, type TaskCanvasCloseoutTask } from "./developer-task-closeout.js";
+import { SlackPostError, chatPostMessage, chatUpdate, createTaskPlanCanvas, deleteTaskPlanCanvas, postMayHaveLanded } from "./slack-web.js";
 
 type Client = { send(command: unknown): Promise<unknown> };
 const errorName = (error: unknown) => (error instanceof Error ? error.name : "unknown");
@@ -37,7 +38,8 @@ export interface NotifierDependencies {
   /** Trusted same-origin API base used for authenticated AgentX task detail links. */
   reviewUrlBase?: string;
   /** Creates a channel-readable detail page and returns Slack's verified link. */
-  createPlanCanvas?(input: { channel: string; taskId: string; title: string; version: number; markdown: string }): Promise<{ canvasId: string; permalink: string }>;
+  createPlanCanvas?(input: { channel: string; taskId: string; title: string; version: number; markdown: string }, onCreated?: (canvasId: string) => Promise<void>): Promise<{ canvasId: string; permalink: string }>;
+  closeTaskCanvases?(taskId: string, expectedManifestDigest?: string): Promise<{ status: "COMPLETE" | "ARCHIVE_PENDING"; reason?: string }>;
   /** Spec 025 E13: chat.update, to edit an admin change's message when it ends. */
   update?(input: UpdateInput): Promise<void>;
   now(): number;
@@ -54,10 +56,14 @@ class StartPending extends Error {
   }
 }
 
+class CanvasCloseoutPending extends Error {
+  constructor(readonly reason: string) { super("task Canvas closeout remains pending"); this.name = "CanvasCloseoutPending"; }
+}
+
 /** 30, 60, 120, 240, 480, then 900 seconds, by the delivery attempt that failed. */
 export const retryDelaySeconds = (attempt: number): number => Math.min(900, 30 * 2 ** Math.max(0, Math.min(attempt - 1, 5)));
 
-const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "workflow", "github_feedback", "admin_change_dm", "admin_change_outcome", "admin_change_expiry"]);
+const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "workflow", "github_feedback", "canvas_closeout", "admin_change_dm", "admin_change_outcome", "admin_change_expiry"]);
 
 /**
  * #217: how long after a change's expiry its message is edited. The broker refuses a claim at or
@@ -255,6 +261,44 @@ async function markPostFailed(deps: NotifierDependencies, taskId: string): Promi
   deps.log({ event: "developer_notifier.mark_conflict", taskId });
 }
 
+async function mutateCanvasLineage(
+  deps: NotifierDependencies,
+  taskId: string,
+  workflowRevision: number,
+  key: string,
+  mutate: (current: WorkflowCanvasLineage | undefined, artifact: WorkflowArtifact, task: DeveloperTaskRecord) => WorkflowCanvasLineage,
+): Promise<WorkflowCanvasLineage | undefined> {
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const task = await getItem<DeveloperTaskRecord>(deps, taskKey(taskId));
+    const workflow = task?.workflow;
+    if (task === undefined || workflow === undefined || workflow.revision !== workflowRevision || task.closedAt !== undefined) return undefined;
+    const artifact = workflow.artifacts.find((entry) => key.endsWith(`:${entry.id}`));
+    if (artifact === undefined) return undefined;
+    const records = workflow.canvasLineage ?? [];
+    const existing = records.find((entry) => entry.key === key);
+    const updated = mutate(existing, artifact, task);
+    if (updated.key !== key || updated.artifactId !== artifact.id || updated.artifactRef !== artifact.objectKey
+      || updated.artifactDigest !== artifact.sha256) return undefined;
+    if (existing !== undefined && JSON.stringify(existing) === JSON.stringify(updated)) return existing;
+    const version = task.canvasLineageVersion ?? 0;
+    const next = [...records.filter((entry) => entry.key !== key), updated];
+    const nextWorkflow = { ...workflow, canvasLineage: next, canvasLineageVersion: version + 1, updatedAt: new Date(deps.now()).toISOString() };
+    try {
+      await deps.documentClient.send(new UpdateCommand({
+        TableName: deps.tableName, Key: taskKey(taskId),
+        UpdateExpression: "SET workflow = :workflow, canvasLineageVersion = :next",
+        ConditionExpression: `workflow.revision = :revision AND ${version === 0 ? "attribute_not_exists(canvasLineageVersion)" : "canvasLineageVersion = :version"} AND attribute_not_exists(closedAt)`,
+        ExpressionAttributeValues: { ":workflow": nextWorkflow, ":next": version + 1, ":revision": workflowRevision,
+          ...(version === 0 ? {} : { ":version": version }) },
+      }));
+      return updated;
+    } catch (error) {
+      if (!isConditional(error)) throw error;
+    }
+  }
+  return undefined;
+}
+
 async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice): Promise<string | undefined> {
   const operation = async () => (notice.workspaceId === undefined || notice.operationId === undefined
     ? undefined
@@ -303,10 +347,11 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
     case "ended": {
       const ended = await operation();
       if (ended === undefined || !ENDED_STATUSES.has(ended.status)) return undefined;
-      if (task.workflow?.stage === "PLAN_REVIEW" && task.workflow.state === "WAITING") {
-        const artifactType = task.workflow.path === "FULL" && task.workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
-          : task.workflow.path === "FULL" && task.workflow.reviewPhase === "DESIGN" ? "design" : "plan";
-        const plan = task.workflow.artifacts.filter((artifact) => artifact.type === artifactType).at(-1);
+      const workflow = task.workflow;
+      if (workflow?.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {
+        const artifactType = workflow.path === "FULL" && workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
+          : workflow.path === "FULL" && workflow.reviewPhase === "DESIGN" ? "design" : "plan";
+        const plan = workflow.artifacts.filter((artifact) => artifact.type === artifactType).at(-1);
         if (plan === undefined || deps.readArtifact === undefined || deps.createPlanCanvas === undefined) {
           return "The approval document is ready, but AgentX couldn't prepare its Slack details link. No code changes have started. Ask an administrator to check the Slack Canvas setup.";
         }
@@ -314,10 +359,55 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
         if (createHash("sha256").update(markdown, "utf8").digest("hex") !== plan.sha256) {
           return "The approval document is ready, but its saved copy failed an integrity check. No code changes have started. Ask an administrator to investigate.";
         }
+        const canvasKey = `${workflow.stage}:${workflow.revision}:${plan.id}`;
+        const prior = workflow.canvasLineage?.find((entry) => entry.key === canvasKey);
+        if (prior?.state === "CREATE_OUTCOME_UNKNOWN") {
+          return "AgentX cannot confirm whether Slack created this detail page. An administrator must reconcile its exact Canvas ID before retrying, to avoid creating a duplicate.";
+        }
+        if (prior?.state === "CREATED" && prior.permalink !== undefined) {
+          const documentName = artifactType === "plan" ? "coding plan" : `${artifactType} document`;
+          return `The ${documentName} is ready. No code changes have started. <${prior.permalink}|Read and approve this step>.`;
+        }
+        if (prior?.state === "CREATED") {
+          return "Slack created the detail page, but AgentX could not confirm its link. Ask an administrator to reconcile the recorded Canvas before retrying.";
+        }
+        const prepared = await mutateCanvasLineage(deps, task.taskId, workflow.revision, canvasKey, (current, artifact) => ({
+          key: canvasKey, stage: workflow.stage, workflowRevision: workflow.revision, artifactId: artifact.id,
+          artifactRef: artifact.objectKey, artifactDigest: artifact.sha256,
+          state: "PREPARED", createdAt: current?.createdAt ?? new Date(deps.now()).toISOString(),
+        }));
+        if (prepared === undefined) throw new Error("Canvas creation intent could not be recorded");
+        if (prepared.state === "CREATE_OUTCOME_UNKNOWN") {
+          return "AgentX cannot confirm whether Slack created this detail page. An administrator must reconcile its exact Canvas ID before retrying, to avoid creating a duplicate.";
+        }
+        const attempting = await mutateCanvasLineage(deps, task.taskId, workflow.revision, canvasKey, (current, artifact) => ({
+          key: canvasKey, stage: workflow.stage, workflowRevision: workflow.revision, artifactId: artifact.id,
+          artifactRef: artifact.objectKey, artifactDigest: artifact.sha256,
+          state: "CREATE_OUTCOME_UNKNOWN", createdAt: current?.createdAt ?? new Date(deps.now()).toISOString(),
+        }));
+        if (attempting === undefined || attempting.state !== "CREATE_OUTCOME_UNKNOWN") throw new Error("Canvas create attempt could not be fenced");
         let canvas: { canvasId: string; permalink: string };
         try {
-          canvas = await deps.createPlanCanvas({ channel: task.share.channelId, taskId: task.taskId, title: task.title, version: plan.version, markdown });
+          canvas = await deps.createPlanCanvas({ channel: task.share.channelId, taskId: task.taskId, title: task.title, version: plan.version, markdown }, async (canvasId) => {
+            const recorded = await mutateCanvasLineage(deps, task.taskId, workflow.revision, canvasKey, (current, artifact) => ({
+              key: canvasKey, stage: workflow.stage, workflowRevision: workflow.revision, artifactId: artifact.id,
+              artifactRef: artifact.objectKey, artifactDigest: artifact.sha256, state: "CREATED", canvasId,
+              createdAt: current?.createdAt ?? new Date(deps.now()).toISOString(),
+            }));
+            if (recorded?.canvasId !== canvasId || recorded.state !== "CREATED") throw new Error("created Canvas ID could not be persisted");
+          });
         } catch (error) {
+          const latest = await getItem<DeveloperTaskRecord>(deps, taskKey(task.taskId));
+          const created = latest?.workflow?.canvasLineage?.find((entry) => entry.key === canvasKey);
+          if (created?.state !== "CREATED") {
+            const mayHaveLanded = postMayHaveLanded(error);
+            await mutateCanvasLineage(deps, task.taskId, workflow.revision, canvasKey, (current, artifact) => ({
+              key: canvasKey, stage: workflow.stage, workflowRevision: workflow.revision, artifactId: artifact.id,
+              artifactRef: artifact.objectKey, artifactDigest: artifact.sha256,
+              state: mayHaveLanded ? "CREATE_OUTCOME_UNKNOWN" : "CREATE_FAILED", createdAt: current?.createdAt ?? new Date(deps.now()).toISOString(),
+              ...(!mayHaveLanded && error instanceof SlackPostError ? { errorCategory: error.slackError } : {}),
+            }));
+          }
           if (error instanceof SlackPostError && [
             "missing_scope", "not_allowed_token_type", "feature_not_enabled", "method_not_supported_for_channel_type",
             "canvas_disabled_user_team", "canvas_disabled_file_team", "canvas_globally_disabled",
@@ -327,6 +417,12 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
           }
           throw error;
         }
+        const linked = await mutateCanvasLineage(deps, task.taskId, workflow.revision, canvasKey, (current, artifact) => ({
+          key: canvasKey, stage: workflow.stage, workflowRevision: workflow.revision, artifactId: artifact.id,
+          artifactRef: artifact.objectKey, artifactDigest: artifact.sha256, state: "CREATED", canvasId: canvas.canvasId,
+          permalink: canvas.permalink, createdAt: current?.createdAt ?? new Date(deps.now()).toISOString(),
+        }));
+        if (linked?.state !== "CREATED" || linked.permalink === undefined) throw new Error("Canvas permalink could not be persisted");
         const documentName = artifactType === "plan" ? "coding plan" : `${artifactType} document`;
         return `The ${documentName} is ready. No code changes have started. <${canvas.permalink}|Read and approve this step>.`;
       }
@@ -608,6 +704,12 @@ async function keepPostedTs(deps: NotifierDependencies, marker: { pk: string; sk
 
 async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outcome> {
   const task = await noticeTask(deps, notice);
+  if (notice.kind === "canvas_closeout") {
+    if (task === undefined || deps.closeTaskCanvases === undefined) throw new Error("Canvas closeout service is unavailable");
+    const result = await deps.closeTaskCanvases(task.taskId, notice.manifestDigest);
+    if (result.status !== "COMPLETE") throw new CanvasCloseoutPending(result.reason ?? "archive_pending");
+    return "recorded";
+  }
   if (task?.share === undefined) return "not_shared";
   const share = task.share;
   // Ruling F7: a notice carries its change's own time to the millisecond, so it compares exactly with the share's.
@@ -716,14 +818,15 @@ export function createNotifierHandler(deps: NotifierDependencies) {
         deps.log({ event: "developer_notifier.notice", kind: notice.kind, noticeId: notice.id, outcome });
       } catch (error) {
         const reason = error instanceof SlackPostError ? error.slackError : errorName(error);
-        if (deps.now() - Date.parse(notice.at) < SHARE_DELIVERY_WINDOW_MS) {
+        if (notice.kind === "canvas_closeout" || deps.now() - Date.parse(notice.at) < SHARE_DELIVERY_WINDOW_MS) {
           const attempt = Number(record.attributes?.ApproximateReceiveCount ?? "1");
           try {
             await deps.retryLater(record.receiptHandle, retryDelaySeconds(attempt));
           } catch (delayError) {
             deps.log({ event: "developer_notifier.delay_failed", error: errorName(delayError) });
           }
-          deps.log({ event: "developer_notifier.retry", kind: notice.kind, noticeId: notice.id, attempt, reason });
+          deps.log({ event: "developer_notifier.retry", kind: notice.kind, noticeId: notice.id, attempt,
+            ...(error instanceof CanvasCloseoutPending ? { reason: error.reason } : { reason }) });
           batchItemFailures.push({ itemIdentifier: record.messageId });
         } else {
           deps.log({ event: "developer_notifier.delivery_failed", kind: notice.kind, noticeId: notice.id, reason });
@@ -801,6 +904,66 @@ function createAwsNotifierHandler() {
   const queueUrl = () => requiredEnvironment("NOTICE_QUEUE_URL");
   const slack = cachedSlackClient(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
     .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken));
+  const closeoutStore: CanvasCloseoutStore = {
+    async loadTask(taskId) {
+      const result = await documentClient.send(new GetCommand({ TableName: requiredEnvironment("STATE_TABLE_NAME"), Key: taskKey(taskId), ConsistentRead: true }));
+      return (result as unknown as { Item?: TaskCanvasCloseoutTask }).Item;
+    },
+    async readArtifact(ref) {
+      const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: ref.objectKey }));
+      return response.Body?.transformToString("utf8");
+    },
+    async readManifest(key) {
+      const response = await s3.send(new GetObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key }));
+      return response.Body?.transformToString("utf8");
+    },
+    async putManifest(key, digest, bytes) {
+      try {
+        await s3.send(new PutObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key, Body: bytes,
+          ContentType: "application/json", Metadata: { sha256: digest }, IfNoneMatch: "*" }));
+      } catch (error) {
+        if (error instanceof Error && error.name === "PreconditionFailed") {
+          const existing = await closeoutStore.readManifest(key);
+          if (existing === bytes) return;
+        }
+        throw error;
+      }
+    },
+    async saveCloseout(taskId, nextCloseout, expectedRevision) {
+      const tableName = requiredEnvironment("STATE_TABLE_NAME");
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const current = await closeoutStore.loadTask(taskId);
+        const workflow = current?.workflow;
+        if (current === undefined || workflow === undefined || workflow.revision !== expectedRevision
+          || (workflow.canvasCloseout !== undefined && workflow.canvasCloseout.manifestDigest !== nextCloseout.manifestDigest)) return false;
+        const priorEntries = new Map((workflow.canvasCloseout?.canvases ?? []).map((canvas) => [canvas.lineageKey, canvas]));
+        const merged = { ...nextCloseout, canvases: nextCloseout.canvases.map((canvas) => {
+          const prior = priorEntries.get(canvas.lineageKey);
+          return prior?.status === "DELETED" ? prior : canvas;
+        }) };
+        const mergedWorkflow = { ...workflow, canvasCloseout: merged };
+        const version = current.canvasCloseoutVersion ?? 0;
+        try {
+          await documentClient.send(new UpdateCommand({ TableName: tableName, Key: taskKey(taskId),
+            UpdateExpression: "SET workflow = :workflow, canvasCloseoutVersion = :next",
+            ConditionExpression: `workflow.revision = :revision AND ${version === 0 ? "attribute_not_exists(canvasCloseoutVersion)" : "canvasCloseoutVersion = :version"}`,
+            ExpressionAttributeValues: { ":workflow": mergedWorkflow, ":next": version + 1, ":revision": expectedRevision,
+              ...(version === 0 ? {} : { ":version": version }) },
+          }));
+          return true;
+        } catch (error) {
+          if (!isConditional(error)) throw error;
+        }
+      }
+      return false;
+    },
+    async deleteCanvas(canvasId) {
+      const token = await secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
+        .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken);
+      return deleteTaskPlanCanvas(token, canvasId);
+    },
+    now: () => new Date().toISOString(),
+  };
   return createNotifierHandler({
     documentClient,
     tableName: requiredEnvironment("STATE_TABLE_NAME"),
@@ -829,9 +992,20 @@ function createAwsNotifierHandler() {
       if (response.Body === undefined) throw new Error("workflow plan artifact has no body");
       return response.Body.transformToString("utf8");
     },
-    createPlanCanvas(input) {
+    createPlanCanvas(input, onCreated) {
       return cachedBotToken(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
-        .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken))((token) => createTaskPlanCanvas(token, input));
+        .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken))((token) => createTaskPlanCanvas(token, input, fetch, onCreated));
+    },
+    async closeTaskCanvases(taskId, expectedManifestDigest) {
+      const result = await runTaskCanvasCloseout(closeoutStore, { taskId, ...(expectedManifestDigest === undefined ? {} : { expectedManifestDigest }) });
+      if (result.status === "ARCHIVE_PENDING") {
+        console.log(JSON.stringify({ component: "developer-task-closeout", event: "archive_pending", taskId,
+          reason: "reason" in result ? result.reason : "archive_pending" }));
+        return result;
+      }
+      console.log(JSON.stringify({ component: "developer-task-closeout", event: "closeout_complete", taskId,
+        canvasCount: result.canvases.length, outcomes: result.canvases.map((canvas) => canvas.status) }));
+      return result;
     },
     update: slack.update,
     now: Date.now,

@@ -55,6 +55,10 @@ export interface DeveloperTaskRecord {
   share?: TaskShare;
   /** C1: every write of `share` replaces the whole map, conditioned on this number. */
   shareVersion?: number;
+  /** Serializes append-only task Canvas lineage mutations without advancing workflow revision. */
+  canvasLineageVersion?: number;
+  canvasCloseoutVersion?: number;
+  canvasCloseoutRetry?: { requestId: string; manifestDigest: string; actorId: string; requestedAt: string; dispatchAttempt: number };
   createdAt: string;
   updatedAt: string;
   closedAt?: string;

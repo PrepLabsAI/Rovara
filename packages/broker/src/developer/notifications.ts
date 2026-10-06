@@ -8,7 +8,7 @@ export interface StreamRecord {
   eventName?: string;
   dynamodb?: { ApproximateCreationDateTime?: number; NewImage?: Record<string, AttributeValue>; OldImage?: Record<string, AttributeValue> };
 }
-export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request" | "workflow" | "github_feedback" | "admin_change_dm" | "admin_change_outcome" | "admin_change_expiry";
+export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request" | "workflow" | "github_feedback" | "canvas_closeout" | "admin_change_dm" | "admin_change_outcome" | "admin_change_expiry";
 export interface Notice {
   /** Fixed per change, so a repeated delivery posts once (C9). */
   id: string;
@@ -25,6 +25,8 @@ export interface Notice {
   notBefore?: string;
   /** Active immutable PR-feedback report announced by this notice. */
   feedbackReviewDigest?: string;
+  /** Immutable closeout snapshot that an owner-authorized retry is allowed to resume. */
+  manifestDigest?: string;
 }
 
 /** Stable key shared by notice production and the owner-decision latency measurement. */
@@ -70,6 +72,22 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
       }
       // A stored NULL counts as unset.
       if (next.closedAt != null && previous?.closedAt == null) notices.push({ id: `${taskId}:closed`, kind: "closed", taskId, at });
+      const terminalWorkflow = (value: Record<string, unknown> | undefined): boolean => value?.state === "COMPLETE"
+        && ((value.stage === "MERGED" && value.outcome === "MERGED") || (value.stage === "CLOSED" && value.outcome === "CLOSED"));
+      if ((terminalWorkflow(afterWorkflow) && !terminalWorkflow(beforeWorkflow)) || (next.closedAt != null && previous?.closedAt == null)) {
+        const revision = afterWorkflow?.revision;
+        const closeoutId = next.closedAt != null && previous?.closedAt == null ? "closed" : typeof revision === "number" ? String(revision) : "terminal";
+        notices.push({ id: `${taskId}:canvas_closeout:${closeoutId}`, kind: "canvas_closeout", taskId, at });
+      }
+      const beforeRetry = record(previous?.canvasCloseoutRetry);
+      const afterRetry = record(next.canvasCloseoutRetry);
+      const dispatchAttempt = typeof afterRetry?.dispatchAttempt === "number" && Number.isInteger(afterRetry.dispatchAttempt)
+        ? afterRetry.dispatchAttempt : 1;
+      if (afterRetry?.requestId !== undefined && (afterRetry.requestId !== beforeRetry?.requestId
+        || afterRetry.dispatchAttempt !== beforeRetry?.dispatchAttempt) && typeof afterRetry.manifestDigest === "string") {
+        notices.push({ id: `${taskId}:canvas_closeout_retry:${text(afterRetry.requestId)}:${dispatchAttempt}`, kind: "canvas_closeout", taskId, at,
+          manifestDigest: afterRetry.manifestDigest });
+      }
       return notices;
     }
     case "DEVELOPER_TASK_POINTER":

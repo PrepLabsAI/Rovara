@@ -151,6 +151,39 @@ describe("native developer task workflow", () => {
     expect(harness.db.get(`DEVTASK#${task.taskId}`, "META")).not.toHaveProperty("workflow");
   });
 
+  it("lets only the task owner re-drive the currently pinned Canvas manifest", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
+      requestId: randomUUID(), project: "payments", instructions: "Closeout retry fixture", client: "test-client", workflow: true,
+    });
+    const taskId = String((started.body.task as { taskId: string }).taskId);
+    const row = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
+    const digest = "a".repeat(64);
+    const workflow = { ...row.workflow, stage: "CLOSED", state: "COMPLETE", outcome: "CLOSED",
+      canvasCloseout: { status: "ARCHIVE_PENDING", terminalState: "CLOSED", manifestDigest: digest,
+        manifestRef: `private/task-closeouts/${taskId}/${digest}.json`, preparedAt: new Date().toISOString(), canvases: [] } };
+    harness.db.set({ ...row, workflow });
+    const requestId = randomUUID();
+    const wrongManifest = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/canvas-closeout/retry`, {
+      requestId, manifestDigest: "b".repeat(64),
+    });
+    expect(wrongManifest.status).not.toBe(200);
+    const unauthorized = await harness.dev(OMAR, "POST", `/v1/dev/tasks/${taskId}/canvas-closeout/retry`, {
+      requestId: randomUUID(), manifestDigest: digest,
+    });
+    expect(unauthorized.status).not.toBe(200);
+    expect(harness.db.get(`DEVTASK#${taskId}`, "META")).not.toHaveProperty("canvasCloseoutRetry");
+
+    const accepted = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/canvas-closeout/retry`, { requestId, manifestDigest: digest });
+    expect(accepted.status).toBe(200);
+    expect(accepted.body).toMatchObject({ status: "retry_requested", manifestDigest: digest });
+    const duplicateRetry = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/canvas-closeout/retry`, { requestId, manifestDigest: digest });
+    expect(duplicateRetry.status).toBe(200);
+    expect(harness.db.get(`DEVTASK#${taskId}`, "META")).toMatchObject({
+      canvasCloseoutRetry: { requestId, manifestDigest: digest, actorId: row.ownerKey, dispatchAttempt: 2 },
+    });
+  });
+
   it("runs Full requirements, design, and coding-plan reviews before implementation", async () => {
     const harness = await createDeveloperTaskBroker();
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {

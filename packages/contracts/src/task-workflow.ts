@@ -360,6 +360,49 @@ export const WorkflowReviewPhaseSchema = z.enum(["REQUIREMENTS", "DESIGN", "IMPL
 export type WorkflowPath = z.infer<typeof WorkflowPathSchema>;
 export type WorkflowReviewPhase = z.infer<typeof WorkflowReviewPhaseSchema>;
 
+const WorkflowCanvasLineageSchema = z.object({
+  key: z.string().trim().min(1).max(256), stage: WorkflowStageSchema,
+  workflowRevision: z.number().int().positive(), artifactId: z.string().trim().min(1).max(128),
+  artifactRef: FeedbackObjectKeySchema, artifactDigest: DigestSchema,
+  state: z.enum(["PREPARED", "CREATE_OUTCOME_UNKNOWN", "CREATE_FAILED", "CREATED"]),
+  canvasId: z.string().regex(/^F[A-Z0-9]{8,}$/).optional(), permalink: z.string().url().max(2048).optional(),
+  createdAt: z.string().datetime(), errorCategory: z.string().regex(/^[a-z_]{1,64}$/).optional(),
+}).strict().superRefine((record, context) => {
+  if (record.state === "CREATED" && record.canvasId === undefined) {
+    context.addIssue({ code: "custom", message: "created Canvas lineage requires its exact Slack ID" });
+  }
+  if (record.state !== "CREATED" && record.canvasId !== undefined) {
+    context.addIssue({ code: "custom", message: "unconfirmed Canvas creation cannot claim a Canvas ID" });
+  }
+});
+export type WorkflowCanvasLineage = z.infer<typeof WorkflowCanvasLineageSchema>;
+
+const WorkflowCanvasCloseoutSchema = z.object({
+  status: z.enum(["ARCHIVE_PENDING", "COMPLETE"]),
+  terminalState: z.enum(["MERGED", "CLOSED", "CANCELLED"]),
+  manifestDigest: DigestSchema,
+  manifestRef: FeedbackObjectKeySchema,
+  preparedAt: z.string().datetime(), completedAt: z.string().datetime().optional(),
+  canvases: z.array(z.object({
+    lineageKey: z.string().trim().min(1).max(256), canvasId: z.string().regex(/^F[A-Z0-9]{8,}$/),
+    status: z.enum(["PENDING", "DELETED", "UNKNOWN"]), attempts: z.number().int().nonnegative().max(1000),
+    attemptedAt: z.string().datetime().optional(), errorCategory: z.string().regex(/^[a-z_]{1,64}$/).optional(),
+  }).strict()).max(100),
+}).strict().superRefine((closeout, context) => {
+  if (!closeout.manifestRef.includes(closeout.manifestDigest)) context.addIssue({ code: "custom", message: "closeout manifest key must include its digest" });
+  if (new Set(closeout.canvases.map((canvas) => canvas.lineageKey)).size !== closeout.canvases.length
+    || new Set(closeout.canvases.map((canvas) => canvas.canvasId)).size !== closeout.canvases.length) {
+    context.addIssue({ code: "custom", message: "closeout Canvas identities must be unique" });
+  }
+  if (closeout.status === "COMPLETE" && (closeout.completedAt === undefined || closeout.canvases.some((canvas) => canvas.status !== "DELETED"))) {
+    context.addIssue({ code: "custom", message: "closeout is complete only after every Canvas deletion is confirmed" });
+  }
+  if (closeout.status === "ARCHIVE_PENDING" && closeout.completedAt !== undefined) {
+    context.addIssue({ code: "custom", message: "pending closeout cannot have a completion time" });
+  }
+});
+export type WorkflowCanvasCloseout = z.infer<typeof WorkflowCanvasCloseoutSchema>;
+
 export const WorkflowSnapshotSchema = z.object({
   schemaVersion: z.literal(1),
   definitionId: z.literal("agentx-task-to-pr"),
@@ -388,10 +431,20 @@ export const WorkflowSnapshotSchema = z.object({
   feedbackDecisions: z.array(WorkflowFeedbackDecisionSchema).max(100).optional(),
   feedbackDispatchApproval: WorkflowFeedbackApprovalBindingSchema.optional(),
   feedbackNotes: z.array(WorkflowFeedbackNoteSchema).max(100).optional(),
+  canvasLineage: z.array(WorkflowCanvasLineageSchema).max(100).optional(),
+  canvasLineageVersion: z.number().int().nonnegative().optional(),
+  canvasCloseout: WorkflowCanvasCloseoutSchema.optional(),
 }).superRefine((workflow, context) => {
-  const feedbackMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackDispatchApproval: workflow.feedbackDispatchApproval, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory };
-  if (Buffer.byteLength(JSON.stringify(feedbackMetadata), "utf8") > 262_144) {
-    context.addIssue({ code: "custom", message: "feedback metadata exceeds the task snapshot storage budget" });
+  const taskMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackDispatchApproval: workflow.feedbackDispatchApproval, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory, canvasLineage: workflow.canvasLineage, canvasCloseout: workflow.canvasCloseout };
+  if (Buffer.byteLength(JSON.stringify(taskMetadata), "utf8") > 262_144) {
+    context.addIssue({ code: "custom", message: "workflow metadata exceeds the task snapshot storage budget" });
+  }
+  if (new Set((workflow.canvasLineage ?? []).map((canvas) => canvas.key)).size !== (workflow.canvasLineage ?? []).length) {
+    context.addIssue({ code: "custom", path: ["canvasLineage"], message: "Canvas lineage keys must be unique" });
+  }
+  if (workflow.canvasLineage?.some((canvas) => !workflow.artifacts.some((artifact) => artifact.id === canvas.artifactId
+    && artifact.objectKey === canvas.artifactRef && artifact.sha256 === canvas.artifactDigest))) {
+    context.addIssue({ code: "custom", path: ["canvasLineage"], message: "Canvas lineage must reference a workflow artifact" });
   }
   if (workflow.feedbackReview?.reviewRef?.taskId !== undefined && workflow.feedbackReview.reviewRef.taskId !== workflow.taskId) {
     context.addIssue({ code: "custom", message: "feedback review must belong to this task" });
