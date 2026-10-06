@@ -12539,6 +12539,422 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
     },
   },
   "Resources": {
+    "ActionLogs3E70FEE0": {
+      "DeletionPolicy": "Retain",
+      "Metadata": {
+        "agentx:retain-on-create-rollback": true,
+      },
+      "Properties": {
+        "KmsKeyId": {
+          "Fn::GetAtt": [
+            "ActionLogsKey35E146E5",
+            "Arn",
+          ],
+        },
+        "LogGroupName": {
+          "Fn::Join": [
+            "",
+            [
+              "/aws/vendedlogs/ecs/action-logs/agentx-staging-",
+              {
+                "Fn::Select": [
+                  2,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Ref": "AWS::StackId",
+                      },
+                    ],
+                  },
+                ],
+              },
+            ],
+          ],
+        },
+        "ResourcePolicyDocument": {
+          "Statement": [
+            {
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+              ],
+              "Condition": {
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::GetAtt": [
+                      "Cluster",
+                      "Arn",
+                    ],
+                  },
+                },
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "delivery.logs.amazonaws.com",
+              },
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":logs:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":log-group:/aws/vendedlogs/ecs/action-logs/agentx-staging-",
+                    {
+                      "Fn::Select": [
+                        2,
+                        {
+                          "Fn::Split": [
+                            "/",
+                            {
+                              "Ref": "AWS::StackId",
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                    ":log-stream:*",
+                  ],
+                ],
+              },
+              "Sid": "AllowEcsActionLogDelivery",
+            },
+            {
+              "Action": [
+                "logs:CreateLogStream",
+                "logs:PutLogEvents",
+              ],
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "events.amazonaws.com",
+              },
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":logs:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":log-group:/aws/vendedlogs/ecs/action-logs/agentx-staging-",
+                    {
+                      "Fn::Select": [
+                        2,
+                        {
+                          "Fn::Split": [
+                            "/",
+                            {
+                              "Ref": "AWS::StackId",
+                            },
+                          ],
+                        },
+                      ],
+                    },
+                    ":log-stream:*",
+                  ],
+                ],
+              },
+              "Sid": "AllowEcsDeploymentFailureEvents",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "RetentionInDays": 30,
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::LogGroup",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "ActionLogsDelivery": {
+      "DependsOn": [
+        "ActionLogs3E70FEE0",
+      ],
+      "Properties": {
+        "DeliveryDestinationArn": {
+          "Fn::GetAtt": [
+            "ActionLogsDestination",
+            "Arn",
+          ],
+        },
+        "DeliverySourceName": {
+          "Fn::Join": [
+            "",
+            [
+              "agentx-staging-",
+              {
+                "Fn::Select": [
+                  0,
+                  {
+                    "Fn::Split": [
+                      "-",
+                      {
+                        "Fn::Select": [
+                          2,
+                          {
+                            "Fn::Split": [
+                              "/",
+                              {
+                                "Ref": "AWS::StackId",
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+              "-action-source",
+            ],
+          ],
+        },
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::Delivery",
+    },
+    "ActionLogsDestination": {
+      "Properties": {
+        "DeliveryDestinationType": "CloudWatchLogs",
+        "DestinationResourceArn": {
+          "Fn::GetAtt": [
+            "ActionLogs3E70FEE0",
+            "Arn",
+          ],
+        },
+        "Name": {
+          "Fn::Join": [
+            "",
+            [
+              "agentx-staging-",
+              {
+                "Fn::Select": [
+                  0,
+                  {
+                    "Fn::Split": [
+                      "-",
+                      {
+                        "Fn::Select": [
+                          2,
+                          {
+                            "Fn::Split": [
+                              "/",
+                              {
+                                "Ref": "AWS::StackId",
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+              "-action-dest",
+            ],
+          ],
+        },
+        "OutputFormat": "json",
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::DeliveryDestination",
+    },
+    "ActionLogsKey35E146E5": {
+      "DeletionPolicy": "Retain",
+      "Metadata": {
+        "agentx:retain-on-create-rollback": true,
+      },
+      "Properties": {
+        "Description": "AgentX staging ECS action log encryption",
+        "EnableKeyRotation": true,
+        "KeyPolicy": {
+          "Statement": [
+            {
+              "Action": "kms:*",
+              "Effect": "Allow",
+              "Principal": {
+                "AWS": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "arn:",
+                      {
+                        "Ref": "AWS::Partition",
+                      },
+                      ":iam::",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ":root",
+                    ],
+                  ],
+                },
+              },
+              "Resource": "*",
+            },
+            {
+              "Action": [
+                "kms:Encrypt",
+                "kms:Decrypt",
+                "kms:ReEncrypt*",
+                "kms:GenerateDataKey*",
+                "kms:Describe*",
+              ],
+              "Condition": {
+                "ArnLike": {
+                  "kms:EncryptionContext:aws:logs:arn": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        {
+                          "Ref": "AWS::Partition",
+                        },
+                        ":logs:",
+                        {
+                          "Ref": "AWS::Region",
+                        },
+                        ":",
+                        {
+                          "Ref": "AWS::AccountId",
+                        },
+                        ":log-group:/aws/vendedlogs/ecs/action-logs/agentx-staging-",
+                        {
+                          "Fn::Select": [
+                            2,
+                            {
+                              "Fn::Split": [
+                                "/",
+                                {
+                                  "Ref": "AWS::StackId",
+                                },
+                              ],
+                            },
+                          ],
+                        },
+                      ],
+                    ],
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "logs.",
+                      {
+                        "Ref": "AWS::Region",
+                      },
+                      ".amazonaws.com",
+                    ],
+                  ],
+                },
+              },
+              "Resource": "*",
+              "Sid": "AllowCloudWatchLogsEncryptionForActionLogGroup",
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+      },
+      "Type": "AWS::KMS::Key",
+      "UpdateReplacePolicy": "Retain",
+    },
+    "ActionLogsSource": {
+      "Properties": {
+        "LogType": "ACTION_LOGS",
+        "Name": {
+          "Fn::Join": [
+            "",
+            [
+              "agentx-staging-",
+              {
+                "Fn::Select": [
+                  0,
+                  {
+                    "Fn::Split": [
+                      "-",
+                      {
+                        "Fn::Select": [
+                          2,
+                          {
+                            "Fn::Split": [
+                              "/",
+                              {
+                                "Ref": "AWS::StackId",
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+              "-action-source",
+            ],
+          ],
+        },
+        "ResourceArn": {
+          "Fn::GetAtt": [
+            "Cluster",
+            "Arn",
+          ],
+        },
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+      },
+      "Type": "AWS::Logs::DeliverySource",
+    },
     "BedrockThrottlingAlarm709CDF3A": {
       "Condition": "OrchestratorOnBedrock",
       "Properties": {
@@ -12802,8 +13218,33 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
       "Type": "AWS::IAM::Policy",
     },
     "Logs6819BB44": {
-      "DeletionPolicy": "Delete",
+      "DeletionPolicy": "Retain",
+      "Metadata": {
+        "agentx:retain-on-create-rollback": true,
+      },
       "Properties": {
+        "LogGroupName": {
+          "Fn::Join": [
+            "",
+            [
+              "/agentx/staging/slack/",
+              {
+                "Fn::Select": [
+                  2,
+                  {
+                    "Fn::Split": [
+                      "/",
+                      {
+                        "Ref": "AWS::StackId",
+                      },
+                    ],
+                  },
+                ],
+              },
+              "/application",
+            ],
+          ],
+        },
         "RetentionInDays": 30,
         "Tags": [
           {
@@ -12813,7 +13254,7 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
         ],
       },
       "Type": "AWS::Logs::LogGroup",
-      "UpdateReplacePolicy": "Delete",
+      "UpdateReplacePolicy": "Retain",
     },
     "LogsEvalBatchWatcherFailedMetricEA3F0B1F": {
       "Properties": {
@@ -13026,6 +13467,10 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
       "Type": "AWS::EC2::SecurityGroup",
     },
     "Service": {
+      "DependsOn": [
+        "ActionLogsDelivery",
+        "ServiceDeploymentFailureEvents",
+      ],
       "Properties": {
         "Cluster": {
           "Ref": "Cluster",
@@ -13068,6 +13513,103 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
         },
       },
       "Type": "AWS::ECS::Service",
+    },
+    "ServiceDeploymentFailureEvents": {
+      "Properties": {
+        "Description": "ECS deployment failure events for AgentX staging Slack test attempt",
+        "EventPattern": {
+          "detail": {
+            "eventName": [
+              "SERVICE_DEPLOYMENT_FAILED",
+            ],
+          },
+          "detail-type": [
+            "ECS Deployment State Change",
+          ],
+          "resources": [
+            {
+              "prefix": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":ecs:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":service/",
+                    {
+                      "Ref": "Cluster",
+                    },
+                    "/",
+                  ],
+                ],
+              },
+            },
+          ],
+          "source": [
+            "aws.ecs",
+          ],
+        },
+        "Name": {
+          "Fn::Join": [
+            "",
+            [
+              "agentx-staging-",
+              {
+                "Fn::Select": [
+                  0,
+                  {
+                    "Fn::Split": [
+                      "-",
+                      {
+                        "Fn::Select": [
+                          2,
+                          {
+                            "Fn::Split": [
+                              "/",
+                              {
+                                "Ref": "AWS::StackId",
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ],
+              },
+              "-service-failures",
+            ],
+          ],
+        },
+        "State": "ENABLED",
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+        "Targets": [
+          {
+            "Arn": {
+              "Fn::GetAtt": [
+                "ActionLogs3E70FEE0",
+                "Arn",
+              ],
+            },
+            "Id": "ActionLogs",
+          },
+        ],
+      },
+      "Type": "AWS::Events::Rule",
     },
     "SlackDeliveryFailedAlarm16CEA92A": {
       "Properties": {
