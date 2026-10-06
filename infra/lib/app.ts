@@ -5,7 +5,7 @@ import { CONTEXT_ENV, CONTEXT_OVERFLOW_LOCATION_ENV } from "aws-cdk-lib/cx-api";
 import { AccessStack } from "./access.js";
 import { ControlPlaneStack } from "./control-plane.js";
 import { IdentityStack } from "./identity.js";
-import { InstallerStack } from "./installer.js";
+import { INSTALLER_DESCRIPTION, InstallerStack } from "./installer.js";
 import { namingFromContext } from "./naming.js";
 import { applyPermissionsBoundaryParameter } from "./permissions-boundary.js";
 import { ProductionFoundationStack } from "./production-foundation.js";
@@ -159,7 +159,7 @@ export function buildAgentXApp(context: Record<string, unknown> = {}): App {
   // deploys it, and the environment it installs is never part of it.
   if (app.node.tryGetContext("agentxInstaller") === "enabled") {
     new InstallerStack(app, "AgentXInstaller", {
-      description: "AgentX installer: installs an AgentX environment from its setup page, with no terminal",
+      description: INSTALLER_DESCRIPTION,
       env: { region: deploymentRegion ?? "us-east-1" },
     });
   }

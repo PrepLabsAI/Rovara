@@ -9,7 +9,10 @@ added afterwards with `connector add mcp`). It prints everything it
 will create and an estimated monthly cost before it creates anything, and running it again resumes
 where it stopped.
 
-The whole install is one command: `npx @preplabsai/rovara-code init --env <name>`.
+The usual way to start it is the Launch in AWS button in [Installing Rovara](install.md#install-with-the-launch-in-aws-button-recommended):
+it runs `agentx init` in your own AWS account and asks everything on a setup page, so nothing is
+installed on your computer. From a terminal, the whole install is one command:
+`npx @preplabsai/rovara-code init --env <name>`.
 
 On your own computer, `init` opens an install page in your browser, served only from this computer,
 and asks everything there, from the AWS account to the first reply in Slack. Pass `--no-ui` to
