@@ -51,7 +51,7 @@ import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallPro
 import { initLogPath, openInitLog, type InitLog } from "./log-file.js";
 import { confirmInstallPlan } from "./plan.js";
 import { awsPrerequisiteChecks, checkAccount, checkPrerequisites, isRootUser, type PrerequisiteCheck, type PrerequisiteChecks } from "./prerequisites.js";
-import { askForm, processPrompter, secretFromSource, unattendedPrompter, type FormField, type FormOptions, type Prompter, type QuestionHelp } from "./prompts.js";
+import { askForm, processPrompter, secretFromSource, unattendedPrompter, unattendedUntilSteps, type FormField, type FormOptions, type Prompter, type QuestionHelp } from "./prompts.js";
 import { fetchRelease, sourceRelease } from "./release-fetch.js";
 import { checkWithChangeOnPage, problemText, retryOnPage } from "./retry.js";
 import { developerSignInStep } from "./signin-step.js";
@@ -308,6 +308,8 @@ function neverThrowingBrowser(open: (url: string) => Promise<unknown>, write: (l
 interface InitSession {
   /** --setup-table: the table the setup page and this run share. */
   setupStore?: SetupStore;
+  /** --setup-table: from here on the setup page asks (before it, the flags and defaults answer). */
+  startSteps?: () => void;
   /** Spec 048 FR-020: the install's current name, which a Change answers (or a first settings
    * submission) can rename; starts as options.env, and every "Continue later with" command uses
    * this, not options.env, so it keeps up with the rename. */
@@ -588,6 +590,11 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     session.wizard = wizard;
     session.watcher = childActionWatcher((action) => wizard.surface.card(awsSignInCard(action)));
     prompter = deps.prompter ?? wizard.prompter;
+    if (options.cloud !== undefined && deps.prompter === undefined) {
+      const cloud = unattendedUntilSteps(wizard.prompter);
+      prompter = cloud.prompter;
+      session.startSteps = cloud.start;
+    }
     session.say(stageLine("get-started"));
   } else if (deps.prompter !== undefined) {
     prompter = deps.prompter;
@@ -1029,6 +1036,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     ...(options.cloud === undefined ? {} : { setupPageUrl: options.cloud.url }),
   };
 
+  session.startSteps?.();
   try {
     const result = await runInitSteps({
       env, region, store, holder: caller.arn, context, now,

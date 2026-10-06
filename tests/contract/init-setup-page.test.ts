@@ -10,8 +10,8 @@ import { dynamoSetupStore, memorySetupStore, SETUP_ITEM_TTL_SECONDS, SETUP_LOG_L
 import { createWizardHub } from "../../packages/cli/src/init/ui/state.js";
 import { WIZARD_TOKEN_HEADER, WIZARD_TOKEN_QUERY } from "../../packages/cli/src/init/ui/protocol.js";
 import { TEST_PRIVATE_KEY } from "../support/init-fakes.js";
-import { FINISH, FIRST_RUN, harness, SIGNIN, SLACK } from "../support/init-ui-harness.js";
-import { accessToken } from "../support/setup-fakes.js";
+import { FINISH, harness, SIGNIN, SLACK } from "../support/init-ui-harness.js";
+import { accessToken, ADMIN_EMAIL } from "../support/setup-fakes.js";
 import { SETUP_ORIGIN, setupPageOperator } from "../support/setup-page-operator.js";
 
 const TOKEN = "setup-page-token-0123456789abcdef";
@@ -197,12 +197,17 @@ describe("agentx init --setup-table", () => {
     const h = await harness();
     const store = memorySetupStore();
     const handle = setupPageHandler({ store, env: "staging", origin: SETUP_ORIGIN, auth: { kind: "token", token: TOKEN }, verdictWaitMs: 200, sleep: (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 5))) });
-    const operator = setupPageOperator({ script: [...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH], handle, token: TOKEN });
+    // Nothing is asked before the first step: no one can reach the page yet. The flags the
+    // bootstrap stack passes and the defaults answer the settings and the plan.
+    const operator = setupPageOperator({ script: [...SLACK, ...SIGNIN, ...FINISH], handle, token: TOKEN });
     // The admin signed in on the setup page, which left their sign-in for the job (setup-auth.ts).
     await store.putAdminToken(`sealed:${accessToken({ "cognito:groups": ["agentx-admin"] })}`, Date.now() + 3_600_000);
     const running = operator.run();
     const code = await h.run(
-      ["--setup-table", "agentx-setup", "--setup-url", SETUP_ORIGIN, "--github-app-id", "424242", "--github-installation-id", "777", "--github-private-key-env", "GH_KEY"],
+      [
+        "--setup-table", "agentx-setup", "--setup-url", SETUP_ORIGIN, "--admin-email", ADMIN_EMAIL, "--github-account", "acme",
+        "--github-app-id", "424242", "--github-installation-id", "777", "--github-private-key-env", "GH_KEY",
+      ],
       {
         setupStore: () => store, setupRelayTiming: FAST, processEnv: { GH_KEY: TEST_PRIVATE_KEY },
         setupSeal: { seal: async (plain) => `sealed:${plain}`, open: async (sealed) => sealed.replace(/^sealed:/, "") },
@@ -211,7 +216,8 @@ describe("agentx init --setup-table", () => {
     await running;
     expect(code).toBe(0);
     expect(operator.remaining()).toBe(0);
-    expect(operator.asked[0]).toBe("Your settings");
+    expect(operator.asked).not.toContain("Your settings");
+    expect(operator.asked).not.toContain("Create all of this?");
     expect(operator.states.at(-1)).toMatchObject({ installerClosed: true });
     expect(operator.states.at(-1)?.cards?.some((card) => card.id === "ready")).toBe(true);
     // Nothing is served from the job's own machine.
