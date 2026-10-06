@@ -157,7 +157,7 @@ jobs:
       - run: npm install -g npm@11
       - env:
           VERSION: ${{ github.ref_name }}
-          NAME: ${{ vars.AGENTX_NPM_PACKAGE || '@charterarc/agentx' }}
+          NAME: ${{ vars.AGENTX_NPM_PACKAGE || '@preplabs/rovara-code' }}
         run: |
           VERSION="${VERSION#v}"
           npm run release:pack-cli -- --version "$VERSION" --name "$NAME" --out "$RUNNER_TEMP/cli"

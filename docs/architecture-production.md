@@ -321,7 +321,7 @@ every `AWS::IAM::Role` in every environment stack carries the given boundary, el
 The step-by-step guide for each way to install is [docs/install.md](install.md); running an
 environment afterwards is [docs/day-two.md](day-two.md). This section describes how `init` works.
 
-`agentx init --env <name>` (`npx @charterarc/agentx init`) walks an engineer from AWS credentials to a
+`agentx init --env <name>` (`npx @preplabs/rovara-code init`) walks an engineer from AWS credentials to a
 deployed AgentX environment with its own GitHub App and Slack app. For this first run it needs AWS admin
 credentials, a GitHub organization or personal account to own the GitHub App, and a Slack workspace where
 the engineer can create apps. Day-2 commands then use the narrower operator role.
@@ -460,9 +460,9 @@ Environments installed before developer sign-in existed turn it on with `agentx 
 A developer needs no AWS credentials:
 
 ```sh
-npx @charterarc/agentx login <control plane URL>   # opens the browser: Slack or your company's sign-in
-npx @charterarc/agentx whoami                      # who you are, and which projects you can use
-npx @charterarc/agentx logout
+npx @preplabs/rovara-code login <control plane URL>   # opens the browser: Slack or your company's sign-in
+npx @preplabs/rovara-code whoami                      # who you are, and which projects you can use
+npx @preplabs/rovara-code logout
 ```
 
 Tokens are kept in the operating system's credential store; `~/.agentx/developer.yaml` holds only

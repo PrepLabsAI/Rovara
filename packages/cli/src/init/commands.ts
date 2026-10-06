@@ -1,6 +1,7 @@
 // agentx init (FR-015 to FR-020): find the release and region, read any install already under way,
 // ask and check and confirm on a first run, then run the steps. Every AWS, GitHub, Slack, browser
 // and clock dependency is overridable through InitCliDependencies (main.ts's CliDependencies.init).
+import { CLI_PACKAGE_NAME } from "@agentx/contracts";
 import { BudgetsClient } from "@aws-sdk/client-budgets";
 import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
@@ -474,7 +475,7 @@ async function assertBundleResumable(input: { bundle: BundleAnswers; bundleDir: 
   const { bundle } = input;
   if (bundle.account !== input.account) throw agentXError("CONFIG_INVALID", `the bundle is for account ${bundle.account}, but your AWS credentials are for account ${input.account}`);
   if (bundle.releaseVersion !== input.releaseVersion) {
-    throw agentXError("CONFIG_INVALID", `the bundle is for release ${bundle.releaseVersion}; run npx @charterarc/agentx@${bundle.releaseVersion} init --resume --from-bundle ${input.bundleDir}`);
+    throw agentXError("CONFIG_INVALID", `the bundle is for release ${bundle.releaseVersion}; run npx ${CLI_PACKAGE_NAME}@${bundle.releaseVersion} init --resume --from-bundle ${input.bundleDir}`);
   }
   const accessStack = environmentStackName(bundle.env, "access");
   const status = await input.stackStatus.status(accessStack);
@@ -772,7 +773,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     initialAnswers = stored;
     if (stored.account !== caller.account) throw agentXError("CONFIG_INVALID", `the install of ${env} started in account ${stored.account}, but your AWS credentials are for account ${caller.account}; use credentials for ${stored.account}`);
     if (stored.releaseVersion !== release.manifest.version) {
-      throw agentXError("CONFIG_INVALID", `the install of ${env} started with release ${stored.releaseVersion}, but this agentx has release ${release.manifest.version}; run npx @charterarc/agentx@${stored.releaseVersion} init --env ${env}, or pass --release <dir> for ${stored.releaseVersion}`);
+      throw agentXError("CONFIG_INVALID", `the install of ${env} started with release ${stored.releaseVersion}, but this agentx has release ${release.manifest.version}; run npx ${CLI_PACKAGE_NAME}@${stored.releaseVersion} init --env ${env}, or pass --release <dir> for ${stored.releaseVersion}`);
     }
     assertResumeFlagsMatch(stored, options.flags);
     await assertEngineSource(stored);

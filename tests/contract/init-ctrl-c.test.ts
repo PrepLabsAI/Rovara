@@ -95,6 +95,6 @@ describe("Ctrl-C at an agentx init --no-ui question (#235)", () => {
   it("shows that command through npx, with its version, when AgentX ran that way", async () => {
     const { code, err } = await run(readlineCtrlC, [], NPX_CLI_INVOCATION);
     expect(code).toBe(130);
-    expect(err.endsWith(`Stopped. Run npx @charterarc/agentx@${NPX_CLI_INVOCATION.version} init --env livefinal again to continue from here.\n`)).toBe(true);
+    expect(err.endsWith(`Stopped. Run npx @preplabs/rovara-code@${NPX_CLI_INVOCATION.version} init --env livefinal again to continue from here.\n`)).toBe(true);
   });
 });

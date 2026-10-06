@@ -1,5 +1,5 @@
 // agentx login <url> (FR-011): the developer sign-in. It needs no AWS credentials.
-import { AGENTX_CLI_CLIENT_ID, AgentXConfigurationSchema, DEVELOPER_API_VERSION, DeveloperTokenResponseSchema, agentXError, apiVersionCompatible, type AgentXConfiguration } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME, AGENTX_CLI_CLIENT_ID, AgentXConfigurationSchema, DEVELOPER_API_VERSION, DeveloperTokenResponseSchema, agentXError, apiVersionCompatible, type AgentXConfiguration } from "@agentx/contracts";
 import { createCallbackListener, createPkceParameters, openSystemBrowser } from "../auth.js";
 import type { TokenStore } from "../token-store.js";
 import { developerTokenKey, saveDeveloperEnvironment } from "./config.js";
@@ -24,7 +24,7 @@ async function readConfiguration(options: DeveloperLoginOptions, base: URL, url:
     if (new URL(endpoint).origin !== base.origin) throw agentXError("CONFIG_INVALID", `the sign-in endpoints must be on ${base.origin}; ${endpoint} is not, so nothing was sent`);
   }
   const version = apiVersionCompatible(configuration.apiVersion, DEVELOPER_API_VERSION);
-  if (!version.compatible) throw agentXError("CONFIG_INVALID", `this AgentX (API ${configuration.apiVersion}) needs a newer CLI; upgrade: npx @charterarc/agentx@latest login ${url}`);
+  if (!version.compatible) throw agentXError("CONFIG_INVALID", `this AgentX (API ${configuration.apiVersion}) needs a newer CLI; upgrade: npx ${CLI_PACKAGE_NAME}@latest login ${url}`);
   if (!configuration.methods.slack && configuration.methods.oidc === null) {
     throw agentXError("CONFIG_INVALID", "no developer sign-in method is enabled in this AgentX; ask an admin to run agentx signin enable slack");
   }
@@ -46,7 +46,7 @@ export async function developerLogin(options: DeveloperLoginOptions): Promise<{ 
   const configuration = await readConfiguration(options, base, url);
 
   const pkce = createPkceParameters();
-  const again = `run npx @charterarc/agentx login ${url} again`;
+  const again = `run npx ${CLI_PACKAGE_NAME} login ${url} again`;
   const listener = await createCallbackListener(pkce.state, options.timeoutMs ?? 300_000, options.callbackPort ?? 0, {
     timedOut: `sign-in timed out; ${again}`,
     noAnswer: `the sign-in came back without an answer; ${again}`,

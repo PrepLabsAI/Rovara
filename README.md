@@ -128,7 +128,7 @@ where it stopped.
 waiting on owner setup; see [releases](docs/releases.md)). Until the first release, an install runs
 from a source checkout with a locally built release, and needs container images you have pushed
 yourself. When a release is published, the whole install is one command:
-`npx @charterarc/agentx init --env <name>`.
+`npx @preplabs/rovara-code init --env <name>`.
 
 On your own computer, `init` opens an install page in your browser, served only from this computer,
 and asks everything there, from the AWS account to the first reply in Slack. Pass `--no-ui` to

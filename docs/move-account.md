@@ -74,7 +74,7 @@ again with the same pin.
   kept 30 days).
 - **Workspaces**: open worker sessions and their volumes. Finish or close them first.
 - **Developer sign-in sessions**: everyone signs in again, to the new control plane URL
-  (`npx @charterarc/agentx login <new control plane URL>`).
+  (`npx @preplabs/rovara-code login <new control plane URL>`).
 - **Settings you changed with `agentx config`**: set them again in the new environment
   ([docs/day-two.md](day-two.md)).
 

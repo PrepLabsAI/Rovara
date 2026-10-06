@@ -1,5 +1,5 @@
 // agentx signin show|enable|disable|check (spec 025 FR-045, FR-046), under the operator role.
-import { agentXError } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME, agentXError } from "@agentx/contracts";
 import type { CallerIdentity } from "../environments/adopt.js";
 import type { ParameterStore } from "../environments/parameter-store.js";
 import { readEnvironmentSettings, type EnvironmentSettings } from "../environments/settings.js";
@@ -51,7 +51,7 @@ export async function runSigninShow(services: SigninServices, env: string): Prom
     const response = await services.fetch(agentXConfigurationUrl(settings), { signal: AbortSignal.timeout(10_000) });
     if (response.ok) offered = offeredMethods(await response.json());
   } catch { /* shown as unknown */ }
-  const lines = [...describeSignIn(stored), `Slack team: ${teamId ?? "not recorded"}`, `The control plane offers: ${offered}`, `Developers sign in with: npx @charterarc/agentx login ${apiBase(settings)}`];
+  const lines = [...describeSignIn(stored), `Slack team: ${teamId ?? "not recorded"}`, `The control plane offers: ${offered}`, `Developers sign in with: npx ${CLI_PACKAGE_NAME} login ${apiBase(settings)}`];
   return { lines, data: { settings: stored ?? null, slackTeamId: teamId ?? null, offered } };
 }
 

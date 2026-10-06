@@ -1,6 +1,7 @@
 // Spec 025 A14: the admin tools' view of the control plane, with the admin sign-in `agentx login
 // --admin` stored. Every answer is parsed with the contracts' schemas; every refusal becomes one of
 // FR-049's codes. The token is never part of an error, a log line or a result.
+import { CLI_PACKAGE_NAME } from "@agentx/contracts";
 import { randomUUID } from "node:crypto";
 import {
   ADMIN_CHANGE_FAILED_PATTERN, ADMIN_CHANGE_UNEXPECTED_MESSAGE, AdminBindingsResponseSchema, AdminFailuresResponseSchema, AdminHealthResponseSchema, AdminMeResponseSchema, AdminProjectsResponseSchema,
@@ -12,7 +13,7 @@ import {
 import { z } from "zod";
 import { NEXT_STEPS, ToolError, UNEXPECTED_ANSWER_STEP, UPGRADE_AGENTX_STEP, plainText, type ToolErrorCode } from "./errors.js";
 
-export const ADMIN_SIGN_IN_STEP = "run npx @charterarc/agentx login --admin";
+export const ADMIN_SIGN_IN_STEP = `run npx ${CLI_PACKAGE_NAME} login --admin`;
 export interface AdminSession { baseUrl: string; accessToken: string }
 export type AdminFailuresQuery = { since?: string; until?: string; project?: string; limit?: number };
 export type AdminTurnsQuery = { since: string; until?: string; project?: string; origin?: "slack" | "ai_tool"; thread?: string; task?: string; limit?: number; cursor?: string };

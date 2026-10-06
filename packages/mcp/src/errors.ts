@@ -1,5 +1,5 @@
 // Spec 025 FR-049: every tool error has a stable code, a plain message and a next step.
-import { CHANNEL_PRIVACY_NOT_SET_UP, CHANNEL_PRIVACY_NOT_SET_UP_STEP, PRIVATE_CHANNEL_NOT_A_MEMBER, PRIVATE_CHANNEL_NOT_A_MEMBER_STEP, redactText } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME, CHANNEL_PRIVACY_NOT_SET_UP, CHANNEL_PRIVACY_NOT_SET_UP_STEP, PRIVATE_CHANNEL_NOT_A_MEMBER, PRIVATE_CHANNEL_NOT_A_MEMBER_STEP, redactText } from "@agentx/contracts";
 
 export const TOOL_ERROR_CODES = [
   "SIGN_IN_REQUIRED", "SIGN_IN_REJECTED", "ADMIN_REQUIRED", "PROJECT_NOT_FOUND", "PROJECT_ACCESS_DENIED",
@@ -10,9 +10,9 @@ export const TOOL_ERROR_CODES = [
 export type ToolErrorCode = (typeof TOOL_ERROR_CODES)[number];
 
 export const NEXT_STEPS: Record<ToolErrorCode, string> = {
-  SIGN_IN_REQUIRED: "run npx @charterarc/agentx login <your AgentX URL>",
+  SIGN_IN_REQUIRED: `run npx ${CLI_PACKAGE_NAME} login <your AgentX URL>`,
   SIGN_IN_REJECTED: "contact an AgentX admin; the message says why the sign-in was refused",
-  ADMIN_REQUIRED: "run npx @charterarc/agentx login --admin",
+  ADMIN_REQUIRED: `run npx ${CLI_PACKAGE_NAME} login --admin`,
   PROJECT_NOT_FOUND: "run agentx_list_projects to see the projects you can use",
   PROJECT_ACCESS_DENIED: "join one of the project's Slack channels, or ask an admin for access",
   PROJECT_TASKS_DISABLED: "use the project's Slack channel, or ask an admin",
@@ -27,7 +27,7 @@ export const NEXT_STEPS: Record<ToolErrorCode, string> = {
   CONFIRMATION_DECLINED: "ask for the change again",
   CONFIRMATION_EXPIRED: "ask for the change again",
   CHANGE_STALE: "ask for the change again",
-  UPGRADE_REQUIRED: "run npx -y @charterarc/agentx@latest mcp install --client <claude-code, codex or cursor>",
+  UPGRADE_REQUIRED: `run npx -y ${CLI_PACKAGE_NAME}@latest mcp install --client <claude-code, codex or cursor>`,
   CONTROL_PLANE_UNAVAILABLE: "check your connection and try again",
   INVALID_REQUEST: "fix the input the message names and try again",
 };

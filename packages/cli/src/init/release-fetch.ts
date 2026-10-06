@@ -1,4 +1,4 @@
-// `npx @charterarc/agentx init` needs the release matching the CLI: the GitHub release's
+// `npx @preplabs/rovara-code init` needs the release matching the CLI: the GitHub release's
 // release.json and tarball. The extracted release.json must equal the published one byte for byte;
 // loadRelease then checks every file's sha256 against it. The tarball itself is untrusted until
 // its entries are checked for containment (assertArchiveEntriesAreSafe, assertExtractedTreeIsContained).

@@ -6,6 +6,7 @@ cdk.out/
 .release-synth/
 # docs/ stays ignored except the trees the-loop records into (they must be committed).
 docs/*
+!docs/npm-package.md
 !docs/specs/
 !docs/decisions/
 !docs/learnings/

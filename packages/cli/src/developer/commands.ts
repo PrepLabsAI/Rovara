@@ -1,5 +1,5 @@
 // agentx whoami and agentx logout (FR-011).
-import { AGENTX_CLI_CLIENT_ID, AgentXError, DeveloperProjectsResponseSchema, agentXError, type DeveloperProjectsResponse } from "@agentx/contracts";
+import { CLI_PACKAGE_NAME, AGENTX_CLI_CLIENT_ID, AgentXError, DeveloperProjectsResponseSchema, agentXError, type DeveloperProjectsResponse } from "@agentx/contracts";
 import { sanitizeServerText } from "../auth.js";
 import { developerTokenKey, removeDeveloperEnvironment, resolveDeveloperEnvironment } from "./config.js";
 import { developerAccessToken, type DeveloperSessionDeps } from "./session.js";
@@ -24,11 +24,11 @@ export async function developerGet<T>(
   }
   if (response.status === 401) {
     const reason = refusalReason(await response.json().catch(() => undefined));
-    throw agentXError("AUTH_REQUIRED", `your AgentX sign-in for ${session.env} has ended${reason === undefined ? "" : ` (${reason})`}; run npx @charterarc/agentx login ${session.entry.url}`);
+    throw agentXError("AUTH_REQUIRED", `your AgentX sign-in for ${session.env} has ended${reason === undefined ? "" : ` (${reason})`}; run npx ${CLI_PACKAGE_NAME} login ${session.entry.url}`);
   }
   if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `AgentX answered HTTP ${response.status}; try again`);
   const parsed = schema.safeParse(await response.json().catch(() => undefined));
-  if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", "AgentX answered with something unexpected; try again, or upgrade: npx @charterarc/agentx@latest whoami");
+  if (!parsed.success) throw agentXError("RUNTIME_UNAVAILABLE", `AgentX answered with something unexpected; try again, or upgrade: npx ${CLI_PACKAGE_NAME}@latest whoami`);
   return { env: session.env, url: session.entry.url, body: parsed.data };
 }
 

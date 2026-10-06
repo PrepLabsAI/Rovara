@@ -3,7 +3,7 @@
 // says so in the admin tools' results and in agentx_whoami.
 //
 // Owner decision 2026-10-02: that command is shown the way the person actually ran AgentX, bare
-// `agentx ...` when they ran the installed command, `npx @charterarc/agentx@<version> ...` when
+// `agentx ...` when they ran the installed command, `npx @preplabs/rovara-code@<version> ...` when
 // they ran it through npx, reusing the install ready screen's own cliCommandLine helper.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -31,7 +31,7 @@ const ISSUER = `${URL_BASE}/v1/auth`;
 const ADMIN_TOKEN = "admin-access-token-planted-218";
 
 /** This computer ran the published package as the bare, installed `agentx` command. */
-const INSTALLED_BARE: CliInvocation = { published: true, version: "1.4.0", cliPath: "/opt/node_modules/@charterarc/agentx/dist/main.js", invokedViaNpx: false };
+const INSTALLED_BARE: CliInvocation = { published: true, version: "1.4.0", cliPath: "/opt/node_modules/@preplabs/rovara-code/dist/main.js", invokedViaNpx: false };
 /** The same install, but this run of it was through npx. */
 const INSTALLED_NPX: CliInvocation = { ...INSTALLED_BARE, invokedViaNpx: true };
 
@@ -44,18 +44,18 @@ describe("the admin sign-in's expiry, in words (#218)", () => {
 
   it("says it expired, when, and the exact command, bare, when the caller's command runs bare", () => {
     const now = new Date(2026, 9, 1, 13, 0).getTime();
-    const bare = (args: string) => `agentx ${args}`;
-    expect(adminSignInExpiredText("livefinal", new Date(2026, 9, 1, 12, 31).getTime(), now, bare)).toBe("Your admin sign-in for livefinal expired at 12:31. Run agentx --env livefinal login --admin.");
+    const bare = (args: string) => `rovara ${args}`;
+    expect(adminSignInExpiredText("livefinal", new Date(2026, 9, 1, 12, 31).getTime(), now, bare)).toBe("Your admin sign-in for livefinal expired at 12:31. Run rovara --env livefinal login --admin.");
     expect(isExpiredNotice(adminSignInExpiredText("livefinal", 0, now, bare))).toBe(true);
     expect(isExpiredNotice(adminSignInExpiringText("livefinal", now + 60_000, now, bare))).toBe(false);
-    expect(adminSignInExpiringText("livefinal", new Date(2026, 9, 1, 13, 4).getTime(), now, bare)).toBe("Your admin sign-in for livefinal expires at 13:04; run agentx --env livefinal login --admin to sign in again.");
+    expect(adminSignInExpiringText("livefinal", new Date(2026, 9, 1, 13, 4).getTime(), now, bare)).toBe("Your admin sign-in for livefinal expires at 13:04; run rovara --env livefinal login --admin to sign in again.");
   });
 
   it("says the same through whatever command the caller's formatter builds, such as npx with a version", () => {
     const now = new Date(2026, 9, 1, 13, 0).getTime();
-    const npx = (args: string) => `npx @charterarc/agentx@1.4.0 ${args}`;
-    expect(adminSignInExpiredText("livefinal", new Date(2026, 9, 1, 12, 31).getTime(), now, npx)).toBe("Your admin sign-in for livefinal expired at 12:31. Run npx @charterarc/agentx@1.4.0 --env livefinal login --admin.");
-    expect(adminSignInExpiringText("livefinal", new Date(2026, 9, 1, 13, 4).getTime(), now, npx)).toBe("Your admin sign-in for livefinal expires at 13:04; run npx @charterarc/agentx@1.4.0 --env livefinal login --admin to sign in again.");
+    const npx = (args: string) => `npx @preplabs/rovara-code@1.4.0 ${args}`;
+    expect(adminSignInExpiredText("livefinal", new Date(2026, 9, 1, 12, 31).getTime(), now, npx)).toBe("Your admin sign-in for livefinal expired at 12:31. Run npx @preplabs/rovara-code@1.4.0 --env livefinal login --admin.");
+    expect(adminSignInExpiringText("livefinal", new Date(2026, 9, 1, 13, 4).getTime(), now, npx)).toBe("Your admin sign-in for livefinal expires at 13:04; run npx @preplabs/rovara-code@1.4.0 --env livefinal login --admin to sign in again.");
   });
 });
 
@@ -78,27 +78,27 @@ describe("agentx admin commands with an expired admin sign-in (#218)", () => {
     const expiresAt = Date.now() - 60_000;
     const { code, err } = await run({ expiresAt });
     expect(code).toBe(3);
-    expect(err).toBe(`AgentX error [AUTH_REQUIRED]: Your admin sign-in for staging expired at ${localClockTime(expiresAt, Date.now())}. Run agentx --env staging login --admin.\n`);
+    expect(err).toBe(`AgentX error [AUTH_REQUIRED]: Your admin sign-in for staging expired at ${localClockTime(expiresAt, Date.now())}. Run rovara --env staging login --admin.\n`);
     expect(err).not.toContain(ADMIN_TOKEN);
   });
 
   it("says this computer has no admin sign-in for the environment, with the admin command, when none was ever stored", async () => {
     const { code, err } = await run(undefined);
     expect(code).toBe(3);
-    expect(err).toBe("AgentX error [AUTH_REQUIRED]: this computer holds no admin sign-in for staging; run agentx --env staging login --admin\n");
+    expect(err).toBe("AgentX error [AUTH_REQUIRED]: this computer holds no admin sign-in for staging; run rovara --env staging login --admin\n");
   });
 
   it("shows that command through npx, with its version, when AgentX ran that way", async () => {
     const expiresAt = Date.now() - 60_000;
     const { code, err } = await run({ expiresAt }, INSTALLED_NPX);
     expect(code).toBe(3);
-    expect(err).toBe(`AgentX error [AUTH_REQUIRED]: Your admin sign-in for staging expired at ${localClockTime(expiresAt, Date.now())}. Run npx @charterarc/agentx@1.4.0 --env staging login --admin.\n`);
+    expect(err).toBe(`AgentX error [AUTH_REQUIRED]: Your admin sign-in for staging expired at ${localClockTime(expiresAt, Date.now())}. Run npx @preplabs/rovara-code@1.4.0 --env staging login --admin.\n`);
   });
 
   it("shows the no-sign-in-stored command through npx too, when AgentX ran that way", async () => {
     const { code, err } = await run(undefined, INSTALLED_NPX);
     expect(code).toBe(3);
-    expect(err).toBe("AgentX error [AUTH_REQUIRED]: this computer holds no admin sign-in for staging; run npx @charterarc/agentx@1.4.0 --env staging login --admin\n");
+    expect(err).toBe("AgentX error [AUTH_REQUIRED]: this computer holds no admin sign-in for staging; run npx @preplabs/rovara-code@1.4.0 --env staging login --admin\n");
   });
 });
 
@@ -150,11 +150,11 @@ describe("agentx mcp with an expired admin sign-in (#218)", () => {
     // A direct call to the hidden tool is answered with the offer's refusal, once its first check has answered.
     const refusal = async () => toolError((await client.callTool({ name: "agentx_admin_list_projects", arguments: {} })) as Parameters<typeof toolError>[0]);
     await expect.poll(refusal).toEqual({
-      code: "ADMIN_REQUIRED", message: `Your admin sign-in for staging expired at ${time}`, next_step: "run agentx --env staging login --admin",
+      code: "ADMIN_REQUIRED", message: `Your admin sign-in for staging expired at ${time}`, next_step: "run rovara --env staging login --admin",
     });
     expect(whoami.structuredContent).toMatchObject({ admin: false });
     const text = JSON.stringify(whoami.content);
-    expect(text).toContain(`Your admin sign-in for staging expired at ${time}. Run agentx --env staging login --admin.`);
+    expect(text).toContain(`Your admin sign-in for staging expired at ${time}. Run rovara --env staging login --admin.`);
     expect(text).not.toContain("holds no admin sign-in");
     expect(await stop()).toBe(0);
   });
@@ -165,10 +165,10 @@ describe("agentx mcp with an expired admin sign-in (#218)", () => {
     const time = localClockTime(expiresAt, Date.now());
     const refusal = async () => toolError((await client.callTool({ name: "agentx_admin_list_projects", arguments: {} })) as Parameters<typeof toolError>[0]);
     await expect.poll(refusal).toEqual({
-      code: "ADMIN_REQUIRED", message: `Your admin sign-in for staging expired at ${time}`, next_step: "run npx @charterarc/agentx@1.4.0 --env staging login --admin",
+      code: "ADMIN_REQUIRED", message: `Your admin sign-in for staging expired at ${time}`, next_step: "run npx @preplabs/rovara-code@1.4.0 --env staging login --admin",
     });
     const whoami = await client.callTool({ name: "agentx_whoami", arguments: {} });
-    expect(JSON.stringify(whoami.content)).toContain(`Your admin sign-in for staging expired at ${time}. Run npx @charterarc/agentx@1.4.0 --env staging login --admin.`);
+    expect(JSON.stringify(whoami.content)).toContain(`Your admin sign-in for staging expired at ${time}. Run npx @preplabs/rovara-code@1.4.0 --env staging login --admin.`);
     expect(await stop()).toBe(0);
   });
 });
@@ -197,7 +197,7 @@ describe("an admin sign-in about to expire (#218)", () => {
     const expiresAt = Date.now() + 120_000;
     const client = await server(expiresAt);
     await expect.poll(async () => (await client.listTools()).tools.some((tool) => tool.name === "agentx_admin_list_projects")).toBe(true);
-    const warning = `Your admin sign-in for staging expires at ${localClockTime(expiresAt, Date.now())}; run agentx --env staging login --admin to sign in again.`;
+    const warning = `Your admin sign-in for staging expires at ${localClockTime(expiresAt, Date.now())}; run rovara --env staging login --admin to sign in again.`;
     const result = await client.callTool({ name: "agentx_admin_list_projects", arguments: {} });
     expect(result.isError).not.toBe(true);
     expect(result.structuredContent).toEqual({ projects: [] });
@@ -209,7 +209,7 @@ describe("an admin sign-in about to expire (#218)", () => {
     const expiresAt = Date.now() + 120_000;
     const client = await server(expiresAt, INSTALLED_NPX);
     await expect.poll(async () => (await client.listTools()).tools.some((tool) => tool.name === "agentx_admin_list_projects")).toBe(true);
-    const warning = `Your admin sign-in for staging expires at ${localClockTime(expiresAt, Date.now())}; run npx @charterarc/agentx@1.4.0 --env staging login --admin to sign in again.`;
+    const warning = `Your admin sign-in for staging expires at ${localClockTime(expiresAt, Date.now())}; run npx @preplabs/rovara-code@1.4.0 --env staging login --admin to sign in again.`;
     const result = await client.callTool({ name: "agentx_admin_list_projects", arguments: {} });
     expect(JSON.stringify(result.content)).toContain(warning);
   });

@@ -69,7 +69,7 @@ describe("agentx mcp and the admin sign-in (A14)", () => {
     admin.expiresAt = Date.now() - 1;
     await client.callTool({ name: "agentx_whoami", arguments: {} });
     await expect.poll(async () => (await client.listTools()).tools.length).toBe(11);
-    expect(toolError(await client.callTool({ name: "agentx_admin_list_projects", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED", next_step: "run npx @charterarc/agentx login --admin" });
+    expect(toolError(await client.callTool({ name: "agentx_admin_list_projects", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED", next_step: "run npx @preplabs/rovara-code login --admin" });
   });
 
   it("offers no admin tool against a control plane without the admin API, and whoami says why", async () => {

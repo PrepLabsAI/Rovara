@@ -1,5 +1,6 @@
 // Spec 025 FR-027: the tools' view of the control plane. The stdio server gives it the signed-in
 // developer's session (packages/cli); the hosted endpoint will give it another.
+import { CLI_PACKAGE_NAME } from "@agentx/contracts";
 import { randomUUID } from "node:crypto";
 import {
   AgentXConfigurationConfirmSchema,
@@ -53,7 +54,7 @@ export interface ControlPlaneClient {
 /** Spec 025 E16 (C22): confirm is absent from a control plane from before 25e. */
 const ConfigurationSchema = z.object({ env: z.string(), apiVersion: z.string(), adminApiVersion: z.string().optional(), confirm: AgentXConfigurationConfirmSchema.optional() });
 const UNREADABLE = "AgentX answered with something this version of the CLI cannot read; upgrade it";
-const DEFAULT_SIGN_IN = "npx @charterarc/agentx login <your AgentX URL>";
+const DEFAULT_SIGN_IN = `npx ${CLI_PACKAGE_NAME} login <your AgentX URL>`;
 const REQUEST_TIMEOUT_MS = 30_000;
 /** No call, retries included, takes longer than this. */
 const DEADLINE_MS = 45_000;

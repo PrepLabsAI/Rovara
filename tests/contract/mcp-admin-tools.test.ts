@@ -85,11 +85,11 @@ describe("the admin read tools (FR-030)", () => {
 
   it("answers ADMIN_REQUIRED when the server holds no admin client", async () => {
     const client = await connect(undefined);
-    expect(toolError(await client.callTool({ name: "agentx_admin_health", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED", next_step: "run npx @charterarc/agentx login --admin" });
+    expect(toolError(await client.callTool({ name: "agentx_admin_health", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED", next_step: "run npx @preplabs/rovara-code login --admin" });
   });
 
   it("passes a refusal through as its tool error", async () => {
-    const client = await connect({ health: async () => { throw new ToolError("ADMIN_REQUIRED", "AgentX refused this computer's admin sign-in, or it has expired", "run npx @charterarc/agentx login --admin"); } });
+    const client = await connect({ health: async () => { throw new ToolError("ADMIN_REQUIRED", "AgentX refused this computer's admin sign-in, or it has expired", "run npx @preplabs/rovara-code login --admin"); } });
     expect(toolError(await client.callTool({ name: "agentx_admin_health", arguments: {} }))).toMatchObject({ code: "ADMIN_REQUIRED" });
   });
 

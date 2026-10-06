@@ -1,8 +1,9 @@
 // Spec 025 FR-043: add the agentx MCP server to Claude Code, Codex or Cursor without touching
 // any other entry, and say exactly what changed. --print only prints the entry.
 //
-// The entry only runs the published CLI (`npx -y @charterarc/agentx@<version> [--env <name>] mcp`);
+// The entry only runs the published CLI (`npx -y @preplabs/rovara-code@<version> [--env <name>] mcp`);
 // it never holds a token: the MCP server reads the developer sign-in from the system token store.
+import { CLI_PACKAGE_NAME } from "@agentx/contracts";
 import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
@@ -26,7 +27,7 @@ type Edit = { text: string; action: "added" | "replaced" };
 
 /** R26: the packed release's version, or latest for a CLI built from source. */
 export function mcpEntry(version: string | undefined, env: string | undefined): McpEntry {
-  return { command: "npx", args: ["-y", `@charterarc/agentx@${version ?? "latest"}`, ...(env === undefined ? [] : ["--env", env]), "mcp"] };
+  return { command: "npx", args: ["-y", `${CLI_PACKAGE_NAME}@${version ?? "latest"}`, ...(env === undefined ? [] : ["--env", env]), "mcp"] };
 }
 
 const tomlBlock = (entry: McpEntry) => ["[mcp_servers.agentx]", `command = ${JSON.stringify(entry.command)}`, `args = [${entry.args.map((arg) => JSON.stringify(arg)).join(", ")}]`];
@@ -167,7 +168,7 @@ const readIfPresent = (path: string) => readFile(path, "utf8").catch((error: Nod
   throw error;
 });
 
-const NEXT = "Start a new session of your AI tool, and sign in if you have not yet: npx @charterarc/agentx login <your AgentX URL>\n";
+const NEXT = `Start a new session of your AI tool, and sign in if you have not yet: npx ${CLI_PACKAGE_NAME} login <your AgentX URL>\n`;
 
 export async function installMcp(kind: McpClientKind, options: { print: boolean; env?: string }, deps: McpInstallDeps): Promise<string> {
   const entry = mcpEntry(deps.version, options.env);

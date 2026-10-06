@@ -137,7 +137,8 @@ export const TEST_CLI_INVOCATION: CliInvocation = { published: false, cliPath: "
  * the way the person actually ran AgentX.
  */
 export const INSTALLED_CLI_INVOCATION: CliInvocation = {
-  published: true, version: "1.4.0", cliPath: "/opt/node_modules/@charterarc/agentx/dist/main.js", invokedViaNpx: false,
+  published: true, version: "1.4.0", cliPath: "/opt/node_modules/@preplabs/rovara-code/bin/agentx.mjs", invokedViaNpx: false,
+  packageName: "@preplabs/rovara-code", commandName: "agentx",
 };
 
 /** The same install, but this run of it was through npx. */

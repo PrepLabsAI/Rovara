@@ -18,8 +18,8 @@ afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { 
 async function publishedBinLink(): Promise<string> {
   const dir = await mkdtemp(join(tmpdir(), "agentx-cli-"));
   dirs.push(dir);
-  const main = join(dir, "node_modules", "@charterarc", "agentx", "dist", "main.js");
-  await mkdir(join(dir, "node_modules", "@charterarc", "agentx", "dist"), { recursive: true });
+  const main = join(dir, "node_modules", "@preplabs", "rovara-code", "dist", "main.js");
+  await mkdir(join(dir, "node_modules", "@preplabs", "rovara-code", "dist"), { recursive: true });
   await mkdir(join(dir, "node_modules", ".bin"), { recursive: true });
   await writeFile(main, "");
   const bin = join(dir, "node_modules", ".bin", "agentx");
@@ -33,7 +33,7 @@ describe("the command a person can run", () => {
     const invocation = currentCliInvocation(bin, "1.2.3", { npm_command: "exec" });
     expect(invocation.published).toBe(true);
     expect(invocation.invokedViaNpx).toBe(true);
-    expect(cliCommandLine(invocation, "login https://abc.example.com")).toBe("npx @charterarc/agentx@1.2.3 login https://abc.example.com");
+    expect(cliCommandLine(invocation, "login https://abc.example.com")).toBe("npx @preplabs/rovara-code@1.2.3 login https://abc.example.com");
   });
 
   it("names the installed command bare, same bin link, when npm did not launch this process as npx", async () => {
@@ -41,13 +41,13 @@ describe("the command a person can run", () => {
     const invocation = currentCliInvocation(bin, "1.2.3", {});
     expect(invocation.published).toBe(true);
     expect(invocation.invokedViaNpx).toBe(false);
-    expect(cliCommandLine(invocation, "login https://abc.example.com")).toBe("agentx login https://abc.example.com");
+    expect(cliCommandLine(invocation, "login https://abc.example.com")).toBe("rovara login https://abc.example.com");
   });
 
   it("falls back to npx, the universally-working suggestion, when told nothing about how it ran", () => {
     // A persisted hint (built earlier, for a command shown again later) that never set
     // invokedViaNpx: the ready screen's own existing behavior, unchanged.
-    expect(cliCommandLine({ published: true, version: "1.2.3", cliPath: "/x" }, "login https://abc.example.com")).toBe("npx @charterarc/agentx@1.2.3 login https://abc.example.com");
+    expect(cliCommandLine({ published: true, version: "1.2.3", cliPath: "/x" }, "login https://abc.example.com")).toBe("npx @preplabs/rovara-code@1.2.3 login https://abc.example.com");
   });
 
   it("shows a build from source by its own path, quoted when it has a space", () => {

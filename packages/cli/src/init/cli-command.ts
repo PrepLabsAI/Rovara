@@ -7,9 +7,17 @@
 // shows as the bare `agentx` command, not as the universally-working `npx` suggestion that a
 // persisted (not live) hint still falls back to when it was never told.
 import { realpathSync } from "node:fs";
+import { CLI_COMMAND_NAME, CLI_PACKAGE_NAME } from "@agentx/contracts";
 import { RELEASE_VERSION } from "../version.js";
 
-export interface CliInvocation { published: boolean; version?: string; cliPath: string; invokedViaNpx?: boolean }
+export interface CliInvocation {
+  published: boolean;
+  version?: string;
+  cliPath: string;
+  invokedViaNpx?: boolean;
+  packageName?: string;
+  commandName?: string;
+}
 
 const resolved = (path: string): string => {
   try {
@@ -30,8 +38,19 @@ export function currentCliInvocation(
   env: NodeJS.ProcessEnv = process.env,
 ): CliInvocation {
   const cliPath = resolved(argv1);
-  const published = version !== undefined && /[\\/]node_modules[\\/]@charterarc[\\/]agentx[\\/]/.test(cliPath);
-  return { published, ...(version === undefined ? {} : { version }), cliPath, invokedViaNpx: ranViaNpx(env) };
+  const normalized = cliPath.replaceAll("\\", "/");
+  // Match complete package path segments, including npm's npx cache and Windows separators.
+  // A source checkout has no release version and must continue to show its real local path.
+  const packageName = [CLI_PACKAGE_NAME, "@charterarc/agentx"].find((name) => normalized.includes(`/node_modules/${name}/`));
+  const published = version !== undefined && packageName !== undefined;
+  const commandName = packageName === "@charterarc/agentx" ? "agentx" : CLI_COMMAND_NAME;
+  return {
+    published,
+    ...(version === undefined ? {} : { version }),
+    ...(published ? { packageName, commandName } : {}),
+    cliPath,
+    invokedViaNpx: ranViaNpx(env),
+  };
 }
 
 const quoted = (path: string): string => (/^[A-Za-z0-9_./:@-]+$/.test(path) ? path : `"${path.replaceAll('"', '\\"')}"`);
@@ -46,6 +65,9 @@ const quoted = (path: string): string => (/^[A-Za-z0-9_./:@-]+$/.test(path) ? pa
  */
 export function cliCommandLine(invocation: CliInvocation, args: string): string {
   if (!invocation.published || invocation.version === undefined) return `node ${quoted(invocation.cliPath)} ${args}`;
-  if (invocation.invokedViaNpx === false) return `agentx ${args}`;
-  return `npx @charterarc/agentx@${invocation.version} ${args}`;
+  const legacy = invocation.cliPath.replaceAll("\\", "/").includes("/node_modules/@charterarc/agentx/");
+  const packageName = invocation.packageName ?? (legacy ? "@charterarc/agentx" : CLI_PACKAGE_NAME);
+  const commandName = invocation.commandName ?? (legacy ? "agentx" : CLI_COMMAND_NAME);
+  if (invocation.invokedViaNpx === false) return `${commandName} ${args}`;
+  return `npx ${packageName}@${invocation.version} ${args}`;
 }

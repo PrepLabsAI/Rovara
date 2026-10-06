@@ -423,7 +423,7 @@ describe("agentx signin disable and show", () => {
       "Company sign-in: off",
       "Slack team: T0TEAM",
       "The control plane offers: Slack",
-      "Developers sign in with: npx @charterarc/agentx login https://abc.execute-api.us-east-1.amazonaws.com",
+      "Developers sign in with: npx @preplabs/rovara-code login https://abc.execute-api.us-east-1.amazonaws.com",
     ]);
   });
 });

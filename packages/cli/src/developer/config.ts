@@ -1,5 +1,6 @@
 // ~/.agentx/developer.yaml: which AgentX environments this computer has signed in to (FR-011).
 // Never holds a token: tokens live in the system token store.
+import { CLI_PACKAGE_NAME } from "@agentx/contracts";
 import { chmod, mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { AGENTX_CLI_CLIENT_ID, DEVELOPER_TOKEN_AUDIENCE, EnvironmentNameSchema, agentXError } from "@agentx/contracts";
@@ -90,7 +91,7 @@ export async function resolveDeveloperEnvironment(home: string, env: string | un
   const name = env ?? config.default;
   const entry = name === undefined ? undefined : config.environments[name];
   if (name === undefined || entry === undefined) {
-    throw agentXError("AUTH_REQUIRED", `this computer is not signed in to AgentX${name === undefined ? "" : ` environment ${name}`}; run npx @charterarc/agentx login <your AgentX URL>`);
+    throw agentXError("AUTH_REQUIRED", `this computer is not signed in to AgentX${name === undefined ? "" : ` environment ${name}`}; run npx ${CLI_PACKAGE_NAME} login <your AgentX URL>`);
   }
   return { env: name, entry };
 }
