@@ -22,7 +22,7 @@
 
 <br/>
 
-# Delegate a coding task. Get the change and its check report.
+# The open-source alternative to Claude Tag!
 
 Start a task in Slack, or hand one over from Claude Code, Codex or Cursor. A remote
 [Pi](https://github.com/earendil-works/pi) coding agent works on it in a persistent, isolated EC2
@@ -480,5 +480,5 @@ two years after it ships. &copy; 2026 PrepLabs
 ---
 
 <p align="center">
-  <sub>Delegate the task. Read the report. Review the pull request.</sub>
+  <sub>The open-source alternative to Claude Tag!</sub>
 </p>
