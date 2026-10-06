@@ -129,7 +129,7 @@ describe("spec 048 FR-029: the plan as a plain summary", () => {
     expect(plan.sections.map((section) => section.title)).toEqual(["In AWS", "In GitHub", "In Slack", "Budget and alerts", "To remove it later"]);
     expect(plan.sections[0]?.lines).toEqual([
       "The network and sign-in, the AgentX service and the Slack connection, in AWS account 123456789012 (us-east-1).",
-      "Building them takes about 18 minutes, and you can leave while it runs.",
+      "Building them takes about 21 minutes, and you can leave while it runs.",
     ]);
     expect(plan.sections[1]?.lines).toEqual(["An app named \"AgentX acme (staging)\" owned by acme. It can read code and open pull requests in the repositories you choose."]);
     expect(plan.sections[4]?.lines).toEqual(["The ready screen gives you the command that removes everything, the coding machines' disks too."]);

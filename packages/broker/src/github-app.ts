@@ -2,9 +2,13 @@ import { createSign } from "node:crypto";
 import { agentXError, type AgentXError } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "./repository-access.js";
 
+const GITHUB_APP_ID = /^[1-9][0-9]*$/;
+
 export interface GitHubAppCredentialProviderOptions {
   credentialRef: string;
-  appId: string;
+  /** The App's id, or a function that reads it when first needed: an install's control plane
+   * deploys before its GitHub App exists, and then reads the id from the App's secret. */
+  appId: string | (() => Promise<string>);
   getPrivateKey: () => Promise<string>;
   fetchImplementation?: typeof fetch;
   now?: () => number;
@@ -63,7 +67,7 @@ export class GitHubAppCredentialProvider {
   private readonly installations = new Map<string, Promise<{ id: number; login: string }>>();
 
   constructor(private readonly options: GitHubAppCredentialProviderOptions) {
-    if (!/^[1-9][0-9]*$/.test(options.appId)) throw new Error("GitHub App ID must be numeric");
+    if (typeof options.appId === "string" && !GITHUB_APP_ID.test(options.appId)) throw new Error("GitHub App ID must be numeric");
     this.fetchImplementation = options.fetchImplementation ?? fetch;
     this.now = options.now ?? Date.now;
   }
@@ -250,8 +254,10 @@ export class GitHubAppCredentialProvider {
   }
 
   private async appHeaders(): Promise<Record<string, string>> {
+    const appId = typeof this.options.appId === "string" ? this.options.appId : await this.options.appId();
+    if (!GITHUB_APP_ID.test(appId)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App ID must be numeric");
     const privateKey = await this.options.getPrivateKey();
-    const jwt = createGitHubAppJwt(this.options.appId, privateKey, this.now());
+    const jwt = createGitHubAppJwt(appId, privateKey, this.now());
     return {
       accept: "application/vnd.github+json",
       authorization: `Bearer ${jwt}`,
@@ -436,6 +442,20 @@ export function privateKeyFromSecret(secret: string): string {
     // Report one stable error below without reflecting secret contents.
   }
   throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App private-key secret is not a PEM key");
+}
+
+/** The App's id from the secret `agentx init` stores (`{"appId", "privateKey", ...}`). A secret
+ * holding only a PEM key has none: its control plane passes GITHUB_APP_ID instead. */
+export function appIdFromSecret(secret: string): string {
+  try {
+    const value = JSON.parse(secret.trim()) as unknown;
+    if (value && typeof value === "object" && "appId" in value && typeof value.appId === "string" && GITHUB_APP_ID.test(value.appId)) {
+      return value.appId;
+    }
+  } catch {
+    // Report one stable error below without reflecting secret contents.
+  }
+  throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App secret holds no appId; set the control plane's GitHubAppId parameter");
 }
 
 function parseGitHubRepository(repositoryUrl: string): { owner: string; name: string } {

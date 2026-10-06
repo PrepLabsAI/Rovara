@@ -84,7 +84,7 @@ npx @preplabsai/rovara-code --env <env> init --region <region>
 
 In a terminal on your own computer, `init` opens a page in your browser, served from this computer
 only (`127.0.0.1`). The page shows the five parts of the install (Get started, Your choices, Build
-in AWS, Connect Slack, Finish), how long each usually takes, which one you are in, and the time
+in AWS, Connect GitHub and Slack, Finish), how long each usually takes, which one you are in, and the time
 left. The browser tab's title reads "(Action needed) Install AgentX" whenever the install waits for
 you.
 
@@ -97,12 +97,13 @@ The page walks you through five parts, and tells you when it needs you:
    name. Everything else has a recommended value under Advanced settings. Rovara checks your answers
    (the models, the release's images, the names, the GitHub owner) before anything is created, then
    shows the plan with its cost. Press Create Rovara, or Change answers to go back with every answer
-   kept. Then you create and install the GitHub app.
-3. **Build in AWS.** About 18 minutes, unattended. You can leave; the alert confirmation email
-   arrives during this part.
-4. **Connect Slack.** One visit: create the Slack app, then paste its Client ID, Client Secret,
-   Signing Secret and Bot User OAuth Token on one form. Developer sign-in is turned on with the
-   Slack connection, as the plan said.
+   kept.
+3. **Build in AWS.** About 21 minutes, unattended: every stack, the Slack service included. You can
+   leave; the alert confirmation email arrives during this part.
+4. **Connect GitHub and Slack.** One visit, once the build is done: create and install the GitHub
+   app, then create the Slack app and paste its Client ID, Client Secret, Signing Secret and Bot
+   User OAuth Token on one form. Rovara checks that Slack reaches it, and turns on developer
+   sign-in with the Slack connection, as the plan said.
 5. **Finish.** Your admin sign-in, the first project and channel, alerts, and a first reply.
 
 Without a browser (`--no-ui`, SSH, CI) the terminal asks in the same order and runs the same checks;

@@ -120,7 +120,7 @@ import { recordPrepareFailureEvent } from "./operation-events.js";
 import { releaseFailedPreparation, slackMemberLimitKey, slackOrganizationLimitKey, slackThreadKey } from "./failed-preparation.js";
 import { releaseFailedCancelWorkspace } from "./failed-cancel-release.js";
 import { assertNoUntrustedRoutingFields } from "../authorization.js";
-import { GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
+import { appIdFromSecret, GitHubAppCredentialProvider, privateKeyFromSecret } from "../github-app.js";
 import { CatalogCache, CredentialUnavailable } from "@agentx/gateway";
 import { unsupportedThinkingLevels } from "@agentx/model-runtime/thinking-levels";
 import { executeGitHubTool, toGitHubCatalog, type GitHubMcpDependencies } from "../github-mcp.js";
@@ -5043,9 +5043,13 @@ const ec2Sessions = new SessionManager({
   },
 });
 const githubPrivateKeySecretArn = requiredEnvironment("GITHUB_APP_PRIVATE_KEY_SECRET_ARN");
-let githubPrivateKey: Promise<string> | undefined;
-const loadGitHubPrivateKey = (): Promise<string> => {
-  githubPrivateKey ??= secretsManager.send(new GetSecretValueCommand({
+// An empty GITHUB_APP_ID (an install whose control plane deployed before its GitHub App) means
+// the id is the secret's appId. The secret is empty until `agentx init` creates the App: a failed
+// read is not cached, so the next request reads it again.
+const githubAppIdSetting = process.env.GITHUB_APP_ID ?? "";
+let githubApp: Promise<{ appId: string; privateKey: string }> | undefined;
+const loadGitHubApp = (): Promise<{ appId: string; privateKey: string }> => {
+  githubApp ??= secretsManager.send(new GetSecretValueCommand({
     SecretId: githubPrivateKeySecretArn,
   })).then((response) => {
     const secret = response.SecretString ?? (
@@ -5054,17 +5058,21 @@ const loadGitHubPrivateKey = (): Promise<string> => {
         : Buffer.from(response.SecretBinary).toString("utf8")
     );
     if (!secret) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App private-key secret is empty");
-    return privateKeyFromSecret(secret);
+    return { appId: githubAppIdSetting !== "" ? githubAppIdSetting : appIdFromSecret(secret), privateKey: privateKeyFromSecret(secret) };
   }).catch((error: unknown) => {
-    githubPrivateKey = undefined;
+    githubApp = undefined;
+    // A secret created without a value (before the App exists) has no current version.
+    if (error instanceof Error && error.name === "ResourceNotFoundException") {
+      throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App private-key secret is empty; finish agentx init to create the GitHub App");
+    }
     throw error;
   });
-  return githubPrivateKey;
+  return githubApp;
 };
 const githubCredentials = new GitHubAppCredentialProvider({
   credentialRef: requiredEnvironment("GITHUB_APP_CREDENTIAL_REF"),
-  appId: requiredEnvironment("GITHUB_APP_ID"),
-  getPrivateKey: loadGitHubPrivateKey,
+  appId: githubAppIdSetting !== "" ? githubAppIdSetting : async () => (await loadGitHubApp()).appId,
+  getPrivateKey: async () => (await loadGitHubApp()).privateKey,
 });
 const repositoryGrantSigningKey = createHmac("sha256", requiredEnvironment("CALLBACK_SIGNING_KEY"))
   .update("agentx:repository-grants:v3")

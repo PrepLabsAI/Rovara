@@ -203,6 +203,8 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
       "Type": "String",
     },
     "GitHubAppId": {
+      "Default": "",
+      "Description": "GitHub App id; empty reads it from the private-key secret's appId",
       "Type": "String",
     },
     "GitHubAppPrivateKeySecretArn": {

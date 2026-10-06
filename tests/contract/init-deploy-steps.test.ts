@@ -41,10 +41,11 @@ describe("init deploy answers", () => {
     expect(initDeployAnswers(sampleAnswers({ identity }), emptyProgress("staging", T0), ["access"]).identity).toEqual(identity);
   });
 
-  it("refuses to deploy the control plane before the GitHub App is installed", () => {
-    const notInstalled = { account: GITHUB.account, appId: GITHUB.appId, slug: GITHUB.slug, privateKeySecretArn: GITHUB.privateKeySecretArn };
-    expect(() => initDeployAnswers(sampleAnswers(), { ...emptyProgress("staging", T0), github: notInstalled }, ["control-plane"]))
-      .toThrow("the control plane needs the GitHub App's installation; the github-app step must finish first");
+  it("deploys the control plane before the GitHub App with the app's empty secret and no app id", () => {
+    const deploy = initDeployAnswers(sampleAnswers(), emptyProgress("staging", T0), ["control-plane"], GITHUB.privateKeySecretArn);
+    expect(deploy.github).toEqual({ account: "", appId: "", installationId: "", privateKeySecretArn: GITHUB.privateKeySecretArn });
+    expect(() => initDeployAnswers(sampleAnswers(), emptyProgress("staging", T0), ["control-plane"]))
+      .toThrow("the control plane needs the GitHub App's secret; run agentx init again");
   });
 });
 
@@ -79,6 +80,15 @@ describe("init deploy steps", () => {
     await deployStep({ id: "access", title: "a" }).run(context, progressHandle());
     await deployStep({ id: "core", title: "c" }).run(context, progressHandle());
     expect(context.deployer.requests.map((request) => request.part)).toEqual(["access", "foundation"]);
+  });
+
+  it("creates the GitHub App's secret with no value before the app exists, and deploys the control plane with its ARN", async () => {
+    const context = initContext();
+    homes.push(context.home);
+    for (const id of ["access", "core", "control-plane"] as const) await deployStep({ id, title: id }).run(context, progressHandle());
+    const parameters = context.deployer.requests.find((request) => request.part === "control-plane")?.parameters;
+    expect(parameters).toMatchObject({ GitHubAppId: "", GitHubAppPrivateKeySecretArn: await context.secrets.arn("agentx/staging/github-app") });
+    expect(await context.secrets.get("agentx/staging/github-app")).toBeUndefined();
   });
 
   it("passes the Slack app-posted-messages choice to the control plane", async () => {

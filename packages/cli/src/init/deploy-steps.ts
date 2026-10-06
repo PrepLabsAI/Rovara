@@ -8,6 +8,7 @@ import { installOrder, type DeployPart } from "../deploy/parameters.js";
 import { writeEnvironmentCache } from "../environments/cache.js";
 import { readEnvironmentSettings } from "../environments/settings.js";
 import type { InitContext, StackStatusReader } from "./context.js";
+import { githubAppSecretName } from "./github-app.js";
 import type { InitAnswers, InstallProgress } from "./install-state.js";
 import type { InitStep, ProgressHandle } from "./steps.js";
 
@@ -22,16 +23,21 @@ export type DeployStepId = keyof typeof DEPLOY_STEP_PARTS;
 export const IDLE_WAIT_TIMEOUT_MS = 60 * 60 * 1000;
 const IDLE_POLL_MS = 15_000;
 
-/** The deploy answers for `parts`. GitHub is filled only for the control plane, which cannot deploy
- * before the github-app step has recorded the app's installation; earlier parts do not read it. */
-export function initDeployAnswers(answers: InitAnswers, progress: InstallProgress, parts: readonly DeployPart[]): DeployAnswers {
+/** The deploy answers for `parts`. GitHub is filled only for the control plane; earlier parts do
+ * not read it. The control plane deploys before the github-app step, so until that step records the
+ * app it gets the app's secret still empty (`githubSecretArn`) and no app id: the broker then reads
+ * the id from the secret, once the github-app step has stored it there. */
+export function initDeployAnswers(answers: InitAnswers, progress: InstallProgress, parts: readonly DeployPart[], githubSecretArn?: string): DeployAnswers {
   let github: DeployAnswers["github"] = { account: "", appId: "", installationId: "", privateKeySecretArn: "" };
   if (parts.includes("control-plane")) {
     const app = progress.github;
-    if (app?.installationId === undefined) {
-      throw agentXError("CONFIG_INVALID", "the control plane needs the GitHub App's installation; the github-app step must finish first");
+    if (app !== undefined) {
+      github = { account: app.account, appId: app.appId, installationId: app.installationId ?? "", privateKeySecretArn: app.privateKeySecretArn };
+    } else if (githubSecretArn !== undefined) {
+      github = { account: "", appId: "", installationId: "", privateKeySecretArn: githubSecretArn };
+    } else {
+      throw agentXError("CONFIG_INVALID", "the control plane needs the GitHub App's secret; run agentx init again");
     }
-    github = { account: app.account, appId: app.appId, installationId: app.installationId, privateKeySecretArn: app.privateKeySecretArn };
   }
   const images = deployImagesAnswers(answers.images);
   return {
@@ -88,10 +94,14 @@ export function deployStep(input: { id: DeployStepId; title: string; after?: (co
       const parts = DEPLOY_STEP_PARTS[input.id].filter((part) => order.includes(part));
       await waitForIdleStacks({ reader: context.stackStatus, stackNames: parts.map((part) => environmentStackName(env, part)), sleep: context.sleep, write: context.write, now: context.now });
       const deployment = await context.deployment();
+      // The github-app step stores the app's key in this secret later; the control plane only needs its ARN now.
+      const githubSecretArn = parts.includes("control-plane") && progress.current().github === undefined
+        ? await context.secrets.reserve(githubAppSecretName(env))
+        : undefined;
       const result = await deployEnvironment({
         mode: "install",
         engine: answers.engine,
-        answers: initDeployAnswers(answers, progress.current(), parts),
+        answers: initDeployAnswers(answers, progress.current(), parts, githubSecretArn),
         release: context.release,
         deployer: deployment.deployer,
         store: deployment.store,

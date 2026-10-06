@@ -204,20 +204,21 @@ describe("init step runner", () => {
     expect(thrown).toMatchObject({ message: expect.stringContaining("said no to continuing") as unknown });
   });
 
-  it("spec 048 phase 2: a resume of the old order runs the GitHub step next and deploys nothing twice", async () => {
+  it("a resume of the earlier order (the GitHub app before the build) skips the done GitHub step and deploys nothing twice", async () => {
     const store = new MemoryParameterStore();
+    const at = "2026-10-01T00:00:00.000Z";
     await writeInstallProgress(store, {
       ...emptyProgress("staging", 0),
-      steps: { prerequisites: { status: "done", at: "2026-10-01T00:00:00.000Z" }, access: { status: "done", at: "2026-10-01T00:00:00.000Z" }, core: { status: "done", at: "2026-10-01T00:00:00.000Z" } },
+      steps: { prerequisites: { status: "done", at }, "github-app": { status: "done", at }, access: { status: "done", at }, core: { status: "done", at } },
     });
     const ran: string[] = [];
     const step = (id: InitStepId): InitStep<null> => ({ id, title: id, run: async () => { ran.push(id); return { status: "done" }; } });
     const result = await runInitSteps({
       env: "staging", region: "us-east-1", store, holder: HOLDER, context: null, now: () => 1,
-      steps: INSTALL_STEP_ORDER.slice(0, 5).map(step),
+      steps: INSTALL_STEP_ORDER.slice(0, 6).map(step),
     });
-    expect(ran).toEqual(["github-app", "control-plane"]);
-    expect(result).toMatchObject({ status: "complete", skipped: ["prerequisites", "access", "core"] });
+    expect(ran).toEqual(["control-plane", "slack-service"]);
+    expect(result).toMatchObject({ status: "complete", skipped: ["prerequisites", "access", "core", "github-app"] });
   });
 });
 

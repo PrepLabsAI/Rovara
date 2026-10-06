@@ -340,31 +340,36 @@ as it finishes:
 1. **prerequisites**: the checks above (already run on a first run; a resumed run runs them here).
 2. **access**: the access stack, deployed with the caller's own AWS credentials.
 3. **core**: foundation and identity (skipped when bringing your own OIDC).
-4. **Create the GitHub app** (`github-app`): one click on GitHub's pre-filled manifest page creates the app; then choose which
+4. **control-plane**: the control plane and runtime. The GitHub App does not exist yet, so `init` first
+   creates its secret, `agentx/<env>/github-app`, with no value, and deploys the control plane with
+   that secret's ARN and an empty `GitHubAppId`; the broker reads the App's id from the secret once
+   the `github-app` step has stored it.
+5. **slack-service**: the Slack service. It reads the Slack app's bot token only when it first needs it,
+   so it deploys before the Slack app exists. This ends the unattended build.
+6. **Create the GitHub app** (`github-app`): one click on GitHub's pre-filled manifest page creates the app; then choose which
    repositories it may use. A GitHub App made beforehand can be used instead, with `--github-app-id`,
    `--github-installation-id` and `--github-private-key-file` (or `-env`); its private key cannot be
    pasted into a hidden prompt because it spans several lines.
-5. **control-plane**: the control plane and runtime.
-6. **Create the Slack app** (`slack-app`): create it from Rovara's manifest, install it to the workspace, then paste the Bot
+7. **Create the Slack app** (`slack-app`): create it from Rovara's manifest, install it to the workspace, then paste the Bot
    User OAuth Token and the Signing Secret into two hidden prompts.
-7. **slack-service**: the Slack service, a signed self-probe of both Slack URLs, then a request to
-   confirm the app's Event Subscriptions page shows "Verified" (Slack has no API that reports this).
-8. **developer-signin**: how developers sign in to Rovara from their own machines. Choose Slack (the
+8. **slack-check**: a signed self-probe of both Slack URLs, then a request to confirm the app's Event
+   Subscriptions page shows "Verified" (Slack has no API that reports this).
+9. **developer-signin**: how developers sign in to Rovara from their own machines. Choose Slack (the
    default), your company's sign-in (OIDC), or both. For Slack, paste the Slack app's Client ID and Client
    Secret (Basic Information, App Credentials); for company sign-in, give its issuer, client ID and client
    secret, and optionally a claim a person must carry (such as a group). `init` shows the change to the
    control plane and asks before applying it. See [Developer sign-in](#developer-sign-in) below.
-9. **admin-user**: Cognito creates your admin user from your email and emails a temporary password; a
+10. **admin-user**: Cognito creates your admin user from your email and emails a temporary password; a
    browser opens the Rovara sign-in page (127.0.0.1:8765, so over SSH forward that port). Your own
    OIDC provider: sign in; your token must carry the admin claim.
-10. **first-project**: pick a repository the GitHub App sees; confirm or edit the proposed setup and
+11. **first-project**: pick a repository the GitHub App sees; confirm or edit the proposed setup and
     test commands; the project runs on EC2 workers; pick its Slack channel (a private one needs
     `/invite @<bot>`).
-11. **connectors**: Linear, Jira and Asana are each offered; say no to add them later. Any other MCP
+12. **connectors**: Linear, Jira and Asana are each offered; say no to add them later. Any other MCP
     server is added after the install with `connector add mcp`.
-12. **alerts**: confirm the AWS Notifications email (a PagerDuty or Opsgenie address confirms on its
+13. **alerts**: confirm the AWS Notifications email (a PagerDuty or Opsgenie address confirms on its
     own); a test alarm is sent and you are asked whether it arrived.
-13. **e2e**: mention the bot in the channel; init ends when Rovara replies in the thread.
+14. **e2e**: mention the bot in the channel; init ends when Rovara replies in the thread.
 
 Every question has a flag (`--engine`, `--identity`, `--orchestrator-model`, `--github-account`, and so
 on). `--yes` answers every question with its default or its flag and accepts every confirmation except a

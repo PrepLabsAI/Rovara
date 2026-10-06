@@ -2,6 +2,7 @@ import { generateKeyPairSync, verify } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   GitHubAppCredentialProvider,
+  appIdFromSecret,
   createGitHubAppJwt,
   privateKeyFromSecret,
 } from "../../packages/broker/src/github-app.js";
@@ -455,6 +456,30 @@ describe("GitHub App repository credentials", () => {
     expect(() => createGitHubAppJwt("5002502", "sensitive-invalid-value", Date.now())).toThrow(
       /could not sign/i,
     );
+  });
+
+  it("reads the App id from the secret agentx init stores, without reflecting invalid secret data", () => {
+    const pem = "-----BEGIN PRIVATE KEY-----\nfixture\n-----END PRIVATE KEY-----";
+    expect(appIdFromSecret(JSON.stringify({ appId: "5002502", slug: "agentx-acme", account: "acme", privateKey: pem }))).toBe("5002502");
+    for (const secret of [pem, JSON.stringify({ privateKey: pem }), JSON.stringify({ appId: "12a", privateKey: pem }), "sensitive-invalid-value"]) {
+      expect(() => appIdFromSecret(secret)).toThrow("GitHub App secret holds no appId; set the control plane's GitHubAppId parameter");
+    }
+  });
+
+  it("signs as an App id it reads only when first needed, as a control plane deployed before its App does", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const fetchImplementation = vi.fn(async () => new Response(JSON.stringify({ token: "installation-token" }), { status: 201 }));
+    const appId = vi.fn(async () => "5002502");
+    const provider = appProvider({ credentialRef: "github-agentx-sdlc", appId, getPrivateKey: async () => pem, fetchImplementation });
+    expect(appId).not.toHaveBeenCalled();
+    await expect(provider.resolve("github-agentx-sdlc", "https://github.com/acme/demo.git")).resolves.toEqual({ username: "x-access-token", password: "installation-token" });
+    const authorization = new Headers((fetchImplementation.mock.calls[0] as unknown as [string, RequestInit])[1].headers).get("authorization") ?? "";
+    const payload = JSON.parse(Buffer.from(authorization.replace(/^Bearer /, "").split(".")[1] ?? "", "base64url").toString("utf8")) as { iss?: unknown };
+    expect(payload.iss).toBe("5002502");
+
+    const unreadable = appProvider({ credentialRef: "github-agentx-sdlc", appId: async () => "not-a-number", getPrivateKey: async () => pem, fetchImplementation: vi.fn() });
+    await expect(unreadable.resolve("github-agentx-sdlc", "https://github.com/acme/demo.git")).rejects.toThrow("GitHub App ID must be numeric");
   });
 
   it("opens a draft only when asked", async () => {

@@ -6,11 +6,11 @@
 import type { InitStepId } from "../install-state.js";
 import type { CardId, StepStatus } from "./protocol.js";
 
-export const JOURNEY_PHASE_IDS = ["get-started", "your-choices", "build", "connect-slack", "finish"] as const;
+export const JOURNEY_PHASE_IDS = ["get-started", "your-choices", "build", "connect", "finish"] as const;
 export type JourneyPhaseId = (typeof JOURNEY_PHASE_IDS)[number];
 
 export const PHASE_TITLES: Readonly<Record<JourneyPhaseId, string>> = {
-  "get-started": "Get started", "your-choices": "Your choices", build: "Build in AWS", "connect-slack": "Connect Slack", finish: "Finish",
+  "get-started": "Get started", "your-choices": "Your choices", build: "Build in AWS", connect: "Connect GitHub and Slack", finish: "Finish",
 };
 
 export type JourneyStatus = "done" | "now" | "waiting" | "coming" | "stopped";
@@ -21,7 +21,7 @@ export const STATUS_WORDS: Readonly<Record<JourneyStatus, string>> = {
 
 /** FR-003: which phase each card belongs to, so a finished one collapses into that phase in the rail. */
 export const CARD_PHASES: Readonly<Record<CardId, JourneyPhaseId>> = {
-  release: "get-started", aws: "get-started", "aws-signin": "get-started", "account-checks": "get-started", prerequisites: "your-choices", github: "your-choices", slack: "connect-slack", "slack-urls": "connect-slack",
+  release: "get-started", aws: "get-started", "aws-signin": "get-started", "account-checks": "get-started", prerequisites: "your-choices", github: "connect", slack: "connect", "slack-urls": "connect",
   admin: "finish", project: "finish", channel: "finish", connectors: "finish", alerts: "finish", reply: "finish", ready: "finish",
 };
 
@@ -31,11 +31,13 @@ export const STEP_STATUS_WORDS: Readonly<Record<StepStatus, string>> = {
 
 export interface StepPlan { phase: JourneyPhaseId; title: string; usualSeconds: number; needsYou: boolean }
 
-/** Spec 048 FR-031 and FR-032: the order the steps run in. The GitHub app comes before the long
- * build. INIT_STEP_IDS keeps its own order: it is the progress schema's list, and a done step is
- * skipped by its id wherever it now stands. */
+/** The order the steps run in: every stack in one unattended build, then the GitHub and Slack apps
+ * together, so a person is needed before the build and after it, never in the middle. (Spec 048
+ * FR-031 put the GitHub app before the build; the build no longer needs it.) INIT_STEP_IDS keeps
+ * its own order: it is the progress schema's list, and a done step is skipped by its id wherever
+ * it now stands. */
 export const INSTALL_STEP_ORDER: readonly InitStepId[] = [
-  "prerequisites", "github-app", "access", "core", "control-plane", "slack-app", "slack-service", "developer-signin",
+  "prerequisites", "access", "core", "control-plane", "slack-service", "github-app", "slack-app", "slack-check", "developer-signin",
   "admin-user", "first-project", "connectors", "alerts", "e2e",
 ];
 
@@ -43,14 +45,15 @@ export const INSTALL_STEP_ORDER: readonly InitStepId[] = [
  * with numbers measured on two clean runs (FR-002). */
 export const STEP_PLAN: Readonly<Record<InitStepId, StepPlan>> = {
   prerequisites: { phase: "your-choices", title: "Check your account and choices", usualSeconds: 30, needsYou: false },
-  "github-app": { phase: "your-choices", title: "Create the GitHub app", usualSeconds: 120, needsYou: true },
+  "github-app": { phase: "connect", title: "Create the GitHub app", usualSeconds: 120, needsYou: true },
   access: { phase: "build", title: "Set up AWS permissions", usualSeconds: 60, needsYou: false },
   core: { phase: "build", title: "Build the network and sign-in", usualSeconds: 240, needsYou: false },
   "control-plane": { phase: "build", title: "Start the AgentX service", usualSeconds: 780, needsYou: false },
-  "slack-app": { phase: "connect-slack", title: "Create the Slack app", usualSeconds: 240, needsYou: true },
-  "slack-service": { phase: "connect-slack", title: "Start the Slack connection", usualSeconds: 180, needsYou: true },
+  "slack-service": { phase: "build", title: "Start the Slack connection", usualSeconds: 180, needsYou: false },
+  "slack-app": { phase: "connect", title: "Create the Slack app", usualSeconds: 240, needsYou: true },
+  "slack-check": { phase: "connect", title: "Check that Slack reaches AgentX", usualSeconds: 60, needsYou: true },
   // FR-030: part of the confirmed plan; it asks nothing (Task 13).
-  "developer-signin": { phase: "connect-slack", title: "Turn on developer sign-in", usualSeconds: 120, needsYou: false },
+  "developer-signin": { phase: "connect", title: "Turn on developer sign-in", usualSeconds: 120, needsYou: false },
   "admin-user": { phase: "finish", title: "Sign in to AgentX", usualSeconds: 120, needsYou: true },
   "first-project": { phase: "finish", title: "Set up your first project", usualSeconds: 120, needsYou: true },
   connectors: { phase: "finish", title: "Connect your issue trackers", usualSeconds: 60, needsYou: true },

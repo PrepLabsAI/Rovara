@@ -1,5 +1,5 @@
 // Spec 048 FR-031, FR-035, FR-072, SC-006 and SC-015: the page and the terminal ask in the same
-// order and run the same early checks; once the build starts, only Connect Slack and Finish wait.
+// order and run the same early checks; once the build starts, only Connect GitHub and Slack and Finish wait.
 import { describe, expect, it } from "vitest";
 import { ADMIN_EMAIL } from "../support/setup-fakes.js";
 import { passingChecks, scriptedPrompter, settingsScript } from "../support/init-fakes.js";
@@ -51,22 +51,24 @@ describe("the install's order", () => {
     }
   });
 
-  it("FR-035 and SC-006: once the build starts, the run waits only in Connect Slack and Finish", async () => {
+  it("FR-035 and SC-006: once the build starts, the run waits only in Connect GitHub and Slack and Finish", async () => {
     const h = await harness();
     const { operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     const built = operator.states.findIndex((state) => state.steps.some((step) => step.id === "access" && step.status !== "pending"));
     expect(built).toBeGreaterThan(0);
     const waitingAfter = operator.states.slice(built).filter((state) => state.question !== undefined || state.waitingOnYou);
     expect(waitingAfter.length).toBeGreaterThan(0);
-    for (const state of waitingAfter) expect(["connect-slack", "finish"]).toContain(state.journey.current);
+    for (const state of waitingAfter) expect(["connect", "finish"]).toContain(state.journey.current);
   });
 
-  it("FR-031: before the build the page asks only the settings and the plan, and the GitHub app is made then", async () => {
+  it("before the build the page asks only the settings and the plan, and the GitHub app is made after every stack is up", async () => {
     const h = await harness();
     const { operator } = await h.runUi([...FIRST_RUN, ...SLACK, ...SIGNIN, ...FINISH]);
     const built = operator.states.findIndex((state) => state.steps.some((step) => step.id === "access" && step.status !== "pending"));
     const before = [...new Set(operator.states.slice(0, built).flatMap((state) => (state.question === undefined ? [] : [state.question.text])))];
     expect(before).toEqual([SETTINGS_TITLE, "Create all of this?"]);
-    expect(operator.states[built - 1]?.steps.find((step) => step.id === "github-app")?.status).toBe("done");
+    const github = operator.states.findIndex((state) => state.steps.some((step) => step.id === "github-app" && step.status !== "pending"));
+    expect(github).toBeGreaterThan(built);
+    expect(operator.states[github]?.steps.find((step) => step.id === "slack-service")?.status).toBe("done");
   });
 });

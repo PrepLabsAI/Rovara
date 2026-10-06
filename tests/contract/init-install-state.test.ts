@@ -200,10 +200,10 @@ describe("install state", () => {
 });
 
 describe("15d2 install state", () => {
-  it("appends the five finishing steps after developer-signin, moving no earlier id", () => {
+  it("appends the five finishing steps after developer-signin, then slack-check, moving no earlier id", () => {
     expect(INIT_STEP_IDS).toEqual([
       "prerequisites", "access", "core", "github-app", "control-plane", "slack-app", "slack-service", "developer-signin",
-      "admin-user", "first-project", "connectors", "alerts", "e2e",
+      "admin-user", "first-project", "connectors", "alerts", "e2e", "slack-check",
     ]);
   });
 
