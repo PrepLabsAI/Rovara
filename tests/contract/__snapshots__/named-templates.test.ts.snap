@@ -247,6 +247,43 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
                 },
                 {
                   "Action": [
+                    "events:DeleteRule",
+                    "events:DescribeRule",
+                    "events:DisableRule",
+                    "events:EnableRule",
+                    "events:ListTagsForResource",
+                    "events:ListTargetsByRule",
+                    "events:PutRule",
+                    "events:PutTargets",
+                    "events:RemoveTargets",
+                    "events:TagResource",
+                    "events:UntagResource",
+                  ],
+                  "Effect": "Allow",
+                  "Resource": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        {
+                          "Ref": "AWS::Partition",
+                        },
+                        ":events:",
+                        {
+                          "Ref": "AWS::Region",
+                        },
+                        ":",
+                        {
+                          "Ref": "AWS::AccountId",
+                        },
+                        ":rule/agentx-staging-*-service-failures",
+                      ],
+                    ],
+                  },
+                  "Sid": "EcsFailureEventsRule",
+                },
+                {
+                  "Action": [
                     "iam:CreateRole",
                     "iam:DeleteRole",
                     "iam:GetRole",
@@ -511,6 +548,43 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
               "Effect": "Allow",
               "Resource": "*",
               "Sid": "Services",
+            },
+            {
+              "Action": [
+                "events:DeleteRule",
+                "events:DescribeRule",
+                "events:DisableRule",
+                "events:EnableRule",
+                "events:ListTagsForResource",
+                "events:ListTargetsByRule",
+                "events:PutRule",
+                "events:PutTargets",
+                "events:RemoveTargets",
+                "events:TagResource",
+                "events:UntagResource",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    "arn:",
+                    {
+                      "Ref": "AWS::Partition",
+                    },
+                    ":events:",
+                    {
+                      "Ref": "AWS::Region",
+                    },
+                    ":",
+                    {
+                      "Ref": "AWS::AccountId",
+                    },
+                    ":rule/agentx-staging-*-service-failures",
+                  ],
+                ],
+              },
+              "Sid": "EcsFailureEventsRule",
             },
             {
               "Action": [
@@ -911,6 +985,33 @@ exports[`named environment templates > agentx-staging-access is unchanged 1`] = 
                     },
                   ],
                   "Sid": "Stacks",
+                },
+                {
+                  "Action": [
+                    "cloudformation:DescribeEvents",
+                  ],
+                  "Effect": "Allow",
+                  "Resource": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        {
+                          "Ref": "AWS::Partition",
+                        },
+                        ":cloudformation:",
+                        {
+                          "Ref": "AWS::Region",
+                        },
+                        ":",
+                        {
+                          "Ref": "AWS::AccountId",
+                        },
+                        ":changeSet/agentx-*/*",
+                      ],
+                    ],
+                  },
+                  "Sid": "ChangeSetEvents",
                 },
                 {
                   "Action": [
@@ -12747,7 +12848,7 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
     },
     "ActionLogsDestination": {
       "Properties": {
-        "DeliveryDestinationType": "CloudWatchLogs",
+        "DeliveryDestinationType": "CWL",
         "DestinationResourceArn": {
           "Fn::GetAtt": [
             "ActionLogs3E70FEE0",

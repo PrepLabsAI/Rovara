@@ -40,7 +40,7 @@ export class AccessStack extends Stack {
           description: `Default permission boundary for every agentx-${env} role`,
           policyDocument: {
             Version: "2012-10-17",
-            Statement: defaultBoundaryStatements({ env, partition: Aws.PARTITION, account: this.account, cloudFormationRoleName: naming.cloudFormationRoleName }),
+            Statement: defaultBoundaryStatements({ env, partition: Aws.PARTITION, region: Aws.REGION, account: this.account, cloudFormationRoleName: naming.cloudFormationRoleName }),
           },
         });
         policy.cfnOptions.condition = useDefaultBoundary;

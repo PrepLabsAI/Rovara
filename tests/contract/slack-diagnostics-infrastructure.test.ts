@@ -25,7 +25,7 @@ describe("named Slack ECS diagnostics", () => {
       LogType: "ACTION_LOGS",
     });
     template.hasResourceProperties("AWS::Logs::DeliveryDestination", {
-      DeliveryDestinationType: "CloudWatchLogs",
+      DeliveryDestinationType: "CWL",
     });
 
     const deliveryId = Object.keys(template.findResources("AWS::Logs::Delivery"))[0]!;

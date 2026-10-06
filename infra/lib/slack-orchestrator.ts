@@ -10,7 +10,6 @@ import {
   Fn,
   RemovalPolicy,
   Stack,
-  Validations,
   type StackProps,
   aws_cloudwatch as cloudwatch,
   aws_cloudwatch_actions as cloudwatchActions,
@@ -163,13 +162,9 @@ export class SlackOrchestratorStack extends Stack {
       });
       const actionDestination = new logs.CfnDeliveryDestination(this, "ActionLogsDestination", {
         name: Fn.join("", ["agentx-", naming.env, "-", attemptShort, "-action-dest"]),
-        deliveryDestinationType: "CloudWatchLogs",
+        deliveryDestinationType: "CWL",
         destinationResourceArn: actionLogGroup.logGroupArn,
         outputFormat: "json",
-      });
-      Validations.of(actionDestination).acknowledge({
-        id: "CloudFormation-Validate::F3033",
-        reason: "CloudWatch Logs delivery requires the documented CloudFormation enum CloudWatchLogs; this validator applies an incorrect 12-character maximum.",
       });
       actionLogDelivery = new logs.CfnDelivery(this, "ActionLogsDelivery", {
         deliverySourceName: actionSource.name,

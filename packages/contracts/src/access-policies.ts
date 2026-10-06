@@ -21,6 +21,26 @@ export interface PolicyStatementJson {
   Condition?: Record<string, Record<string, string | string[]>>;
 }
 
+/** Only this environment's uniquely named ECS deployment-failure rule. */
+function ecsFailureRuleArn(scope: Pick<PolicyScope, "env" | "partition" | "region" | "account">): string {
+  return `arn:${scope.partition}:events:${scope.region}:${scope.account}:rule/agentx-${scope.env}-*-service-failures`;
+}
+
+/** CRUD and validation reads CloudFormation needs for the one ECS failure-events rule. */
+const ECS_FAILURE_RULE_ACTIONS = [
+  "events:DeleteRule",
+  "events:DescribeRule",
+  "events:DisableRule",
+  "events:EnableRule",
+  "events:ListTagsForResource",
+  "events:ListTargetsByRule",
+  "events:PutRule",
+  "events:PutTargets",
+  "events:RemoveTargets",
+  "events:TagResource",
+  "events:UntagResource",
+];
+
 /** Services the service role may use with any resource; IAM is handled separately and name-scoped. */
 export const SERVICE_ROLE_SERVICES: readonly string[] = [
   "apigateway",
@@ -143,6 +163,7 @@ export function serviceRoleStatements(scope: PolicyScope): PolicyStatementJson[]
   const boundary = scope.permissionsBoundaryArn ?? defaultBoundaryArn(scope);
   return [
     { Sid: "Services", Effect: "Allow", Action: SERVICE_ROLE_SERVICES.map((s) => `${s}:*`), Resource: "*" },
+    { Sid: "EcsFailureEventsRule", Effect: "Allow", Action: [...ECS_FAILURE_RULE_ACTIONS], Resource: ecsFailureRuleArn(scope) },
     { Sid: "IamRoles", Effect: "Allow", Action: [...ROLE_ACTIONS], Resource: roles },
     { Sid: "IamInstanceProfiles", Effect: "Allow", Action: [...INSTANCE_PROFILE_ACTIONS], Resource: environmentInstanceProfiles(scope) },
     {
@@ -183,11 +204,12 @@ export function serviceRoleStatements(scope: PolicyScope): PolicyStatementJson[]
  * management only on this environment's roles, and nothing for users, groups or managed policies.
  * The Deny statements hold even if a later change widens an Allow.
  */
-export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "partition" | "account" | "cloudFormationRoleName">): PolicyStatementJson[] {
+export function defaultBoundaryStatements(scope: Pick<PolicyScope, "env" | "partition" | "region" | "account" | "cloudFormationRoleName">): PolicyStatementJson[] {
   const { partition, account } = scope;
   const roles = environmentRoles(scope);
   return [
     { Sid: "Services", Effect: "Allow", Action: BOUNDARY_SERVICES.map((s) => `${s}:*`), Resource: "*" },
+    { Sid: "EcsFailureEventsRule", Effect: "Allow", Action: [...ECS_FAILURE_RULE_ACTIONS], Resource: ecsFailureRuleArn(scope) },
     // The operator's identity check; the only STS action any AgentX role uses.
     { Sid: "CallerIdentity", Effect: "Allow", Action: ["sts:GetCallerIdentity"], Resource: "*" },
     // The operator's EC2 quota reads (prerequisites on a resume); named like CallerIdentity above,
@@ -245,6 +267,12 @@ export function operatorRoleStatements(scope: PolicyScope): PolicyStatementJson[
         "cloudformation:ListStackResources",
       ],
       Resource: STACK_PARTS.map(stackArn),
+    },
+    {
+      Sid: "ChangeSetEvents",
+      Effect: "Allow",
+      Action: ["cloudformation:DescribeEvents"],
+      Resource: `arn:${partition}:cloudformation:${region}:${account}:changeSet/agentx-*/*`,
     },
     {
       Sid: "ChangeSets",

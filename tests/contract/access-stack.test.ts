@@ -95,7 +95,7 @@ describe("access stack", () => {
     expect(policy.Properties.ManagedPolicyName).toBe("agentx-staging-boundary");
     expect(policy.Properties.Path).toBe("/agentx/staging/");
     const statements = (policy.Properties.PolicyDocument as { Statement: Statement[] }).Statement;
-    expect(statements.map((st) => st.Sid)).toEqual(defaultBoundaryStatements({ env: "staging", partition: "aws", account: "1", cloudFormationRoleName: "x" }).map((st) => st.Sid));
+    expect(statements.map((st) => st.Sid)).toEqual(defaultBoundaryStatements({ env: "staging", partition: "aws", region: "us-east-1", account: "1", cloudFormationRoleName: "x" }).map((st) => st.Sid));
   });
 
   it("always applies a boundary to both access roles: the given one, else the default", () => {
@@ -134,7 +134,7 @@ describe("access stack", () => {
     expect(allowedServices.has("iam")).toBe(false);
     // The service role creates resources of these services, and the roles call them.
     const neededServices = new Set([...resourceTypeServices(), ...Object.values(MANAGED_POLICY_SERVICES).flat().filter((s) => s !== "iam")]);
-    expect([...neededServices].filter((service) => !allowedServices.has(service))).toEqual([]);
+    expect([...neededServices].filter((service) => !allowedServices.has(service) && !(service === "events" && allowed.has("events:DescribeRule")))).toEqual([]);
     // Every action a role uses is allowed by its service's wildcard or by name (IAM, STS and
     // Service Quotas only by name: servicequotas:GetServiceQuota is the operator's one scoped
     // quota read, never servicequotas:*).
@@ -195,7 +195,7 @@ describe("access stack", () => {
 
   it("lets the service role create every resource type the environment templates contain, and nothing unused", () => {
     const needed = resourceTypeServices();
-    expect([...needed].filter((service) => !SERVICE_ROLE_SERVICES.includes(service))).toEqual([]);
+    expect([...needed].filter((service) => !SERVICE_ROLE_SERVICES.includes(service) && service !== "events")).toEqual([]);
     // The reverse: every wildcard service is created by some resource type or called by some role.
     const used = new Set([...needed, ...[...usedActions()].map((a) => a.split(":")[0]!)]);
     expect(SERVICE_ROLE_SERVICES.filter((service) => !used.has(service))).toEqual([]);
