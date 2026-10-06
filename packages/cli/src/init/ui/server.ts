@@ -36,14 +36,14 @@ export function manifestFormCsp(nonce: string): string {
 }
 
 /** The callback's answer carries nothing and loads nothing, and sends no Referer onward. */
-const CALLBACK_HEADERS: Record<string, string> = {
+export const CALLBACK_HEADERS: Record<string, string> = {
   "cache-control": "no-store",
   "content-security-policy": "default-src 'none'; base-uri 'none'; frame-ancestors 'none'",
   "referrer-policy": "no-referrer",
   "x-content-type-options": "nosniff",
   "x-frame-options": "DENY",
 };
-const CALLBACK_PAGE = (text: string, nonce?: string) =>
+export const CALLBACK_PAGE = (text: string, nonce?: string) =>
   `<!doctype html><meta charset="utf-8"><title>Install AgentX</title><p>${text}</p>${nonce === undefined ? "" : `<script nonce="${nonce}">window.close()</script>`}`;
 
 interface ManifestRoute {
@@ -73,7 +73,7 @@ export const SECURITY_HEADERS: Record<string, string> = {
   "x-frame-options": "DENY",
 };
 
-function tokensMatch(provided: string | undefined, expected: string): boolean {
+export function tokensMatch(provided: string | undefined, expected: string): boolean {
   if (provided === undefined) return false;
   const given = Buffer.from(provided, "utf8");
   const want = Buffer.from(expected, "utf8");

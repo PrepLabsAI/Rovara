@@ -14,6 +14,8 @@ export const SETUP_ORIGIN = "https://setup.example.com";
 
 export interface SetupPageOperator {
   asked: string[];
+  /** Every link the page offered, in the order the operator opened it. */
+  clicked: string[];
   states: WizardSnapshot[];
   fieldErrors: string[];
   /** Polls until the installer closes, answering as it goes; rethrows what stopped it. */
@@ -25,9 +27,11 @@ export function setupPageOperator(input: {
   script: ScriptedAnswer[];
   handle: (request: SetupRequest) => Promise<SetupResponse>;
   token: string;
+  githubCode?: string;
 }): SetupPageOperator {
   const queue = [...input.script];
   const asked: string[] = [];
+  const clicked: string[] = [];
   const states: WizardSnapshot[] = [];
   const fieldErrors: string[] = [];
   const headers = { host: new URL(SETUP_ORIGIN).host, origin: SETUP_ORIGIN };
@@ -35,8 +39,22 @@ export function setupPageOperator(input: {
   const post = (path: string, body: unknown) => input.handle({
     method: "POST", path, query: {}, headers: { ...headers, [WIZARD_TOKEN_HEADER]: input.token, "content-type": "application/json" }, body: JSON.stringify(body),
   });
+  /** What a person's browser does with a link the page offers: the GitHub App form is played back
+   * as GitHub (a redirect to the page's callback with a code and the form's state); anything else
+   * is only recorded. */
+  const visit = async (url: string): Promise<void> => {
+    if (!url.startsWith(`${SETUP_ORIGIN}/github/start`)) return;
+    const form = await get("/github/start");
+    if (form.status !== 200) throw new Error(`the setup page answered HTTP ${form.status} for /github/start`);
+    const state = /[?&]amp;state=([a-f0-9]+)|[?&]state=([a-f0-9]+)/.exec(form.body);
+    // GitHub's redirect is a cross-site visit with no token or session.
+    await input.handle({
+      method: "GET", path: "/github/created", query: { code: input.githubCode ?? "0123456789abcdef0123", state: state?.[1] ?? state?.[2] ?? "missing" },
+      headers: { host: new URL(SETUP_ORIGIN).host, "sec-fetch-site": "cross-site", referer: "https://github.com/" },
+    });
+  };
   return {
-    asked, states, fieldErrors,
+    asked, clicked, states, fieldErrors,
     remaining: () => queue.length,
     async run() {
       let answered: string | undefined;
@@ -47,6 +65,11 @@ export function setupPageOperator(input: {
         const state = JSON.parse(response.body) as SetupStateReply;
         states.push(state);
         if (state.installerClosed) return;
+        for (const link of [state.link, ...(state.cards ?? []).map((card) => card.link)]) {
+          if (link === undefined || clicked.includes(link.url)) continue;
+          clicked.push(link.url);
+          await visit(link.url);
+        }
         const question = state.question;
         if (question !== undefined && question.id !== answered) {
           if (question.error !== undefined) fieldErrors.push(question.error);

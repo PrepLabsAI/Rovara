@@ -166,4 +166,8 @@ export interface InitContext {
    * it for its sign-in callback and invitation, and the admin user is made as soon as that stack is
    * up, so the invitation (with the address) arrives while the rest builds. */
   setupPageUrl?: string;
+  /** How long the GitHub step waits for the person to create and install the app (default
+   * GITHUB_WAIT_MS, 15 minutes). The install in the cloud waits longer: the person may have left
+   * during the build and come back to the setup page later. */
+  githubWaitMs?: number;
 }

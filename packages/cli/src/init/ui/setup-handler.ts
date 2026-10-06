@@ -7,12 +7,13 @@
 // It differs from the local server in three ways: the page polls GET /state instead of holding an
 // event stream open (API Gateway closes those); an answer goes to the table and the reply waits a
 // few seconds for the job's verdict; and the GitHub App's manifest flow is not here yet.
+import { randomBytes } from "node:crypto";
 import type { AnswerReply, AnswerRequest } from "./protocol.js";
 import { WIZARD_TOKEN_HEADER, WIZARD_TOKEN_QUERY } from "./protocol.js";
 import { WIZARD_CSS, WIZARD_JS, wizardHtml } from "./page.js";
-import { MAX_BODY_BYTES, refusalReason, SECURITY_HEADERS } from "./server.js";
+import { CALLBACK_HEADERS, CALLBACK_PAGE, GITHUB_CALLBACK_PATH, GITHUB_START_PATH, manifestFormCsp, MAX_BODY_BYTES, refusalReason, SECURITY_HEADERS, tokensMatch } from "./server.js";
 import { finishSignIn, SETUP_CALLBACK_PATH, SETUP_LOGIN_PATH, signedInSession, startSignIn, type SetupIdentity, type TokenSeal } from "./setup-auth.js";
-import type { SetupStore } from "./setup-store.js";
+import { GITHUB_NONCE_PLACEHOLDER, type SetupStore } from "./setup-store.js";
 import { createWizardHub } from "./state.js";
 
 /** How long POST /answer waits for the job's verdict before replying that the answer was sent. */
@@ -102,6 +103,13 @@ export function setupPageHandler(input: {
   };
 
   return async (request) => {
+    // GitHub's redirect back after it made the App: a cross-site visit with no token or session,
+    // let through only with the state of the form the job is waiting on, once (as the local
+    // server's own callback is).
+    if (request.method === "GET" && request.path === GITHUB_CALLBACK_PATH) {
+      if (request.headers.host !== expectedHost) return reply(403, "text/plain; charset=utf-8", "wrong Host\n");
+      return githubCallback(input.store, request.query);
+    }
     const refusal = await refused(request);
     if (refusal !== undefined) return refusal;
 
@@ -152,12 +160,37 @@ export function setupPageHandler(input: {
       // The job has not read it yet; it will. The page sees the outcome in the state it polls.
       return json({ ok: true } satisfies AnswerReply);
     }
+    if (request.method === "GET" && request.path === GITHUB_START_PATH) {
+      const manifest = await input.store.getGitHubManifest();
+      if (manifest === undefined) return reply(404, "text/plain; charset=utf-8", "There is no GitHub app to create right now. Go back to the setup page.\n");
+      const nonce = randomBytes(16).toString("base64");
+      return {
+        status: 200,
+        headers: { ...SECURITY_HEADERS, "content-security-policy": manifestFormCsp(nonce), "content-type": "text/html; charset=utf-8" },
+        body: manifest.html.replaceAll(GITHUB_NONCE_PLACEHOLDER, nonce),
+      };
+    }
     if (request.method === "POST" && request.path === "/close") {
       await input.store.requestClose();
       return json({ ok: true } satisfies AnswerReply);
     }
     return reply(404, "text/plain; charset=utf-8", "not found\n");
   };
+}
+
+async function githubCallback(store: SetupStore, query: Record<string, string | undefined>): Promise<SetupResponse> {
+  const answer = (status: number, text: string): SetupResponse => ({
+    status, headers: { ...CALLBACK_HEADERS, "content-type": "text/html; charset=utf-8" }, body: CALLBACK_PAGE(text),
+  });
+  const manifest = await store.getGitHubManifest();
+  if (manifest === undefined || !tokensMatch(query.state, manifest.state)) {
+    return answer(400, "This page is from another AgentX install, or its GitHub app was already created. Go back to the setup page.");
+  }
+  if (query.code === undefined || query.code === "") return answer(400, "GitHub sent no code. Go back to the setup page.");
+  await store.putGitHubCode(manifest.state, query.code);
+  await store.deleteGitHubManifest();
+  // GitHub has not converted the code yet; the setup page says whether that worked.
+  return answer(200, "GitHub sent AgentX the new app. You can close this tab and go back to the setup page.");
 }
 
 /** A redirect, with each cookie in its own Set-Cookie (the Lambda adapter sends them as a list). */

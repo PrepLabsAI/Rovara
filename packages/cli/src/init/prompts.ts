@@ -158,12 +158,12 @@ export function unattendedPrompter(): Prompter {
  * stack is up, so every question before the first step (the settings, the plan) is answered as
  * --yes answers it, from the flags the bootstrap stack passes and the defaults. Pressing Create
  * stack on the quick-create page was the plan's confirmation. From `start()` on, the page asks. */
-export function unattendedUntilSteps(page: Prompter): { prompter: Prompter; start(): void } {
+export function unattendedUntilSteps(page: Prompter): { prompter: Prompter; start: () => void } {
   const unattended = unattendedPrompter();
   let started = false;
   const now = () => (started ? page : unattended);
   return {
-    start() { started = true; },
+    start: () => { started = true; },
     prompter: {
       ask: (question, options) => now().ask(question, options),
       choose: (question, choices, options) => now().choose(question, choices, options),

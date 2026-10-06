@@ -68,6 +68,9 @@ import type { WizardPlan, WizardResume } from "./ui/protocol.js";
 import { kmsTokenSeal, SETUP_LOGIN_PATH, setupPageLogin, type TokenSeal } from "./ui/setup-auth.js";
 import { dynamoSetupStore, type SetupStore } from "./ui/setup-store.js";
 
+/** The install in the cloud: how long the GitHub step waits for the person on the setup page. */
+export const CLOUD_GITHUB_WAIT_MS = 60 * 60 * 1000;
+
 export interface InitCliDependencies {
   /** identity, store, deployer, templatesClients, commandRunner: the same seam agentx deploy uses. */
   deploy?: DeployCliDependencies;
@@ -1033,7 +1036,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     adminSession,
     flags: options.finishFlags,
     cliInvocation: session.invocation,
-    ...(options.cloud === undefined ? {} : { setupPageUrl: options.cloud.url }),
+    ...(options.cloud === undefined ? {} : { setupPageUrl: options.cloud.url, githubWaitMs: CLOUD_GITHUB_WAIT_MS }),
   };
 
   session.startSteps?.();
