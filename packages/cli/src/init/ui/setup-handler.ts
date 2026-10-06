@@ -11,7 +11,7 @@ import { randomBytes } from "node:crypto";
 import type { AnswerReply, AnswerRequest } from "./protocol.js";
 import { WIZARD_TOKEN_HEADER, WIZARD_TOKEN_QUERY } from "./protocol.js";
 import { WIZARD_CSS, WIZARD_JS, wizardHtml } from "./page.js";
-import { CALLBACK_HEADERS, CALLBACK_PAGE, GITHUB_CALLBACK_PATH, GITHUB_START_PATH, manifestFormCsp, MAX_BODY_BYTES, refusalReason, SECURITY_HEADERS, tokensMatch } from "./server.js";
+import { CALLBACK_HEADERS, CALLBACK_PAGE, GITHUB_CALLBACK_PATH, GITHUB_START_PATH, manifestFormCsp, MAX_BODY_BYTES, refusalReason, SECURITY_HEADERS, SLACK_CALLBACK_PATH, tokensMatch } from "./server.js";
 import { finishSignIn, SETUP_CALLBACK_PATH, SETUP_LOGIN_PATH, signedInSession, startSignIn, type SetupIdentity, type TokenSeal } from "./setup-auth.js";
 import { GITHUB_NONCE_PLACEHOLDER, type SetupStore } from "./setup-store.js";
 import { createWizardHub } from "./state.js";
@@ -110,6 +110,12 @@ export function setupPageHandler(input: {
       if (request.headers.host !== expectedHost) return reply(403, "text/plain; charset=utf-8", "wrong Host\n");
       return githubCallback(input.store, request.query);
     }
+    // Slack's redirect back after Add to Slack: the same rule, with the state of the install the
+    // job is waiting on.
+    if (request.method === "GET" && request.path === SLACK_CALLBACK_PATH) {
+      if (request.headers.host !== expectedHost) return reply(403, "text/plain; charset=utf-8", "wrong Host\n");
+      return slackCallback(input.store, request.query);
+    }
     const refusal = await refused(request);
     if (refusal !== undefined) return refusal;
 
@@ -191,6 +197,26 @@ async function githubCallback(store: SetupStore, query: Record<string, string | 
   await store.deleteGitHubManifest();
   // GitHub has not converted the code yet; the setup page says whether that worked.
   return answer(200, "GitHub sent AgentX the new app. You can close this tab and go back to the setup page.");
+}
+
+async function slackCallback(store: SetupStore, query: Record<string, string | undefined>): Promise<SetupResponse> {
+  const answer = (status: number, text: string): SetupResponse => ({
+    status, headers: { ...CALLBACK_HEADERS, "content-type": "text/html; charset=utf-8" }, body: CALLBACK_PAGE(text),
+  });
+  const state = await store.getSlackInstall();
+  if (state === undefined || !tokensMatch(query.state, state)) {
+    return answer(400, "This page is from another AgentX install, or its Slack app was already added. Go back to the setup page.");
+  }
+  // Cancel, or Request to Install in a workspace that needs an admin's approval: nothing to take
+  // yet, and the setup page still offers Add to Slack. Slack's own word, never echoed raw.
+  if (query.error !== undefined) {
+    const reason = /^[a-z_]{1,40}$/.test(query.error) ? query.error : "an error";
+    return answer(400, `Slack did not add the app (${reason}). Go back to the setup page; once you may, press Add to Slack again.`);
+  }
+  if (query.code === undefined || query.code === "") return answer(400, "Slack sent no code. Go back to the setup page.");
+  await store.putSlackCode(state, query.code);
+  await store.deleteSlackInstall();
+  return answer(200, "Slack sent AgentX the app's install. You can close this tab and go back to the setup page.");
 }
 
 /** A redirect, with each cookie in its own Set-Cookie (the Lambda adapter sends them as a list). */

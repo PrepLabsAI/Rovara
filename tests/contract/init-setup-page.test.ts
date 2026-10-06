@@ -10,7 +10,8 @@ import { dynamoSetupStore, GITHUB_NONCE_PLACEHOLDER, memorySetupStore, SETUP_ITE
 import { cloudManifestHost } from "../../packages/cli/src/init/ui/index.js";
 import { createWizardHub } from "../../packages/cli/src/init/ui/state.js";
 import { WIZARD_TOKEN_HEADER, WIZARD_TOKEN_QUERY } from "../../packages/cli/src/init/ui/protocol.js";
-import { FINISH, harness, SIGNIN, SLACK } from "../support/init-ui-harness.js";
+import { FINISH, harness, SIGNIN } from "../support/init-ui-harness.js";
+import { FAKE_SLACK_CLIENT, fakeSlackApi, TEST_BOT_TOKEN, TEST_SIGNING_SECRET } from "../support/init-fakes.js";
 import { accessToken, ADMIN_EMAIL } from "../support/setup-fakes.js";
 import { SETUP_ORIGIN, setupPageOperator } from "../support/setup-page-operator.js";
 
@@ -23,6 +24,8 @@ const until = async (check: () => boolean | Promise<boolean>) => {
   throw new Error("test setup: the condition never held");
 };
 const FAST = { stateWriteMs: 1, pollMs: 2 };
+// A made-up token in Slack's format, put together here so no file holds one (push protection).
+const CONFIG_TOKEN = ["xoxe", "xoxp-1-NOTAREALTOKENFORTESTS"].join(".");
 
 /** A table in memory that answers the four commands the store sends, as DynamoDB would. */
 function fakeDynamo() {
@@ -239,10 +242,13 @@ describe("agentx init --setup-table", () => {
   it("runs a whole install with every question answered on the setup page, through the table", async () => {
     const h = await harness();
     const store = memorySetupStore();
+    const slack = fakeSlackApi();
     const handle = setupPageHandler({ store, env: "staging", origin: SETUP_ORIGIN, auth: { kind: "token", token: TOKEN }, verdictWaitMs: 200, sleep: (ms) => new Promise((resolve) => setTimeout(resolve, Math.min(ms, 5))) });
     // Nothing is asked before the first step: no one can reach the page yet. The flags the
     // bootstrap stack passes and the defaults answer the settings and the plan.
-    const operator = setupPageOperator({ script: [...SLACK, ...SIGNIN, ...FINISH], handle, token: TOKEN });
+    // Add to Slack: the operator pastes one configuration token; Slack's page and its redirect back
+    // are played by the operator, and nobody confirms the request URL by hand.
+    const operator = setupPageOperator({ script: ["token", CONFIG_TOKEN, ...SIGNIN, ...FINISH], handle, token: TOKEN });
     // The admin signed in on the setup page, which left their sign-in for the job (setup-auth.ts).
     await store.putAdminToken(`sealed:${accessToken({ "cognito:groups": ["agentx-admin"] })}`, Date.now() + 3_600_000);
     const running = operator.run();
@@ -251,7 +257,7 @@ describe("agentx init --setup-table", () => {
         "--setup-table", "agentx-setup", "--setup-url", SETUP_ORIGIN, "--admin-email", ADMIN_EMAIL, "--github-account", "acme",
       ],
       {
-        setupStore: () => store, setupRelayTiming: FAST,
+        setupStore: () => store, setupRelayTiming: FAST, slack,
         setupSeal: { seal: async (plain) => `sealed:${plain}`, open: async (sealed) => sealed.replace(/^sealed:/, "") },
       },
     );
@@ -262,6 +268,15 @@ describe("agentx init --setup-table", () => {
     expect(operator.clicked).toContain(`${SETUP_ORIGIN}/github/start`);
     expect(h.github.conversions).toEqual(["0123456789abcdef0123"]);
     expect(await store.getGitHubManifest()).toBeUndefined();
+    expect(slack.manifests.map((each) => each.method)).toEqual(["create", "update"]);
+    expect(slack.manifests[0]?.manifest.settings.event_subscriptions).toBeUndefined();
+    expect(slack.manifests[1]?.manifest.settings.event_subscriptions?.request_url).toMatch(/\/slack\/events$/);
+    expect(slack.manifests[0]?.manifest.oauth_config.redirect_urls).toContain(`${SETUP_ORIGIN}/slack/callback`);
+    expect(slack.exchanged).toEqual(["slack-code-0123"]);
+    expect(operator.asked).not.toContain("Does Slack show the Request URL as Verified?");
+    const stored = JSON.parse(h.secrets.values.get("agentx/staging/slack") ?? "{}") as Record<string, string>;
+    expect(stored).toMatchObject({ botToken: TEST_BOT_TOKEN, signingSecret: TEST_SIGNING_SECRET, clientId: FAKE_SLACK_CLIENT.clientId });
+    expect(JSON.stringify(stored)).not.toContain(CONFIG_TOKEN);
     expect(operator.asked).not.toContain("Your settings");
     expect(operator.asked).not.toContain("Create all of this?");
     expect(operator.states.at(-1)).toMatchObject({ installerClosed: true });

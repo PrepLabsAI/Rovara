@@ -197,6 +197,10 @@ export type SlackCardInput =
    * advice to run agentx init again, kept in the details. */
   | { stage: "refused"; problem: string; retry?: false }
   | { stage: "approval"; appName: string }
+  /** Add to Slack (the setup page): the configuration token AgentX makes the app with. */
+  | { stage: "token"; appName: string }
+  /** Add to Slack: the app is made; the person installs it in their workspace. */
+  | { stage: "add"; appName: string; addUrl: string }
   | { stage: "done"; appName: string; appId: string; teamId: string; teamName?: string };
 
 export const SLACK_APPS_URL = "https://api.slack.com/apps";
@@ -237,6 +241,22 @@ export function slackAppCard(input: SlackCardInput): WizardCard {
         "Your progress is saved. You can leave the installer running, or stop and continue later.",
         "When the app is installed in Slack, choose Installed, continue.",
       ],
+    };
+    case "token": return {
+      ...base, status: "waiting",
+      lines: [
+        `AgentX makes the Slack app "${input.appName}" for you. It needs a Slack app configuration token, used once and not kept.`,
+        "Open your Slack apps, find Your App Configuration Tokens, press Generate Token, pick your workspace, then copy the Access Token and paste it below.",
+      ],
+      link: { url: SLACK_APPS_URL, label: "Open your Slack apps" },
+    };
+    case "add": return {
+      ...base, status: "waiting",
+      lines: [
+        `AgentX made the Slack app "${input.appName}". Add it to your workspace: Slack asks you to allow what it may do.`,
+        "If your workspace needs an admin to approve new apps, choose Request to Install there. Once an admin approves it, press Add to Slack again.",
+      ],
+      link: { url: input.addUrl, label: "Add to Slack" },
     };
     case "done": return {
       ...base, status: "ok",

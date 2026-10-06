@@ -11,7 +11,8 @@ import type { InitContext, InitSecrets, SecretFlags } from "./context.js";
 import { SLACK_BOT_HANDLE_PATTERN, type InstallProgress } from "./install-state.js";
 import { askForm, checkSlackBotToken, checkSlackSigningSecret, cleanSecret, fieldCheck, secretFromSource, type FormField, type SecretSource } from "./prompts.js";
 import { problemText, retryOnPage } from "./retry.js";
-import type { InitStep, ProgressHandle } from "./steps.js";
+import { addToSlack, SLACK_CALLBACK_PATH } from "./slack-install.js";
+import type { InitStep, ProgressHandle, StepOutcome } from "./steps.js";
 import { SLACK_APPS_URL, slackAppCard, type SlackCardInput, slackUrlsCard, type SlackUrlsCardInput } from "./ui/cards.js";
 import { STEP_PLAN } from "./ui/journey.js";
 import { checkSlackClientId, checkSlackClientSecret, hasStoredSlackClient, SIGNIN_FLAG_NAMES, slackClientIdProblem, type SigninFlags } from "../signin/collect.js";
@@ -64,7 +65,9 @@ export interface SlackManifest {
   features: { bot_user: { display_name: string; always_online: boolean } };
   oauth_config: { redirect_urls: string[]; scopes: { bot: string[]; user: string[] } };
   settings: {
-    event_subscriptions: { request_url: string; bot_events: string[] };
+    /** Left out when Add to Slack makes the app: Slack checks the request URL as it saves it, and
+     * AgentX cannot answer that check until it holds the new app's signing secret. */
+    event_subscriptions?: { request_url: string; bot_events: string[] };
     interactivity: { is_enabled: boolean; request_url: string };
     org_deploy_enabled: boolean;
     socket_mode_enabled: boolean;
@@ -150,6 +153,21 @@ export function slackSecretWithBot(existing: string | undefined, bot: { signingS
   const current = parsedSecret(existing);
   const keep = Object.fromEntries(["clientId", "clientSecret"].filter((key) => typeof current[key] === "string").map((key) => [key, current[key]]));
   return JSON.stringify({ ...keep, signingSecret: bot.signingSecret, botToken: bot.botToken });
+}
+
+/** A new app's credentials, before it is installed: the bot token stays whatever the secret holds
+ * (the control plane's placeholder) until the install gives one. */
+export function slackSecretWithApp(existing: string | undefined, app: { signingSecret: string; clientId: string; clientSecret: string }): string {
+  return JSON.stringify({ ...parsedSecret(existing), signingSecret: app.signingSecret, clientId: app.clientId, clientSecret: app.clientSecret });
+}
+
+/** A made app's credentials in the Slack secret (Add to Slack keeps them there before the install),
+ * or undefined when it holds none. */
+export function storedSlackApp(raw: string | undefined): { signingSecret: string; clientId: string; clientSecret: string } | undefined {
+  const value = parsedSecret(raw);
+  const { signingSecret, clientId, clientSecret } = value;
+  return typeof signingSecret === "string" && /^[a-f0-9]{32}$/.test(signingSecret) && typeof clientId === "string" && typeof clientSecret === "string"
+    ? { signingSecret, clientId, clientSecret } : undefined;
 }
 
 /** The Sign in with Slack client credentials added to the Slack secret, keeping every other key. */
@@ -281,10 +299,22 @@ export async function probeSlackUrls(input: {
   }
 }
 
+/** Slack's own reasons a manifest was refused (apps.manifest.create and update). */
+export interface SlackManifestErrors { errors?: Array<{ message?: string; pointer?: string }> }
+
 export interface SlackApi {
   /** `scopes` comes from the response's x-oauth-scopes header, when Slack sends it. */
   authTest(token: string): Promise<{ ok: boolean; error?: string; user_id?: string; bot_id?: string; team_id?: string; team?: string; url?: string; user?: string; scopes?: string[] }>;
   botsInfo(token: string, botId: string): Promise<{ ok: boolean; error?: string; bot?: { app_id?: string } }>;
+  /** Creates an app from a manifest, with an app configuration token (Add to Slack, slack-install.ts). */
+  manifestCreate(configToken: string, manifest: SlackManifest): Promise<{
+    ok: boolean; error?: string; app_id?: string; credentials?: { client_id?: string; client_secret?: string; signing_secret?: string };
+  } & SlackManifestErrors>;
+  manifestUpdate(configToken: string, appId: string, manifest: SlackManifest): Promise<{ ok: boolean; error?: string } & SlackManifestErrors>;
+  /** The OAuth install's code for the app's bot token. */
+  oauthAccess(input: { clientId: string; clientSecret: string; code: string; redirectUri: string }): Promise<{
+    ok: boolean; error?: string; access_token?: string; token_type?: string; bot_user_id?: string; app_id?: string; team?: { id?: string; name?: string };
+  }>;
 }
 
 export function slackWebApi(fetchImplementation: typeof fetch): SlackApi {
@@ -292,6 +322,16 @@ export function slackWebApi(fetchImplementation: typeof fetch): SlackApi {
     const response = await fetchImplementation(`https://slack.com/api/${method}${query}`, { method: "POST", headers: { authorization: `Bearer ${token}` } });
     if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `Slack ${method} failed with HTTP ${response.status}; try again in a minute`);
     return { body: await response.json(), headers: response.headers };
+  };
+  /** A form-encoded call; the token, when there is one, as a bearer header. Never logs the body. */
+  const form = async (method: string, fields: Record<string, string>, token?: string): Promise<unknown> => {
+    const response = await fetchImplementation(`https://slack.com/api/${method}`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded", ...(token === undefined ? {} : { authorization: `Bearer ${token}` }) },
+      body: new URLSearchParams(fields).toString(),
+    });
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `Slack ${method} failed with HTTP ${response.status}; try again in a minute`);
+    return response.json();
   };
   return {
     async authTest(token) {
@@ -301,6 +341,13 @@ export function slackWebApi(fetchImplementation: typeof fetch): SlackApi {
       return { ...(body as Awaited<ReturnType<SlackApi["authTest"]>>), ...scopes };
     },
     botsInfo: async (token, botId) => (await call("bots.info", token, `?bot=${encodeURIComponent(botId)}`)).body as Awaited<ReturnType<SlackApi["botsInfo"]>>,
+    manifestCreate: async (configToken, manifest) =>
+      (await form("apps.manifest.create", { manifest: JSON.stringify(manifest) }, configToken)) as Awaited<ReturnType<SlackApi["manifestCreate"]>>,
+    manifestUpdate: async (configToken, appId, manifest) =>
+      (await form("apps.manifest.update", { app_id: appId, manifest: JSON.stringify(manifest) }, configToken)) as Awaited<ReturnType<SlackApi["manifestUpdate"]>>,
+    oauthAccess: async (input) => (await form("oauth.v2.access", {
+      client_id: input.clientId, client_secret: input.clientSecret, code: input.code, redirect_uri: input.redirectUri,
+    })) as Awaited<ReturnType<SlackApi["oauthAccess"]>>,
   };
 }
 
@@ -331,6 +378,22 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
       const resuming = progress.current().steps["slack-app"]?.status === "waiting";
       const url = slackCreateAppUrl(slackAppManifest({ appName, eventsUrl, interactivityUrl, signInCallbackUrl: slackSignInCallbackUrl(apiEndpoint) }));
       const show = (card: SlackCardInput) => context.surface?.card(slackAppCard(card));
+      // The setup page: Add to Slack, with one configuration token (slack-install.ts), unless the
+      // person would rather make the app by hand. A run that already made the app goes on with it.
+      if (context.slackInstallHost !== undefined && context.setupPageUrl !== undefined) {
+        const how = progress.current().slackPending !== undefined ? "token" : await context.prompter.choose<"token" | "manual">(SLACK_HOW_QUESTION, [
+          { value: "token", label: "With a Slack configuration token: AgentX makes and installs the app (recommended)" },
+          { value: "manual", label: "By hand: make it from AgentX's manifest and paste its values" },
+        ], { flag: "--slack-create", defaultValue: "token" });
+        if (how === "token") {
+          const added = await addToSlack({
+            context, api, progress, show, appName,
+            manifest: slackAppManifest({ appName, eventsUrl, interactivityUrl, signInCallbackUrl: slackSignInCallbackUrl(apiEndpoint) }),
+            redirectUri: `${context.setupPageUrl}${SLACK_CALLBACK_PATH}`,
+          });
+          return finishSlackApp(context, progress, show, appName, added);
+        }
+      }
       if (resuming) {
         context.write(`Continuing with the Slack app "${appName}". Once an admin approves it, install it from its Install App page.`);
         context.write(`If you have not created the app yet, open: ${url}`);
@@ -379,16 +442,25 @@ export function slackAppStep(api: SlackApi): InitStep<InitContext> {
           },
       });
 
-      // Read, merge, write: a concurrent writer (this step alongside `agentx signin enable slack`)
-      // could lose an update. Left for admins to avoid by running one at a time.
-      const before = await context.secrets.get(slackSecretName(env));
-      const withBot = slackSecretWithBot(before, { signingSecret: bot.signingSecret, botToken: bot.botToken });
-      await context.secrets.put(slackSecretName(env), bot.client === undefined ? withBot : slackSecretWithSignIn(withBot, bot.client));
-      await progress.update({ slack: { appId: bot.appId, teamId: bot.teamId, botUserId: bot.botUserId, ...(bot.botName === undefined ? {} : { botName: bot.botName }), ...(bot.teamName === undefined ? {} : { teamName: bot.teamName }) } });
-      show({ stage: "done", appName, appId: bot.appId, teamId: bot.teamId, ...(bot.teamName === undefined ? {} : { teamName: bot.teamName }) });
-      return { status: "done", note: `Slack app ${bot.appId} in workspace ${bot.teamId}` };
+      return finishSlackApp(context, progress, show, appName, bot);
     },
   };
+}
+
+export const SLACK_HOW_QUESTION = "How do you want to make the Slack app?";
+
+/** Keeps the bot's token and signing secret (and the sign-in client, when there is one) in the Slack
+ * secret, and records the app, however it was made. */
+async function finishSlackApp(context: InitContext, progress: ProgressHandle, show: (card: SlackCardInput) => void, appName: string, bot: SlackValues): Promise<StepOutcome> {
+  const name = slackSecretName(context.env);
+  // Read, merge, write: a concurrent writer (this step alongside `agentx signin enable slack`)
+  // could lose an update. Left for admins to avoid by running one at a time.
+  const before = await context.secrets.get(name);
+  const withBot = slackSecretWithBot(before, { signingSecret: bot.signingSecret, botToken: bot.botToken });
+  await context.secrets.put(name, bot.client === undefined ? withBot : slackSecretWithSignIn(withBot, bot.client));
+  await progress.update({ slack: { appId: bot.appId, teamId: bot.teamId, botUserId: bot.botUserId, ...(bot.botName === undefined ? {} : { botName: bot.botName }), ...(bot.teamName === undefined ? {} : { teamName: bot.teamName }) } });
+  show({ stage: "done", appName, appId: bot.appId, teamId: bot.teamId, ...(bot.teamName === undefined ? {} : { teamName: bot.teamName }) });
+  return { status: "done", note: `Slack app ${bot.appId} in workspace ${bot.teamId}` };
 }
 
 /** FR-026 and FR-027: Slack's own handle for the bot, as the Slack app step stored it, else the
@@ -487,6 +559,16 @@ export async function verifySlackUrls(context: InitContext, progress: ProgressHa
         eventsUrl, interactivityUrl, signingSecret, fetch: context.fetch, now: context.now, sleep: context.sleep, write: context.write,
         onWaiting: () => show({ stage: "waiting-for-secret", eventsUrl, until: new Date(context.now() + SLACK_PROBE_TIMEOUT_MS).toISOString() }),
       });
+      // Add to Slack made the app without its event subscriptions: added now, Slack checks the
+      // request URL as it saves it, so there is nothing for the person to confirm.
+      if (context.slackEvents !== undefined) {
+        const added = await context.slackEvents();
+        if (added.ok) {
+          context.write("Slack checked AgentX's request URL and turned on the app's events.");
+          return;
+        }
+        context.write(`Slack did not take the app's events (${added.problem}); check them on the app's page.`);
+      }
       context.write(`AgentX now answers Slack's URL check. Open ${page}; if the Request URL is not marked Verified, press Retry.`);
       show({ stage: "verify", pageUrl: page });
       if (context.openBrowser !== undefined) await context.openBrowser(page);

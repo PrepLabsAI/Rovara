@@ -115,6 +115,9 @@ export interface InstallSurface {
  * with --ui (FR-030). */
 export interface ManifestHost { port: number; startUrl: string; redirectUrl: string; code: Promise<string>; close(): void }
 export type OpenManifestHost = (input: { state: string; page: (redirectUrl: string, nonce?: string) => string; timeoutMs: number }) => Promise<ManifestHost>;
+/** Add to Slack (slack-install.ts): the setup page receives Slack's redirect back with the code. */
+export interface SlackInstallHost { code: Promise<string>; close(): void }
+export type OpenSlackInstallHost = (input: { state: string; timeoutMs: number }) => Promise<SlackInstallHost>;
 
 // write, now and sleep are function-typed properties rather than methods, so steps can pass them
 // on (as `write: context.write`) without an unbound-method lint error.
@@ -170,4 +173,9 @@ export interface InitContext {
    * GITHUB_WAIT_MS, 15 minutes). The install in the cloud waits longer: the person may have left
    * during the build and come back to the setup page later. */
   githubWaitMs?: number;
+  /** The setup page's Add to Slack (the install in the cloud); absent elsewhere. */
+  slackInstallHost?: OpenSlackInstallHost;
+  /** Set by the slack-app step after Add to Slack, for this run only: adds the app's event
+   * subscriptions once Slack can reach AgentX (the slack-check step). */
+  slackEvents?: () => Promise<{ ok: true } | { ok: false; problem: string }>;
 }

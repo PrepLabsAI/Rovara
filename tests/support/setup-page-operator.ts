@@ -28,6 +28,7 @@ export function setupPageOperator(input: {
   handle: (request: SetupRequest) => Promise<SetupResponse>;
   token: string;
   githubCode?: string;
+  slackCode?: string;
 }): SetupPageOperator {
   const queue = [...input.script];
   const asked: string[] = [];
@@ -43,6 +44,16 @@ export function setupPageOperator(input: {
    * as GitHub (a redirect to the page's callback with a code and the form's state); anything else
    * is only recorded. */
   const visit = async (url: string): Promise<void> => {
+    // Add to Slack: Slack's page, played back as Slack (the install allowed, back to the callback).
+    if (url.startsWith("https://slack.com/oauth/v2/authorize")) {
+      const authorize = new URL(url);
+      if (!(authorize.searchParams.get("redirect_uri") ?? "").startsWith(`${SETUP_ORIGIN}/slack/callback`)) throw new Error(`test setup: Add to Slack sends Slack back to ${authorize.searchParams.get("redirect_uri")}`);
+      await input.handle({
+        method: "GET", path: "/slack/callback", query: { code: input.slackCode ?? "slack-code-0123", state: authorize.searchParams.get("state") ?? "missing" },
+        headers: { host: new URL(SETUP_ORIGIN).host, "sec-fetch-site": "cross-site", referer: "https://slack.com/" },
+      });
+      return;
+    }
     if (!url.startsWith(`${SETUP_ORIGIN}/github/start`)) return;
     const form = await get("/github/start");
     if (form.status !== 200) throw new Error(`the setup page answered HTTP ${form.status} for /github/start`);

@@ -13,6 +13,8 @@
 //                     job takes it (deleted as read)
 //   github-manifest   the GitHub App form the page serves at /github/start, while the job waits
 //   github-code#<st>  the code GitHub sent back for that form's state, until the job takes it
+//   slack-install     the state of the Add to Slack the job is waiting on
+//   slack-code#<st>   the code Slack sent back for it, until the job takes it
 //
 // FR-012 still holds: an answer may be a secret, so it lives here only between the page's write
 // and the job's next poll (about a second), is deleted as it is read, and expires within minutes
@@ -69,6 +71,13 @@ export interface SetupStore {
   putGitHubCode(state: string, code: string): Promise<void>;
   /** The job: that code, deleted as it is read; undefined while there is none. */
   takeGitHubCode(state: string): Promise<string | undefined>;
+  /** The job: the state Slack must send back after Add to Slack. */
+  putSlackInstall(state: string): Promise<void>;
+  /** The page: that state, or undefined while the job waits on none. */
+  getSlackInstall(): Promise<string | undefined>;
+  deleteSlackInstall(): Promise<void>;
+  putSlackCode(state: string, code: string): Promise<void>;
+  takeSlackCode(state: string): Promise<string | undefined>;
 }
 
 /** The GitHub App form, rendered by the job with GITHUB_NONCE_PLACEHOLDER where its script's nonce
@@ -196,6 +205,23 @@ export function dynamoSetupStore(input: { client: Pick<DynamoDBClient, "send">; 
     async takeGitHubCode(state) {
       return (await take(`github-code#${state}`))?.code?.S;
     },
+    async putSlackInstall(state) {
+      await client.send(new PutItemCommand({
+        TableName: table, Item: { pk, sk: { S: "slack-install" }, state: { S: state }, expiresAt: { N: String(Math.floor(now() / 1000) + 8 * 60 * 60) } },
+      }));
+    },
+    async getSlackInstall() {
+      return (await client.send(new GetItemCommand({ TableName: table, Key: { pk, sk: { S: "slack-install" } }, ConsistentRead: true }))).Item?.state?.S;
+    },
+    async deleteSlackInstall() {
+      await take("slack-install");
+    },
+    async putSlackCode(state, code) {
+      await client.send(new PutItemCommand({ TableName: table, Item: { pk, sk: { S: `slack-code#${state}` }, code: { S: code }, expiresAt: { N: expiry(now()) } } }));
+    },
+    async takeSlackCode(state) {
+      return (await take(`slack-code#${state}`))?.code?.S;
+    },
   };
 }
 
@@ -206,6 +232,8 @@ export function memorySetupStore(now: () => number = Date.now): SetupStore & { a
   let adminToken: { sealed: string; expiresAt: number } | undefined;
   let githubManifest: SetupGitHubManifest | undefined;
   const githubCodes = new Map<string, string>();
+  let slackInstall: string | undefined;
+  const slackCodes = new Map<string, string>();
   const answers = new Map<string, SetupAnswer>();
   const verdicts = new Map<string, AnswerReply>();
   let close = false;
@@ -251,6 +279,15 @@ export function memorySetupStore(now: () => number = Date.now): SetupStore & { a
     async takeGitHubCode(state) {
       const code = githubCodes.get(state);
       githubCodes.delete(state);
+      return code;
+    },
+    async putSlackInstall(state) { slackInstall = state; },
+    async getSlackInstall() { return slackInstall; },
+    async deleteSlackInstall() { slackInstall = undefined; },
+    async putSlackCode(state, code) { slackCodes.set(state, code); },
+    async takeSlackCode(state) {
+      const code = slackCodes.get(state);
+      slackCodes.delete(state);
       return code;
     },
     async takeAdminToken() {

@@ -1000,6 +1000,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     ...(stepBrowser === undefined ? {} : { openBrowser: stepBrowser }),
     ...(surface === undefined ? {} : { surface }),
     ...(session.wizard === undefined ? {} : { manifestHost: session.wizard.manifestHost }),
+    ...(session.wizard?.slackInstallHost === undefined ? {} : { slackInstallHost: session.wizard.slackInstallHost }),
     now,
     sleep,
     fetch: fetchImplementation,
