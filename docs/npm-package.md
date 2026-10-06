@@ -5,7 +5,7 @@ is `rovara`. The package also installs `agentx` as a compatibility alias pointin
 the same executable. Configuration continues to live under `~/.agentx`; existing
 AWS resource names, MCP server/tool identifiers and task/evidence IDs are unchanged.
 
-To run it without installing:
+Published since 0.1.0:
 
 ```sh
 npx @preplabsai/rovara-code --help
@@ -25,7 +25,18 @@ the npm package does not create an AWS environment by itself. The `init` command
 downloads a release bundle matching its CLI version, then guides the administrator
 through the existing installation and confirmation steps.
 
-## PrepLabsAI owner setup (done for 0.1.0)
+## Publishing
+
+Every version after 0.1.0 publishes from `.github/workflows/release.yml` when an admin pushes its
+`vX.Y.Z` tag (see [releases.md](releases.md)), through npm trusted publishing: no token is
+stored, and npm adds provenance. The package's Trusted Publisher is GitHub Actions, organization
+`PrepLabsAI`, repository `Rovara`, workflow `release.yml`; update it, and `repository.url` in
+`scripts/release/pack-cli.ts`, together if the repository is renamed or moves.
+
+## Publishing by hand
+
+Only the first version needed this, because trusted publishing can only be configured on a package
+that exists. Kept for a version that must be published outside the workflow:
 
 1. Sign in to npm with `npm login --registry=https://registry.npmjs.org`.
 2. Confirm the active npm account with `npm whoami` and its role with
@@ -53,14 +64,13 @@ through the existing installation and confirmation steps.
    npm publish ./cli-release/preplabsai-rovara-code-<version>.tgz --access public
    ```
 
-6. Configure the package's npm Trusted Publisher for GitHub organization
-   `PrepLabsAI`, repository `Rovara`, workflow filename `release.yml`.
-   Update these values together if the source repository moves.
-7. Set the existing repository variable `AGENTX_NPM_PACKAGE` to
-   `@preplabsai/rovara-code`, then `AGENTX_PUBLISH_ENABLED` to `true` (see
-   [releases.md](./releases.md)).
-8. Confirm the registry version, public installation commands and matching release
-   downloads before replacing the website's installation placeholder.
+   Publishing requires two-factor authentication. npm asks for a one-time password, or
+   pass `--otp <code>`; with a security key, run it in an interactive terminal and approve
+   in the browser.
+6. Publish the version before pushing its tag. The workflow's npm job then finds it on the
+   registry and skips it, while the images and the GitHub release publish normally.
+7. Confirm the registry version, public installation commands and matching release
+   downloads.
 
 The packager embeds the chosen package name, including a `--name` override, into
 generated login/resume commands and MCP client installation snippets. Existing
