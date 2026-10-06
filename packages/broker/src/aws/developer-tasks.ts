@@ -309,6 +309,9 @@ export async function getWorkflowFeedbackReview(deps: DeveloperTaskRouteDependen
     : operationIsLive ? `${String(activeOperation?.kind ?? "Task")} operation is in progress.`
     : workflow.stage === "IMPLEMENT" && workflow.state === "READY" ? "Implementation is ready to start."
     : workflow.stage === "IMPLEMENT" && workflow.state === "RUNNING" ? "Implementation is in progress."
+    : workflow.stage === "VERIFY" ? "Run the required checks for the current code version."
+    : workflow.stage === "REVIEW" ? "Complete the required code and security reviews."
+    : workflow.stage === "PULL_REQUEST" ? "Create the required pull requests for the verified code."
     : workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING" ? "Waiting for GitHub to confirm every required pull request is merged."
     : review.status === "PENDING" ? "Review this proposal and choose the next action."
     : "No code changes will start from this proposal.";

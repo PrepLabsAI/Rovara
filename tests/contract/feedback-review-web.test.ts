@@ -267,6 +267,21 @@ describe("broker-backed feedback review data", () => {
     await expect(getWorkflowFeedbackReview(fixture.deps as never, { developerId: OMAR.developerId, sessionId: OMAR.sessionId, amr: "oidc", name: OMAR.name }, fixture.taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
   });
 
+  it.each([
+    ["VERIFY", "RUNNING", "Run the required checks for the current code version."],
+    ["REVIEW", "RUNNING", "Complete the required code and security reviews."],
+    ["PULL_REQUEST", "READY", "Create the required pull requests for the verified code."],
+  ] as const)("shows the current %s stage action after the feedback decision", async (stage, state, expectedNextAction) => {
+    const fixture = await preparedReview();
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId };
+    const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
+    fixture.harness.db.set({ ...task, workflow: { ...task.workflow, stage, state } });
+
+    const data = await getWorkflowFeedbackReview(fixture.deps as never, owner, fixture.taskId);
+
+    expect(data).toMatchObject({ workflowStage: stage, workflowStatus: state, nextAction: expectedNextAction });
+  });
+
   it("stores the attributed owner decision with a revision and digest condition", async () => {
     const fixture = await preparedReview();
     const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId };
