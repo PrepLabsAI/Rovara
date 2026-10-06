@@ -187,7 +187,7 @@ export type ContinueDeveloperTaskRequest = z.infer<typeof ContinueDeveloperTaskR
 export const DeveloperTaskActionRequestSchema = z.object({ requestId: RequestIdSchema }).strict();
 export type DeveloperTaskActionRequest = z.infer<typeof DeveloperTaskActionRequestSchema>;
 
-export const CanvasCloseoutRetryRequestSchema = z.object({ requestId: RequestIdSchema, manifestDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
+export const CanvasCloseoutRetryRequestSchema = z.object({ requestId: RequestIdSchema, workflowRevision: z.number().int().positive(), manifestDigest: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict();
 export type CanvasCloseoutRetryRequest = z.infer<typeof CanvasCloseoutRetryRequestSchema>;
 
 export const DeveloperPullRequestRequestSchema = z

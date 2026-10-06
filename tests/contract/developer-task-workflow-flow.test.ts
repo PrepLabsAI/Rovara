@@ -158,6 +158,7 @@ describe("native developer task workflow", () => {
     });
     const taskId = String((started.body.task as { taskId: string }).taskId);
     const row = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
+    const workflowRevision = Number(row.workflow.revision);
     const digest = "a".repeat(64);
     const workflow = { ...row.workflow, stage: "CLOSED", state: "COMPLETE", outcome: "CLOSED",
       canvasCloseout: { status: "ARCHIVE_PENDING", terminalState: "CLOSED", manifestDigest: digest,
@@ -165,23 +166,62 @@ describe("native developer task workflow", () => {
     harness.db.set({ ...row, workflow });
     const requestId = randomUUID();
     const wrongManifest = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/canvas-closeout/retry`, {
-      requestId, manifestDigest: "b".repeat(64),
+      requestId, workflowRevision, manifestDigest: "b".repeat(64),
     });
     expect(wrongManifest.status).not.toBe(200);
     const unauthorized = await harness.dev(OMAR, "POST", `/v1/dev/tasks/${taskId}/canvas-closeout/retry`, {
-      requestId: randomUUID(), manifestDigest: digest,
+      requestId: randomUUID(), workflowRevision, manifestDigest: digest,
     });
     expect(unauthorized.status).not.toBe(200);
     expect(harness.db.get(`DEVTASK#${taskId}`, "META")).not.toHaveProperty("canvasCloseoutRetry");
 
-    const accepted = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/canvas-closeout/retry`, { requestId, manifestDigest: digest });
+    const accepted = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/canvas-closeout/retry`, { requestId, workflowRevision, manifestDigest: digest });
     expect(accepted.status).toBe(200);
     expect(accepted.body).toMatchObject({ status: "retry_requested", manifestDigest: digest });
-    const duplicateRetry = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/canvas-closeout/retry`, { requestId, manifestDigest: digest });
+    const duplicateRetry = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/canvas-closeout/retry`, { requestId, workflowRevision, manifestDigest: digest });
     expect(duplicateRetry.status).toBe(200);
     expect(harness.db.get(`DEVTASK#${taskId}`, "META")).toMatchObject({
-      canvasCloseoutRetry: { requestId, manifestDigest: digest, actorId: row.ownerKey, dispatchAttempt: 2 },
+      canvasCloseoutRetry: { requestId, workflowRevision, manifestDigest: digest, actorId: row.ownerKey, dispatchAttempt: 2 },
     });
+  });
+
+  it("allows an owner to retry a preparation failure bound to the current workflow revision", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
+      requestId: randomUUID(), project: "payments", instructions: "Retry artifact verification", client: "test-client", workflow: true,
+    });
+    const taskId = String((started.body.task as { taskId: string }).taskId);
+    const row = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
+    const workflowRevision = Number(row.workflow.revision);
+    const attempt = { status: "ARCHIVE_PENDING", workflowRevision, terminalState: "CLOSED", reason: "artifact_unavailable",
+      attempts: 1, updatedAt: new Date().toISOString() };
+    harness.db.set({ ...row, workflow: { ...row.workflow, stage: "CLOSED", state: "COMPLETE", outcome: "CLOSED", canvasCloseoutAttempt: attempt } });
+    const response = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/canvas-closeout/retry`, {
+      requestId: randomUUID(), workflowRevision,
+    });
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ status: "retry_requested", workflowRevision });
+    expect(harness.db.get(`DEVTASK#${taskId}`, "META")).toMatchObject({
+      canvasCloseoutRetry: { workflowRevision, actorId: row.ownerKey },
+    });
+  });
+
+  it("rejects an owner retry when the workflow advanced after the persisted preparation failure", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
+      requestId: randomUUID(), project: "payments", instructions: "Fence stale closeout retry", client: "test-client", workflow: true,
+    });
+    const taskId = String((started.body.task as { taskId: string }).taskId);
+    const row = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
+    const failedRevision = Number(row.workflow.revision);
+    const attempt = { status: "ARCHIVE_PENDING", workflowRevision: failedRevision, terminalState: "CLOSED", reason: "artifact_unavailable",
+      attempts: 1, updatedAt: new Date().toISOString() };
+    harness.db.set({ ...row, workflow: { ...row.workflow, revision: failedRevision + 1, stage: "CLOSED", state: "COMPLETE", outcome: "CLOSED", canvasCloseoutAttempt: attempt } });
+    const response = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/canvas-closeout/retry`, {
+      requestId: randomUUID(), workflowRevision: failedRevision,
+    });
+    expect(response.status).not.toBe(200);
+    expect(harness.db.get(`DEVTASK#${taskId}`, "META")).not.toHaveProperty("canvasCloseoutRetry");
   });
 
   it("runs Full requirements, design, and coding-plan reviews before implementation", async () => {

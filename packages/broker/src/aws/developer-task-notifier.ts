@@ -39,7 +39,7 @@ export interface NotifierDependencies {
   reviewUrlBase?: string;
   /** Creates a channel-readable detail page and returns Slack's verified link. */
   createPlanCanvas?(input: { channel: string; taskId: string; title: string; version: number; markdown: string }, onCreated?: (canvasId: string) => Promise<void>): Promise<{ canvasId: string; permalink: string }>;
-  closeTaskCanvases?(taskId: string, expectedManifestDigest?: string): Promise<{ status: "COMPLETE" | "ARCHIVE_PENDING"; reason?: string }>;
+  closeTaskCanvases?(taskId: string, expectedManifestDigest?: string, expectedWorkflowRevision?: number): Promise<{ status: "COMPLETE" | "ARCHIVE_PENDING"; reason?: string }>;
   /** Spec 025 E13: chat.update, to edit an admin change's message when it ends. */
   update?(input: UpdateInput): Promise<void>;
   now(): number;
@@ -134,6 +134,8 @@ function parseNotice(body: string): Notice | undefined {
   try {
     const value = JSON.parse(body) as Partial<Notice>;
     return typeof value.id === "string" && typeof value.at === "string" && !Number.isNaN(Date.parse(value.at)) && typeof value.kind === "string" && NOTICE_KINDS.has(value.kind)
+      && (value.kind !== "canvas_closeout" || (value.manifestDigest === undefined || /^[a-f0-9]{64}$/.test(value.manifestDigest))
+        && (value.expectedWorkflowRevision === undefined || Number.isSafeInteger(value.expectedWorkflowRevision) && value.expectedWorkflowRevision > 0))
       ? value as Notice
       : undefined;
   } catch {
@@ -706,7 +708,7 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
   const task = await noticeTask(deps, notice);
   if (notice.kind === "canvas_closeout") {
     if (task === undefined || deps.closeTaskCanvases === undefined) throw new Error("Canvas closeout service is unavailable");
-    const result = await deps.closeTaskCanvases(task.taskId, notice.manifestDigest);
+    const result = await deps.closeTaskCanvases(task.taskId, notice.manifestDigest, notice.expectedWorkflowRevision);
     if (result.status !== "COMPLETE") throw new CanvasCloseoutPending(result.reason ?? "archive_pending");
     return "recorded";
   }
@@ -922,7 +924,7 @@ function createAwsNotifierHandler() {
         await s3.send(new PutObjectCommand({ Bucket: requiredEnvironment("ARTIFACT_BUCKET_NAME"), Key: key, Body: bytes,
           ContentType: "application/json", Metadata: { sha256: digest }, IfNoneMatch: "*" }));
       } catch (error) {
-        if (error instanceof Error && error.name === "PreconditionFailed") {
+        if (error instanceof Error && ["PreconditionFailed", "ConditionalRequestConflict"].includes(error.name)) {
           const existing = await closeoutStore.readManifest(key);
           if (existing === bytes) return;
         }
@@ -941,7 +943,31 @@ function createAwsNotifierHandler() {
           const prior = priorEntries.get(canvas.lineageKey);
           return prior?.status === "DELETED" ? prior : canvas;
         }) };
-        const mergedWorkflow = { ...workflow, canvasCloseout: merged };
+        const workflowWithoutAttempt = { ...workflow };
+        delete workflowWithoutAttempt.canvasCloseoutAttempt;
+        const mergedWorkflow = { ...workflowWithoutAttempt, canvasCloseout: merged };
+        const version = current.canvasCloseoutVersion ?? 0;
+        try {
+          await documentClient.send(new UpdateCommand({ TableName: tableName, Key: taskKey(taskId),
+            UpdateExpression: "SET workflow = :workflow, canvasCloseoutVersion = :next",
+            ConditionExpression: `workflow.revision = :revision AND ${version === 0 ? "attribute_not_exists(canvasCloseoutVersion)" : "canvasCloseoutVersion = :version"}`,
+            ExpressionAttributeValues: { ":workflow": mergedWorkflow, ":next": version + 1, ":revision": expectedRevision,
+              ...(version === 0 ? {} : { ":version": version }) },
+          }));
+          return true;
+        } catch (error) {
+          if (!isConditional(error)) throw error;
+        }
+      }
+      return false;
+    },
+    async saveCloseoutAttempt(taskId, attemptRecord, expectedRevision) {
+      const tableName = requiredEnvironment("STATE_TABLE_NAME");
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const current = await closeoutStore.loadTask(taskId);
+        const workflow = current?.workflow;
+        if (current === undefined || workflow === undefined || workflow.revision !== expectedRevision) return false;
+        const mergedWorkflow = { ...workflow, canvasCloseoutAttempt: attemptRecord };
         const version = current.canvasCloseoutVersion ?? 0;
         try {
           await documentClient.send(new UpdateCommand({ TableName: tableName, Key: taskKey(taskId),
@@ -996,8 +1022,10 @@ function createAwsNotifierHandler() {
       return cachedBotToken(() => secretsManager.send(new GetSecretValueCommand({ SecretId: requiredEnvironment("SLACK_SECRET_ARN") }))
         .then((response) => parseSlackSecrets(response.SecretString ?? "").botToken))((token) => createTaskPlanCanvas(token, input, fetch, onCreated));
     },
-    async closeTaskCanvases(taskId, expectedManifestDigest) {
-      const result = await runTaskCanvasCloseout(closeoutStore, { taskId, ...(expectedManifestDigest === undefined ? {} : { expectedManifestDigest }) });
+    async closeTaskCanvases(taskId, expectedManifestDigest, expectedWorkflowRevision) {
+      const result = await runTaskCanvasCloseout(closeoutStore, { taskId,
+        ...(expectedManifestDigest === undefined ? {} : { expectedManifestDigest }),
+        ...(expectedWorkflowRevision === undefined ? {} : { expectedWorkflowRevision }) });
       if (result.status === "ARCHIVE_PENDING") {
         console.log(JSON.stringify({ component: "developer-task-closeout", event: "archive_pending", taskId,
           reason: "reason" in result ? result.reason : "archive_pending" }));

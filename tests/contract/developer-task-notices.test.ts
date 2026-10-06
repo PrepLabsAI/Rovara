@@ -124,11 +124,23 @@ describe("notices from the stream (C7, C8)", () => {
   it("re-emits owner closeout retries even when the request ID is reused", () => {
     const taskId = randomUUID();
     const before = { entityType: "DEVELOPER_TASK", taskId,
-      canvasCloseoutRetry: { requestId: "same-request", manifestDigest: "a".repeat(64), dispatchAttempt: 1 } };
+      canvasCloseoutRetry: { requestId: "same-request", workflowRevision: 4, manifestDigest: "a".repeat(64), dispatchAttempt: 1 } };
     const after = { ...before, canvasCloseoutRetry: { ...before.canvasCloseoutRetry, dispatchAttempt: 2 } };
     expect(noticesOf(before, after, "2026-10-05T12:02:00.000Z", "retry-again")).toEqual([{
       id: `${taskId}:canvas_closeout_retry:same-request:2`, kind: "canvas_closeout", taskId, at: "2026-10-05T12:02:00.000Z",
+      expectedWorkflowRevision: 4,
       manifestDigest: "a".repeat(64),
+    }]);
+  });
+
+  it("dispatches a preparation retry with its workflow revision before a manifest exists", () => {
+    const taskId = randomUUID();
+    const before = { entityType: "DEVELOPER_TASK", taskId };
+    const after = { ...before, canvasCloseoutRetry: { requestId: "prepare-retry", workflowRevision: 9, actorId: "owner",
+      requestedAt: "2026-10-05T12:03:00.000Z", dispatchAttempt: 1 } };
+    expect(noticesOf(before, after, "2026-10-05T12:03:00.000Z", "retry")).toEqual([{
+      id: `${taskId}:canvas_closeout_retry:prepare-retry:1`, kind: "canvas_closeout", taskId, at: "2026-10-05T12:03:00.000Z",
+      expectedWorkflowRevision: 9,
     }]);
   });
 

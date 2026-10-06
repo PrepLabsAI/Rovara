@@ -48,6 +48,10 @@ describe("native task workflow contracts", () => {
       canvases: [{ lineageKey: "PLAN:2:plan-v1", canvasId: "F12345678", status: "UNKNOWN", attempts: 1 }] } });
     expect(tracked.canvasLineage?.[0]?.canvasId).toBe("F12345678");
     expect(tracked.canvasCloseout?.canvases[0]?.status).toBe("UNKNOWN");
+    expect(WorkflowSnapshotSchema.parse({ ...workflow, canvasCloseoutAttempt: {
+      status: "ARCHIVE_PENDING", workflowRevision: 1, terminalState: "CLOSED", reason: "artifact_unavailable", attempts: 1,
+      updatedAt: "2026-10-05T12:02:00.000Z",
+    } }).canvasCloseoutAttempt).toMatchObject({ reason: "artifact_unavailable", workflowRevision: 1 });
     expect(WorkflowSnapshotSchema.safeParse({ ...workflow, canvasLineage: [{
       key: "PLAN:2:plan-v1", stage: "PLAN_REVIEW", workflowRevision: 2, artifactId: "plan-v1",
       artifactRef: plan.objectKey, artifactDigest: plan.sha256, state: "CREATED", canvasId: "F99999999",

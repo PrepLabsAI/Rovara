@@ -1151,37 +1151,49 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
   return { task: view };
 }
 
-/** Re-drive only the exact immutable manifest already stored on this owned task. */
-async function retryTaskCanvasCloseout(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ status: "retry_requested"; manifestDigest: string }> {
+/** Re-drive only the task's current terminal revision and, when present, its exact manifest candidate. */
+async function retryTaskCanvasCloseout(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ status: "retry_requested"; workflowRevision: number; manifestDigest?: string }> {
   const request = parse(CanvasCloseoutRetryRequestSchema, value, deps, "canvas-closeout-retry");
   const task = await loadOwnedTask(deps, caller, taskId);
   const closeout = task.workflow?.canvasCloseout;
-  if (closeout === undefined || closeout.status !== "ARCHIVE_PENDING") {
-    throw agentXError("CONFIG_INVALID", "this task has no retryable Canvas closeout");
+  const attempt = task.workflow?.canvasCloseoutAttempt;
+  const workflowRevision = task.workflow?.revision;
+  if (task.workflow === undefined || workflowRevision !== request.workflowRevision) {
+    throw agentXError("IDEMPOTENCY_CONFLICT", "the requested closeout workflow revision is no longer current");
   }
-  if (closeout.manifestDigest !== request.manifestDigest) {
-    throw agentXError("IDEMPOTENCY_CONFLICT", "the requested closeout manifest is not the task's current verified snapshot");
+  const terminal = (task.workflow.stage === "MERGED" && task.workflow.state === "COMPLETE" && task.workflow.outcome === "MERGED")
+    || (task.workflow.stage === "CLOSED" && task.workflow.state === "COMPLETE" && task.workflow.outcome === "CLOSED")
+    || (task.closedAt !== undefined && task.workflow.stage !== "MERGED");
+  if (!terminal) throw agentXError("CONFIG_INVALID", "Canvas closeout can only be retried for a terminal task");
+  if (closeout !== undefined) {
+    if (closeout.status !== "ARCHIVE_PENDING" || request.manifestDigest !== closeout.manifestDigest) {
+      throw agentXError("IDEMPOTENCY_CONFLICT", "the requested closeout manifest is not the task's current pending snapshot");
+    }
+  } else if (attempt === undefined || attempt.workflowRevision !== request.workflowRevision
+    || (attempt.candidateManifestDigest === undefined ? request.manifestDigest !== undefined : request.manifestDigest !== attempt.candidateManifestDigest)) {
+    throw agentXError("IDEMPOTENCY_CONFLICT", "the requested closeout preparation attempt is no longer current");
   }
   const existing = task.canvasCloseoutRetry;
-  if (existing?.requestId === request.requestId && existing.manifestDigest !== request.manifestDigest) {
-    throw agentXError("IDEMPOTENCY_CONFLICT", "this request_id was already used for a different closeout manifest");
+  if (existing?.requestId === request.requestId && (existing.manifestDigest !== request.manifestDigest || existing.workflowRevision !== workflowRevision)) {
+    throw agentXError("IDEMPOTENCY_CONFLICT", "this request_id was already used for a different closeout snapshot");
   }
-  const retry = { requestId: request.requestId, manifestDigest: request.manifestDigest,
-    actorId: task.workflow!.ownerId, requestedAt: iso(deps), dispatchAttempt: (existing?.dispatchAttempt ?? 0) + 1 };
+  const retry = { requestId: request.requestId, workflowRevision, ...(request.manifestDigest === undefined ? {} : { manifestDigest: request.manifestDigest }),
+    actorId: task.workflow.ownerId, requestedAt: iso(deps), dispatchAttempt: (existing?.dispatchAttempt ?? 0) + 1 };
   try {
     await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: taskKey(taskId),
       UpdateExpression: "SET canvasCloseoutRetry = :retry",
-      ConditionExpression: "workflow.canvasCloseout.manifestDigest = :digest AND workflow.canvasCloseout.#status = :pending",
-      ExpressionAttributeNames: { "#status": "status" },
-      ExpressionAttributeValues: { ":retry": retry, ":digest": request.manifestDigest, ":pending": "ARCHIVE_PENDING" },
+      ConditionExpression: `workflow.revision = :revision AND ${task.canvasCloseoutVersion === undefined ? "attribute_not_exists(canvasCloseoutVersion)" : "canvasCloseoutVersion = :version"}`,
+      ExpressionAttributeValues: { ":retry": retry, ":revision": workflowRevision,
+        ...(task.canvasCloseoutVersion === undefined ? {} : { ":version": task.canvasCloseoutVersion }) },
     }));
-    return { status: "retry_requested", manifestDigest: request.manifestDigest };
+    return { status: "retry_requested", workflowRevision, ...(request.manifestDigest === undefined ? {} : { manifestDigest: request.manifestDigest }) };
   } catch (error) {
     if (!isConditional(error)) throw error;
     const fresh = await loadOwnedTask(deps, caller, taskId);
-    if (fresh.canvasCloseoutRetry?.requestId === request.requestId && fresh.canvasCloseoutRetry.manifestDigest === request.manifestDigest
+    if (fresh.canvasCloseoutRetry?.requestId === request.requestId && fresh.canvasCloseoutRetry.workflowRevision === workflowRevision
+      && fresh.canvasCloseoutRetry.manifestDigest === request.manifestDigest
       && fresh.canvasCloseoutRetry.dispatchAttempt >= retry.dispatchAttempt) {
-      return { status: "retry_requested", manifestDigest: request.manifestDigest };
+      return { status: "retry_requested", workflowRevision, ...(request.manifestDigest === undefined ? {} : { manifestDigest: request.manifestDigest }) };
     }
     throw agentXError("WORKSPACE_BUSY", "the task closeout changed while requesting its retry; refresh the task and try again");
   }

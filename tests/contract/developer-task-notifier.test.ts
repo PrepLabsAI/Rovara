@@ -81,15 +81,15 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
   it("retries owner re-drives against the supplied manifest digest until closeout completes", async () => {
     const manifestDigest = "a".repeat(64);
     let closeoutAttempt = 0;
-    const closeoutCalls: Array<[string, string | undefined]> = [];
-    const closeTaskCanvases = async (taskId: string, digest?: string) => {
-      closeoutCalls.push([taskId, digest]);
+    const closeoutCalls: Array<[string, string | undefined, number | undefined]> = [];
+    const closeTaskCanvases = async (taskId: string, digest?: string, workflowRevision?: number) => {
+      closeoutCalls.push([taskId, digest, workflowRevision]);
       closeoutAttempt += 1;
       return closeoutAttempt === 1 ? { status: "ARCHIVE_PENDING" as const, reason: "timeout" } : { status: "COMPLETE" as const };
     };
     const h = await notifierHarness({ shareToChannel: false, workflow: true }, { closeTaskCanvases });
     const pendingNotice: Notice = { id: `${h.taskId}:canvas_closeout_retry:req`, kind: "canvas_closeout", taskId: h.taskId,
-      at: new Date(h.now() - 2 * 60 * 60 * 1000).toISOString(), manifestDigest };
+      at: new Date(h.now() - 2 * 60 * 60 * 1000).toISOString(), manifestDigest, expectedWorkflowRevision: 3 };
     const deliver = async () => h.handle({ Records: [{ eventSource: "aws:sqs", messageId: "closeout", receiptHandle: "receipt",
       body: JSON.stringify(pendingNotice), attributes: { ApproximateReceiveCount: "1" } }] });
     const first = await deliver();
@@ -97,7 +97,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     expect(h.retryLater).toHaveBeenCalledWith("receipt", expect.any(Number));
     const second = await deliver();
     expect(second.batchItemFailures).toEqual([]);
-    expect(closeoutCalls).toEqual([[h.taskId, manifestDigest], [h.taskId, manifestDigest]]);
+    expect(closeoutCalls).toEqual([[h.taskId, manifestDigest, 3], [h.taskId, manifestDigest, 3]]);
   });
 
   it("posts a short plan-ready note with a link to the saved Canvas details", async () => {

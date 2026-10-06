@@ -27,6 +27,8 @@ export interface Notice {
   feedbackReviewDigest?: string;
   /** Immutable closeout snapshot that an owner-authorized retry is allowed to resume. */
   manifestDigest?: string;
+  /** Workflow snapshot revision to resume when verification failed before a manifest existed. */
+  expectedWorkflowRevision?: number;
 }
 
 /** Stable key shared by notice production and the owner-decision latency measurement. */
@@ -83,10 +85,11 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
       const afterRetry = record(next.canvasCloseoutRetry);
       const dispatchAttempt = typeof afterRetry?.dispatchAttempt === "number" && Number.isInteger(afterRetry.dispatchAttempt)
         ? afterRetry.dispatchAttempt : 1;
-      if (afterRetry?.requestId !== undefined && (afterRetry.requestId !== beforeRetry?.requestId
-        || afterRetry.dispatchAttempt !== beforeRetry?.dispatchAttempt) && typeof afterRetry.manifestDigest === "string") {
+      if (afterRetry?.requestId !== undefined && typeof afterRetry.workflowRevision === "number"
+        && (afterRetry.requestId !== beforeRetry?.requestId || afterRetry.dispatchAttempt !== beforeRetry?.dispatchAttempt)) {
         notices.push({ id: `${taskId}:canvas_closeout_retry:${text(afterRetry.requestId)}:${dispatchAttempt}`, kind: "canvas_closeout", taskId, at,
-          manifestDigest: afterRetry.manifestDigest });
+          expectedWorkflowRevision: afterRetry.workflowRevision,
+          ...(typeof afterRetry.manifestDigest === "string" ? { manifestDigest: afterRetry.manifestDigest } : {}) });
       }
       return notices;
     }

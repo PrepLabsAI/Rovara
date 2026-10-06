@@ -403,6 +403,27 @@ const WorkflowCanvasCloseoutSchema = z.object({
 });
 export type WorkflowCanvasCloseout = z.infer<typeof WorkflowCanvasCloseoutSchema>;
 
+const WorkflowCanvasCloseoutAttemptSchema = z.object({
+  status: z.literal("ARCHIVE_PENDING"), workflowRevision: z.number().int().positive(),
+  terminalState: z.enum(["MERGED", "CLOSED", "CANCELLED"]),
+  reason: z.enum(["canvas_artifact_binding_failed", "canvas_lineage_unresolved", "manifest_binding_changed", "manifest_integrity_failed",
+    "artifact_unavailable", "artifact_digest_mismatch", "manifest_write_failed", "manifest_pointer_write_failed", "manifest_unavailable",
+    "attempt_checkpoint_failed", "outcome_checkpoint_failed", "closeout_attempt_write_failed", "manifest_preparation_pending"]),
+  attempts: z.number().int().positive().max(1000), updatedAt: z.string().datetime(),
+  candidateManifestDigest: DigestSchema.optional(), candidateManifestRef: FeedbackObjectKeySchema.optional(), candidatePreparedAt: z.string().datetime().optional(),
+}).strict().superRefine((attempt, context) => {
+  if ((attempt.candidateManifestDigest === undefined) !== (attempt.candidateManifestRef === undefined)) {
+    context.addIssue({ code: "custom", message: "closeout attempt candidate digest and reference must be stored together" });
+  }
+  if (attempt.candidateManifestRef !== undefined && !attempt.candidateManifestRef.includes(attempt.candidateManifestDigest!)) {
+    context.addIssue({ code: "custom", message: "closeout attempt key must include its candidate digest" });
+  }
+  if ((attempt.candidateManifestDigest === undefined) !== (attempt.candidatePreparedAt === undefined)) {
+    context.addIssue({ code: "custom", message: "candidate manifest preparation time requires its digest" });
+  }
+});
+export type WorkflowCanvasCloseoutAttempt = z.infer<typeof WorkflowCanvasCloseoutAttemptSchema>;
+
 export const WorkflowSnapshotSchema = z.object({
   schemaVersion: z.literal(1),
   definitionId: z.literal("agentx-task-to-pr"),
@@ -434,8 +455,9 @@ export const WorkflowSnapshotSchema = z.object({
   canvasLineage: z.array(WorkflowCanvasLineageSchema).max(100).optional(),
   canvasLineageVersion: z.number().int().nonnegative().optional(),
   canvasCloseout: WorkflowCanvasCloseoutSchema.optional(),
+  canvasCloseoutAttempt: WorkflowCanvasCloseoutAttemptSchema.optional(),
 }).superRefine((workflow, context) => {
-  const taskMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackDispatchApproval: workflow.feedbackDispatchApproval, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory, canvasLineage: workflow.canvasLineage, canvasCloseout: workflow.canvasCloseout };
+  const taskMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackDispatchApproval: workflow.feedbackDispatchApproval, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory, canvasLineage: workflow.canvasLineage, canvasCloseout: workflow.canvasCloseout, canvasCloseoutAttempt: workflow.canvasCloseoutAttempt };
   if (Buffer.byteLength(JSON.stringify(taskMetadata), "utf8") > 262_144) {
     context.addIssue({ code: "custom", message: "workflow metadata exceeds the task snapshot storage budget" });
   }
