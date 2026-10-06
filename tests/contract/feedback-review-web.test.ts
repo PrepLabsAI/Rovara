@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { createFeedbackReviewWeb, type FeedbackReviewWebDependencies } from "../../packages/broker/src/aws/feedback-review-web.js";
 import { getWorkflowFeedbackReview, submitWorkflowFeedbackDecision } from "../../packages/broker/src/aws/developer-tasks.js";
+import { authenticateDeveloperSessionId } from "../../packages/broker/src/aws/developer-routes.js";
 import { createCandidateManifest, createWorkflowSnapshot, requestWorkflowFeedbackReview, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema } from "@agentx/contracts";
 import { createDeveloperTaskBroker, MAYA, OMAR } from "../support/developer-task-broker.js";
 import type { AdaptedHttpRequest } from "../../packages/broker/src/aws/lambda.js";
@@ -64,6 +65,55 @@ describe("authenticated PR feedback review web journey", () => {
     expect(response.body).not.toContain("session-owner");
     expect(response.body).not.toContain("Bearer ");
     expect(deps.getWorkflowFeedbackReview).toHaveBeenCalledWith(expect.objectContaining({ slackUserId: "UOWNER" }), taskId);
+  });
+
+  it("does not let a copied browser review cookie outlive its server-side 15 minute expiry", async () => {
+    const now = 1_791_212_400_000;
+    const expiresAt = Math.floor(now / 1000) + 15 * 60;
+    const deps = {
+      developer: { issuer: origin, env: "test", methods: { slack: true, oidc: false }, signInTableName: "signin", channelMembers: vi.fn() },
+      documentClient: { send: vi.fn(async (command: { input?: { Key?: { pk?: string } } }) => ({ Item: command.input?.Key?.pk?.startsWith("DEVELOPER#")
+        ? { displayName: "Maya", slackUserId: "UOWNER", revoked: false }
+        : { sessionId: "session-owner", developerId: "d".repeat(64), amr: "slack", startedAt: new Date(now).toISOString(), endsAt: expiresAt + 7 * 24 * 60 * 60, reviewExpiresAt: expiresAt } })) },
+      now: () => now,
+    };
+    const copiedCookieSession = "11111111-1111-4111-8111-111111111111";
+    await expect(authenticateDeveloperSessionId(deps as never, copiedCookieSession)).resolves.toMatchObject({ sessionId: copiedCookieSession });
+    deps.now = () => now + 15 * 60 * 1000;
+    await expect(authenticateDeveloperSessionId(deps as never, copiedCookieSession)).rejects.toMatchObject({ code: "AUTH_REQUIRED" });
+  });
+
+  it.each([
+    ["APPROVE", "APPROVED", "Approved", "AgentX will continue with implementation"],
+    ["REQUEST_CHANGES", "CHANGES_REQUESTED", "Changes requested", "AgentX is waiting for your updated instructions"],
+    ["DISMISS", "DISMISSED", "Dismissed", "No code changes will start from this proposal"],
+  ] as const)("renders a durable read-only %s outcome after the pending decision controls disappear", async (action, status, label, nextActionText) => {
+    const deps = dependencies({ getWorkflowFeedbackReview: vi.fn(async () => ({
+      taskId, title: "Handle retries", revision: 13, status, qualification: "AI_GENERATED_ADVISORY",
+      proposalDigest: "b".repeat(64), bundleDigests: ["a".repeat(64)], candidates: [], findings: [{ ...finding, comments: [] }], recommendedFindingIds: [], checks: [],
+      decision: { decision: action, nextAction: action === "APPROVE" ? "implementation" : "owner_review", at: "2026-10-05T12:00:00.000Z", selectedFindingIds: action === "APPROVE" ? [finding.id] : [] },
+    })) });
+    const response = await createFeedbackReviewWeb(deps)(request("GET", `/review/${taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${taskId}`, origin));
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain(`Decision recorded: ${label}`);
+    expect(response.body).toContain(nextActionText);
+    expect(response.body).not.toContain("Approve recommended fixes");
+    expect(response.body).not.toContain("Request changes");
+    expect(response.body).not.toContain("Include this finding");
+    expect(response.body).not.toContain("__Host-agentx_review_csrf=");
+  });
+
+  it("keeps report-controlled finding IDs inside the inline script string", async () => {
+    const attack = "bad</script><script>alert(1)</script>";
+    const deps = dependencies({ getWorkflowFeedbackReview: vi.fn(async () => ({
+      taskId, title: "Handle retries", revision: 12, status: "PENDING", qualification: "AI_GENERATED_ADVISORY",
+      reviewDigest: "d".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["a".repeat(64)], candidates: [], checks: [],
+      findings: [{ ...finding, id: attack, comments: [] }], recommendedFindingIds: [attack],
+    })) });
+    const response = await createFeedbackReviewWeb(deps)(request("GET", `/review/${taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${taskId}`, origin));
+    expect(response.statusCode).toBe(200);
+    expect(response.body).not.toContain("</script><script>alert(1)");
+    expect(response.body).toContain("bad\\u003c/script\\u003e\\u003cscript\\u003ealert(1)\\u003c/script\\u003e");
   });
 
   it("does not render comment source links outside canonical GitHub HTTPS", async () => {
@@ -174,11 +224,28 @@ describe("broker-backed feedback review data", () => {
     expect(fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META")?.workflow).toMatchObject({ stage: "IMPLEMENT", state: "READY", feedbackDecisions: [{ actorRole: "TASK_OWNER", actorId: task.ownerKey, selectedFindingIds: ["finding-1"] }] });
   });
 
+  it.each([
+    ["APPROVE", "APPROVED", "implementation", ["finding-1"]],
+    ["REQUEST_CHANGES", "CHANGES_REQUESTED", "owner_review", []],
+    ["DISMISS", "DISMISSED", "owner_review", []],
+  ] as const)("keeps a verified %s review available as a private outcome after the owner decision", async (action, status, nextAction, selectedFindingIds) => {
+    const fixture = await preparedReview();
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId };
+    await submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: [fixture.bundleDigest], decision: action, selectedFindingIds,
+      ...(action === "APPROVE" ? {} : { ownerNote: "Please stop or revise this proposal." }),
+    });
+    await expect(getWorkflowFeedbackReview(fixture.deps as never, owner, fixture.taskId)).resolves.toMatchObject({
+      status, decision: { decision: action, nextAction, selectedFindingIds },
+    });
+  });
+
   it("serves the verified review to the current owner through the broker route", async () => {
     const fixture = await preparedReview();
     const sessionId = randomUUID();
     fixture.harness.db.set({ pk: `SESSION#${sessionId}`, sk: "META", sessionId, developerId: MAYA.developerId, amr: "slack", slackUserId: MAYA.slackUserId,
-      startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 600 });
+      startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 600, reviewExpiresAt: Math.floor(Date.now() / 1000) + 600 });
     const response = await fixture.harness.handler({
       version: "2.0", routeKey: "ANY /review/{proxy+}", rawPath: `/review/${fixture.taskId}`, rawQueryString: "", headers: { host: "abc123.execute-api.us-east-1.amazonaws.com", cookie: `__Host-agentx_review_session=${sessionId}` },
       requestContext: { requestId: randomUUID(), http: { method: "GET" } },

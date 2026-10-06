@@ -314,7 +314,10 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       ...(slackUserId === undefined ? {} : { slackUserId }),
     });
     if (request.browserReturnTo !== undefined) {
-      const { session } = await store.createSession({ developerId, amr: method, ...(slackUserId === undefined ? {} : { slackUserId }) });
+      const { session } = await store.createSession({ developerId, amr: method,
+        ...(slackUserId === undefined ? {} : { slackUserId }),
+        reviewExpiresAt: Math.floor(deps.now() / 1000) + REVIEW_SESSION_MAX_AGE_SECONDS,
+      });
       deps.log({ event: "signin.browser_succeeded", method, developerId });
       return browserReturn(request.browserReturnTo, true, session.sessionId);
     }

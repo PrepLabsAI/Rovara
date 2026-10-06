@@ -167,7 +167,7 @@ describe("browser sign-in for an AgentX feedback review", () => {
     expect(result.cookies?.find(cookie => cookie.startsWith("__Host-agentx_review_pkce="))).toContain("Max-Age=0");
     expect(result.headers.location).not.toContain("code=");
     const sessionId = result.cookies?.find(cookie => cookie.startsWith("__Host-agentx_review_session="))!.split("=", 2)[1]!.split(";", 1)[0]!;
-    expect(h.db.get(`SESSION#${sessionId}`, "META")).toMatchObject({ developerId: mayaId, amr: "slack" });
+    expect(h.db.get(`SESSION#${sessionId}`, "META")).toMatchObject({ developerId: mayaId, amr: "slack", reviewExpiresAt: Math.floor(h.now() / 1000) + 900 });
     expect(h.logs.some(line => JSON.stringify(line).includes(sessionId))).toBe(false);
   });
 

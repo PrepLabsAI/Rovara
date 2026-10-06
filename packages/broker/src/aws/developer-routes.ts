@@ -289,8 +289,11 @@ async function authenticateSession(deps: DeveloperRouteDependencies, token: { de
 /** Rechecks an opaque browser-cookie session against DeveloperIdentity on every page/API request. */
 export async function authenticateDeveloperSessionId(deps: DeveloperRouteDependencies, sessionId: string): Promise<DeveloperCaller> {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
-  const session = await getSignIn<Pick<SessionRecord, "developerId" | "amr">>(deps, `SESSION#${sessionId}`);
-  if (session === undefined || (session.amr !== "slack" && session.amr !== "oidc")) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  const session = await getSignIn<Pick<SessionRecord, "developerId" | "amr" | "reviewExpiresAt">>(deps, `SESSION#${sessionId}`);
+  if (session === undefined || (session.amr !== "slack" && session.amr !== "oidc")
+    || session.reviewExpiresAt === undefined || session.reviewExpiresAt <= Math.floor(deps.now() / 1000)) {
+    throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  }
   return authenticateSession(deps, { developerId: session.developerId, sessionId, amr: session.amr });
 }
 

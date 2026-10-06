@@ -217,7 +217,8 @@ export async function getWorkflowFeedbackReview(deps: DeveloperTaskRouteDependen
   const task = await loadOwnedTask(deps, caller, taskId);
   const workflow = task.workflow;
   const review = workflow?.feedbackReview;
-  if (workflow === undefined || review?.reviewRef === undefined || review.status !== "PENDING") {
+  const decision = workflow?.feedbackDecisions?.find(item => item.reviewDigest === review?.reviewRef?.sha256);
+  if (workflow === undefined || review?.reviewRef === undefined || (review.status !== "PENDING" && decision === undefined)) {
     throw agentXError("NOT_FOUND", "PR feedback review not found");
   }
   const reportRef = review.reviewRef;
@@ -276,6 +277,11 @@ export async function getWorkflowFeedbackReview(deps: DeveloperTaskRouteDependen
   const checks = [...(workflow.checkPolicy?.required ?? []), ...(workflow.checkPolicy?.optional.filter(check => workflow.checkPolicy?.selectedOptionalIds.includes(check.id)) ?? [])].map(check => check.label);
   return {
     taskId, title: task.title, revision: workflow.revision, status: review.status,
+    ...(decision === undefined ? {} : { decision: {
+      decision: decision.decision, at: decision.at, selectedFindingIds: decision.selectedFindingIds,
+      ...(decision.ownerNote === undefined ? {} : { ownerNote: decision.ownerNote }),
+      nextAction: decision.decision === "APPROVE" ? "implementation" : "owner_review",
+    } }),
     qualification: report.qualification, reviewDigest: reportRef.sha256, proposalDigest: report.proposalDigest,
     bundleDigests: report.bundleDigests, candidates, findings,
     recommendedFindingIds: findings.filter(finding => finding.recommended).map(finding => finding.id), checks,
