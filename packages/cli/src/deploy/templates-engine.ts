@@ -288,7 +288,7 @@ export function templatesDeployer(input: {
      */
     async function changeSetValidationDetails(): Promise<string> {
       try {
-        const result = await cloudFormation.send(new DescribeEventsCommand({ ChangeSetName: changeSetName }));
+        const result = await cloudFormation.send(new DescribeEventsCommand({ StackName: stackName, ChangeSetName: changeSetName }));
         const failures = (result.OperationEvents ?? [])
           .filter((event) => event.EventType === "VALIDATION_ERROR" || event.ValidationStatus === "FAILED")
           .map((event) => {

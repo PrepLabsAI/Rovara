@@ -693,7 +693,7 @@ describe("templates engine", () => {
       "change set for agentx-staging-foundation failed: Template format error: Unresolved resource dependencies [Missing]; CloudFormation validation: PROPERTY_VALIDATION at /Resources/ActionLogsDelivery/Properties/DeliverySourceName: The referenced delivery source does not exist",
     );
     expect(fake.names().indexOf("cloudFormation:DescribeEvents")).toBeLessThan(fake.names().indexOf("cloudFormation:DeleteChangeSet"));
-    expect(fake.inputs("DescribeEvents")).toEqual([{ ChangeSetName: CHANGE_SET }]);
+    expect(fake.inputs("DescribeEvents")).toEqual([{ StackName: "agentx-staging-foundation", ChangeSetName: CHANGE_SET }]);
     expect(fake.inputs("DeleteChangeSet")).toEqual([{ StackName: "agentx-staging-foundation", ChangeSetName: CHANGE_SET }]);
     expect(fake.inputs("ExecuteChangeSet")).toEqual([]);
   });
