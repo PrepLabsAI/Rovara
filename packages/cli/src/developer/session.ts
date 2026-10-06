@@ -1,6 +1,7 @@
 // The developer's AgentX tokens on this computer: used as long as they are valid, refreshed once,
 // under a lock file, when they are not (R19). A failed refresh deletes tokens only when the server
 // says the sign-in has ended (R18).
+import { CLI_PACKAGE_NAME } from "@agentx/contracts";
 import { chmod, mkdir, open, readFile, rm, stat } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
@@ -71,7 +72,7 @@ export async function developerAccessToken(deps: DeveloperSessionDeps, env: stri
   const now = deps.now ?? Date.now;
   const resolved = await resolveDeveloperEnvironment(deps.home, env);
   const key = developerTokenKey(resolved.entry.issuer);
-  const signIn = `run npx @charterarc/agentx login ${resolved.entry.url}`;
+  const signIn = `run npx ${CLI_PACKAGE_NAME} login ${resolved.entry.url}`;
   const fresh = (tokens: StoredTokens): boolean => tokens.expiresAt - EARLY_MS > now();
 
   const stored = await deps.tokenStore.get(key);

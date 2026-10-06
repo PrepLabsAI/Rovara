@@ -4,7 +4,7 @@ import { agentXError } from "@agentx/contracts";
 import { NEXT_STEPS, SHARE_BUSY_STEP, TOOL_ERROR_CODES, ToolError, UNEXPECTED_ANSWER_STEP, UPGRADE_AGENTX_STEP, httpControlPlaneClient, signInStep } from "../../packages/mcp/src/index.js";
 
 const TOKEN = "eyJhbGciOiJSUzI1NiJ9.planted-access-token.sig";
-const session = async () => ({ baseUrl: "https://agentx.example.test", accessToken: TOKEN, signInCommand: "npx @charterarc/agentx login https://agentx.example.test" });
+const session = async () => ({ baseUrl: "https://agentx.example.test", accessToken: TOKEN, signInCommand: "npx @preplabsai/rovara-code login https://agentx.example.test" });
 const view = { taskId: "44444444-4444-4444-8444-444444444444", title: "Fix", project: "payments", status: "STARTING", startingRevision: 1, client: "Claude Code", shared: false, createdAt: "t", updatedAt: "t", events: [] };
 const reply = (status: number, body: unknown) => new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 const client = (fetch: typeof globalThis.fetch, overrides: Partial<Parameters<typeof httpControlPlaneClient>[0]> = {}) =>
@@ -186,15 +186,15 @@ describe("the control-plane client (FR-027)", () => {
     const hook = vi.fn(session);
     const refused = vi.fn(async () => reply(401, { error: { code: "AUTH_REQUIRED", message: "your AgentX sign-in has ended" } }));
     const error = await client(refused, { session: hook }).startTask(start).catch((caught: unknown) => caught);
-    expect(error).toMatchObject({ code: "SIGN_IN_REQUIRED", nextStep: "run npx @charterarc/agentx login https://agentx.example.test" });
+    expect(error).toMatchObject({ code: "SIGN_IN_REQUIRED", nextStep: "run npx @preplabsai/rovara-code login https://agentx.example.test" });
     expect(refused).toHaveBeenCalledTimes(2);
     expect(hook).toHaveBeenCalledTimes(2);
     const ended = vi.fn(async (options?: { force?: boolean }) => {
-      if (options?.force === true) throw agentXError("AUTH_REQUIRED", "your AgentX sign-in for staging has ended; run npx @charterarc/agentx login https://agentx.example.test");
+      if (options?.force === true) throw agentXError("AUTH_REQUIRED", "your AgentX sign-in for staging has ended; run npx @preplabsai/rovara-code login https://agentx.example.test");
       return session();
     });
     const once = vi.fn(async () => reply(401, {}));
-    expect(await client(once, { session: ended }).projects().catch((caught: unknown) => caught)).toMatchObject({ code: "SIGN_IN_REQUIRED", nextStep: "run npx @charterarc/agentx login https://agentx.example.test" });
+    expect(await client(once, { session: ended }).projects().catch((caught: unknown) => caught)).toMatchObject({ code: "SIGN_IN_REQUIRED", nextStep: "run npx @preplabsai/rovara-code login https://agentx.example.test" });
     expect(once).toHaveBeenCalledTimes(1);
   });
 
@@ -236,21 +236,21 @@ describe("the control-plane client (FR-027)", () => {
 
   it("gives SIGN_IN_REQUIRED the exact sign-in command, from a 401 or from the local session", async () => {
     const refused = await client(async () => reply(401, { error: { code: "AUTH_REQUIRED", message: "your AgentX sign-in has ended" } })).projects().catch((caught: unknown) => caught);
-    expect(refused).toMatchObject({ code: "SIGN_IN_REQUIRED", nextStep: "run npx @charterarc/agentx login https://agentx.example.test" });
+    expect(refused).toMatchObject({ code: "SIGN_IN_REQUIRED", nextStep: "run npx @preplabsai/rovara-code login https://agentx.example.test" });
     const local = await client(vi.fn(), {
-      session: async () => { throw agentXError("AUTH_REQUIRED", "this computer is not signed in to AgentX environment staging; run npx @charterarc/agentx login https://agentx.example.test"); },
+      session: async () => { throw agentXError("AUTH_REQUIRED", "this computer is not signed in to AgentX environment staging; run npx @preplabsai/rovara-code login https://agentx.example.test"); },
     }).projects().catch((caught: unknown) => caught);
-    expect(local).toMatchObject({ code: "SIGN_IN_REQUIRED", nextStep: "run npx @charterarc/agentx login https://agentx.example.test" });
+    expect(local).toMatchObject({ code: "SIGN_IN_REQUIRED", nextStep: "run npx @preplabsai/rovara-code login https://agentx.example.test" });
   });
 
   it("keeps the whole placeholder when no environment is signed in (ruling F16)", async () => {
     const fetch = vi.fn();
     const local = await client(fetch, {
-      session: async () => { throw agentXError("AUTH_REQUIRED", "this computer is not signed in to AgentX; run npx @charterarc/agentx login <your AgentX URL>"); },
+      session: async () => { throw agentXError("AUTH_REQUIRED", "this computer is not signed in to AgentX; run npx @preplabsai/rovara-code login <your AgentX URL>"); },
     }).projects().catch((caught: unknown) => caught);
-    expect(local).toMatchObject({ code: "SIGN_IN_REQUIRED", message: "this computer is not signed in to AgentX; run npx @charterarc/agentx login <your AgentX URL>", nextStep: "run npx @charterarc/agentx login <your AgentX URL>" });
+    expect(local).toMatchObject({ code: "SIGN_IN_REQUIRED", message: "this computer is not signed in to AgentX; run npx @preplabsai/rovara-code login <your AgentX URL>", nextStep: "run npx @preplabsai/rovara-code login <your AgentX URL>" });
     expect(fetch).not.toHaveBeenCalled();
-    expect(signInStep("no command here", "npx @charterarc/agentx login <your AgentX URL>")).toBe("run npx @charterarc/agentx login <your AgentX URL>");
+    expect(signInStep("no command here", "npx @preplabsai/rovara-code login <your AgentX URL>")).toBe("run npx @preplabsai/rovara-code login <your AgentX URL>");
   });
 
   it("answers CONTROL_PLANE_UNAVAILABLE when the local session cannot refresh", async () => {

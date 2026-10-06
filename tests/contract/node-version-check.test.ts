@@ -24,14 +24,14 @@ describe("nodeVersionProblem", () => {
   it("refuses a Node below the floor with one plain message that names both versions", () => {
     const message = nodeVersionProblem("20.20.2", {});
     expect(message).toBe(
-      "AgentX needs Node 22.19 or newer; this is Node 20.20.2. Install Node 22 from https://nodejs.org, then run agentx again.",
+      "Rovara Code needs Node 22.19 or newer; this is Node 20.20.2. Install Node 22 from https://nodejs.org, then run rovara again.",
     );
   });
 
   it("in AWS CloudShell, prints the one-line Node 22 install and says it only touches this CloudShell", () => {
     const message = nodeVersionProblem("20.20.2", { AWS_EXECUTION_ENV: "CloudShell" });
     expect(message).toBe([
-      "AgentX needs Node 22.19 or newer; this is Node 20.20.2. In AWS CloudShell, run this command in its default Bash shell, then run agentx again:",
+      "Rovara Code needs Node 22.19 or newer; this is Node 20.20.2. In AWS CloudShell, run this command in its default Bash shell, then run rovara again:",
       "",
       `  ${CLOUDSHELL_NODE_INSTALL_COMMAND}`,
       "",
@@ -99,7 +99,7 @@ describe("the agentx executable (packages/cli/src/bin.ts)", () => {
   it("on a supported Node runs the command and prints no Node message", async () => {
     const { stdout, stderr } = await run(process.execPath, ["--import", "tsx", bin, "--version"], { cwd: repoRoot, env: { ...process.env, AWS_EXECUTION_ENV: "CloudShell" } });
     expect(stdout.trim()).toBe("0.1.0");
-    expect(stderr).not.toContain("AgentX needs Node");
+    expect(stderr).not.toContain("Rovara Code needs Node");
   }, 60_000);
 
   it("is written in syntax an old Node can parse (ES2020), so the check runs before anything newer loads", async () => {

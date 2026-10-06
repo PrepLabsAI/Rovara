@@ -61,12 +61,12 @@ export function nodeVersionProblem(nodeVersion: string, env: Readonly<Record<str
   const version = parseVersion(nodeVersion);
   // A version string this cannot read is not a reason to refuse to start.
   if (version === undefined || !isBelow(version, FLOOR)) return undefined;
-  const first = `AgentX needs Node ${floorText()} or newer; this is Node ${nodeVersion}.`;
+  const first = `Rovara Code needs Node ${floorText()} or newer; this is Node ${nodeVersion}.`;
   if (env.AWS_EXECUTION_ENV !== "CloudShell") {
-    return `${first} Install Node 22 from https://nodejs.org, then run agentx again.`;
+    return `${first} Install Node 22 from https://nodejs.org, then run rovara again.`;
   }
   return [
-    `${first} In AWS CloudShell, run this command in its default Bash shell, then run agentx again:`,
+    `${first} In AWS CloudShell, run this command in its default Bash shell, then run rovara again:`,
     "",
     `  ${CLOUDSHELL_NODE_INSTALL_COMMAND}`,
     "",

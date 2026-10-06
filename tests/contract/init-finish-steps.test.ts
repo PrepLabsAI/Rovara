@@ -151,6 +151,6 @@ describe("the message init ends with", () => {
     expect(text).not.toMatch(/<@/);
     expect(text).toContain("  Talk to it: mention @agentx-acme-staging in #payments (project payments-api).");
     expect(text).toContain("  Developers sign in with: node /opt/agentx/dist/main.js login https://abc.example.com");
-    expect(text).not.toContain("@charterarc/agentx");
+    expect(text).not.toContain("@preplabsai/rovara-code");
   });
 });

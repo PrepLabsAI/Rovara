@@ -1,4 +1,5 @@
 export * from "./access-policies.js";
+export * from "./cli-distribution.js";
 export * from "./action-policy.js";
 export * from "./item-paths.js";
 export * from "./mcp-connector.js";

@@ -69,21 +69,21 @@ describe("agentx whoami and logout (FR-011)", () => {
   it("whoami without a sign-in says how to sign in", async () => {
     const h = await signedIn();
     expect(await h.run(["--env", "other", "whoami"])).toBe(3);
-    expect(h.err.join("")).toContain("this computer is not signed in to AgentX environment other; run npx @charterarc/agentx login <your AgentX URL>");
+    expect(h.err.join("")).toContain("this computer is not signed in to AgentX environment other; run npx @preplabsai/rovara-code login <your AgentX URL>");
   });
 
   it("whoami gives the server's reason when AgentX refuses the sign-in, made safe, with the login hint", async () => {
     const refused = (message: unknown) => () => Response.json({ error: { code: "AUTH_REQUIRED", message } }, { status: 401 });
     const h = await signedIn({ projects: refused("your sign-in ended when Slack was turned off\u001b[2J; sign in again with agentx login <url>") });
     expect(await h.run(["whoami"])).toBe(3);
-    expect(h.err.join("")).toContain(`your AgentX sign-in for staging has ended (your sign-in ended when Slack was turned off[2J); run npx @charterarc/agentx login ${URL_}`);
+    expect(h.err.join("")).toContain(`your AgentX sign-in for staging has ended (your sign-in ended when Slack was turned off[2J); run npx @preplabsai/rovara-code login ${URL_}`);
     // No reason, or one that is not text: the generic line, still with the hint.
     const bare = await signedIn({ projects: () => new Response("", { status: 401 }) });
     expect(await bare.run(["whoami"])).toBe(3);
-    expect(bare.err.join("")).toContain(`your AgentX sign-in for staging has ended; run npx @charterarc/agentx login ${URL_}`);
+    expect(bare.err.join("")).toContain(`your AgentX sign-in for staging has ended; run npx @preplabsai/rovara-code login ${URL_}`);
     const odd = await signedIn({ projects: refused(7) });
     expect(await odd.run(["whoami"])).toBe(3);
-    expect(odd.err.join("")).toContain(`your AgentX sign-in for staging has ended; run npx @charterarc/agentx login ${URL_}`);
+    expect(odd.err.join("")).toContain(`your AgentX sign-in for staging has ended; run npx @preplabsai/rovara-code login ${URL_}`);
   });
 
   it("logout revokes the session at the server and removes the tokens and the environment", async () => {
@@ -126,7 +126,7 @@ describe("agentx whoami and logout (FR-011)", () => {
   it("logout without a developer sign-in names the admin logout too", async () => {
     const h = await signedIn();
     expect(await h.run(["--env", "other", "logout"])).toBe(3);
-    expect(h.err.join("")).toContain("this computer is not signed in to AgentX environment other; run npx @charterarc/agentx login <your AgentX URL>; for the admin login, run agentx logout --admin");
+    expect(h.err.join("")).toContain("this computer is not signed in to AgentX environment other; run npx @preplabsai/rovara-code login <your AgentX URL>; for the admin login, run agentx logout --admin");
   });
 
   it("logout --json reports whether the server revoked the session", async () => {

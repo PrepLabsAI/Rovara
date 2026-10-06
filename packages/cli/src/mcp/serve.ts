@@ -1,5 +1,6 @@
 // Spec 025 FR-026: `agentx mcp`, a stdio MCP server for the developer signed in on this computer.
 // stdout carries only MCP messages; logs go to stderr and never hold a token.
+import { CLI_PACKAGE_NAME } from "@agentx/contracts";
 import { randomUUID } from "node:crypto";
 import type { Readable, Writable } from "node:stream";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -58,7 +59,7 @@ export function developerControlPlaneClient(deps: McpServeDeps): ControlPlaneCli
     fetch: deps.fetch,
     session: async (options) => {
       const session = await developerAccessToken(deps, deps.env, { force: options?.force === true });
-      return { baseUrl: session.entry.url, accessToken: session.accessToken, signInCommand: `npx @charterarc/agentx login ${session.entry.url}` };
+      return { baseUrl: session.entry.url, accessToken: session.accessToken, signInCommand: `npx ${CLI_PACKAGE_NAME} login ${session.entry.url}` };
     },
   });
 }

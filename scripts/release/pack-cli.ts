@@ -5,12 +5,13 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { build, type Metafile, type Plugin } from "esbuild";
 import { NODE_ENGINE_RANGE } from "../../packages/cli/src/node-version.js";
+import { DEFAULT_CLI_PACKAGE_NAME } from "../../packages/contracts/src/cli-distribution.js";
 
 const execFileAsync = promisify(execFile);
 
 // scripts/release/pack-cli.ts -> repo root is two levels up, same as build.ts's REPO_ROOT.
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const DEFAULT_PACKAGE_NAME = "@charterarc/agentx";
+const DEFAULT_PACKAGE_NAME = DEFAULT_CLI_PACKAGE_NAME;
 const ENTRY_POINT = join(REPO_ROOT, "packages/cli/src/main.ts");
 // The executable: the Node version check, which loads the bundle above only once it passes (#238).
 const BIN_ENTRY_POINT = join(REPO_ROOT, "packages/cli/src/bin.ts");
@@ -130,7 +131,7 @@ export async function thirdPartyNotices(metafile: Metafile, root: string): Promi
     "",
   ].join("\n"));
   const text = [
-    "Third-party notices for the AgentX CLI",
+    "Third-party notices for the Rovara Code CLI",
     "",
     `bin/${CLI_BUNDLE_NAME} bundles the open-source packages below. Each is listed with its version, its`,
     "license, and the license text it ships.",
@@ -144,7 +145,7 @@ function readmeText(name: string): string {
   return [
     `# ${name}`,
     "",
-    "AgentX installer and administration CLI, bundled as one self-contained script",
+    "Rovara Code installer and administration CLI, bundled as one self-contained script",
     "(bin/agentx-cli.mjs) behind a small entry that checks the Node version, with no",
     "runtime dependencies of its own. See LICENSE for terms (Functional Source License 1.1, ALv2",
     "future license). The notices and license texts of the open-source packages the bundle",
@@ -154,8 +155,21 @@ function readmeText(name: string): string {
     "",
     "```",
     `npm install -g ${name}`,
-    "agentx --help",
+    "rovara --help",
     "```",
+    "",
+    "The `agentx` command is retained as a compatibility alias. Existing `~/.agentx`",
+    "configuration and MCP tool names continue to work.",
+    "",
+    "## Deploy to your AWS account",
+    "",
+    "```",
+    `npx ${name} init --env <name>`,
+    "```",
+    "",
+    "Deployment requires the matching GitHub release bundle and container images.",
+    "Follow https://rovara-dev.github.io/docs/release/ for release availability",
+    "and https://rovara-dev.github.io/deployment/ for deployment prerequisites.",
     "",
   ].join("\n");
 }
@@ -186,7 +200,10 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
     format: "esm",
     target: "node22",
     outfile: bundlePath,
-    define: { __AGENTX_VERSION__: JSON.stringify(input.version) },
+    define: {
+      __AGENTX_VERSION__: JSON.stringify(input.version),
+      __AGENTX_NPM_PACKAGE__: JSON.stringify(name),
+    },
     // Bundled CommonJS dependencies call `require`, which a native ESM module doesn't have.
     banner: {
       js: "import { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);",
@@ -214,11 +231,14 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
     name,
     version: input.version,
     type: "module",
-    bin: { agentx: "bin/agentx.mjs" },
+    // npm exec can infer the executable when all bin aliases point to the same file.
+    bin: { rovara: "bin/agentx.mjs", agentx: "bin/agentx.mjs" },
     engines: { node: NODE_ENGINE_RANGE },
     license: "FSL-1.1-ALv2",
     files: ["bin", "README.md", "LICENSE", "THIRD_PARTY_NOTICES"],
-    description: "AgentX installer and administration CLI",
+    description: "Rovara Code installer and administration CLI",
+    homepage: "https://rovara-dev.github.io/",
+    publishConfig: { access: "public", registry: "https://registry.npmjs.org/" },
     // release.yml's npm job passes no --provenance flag: PrepLabsAI/AgentX is private today, and
     // npm provenance attestation fails for private repositories. Once the repository is public,
     // npm trusted publishing (OIDC) adds provenance automatically, with no flag and no other change

@@ -6,6 +6,7 @@ import { basename, dirname, extname, join, resolve } from "node:path";
 import { Writable as NodeWritable, type Readable, type Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import {
+  CLI_COMMAND_NAME,
   AgentXError,
   AgentXNameSchema,
   DEFAULT_ENVIRONMENT,
@@ -261,8 +262,8 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
   const developerSession = () => ({ home, tokenStore: services.tokenStore, fetch: services.fetchImplementation });
 
   const program = new Command()
-    .name("agentx")
-    .description("AgentX: sign in, and administer AgentX; developers hand off tasks from their AI tools or work in Slack")
+    .name(CLI_COMMAND_NAME)
+    .description("Rovara Code: sign in, deploy and administer your coding-agent workspace; hand off tasks from your coding tool or Slack")
     .version(CLI_VERSION)
     .option("--project <project-name>", "select a locally configured AgentX project")
     .option("--config-dir <directory>", "project configuration directory", join(homedir(), ".agentx/projects"))
