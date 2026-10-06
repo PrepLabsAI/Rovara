@@ -2,7 +2,7 @@
 
 This guide removes one Rovara environment from an AWS account: its stacks, its EC2 workers, the
 data the stacks keep, its secrets and its settings. Nothing removed here can be brought back.
-It answers [issue #66](https://github.com/PrepLabsAI/Rovera/issues/66).
+It answers [issue #66](https://github.com/PrepLabsAI/Rovara/issues/66).
 
 Both ways below need admin credentials in the environment's account. The operator role cannot
 delete the access stack's IAM roles or the kept data, by design.
