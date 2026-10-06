@@ -49,7 +49,7 @@ directly for that environment name would have produced (FR-012).
    runs the test job first: typecheck, the stricter type check (`typecheck:all`), lint, build, the
    full test suite, and `infra:synth`.
 3. Nothing else happens unless the repository variable `AGENTX_PUBLISH_ENABLED` is exactly `true`.
-   That is the default today; see "One-time owner setup" below.
+   It has been `true` since 2026-10-06; see "One-time owner setup" below.
 4. When publishing is enabled, three more jobs run in order:
    - **images**: builds and pushes the two container images, then reads back the digest the
      registry itself reports (not just what the build produced) before trusting it.
@@ -73,18 +73,22 @@ directly for that environment name would have produced (FR-012).
 
 ## One-time owner setup
 
-Nothing publishes until an owner does the following, once. None of it touches the live Rovara
-deployment.
+An owner did the following once, before the first release (`v0.1.0`, 2026-10-06). None of it
+touches the live Rovara deployment. It is kept here for moving the release to another account,
+package or repository.
 
 1. **ECR Public repositories: done.** `agentx-worker` and `agentx-slack` exist in account
    `944937319445` (`us-east-1`). A shorter alias, `agentx`, has been requested and is waiting on
    AWS's approval; until it is approved, images use the default alias `i7z2k3a8` instead.
 2. **A role GitHub can assume: done.** `arn:aws:iam::944937319445:role/agentx-github-release`
-   exists. It can only be assumed from a version-tag push on `PrepLabsAI/AgentX`. Its permissions
+   exists. It can only be assumed from a version-tag push on `PrepLabsAI/Rovara`; it trusts the
+   organization's and repository's numeric IDs rather than their names, so a rename does not
+   break it, but a transfer to another organization would. Its permissions
    let it push images only to the two repositories above, plus the two sign-in permissions ECR
    Public itself requires to let anything push at all (`ecr-public:GetAuthorizationToken` and
    `sts:GetServiceBearerToken`).
-3. **The npm package: owner setup required.** The selected package is
+3. **The npm package: done.** `0.1.0` was published by hand, and later versions publish from the
+   workflow through npm's Trusted Publisher. The steps, for the record: the selected package is
    `@preplabsai/rovara-code`. Verify that the release owner controls the `preplabs` npm
    organization; GitHub organization membership does not grant npm organization access.
    A registry 404 does not reserve a package name. Before turning on
@@ -102,8 +106,8 @@ deployment.
       bundle and images are available to the intended users, then publish with
       `npm publish ./cli-release/preplabsai-rovara-code-<x.y.z>.tgz --access public`.
    4. On the package's npm page, turn on "Trusted Publisher" (GitHub Actions,
-      `PrepLabsAI/AgentX`, `release.yml`), so every later version can publish itself with no
-      stored password.
+      `PrepLabsAI/Rovara`, `release.yml`), so every later version can publish itself with no
+      stored password. It is matched by name, so update it if the repository is renamed.
 
    The first package publication makes bundled source publicly readable. Keep the
    repository's current LICENSE and third-party notices in the package; changing the
@@ -119,17 +123,17 @@ deployment.
    correctly on npm, and every version after this first one publishes through npm automatically
    with no manual step.
 4. **A license: done.** The `LICENSE` file (FSL-1.1-ALv2) is in this repository as of this phase.
-5. **A decision still open.** `PrepLabsAI/AgentX` is a private repository today. Publishing a
+5. **The repository is public: done.** `PrepLabsAI/Rovara` was made public on 2026-10-06. Publishing a
    release makes the built code public: the npm package is plain, readable JavaScript, and the two
    images contain the same programs the repository does. The usual choice under this license is to
    make the repository public before the first release. Doing so also turns on npm's provenance
    badge automatically.
-6. **Repository variables: remaining.** Once the above is settled, set these under Settings →
+6. **Repository variables: done.** These are set under Settings →
    Secrets and variables → Actions → Variables, saving the last one for last:
    `AGENTX_PUBLISH_ROLE_ARN`, `AGENTX_ECR_PUBLIC_ALIAS`,
    `AGENTX_NPM_PACKAGE=@preplabsai/rovara-code`, then
    `AGENTX_PUBLISH_ENABLED=true`.
-7. **A tag protection ruleset: recommended.** The workflow checks that a tag's *name* matches
+7. **A tag protection ruleset: done** (`release-tags`). The workflow checks that a tag's *name* matches
    `vX.Y.Z` and that its commit is on mainline; it does not check who pushed it. That mainline
    check only catches mistakes: GitHub runs the tagged commit's own copy of the workflow, so
    someone who can push a tag could also remove the check on a branch and tag that. Anyone who can

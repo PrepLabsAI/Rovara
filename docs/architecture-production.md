@@ -326,12 +326,9 @@ deployed Rovara environment with its own GitHub App and Slack app. For this firs
 credentials, a GitHub organization or personal account to own the GitHub App, and a Slack workspace where
 the engineer can create apps. Day-2 commands then use the narrower operator role.
 
-No Rovara release is published yet (see [releases](releases.md)). Until then, run `init` from a source
-checkout: build the CLI (`npm ci && npm run build`), build a release with `npm run release:build`, and pass
-it with `--release <dir>`, together with `--worker-image` and `--slack-image` for images you pushed
-yourself. With the cdk engine no release is needed: pass `--engine cdk --source <a clean checkout of a
-release tag>` with both image flags (see [install](install.md#with-cdk)). The steps below are the same
-either way.
+`init` downloads the release that matches its own version. To deploy with the CDK instead, or to install a
+commit that has no release from a source checkout, see [Other ways to install](install-advanced.md). The
+steps below are the same either way.
 
 `init` asks its questions, then checks prerequisites (the region, model access, and the chosen engine's
 tooling), shows the plan and an estimated cost, then runs its steps in order, recording each one in SSM

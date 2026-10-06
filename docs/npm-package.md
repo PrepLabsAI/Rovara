@@ -5,7 +5,7 @@ is `rovara`. The package also installs `agentx` as a compatibility alias pointin
 the same executable. Configuration continues to live under `~/.agentx`; existing
 AWS resource names, MCP server/tool identifiers and task/evidence IDs are unchanged.
 
-These registry commands become usable after publication:
+To run it without installing:
 
 ```sh
 npx @preplabsai/rovara-code --help
@@ -25,7 +25,7 @@ the npm package does not create an AWS environment by itself. The `init` command
 downloads a release bundle matching its CLI version, then guides the administrator
 through the existing installation and confirmation steps.
 
-## PrepLabsAI owner setup
+## PrepLabsAI owner setup (done for 0.1.0)
 
 1. Sign in to npm with `npm login --registry=https://registry.npmjs.org`.
 2. Confirm the active npm account with `npm whoami` and its role with
@@ -54,11 +54,11 @@ through the existing installation and confirmation steps.
    ```
 
 6. Configure the package's npm Trusted Publisher for GitHub organization
-   `PrepLabsAI`, repository `AgentX`, workflow filename `release.yml`.
+   `PrepLabsAI`, repository `Rovara`, workflow filename `release.yml`.
    Update these values together if the source repository moves.
 7. Set the existing repository variable `AGENTX_NPM_PACKAGE` to
-   `@preplabsai/rovara-code`. Keep publication disabled until the complete release
-   chain described in [releases.md](./releases.md) is ready.
+   `@preplabsai/rovara-code`, then `AGENTX_PUBLISH_ENABLED` to `true` (see
+   [releases.md](./releases.md)).
 8. Confirm the registry version, public installation commands and matching release
    downloads before replacing the website's installation placeholder.
 

@@ -295,15 +295,6 @@ contracts every component validates against.
 
 ## Quickstart
 
-> **Status:** no Rovara release is published yet; see [releases](docs/releases.md) and the
-> [field guide](https://rovara-dev.github.io/docs/index.html). Until then, an install runs from a
-> source checkout and needs container images you have pushed yourself. Once a release is out, the
-> install starts with one command ([npm package](docs/npm-package.md)):
->
-> ```bash
-> npx @preplabsai/rovara-code init --env <name>
-> ```
-
 ### What you need
 
 - AWS administrator credentials for the first run, ideally in an account used only for Rovara
@@ -312,21 +303,18 @@ contracts every component validates against.
 - Model access: Amazon Bedrock in your region, or an OpenRouter, Anthropic or OpenAI API key
 - Node.js 22.19 or newer (Node 22 LTS recommended)
 
-### Install from source
+### Install
 
 ```bash
-npm ci && npm run build
-npm run release:build -- --version <x.y.z> --out ./release \
-  --worker-image <worker repo@sha256:...> --slack-image <slack repo@sha256:...>
-
 export AWS_PROFILE=<an admin profile for the target account>
-node packages/cli/dist/bin.js --env <name> init --region us-east-1 --release ./release \
-  --worker-image <worker repo@sha256:...> --slack-image <slack repo@sha256:...>
+npx @preplabsai/rovara-code init --env <name>
 ```
 
 On your own computer, `init` opens an install page in your browser (served only from `127.0.0.1`)
 and walks you from the AWS account to the first reply in Slack. Pass `--no-ui` to stay in the
-terminal. It finishes when someone mentions the bot in your channel and gets a threaded reply.
+terminal. It finishes when someone mentions the bot in your channel and gets a threaded reply. See
+[Installing Rovara](docs/install.md) for the details, and [Other ways to install](docs/install-advanced.md)
+for the CDK, a platform team, or a source checkout.
 
 ### Use it
 

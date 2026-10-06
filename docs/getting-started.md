@@ -9,11 +9,7 @@ added afterwards with `connector add mcp`). It prints everything it
 will create and an estimated monthly cost before it creates anything, and running it again resumes
 where it stopped.
 
-**Status:** no Rovara release is published yet (the public image registry and the npm package are
-waiting on owner setup; see [releases](releases.md)). Until the first release, an install runs
-from a source checkout with a locally built release, and needs container images you have pushed
-yourself. When a release is published, the whole install is one command:
-`npx @preplabsai/rovara-code init --env <name>`.
+The whole install is one command: `npx @preplabsai/rovara-code init --env <name>`.
 
 On your own computer, `init` opens an install page in your browser, served only from this computer,
 and asks everything there, from the AWS account to the first reply in Slack. Pass `--no-ui` to
@@ -31,17 +27,13 @@ You need:
 - Node.js 22.19 or newer (Node 22 LTS recommended). AWS CloudShell comes with Node 20: see
   [Node 22 in AWS CloudShell](install.md#node-22-in-aws-cloudshell) for a one-line install.
 
-From a source checkout today:
-
 ```sh
-npm ci && npm run build
-npm run release:build -- --version <x.y.z> --out ./release \
-  --worker-image <worker repo@sha256:...> --slack-image <slack repo@sha256:...>
-
 export AWS_PROFILE=<an admin profile for the target account>
-node packages/cli/dist/bin.js --env <name> init --region us-east-1 --release ./release \
-  --worker-image <worker repo@sha256:...> --slack-image <slack repo@sha256:...>
+npx @preplabsai/rovara-code init --env <name>
 ```
+
+To install with the CDK, through a platform team, or from a source checkout, see
+[Other ways to install](install-advanced.md).
 
 `init` asks its questions (every one has a flag, and `--yes` runs it unattended), then:
 
@@ -102,8 +94,9 @@ list in the terminal). To hand tasks to Rovara from Claude Code, Codex or Cursor
 
 The guides:
 
-- [Installing Rovara](install.md): each way to install (published templates, cdk, or through
-  a platform team), resuming, unattended installs and the cost estimate.
+- [Installing Rovara](install.md): the install, the install page, resuming, unattended installs
+  and the cost estimate. [Other ways to install](install-advanced.md) covers the CDK, a platform
+  team and a source checkout.
 - [Running Rovara](day-two.md): the operator role, `doctor`, `upgrade`, `config`, projects,
   channels, connectors and developer sign-in settings (`agentx signin`).
 - [Removing an environment](teardown.md) and
