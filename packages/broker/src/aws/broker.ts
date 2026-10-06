@@ -192,6 +192,7 @@ import { withEvalBatches, type EvalBatchDependencies } from "./eval-batch.js";
 import { dropWatchedBatch, listWatchedBatches, recordWatchedBatchThread, startSlackBatch, updateWatchedBatch } from "./eval-batch-service.js";
 import { batchResults, parseStartBody, requireBatchProject, showBatch, startBatch, stopBatchById } from "./eval-batch-admin.js";
 import { swebenchDeploymentFromParameters } from "./swebench-settings.js";
+import { slackWorkflowCaller } from "./slack-workflow-caller.js";
 
 const MAX_ARTIFACT_BYTES = 5_000_000;
 const EVENT_TRANSACTION_CHUNK = 80;
@@ -3377,7 +3378,7 @@ async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: De
   if (existingWorkflowThread !== undefined || (typeof existingThreadTask?.workspaceId === "string" && existingThreadTask.closedAt === undefined)) {
     throw agentXError("WORKSPACE_BUSY", "this Slack thread already has a task; start the workflow in a new thread");
   }
-  const caller: DeveloperCaller = { developerId: userId, sessionId: "slack-workflow", amr: "slack", name: `Slack user ${userId}`, slackUserId: userId };
+  const caller = slackWorkflowCaller(userId);
   const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller, thread);
   const request = {
     method: "POST", path: "/v1/dev/tasks", headers: {}, requestId,
@@ -4787,7 +4788,8 @@ async function completedWorkflowItems(
       TableName: dependencies.tableName,
       Key: taskKey(task.taskId),
       UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-      ConditionExpression: "workflow.revision = :revision AND workflow.stage = :stage AND workflow.state = :ready",
+      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :ready",
+      ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
       ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": "PULL_REQUEST", ":ready": "READY" },
     } }, ...(existingIndex === undefined ? [{ Put: {
       TableName: dependencies.tableName,
@@ -4937,7 +4939,8 @@ async function completedWorkflowItems(
     TableName: dependencies.tableName,
     Key: taskKey(task.taskId),
     UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-    ConditionExpression: "workflow.revision = :revision AND workflow.stage = :stage AND workflow.state = :running",
+    ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :running",
+    ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
     ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": task.workflow.revision, ":stage": task.workflow.stage, ":running": "RUNNING" },
   } }];
 }

@@ -269,7 +269,9 @@ const EXPRESSION_KEYWORDS: ReadonlySet<string> = new Set(["AND", "OR", "NOT", "S
 /** Throws as DynamoDB does when an expression names a reserved word without an #alias. */
 export function assertNoReservedWords(expression: string | undefined): void {
   if (expression === undefined) return;
-  const words = expression.match(/(?<![#:\w.])[A-Za-z_]\w*\b(?!\s*\()/g) ?? [];
+  // A document-path separator does not make the following attribute name safe:
+  // `workflow.state` still names the reserved DynamoDB word `state`.
+  const words = expression.match(/(?<![#:\w])[A-Za-z_]\w*\b(?!\s*\()/g) ?? [];
   const reserved = words.find((word) => !EXPRESSION_KEYWORDS.has(word) && RESERVED_WORDS.has(word.toUpperCase()));
   if (reserved !== undefined) {
     throw Object.assign(new Error(`Invalid expression: Attribute name is a reserved keyword; reserved keyword: ${reserved}`), { name: "ValidationException" });

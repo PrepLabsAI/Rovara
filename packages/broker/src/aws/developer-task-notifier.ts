@@ -64,6 +64,21 @@ class CanvasCloseoutPending extends Error {
 export const retryDelaySeconds = (attempt: number): number => Math.min(900, 30 * 2 ** Math.max(0, Math.min(attempt - 1, 5)));
 
 const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "workflow", "github_feedback", "canvas_closeout", "admin_change_dm", "admin_change_outcome", "admin_change_expiry"]);
+const SLACK_SECTION_TEXT_LIMIT = 2_800;
+
+/** Slack section blocks have a 3,000-character limit; split long inline plan fallbacks safely. */
+function slackSectionTexts(text: string): string[] {
+  const chunks: string[] = [];
+  let remaining = text;
+  while (remaining.length > SLACK_SECTION_TEXT_LIMIT) {
+    let splitAt = remaining.lastIndexOf("\n", SLACK_SECTION_TEXT_LIMIT);
+    if (splitAt < SLACK_SECTION_TEXT_LIMIT / 2) splitAt = SLACK_SECTION_TEXT_LIMIT;
+    chunks.push(remaining.slice(0, splitAt));
+    remaining = remaining.slice(splitAt).replace(/^\n+/, "");
+  }
+  if (remaining.length > 0) chunks.push(remaining);
+  return chunks;
+}
 
 /**
  * #217: how long after a change's expiry its message is edited. The broker refuses a claim at or
@@ -415,7 +430,8 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
             "canvas_disabled_user_team", "canvas_disabled_file_team", "canvas_globally_disabled",
             "free_teams_cannot_create_standalone_canvases", "team_tier_cannot_create_channel_canvases",
           ].includes(error.slackError)) {
-            return "The approval document is ready, but Slack couldn't open its detail page. Ask an administrator to enable Canvas access for AgentX. No code changes have started.";
+            const documentName = artifactType === "plan" ? "coding plan" : `${artifactType} document`;
+            return `The ${documentName} is ready. Canvas isn’t available in this Slack workspace, so I’m including it here. No code changes have started.\n\n${markdown}`;
           }
           throw error;
         }
@@ -785,7 +801,7 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
   const blocks = feedbackReview?.blocks
     ?? (notice.kind === "ended" && workflow?.stage === "PLAN_REVIEW" && workflow.state === "WAITING" && plan !== undefined
     ? [
-        { type: "section", text: { type: "mrkdwn", text } },
+        ...slackSectionTexts(text).map((section) => ({ type: "section", text: { type: "mrkdwn", text: section } })),
         { type: "actions", elements: [
           { type: "button", action_id: "agentx_workflow_approve", style: "primary", text: { type: "plain_text", text: "Approve this step" }, value: JSON.stringify({ taskId: task.taskId, revision: workflow.revision, digest: plan.sha256, decision: "APPROVE" }) },
           { type: "button", action_id: "agentx_workflow_changes", text: { type: "plain_text", text: "Request changes" }, value: JSON.stringify({ taskId: task.taskId, revision: workflow.revision, digest: plan.sha256, decision: "REQUEST_CHANGES" }) },

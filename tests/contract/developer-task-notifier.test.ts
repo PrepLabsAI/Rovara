@@ -161,6 +161,29 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     })]);
   });
 
+  it("shows the saved plan in Slack when this workspace cannot create Canvases", async () => {
+    const plan = "# Goal\nFix retry handling.\n\n## Checks\nRun the retry regression test.";
+    const createPlanCanvas = vi.fn(async () => { throw new SlackPostError("free_teams_cannot_create_standalone_canvases"); });
+    const h = await notifierHarness({ shareToChannel: true, workflow: true }, { readArtifact: async () => plan, createPlanCanvas });
+    await h.pump();
+    const preparation = h.active();
+    await h.finish(h.workspaceId, preparation, "SUCCEEDED");
+    await h.pump();
+    const planning = h.active();
+    await h.artifact(h.workspaceId, planning, "plan.md", plan);
+    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await h.pump();
+
+    const message = h.posts.at(-1)!;
+    expect(message.text).toContain("Canvas isn’t available in this Slack workspace");
+    expect(message.text).toContain(plan);
+    expect(message.text).toContain("No code changes have started.");
+    const sections = (message.blocks ?? []).filter((block) => (block as { type?: string }).type === "section") as Array<{ text: { text: string } }>;
+    expect(sections.map((section) => section.text.text).join("\n")).toContain(plan);
+    const actions = (message.blocks?.at(-1) as { elements: Array<{ action_id: string }> }).elements;
+    expect(actions.map((button) => button.action_id)).toEqual(["agentx_workflow_approve", "agentx_workflow_changes"]);
+  });
+
   it("shows the current requirements document in the Full path approval message", async () => {
     const requirements = "# Requirements\nAdd password reset.\n";
     const createPlanCanvas = vi.fn(async () => ({ canvasId: "F22345678", permalink: "https://acme.slack.com/docs/T123/F22345678" }));

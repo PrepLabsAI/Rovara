@@ -429,7 +429,8 @@ export async function submitWorkflowFeedbackDecision(
     await deps.actions.transact([{ Update: {
       TableName: deps.tableName, Key: taskKey(taskId),
       UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-      ConditionExpression: "workflow.revision = :revision AND workflow.stage = :stage AND workflow.state = :state AND workflow.feedbackReview.status = :pending AND workflow.feedbackReview.reviewRef.sha256 = :reviewDigest AND workflow.feedbackReview.reviewRef.proposalDigest = :proposalDigest",
+      ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND workflow.feedbackReview.#status = :pending AND workflow.feedbackReview.reviewRef.sha256 = :reviewDigest AND workflow.feedbackReview.reviewRef.proposalDigest = :proposalDigest",
+      ExpressionAttributeNames: { "#stage": "stage", "#state": "state", "#status": "status" },
       ExpressionAttributeValues: { ":workflow": next, ":now": iso(deps), ":revision": current.revision, ":stage": "WAIT_FOR_MERGE", ":state": "WAITING", ":pending": "PENDING", ":reviewDigest": input.reviewDigest, ":proposalDigest": input.proposalDigest },
     } }]);
   } catch (error) {
@@ -1073,7 +1074,8 @@ async function decideTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: 
     await deps.actions.transact([{ Update: {
       TableName: deps.tableName, Key: taskKey(taskId),
       UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-      ConditionExpression: "workflow.revision = :revision AND workflow.state = :waiting",
+      ConditionExpression: "workflow.revision = :revision AND workflow.#state = :waiting",
+      ExpressionAttributeNames: { "#state": "state" },
       ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": task.workflow.revision, ":waiting": "WAITING" },
     } }]);
     const fresh = await loadOwnedTask(deps, caller, taskId);
@@ -1104,7 +1106,8 @@ async function decideTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: 
       { Update: {
         TableName: deps.tableName, Key: taskKey(taskId),
         UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-        ConditionExpression: "workflow.revision = :revision AND workflow.state = :waiting",
+        ConditionExpression: "workflow.revision = :revision AND workflow.#state = :waiting",
+        ExpressionAttributeNames: { "#state": "state" },
         ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": task.workflow!.revision, ":waiting": "WAITING" },
       } },
       putNew(turnTable(deps), aiToolTurn({
@@ -1137,7 +1140,8 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
       { Update: {
         TableName: deps.tableName, Key: taskKey(taskId),
         UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-        ConditionExpression: "workflow.revision = :revision AND workflow.state = :blocked AND workflow.stage = :plan",
+        ConditionExpression: "workflow.revision = :revision AND workflow.#state = :blocked AND workflow.#stage = :plan",
+        ExpressionAttributeNames: { "#state": "state", "#stage": "stage" },
         ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": task.workflow!.revision, ":blocked": "BLOCKED", ":plan": "PLAN" },
       } },
       putNew(turnTable(deps), aiToolTurn({
@@ -1221,7 +1225,8 @@ async function startTaskWorkflowReview(deps: DeveloperTaskRouteDependencies, cal
       { Update: {
         TableName: deps.tableName, Key: taskKey(taskId),
         UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-        ConditionExpression: "workflow.revision = :revision AND workflow.stage = :review AND workflow.state = :waiting AND workflow.candidate.digest = :candidate",
+        ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :review AND workflow.#state = :waiting AND workflow.candidate.digest = :candidate",
+        ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
         ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": workflow.revision, ":review": "REVIEW", ":waiting": "WAITING", ":candidate": candidateDigest },
       } },
       putNew(turnTable(deps), aiToolTurn({
@@ -1261,8 +1266,8 @@ export async function startTaskWorkflowFeedbackReviewFromWebhook(
       { Update: {
         TableName: deps.tableName, Key: taskKey(taskId),
         UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-        ConditionExpression: "workflow.revision = :revision AND workflow.stage = :stage AND workflow.state = :waiting AND workflow.feedbackReview.#status = :collecting AND workflow.candidate.digest = :candidate AND attribute_not_exists(closedAt)",
-        ExpressionAttributeNames: { "#status": "status" },
+        ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :waiting AND workflow.feedbackReview.#status = :collecting AND workflow.candidate.digest = :candidate AND attribute_not_exists(closedAt)",
+        ExpressionAttributeNames: { "#stage": "stage", "#state": "state", "#status": "status" },
         ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": workflow.revision, ":stage": "WAIT_FOR_MERGE", ":waiting": "WAITING", ":collecting": "COLLECTING", ":candidate": binding.candidateDigest },
       } },
       { Put: { TableName: turnTable(deps), Item: aiToolTurn({
@@ -1294,7 +1299,8 @@ async function decideTaskFeedback(deps: DeveloperTaskRouteDependencies, caller: 
     await deps.actions.transact([{ Update: {
       TableName: deps.tableName, Key: taskKey(taskId),
       UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-      ConditionExpression: "workflow.revision = :revision AND workflow.state = :waiting",
+      ConditionExpression: "workflow.revision = :revision AND workflow.#state = :waiting",
+      ExpressionAttributeNames: { "#state": "state" },
       ExpressionAttributeValues: { ":workflow": decided, ":now": receivedAt, ":revision": current.revision, ":waiting": "WAITING" },
     } }]);
     return { task: await taskView(deps, await loadOwnedTask(deps, caller, taskId), { events: 0, details: false }) };
@@ -1312,7 +1318,8 @@ async function decideTaskFeedback(deps: DeveloperTaskRouteDependencies, caller: 
       { Update: {
         TableName: deps.tableName, Key: taskKey(taskId),
         UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-        ConditionExpression: "workflow.revision = :revision AND workflow.state = :waiting",
+        ConditionExpression: "workflow.revision = :revision AND workflow.#state = :waiting",
+        ExpressionAttributeNames: { "#state": "state" },
         ExpressionAttributeValues: { ":workflow": running, ":now": receivedAt, ":revision": current.revision, ":waiting": "WAITING" },
       } },
       putNew(turnTable(deps), aiToolTurn({
