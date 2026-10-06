@@ -29,6 +29,10 @@ describe("named Slack ECS diagnostics", () => {
     });
 
     const deliveryId = Object.keys(template.findResources("AWS::Logs::Delivery"))[0]!;
+    const delivery = Object.values(template.findResources("AWS::Logs::Delivery"))[0] as { DependsOn?: string[] };
+    const sourceId = Object.keys(template.findResources("AWS::Logs::DeliverySource"))[0]!;
+    const destinationId = Object.keys(template.findResources("AWS::Logs::DeliveryDestination"))[0]!;
+    expect(delivery.DependsOn).toEqual(expect.arrayContaining([sourceId, destinationId]));
     const service = Object.values(template.findResources("AWS::ECS::Service"))[0] as { DependsOn?: string[] };
     expect(service.DependsOn).toContain(deliveryId);
     template.resourceCountIs("AWS::Events::Rule", 1);
@@ -60,6 +64,10 @@ describe("named Slack ECS diagnostics", () => {
     expect(keys).toHaveLength(1);
     expect(keys[0]?.DeletionPolicy).toBe("Retain");
     expect(keys[0]?.UpdateReplacePolicy).toBe("Retain");
+    const sources = Object.values(resources).filter((resource) => resource.Type === "AWS::Logs::DeliverySource");
+    expect(sources).toHaveLength(1);
+    expect(sources[0]?.DeletionPolicy).toBe("Retain");
+    expect(sources[0]?.UpdateReplacePolicy).toBe("Retain");
     expect(JSON.stringify(template.toJSON())).toContain("delivery.logs.amazonaws.com");
     expect(JSON.stringify(template.toJSON())).toContain("logs.");
     expect(JSON.stringify(template.toJSON())).toContain("AWS::Region");

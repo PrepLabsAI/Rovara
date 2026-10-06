@@ -57,6 +57,7 @@ describe("retained resources in a named environment", () => {
       "agentx-staging-identity UserPool AWS::Cognito::UserPool",
       "agentx-staging-slack ActionLogs AWS::Logs::LogGroup",
       "agentx-staging-slack ActionLogsKey AWS::KMS::Key",
+      "agentx-staging-slack ActionLogsSource AWS::Logs::DeliverySource",
       "agentx-staging-slack Logs AWS::Logs::LogGroup",
     ]);
   });

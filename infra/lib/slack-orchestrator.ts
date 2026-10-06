@@ -42,6 +42,11 @@ export class SlackOrchestratorStack extends Stack {
       allowedPattern: "^.+@sha256:[a-f0-9]{64}$",
       description: "Immutable private ECR linux/arm64 Slack orchestrator image URI",
     });
+    const imageRepositoryName = new CfnParameter(this, "OrchestratorImageRepositoryName", {
+      type: "String",
+      allowedPattern: "^(?:\\{\\{output:access\\.PullThroughPrefix\\}\\}/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$",
+      description: "ECR repository containing the selected Slack image",
+    });
     const taskRoleArn = new CfnParameter(this, "TaskRoleArn", {
       type: "String",
       allowedPattern: "^arn:aws(-[^:]+)?:iam::[0-9]{12}:role/.+$",
@@ -160,6 +165,10 @@ export class SlackOrchestratorStack extends Stack {
         resourceArn: cluster.attrArn,
         logType: "ACTION_LOGS",
       });
+      // Preserve the per-attempt diagnostic source if a first stack create rolls back. The
+      // delivery itself must be removed before this source on rollback/delete.
+      actionSource.applyRemovalPolicy(RemovalPolicy.RETAIN);
+      actionSource.addMetadata("agentx:retain-on-create-rollback", true);
       const actionDestination = new logs.CfnDeliveryDestination(this, "ActionLogsDestination", {
         name: Fn.join("", ["agentx-", naming.env, "-", attemptShort, "-action-dest"]),
         deliveryDestinationType: "CWL",
@@ -171,6 +180,8 @@ export class SlackOrchestratorStack extends Stack {
         deliveryDestinationArn: actionDestination.attrArn,
       });
       actionLogDelivery.addResourceDependency(actionLogGroupResource);
+      actionLogDelivery.addResourceDependency(actionSource);
+      actionLogDelivery.addResourceDependency(actionDestination);
 
       deploymentFailureRule = new events.CfnRule(this, "ServiceDeploymentFailureEvents", {
         description: `ECS deployment failure events for AgentX ${naming.env} Slack test attempt`,
@@ -303,8 +314,9 @@ export class SlackOrchestratorStack extends Stack {
       resources: ["*"],
     }));
     executionRole.addToPolicy(new iam.PolicyStatement({
+      sid: "EcrSelectedImage",
       actions: ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
-      resources: [`arn:${this.partition}:ecr:${this.region}:${this.account}:repository/${AGENTX_SLACK_ORCHESTRATOR_REPOSITORY}`],
+      resources: [Fn.sub(`arn:\${AWS::Partition}:ecr:\${AWS::Region}:\${AWS::AccountId}:repository/\${RepositoryName}`, { RepositoryName: imageRepositoryName.valueAsString })],
     }));
     // Under environment naming, the Slack service pulls AgentX images through the ECR pull-through
     // cache: the first pull of any tag imports it into the environment's cache prefix, which needs

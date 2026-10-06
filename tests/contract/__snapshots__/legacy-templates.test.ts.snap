@@ -8675,6 +8675,11 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
       "Description": "Optional Secrets Manager ARN containing the raw OpenRouter API key",
       "Type": "String",
     },
+    "OrchestratorImageRepositoryName": {
+      "AllowedPattern": "^(?:\\{\\{output:access\\.PullThroughPrefix\\}\\}/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$",
+      "Description": "ECR repository containing the selected Slack image",
+      "Type": "String",
+    },
     "OrchestratorImageUri": {
       "AllowedPattern": "^.+@sha256:[a-f0-9]{64}$",
       "Description": "Immutable private ECR linux/arm64 Slack orchestrator image URI",
@@ -8774,21 +8779,16 @@ exports[`legacy production templates > AgentXSlackOrchestrator is unchanged 1`] 
               ],
               "Effect": "Allow",
               "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
+                "Fn::Sub": [
+                  "arn:\${AWS::Partition}:ecr:\${AWS::Region}:\${AWS::AccountId}:repository/\${RepositoryName}",
+                  {
+                    "RepositoryName": {
+                      "Ref": "OrchestratorImageRepositoryName",
                     },
-                    ":ecr:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":repository/agentx-slack-orchestrator",
-                  ],
+                  },
                 ],
               },
+              "Sid": "EcrSelectedImage",
             },
             {
               "Action": [

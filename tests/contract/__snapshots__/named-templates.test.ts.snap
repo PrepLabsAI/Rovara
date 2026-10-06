@@ -12506,6 +12506,11 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
       "Description": "The environment's alert topic, the control plane's OperatorAlertsTopicArn output",
       "Type": "String",
     },
+    "OrchestratorImageRepositoryName": {
+      "AllowedPattern": "^(?:\\{\\{output:access\\.PullThroughPrefix\\}\\}/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$",
+      "Description": "ECR repository containing the selected Slack image",
+      "Type": "String",
+    },
     "OrchestratorImageUri": {
       "AllowedPattern": "^.+@sha256:[a-f0-9]{64}$",
       "Description": "Immutable private ECR linux/arm64 Slack orchestrator image URI",
@@ -12716,6 +12721,8 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
     "ActionLogsDelivery": {
       "DependsOn": [
         "ActionLogs3E70FEE0",
+        "ActionLogsDestination",
+        "ActionLogsSource",
       ],
       "Properties": {
         "DeliveryDestinationArn": {
@@ -12926,6 +12933,10 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
       "UpdateReplacePolicy": "Retain",
     },
     "ActionLogsSource": {
+      "DeletionPolicy": "Retain",
+      "Metadata": {
+        "agentx:retain-on-create-rollback": true,
+      },
       "Properties": {
         "LogType": "ACTION_LOGS",
         "Name": {
@@ -12974,6 +12985,7 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
         ],
       },
       "Type": "AWS::Logs::DeliverySource",
+      "UpdateReplacePolicy": "Retain",
     },
     "BedrockThrottlingAlarm709CDF3A": {
       "Condition": "OrchestratorOnBedrock",
@@ -13165,21 +13177,16 @@ exports[`named environment templates > agentx-staging-slack is unchanged 1`] = `
               ],
               "Effect": "Allow",
               "Resource": {
-                "Fn::Join": [
-                  "",
-                  [
-                    "arn:",
-                    {
-                      "Ref": "AWS::Partition",
+                "Fn::Sub": [
+                  "arn:\${AWS::Partition}:ecr:\${AWS::Region}:\${AWS::AccountId}:repository/\${RepositoryName}",
+                  {
+                    "RepositoryName": {
+                      "Ref": "OrchestratorImageRepositoryName",
                     },
-                    ":ecr:us-east-1:",
-                    {
-                      "Ref": "AWS::AccountId",
-                    },
-                    ":repository/agentx-slack-orchestrator",
-                  ],
+                  },
                 ],
               },
+              "Sid": "EcrSelectedImage",
             },
             {
               "Action": [
