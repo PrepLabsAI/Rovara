@@ -1,7 +1,7 @@
 <h1 align="center">Rovara</h1>
 
 <p align="center">
-  <strong>The open-source alternative to Claude Tag!</strong>
+  <strong>A remote coding-agent runtime and task workflow, in your own AWS account.</strong>
 </p>
 
 <p align="center">
@@ -22,7 +22,7 @@
 
 <br/>
 
-# Delegate a coding task. Get the change and its check report.
+# The open-source alternative to Claude Tag!
 
 Start a task in Slack, or hand one over from Claude Code, Codex or Cursor. A remote
 [Pi](https://github.com/earendil-works/pi) coding agent works on it in a persistent, isolated EC2
