@@ -284,12 +284,42 @@ export async function getWorkflowFeedbackReview(deps: DeveloperTaskRouteDependen
   }
   const candidates = report.candidateBindings.map(binding => ({ repositoryId: binding.repositoryId, number: binding.number, headSha: binding.headSha }));
   const checks = [...(workflow.checkPolicy?.required ?? []), ...(workflow.checkPolicy?.optional.filter(check => workflow.checkPolicy?.selectedOptionalIds.includes(check.id)) ?? [])].map(check => check.label);
+  const workspaceResult = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName,
+    Key: { pk: `WORKSPACE#${task.workspaceId}`, sk: "META" }, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+  const activeOperationId = workspaceResult.Item?.activeOperationId;
+  let activeOperation: Record<string, unknown> | undefined;
+  if (typeof activeOperationId === "string" && activeOperationId.length > 0) {
+    const operationResult = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName,
+      Key: { pk: `WORKSPACE#${task.workspaceId}`, sk: `OPERATION#${activeOperationId}` }, ConsistentRead: true })) as { Item?: Record<string, unknown> };
+    const operation = operationResult.Item;
+    if (operation?.entityType === "OPERATION" && operation.id === activeOperationId && operation.workspaceId === task.workspaceId) {
+      activeOperation = { status: operation.status, kind: operation.kind, workflowMode: operation.workflowMode };
+    }
+  }
+  const operationIsLive = activeOperation !== undefined
+    && ["ACCEPTED", "DISPATCHING", "RUNNING", "CANCEL_REQUESTED"].includes(String(activeOperation.status));
+  const nextAction = workflow.state === "BLOCKED" ? "Resolve the blocker before continuing."
+    : workflow.state === "COMPLETE" && workflow.stage === "MERGED" ? "All required pull requests are merged."
+    : activeOperation?.status === "FAILED" || activeOperation?.status === "INTERRUPTED" ? "Review the failed operation before retrying."
+    : activeOperation?.status === "CANCELLED" ? "Restart the operation if the task still needs work."
+    : review.status === "CHANGES_REQUESTED" ? "AgentX is waiting for your updated instructions."
+    : review.status === "DISMISSED" ? "No code changes will start from this proposal."
+    : operationIsLive && activeOperation?.workflowMode === "IMPLEMENT" && activeOperation.status === "ACCEPTED" ? "Implementation is queued to start."
+    : operationIsLive && activeOperation?.workflowMode === "IMPLEMENT" ? "Implementation is in progress."
+    : operationIsLive ? `${String(activeOperation?.kind ?? "Task")} operation is in progress.`
+    : workflow.stage === "IMPLEMENT" && workflow.state === "READY" ? "Implementation is ready to start."
+    : workflow.stage === "IMPLEMENT" && workflow.state === "RUNNING" ? "Implementation is in progress."
+    : workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING" ? "Waiting for GitHub to confirm every required pull request is merged."
+    : review.status === "PENDING" ? "Review this proposal and choose the next action."
+    : "No code changes will start from this proposal.";
   return {
     taskId, title: task.title, revision: workflow.revision, status: review.status,
+    workflowStatus: workflow.state, workflowStage: workflow.stage, ...(workflow.outcome === undefined ? {} : { workflowOutcome: workflow.outcome }),
+    ...(workflow.blockReason === undefined ? {} : { blockReason: workflow.blockReason }),
+    ...(activeOperation === undefined ? {} : { activeOperation }), nextAction,
     ...(decision === undefined ? {} : { decision: {
       decision: decision.decision, at: decision.at, selectedFindingIds: decision.selectedFindingIds,
       ...(decision.ownerNote === undefined ? {} : { ownerNote: decision.ownerNote }),
-      nextAction: decision.decision === "APPROVE" ? "implementation" : "owner_review",
     } }),
     qualification: report.qualification, reviewDigest: reportRef.sha256, proposalDigest: report.proposalDigest,
     bundleDigests: report.bundleDigests, candidates, findings,

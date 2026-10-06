@@ -197,19 +197,21 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(tableStatements[0]!.Resource).toEqual({ "Fn::GetAtt": [tableId, "Arn"] });
   });
 
-  it("throttles the public /v1/auth/* and /v1/dev/* routes on the default stage (burst 50, 20 requests a second)", () => {
+  it("throttles the public /v1/auth/*, /v1/dev/*, and /review/* routes on the default stage (burst 50, 20 requests a second)", () => {
     const stages = ofType(named, "AWS::ApiGatewayV2::Stage");
     expect(stages).toHaveLength(1);
     const [, stage] = stages[0]!;
     expect(stage.Properties.RouteSettings).toEqual({
       "ANY /v1/auth/{proxy+}": { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 },
       "ANY /v1/dev/{proxy+}": { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 },
+      "ANY /review/{proxy+}": { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 },
     });
     // A stage's route settings name routes that must already exist.
     const routeId = (key: string) => ofType(named, "AWS::ApiGatewayV2::Route").find(([, r]) => r.Properties.RouteKey === key)![0];
     const dependsOn = [(stage as Resource & { DependsOn?: string | string[] }).DependsOn].flat();
     expect(dependsOn).toContain(routeId("ANY /v1/auth/{proxy+}"));
     expect(dependsOn).toContain(routeId("ANY /v1/dev/{proxy+}"));
+    expect(dependsOn).toContain(routeId("ANY /review/{proxy+}"));
   });
 
   it("keeps sign-in records in a retained, point-in-time recoverable table with a TTL", () => {

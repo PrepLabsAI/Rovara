@@ -3225,6 +3225,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "DependsOn": [
         "DeveloperSignInAuthRoute98555360",
         "DeveloperSignInDevRoute4BB932E2",
+        "DeveloperSignInFeedbackReviewRoute881C7CFE",
       ],
       "Properties": {
         "ApiId": {
@@ -3232,6 +3233,10 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         },
         "AutoDeploy": true,
         "RouteSettings": {
+          "ANY /review/{proxy+}": {
+            "ThrottlingBurstLimit": 50,
+            "ThrottlingRateLimit": 20,
+          },
           "ANY /v1/auth/{proxy+}": {
             "ThrottlingBurstLimit": 50,
             "ThrottlingRateLimit": 20,
@@ -3276,6 +3281,27 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         },
         "AuthorizationType": "NONE",
         "RouteKey": "ANY /v1/dev/{proxy+}",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "DeveloperSignInFeedbackReviewRoute881C7CFE": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "ANY /review/{proxy+}",
         "Target": {
           "Fn::Join": [
             "",
@@ -3745,6 +3771,12 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "AGENTX_METRICS_NAMESPACE": "AgentX/staging",
             "ARTIFACT_BUCKET_NAME": {
               "Ref": "Artifacts82DD59A1",
+            },
+            "CONTROL_PLANE_URL": {
+              "Fn::GetAtt": [
+                "HttpApi",
+                "ApiEndpoint",
+              ],
             },
             "NOTICE_QUEUE_URL": {
               "Ref": "DeveloperTaskNotifierNoticeQueue56CA42FC",

@@ -12,12 +12,14 @@ Implemented locally against `MSDLC-OBJ-001@0.4` and the approved PR feedback rev
 - Recommendation events run only after the decision commits. A duplicate decision returns through the idempotency path and does not emit a second event.
 - Reopened feedback is emitted only after a successful workflow save when a previously resolved thread is reopened or gains newly eligible feedback. Duplicate/replay reconciliation does not emit another count.
 - Added assertions that analytics contain no task, finding, reviewer, comment, diff, Slack identity, or comment-body values.
+- The review page now reads workflow state/stage/outcome/blocker and any active operation from the current task/workspace records. Its current next action is derived from those live records; the older owner decision remains a historical decision only.
+- The page hides approval controls when there are no recommended findings, and it also suppresses them when the current workflow is blocked.
 
 ## Recovery and journey evidence
 
-The existing broker contract suites exercise the relevant service-level recovery paths: current bundles across two linked PRs; duplicate and delayed webhook deliveries; changed comments and heads; concurrent revision conflicts followed by fresh recollection; approval bound to exact current digests; refusal before dispatch when state changes; idempotent owner retry; worker-start reauthorization; and completion only after all required PRs are GitHub-observed merged. The new tests add the two-PR owner approval journey and aggregate replay/idempotency assertions.
+The existing broker contract suites exercise service-level retry/replay paths: current bundles across two linked PRs; duplicate and delayed webhook deliveries; changed comments and heads; concurrent revision conflicts followed by fresh recollection; approval bound to exact current digests; refusal before dispatch when state changes; idempotent owner retry; worker-start reauthorization; and completion only after all required PRs are GitHub-observed merged. These tests do **not** prove process-crash or consumer-restart recovery. The added persisted-state test recreates the review-page handler at the review and approval boundaries and confirms it reads the stored decision and subsequent blocked/merged workflow state. Webhook-consumer restart recovery remains unverified.
 
-No `tests/e2e` directory or browser automation infrastructure exists in this checkout. Keyboard, focus, narrow-screen, zoom, and semantic browser interaction checks remain unverified and need a suitable browser harness.
+No `tests/e2e` directory or browser automation infrastructure exists in this checkout. Keyboard, focus, narrow-screen, zoom, and semantic browser interaction checks remain unverified and need a suitable browser harness. Canvas deletion recovery is also open; Canvas closeout/deletion belongs to the companion plan and was not implemented here.
 
 ## Verification
 
@@ -25,6 +27,12 @@ No `tests/e2e` directory or browser automation infrastructure exists in this che
 - Node `22.23.0`: `npm run build` — passed (`tsc -b`).
 - `git diff --check` — passed.
 - Full base/candidate test suites, `npm run typecheck`, `npm run lint`, `npm run infra:synth`, live services, and browser accessibility checks were not run in this subtask.
+
+## Review correction
+
+The persisted-state journey recreates the review-page handler before/after owner approval and after workflow transitions to blocked and merged. It asserts current workflow state, active operation status, blocker, and next action, so an earlier `APPROVE` record cannot make a later blocked task appear to be progressing. The review page's approval controls are omitted for a zero-recommendation advisory. The API Gateway route throttling assertion and named control-plane template snapshot now include the public `/review/*` route.
+
+Focused correction verification (Node `22.23.0`): `feedback-review-web`, measure, webhook, workflow, sign-in infrastructure, and named-template suites passed (6 files / 108 tests). `npm run build` (`tsc -b`) and `git diff --check` passed.
 
 ## Limits
 

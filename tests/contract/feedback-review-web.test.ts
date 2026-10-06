@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createFeedbackReviewWeb, type FeedbackReviewWebDependencies } from "../../packages/broker/src/aws/feedback-review-web.js";
 import { getWorkflowFeedbackReview, submitWorkflowFeedbackDecision } from "../../packages/broker/src/aws/developer-tasks.js";
 import { authenticateDeveloperSessionId } from "../../packages/broker/src/aws/developer-routes.js";
-import { createCandidateManifest, createWorkflowSnapshot, requestWorkflowFeedbackReview, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema } from "@agentx/contracts";
+import { createCandidateManifest, createWorkflowSnapshot, observeWorkflowPullRequest, requestWorkflowFeedbackReview, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema } from "@agentx/contracts";
 import { createDeveloperTaskBroker, MAYA, OMAR } from "../support/developer-task-broker.js";
 import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
 import { feedbackReviewNoticeId } from "../../packages/broker/src/developer/notifications.js";
@@ -67,6 +67,33 @@ describe("authenticated PR feedback review web journey", () => {
     expect(response.body).not.toContain("session-owner");
     expect(response.body).not.toContain("Bearer ");
     expect(deps.getWorkflowFeedbackReview).toHaveBeenCalledWith(expect.objectContaining({ slackUserId: "UOWNER" }), taskId);
+  });
+
+  it("does not offer approve-recommended when the advisory recommends no findings", async () => {
+    const deps = dependencies({ getWorkflowFeedbackReview: vi.fn(async () => ({
+      taskId, title: "Handle retries", revision: 12, status: "PENDING", qualification: "AI_GENERATED_ADVISORY",
+      proposalDigest: "b".repeat(64), bundleDigests: ["a".repeat(64)], candidates: [],
+      findings: [{ ...finding, recommended: false, comments: [] }], recommendedFindingIds: [], checks: [],
+    })) });
+    const response = await createFeedbackReviewWeb(deps)(request("GET", `/review/${taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${taskId}`, origin));
+    expect(response.statusCode).toBe(200);
+    expect(response.body).not.toContain("Approve recommended fixes");
+    expect(response.body).not.toContain("#approve-recommended");
+    expect(response.body).toContain("Approve selected findings");
+  });
+
+  it("does not offer approval controls when the current workflow is blocked", async () => {
+    const deps = dependencies({ getWorkflowFeedbackReview: vi.fn(async () => ({
+      taskId, title: "Handle retries", revision: 12, status: "PENDING", workflowStatus: "BLOCKED", workflowStage: "VERIFY",
+      blockReason: "The required check failed", nextAction: "Resolve the blocker before continuing.", qualification: "AI_GENERATED_ADVISORY",
+      proposalDigest: "b".repeat(64), bundleDigests: ["a".repeat(64)], candidates: [], findings: [{ ...finding, comments: [] }],
+      recommendedFindingIds: [finding.id], checks: [],
+    })) });
+    const response = await createFeedbackReviewWeb(deps)(request("GET", `/review/${taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${taskId}`, origin));
+    expect(response.statusCode).toBe(200);
+    expect(response.body).toContain("Resolve the blocker before continuing.");
+    expect(response.body).not.toContain("Approve recommended fixes");
+    expect(response.body).not.toContain("Approve selected findings");
   });
 
   it("does not let a copied browser review cookie outlive its server-side 15 minute expiry", async () => {
@@ -319,6 +346,57 @@ describe("broker-backed feedback review data", () => {
     expect(fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION" && item.workflowMode === "IMPLEMENT")).toHaveLength(1);
   });
 
+  it("recreated review handlers show current blocked and merged status after an earlier approval", async () => {
+    const fixture = await preparedReview();
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId };
+    const webDependencies = (): FeedbackReviewWebDependencies => ({
+      origin,
+      authenticateSession: async sessionId => sessionId === "session-owner" ? owner : undefined,
+      getWorkflowFeedbackReview: (caller, id) => getWorkflowFeedbackReview(fixture.deps as never, caller, id),
+      submitWorkflowFeedbackDecision: (caller, id, input) => submitWorkflowFeedbackDecision(fixture.deps as never, caller, id, input),
+      now: () => Date.parse("2026-10-05T12:00:00.000Z"),
+    });
+    const requestPage = async () => createFeedbackReviewWeb(webDependencies())(
+      request("GET", `/review/${fixture.taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }),
+      new URL(`/review/${fixture.taskId}`, origin));
+
+    expect((await requestPage()).body).toContain("Current workflow status");
+    await submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest,
+      proposalDigest: "b".repeat(64), bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
+    });
+    const approvedReview = await getWorkflowFeedbackReview(fixture.deps as never, owner, fixture.taskId);
+    expect(approvedReview.decision).not.toHaveProperty("nextAction");
+    expect(approvedReview.nextAction).toMatch(/^Implementation is (queued to start|in progress)\.$/);
+    let pageAfterRestart = await requestPage(); // a new handler reads the committed owner decision from the persisted task
+    expect(pageAfterRestart.body).toContain("Decision recorded: Approved");
+
+    const blockedTask = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
+    fixture.harness.db.set({ ...blockedTask, workflow: { ...blockedTask.workflow, state: "BLOCKED", blockReason: "Required unit check failed" } });
+    const workspace = fixture.harness.db.get(`WORKSPACE#${blockedTask.workspaceId}`, "META") as Record<string, unknown>;
+    const operationId = randomUUID();
+    fixture.harness.db.set({ ...workspace, activeOperationId: operationId });
+    fixture.harness.db.set({ pk: `WORKSPACE#${blockedTask.workspaceId}`, sk: `OPERATION#${operationId}`, entityType: "OPERATION", id: operationId,
+      workspaceId: blockedTask.workspaceId, kind: "task", workflowMode: "IMPLEMENT", status: "FAILED" });
+    pageAfterRestart = await requestPage();
+    expect(pageAfterRestart.body).toContain("Current workflow status: BLOCKED");
+    expect(pageAfterRestart.body).toContain("Current operation status: FAILED");
+    expect(pageAfterRestart.body).toContain("Required unit check failed");
+    expect(pageAfterRestart.body).toContain("Resolve the blocker before continuing.");
+    expect(pageAfterRestart.body).not.toContain("AgentX will continue with implementation and the selected checks.");
+
+    const beforeMerge = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as Record<string, unknown> & { workflow: any };
+    const waitingForMerge = { ...beforeMerge.workflow, stage: "WAIT_FOR_MERGE", state: "WAITING", blockReason: undefined };
+    fixture.harness.db.set({ ...beforeMerge, workflow: waitingForMerge });
+    const completed = observeWorkflowPullRequest(waitingForMerge, { repositoryId: "demo", number: 42,
+      candidateDigest: waitingForMerge.candidate.digest, state: "MERGED", source: "GITHUB_API", observedAt: "2026-10-05T12:05:00.000Z" }, "2026-10-05T12:05:00.000Z");
+    fixture.harness.db.set({ ...beforeMerge, workflow: completed });
+    pageAfterRestart = await requestPage();
+    expect(pageAfterRestart.body).toContain("Current workflow status: COMPLETE");
+    expect(pageAfterRestart.body).toContain("Current stage: MERGED");
+    expect(pageAfterRestart.body).toContain("All required pull requests are merged.");
+  });
+
   it("refuses a queued implementation at the broker worker-start callback after approval is invalidated", async () => {
     const fixture = await preparedReview();
     const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId };
@@ -360,8 +438,8 @@ describe("broker-backed feedback review data", () => {
 
   it.each([
     ["APPROVE", "APPROVED", "implementation", ["finding-1"]],
-    ["REQUEST_CHANGES", "CHANGES_REQUESTED", "owner_review", []],
-    ["DISMISS", "DISMISSED", "owner_review", []],
+    ["REQUEST_CHANGES", "CHANGES_REQUESTED", "AgentX is waiting for your updated instructions.", []],
+    ["DISMISS", "DISMISSED", "No code changes will start from this proposal.", []],
   ] as const)("keeps a verified %s review available as a private outcome after the owner decision", async (action, status, nextAction, selectedFindingIds) => {
     const fixture = await preparedReview();
     const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId };
@@ -370,9 +448,10 @@ describe("broker-backed feedback review data", () => {
       bundleDigests: [fixture.bundleDigest], decision: action, selectedFindingIds,
       ...(action === "APPROVE" ? {} : { ownerNote: "Please stop or revise this proposal." }),
     });
-    await expect(getWorkflowFeedbackReview(fixture.deps as never, owner, fixture.taskId)).resolves.toMatchObject({
-      status, decision: { decision: action, nextAction, selectedFindingIds },
-    });
+    const current = await getWorkflowFeedbackReview(fixture.deps as never, owner, fixture.taskId);
+    expect(current).toMatchObject({ status, decision: { decision: action, selectedFindingIds } });
+    if (action === "APPROVE") expect(current.nextAction).toMatch(/^Implementation is (queued to start|in progress)\.$/);
+    else expect(current.nextAction).toBe(nextAction);
   });
 
   it("serves the verified review to the current owner through the broker route", async () => {
