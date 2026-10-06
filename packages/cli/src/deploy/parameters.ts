@@ -48,6 +48,9 @@ export interface InstallAnswers {
   developerSignIn?: StoredDeveloperSignIn;
   /** FR-047's budget; absent means none (the template's BudgetMonthlyUsd default, 0). */
   budget?: { monthlyUsd: number; scope: "tag" | "account" };
+  /** The install in the cloud: the setup page's address, for the identity stack's sign-in callback
+   * and invitation email. Absent everywhere else (the template's default, empty). */
+  setupPageUrl?: string;
 }
 
 /** The shortest callback signing key the control plane accepts. */
@@ -226,8 +229,10 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
       return { ...base, OperatorPrincipalArn: answers.operatorPrincipalArn ?? "" };
 
     case "foundation":
-    case "identity":
       return base;
+
+    case "identity":
+      return answers.setupPageUrl === undefined ? base : { ...base, SetupPageUrl: answers.setupPageUrl };
 
     case "control-plane": {
       if (answers.callbackSigningKey.length < MIN_CALLBACK_SIGNING_KEY_LENGTH) {

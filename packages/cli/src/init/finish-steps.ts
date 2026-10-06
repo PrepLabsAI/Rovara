@@ -20,7 +20,7 @@ import type { InitContext } from "./context.js";
 import { CONNECTOR_LABELS, CONNECTOR_TYPES, type ConnectorType, type InitAnswers, type InstallProgress } from "./install-state.js";
 import { problemText, retryOnPage } from "./retry.js";
 import { botNameOf, readSlackBotToken } from "./slack-app.js";
-import type { InitStep } from "./steps.js";
+import type { InitStep, ProgressHandle } from "./steps.js";
 import { adminCard, alertsCard, channelCard, connectorsCard, projectCard, replyCard, type AdminCardInput, type ReplyCardInput } from "./ui/cards.js";
 import { STEP_PLAN } from "./ui/journey.js";
 
@@ -44,6 +44,24 @@ function oidcAdminName(accessToken: string): string {
     throw agentXError("CONFIG_INVALID", "your sign-in token has no email or sub claim of 3 to 128 characters to record the admin by; make your identity provider put one in the access token, then run agentx init again");
   }
   return name;
+}
+
+/** The install in the cloud: makes the admin user as soon as the identity stack is up (the core
+ * step's last act), so Cognito's invitation, which carries the setup page's address, arrives while
+ * the rest builds. The admin-user step then finds the user recorded and only signs in. Does nothing
+ * for any other install, or when no admin email is known yet (the admin-user step asks then). */
+export async function adminUserForSetupPage(context: InitContext, progress: ProgressHandle): Promise<void> {
+  if (context.setupPageUrl === undefined || context.answers.identity.mode !== "cognito" || progress.current().admin !== undefined) return;
+  const email = context.flags.adminEmail ?? context.answers.adminEmail;
+  if (email === undefined) return;
+  const outputs = await (await context.deployment()).deployer.outputs(environmentStackName(context.env, "identity"));
+  const poolId = outputs?.UserPoolId;
+  if (poolId === undefined) throw agentXError("CONFIG_INVALID", `stack ${environmentStackName(context.env, "identity")} has no output UserPoolId; run agentx init again`);
+  await ensureCognitoAdmin({
+    cognito: context.setup.cognito, poolId, email, write: context.write,
+    confirm: (question) => context.prompter.confirm(question, { defaultValue: false }),
+  });
+  await progress.update({ admin: { username: email, mode: "cognito" } });
 }
 
 export function adminUserStep(): InitStep<InitContext> {

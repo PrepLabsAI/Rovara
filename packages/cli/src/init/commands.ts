@@ -7,6 +7,7 @@ import { CloudFormationClient } from "@aws-sdk/client-cloudformation";
 import { CloudWatchClient } from "@aws-sdk/client-cloudwatch";
 import { CognitoIdentityProviderClient } from "@aws-sdk/client-cognito-identity-provider";
 import { DynamoDBClient } from "@aws-sdk/client-dynamodb";
+import { KMSClient } from "@aws-sdk/client-kms";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SNSClient } from "@aws-sdk/client-sns";
 import { SSMClient } from "@aws-sdk/client-ssm";
@@ -31,7 +32,7 @@ import { vendorApi } from "../setup/connectors/vendors.js";
 import { githubRepositoryApi } from "../setup/project-files.js";
 import { cognitoAdmin, type SetupServices } from "../setup/services.js";
 import type { SigninFlags } from "../signin/collect.js";
-import { SystemCredentialTokenStore, type TokenStore } from "../token-store.js";
+import { InMemoryTokenStore, SystemCredentialTokenStore, type TokenStore } from "../token-store.js";
 import { isPrereleaseVersion, RELEASE_VERSION } from "../version.js";
 import {
   assertResumeFlagsMatch, checkAlertWebhook, collectInitAnswers, openRouterSecretName, persistInitAnswers, readOpenRouterKeyAnswer, readProviderKeyAnswer, resumedKeySources, storeAlertWebhook,
@@ -43,7 +44,7 @@ import {
   cloudFormationStatusReader, secretsManagerInitSecrets, type FinishFlags, type InitContext, type InitSecrets, type PreMadeGitHubApp, type SecretFlags, type StackStatusReader,
 } from "./context.js";
 import { deployStep } from "./deploy-steps.js";
-import { finishSteps, readSettingsOrThrow, readyText, subscribeAlertsAfterDeploy } from "./finish-steps.js";
+import { adminUserForSetupPage, finishSteps, readSettingsOrThrow, readyText, subscribeAlertsAfterDeploy } from "./finish-steps.js";
 import { githubAppStep, githubRestApi, type GitHubApi } from "./github-app.js";
 import { listAwsProfiles, pickAwsProfile, realAccountAlias, resolveCaller } from "./aws-account.js";
 import { emptyProgress, readInstallAnswers, readInstallProgress, writeInstallProgress, type InitAnswers, type InitStepId } from "./install-state.js";
@@ -64,6 +65,7 @@ import { askFailureAction, failureScreen, isRetryableStep, plainReason, STOPPED_
 import { startCloudInstallWizard, startInstallWizard, type InstallWizard } from "./ui/index.js";
 import { READY_LINE, stageLine, STEP_PLAN, stoppedLine, terminalStepLine } from "./ui/journey.js";
 import type { WizardPlan, WizardResume } from "./ui/protocol.js";
+import { kmsTokenSeal, SETUP_LOGIN_PATH, setupPageLogin, type TokenSeal } from "./ui/setup-auth.js";
 import { dynamoSetupStore, type SetupStore } from "./ui/setup-store.js";
 
 export interface InitCliDependencies {
@@ -102,6 +104,8 @@ export interface InitCliDependencies {
   setupStore?: (table: string) => SetupStore;
   /** The relay's timers for --setup-table (tests make them short). */
   setupRelayTiming?: { stateWriteMs: number; pollMs: number };
+  /** Opens the admin's sealed sign-in for --setup-table (tests: no KMS); defaults to KMS. */
+  setupSeal?: TokenSeal;
 }
 
 export interface InitOptions {
@@ -209,7 +213,7 @@ export function initSteps(input: { github: GitHubApi; slack: SlackApi }): InitSt
     },
     // Every stack first, in one unattended stretch; then the GitHub and Slack apps, which need a person.
     accessStep(),
-    deployStep({ id: "core", title: STEP_PLAN.core.title }),
+    deployStep({ id: "core", title: STEP_PLAN.core.title, after: adminUserForSetupPage }),
     deployStep({ id: "control-plane", title: STEP_PLAN["control-plane"].title, after: subscribeAlertsAfterDeploy }),
     deployStep({ id: "slack-service", title: STEP_PLAN["slack-service"].title }),
     githubAppStep(input.github),
@@ -302,6 +306,8 @@ function neverThrowingBrowser(open: (url: string) => Promise<unknown>, write: (l
  * progress line to both the terminal and the page's log pane. Held out here so the wizard is closed
  * with the run whichever way it ends (FR-002). */
 interface InitSession {
+  /** --setup-table: the table the setup page and this run share. */
+  setupStore?: SetupStore;
   /** Spec 048 FR-020: the install's current name, which a Change answers (or a first settings
    * submission) can rename; starts as options.env, and every "Continue later with" command uses
    * this, not options.env, so it keeps up with the rename. */
@@ -560,7 +566,10 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   if (uiMode.mode === "page") {
     if (options.yes) throw agentXError("CONFIG_INVALID", "agentx init --ui asks its questions on a page; --yes answers them without asking. Use one or the other");
     session.log = await openInitLog(initLogPath(services.home, env), { onError: (line) => services.stderr.write(`${line}\n`) });
-    const wizard = options.cloud === undefined
+    if (options.cloud !== undefined) {
+      session.setupStore = (deps.setupStore ?? ((table) => dynamoSetupStore({ client: new DynamoDBClient({}), table, env })))(options.cloud.table);
+    }
+    const wizard = options.cloud === undefined || session.setupStore === undefined
       ? await startInstallWizard({
         env,
         write: (line) => services.stderr.write(`${line}\n`),
@@ -569,7 +578,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
       })
       : startCloudInstallWizard({
         env,
-        store: (deps.setupStore ?? ((table) => dynamoSetupStore({ client: new DynamoDBClient({}), table, env })))(options.cloud.table),
+        store: session.setupStore,
         url: options.cloud.url,
         write: (line) => services.stderr.write(`${line}\n`),
         logPath: session.log.path,
@@ -943,6 +952,17 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
   };
 
   const setup: SetupServices = { ...realSetupServices({ region, fetch: fetchImplementation, configDir: options.configDir }), ...deps.setup };
+  // The install in the cloud: the admin signs in on the setup page, and this run takes that sign-in
+  // from the table instead of opening a browser on its own machine.
+  if (options.cloud !== undefined && session.setupStore !== undefined) {
+    const pageLogin = setupPageLogin({
+      store: session.setupStore, seal: deps.setupSeal ?? kmsTokenSeal({ client: new KMSClient({ region }), env }),
+      signInUrl: `${options.cloud.url}${SETUP_LOGIN_PATH}`, sleep, now,
+    });
+    setup.login = pageLogin;
+    // The job's container has no system keychain; the sign-in lasts as long as the job does.
+    if (deps.setup?.tokenStore === undefined) setup.tokenStore = new InMemoryTokenStore();
+  }
   const identity = finalAnswers.identity;
   // F13: your own OIDC's admin claim, when the answers name both halves of it. The admin-user step
   // refuses answers that do not (C6), before any session is opened.
@@ -1006,6 +1026,7 @@ async function init(options: InitOptions, deps: InitCliDependencies, services: {
     adminSession,
     flags: options.finishFlags,
     cliInvocation: session.invocation,
+    ...(options.cloud === undefined ? {} : { setupPageUrl: options.cloud.url }),
   };
 
   try {

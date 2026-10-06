@@ -101,7 +101,10 @@ export function deployStep(input: { id: DeployStepId; title: string; after?: (co
       const result = await deployEnvironment({
         mode: "install",
         engine: answers.engine,
-        answers: initDeployAnswers(answers, progress.current(), parts, githubSecretArn),
+        answers: {
+          ...initDeployAnswers(answers, progress.current(), parts, githubSecretArn),
+          ...(context.setupPageUrl === undefined ? {} : { setupPageUrl: context.setupPageUrl }),
+        },
         release: context.release,
         deployer: deployment.deployer,
         store: deployment.store,

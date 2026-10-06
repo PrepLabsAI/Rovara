@@ -39,8 +39,9 @@ describe("identity stack", () => {
       AllowedOAuthFlows: ["code"],
       AllowedOAuthFlowsUserPoolClient: true,
       AllowedOAuthScopes: Match.arrayEquals(["openid", "email", "profile"]),
-      CallbackURLs: ["http://127.0.0.1:8765/callback"],
-      LogoutURLs: ["http://127.0.0.1:8765/callback"],
+      // The loopback callback only, unless the install runs in the cloud (setup-page-signin.test.ts).
+      CallbackURLs: { "Fn::If": ["HasSetupPage", Match.anyValue(), ["http://127.0.0.1:8765/callback"]] },
+      LogoutURLs: { "Fn::If": ["HasSetupPage", Match.anyValue(), ["http://127.0.0.1:8765/callback"]] },
       SupportedIdentityProviders: ["COGNITO"],
       PreventUserExistenceErrors: "ENABLED",
     });

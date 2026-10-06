@@ -36,7 +36,7 @@ if (values["create-table"]) await ensureTable(client, table);
 
 const token = randomBytes(32).toString("base64url");
 const origin = `http://127.0.0.1:${port}`;
-const handle = setupPageHandler({ store: dynamoSetupStore({ client, table, env }), env, origin, token });
+const handle = setupPageHandler({ store: dynamoSetupStore({ client, table, env }), env, origin, auth: { kind: "token", token } });
 
 const server = createServer((request, response) => {
   void (async () => {
@@ -46,7 +46,7 @@ const server = createServer((request, response) => {
       method: request.method ?? "GET", path: url.pathname, query: Object.fromEntries(url.searchParams), headers,
       ...(request.method === "POST" ? { body: await readBody(request) } : {}),
     });
-    response.writeHead(result.status, result.headers);
+    response.writeHead(result.status, { ...result.headers, ...(result.cookies === undefined ? {} : { "set-cookie": result.cookies }) });
     response.end(result.body);
   })().catch((error: unknown) => {
     response.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
