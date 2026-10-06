@@ -704,9 +704,15 @@ export function workflowSlackHandlers(deps: {
         catch { throw new Error("invalid feedback modal metadata"); }
         const value = feedbackReviewActionValue(JSON.stringify(metadata));
         const thread = SlackThreadSchema.safeParse(metadata.thread);
-        const user = SlackUserIdSchema.safeParse(asRecord(payload.user).id);
-        if (!value || !thread.success || !user.success || typeof metadata.requestId !== "string" || !CHANGE_ID.test(String(metadata.taskId))) throw new Error("invalid feedback modal submission");
-        const { bundleDigests } = await currentFeedbackReview(value, user.data, thread.data.teamId, thread.data.teamId, thread.data);
+        const slackUser = asRecord(payload.user);
+        const user = SlackUserIdSchema.safeParse(slackUser.id);
+        const userTeam = SlackTeamIdSchema.safeParse(slackUser.team_id);
+        const workspaceTeam = SlackTeamIdSchema.safeParse(asRecord(payload.team).id);
+        if (!value || !thread.success || !user.success || !userTeam.success || !workspaceTeam.success
+          || typeof metadata.requestId !== "string" || !CHANGE_ID.test(String(metadata.taskId))) {
+          throw new WorkflowInteractionRefusal("This PR feedback belongs to another Slack workspace or thread.");
+        }
+        const { bundleDigests } = await currentFeedbackReview(value, user.data, userTeam.data, workspaceTeam.data, thread.data);
         const reason = asRecord(asRecord(asRecord(view.state).values).feedback_note).reason;
         const ownerNote = asRecord(reason).value;
         if (typeof ownerNote !== "string" || ownerNote.trim().length === 0 || ownerNote.trim().length > 500) throw new WorkflowInteractionRefusal("Add a short note before sending.");

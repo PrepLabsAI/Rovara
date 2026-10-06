@@ -424,12 +424,31 @@ describe("Slack PR feedback review actions", () => {
     expect(opened).toMatchObject({ callback_id: "agentx_feedback_review_changes_submission" });
     const modal = opened as Record<string, unknown>;
     const metadata = JSON.parse(String(modal.private_metadata)) as Record<string, unknown>;
-    await handlers.handleSubmission({ user: { id: requester }, view: { callback_id: modal.callback_id,
+    await handlers.handleSubmission({ team: { id: thread.teamId }, user: { id: requester, team_id: thread.teamId }, view: { callback_id: modal.callback_id,
       private_metadata: modal.private_metadata, state: { values: { feedback_note: { reason: { value: "Please reconsider the edge case." } } } } } });
     expect(submitted).toHaveLength(1);
     expect(submitted[0]).toMatchObject({ taskId, userId: requester, thread, expectedRevision: 4,
       reviewDigest: review.reviewDigest, proposalDigest: review.proposalDigest, bundleDigests: review.bundleDigests,
       selection: "RECOMMENDED", decision: "REQUEST_CHANGES", ownerNote: "Please reconsider the edge case.", requestId: metadata.requestId });
+  });
+
+  it("rejects missing, mismatched, or Slack Connect modal workspace identities", async () => {
+    let opened: Record<string, unknown> | undefined;
+    const submitted: Array<Record<string, unknown>> = [];
+    const handlers = workflowSlackHandlers({ loadTask: async () => task,
+      openView: async (_trigger, view) => { opened = view; }, submit: async () => undefined,
+      submitFeedback: async input => { submitted.push(input); } });
+    await handlers.handleAction({ ...action, actionId: "agentx_feedback_review_changes" });
+    const modal = opened as Record<string, unknown>;
+    const submit = (identity: { team?: unknown; user?: unknown }) => handlers.handleSubmission({ ...identity, view: {
+      callback_id: modal.callback_id, private_metadata: modal.private_metadata,
+      state: { values: { feedback_note: { reason: { value: "Please reconsider this." } } } },
+    } });
+    await expect(submit({ user: { id: requester, team_id: thread.teamId } })).rejects.toThrow(/workspace/);
+    await expect(submit({ team: { id: thread.teamId }, user: { id: requester } })).rejects.toThrow(/workspace/);
+    await expect(submit({ team: { id: "T9999999999" }, user: { id: requester, team_id: thread.teamId } })).rejects.toThrow(/workspace/);
+    await expect(submit({ team: { id: thread.teamId }, user: { id: requester, team_id: "T9999999999" } })).rejects.toThrow(/workspace/);
+    expect(submitted).toHaveLength(0);
   });
 });
 

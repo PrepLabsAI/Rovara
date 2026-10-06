@@ -705,4 +705,18 @@ describe("the PR feedback advisory summary", () => {
     expect(JSON.parse(((maxPrMessage.blocks[1] as { elements: Array<{ value: string }> }).elements[0]!).value)).toMatchObject({ bundleSetDigest: expect.stringMatching(/^[a-f0-9]{64}$/) });
     expect(((maxPrMessage.blocks[1] as { elements: Array<{ value: string }> }).elements[0]!).value.length).toBeLessThan(2_000);
   });
+
+  it("does not offer approval when there are no recommended fixes", async () => {
+    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const message = feedbackReviewSlackMessage({
+      taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
+      reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
+      totalComments: 0, recommendedFindingIds: [], highestPriority: undefined,
+      detailUrl: "https://agentx.example/review/11111111-1111-4111-8111-111111111111",
+    });
+    expect(message.text).toContain("No fixes are recommended");
+    const actions = (message.blocks as Array<{ elements?: Array<{ action_id: string; text: { text: string } }> }>).flatMap(block => block.elements ?? []);
+    expect(actions.map(action => action.action_id)).toEqual(["agentx_feedback_review_changes"]);
+    expect(actions[0]?.text.text).toBe("Request changes");
+  });
 });

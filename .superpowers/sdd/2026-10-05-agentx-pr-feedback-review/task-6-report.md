@@ -24,6 +24,12 @@ The interactivity handler renders Request changes as a modal, preserves short te
 - Live Slack posting, button callbacks, modal submission, OAuth/session-protected AgentX page, GitHub App refresh, AWS persistence, Canvas cleanup, deployment, and production behavior remain unverified.
 - The Slack app manifest has no permission delta in this task. If ordinary unmentioned thread replies become a requirement, that needs a separate explicit scope/permission decision.
 
+## Review correction
+
+The first independent review found two P2 issues. Modal submission now requires valid `payload.team.id` and `payload.user.team_id`, and checks both against the task's exact workspace before accepting the note. Missing values, another workspace, and a Slack Connect user's external team are rejected. When the review has zero recommended findings, the Slack summary now says no fixes are recommended and omits the approval button; the owner can still open details or request changes.
+
+Correction verification on Node 22.23.0: 7 focused files passed, 276 tests passed; TypeScript build and `git diff --check` passed.
+
 ## Objective postflight
 
 ```yaml
@@ -31,7 +37,7 @@ executed_against: MSDLC-OBJ-001@0.4
 alignment: pass
 result_status: verified
 evidence_added:
-  - focused Node 22 suite: 7 files, 274 tests passed
+  - focused Node 22 suite after review correction: 7 files, 276 tests passed
   - TypeScript build passed
   - diff check passed
 decision_proposals: []

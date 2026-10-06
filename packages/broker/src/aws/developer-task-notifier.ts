@@ -86,18 +86,23 @@ export function feedbackReviewSlackMessage(input: {
   }
   const priority = input.highestPriority === "MUST_FIX" ? "must fix" : input.highestPriority === "SHOULD_FIX" ? "should fix"
     : input.highestPriority === "OPTIONAL" ? "optional" : "none recommended";
-  const text = `PR feedback is ready: ${input.totalComments} comments; ${input.recommendedFindingIds.length} recommendations. Highest priority: ${priority}. <${slackText(url.href)}|Open details>.`;
+  const recommendationSummary = input.recommendedFindingIds.length === 0
+    ? "No fixes are recommended."
+    : `${input.recommendedFindingIds.length} recommendations.`;
+  const text = `PR feedback is ready: ${input.totalComments} comments; ${recommendationSummary} Highest priority: ${priority}. <${slackText(url.href)}|Open details>.`;
   const bundleSetDigest = createHash("sha256").update(JSON.stringify(input.bundleDigests), "utf8").digest("hex");
   const binding = JSON.stringify({ taskId: input.taskId, expectedRevision: input.revision, reviewDigest: input.reviewDigest,
     proposalDigest: input.proposalDigest, bundleSetDigest, selection: "RECOMMENDED" });
+  const elements: Array<Record<string, unknown>> = [
+    ...(input.recommendedFindingIds.length > 0 ? [{ type: "button", action_id: "agentx_feedback_review_recommended", style: "primary",
+      text: { type: "plain_text", text: `Approve ${input.recommendedFindingIds.length} recommended` }, value: binding }] : []),
+    { type: "button", action_id: "agentx_feedback_review_changes", text: { type: "plain_text", text: "Request changes" }, value: binding },
+  ];
   return {
     text,
     blocks: [
       { type: "section", text: { type: "mrkdwn", text } },
-      { type: "actions", elements: [
-        { type: "button", action_id: "agentx_feedback_review_recommended", style: "primary", text: { type: "plain_text", text: `Approve ${input.recommendedFindingIds.length} recommended` }, value: binding },
-        { type: "button", action_id: "agentx_feedback_review_changes", text: { type: "plain_text", text: "Request changes" }, value: binding },
-      ] },
+      { type: "actions", elements },
     ],
   };
 }
