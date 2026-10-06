@@ -239,13 +239,11 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
     description: "Rovara Code installer and administration CLI",
     homepage: "https://rovara-dev.github.io/",
     publishConfig: { access: "public", registry: "https://registry.npmjs.org/" },
-    // release.yml's npm job passes no --provenance flag: PrepLabsAI/AgentX is private today, and
-    // npm provenance attestation fails for private repositories. Once the repository is public,
-    // npm trusted publishing (OIDC) adds provenance automatically, with no flag and no other change
-    // needed here — except that npm cross-checks this field against the source repository the
-    // publish's OIDC token was minted for (release.yml checks out PrepLabsAI/AgentX), so a missing
-    // or mismatched repository.url would make npm reject the publish.
-    repository: { type: "git", url: "git+https://github.com/PrepLabsAI/AgentX.git" },
+    // release.yml's npm job passes no --provenance flag: npm trusted publishing (OIDC) adds
+    // provenance automatically for this public repository. npm cross-checks this field against the
+    // source repository the publish's OIDC token was minted for (PrepLabsAI/Rovara), so a missing
+    // or mismatched repository.url would make npm reject the publish. Update it with any rename.
+    repository: { type: "git", url: "git+https://github.com/PrepLabsAI/Rovara.git" },
   };
   await writeFile(join(packageDir, "package.json"), `${JSON.stringify(manifest, null, 2)}\n`, "utf8");
   await writeFile(join(packageDir, "README.md"), readmeText(name), "utf8");

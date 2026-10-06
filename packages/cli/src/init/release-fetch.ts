@@ -9,7 +9,7 @@ import type { CommandRunner } from "../deploy/cdk-engine.js";
 import { sourceReleaseVersion } from "../deploy/cdk-source.js";
 import type { LoadedRelease } from "../deploy/release.js";
 
-export const RELEASE_REPOSITORY = "PrepLabsAI/AgentX";
+export const RELEASE_REPOSITORY = "PrepLabsAI/Rovara";
 
 export function releaseAssetUrls(version: string): { tarball: string; manifest: string } {
   const base = `https://github.com/${RELEASE_REPOSITORY}/releases/download/v${version}`;
