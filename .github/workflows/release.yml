@@ -137,7 +137,7 @@ jobs:
           npm run release:build -- --version "$VERSION" --out "$RUNNER_TEMP/release" --worker-image "$WORKER" --slack-image "$SLACK"
           npm run release:verify -- "$RUNNER_TEMP/release"
           (cd "$RUNNER_TEMP/release" && tar -czf "$RUNNER_TEMP/agentx-$VERSION.tar.gz" .)
-          gh release create "v$VERSION" --verify-tag --title "AgentX $VERSION" --notes-from-tag "$RUNNER_TEMP/agentx-$VERSION.tar.gz" "$RUNNER_TEMP/release/release.json"
+          gh release create "v$VERSION" --verify-tag --title "Rovara $VERSION" --notes-from-tag "$RUNNER_TEMP/agentx-$VERSION.tar.gz" "$RUNNER_TEMP/release/release.json"
 
   npm:
     needs: release
