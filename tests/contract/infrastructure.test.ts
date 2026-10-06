@@ -338,7 +338,7 @@ describe("production release pipeline", () => {
         Actions: [Match.objectLike({
           Configuration: {
             ConnectionArn: { Ref: "GitHubConnectionArn" },
-            FullRepositoryId: "PrepLabsAI/AgentX",
+            FullRepositoryId: "PrepLabsAI/Rovara",
             BranchName: "mainline",
             OutputArtifactFormat: "CODEBUILD_CLONE_REF",
           },
