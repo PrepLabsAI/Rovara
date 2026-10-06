@@ -1,4 +1,4 @@
-import { CfnOutput, Duration, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
+import { Aws, CfnCondition, CfnOutput, CfnParameter, Duration, Fn, RemovalPolicy, Stack, type StackProps } from "aws-cdk-lib";
 import * as cognito from "aws-cdk-lib/aws-cognito";
 import type { Construct } from "constructs";
 import { assertCognitoDomainSafe } from "@agentx/contracts";
@@ -10,6 +10,8 @@ export const ADMIN_GROUP = "agentx-admin";
 // defaults that port to DEFAULT_CALLBACK_PORT (8765). tests/contract/identity-stack.test.ts ties
 // this literal to that default so the two can't silently drift.
 export const CLI_CALLBACK_URL = "http://127.0.0.1:8765/callback";
+/** The setup page's own sign-in callback, under its address (packages/cli/src/init/ui/setup-auth.ts). */
+export const SETUP_CALLBACK_PATH = "/auth/callback";
 
 export interface IdentityStackProps extends StackProps {
   naming: AgentXNaming;
@@ -71,6 +73,33 @@ export class IdentityStack extends Stack {
       idTokenValidity: Duration.hours(6),
       refreshTokenValidity: Duration.days(30),
     });
+
+    // The install in the cloud (the Launch in AWS button): its setup page signs the admin in with
+    // the same client, so the admin's token is one the control plane already accepts, and Cognito's
+    // invitation carries the page's address. Empty (every other install, and after an upgrade):
+    // neither changes anything.
+    const setupPageUrl = new CfnParameter(this, "SetupPageUrl", {
+      type: "String",
+      default: "",
+      description: "The setup page's address while the install runs in the cloud; empty otherwise",
+    });
+    const hasSetupPage = new CfnCondition(this, "HasSetupPage", { expression: Fn.conditionNot(Fn.conditionEquals(setupPageUrl.valueAsString, "")) });
+    const setupCallback = Fn.join("", [setupPageUrl.valueAsString, SETUP_CALLBACK_PATH]);
+    const cfnClient = client.node.defaultChild as cognito.CfnUserPoolClient;
+    cfnClient.callbackUrLs = Fn.conditionIf(hasSetupPage.logicalId, [CLI_CALLBACK_URL, setupCallback], [CLI_CALLBACK_URL]) as unknown as string[];
+    cfnClient.logoutUrLs = Fn.conditionIf(hasSetupPage.logicalId, [CLI_CALLBACK_URL, setupPageUrl.valueAsString], [CLI_CALLBACK_URL]) as unknown as string[];
+    const cfnPool = pool.node.defaultChild as cognito.CfnUserPool;
+    cfnPool.adminCreateUserConfig = {
+      allowAdminCreateUserOnly: true,
+      inviteMessageTemplate: Fn.conditionIf(hasSetupPage.logicalId, {
+        EmailSubject: "Your temporary password",
+        EmailMessage: Fn.join("", [
+          "Rovara is being installed in AWS account ", Aws.ACCOUNT_ID, ". Finish setting it up at ", setupPageUrl.valueAsString,
+          "<br><br>Sign in with your email, {username}, and this temporary password: {####}<br><br>",
+          "You choose your own password when you first sign in. This temporary password works for 7 days.",
+        ]),
+      }, Aws.NO_VALUE),
+    };
 
     new CfnOutput(this, "UserPoolId", { value: pool.userPoolId });
     new CfnOutput(this, "Issuer", { value: `https://cognito-idp.${this.region}.amazonaws.com/${pool.userPoolId}` });

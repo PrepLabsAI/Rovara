@@ -8,6 +8,9 @@
 //   answer#<key>      an answer the page posted, until the job reads it (then deleted)
 //   verdict#<key>     the job's reply to that answer, until the page reads it (then deleted)
 //   close             the page asked the run to close
+//   session#<hash>    a signed-in admin's page session (the cookie holds the id; only its hash is here)
+//   admin-token       the admin's sign-in for the job, sealed with the table's KMS key, until the
+//                     job takes it (deleted as read)
 //
 // FR-012 still holds: an answer may be a secret, so it lives here only between the page's write
 // and the job's next poll (about a second), is deleted as it is read, and expires within minutes
@@ -22,6 +25,8 @@ export const SETUP_ITEM_TTL_SECONDS = 10 * 60;
 export const SETUP_LOG_LINES = 200;
 
 export interface SetupAnswer { key: string; id: string; value: string }
+/** A signed-in admin's page session. `expiresAt` is in milliseconds, as the sign-in's own expiry. */
+export interface SetupSession { username: string; expiresAt: number }
 export interface StoredSetupState { snapshot: WizardSnapshot; closed: boolean }
 
 export interface SetupStore {
@@ -41,6 +46,14 @@ export interface SetupStore {
   requestClose(): Promise<void>;
   /** The job: true once, when the page asked to close. */
   takeClose(): Promise<boolean>;
+  /** The page: a session for a signed-in admin, under the hash of the id its cookie holds. */
+  putSession(idHash: string, session: SetupSession): Promise<void>;
+  /** The page: the session under this hash, or undefined (none, or expired). */
+  getSession(idHash: string): Promise<SetupSession | undefined>;
+  /** The page: the admin's sign-in, sealed, for the job; replaces any the job has not taken. */
+  putAdminToken(sealed: string, expiresAt: number): Promise<void>;
+  /** The job: the sealed sign-in, deleted as it is read; undefined while there is none. */
+  takeAdminToken(): Promise<{ sealed: string; expiresAt: number } | undefined>;
 }
 
 const partition = (env: string) => `install#${env}`;
@@ -112,18 +125,49 @@ export function dynamoSetupStore(input: { client: Pick<DynamoDBClient, "send">; 
     async takeClose() {
       return (await take("close")) !== undefined;
     },
+    async putSession(idHash, session) {
+      await client.send(new PutItemCommand({
+        TableName: table,
+        Item: {
+          pk, sk: { S: `session#${idHash}` }, username: { S: session.username }, sessionExpiresAt: { N: String(session.expiresAt) },
+          expiresAt: { N: String(Math.ceil(session.expiresAt / 1000)) },
+        },
+      }));
+    },
+    async getSession(idHash) {
+      const item = (await client.send(new GetItemCommand({ TableName: table, Key: { pk, sk: { S: `session#${idHash}` } }, ConsistentRead: true }))).Item;
+      const username = item?.username?.S;
+      const expiresAt = Number(item?.sessionExpiresAt?.N);
+      // TTL deletes within a day or two, not on the second: an expired session is refused here.
+      return username === undefined || !(expiresAt > now()) ? undefined : { username, expiresAt };
+    },
+    async putAdminToken(sealed, expiresAt) {
+      await client.send(new PutItemCommand({
+        TableName: table,
+        Item: { pk, sk: { S: "admin-token" }, sealed: { S: sealed }, tokenExpiresAt: { N: String(expiresAt) }, expiresAt: { N: String(Math.ceil(expiresAt / 1000)) } },
+      }));
+    },
+    async takeAdminToken() {
+      const removed = await take("admin-token");
+      const sealed = removed?.sealed?.S;
+      const expiresAt = Number(removed?.tokenExpiresAt?.N);
+      return sealed === undefined || !(expiresAt > now()) ? undefined : { sealed, expiresAt };
+    },
   };
 }
 
 /** The same store in memory, for tests and for one process that is both sides. */
-export function memorySetupStore(): SetupStore & { answers: Map<string, SetupAnswer> } {
+export function memorySetupStore(now: () => number = Date.now): SetupStore & { answers: Map<string, SetupAnswer>; sessions: Map<string, SetupSession> } {
   let state: StoredSetupState | undefined;
+  const sessions = new Map<string, SetupSession>();
+  let adminToken: { sealed: string; expiresAt: number } | undefined;
   const answers = new Map<string, SetupAnswer>();
   const verdicts = new Map<string, AnswerReply>();
   let close = false;
   let counter = 0;
   return {
     answers,
+    sessions,
     async putState(snapshot, closed) { state = { snapshot: storableSnapshot(structuredClone(snapshot)), closed }; },
     async getState() { return state === undefined ? undefined : structuredClone(state); },
     async putAnswer(id, value) {
@@ -148,6 +192,17 @@ export function memorySetupStore(): SetupStore & { answers: Map<string, SetupAns
       const wanted = close;
       close = false;
       return wanted;
+    },
+    async putSession(idHash, session) { sessions.set(idHash, session); },
+    async getSession(idHash) {
+      const session = sessions.get(idHash);
+      return session === undefined || session.expiresAt <= now() ? undefined : session;
+    },
+    async putAdminToken(sealed, expiresAt) { adminToken = { sealed, expiresAt }; },
+    async takeAdminToken() {
+      const taken = adminToken;
+      adminToken = undefined;
+      return taken === undefined || taken.expiresAt <= now() ? undefined : taken;
     },
   };
 }

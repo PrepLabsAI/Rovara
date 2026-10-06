@@ -11514,6 +11514,18 @@ exports[`named environment templates > agentx-staging-identity is unchanged 1`] 
         },
       ],
     },
+    "HasSetupPage": {
+      "Fn::Not": [
+        {
+          "Fn::Equals": [
+            {
+              "Ref": "SetupPageUrl",
+            },
+            "",
+          ],
+        },
+      ],
+    },
   },
   "Description": "AgentX Cognito user pool, admin group and CLI app client for a named environment",
   "Outputs": {
@@ -11572,6 +11584,11 @@ exports[`named environment templates > agentx-staging-identity is unchanged 1`] 
       "Description": "Optional IAM permissions boundary policy ARN applied to every role this environment creates; empty uses the default boundary",
       "Type": "String",
     },
+    "SetupPageUrl": {
+      "Default": "",
+      "Description": "The setup page's address while the install runs in the cloud; empty otherwise",
+      "Type": "String",
+    },
   },
   "Resources": {
     "AdminGroup": {
@@ -11597,6 +11614,33 @@ exports[`named environment templates > agentx-staging-identity is unchanged 1`] 
         },
         "AdminCreateUserConfig": {
           "AllowAdminCreateUserOnly": true,
+          "InviteMessageTemplate": {
+            "Fn::If": [
+              "HasSetupPage",
+              {
+                "EmailMessage": {
+                  "Fn::Join": [
+                    "",
+                    [
+                      "Rovara is being installed in AWS account ",
+                      {
+                        "Ref": "AWS::AccountId",
+                      },
+                      ". Finish setting it up at ",
+                      {
+                        "Ref": "SetupPageUrl",
+                      },
+                      "<br><br>Sign in with your email, {username}, and this temporary password: {####}<br><br>You choose your own password when you first sign in. This temporary password works for 7 days.",
+                    ],
+                  ],
+                },
+                "EmailSubject": "Your temporary password",
+              },
+              {
+                "Ref": "AWS::NoValue",
+              },
+            ],
+          },
         },
         "AutoVerifiedAttributes": [
           "email",
@@ -11647,17 +11691,47 @@ exports[`named environment templates > agentx-staging-identity is unchanged 1`] 
           "email",
           "profile",
         ],
-        "CallbackURLs": [
-          "http://127.0.0.1:8765/callback",
-        ],
+        "CallbackURLs": {
+          "Fn::If": [
+            "HasSetupPage",
+            [
+              "http://127.0.0.1:8765/callback",
+              {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Ref": "SetupPageUrl",
+                    },
+                    "/auth/callback",
+                  ],
+                ],
+              },
+            ],
+            [
+              "http://127.0.0.1:8765/callback",
+            ],
+          ],
+        },
         "ExplicitAuthFlows": [
           "ALLOW_REFRESH_TOKEN_AUTH",
         ],
         "GenerateSecret": false,
         "IdTokenValidity": 360,
-        "LogoutURLs": [
-          "http://127.0.0.1:8765/callback",
-        ],
+        "LogoutURLs": {
+          "Fn::If": [
+            "HasSetupPage",
+            [
+              "http://127.0.0.1:8765/callback",
+              {
+                "Ref": "SetupPageUrl",
+              },
+            ],
+            [
+              "http://127.0.0.1:8765/callback",
+            ],
+          ],
+        },
         "PreventUserExistenceErrors": "ENABLED",
         "RefreshTokenValidity": 43200,
         "SupportedIdentityProviders": [

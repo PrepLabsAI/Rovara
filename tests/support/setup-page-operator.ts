@@ -53,7 +53,10 @@ export function setupPageOperator(input: {
           count += 1;
           if (count > MAX_QUESTIONS) throw new Error(`test setup: the setup page asked more than ${MAX_QUESTIONS} questions`);
           const next = queue.shift();
-          if (next === undefined) throw new Error(`test setup: no scripted answer for "${question.text}"`);
+          if (next === undefined) {
+            const failure = state.failure === undefined ? "" : ` (the page shows a failure: ${state.failure.what} ${state.failure.details.join(" ")})`;
+            throw new Error(`test setup: no scripted answer for "${question.text}"${failure}`);
+          }
           asked.push(question.text);
           answered = question.id;
           const value = typeof next === "boolean" ? (next ? "yes" : "no") : next;

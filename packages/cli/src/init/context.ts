@@ -162,4 +162,8 @@ export interface InitContext {
   /** Issue #222 and spec 048 FR-059 and FR-061: the command this CLI runs as, so every command the
    * steps show (the developer sign-in line, the ready screen) works as shown. */
   cliInvocation: CliInvocation;
+  /** The install in the cloud (--setup-table): the setup page's address. The identity stack takes
+   * it for its sign-in callback and invitation, and the admin user is made as soon as that stack is
+   * up, so the invitation (with the address) arrives while the rest builds. */
+  setupPageUrl?: string;
 }
