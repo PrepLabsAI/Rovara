@@ -6,10 +6,10 @@ import { DeleteItemCommand, GetItemCommand, PutItemCommand, QueryCommand } from 
 import { wizardHtml } from "../../packages/cli/src/init/ui/page.js";
 import { startHubRelay } from "../../packages/cli/src/init/ui/relay.js";
 import { setupPageHandler, type SetupRequest } from "../../packages/cli/src/init/ui/setup-handler.js";
-import { dynamoSetupStore, memorySetupStore, SETUP_ITEM_TTL_SECONDS, SETUP_LOG_LINES, storableSnapshot } from "../../packages/cli/src/init/ui/setup-store.js";
+import { dynamoSetupStore, GITHUB_NONCE_PLACEHOLDER, memorySetupStore, SETUP_ITEM_TTL_SECONDS, SETUP_LOG_LINES, storableSnapshot } from "../../packages/cli/src/init/ui/setup-store.js";
+import { cloudManifestHost } from "../../packages/cli/src/init/ui/index.js";
 import { createWizardHub } from "../../packages/cli/src/init/ui/state.js";
 import { WIZARD_TOKEN_HEADER, WIZARD_TOKEN_QUERY } from "../../packages/cli/src/init/ui/protocol.js";
-import { TEST_PRIVATE_KEY } from "../support/init-fakes.js";
 import { FINISH, harness, SIGNIN, SLACK } from "../support/init-ui-harness.js";
 import { accessToken, ADMIN_EMAIL } from "../support/setup-fakes.js";
 import { SETUP_ORIGIN, setupPageOperator } from "../support/setup-page-operator.js";
@@ -192,6 +192,49 @@ describe("the setup page's handler", () => {
   });
 });
 
+describe("the GitHub App from the setup page", () => {
+  const FORM = { state: "a".repeat(32), html: `<form action="https://github.com/settings/apps/new?state=${"a".repeat(32)}"></form><script nonce="${GITHUB_NONCE_PLACEHOLDER}">submit()</script>` };
+  const handler = (store = memorySetupStore()) => ({ store, handle: setupPageHandler({ store, env: "staging", origin: SETUP_ORIGIN, auth: { kind: "token", token: TOKEN } }) });
+  const github = (query: Record<string, string>) => ({ method: "GET", path: "/github/created", query, headers: { host: "setup.example.com", "sec-fetch-site": "cross-site" } });
+
+  it("serves the job's form with a fresh nonce under its own strict policy, only while the job waits on it", async () => {
+    const { store, handle } = handler();
+    const start = { method: "GET", path: "/github/start", query: { [WIZARD_TOKEN_QUERY]: TOKEN }, headers: { host: "setup.example.com" } };
+    expect((await handle(start)).status).toBe(404);
+    await store.putGitHubManifest(FORM);
+    const first = await handle(start);
+    const nonce = /nonce="([^"]+)"/.exec(first.body)?.[1] ?? "";
+    expect(nonce).not.toBe(GITHUB_NONCE_PLACEHOLDER);
+    expect(first.headers["content-security-policy"]).toBe(`default-src 'none'; script-src 'nonce-${nonce}'; form-action https://github.com; base-uri 'none'; frame-ancestors 'none'`);
+    expect(/nonce="([^"]+)"/.exec((await handle(start)).body)?.[1]).not.toBe(nonce);
+  });
+
+  it("takes GitHub's redirect, with no token, only with the waiting form's state, once", async () => {
+    const { store, handle } = handler();
+    expect((await handle(github({ code: "c0de", state: FORM.state }))).status).toBe(400);
+    await store.putGitHubManifest(FORM);
+    expect((await handle(github({ code: "c0de", state: "b".repeat(32) }))).status).toBe(400);
+    expect((await handle(github({ state: FORM.state }))).status).toBe(400);
+    const sent = await handle(github({ code: "c0de", state: FORM.state }));
+    expect(sent).toMatchObject({ status: 200, body: expect.stringContaining("GitHub sent AgentX the new app") as unknown });
+    expect(await store.takeGitHubCode(FORM.state)).toBe("c0de");
+    expect((await handle(github({ code: "again", state: FORM.state }))).status).toBe(400);
+  });
+
+  it("is waited on by the job as long as the step lasts, and dropped when the step ends", async () => {
+    const store = memorySetupStore();
+    const host = await cloudManifestHost({ store, url: SETUP_ORIGIN, pollMs: 1 })({ state: FORM.state, page: (redirect, nonce) => `${redirect}|${nonce ?? ""}`, timeoutMs: 1 });
+    expect(host).toMatchObject({ startUrl: `${SETUP_ORIGIN}/github/start`, redirectUrl: `${SETUP_ORIGIN}/github/created` });
+    expect(await store.getGitHubManifest()).toEqual({ state: FORM.state, html: `${SETUP_ORIGIN}/github/created|${GITHUB_NONCE_PLACEHOLDER}` });
+    // Long past the 15 minutes the local page allows: the code still arrives.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    await store.putGitHubCode(FORM.state, "late-code");
+    expect(await host.code).toBe("late-code");
+    host.close();
+    await until(async () => (await store.getGitHubManifest()) === undefined);
+  });
+});
+
 describe("agentx init --setup-table", () => {
   it("runs a whole install with every question answered on the setup page, through the table", async () => {
     const h = await harness();
@@ -206,16 +249,19 @@ describe("agentx init --setup-table", () => {
     const code = await h.run(
       [
         "--setup-table", "agentx-setup", "--setup-url", SETUP_ORIGIN, "--admin-email", ADMIN_EMAIL, "--github-account", "acme",
-        "--github-app-id", "424242", "--github-installation-id", "777", "--github-private-key-env", "GH_KEY",
       ],
       {
-        setupStore: () => store, setupRelayTiming: FAST, processEnv: { GH_KEY: TEST_PRIVATE_KEY },
+        setupStore: () => store, setupRelayTiming: FAST,
         setupSeal: { seal: async (plain) => `sealed:${plain}`, open: async (sealed) => sealed.replace(/^sealed:/, "") },
       },
     );
     await running;
     expect(code).toBe(0);
     expect(operator.remaining()).toBe(0);
+    // The GitHub App was made from the setup page's own form, and GitHub's redirect came back there.
+    expect(operator.clicked).toContain(`${SETUP_ORIGIN}/github/start`);
+    expect(h.github.conversions).toEqual(["0123456789abcdef0123"]);
+    expect(await store.getGitHubManifest()).toBeUndefined();
     expect(operator.asked).not.toContain("Your settings");
     expect(operator.asked).not.toContain("Create all of this?");
     expect(operator.states.at(-1)).toMatchObject({ installerClosed: true });

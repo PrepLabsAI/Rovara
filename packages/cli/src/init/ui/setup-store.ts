@@ -11,6 +11,8 @@
 //   session#<hash>    a signed-in admin's page session (the cookie holds the id; only its hash is here)
 //   admin-token       the admin's sign-in for the job, sealed with the table's KMS key, until the
 //                     job takes it (deleted as read)
+//   github-manifest   the GitHub App form the page serves at /github/start, while the job waits
+//   github-code#<st>  the code GitHub sent back for that form's state, until the job takes it
 //
 // FR-012 still holds: an answer may be a secret, so it lives here only between the page's write
 // and the job's next poll (about a second), is deleted as it is read, and expires within minutes
@@ -18,6 +20,9 @@
 import { randomUUID } from "node:crypto";
 import { DeleteItemCommand, GetItemCommand, PutItemCommand, QueryCommand, type DynamoDBClient } from "@aws-sdk/client-dynamodb";
 import type { AnswerReply, WizardSnapshot } from "./protocol.js";
+
+/** Where the GitHub App form's script nonce goes (setup-handler.ts fills a fresh one in). */
+export const GITHUB_NONCE_PLACEHOLDER = "agentx-github-form-nonce";
 
 /** How long an answer, a verdict or a close request is kept when nobody reads it. */
 export const SETUP_ITEM_TTL_SECONDS = 10 * 60;
@@ -54,7 +59,21 @@ export interface SetupStore {
   putAdminToken(sealed: string, expiresAt: number): Promise<void>;
   /** The job: the sealed sign-in, deleted as it is read; undefined while there is none. */
   takeAdminToken(): Promise<{ sealed: string; expiresAt: number } | undefined>;
+  /** The job: the GitHub App form to serve, and the state GitHub must send back with its code. */
+  putGitHubManifest(manifest: SetupGitHubManifest): Promise<void>;
+  /** The page: the form waiting to be served, or undefined. */
+  getGitHubManifest(): Promise<SetupGitHubManifest | undefined>;
+  /** The job: the form is no longer awaited. */
+  deleteGitHubManifest(): Promise<void>;
+  /** The page: the code GitHub sent back for this state. */
+  putGitHubCode(state: string, code: string): Promise<void>;
+  /** The job: that code, deleted as it is read; undefined while there is none. */
+  takeGitHubCode(state: string): Promise<string | undefined>;
 }
+
+/** The GitHub App form, rendered by the job with GITHUB_NONCE_PLACEHOLDER where its script's nonce
+ * goes; the page puts a fresh nonce there each time it serves it. */
+export interface SetupGitHubManifest { state: string; html: string }
 
 const partition = (env: string) => `install#${env}`;
 const expiry = (now: number) => String(Math.floor(now / 1000) + SETUP_ITEM_TTL_SECONDS);
@@ -153,6 +172,30 @@ export function dynamoSetupStore(input: { client: Pick<DynamoDBClient, "send">; 
       const expiresAt = Number(removed?.tokenExpiresAt?.N);
       return sealed === undefined || !(expiresAt > now()) ? undefined : { sealed, expiresAt };
     },
+    async putGitHubManifest(manifest) {
+      await client.send(new PutItemCommand({
+        TableName: table,
+        // Kept as long as the job may wait on it; the job deletes it once the code is in.
+        Item: { pk, sk: { S: "github-manifest" }, state: { S: manifest.state }, html: { S: manifest.html }, expiresAt: { N: String(Math.floor(now() / 1000) + 8 * 60 * 60) } },
+      }));
+    },
+    async getGitHubManifest() {
+      const item = (await client.send(new GetItemCommand({ TableName: table, Key: { pk, sk: { S: "github-manifest" } }, ConsistentRead: true }))).Item;
+      const state = item?.state?.S;
+      const html = item?.html?.S;
+      return state === undefined || html === undefined ? undefined : { state, html };
+    },
+    async deleteGitHubManifest() {
+      await take("github-manifest");
+    },
+    async putGitHubCode(state, code) {
+      await client.send(new PutItemCommand({
+        TableName: table, Item: { pk, sk: { S: `github-code#${state}` }, code: { S: code }, expiresAt: { N: expiry(now()) } },
+      }));
+    },
+    async takeGitHubCode(state) {
+      return (await take(`github-code#${state}`))?.code?.S;
+    },
   };
 }
 
@@ -161,6 +204,8 @@ export function memorySetupStore(now: () => number = Date.now): SetupStore & { a
   let state: StoredSetupState | undefined;
   const sessions = new Map<string, SetupSession>();
   let adminToken: { sealed: string; expiresAt: number } | undefined;
+  let githubManifest: SetupGitHubManifest | undefined;
+  const githubCodes = new Map<string, string>();
   const answers = new Map<string, SetupAnswer>();
   const verdicts = new Map<string, AnswerReply>();
   let close = false;
@@ -199,6 +244,15 @@ export function memorySetupStore(now: () => number = Date.now): SetupStore & { a
       return session === undefined || session.expiresAt <= now() ? undefined : session;
     },
     async putAdminToken(sealed, expiresAt) { adminToken = { sealed, expiresAt }; },
+    async putGitHubManifest(manifest) { githubManifest = manifest; },
+    async getGitHubManifest() { return githubManifest; },
+    async deleteGitHubManifest() { githubManifest = undefined; },
+    async putGitHubCode(state, code) { githubCodes.set(state, code); },
+    async takeGitHubCode(state) {
+      const code = githubCodes.get(state);
+      githubCodes.delete(state);
+      return code;
+    },
     async takeAdminToken() {
       const taken = adminToken;
       adminToken = undefined;

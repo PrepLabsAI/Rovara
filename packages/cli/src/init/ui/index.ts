@@ -15,8 +15,8 @@ import { minutesText, totalMinutes, type JourneyPhaseId } from "./journey.js";
 import { browserPrompter } from "./prompter.js";
 import type { WizardCommand, WizardFailure, WizardPhase, WizardPlan, WizardResume } from "./protocol.js";
 import { startHubRelay } from "./relay.js";
-import { startWizardServer, type WizardServer } from "./server.js";
-import type { SetupStore } from "./setup-store.js";
+import { GITHUB_CALLBACK_PATH, GITHUB_START_PATH, startWizardServer, type WizardServer } from "./server.js";
+import { GITHUB_NONCE_PLACEHOLDER, type SetupStore } from "./setup-store.js";
 import { createWizardHub, isShowableLink, type WizardHub } from "./state.js";
 
 /** Q3: how long a question, or a page button, may wait with no page connected before the terminal
@@ -168,14 +168,42 @@ export function startCloudInstallWizard(input: {
   return wizardOn(hub, {
     url: input.url,
     ...(input.logPath === undefined ? {} : { logPath: input.logPath }),
-    manifestHost: async () => {
-      throw agentXError("CONFIG_INVALID", "the setup page cannot make the GitHub App yet; pass --github-app-id, --github-installation-id and --github-private-key-file for an app made beforehand");
-    },
+    manifestHost: cloudManifestHost({ store: input.store, url: input.url, pollMs: input.timing?.pollMs ?? GITHUB_CODE_POLL_MS }),
     async close() {
       hub.close();
       await relay.stop();
     },
   });
+}
+
+const GITHUB_CODE_POLL_MS = 2_000;
+
+/** FR-030 in the cloud: the GitHub App's form is served by the setup page, from the table, and
+ * GitHub's redirect back lands there too. The job waits for the code as long as the step lets it
+ * (no 15-minute limit: the person may come back to the page much later). */
+export function cloudManifestHost(input: { store: SetupStore; url: string; pollMs: number }): OpenManifestHost {
+  return async ({ state, page }) => {
+    const redirectUrl = `${input.url}${GITHUB_CALLBACK_PATH}`;
+    await input.store.putGitHubManifest({ state, html: page(redirectUrl, GITHUB_NONCE_PLACEHOLDER) });
+    let closed = false;
+    const code = (async () => {
+      for (;;) {
+        if (closed) throw agentXError("OPERATION_INTERRUPTED", "the GitHub app step ended before GitHub sent its code");
+        const sent = await input.store.takeGitHubCode(state);
+        if (sent !== undefined) return sent;
+        await new Promise((resolve) => setTimeout(resolve, input.pollMs));
+      }
+    })();
+    // A step that ends another way never reads it: nothing is left unhandled.
+    code.catch(() => undefined);
+    return {
+      port: 0, startUrl: `${input.url}${GITHUB_START_PATH}`, redirectUrl, code,
+      close() {
+        closed = true;
+        void input.store.deleteGitHubManifest().catch(() => undefined);
+      },
+    };
+  };
 }
 
 /** The wizard around a hub, whichever way its page is served. */

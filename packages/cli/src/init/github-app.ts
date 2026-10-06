@@ -232,7 +232,7 @@ async function createWithManifest(context: InitContext, api: GitHubApi, show: (c
   const listener = await openHost({
     state,
     page: (redirectUrl, nonce) => manifestFormPage({ actionUrl, manifest: githubAppManifest({ appName, redirectUrl }), ...(nonce === undefined ? {} : { nonce }) }),
-    timeoutMs: GITHUB_WAIT_MS,
+    timeoutMs: context.githubWaitMs ?? GITHUB_WAIT_MS,
   });
   try {
     context.write(`Create the GitHub App "${appName}" for ${account}: GitHub opens with everything filled in; press Create GitHub App.`);
@@ -372,7 +372,7 @@ async function runGitHubAppStep(context: InitContext, progress: ProgressHandle, 
   }
 
   const installUrl = `https://github.com/apps/${app.slug}/installations/new`;
-  const deadline = context.now() + GITHUB_WAIT_MS;
+  const deadline = context.now() + (context.githubWaitMs ?? GITHUB_WAIT_MS);
   let installationId = context.preMadeGitHubApp?.installationId;
   if (installationId !== undefined) {
     const listed = await api.listInstallations(jwtFor(app.appId, privateKey));
