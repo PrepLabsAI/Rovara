@@ -2,7 +2,7 @@
 
 Rovara has no command that moves an environment. Moving is reinstalling: you install a new
 environment in the new account, register your projects there again, and then remove the old one.
-This is a deliberate decision, tracked in [issue #67](https://github.com/PrepLabsAI/Rovera/issues/67).
+This is a deliberate decision, tracked in [issue #67](https://github.com/PrepLabsAI/Rovara/issues/67).
 
 ## 1. Keep a copy of your project files
 

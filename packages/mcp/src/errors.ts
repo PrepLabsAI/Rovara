@@ -85,8 +85,10 @@ export function isMeaningfulCode(code: string | undefined): boolean {
   return code !== undefined && (PASSED_THROUGH.has(code) || BUSY.has(code) || INVALID.has(code) || code === "AUTH_REQUIRED");
 }
 
-// Ruling F16: the placeholder "<your AgentX URL>" is kept whole.
-const SIGN_IN = /\brun (npx @charterarc\/agentx login (?:<[^>]+>|\S+))/;
+const escapeRegExp = (text: string) => text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// Ruling F16: the placeholder "<your AgentX URL>" is kept whole. Built from CLI_PACKAGE_NAME so it
+// matches the sign-in command the CLI writes.
+const SIGN_IN = new RegExp(`\\brun (npx ${escapeRegExp(CLI_PACKAGE_NAME)} login (?:<[^>]+>|\\S+))`);
 
 /** The exact sign-in command from a message, else the session's own. */
 export function signInStep(message: string, fallback: string): string {

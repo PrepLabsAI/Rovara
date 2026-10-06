@@ -28,13 +28,13 @@ describe("the guides (FR-054)", () => {
     const positions = order.map((text) => byHand.indexOf(text));
     expect(positions.every((position) => position >= 0)).toBe(true);
     expect([...positions].sort((a, b) => a - b)).toEqual(positions);
-    expect(guide).toContain("https://github.com/PrepLabsAI/AgentX/issues/66");
+    expect(guide).toContain("https://github.com/PrepLabsAI/Rovara/issues/66");
   });
 
   it("has an install guide for each path, and a move guide that links #67", () => {
     const install = read("docs/install.md");
     for (const heading of ["## With published templates (recommended)", "## With cdk", "## Through your platform team (export)"]) expect(install).toContain(heading);
-    expect(read("docs/move-account.md")).toContain("https://github.com/PrepLabsAI/AgentX/issues/67");
+    expect(read("docs/move-account.md")).toContain("https://github.com/PrepLabsAI/Rovara/issues/67");
   });
 
   it("tells the release test owner that each ECR repository needs a lifecycle policy for the rt- images (final review M3)", () => {

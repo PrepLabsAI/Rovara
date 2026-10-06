@@ -247,7 +247,7 @@ describe("installMcp (US7 scenarios 1 and 2)", () => {
 
   it("prints the command to run when Claude Code is not installed", async () => {
     const run = vi.fn(async () => { throw Object.assign(new Error("spawn claude ENOENT"), { code: "ENOENT" }); });
-    await expect(installMcp("claude-code", { print: false }, { home: await home(), run, version: "0.4.0" })).rejects.toThrow(/claude mcp add --scope user agentx -- npx -y @charterarc\/agentx@0\.4\.0 mcp/);
+    await expect(installMcp("claude-code", { print: false }, { home: await home(), run, version: "0.4.0" })).rejects.toThrow(/claude mcp add --scope user agentx -- npx -y @preplabsai\/rovara-code@0\.4\.0 mcp/);
   });
 
   it("with --print, only prints the entry and changes nothing", async () => {

@@ -214,14 +214,14 @@ Every turn leaves a record of the tools called and why. A <strong>Details</stron
 <tr>
 <td width="50%">
 
-**Slack service** (`packages/slack-service`, `packages/orchestrator`) — An ingress Lambda verifies
+**Slack service** (`packages/slack-service`, `packages/orchestrator`): An ingress Lambda verifies
 Slack's signature and queues the request. An ECS Fargate service runs the Pi orchestrator for the
 thread, applies the action gate, and posts the reply. [Working in Slack](docs/slack.md)
 
 </td>
 <td width="50%">
 
-**Control plane** (`packages/broker`) — The API behind everything: projects and revisions,
+**Control plane** (`packages/broker`): The API behind everything: projects and revisions,
 workspaces, operations, callbacks, pull requests, CodeBuild gates and turn records, with state in
 DynamoDB. [Production architecture](docs/architecture-production.md)
 
@@ -230,7 +230,7 @@ DynamoDB. [Production architecture](docs/architecture-production.md)
 <tr>
 <td>
 
-**Coding worker** (`packages/worker`) — Runs the Pi coding agent on an EC2 instance with an
+**Coding worker** (`packages/worker`): Runs the Pi coding agent on an EC2 instance with an
 encrypted EBS workspace. Loads each repository's `AGENTS.md` or `CLAUDE.md`, runs the
 verification extension that produces the check report, and records usage for every task.
 [How Rovara works](docs/how-it-works.md)
@@ -238,7 +238,7 @@ verification extension that produces the check report, and records usage for eve
 </td>
 <td>
 
-**Session lifecycle** — The dispatcher signs each invocation; the session manager and Step
+**Session lifecycle**: The dispatcher signs each invocation; the session manager and Step
 Functions provision, resume and delete workers; the idle reaper stops compute and keeps the volume;
 the reconciler cleans up stuck cancels.
 
@@ -247,7 +247,7 @@ the reconciler cleans up stuck cancels.
 <tr>
 <td>
 
-**Connector gateway** (`packages/gateway`) — One definition per connector type (GitHub, Linear,
+**Connector gateway** (`packages/gateway`): One definition per connector type (GitHub, Linear,
 Jira, Asana and generic MCP). Discovers vendor tools, offers only approved ones, fills
 server-bound arguments and keeps credentials out of the model's reach.
 [Connector credentials](docs/slack.md#connector-credentials)
@@ -255,7 +255,7 @@ server-bound arguments and keeps credentials out of the model's reach.
 </td>
 <td>
 
-**Developer MCP server** (`packages/mcp`) — `agentx mcp` lets a signed-in developer's AI tool list
+**Developer MCP server** (`packages/mcp`): `agentx mcp` lets a signed-in developer's AI tool list
 projects, start and continue tasks, share them to Slack and open pull requests.
 [Use Rovara from your AI tool](docs/mcp-install.md)
 
@@ -264,14 +264,14 @@ projects, start and continue tasks, share them to Slack and open pull requests.
 <tr>
 <td>
 
-**CLI and installer** (`packages/cli`) — `agentx init`, `upgrade`, `config`, `doctor`, `destroy`,
+**CLI and installer** (`packages/cli`): `agentx init`, `upgrade`, `config`, `doctor`, `destroy`,
 project, channel and connector setup, developer sign-in, and every admin command.
 [Administration client](docs/administration.md)
 
 </td>
 <td>
 
-**Infrastructure** (`infra`, `packages/model-runtime`, `packages/contracts`) — CDK stacks and
+**Infrastructure** (`infra`, `packages/model-runtime`, `packages/contracts`): CDK stacks and
 published CloudFormation templates, the model catalog and provider settings, and the shared
 contracts every component validates against.
 
