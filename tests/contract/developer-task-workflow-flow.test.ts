@@ -10,7 +10,7 @@ import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task
 describe("native developer task workflow", () => {
   it("launches one feedback critic from current collection, limits its reads, and stores only an advisory report", async () => {
     const currentFeedback = { pullRequest: { number: 7, url: "https://github.com/example/demo/pull/7", state: "open" as const,
-      headBranch: "feature", baseBranch: "main", headCommit: "a".repeat(40), title: "Fix retry", body: "" }, comments: [], threads: [] };
+      headBranch: "feature", baseBranch: "main", headCommit: "a".repeat(40), headTreeSha: "b".repeat(40), title: "Fix retry", body: "" }, comments: [], threads: [] };
     const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getPullRequestFeedback: async () => currentFeedback } } });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
       requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true,
@@ -35,11 +35,11 @@ describe("native developer task workflow", () => {
       decisions: [{ requestId: randomUUID(), workflowRevision: 1, decision: "APPROVE", actorId: task.ownerKey, actorRole: "TASK_OWNER", reason: "Approved plan", artifactDigest: planSha, at: now }],
       verification: { candidateDigest: candidate.digest, producer: "broker", environmentId: workspaceId, recordedAt: now, results: [{ checkId: "unit", status: "PASS" }] },
       reviews: ["CRITIC", "SECURITY"].map(role => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now })),
-      pullRequests: [{ repositoryId: "demo", number: 7, url: "https://github.com/example/demo/pull/7", candidateDigest: candidate.digest, required: true, state: "OPEN" }],
+      pullRequests: [{ repositoryId: "demo", number: 7, url: "https://github.com/example/demo/pull/7", headSha: "a".repeat(40), candidateDigest: candidate.digest, required: true, state: "OPEN" }],
     });
     const commentSetDigest = createHash("sha256").update("[]").digest("hex");
     const bundle = WorkflowFeedbackBundleSchema.parse({ schemaVersion: 1, taskId, repositoryId: "demo", number: 7,
-      headSha: "a".repeat(40), candidateDigest: candidate.digest, commentSetDigest, producer: "agentx-github-reconciler", version: "1", recordedAt: now,
+      headSha: "a".repeat(40), headTreeSha: "b".repeat(40), candidateDigest: candidate.digest, commentSetDigest, producer: "agentx-github-reconciler", version: "1", recordedAt: now,
       comments: [], sourceDeliveryIds: ["delivery-test"] });
     const bundleBytes = JSON.stringify(bundle);
     const bundleDigest = createHash("sha256").update(bundleBytes).digest("hex");
@@ -258,7 +258,10 @@ describe("native developer task workflow", () => {
   });
 
   it("stores a control-plane-digested plan and only queues implementation after owner approval", async () => {
-    const harness = await createDeveloperTaskBroker();
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getPullRequestFeedback: async (_url: string, number: number) => ({
+      pullRequest: { number, url: "https://github.com/example/demo/pull/42", state: "open", headCommit: "d".repeat(40), headTreeSha: "b".repeat(40) },
+      comments: [], threads: [],
+    }) } } });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
       requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true,
     });
@@ -326,6 +329,10 @@ describe("native developer task workflow", () => {
     expect(pullRequest.status).toBe(200);
     expect(pullRequest.body).toHaveProperty("operationId");
     const publication = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.id === pullRequest.body.operationId) as { id?: string; publication?: { headBranch?: string } } | undefined;
+    harness.db.set({ pk: `WORKSPACE#${workspaceId}`, sk: "PULL_REQUEST#demo#000000000042", entityType: "PULL_REQUEST", workspaceId,
+      repository: "demo", repositoryUrl: "https://github.com/example/demo.git", number: 42, url: "https://github.com/example/demo/pull/42", state: "open", headBranch: publication?.publication?.headBranch,
+      baseBranch: "main", expectedHeadCommit: "d".repeat(40), title: "Fix retry", body: "", createdByOperationId: String(publication?.id), updatedAt: new Date().toISOString() });
+    expect(harness.db.get(`WORKSPACE#${workspaceId}`, "PULL_REQUEST#demo#000000000042")).toMatchObject({ expectedHeadCommit: "d".repeat(40), url: "https://github.com/example/demo/pull/42" });
     await harness.finish(workspaceId, String(publication?.id), "SUCCEEDED", { result: {
       repository: "demo", number: 42, url: "https://github.com/example/demo/pull/42",
       headBranch: publication?.publication?.headBranch, baseBranch: "main", commit: "d".repeat(40), checks: [], reconciled: false,
@@ -336,6 +343,7 @@ describe("native developer task workflow", () => {
     });
     const waitingForMerge = (await harness.dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body.task as { workflow: { stage: string; state: string; pullRequests?: Array<{ repositoryId: string; number: number; state: string }> } };
     expect(waitingForMerge.workflow).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", pullRequests: [{ repositoryId: "demo", number: 42, state: "UNKNOWN" }] });
+    expect((waitingForMerge.workflow.pullRequests?.[0] as { headSha?: string } | undefined)?.headSha).toBe("d".repeat(40));
 
     const taskRecord = harness.db.get(`DEVTASK#${task.taskId}`, "META")!;
     const feedbackWorkflow = requestWorkflowFeedback(taskRecord.workflow, {

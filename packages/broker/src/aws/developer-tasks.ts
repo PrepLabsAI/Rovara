@@ -318,6 +318,9 @@ export async function getWorkflowFeedbackReview(deps: DeveloperTaskRouteDependen
   return {
     taskId, title: task.title, revision: workflow.revision, status: review.status,
     workflowStatus: workflow.state, workflowStage: workflow.stage, ...(workflow.outcome === undefined ? {} : { workflowOutcome: workflow.outcome }),
+    ...(workflow.state === "COMPLETE" && (workflow.stage === "MERGED" || workflow.stage === "CLOSED")
+      ? { canvasCleanupStatus: workflow.canvasCloseout?.status === "COMPLETE" ? "COMPLETE" : "RETRYING" }
+      : {}),
     ...(workflow.blockReason === undefined ? {} : { blockReason: workflow.blockReason }),
     ...(activeOperation === undefined ? {} : { activeOperation }), nextAction,
     ...(decision === undefined ? {} : { decision: {

@@ -203,14 +203,21 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
         || feedback.comments.some(comment => !comment.url.startsWith(`${pr.url}#`))) throw new GithubWebhookRefusal("current GitHub feedback scope mismatch");
       reads.push({ pr, feedback });
     }
+    const headMatchesCandidate = ({ pr, feedback }: typeof reads[number]): boolean => pr.headSha !== undefined
+      && pr.headSha === feedback.pullRequest.headCommit
+      && current.candidate!.repositories.find(repo => repo.repositoryId === pr.repositoryId)?.treeSha === feedback.pullRequest.headTreeSha;
+    const changedHead = reads.some(read => (read.feedback.pullRequest.state === "open" || read.feedback.pullRequest.state === "merged")
+      && !headMatchesCandidate(read));
     let next = current;
     for (const { pr, feedback } of reads) {
       const state = feedback.pullRequest.state === "merged" ? "MERGED" : feedback.pullRequest.state === "closed" ? "CLOSED" : "OPEN";
+      // A merge only completes this candidate-bound task when the merged PR still points at its checked publication.
+      // Keep mismatched merged PRs in their prior workflow state so the task cannot become terminally complete.
+      if (state === "MERGED" && !headMatchesCandidate({ pr, feedback })) continue;
       if (pr.state !== state) next = observeWorkflowPullRequest(next, { repositoryId: pr.repositoryId, number: pr.number,
         candidateDigest: pr.candidateDigest, state, source: "GITHUB_API", observedAt: input.now }, input.now);
     }
     const open = reads.filter(r => r.feedback.pullRequest.state === "open");
-    const changedHead = open.some(({ pr, feedback }) => !current.candidate!.repositories.some(repo => repo.repositoryId === pr.repositoryId && repo.commitSha === feedback.pullRequest.headCommit));
     let reopenedFeedback = false;
     if (changedHead || open.length === 0) {
       if (!current.feedbackReview && !current.feedback && next === current
@@ -219,7 +226,7 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
       const history = [...(current.feedbackReviewHistory ?? [])];
       if (previousReport && !history.some(r => r.sha256 === previousReport.sha256)) history.push(previousReport);
       next = WorkflowSnapshotSchema.parse({ ...next, revision: next.revision + 1,
-        ...(changedHead ? { state: "BLOCKED", blockReason: "GitHub PR head changed; candidate verification and feedback review must be refreshed" } : {}),
+        ...(changedHead ? { state: "BLOCKED", blockReason: "GitHub PR head no longer matches the checked candidate; completion and feedback actions are blocked" } : {}),
         feedback: undefined, feedbackReview: undefined, feedbackReviewHistory: history, updatedAt: input.now });
     } else {
       const observations: WorkflowFeedbackThreadObservation[] = [];
@@ -251,7 +258,8 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
         const selected = comments.filter(c => eligible.has(c.id)).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
         const normalizedComments = WorkflowFeedbackBundleCommentsSchema.parse(selected);
         const normalized = WorkflowFeedbackBundleSchema.parse({ schemaVersion: 1, taskId: current.taskId, repositoryId: pr.repositoryId, number: pr.number,
-          headSha: feedback.pullRequest.headCommit, candidateDigest: current.candidate!.digest, commentSetDigest: digest(JSON.stringify(normalizedComments)),
+          headSha: feedback.pullRequest.headCommit, headTreeSha: feedback.pullRequest.headTreeSha,
+          candidateDigest: current.candidate!.digest, commentSetDigest: digest(JSON.stringify(normalizedComments)),
           producer: "agentx-github-reconciler", version: "1", recordedAt: input.now, comments: normalizedComments, sourceDeliveryIds: [input.deliveryId] });
         return WorkflowFeedbackBundleSchema.parse({ ...normalized, commentSetDigest: digest(JSON.stringify(normalized.comments)) });
       });
@@ -303,7 +311,8 @@ export async function verifyTaskPullRequestFeedbackCurrent(input: Pick<Reconcile
     const index = await findLinkedGithubWorkflowPullRequest({ ...input, repositoryFullName: fullName, number: pr.number });
     if (!index || index.taskId !== linked.taskId || index.repositoryId !== pr.repositoryId || index.url !== pr.url || index.candidateDigest !== approval.candidateDigest) return false;
     const feedback = await input.getCurrentFeedback(url, pr.number);
-    if (feedback.pullRequest.state !== "open" || feedback.pullRequest.headCommit !== workflow.candidate.repositories.find(repo => repo.repositoryId === pr.repositoryId)?.commitSha
+    if (feedback.pullRequest.state !== "open" || feedback.pullRequest.headCommit !== pr.headSha
+      || feedback.pullRequest.headTreeSha !== workflow.candidate.repositories.find(repo => repo.repositoryId === pr.repositoryId)?.treeSha
       || feedback.pullRequest.url !== pr.url || feedback.comments.some(comment => !comment.url.startsWith(`${pr.url}#`))) return false;
     const comments = feedback.comments.map(comment => ({ ...comment, bodyDigest: digest(comment.body), bodyBytes: Buffer.byteLength(comment.body, "utf8") }));
     const eligible = new Set(comments.filter(comment => comment.kind !== "REVIEW_COMMENT").map(comment => comment.id));
@@ -330,6 +339,7 @@ export async function verifyTaskPullRequestFeedbackCurrent(input: Pick<Reconcile
     const normalizedComments = WorkflowFeedbackBundleCommentsSchema.parse(selected);
     const ref = review.bundleRefs.find(bundle => bundle.repositoryId === pr.repositoryId && bundle.number === pr.number);
     if (!ref || ref.candidateDigest !== approval.candidateDigest || ref.headSha !== feedback.pullRequest.headCommit
+      || ref.headTreeSha !== feedback.pullRequest.headTreeSha
       || ref.commentSetDigest !== digest(JSON.stringify(normalizedComments))) return false;
   }
   observations.sort((a, b) => a.repositoryId.localeCompare(b.repositoryId) || a.number - b.number || a.threadId.localeCompare(b.threadId));

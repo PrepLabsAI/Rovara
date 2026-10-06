@@ -39,7 +39,7 @@ describe("GitHub webhook signature verification", () => {
       candidate,
       verification: { candidateDigest: candidate.digest, producer: "agentx", environmentId: "ci", recordedAt: "2026-10-05T12:01:00.000Z", results: [{ checkId: "unit", status: "PASS" as const }] },
       reviews: ["CRITIC", "SECURITY"].map((role) => ({ operationId: "11111111-1111-4111-8111-111111111111", candidateDigest: candidate.digest, role: role as "CRITIC" | "SECURITY", provider: "reviewer", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: "2026-10-05T12:02:00.000Z" })),
-      pullRequests: [{ repositoryId: "demo", number: 42, url: "https://github.com/acme/demo/pull/42", candidateDigest: candidate.digest, required: true, state: "UNKNOWN" as const }],
+      pullRequests: [{ repositoryId: "demo", number: 42, url: "https://github.com/acme/demo/pull/42", headSha: "a".repeat(40), candidateDigest: candidate.digest, required: true, state: "UNKNOWN" as const }],
     };
     const index = { pk: "GITHUB_PR#acme/demo", sk: "PR#0000000042", entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: "acme/demo", repositoryId: "demo", number: 42, url: "https://github.com/acme/demo/pull/42", taskId, workspaceId: "workspace-1", candidateDigest: candidate.digest };
     const saved: unknown[] = [];
@@ -396,11 +396,14 @@ describe("task-wide current PR feedback reconciliation", () => {
     let workflow: WorkflowSnapshot = WorkflowSnapshotSchema.parse({ ...createWorkflowSnapshot({ taskId, ownerId: "a".repeat(64), now }), candidate,
       stage: "WAIT_FOR_MERGE", state: "WAITING", verification: { candidateDigest: candidate.digest, producer: "broker", environmentId: "fixture", recordedAt: now, results: [{ checkId: "unit", status: "PASS" }] },
       reviews: ["CRITIC", "SECURITY"].map(role => ({ operationId: taskId, candidateDigest: candidate.digest, role, provider: "fixture", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now })),
-      pullRequests: ["api", "ui"].map((repositoryId, i) => ({ repositoryId, number: i + 1, url: `https://github.com/acme/${repositoryId}/pull/${i + 1}`, candidateDigest: candidate.digest, required: true, state: i ? "UNKNOWN" : "OPEN" })) });
+      pullRequests: ["api", "ui"].map((repositoryId, i) => ({ repositoryId, number: i + 1, url: `https://github.com/acme/${repositoryId}/pull/${i + 1}`, headSha: "a".repeat(40), candidateDigest: candidate.digest, required: true, state: i ? "UNKNOWN" : "OPEN" })) });
     const rows = new Map(["api", "ui"].map((repositoryId, i) => [`GITHUB_PR#acme/${repositoryId}`, { entityType: "GITHUB_WORKFLOW_PR", repositoryFullName: `acme/${repositoryId}`, repositoryId, number: i + 1, url: `https://github.com/acme/${repositoryId}/pull/${i + 1}`, taskId, workspaceId: "workspace", candidateDigest: candidate.digest }]));
     let currentBody = "current authoritative body";
     let inlineIds = ["review_comment:4"];
     let resolved = true;
+    let publishedHeadSha = "a".repeat(40);
+    let publishedHeadTreeSha = "b".repeat(40);
+    let publishedState: "open" | "merged" = "open";
     let conflict = false;
     let wrongScope = false;
     const artifacts: Array<{ bundle: WorkflowFeedbackBundle; bytes: string }> = [];
@@ -417,7 +420,7 @@ describe("task-wide current PR feedback reconciliation", () => {
         reads.push(url);
         const repo = number === 1 ? "api" : "ui";
         const comment = (id: string): GitHubPullRequestFeedback["comments"][number] => ({ id, kind: id.startsWith("review_comment") ? "REVIEW_COMMENT" : id.startsWith("review:") ? "REVIEW" : "DISCUSSION", author: "reviewer", url: `https://github.com/acme/${repo}/pull/${number}#comment`, updatedAt: now, body: currentBody, ...(id.startsWith("review_comment") ? { threadId: "thread-1" } : {}) });
-        return { pullRequest: { number, url: `https://github.com/${wrongScope ? "other" : "acme"}/${repo}/pull/${number}`, state: "open", headCommit: "a".repeat(40) },
+        return { pullRequest: { number, url: `https://github.com/${wrongScope ? "other" : "acme"}/${repo}/pull/${number}`, state: publishedState, headCommit: publishedHeadSha, headTreeSha: publishedHeadTreeSha },
           comments: number === 1 ? [comment("review:1"), ...inlineIds.map(comment)] : [comment("discussion:3")], threads: number === 1 ? [{ id: "thread-1", resolved, commentIds: inlineIds }] : [] };
       },
       persistBundle: async (bundle, bytes: string, sha256: string) => { artifacts.push({ bundle, bytes }); return `tasks/${taskId}/feedback/${sha256}.json`; },
@@ -427,7 +430,10 @@ describe("task-wide current PR feedback reconciliation", () => {
         workflow = next;
       }, measure: (entry: Record<string, unknown>) => measures.push(entry), now,
     };
-    return { module, input, artifacts, reads, measures, workflow: () => workflow, setWorkflow: (next: WorkflowSnapshot) => { workflow = next; }, edit: (body: string) => { currentBody = body; }, addInline: () => { inlineIds.push("review_comment:5"); }, reopen: () => { resolved = false; }, deleteInline: () => { inlineIds = []; }, conflict: () => { conflict = true; }, wrongScope: () => { wrongScope = true; } };
+    return { module, input, artifacts, reads, measures, workflow: () => workflow, setWorkflow: (next: WorkflowSnapshot) => { workflow = next; },
+      setPublishedHeadSha: (sha: string) => { publishedHeadSha = sha; workflow = WorkflowSnapshotSchema.parse({ ...workflow, pullRequests: workflow.pullRequests?.map(pr => ({ ...pr, headSha: sha })) }); },
+      setRemotePr: (state: "open" | "merged", headSha: string, headTreeSha: string) => { publishedState = state; publishedHeadSha = headSha; publishedHeadTreeSha = headTreeSha; },
+      edit: (body: string) => { currentBody = body; }, addInline: () => { inlineIds.push("review_comment:5"); }, reopen: () => { resolved = false; }, deleteInline: () => { inlineIds = []; }, conflict: () => { conflict = true; }, wrongScope: () => { wrongScope = true; } };
   }
   it("persists both current PR bundles and ignores duplicate or delayed event bodies", async () => {
     const f = await fixture();
@@ -443,6 +449,21 @@ describe("task-wide current PR feedback reconciliation", () => {
     f.edit("edited current body");
     expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
     expect(f.artifacts.at(-1)?.bundle.comments[0].body).toBe("edited current body");
+  });
+  it("accepts a publication commit different from the checked workspace commit when GitHub confirms the exact candidate tree", async () => {
+    const f = await fixture();
+    f.setPublishedHeadSha("d".repeat(40));
+    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
+    expect(f.workflow().state).toBe("WAITING");
+    expect(f.workflow().feedbackReview?.status).toBe("COLLECTING");
+    expect(f.artifacts[0]?.bundle).toMatchObject({ headSha: "d".repeat(40), headTreeSha: "b".repeat(40), candidateDigest: f.workflow().candidate?.digest });
+  });
+  it("does not complete when a linked PR changes candidate before it is merged", async () => {
+    const f = await fixture();
+    f.setRemotePr("merged", "d".repeat(40), "c".repeat(40));
+    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
+    expect(f.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED" });
+    expect(f.workflow().pullRequests?.[0]?.state).not.toBe("MERGED");
   });
   it("includes new activity on a resolved thread, reopened threads, and observes deletions", async () => {
     const f = await fixture(); expect(f.module.reconcileTaskPullRequestFeedback).toBeTypeOf("function");

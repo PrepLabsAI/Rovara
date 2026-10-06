@@ -259,11 +259,11 @@ describe("native task workflow contracts", () => {
       ],
     };
     const first = registerWorkflowPullRequest(current, {
-      repositoryId: "payments-api", number: 11, url: "https://github.com/acme/api/pull/11", candidateDigest: candidate.digest, required: true,
+      repositoryId: "payments-api", number: 11, url: "https://github.com/acme/api/pull/11", headSha: "d".repeat(40), candidateDigest: candidate.digest, required: true,
     }, "2026-10-05T12:04:00.000Z");
     expect(first).toMatchObject({ stage: "PULL_REQUEST", state: "READY", pullRequests: [{ repositoryId: "payments-api", state: "UNKNOWN" }] });
     const completeSet = registerWorkflowPullRequest(first, {
-      repositoryId: "payments-ui", number: 12, url: "https://github.com/acme/ui/pull/12", candidateDigest: candidate.digest, required: true,
+      repositoryId: "payments-ui", number: 12, url: "https://github.com/acme/ui/pull/12", headSha: "e".repeat(40), candidateDigest: candidate.digest, required: true,
     }, "2026-10-05T12:05:00.000Z");
     expect(completeSet).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", pullRequests: [{ repositoryId: "payments-api" }, { repositoryId: "payments-ui" }] });
     const oneMerged = observeWorkflowPullRequest(completeSet, { repositoryId: "payments-api", number: 11, candidateDigest: candidate.digest, state: "MERGED", source: "GITHUB_API", observedAt: "2026-10-05T12:06:00.000Z" }, "2026-10-05T12:06:00.000Z");
@@ -390,7 +390,7 @@ describe("immutable multi-PR feedback reviews", () => {
     ]);
     const bundleRefs = candidate.repositories.map((repo, index) => ({
       schemaVersion: 1 as const, taskId, repositoryId: repo.repositoryId, number: index + 1,
-      headSha: repo.commitSha, candidateDigest: candidate.digest,
+      headSha: "d".repeat(40), headTreeSha: repo.treeSha, candidateDigest: candidate.digest,
       commentSetDigest: hash(index === 0 ? "c" : "d"), sha256: hash(index === 0 ? "e" : "f"),
       objectKey: `tasks/${taskId}/feedback/${hash(index === 0 ? "e" : "f")}.json`,
       producer: "github-reconciler", version: "1", recordedAt: now,
@@ -412,7 +412,7 @@ describe("immutable multi-PR feedback reviews", () => {
       stage: "WAIT_FOR_MERGE", state: "WAITING",
       verification: { candidateDigest: candidate.digest, producer: "broker", environmentId: "test", recordedAt: now, results: [{ checkId: "unit", status: "PASS" }] },
       reviews: ["CRITIC", "SECURITY"].map(role => ({ operationId: uuid, candidateDigest: candidate.digest, role, provider: "scripted", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now })),
-      pullRequests: bundleRefs.map(b => ({ repositoryId: b.repositoryId, number: b.number, candidateDigest: b.candidateDigest, required: true, state: "OPEN", url: `https://github.com/acme/${b.repositoryId}/pull/${b.number}` })),
+      pullRequests: bundleRefs.map(b => ({ repositoryId: b.repositoryId, number: b.number, headSha: b.headSha, candidateDigest: b.candidateDigest, required: true, state: "OPEN", url: `https://github.com/acme/${b.repositoryId}/pull/${b.number}` })),
     });
     const request = { requestId: uuid, expectedRevision: current.revision + 1, reviewDigest: reviewRef.sha256,
       proposalDigest: reviewRef.proposalDigest, bundleDigests: reviewRef.bundleDigests, selectedFindingIds: ["finding-0"], decision: "APPROVE" as const };
@@ -531,7 +531,7 @@ describe("immutable multi-PR feedback reviews", () => {
   it("retains two exact heads and grouped source IDs while excluding full bodies from snapshot references", () => {
     const { current, bundleRefs, reviewRef } = fixture();
     const reviewed = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef }, now);
-    expect(reviewed.feedbackReview?.bundleRefs.map(b => b.headSha)).toEqual(["a".repeat(40), "b".repeat(40)]);
+    expect(reviewed.feedbackReview?.bundleRefs.map(b => b.headSha)).toEqual(["d".repeat(40), "d".repeat(40)]);
     expect(reviewed.feedbackReview?.reviewRef.findingRefs[0]?.commentIds).toEqual(["api-0", "api-1"]);
     expect(reviewed.feedbackReview?.bundleRefs[0]?.comments[0]?.threadId).toBe("thread-api");
     expect(JSON.stringify(reviewed)).not.toContain('"body":');
@@ -561,7 +561,7 @@ describe("immutable multi-PR feedback reviews", () => {
     const approved = decideWorkflowFeedbackFindings(reviewed, request, { actorId: ownerId, role: "TASK_OWNER" }, now);
     expect(approved).toMatchObject({ stage: "IMPLEMENT", state: "READY" });
     expect(approved.feedbackDecisions?.[0]).toMatchObject({ selectedFindingIds: ["finding-0"], selectedCommentIds: ["api-0", "api-1"], reviewDigest: reviewRef.sha256, proposalDigest: reviewRef.proposalDigest, actorId: ownerId });
-    expect(approved.feedbackDecisions?.[0]?.candidates).toEqual([{ repositoryId: "api", number: 1, headSha: "a".repeat(40), candidateDigest: current.candidate!.digest, commentSetDigest: hash("c"), bundleDigest: hash("e") }]);
+    expect(approved.feedbackDecisions?.[0]?.candidates).toEqual([{ repositoryId: "api", number: 1, headSha: "d".repeat(40), candidateDigest: current.candidate!.digest, commentSetDigest: hash("c"), bundleDigest: hash("e") }]);
     expect(approved.feedbackReview?.reviewRef.findingRefs).toHaveLength(2);
     expect(approved.pullRequests).toEqual(current.pullRequests);
     expect(() => decideWorkflowFeedbackFindings(approved, request, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();

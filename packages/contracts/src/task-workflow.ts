@@ -57,6 +57,9 @@ const WorkflowPullRequestSchema = z.object({
   repositoryId: z.string().trim().min(1).max(200),
   number: z.number().int().positive(),
   url: z.string().url().max(2048),
+  /** Exact GitHub head commit returned by the broker-verified publication callback. */
+  /** Present on newly published workflow PRs; absent only on pre-feature persisted snapshots. */
+  headSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
   candidateDigest: DigestSchema,
   required: z.boolean(),
   state: z.enum(["UNKNOWN", "OPEN", "CLOSED", "MERGED"]),
@@ -89,7 +92,9 @@ const FeedbackCommentRefSchema = z.object({
 }).strict();
 const WorkflowFeedbackBundleMetadataSchema = z.object({
   schemaVersion: z.literal(1), taskId: z.string().uuid(), repositoryId: z.string().trim().min(1).max(200),
-  number: z.number().int().positive(), headSha: z.string().regex(/^[a-f0-9]{40}$/), candidateDigest: DigestSchema,
+  number: z.number().int().positive(), headSha: z.string().regex(/^[a-f0-9]{40}$/),
+  /** GitHub's immutable tree for headSha; this maps a publication commit to the checked candidate tree. */
+  headTreeSha: z.string().regex(/^[a-f0-9]{40}$/).optional(), candidateDigest: DigestSchema,
   commentSetDigest: DigestSchema,
   producer: z.string().trim().min(1).max(120), version: z.string().trim().min(1).max(120), recordedAt: z.string().datetime(),
   comments: z.array(FeedbackCommentRefSchema).max(128),
@@ -633,9 +638,9 @@ export function recordExpectedWorkflowPullRequests(currentInput: unknown, pullRe
 }
 
 /** Adds each successfully created candidate PR; multi-repository workflows wait until the full candidate set exists. */
-export function registerWorkflowPullRequest(currentInput: unknown, pullRequestInput: Omit<WorkflowPullRequest, "state" | "observedAt">, now: string): WorkflowSnapshot {
+export function registerWorkflowPullRequest(currentInput: unknown, pullRequestInput: Omit<WorkflowPullRequest, "state" | "observedAt" | "headSha"> & { headSha: string }, now: string): WorkflowSnapshot {
   const current = validSnapshot(currentInput);
-  const parsed = WorkflowPullRequestSchema.omit({ state: true, observedAt: true }).safeParse(pullRequestInput);
+  const parsed = WorkflowPullRequestSchema.omit({ state: true, observedAt: true }).extend({ headSha: z.string().regex(/^[a-f0-9]{40}$/) }).safeParse(pullRequestInput);
   if (!parsed.success || current.stage !== "PULL_REQUEST" || current.state !== "READY" || current.candidate === undefined
     || parsed.data.candidateDigest !== current.candidate.digest
     || !current.candidate.repositories.some((repository) => repository.repositoryId === parsed.data.repositoryId)
@@ -768,9 +773,9 @@ export function collectWorkflowFeedbackBundles(currentInput: unknown, input: {
     || current.pullRequests?.some(pr => (pr.state === "OPEN" || pr.state === "UNKNOWN")
       && !collected.data.bundleRefs.some(b => b.repositoryId === pr.repositoryId && b.number === pr.number))
     || collected.data.bundleRefs.some(b => b.taskId !== current.taskId || b.candidateDigest !== current.candidate?.digest
-      || !current.candidate.repositories.some(r => r.repositoryId === b.repositoryId && r.commitSha === b.headSha)
+      || !current.candidate.repositories.some(r => r.repositoryId === b.repositoryId && r.treeSha === b.headTreeSha)
       || !current.pullRequests?.some(pr => pr.repositoryId === b.repositoryId && pr.number === b.number
-        && pr.candidateDigest === b.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN")))) {
+        && pr.headSha === b.headSha && pr.candidateDigest === b.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN")))) {
     throw new WorkflowTransitionError("collected feedback does not match the current linked PR set");
   }
   const previousReport = current.feedbackReview?.reviewRef;
@@ -791,9 +796,9 @@ export function requestWorkflowFeedbackReview(currentInput: unknown, input: { bu
         bundle.repositoryId === pr.repositoryId && bundle.number === pr.number)))
     || review.data.bundleRefs.some(bundle =>
       bundle.taskId !== current.taskId || bundle.candidateDigest !== current.candidate?.digest
-      || !current.candidate?.repositories.some(repo => repo.repositoryId === bundle.repositoryId && repo.commitSha === bundle.headSha)
+      || !current.candidate?.repositories.some(repo => repo.repositoryId === bundle.repositoryId && repo.treeSha === bundle.headTreeSha)
       || !current.pullRequests?.some(pr => pr.repositoryId === bundle.repositoryId && pr.number === bundle.number
-        && pr.candidateDigest === bundle.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN")))) {
+        && pr.headSha === bundle.headSha && pr.candidateDigest === bundle.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN")))) {
     throw new WorkflowTransitionError("feedback review does not match current linked PR candidates or comment set");
   }
   return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, feedbackReview: { ...review.data, threadObservations: current.feedbackReview?.threadObservations }, updatedAt: now });
@@ -820,9 +825,9 @@ export function completeWorkflowFeedbackReview(currentInput: unknown, input: {
     throw new WorkflowTransitionError("feedback critic report does not use the exact collected bundle set");
   }
   if (review.data.bundleRefs.some(bundle => bundle.taskId !== current.taskId || bundle.candidateDigest !== input.candidateDigest
-    || !current.candidate?.repositories.some(repo => repo.repositoryId === bundle.repositoryId && repo.commitSha === bundle.headSha)
+    || !current.candidate?.repositories.some(repo => repo.repositoryId === bundle.repositoryId && repo.treeSha === bundle.headTreeSha)
     || !current.pullRequests?.some(pr => pr.repositoryId === bundle.repositoryId && pr.number === bundle.number
-      && pr.candidateDigest === bundle.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN")))) {
+      && pr.headSha === bundle.headSha && pr.candidateDigest === bundle.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN")))) {
     throw new WorkflowTransitionError("feedback critic report includes a bundle outside the current linked candidates");
   }
   return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, state: "WAITING",
@@ -847,9 +852,9 @@ export function decideWorkflowFeedbackFindings(currentInput: unknown, input: {
     || review.reviewRef.sha256 !== input.reviewDigest || review.reviewRef.proposalDigest !== input.proposalDigest
     || input.bundleDigests.length !== review.bundleRefs.length || new Set(input.bundleDigests).size !== input.bundleDigests.length
     || !review.bundleRefs.every(b => input.bundleDigests.includes(b.sha256) && b.candidateDigest === current.candidate?.digest
-      && current.candidate.repositories.some(repo => repo.repositoryId === b.repositoryId && repo.commitSha === b.headSha)
+      && current.candidate.repositories.some(repo => repo.repositoryId === b.repositoryId && repo.treeSha === b.headTreeSha)
       && current.pullRequests?.some(pr => pr.repositoryId === b.repositoryId && pr.number === b.number
-        && pr.candidateDigest === b.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN")))
+        && pr.headSha === b.headSha && pr.candidateDigest === b.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN")))
     || current.decisions.some(d => d.requestId === input.requestId)
     || current.feedbackDecisions?.some(d => d.requestId === input.requestId)) {
     throw new WorkflowTransitionError("feedback finding decision is stale, incomplete or already used");

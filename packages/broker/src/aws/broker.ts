@@ -3654,7 +3654,8 @@ async function authorizeWorkflowFeedbackApproval(dependencies: AwsBrokerDependen
     || !workflowFeedbackApprovalMatchesReview(input, review)
     || activePullRequests.length !== review.bundleRefs.length
     || review.bundleRefs.some(ref => !activePullRequests.some(pr => pr.repositoryId === ref.repositoryId && pr.number === ref.number
-      && pr.candidateDigest === ref.candidateDigest && workflow.candidate?.repositories.some(repo => repo.repositoryId === ref.repositoryId && repo.commitSha === ref.headSha)))
+      && pr.headSha === ref.headSha && pr.candidateDigest === ref.candidateDigest
+      && workflow.candidate?.repositories.some(repo => repo.repositoryId === ref.repositoryId && repo.treeSha === ref.headTreeSha)))
     || decision?.decision !== "APPROVE" || decision.actorRole !== "TASK_OWNER" || decision.actorId !== task.ownerKey
     || decision.workflowRevision !== input.decisionWorkflowRevision || decision.reviewDigest !== input.reviewDigest
     || decision.proposalDigest !== input.proposalDigest || JSON.stringify(decision.bundleDigests) !== JSON.stringify(input.bundleDigests)
@@ -3739,9 +3740,9 @@ async function readFeedbackBundlesForCritic(
     const ref = WorkflowFeedbackBundleRefSchema.parse(rawRef);
     if (ref.taskId !== task.taskId || ref.candidateDigest !== binding.candidateDigest
       || !ref.objectKey.startsWith(`private/${task.ownerKey}/${task.workspaceId}/feedback/`)
-      || !workflow.candidate.repositories.some(repository => repository.repositoryId === ref.repositoryId && repository.commitSha === ref.headSha)
+      || !workflow.candidate.repositories.some(repository => repository.repositoryId === ref.repositoryId && repository.treeSha === ref.headTreeSha)
       || !workflow.pullRequests?.some(pr => pr.repositoryId === ref.repositoryId && pr.number === ref.number
-        && pr.candidateDigest === binding.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN"))) {
+        && pr.headSha === ref.headSha && pr.candidateDigest === binding.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN"))) {
       throw agentXError("STALE_FENCE", "feedback bundle no longer matches the linked candidate");
     }
     const response = await dependencies.s3.send(new GetObjectCommand({ Bucket: dependencies.artifactBucketName, Key: ref.objectKey }));
@@ -4738,6 +4739,23 @@ async function completedWorkflowItems(
     if (!pullRequestMatchesRepository(published.data.url, repositoryFullName, published.data.number)) {
       throw agentXError("CONFIG_INVALID", "published pull request URL does not match the task's registered repository");
     }
+    const publishedRecord = await requirePullRequest(dependencies, task.workspaceId, published.data.repository, published.data.number);
+    if (publishedRecord.url !== published.data.url || publishedRecord.expectedHeadCommit !== published.data.commit) {
+      throw agentXError("STALE_FENCE", "published pull request head does not match the broker-verified publication");
+    }
+    const candidateRepository = task.workflow.candidate.repositories.find(entry => entry.repositoryId === published.data.repository);
+    const getFeedback = dependencies.githubPullRequests.getPullRequestFeedback;
+    if (candidateRepository === undefined || getFeedback === undefined) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "cannot verify the published pull request against the checked candidate");
+    }
+    const publishedFeedback = await getFeedback.call(dependencies.githubPullRequests, repository.url, published.data.number);
+    if (publishedFeedback.pullRequest.number !== published.data.number
+      || publishedFeedback.pullRequest.url !== published.data.url
+      || publishedFeedback.pullRequest.state !== "open"
+      || publishedFeedback.pullRequest.headCommit !== publishedRecord.expectedHeadCommit
+      || publishedFeedback.pullRequest.headTreeSha !== candidateRepository.treeSha) {
+      throw agentXError("STALE_FENCE", "published pull request does not contain the exact checked candidate tree");
+    }
     const indexKey = githubWorkflowPullRequestKey(repositoryFullName, published.data.number);
     const existingIndex = await getItem<GithubWorkflowPullRequestRecord>(dependencies, indexKey);
     const indexRecord: GithubWorkflowPullRequestRecord = {
@@ -4761,6 +4779,7 @@ async function completedWorkflowItems(
       repositoryId: published.data.repository,
       number: published.data.number,
       url: published.data.url,
+      headSha: publishedRecord.expectedHeadCommit,
       candidateDigest: task.workflow.candidate.digest,
       required: true,
     }, now);

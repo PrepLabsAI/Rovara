@@ -563,6 +563,7 @@ describe("current PR feedback API reads", () => {
         const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url; requests.push(requestUrl);
         if (requestUrl.endsWith("access_tokens")) return new Response(JSON.stringify({ token: "fixture" }));
         if (requestUrl === `${api}/pulls/42`) return Response.json({ ...pullRequestFixture(), head: { ref: "branch", sha: options.changedHead && reads++ ? "b".repeat(40) : "a".repeat(40) } });
+        if (requestUrl.includes("/git/commits/")) return Response.json({ tree: { sha: "b".repeat(40) } });
         if (requestUrl === "https://api.github.com/graphql") {
           const requestBody = typeof init?.body === "string" ? init.body : "";
           const request = JSON.parse(requestBody) as { variables: Record<string, unknown>; query: string };
@@ -592,6 +593,7 @@ describe("current PR feedback API reads", () => {
     expect(typeof provider.getPullRequestFeedback).toBe("function");
     const result = await provider.getPullRequestFeedback("https://github.com/ps06756/personal-website-test.git", 42);
     expect(result.pullRequest.headCommit).toBe("a".repeat(40));
+    expect(result.pullRequest.headTreeSha).toBe("b".repeat(40));
     expect(result.comments.map(c => c.id)).toEqual(["review:1", "review_comment:2", "review_comment:4", "discussion:3"]);
     expect(result.comments[1]).toMatchObject({ threadId: "thread-1", body: "comment 2", path: "src/file.ts", line: 3 });
     expect(result.threads).toEqual([{ id: "thread-1", resolved: true, commentIds: ["review_comment:2", "review_comment:4"] }]);

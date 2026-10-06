@@ -2,7 +2,7 @@
 
 **Feature Branch**: `codex/agentx-native-workflow`
 **Created**: 2026-10-05
-**Status**: Owner-approved for implementation planning
+**Status**: Owner-approved for implementation
 **Input**: Owner-approved UX direction in this task; specs 056, 057, and 058
 **Objective**: `MSDLC-OBJ-001@0.4` (unchanged)
 
@@ -101,10 +101,13 @@ decisions cannot dispatch work.
 
 ### Story 3 — Keep Slack readable and retain the record in AgentX (P1)
 
-Slack shows brief status and links, not the full review report. On a terminal task outcome, AgentX
-verifies the original task artifacts and workflow record, saves a closeout manifest that links them
-to the task's Slack Canvases, and then deletes those Canvases from Slack. The
-remaining Slack thread and any owner-authored replies are still subject to the workspace's Slack
+Slack shows brief status and links, not the full review report. When the task reaches a terminal
+outcome, AgentX reports that work outcome as complete independently of Slack Canvas cleanup. Before
+deleting the Canvases, AgentX verifies the original task artifacts and workflow record and saves a
+closeout manifest that links them to the task's Slack Canvases. Cleanup failures are retried in the
+background and shown separately on the authenticated AgentX detail page; the owner does not need to
+investigate or retry cleanup. AgentX never reports cleanup complete unless Slack confirms deletion.
+The remaining Slack thread and any owner-authored replies are still subject to the workspace's Slack
 retention settings; the complete task record, review, decisions, and evidence remain in AgentX under
 its configured retention policy.
 
@@ -118,11 +121,16 @@ review content in Slack notifications or operational logs.
    still exists and its digest matches the task record, then AgentX records the artifact reference,
    digest, and Canvas ID before requesting Canvas deletion.
 2. Given an AgentX archive write or digest check failure, when closeout runs, then the Slack Canvas
-   is not deleted and the task shows an actionable archive-pending state.
+   is not deleted, the terminal work outcome remains complete, and the AgentX detail page shows
+   cleanup as pending.
 3. Given a successful archive followed by a transient Slack deletion failure, when retry runs, then
-   the existing snapshot is reused and the deletion is retried idempotently.
+   the existing snapshot is reused and deletion is retried automatically and idempotently without an
+   owner action.
 4. Given a task with no Canvas or a Canvas already deleted, when closeout runs, then AgentX records
    the observed state without losing or duplicating the canonical record.
+5. Given Slack returns an ambiguous `canvas_not_found` result, when closeout runs, then work remains
+   complete, cleanup remains visibly pending, and AgentX retries in the background without claiming
+   the Canvas is deleted or asking the task owner to investigate.
 
 ## Functional Requirements
 
@@ -194,11 +202,14 @@ review content in Slack notifications or operational logs.
   artifact verification. Slack thread messages and replies are not deleted by this operation and
   remain subject to the workspace's retention policy. The closeout MUST cover every Canvas created
   for the task, including earlier workflow stages and revised plans, not just the most recent Canvas.
-- **FR-015:** Canvas deletion outcome MUST be recorded. Failure MUST leave a visible retryable
-  archive-pending state; it MUST NOT erase or invalidate the AgentX record.
+- **FR-015:** Canvas deletion outcome MUST be recorded separately from the task outcome. A cleanup
+  failure MUST NOT reverse or delay a terminal task outcome, erase or invalidate the AgentX record,
+  or require a task-owner action. AgentX MUST expose a concise cleanup status on the authenticated
+  task detail page and retry cleanup in the background.
 - **FR-016:** The AgentX closeout manifest MUST record the Slack Canvas IDs and their associated
-  AgentX artifact digests. AgentX MUST verify every task Canvas was deleted or was already absent
-  before declaring Canvas cleanup complete.
+  AgentX artifact digests. AgentX MUST verify every task Canvas was deleted before declaring Canvas
+  cleanup complete. An ambiguous not-found response MUST remain pending and MUST NOT change the task
+  outcome.
 - **FR-017:** AgentX-authored Slack status messages and CloudWatch logs MUST NOT contain full PR
   comment bodies, full diffs, auth tokens, or full proposal text. Monitoring MUST use redacted
   identifiers, transition outcomes, retry counts, and error categories. User-authored Slack replies
@@ -240,8 +251,9 @@ review content in Slack notifications or operational logs.
 - **SC-003:** A stale or unauthorized browser session cannot read task details or authorize changes.
 - **SC-004:** Duplicate/replayed decisions, webhook deliveries, and archive retries produce one
   durable outcome and do not lose records.
-- **SC-005:** Canvas deletion never precedes a verified AgentX snapshot, and interrupted closeout
-  converges to a visible completed or retryable state.
+- **SC-005:** Canvas deletion never precedes a verified AgentX snapshot; task outcome remains
+  distinct from cleanup state; interrupted closeout is retried automatically and its status remains
+  visible without requiring task-owner intervention.
 - **SC-006:** Slack messages remain short; detailed comment content and review evidence are available
   in the authenticated AgentX view and canonical AgentX records after closeout. The spec does not
   claim GitHub source comments or Slack-authored thread replies are deleted.

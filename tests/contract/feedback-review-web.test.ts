@@ -212,10 +212,18 @@ describe("broker-backed feedback review data", () => {
     ];
     const bodyFor = (index: number) => index === 0 ? "Handle empty input" : "Keep the retry notice accessible";
     const githubFeedback = { pullRequest: { number: 42, url: "https://github.com/example/demo/pull/42", state: "open" as const,
-      headBranch: "feature", baseBranch: "main", headCommit: "c".repeat(40), title: "Handle retries", body: "" },
+      headBranch: "feature", baseBranch: "main", headCommit: "c".repeat(40), headTreeSha: "e".repeat(40), title: "Handle retries", body: "" },
       comments: [{ id: "comment-1", threadId: "thread-1", kind: "DISCUSSION" as const,
         url: "https://github.com/example/demo/pull/42#discussion_r1", author: "reviewer", updatedAt: now, body: bodyFor(0), path: "src/retry.ts", line: 10 }], threads: [] };
-    const githubRead = vi.fn(async () => githubFeedback);
+    const githubRead = vi.fn(async (url: string) => {
+      const repositoryId = url.includes("/ui.") || url.endsWith("/ui") ? "ui" : "demo";
+      const number = repositoryId === "ui" ? 43 : 42;
+      const pullRequestUrl = `https://github.com/example/${repositoryId}/pull/${number}`;
+      return { ...githubFeedback, pullRequest: { ...githubFeedback.pullRequest, number, url: pullRequestUrl,
+        headCommit: repositoryId === "ui" ? "a".repeat(40) : "c".repeat(40),
+        headTreeSha: repositoryId === "ui" ? "b".repeat(40) : "e".repeat(40) },
+      comments: githubFeedback.comments.map(comment => ({ ...comment, url: `${pullRequestUrl}#discussion_r1` })) };
+    });
     const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getPullRequestFeedback: githubRead } } });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Handle retries", client: "test", workflow: true });
     const taskId = String((started.body.task as { taskId: string }).taskId);
@@ -233,6 +241,7 @@ describe("broker-backed feedback review data", () => {
       const commentSetDigest = createHash("sha256").update(JSON.stringify([validComment])).digest("hex");
       const bundle = WorkflowFeedbackBundleSchema.parse({ schemaVersion: 1, taskId, repositoryId, number,
         headSha: repositoryId === "demo" ? "c".repeat(40) : "a".repeat(40), candidateDigest: candidate.digest,
+        headTreeSha: candidate.repositories.find(repository => repository.repositoryId === repositoryId)?.treeSha,
         commentSetDigest, producer: "test", version: "1", recordedAt: now, comments: [validComment], sourceDeliveryIds: ["delivery-1"] });
       const bundleBytes = JSON.stringify(bundle);
       const bundleDigest = createHash("sha256").update(bundleBytes).digest("hex");
@@ -265,7 +274,8 @@ describe("broker-backed feedback review data", () => {
     const waiting = { ...base, stage: "WAIT_FOR_MERGE" as const, state: "WAITING" as const, candidate,
       verification: { candidateDigest: candidate.digest, producer: "test", environmentId: "fixture", recordedAt: now, results: [{ checkId: "test", status: "PASS" as const }] },
       reviews: (["CRITIC", "SECURITY"] as const).map(role => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS" as const, findings: [], readOnly: true as const, recordedAt: now })),
-      pullRequests: repositories.map(({ repositoryId, number }) => ({ repositoryId, number, url: `https://github.com/example/${repositoryId}/pull/${number}`,
+      pullRequests: repositories.map(({ repositoryId, number }) => ({ repositoryId, number,
+        headSha: repositoryId === "demo" ? "c".repeat(40) : "a".repeat(40), url: `https://github.com/example/${repositoryId}/pull/${number}`,
         candidateDigest: candidate.digest, required: true, state: "OPEN" as const })) };
     const workflow = requestWorkflowFeedbackReview(waiting, { bundleRefs: bundles.map(bundle => bundle.ref), reviewRef: reportRef }, now);
     harness.db.set({ ...task, workflow });
@@ -427,11 +437,19 @@ describe("broker-backed feedback review data", () => {
     if (candidate === undefined) throw new Error("fixture workflow must retain its candidate");
     const completed = observeWorkflowPullRequest(waitingForMerge, { repositoryId: "demo", number: 42,
       candidateDigest: candidate.digest, state: "MERGED", source: "GITHUB_API", observedAt: "2026-10-05T12:05:00.000Z" }, "2026-10-05T12:05:00.000Z");
-    fixture.harness.db.set({ ...beforeMerge, workflow: completed });
+    fixture.harness.db.set({ ...beforeMerge, workflow: { ...completed, canvasCloseout: {
+      status: "ARCHIVE_PENDING", terminalState: "MERGED", manifestDigest: "c".repeat(64),
+      manifestRef: `private/task-closeouts/${fixture.taskId}/${"c".repeat(64)}.json`, preparedAt: "2026-10-05T12:06:00.000Z",
+      canvases: [{ lineageKey: "plan:1", canvasId: "F12345678", status: "UNKNOWN", attempts: 1, errorCategory: "canvas_not_found" }],
+    } } });
     pageAfterRestart = await requestPage();
     expect(pageAfterRestart.body).toContain("Current workflow status: COMPLETE");
     expect(pageAfterRestart.body).toContain("Current stage: MERGED");
     expect(pageAfterRestart.body).toContain("All required pull requests are merged.");
+    expect(pageAfterRestart.body).toContain('aria-label="Slack cleanup status"');
+    expect(pageAfterRestart.body).toContain("Work complete.");
+    expect(pageAfterRestart.body).toContain("AgentX is retrying Slack Canvas cleanup in the background.");
+    expect(pageAfterRestart.body).toContain("No action is needed.");
   });
 
   it("refuses a queued implementation at the broker worker-start callback after approval is invalidated", async () => {

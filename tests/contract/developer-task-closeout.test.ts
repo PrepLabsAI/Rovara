@@ -114,6 +114,7 @@ describe("verified Slack Canvas closeout", () => {
     h.store.deleteCanvas = async () => "unknown";
     const result = await runTaskCanvasCloseout(h.store, { taskId });
     expect(result.status).toBe("ARCHIVE_PENDING");
+    expect(h.saved.workflow).toMatchObject({ stage: "CLOSED", state: "COMPLETE", outcome: "CLOSED" });
     expect(h.saved.workflow?.canvasCloseout?.canvases.every((canvas) => canvas.status === "UNKNOWN" && canvas.errorCategory === "canvas_not_found")).toBe(true);
     const retry = await runTaskCanvasCloseout(h.store, { taskId });
     expect(retry.status).toBe("ARCHIVE_PENDING");

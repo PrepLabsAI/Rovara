@@ -78,6 +78,28 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
 }
 
 describe("the shared thread (FR-032, US3 scenario 1)", () => {
+  it("automatically retries terminal Canvas cleanup without requiring an owner re-drive", async () => {
+    let attempt = 0;
+    const closeTaskCanvases = vi.fn(async () => {
+      attempt += 1;
+      return attempt === 1 ? { status: "ARCHIVE_PENDING" as const, reason: "canvas_not_found" } : { status: "COMPLETE" as const };
+    });
+    const h = await notifierHarness({ shareToChannel: false, workflow: true }, { closeTaskCanvases });
+    const terminalNotice: Notice = { id: `${h.taskId}:canvas_closeout:4`, kind: "canvas_closeout", taskId: h.taskId,
+      at: new Date(h.now()).toISOString(), expectedWorkflowRevision: 4 };
+    const deliver = async () => h.handle({ Records: [{ eventSource: "aws:sqs", messageId: "terminal-closeout", receiptHandle: "receipt",
+      body: JSON.stringify(terminalNotice), attributes: { ApproximateReceiveCount: "1" } }] });
+
+    const first = await deliver();
+    expect(first.batchItemFailures).toEqual([{ itemIdentifier: "terminal-closeout" }]);
+    expect(h.retryLater).toHaveBeenCalledWith("receipt", expect.any(Number));
+    expect(closeTaskCanvases).toHaveBeenCalledTimes(1);
+    const retried = await deliver();
+
+    expect(retried.batchItemFailures).toEqual([]);
+    expect(closeTaskCanvases).toHaveBeenCalledTimes(2);
+  });
+
   it("retries owner re-drives against the supplied manifest digest until closeout completes", async () => {
     const manifestDigest = "a".repeat(64);
     let closeoutAttempt = 0;

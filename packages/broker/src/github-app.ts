@@ -316,7 +316,23 @@ export class GitHubAppCredentialProvider {
     if ([...assignments.keys()].some(id => !commentIds.has(id))) throw feedbackReadError("thread and REST comment sets changed during collection");
     const after = await this.getPullRequestWithToken(repository, number, token);
     if (after.number !== number || after.headCommit !== before.headCommit || after.state !== before.state) throw feedbackReadError("PR head or state changed during collection");
-    return { pullRequest: after, comments, threads };
+    const headTreeSha = await this.getCommitTreeSha(repository, after.headCommit, token);
+    const final = await this.getPullRequestWithToken(repository, number, token);
+    if (final.number !== number || final.headCommit !== after.headCommit || final.state !== after.state) throw feedbackReadError("PR head or state changed during collection");
+    return { pullRequest: { ...final, headTreeSha }, comments, threads };
+  }
+
+  /** GitHub's immutable tree object identifies code content independently of publication commit metadata. */
+  private async getCommitTreeSha(repository: InstalledRepository, commitSha: string, token: string): Promise<string> {
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/git/commits/${commitSha}`,
+      { headers: githubHeaders(token), signal: AbortSignal.timeout(8_000), redirect: "error" },
+    );
+    if (!response.ok) throw feedbackReadError(`head commit lookup HTTP ${response.status}`);
+    const value = feedbackRecord(await response.json());
+    const tree = feedbackRecord(value.tree);
+    if (typeof tree.sha !== "string" || !/^[a-f0-9]{40}$/u.test(tree.sha)) throw feedbackReadError("invalid PR head tree identity");
+    return tree.sha;
   }
 
   private async feedbackPages(path: string, token: string): Promise<unknown[]> {
@@ -545,7 +561,7 @@ export interface GitHubFeedbackComment {
 }
 export interface GitHubFeedbackThread { id: string; resolved: boolean; commentIds: string[] }
 export interface GitHubPullRequestFeedback {
-  pullRequest: GitHubPullRequestDetails; comments: GitHubFeedbackComment[]; threads: GitHubFeedbackThread[];
+  pullRequest: GitHubPullRequestDetails & { headTreeSha: string }; comments: GitHubFeedbackComment[]; threads: GitHubFeedbackThread[];
 }
 const FEEDBACK_THREAD_FIELDS = `id isResolved repository { nameWithOwner } pullRequest { number }
   comments(first:100) { nodes { fullDatabaseId } pageInfo { hasNextPage endCursor } }`;
