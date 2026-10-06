@@ -6,6 +6,7 @@ import { readFile } from "node:fs/promises";
 import {
   CreateChangeSetCommand,
   DeleteChangeSetCommand,
+  DescribeEventsCommand,
   DescribeChangeSetCommand,
   DescribeStackEventsCommand,
   DescribeStacksCommand,
@@ -281,6 +282,33 @@ export function templatesDeployer(input: {
     }
 
     /**
+     * CloudFormation keeps pre-deployment validation details on the change set. Read them before
+     * deleting a failed change set so the operator sees the resource/property that blocked it.
+     * This is best effort: limited DescribeEvents permissions must not hide the original failure.
+     */
+    async function changeSetValidationDetails(): Promise<string> {
+      try {
+        const result = await cloudFormation.send(new DescribeEventsCommand({ ChangeSetName: changeSetName }));
+        const failures = (result.OperationEvents ?? [])
+          .filter((event) => event.EventType === "VALIDATION_ERROR" || event.ValidationStatus === "FAILED")
+          .map((event) => {
+            const label = event.ValidationName ?? event.ResourceType ?? event.LogicalResourceId;
+            const location = event.ValidationPath ?? event.LogicalResourceId;
+            const reason = event.ValidationStatusReason ?? event.ResourceStatusReason;
+            const prefix = [label, location === undefined ? undefined : `at ${location}`]
+              .filter((part): part is string => part !== undefined && part !== "")
+              .join(" ");
+            return [prefix, reason].filter((part): part is string => part !== undefined && part !== "").join(": ");
+          })
+          .filter((detail) => detail !== "")
+          .slice(0, 5);
+        return failures.length === 0 ? "" : `; CloudFormation validation: ${failures.join("; ")}`;
+      } catch {
+        return "; detailed CloudFormation validation events could not be retrieved";
+      }
+    }
+
+    /**
      * Polls the change set until the stack operation it started is over, then the stack until it is settled.
      * CloudFormation can remove an executed change set while the operation runs (seen live creating a new
      * stack), so a change set that is gone hands over to the stack, whose status is the real outcome. The
@@ -372,7 +400,7 @@ export function templatesDeployer(input: {
         emit({ kind: "no-changes", stackName });
         return stackOutputs(current);
       }
-      const failure = `change set for ${stackName} failed: ${reason}`;
+      const failure = `change set for ${stackName} failed: ${reason}${await changeSetValidationDetails()}`;
       await deleteChangeSet(failure);
       throw agentXError("CONFIG_INVALID", failure);
     }
