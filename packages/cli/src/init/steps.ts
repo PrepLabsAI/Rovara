@@ -11,7 +11,7 @@ import { isOperatorStop, markOperatorStop } from "./stop.js";
 
 export type StepOutcome = { status: "done"; note?: string } | { status: "waiting"; message: string };
 
-export type ProgressPatch = Pick<Partial<InstallProgress>, "github" | "githubPending" | "slack" | "admin" | "project" | "connectors" | "alerts">;
+export type ProgressPatch = Pick<Partial<InstallProgress>, "github" | "githubPending" | "slack" | "slackPending" | "admin" | "project" | "connectors" | "alerts">;
 
 export interface ProgressHandle {
   current(): InstallProgress;

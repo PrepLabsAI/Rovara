@@ -6,7 +6,7 @@
 // has -- `Prompter`, `onEvent`, `write(line)` and `openBrowser(url)` -- so the terminal path and
 // `--yes` are untouched.
 import { agentXError } from "@agentx/contracts";
-import type { InstallSurface, OpenManifestHost } from "../context.js";
+import type { InstallSurface, OpenManifestHost, OpenSlackInstallHost } from "../context.js";
 import type { Prompter } from "../prompts.js";
 import type { InitEvent } from "../steps.js";
 import type { InitStepId } from "../install-state.js";
@@ -68,6 +68,8 @@ export interface InstallWizard {
   openLink: (url: string) => Promise<boolean>;
   /** FR-030: the GitHub App's manifest form and GitHub's redirect, on the wizard's own address. */
   manifestHost: OpenManifestHost;
+  /** Add to Slack: on the setup page only (Slack takes only https redirects). */
+  slackInstallHost?: OpenSlackInstallHost;
   hub: WizardHub;
   /** One line for the log pane: the same line init writes to stderr. */
   log(line: string): void;
@@ -169,6 +171,7 @@ export function startCloudInstallWizard(input: {
     url: input.url,
     ...(input.logPath === undefined ? {} : { logPath: input.logPath }),
     manifestHost: cloudManifestHost({ store: input.store, url: input.url, pollMs: input.timing?.pollMs ?? GITHUB_CODE_POLL_MS }),
+    slackInstallHost: cloudSlackInstallHost({ store: input.store, pollMs: input.timing?.pollMs ?? GITHUB_CODE_POLL_MS }),
     async close() {
       hub.close();
       await relay.stop();
@@ -206,9 +209,38 @@ export function cloudManifestHost(input: { store: SetupStore; url: string; pollM
   };
 }
 
+/** Add to Slack: Slack's redirect back lands on the setup page, which hands the code to this run
+ * through the table. Waits as long as the step allows. */
+export function cloudSlackInstallHost(input: { store: SetupStore; pollMs: number }): OpenSlackInstallHost {
+  return async ({ state, timeoutMs }) => {
+    await input.store.putSlackInstall(state);
+    let closed = false;
+    const started = Date.now();
+    const code = (async () => {
+      for (;;) {
+        if (closed) throw agentXError("OPERATION_INTERRUPTED", "the Slack app step ended before Slack sent its install");
+        const sent = await input.store.takeSlackCode(state);
+        if (sent !== undefined) return sent;
+        if (Date.now() - started > timeoutMs) {
+          throw agentXError("OPERATION_INTERRUPTED", `the Slack app was not added within ${Math.round(timeoutMs / 60_000)} minutes; press Add to Slack, then try this step again`);
+        }
+        await new Promise((resolve) => setTimeout(resolve, input.pollMs));
+      }
+    })();
+    code.catch(() => undefined);
+    return {
+      code,
+      close() {
+        closed = true;
+        void input.store.deleteSlackInstall().catch(() => undefined);
+      },
+    };
+  };
+}
+
 /** The wizard around a hub, whichever way its page is served. */
 function wizardOn(hub: WizardHub, transport: {
-  url: string; token?: string; logPath?: string; manifestHost: OpenManifestHost; close(): Promise<void>;
+  url: string; token?: string; logPath?: string; manifestHost: OpenManifestHost; slackInstallHost?: OpenSlackInstallHost; close(): Promise<void>;
 }): InstallWizard {
   let closed = false;
   return {
@@ -225,6 +257,7 @@ function wizardOn(hub: WizardHub, transport: {
       return isShowableLink(url);
     },
     manifestHost: transport.manifestHost,
+    ...(transport.slackInstallHost === undefined ? {} : { slackInstallHost: transport.slackInstallHost }),
     log: (line) => hub.log(line),
     event: (event) => hub.applyEvent(event),
     setSteps: (steps) => hub.setSteps(steps),

@@ -93,6 +93,9 @@ export const InstallProgressSchema = z.object({
    * run that stops in between can offer to finish with it or replace it. Read only while `github`
    * is not recorded. */
   githubPending: z.object({ account: z.string().regex(GITHUB_LOGIN_PATTERN), appId: z.string().regex(GITHUB_APP_ID), slug: z.string().regex(GITHUB_APP_SLUG) }).strict().optional(),
+  /** Add to Slack: the app AgentX made, before it is installed. Its credentials are already in the
+   * Slack secret, so a run that stops here never makes a second app. */
+  slackPending: z.object({ appId: z.string().regex(/^A[A-Z0-9]{2,}$/) }).strict().optional(),
   slack: z.object({
     appId: z.string().regex(/^A[A-Z0-9]+$/), teamId: z.string().regex(/^T[A-Z0-9]+$/), botUserId: z.string().regex(/^[UW][A-Z0-9]+$/),
     /** Spec 048 FR-026 and FR-027: the bot's handle and the workspace's name, as Slack reported them. */

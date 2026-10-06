@@ -15,7 +15,7 @@ import type { GitHubApi } from "../../packages/cli/src/init/github-app.js";
 import { emptyProgress, type InitAnswers, type InstallProgress } from "../../packages/cli/src/init/install-state.js";
 import type { PrerequisiteChecks } from "../../packages/cli/src/init/prerequisites.js";
 import type { Prompter } from "../../packages/cli/src/init/prompts.js";
-import type { SlackApi } from "../../packages/cli/src/init/slack-app.js";
+import type { SlackApi, SlackManifest } from "../../packages/cli/src/init/slack-app.js";
 import { settingsFields, type SettingsFieldName } from "../../packages/cli/src/init/settings-form.js";
 import type { ProgressHandle } from "../../packages/cli/src/init/steps.js";
 import { openAdminSession } from "../../packages/cli/src/setup/admin-session.js";
@@ -339,10 +339,30 @@ export function browserThatCreatesGitHubApp(opened: string[], code = "0123456789
 export const TEST_BOT_TOKEN = "xoxb-1111-2222-SECRETbotTOKENvalue";
 export const TEST_SIGNING_SECRET = "0123456789abcdef0123456789abcdef";
 
-export function fakeSlackApi(overrides: Partial<SlackApi> = {}): SlackApi {
+/** The Slack client ID and secret Add to Slack's fake manifestCreate gives the app it makes. */
+export const FAKE_SLACK_CLIENT = { clientId: "1111111111.3333333333333", clientSecret: "0123456789abcdef0123456789abcdef" };
+
+/** Slack, played back. Add to Slack's calls are recorded: `manifests` (each create and update, by
+ * method), and the codes exchanged for a bot token. */
+export function fakeSlackApi(overrides: Partial<SlackApi> = {}): SlackApi & { manifests: Array<{ method: "create" | "update"; token: string; manifest: SlackManifest }>; exchanged: string[] } {
+  const manifests: Array<{ method: "create" | "update"; token: string; manifest: SlackManifest }> = [];
+  const exchanged: string[] = [];
   return {
+    manifests, exchanged,
     authTest: async () => ({ ok: true, user_id: "U0BOT", bot_id: "B0BOT", team_id: "T0TEAM", team: "Acme", url: "https://acme.slack.com/", user: "agentx" }),
     botsInfo: async () => ({ ok: true, bot: { app_id: "A0APP" } }),
+    manifestCreate: async (token, manifest) => {
+      manifests.push({ method: "create", token, manifest });
+      return { ok: true, app_id: "A0APP", credentials: { client_id: FAKE_SLACK_CLIENT.clientId, client_secret: FAKE_SLACK_CLIENT.clientSecret, signing_secret: TEST_SIGNING_SECRET } };
+    },
+    manifestUpdate: async (token, _appId, manifest) => {
+      manifests.push({ method: "update", token, manifest });
+      return { ok: true };
+    },
+    oauthAccess: async ({ code }) => {
+      exchanged.push(code);
+      return { ok: true, access_token: TEST_BOT_TOKEN, token_type: "bot", bot_user_id: "U0BOT", app_id: "A0APP", team: { id: "T0TEAM", name: "Acme" } };
+    },
     ...overrides,
   };
 }

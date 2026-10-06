@@ -29,6 +29,8 @@ const HEARTBEAT_MS = 20_000;
 
 export const GITHUB_START_PATH = "/github/start";
 export const GITHUB_CALLBACK_PATH = "/github/created";
+/** Where Slack sends the browser back after Add to Slack, on the setup page (slack-install.ts). */
+export const SLACK_CALLBACK_PATH = "/slack/callback";
 
 /** The GitHub form page's policy: its one script (by nonce) submits one form, to GitHub only. */
 export function manifestFormCsp(nonce: string): string {
