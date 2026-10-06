@@ -23,7 +23,6 @@ import {
   ShareDeveloperTaskRequestSchema,
   SlackChannelIdSchema,
   SlackMessageTimestampSchema,
-  SlackTeamIdSchema,
   SlackThreadSchema,
   SlackUserIdSchema,
   StartDeveloperTaskRequestSchema,
@@ -306,7 +305,7 @@ export async function getWorkflowFeedbackReview(deps: DeveloperTaskRouteDependen
     : review.status === "DISMISSED" ? "No code changes will start from this proposal."
     : operationIsLive && activeOperation?.workflowMode === "IMPLEMENT" && activeOperation.status === "ACCEPTED" ? "Implementation is queued to start."
     : operationIsLive && activeOperation?.workflowMode === "IMPLEMENT" ? "Implementation is in progress."
-    : operationIsLive ? `${String(activeOperation?.kind ?? "Task")} operation is in progress.`
+    : operationIsLive ? `${typeof activeOperation?.kind === "string" ? activeOperation.kind : "Task"} operation is in progress.`
     : workflow.stage === "IMPLEMENT" && workflow.state === "READY" ? "Implementation is ready to start."
     : workflow.stage === "IMPLEMENT" && workflow.state === "RUNNING" ? "Implementation is in progress."
     : workflow.stage === "VERIFY" ? "Run the required checks for the current code version."
@@ -408,7 +407,7 @@ export async function submitWorkflowFeedbackDecision(
     try {
       await deps.actions.acceptTask(developerTaskIdentity(latest), workspace.id, {
         requestId: input.requestId, conversationId: latest.conversationId, prompt,
-      }, operation => [{ Update: {
+      }, () => [{ Update: {
         TableName: deps.tableName, Key: taskKey(taskId),
         UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
         ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :stage AND workflow.#state = :state AND workflow.feedbackReview.#reviewStatus = :pending AND workflow.feedbackReview.reviewRef.sha256 = :reviewDigest AND workflow.feedbackReview.reviewRef.proposalDigest = :proposalDigest AND attribute_not_exists(closedAt)",
@@ -1126,7 +1125,8 @@ async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: D
   }
   await actionableWorkspace(deps, task);
   const receivedAt = iso(deps);
-  const { blockReason: _blockReason, ...unblocked } = task.workflow;
+  const unblocked = { ...task.workflow };
+  delete unblocked.blockReason;
   const next: WorkflowSnapshot = { ...unblocked, revision: task.workflow.revision + 1, state: "RUNNING", updatedAt: receivedAt };
   try {
     await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, { requestId: request.requestId, conversationId: task.conversationId, prompt: request.instructions }, (operation) => [

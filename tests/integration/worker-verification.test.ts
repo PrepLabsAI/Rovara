@@ -199,10 +199,11 @@ async function feedbackReviewFixture() {
   Object.assign(bundle, normalized);
   const bytes = JSON.stringify(bundle);
   const sha256 = createHash("sha256").update(bytes).digest("hex");
-  const { sourceDeliveryIds: _deliveryIds, comments, ...metadata } = bundle;
+  const { sourceDeliveryIds: deliveryIds, comments, ...metadata } = bundle;
+  void deliveryIds;
   const bundleRef: WorkflowFeedbackBundleRef = {
     ...metadata, sha256, objectKey: `feedback/${sha256}.json`,
-    comments: comments.map(({ body: _body, ...comment }) => comment),
+    comments: comments.map(({ body, ...comment }) => { void body; return comment; }),
   };
   return { rootPath, repositories, candidate, bundle, bundleRef, bytes, taskId: bundle.taskId };
 }
@@ -214,6 +215,7 @@ function feedbackReviewerAdapter(response: string, beforePrompt?: () => Promise<
       return {
         conversationId: randomUUID(), sessionFile: join(input.sessionDirectory, "feedback-review.json"),
         async prompt(_prompt) {
+          void _prompt;
           await beforePrompt?.();
           notify?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: response }] } });
         }, async abort() {},

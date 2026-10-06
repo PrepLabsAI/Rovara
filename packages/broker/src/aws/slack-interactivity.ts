@@ -565,12 +565,12 @@ interface FeedbackReviewActionValue {
 function feedbackReviewActionValue(value: string): FeedbackReviewActionValue | undefined {
   try {
     const parsed = asRecord(JSON.parse(value));
-    if (typeof parsed.taskId !== "string" || !CHANGE_ID.test(parsed.taskId) || !Number.isInteger(parsed.expectedRevision)
+    if (typeof parsed.taskId !== "string" || !CHANGE_ID.test(parsed.taskId) || typeof parsed.expectedRevision !== "number" || !Number.isInteger(parsed.expectedRevision)
       || typeof parsed.reviewDigest !== "string" || !/^[a-f0-9]{64}$/.test(parsed.reviewDigest)
       || typeof parsed.proposalDigest !== "string" || !/^[a-f0-9]{64}$/.test(parsed.proposalDigest)
       || typeof parsed.bundleSetDigest !== "string" || !/^[a-f0-9]{64}$/.test(parsed.bundleSetDigest)
       || parsed.selection !== "RECOMMENDED") return undefined;
-    return { taskId: parsed.taskId as string, expectedRevision: parsed.expectedRevision as number, reviewDigest: parsed.reviewDigest as string, proposalDigest: parsed.proposalDigest as string, bundleSetDigest: parsed.bundleSetDigest as string, selection: "RECOMMENDED" };
+    return { taskId: parsed.taskId, expectedRevision: parsed.expectedRevision, reviewDigest: parsed.reviewDigest, proposalDigest: parsed.proposalDigest, bundleSetDigest: parsed.bundleSetDigest, selection: "RECOMMENDED" };
   } catch { return undefined; }
 }
 

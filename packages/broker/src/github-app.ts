@@ -241,6 +241,7 @@ export class GitHubAppCredentialProvider {
       const connection = feedbackConnection(pr.reviews);
       for (const value of connection.nodes) {
         const review = feedbackRecord(value);
+        if (typeof review.fullDatabaseId !== "number" || !Number.isSafeInteger(review.fullDatabaseId) || review.fullDatabaseId < 1) throw feedbackReadError("invalid review ID");
         const id = `review:${review.fullDatabaseId}`;
         const comment = comments.find(c => c.id === id && c.kind === "REVIEW");
         if (!comment) continue; // Blank bodies and unpublished draft reviews were excluded by REST.
@@ -329,7 +330,7 @@ export class GitHubAppCredentialProvider {
       if (!response.ok) throw feedbackReadError(`comment lookup HTTP ${response.status}`);
       const page: unknown = await response.json();
       if (!Array.isArray(page)) throw feedbackReadError("invalid comment page");
-      values.push(...page);
+      for (const value of page as unknown[]) values.push(value);
       const link = response.headers.get("link");
       const linked = link?.split(",").map(part => /^\s*<([^>]+)>;\s*rel="next"\s*$/.exec(part)).find(match => match)?.[1];
       if (linked) {
@@ -556,7 +557,7 @@ function feedbackRecord(value: unknown): Record<string, unknown> {
 function feedbackConnection(value: unknown): { nodes: unknown[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } {
   const record = feedbackRecord(value); const info = feedbackRecord(record.pageInfo);
   if (!Array.isArray(record.nodes) || typeof info.hasNextPage !== "boolean" || (info.endCursor !== null && typeof info.endCursor !== "string")) throw feedbackReadError("invalid pagination state");
-  return { nodes: record.nodes, pageInfo: { hasNextPage: info.hasNextPage, endCursor: info.endCursor as string | null } };
+  return { nodes: record.nodes, pageInfo: { hasNextPage: info.hasNextPage, endCursor: info.endCursor } };
 }
 function nextFeedbackCursor(connection: ReturnType<typeof feedbackConnection>, seen: Set<string>): string | null {
   if (!connection.pageInfo.hasNextPage) return null;
@@ -572,8 +573,9 @@ function validateFeedbackThread(thread: Record<string, unknown>, repo: Installed
 function parseFeedbackComment(record: Record<string, unknown>, repository: InstalledRepository, number: number, kind: GitHubFeedbackComment["kind"]): GitHubFeedbackComment {
   const prefix = kind === "REVIEW" ? "review" : kind === "REVIEW_COMMENT" ? "review_comment" : "discussion";
   const anchor = kind === "REVIEW" ? "pullrequestreview-" : kind === "REVIEW_COMMENT" ? "discussion_r" : "issuecomment-";
-  if (!Number.isSafeInteger(record.id) || (record.id as number) < 1) throw feedbackReadError("invalid comment ID");
-  const expected = `https://github.com/${repository.owner}/${repository.name}/pull/${number}#${anchor}${record.id}`;
+  if (typeof record.id !== "number" || !Number.isSafeInteger(record.id) || record.id < 1) throw feedbackReadError("invalid comment ID");
+  const commentId = record.id;
+  const expected = `https://github.com/${repository.owner}/${repository.name}/pull/${number}#${anchor}${commentId}`;
   const api = `https://api.github.com/repos/${repository.owner}/${repository.name}`;
   const user = feedbackRecord(record.user);
   const timestamp = record.updated_at ?? record.submitted_at;
@@ -583,7 +585,7 @@ function parseFeedbackComment(record: Record<string, unknown>, repository: Insta
     || typeof timestamp !== "string" || !/^\d{4}-\d\d-\d\dT/.test(timestamp) || !Number.isFinite(Date.parse(timestamp))) throw feedbackReadError("invalid comment content");
   if (record.path !== undefined && (typeof record.path !== "string" || record.path.length > 1024)) throw feedbackReadError("invalid comment path");
   if (record.line !== undefined && record.line !== null && (!Number.isSafeInteger(record.line) || (record.line as number) < 1)) throw feedbackReadError("invalid comment line");
-  return { id: `${prefix}:${record.id}`, kind, url: expected, author: user.login, updatedAt: new Date(timestamp).toISOString(), body: (record.body as string | null) ?? "",
+  return { id: `${prefix}:${commentId}`, kind, url: expected, author: user.login, updatedAt: new Date(timestamp).toISOString(), body: (record.body) ?? "",
     ...(kind === "REVIEW_COMMENT" && typeof record.path === "string" ? { path: record.path } : {}),
     ...(kind === "REVIEW_COMMENT" && typeof record.line === "number" ? { line: record.line } : {}) };
 }

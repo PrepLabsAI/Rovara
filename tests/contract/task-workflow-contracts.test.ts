@@ -56,9 +56,9 @@ describe("native task workflow contracts", () => {
         candidateBindings: [{ repositoryId: "demo", number: 42, headSha: "e".repeat(40), candidateDigest: binding.candidateDigest, bundleDigest: binding.bundleDigests[0] }],
         findingRefs: [{ id: "finding-1", bundleDigest: binding.bundleDigests[0], commentIds: ["comment-1"], priority: "MUST_FIX", assessment: "ACTIONABLE", recommended: true }] } };
     expect(workflowContracts.workflowFeedbackApprovalMatchesReview(binding as never, review as never)).toBe(true);
-    expect(workflowContracts.workflowFeedbackApprovalMatchesReview({ ...binding, selectedCommentIds: ["comment-2"] } as never, review as never)).toBe(false);
-    expect(workflowContracts.workflowFeedbackApprovalMatchesReview({ ...binding, selectedFindingIds: ["finding-1", "finding-2"] } as never, review as never)).toBe(false);
-    expect(workflowContracts.workflowFeedbackApprovalMatchesReview({ ...binding, bundleDigests: ["f".repeat(64)] } as never, review as never)).toBe(false);
+    expect(workflowContracts.workflowFeedbackApprovalMatchesReview({ ...binding, selectedCommentIds: ["comment-2"] }, review as never)).toBe(false);
+    expect(workflowContracts.workflowFeedbackApprovalMatchesReview({ ...binding, selectedFindingIds: ["finding-1", "finding-2"] }, review as never)).toBe(false);
+    expect(workflowContracts.workflowFeedbackApprovalMatchesReview({ ...binding, bundleDigests: ["f".repeat(64)] }, review as never)).toBe(false);
   });
   it("computes a stable candidate digest from sorted repository identities and exact commits", () => {
     const left = { repositoryId: "repo-b", commitSha: "b".repeat(40), treeSha: "2".repeat(40) };
@@ -425,18 +425,20 @@ describe("immutable multi-PR feedback reviews", () => {
   it("serializes artifact bodies before hashing and validates storage envelopes after round-trip", () => {
     const { bundleRefs, reviewRef } = fixture();
     const { sha256: _bundleDigest, objectKey: _bundleKey, ...bundleMetadata } = bundleRefs[0]!;
+    void _bundleDigest; void _bundleKey;
     const payloadComments = bundleMetadata.comments.map(c => ({ ...c, body: "comment" }));
     const payload = { ...bundleMetadata, comments: payloadComments,
       commentSetDigest: createHash("sha256").update(JSON.stringify(payloadComments), "utf8").digest("hex"), sourceDeliveryIds: ["delivery-1"] };
     const parsed = WorkflowFeedbackBundleSchema.parse(payload);
     const bytes = Buffer.from(JSON.stringify(parsed), "utf8");
     const sha256 = createHash("sha256").update(bytes).digest("hex");
-    const stored = JSON.parse(bytes.toString("utf8"));
+    const stored: unknown = JSON.parse(bytes.toString("utf8"));
     expect(WorkflowFeedbackBundleSchema.parse(stored)).toEqual(parsed);
     const bundleRef = WorkflowFeedbackBundleRefSchema.parse({ ...bundleMetadata, sha256, objectKey: `tasks/${taskId}/feedback/${sha256}.json` });
     expect(createHash("sha256").update(bytes).digest("hex")).toBe(bundleRef.sha256);
     expect(WorkflowFeedbackBundleSchema.safeParse({ ...stored, sha256, objectKey: bundleRef.objectKey }).success).toBe(false);
     const { sha256: _reviewDigest, objectKey: _reviewKey, ...reportMetadata } = reviewRef;
+    void _reviewDigest; void _reviewKey;
     const findingRefs = [{ ...reviewRef.findingRefs[0]!, bundleDigest: sha256 }];
     const report = WorkflowFeedbackReviewReportSchema.parse({ ...reportMetadata, bundleDigests: [sha256],
       candidateBindings: [{ ...reportMetadata.candidateBindings[0]!, bundleDigest: sha256 }], findingRefs,
@@ -492,6 +494,7 @@ describe("immutable multi-PR feedback reviews", () => {
     const result = requestWorkflowFeedbackReview(current, { bundleRefs: bundles, reviewRef: ref }, now);
     expect(result.feedbackReview?.bundleRefs[0]?.comments).toEqual([]);
     const { sha256: _digest, objectKey: _key, ...emptyPayload } = bundles[0]!;
+    void _digest; void _key;
     expect(WorkflowFeedbackBundleSchema.safeParse({ ...emptyPayload, commentSetDigest: createHash("sha256").update("[]", "utf8").digest("hex"), sourceDeliveryIds: [] }).success).toBe(true);
     const omitted = { ...reviewRef, bundleDigests: [bundleRefs[0]!.sha256], candidateBindings: [reviewRef.candidateBindings[0]!],
       findingRefs: [reviewRef.findingRefs[0]!] };
@@ -514,6 +517,7 @@ describe("immutable multi-PR feedback reviews", () => {
     const { bundleRefs, reviewRef } = fixture();
     const { sha256: _bundleSha, objectKey: _bundleKey, ...bundlePayload } = bundleRefs[0]!;
     const { sha256: _reviewSha, objectKey: _reviewKey, ...reviewPayload } = reviewRef;
+    void _bundleSha; void _bundleKey; void _reviewSha; void _reviewKey;
     const finding = { ...reviewRef.findingRefs[0], evidence: [{ source: "code", reference: "api/file.ts:1" }], rationale: "Empty input causes failure.", confidence: { level: "HIGH", reason: "Reproduced in candidate code" }, proposedDisposition: "IMPLEMENT" };
     for (const priority of ["MUST_FIX", "SHOULD_FIX", "OPTIONAL"])
       for (const assessment of ["ACTIONABLE", "ALREADY_ADDRESSED", "STALE", "TECHNICALLY_INCORRECT", "OUT_OF_SCOPE", "CONFLICTING", "NEEDS_OWNER_DECISION"])

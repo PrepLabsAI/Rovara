@@ -568,7 +568,7 @@ export function developerTaskRouteDependencies(
     tableName: deps.tableName,
     ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
     actions: deps.tasks!,
-    ...(deps.refreshTaskFeedback === undefined ? {} : { refreshTaskFeedback: deps.refreshTaskFeedback }),
+    ...(deps.refreshTaskFeedback === undefined ? {} : { refreshTaskFeedback: deps.refreshTaskFeedback.bind(deps) }),
     ...(initialSlackThread === undefined ? {} : { initialSlackThread }),
     checkAccess: (project) => checkProjectAccess(deps, caller, project),
     channelMember: async (slackUserId, channelId) => {

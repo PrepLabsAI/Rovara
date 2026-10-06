@@ -264,8 +264,9 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
       for (const bundle of bundles) {
         const bytes = JSON.stringify(bundle); const sha256 = digest(bytes);
         const objectKey = await input.persistBundle(bundle, bytes, sha256);
-        const { sourceDeliveryIds: _deliveryIds, comments, ...metadata } = bundle;
-        refs.push(WorkflowFeedbackBundleRefSchema.parse({ ...metadata, sha256, objectKey, comments: comments.map(({ body: _body, ...ref }) => ref) }));
+        const { sourceDeliveryIds: deliveryIds, comments, ...metadata } = bundle;
+        void deliveryIds;
+        refs.push(WorkflowFeedbackBundleRefSchema.parse({ ...metadata, sha256, objectKey, comments: comments.map(({ body, ...ref }) => { void body; return ref; }) }));
       }
       next = collectWorkflowFeedbackBundles(next, { bundleRefs: refs, threadObservations: observations }, input.now);
     }

@@ -3759,7 +3759,7 @@ async function readFeedbackBundlesForCritic(
       || bundle.headSha !== ref.headSha || bundle.candidateDigest !== ref.candidateDigest
       || bundle.commentSetDigest !== ref.commentSetDigest || bundle.recordedAt !== ref.recordedAt
       || bundle.producer !== ref.producer || bundle.version !== ref.version
-      || JSON.stringify(bundle.comments.map(({ body: _body, ...comment }) => comment)) !== JSON.stringify(ref.comments)) {
+      || JSON.stringify(bundle.comments.map(({ body, ...comment }) => { void body; return comment; })) !== JSON.stringify(ref.comments)) {
       throw agentXError("RUNTIME_UNAVAILABLE", "feedback bundle metadata does not match its immutable reference");
     }
     bundles.push({ ref, bytesBase64: bytes.toString("base64") });
@@ -4876,7 +4876,8 @@ async function completedWorkflowItems(
               && candidate.candidateDigest === ref.candidateDigest && candidate.commentSetDigest === ref.commentSetDigest && candidate.bundleDigest === ref.sha256))) {
           throw new Error("critic report provenance does not match the exact collected inputs");
         }
-        const { findings: _findings, ...metadata } = report;
+        const { findings, ...metadata } = report;
+        void findings;
         const reviewRef = WorkflowFeedbackReviewRefSchema.parse({ ...metadata, sha256: resultRecord.outputDigest, objectKey: String(artifacts[0].objectKey) });
         next = completeWorkflowFeedbackReview(current, {
           expectedRevision: binding.workflowRevision, taskId: binding.taskId, candidateDigest: binding.candidateDigest,

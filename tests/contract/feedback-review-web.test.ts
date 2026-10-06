@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createFeedbackReviewWeb, type FeedbackReviewWebDependencies } from "../../packages/broker/src/aws/feedback-review-web.js";
 import { getWorkflowFeedbackReview, submitWorkflowFeedbackDecision } from "../../packages/broker/src/aws/developer-tasks.js";
 import { authenticateDeveloperSessionId } from "../../packages/broker/src/aws/developer-routes.js";
-import { createCandidateManifest, createWorkflowSnapshot, observeWorkflowPullRequest, requestWorkflowFeedbackReview, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema } from "@agentx/contracts";
+import { createCandidateManifest, createWorkflowSnapshot, observeWorkflowPullRequest, requestWorkflowFeedbackReview, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleSchema, WorkflowFeedbackReviewReportSchema, type WorkflowSnapshot } from "@agentx/contracts";
 import { createDeveloperTaskBroker, MAYA, OMAR } from "../support/developer-task-broker.js";
 import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
 import { feedbackReviewNoticeId } from "../../packages/broker/src/developer/notifications.js";
@@ -22,19 +22,34 @@ function request(method: string, path: string, headers: Record<string, string> =
   return { method, path, headers: { host: "agentx.example.test", ...headers }, requestId: randomUUID(), ...(body === undefined ? {} : { body: JSON.stringify(body) }) };
 }
 
-function dependencies(overrides: Partial<FeedbackReviewWebDependencies> = {}): FeedbackReviewWebDependencies {
+type FeedbackReviewTestDependencies = FeedbackReviewWebDependencies & { observed: {
+  reviewReads: Array<Parameters<FeedbackReviewWebDependencies["getWorkflowFeedbackReview"]>>;
+  decisions: Array<Parameters<FeedbackReviewWebDependencies["submitWorkflowFeedbackDecision"]>>;
+} };
+
+function dependencies(overrides: Partial<FeedbackReviewWebDependencies> = {}): FeedbackReviewTestDependencies {
+  const observed: FeedbackReviewTestDependencies["observed"] = { reviewReads: [], decisions: [] };
+  const getReview = vi.fn(async (...args: Parameters<FeedbackReviewWebDependencies["getWorkflowFeedbackReview"]>) => {
+    observed.reviewReads.push(args);
+    return {
+      taskId, title: "Handle retries", revision: 12, status: "PENDING", qualification: "AI_GENERATED_ADVISORY",
+      proposalDigest: "b".repeat(64), bundleDigests: ["a".repeat(64)], candidates: [{ repositoryId: "payments", number: 42, headSha: "c".repeat(40) }],
+      findings: [{ ...finding, comments: [{ id: "comment-1", author: "reviewer", url: "https://github.com/example/repo/pull/42#discussion_r1", body: "Handle empty input", updatedAt: "2026-10-05T12:00:00.000Z", path: "src/retry.ts", line: 10 }] }],
+      recommendedFindingIds: [finding.id], checks: ["npm test"],
+    };
+  });
+  const submitDecision = vi.fn(async (...args: Parameters<FeedbackReviewWebDependencies["submitWorkflowFeedbackDecision"]>) => {
+    observed.decisions.push(args);
+    return { status: "accepted" };
+  });
   return {
     origin,
     authenticateSession: vi.fn(async (sessionId: string) => sessionId === "session-owner"
       ? { developerId: "d".repeat(64), sessionId, amr: "slack" as const, name: "Maya", slackUserId: "UOWNER" }
       : undefined),
-    getWorkflowFeedbackReview: vi.fn(async () => ({
-      taskId, title: "Handle retries", revision: 12, status: "PENDING", qualification: "AI_GENERATED_ADVISORY",
-      proposalDigest: "b".repeat(64), bundleDigests: ["a".repeat(64)], candidates: [{ repositoryId: "payments", number: 42, headSha: "c".repeat(40) }],
-      findings: [{ ...finding, comments: [{ id: "comment-1", author: "reviewer", url: "https://github.com/example/repo/pull/42#discussion_r1", body: "Handle empty input", updatedAt: "2026-10-05T12:00:00.000Z", path: "src/retry.ts", line: 10 }] }],
-      recommendedFindingIds: [finding.id], checks: ["npm test"],
-    })),
-    submitWorkflowFeedbackDecision: vi.fn(async (_caller, _task, input) => ({ status: "accepted", decision: input.decision })),
+    getWorkflowFeedbackReview: getReview,
+    submitWorkflowFeedbackDecision: submitDecision,
+    observed,
     now: () => 1_791_212_400_000,
     ...overrides,
   };
@@ -66,7 +81,8 @@ describe("authenticated PR feedback review web journey", () => {
     expect(response.body).toContain("Choose findings");
     expect(response.body).not.toContain("session-owner");
     expect(response.body).not.toContain("Bearer ");
-    expect(deps.getWorkflowFeedbackReview).toHaveBeenCalledWith(expect.objectContaining({ slackUserId: "UOWNER" }), taskId);
+    expect(deps.observed.reviewReads[0]?.[0]).toMatchObject({ slackUserId: "UOWNER" });
+    expect(deps.observed.reviewReads[0]?.[1]).toBe(taskId);
   });
 
   it("does not offer approve-recommended when the advisory recommends no findings", async () => {
@@ -164,7 +180,7 @@ describe("authenticated PR feedback review web journey", () => {
     expect(deniedOrigin.statusCode).toBe(403);
     const deniedToken = await handler(request("POST", `/review/${taskId}/api/decision`, { cookie: "__Host-agentx_review_session=session-owner; __Host-agentx_review_csrf=csrf-value-0123456789abcdef012345", origin, "x-agentx-csrf": "wrong", "content-type": "application/json" }, body), new URL(`/review/${taskId}/api/decision`, origin));
     expect(deniedToken.statusCode).toBe(403);
-    expect(deps.submitWorkflowFeedbackDecision).not.toHaveBeenCalled();
+    expect(deps.observed.decisions).toHaveLength(0);
   });
 
   it("rechecks the signed-in session for every request and does not reveal task data to another owner", async () => {
@@ -172,7 +188,7 @@ describe("authenticated PR feedback review web journey", () => {
     const response = await createFeedbackReviewWeb(deps)(request("GET", `/review/${taskId}/api`, { cookie: "__Host-agentx_review_session=revoked-session" }), new URL(`/review/${taskId}/api`, origin));
     expect(response.statusCode).toBe(401);
     expect(response.body).not.toContain("Handle retries");
-    expect(deps.getWorkflowFeedbackReview).not.toHaveBeenCalled();
+    expect(deps.observed.reviewReads).toHaveLength(0);
   });
 
   it("sends an explicit batch decision to the broker only after the owner action", async () => {
@@ -181,7 +197,9 @@ describe("authenticated PR feedback review web journey", () => {
     const payload = { requestId: randomUUID(), expectedRevision: 12, reviewDigest: "d".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["a".repeat(64)], decision: "APPROVE", selectedFindingIds: [finding.id] };
     const response = await handler(request("POST", `/review/${taskId}/api/decision`, { cookie: "__Host-agentx_review_session=session-owner; __Host-agentx_review_csrf=csrf-value-0123456789abcdef012345", origin, "x-agentx-csrf": "csrf-value-0123456789abcdef012345", "content-type": "application/json" }, payload), new URL(`/review/${taskId}/api/decision`, origin));
     expect(response.statusCode).toBe(200);
-    expect(deps.submitWorkflowFeedbackDecision).toHaveBeenCalledWith(expect.objectContaining({ slackUserId: "UOWNER" }), taskId, payload);
+    expect(deps.observed.decisions[0]?.[0]).toMatchObject({ slackUserId: "UOWNER" });
+    expect(deps.observed.decisions[0]?.[1]).toBe(taskId);
+    expect(deps.observed.decisions[0]?.[2]).toEqual(payload);
     expect(response.headers["cache-control"]).toContain("no-store");
   });
 });
@@ -220,7 +238,8 @@ describe("broker-backed feedback review data", () => {
       const bundleDigest = createHash("sha256").update(bundleBytes).digest("hex");
       const bundleKey = `private/${task.ownerKey}/${task.workspaceId}/feedback/${bundleDigest}.json`;
       harness.s3.objects.set(bundleKey, bundleBytes);
-      const { sourceDeliveryIds: _deliveryIds, comments, ...bundleMetadata } = bundle;
+      const { sourceDeliveryIds: deliveryIds, comments, ...bundleMetadata } = bundle;
+      void deliveryIds; void comments;
       return { digest: bundleDigest, commentSetDigest, ref: { ...bundleMetadata, sha256: bundleDigest, objectKey: bundleKey, comments: [commentRef] }, findingRef: {
         id: `finding-${index + 1}`, bundleDigest, commentIds: [commentId], priority: "MUST_FIX" as const,
         assessment: "ACTIONABLE" as const, recommended: true,
@@ -240,6 +259,7 @@ describe("broker-backed feedback review data", () => {
     const reportKey = `private/${task.ownerKey}/${task.workspaceId}/feedback-reviews/${reviewDigest}.json`;
     harness.s3.objects.set(reportKey, reportBytes);
     const { findings, ...reportMetadata } = report;
+    void findings;
     const reportRef = { ...reportMetadata, sha256: reviewDigest, objectKey: reportKey };
     const base = createWorkflowSnapshot({ taskId, ownerId: task.ownerKey, now });
     const waiting = { ...base, stage: "WAIT_FOR_MERGE" as const, state: "WAITING" as const, candidate,
@@ -262,7 +282,7 @@ describe("broker-backed feedback review data", () => {
 
   it("loads only the current owner's verified report and comment bundles through broker artifact reads", async () => {
     const fixture = await preparedReview();
-    const data = await getWorkflowFeedbackReview(fixture.deps as never, { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack", name: MAYA.name, slackUserId: MAYA.slackUserId }, fixture.taskId);
+    const data = await getWorkflowFeedbackReview(fixture.deps, { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack", name: MAYA.name, slackUserId: MAYA.slackUserId }, fixture.taskId);
     expect(data).toMatchObject({ status: "PENDING", qualification: "AI_GENERATED_ADVISORY", reviewDigest: fixture.reviewDigest, bundleDigests: [fixture.bundleDigest], findings: [{ id: "finding-1", comments: [{ body: "Handle empty input" }] }] });
     await expect(getWorkflowFeedbackReview(fixture.deps as never, { developerId: OMAR.developerId, sessionId: OMAR.sessionId, amr: "oidc", name: OMAR.name }, fixture.taskId)).rejects.toMatchObject({ code: "TASK_NOT_FOUND" });
   });
@@ -277,7 +297,7 @@ describe("broker-backed feedback review data", () => {
     const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
     fixture.harness.db.set({ ...task, workflow: { ...task.workflow, stage, state } });
 
-    const data = await getWorkflowFeedbackReview(fixture.deps as never, owner, fixture.taskId);
+    const data = await getWorkflowFeedbackReview(fixture.deps, owner, fixture.taskId);
 
     expect(data).toMatchObject({ workflowStage: stage, workflowStatus: state, nextAction: expectedNextAction });
   });
@@ -285,7 +305,7 @@ describe("broker-backed feedback review data", () => {
   it("stores the attributed owner decision with a revision and digest condition", async () => {
     const fixture = await preparedReview();
     const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId };
-    const result = await submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, {
+    const result = await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
       requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
       bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
     });
@@ -303,7 +323,7 @@ describe("broker-backed feedback review data", () => {
       sk: `NOTICE#${feedbackReviewNoticeId(fixture.taskId, fixture.reviewDigest, fixture.workflow.revision)}`,
       entityType: "NOTICE", deliveredAt: "2026-10-05T11:30:00.000Z" });
 
-    await submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, {
+    await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
       requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest,
       proposalDigest: "b".repeat(64), bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
     });
@@ -323,7 +343,7 @@ describe("broker-backed feedback review data", () => {
     const requestId = randomUUID();
     const payload = { requestId, expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
       bundleDigests: [fixture.bundleDigest], decision: "APPROVE" as const, selectedFindingIds: ["finding-1"] };
-    const result = await submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, payload);
+    const result = await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, payload);
     expect(refresh).toHaveBeenCalledTimes(2);
     expect(result).toMatchObject({ status: "APPROVED", nextAction: "implementation" });
     const task = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as { workspaceId: string; workflow: { state: string; feedbackDecisions: Array<{ requestId: string; selectedCommentIds: string[] }> } };
@@ -345,12 +365,12 @@ describe("broker-backed feedback review data", () => {
   it("lets the owner approve findings bound to both linked PRs in one decision and dispatches once", async () => {
     const fixture = await preparedReview(2);
     const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId };
-    const review = await getWorkflowFeedbackReview(fixture.deps as never, owner, fixture.taskId);
+    const review = await getWorkflowFeedbackReview(fixture.deps, owner, fixture.taskId);
     expect(review.candidates).toEqual([
       { repositoryId: "demo", number: 42, headSha: "c".repeat(40) },
       { repositoryId: "ui", number: 43, headSha: "a".repeat(40) },
     ]);
-    expect(review.findings.map((finding: { id: string }) => finding.id)).toEqual(["finding-1", "finding-2"]);
+    expect(review.findings).toMatchObject([{ id: "finding-1" }, { id: "finding-2" }]);
     await expect(submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, {
       requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest,
       proposalDigest: "b".repeat(64), bundleDigests: fixture.bundleDigests, decision: "APPROVE",
@@ -367,8 +387,8 @@ describe("broker-backed feedback review data", () => {
     const webDependencies = (): FeedbackReviewWebDependencies => ({
       origin,
       authenticateSession: async sessionId => sessionId === "session-owner" ? owner : undefined,
-      getWorkflowFeedbackReview: (caller, id) => getWorkflowFeedbackReview(fixture.deps as never, caller, id),
-      submitWorkflowFeedbackDecision: (caller, id, input) => submitWorkflowFeedbackDecision(fixture.deps as never, caller, id, input),
+      getWorkflowFeedbackReview: (caller, id) => getWorkflowFeedbackReview(fixture.deps, caller, id),
+      submitWorkflowFeedbackDecision: (caller, id, input) => submitWorkflowFeedbackDecision(fixture.deps, caller, id, input),
       now: () => Date.parse("2026-10-05T12:00:00.000Z"),
     });
     const requestPage = async () => createFeedbackReviewWeb(webDependencies())(
@@ -376,17 +396,17 @@ describe("broker-backed feedback review data", () => {
       new URL(`/review/${fixture.taskId}`, origin));
 
     expect((await requestPage()).body).toContain("Current workflow status");
-    await submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, {
+    await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
       requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest,
       proposalDigest: "b".repeat(64), bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
     });
-    const approvedReview = await getWorkflowFeedbackReview(fixture.deps as never, owner, fixture.taskId);
+    const approvedReview = await getWorkflowFeedbackReview(fixture.deps, owner, fixture.taskId);
     expect(approvedReview.decision).not.toHaveProperty("nextAction");
     expect(approvedReview.nextAction).toMatch(/^Implementation is (queued to start|in progress)\.$/);
     let pageAfterRestart = await requestPage(); // a new handler reads the committed owner decision from the persisted task
     expect(pageAfterRestart.body).toContain("Decision recorded: Approved");
 
-    const blockedTask = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
+    const blockedTask = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as Record<string, unknown> & { workspaceId: string; workflow: Record<string, unknown> };
     fixture.harness.db.set({ ...blockedTask, workflow: { ...blockedTask.workflow, state: "BLOCKED", blockReason: "Required unit check failed" } });
     const workspace = fixture.harness.db.get(`WORKSPACE#${blockedTask.workspaceId}`, "META") as Record<string, unknown>;
     const operationId = randomUUID();
@@ -400,11 +420,13 @@ describe("broker-backed feedback review data", () => {
     expect(pageAfterRestart.body).toContain("Resolve the blocker before continuing.");
     expect(pageAfterRestart.body).not.toContain("AgentX will continue with implementation and the selected checks.");
 
-    const beforeMerge = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as Record<string, unknown> & { workflow: any };
+    const beforeMerge = fixture.harness.db.get(`DEVTASK#${fixture.taskId}`, "META") as Record<string, unknown> & { workspaceId: string; workflow: WorkflowSnapshot };
     const waitingForMerge = { ...beforeMerge.workflow, stage: "WAIT_FOR_MERGE", state: "WAITING", blockReason: undefined };
     fixture.harness.db.set({ ...beforeMerge, workflow: waitingForMerge });
+    const candidate = waitingForMerge.candidate;
+    if (candidate === undefined) throw new Error("fixture workflow must retain its candidate");
     const completed = observeWorkflowPullRequest(waitingForMerge, { repositoryId: "demo", number: 42,
-      candidateDigest: waitingForMerge.candidate.digest, state: "MERGED", source: "GITHUB_API", observedAt: "2026-10-05T12:05:00.000Z" }, "2026-10-05T12:05:00.000Z");
+      candidateDigest: candidate.digest, state: "MERGED", source: "GITHUB_API", observedAt: "2026-10-05T12:05:00.000Z" }, "2026-10-05T12:05:00.000Z");
     fixture.harness.db.set({ ...beforeMerge, workflow: completed });
     pageAfterRestart = await requestPage();
     expect(pageAfterRestart.body).toContain("Current workflow status: COMPLETE");
@@ -415,7 +437,7 @@ describe("broker-backed feedback review data", () => {
   it("refuses a queued implementation at the broker worker-start callback after approval is invalidated", async () => {
     const fixture = await preparedReview();
     const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId };
-    await submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, {
+    await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
       requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
       bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
     });
@@ -458,12 +480,12 @@ describe("broker-backed feedback review data", () => {
   ] as const)("keeps a verified %s review available as a private outcome after the owner decision", async (action, status, nextAction, selectedFindingIds) => {
     const fixture = await preparedReview();
     const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId };
-    await submitWorkflowFeedbackDecision(fixture.deps as never, owner, fixture.taskId, {
+    await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
       requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
       bundleDigests: [fixture.bundleDigest], decision: action, selectedFindingIds,
       ...(action === "APPROVE" ? {} : { ownerNote: "Please stop or revise this proposal." }),
     });
-    const current = await getWorkflowFeedbackReview(fixture.deps as never, owner, fixture.taskId);
+    const current = await getWorkflowFeedbackReview(fixture.deps, owner, fixture.taskId);
     expect(current).toMatchObject({ status, decision: { decision: action, selectedFindingIds } });
     if (action === "APPROVE") expect(current.nextAction).toMatch(/^Implementation is (queued to start|in progress)\.$/);
     else expect(current.nextAction).toBe(nextAction);

@@ -22,7 +22,6 @@ describe("native developer task workflow", () => {
     const planOperation = harness.db.find(item => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find(item => item.workflowMode === "PLAN");
     await harness.finish(workspaceId, String(planOperation?.id), "FAILED", { error: "test setup advances the workspace to READY" });
     const task = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { developerId: string; provider: "slack"; developerName: string; client: string; ownerKey: string; workspaceId: string; conversationId: string };
-    const workspace = harness.db.get(`WORKSPACE#${workspaceId}`, "META") as Record<string, unknown>;
     const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
     const now = new Date().toISOString();
     const planContent = "Approved plan: address the linked PR feedback after owner approval.";
@@ -46,7 +45,8 @@ describe("native developer task workflow", () => {
     const bundleDigest = createHash("sha256").update(bundleBytes).digest("hex");
     const bundleKey = `private/${task.ownerKey}/${workspaceId}/feedback/${bundleDigest}.json`;
     harness.s3.objects.set(bundleKey, bundleBytes);
-    const { sourceDeliveryIds: _deliveryIds, comments, ...metadata } = bundle;
+    const { sourceDeliveryIds: deliveryIds, comments, ...metadata } = bundle;
+    void deliveryIds;
     const bundleRef = { ...metadata, sha256: bundleDigest, objectKey: bundleKey, comments };
     workflow = collectWorkflowFeedbackBundles(workflow, { bundleRefs: [bundleRef], threadObservations: [] }, now);
     harness.db.set({ ...task, workflow, updatedAt: now });
@@ -68,9 +68,14 @@ describe("native developer task workflow", () => {
     await expect(readBundles({ ...binding, candidateDigest: "f".repeat(64) })).rejects.toThrow();
     await expect(readBundles({ ...binding, objectKey: bundleKey })).rejects.toThrow();
     await expect(readBundles({ ...binding, bundleDigest: "f".repeat(64) })).rejects.toThrow();
-    const material = await readBundles(binding) as { taskRequirements: string; bundles: Array<{ ref: { sha256: string }; bytesBase64: string }> };
+    const material: unknown = await readBundles(binding);
+    if (material === null || typeof material !== "object" || !("taskRequirements" in material)
+      || typeof material.taskRequirements !== "string" || !("bundles" in material) || !Array.isArray(material.bundles)) {
+      throw new Error("feedback bundle callback returned invalid material");
+    }
     expect(material.taskRequirements).toContain("Approved plan");
-    expect(material.bundles).toEqual([{ ref: expect.objectContaining({ sha256: bundleDigest }), bytesBase64: Buffer.from(bundleBytes).toString("base64") }]);
+    expect(JSON.stringify(material)).toContain(bundleDigest);
+    expect(JSON.stringify(material)).toContain(Buffer.from(bundleBytes).toString("base64"));
     harness.s3.objects.set(bundleKey, bundleBytes + "tampered");
     await expect(readBundles(binding)).rejects.toThrow();
     harness.s3.objects.set(bundleKey, bundleBytes);

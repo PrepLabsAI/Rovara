@@ -560,18 +560,24 @@ describe("current PR feedback API reads", () => {
     const comment = (id: number, anchor: string) => ({ id, body: `comment ${id}`, html_url: `${root}#${anchor}${id}`, user: { login: "reviewer" }, updated_at: "2026-10-05T12:00:00Z", submitted_at: "2026-10-05T12:00:00Z", path: "src/file.ts", line: 3, pull_request_url: `${api}/pulls/42`, issue_url: `${api}/issues/42` });
     const provider = appProvider({ credentialRef: "github-app", appId: "123", getPrivateKey: async () => privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
       fetchImplementation: async (url, init) => {
-        const requestUrl = String(url); requests.push(requestUrl);
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url; requests.push(requestUrl);
         if (requestUrl.endsWith("access_tokens")) return new Response(JSON.stringify({ token: "fixture" }));
         if (requestUrl === `${api}/pulls/42`) return Response.json({ ...pullRequestFixture(), head: { ref: "branch", sha: options.changedHead && reads++ ? "b".repeat(40) : "a".repeat(40) } });
         if (requestUrl === "https://api.github.com/graphql") {
-          const request = JSON.parse(String(init?.body));
+          const requestBody = typeof init?.body === "string" ? init.body : "";
+          const request = JSON.parse(requestBody) as { variables: Record<string, unknown>; query: string };
           const variables = request.variables;
-          if (request.query.includes("reviews(first")) return Response.json({ data: { repository: { nameWithOwner: "ps06756/personal-website-test", pullRequest: { number: 42, headRefOid: "a".repeat(40), reviews: page([{ fullDatabaseId: "1", body: "comment 1", updatedAt: "2026-10-05T13:00:00Z", url: `${root}#pullrequestreview-1` }]) } } } });
-          const connection = page([{ fullDatabaseId: "2" }], !!options.nested && !variables.threadId, "comment-next");
-          const thread = { id: "thread-1", isResolved: true, repository: { nameWithOwner: "ps06756/personal-website-test" }, pullRequest: { number: 42 }, comments: variables.threadId ? page([{ fullDatabaseId: "4" }]) : connection };
-          return Response.json({ data: variables.threadId ? { node: thread } : { repository: { nameWithOwner: "ps06756/personal-website-test", pullRequest: { number: 42, headRefOid: "a".repeat(40), reviewThreads: page([thread]) } } } });
+          if (request.query.includes("reviews(first")) return Response.json({ data: { repository: { nameWithOwner: "ps06756/personal-website-test", pullRequest: { number: 42, headRefOid: "a".repeat(40), reviews: page([{ fullDatabaseId: 1, body: "comment 1", updatedAt: "2026-10-05T13:00:00Z", url: `${root}#pullrequestreview-1` }]) } } } });
+          const threadId = typeof variables.threadId === "string" ? variables.threadId : undefined;
+          const connection = page([{ fullDatabaseId: 2 }], !!options.nested && !threadId, "comment-next");
+          const thread = { id: "thread-1", isResolved: true, repository: { nameWithOwner: "ps06756/personal-website-test" }, pullRequest: { number: 42 }, comments: threadId ? page([{ fullDatabaseId: 4 }]) : connection };
+          return Response.json({ data: threadId ? { node: thread } : { repository: { nameWithOwner: "ps06756/personal-website-test", pullRequest: { number: 42, headRefOid: "a".repeat(40), reviewThreads: page([thread]) } } } });
         }
-        if (requestUrl.includes("/reviews?")) { const review = comment(1, "pullrequestreview-"); if (options.exactReviewTime) delete (review as any).updated_at; return Response.json([review]); }
+        if (requestUrl.includes("/reviews?")) {
+          const review = comment(1, "pullrequestreview-");
+          if (options.exactReviewTime) { const { updated_at: _updatedAt, ...withoutUpdatedAt } = review; void _updatedAt; return Response.json([withoutUpdatedAt]); }
+          return Response.json([review]);
+        }
         if (requestUrl.includes("/pulls/42/comments?")) return Response.json(options.nested ? [comment(2, "discussion_r"), comment(4, "discussion_r")] : [comment(2, "discussion_r")]);
         if (requestUrl.includes("/issues/42/comments?")) {
           if (requestUrl.includes("page=2")) return Response.json([{ ...comment(3, "issuecomment-"), ...(options.wrongScope ? { html_url: "https://github.com/other/repo/pull/42#issuecomment-3" } : {}) }]);
@@ -583,7 +589,7 @@ describe("current PR feedback API reads", () => {
   }
   it("collects paginated discussion, review bodies and inline comment IDs with current thread state", async () => {
     const { provider, requests } = fixture({ nested: true });
-    expect(provider.getPullRequestFeedback).toBeTypeOf("function");
+    expect(typeof provider.getPullRequestFeedback).toBe("function");
     const result = await provider.getPullRequestFeedback("https://github.com/ps06756/personal-website-test.git", 42);
     expect(result.pullRequest.headCommit).toBe("a".repeat(40));
     expect(result.comments.map(c => c.id)).toEqual(["review:1", "review_comment:2", "review_comment:4", "discussion:3"]);
@@ -598,12 +604,12 @@ describe("current PR feedback API reads", () => {
   });
   it("refuses comments returned outside the exact linked repository and PR", async () => {
     const { provider } = fixture({ wrongScope: true });
-    expect(provider.getPullRequestFeedback).toBeTypeOf("function");
+    expect(typeof provider.getPullRequestFeedback).toBe("function");
     await expect(provider.getPullRequestFeedback("https://github.com/ps06756/personal-website-test.git", 42)).rejects.toThrow(/scope|canonical/);
   });
   it("refuses a head change during paginated feedback collection", async () => {
     const { provider } = fixture({ changedHead: true });
-    expect(provider.getPullRequestFeedback).toBeTypeOf("function");
+    expect(typeof provider.getPullRequestFeedback).toBe("function");
     await expect(provider.getPullRequestFeedback("https://github.com/ps06756/personal-website-test.git", 42)).rejects.toThrow(/changed/);
   });
 });

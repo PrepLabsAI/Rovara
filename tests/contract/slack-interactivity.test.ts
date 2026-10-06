@@ -6,9 +6,6 @@ import {
   createWorkflowSnapshot,
   createCandidateManifest,
   requestWorkflowFeedback,
-  WorkflowFeedbackReviewReportSchema,
-  collectWorkflowFeedbackBundles,
-  completeWorkflowFeedbackReview,
   WorkflowSnapshotSchema,
   submitWorkflowArtifact,
   answeredConfirmationBlocks,
@@ -401,7 +398,8 @@ describe("Slack PR feedback review actions", () => {
     expect(submitted).toHaveLength(1);
     expect(submitted[0]).toMatchObject({ taskId, userId: requester, thread, expectedRevision: 4,
       reviewDigest: review.reviewDigest, proposalDigest: review.proposalDigest, bundleDigests: review.bundleDigests,
-      selection: "RECOMMENDED", decision: "APPROVE", requestId: expect.any(String) });
+      selection: "RECOMMENDED", decision: "APPROVE" });
+    expect(submitted[0]?.requestId).toEqual(expect.any(String));
     expect(submitted[0]).not.toHaveProperty("findingIds");
   });
 

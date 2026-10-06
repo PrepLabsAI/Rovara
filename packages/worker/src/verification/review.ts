@@ -174,9 +174,10 @@ function validateFeedbackBundles(inputs: readonly { ref: WorkflowFeedbackBundleR
       throw new Error("feedback bundle bytes do not match their immutable reference");
     }
     const bundle = WorkflowFeedbackBundleSchema.parse(JSON.parse(raw.toString("utf8")) as unknown);
-    const { sourceDeliveryIds: _deliveryIds, comments, ...metadata } = bundle;
+    const { sourceDeliveryIds: deliveryIds, comments, ...metadata } = bundle;
+    void deliveryIds;
     const expectedRef = WorkflowFeedbackBundleRefSchema.parse({ ...metadata, sha256: ref.sha256, objectKey: ref.objectKey,
-      comments: comments.map(({ body: _body, ...comment }) => comment) });
+      comments: comments.map(({ body, ...comment }) => { void body; return comment; }) });
     if (stableJson(expectedRef) !== stableJson(ref)) throw new Error("feedback bundle metadata differs from its reference");
     if (bundle.taskId !== taskId || bundle.candidateDigest !== candidateDigest) throw new Error("feedback bundle belongs to another task or candidate");
     if (sha256(Buffer.from(JSON.stringify(bundle.comments), "utf8")) !== bundle.commentSetDigest) throw new Error("feedback bundle comments do not match their comment-set digest");

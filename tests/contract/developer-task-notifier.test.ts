@@ -15,6 +15,11 @@ import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 const SECRET = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
 const BOT_TOKEN = "xoxb-1111-2222-plantedbottoken";
 const say = (text: string) => ({ type: "progress", payload: { type: "message_end", message: { role: "assistant", content: [{ type: "text", text }] } } });
+function parseAction(value: string): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(value);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("expected Slack action object");
+  return parsed as Record<string, unknown>;
+}
 
 type Post = (input: { channel: string; threadTs?: string; text: string }) => Promise<{ ts: string }>;
 
@@ -94,7 +99,9 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     expect(message.blocks).toHaveLength(2);
     const actions = (message.blocks?.[1] as { elements: Array<{ action_id: string; value: string }> }).elements;
     expect(actions.map((button) => button.action_id)).toEqual(["agentx_workflow_approve", "agentx_workflow_changes"]);
-    expect(JSON.parse(actions[0]!.value)).toMatchObject({ taskId: h.taskId, revision: 2, decision: "APPROVE", digest: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    const approvalValue = parseAction(actions[0]!.value);
+    expect(approvalValue).toMatchObject({ taskId: h.taskId, revision: 2, decision: "APPROVE" });
+    expect(typeof approvalValue.digest === "string" && /^[a-f0-9]{64}$/.test(approvalValue.digest)).toBe(true);
   });
 
   it("shows the current requirements document in the Full path approval message", async () => {
@@ -695,14 +702,17 @@ describe("the PR feedback advisory summary", () => {
     expect(actions.map(action => action.action_id)).toEqual([
       "agentx_feedback_review_recommended", "agentx_feedback_review_changes",
     ]);
-    expect(JSON.parse(actions[0]!.value)).toMatchObject({
+    const feedbackActionValue = parseAction(actions[0]!.value);
+    expect(feedbackActionValue).toMatchObject({
       selection: "RECOMMENDED", expectedRevision: 8, reviewDigest: "a".repeat(64),
-      proposalDigest: "b".repeat(64), bundleSetDigest: expect.stringMatching(/^[a-f0-9]{64}$/),
+      proposalDigest: "b".repeat(64),
     });
+    expect(typeof feedbackActionValue.bundleSetDigest === "string" && /^[a-f0-9]{64}$/.test(feedbackActionValue.bundleSetDigest)).toBe(true);
     const maxPrMessage = feedbackReviewSlackMessage({ taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
       reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: Array.from({ length: 32 }, (_, index) => String(index).padStart(2, "0").repeat(32)),
       totalComments: 128, recommendedFindingIds: ["finding"], highestPriority: "MUST_FIX", detailUrl: "https://agentx.example/review/11111111-1111-4111-8111-111111111111" });
-    expect(JSON.parse(((maxPrMessage.blocks[1] as { elements: Array<{ value: string }> }).elements[0]!).value)).toMatchObject({ bundleSetDigest: expect.stringMatching(/^[a-f0-9]{64}$/) });
+    const maxPrActionValue = parseAction(((maxPrMessage.blocks[1] as { elements: Array<{ value: string }> }).elements[0]!).value);
+    expect(typeof maxPrActionValue.bundleSetDigest === "string" && /^[a-f0-9]{64}$/.test(maxPrActionValue.bundleSetDigest)).toBe(true);
     expect(((maxPrMessage.blocks[1] as { elements: Array<{ value: string }> }).elements[0]!).value.length).toBeLessThan(2_000);
   });
 
