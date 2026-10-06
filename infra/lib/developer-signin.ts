@@ -7,6 +7,7 @@ import { packagedFunction } from "./control-plane.js";
 
 const SIGN_IN_ROUTE_KEY = "ANY /v1/auth/{proxy+}";
 const DEV_ROUTE_KEY = "ANY /v1/dev/{proxy+}";
+const FEEDBACK_REVIEW_ROUTE_KEY = "ANY /review/{proxy+}";
 
 export interface DeveloperSignInParameters {
   slackTeamId: CfnParameter; slack: CfnParameter; oidcIssuer: CfnParameter; oidcClientId: CfnParameter;
@@ -138,13 +139,18 @@ export class DeveloperSignIn extends Construct {
     const devRoute = new apigwv2.CfnRoute(this, "DevRoute", {
       apiId: props.api.ref, routeKey: DEV_ROUTE_KEY, target: `integrations/${props.brokerIntegration.ref}`, authorizationType: "NONE",
     });
-    // Both routes are public, so the stage caps each: bursts of 50, 20 requests a second on average,
+    // The review page uses its own opaque, revocable session cookie and owner checks in the broker.
+    const feedbackReviewRoute = new apigwv2.CfnRoute(this, "FeedbackReviewRoute", {
+      apiId: props.api.ref, routeKey: FEEDBACK_REVIEW_ROUTE_KEY, target: `integrations/${props.brokerIntegration.ref}`, authorizationType: "NONE",
+    });
+    // Public routes are stage-capped: bursts of 50, 20 requests a second on average,
     // across all callers. A developer signs in a few times a week, so this only bites a flood.
     const throttle = { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 };
-    props.stage.routeSettings = { [SIGN_IN_ROUTE_KEY]: throttle, [DEV_ROUTE_KEY]: throttle };
+    props.stage.routeSettings = { [SIGN_IN_ROUTE_KEY]: throttle, [DEV_ROUTE_KEY]: throttle, [FEEDBACK_REVIEW_ROUTE_KEY]: throttle };
     // Route settings must name routes that already exist.
     props.stage.addDependency(authRoute);
     props.stage.addDependency(devRoute);
+    props.stage.addDependency(feedbackReviewRoute);
 
     const broker = props.broker;
     broker.addEnvironment("DEVELOPER_TOKEN_ISSUER", issuer);

@@ -320,6 +320,7 @@ interface SlackServiceConfiguration {
 /** A "." or ".." path segment, also percent-encoded (%2e in any case). */
 const DOT_SEGMENT = /(?:^|\/)(?:\.|%2e){1,2}(?:\/|$)/i;
 const DEVELOPER_ROUTE_KEY = "ANY /v1/dev/{proxy+}";
+const FEEDBACK_REVIEW_ROUTE_KEY = "ANY /review/{proxy+}";
 
 /** The handler's dependencies from what callers supply (see AwsBrokerInput). */
 function brokerDependencies(input: AwsBrokerInput): AwsBrokerDependencies {
@@ -635,6 +636,12 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       // the broker through the authorizer-free /v1/dev route (D17), so it must never be resolved.
       if (DOT_SEGMENT.test(event.rawPath ?? "/")) throw agentXError("NOT_FOUND", "route not found");
       const url = new URL(request.path, "https://agentx.invalid");
+      // The browser page uses its own opaque revocable session cookie and reauthorizes each
+      // request. Only API Gateway's exact public review route may reach this branch.
+      if (event.routeKey === FEEDBACK_REVIEW_ROUTE_KEY) {
+        if (!url.pathname.startsWith("/review/") || !dependencies.developer) throw agentXError("NOT_FOUND", "route not found");
+        return await routeDeveloperRequest({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, request, url) as { statusCode: number; headers: Record<string, string>; body: string };
+      }
       // The /v1/dev route has no API Gateway authorizer, so what it carries goes to the developer API or nowhere.
       if (event.routeKey === DEVELOPER_ROUTE_KEY && !url.pathname.startsWith("/v1/dev/")) throw agentXError("NOT_FOUND", "route not found");
       if (url.pathname === "/v1/github/webhooks") {

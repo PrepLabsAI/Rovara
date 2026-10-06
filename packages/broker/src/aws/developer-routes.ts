@@ -35,8 +35,9 @@ import {
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { DeveloperTaskActions } from "./developer-task-actions.js";
-import { routeDeveloperTaskRequest, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
+import { getWorkflowFeedbackReview, routeDeveloperTaskRequest, submitWorkflowFeedbackDecision, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
+import { createFeedbackReviewWeb } from "./feedback-review-web.js";
 
 export interface DeveloperApiConfiguration {
   issuer: string; env: string; methods: { slack: boolean; oidc: boolean }; slackTeamId?: string;
@@ -257,10 +258,15 @@ async function getSignIn<T>(deps: DeveloperRouteDependencies, pk: string): Promi
 
 export async function authenticateDeveloper(deps: DeveloperRouteDependencies, claims: Record<string, unknown> | undefined): Promise<DeveloperCaller> {
   const token = developerClaims(claims, deps.developer);
-  const session = await getSignIn<Pick<SessionRecord, "developerId" | "endsAt" | "revokedAt" | "startedAt">>(deps, `SESSION#${token.sessionId}`);
+  return authenticateSession(deps, token);
+}
+
+async function authenticateSession(deps: DeveloperRouteDependencies, token: { developerId: string; sessionId: string; amr: DeveloperSignInMethod }): Promise<DeveloperCaller> {
+  const session = await getSignIn<Pick<SessionRecord, "developerId" | "amr" | "endsAt" | "revokedAt" | "startedAt" | "slackUserId">>(deps, `SESSION#${token.sessionId}`);
   if (session === undefined || session.developerId !== token.developerId || session.revokedAt !== undefined || session.endsAt <= Math.floor(deps.now() / 1000)) {
     throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   }
+  if (session.amr !== token.amr) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
   // The broker may only read the sign-in table (R13), so it refuses; the token endpoint revokes the
   // session at its next refresh.
   if (startedBeforeMethodOn(session.startedAt, deps.developer.since?.[token.amr])) {
@@ -278,6 +284,14 @@ export async function authenticateDeveloper(deps: DeveloperRouteDependencies, cl
     ...(developer.slackUserId === undefined ? {} : { slackUserId: developer.slackUserId }),
     ...(developer.email === undefined ? {} : { email: developer.email }),
   };
+}
+
+/** Rechecks an opaque browser-cookie session against DeveloperIdentity on every page/API request. */
+export async function authenticateDeveloperSessionId(deps: DeveloperRouteDependencies, sessionId: string): Promise<DeveloperCaller> {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  const session = await getSignIn<Pick<SessionRecord, "developerId" | "amr">>(deps, `SESSION#${sessionId}`);
+  if (session === undefined || (session.amr !== "slack" && session.amr !== "oidc")) throw agentXError("AUTH_REQUIRED", SIGN_IN_AGAIN);
+  return authenticateSession(deps, { developerId: session.developerId, sessionId, amr: session.amr });
 }
 
 /** Every item under `pk` with the sort key prefix, following LastEvaluatedKey through each page. */
@@ -571,6 +585,20 @@ export function developerTaskRouteDependencies(
 }
 
 export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
+  if (url.pathname.startsWith("/review/")) {
+    if (deps.tasks === undefined) throw agentXError("NOT_FOUND", "developer tasks are not set up in this deployment");
+    const web = createFeedbackReviewWeb({
+      origin: new URL(deps.developer.issuer).origin,
+      authenticateSession: async (sessionId) => {
+        try { return await authenticateDeveloperSessionId(deps, sessionId); }
+        catch { return undefined; }
+      },
+      getWorkflowFeedbackReview: (caller, taskId) => getWorkflowFeedbackReview(developerTaskRouteDependencies(deps, caller), caller, taskId),
+      submitWorkflowFeedbackDecision: (caller, taskId, input) => submitWorkflowFeedbackDecision(developerTaskRouteDependencies(deps, caller), caller, taskId, input),
+      now: deps.now,
+    });
+    return web(request, url);
+  }
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
   const caller = await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(request.headers.authorization));
   if (request.method === "GET" && url.pathname === "/v1/dev/projects") return listProjects(deps, caller);

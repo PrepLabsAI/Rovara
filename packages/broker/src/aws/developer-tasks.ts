@@ -46,10 +46,13 @@ import {
   type WorkflowCheckPolicy,
   WorkflowDecisionRequestSchema,
   WorkflowFeedbackDecisionRequestSchema,
+  WorkflowFeedbackBundleSchema,
+  WorkflowFeedbackReviewReportSchema,
   WorkflowTransitionError,
   createWorkflowSnapshot,
   decideWorkflow,
   decideWorkflowFeedback,
+  decideWorkflowFeedbackFindings,
   WORKFLOW_PLAN_MAX_BYTES,
 } from "@agentx/contracts";
 import type { z } from "zod";
@@ -203,6 +206,123 @@ export async function loadOwnedTask(deps: DeveloperTaskRouteDependencies, caller
     throw agentXError("TASK_NOT_FOUND", TASK_ID.test(taskId) ? `no task ${taskId} of yours` : "that is not a task ID of yours");
   }
   return task;
+}
+
+const FEEDBACK_REPORT_MAX_BYTES = 1_000_000;
+const FEEDBACK_BUNDLE_MAX_BYTES = 2_000_000;
+const FEEDBACK_BUNDLE_TOTAL_MAX_BYTES = 8_000_000;
+
+/** Return a private review only after current task ownership and every stored digest are verified. */
+export async function getWorkflowFeedbackReview(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<Record<string, unknown>> {
+  const task = await loadOwnedTask(deps, caller, taskId);
+  const workflow = task.workflow;
+  const review = workflow?.feedbackReview;
+  if (workflow === undefined || review?.reviewRef === undefined || review.status !== "PENDING") {
+    throw agentXError("NOT_FOUND", "PR feedback review not found");
+  }
+  const reportRef = review.reviewRef;
+  const reportPrefix = `private/${task.ownerKey}/${task.workspaceId}/feedback-reviews/`;
+  if (reportRef.taskId !== taskId || !reportRef.objectKey.startsWith(reportPrefix)
+    || reportRef.objectKey !== `${reportPrefix}${reportRef.sha256}.json`) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the feedback review record failed its ownership check");
+  }
+  const reportBytes = await deps.actions.readArtifact(reportRef.objectKey, FEEDBACK_REPORT_MAX_BYTES);
+  if (Buffer.byteLength(reportBytes, "utf8") > FEEDBACK_REPORT_MAX_BYTES
+    || createHash("sha256").update(reportBytes, "utf8").digest("hex") !== reportRef.sha256) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the feedback review record failed its integrity check");
+  }
+  let reportInput: unknown;
+  try { reportInput = JSON.parse(reportBytes); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "the feedback review record is invalid"); }
+  const reportResult = WorkflowFeedbackReviewReportSchema.safeParse(reportInput);
+  if (!reportResult.success || reportResult.data.taskId !== taskId || reportResult.data.status !== "COMPLETE"
+    || reportResult.data.proposalDigest !== reportRef.proposalDigest || reportResult.data.bundleDigests.join("\0") !== reportRef.bundleDigests.join("\0")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "the feedback review record is invalid");
+  }
+  const report = reportResult.data;
+  const bundleByDigest = new Map<string, Map<string, Record<string, unknown>>>();
+  let bundleBytesTotal = 0;
+  for (const ref of review.bundleRefs) {
+    const prefix = `private/${task.ownerKey}/${task.workspaceId}/feedback/`;
+    if (ref.taskId !== taskId || !report.bundleDigests.includes(ref.sha256) || !ref.objectKey.startsWith(prefix)
+      || ref.objectKey !== `${prefix}${ref.sha256}.json`) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "a feedback comment record failed its ownership check");
+    }
+    const bytes = await deps.actions.readArtifact(ref.objectKey, FEEDBACK_BUNDLE_MAX_BYTES);
+    bundleBytesTotal += Buffer.byteLength(bytes, "utf8");
+    if (bundleBytesTotal > FEEDBACK_BUNDLE_TOTAL_MAX_BYTES || Buffer.byteLength(bytes, "utf8") > FEEDBACK_BUNDLE_MAX_BYTES
+      || createHash("sha256").update(bytes, "utf8").digest("hex") !== ref.sha256) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "a feedback comment record failed its integrity check");
+    }
+    let bundleInput: unknown;
+    try { bundleInput = JSON.parse(bytes); } catch { throw agentXError("RUNTIME_UNAVAILABLE", "a feedback comment record is invalid"); }
+    const parsed = WorkflowFeedbackBundleSchema.safeParse(bundleInput);
+    if (!parsed.success || parsed.data.taskId !== taskId || parsed.data.repositoryId !== ref.repositoryId
+      || parsed.data.number !== ref.number || parsed.data.headSha !== ref.headSha || parsed.data.candidateDigest !== ref.candidateDigest
+      || parsed.data.commentSetDigest !== ref.commentSetDigest) {
+      throw agentXError("RUNTIME_UNAVAILABLE", "a feedback comment record is invalid");
+    }
+    bundleByDigest.set(ref.sha256, new Map(parsed.data.comments.map(comment => [comment.id, comment])));
+  }
+  const priorityOrder = { MUST_FIX: 0, SHOULD_FIX: 1, OPTIONAL: 2 } as const;
+  const findings = report.findings.map(finding => ({
+    ...finding,
+    comments: finding.commentIds.map(commentId => bundleByDigest.get(finding.bundleDigest)?.get(commentId)).filter((comment): comment is NonNullable<typeof comment> => comment !== undefined),
+  })).sort((left, right) => priorityOrder[left.priority] - priorityOrder[right.priority]
+    || Number(right.recommended) - Number(left.recommended) || left.id.localeCompare(right.id));
+  if (findings.some((finding, index) => finding.comments.length !== report.findings[index]?.commentIds.length)) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "a feedback finding references a missing comment");
+  }
+  const candidates = report.candidateBindings.map(binding => ({ repositoryId: binding.repositoryId, number: binding.number, headSha: binding.headSha }));
+  const checks = [...(workflow.checkPolicy?.required ?? []), ...(workflow.checkPolicy?.optional.filter(check => workflow.checkPolicy?.selectedOptionalIds.includes(check.id)) ?? [])].map(check => check.label);
+  return {
+    taskId, title: task.title, revision: workflow.revision, status: review.status,
+    qualification: report.qualification, reviewDigest: reportRef.sha256, proposalDigest: report.proposalDigest,
+    bundleDigests: report.bundleDigests, candidates, findings,
+    recommendedFindingIds: findings.filter(finding => finding.recommended).map(finding => finding.id), checks,
+  };
+}
+
+/** Store an owner-attributed decision with a revision and exact review/candidate digest fence. */
+export async function submitWorkflowFeedbackDecision(
+  deps: DeveloperTaskRouteDependencies,
+  caller: DeveloperCaller,
+  taskId: string,
+  input: { requestId: string; expectedRevision: number; reviewDigest: string; proposalDigest: string; bundleDigests: string[]; decision: "APPROVE" | "REQUEST_CHANGES" | "DISMISS"; selectedFindingIds: string[]; ownerNote?: string | undefined },
+): Promise<{ status: string; nextAction: string }> {
+  const task = await loadOwnedTask(deps, caller, taskId);
+  const current = task.workflow;
+  if (current === undefined) throw agentXError("NOT_FOUND", "PR feedback review not found");
+  const prior = current.feedbackDecisions?.find(decision => decision.requestId === input.requestId);
+  if (prior !== undefined) {
+    const same = prior.actorId === task.ownerKey && prior.decision === input.decision && prior.reviewDigest === input.reviewDigest
+      && prior.proposalDigest === input.proposalDigest && JSON.stringify(prior.bundleDigests) === JSON.stringify(input.bundleDigests)
+      && JSON.stringify(prior.selectedFindingIds) === JSON.stringify(input.selectedFindingIds) && prior.ownerNote === input.ownerNote;
+    if (!same) throw agentXError("IDEMPOTENCY_CONFLICT", "this decision request ID was already used");
+    return { status: prior.decision === "APPROVE" ? "APPROVED" : prior.decision === "REQUEST_CHANGES" ? "CHANGES_REQUESTED" : "DISMISSED", nextAction: prior.decision === "APPROVE" ? "implementation" : "owner_review" };
+  }
+  let next: WorkflowSnapshot;
+  try {
+    next = decideWorkflowFeedbackFindings(current, {
+      requestId: input.requestId, expectedRevision: input.expectedRevision, reviewDigest: input.reviewDigest,
+      proposalDigest: input.proposalDigest, bundleDigests: input.bundleDigests,
+      selectedFindingIds: input.selectedFindingIds, decision: input.decision, ...(input.ownerNote === undefined ? {} : { ownerNote: input.ownerNote }),
+    }, { actorId: task.ownerKey, role: "TASK_OWNER" }, iso(deps));
+  } catch (error) {
+    if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", error.message);
+    throw error;
+  }
+  try {
+    await deps.actions.transact([{ Update: {
+      TableName: deps.tableName, Key: taskKey(taskId),
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ConditionExpression: "workflow.revision = :revision AND workflow.stage = :stage AND workflow.state = :state AND workflow.feedbackReview.status = :pending AND workflow.feedbackReview.reviewRef.sha256 = :reviewDigest AND workflow.feedbackReview.reviewRef.proposalDigest = :proposalDigest",
+      ExpressionAttributeValues: { ":workflow": next, ":now": iso(deps), ":revision": current.revision, ":stage": "WAIT_FOR_MERGE", ":state": "WAITING", ":pending": "PENDING", ":reviewDigest": input.reviewDigest, ":proposalDigest": input.proposalDigest },
+    } }]);
+  } catch (error) {
+    if (isConditional(error)) throw agentXError("CONFIG_INVALID", "the review changed; reload it before deciding");
+    throw error;
+  }
+  return { status: input.decision === "APPROVE" ? "APPROVED" : input.decision === "REQUEST_CHANGES" ? "CHANGES_REQUESTED" : "DISMISSED", nextAction: input.decision === "APPROVE" ? "implementation" : "owner_review" };
 }
 
 const DIFF_READ_BYTES = 1_000_000;
