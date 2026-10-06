@@ -51,13 +51,18 @@ directly for that environment name would have produced (FR-012).
    full test suite, and `infra:synth`.
 3. Nothing else happens unless the repository variable `AGENTX_PUBLISH_ENABLED` is exactly `true`.
    It is `true` since v0.1.0; see "Release setup" below.
-4. When publishing is enabled, three more jobs run in order:
+4. When publishing is enabled, more jobs run in order:
    - **images**: builds and pushes the two container images, then reads back the digest the
      registry itself reports (not just what the build produced) before trusting it.
    - **release**: builds the release directory, verifies it, and creates a GitHub release titled
      "Rovara X.Y.Z" with `release.json` and a tarball of the whole directory attached.
    - **npm**: packs and publishes the CLI through npm trusted publishing, which adds provenance.
      A version already on the registry is skipped, not failed.
+   - **installer**: builds the Launch in AWS button's installer (`npm run release:installer`) and
+     uploads it to the installer bucket: `<version>/installer.template.json` and
+     `<version>/packages/<assetId>.zip` first, then `latest/installer.template.json`, which the
+     README's button opens. It runs only when `AGENTX_INSTALLER_BUCKET` is set, and after npm, so
+     the template's pinned CLI version is always published.
 5. The version always comes from the tag name. There is no way to type a different version by
    hand, even when re-running the workflow manually. A manual run must still be started from a
    tag, or it fails immediately with a clear error.
@@ -72,6 +77,10 @@ directly for that environment name would have produced (FR-012).
   a release directory that no longer matches what today's source would produce.
 - `npm run release:pack-cli -- --version <version> --out <dir> [--name <package-name>]` builds the
   npm package for the CLI and packs it into a tarball, without publishing anything.
+- `npm run release:installer -- --version <version> --bucket <installer bucket> --out <dir>` builds
+  the installer's quick-create template and code package as the workflow uploads them, and prints
+  the Launch in AWS address. `aws cloudformation validate-template --template-body file://<dir>/latest/installer.template.json`
+  checks the template without creating anything.
 
 ## Release setup
 
@@ -112,6 +121,24 @@ place; this records what it is, so a change to any piece can be made deliberatel
   GitHub runs the tagged commit's own copy of the workflow, so whoever can push a `v*` tag can
   publish. The ruleset is what limits that to admins.
 - **The license.** `LICENSE` (FSL-1.1-ALv2) ships in the npm package and the release tarball.
+- **The installer bucket** (one-time setup, before the first release with the Launch in AWS
+  button). `rovara-installer-us-east-1` in account `944937319445`, `us-east-1`: anyone may read its
+  objects (the quick-create template, and the setup page's code, which Lambda reads from the
+  visitor's own account); only the publish role writes them. The README's button points at it, so
+  the name is fixed. From an admin profile in that account:
+
+  ```sh
+  B=rovara-installer-us-east-1
+  aws s3api create-bucket --bucket "$B" --region us-east-1
+  # Only if the account's own Block Public Access blocks public bucket policies:
+  #   aws s3control get-public-access-block --account-id 944937319445
+  aws s3api put-public-access-block --bucket "$B" --public-access-block-configuration \
+    BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=false,RestrictPublicBuckets=false
+  aws s3api put-bucket-policy --bucket "$B" --policy "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Sid\":\"PublicRead\",\"Effect\":\"Allow\",\"Principal\":\"*\",\"Action\":\"s3:GetObject\",\"Resource\":\"arn:aws:s3:::$B/*\"}]}"
+  aws iam put-role-policy --role-name agentx-github-release --policy-name installer-bucket \
+    --policy-document "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":\"s3:PutObject\",\"Resource\":\"arn:aws:s3:::$B/*\"}]}"
+  gh variable set AGENTX_INSTALLER_BUCKET --body "$B"
+  ```
 
 ## If a release fails partway
 

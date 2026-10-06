@@ -1,8 +1,9 @@
 # Installing Rovara
 
-This guide installs one Rovara environment in your AWS account with one command, from the
-published release. It ends with Rovara answering in Slack. After the install,
-[docs/day-two.md](day-two.md) covers running it.
+This guide installs one Rovara environment in your AWS account. The usual way is the Launch in AWS
+button: nothing to install on your computer, and everything is answered on a setup page. You can
+also install from a terminal with one command. Either way ends with Rovara answering in Slack.
+After the install, [docs/day-two.md](day-two.md) covers running it.
 
 Installing with the CDK, through a platform team that must deploy the IAM roles itself, or from a
 source checkout is in [Other ways to install](install-advanced.md).
@@ -14,10 +15,11 @@ You need:
 - **An AWS account.** A separate AWS account just for Rovara keeps its costs and permissions apart
   from your other work. Give each install its own: environments that share an account are not a
   security boundary against each other.
-- **Admin credentials in that account for the first run** (for example `aws login` or an SSO
-  profile). The platform team path needs them only on the platform team's side. Later, day-2
-  commands use the narrower operator role that the install creates.
-- **Node 22.19 or newer (Node 22 LTS recommended).** AWS CloudShell comes with Node 20; see
+- **Admin rights in that account for the first run:** with the button, signed in to the AWS
+  console as someone who can create IAM roles; from a terminal, admin credentials (for example
+  `aws login` or an SSO profile). The platform team path needs them only on the platform team's
+  side. Later, day-2 commands use the narrower operator role that the install creates.
+- **From a terminal only: Node 22.19 or newer (Node 22 LTS recommended).** AWS CloudShell comes with Node 20; see
   [Node 22 in AWS CloudShell](#node-22-in-aws-cloudshell). With an older Node, `agentx` stops
   before it does anything and says what to install.
 - **A GitHub organization or personal account** that will own the Rovara GitHub App.
@@ -67,7 +69,34 @@ Pick an environment name: lower-case letters, digits and hyphens, such as `prod`
 Every command takes it as `--env <env>`. Always pass it: without it, `agentx` means the
 environment named `production`.
 
-## Install
+## Install with the Launch in AWS button (recommended)
+
+[![Launch in AWS](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/quickcreate?templateURL=https%3A%2F%2Frovara-installer-us-east-1.s3.us-east-1.amazonaws.com%2Flatest%2Finstaller.template.json&stackName=agentx-installer)
+
+The button opens the AWS console's Create stack page for the Rovara installer, in `us-east-1` (the
+one region Rovara runs in today), with everything filled in but three answers.
+
+1. **Create the installer.** Enter your email, the GitHub organization or user that will own
+   Rovara's GitHub app, and an install name (`prod` unless you want another). Tick the box that
+   says CloudFormation might create IAM resources, and press Create stack.
+2. **Wait for the email, about five minutes.** It comes from `no-reply@verificationemail.com`
+   with the subject "Your temporary password" (look in Spam too). It has the setup page's
+   address; the installer stack's Outputs tab shows the same address as `SetupPageUrl`.
+3. **Sign in to the setup page** with your email and the temporary password, and choose your own
+   password. The page shows the build in AWS, about 20 minutes. You can close it and come back.
+4. **Connect GitHub and Slack on the page.** Create the GitHub app with one button and choose its
+   repositories. For Slack, paste one Slack app configuration token (the page says where to get
+   it), then press Add to Slack.
+5. **Finish on the page:** pick the first project's repository and Slack channel, confirm the
+   alert email, and mention the bot in the channel. The install ends at its first reply.
+
+The installer is one CloudFormation stack, `agentx-installer`: a CodeBuild job that runs
+`agentx init` in your account, as an administrator role that is deleted with the stack, and the
+setup page. Everything the install makes is in its own `agentx-<name>-*` stacks. Once Rovara
+answers in Slack, delete the `agentx-installer` stack: that removes only the installer, and Rovara
+keeps running. To remove Rovara itself, see [docs/teardown.md](teardown.md).
+
+## Install from a terminal
 
 ```sh
 npx @preplabsai/rovara-code --env <env> init --region <region>

@@ -30,7 +30,7 @@ export interface BuildReleaseInput {
 // embedded "../../../../../../../../Users/<name>/.../packages/...", synthesizing under
 // `<repoRoot>/.release-synth/...` produced clean "../../../node_modules/..." with no absolute path.
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..");
-const RELEASE_SYNTH_ROOT = join(REPO_ROOT, ".release-synth");
+export const RELEASE_SYNTH_ROOT = join(REPO_ROOT, ".release-synth");
 
 /** Validates images against ImageDigest before any other work, so a bad reference fails fast. */
 function checkedImages(images: BuildReleaseInput["images"]): ReleaseManifest["images"] {
@@ -49,7 +49,7 @@ function checkedImages(images: BuildReleaseInput["images"]): ReleaseManifest["im
 }
 
 /** Reuses the manifest schema's own field validators, so "valid" means the same thing everywhere. */
-function checkedVersion(version: string): string {
+export function checkedVersion(version: string): string {
   const parsed = ReleaseManifestSchema.shape.version.safeParse(version);
   if (!parsed.success) throw new Error(`version must be a semantic version such as 1.2.3 or 1.2.3-beta.1, not ${JSON.stringify(version)}`);
   return parsed.data;
@@ -69,7 +69,7 @@ function checkedGitCommit(gitCommit: string): string {
  * this function's agentxEnv/agentxSynthesizer/outdir and produce a release that depends on whatever
  * happened to be in the calling shell's environment. Refuse instead.
  */
-function checkedNoAmbientCdkContext(): void {
+export function checkedNoAmbientCdkContext(): void {
   if (process.env[CONTEXT_ENV] !== undefined) {
     throw new Error(
       `refusing to build a release with ${CONTEXT_ENV} set in the environment; it could override this release's context and make the output depend on the ambient environment instead of these inputs alone. Unset it and retry`,
@@ -95,7 +95,7 @@ function checkedNoAmbientCdkContext(): void {
  * suite's files under the forks pool (a separate OS process per test file) and no test in this file
  * calls buildRelease concurrently with another cwd-sensitive call.
  */
-function withRepoRootCwd<T>(run: () => T): T {
+export function withRepoRootCwd<T>(run: () => T): T {
   const originalCwd = process.cwd();
   process.chdir(REPO_ROOT);
   try {

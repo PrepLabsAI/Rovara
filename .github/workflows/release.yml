@@ -172,3 +172,31 @@ jobs:
           # No provenance flag needed: npm trusted publishing adds provenance automatically for
           # this public repository.
           npm publish "$RUNNER_TEMP"/cli/*.tgz --access public
+
+  # The Launch in AWS button's installer: its quick-create template and the setup page's code, in
+  # the public installer bucket (docs/releases.md, one-time owner setup). After npm, so latest/
+  # never points at a CLI that is not published yet; the versioned files before latest/, which
+  # points at them.
+  installer:
+    needs: npm
+    if: vars.AGENTX_PUBLISH_ENABLED == 'true' && vars.AGENTX_INSTALLER_BUCKET != ''
+    runs-on: ubuntu-latest
+    permissions: { contents: read, id-token: write }
+    steps:
+      - uses: actions/checkout@v5
+        with: { persist-credentials: false }
+      - uses: actions/setup-node@v5
+        with: { node-version-file: .node-version, cache: npm }
+      - run: npm ci
+      # release:installer imports workspace packages by their built (gitignored) dist/ output.
+      - run: npm run build
+      - uses: aws-actions/configure-aws-credentials@v5
+        with: { role-to-assume: "${{ vars.AGENTX_PUBLISH_ROLE_ARN }}", aws-region: us-east-1 }
+      - env:
+          VERSION: ${{ github.ref_name }}
+          BUCKET: ${{ vars.AGENTX_INSTALLER_BUCKET }}
+        run: |
+          VERSION="${VERSION#v}"
+          npm run release:installer -- --version "$VERSION" --bucket "$BUCKET" --out "$RUNNER_TEMP/installer"
+          aws s3 cp --recursive "$RUNNER_TEMP/installer/$VERSION" "s3://$BUCKET/$VERSION"
+          aws s3 cp "$RUNNER_TEMP/installer/latest/installer.template.json" "s3://$BUCKET/latest/installer.template.json" --cache-control "max-age=300"

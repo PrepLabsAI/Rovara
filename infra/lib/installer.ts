@@ -7,17 +7,41 @@
 // so deleting this stack removes the installer and leaves the environment running; `agentx
 // destroy` removes the environment.
 import {
-  Aws, CfnOutput, CfnParameter, Duration, RemovalPolicy, Stack, type StackProps,
+  Aws, CfnOutput, CfnParameter, CustomResource, Duration, RemovalPolicy, Stack, type StackProps,
   aws_apigatewayv2 as apigwv2,
   aws_codebuild as codebuild,
   aws_dynamodb as dynamodb,
   aws_iam as iam,
   aws_kms as kms,
-  custom_resources as cr,
+  aws_lambda as lambda,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
 import { CLI_PACKAGE_NAME, ENVIRONMENT_NAME_PATTERN } from "@agentx/contracts";
 import { packagedFunction } from "./control-plane.js";
+
+/** Starts the installer job on Create and answers CloudFormation; Update and Delete only answer.
+ * CloudFormation's own response protocol, written out: a failure to start fails the stack. */
+export const START_INSTALLER_CODE = `
+const https = require("node:https");
+const { CodeBuildClient, StartBuildCommand } = require("@aws-sdk/client-codebuild");
+const answer = (event, status, reason) => new Promise((resolve) => {
+  const body = JSON.stringify({ Status: status, Reason: reason, PhysicalResourceId: "start-installer", StackId: event.StackId, RequestId: event.RequestId, LogicalResourceId: event.LogicalResourceId });
+  const request = https.request(event.ResponseURL, { method: "PUT", headers: { "content-type": "", "content-length": Buffer.byteLength(body) } }, (response) => { response.resume(); response.on("end", resolve); });
+  request.on("error", resolve);
+  request.end(body);
+});
+exports.handler = async (event) => {
+  try {
+    if (event.RequestType === "Create") await new CodeBuildClient({}).send(new StartBuildCommand({ projectName: process.env.PROJECT }));
+    await answer(event, "SUCCESS", "ok");
+  } catch (error) {
+    await answer(event, "FAILED", String(error && error.message || error).slice(0, 200));
+  }
+};
+`;
+
+/** The installer stack's description, the same in the cdk app and the published template. */
+export const INSTALLER_DESCRIPTION = "AgentX installer: installs an AgentX environment from its setup page, with no terminal";
 
 /** How long the installer job may run. A step that waits on a person keeps it running. */
 export const INSTALLER_TIMEOUT = Duration.hours(8);
@@ -50,6 +74,22 @@ export class InstallerStack extends Stack {
       default: `${CLI_PACKAGE_NAME}@latest`,
       description: "The AgentX CLI the installer runs (an npm package spec); leave as is",
     });
+
+    // The quick-create form: the three answers first, in plain words, the CLI's package last.
+    this.templateOptions.metadata = {
+      "AWS::CloudFormation::Interface": {
+        ParameterGroups: [
+          { Label: { default: "Your AgentX install" }, Parameters: [adminEmail.logicalId, githubOwner.logicalId, installName.logicalId] },
+          { Label: { default: "Advanced" }, Parameters: [cliPackage.logicalId] },
+        ],
+        ParameterLabels: {
+          [adminEmail.logicalId]: { default: "Your email" },
+          [githubOwner.logicalId]: { default: "GitHub owner (organization or user)" },
+          [installName.logicalId]: { default: "Install name" },
+          [cliPackage.logicalId]: { default: "AgentX CLI package" },
+        },
+      },
+    };
 
     // The table's own key: it also seals the admin's sign-in on its way to the job.
     const key = new kms.Key(this, "SetupKey", {
@@ -129,18 +169,17 @@ export class InstallerStack extends Stack {
     table.grantReadWriteData(role);
 
     // The job starts as soon as the stack exists: Create stack is the only thing anyone presses.
-    new cr.AwsCustomResource(this, "StartInstaller", {
-      onCreate: {
-        service: "CodeBuild",
-        action: "startBuild",
-        parameters: { projectName: project.projectName },
-        physicalResourceId: cr.PhysicalResourceId.of("start-installer"),
-      },
-      policy: cr.AwsCustomResourcePolicy.fromStatements([
-        new iam.PolicyStatement({ actions: ["codebuild:StartBuild"], resources: [project.projectArn] }),
-      ]),
-      installLatestAwsSdk: false,
+    // Its code is inline, so the quick-create template needs no code package for it.
+    const starter = new lambda.Function(this, "StartInstallerFunction", {
+      runtime: lambda.Runtime.NODEJS_22_X,
+      handler: "index.handler",
+      timeout: Duration.seconds(30),
+      code: lambda.Code.fromInline(START_INSTALLER_CODE),
+      environment: { PROJECT: project.projectName },
+      description: "AgentX installer: starts the installer job when the stack is created",
     });
+    starter.addToRolePolicy(new iam.PolicyStatement({ actions: ["codebuild:StartBuild"], resources: [project.projectArn] }));
+    new CustomResource(this, "StartInstaller", { serviceToken: starter.functionArn, resourceType: "Custom::StartInstaller" });
 
     new CfnOutput(this, "SetupPageUrl", {
       value: setupUrl,

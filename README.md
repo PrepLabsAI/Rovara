@@ -297,24 +297,30 @@ contracts every component validates against.
 
 ### What you need
 
-- AWS administrator credentials for the first run, ideally in an account used only for Rovara
+- An AWS account where you can create IAM roles, ideally one used only for Rovara
 - A GitHub organization or personal account to own Rovara's GitHub App
 - A Slack workspace where you can create and install apps
 - Model access: Amazon Bedrock in your region, or an OpenRouter, Anthropic or OpenAI API key
-- Node.js 22.19 or newer (Node 22 LTS recommended)
 
 ### Install
+
+[![Launch in AWS](https://s3.amazonaws.com/cloudformation-examples/cloudformation-launch-stack.png)](https://console.aws.amazon.com/cloudformation/home?region=us-east-1#/stacks/quickcreate?templateURL=https%3A%2F%2Frovara-installer-us-east-1.s3.us-east-1.amazonaws.com%2Flatest%2Finstaller.template.json&stackName=agentx-installer)
+
+Press the button, enter your email, your GitHub owner and an install name, and press Create stack.
+An email with your temporary password and the setup page's address arrives in about five minutes.
+The setup page asks everything else: it builds Rovara in your account, then connects GitHub and
+Slack and ends at the bot's first reply in your channel. Nothing is installed on your computer.
+
+To install from a terminal instead, with Node.js 22.19 or newer (Node 22 LTS recommended):
 
 ```bash
 export AWS_PROFILE=<an admin profile for the target account>
 npx @preplabsai/rovara-code init --env <name>
 ```
 
-On your own computer, `init` opens an install page in your browser (served only from `127.0.0.1`)
-and walks you from the AWS account to the first reply in Slack. Pass `--no-ui` to stay in the
-terminal. It finishes when someone mentions the bot in your channel and gets a threaded reply. See
-[Installing Rovara](docs/install.md) for the details, and [Other ways to install](docs/install-advanced.md)
-for the CDK, a platform team, or a source checkout.
+On your own computer, `init` opens an install page in your browser (served only from `127.0.0.1`).
+Pass `--no-ui` to stay in the terminal. See [Installing Rovara](docs/install.md) for both ways, and
+[Other ways to install](docs/install-advanced.md) for the CDK, a platform team, or a source checkout.
 
 ### Use it
 

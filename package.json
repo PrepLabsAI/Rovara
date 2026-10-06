@@ -28,6 +28,7 @@
     "release:prod": "tsx scripts/release-production.ts",
     "session:e2e": "tsx scripts/session-e2e.ts",
     "release:build": "tsx scripts/release/build.ts",
+    "release:installer": "tsx scripts/release/installer.ts",
     "release:verify": "tsx scripts/release/verify.ts",
     "release:pack-cli": "tsx scripts/release/pack-cli.ts",
     "swebench:runner-image": "tsx scripts/swebench-runner-image.ts",

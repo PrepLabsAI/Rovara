@@ -5,7 +5,7 @@ import { Match, Template } from "aws-cdk-lib/assertions";
 import { describe, expect, it } from "vitest";
 import { DescribeStacksCommand } from "@aws-sdk/client-cloudformation";
 import { buildAgentXApp } from "../../infra/lib/app.js";
-import { InstallerStack, INSTALLER_TIMEOUT } from "../../infra/lib/installer.js";
+import { InstallerStack, INSTALLER_TIMEOUT, START_INSTALLER_CODE } from "../../infra/lib/installer.js";
 import { setupPageFunction, stackSetupIdentity } from "../../packages/cli/src/init/ui/setup-lambda.js";
 import { memorySetupStore } from "../../packages/cli/src/init/ui/setup-store.js";
 import { WIZARD_TOKEN_HEADER } from "../../packages/cli/src/init/ui/protocol.js";
@@ -50,9 +50,12 @@ describe("the installer stack", () => {
 
   it("starts the job as soon as the stack is created", () => {
     const resources = template().toJSON().Resources as Record<string, { Type: string; Properties: Record<string, unknown> }>;
-    const start = Object.values(resources).find((resource) => resource.Type === "Custom::AWS");
-    expect(JSON.stringify(start?.Properties.Create)).toContain("startBuild");
-    expect(start?.Properties.Update).toBeUndefined();
+    expect(Object.values(resources).some((resource) => resource.Type === "Custom::StartInstaller")).toBe(true);
+    // Inline, so the published template needs no code package for it (CloudFormation takes at most 4096 characters).
+    expect(START_INSTALLER_CODE.length).toBeLessThan(4096);
+    expect(START_INSTALLER_CODE).toContain('if (event.RequestType === "Create") await new CodeBuildClient({}).send(new StartBuildCommand({ projectName: process.env.PROJECT }))');
+    const starter = Object.values(resources).find((resource) => resource.Type === "AWS::Lambda::Function" && JSON.stringify(resource.Properties).includes("StartBuildCommand"));
+    expect(starter?.Properties.Code).toEqual({ ZipFile: START_INSTALLER_CODE });
   });
 
   it("serves the setup page from a function behind an HTTP API, and says where it is", () => {
