@@ -25,6 +25,6 @@ describe("privacy-safe feedback review measures", () => {
   it("counts reopened feedback using only an aggregate name, count, and timestamp", () => {
     const measure = feedbackReopenedMeasure("2026-10-05T12:00:00.000Z");
     expect(measure).toEqual({ event: "feedback_review.measure", measure: "feedback_reopened", count: 1, at: "2026-10-05T12:00:00.000Z" });
-    expect(Object.keys(measure).sort()).toEqual(["at", "count", "event", "measure"]);
+    expect(Object.keys(measure ?? {}).sort()).toEqual(["at", "count", "event", "measure"]);
   });
 });

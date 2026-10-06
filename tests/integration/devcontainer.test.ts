@@ -619,7 +619,7 @@ describe("a task's test commands, written with the container's paths", () => {
 
   it("records and replays `cd /workspaces/sample && npm test` from the host folder, in the container", async () => {
     const { checks, replays, checkout } = await taskThatRan(["cd /workspaces/sample && npm test", "cd /workspaces/sample/src && npm test"], (dir) => mkdir(join(dir, "src")));
-    expect(checks.checks.map((entry) => ({ label: entry.label, after: entry.after }))).toEqual([
+    expect(checks?.checks?.map((entry) => ({ label: entry.label, after: entry.after }))).toEqual([
       { label: "cd repo/sample && npm test", after: "passed" },
       { label: "cd repo/sample/src && npm test", after: "passed" },
     ]);
@@ -638,7 +638,7 @@ describe("a task's test commands, written with the container's paths", () => {
   it("refuses at replay a sub path that is a link out of the workspace, and runs nothing for it", async () => {
     const outside = await mkdtemp(join(tmpdir(), "agentx-devcontainer-outside-"));
     const { checks, replays } = await taskThatRan(["cd /workspaces/sample/escape && npm test"], (dir) => symlink(outside, join(dir, "escape")));
-    expect(checks.checks).toEqual([expect.objectContaining({ after: "not_run" })]);
+    expect(checks?.checks).toEqual([expect.objectContaining({ after: "not_run" })]);
     expect(replays).toEqual([]);
   });
 });

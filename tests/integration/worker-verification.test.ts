@@ -212,15 +212,17 @@ function feedbackReviewerAdapter(response: string, beforePrompt?: () => Promise<
   return {
     async create(input) {
       let notify: ((event: unknown) => void) | undefined;
+      const sessionFile = join(input.sessionDirectory, "feedback-review.json");
       return {
-        conversationId: randomUUID(), sessionFile: join(input.sessionDirectory, "feedback-review.json"),
+        conversationId: randomUUID(), sessionFile,
         async prompt(_prompt) {
           void _prompt;
           await beforePrompt?.();
           notify?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: response }] } });
         }, async abort() {},
         getModel: () => ({ provider: "test-provider", modelId: "read-only-critic-v1" }),
-        getSessionStats: () => ({ totalMessages: 2, inputTokens: 1, outputTokens: 1, cacheRead: 0, cacheWrite: 0, cost: 0 }),
+        getSessionStats: () => ({ sessionFile, sessionId: "feedback-review", userMessages: 1, assistantMessages: 1, toolCalls: 0, toolResults: 0,
+          totalMessages: 2, tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 }),
         subscribe(listener) { notify = listener; return () => { notify = undefined; }; },
         dispose() {},
       };
@@ -436,7 +438,7 @@ describe("AgentX checks the agent's work when it finishes (spec 051 Task 4)", ()
     const fromEvent = CheckReportSchema.parse((run.resultEvent!.payload as { checks: unknown }).checks);
     expect(fromEvent).toEqual(run.report);
     expect(run.result!.checks).toEqual(run.report);
-    expect(run.result!.checks.preambleSha256).toBe(agentxPreambleSha256());
+    expect(run.result!.checks?.preambleSha256).toBe(agentxPreambleSha256());
   });
 });
 

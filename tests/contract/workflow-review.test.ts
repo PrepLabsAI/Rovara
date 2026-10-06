@@ -14,7 +14,6 @@ function reviewerAdapter(prompt: (input: PiSessionInput, text: string) => Promis
     async create(input) {
       const sessionFile = join(input.sessionDirectory, `${input.conversationId}.jsonl`);
       await writeFile(sessionFile, "{}");
-      let listener: ((event: unknown) => void) | undefined;
       return {
         conversationId: input.conversationId ?? "review-session",
         sessionFile,
@@ -22,7 +21,7 @@ function reviewerAdapter(prompt: (input: PiSessionInput, text: string) => Promis
         async abort() { await onAbort(); },
         getModel: () => ({ provider: "test", modelId: "review-v1" }),
         getSessionStats: () => ({ tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 } as never),
-        subscribe(callback) { listener = callback; return () => { listener = undefined; }; },
+        subscribe() { return () => undefined; },
         dispose() {},
       };
     },
@@ -58,7 +57,8 @@ describe("workflow reviewer output", () => {
     const sessionInputs: Array<{ mode?: string; conversationId?: string }> = [];
     const adapter: PiSessionAdapter = {
       async create(input) {
-        sessionInputs.push({ mode: input.workflowMode, conversationId: input.conversationId });
+        sessionInputs.push({ ...(input.workflowMode === undefined ? {} : { mode: input.workflowMode }),
+          ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }) });
         const sessionFile = join(input.sessionDirectory, `${input.conversationId}.jsonl`);
         await writeFile(sessionFile, "{}");
         let listener: ((event: unknown) => void) | undefined;

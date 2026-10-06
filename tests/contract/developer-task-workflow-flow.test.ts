@@ -59,10 +59,11 @@ describe("native developer task workflow", () => {
     const accepted = { operation: harness.db.find(item => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION")
       .find(item => item.workflowMode === "FEEDBACK_REVIEW")! };
     expect(accepted.operation).toBeDefined();
+    const operationId = String(accepted.operation.id);
     expect(harness.db.find(item => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION")
       .filter(item => item.workflowMode === "FEEDBACK_REVIEW")).toHaveLength(1);
     const binding = accepted.operation.workflowFeedbackReview as { taskId: string; workflowRevision: number; candidateDigest: string };
-    const readBundles = (input: Record<string, unknown>) => harness.callback(workspaceId, accepted.operation.id, "feedback-bundles", input);
+    const readBundles = (input: Record<string, unknown>) => harness.callback(workspaceId, operationId, "feedback-bundles", input);
     await expect(readBundles({ ...binding, taskId: randomUUID() })).rejects.toThrow();
     await expect(readBundles({ ...binding, workflowRevision: binding.workflowRevision + 1 })).rejects.toThrow();
     await expect(readBundles({ ...binding, candidateDigest: "f".repeat(64) })).rejects.toThrow();
@@ -89,8 +90,8 @@ describe("native developer task workflow", () => {
       status: "COMPLETE", bundleDigests: [bundleDigest], findingRefs, findings: [], recordedAt: now });
     const outputDigest = createHash("sha256").update(output).digest("hex");
     const artifactName = `workflow-feedback-review-${outputDigest}.json`;
-    await harness.artifact(workspaceId, accepted.operation.id, artifactName, output);
-    await harness.finish(workspaceId, accepted.operation.id, "SUCCEEDED", { result: { workflowFeedbackReviewResult: {
+    await harness.artifact(workspaceId, operationId, artifactName, output);
+    await harness.finish(workspaceId, operationId, "SUCCEEDED", { result: { workflowFeedbackReviewResult: {
       ...binding, outputDigest, artifactName, status: "COMPLETE",
     } } });
     const saved = harness.db.get(`DEVTASK#${taskId}`, "META")?.workflow as Record<string, unknown>;

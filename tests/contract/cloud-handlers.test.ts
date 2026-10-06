@@ -411,7 +411,7 @@ describe("AWS control-plane handlers", () => {
       adminValues: ["admins"],
       callbackSigningKey: "c".repeat(64),
       repositoryGrants: grants,
-      githubPullRequests: { reconcilePullRequest, getPullRequest, updatePullRequest },
+      githubPullRequests: { reconcilePullRequest, getPullRequest, updatePullRequest, verifyWebhookRepository: async () => true },
       codeBuild: { start: codeBuildStart, status: codeBuildStatus },
       slack: { orchestratorRoleArn, memberWorkspaceLimit: 3, organizationWorkspaceLimit: 20 },
     });

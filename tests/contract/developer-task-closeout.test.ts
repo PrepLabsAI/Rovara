@@ -10,12 +10,12 @@ const artifact1 = { id: "plan-1", type: "plan" as const, version: 1, sha256: cre
 const artifact2 = { ...artifact1, id: "plan-2", version: 2, sha256: createHash("sha256").update(bytes2).digest("hex"), objectKey: `private/${taskId}/plan-2.md` };
 const task: TaskCanvasCloseoutTask = {
   taskId, closedAt: "2026-10-05T13:00:00.000Z",
-  workflow: { taskId, revision: 4, stage: "CLOSED", state: "COMPLETE", outcome: "CLOSED", updatedAt: "2026-10-05T13:00:00.000Z", artifacts: [artifact1, artifact2],
+  workflow: { revision: 4, stage: "CLOSED", state: "COMPLETE", outcome: "CLOSED", updatedAt: "2026-10-05T13:00:00.000Z", artifacts: [artifact1, artifact2],
     canvasLineage: [
-      { key: "PLAN:2:plan-1", stage: "PLAN_REVIEW", workflowRevision: 2, artifactId: "plan-1", artifactRef: artifact1.objectKey,
-        artifactDigest: artifact1.sha256, state: "CREATED", canvasId: "F12345678", permalink: "https://acme.slack.com/docs/T123/F12345678", createdAt: artifact1.createdAt },
-      { key: "PLAN:3:plan-2", stage: "PLAN_REVIEW", workflowRevision: 3, artifactId: "plan-2", artifactRef: artifact2.objectKey,
-        artifactDigest: artifact2.sha256, state: "CREATED", canvasId: "F22345678", permalink: "https://acme.slack.com/docs/T123/F22345678", createdAt: artifact2.createdAt },
+      { key: "PLAN:2:plan-1", workflowRevision: 2, artifactId: "plan-1", artifactRef: artifact1.objectKey,
+        artifactDigest: artifact1.sha256, state: "CREATED", canvasId: "F12345678" },
+      { key: "PLAN:3:plan-2", workflowRevision: 3, artifactId: "plan-2", artifactRef: artifact2.objectKey,
+        artifactDigest: artifact2.sha256, state: "CREATED", canvasId: "F22345678" },
     ] },
 };
 
@@ -148,6 +148,7 @@ describe("verified Slack Canvas closeout", () => {
     const h = storeFor(task, { manifestWriteUncertain: true });
     await expect(runTaskCanvasCloseout(h.store, { taskId })).resolves.toMatchObject({ status: "ARCHIVE_PENDING" });
     const digest = h.saved.workflow?.canvasCloseoutAttempt?.candidateManifestDigest;
+    if (!digest) throw new Error("retry attempt did not persist its manifest digest");
     expect(digest).toMatch(/^[a-f0-9]{64}$/);
     expect(h.calls.filter((call) => call.startsWith("delete:"))).toEqual([]);
     const retried = await runTaskCanvasCloseout(h.store, { taskId, expectedManifestDigest: digest });

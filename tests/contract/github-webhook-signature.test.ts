@@ -4,6 +4,7 @@ import { createCandidateManifest, createWorkflowSnapshot, recordExpectedWorkflow
 import { buildGithubFeedbackPlan, claimGithubWebhookDelivery, completeGithubWebhookDelivery, findLinkedGithubWorkflowPullRequest, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, receiveGithubWebhook, reconcileGithubWorkflowPullRequest, reconcileTaskPullRequestFeedback, recordLinkedGithubWorkflowFeedback, reserveGithubWebhookDelivery, verifyGithubWebhookSignature, verifyTaskPullRequestFeedbackCurrent } from "../../packages/broker/src/aws/github-webhooks.js";
 import type { ReconcileTaskPullRequestFeedbackInput } from "../../packages/broker/src/aws/github-webhooks.js";
 import type { GitHubPullRequestFeedback } from "../../packages/broker/src/github-app.js";
+import type { FeedbackReviewMeasure } from "../../packages/broker/src/developer/feedback-review-measures.js";
 
 function commandInput(command: unknown): { constructor: { name: string }; input: Record<string, unknown> } {
   return command as { constructor: { name: string }; input: Record<string, unknown> };
@@ -11,6 +12,10 @@ function commandInput(command: unknown): { constructor: { name: string }; input:
 
 function objectInput(value: unknown): Record<string, unknown> {
   return typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+}
+
+function stringField(value: unknown): string {
+  return typeof value === "string" ? value : "";
 }
 
 describe("GitHub webhook signature verification", () => {
@@ -266,23 +271,26 @@ describe("GitHub webhook signature verification", () => {
     const records = new Map<string, Record<string, unknown>>();
     const documentClient = {
       async send(command: unknown) {
-        const value = command as { constructor: { name: string }; input: Record<string, any> };
-        const key = `${value.input.Key?.pk ?? value.input.Item?.pk}/${value.input.Key?.sk ?? value.input.Item?.sk}`;
+        const value = command as { constructor: { name: string }; input: Record<string, unknown> };
+        const keyData = objectInput(value.input.Key);
+        const itemData = objectInput(value.input.Item);
+        const key = `${stringField(keyData.pk ?? itemData.pk)}/${stringField(keyData.sk ?? itemData.sk)}`;
         if (value.constructor.name === "PutCommand") {
           if (records.has(key)) throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" });
-          records.set(key, value.input.Item);
+          records.set(key, itemData);
           return {};
         }
         if (value.constructor.name === "UpdateCommand") {
           const record = records.get(key);
           if (!record) throw new Error("missing record");
-          if (value.input.ExpressionAttributeValues[":completed"] === undefined) {
+          const values = objectInput(value.input.ExpressionAttributeValues);
+          if (values[":completed"] === undefined) {
             if (record.status !== "RECEIVED" && record.status !== "RETRYABLE") throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" });
             record.status = "PROCESSING";
-            record.leaseToken = value.input.ExpressionAttributeValues[":leaseToken"];
+            record.leaseToken = values[":leaseToken"];
           } else {
-            if (record.status !== "PROCESSING" || record.leaseToken !== value.input.ExpressionAttributeValues[":leaseToken"]) throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" });
-            record.status = value.input.ExpressionAttributeValues[":completed"];
+            if (record.status !== "PROCESSING" || record.leaseToken !== values[":leaseToken"]) throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" });
+            record.status = values[":completed"];
           }
           return { Attributes: record };
         }
@@ -313,17 +321,19 @@ describe("GitHub webhook signature verification", () => {
     const records = new Map<string, Record<string, unknown>>();
     const documentClient = {
       async send(command: unknown) {
-        const value = command as { constructor: { name: string }; input: Record<string, any> };
-        const key = `${value.input.Key?.pk ?? value.input.Item?.pk}/${value.input.Key?.sk ?? value.input.Item?.sk}`;
+        const value = command as { constructor: { name: string }; input: Record<string, unknown> };
+        const keyData = objectInput(value.input.Key);
+        const itemData = objectInput(value.input.Item);
+        const key = `${stringField(keyData.pk ?? itemData.pk)}/${stringField(keyData.sk ?? itemData.sk)}`;
         if (value.constructor.name === "PutCommand") {
           if (records.has(key)) throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" });
-          records.set(key, value.input.Item);
+          records.set(key, itemData);
           return {};
         }
         const record = records.get(key);
         if (!record) throw new Error("missing record");
         if (value.constructor.name === "GetCommand") return { Item: record };
-        const values = value.input.ExpressionAttributeValues ?? {};
+        const values = objectInput(value.input.ExpressionAttributeValues);
         if (values[":completed"] !== undefined) {
           if (record.status !== "PROCESSING" || record.leaseToken !== values[":leaseToken"]) throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" });
           record.status = "COMPLETED";
@@ -408,7 +418,7 @@ describe("task-wide current PR feedback reconciliation", () => {
     let wrongScope = false;
     const artifacts: Array<{ bundle: WorkflowFeedbackBundle; bytes: string }> = [];
     const reads: string[] = [];
-    const measures: Array<Record<string, unknown>> = [];
+    const measures: FeedbackReviewMeasure[] = [];
     const input: ReconcileTaskPullRequestFeedbackInput = {
       documentClient: { send: async (command: unknown) => {
         const key = objectInput(commandInput(command).input.Key);
@@ -420,7 +430,8 @@ describe("task-wide current PR feedback reconciliation", () => {
         reads.push(url);
         const repo = number === 1 ? "api" : "ui";
         const comment = (id: string): GitHubPullRequestFeedback["comments"][number] => ({ id, kind: id.startsWith("review_comment") ? "REVIEW_COMMENT" : id.startsWith("review:") ? "REVIEW" : "DISCUSSION", author: "reviewer", url: `https://github.com/acme/${repo}/pull/${number}#comment`, updatedAt: now, body: currentBody, ...(id.startsWith("review_comment") ? { threadId: "thread-1" } : {}) });
-        return { pullRequest: { number, url: `https://github.com/${wrongScope ? "other" : "acme"}/${repo}/pull/${number}`, state: publishedState, headCommit: publishedHeadSha, headTreeSha: publishedHeadTreeSha },
+        return { pullRequest: { number, url: `https://github.com/${wrongScope ? "other" : "acme"}/${repo}/pull/${number}`, state: publishedState,
+          headBranch: "feature", baseBranch: "main", headCommit: publishedHeadSha, headTreeSha: publishedHeadTreeSha, title: "Fix retry", body: "" },
           comments: number === 1 ? [comment("review:1"), ...inlineIds.map(comment)] : [comment("discussion:3")], threads: number === 1 ? [{ id: "thread-1", resolved, commentIds: inlineIds }] : [] };
       },
       persistBundle: async (bundle, bytes: string, sha256: string) => { artifacts.push({ bundle, bytes }); return `tasks/${taskId}/feedback/${sha256}.json`; },
@@ -428,7 +439,7 @@ describe("task-wide current PR feedback reconciliation", () => {
         if (conflict) { conflict = false; workflow = { ...workflow, revision: workflow.revision + 1 }; currentBody = "newer edit after race"; throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" }); }
         if (revision !== workflow.revision) throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" });
         workflow = next;
-      }, measure: (entry: Record<string, unknown>) => measures.push(entry), now,
+      }, measure: (entry) => { measures.push(entry); }, now,
     };
     return { module, input, artifacts, reads, measures, workflow: () => workflow, setWorkflow: (next: WorkflowSnapshot) => { workflow = next; },
       setPublishedHeadSha: (sha: string) => { publishedHeadSha = sha; workflow = WorkflowSnapshotSchema.parse({ ...workflow, pullRequests: workflow.pullRequests?.map(pr => ({ ...pr, headSha: sha })) }); },
@@ -442,13 +453,13 @@ describe("task-wide current PR feedback reconciliation", () => {
     expect(f.workflow().feedbackReview?.status).toBe("COLLECTING");
     expect(f.workflow().feedbackReview?.bundleRefs.map((b) => b.repositoryId)).toEqual(["api", "ui"]);
     expect(f.artifacts[0]?.bundle.comments.map((c) => c.id)).toEqual(["review:1"]);
-    expect(f.artifacts[1]?.bundle.comments[0].body).toBe("current authoritative body");
+    expect(f.artifacts[1]?.bundle.comments[0]?.body).toBe("current authoritative body");
     const revision = f.workflow().revision;
     expect(await f.module.reconcileTaskPullRequestFeedback({ ...f.input, deliveryId: "delayed-old-event" })).toBe(false);
     expect(f.workflow().revision).toBe(revision);
     f.edit("edited current body");
     expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
-    expect(f.artifacts.at(-1)?.bundle.comments[0].body).toBe("edited current body");
+    expect(f.artifacts.at(-1)?.bundle.comments[0]?.body).toBe("edited current body");
   });
   it("accepts a publication commit different from the checked workspace commit when GitHub confirms the exact candidate tree", async () => {
     const f = await fixture();
@@ -491,7 +502,7 @@ describe("task-wide current PR feedback reconciliation", () => {
   it("recollects authoritative data after a concurrent revision conflict", async () => {
     const f = await fixture(); expect(f.module.reconcileTaskPullRequestFeedback).toBeTypeOf("function"); f.conflict();
     await f.module.reconcileTaskPullRequestFeedback(f.input);
-    expect(f.artifacts.at(-1)?.bundle.comments[0].body).toBe("newer edit after race");
+    expect(f.artifacts.at(-1)?.bundle.comments[0]?.body).toBe("newer edit after race");
     expect(f.reads).toHaveLength(4);
   });
   it("keeps delayed events idempotent after every linked PR is observed merged", async () => {
@@ -511,14 +522,24 @@ describe("task-wide current PR feedback reconciliation", () => {
     const review = current.feedbackReview;
     if (!review || review.status !== "COLLECTING") throw new Error("feedback review was not collected");
     const selectedCommentIds = review.bundleRefs.flatMap((bundle) => bundle.comments.map((comment) => comment.id));
+    const candidateDigest = current.candidate?.digest;
+    if (!candidateDigest) throw new Error("workflow candidate missing");
+    const reviewDigest = "c".repeat(64);
+    const proposalDigest = "d".repeat(64);
+    const bundleDigests = review.bundleRefs.map((ref) => ref.sha256);
+    const candidateBindings = review.bundleRefs.map((bundle) => ({ repositoryId: bundle.repositoryId, number: bundle.number,
+      headSha: bundle.headSha, candidateDigest, commentSetDigest: bundle.commentSetDigest, bundleDigest: bundle.sha256 }));
     const approval = { taskId: current.taskId, requestId: "550e8400-e29b-41d4-a716-446655440099", ownerId: current.ownerId,
       decisionWorkflowRevision: current.revision, activeWorkflowRevision: current.revision + 1, reviewDigest: "c".repeat(64),
-      proposalDigest: "d".repeat(64), bundleDigests: review.bundleRefs.map((ref) => ref.sha256), candidateDigest: current.candidate.digest,
+      proposalDigest, bundleDigests, candidateDigest,
       selectedFindingIds: ["finding-1"], selectedCommentIds };
     f.setWorkflow({ ...current, revision: approval.activeWorkflowRevision, stage: "IMPLEMENT", state: "RUNNING",
-      feedbackReview: { ...review, status: "APPROVED", reviewRef: { sha256: approval.reviewDigest, proposalDigest: approval.proposalDigest } },
+      feedbackReview: { ...review, status: "APPROVED", reviewRef: { schemaVersion: 1, taskId: current.taskId, workflowRevision: current.revision,
+        operationMode: "FEEDBACK_REVIEW", qualification: "AI_GENERATED_ADVISORY", proposalDigest, taskRequirementsDigest: "e".repeat(64),
+        candidateBindings, operationId: "11111111-1111-4111-8111-111111111111", provider: "test", version: "1", status: "COMPLETE",
+        bundleDigests, findingRefs: [], recordedAt: "2026-10-05T12:00:00.000Z", sha256: reviewDigest, objectKey: `tasks/${current.taskId}/reviews/${reviewDigest}.json` } },
       feedbackDispatchApproval: approval, feedbackDecisions: [{ requestId: approval.requestId, workflowRevision: approval.decisionWorkflowRevision,
-        decision: "APPROVE", actorId: current.ownerId, actorRole: "TASK_OWNER", reviewDigest: approval.reviewDigest,
+        schemaVersion: 1, decision: "APPROVE", actorId: current.ownerId, actorRole: "TASK_OWNER", reviewDigest: approval.reviewDigest,
         proposalDigest: approval.proposalDigest, bundleDigests: approval.bundleDigests, selectedFindingIds: approval.selectedFindingIds,
         selectedCommentIds, candidates: [], at: "2026-10-05T12:00:00.000Z" }] });
     const candidateIsCurrent = await f.module.verifyTaskPullRequestFeedbackCurrent(f.input);

@@ -460,7 +460,8 @@ describe("immutable multi-PR feedback reviews", () => {
     expect(WorkflowFeedbackBundleSchema.parse(stored)).toEqual(parsed);
     const bundleRef = WorkflowFeedbackBundleRefSchema.parse({ ...bundleMetadata, sha256, objectKey: `tasks/${taskId}/feedback/${sha256}.json` });
     expect(createHash("sha256").update(bytes).digest("hex")).toBe(bundleRef.sha256);
-    expect(WorkflowFeedbackBundleSchema.safeParse({ ...stored, sha256, objectKey: bundleRef.objectKey }).success).toBe(false);
+    const parsedStored = WorkflowFeedbackBundleSchema.parse(stored);
+    expect(WorkflowFeedbackBundleSchema.safeParse({ ...parsedStored, sha256, objectKey: bundleRef.objectKey }).success).toBe(false);
     const { sha256: _reviewDigest, objectKey: _reviewKey, ...reportMetadata } = reviewRef;
     void _reviewDigest; void _reviewKey;
     const findingRefs = [{ ...reviewRef.findingRefs[0]!, bundleDigest: sha256 }];
@@ -488,7 +489,9 @@ describe("immutable multi-PR feedback reviews", () => {
         const result = decideWorkflowFeedbackFindings(reviewed, noteRequest, { actorId: ownerId, role: "TASK_OWNER" }, now);
         expect(result.stage).toBe("WAIT_FOR_MERGE");
         expect(result.feedbackNotes?.[0]).toMatchObject({ actorId: ownerId, source: decision, text: noteRequest.ownerNote });
-        expect(() => decideWorkflowFeedbackFindings(reviewed, { ...noteRequest, ownerNote: undefined }, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+        const { ownerNote: _ownerNote, ...withoutOwnerNote } = noteRequest;
+        void _ownerNote;
+        expect(() => decideWorkflowFeedbackFindings(reviewed, withoutOwnerNote, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
         expect(() => decideWorkflowFeedbackFindings(reviewed, { ...noteRequest, expectedRevision: 99 }, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
         expect(() => decideWorkflowFeedbackFindings(reviewed, { ...noteRequest, reviewDigest: hash("f") }, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
         expect(() => decideWorkflowFeedbackFindings(reviewed, noteRequest, { actorId: hash("f"), role: "TASK_OWNER" }, now)).toThrow();
@@ -524,7 +527,7 @@ describe("immutable multi-PR feedback reviews", () => {
       findingRefs: [reviewRef.findingRefs[0]!] };
     expect(() => requestWorkflowFeedbackReview(current, { bundleRefs: [bundleRefs[0]], reviewRef: omitted }, now)).toThrow();
     const emptyReview = requestWorkflowFeedbackReview(current, { bundleRefs: bundleRefs.map(b => ({ ...b, comments: [] })), reviewRef: { ...reviewRef, findingRefs: [] } }, now);
-    expect(emptyReview.feedbackReview?.reviewRef.findingRefs).toEqual([]);
+    expect(emptyReview.feedbackReview?.reviewRef?.findingRefs).toEqual([]);
     const closedCurrent = { ...current, pullRequests: current.pullRequests!.map(pr => pr.repositoryId === "ui" ? { ...pr, state: "CLOSED" } : pr) };
     expect(requestWorkflowFeedbackReview(closedCurrent, { bundleRefs: [bundleRefs[0]], reviewRef: omitted }, now).feedbackReview?.bundleRefs).toHaveLength(1);
   });
@@ -532,7 +535,7 @@ describe("immutable multi-PR feedback reviews", () => {
     const { current, bundleRefs, reviewRef } = fixture();
     const reviewed = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef }, now);
     expect(reviewed.feedbackReview?.bundleRefs.map(b => b.headSha)).toEqual(["d".repeat(40), "d".repeat(40)]);
-    expect(reviewed.feedbackReview?.reviewRef.findingRefs[0]?.commentIds).toEqual(["api-0", "api-1"]);
+    expect(reviewed.feedbackReview?.reviewRef?.findingRefs[0]?.commentIds).toEqual(["api-0", "api-1"]);
     expect(reviewed.feedbackReview?.bundleRefs[0]?.comments[0]?.threadId).toBe("thread-api");
     expect(JSON.stringify(reviewed)).not.toContain('"body":');
     expect(() => requestWorkflowFeedbackReview(current, { bundleRefs: [{ ...bundleRefs[0], comments: [{ ...bundleRefs[0]!.comments[0], body: "large comment" }] }, bundleRefs[1]], reviewRef }, now)).toThrow();
@@ -562,7 +565,7 @@ describe("immutable multi-PR feedback reviews", () => {
     expect(approved).toMatchObject({ stage: "IMPLEMENT", state: "READY" });
     expect(approved.feedbackDecisions?.[0]).toMatchObject({ selectedFindingIds: ["finding-0"], selectedCommentIds: ["api-0", "api-1"], reviewDigest: reviewRef.sha256, proposalDigest: reviewRef.proposalDigest, actorId: ownerId });
     expect(approved.feedbackDecisions?.[0]?.candidates).toEqual([{ repositoryId: "api", number: 1, headSha: "d".repeat(40), candidateDigest: current.candidate!.digest, commentSetDigest: hash("c"), bundleDigest: hash("e") }]);
-    expect(approved.feedbackReview?.reviewRef.findingRefs).toHaveLength(2);
+    expect(approved.feedbackReview?.reviewRef?.findingRefs).toHaveLength(2);
     expect(approved.pullRequests).toEqual(current.pullRequests);
     expect(() => decideWorkflowFeedbackFindings(approved, request, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
   });

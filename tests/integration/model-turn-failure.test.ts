@@ -96,7 +96,7 @@ describe("a task whose model call fails", () => {
   it("saves a plan without running code checks or publishing a workspace diff", async () => {
     const adapter = await realPi([fauxAssistantMessage("## Plan\\n\\n1. Update the route.\\n2. Add a focused test.")]);
     const invocation = { ...taskInvocation(), payload: { ...taskInvocation().payload, workflowMode: "PLAN" as const } };
-    const { outcome, result, artifacts, events } = await run(adapter, undefined, invocation);
+    const { result, artifacts, events } = await run(adapter, undefined, invocation);
 
     expect(result).toMatchObject({ workflowMode: "PLAN" });
     expect(artifacts.find((artifact) => artifact.name === "plan.md")?.content).toContain("Update the route");

@@ -572,6 +572,7 @@ export function recordWorkflowVerification(
   const passed = checks.data.results.every((result) => result.status === "PASS");
   const candidateChanged = current.candidate?.digest !== candidate.digest;
   const { blockReason: _priorBlockReason, ...withoutBlockReason } = current;
+  void _priorBlockReason;
   return WorkflowSnapshotSchema.parse({
     ...withoutBlockReason,
     revision: current.revision + 1,
@@ -599,6 +600,7 @@ export function submitWorkflowReview(currentInput: unknown, reportInput: unknown
   const complete = (["CRITIC", "SECURITY"] as const).every((role) => reviews.some((entry) => entry.role === role && entry.status === "PASS"));
   const failed = reviews.some((entry) => entry.status !== "PASS");
   const { blockReason: _priorBlockReason, ...withoutBlockReason } = current;
+  void _priorBlockReason;
   return WorkflowSnapshotSchema.parse({
     ...withoutBlockReason,
     revision: current.revision + 1,
@@ -686,6 +688,7 @@ export function observeWorkflowPullRequest(currentInput: unknown, observationInp
     : pullRequest);
   const complete = pullRequests.filter((pullRequest) => pullRequest.required).every((pullRequest) => pullRequest.state === "MERGED");
   const { outcome: _priorOutcome, ...withoutPriorOutcome } = current;
+  void _priorOutcome;
   return WorkflowSnapshotSchema.parse({
     ...withoutPriorOutcome,
     revision: current.revision + 1,
@@ -756,6 +759,7 @@ export function decideWorkflowFeedback(currentInput: unknown, input: {
     ...current, revision: current.revision + 1, feedback: { ...feedback, status: "DISMISSED" }, decisions: [...current.decisions, decision], updatedAt: now,
   });
   const { candidate: _candidate, verification: _verification, reviews: _reviews, pullRequests: _pullRequests, outcome: _outcome, blockReason: _blockReason, ...remaining } = current;
+  void _candidate; void _verification; void _reviews; void _pullRequests; void _outcome; void _blockReason;
   return WorkflowSnapshotSchema.parse({
     ...remaining, revision: current.revision + 1, stage: "IMPLEMENT", state: "READY",
     feedback: { ...feedback, status: "APPROVED" }, decisions: [...current.decisions, decision], updatedAt: now,
