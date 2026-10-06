@@ -45,7 +45,7 @@ const EVERY_CARD: WizardCard[] = [
   slackAppCard({ stage: "done", appName: "AgentX acme (staging)", appId: "A0APP", teamId: "T0TEAM", teamName: "Acme" }),
   slackUrlsCard({ stage: "verify", pageUrl: "https://api.slack.com/apps/A0APP/event-subscriptions" }),
   slackUrlsCard({ stage: "failed", problem: "the URL answered 401; run agentx init again", pageUrl: "https://api.slack.com/apps/A0APP/event-subscriptions" }),
-  adminCard({ stage: "signing-in", who: "you@example.com", createdEmail: "you@example.com" }),
+  adminCard({ stage: "signing-in", who: "you@example.com", passwordEmail: "you@example.com" }),
   adminCard({ stage: "failed", problem: "the AgentX sign-in did not finish within 10 minutes; run agentx init again", retry: false }),
   projectCard({ name: "payments-api", revision: 1, repository: "acme/payments-api" }),
   channelCard({ stage: "waiting", channelName: "payments", botName: "agentx-acme-staging" }),
@@ -278,11 +278,11 @@ const WHERE = { channelName: "payments", channelId: "C0PAY00001", teamId: "T0123
 
 describe("the finishing cards", () => {
   it("admin: the new user, the sign-in wait, a failed sign-in, and who signed in", () => {
-    expect(adminCard({ stage: "signing-in", who: "alice@example.com", createdEmail: "alice@example.com" })).toEqual({
+    expect(adminCard({ stage: "signing-in", who: "alice@example.com", passwordEmail: "alice@example.com" })).toEqual({
       id: "admin", title: "Your AgentX sign-in", status: "waiting",
       lines: [
-        "AgentX made your admin sign-in for alice@example.com. Look for an email with your temporary password; you choose your own when you first sign in.",
-        "Sign in to AgentX as alice@example.com in the tab the Sign in button opens. This page moves on by itself when you have.",
+        "First, check your email at alice@example.com for your temporary password. It comes from no-reply@verificationemail.com with the subject \"Your temporary password\", can take a few minutes, and often lands in Spam. It works for 7 days.",
+        "Then press Sign in, enter alice@example.com and the temporary password, and choose your own password. This page moves on by itself when you have.",
       ],
     });
     expect(adminCard({ stage: "signing-in", who: "alice@example.com" }).lines).toHaveLength(1);
