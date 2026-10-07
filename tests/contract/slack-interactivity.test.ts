@@ -315,6 +315,28 @@ describe("Slack native workflow review controls", () => {
     await expect(handlers.handleAction({ ...action, userId: requester, value: JSON.stringify({ taskId, revision: workflow.revision - 1, digest, decision: "APPROVE" }) })).rejects.toThrow();
   });
 
+  it("retries only an unknown review for the exact current candidate and workflow revision", async () => {
+    const now = new Date(nowSeconds * 1_000).toISOString();
+    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "c".repeat(40), treeSha: "d".repeat(40) }]);
+    const blocked = WorkflowSnapshotSchema.parse({ ...createWorkflowSnapshot({ taskId, ownerId: "b".repeat(64), now }),
+      revision: 7, stage: "REVIEW", state: "BLOCKED", candidate,
+      verification: { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "test", recordedAt: now, results: [{ checkId: "required-1", status: "PASS" }] },
+      reviews: [{ operationId: "33333333-3333-4333-8333-333333333333", candidateDigest: candidate.digest, role: "SECURITY", provider: "test", version: "1", status: "UNKNOWN", failureReason: "INVALID_JSON", findings: [], readOnly: true, recordedAt: now }],
+    });
+    let loaded = { ...task, workflow: blocked };
+    const retries: Array<Record<string, unknown>> = [];
+    const handlers = workflowSlackHandlers({ loadTask: async () => loaded, openView: async () => undefined, submit: async () => undefined,
+      retryReviews: async (input) => { retries.push(input); } });
+    const action = { actionId: "agentx_workflow_retry_reviews", value: JSON.stringify({ taskId, revision: blocked.revision, candidateDigest: candidate.digest }),
+      userId: requester, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "",
+      requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: "review", responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" };
+    await handlers.handleAction(action);
+    expect(retries[0]).toMatchObject({ taskId, userId: requester, thread, expectedRevision: blocked.revision, candidateDigest: candidate.digest });
+    await expect(handlers.handleAction({ ...action, value: JSON.stringify({ taskId, revision: blocked.revision - 1, candidateDigest: candidate.digest }) })).rejects.toThrow(/no longer current/);
+    loaded = { ...loaded, workflow: { ...blocked, reviews: [{ ...blocked.reviews![0]!, status: "FINDINGS" }] } };
+    await expect(handlers.handleAction(action)).rejects.toThrow(/no longer current/);
+  });
+
   it("binds a Full path approval button to the current requirements artifact", async () => {
     const now = new Date(nowSeconds * 1_000).toISOString();
     const fullRequirementsDigest = "c".repeat(64);

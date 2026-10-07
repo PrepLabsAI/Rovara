@@ -581,7 +581,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
   const tasks = developerTaskActions(dependencies);
   const adminReads = adminReadDependencies(dependencies);
   const adminChanges = adminChangeDependencies(dependencies, adminReads);
-  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
+  return async (event: HttpApiV2Event | SlackStopTaskEvent | SlackWorkflowStartEvent | SlackWorkflowDecisionEvent | SlackWorkflowRetryEvent | SlackWorkflowReviewRetryEvent | AdminChangePressEvent | { source: "agentx.github-webhook-recovery" }): Promise<{ statusCode: number; headers: Record<string, string>; body: string }> => {
     // Spec 025 E14: a Slack Confirm or Cancel press, invoked directly by the ingress (never through API Gateway).
     if (isAdminChangePressEvent(event)) {
       if (adminChanges === undefined) return json({ error: { code: "NOT_FOUND", message: "admin changes are not set up in this deployment" } }, "slack-ingress", 404);
@@ -636,6 +636,16 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
       try {
         const result = await retrySlackWorkflowChecks(dependencies, tasks, event);
         console.log(JSON.stringify({ component: "broker", event: "slack.workflow_verification_retry_saved", taskId: event.taskId, requestId: event.requestId }));
+        return json(result, "slack-ingress");
+      } catch (error) {
+        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
+        return unexpectedErrorAnswer(error, "slack-ingress");
+      }
+    }
+    if (isSlackWorkflowReviewRetryEvent(event)) {
+      try {
+        const result = await retrySlackWorkflowReviews(dependencies, tasks, event);
+        console.log(JSON.stringify({ component: "broker", event: "slack.workflow_review_retry_saved", taskId: event.taskId, requestId: event.requestId }));
         return json(result, "slack-ingress");
       } catch (error) {
         if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
@@ -3410,6 +3420,17 @@ export interface SlackWorkflowRetryEvent {
   selectedOptionalCheckIds: string[];
 }
 
+export interface SlackWorkflowReviewRetryEvent {
+  source: "agentx.slack-ingress";
+  action: "workflow-review-retry";
+  taskId: string;
+  userId: string;
+  thread: SlackThread;
+  requestId: string;
+  expectedRevision: number;
+  candidateDigest: string;
+}
+
 export interface SlackWorkflowFeedbackDecisionEvent {
   source: "agentx.slack-ingress";
   action: "workflow-feedback-decision";
@@ -3490,6 +3511,15 @@ export function isSlackWorkflowRetryEvent(event: unknown): event is SlackWorkflo
     && value.selectedOptionalCheckIds.every((id) => typeof id === "string") && typeof value.thread === "object" && value.thread !== null;
 }
 
+export function isSlackWorkflowReviewRetryEvent(event: unknown): event is SlackWorkflowReviewRetryEvent {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  return value.source === "agentx.slack-ingress" && value.action === "workflow-review-retry" && value.requestContext === undefined
+    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
+    && Number.isInteger(value.expectedRevision) && typeof value.candidateDigest === "string" && /^[a-f0-9]{64}$/.test(value.candidateDigest)
+    && typeof value.thread === "object" && value.thread !== null;
+}
+
 async function retrySlackWorkflowChecks(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowRetryEvent) {
   if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
   const thread = SlackThreadSchema.parse(event.thread);
@@ -3505,6 +3535,25 @@ async function retrySlackWorkflowChecks(dependencies: AwsBrokerDependencies, tas
   const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
   const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision, instructions: "Retry the owner-selected project checks without changing code.", selectedOptionalCheckIds: event.selectedOptionalCheckIds });
   const path = `/v1/dev/tasks/${taskId}/workflow/retry`;
+  return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
+}
+
+async function retrySlackWorkflowReviews(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowReviewRetryEvent) {
+  if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
+  const thread = SlackThreadSchema.parse(event.thread);
+  const userId = SlackRequesterSchema.shape.userId.parse(event.userId);
+  const taskId = randomUUIDSchema.parse(event.taskId);
+  const requestId = randomUUIDSchema.parse(event.requestId);
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  if (task === undefined || task.slackUserId !== userId) throw agentXError("FORBIDDEN", "only the task owner can retry reviews");
+  if (task.share?.teamId !== thread.teamId || task.share.channelId !== thread.channelId || task.share.threadTs !== thread.threadTs) {
+    throw agentXError("FORBIDDEN", "this review retry belongs to another Slack thread");
+  }
+  const caller = slackWorkflowCaller(userId);
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
+  const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision, candidateDigest: event.candidateDigest,
+    instructions: "Retry the independent read-only code and security reviews on the same verified candidate. Do not edit files." });
+  const path = `/v1/dev/tasks/${taskId}/workflow/review`;
   return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
 }
 

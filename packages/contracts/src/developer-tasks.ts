@@ -187,6 +187,8 @@ export const ContinueDeveloperTaskRequestSchema = z.object({
   instructions: DeveloperInstructionsSchema,
   /** Optional revision fence for a retry initiated from a staleable UI action. */
   expectedRevision: z.number().int().positive().optional(),
+  /** Candidate fence for an independent-review retry. */
+  candidateDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   /** Owner-selected, project-approved optional checks for a blocked verification retry. */
   selectedOptionalCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(20).optional(),
 }).strict().superRefine((request, context) => {

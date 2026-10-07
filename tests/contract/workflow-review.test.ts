@@ -38,9 +38,9 @@ describe("workflow reviewer output", () => {
   });
 
   it("fails closed for malformed, oversized, or unbounded output", () => {
-    expect(parseWorkflowReviewerResponse("not json")).toEqual({ status: "UNKNOWN", findings: [] });
-    expect(parseWorkflowReviewerResponse(JSON.stringify({ findings: ["x".repeat(1001)] }))).toEqual({ status: "UNKNOWN", findings: [] });
-    expect(parseWorkflowReviewerResponse(" ".repeat(20_001))).toEqual({ status: "UNKNOWN", findings: [] });
+    expect(parseWorkflowReviewerResponse("not json")).toEqual({ status: "UNKNOWN", findings: [], failureReason: "INVALID_JSON" });
+    expect(parseWorkflowReviewerResponse(JSON.stringify({ findings: ["x".repeat(1001)] }))).toEqual({ status: "UNKNOWN", findings: [], failureReason: "INVALID_SHAPE" });
+    expect(parseWorkflowReviewerResponse(" ".repeat(20_001))).toEqual({ status: "UNKNOWN", findings: [], failureReason: "RESPONSE_TOO_LARGE" });
   });
 
   it("runs critic and security as separate read-only sessions pinned to one unchanged candidate", async () => {
@@ -98,12 +98,21 @@ describe("workflow reviewer output", () => {
       expect(new Set(sessionInputs.map(({ conversationId }) => conversationId)).size).toBe(2);
       expect(usage).toEqual([{ role: "CRITIC", outcome: "SUCCEEDED" }, { role: "SECURITY", outcome: "SUCCEEDED" }]);
 
+      const missingResponses = await runWorkflowReviews({
+        operationId: "11111111-1111-4111-8111-111111111111", rootPath,
+        model: { provider: "test", modelId: "review-v1" }, candidate, repositories,
+        piAdapter: reviewerAdapter(async () => undefined),
+      });
+      expect(missingResponses.map((report) => [report.status, report.failureReason])).toEqual([
+        ["UNKNOWN", "RESPONSE_MISSING"], ["UNKNOWN", "RESPONSE_MISSING"],
+      ]);
+
       const timeoutReports = await runWorkflowReviews({
         operationId: "11111111-1111-4111-8111-111111111111",
         rootPath, model: { provider: "test", modelId: "review-v1" }, candidate, repositories,
         piAdapter: reviewerAdapter(() => new Promise(() => undefined)), timeoutMs: 5,
       });
-      expect(timeoutReports.map((report) => report.status)).toEqual(["UNKNOWN", "UNKNOWN"]);
+      expect(timeoutReports.map((report) => [report.status, report.failureReason])).toEqual([["UNKNOWN", "TIMEOUT"], ["UNKNOWN", "TIMEOUT"]]);
       const unresponsiveAbortReports = await runWorkflowReviews({
         operationId: "11111111-1111-4111-8111-111111111111",
         rootPath, model: { provider: "test", modelId: "review-v1" }, candidate, repositories,

@@ -81,6 +81,32 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
 }
 
 describe("the shared thread (FR-032, US3 scenario 1)", () => {
+  it("reports a blocked independent review instead of forwarding a worker PASS summary, with an exact-candidate retry", async () => {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
+    await h.pump();
+    await h.finish(h.workspaceId, h.active(), "SUCCEEDED");
+    await h.pump();
+    const operationId = h.active();
+    const candidateDigest = "a".repeat(64);
+    await h.finish(h.workspaceId, operationId, "SUCCEEDED", { result: { result: "Both reviews PASS" } });
+    await h.db.send(new UpdateCommand({ TableName: "state", Key: { pk: `DEVTASK#${h.taskId}`, sk: "META" },
+      UpdateExpression: "SET workflow = :workflow", ExpressionAttributeValues: { ":workflow": {
+        revision: 9, stage: "REVIEW", state: "BLOCKED", artifacts: [], candidate: { digest: candidateDigest },
+        verification: { candidateDigest, results: [{ checkId: "diff-check", status: "PASS" }] },
+        reviews: [{ operationId, candidateDigest, role: "SECURITY", provider: "test", version: "1", status: "UNKNOWN", failureReason: "INVALID_JSON", findings: [], readOnly: true, recordedAt: new Date().toISOString() }],
+      } },
+    }));
+    await h.pump();
+    const message = h.posts.at(-1)!;
+    expect(message.text).toContain("security review: invalid json");
+    expect(message.text).toContain("has not opened a pull request");
+    expect(message.text).not.toContain("Both reviews PASS");
+    expect(message.blocks).toContainEqual(expect.objectContaining({ type: "actions", elements: [expect.objectContaining({
+      action_id: "agentx_workflow_retry_reviews", text: { type: "plain_text", text: "Retry reviews" },
+      value: JSON.stringify({ taskId: h.taskId, revision: 9, candidateDigest }),
+    })] }));
+  });
+
   it("automatically retries terminal Canvas cleanup without requiring an owner re-drive", async () => {
     let attempt = 0;
     const closeTaskCanvases = vi.fn(async () => {

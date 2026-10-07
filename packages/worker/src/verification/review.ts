@@ -309,7 +309,7 @@ export async function runWorkflowReviews(input: {
     const recordedAt = (input.now ?? (() => new Date().toISOString()))();
     let provider = input.model.provider;
     let version = input.model.modelId;
-    let parsed: { status: "PASS" | "FINDINGS" | "UNKNOWN"; findings: string[] } = { status: "UNKNOWN", findings: [] };
+    let parsed: { status: "PASS" | "FINDINGS" | "UNKNOWN"; findings: string[]; failureReason?: "RESPONSE_MISSING" | "RESPONSE_TOO_LARGE" | "INVALID_JSON" | "INVALID_SHAPE" | "TIMEOUT" | "INTERRUPTED" | "CANDIDATE_CHANGED" | "SESSION_FAILED" | "USAGE_UNAVAILABLE" } = { status: "UNKNOWN", findings: [], failureReason: "RESPONSE_MISSING" };
     let session: Awaited<ReturnType<typeof createWorkspacePiSession>> | undefined;
     let unsubscribe: (() => void) | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -368,9 +368,13 @@ export async function runWorkflowReviews(input: {
       if (after.digest !== manifest.digest) throw new Error("candidate changed during review");
       parsed = response === undefined ? parsed : parseWorkflowReviewerResponse(response);
       usageOutcome = "SUCCEEDED";
-    } catch {
-      parsed = { status: "UNKNOWN", findings: [] };
-      if (interrupted) statusOverride = "INTERRUPTED";
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "";
+      const failureReason = interrupted || message.includes("interrupted") ? "INTERRUPTED"
+        : message.includes("timed out") ? "TIMEOUT"
+          : message.includes("candidate changed") ? "CANDIDATE_CHANGED" : "SESSION_FAILED";
+      parsed = { status: "UNKNOWN", findings: [], failureReason };
+      if (failureReason === "INTERRUPTED") statusOverride = "INTERRUPTED";
     } finally {
       if (timeout !== undefined) clearTimeout(timeout);
       if (abortListener !== undefined) input.signal?.removeEventListener("abort", abortListener);
@@ -380,9 +384,9 @@ export async function runWorkflowReviews(input: {
     }
     if (usageStats !== undefined && input.onUsage !== undefined) {
       try { await input.onUsage({ role, stats: usageStats, model: { provider, modelId: version }, outcome: usageOutcome }); }
-      catch { parsed = { status: "UNKNOWN", findings: [] }; }
+      catch { parsed = { status: "UNKNOWN", findings: [], failureReason: "USAGE_UNAVAILABLE" }; }
     } else if (input.onUsage !== undefined) {
-      parsed = { status: "UNKNOWN", findings: [] };
+      parsed = { status: "UNKNOWN", findings: [], failureReason: "USAGE_UNAVAILABLE" };
     }
     reports.push(WorkflowReviewReportSchema.parse({
       operationId: input.operationId,
@@ -392,6 +396,7 @@ export async function runWorkflowReviews(input: {
       version,
       status: parsed.status,
       ...(statusOverride === undefined ? {} : { status: statusOverride }),
+      ...(parsed.failureReason === undefined ? {} : { failureReason: parsed.failureReason }),
       findings: parsed.findings,
       readOnly: true,
       recordedAt,

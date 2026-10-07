@@ -494,6 +494,11 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
           ? `Implementation is finished, but no checks ran: this project has no required checks and no optional check was selected. AgentX has not started code review or opened a pull request. ${hasChecks ? "Choose a check below to retry verification against the current code." : "Ask a project admin to configure at least one check, then retry verification."}`
           : `Implementation is finished, but AgentX could not verify checks for the current code, so it has not started code review or opened a pull request. ${task.workflow.blockReason ?? "Resolve the verification issue and retry."} ${hasChecks ? "Choose checks below to retry verification." : "Ask a project admin to configure a check."}`;
       }
+      if (task.workflow?.stage === "REVIEW" && task.workflow.state === "BLOCKED") {
+        const unverified = task.workflow.reviews?.filter((review) => ["UNKNOWN", "FAILED", "INTERRUPTED"].includes(review.status)) ?? [];
+        const reason = unverified.map((review) => `${review.role.toLowerCase()} review: ${review.failureReason?.toLowerCase().replaceAll("_", " ") ?? "no verifiable result was recorded"}`).join("; ");
+        return `Implementation and checks are complete, but the independent ${unverified.length > 0 ? reason : "code and security reviews did not both pass"}. AgentX has not opened a pull request. ${unverified.length > 0 ? "Use Retry reviews to rerun only the reviews on this same checked code version." : "Review the reported findings before continuing."}`;
+      }
       if (task.workflow?.stage === "REVIEW" && task.workflow.state === "WAITING" && task.workflow.verification !== undefined) {
         return "The selected checks passed for the current code version. AgentX has recorded which version was checked. The next step is the independent code and security reviews; no pull request has been opened yet.";
       }
@@ -870,6 +875,16 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
               value: JSON.stringify({ taskId: task.taskId, revision: workflow.revision }) },
           ] }] : []),
         ]
+      : notice.kind === "ended" && workflow?.stage === "REVIEW" && workflow.state === "BLOCKED"
+        && workflow.reviews?.some((review) => ["UNKNOWN", "FAILED", "INTERRUPTED"].includes(review.status))
+        && workflow.candidate !== undefined
+        ? [
+            ...slackSectionTexts(text).map((section) => ({ type: "section", text: { type: "mrkdwn", text: section } })),
+            { type: "actions", elements: [
+              { type: "button", action_id: "agentx_workflow_retry_reviews", style: "primary", text: { type: "plain_text", text: "Retry reviews" },
+                value: JSON.stringify({ taskId: task.taskId, revision: workflow.revision, candidateDigest: workflow.candidate.digest }) },
+            ] },
+          ]
       : undefined);
   const posted = await deps.post({ channel: share.channelId, threadTs: share.threadTs, text, ...(blocks === undefined ? {} : { blocks }) });
   const approvalArtifact = notice.kind === "ended" && workflow?.stage === "PLAN_REVIEW" && workflow.state === "WAITING" ? plan : undefined;

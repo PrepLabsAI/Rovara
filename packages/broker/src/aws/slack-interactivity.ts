@@ -243,7 +243,7 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
       const handler = dependencies.workflow && (action.actionId === "agentx_workflow_approve" || action.actionId === "agentx_workflow_changes"
         || action.actionId === "agentx_github_feedback_approve" || action.actionId === "agentx_github_feedback_dismiss"
         || action.actionId === "agentx_feedback_review_recommended" || action.actionId === "agentx_feedback_review_changes"
-        || action.actionId === "agentx_workflow_retry_checks")
+        || action.actionId === "agentx_workflow_retry_checks" || action.actionId === "agentx_workflow_retry_reviews")
         ? { matches: () => true, handle: (value: SlackBlockAction) => dependencies.workflow!.handleAction(value) }
         : dependencies.handlers.find((entry) => entry.matches(action.actionId));
       if (!handler) {
@@ -265,9 +265,10 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
           const workflowButton = action.actionId === "agentx_workflow_approve" || action.actionId === "agentx_workflow_changes"
             || action.actionId === "agentx_github_feedback_approve" || action.actionId === "agentx_github_feedback_dismiss"
             || action.actionId === "agentx_feedback_review_recommended" || action.actionId === "agentx_feedback_review_changes"
-            || action.actionId === "agentx_workflow_retry_checks";
+            || action.actionId === "agentx_workflow_retry_checks" || action.actionId === "agentx_workflow_retry_reviews";
           const message = error instanceof WorkflowInteractionRefusal ? error.message
             : error instanceof WorkflowDecisionSubmissionError ? "I couldn't save that decision. Try again."
+            : action.actionId === "agentx_workflow_retry_reviews" ? "I couldn't start the review retry. Use the latest AgentX task update and try again."
             : workflowButton ? "I couldn't open those plan controls. Use the latest plan message and try again."
             : CLICK_FAILED_TEXT;
           await dependencies.respondEphemeral?.(action.responseUrl, message);
@@ -528,6 +529,9 @@ export function createAwsSlackInteractivityHandler() {
     async retryChecks(input) {
       await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-retry", ...input });
     },
+    async retryReviews(input) {
+      await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-review-retry", ...input });
+    },
     async submitFeedback(input) {
       const action = input.selection === "RECOMMENDED" ? "workflow-feedback-findings-decision" : "workflow-feedback-decision";
       await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action, ...input });
@@ -630,6 +634,7 @@ export function workflowSlackHandlers(deps: {
   openView(triggerId: string, view: Record<string, unknown>): Promise<void>;
   submit(input: Record<string, unknown>): Promise<void>;
   retryChecks?(input: Record<string, unknown>): Promise<void>;
+  retryReviews?(input: Record<string, unknown>): Promise<void>;
   submitFeedback?(input: Record<string, unknown>): Promise<void>;
 }) {
   const currentFeedbackReview = async (value: FeedbackReviewActionValue, userId: string, userTeamId: string, workspaceTeamId: string, thread: SlackThread) => {
@@ -680,6 +685,22 @@ export function workflowSlackHandlers(deps: {
     }
     return { task, workflow: parsed.data };
   };
+  const currentReviewRetry = async (taskId: string, revision: number, candidateDigest: string, userId: string, thread: SlackThread) => {
+    const task = await deps.loadTask(taskId);
+    if (!task || task.slackUserId !== userId) throw new WorkflowInteractionRefusal("Only the task owner can retry reviews.");
+    const share = asRecord(task.share);
+    if (share.teamId !== thread.teamId || share.channelId !== thread.channelId || share.threadTs !== thread.threadTs) {
+      throw new WorkflowInteractionRefusal("This review retry belongs to another Slack thread.");
+    }
+    const parsed = WorkflowSnapshotSchema.safeParse(task.workflow);
+    if (!parsed.success || parsed.data.revision !== revision || parsed.data.stage !== "REVIEW" || parsed.data.state !== "BLOCKED"
+      || parsed.data.candidate?.digest !== candidateDigest || parsed.data.verification?.candidateDigest !== candidateDigest
+      || !parsed.data.verification.results.every((result) => result.status === "PASS")
+      || !parsed.data.reviews?.some((review) => ["UNKNOWN", "FAILED", "INTERRUPTED"].includes(review.status))) {
+      throw new WorkflowInteractionRefusal("This review retry is no longer current. Use the latest AgentX task update.");
+    }
+    return parsed.data;
+  };
   return {
     async handleAction(action: SlackBlockAction) {
       if (action.actionId === "agentx_workflow_retry_checks") {
@@ -711,6 +732,19 @@ export function workflowSlackHandlers(deps: {
           title: { type: "plain_text", text: "Retry verification" }, submit: { type: "plain_text", text: "Run checks" },
           close: { type: "plain_text", text: "Cancel" }, blocks: modalBlocks,
         });
+        return;
+      }
+      if (action.actionId === "agentx_workflow_retry_reviews") {
+        let retry: Record<string, unknown>;
+        try { retry = asRecord(JSON.parse(action.value)); } catch { throw new WorkflowInteractionRefusal("This review retry is no longer available."); }
+        const taskId = typeof retry.taskId === "string" && CHANGE_ID.test(retry.taskId) ? retry.taskId : undefined;
+        const candidateDigest = typeof retry.candidateDigest === "string" && /^[a-f0-9]{64}$/.test(retry.candidateDigest) ? retry.candidateDigest : undefined;
+        if (taskId === undefined || candidateDigest === undefined || !Number.isInteger(retry.revision)) throw new WorkflowInteractionRefusal("This review retry is no longer available.");
+        if (action.workspaceTeamId !== action.thread.teamId || action.userTeamId !== action.thread.teamId) throw new WorkflowInteractionRefusal("This review retry must be opened from the task's AgentX workspace.");
+        const workflow = await currentReviewRetry(taskId, Number(retry.revision), candidateDigest, action.userId, action.thread);
+        if (deps.retryReviews === undefined) throw new Error("review retry is not configured");
+        await deps.retryReviews({ taskId, userId: action.userId, thread: action.thread, requestId: slackActionRequestId(action),
+          expectedRevision: workflow.revision, candidateDigest });
         return;
       }
       if (action.actionId === "agentx_feedback_review_recommended" || action.actionId === "agentx_feedback_review_changes") {

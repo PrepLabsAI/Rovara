@@ -1279,24 +1279,34 @@ async function startTaskWorkflowReview(deps: DeveloperTaskRouteDependencies, cal
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "workflow-review");
   const task = await loadOwnedTask(deps, caller, taskId);
   const workflow = task.workflow;
-  if (workflow === undefined || workflow.stage !== "REVIEW" || workflow.state !== "WAITING"
+  const retrying = workflow?.stage === "REVIEW" && workflow.state === "BLOCKED";
+  const retryableReview = workflow?.reviews?.some((report) => ["UNKNOWN", "FAILED", "INTERRUPTED"].includes(report.status)) === true;
+  if (workflow === undefined || workflow.stage !== "REVIEW" || !(workflow.state === "WAITING" || (retrying && retryableReview))
     || workflow.candidate === undefined || workflow.verification?.candidateDigest !== workflow.candidate.digest
     || workflow.verification.results.some((result) => result.status !== "PASS")) {
-    throw agentXError("CONFIG_INVALID", "independent review is available only after checks pass for the current candidate");
+    throw agentXError("CONFIG_INVALID", "review can start or retry only when the exact candidate's checks passed and the review is waiting or has an unverified result");
+  }
+  if (retrying && (request.expectedRevision !== workflow.revision || request.candidateDigest !== workflow.candidate.digest)) {
+    throw agentXError("IDEMPOTENCY_CONFLICT", "the review retry is stale; refresh the task and use its current candidate and revision");
+  }
+  if (!retrying && request.expectedRevision !== undefined && request.expectedRevision !== workflow.revision) {
+    throw agentXError("IDEMPOTENCY_CONFLICT", "the review request is stale; refresh the task and try again");
   }
   await actionableWorkspace(deps, task);
   const receivedAt = iso(deps);
   const candidateDigest = workflow.candidate.digest;
-  const next: WorkflowSnapshot = { ...workflow, revision: workflow.revision + 1, state: "RUNNING", updatedAt: receivedAt };
+  const { blockReason: _blockReason, reviews: _oldReviews, ...retryBase } = workflow;
+  void _blockReason; void _oldReviews;
+  const next: WorkflowSnapshot = { ...retryBase, revision: workflow.revision + 1, state: "RUNNING", updatedAt: receivedAt };
   const prompt = `Perform the required read-only critic and security reviews for the task. The current verified candidate digest is ${candidateDigest}. Do not edit files. Reviewer findings must be concise and refer to code evidence. Owner note: ${request.instructions}`;
   try {
     await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, { requestId: request.requestId, conversationId: task.conversationId, prompt }, (operation) => [
       { Update: {
         TableName: deps.tableName, Key: taskKey(taskId),
         UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
-        ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :review AND workflow.#state = :waiting AND workflow.candidate.digest = :candidate",
+        ConditionExpression: "workflow.revision = :revision AND workflow.#stage = :review AND workflow.#state = :state AND workflow.candidate.digest = :candidate",
         ExpressionAttributeNames: { "#stage": "stage", "#state": "state" },
-        ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": workflow.revision, ":review": "REVIEW", ":waiting": "WAITING", ":candidate": candidateDigest },
+        ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": workflow.revision, ":review": "REVIEW", ":state": workflow.state, ":candidate": candidateDigest },
       } },
       putNew(turnTable(deps), aiToolTurn({
         party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),

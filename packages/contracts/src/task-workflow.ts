@@ -54,6 +54,8 @@ export const WorkflowReviewReportSchema = z.object({
   provider: z.string().trim().min(1).max(120),
   version: z.string().trim().min(1).max(120),
   status: z.enum(["PASS", "FINDINGS", "FAILED", "INTERRUPTED", "UNKNOWN"]),
+  /** Safe machine-readable reason a review did not qualify; never includes model output. */
+  failureReason: z.enum(["RESPONSE_MISSING", "RESPONSE_TOO_LARGE", "INVALID_JSON", "INVALID_SHAPE", "TIMEOUT", "INTERRUPTED", "CANDIDATE_CHANGED", "SESSION_FAILED", "USAGE_UNAVAILABLE"]).optional(),
   findings: z.array(z.string().trim().min(1).max(1000)).max(50),
   readOnly: z.literal(true),
   recordedAt: z.string().datetime(),
