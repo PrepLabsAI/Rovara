@@ -514,11 +514,11 @@ export function createAwsSlackInteractivityHandler() {
     },
     openView: async (triggerId, view) => slackApi((await secrets()).botToken, "views.open", { trigger_id: triggerId, view }),
     async submit(input) {
-      await invokeWorkflowDecision(lambda, brokerFunctionName!, { source: "agentx.slack-ingress", action: "workflow-decision", ...input });
+      await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-decision", ...input });
     },
     async submitFeedback(input) {
       const action = input.selection === "RECOMMENDED" ? "workflow-feedback-findings-decision" : "workflow-feedback-decision";
-      await invokeWorkflowDecision(lambda, brokerFunctionName!, { source: "agentx.slack-ingress", action, ...input });
+      await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action, ...input });
     },
   }) : undefined;
   return createSlackInteractivityHandler({
