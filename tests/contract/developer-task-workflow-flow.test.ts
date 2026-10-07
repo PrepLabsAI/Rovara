@@ -13,7 +13,7 @@ describe("native developer task workflow", () => {
       headBranch: "feature", baseBranch: "main", headCommit: "a".repeat(40), headTreeSha: "b".repeat(40), title: "Fix retry", body: "" }, comments: [], threads: [] };
     const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getPullRequestFeedback: async () => currentFeedback } } });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
-      requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true,
+      requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK",
     });
     const taskId = String((started.body.task as { taskId: string }).taskId);
     const workspaceId = String(harness.db.get(`DEVTASK#${taskId}`, "META")?.workspaceId);
@@ -155,7 +155,7 @@ describe("native developer task workflow", () => {
   it("lets only the task owner re-drive the currently pinned Canvas manifest", async () => {
     const harness = await createDeveloperTaskBroker();
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
-      requestId: randomUUID(), project: "payments", instructions: "Closeout retry fixture", client: "test-client", workflow: true,
+      requestId: randomUUID(), project: "payments", instructions: "Closeout retry fixture", client: "test-client", workflow: true, workflowPath: "QUICK",
     });
     const taskId = String((started.body.task as { taskId: string }).taskId);
     const row = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
@@ -189,7 +189,7 @@ describe("native developer task workflow", () => {
   it("allows an owner to retry a preparation failure bound to the current workflow revision", async () => {
     const harness = await createDeveloperTaskBroker();
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
-      requestId: randomUUID(), project: "payments", instructions: "Retry artifact verification", client: "test-client", workflow: true,
+      requestId: randomUUID(), project: "payments", instructions: "Retry artifact verification", client: "test-client", workflow: true, workflowPath: "QUICK",
     });
     const taskId = String((started.body.task as { taskId: string }).taskId);
     const row = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
@@ -210,7 +210,7 @@ describe("native developer task workflow", () => {
   it("rejects an owner retry when the workflow advanced after the persisted preparation failure", async () => {
     const harness = await createDeveloperTaskBroker();
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
-      requestId: randomUUID(), project: "payments", instructions: "Fence stale closeout retry", client: "test-client", workflow: true,
+      requestId: randomUUID(), project: "payments", instructions: "Fence stale closeout retry", client: "test-client", workflow: true, workflowPath: "QUICK",
     });
     const taskId = String((started.body.task as { taskId: string }).taskId);
     const row = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
@@ -264,7 +264,7 @@ describe("native developer task workflow", () => {
       comments: [], threads: [],
     }) } } });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
-      requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true,
+      requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK",
     });
     const task = started.body.task as { taskId: string; workflow: { stage: string; state: string; revision: number } };
     expect(task.workflow).toMatchObject({ stage: "PLAN", state: "RUNNING", revision: 1 });
@@ -374,7 +374,7 @@ describe("native developer task workflow", () => {
   it("blocks verification when the code checked differs from the final candidate", async () => {
     const harness = await createDeveloperTaskBroker();
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
-      requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true,
+      requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK",
     });
     const task = started.body.task as { taskId: string };
     const workspaceId = String(harness.db.get(`DEVTASK#${task.taskId}`, "META")?.workspaceId);
@@ -406,7 +406,7 @@ describe("native developer task workflow", () => {
   it("keeps an interrupted plan blocked and requires a new read-only planning run to recover", async () => {
     const harness = await createDeveloperTaskBroker();
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
-      requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true,
+      requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK",
     });
     const task = started.body.task as { taskId: string };
     const workspaceId = String(harness.db.get(`DEVTASK#${task.taskId}`, "META")?.workspaceId);

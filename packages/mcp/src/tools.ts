@@ -356,7 +356,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       share_to_channel: z.boolean().optional(),
       share_mode: z.enum(["view", "continue"]).optional(),
       channel: z.string().min(1).max(80).optional(),
-      workflow_path: z.enum(["quick", "full"]).default("quick").describe("approval sequence: quick asks once for the coding plan; full asks separately for requirements, design, and coding steps"),
+      workflow_path: z.enum(["quick", "full"]).describe("required approval sequence: quick asks once for the coding plan; full asks separately for requirements, design, and coding steps"),
       wait_seconds: waitInput(0).optional(),
       request_id: requestIdInput,
     },

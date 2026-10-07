@@ -231,7 +231,7 @@ describe("broker-backed feedback review data", () => {
       comments: githubFeedback.comments.map(comment => ({ ...comment, url: `${pullRequestUrl}#discussion_r1` })) };
     });
     const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getPullRequestFeedback: githubRead } } });
-    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Handle retries", client: "test", workflow: true });
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Handle retries", client: "test", workflow: true, workflowPath: "QUICK" });
     const taskId = String((started.body.task as { taskId: string }).taskId);
     const task = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { ownerKey: string; workspaceId: string };
     const candidate = createCandidateManifest(repositories.map(({ repositoryId }) => ({ repositoryId, commitSha: repositoryId === "demo" ? "c".repeat(40) : "a".repeat(40), treeSha: repositoryId === "demo" ? "e".repeat(40) : "b".repeat(40) })));

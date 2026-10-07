@@ -38,6 +38,7 @@ import { createAwsSlackInteractivityHandler } from "./slack-interactivity.js";
 const SIGNATURE_WINDOW_SECONDS = 300;
 const EVENT_RETENTION_SECONDS = 14 * 24 * 60 * 60;
 const SECRET_CACHE_MILLISECONDS = 5 * 60 * 1_000;
+const WORKFLOW_CHOICE_RETENTION_SECONDS = 24 * 60 * 60;
 
 export interface SlackSecrets {
   signingSecret: string;
@@ -45,6 +46,22 @@ export interface SlackSecrets {
 }
 
 export type SlackIngressLog = (event: string, fields: Readonly<Record<string, string | number | boolean>>) => void;
+
+export class SlackWorkflowStartError extends Error {
+  constructor(readonly code: string) {
+    super(`Slack workflow start failed: ${code}`);
+    this.name = "SlackWorkflowStartError";
+  }
+}
+
+function workflowStartFailureNotice(error: unknown): string {
+  const code = error instanceof SlackWorkflowStartError ? error.code : "";
+  if (code === "WORKSPACE_LIMIT") return "You’ve reached the open-task limit. Close a finished AgentX task, then try again.";
+  if (code === "WORKSPACE_BUSY") return "This Slack thread already has an open task. Start the workflow in a new thread.";
+  if (code === "FORBIDDEN") return "This channel isn’t connected to an AgentX project. Ask an AgentX admin to check the channel binding.";
+  if (code === "PROJECT_TASKS_DISABLED") return "Task workflows aren’t enabled for this project. Ask an AgentX admin to enable them.";
+  return "I couldn't start that workflow. Try again shortly, or ask an AgentX admin for help.";
+}
 
 export interface SlackIngressDependencies {
   secrets: () => Promise<SlackSecrets>;
@@ -62,6 +79,10 @@ export interface SlackIngressDependencies {
   stopTask?: (thread: SlackThread, userId: string) => Promise<"CANCEL_REQUESTED" | "NOTHING_RUNNING">;
   /** Explicit `workflow: ...` mentions start the native human-gated workflow in this exact thread. */
   startWorkflow?: (input: { thread: SlackThread; userId: string; instructions: string; workflowPath: "QUICK" | "FULL"; requestId: string }) => Promise<void>;
+  /** A bare `workflow:` mention is held for an explicit Quick/Full choice; it never defaults. */
+  requestWorkflowChoice?: (input: { thread: SlackThread; userId: string; instructions: string; requestId: string }) => Promise<void>;
+  /** Applies the original request to a Quick/Full reply in the same Slack thread. */
+  chooseWorkflowPath?: (input: { thread: SlackThread; userId: string; workflowPath: "QUICK" | "FULL"; selectionEventId: string }) => Promise<boolean>;
   /**
    * Spec 025 FR-035: shared task threads. Absent (the legacy deployment): every thread is ordinary.
    * `lookup` gives the thread's mode, or undefined for an ordinary thread, and throws when it cannot
@@ -261,17 +282,46 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       }
       // Nothing is running: the request goes to the orchestrator like any other.
     }
+    const workflowPathChoice = /^(quick|full)$/i.exec(text);
+    if (workflowPathChoice && dependencies.chooseWorkflowPath) {
+      try {
+        const selected = await dependencies.chooseWorkflowPath({
+          thread, userId: mention.userId, workflowPath: workflowPathChoice[1]!.toUpperCase() as "QUICK" | "FULL", selectionEventId: mention.eventId,
+        });
+        if (selected) {
+          await post(dependencies, log, thread, workflowPathChoice[1]!.toUpperCase() === "FULL"
+            ? "Full selected. I’ll prepare requirements, design, and coding steps for your review before work starts."
+            : "Quick selected. I’ll prepare a plan here first. No code changes start until you approve it.", "workflow.choice_notice_failed");
+        } else {
+          await post(dependencies, log, thread, "No Quick or Full choice is waiting in this thread. Start a request with `workflow: ...` to choose a path.", "workflow.choice_notice_failed");
+        }
+        return respond(200, { ok: true });
+      } catch {
+        log("workflow.choice_failed", { eventId: mention.eventId });
+        await post(dependencies, log, thread, "I couldn't apply that choice. Try again in this thread, or start a new workflow.", "workflow.choice_failure_notice_failed");
+        return respond(200, { ok: true });
+      }
+    }
     const workflowRequest = /^workflow(?:\s+(quick|full))?\s*:\s*([\s\S]+)$/i.exec(text);
     if (workflowRequest && dependencies.startWorkflow) {
       try {
-        const workflowPath = workflowRequest[1]?.toUpperCase() === "FULL" ? "FULL" : "QUICK";
-        await dependencies.startWorkflow({ thread, userId: mention.userId, instructions: workflowRequest[2]!.trim(), workflowPath, requestId: mention.eventId });
+        const instructions = workflowRequest[2]!.trim();
+        if (workflowRequest[1] === undefined) {
+          if (dependencies.requestWorkflowChoice === undefined) {
+            await post(dependencies, log, thread, `Choose Quick or Full, then send your request as \`workflow quick: ${instructions}\` or \`workflow full: ${instructions}\`.`);
+            return respond(200, { ok: true });
+          }
+          await dependencies.requestWorkflowChoice({ thread, userId: mention.userId, instructions, requestId: mention.eventId });
+          return respond(200, { ok: true });
+        }
+        const workflowPath = workflowRequest[1].toUpperCase() === "FULL" ? "FULL" : "QUICK";
+        await dependencies.startWorkflow({ thread, userId: mention.userId, instructions, workflowPath, requestId: mention.eventId });
         await post(dependencies, log, thread, workflowPath === "FULL"
           ? "Got it. I’ll prepare requirements, design, and coding steps for your review before work starts."
           : "Got it. I’ll prepare a plan here first. No code changes start until you approve it.", "workflow.start_notice_failed");
-      } catch {
+      } catch (error) {
         log("workflow.start_failed", { eventId: mention.eventId });
-        await post(dependencies, log, thread, "I couldn't start that workflow. Check that this channel is bound to a project and try again.", "workflow.start_failure_notice_failed");
+        await post(dependencies, log, thread, workflowStartFailureNotice(error), "workflow.start_failure_notice_failed");
       }
       return respond(200, { ok: true });
     }
@@ -439,6 +489,10 @@ export async function postSlackMessage(
   }
 }
 
+function workflowChoiceKey(thread: SlackThread): { pk: string; sk: string } {
+  return { pk: `WORKFLOW_CHOICE#${thread.teamId}#${thread.channelId}#${thread.threadTs}`, sk: "META" };
+}
+
 export interface SlackIngressSettings {
   acceptAppPosted: boolean;
   turnsPerMinute: number;
@@ -497,6 +551,26 @@ function createAwsSlackIngressHandler() {
     return cached.secrets;
   };
   const checkMember = createSlackMemberCheck({ token: async () => (await secrets()).botToken });
+  const invokeWorkflow = async (input: { thread: SlackThread; userId: string; instructions: string; workflowPath: "QUICK" | "FULL"; requestId: string }) => {
+    if (brokerFunctionName === undefined) throw new Error("broker workflow start is not configured");
+    const requestId = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(input.requestId) ? input.requestId : randomUUID();
+    const response = await lambda.send(new InvokeCommand({
+      FunctionName: brokerFunctionName,
+      InvocationType: "RequestResponse",
+      Payload: Buffer.from(JSON.stringify({ source: "agentx.slack-ingress", action: "start-workflow", ...input, requestId })),
+    }));
+    if (response.FunctionError !== undefined || response.Payload === undefined) throw new Error("broker workflow start failed");
+    const reply = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as { statusCode?: number; body?: string };
+    if (reply.statusCode !== 200 && reply.statusCode !== 201) {
+      let code = "UNKNOWN";
+      try {
+        const body = asRecord(JSON.parse(reply.body ?? "{}"));
+        const problem = asRecord(body.error);
+        if (typeof problem.code === "string") code = problem.code;
+      } catch { /* Keep the safe generic failure when the broker response is malformed. */ }
+      throw new SlackWorkflowStartError(code);
+    }
+  };
   return createSlackIngressHandler({
     secrets,
     appPosted: { accept: settings.acceptAppPosted, checkMember },
@@ -557,6 +631,67 @@ function createAwsSlackIngressHandler() {
     async releaseEvent(eventId) {
       await documentClient.send(new DeleteCommand({ TableName: threadsTableName, Key: { pk: `EVENT#${eventId}`, sk: "META" } }));
     },
+    ...(brokerFunctionName === undefined ? {} : {
+      async requestWorkflowChoice(input: { thread: SlackThread; userId: string; instructions: string; requestId: string }) {
+        const id = randomUUID();
+        const key = workflowChoiceKey(input.thread);
+        const now = Date.now();
+        try {
+          await documentClient.send(new PutCommand({
+            TableName: threadsTableName,
+            Item: {
+              ...key, entityType: "WORKFLOW_PATH_CHOICE", choiceId: id, teamId: input.thread.teamId,
+              channelId: input.thread.channelId, threadTs: input.thread.threadTs, userId: input.userId,
+              instructions: input.instructions, requestId: id, createdAt: new Date(now).toISOString(),
+              expiresAt: Math.floor(now / 1_000) + WORKFLOW_CHOICE_RETENTION_SECONDS,
+            },
+            ConditionExpression: "attribute_not_exists(pk)",
+          }));
+        } catch (error) {
+          if (error instanceof Error && error.name === "ConditionalCheckFailedException") {
+            throw new Error("a Quick or Full choice is already waiting in this Slack thread", { cause: error });
+          }
+          throw error;
+        }
+        try {
+          await postSlackMessage((await secrets()).botToken, {
+            channel: input.thread.channelId, threadTs: input.thread.threadTs,
+            text: "Choose Quick or Full by replying `@AgentX Quick` or `@AgentX Full` in this thread. I’ll use your original request; no code changes start before you approve the plan.",
+          });
+        } catch (error) {
+          await documentClient.send(new DeleteCommand({ TableName: threadsTableName, Key: key, ConditionExpression: "choiceId = :choiceId", ExpressionAttributeValues: { ":choiceId": id } })).catch(() => undefined);
+          throw error;
+        }
+      },
+      async chooseWorkflowPath(input: { thread: SlackThread; userId: string; workflowPath: "QUICK" | "FULL"; selectionEventId: string }) {
+        const key = workflowChoiceKey(input.thread);
+        const response = await documentClient.send(new GetCommand({ TableName: threadsTableName, Key: key, ConsistentRead: true }));
+        const choice = response.Item as Record<string, unknown> | undefined;
+        if (choice === undefined || typeof choice.instructions !== "string" || typeof choice.requestId !== "string"
+          || typeof choice.userId !== "string" || typeof choice.expiresAt !== "number" || choice.expiresAt <= Math.floor(Date.now() / 1_000)) return false;
+        if (choice.userId !== input.userId) throw new Error("only the requester can choose the workflow path");
+        if (choice.teamId !== input.thread.teamId || choice.channelId !== input.thread.channelId || choice.threadTs !== input.thread.threadTs) {
+          throw new Error("workflow path choice belongs to another Slack thread");
+        }
+        try {
+          await documentClient.send(new UpdateCommand({
+            TableName: threadsTableName, Key: key,
+            UpdateExpression: "SET selectedPath = if_not_exists(selectedPath, :path)",
+            ConditionExpression: "attribute_exists(pk) AND expiresAt > :now AND (attribute_not_exists(selectedPath) OR selectedPath = :path)",
+            ExpressionAttributeValues: { ":path": input.workflowPath, ":now": Math.floor(Date.now() / 1_000) },
+          }));
+        } catch (error) {
+          if (error instanceof Error && error.name === "ConditionalCheckFailedException") throw new Error("a different workflow path was already selected", { cause: error });
+          throw error;
+        }
+        await invokeWorkflow({
+          thread: input.thread, userId: input.userId, instructions: choice.instructions,
+          workflowPath: input.workflowPath, requestId: choice.requestId,
+        });
+        await documentClient.send(new DeleteCommand({ TableName: threadsTableName, Key: key, ConditionExpression: "selectedPath = :path", ExpressionAttributeValues: { ":path": input.workflowPath } }));
+        return true;
+      },
+    }),
     async changePending(threadSubject, delta) {
       const response = await documentClient.send(new UpdateCommand({
         TableName: threadsTableName,
@@ -628,15 +763,8 @@ function createAwsSlackIngressHandler() {
         if (reply.statusCode !== 200 || typeof body.captured !== "boolean") throw new Error("broker feedback note failed");
         return { captured: body.captured };
       },
-      async startWorkflow(input: { thread: SlackThread; userId: string; instructions: string; requestId: string }) {
-        const response = await lambda.send(new InvokeCommand({
-          FunctionName: brokerFunctionName,
-          InvocationType: "RequestResponse",
-          Payload: Buffer.from(JSON.stringify({ source: "agentx.slack-ingress", action: "start-workflow", ...input, requestId: randomUUID() })),
-        }));
-        if (response.FunctionError !== undefined || response.Payload === undefined) throw new Error("broker workflow start failed");
-        const reply = JSON.parse(Buffer.from(response.Payload).toString("utf8")) as { statusCode?: number };
-        if (reply.statusCode !== 200 && reply.statusCode !== 201) throw new Error("broker workflow start failed");
+      async startWorkflow(input: { thread: SlackThread; userId: string; instructions: string; workflowPath: "QUICK" | "FULL"; requestId: string }) {
+        await invokeWorkflow(input);
       },
     }),
     log(event, fields) {

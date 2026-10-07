@@ -3310,7 +3310,7 @@ export interface SlackWorkflowStartEvent {
   thread: SlackThread;
   userId: string;
   instructions: string;
-  workflowPath?: "QUICK" | "FULL";
+  workflowPath: "QUICK" | "FULL";
   requestId: string;
 }
 
@@ -3359,7 +3359,7 @@ export function isSlackWorkflowStartEvent(event: unknown): event is SlackWorkflo
   const value = event as Record<string, unknown>;
   return value.source === "agentx.slack-ingress" && value.action === "start-workflow" && value.requestContext === undefined
     && typeof value.instructions === "string" && value.instructions.trim().length > 0
-    && typeof value.requestId === "string" && (value.workflowPath === undefined || value.workflowPath === "QUICK" || value.workflowPath === "FULL");
+    && typeof value.requestId === "string" && (value.workflowPath === "QUICK" || value.workflowPath === "FULL");
 }
 
 async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowStartEvent) {
@@ -3382,7 +3382,7 @@ async function startSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: De
   const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller, thread);
   const request = {
     method: "POST", path: "/v1/dev/tasks", headers: {}, requestId,
-    body: JSON.stringify({ requestId, project: binding.projectName, instructions, client: "slack", workflow: true, workflowPath: event.workflowPath ?? "QUICK", shareToChannel: true, channel: thread.channelId }),
+    body: JSON.stringify({ requestId, project: binding.projectName, instructions, client: "slack", workflow: true, workflowPath: event.workflowPath, shareToChannel: true, channel: thread.channelId }),
   };
   return await routeDeveloperTaskRequest(routeDeps, caller, request, new URL(request.path, "https://agentx.invalid")) as { task: { taskId: string } };
 }

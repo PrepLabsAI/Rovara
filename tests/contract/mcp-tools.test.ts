@@ -237,10 +237,18 @@ describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 
   it("starts the native workflow only through its explicit tool", async () => {
     const startTask = vi.fn(async () => view("STARTING"));
     const mcp = await connect({ startTask }, { newRequestId: counter() });
-    await mcp.callTool({ name: "agentx_start_workflow", arguments: { project: "payments", instructions: "Fix retry handling" } });
+    await mcp.callTool({ name: "agentx_start_workflow", arguments: { project: "payments", instructions: "Fix retry handling", workflow_path: "quick" } });
     await mcp.callTool({ name: "agentx_start_workflow", arguments: { project: "payments", instructions: "Full scope", workflow_path: "full" } });
     expect(startTask).toHaveBeenNthCalledWith(1, expect.objectContaining({ project: "payments", workflow: true, workflowPath: "QUICK" }));
     expect(startTask).toHaveBeenNthCalledWith(2, expect.objectContaining({ project: "payments", workflow: true, workflowPath: "FULL" }));
+  });
+
+  it("requires an explicit workflow path instead of silently choosing Quick", async () => {
+    const startTask = vi.fn(async () => view("STARTING"));
+    const mcp = await connect({ startTask }, { newRequestId: counter() });
+    const result = await mcp.callTool({ name: "agentx_start_workflow", arguments: { project: "payments", instructions: "Fix retry handling" } });
+    expect(result.isError).toBe(true);
+    expect(startTask).not.toHaveBeenCalled();
   });
 
   it("repeats an identical pull request call with the same requestId, and returns it", async () => {

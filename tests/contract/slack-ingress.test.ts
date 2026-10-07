@@ -5,6 +5,7 @@ import { CLOSED_SHARED_NOTICE, SlackRequestMessageSchema, VIEW_ONLY_NOTICE, shar
 import {
   createSlackIngressHandler,
   parseSlackSecrets,
+  SlackWorkflowStartError,
   slackIngressSettings,
   validSignature,
 } from "../../packages/broker/src/aws/slack-ingress.js";
@@ -28,12 +29,16 @@ function harness(options: {
   failRelease?: number;
   failDecrement?: number;
   stop?: { outcome?: "CANCEL_REQUESTED" | "NOTHING_RUNNING"; throws?: boolean };
-  workflowStart?: { throws?: boolean };
+  workflowStart?: { throws?: boolean; errorCode?: string };
+  workflowChoice?: { throws?: boolean };
+  workflowSelection?: { selected?: boolean; throws?: boolean };
   shared?: { threads: Record<string, { mode: "view" | "continue"; closed?: boolean; taskId?: string }>; lookupThrows?: boolean; claimThrows?: boolean };
   feedbackCapture?: { captured?: boolean; throws?: boolean };
 } = {}) {
   const stopCalls: Array<{ thread: unknown; userId: string }> = [];
   const workflowStarts: Array<{ thread: unknown; userId: string; instructions: string; requestId: string }> = [];
+  const workflowChoices: Array<{ thread: unknown; userId: string; instructions: string; requestId: string }> = [];
+  const workflowSelections: Array<{ thread: unknown; userId: string; workflowPath: "QUICK" | "FULL"; selectionEventId: string }> = [];
   const feedbackNotes: Array<Record<string, unknown>> = [];
   const memberChecks: string[] = [];
   const clock = { seconds: nowSeconds };
@@ -117,7 +122,20 @@ function harness(options: {
     ...(options.workflowStart === undefined ? {} : {
       startWorkflow: async (input: { thread: unknown; userId: string; instructions: string; requestId: string }) => {
         workflowStarts.push(input);
-        if (options.workflowStart?.throws) throw new Error("broker unavailable");
+        if (options.workflowStart?.throws) throw new SlackWorkflowStartError(options.workflowStart.errorCode ?? "UNKNOWN");
+      },
+    }),
+    ...(options.workflowChoice === undefined ? {} : {
+      requestWorkflowChoice: async (input: { thread: unknown; userId: string; instructions: string; requestId: string }) => {
+        workflowChoices.push(input);
+        if (options.workflowChoice?.throws) throw new Error("Slack unavailable");
+      },
+    }),
+    ...(options.workflowSelection === undefined ? {} : {
+      chooseWorkflowPath: async (input: { thread: unknown; userId: string; workflowPath: "QUICK" | "FULL"; selectionEventId: string }) => {
+        workflowSelections.push(input);
+        if (options.workflowSelection?.throws) throw new Error("broker unavailable");
+        return options.workflowSelection?.selected ?? true;
       },
     }),
     ...(options.feedbackCapture === undefined ? {} : {
@@ -162,7 +180,7 @@ function harness(options: {
       },
     }),
   });
-  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls, workflowStarts, feedbackNotes, noticedAt };
+  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls, workflowStarts, workflowChoices, workflowSelections, feedbackNotes, noticedAt };
 }
 
 function sharedNoticeKeyItem(table: FakeDynamoDb, subject: string): { noticedAt?: unknown } | undefined {
@@ -735,9 +753,9 @@ describe("the stop command (#126)", () => {
     expect(queue.map((entry) => entry.message.text)).toEqual(["stop"]);
   });
 
-  it("starts an explicit workflow in the bound Slack thread and leaves ordinary mentions on the existing path", async () => {
+  it("starts an explicitly selected Quick workflow in the bound Slack thread and leaves ordinary mentions on the existing path", async () => {
     const { handler, queue, posts, workflowStarts } = harness({ workflowStart: {} });
-    await send(handler, signedEvent(mention({ eventId: "EvWorkflow001", event: { text: `<@${bot}> workflow: Add password reset to the account page` } })));
+    await send(handler, signedEvent(mention({ eventId: "EvWorkflow001", event: { text: `<@${bot}> workflow quick: Add password reset to the account page` } })));
     expect(workflowStarts).toEqual([{ thread: { teamId: team, channelId: channel, threadTs: "1695500000.000001" }, userId: pratik, instructions: "Add password reset to the account page", workflowPath: "QUICK", requestId: "EvWorkflow001" }]);
     expect(posts.at(-1)?.text).toContain("No code changes start until you approve it.");
     expect(queue).toHaveLength(0);
@@ -750,6 +768,39 @@ describe("the stop command (#126)", () => {
     await send(handler, signedEvent(mention({ eventId: "EvWorkflowFull1", event: { text: `<@${bot}> workflow full: Add password reset` } })));
     expect(workflowStarts).toEqual([{ thread: { teamId: team, channelId: channel, threadTs: "1695500000.000001" }, userId: pratik, instructions: "Add password reset", workflowPath: "FULL", requestId: "EvWorkflowFull1" }]);
     expect(posts.at(-1)?.text).toContain("requirements, design, and coding steps");
+  });
+
+  it("asks the requester to choose Quick or Full before creating a workflow", async () => {
+    const { handler, posts, workflowStarts, workflowChoices, queue } = harness({ workflowStart: {}, workflowChoice: {} });
+    await send(handler, signedEvent(mention({ eventId: "EvWorkflowChoose1", event: { text: `<@${bot}> workflow: Add password reset` } })));
+    expect(workflowStarts).toEqual([]);
+    expect(workflowChoices).toEqual([{ thread: { teamId: team, channelId: channel, threadTs: "1695500000.000001" }, userId: pratik, instructions: "Add password reset", requestId: "EvWorkflowChoose1" }]);
+    expect(posts).toEqual([]);
+    expect(queue).toHaveLength(0);
+  });
+
+  it("uses the requester's Quick or Full reply to start the saved workflow", async () => {
+    const { handler, workflowChoices, workflowSelections, queue, posts } = harness({ workflowStart: {}, workflowChoice: {}, workflowSelection: {} });
+    await send(handler, signedEvent(mention({ eventId: "EvWorkflowChoose2", event: { text: `<@${bot}> workflow: Add password reset` } })));
+    await send(handler, signedEvent(mention({ eventId: "EvWorkflowPickFull", event: { text: `<@${bot}> Full` } })));
+    expect(workflowChoices).toHaveLength(1);
+    expect(workflowSelections).toEqual([{ thread: { teamId: team, channelId: channel, threadTs: "1695500000.000001" }, userId: pratik, workflowPath: "FULL", selectionEventId: "EvWorkflowPickFull" }]);
+    expect(queue).toHaveLength(0);
+    expect(posts.at(-1)?.text).toContain("Full selected");
+  });
+
+  it("explains the task limit instead of blaming the channel binding", async () => {
+    const { handler, posts } = harness({ workflowStart: { throws: true, errorCode: "WORKSPACE_LIMIT" } });
+    await send(handler, signedEvent(mention({ eventId: "EvWorkflowLimit1", event: { text: `<@${bot}> workflow quick: Add password reset` } })));
+    expect(posts.at(-1)?.text).toContain("open-task limit");
+    expect(posts.at(-1)?.text).not.toContain("channel is connected");
+  });
+
+  it("does not send a Quick or Full reply as a new coding task when no path choice is pending", async () => {
+    const { handler, posts, queue } = harness({ workflowStart: {}, workflowSelection: { selected: false } });
+    await send(handler, signedEvent(mention({ eventId: "EvWorkflowStaleChoice", event: { text: `<@${bot}> Full` } })));
+    expect(queue).toEqual([]);
+    expect(posts.at(-1)?.text).toContain("No Quick or Full choice is waiting");
   });
 });
 

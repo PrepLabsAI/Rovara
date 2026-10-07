@@ -22,9 +22,11 @@ CharterArc or synchronize another product's case.
 
 ### Story 1 — Choose the review path for this task (P1)
 
-At task start, the requester chooses **Quick** or **Full**. Quick is the default: review one concise
-implementation plan before code changes. Full adds separate approval points for requirements,
-design, and the task breakdown before implementation. Both paths keep project-required checks,
+At task start, the requester chooses **Quick** or **Full**. AgentX must ask when the requester has not
+chosen; it must not silently default. In Slack, a `workflow:` request is saved and AgentX asks the
+requester to reply `Quick` or `Full` in the same thread. Only that requester may choose, and AgentX
+uses the saved request. Quick has one coding-plan approval before code changes. Full adds separate
+approval points for requirements, design, and coding steps. Both paths keep project-required checks,
 reviews, and human delivery authority in force. The selected path is recorded with the task.
 
 **Independent test:** Start one Quick and one Full task. Verify each presents only its configured
@@ -139,9 +141,11 @@ recorded before an implementation operation is queued.
 - **FR-013:** Workflow Slack actions MUST be authenticated from Slack's signed interaction payload,
   mapped to the task and current workflow revision, authorized against the task owner/admin policy,
   and idempotent under repeated delivery.
-- **FR-014:** A requester MUST be able to select Quick or Full when starting a workflow in Slack or
-  through the workflow MCP tool. Quick is the default. Project-required checks, reviews, and authority
-  rules MUST apply to both paths and MUST NOT be disabled by path selection.
+- **FR-014:** A requester MUST explicitly select Quick or Full when starting a workflow in Slack or
+  through the workflow MCP tool. Slack MUST ask when no path is supplied and bind the reply to the
+  same requester, thread, and saved request. The MCP tool MUST require the path. Neither surface
+  may silently default. Project-required checks, reviews, and authority rules MUST apply to both paths
+  and MUST NOT be disabled by path selection.
 
 ## Entities
 

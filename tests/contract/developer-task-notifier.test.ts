@@ -84,7 +84,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
       attempt += 1;
       return attempt === 1 ? { status: "ARCHIVE_PENDING" as const, reason: "canvas_not_found" } : { status: "COMPLETE" as const };
     });
-    const h = await notifierHarness({ shareToChannel: false, workflow: true }, { closeTaskCanvases });
+    const h = await notifierHarness({ shareToChannel: false, workflow: true, workflowPath: "QUICK" }, { closeTaskCanvases });
     const terminalNotice: Notice = { id: `${h.taskId}:canvas_closeout:4`, kind: "canvas_closeout", taskId: h.taskId,
       at: new Date(h.now()).toISOString(), expectedWorkflowRevision: 4 };
     const deliver = async () => h.handle({ Records: [{ eventSource: "aws:sqs", messageId: "terminal-closeout", receiptHandle: "receipt",
@@ -109,7 +109,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
       closeoutAttempt += 1;
       return closeoutAttempt === 1 ? { status: "ARCHIVE_PENDING" as const, reason: "timeout" } : { status: "COMPLETE" as const };
     };
-    const h = await notifierHarness({ shareToChannel: false, workflow: true }, { closeTaskCanvases });
+    const h = await notifierHarness({ shareToChannel: false, workflow: true, workflowPath: "QUICK" }, { closeTaskCanvases });
     const pendingNotice: Notice = { id: `${h.taskId}:canvas_closeout_retry:req`, kind: "canvas_closeout", taskId: h.taskId,
       at: new Date(h.now() - 2 * 60 * 60 * 1000).toISOString(), manifestDigest, expectedWorkflowRevision: 3 };
     const deliver = async () => h.handle({ Records: [{ eventSource: "aws:sqs", messageId: "closeout", receiptHandle: "receipt",
@@ -128,7 +128,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
       await onCreated?.("F12345678");
       return { canvasId: "F12345678", permalink: "https://acme.slack.com/docs/T123/F12345678" };
     });
-    const h = await notifierHarness({ shareToChannel: true, workflow: true }, {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
       readArtifact: async () => plan,
       createPlanCanvas,
     });
@@ -164,7 +164,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
   it("shows the saved plan in Slack when this workspace cannot create Canvases", async () => {
     const plan = "# Goal\nFix retry handling.\n\n## Checks\nRun the retry regression test.";
     const createPlanCanvas = vi.fn(async () => { throw new SlackPostError("free_teams_cannot_create_standalone_canvases"); });
-    const h = await notifierHarness({ shareToChannel: true, workflow: true }, { readArtifact: async () => plan, createPlanCanvas });
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, { readArtifact: async () => plan, createPlanCanvas });
     await h.pump();
     const preparation = h.active();
     await h.finish(h.workspaceId, preparation, "SUCCEEDED");
@@ -187,7 +187,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
   it("shows the current requirements document in the Full path approval message", async () => {
     const requirements = "# Requirements\nAdd password reset.\n";
     const createPlanCanvas = vi.fn(async () => ({ canvasId: "F22345678", permalink: "https://acme.slack.com/docs/T123/F22345678" }));
-    const h = await notifierHarness({ shareToChannel: true, workflow: true }, {
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
       readArtifact: async () => requirements,
       createPlanCanvas,
     });
@@ -211,7 +211,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
   });
 
   it("posts concise Slack updates as GitHub merges each required pull request", async () => {
-    const h = await notifierHarness({ shareToChannel: true, workflow: true });
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
     await h.pump();
     h.advance(10_000);
     const taskKey = `DEVTASK#${h.taskId}`;
@@ -239,7 +239,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
   });
 
   it("keeps legacy PR feedback notices redacted and does not expose an unbound approval button", async () => {
-    const h = await notifierHarness({ shareToChannel: true, workflow: true });
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" });
     await h.pump();
     h.advance(10_000);
     const taskKey = `DEVTASK#${h.taskId}`;

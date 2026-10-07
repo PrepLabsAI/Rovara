@@ -173,11 +173,12 @@ export const StartDeveloperTaskRequestSchema = z
     channel: z.string().min(1).max(80).optional(),
     /** Opts this task into the native human-gated task-to-PR workflow. */
     workflow: z.literal(true).optional(),
-    /** Selects the approval sequence for a native workflow; QUICK is used when omitted. */
+    /** Selects the required approval sequence for a native workflow. */
     workflowPath: WorkflowPathSchema.optional(),
   })
   .strict().superRefine((request, context) => {
     if (request.workflowPath !== undefined && request.workflow !== true) context.addIssue({ code: "custom", path: ["workflowPath"], message: "workflowPath requires workflow: true" });
+    if (request.workflow === true && request.workflowPath === undefined) context.addIssue({ code: "custom", path: ["workflowPath"], message: "workflow requests require an explicit Quick or Full path" });
   });
 export type StartDeveloperTaskRequest = z.infer<typeof StartDeveloperTaskRequestSchema>;
 

@@ -21,6 +21,7 @@ import {
   dismissDeletedWorkflowFeedback,
   WorkflowSnapshotSchema,
   submitWorkflowArtifact,
+  StartDeveloperTaskRequestSchema,
 } from "@agentx/contracts";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
@@ -36,6 +37,12 @@ const plan = {
 };
 
 describe("native task workflow contracts", () => {
+  it("requires an explicit Quick or Full choice when creating a workflow task", () => {
+    const request = { requestId: "a1ec6b71-2494-4cbd-92a9-6eecab01676b", project: "payments", instructions: "Fix retry handling", workflow: true };
+    expect(StartDeveloperTaskRequestSchema.safeParse(request).success).toBe(false);
+    expect(StartDeveloperTaskRequestSchema.safeParse({ ...request, workflowPath: "QUICK" }).success).toBe(true);
+  });
+
   it("stores exact task Canvas lineage and retryable closeout state while keeping legacy snapshots valid", () => {
     const workflow = { ...createWorkflowSnapshot({ taskId, ownerId, now: "2026-10-05T12:00:00.000Z" }), artifacts: [plan] };
     expect(WorkflowSnapshotSchema.parse(workflow).canvasLineage).toBeUndefined();
