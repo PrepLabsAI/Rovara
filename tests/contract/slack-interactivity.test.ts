@@ -330,7 +330,25 @@ describe("Slack native workflow review controls", () => {
     const action = { actionId: "agentx_workflow_approve", value: JSON.stringify({ taskId, revision: fullWorkflow.revision, digest: fullRequirementsDigest, decision: "APPROVE" }), userId: requester, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "", requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: "requirements", responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" };
     await handlers.handleAction(action);
     expect(opened).toMatchObject({ callback_id: "agentx_workflow_review_submission" });
+    const approvalBlocks = JSON.stringify(opened?.blocks);
+    expect(approvalBlocks).toContain("Checks are chosen when you approve the coding plan.");
+    expect(approvalBlocks).not.toContain("workflow_feedback");
+    expect(approvalBlocks).not.toContain("What should change?");
     await expect(handlers.handleAction({ ...action, value: JSON.stringify({ taskId, revision: fullWorkflow.revision, digest, decision: "APPROVE" }) })).rejects.toThrow(/changed/);
+  });
+
+  it("asks for a comment only when the owner requests changes", async () => {
+    let opened: Record<string, unknown> | undefined;
+    const handlers = workflowSlackHandlers({ loadTask: async () => task,
+      openView: async (_trigger, view) => { opened = view; }, submit: async () => undefined });
+    await handlers.handleAction({ actionId: "agentx_workflow_changes",
+      value: JSON.stringify({ taskId, revision: workflow.revision, digest, decision: "REQUEST_CHANGES" }),
+      userId: requester, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "",
+      requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: "plan",
+      responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" });
+    const changeBlocks = JSON.stringify(opened?.blocks);
+    expect(changeBlocks).toContain("workflow_feedback");
+    expect(changeBlocks).toContain("What should change?");
   });
 
   it("lets only the owner approve the current PR feedback and candidate in the same task thread", async () => {

@@ -788,7 +788,7 @@ export function workflowSlackHandlers(deps: {
         if (optional.length) blocks.push({ type: "input", block_id: "workflow_checks", optional: requiredChecks.length > 0, label: { type: "plain_text", text: requiredChecks.length > 0 ? "Optional checks" : "Choose a check" }, element: {
           type: "checkboxes", action_id: "selected_options", options: optional.map((check) => ({ text: { type: "plain_text", text: check.label }, value: check.id })),
         } });
-      } else {
+      } else if (value.decision === "REQUEST_CHANGES") {
         blocks.push({ type: "input", block_id: "workflow_feedback", label: { type: "plain_text", text: "What should change?" }, element: { type: "plain_text_input", action_id: "reason", multiline: true, max_length: 500 } });
       }
       // Keep this below Slack's 3,000-character private_metadata limit. The original
