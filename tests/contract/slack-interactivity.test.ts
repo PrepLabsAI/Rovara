@@ -293,6 +293,21 @@ describe("Slack native workflow review controls", () => {
     expect(submitted[1]?.requestId).toBe(submitted[0]?.requestId);
   });
 
+  it("keeps long plan text out of Slack modal metadata", async () => {
+    let opened: Record<string, unknown> | undefined;
+    const handlers = workflowSlackHandlers({ loadTask: async () => task,
+      openView: async (_trigger, view) => { opened = view; }, submit: async () => undefined });
+    await handlers.handleAction({ actionId: "agentx_workflow_approve",
+      value: JSON.stringify({ taskId, revision: workflow.revision, digest, decision: "APPROVE" }),
+      userId: requester, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "",
+      requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002",
+      messageText: `plan ${"x".repeat(3_200)}`, responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" });
+    const metadata = String(opened?.private_metadata);
+    expect(metadata.length).toBeLessThan(3_000);
+    expect(metadata).not.toContain("messageText");
+    expect(metadata).not.toContain("plan ");
+  });
+
   it("refuses another Slack member and refuses a stale plan button", async () => {
     const handlers = workflowSlackHandlers({ loadTask: async () => task, openView: async () => undefined, submit: async () => undefined });
     const action = { actionId: "agentx_workflow_approve", value: JSON.stringify({ taskId, revision: workflow.revision, digest, decision: "APPROVE" }), userId: other, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "", requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: "plan", responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" };

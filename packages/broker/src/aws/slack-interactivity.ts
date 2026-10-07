@@ -791,7 +791,10 @@ export function workflowSlackHandlers(deps: {
       } else {
         blocks.push({ type: "input", block_id: "workflow_feedback", label: { type: "plain_text", text: "What should change?" }, element: { type: "plain_text_input", action_id: "reason", multiline: true, max_length: 500 } });
       }
-      const privateMetadata = JSON.stringify({ ...value, thread: action.thread, messageTs: action.messageTs, messageText: action.messageText });
+      // Keep this below Slack's 3,000-character private_metadata limit. The original
+      // approval card is updated from its persisted notifier record after the decision;
+      // copying the full plan message here is unnecessary and breaks long plans.
+      const privateMetadata = JSON.stringify({ ...value, thread: action.thread });
       await deps.openView(action.triggerId, {
         type: "modal", callback_id: "agentx_workflow_review_submission", private_metadata: privateMetadata,
         title: { type: "plain_text", text: value.decision === "APPROVE" ? "Approve plan" : "Request changes" },
