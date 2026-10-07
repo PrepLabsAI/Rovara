@@ -510,7 +510,9 @@ describe("native developer task workflow", () => {
     const retryRoute = `/v1/dev/tasks/${task.taskId}/workflow/retry`;
     const requestId = randomUUID();
     const missingRevision = await harness.dev(MAYA, "POST", retryRoute, { requestId, instructions: "Run the selected check." });
-    expect(missingRevision.body.error).toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("include its current revision") });
+    const missingRevisionError = missingRevision.body.error as { code: string; message: string };
+    expect(missingRevisionError.code).toBe("CONFIG_INVALID");
+    expect(missingRevisionError.message).toContain("include its current revision");
     const staleRevision = await harness.dev(MAYA, "POST", retryRoute, { requestId, instructions: "Run the selected check.", expectedRevision: current.workflow.revision - 1 });
     expect(staleRevision.body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
 

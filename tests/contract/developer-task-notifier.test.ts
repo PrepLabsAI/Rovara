@@ -198,7 +198,9 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
 
     expect(h.updates).toHaveLength(1);
     const postedMarker = h.db.find((item) => item.pk === `DEVTASK#${h.taskId}` && item.postedWorkflowRevision === planRevision && item.postedArtifactDigest === planDigest)[0];
-    expect(h.updates[0]).toMatchObject({ channel: approvalCard.channel, ts: postedMarker?.postedTs, text: expect.stringContaining("Approved by <@U0MAYA001>") });
+    expect(h.updates[0]?.channel).toBe(approvalCard.channel);
+    expect(h.updates[0]?.ts).toBe(postedMarker?.postedTs);
+    expect(h.updates[0]?.text).toContain("Approved by <@U0MAYA001>");
     expect(h.updates[0]?.blocks.every((block) => (block as { type?: string }).type === "section")).toBe(true);
     expect(JSON.stringify(h.updates[0]?.blocks)).not.toContain("agentx_workflow_approve");
     expect(JSON.stringify(h.updates[0]?.blocks)).not.toContain("agentx_workflow_changes");
