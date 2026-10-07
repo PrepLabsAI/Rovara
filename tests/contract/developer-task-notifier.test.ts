@@ -200,10 +200,51 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     const postedMarker = h.db.find((item) => item.pk === `DEVTASK#${h.taskId}` && item.postedWorkflowRevision === planRevision && item.postedArtifactDigest === planDigest)[0];
     expect(h.updates[0]?.channel).toBe(approvalCard.channel);
     expect(h.updates[0]?.ts).toBe(postedMarker?.postedTs);
-    expect(h.updates[0]?.text).toContain("Approved by <@U0MAYA001>");
+    expect(h.updates[0]?.text).toBe(approvalCard.text);
     expect(h.updates[0]?.blocks.every((block) => (block as { type?: string }).type === "section")).toBe(true);
     expect(JSON.stringify(h.updates[0]?.blocks)).not.toContain("agentx_workflow_approve");
     expect(JSON.stringify(h.updates[0]?.blocks)).not.toContain("agentx_workflow_changes");
+  });
+
+  it("removes stale buttons without growing a long fallback approval message", async () => {
+    const plan = "P".repeat(32_700);
+    const updates: Array<{ channel: string; ts: string; text: string; blocks: unknown[] }> = [];
+    let originalText: string | undefined;
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
+      readArtifact: async () => plan,
+      createPlanCanvas: async () => { throw new SlackPostError("free_teams_cannot_create_standalone_canvases"); },
+      update: async (input) => {
+        if (originalText !== undefined && input.text.length > originalText.length) throw new SlackPostError("msg_too_long");
+        updates.push(input);
+      },
+    });
+    const workflowRecord = h.db.get(`DEVTASK#${h.taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
+    const requiredCheck = { id: "required-1", label: "npm test", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 30 } };
+    h.db.set({ ...workflowRecord, workflow: { ...workflowRecord.workflow, checkPolicy: { required: [requiredCheck], optional: [], selectedOptionalIds: [] } } });
+    await h.pump();
+    const preparation = h.active();
+    await h.finish(h.workspaceId, preparation, "SUCCEEDED");
+    await h.pump();
+    const planning = h.active();
+    await h.artifact(h.workspaceId, planning, "plan.md", plan);
+    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await h.pump();
+
+    const approvalCard = h.posts.at(-1)!;
+    originalText = approvalCard.text;
+    expect(approvalCard.text.length).toBeGreaterThan(32_768);
+    const saved = h.db.get(`DEVTASK#${h.taskId}`, "META") as { workflow: { revision: number; artifacts: Array<{ sha256: string }> } };
+    const decision = await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/workflow/decision`, {
+      requestId: randomUUID(), expectedRevision: saved.workflow.revision, decision: "APPROVE", reason: "Looks good.",
+      artifactDigest: saved.workflow.artifacts.at(-1)?.sha256,
+    });
+    expect(decision.status, JSON.stringify(decision.body)).toBe(200);
+    await h.pump();
+
+    expect(updates).toHaveLength(1);
+    expect(updates[0]?.text).toBe(approvalCard.text);
+    expect(JSON.stringify(updates[0]?.blocks)).not.toContain("agentx_workflow_approve");
+    expect(JSON.stringify(updates[0]?.blocks)).not.toContain("agentx_workflow_changes");
   });
 
   it("shows the saved plan in Slack when this workspace cannot create Canvases", async () => {

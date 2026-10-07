@@ -209,11 +209,10 @@ async function updateWorkflowApprovalCard(deps: NotifierDependencies, task: Deve
     return;
   }
   if ((marker.workflowDecisionRevision ?? 0) >= decisionRevision) return;
-  const status = decision.decision === "APPROVE" ? `\n\n✅ Approved by <@${task.slackUserId}>. AgentX is starting the next step.`
-    : decision.decision === "REQUEST_CHANGES" ? `\n\n↩️ Changes requested by <@${task.slackUserId}>. AgentX is revising this step.`
-      : decision.decision === "REJECT" ? `\n\n⛔ Closed by <@${task.slackUserId}>. AgentX will not continue from this plan.`
-        : `\n\nSkipped by <@${task.slackUserId}>.`;
-  const text = `${marker.postedText}${status}`;
+  // Do not append status text to the original document: a long fallback plan may already be
+  // near Slack's message limit. Keep the accepted text byte-for-byte and remove the old actions;
+  // the next workflow notice reports the new step separately.
+  const text = marker.postedText;
   await deps.update({ channel: marker.postedChannelId, ts: marker.postedTs, text,
     blocks: slackSectionTexts(text).map((section) => ({ type: "section", text: { type: "mrkdwn", text: section } })) });
   await deps.documentClient.send(new UpdateCommand({
