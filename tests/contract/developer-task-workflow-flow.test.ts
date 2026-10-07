@@ -6,6 +6,7 @@ import { developerTaskIdentity } from "../../packages/broker/src/developer/task-
 import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
 import { startTaskWorkflowFeedbackReviewFromWebhook } from "../../packages/broker/src/aws/developer-tasks.js";
 import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
+import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
 describe("native developer task workflow", () => {
   it("launches one feedback critic from current collection, limits its reads, and stores only an advisory report", async () => {
@@ -433,6 +434,37 @@ describe("native developer task workflow", () => {
     const implementation = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.workflowMode === "IMPLEMENT");
     const invocation = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === implementation?.id)[0]?.invocation as { payload?: { readiness?: unknown[] } };
     expect(invocation.payload?.readiness).toEqual([selectedCheck.command]);
+  });
+
+  it("accepts a Slack owner's workflow approval using the same stable developer identity as task start", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000077" };
+    const started = await harness.handler({ source: "agentx.slack-ingress", action: "start-workflow", thread,
+      userId: MAYA.slackUserId, instructions: "Fix the retry bug", workflowPath: "QUICK", requestId: randomUUID() });
+    expect(started.statusCode).toBe(200);
+    const taskId = String((JSON.parse(started.body) as { taskId: string }).taskId);
+    const taskKey = `DEVTASK#${taskId}`;
+    const task = harness.db.get(taskKey, "META") as Record<string, unknown> & { developerId: string; workspaceId: string; workflow: Record<string, unknown> };
+    expect(task.developerId).not.toBe(MAYA.slackUserId);
+
+    const workspaceId = task.workspaceId;
+    const prepare = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.kind === "prepare");
+    await harness.finish(workspaceId, String(prepare?.id), "SUCCEEDED");
+    const planning = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.workflowMode === "PLAN");
+    const plan = "# Plan\n\nFix the retry bug and add a regression test.\n";
+    await harness.artifact(workspaceId, String(planning?.id), "plan.md", plan);
+    await harness.finish(workspaceId, String(planning?.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+
+    const waiting = harness.db.get(taskKey, "META") as Record<string, unknown> & { workflow: { revision: number; artifacts: Array<{ sha256: string }>; checkPolicy?: Record<string, unknown> } };
+    const selectedCheck = { id: "diff-check", label: "Check patch whitespace", command: { cwd: "repo/demo", executable: "git", args: ["diff", "--check"], timeoutSeconds: 30 } };
+    harness.db.set({ ...waiting, workflow: { ...waiting.workflow, checkPolicy: { required: [], optional: [selectedCheck], selectedOptionalIds: [] } } });
+    const response = await harness.handler({ source: "agentx.slack-ingress", action: "workflow-decision", taskId,
+      userId: MAYA.slackUserId, thread, requestId: randomUUID(), expectedRevision: waiting.workflow.revision,
+      artifactDigest: createHash("sha256").update(plan).digest("hex"), decision: "APPROVE", reason: "Approved in Slack.", selectedOptionalCheckIds: ["diff-check"] });
+
+    expect(response.statusCode).toBe(200);
+    const saved = harness.db.get(taskKey, "META") as { workflow: { stage: string; state: string; checkPolicy: { selectedOptionalIds: string[] } } };
+    expect(saved.workflow).toMatchObject({ stage: "IMPLEMENT", state: "RUNNING", checkPolicy: { selectedOptionalIds: ["diff-check"] } });
   });
 
   it("explains that verification stopped because no required or selected optional check ran", async () => {

@@ -3416,7 +3416,7 @@ async function decideSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: D
   if (task.share?.teamId !== thread.teamId || task.share.channelId !== thread.channelId || task.share.threadTs !== thread.threadTs) {
     throw agentXError("FORBIDDEN", "this plan belongs to another Slack thread");
   }
-  const caller: DeveloperCaller = { developerId: userId, sessionId: "slack-workflow", amr: "slack", name: task.developerName, slackUserId: userId };
+  const caller = slackWorkflowCaller(userId);
   const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
   const body = JSON.stringify({
     requestId, expectedRevision: event.expectedRevision, artifactDigest: event.artifactDigest,
@@ -3521,7 +3521,7 @@ async function decideSlackWorkflowFeedback(dependencies: AwsBrokerDependencies, 
     || task.workflow?.revision !== event.expectedRevision || task.workflow.candidate?.digest !== event.candidateDigest) {
     throw agentXError("CONFIG_INVALID", "this PR feedback changed; use the latest AgentX message");
   }
-  const caller: DeveloperCaller = { developerId: userId, sessionId: "slack-workflow", amr: "slack", name: task.developerName, slackUserId: userId };
+  const caller: DeveloperCaller = { developerId: task.developerId, sessionId: "slack-workflow", amr: "slack", name: task.developerName, slackUserId: userId };
   const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
   const body = JSON.stringify({
     requestId, expectedRevision: event.expectedRevision, feedbackId: event.feedbackId,
