@@ -147,8 +147,9 @@ function readmeText(name: string): string {
     "",
     "Rovara Code installer and administration CLI, bundled as one self-contained script",
     "(bin/agentx-cli.mjs) behind a small entry that checks the Node version, with no",
-    "runtime dependencies of its own. Rovara is licensed under Apache License 2.0. The grant",
-    "covering all earlier Rovara releases is in RELICENSED.md. License texts for bundled",
+    "runtime dependencies of its own. Rovara is licensed under the MIT License. The prior",
+    "Apache 2.0 grant for PrepLabsAI-owned Rovara work is described in RELICENSED.md, and its",
+    "license text is in LICENSE-APACHE. License texts for bundled",
     "third-party packages are in THIRD_PARTY_NOTICES.",
     "",
     "## Install",
@@ -234,8 +235,8 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
     // npm exec can infer the executable when all bin aliases point to the same file.
     bin: { rovara: "bin/agentx.mjs", agentx: "bin/agentx.mjs" },
     engines: { node: NODE_ENGINE_RANGE },
-    license: "Apache-2.0",
-    files: ["bin", "README.md", "LICENSE", "RELICENSED.md", "THIRD_PARTY_NOTICES"],
+    license: "MIT",
+    files: ["bin", "README.md", "LICENSE", "LICENSE-APACHE", "RELICENSED.md", "THIRD_PARTY_NOTICES"],
     description: "Rovara Code installer and administration CLI",
     homepage: "https://rovara-dev.github.io/",
     publishConfig: { access: "public", registry: "https://registry.npmjs.org/" },
@@ -250,6 +251,7 @@ export async function packCli(input: PackCliInput): Promise<PackCliResult> {
   // copyFile, not read-as-utf8-then-write, so the packaged LICENSE is byte-for-byte identical to
   // the repo root's (no re-encoding, no line-ending normalization).
   await copyFile(join(REPO_ROOT, "LICENSE"), join(packageDir, "LICENSE"));
+  await copyFile(join(REPO_ROOT, "LICENSE-APACHE"), join(packageDir, "LICENSE-APACHE"));
   await copyFile(join(REPO_ROOT, "RELICENSED.md"), join(packageDir, "RELICENSED.md"));
   // esbuild's metafile paths are relative to its working directory.
   const notices = await thirdPartyNotices(metafile, process.cwd());

@@ -122,10 +122,11 @@ place; this records what it is, so a change to any piece can be made deliberatel
   repository admin role. The workflow checks a tag's name and that its commit is on mainline, but
   GitHub runs the tagged commit's own copy of the workflow, so whoever can push a `v*` tag can
   publish. The ruleset is what limits that to admins.
-- **The license.** `LICENSE` (Apache-2.0) and `RELICENSED.md` ship in the npm package. The v0.3.0
-  GitHub release tarball also includes both files under `legal/`, checksummed in `release.json`.
-  `RELICENSED.md` grants Apache-2.0 rights to all
-  earlier Rovara releases as well. Third-party components keep their own licenses.
+- **The license.** New releases declare MIT in `LICENSE` and npm package metadata. `LICENSE-APACHE`
+  and `RELICENSED.md` travel beside it to preserve and document the Apache 2.0 grant previously
+  issued for PrepLabsAI-owned Rovara work. The v0.3.0 GitHub release remains an Apache 2.0 release;
+  its tag and artifacts are not rewritten. Earlier versions can also be used under MIT under the
+  new grant. Third-party components keep their own licenses.
 - **The installer bucket** (one-time setup, before the first release with the Launch in AWS
   button). `rovara-installer-us-east-1` in account `944937319445`, `us-east-1`: anyone may read its
   objects (the quick-create template, and the setup page's code, which Lambda reads from the

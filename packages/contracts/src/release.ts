@@ -14,7 +14,7 @@ export const ImageDigest = z.string().regex(/^[^@\s]+@sha256:[a-f0-9]{64}$/);
 // proves nothing about where the path points.
 const TEMPLATE_FILE_PATTERN = /^templates\/[a-z0-9-]+\/[a-z-]+\.template\.json$/;
 const PACKAGE_FILE_PATTERN = /^packages\/[a-f0-9]{64}\.zip$/;
-const LEGAL_FILE_PATTERN = /^legal\/(LICENSE|RELICENSED\.md)$/;
+const LEGAL_FILE_PATTERN = /^legal\/(LICENSE|LICENSE-APACHE|RELICENSED\.md)$/;
 
 export const ReleaseManifestSchema = z
   .object({
@@ -54,7 +54,8 @@ export const ReleaseManifestSchema = z
         .refine((pkg) => pkg.file === `packages/${pkg.assetId}.zip`, "file must equal packages/<assetId>.zip"),
     ),
     // Optional for compatibility with release manifests created before license documents were
-    // checksummed. New release builders always include both documents.
+    // checksummed. New release builders include the current license, retained Apache license,
+    // and the grant-history notice.
     legalDocuments: z
       .array(z.object({ file: z.string().regex(LEGAL_FILE_PATTERN), sha256: Sha256 }).strict())
       .optional()
