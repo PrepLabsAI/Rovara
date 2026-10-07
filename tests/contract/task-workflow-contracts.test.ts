@@ -280,13 +280,13 @@ describe("native task workflow contracts", () => {
   });
 
   it("rejects persisted PR-ready or merged stages without their required evidence", () => {
-    const initial = createWorkflowSnapshot({ taskId, ownerId, now: "2026-10-05T12:00:00.000Z" });
+    const initial = createWorkflowSnapshot({ taskId, ownerId, now: "2026-10-05T12:00:00.000Z", checkPolicy: { required: [{ id: "required-1", label: "npm test", command: { cwd: "workspace", executable: "npm", args: ["test"], timeoutSeconds: 120 } }], optional: [], selectedOptionalIds: [] } });
     expect(WorkflowSnapshotSchema.safeParse({ ...initial, stage: "PULL_REQUEST", state: "READY" }).success).toBe(false);
     expect(WorkflowSnapshotSchema.safeParse({ ...initial, stage: "MERGED", state: "COMPLETE", outcome: "MERGED" }).success).toBe(false);
   });
 
   it("requires an attributable approval for the exact current plan before implementation", () => {
-    const initial = createWorkflowSnapshot({ taskId, ownerId, now: "2026-10-05T12:00:00.000Z" });
+    const initial = createWorkflowSnapshot({ taskId, ownerId, now: "2026-10-05T12:00:00.000Z", checkPolicy: { required: [{ id: "required-1", label: "npm test", command: { cwd: "workspace", executable: "npm", args: ["test"], timeoutSeconds: 120 } }], optional: [], selectedOptionalIds: [] } });
     const awaitingApproval = submitWorkflowArtifact(initial, {
       expectedRevision: initial.revision,
       artifact: plan,
@@ -321,7 +321,7 @@ describe("native task workflow contracts", () => {
   });
 
   it("requires requirements, design, and implementation-plan approvals on the Full path", () => {
-    let workflow = createWorkflowSnapshot({ taskId, ownerId, now: "2026-10-05T12:00:00.000Z", path: "FULL" });
+    let workflow = createWorkflowSnapshot({ taskId, ownerId, now: "2026-10-05T12:00:00.000Z", path: "FULL", checkPolicy: { required: [{ id: "required-1", label: "npm test", command: { cwd: "workspace", executable: "npm", args: ["test"], timeoutSeconds: 120 } }], optional: [], selectedOptionalIds: [] } });
     const phases = [
       { type: "requirements" as const, content: "Goal: fix retries.\nScope: payments API." },
       { type: "design" as const, content: "Approach: bounded retry with backoff." },

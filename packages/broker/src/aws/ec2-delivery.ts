@@ -108,6 +108,9 @@ async function forWorker(
   if (invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW" && !features.includes("task.workflowReview")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "independent workflow review requires a compatible worker");
   }
+  if (invocation.kind === "task" && invocation.payload.workflowMode === "CHECKS" && !features.includes("task.workflowChecks")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "verification retry requires a compatible worker that runs checks without code-editing tools");
+  }
   if (carriesFeedbackReview && !features.includes("task.workflowFeedbackReview")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "PR feedback critic requires a compatible worker");
   }

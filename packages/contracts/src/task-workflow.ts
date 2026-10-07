@@ -40,6 +40,13 @@ const VerificationResultsSchema = z.object({
 }).strict();
 export type WorkflowVerificationResults = z.infer<typeof VerificationResultsSchema>;
 
+const WorkflowVerificationRetrySchema = z.object({
+  requestId: z.string().uuid(), actorId: ActorIdSchema,
+  selectedOptionalCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(20),
+  at: z.string().datetime(),
+}).strict().refine(retry => new Set(retry.selectedOptionalCheckIds).size === retry.selectedOptionalCheckIds.length,
+  "verification retry check IDs must be unique");
+
 export const WorkflowReviewReportSchema = z.object({
   operationId: z.string().uuid(),
   candidateDigest: DigestSchema,
@@ -454,6 +461,7 @@ export const WorkflowSnapshotSchema = z.object({
   artifacts: z.array(WorkflowArtifactSchema).max(100),
   decisions: z.array(WorkflowDecisionSchema).max(100),
   checkPolicy: WorkflowCheckPolicySchema.optional(),
+  verificationRetries: z.array(WorkflowVerificationRetrySchema).max(100).optional(),
   candidate: CandidateManifestSchema.optional(),
   verification: VerificationResultsSchema.optional(),
   reviews: z.array(WorkflowReviewReportSchema).max(2).optional(),
@@ -469,7 +477,7 @@ export const WorkflowSnapshotSchema = z.object({
   canvasCloseout: WorkflowCanvasCloseoutSchema.optional(),
   canvasCloseoutAttempt: WorkflowCanvasCloseoutAttemptSchema.optional(),
 }).superRefine((workflow, context) => {
-  const taskMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackDispatchApproval: workflow.feedbackDispatchApproval, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory, canvasLineage: workflow.canvasLineage, canvasCloseout: workflow.canvasCloseout, canvasCloseoutAttempt: workflow.canvasCloseoutAttempt };
+  const taskMetadata = { feedbackReview: workflow.feedbackReview, feedbackDecisions: workflow.feedbackDecisions, feedbackDispatchApproval: workflow.feedbackDispatchApproval, feedbackNotes: workflow.feedbackNotes, feedbackReviewHistory: workflow.feedbackReviewHistory, verificationRetries: workflow.verificationRetries, canvasLineage: workflow.canvasLineage, canvasCloseout: workflow.canvasCloseout, canvasCloseoutAttempt: workflow.canvasCloseoutAttempt };
   if (Buffer.byteLength(JSON.stringify(taskMetadata), "utf8") > 262_144) {
     context.addIssue({ code: "custom", message: "workflow metadata exceeds the task snapshot storage budget" });
   }
@@ -994,6 +1002,11 @@ export function decideWorkflow(
   }
   if (request.data.decision === "SKIP" && !options.allowedSkipStages.includes(current.stage)) {
     throw new WorkflowTransitionError("workflow policy does not allow skipping this stage");
+  }
+  const codingPlanApproval = request.data.decision === "APPROVE"
+    && (current.path === "QUICK" || current.reviewPhase === "IMPLEMENTATION_PLAN");
+  if (codingPlanApproval && (current.checkPolicy?.required.length ?? 0) === 0 && selectedOptionalCheckIds.length === 0) {
+    throw new WorkflowTransitionError("select at least one check before approving the coding plan");
   }
 
   const decision = WorkflowDecisionSchema.parse({

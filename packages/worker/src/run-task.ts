@@ -1,6 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { WorkerInvocationSchema, WORKFLOW_PLAN_MAX_BYTES, agentXError, createCandidateManifest, parseAgentClaim, redactText, type CheckReport, type CandidateRepository, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation } from "@agentx/contracts";
+import { AGENTX_PREAMBLE_VERSION, WorkerInvocationSchema, WORKFLOW_PLAN_MAX_BYTES, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, redactText, reportStatus, type CheckReport, type CandidateRepository, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, recorderFingerprint, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
@@ -29,7 +29,7 @@ import type { FeedbackApprovalAuthorizer, FeedbackBundleReader } from "./callbac
 import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
 import { readCandidateRepositories } from "./verification/candidate.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
-import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
+import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, verificationExtension } from "./verification/extension.js";
 import { gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
 import { CommandRecorder } from "./verification/recorder.js";
@@ -46,7 +46,7 @@ export interface TaskInvocationResult {
   reopened: boolean;
   /** Spec 051 FR-007: AgentX's check of the agent's work, with outputs cut to fit (compactCheckReport). */
   checks?: CheckReport;
-  workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "FEEDBACK_REVIEW";
+  workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW";
   /** Worker-reported Git object identities; the broker recomputes and stores the canonical digest. */
   workflowCandidateRepositories?: Array<{ repositoryId: string; commitSha: string; treeSha: string }>;
   /** Repository identities captured when the final successful check round ended. */
@@ -142,6 +142,68 @@ export async function runTaskInvocation(
   // Spec 051 Ruling L: the check history as it was before the agent ran. The agent can write to .agentx, so every
   // round plans from this snapshot, and the final round's outcomes are merged over it.
   const checkHistory = await readCheckHistory(canonicalRoot, manifest);
+
+  // A verification retry has no model and no coding tools. It snapshots the candidate, runs only
+  // the owner-selected project checks, then snapshots again so the broker can reject a changed tree.
+  if (invocation.payload.workflowMode === "CHECKS") {
+    const readiness = invocation.payload.readiness ?? [];
+    if (readiness.length === 0) throw agentXError("CONFIG_INVALID", "verification retry requires at least one selected project check");
+    const events = new EventBatcher(dependencies.eventSink);
+    const repositories = manifest.repositories.map((repository) => ({ repositoryId: repository.name, directory: resolve(canonicalRoot, repository.path) }));
+    const candidateBefore = await readCandidateRepositories(repositories);
+    const recorder = new CommandRecorder({ fingerprint: (signal) => recorderFingerprint(repositories.map((repository) => ({ name: repository.repositoryId, directory: repository.directory })), signal) });
+    const plan = planChecks(readiness, recorder, checkHistory);
+    const stop = new AbortController();
+    const unregister = dependencies.cancellationController?.register(invocation.operationId, { abort: async () => stop.abort() });
+    try {
+      await events.append("lifecycle", { status: "RUNNING", conversationId: invocation.payload.conversationId, conversation: { started: true, reopened: true } });
+      await events.append("progress", { message: "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
+      const runners = dependencies.checkRunners ?? createCheckRunners({
+        rootPath: canonicalRoot,
+        ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
+        ...(bashOperations === undefined ? {} : { bashOperations }),
+      });
+      const round = await runChecks(plan, runners, { budgetMs: dependencies.checkBudgetMs?.() ?? CHECK_ROUND_BUDGET_MS, signal: stop.signal });
+      const status = round.stopped ? "not_verified" : reportStatus(round.entries);
+      const checks: CheckReport = {
+        status,
+        ...(status === "not_verified" ? { notVerifiedReason: round.stopped || round.entries.length > 0 ? "stopped" : "no_checks" } : {}),
+        source: plan.source,
+        preambleVersion: AGENTX_PREAMBLE_VERSION,
+        preambleSha256: agentxPreambleSha256(),
+        checks: round.entries,
+        extraTry: "not_needed",
+        agentClaim: "none",
+      };
+      try {
+        const restored = await restoreCheckHistory(canonicalRoot, checkHistory, plan.source === "project" && plan.readiness !== undefined
+          ? { plan: { source: plan.source, readiness: plan.readiness }, entries: round.entries } : undefined);
+        if (restored.outcome === "removed") await events.append("progress", { message: "AgentX could not save these check results for the next task and removed the untrusted check-history file." });
+      } catch {
+        await events.append("progress", { message: "AgentX could not safely update the workspace check history." });
+      }
+      const candidateAfter = await readCandidateRepositories(repositories);
+      await dependencies.artifactSink({ name: "checks.json", mediaType: "application/json", content: checksArtifactContent(checks) });
+      const compact = compactCheckReport(checks);
+      await events.append("result", {
+        status: "SUCCEEDED", conversationId: invocation.payload.conversationId, workflowMode: "CHECKS", checks: compact,
+        workflowCandidateRepositories: candidateBefore,
+        workflowCheckCandidateRepositories: candidateAfter,
+      });
+      await events.flush();
+      return {
+        conversationId: invocation.payload.conversationId, reopened: true, workflowMode: "CHECKS", checks: compact,
+        workflowCandidateRepositories: candidateBefore,
+        workflowCheckCandidateRepositories: candidateAfter,
+      };
+    } catch (error) {
+      await events.append("error", { message: redactText(error instanceof Error ? error.message : "verification retry failed") }).catch(() => undefined);
+      await events.flush().catch(() => undefined);
+      throw error;
+    } finally {
+      unregister?.();
+    }
+  }
 
   const conversationId = invocation.payload.conversationId;
   const conversations = new WorkspaceConversationStore(dependencies.rootPath);

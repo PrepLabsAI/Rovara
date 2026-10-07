@@ -66,6 +66,10 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
           feedbackReviewDigest: afterReviewRef.sha256 });
       } else if (afterWorkflow !== undefined && afterWorkflow.revision !== beforeWorkflow?.revision && beforeWorkflow?.state === "WAITING" && eventId !== "") {
         notices.push({ id: `${taskId}:workflow:${String(afterWorkflow?.revision)}`, kind: "workflow", taskId, at });
+      } else if (afterWorkflow !== undefined && afterWorkflow.revision !== beforeWorkflow?.revision
+        && beforeWorkflow?.stage === "VERIFY" && beforeWorkflow?.state === "BLOCKED"
+        && afterWorkflow.stage === "VERIFY" && afterWorkflow.state === "RUNNING" && eventId !== "") {
+        notices.push({ id: `${taskId}:workflow:${String(afterWorkflow.revision)}`, kind: "workflow", taskId, at });
       }
       if (after !== undefined && before === undefined) notices.push({ id: `${taskId}:start`, kind: "start", taskId, at });
       // A mode notice is named by its stream event; without one, two changes would collapse into one ID.

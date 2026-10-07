@@ -38,7 +38,7 @@ export interface OperationRecord extends Operation {
   targetOperationId?: string;
   /** The project revision whose non-disk settings applied, which may be newer than the workspace's. */
   settingsRevision?: number;
-  workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "FEEDBACK_REVIEW" | undefined;
+  workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW" | undefined;
   workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string } | undefined;
   publication?: {
     repository: string;

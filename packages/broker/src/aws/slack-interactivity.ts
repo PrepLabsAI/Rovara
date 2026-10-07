@@ -123,6 +123,10 @@ class WorkflowDecisionSubmissionError extends Error {
   constructor() { super("broker did not save the workflow decision"); this.name = "WorkflowDecisionSubmissionError"; }
 }
 
+class WorkflowCheckSelectionRequired extends Error {
+  constructor(message = "Select at least one check before approving the coding plan.") { super(message); this.name = "WorkflowCheckSelectionRequired"; }
+}
+
 /** Slack must not clear an approval form just because Lambda accepted an asynchronous event. */
 async function invokeWorkflowDecision(
   lambda: LambdaClient,
@@ -184,17 +188,20 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
     }
     if (payload.type === "view_submission") {
       const callbackId = asRecord(payload.view).callback_id;
-      if (callbackId !== "agentx_workflow_review_submission" && callbackId !== "agentx_feedback_review_changes_submission") return respond(200, { response_action: "clear" });
+      if (callbackId !== "agentx_workflow_review_submission" && callbackId !== "agentx_workflow_checks_retry_submission" && callbackId !== "agentx_feedback_review_changes_submission") return respond(200, { response_action: "clear" });
       if (dependencies.workflow === undefined) {
         log("workflow.submission_failed", { errorName: "WorkflowNotConfigured" });
-        return respond(200, { response_action: "errors", errors: { [callbackId === "agentx_feedback_review_changes_submission" ? "feedback_note" : "workflow_feedback"]: "Workflow approvals are temporarily unavailable. Try again shortly." } });
+        return respond(200, { response_action: "errors", errors: { [callbackId === "agentx_feedback_review_changes_submission" ? "feedback_note" : callbackId === "agentx_workflow_checks_retry_submission" ? "workflow_checks" : "workflow_feedback"]: "Workflow approvals are temporarily unavailable. Try again shortly." } });
       }
       try {
         await dependencies.workflow.handleSubmission(payload);
         return respond(200, { response_action: "clear" });
       } catch (error) {
         log("workflow.submission_failed", { errorName: errorName(error) });
-        return respond(200, { response_action: "errors", errors: { [callbackId === "agentx_feedback_review_changes_submission" ? "feedback_note" : "workflow_feedback"]: "I couldn't save this decision. Close this form and try again." } });
+        const field = callbackId === "agentx_feedback_review_changes_submission" ? "feedback_note"
+          : callbackId === "agentx_workflow_checks_retry_submission" || error instanceof WorkflowCheckSelectionRequired ? "workflow_checks" : "workflow_feedback";
+        return respond(200, { response_action: "errors", errors: { [field]: error instanceof WorkflowCheckSelectionRequired
+          ? error.message : "I couldn't save this decision. Close this form and try again." } });
       }
     }
     if (payload.type !== "block_actions") {
@@ -235,7 +242,8 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
     for (const action of actions.actions) {
       const handler = dependencies.workflow && (action.actionId === "agentx_workflow_approve" || action.actionId === "agentx_workflow_changes"
         || action.actionId === "agentx_github_feedback_approve" || action.actionId === "agentx_github_feedback_dismiss"
-        || action.actionId === "agentx_feedback_review_recommended" || action.actionId === "agentx_feedback_review_changes")
+        || action.actionId === "agentx_feedback_review_recommended" || action.actionId === "agentx_feedback_review_changes"
+        || action.actionId === "agentx_workflow_retry_checks")
         ? { matches: () => true, handle: (value: SlackBlockAction) => dependencies.workflow!.handleAction(value) }
         : dependencies.handlers.find((entry) => entry.matches(action.actionId));
       if (!handler) {
@@ -256,7 +264,8 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
         try {
           const workflowButton = action.actionId === "agentx_workflow_approve" || action.actionId === "agentx_workflow_changes"
             || action.actionId === "agentx_github_feedback_approve" || action.actionId === "agentx_github_feedback_dismiss"
-            || action.actionId === "agentx_feedback_review_recommended" || action.actionId === "agentx_feedback_review_changes";
+            || action.actionId === "agentx_feedback_review_recommended" || action.actionId === "agentx_feedback_review_changes"
+            || action.actionId === "agentx_workflow_retry_checks";
           const message = error instanceof WorkflowInteractionRefusal ? error.message
             : error instanceof WorkflowDecisionSubmissionError ? "I couldn't save that decision. Try again."
             : workflowButton ? "I couldn't open those plan controls. Use the latest plan message and try again."
@@ -516,6 +525,9 @@ export function createAwsSlackInteractivityHandler() {
     async submit(input) {
       await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-decision", ...input });
     },
+    async retryChecks(input) {
+      await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-retry", ...input });
+    },
     async submitFeedback(input) {
       const action = input.selection === "RECOMMENDED" ? "workflow-feedback-findings-decision" : "workflow-feedback-decision";
       await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action, ...input });
@@ -617,6 +629,7 @@ export function workflowSlackHandlers(deps: {
   loadTask(taskId: string): Promise<Record<string, unknown> | undefined>;
   openView(triggerId: string, view: Record<string, unknown>): Promise<void>;
   submit(input: Record<string, unknown>): Promise<void>;
+  retryChecks?(input: Record<string, unknown>): Promise<void>;
   submitFeedback?(input: Record<string, unknown>): Promise<void>;
 }) {
   const currentFeedbackReview = async (value: FeedbackReviewActionValue, userId: string, userTeamId: string, workspaceTeamId: string, thread: SlackThread) => {
@@ -654,8 +667,52 @@ export function workflowSlackHandlers(deps: {
     if (!plan || plan.sha256 !== value.digest) throw new WorkflowInteractionRefusal("This approval has changed. Use the latest AgentX message.");
     return { task, workflow: parsed.data };
   };
+  const currentVerificationRetry = async (taskId: string, revision: number, userId: string, thread: SlackThread) => {
+    const task = await deps.loadTask(taskId);
+    if (!task || task.slackUserId !== userId) throw new WorkflowInteractionRefusal("Only the task owner can retry verification.");
+    const share = asRecord(task.share);
+    if (share.teamId !== thread.teamId || share.channelId !== thread.channelId || share.threadTs !== thread.threadTs) {
+      throw new WorkflowInteractionRefusal("This verification retry belongs to another Slack thread.");
+    }
+    const parsed = WorkflowSnapshotSchema.safeParse(task.workflow);
+    if (!parsed.success || parsed.data.revision !== revision || parsed.data.stage !== "VERIFY" || parsed.data.state !== "BLOCKED") {
+      throw new WorkflowInteractionRefusal("This verification retry is no longer current. Use the latest AgentX task update.");
+    }
+    return { task, workflow: parsed.data };
+  };
   return {
     async handleAction(action: SlackBlockAction) {
+      if (action.actionId === "agentx_workflow_retry_checks") {
+        let retry: Record<string, unknown>;
+        try { retry = asRecord(JSON.parse(action.value)); } catch { throw new WorkflowInteractionRefusal("This verification retry is no longer available."); }
+        const taskId = typeof retry.taskId === "string" && CHANGE_ID.test(retry.taskId) ? retry.taskId : undefined;
+        if (taskId === undefined || !Number.isInteger(retry.revision)) throw new WorkflowInteractionRefusal("This verification retry is no longer available.");
+        if (action.workspaceTeamId !== action.thread.teamId || action.userTeamId !== action.thread.teamId) {
+          throw new WorkflowInteractionRefusal("This verification retry must be opened from the task's AgentX workspace.");
+        }
+        const { workflow } = await currentVerificationRetry(taskId, Number(retry.revision), action.userId, action.thread);
+        const required = workflow.checkPolicy?.required ?? [];
+        const optional = workflow.checkPolicy?.optional ?? [];
+        const modalBlocks: Array<Record<string, unknown>> = [{ type: "section", text: { type: "mrkdwn", text: required.length
+          ? `Always run these project checks:\n${required.map(check => `• ${check.label}`).join("\n")}`
+          : "No checks are required by this project. Choose at least one approved check to unblock verification." } }];
+        if (optional.length > 0) {
+          if (optional.some(check => check.command.executable === "git" && check.command.args.join(" ") === "diff --check")) {
+            modalBlocks.push({ type: "context", elements: [{ type: "mrkdwn", text: "*Check patch whitespace* finds whitespace errors such as trailing spaces. It does not test program behavior." }] });
+          }
+          modalBlocks.push({ type: "input", block_id: "workflow_checks", optional: required.length > 0,
+            label: { type: "plain_text", text: required.length > 0 ? "Optional checks" : "Choose a check" }, element: {
+              type: "checkboxes", action_id: "selected_options", options: optional.map(check => ({ text: { type: "plain_text", text: check.label }, value: check.id })),
+            } });
+        }
+        await deps.openView(action.triggerId, {
+          type: "modal", callback_id: "agentx_workflow_checks_retry_submission",
+          private_metadata: JSON.stringify({ taskId, revision: workflow.revision, requestId: randomUUID(), thread: action.thread }),
+          title: { type: "plain_text", text: "Retry verification" }, submit: { type: "plain_text", text: "Run checks" },
+          close: { type: "plain_text", text: "Cancel" }, blocks: modalBlocks,
+        });
+        return;
+      }
       if (action.actionId === "agentx_feedback_review_recommended" || action.actionId === "agentx_feedback_review_changes") {
         const value = feedbackReviewActionValue(action.value);
         if (!value || action.triggerId === "") throw new WorkflowInteractionRefusal("This review action is no longer available. Reopen the AgentX review details.");
@@ -709,20 +766,32 @@ export function workflowSlackHandlers(deps: {
       const value = workflowActionValue(action.value);
       if (!value || action.triggerId === "") throw new Error("invalid workflow action");
       const { workflow } = await currentReview(value, action.userId, action.thread);
-      const requiredText = workflow.checkPolicy?.required.length
-        ? `Always run:\n${workflow.checkPolicy.required.map((check) => `• ${check.label}`).join("\n")}`
-        : "No required project checks are configured.";
+      const requiredChecks = workflow.checkPolicy?.required ?? [];
+      const codingPlan = workflow.path === "QUICK" || workflow.reviewPhase === "IMPLEMENTATION_PLAN";
+      const optionalChecks = workflow.checkPolicy?.optional ?? [];
+      if (value.decision === "APPROVE" && codingPlan && requiredChecks.length === 0 && optionalChecks.length === 0) {
+        throw new WorkflowInteractionRefusal("This project has no checks to run. Ask a project admin to configure at least one check before approving the coding plan.");
+      }
+      const requiredText = requiredChecks.length
+        ? `Always run these project checks:\n${requiredChecks.map((check) => `• ${check.label}`).join("\n")}`
+        : codingPlan ? "No project checks are required. Choose at least one check below before AgentX can start coding."
+          : "Checks are chosen when you approve the coding plan.";
       const blocks: Array<Record<string, unknown>> = [{ type: "section", text: { type: "mrkdwn", text: requiredText } }];
-      if (value.decision === "APPROVE") {
-        const optional = workflow.checkPolicy?.optional ?? [];
-        blocks.push({ type: "section", text: { type: "mrkdwn", text: optional.length ? "Choose any extra checks to run:" : "No extra project-approved checks are available." } });
-        if (optional.length) blocks.push({ type: "input", block_id: "workflow_checks", optional: true, label: { type: "plain_text", text: "Extra checks" }, element: {
+      if (value.decision === "APPROVE" && codingPlan) {
+        const optional = optionalChecks;
+        blocks.push({ type: "section", text: { type: "mrkdwn", text: optional.length
+          ? requiredChecks.length ? "Optional checks: select any extras to run." : "Choose at least one check. AgentX will run these before review or opening a pull request."
+          : requiredChecks.length ? "No optional checks are available." : "No checks are configured for this project yet. Ask a project admin to add a check before approving." } });
+        if (optional.some(check => check.command.executable === "git" && check.command.args.join(" ") === "diff --check")) {
+          blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: "*Check patch whitespace* finds whitespace errors such as trailing spaces. It does not test program behavior." }] });
+        }
+        if (optional.length) blocks.push({ type: "input", block_id: "workflow_checks", optional: requiredChecks.length > 0, label: { type: "plain_text", text: requiredChecks.length > 0 ? "Optional checks" : "Choose a check" }, element: {
           type: "checkboxes", action_id: "selected_options", options: optional.map((check) => ({ text: { type: "plain_text", text: check.label }, value: check.id })),
         } });
       } else {
         blocks.push({ type: "input", block_id: "workflow_feedback", label: { type: "plain_text", text: "What should change?" }, element: { type: "plain_text_input", action_id: "reason", multiline: true, max_length: 500 } });
       }
-      const privateMetadata = JSON.stringify({ ...value, thread: action.thread });
+      const privateMetadata = JSON.stringify({ ...value, thread: action.thread, messageTs: action.messageTs, messageText: action.messageText });
       await deps.openView(action.triggerId, {
         type: "modal", callback_id: "agentx_workflow_review_submission", private_metadata: privateMetadata,
         title: { type: "plain_text", text: value.decision === "APPROVE" ? "Approve plan" : "Request changes" },
@@ -732,6 +801,38 @@ export function workflowSlackHandlers(deps: {
     },
     async handleSubmission(payload: Record<string, unknown>) {
       const view = asRecord(payload.view);
+      if (view.callback_id === "agentx_workflow_checks_retry_submission") {
+        let metadata: Record<string, unknown>;
+        try { metadata = asRecord(JSON.parse(typeof view.private_metadata === "string" ? view.private_metadata : "")); }
+        catch { throw new WorkflowInteractionRefusal("This verification retry is no longer available."); }
+        const taskId = typeof metadata.taskId === "string" && CHANGE_ID.test(metadata.taskId) ? metadata.taskId : undefined;
+        const revision = metadata.revision;
+        const requestId = typeof metadata.requestId === "string" && CHANGE_ID.test(metadata.requestId) ? metadata.requestId : undefined;
+        const thread = SlackThreadSchema.safeParse(metadata.thread);
+        const userId = SlackUserIdSchema.safeParse(asRecord(payload.user).id);
+        const userTeamId = SlackTeamIdSchema.safeParse(asRecord(payload.user).team_id);
+        const workspaceTeamId = SlackTeamIdSchema.safeParse(asRecord(payload.team).id);
+        if (taskId === undefined || !Number.isInteger(revision) || requestId === undefined || !thread.success || !userId.success) {
+          throw new WorkflowInteractionRefusal("This verification retry is no longer available.");
+        }
+        if (!userTeamId.success || !workspaceTeamId.success || userTeamId.data !== thread.data.teamId || workspaceTeamId.data !== thread.data.teamId) {
+          throw new WorkflowInteractionRefusal("This verification retry must be submitted from the task's AgentX workspace.");
+        }
+        const { workflow } = await currentVerificationRetry(taskId, Number(revision), userId.data, thread.data);
+        const selections = asRecord(asRecord(asRecord(asRecord(view.state).values).workflow_checks).selected_options).selected_options;
+        const selectedOptionalCheckIds = Array.isArray(selections) ? selections.flatMap(entry => {
+          const id = asRecord(entry).value;
+          return typeof id === "string" && workflow.checkPolicy?.optional.some(check => check.id === id) ? [id] : [];
+        }) : [];
+        const required = workflow.checkPolicy?.required ?? [];
+        if (required.length === 0 && selectedOptionalCheckIds.length === 0) {
+          throw new WorkflowCheckSelectionRequired("Choose at least one check before retrying verification.");
+        }
+        if (deps.retryChecks === undefined) throw new Error("verification retry is not configured");
+        await deps.retryChecks({ taskId, userId: userId.data, thread: thread.data, requestId, expectedRevision: revision,
+          selectedOptionalCheckIds, instructions: "Retry the selected checks without changing code." });
+        return;
+      }
       if (view.callback_id === "agentx_feedback_review_changes_submission") {
         let metadata: Record<string, unknown>;
         try { metadata = asRecord(JSON.parse(typeof view.private_metadata === "string" ? view.private_metadata : "")); }
@@ -778,6 +879,10 @@ export function workflowSlackHandlers(deps: {
           const id = asRecord(entry).value;
           return typeof id === "string" && workflow.checkPolicy?.optional.some((check) => check.id === id) ? [id] : [];
         });
+        const codingPlan = workflow.path === "QUICK" || workflow.reviewPhase === "IMPLEMENTATION_PLAN";
+        if (codingPlan && (workflow.checkPolicy?.required.length ?? 0) === 0 && selectedOptionalCheckIds.length === 0) {
+          throw new WorkflowCheckSelectionRequired();
+        }
       }
       await deps.submit({
         taskId: value.taskId, userId: userId.data, thread: thread.data,

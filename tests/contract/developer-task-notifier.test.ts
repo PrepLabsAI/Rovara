@@ -29,6 +29,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
   post?: Post;
   documentClient?: (db: FakeDynamoDb) => Client;
   readArtifact?: (key: string) => Promise<string>;
+  update?: (input: { channel: string; ts: string; text: string; blocks: unknown[] }) => Promise<void>;
   createPlanCanvas?: (input: { channel: string; taskId: string; title: string; version: number; markdown: string }) => Promise<{ canvasId: string; permalink: string }>;
   closeTaskCanvases?: (taskId: string, expectedManifestDigest?: string) => Promise<{ status: "COMPLETE" | "ARCHIVE_PENDING"; reason?: string }>;
 } = {}) {
@@ -36,6 +37,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
   const postOverride = options.post;
   const stream = recordStream(harness.db);
   const posts: Array<{ channel: string; threadTs?: string; text: string; blocks?: unknown[] }> = [];
+  const updates: Array<{ channel: string; ts: string; text: string; blocks: unknown[] }> = [];
   const queue: Array<{ notice: Notice; attempt: number }> = [];
   const logs: Array<Record<string, unknown>> = [];
   let clock = Date.now();
@@ -54,6 +56,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
       const text = String(ts);
       return { ts: `${text.slice(0, 10)}.${text.slice(10)}` };
     }),
+    update: options.update ?? (async (input) => { updates.push(input); }),
     ...(options.readArtifact === undefined ? {} : { readArtifact: options.readArtifact }),
     ...(options.createPlanCanvas === undefined ? {} : { createPlanCanvas: options.createPlanCanvas }),
     ...(options.closeTaskCanvases === undefined ? {} : { closeTaskCanvases: options.closeTaskCanvases }),
@@ -72,7 +75,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
   const workspaceId = (harness.db.get(`DEVTASK#${taskId}`, "META") as { workspaceId: string }).workspaceId;
   const active = () => String((harness.db.get(`WORKSPACE#${workspaceId}`, "META") as { activeOperationId: string }).activeOperationId);
   return {
-    ...harness, stream, posts, queue, logs, pump, handle, taskId, workspaceId, active, deliveryFailed, retryLater,
+    ...harness, stream, posts, updates, queue, logs, pump, handle, taskId, workspaceId, active, deliveryFailed, retryLater,
     advance: (ms: number) => { clock += ms; }, fail: (code: string | undefined) => { failing = code; }, now: () => clock,
   };
 }
@@ -159,6 +162,46 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
       artifactDigest: createHash("sha256").update(plan).digest("hex"), state: "CREATED", canvasId: "F12345678",
       permalink: "https://acme.slack.com/docs/T123/F12345678",
     })]);
+  });
+
+  it("updates the original approval card after an owner decision and removes its buttons", async () => {
+    const plan = "# Plan\nAdd a retry regression test.";
+    const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
+      readArtifact: async () => plan,
+      createPlanCanvas: async () => ({ canvasId: "F12345678", permalink: "https://acme.slack.com/docs/T123/F12345678" }),
+    });
+    const workflowRecord = h.db.get(`DEVTASK#${h.taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
+    const requiredCheck = { id: "required-1", label: "npm test", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 30 } };
+    h.db.set({ ...workflowRecord, workflow: { ...workflowRecord.workflow, checkPolicy: { required: [requiredCheck], optional: [], selectedOptionalIds: [] } } });
+
+    await h.pump();
+    const prepare = h.active();
+    await h.finish(h.workspaceId, prepare, "SUCCEEDED");
+    await h.pump();
+    const planning = h.active();
+    await h.artifact(h.workspaceId, planning, "plan.md", plan);
+    await h.finish(h.workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    await h.pump();
+
+    const approvalCard = h.posts.at(-1)!;
+    const originalActions = (approvalCard.blocks?.at(-1) as { elements: Array<{ action_id: string }> }).elements;
+    expect(originalActions.map((action) => action.action_id)).toEqual(["agentx_workflow_approve", "agentx_workflow_changes"]);
+    const saved = h.db.get(`DEVTASK#${h.taskId}`, "META") as { workflow: { revision: number; artifacts: Array<{ sha256: string }> } };
+    const planRevision = saved.workflow.revision;
+    const planDigest = saved.workflow.artifacts.at(-1)?.sha256;
+    const decision = await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/workflow/decision`, {
+      requestId: randomUUID(), expectedRevision: saved.workflow.revision, decision: "APPROVE", reason: "Looks good.",
+      artifactDigest: planDigest,
+    });
+    expect(decision.status).toBe(200);
+    await h.pump();
+
+    expect(h.updates).toHaveLength(1);
+    const postedMarker = h.db.find((item) => item.pk === `DEVTASK#${h.taskId}` && item.postedWorkflowRevision === planRevision && item.postedArtifactDigest === planDigest)[0];
+    expect(h.updates[0]).toMatchObject({ channel: approvalCard.channel, ts: postedMarker?.postedTs, text: expect.stringContaining("Approved by <@U0MAYA001>") });
+    expect(h.updates[0]?.blocks.every((block) => (block as { type?: string }).type === "section")).toBe(true);
+    expect(JSON.stringify(h.updates[0]?.blocks)).not.toContain("agentx_workflow_approve");
+    expect(JSON.stringify(h.updates[0]?.blocks)).not.toContain("agentx_workflow_changes");
   });
 
   it("shows the saved plan in Slack when this workspace cannot create Canvases", async () => {

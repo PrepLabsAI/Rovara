@@ -1127,8 +1127,76 @@ async function decideTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: 
 async function retryTaskWorkflow(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
   const request = parse(ContinueDeveloperTaskRequestSchema, value, deps, "workflow-retry");
   const task = await loadOwnedTask(deps, caller, taskId);
+  const priorVerificationRetry = task.workflow?.verificationRetries?.find((retry) => retry.requestId === request.requestId);
+  if (priorVerificationRetry !== undefined) {
+    const submittedIds = request.selectedOptionalCheckIds ?? task.workflow?.checkPolicy?.selectedOptionalIds ?? [];
+    if (priorVerificationRetry.actorId !== task.ownerKey
+      || JSON.stringify(priorVerificationRetry.selectedOptionalCheckIds) !== JSON.stringify(submittedIds)) {
+      throw agentXError("IDEMPOTENCY_CONFLICT", "this retry request ID was already used for a different check selection");
+    }
+    return { task: await taskView(deps, task, { events: 0, details: false }) };
+  }
+  if (task.workflow?.stage === "VERIFY" && task.workflow.state === "BLOCKED") {
+    const workflow = task.workflow;
+    if (request.expectedRevision === undefined) {
+      throw agentXError("CONFIG_INVALID", "refresh the task and include its current revision before retrying verification");
+    }
+    if (request.expectedRevision !== workflow.revision) {
+      throw agentXError("IDEMPOTENCY_CONFLICT", "the verification retry is stale; refresh the task and choose checks again");
+    }
+    const policy = workflow.checkPolicy;
+    const selectedOptionalIds = request.selectedOptionalCheckIds ?? policy?.selectedOptionalIds ?? [];
+    if (policy === undefined || selectedOptionalIds.some((id) => !policy.optional.some((check) => check.id === id))) {
+      throw agentXError("CONFIG_INVALID", "choose checks that are approved for this project");
+    }
+    const selected = [
+      ...policy.required,
+      ...policy.optional.filter((check) => selectedOptionalIds.includes(check.id)),
+    ];
+    if (selected.length === 0) throw agentXError("CONFIG_INVALID", "select at least one check before retrying verification");
+    await actionableWorkspace(deps, task);
+    const receivedAt = iso(deps);
+    const { blockReason: _previousBlockReason, ...unblocked } = workflow;
+    void _previousBlockReason;
+    const next: WorkflowSnapshot = {
+      ...unblocked,
+      revision: workflow.revision + 1,
+      state: "RUNNING",
+      checkPolicy: { ...policy, selectedOptionalIds },
+      verificationRetries: [...(workflow.verificationRetries ?? []), {
+        requestId: request.requestId, actorId: task.ownerKey, selectedOptionalCheckIds: selectedOptionalIds, at: receivedAt,
+      }],
+      updatedAt: receivedAt,
+    };
+    const selectedReadiness = selected.map((check) => check.command);
+    try {
+      await deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, {
+        requestId: request.requestId, conversationId: task.conversationId,
+        prompt: `Owner-authorized verification retry. Run only the selected project checks against the current code, without editing files. Owner note: ${request.instructions}`,
+      }, (operation) => [
+        { Update: {
+          TableName: deps.tableName, Key: taskKey(taskId),
+          UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+          ConditionExpression: "workflow.revision = :revision AND workflow.#state = :blocked AND workflow.#stage = :verify",
+          ExpressionAttributeNames: { "#state": "state", "#stage": "stage" },
+          ExpressionAttributeValues: { ":workflow": next, ":now": receivedAt, ":revision": workflow.revision, ":blocked": "BLOCKED", ":verify": "VERIFY" },
+        } },
+        putNew(turnTable(deps), aiToolTurn({
+          party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted",
+          receivedAt, finishedAt: iso(deps), request: request.instructions,
+          response: `AgentX is rerunning the selected checks without code-editing tools as operation ${operation.id}.`, operationId: operation.id,
+        })),
+      ], { sharedTask: task.shared === true, workflowMode: "CHECKS", readiness: selectedReadiness });
+    } catch (error) {
+      return busyOrClosing(deps, task, error);
+    }
+    const fresh = await loadOwnedTask(deps, caller, taskId);
+    const view = await taskView(deps, fresh, { events: 0, details: false });
+    await syncIndex(deps, fresh, view.status, view.updatedAt);
+    return { task: view };
+  }
   if (task.workflow === undefined || task.workflow.state !== "BLOCKED" || task.workflow.stage !== "PLAN") {
-    throw agentXError("CONFIG_INVALID", "only a blocked planning stage can be retried through this action");
+    throw agentXError("CONFIG_INVALID", "this action can retry blocked planning or run selected checks for blocked verification");
   }
   await actionableWorkspace(deps, task);
   const receivedAt = iso(deps);

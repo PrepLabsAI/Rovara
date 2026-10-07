@@ -102,6 +102,7 @@ type Request = Array<{ role: string; content: unknown }>;
 async function runTask(options: {
   steps: FauxResponseStep[];
   readiness?: ProjectCommand[];
+  workflowMode?: "CHECKS";
   prepared?: ProjectCommand[];
   runners?: CheckRunners;
   shell?: ReturnType<typeof scriptedShell>;
@@ -132,7 +133,7 @@ async function runTask(options: {
   const invocation: Extract<WorkerInvocation, { kind: "task" }> = {
     protocolVersion: 1, kind: "task", operationId: options.operationId ?? randomUUID(), workspaceId: randomUUID(), fence: 1, projectRevision: 1,
     callbackCapability: "c".repeat(64),
-    payload: { conversationId: randomUUID(), prompt: "fix it", ...(options.readiness === undefined ? {} : { readiness: options.readiness }) },
+    payload: { conversationId: randomUUID(), prompt: "fix it", ...(options.readiness === undefined ? {} : { readiness: options.readiness }), ...(options.workflowMode === undefined ? {} : { workflowMode: options.workflowMode }) },
   };
   const rootPath = options.rootPath ?? await workspaceRoot(options.prepared ?? options.readiness ?? []);
   const events: WorkerEvent[] = [];
@@ -174,6 +175,33 @@ function checksMessages(request: Request): string[] {
 const failedRun = (output: string): AgentResult => ({ exitCode: 1, timedOut: false, output });
 const passedRun: AgentResult = { exitCode: 0, timedOut: false, output: "1 passed\n" };
 const lint: ProjectCommand = { cwd: "app", executable: "npm", args: ["run", "lint"], timeoutSeconds: 60 };
+
+describe("verification-only retries", () => {
+  it("runs only selected project checks without opening a model session or editing files", async () => {
+    const fake = fakeRunners({ project: [{ exitCode: 0, timedOut: false, stdout: "lint passed\n", stderr: "" }] });
+    const shell = scriptedShell();
+    const rootPath = await workspaceRoot([lint]);
+    const repositoryPath = join(rootPath, "app");
+    await writeFile(join(repositoryPath, "README.md"), "fixture\n");
+    execFileSync("git", ["init", "-q", repositoryPath]);
+    execFileSync("git", ["-C", repositoryPath, "-c", "user.name=AgentX Test", "-c", "user.email=test@example.invalid", "add", "."]);
+    execFileSync("git", ["-C", repositoryPath, "-c", "user.name=AgentX Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "fixture"]);
+    const resolvedCommit = execFileSync("git", ["-C", repositoryPath, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const manifestPath = join(rootPath, ".agentx/preparation-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8")) as Record<string, unknown>;
+    manifest.repositories = [{ name: "app", path: "app", defaultBranch: "main", resolvedCommit, resolvedAt: new Date().toISOString(), completedAt: new Date().toISOString() }];
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    const run = await runTask({ steps: [], workflowMode: "CHECKS", readiness: [lint], runners: fake.runners, shell, rootPath });
+
+    expect(run.failure).toBeUndefined();
+    expect(run.result).toMatchObject({ workflowMode: "CHECKS", checks: { status: "verified", source: "project" } });
+    expect(run.requests).toEqual([]);
+    expect(shell.commands).toEqual([]);
+    expect(fake.agentCalls).toEqual([]);
+    expect(fake.projectCalls).toEqual([lint]);
+    expect(run.result?.workflowCandidateRepositories).toEqual(run.result?.workflowCheckCandidateRepositories);
+  });
+});
 
 async function feedbackReviewFixture() {
   const rootPath = await createFixtureDirectory("agentx-feedback-review-");

@@ -182,7 +182,18 @@ export const StartDeveloperTaskRequestSchema = z
   });
 export type StartDeveloperTaskRequest = z.infer<typeof StartDeveloperTaskRequestSchema>;
 
-export const ContinueDeveloperTaskRequestSchema = z.object({ requestId: RequestIdSchema, instructions: DeveloperInstructionsSchema }).strict();
+export const ContinueDeveloperTaskRequestSchema = z.object({
+  requestId: RequestIdSchema,
+  instructions: DeveloperInstructionsSchema,
+  /** Optional revision fence for a retry initiated from a staleable UI action. */
+  expectedRevision: z.number().int().positive().optional(),
+  /** Owner-selected, project-approved optional checks for a blocked verification retry. */
+  selectedOptionalCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(20).optional(),
+}).strict().superRefine((request, context) => {
+  if (request.selectedOptionalCheckIds !== undefined && new Set(request.selectedOptionalCheckIds).size !== request.selectedOptionalCheckIds.length) {
+    context.addIssue({ code: "custom", path: ["selectedOptionalCheckIds"], message: "selected optional checks must be unique" });
+  }
+});
 export type ContinueDeveloperTaskRequest = z.infer<typeof ContinueDeveloperTaskRequestSchema>;
 
 export const DeveloperTaskActionRequestSchema = z.object({ requestId: RequestIdSchema }).strict();

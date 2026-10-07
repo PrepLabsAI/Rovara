@@ -632,6 +632,16 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
         return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
+    if (isSlackWorkflowRetryEvent(event)) {
+      try {
+        const result = await retrySlackWorkflowChecks(dependencies, tasks, event);
+        console.log(JSON.stringify({ component: "broker", event: "slack.workflow_verification_retry_saved", taskId: event.taskId, requestId: event.requestId }));
+        return json(result, "slack-ingress");
+      } catch (error) {
+        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
+        return unexpectedErrorAnswer(error, "slack-ingress");
+      }
+    }
     if (isSlackWorkflowFeedbackDecisionEvent(event)) {
       try {
         return json(await decideSlackWorkflowFeedback(dependencies, tasks, event), "slack-ingress");
@@ -2674,7 +2684,7 @@ async function createConversation(
 async function taskOperationParts(
   dependencies: AwsBrokerDependencies,
   workspace: WorkspaceInstance,
-  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding },
+  input: { requestId: string; conversationId: string; prompt: string; conversationStarted: boolean; requester: { requestedBy?: OperationRequester }; shared?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding },
   now: string,
 ): Promise<{ operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number }> {
   const settings = await requireLatestProject(dependencies, workspace.projectName);
@@ -2746,7 +2756,7 @@ async function acceptTask(
   workspaceId: string,
   value: unknown,
   extra: ExtraItems = () => [],
-  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding } = {},
+  options: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding } = {},
 ): Promise<{ operation: Operation; duplicate: boolean }> {
   assertNoUntrustedRoutingFields(value);
   const request = OperationRequestSchema.parse(value);
@@ -3334,6 +3344,17 @@ export interface SlackWorkflowDecisionEvent {
   selectedOptionalCheckIds: string[];
 }
 
+export interface SlackWorkflowRetryEvent {
+  source: "agentx.slack-ingress";
+  action: "workflow-retry";
+  taskId: string;
+  userId: string;
+  thread: SlackThread;
+  requestId: string;
+  expectedRevision: number;
+  selectedOptionalCheckIds: string[];
+}
+
 export interface SlackWorkflowFeedbackDecisionEvent {
   source: "agentx.slack-ingress";
   action: "workflow-feedback-decision";
@@ -3403,6 +3424,33 @@ export function isSlackWorkflowDecisionEvent(event: unknown): event is SlackWork
     && Number.isInteger(value.expectedRevision) && typeof value.artifactDigest === "string"
     && (value.decision === "APPROVE" || value.decision === "REQUEST_CHANGES") && typeof value.reason === "string"
     && Array.isArray(value.selectedOptionalCheckIds);
+}
+
+export function isSlackWorkflowRetryEvent(event: unknown): event is SlackWorkflowRetryEvent {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  return value.source === "agentx.slack-ingress" && value.action === "workflow-retry" && value.requestContext === undefined
+    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
+    && Number.isInteger(value.expectedRevision) && Array.isArray(value.selectedOptionalCheckIds)
+    && value.selectedOptionalCheckIds.every((id) => typeof id === "string") && typeof value.thread === "object" && value.thread !== null;
+}
+
+async function retrySlackWorkflowChecks(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowRetryEvent) {
+  if (dependencies.developer === undefined) throw agentXError("NOT_FOUND", "developer task workflows are not configured");
+  const thread = SlackThreadSchema.parse(event.thread);
+  const userId = SlackRequesterSchema.shape.userId.parse(event.userId);
+  const taskId = randomUUIDSchema.parse(event.taskId);
+  const requestId = randomUUIDSchema.parse(event.requestId);
+  const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+  if (task === undefined || task.slackUserId !== userId) throw agentXError("FORBIDDEN", "only the task owner can retry verification");
+  if (task.share?.teamId !== thread.teamId || task.share.channelId !== thread.channelId || task.share.threadTs !== thread.threadTs) {
+    throw agentXError("FORBIDDEN", "this verification retry belongs to another Slack thread");
+  }
+  const caller = slackWorkflowCaller(userId);
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer: dependencies.developer, now: Date.now, tasks }, caller);
+  const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision, instructions: "Retry the owner-selected project checks without changing code.", selectedOptionalCheckIds: event.selectedOptionalCheckIds });
+  const path = `/v1/dev/tasks/${taskId}/workflow/retry`;
+  return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
 }
 
 async function decideSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowDecisionEvent) {
@@ -4805,9 +4853,9 @@ async function completedWorkflowItems(
   }
   if (operation.kind !== "task" || operation.workflowMode === undefined || task.workflow.state !== "RUNNING") return [];
   let next: WorkflowSnapshot;
-  if (operation.workflowMode === "IMPLEMENT") {
+  if (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS") {
     if (terminalStatus !== "SUCCEEDED") {
-      next = blockWorkflow(task.workflow, `implementation operation ended ${terminalStatus.toLowerCase()}`, now);
+      next = blockWorkflow(task.workflow, `${operation.workflowMode === "CHECKS" ? "verification retry" : "implementation"} operation ended ${terminalStatus.toLowerCase()}`, now);
     } else {
       const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};
       const repositories = Array.isArray(reported.workflowCandidateRepositories) ? reported.workflowCandidateRepositories : [];
@@ -4816,6 +4864,10 @@ async function completedWorkflowItems(
       const verifying = { ...blockWorkflow(task.workflow, "candidate checks are being recorded", now), stage: "VERIFY" as const };
       let verificationFailure = "AgentX could not verify the selected checks for the final code candidate.";
       try {
+        if (operation.workflowMode === "CHECKS" && task.workflow.stage !== "VERIFY") {
+          verificationFailure = "Verification retry no longer matches the task's current stage.";
+          throw new Error("verification retry stage changed");
+        }
         if (!checks.success) {
           verificationFailure = "AgentX could not read a valid check report for the final code candidate.";
           throw new Error("invalid check report");

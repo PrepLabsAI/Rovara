@@ -172,15 +172,57 @@ const noticeExpiry = (deps: NotifierDependencies) => ({ [INDEX_EXPIRY_ATTRIBUTE]
 /** A delivered marker replaces a start's posted-but-unrecorded marker, never another delivered one. */
 const MARKER_CONDITION = "attribute_not_exists(pk) OR attribute_not_exists(deliveredAt)";
 
-async function putMarker(deps: NotifierDependencies, marker: { pk: string; sk: string }): Promise<void> {
+async function putMarker(deps: NotifierDependencies, marker: { pk: string; sk: string }, details: Partial<NoticeMarker> = {}): Promise<void> {
   try {
-    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", deliveredAt: new Date(deps.now()).toISOString(), ...noticeExpiry(deps) }, ConditionExpression: MARKER_CONDITION }));
+    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName, Item: { ...marker, entityType: "NOTICE", ...details, deliveredAt: new Date(deps.now()).toISOString(), ...noticeExpiry(deps) }, ConditionExpression: MARKER_CONDITION }));
   } catch (error) {
     if (!isConditional(error)) throw error;
   }
 }
 
 const noticeMarker = (taskId: string, noticeId: string) => ({ pk: `DEVTASK#${taskId}`, sk: `NOTICE#${noticeId}` });
+
+/** Edits the original approval card after the decision is durably recorded; replacing blocks removes stale buttons. */
+async function updateWorkflowApprovalCard(deps: NotifierDependencies, task: DeveloperTaskRecord, notice: Notice): Promise<void> {
+  if (notice.kind !== "workflow" || deps.update === undefined || task.workflow === undefined) return;
+  const noticeRevision = Number(notice.id.split(":").at(-1));
+  if (!Number.isInteger(noticeRevision) || noticeRevision < 1) return;
+  // The decision update can be followed by a separate task-state write before this notice is
+  // delivered. Match the decision that led to this revision instead of requiring an exact
+  // equality with the current task revision encoded in the notice ID.
+  const decision = (task.workflow.decisions ?? []).filter(entry => entry.workflowRevision + 1 <= noticeRevision).at(-1);
+  if (decision === undefined || decision.artifactDigest === undefined) return;
+  const decisionRevision = decision.workflowRevision + 1;
+  const response = await deps.documentClient.send(new QueryCommand({
+    TableName: deps.tableName,
+    KeyConditionExpression: "pk = :pk AND begins_with(sk, :prefix)",
+    ExpressionAttributeValues: { ":pk": `DEVTASK#${task.taskId}`, ":prefix": "NOTICE#" },
+    ConsistentRead: true,
+  })) as { Items?: Array<NoticeMarker & { pk: string; sk: string }> };
+  const marker = response.Items?.find(item => item.postedArtifactDigest === decision.artifactDigest && item.postedWorkflowRevision === decision.workflowRevision
+    && typeof item.postedTs === "string" && typeof item.postedChannelId === "string" && typeof item.postedText === "string" && typeof item.deliveredAt === "string");
+  if (marker === undefined || typeof marker.postedTs !== "string" || typeof marker.postedChannelId !== "string"
+    || typeof marker.postedText !== "string" || typeof marker.deliveredAt !== "string") {
+    // Older approval cards were not recorded with message metadata. Keep the workflow notice
+    // deliverable and explain the saved decision in its thread reply instead of retrying forever.
+    deps.log({ event: "developer_notifier.workflow_approval_card_unavailable", taskId: task.taskId, workflowRevision: decision.workflowRevision });
+    return;
+  }
+  if ((marker.workflowDecisionRevision ?? 0) >= decisionRevision) return;
+  const status = decision.decision === "APPROVE" ? `\n\n✅ Approved by <@${task.slackUserId}>. AgentX is starting the next step.`
+    : decision.decision === "REQUEST_CHANGES" ? `\n\n↩️ Changes requested by <@${task.slackUserId}>. AgentX is revising this step.`
+      : decision.decision === "REJECT" ? `\n\n⛔ Closed by <@${task.slackUserId}>. AgentX will not continue from this plan.`
+        : `\n\nSkipped by <@${task.slackUserId}>.`;
+  const text = `${marker.postedText}${status}`;
+  await deps.update({ channel: marker.postedChannelId, ts: marker.postedTs, text,
+    blocks: slackSectionTexts(text).map((section) => ({ type: "section", text: { type: "mrkdwn", text: section } })) });
+  await deps.documentClient.send(new UpdateCommand({
+    TableName: deps.tableName, Key: { pk: marker.pk, sk: marker.sk },
+    UpdateExpression: "SET workflowDecisionRevision = :revision",
+    ConditionExpression: "deliveredAt = :deliveredAt AND (attribute_not_exists(workflowDecisionRevision) OR workflowDecisionRevision < :revision)",
+    ExpressionAttributeValues: { ":revision": decisionRevision, ":deliveredAt": marker.deliveredAt },
+  }));
+}
 
 async function noticeTask(deps: NotifierDependencies, notice: Notice): Promise<DeveloperTaskRecord | undefined> {
   let taskId = notice.taskId;
@@ -338,6 +380,7 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
       if (workflow.feedback?.status === "DISMISSED") return "Dismissed. AgentX made no code changes for this feedback.";
       if (workflow.stage === "PLAN" && workflow.state === "RUNNING") return "Thanks. AgentX is revising the plan based on your feedback. It will post the updated plan here for review.";
       if (workflow.stage === "IMPLEMENT" && workflow.state === "RUNNING") return "Plan approved. AgentX is starting the implementation.";
+      if (workflow.stage === "VERIFY" && workflow.state === "RUNNING") return "Verification retry approved. AgentX is running the selected checks against the current code without code-editing tools.";
       if (workflow.stage === "MERGED" && workflow.state === "COMPLETE") {
         const total = workflow.pullRequests?.filter((pullRequest) => pullRequest.required).length ?? 0;
         return total > 0 ? `GitHub confirms all ${total} required pull requests are merged. The task is complete.` : undefined;
@@ -445,7 +488,15 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
         return `The ${documentName} is ready. No code changes have started. <${canvas.permalink}|Read and approve this step>.`;
       }
       if (task.workflow?.stage === "VERIFY" && task.workflow.state === "BLOCKED") {
-        return "AgentX finished implementation, but the task is blocked until candidate-bound checks and review are available. The pull request has not been opened.";
+        const noChecks = task.workflow.blockReason?.startsWith("No checks ran:") === true
+          || task.workflow.blockReason?.startsWith("No required or selected optional checks ran.") === true;
+        const hasChecks = (task.workflow.checkPolicy?.required.length ?? 0) + (task.workflow.checkPolicy?.optional.length ?? 0) > 0;
+        return noChecks
+          ? `Implementation is finished, but no checks ran: this project has no required checks and no optional check was selected. AgentX has not started code review or opened a pull request. ${hasChecks ? "Choose a check below to retry verification against the current code." : "Ask a project admin to configure at least one check, then retry verification."}`
+          : `Implementation is finished, but AgentX could not verify checks for the current code, so it has not started code review or opened a pull request. ${task.workflow.blockReason ?? "Resolve the verification issue and retry."} ${hasChecks ? "Choose checks below to retry verification." : "Ask a project admin to configure a check."}`;
+      }
+      if (task.workflow?.stage === "REVIEW" && task.workflow.state === "WAITING" && task.workflow.verification !== undefined) {
+        return "The selected checks passed for the current code version. AgentX has recorded which version was checked. The next step is the independent code and security reviews; no pull request has been opened yet.";
       }
       const failed = ended.status === "FAILED" || ended.status === "INTERRUPTED";
       let summary: string | undefined;
@@ -705,7 +756,11 @@ async function releaseStart(deps: NotifierDependencies, marker: { pk: string; sk
   }
 }
 
-interface NoticeMarker { deliveredAt?: string; postedTs?: string; postingUntil?: number }
+interface NoticeMarker {
+  deliveredAt?: string; postedTs?: string; postingUntil?: number;
+  postedArtifactDigest?: string; postedWorkflowRevision?: number; postedText?: string; postedChannelId?: string;
+  workflowDecisionRevision?: number;
+}
 
 /**
  * C1: a start message posted but not recorded keeps its ts on the notice's marker, so the next
@@ -789,6 +844,7 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
     if (share.postFailedAt !== undefined) return "no_thread";
     throw new StartPending();
   }
+  await updateWorkflowApprovalCard(deps, { ...task, share }, notice);
   const feedbackReview = await feedbackReviewNotification(deps, { ...task, share }, notice);
   const text = feedbackReview?.text ?? await replyText(deps, { ...task, share }, notice);
   if (text === undefined) return "stale";
@@ -807,9 +863,26 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
           { type: "button", action_id: "agentx_workflow_changes", text: { type: "plain_text", text: "Request changes" }, value: JSON.stringify({ taskId: task.taskId, revision: workflow.revision, digest: plan.sha256, decision: "REQUEST_CHANGES" }) },
         ] },
       ]
-    : undefined);
-  await deps.post({ channel: share.channelId, threadTs: share.threadTs, text, ...(blocks === undefined ? {} : { blocks }) });
-  await putMarker(deps, marker);
+    : notice.kind === "ended" && workflow?.stage === "VERIFY" && workflow.state === "BLOCKED"
+      ? [
+          ...slackSectionTexts(text).map((section) => ({ type: "section", text: { type: "mrkdwn", text: section } })),
+          ...((workflow.checkPolicy?.required.length ?? 0) + (workflow.checkPolicy?.optional.length ?? 0) > 0 ? [{ type: "actions", elements: [
+            { type: "button", action_id: "agentx_workflow_retry_checks", style: "primary", text: { type: "plain_text", text: "Choose checks and retry" },
+              value: JSON.stringify({ taskId: task.taskId, revision: workflow.revision }) },
+          ] }] : []),
+        ]
+      : undefined);
+  const posted = await deps.post({ channel: share.channelId, threadTs: share.threadTs, text, ...(blocks === undefined ? {} : { blocks }) });
+  const approvalArtifact = notice.kind === "ended" && workflow?.stage === "PLAN_REVIEW" && workflow.state === "WAITING" ? plan : undefined;
+  await putMarker(deps, marker, {
+    postedTs: posted.ts,
+    ...(approvalArtifact === undefined ? {} : {
+      postedArtifactDigest: approvalArtifact.sha256,
+      postedWorkflowRevision: workflow!.revision,
+      postedText: text,
+      postedChannelId: share.channelId,
+    }),
+  });
   return "posted";
 }
 

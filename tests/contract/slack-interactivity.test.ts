@@ -278,7 +278,7 @@ describe("Slack native workflow review controls", () => {
     await handlers.handleAction({ actionId: "agentx_workflow_approve", value: JSON.stringify({ taskId, revision: workflow.revision, digest, decision: "APPROVE" }), userId: requester, userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "", requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: "plan", responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3" });
     expect(opened).toMatchObject({ callback_id: "agentx_workflow_review_submission" });
     const blocks = opened?.blocks as Array<Record<string, unknown>>;
-    expect(JSON.stringify(blocks)).toContain("Always run:");
+    expect(JSON.stringify(blocks)).toContain("Always run these project checks:");
     expect(JSON.stringify(blocks)).toContain("Coverage report");
     expect(JSON.stringify(blocks)).not.toContain("required-1");
     await handlers.handleSubmission({ user: { id: requester }, view: {
