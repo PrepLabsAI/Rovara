@@ -529,6 +529,14 @@ describe("agentx_open_pull_request and agentx_close_task return at once (R22, Ow
     expect(text(result)).toContain("agentx_get_task");
   });
 
+  it("passes discard authorization only when the task owner explicitly selects it", async () => {
+    const closeTask = vi.fn(async () => ({ task: view("CLOSED"), closed: true, discardedUnpublished: true }));
+    const result = await (await connect({ closeTask })).callTool({ name: "agentx_close_task", arguments: { task_id: TASK, discard_unpublished: true } });
+    expect(closeTask).toHaveBeenCalledWith(TASK, expect.any(String), true);
+    expect(result.structuredContent).toMatchObject({ closed: true });
+    expect(text(result)).toContain("unpublished workspace changes were discarded");
+  });
+
   it("uses AgentX's own words for a close that is not done, redacted", async () => {
     const closeTask = vi.fn(async () => ({ task: view("SUCCEEDED", { closing: true }), closed: false, message: `the close preflight is running on demo ${PLANTED}; check back with agentx_get_task` }));
     const result = await (await connect({ closeTask })).callTool({ name: "agentx_close_task", arguments: { task_id: TASK } });

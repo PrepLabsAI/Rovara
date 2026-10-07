@@ -48,7 +48,7 @@ export interface ControlPlaneClient {
   startWorkflowReviewTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
   retryWorkflowTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
   cancelTask(taskId: string, requestId: string): Promise<DeveloperTaskView>;
-  closeTask(taskId: string, requestId: string): Promise<DeveloperCloseResponse>;
+  closeTask(taskId: string, requestId: string, discardUnpublished?: boolean): Promise<DeveloperCloseResponse>;
   openPullRequest(taskId: string, request: DeveloperPullRequestRequest): Promise<DeveloperPullRequestResponse>;
   /** Spec 025 FR-030: shares the task, or changes a shared task's mode (API 1.2). */
   shareTask(taskId: string, request: ShareDeveloperTaskRequest): Promise<DeveloperTaskView>;
@@ -221,7 +221,7 @@ export function httpControlPlaneClient(options: {
     startWorkflowReviewTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/review"), request)),
     retryWorkflowTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/retry"), request)),
     cancelTask: async (taskId, requestId) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/cancel"), { requestId })),
-    closeTask: (taskId, requestId) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId }, true, { busyStep: CLOSE_BUSY_STEP }),
+    closeTask: (taskId, requestId, discardUnpublished = false) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId, ...(discardUnpublished ? { discard_unpublished: true } : {}) }, true, { busyStep: CLOSE_BUSY_STEP }),
     openPullRequest: (taskId, request) => call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request),
     shareTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/share"), request, true, { busyStep: SHARE_BUSY_STEP })),
   };

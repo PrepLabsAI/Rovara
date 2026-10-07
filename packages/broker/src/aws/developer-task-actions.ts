@@ -46,7 +46,7 @@ export interface DeveloperTaskActions {
   acceptTask(identity: AuthenticatedIdentity, workspaceId: string, request: OperationRequest, extra: ExtraItems, options?: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding }): Promise<{ operation: Operation; duplicate: boolean }>;
   acceptPullRequest(identity: AuthenticatedIdentity, workspaceId: string, request: PullRequestRequest, extra: ExtraItems): Promise<{ operation: Operation; duplicate: boolean }>;
   cancelRunning(identity: AuthenticatedIdentity, workspace: WorkspaceInstance, extra: ExtraItems): Promise<TaskCancellationResult>;
-  startClose(identity: AuthenticatedIdentity, workspace: WorkspaceInstance, requestId: string, extra: ExtraItems): Promise<{ operationId: string; duplicate: boolean }>;
+  startClose(identity: AuthenticatedIdentity, workspace: WorkspaceInstance, requestId: string, extra: ExtraItems, discardUnpublished?: boolean): Promise<{ operationId: string; duplicate: boolean }>;
   /** Deletes the workspace's compute; the existing per-mode switch lives behind it (FR-024). Unchecked: callers must load the owned task and check project access first. */
   deleteCompute(workspace: WorkspaceInstance): Promise<void>;
   /** Writes items in one transaction. Unchecked: callers must load the owned task and check project access first. */

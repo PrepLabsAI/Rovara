@@ -198,6 +198,8 @@ export type ContinueDeveloperTaskRequest = z.infer<typeof ContinueDeveloperTaskR
 
 export const DeveloperTaskActionRequestSchema = z.object({ requestId: RequestIdSchema }).strict();
 export type DeveloperTaskActionRequest = z.infer<typeof DeveloperTaskActionRequestSchema>;
+export const DeveloperTaskCloseRequestSchema = z.object({ requestId: RequestIdSchema, discard_unpublished: z.boolean().optional() }).strict();
+export type DeveloperTaskCloseRequest = z.infer<typeof DeveloperTaskCloseRequestSchema>;
 
 export const CanvasCloseoutRetryRequestSchema = z.object({ requestId: RequestIdSchema, workflowRevision: z.number().int().positive(), manifestDigest: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict();
 export type CanvasCloseoutRetryRequest = z.infer<typeof CanvasCloseoutRetryRequestSchema>;
@@ -266,6 +268,7 @@ export const DeveloperTaskResponseSchema = z.object({ task: DeveloperTaskViewSch
 export const DeveloperCloseResponseSchema = z.object({
   task: DeveloperTaskViewSchema,
   closed: z.boolean(),
+  discardedUnpublished: z.boolean().optional(),
   unpublished: z.array(z.object({ repository: z.string(), reasons: z.array(z.string()) })).optional(),
   /** Present whenever `closed` is false: why the task is not closed yet, and what to do next. */
   message: z.string().optional(),

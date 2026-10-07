@@ -506,7 +506,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
         ? { outcome: "CANCEL_REQUESTED", targetOperationId: result.targetOperationId, cancelOperationId: result.cancelOperationId }
         : { outcome: "NOTHING_RUNNING" };
     },
-    startClose: (identity, workspace, requestId, extra) => startTaskClose(dependencies, identity, workspace, requestId, extra),
+    startClose: (identity, workspace, requestId, extra, discardUnpublished) => startTaskClose(dependencies, identity, workspace, requestId, extra, discardUnpublished),
     deleteCompute: (workspace) => deleteWorkspaceCompute(dependencies, workspace),
     transact: async (items) => {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
@@ -1514,6 +1514,7 @@ function closeOperationParts(
   requestId: string,
   requester: { requestedBy?: OperationRequester },
   now: string,
+  discardUnpublished = false,
 ): { operation: OperationRecord; outbox: ReturnType<typeof outboxRecord>; fence: number } {
   const operationId = randomUUID();
   const fence = workspace.fence + 1;
@@ -1522,13 +1523,14 @@ function closeOperationParts(
     workspaceId: workspace.id,
     kind: "close",
     requestId,
-    payloadHash: hashJson({ action: "close", workspaceId: workspace.id }),
+    payloadHash: hashJson({ action: "close", workspaceId: workspace.id, discardUnpublished }),
     status: "ACCEPTED",
     fence,
     createdAt: now,
     updatedAt: now,
     ...requester,
   });
+  if (discardUnpublished) operation.discardUnpublished = true;
   if (workspace.status === "READY" || workspace.status === "STOPPED") operation.closePreviousStatus = workspace.status;
   const invocation: WorkerInvocation = {
     protocolVersion: 1,
@@ -1556,8 +1558,18 @@ async function startThreadWorkspaceClose(
     throw agentXError("FORBIDDEN", SHARED_CLOSE_REFUSED);
   }
   const requestId = uuid(input.requestId, "requestId");
+  if (input.discard_unpublished !== undefined && typeof input.discard_unpublished !== "boolean") {
+    throw agentXError("CONFIG_INVALID", "discard_unpublished must be a boolean");
+  }
+  const discardUnpublished = input.discard_unpublished === true;
   const workspace = await getThreadWorkspace(dependencies, identity.ownerKey);
   if (!workspace) return { outcome: "NOT_FOUND" };
+  if (discardUnpublished) {
+    const thread = await getItem<{ starterUserId?: unknown }>(dependencies, slackThreadKey(identity.ownerKey));
+    if (typeof thread?.starterUserId !== "string" || thread.starterUserId !== identity.slack.requester.userId) {
+      return { outcome: "REFUSED", reason: "not_owner" };
+    }
+  }
   // Spec 014: a thread that never needed the worker has no compute, so there is nothing to close.
   if (workspace.status === "UNPREPARED") return { outcome: "NOT_FOUND" };
   // #213: a failed preparation that was released holds no slot and has nothing to check, and a
@@ -1567,7 +1579,20 @@ async function startThreadWorkspaceClose(
     if (typeof thread?.starterUserId !== "string") return { outcome: "NOT_FOUND" };
   }
   if (workspace.status === "CLOSED" && workspace.closedAt) {
-    return { outcome: "CLOSED", workspaceId: workspace.id, closedAt: workspace.closedAt };
+    const closeOperation = workspace.closeOperationId
+      ? await requireOperation(dependencies, workspace.id, workspace.closeOperationId)
+      : undefined;
+    const closePreflight = closeOperation?.kind === "close" && closeOperation.status === "SUCCEEDED"
+      ? WorkspaceClosePreflightResultSchema.safeParse(closeOperation.result)
+      : undefined;
+    return {
+      outcome: "CLOSED",
+      workspaceId: workspace.id,
+      closedAt: workspace.closedAt,
+      ...(closeOperation?.kind === "close" && closeOperation.discardUnpublished === true && closePreflight?.success && !closePreflight.data.safeToClose
+        ? { discardedUnpublished: true }
+        : {}),
+    };
   }
   if (workspace.status === "CLOSING" && workspace.closeOperationId) {
     const operation = await requireOperation(dependencies, workspace.id, workspace.closeOperationId);
@@ -1588,7 +1613,7 @@ async function startThreadWorkspaceClose(
   }
 
   const now = new Date().toISOString();
-  const { operation, outbox, fence } = closeOperationParts(dependencies, workspace, requestId, requesterOf(identity), now);
+  const { operation, outbox, fence } = closeOperationParts(dependencies, workspace, requestId, requesterOf(identity), now, discardUnpublished);
   const operationId = operation.id;
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
@@ -1639,6 +1664,7 @@ async function startTaskClose(
   workspace: WorkspaceInstance,
   requestId: string,
   extra: ExtraItems,
+  discardUnpublished = false,
 ): Promise<{ operationId: string; duplicate: boolean }> {
   if (workspace.ownerKey !== identity.ownerKey) throw agentXError("NOT_FOUND", "workspace not found");
   if ((workspace.status === "CLOSING" || workspace.status === "CLOSED") && workspace.closeOperationId) {
@@ -1654,7 +1680,7 @@ async function startTaskClose(
     throw agentXError("WORKSPACE_BUSY", `workspace is ${workspace.status}; wait for active work before closing it`);
   }
   const now = new Date().toISOString();
-  const { operation, outbox, fence } = closeOperationParts(dependencies, workspace, requestId, requesterOf(identity), now);
+  const { operation, outbox, fence } = closeOperationParts(dependencies, workspace, requestId, requesterOf(identity), now, discardUnpublished);
   try {
     await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: [
       { Update: {
@@ -1729,15 +1755,37 @@ async function completeThreadWorkspaceClose(
   const operationId = uuid(input.operationId, "operationId");
   const workspace = await getThreadWorkspace(dependencies, identity.ownerKey);
   if (!workspace) throw agentXError("NOT_FOUND", "thread workspace not found");
-  if (workspace.status === "CLOSED" && workspace.closedAt && workspace.closeOperationId === operationId) {
-    return { outcome: "CLOSED", workspaceId: workspace.id, operationId, closedAt: workspace.closedAt, storageReleased: closeReleasesStorage(workspace) };
-  }
   const operation = await requireOperation(dependencies, workspace.id, operationId);
+  if (operation.kind !== "close") throw agentXError("CONFIG_INVALID", "operation is not a workspace close");
+  const preflight = operation.status === "SUCCEEDED" ? WorkspaceClosePreflightResultSchema.safeParse(operation.result) : undefined;
+  const discardedUnpublished = operation.discardUnpublished === true && preflight?.success === true && !preflight.data.safeToClose;
+  if (workspace.status === "CLOSED" && workspace.closedAt && workspace.closeOperationId === operationId) {
+    return {
+      outcome: "CLOSED",
+      workspaceId: workspace.id,
+      operationId,
+      closedAt: workspace.closedAt,
+      storageReleased: closeReleasesStorage(workspace),
+      ...(discardedUnpublished ? { discardedUnpublished: true } : {}),
+    };
+  }
   if (operation.kind !== "close" || operation.status !== "SUCCEEDED" || workspace.status !== "CLOSING" || workspace.closeOperationId !== operationId) {
     throw agentXError("WORKSPACE_NOT_READY", "workspace close preflight has not completed safely");
   }
-  const preflight = WorkspaceClosePreflightResultSchema.parse(operation.result);
-  if (!preflight.safeToClose) throw agentXError("WORKSPACE_NOT_READY", "workspace contains unpublished work");
+  const parsedPreflight = WorkspaceClosePreflightResultSchema.parse(operation.result);
+  if (!parsedPreflight.safeToClose && operation.discardUnpublished !== true) throw agentXError("WORKSPACE_NOT_READY", "workspace contains unpublished work");
+  if (operation.discardUnpublished === true) {
+    const thread = await getItem<{ starterUserId?: unknown }>(dependencies, slackThreadKey(identity.ownerKey));
+    const requestedBy = operation.requestedBy;
+    if (typeof thread?.starterUserId !== "string"
+      || thread.starterUserId !== slack.requester.userId
+      || requestedBy === undefined
+      || "kind" in requestedBy
+      || requestedBy.userId !== thread.starterUserId
+      || requestedBy.teamId !== slack.thread.teamId) {
+      throw agentXError("FORBIDDEN", "only the Slack thread starter who authorized discard may complete this close");
+    }
+  }
 
   await deleteWorkspaceCompute(dependencies, workspace);
   const storageReleased = closeReleasesStorage(workspace);
@@ -1791,11 +1839,18 @@ async function completeThreadWorkspaceClose(
     if (!isConditional(error)) throw error;
     const closed = await requireWorkspace(dependencies, workspace.id);
     if (closed.status === "CLOSED" && closed.closedAt) {
-      return { outcome: "CLOSED", workspaceId: closed.id, operationId, closedAt: closed.closedAt, storageReleased };
+      return {
+        outcome: "CLOSED",
+        workspaceId: closed.id,
+        operationId,
+        closedAt: closed.closedAt,
+        storageReleased,
+        ...(discardedUnpublished ? { discardedUnpublished: true } : {}),
+      };
     }
     throw agentXError("WORKSPACE_BUSY", "workspace close completion conflicted; retry");
   }
-  return { outcome: "CLOSED", workspaceId: workspace.id, operationId, closedAt, storageReleased };
+  return { outcome: "CLOSED", workspaceId: workspace.id, operationId, closedAt, storageReleased, ...(operation.discardUnpublished === true ? { discardedUnpublished: !parsedPreflight.safeToClose } : {}) };
 }
 
 async function ensureThreadWorkspace(
@@ -4592,7 +4647,7 @@ async function completedTurnItems(
       ? `Not closed: unpublished work in ${preflight.data.repositories.map((repository) => `${repository.name} (${repository.reasons.join(", ")})`).join("; ")}`
       : undefined;
     const unfinished = terminalStatus !== "SUCCEEDED";
-    if ((refusal !== undefined || unfinished) && requester !== undefined && "kind" in requester && requester.kind === "developer") {
+    if ((refusal !== undefined || unfinished) && operation.discardUnpublished !== true && requester !== undefined && "kind" in requester && requester.kind === "developer") {
       const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
       if (task === undefined) {
         // The pointer and the task are written in one transaction, so this is not expected.
@@ -5066,13 +5121,18 @@ async function recordTerminalResult(
   const closePreflight = operation.kind === "close" && terminalStatus === "SUCCEEDED"
     ? WorkspaceClosePreflightResultSchema.parse(result)
     : undefined;
+  // Explicit discard only bypasses the unpublished-work refusal after the worker has
+  // successfully produced a valid preflight. A failed or cancelled check must never delete
+  // compute or storage merely because the owner authorized discarding the checked-out changes.
+  const closeCanFinish = operation.kind === "close" && closePreflight !== undefined
+    && (closePreflight.safeToClose || operation.discardUnpublished === true);
   const workspaceStatus =
     operation.kind === "prepare"
       ? terminalStatus === "SUCCEEDED"
         ? "READY"
         : "PREPARATION_FAILED"
       : operation.kind === "close"
-        ? closePreflight?.safeToClose === true
+        ? closeCanFinish
           ? "CLOSING"
           : operation.closePreviousStatus ?? "READY"
         : "READY";
@@ -5112,7 +5172,7 @@ async function recordTerminalResult(
   const standingFailures = latestChecks === undefined ? undefined : await nextWorkspaceStanding(dependencies, operation.workspaceId, latestChecks.report);
   const workspaceExpression = operation.kind === "prepare" && terminalStatus === "SUCCEEDED"
     ? "SET #status = :status, updatedAt = :now, preparationManifest = :manifest REMOVE activeOperationId"
-    : operation.kind === "close" && closePreflight?.safeToClose !== true
+    : operation.kind === "close" && !closeCanFinish
       ? "SET #status = :status, updatedAt = :now, closeError = :closeError REMOVE activeOperationId"
       : "SET #status = :status, updatedAt = :now REMOVE activeOperationId, closeError";
   const workspaceUpdate: TransactItems[number] = { Update: {
@@ -5130,7 +5190,7 @@ async function recordTerminalResult(
       ...(operation.kind === "cancel" ? { ":target": operation.targetOperationId } : { ":operation": operation.id }),
       ...(operation.kind === "prepare" && terminalStatus === "SUCCEEDED" ? { ":manifest": ".agentx/preparation-manifest.json" } : {}),
       ...(latestChecks === undefined ? {} : { ":latestChecks": latestChecks, ":standingFailures": standingFailures }),
-      ...(operation.kind === "close" && closePreflight?.safeToClose !== true
+      ...(operation.kind === "close" && !closeCanFinish
         ? { ":closeError": error ?? (closePreflight ? "workspace contains unpublished work" : "workspace close preflight failed") }
         : {}),
     },
@@ -5189,7 +5249,7 @@ async function recordTerminalResult(
     }
     throw agentXError("STALE_FENCE", "terminal callback no longer owns the workspace");
   }
-  if (closePreflight?.safeToClose === true && taskPointer !== undefined) await finishDeveloperClose(dependencies, taskPointer, operation.id, operation.createdAt);
+  if (closeCanFinish && taskPointer !== undefined) await finishDeveloperClose(dependencies, taskPointer, operation.id, operation.createdAt, operation.discardUnpublished === true && closePreflight?.safeToClose !== true);
   // #213: a prepare that did not succeed leaves the workspace PREPARATION_FAILED, which stops
   // counting toward the workspace limits now; the release logs, and never fails the callback.
   if (operation.kind === "prepare" && recordedStatus !== "SUCCEEDED") {
@@ -5307,14 +5367,14 @@ async function releaseOnOwnResult(dependencies: AwsBrokerDependencies, operation
  * close); the worker's callback never fails because of it. A Slack workspace has no pointer and
  * keeps its own completion flow.
  */
-async function finishDeveloperClose(dependencies: AwsBrokerDependencies, pointer: DeveloperTaskPointerRecord, operationId: string, requestedAt: string): Promise<void> {
+async function finishDeveloperClose(dependencies: AwsBrokerDependencies, pointer: DeveloperTaskPointerRecord, operationId: string, requestedAt: string, discardedUnpublished = false): Promise<void> {
   try {
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
     if (task === undefined) {
       console.log(JSON.stringify({ component: "broker", event: "developer.task_record_missing", taskId: pointer.taskId, operationId }));
       return;
     }
-    await finishTaskClose({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies), documentClient: dependencies.documentClient }, task, operationId, [], requestedAt);
+    await finishTaskClose({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies), documentClient: dependencies.documentClient }, task, operationId, [], requestedAt, discardedUnpublished);
   } catch (error) {
     console.log(JSON.stringify({ component: "broker", event: "developer.task_close_failed", taskId: pointer.taskId, operationId, error: error instanceof Error ? error.name : "unknown" }));
   }

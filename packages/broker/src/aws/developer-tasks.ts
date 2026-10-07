@@ -18,6 +18,7 @@ import {
   DEVELOPER_TASK_SUMMARY_MAX,
   DeveloperPullRequestRequestSchema,
   DeveloperTaskActionRequestSchema,
+  DeveloperTaskCloseRequestSchema,
   DeveloperTaskStatusSchema,
   type ProjectDefinition,
   PullRequestResultSchema,
@@ -1631,6 +1632,7 @@ export async function finishTaskClose(
   extra: TransactItems = [],
   /** When the close was requested (its preflight operation's createdAt): the completed record's receivedAt. */
   requestedAt?: string,
+  discardedUnpublished = false,
 ): Promise<void> {
   const workspace = await deps.actions.workspace(task.workspaceId);
   if (workspace.status !== "CLOSED") await deps.actions.deleteCompute(workspace);
@@ -1679,7 +1681,9 @@ export async function finishTaskClose(
       TableName: deps.actions.turnRecordsTableName,
       Item: aiToolTurn({
         party: partyOfTask(current), turnId: closeTurn.turnId, action: "close", phase: "completed", outcome: "succeeded",
-        receivedAt: closeTurn.receivedAt, finishedAt: now, request: "close", response: "The task is closed, and its workspace is released.",
+        receivedAt: closeTurn.receivedAt, finishedAt: now, request: "close", response: discardedUnpublished
+          ? "The task is closed; its unpublished workspace changes were discarded and its workspace is released."
+          : "The task is closed, and its workspace is released.",
         ...(closeOperationId === undefined ? {} : { operationId: closeOperationId }),
       }),
       ConditionExpression: "attribute_not_exists(pk)",
@@ -1726,7 +1730,8 @@ export async function resumeClose(deps: DeveloperTaskRouteDependencies, task: De
   const safe = safeClose(loaded ?? await workspaceReads(deps, task));
   if (safe === undefined) return false;
   try {
-    await finishTaskClose(deps, task, safe.id, [], safe.createdAt);
+    const preflight = WorkspaceClosePreflightResultSchema.parse(safe.result);
+    await finishTaskClose(deps, task, safe.id, [], safe.createdAt, safe.discardUnpublished === true && !preflight.safeToClose);
     return true;
   } catch (error) {
     log(deps, { event: "developer.task_close_failed", taskId: task.taskId, error: error instanceof Error ? error.name : "unknown" });
@@ -1734,17 +1739,19 @@ export async function resumeClose(deps: DeveloperTaskRouteDependencies, task: De
   }
 }
 
-/** The close operation of a CLOSING workspace whose preflight ended safe, if there is one. */
+/** The close operation of a CLOSING workspace with safe preflight or persisted discard authorization. */
 function safeClose({ workspace, operations }: WorkspaceReads): Operation | undefined {
   if (workspace.status !== "CLOSING" || workspace.closeOperationId === undefined) return undefined;
   const operation = operations.find((entry) => entry.id === workspace.closeOperationId);
   const preflight = WorkspaceClosePreflightResultSchema.safeParse(operation?.result);
-  return operation?.status === "SUCCEEDED" && preflight.success && preflight.data.safeToClose ? operation : undefined;
+  return operation?.status === "SUCCEEDED" && preflight.success
+    && (preflight.data.safeToClose || operation.discardUnpublished === true) ? operation : undefined;
 }
 
 const CLOSE_CHECKING = "AgentX is checking the task's workspace for unpublished work before closing it; check back with agentx_get_task";
 const CLOSE_REFUSED = "not closed: some work is not published; push it or open a pull request with agentx_open_pull_request, then close the task again";
 const CLOSE_COMPUTE_PENDING = "the workspace has no unpublished work, but its compute is not removed yet; try agentx_close_task again shortly";
+const CLOSE_DISCARD_PENDING = "AgentX recorded your request to discard unpublished work, but could not finish releasing the workspace; try agentx_close_task again shortly";
 const CLOSE_CHECK_FAILED = "the check for unpublished work did not finish; try agentx_close_task again with a new request_id";
 const CLOSE_STILL_OPEN = "the task is still open; try agentx_close_task again with a new request_id";
 const COMPUTE_STOPPING = "the task's compute is still stopping; try agentx_close_task again shortly";
@@ -1752,6 +1759,7 @@ const CLOSE_FAILED = "AgentX could not close this task just now; try agentx_clos
 
 /** Why a close did not close the task (it always says, so the AI tool can tell the developer). */
 function notClosedMessage(reads: WorkspaceReads, operation: Operation | undefined, unpublished: DeveloperCloseResponse["unpublished"]): string {
+  if (operation?.discardUnpublished === true && unpublished !== undefined) return CLOSE_DISCARD_PENDING;
   if (unpublished !== undefined) return CLOSE_REFUSED;
   if (safeClose(reads) !== undefined) return CLOSE_COMPUTE_PENDING;
   if (reads.workspace.status === "CLOSING" || operation?.status === "ACCEPTED" || operation?.status === "RUNNING") return CLOSE_CHECKING;
@@ -1782,7 +1790,7 @@ async function closeNeverStarted(deps: DeveloperTaskRouteDependencies, task: Dev
  * writes no new record: nothing new was accepted (the close already has its accepted record).
  */
 async function closeTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<DeveloperCloseResponse> {
-  const request = parse(DeveloperTaskActionRequestSchema, value, deps, "close");
+  const request = parse(DeveloperTaskCloseRequestSchema, value, deps, "close");
   let task = await loadOwnedTask(deps, caller, taskId);
   const turns = turnTable(deps);
   const receivedAt = iso(deps);
@@ -1806,7 +1814,7 @@ async function closeTask(deps: DeveloperTaskRouteDependencies, caller: Developer
         // operation and writes nothing; otherwise the record commits with the preflight (R12).
         started = await deps.actions.startClose(developerTaskIdentity(task), workspace, request.requestId, (operation) => [
           record("Checking the workspace for unpublished work before closing.", operation.id),
-        ]);
+        ], request.discard_unpublished === true);
       } catch (error) {
         busy(error, taskId);
       }
@@ -1817,9 +1825,15 @@ async function closeTask(deps: DeveloperTaskRouteDependencies, caller: Developer
     task = await loadOwnedTask(deps, caller, taskId);
   }
   const reads = await workspaceReads(deps, task);
+  if (operation === undefined && reads.workspace.closeOperationId !== undefined) {
+    operation = reads.operations.find((entry) => entry.id === reads.workspace.closeOperationId);
+  }
   const view = await taskView(deps, task, { events: 0, details: false, loaded: reads });
   await syncIndex(deps, task, view.status, view.updatedAt);
-  if (view.status === "CLOSED") return { task: view, closed: true };
+  const closePreflight = operation?.kind === "close" ? WorkspaceClosePreflightResultSchema.safeParse(operation.result) : undefined;
+  const discardedUnpublished = request.discard_unpublished === true && operation?.discardUnpublished === true
+    && closePreflight?.success === true && !closePreflight.data.safeToClose;
+  if (view.status === "CLOSED") return { task: view, closed: true, ...(discardedUnpublished ? { discardedUnpublished: true } : {}) };
   return { task: view, closed: false, ...(unpublished === undefined ? {} : { unpublished }), message: notClosedMessage(reads, operation, unpublished) };
 }
 

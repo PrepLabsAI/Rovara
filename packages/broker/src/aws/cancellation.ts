@@ -116,6 +116,7 @@ export function publicOperation(record: OperationRecord): Operation {
     id: record.id,
     workspaceId: record.workspaceId,
     kind: record.kind,
+    ...(record.discardUnpublished === true ? { discardUnpublished: true } : {}),
     ...(record.workflowMode === undefined ? {} : { workflowMode: record.workflowMode }),
     ...(record.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: record.workflowFeedbackReview }),
     requestId: record.requestId,
