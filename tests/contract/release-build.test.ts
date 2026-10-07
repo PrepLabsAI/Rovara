@@ -19,6 +19,7 @@ describe("release builder", () => {
     expect(ReleaseManifestSchema.parse(JSON.parse(await readFile(join(out, "release.json"), "utf8")))).toEqual(manifest);
     expect(manifest.legalDocuments?.map((document) => document.file)).toEqual([
       "legal/LICENSE",
+      "legal/LICENSE-APACHE",
       "legal/RELICENSED.md",
     ]);
     expect(manifest.templates.map((t) => t.part)).toEqual(["access", "foundation", "identity", "runtime", "control-plane", "slack"]);

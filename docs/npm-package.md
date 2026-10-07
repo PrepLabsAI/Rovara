@@ -52,12 +52,13 @@ that exists. Kept for a version that must be published outside the workflow:
    ```
 
    The archive is `cli-release/preplabsai-rovara-code-<version>.tgz`. It contains only
-   the two bundled executable files, package manifest, README, Apache LICENSE, earlier-release
-   grant (`RELICENSED.md`) and third-party notices. No private workspace dependencies need separate
+   the two bundled executable files, package manifest, README, MIT `LICENSE`, retained Apache
+   license text (`LICENSE-APACHE`), license-grant notice (`RELICENSED.md`) and third-party notices.
+   No private workspace dependencies need separate
    publication.
 4. Review the exact artifact, source/version, distribution rights and matching
    deployment bundle/images with the release owner. The generated package retains
-   the repository's Apache-2.0 license and earlier-release grant.
+   the repository's MIT license, retained Apache 2.0 grant, and third-party license notices.
 5. After release approval, publish that reviewed archive:
 
    ```sh

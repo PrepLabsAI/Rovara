@@ -28,10 +28,10 @@ describe("publishable CLI package", () => {
       name: "@preplabsai/rovara-code",
       version: "1.2.3",
       bin: { rovara: "bin/agentx.mjs", agentx: "bin/agentx.mjs" },
-      license: "Apache-2.0",
+      license: "MIT",
     });
     expect(manifest.dependencies).toBeUndefined();
-    expect(manifest.files).toEqual(["bin", "README.md", "LICENSE", "RELICENSED.md", "THIRD_PARTY_NOTICES"]);
+    expect(manifest.files).toEqual(["bin", "README.md", "LICENSE", "LICENSE-APACHE", "RELICENSED.md", "THIRD_PARTY_NOTICES"]);
     expect(manifest.description).toBe("Rovara Code installer and administration CLI");
     expect(manifest.repository).toEqual({ type: "git", url: "git+https://github.com/PrepLabsAI/Rovara.git" });
 

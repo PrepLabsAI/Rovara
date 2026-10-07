@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-blue" alt="Apache 2.0 License" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue" alt="MIT License" /></a>
   <img src="https://img.shields.io/badge/node-22.19%2B-339933" alt="Node 22.19+" />
   <img src="https://img.shields.io/badge/runs%20in-your%20AWS%20account-FF9900" alt="Runs in your AWS account" />
   <img src="https://img.shields.io/badge/agent-Pi%201.0-6f42c1" alt="Pi coding agent 1.0" />
@@ -473,8 +473,9 @@ Contributions are welcome; see [CONTRIBUTING.md](CONTRIBUTING.md). To report a v
 
 ## License
 
-Licensed under the [Apache License 2.0](LICENSE). PrepLabsAI's grant applies to earlier Rovara
-releases too; see [RELICENSED.md](RELICENSED.md). Third-party components retain their own licenses.
+Licensed under the [MIT License](LICENSE). PrepLabsAI also preserves its prior Apache 2.0 grant for
+PrepLabsAI-owned Rovara work, including earlier releases; see [RELICENSED.md](RELICENSED.md).
+Third-party components retain their own licenses.
 &copy; 2026 PrepLabs
 
 ---

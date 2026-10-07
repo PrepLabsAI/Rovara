@@ -64,10 +64,10 @@ what it might do.
 
 ## License
 
-Rovara is licensed under the [Apache License 2.0](LICENSE). By submitting a contribution
-intentionally for inclusion, you agree that it is licensed under Apache 2.0, as described in
-section 5 of that license. See [RELICENSED.md](RELICENSED.md) for the grant covering earlier
-releases. Third-party components keep their own licenses.
+Rovara is licensed under the [MIT License](LICENSE). By submitting a contribution intentionally
+for inclusion, you agree that it is licensed under the MIT License. The project also preserves the
+Apache 2.0 grant previously issued for PrepLabsAI-owned Rovara work; see [RELICENSED.md](RELICENSED.md).
+Third-party components and contributions remain subject to their own license terms.
 
 ## Code of conduct
 

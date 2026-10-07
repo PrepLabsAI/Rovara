@@ -283,12 +283,12 @@ export async function buildRelease(input: BuildReleaseInput): Promise<ReleaseMan
       });
     }
 
-    // Include the license and the immediate grant for earlier versions in the release artifact,
-    // and checksum them in release.json like every other shipped file.
+    // Include both current and previously granted license texts plus the grant history in the
+    // release artifact, and checksum them in release.json like every other shipped file.
     const legalDir = join(input.out, "legal");
     await mkdir(legalDir, { recursive: true });
     const legalDocuments: NonNullable<ReleaseManifest["legalDocuments"]> = [];
-    for (const name of ["LICENSE", "RELICENSED.md"] as const) {
+    for (const name of ["LICENSE", "LICENSE-APACHE", "RELICENSED.md"] as const) {
       const file = `legal/${name}`;
       await copyFile(join(REPO_ROOT, name), join(input.out, file));
       const content = await readFile(join(input.out, file));
