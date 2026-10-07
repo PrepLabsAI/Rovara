@@ -117,6 +117,42 @@ function respond(statusCode: number, body: unknown): HttpResponse {
   return { statusCode, headers: { "content-type": "application/json" }, body: JSON.stringify(body) };
 }
 
+const WORKFLOW_DECISION_INVOKE_TIMEOUT_MS = 1_800;
+
+class WorkflowDecisionSubmissionError extends Error {
+  constructor() { super("broker did not save the workflow decision"); this.name = "WorkflowDecisionSubmissionError"; }
+}
+
+/** Slack must not clear an approval form just because Lambda accepted an asynchronous event. */
+async function invokeWorkflowDecision(
+  lambda: LambdaClient,
+  functionName: string,
+  event: Record<string, unknown>,
+): Promise<void> {
+  let response;
+  try {
+    response = await lambda.send(new InvokeCommand({
+      FunctionName: functionName,
+      InvocationType: "RequestResponse",
+      Payload: Buffer.from(JSON.stringify(event)),
+    }), { abortSignal: AbortSignal.timeout(WORKFLOW_DECISION_INVOKE_TIMEOUT_MS) });
+    if (response.FunctionError !== undefined || response.StatusCode !== 200 || response.Payload === undefined) {
+      console.log(JSON.stringify({ component: "slack-interactivity", event: "workflow.broker_decision_failed", taskId: event.taskId, requestId: event.requestId, functionError: response.FunctionError ?? null, statusCode: response.StatusCode ?? null, hasPayload: response.Payload !== undefined }));
+      throw new WorkflowDecisionSubmissionError();
+    }
+    const result = asRecord(JSON.parse(Buffer.from(response.Payload).toString("utf8")));
+    if (typeof result.statusCode !== "number" || result.statusCode < 200 || result.statusCode >= 300) {
+      console.log(JSON.stringify({ component: "slack-interactivity", event: "workflow.broker_decision_rejected", taskId: event.taskId, requestId: event.requestId, statusCode: result.statusCode ?? "invalid" }));
+      throw new WorkflowDecisionSubmissionError();
+    }
+    console.log(JSON.stringify({ component: "slack-interactivity", event: "workflow.decision_saved", taskId: event.taskId, requestId: event.requestId, decision: event.decision }));
+  } catch (error) {
+    if (error instanceof WorkflowDecisionSubmissionError) throw error;
+    console.log(JSON.stringify({ component: "slack-interactivity", event: "workflow.broker_decision_failed", taskId: event.taskId, requestId: event.requestId, errorName: error instanceof Error ? error.name : "unknown" }));
+    throw new WorkflowDecisionSubmissionError();
+  }
+}
+
 function asRecord(value: unknown): Record<string, unknown> {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -146,9 +182,13 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
       log("interaction.rejected", { reason: "malformed_payload" });
       return respond(400, { error: "interaction payload is not JSON" });
     }
-    if (payload.type === "view_submission" && dependencies.workflow !== undefined) {
+    if (payload.type === "view_submission") {
       const callbackId = asRecord(payload.view).callback_id;
       if (callbackId !== "agentx_workflow_review_submission" && callbackId !== "agentx_feedback_review_changes_submission") return respond(200, { response_action: "clear" });
+      if (dependencies.workflow === undefined) {
+        log("workflow.submission_failed", { errorName: "WorkflowNotConfigured" });
+        return respond(200, { response_action: "errors", errors: { [callbackId === "agentx_feedback_review_changes_submission" ? "feedback_note" : "workflow_feedback"]: "Workflow approvals are temporarily unavailable. Try again shortly." } });
+      }
       try {
         await dependencies.workflow.handleSubmission(payload);
         return respond(200, { response_action: "clear" });
@@ -218,6 +258,7 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
             || action.actionId === "agentx_github_feedback_approve" || action.actionId === "agentx_github_feedback_dismiss"
             || action.actionId === "agentx_feedback_review_recommended" || action.actionId === "agentx_feedback_review_changes";
           const message = error instanceof WorkflowInteractionRefusal ? error.message
+            : error instanceof WorkflowDecisionSubmissionError ? "I couldn't save that decision. Try again."
             : workflowButton ? "I couldn't open those plan controls. Use the latest plan message and try again."
             : CLICK_FAILED_TEXT;
           await dependencies.respondEphemeral?.(action.responseUrl, message);
@@ -448,6 +489,7 @@ export function createAwsSlackInteractivityHandler() {
   const turnRecordsTableName = process.env.TURN_RECORDS_TABLE_NAME;
   const stateTableName = process.env.STATE_TABLE_NAME;
   const brokerFunctionName = process.env.BROKER_FUNCTION_NAME;
+  const lambda = new LambdaClient(clientConfiguration);
   let cached: { secrets: Promise<SlackSecrets>; loadedAt: number } | undefined;
   const secrets = (): Promise<SlackSecrets> => {
     if (!cached || Date.now() - cached.loadedAt > SECRET_CACHE_MILLISECONDS) {
@@ -472,19 +514,11 @@ export function createAwsSlackInteractivityHandler() {
     },
     openView: async (triggerId, view) => slackApi((await secrets()).botToken, "views.open", { trigger_id: triggerId, view }),
     async submit(input) {
-      await new LambdaClient(clientConfiguration).send(new InvokeCommand({
-        FunctionName: brokerFunctionName,
-        InvocationType: "Event",
-        Payload: Buffer.from(JSON.stringify({ source: "agentx.slack-ingress", action: "workflow-decision", ...input })),
-      }));
+      await invokeWorkflowDecision(lambda, brokerFunctionName!, { source: "agentx.slack-ingress", action: "workflow-decision", ...input });
     },
     async submitFeedback(input) {
       const action = input.selection === "RECOMMENDED" ? "workflow-feedback-findings-decision" : "workflow-feedback-decision";
-      await new LambdaClient(clientConfiguration).send(new InvokeCommand({
-        FunctionName: brokerFunctionName,
-        InvocationType: "Event",
-        Payload: Buffer.from(JSON.stringify({ source: "agentx.slack-ingress", action, ...input })),
-      }));
+      await invokeWorkflowDecision(lambda, brokerFunctionName!, { source: "agentx.slack-ingress", action, ...input });
     },
   }) : undefined;
   return createSlackInteractivityHandler({
@@ -748,10 +782,17 @@ export function workflowSlackHandlers(deps: {
       await deps.submit({
         taskId: value.taskId, userId: userId.data, thread: thread.data,
         expectedRevision: value.revision, artifactDigest: value.digest, decision: value.decision,
-        reason, selectedOptionalCheckIds, requestId: randomUUID(),
+        reason, selectedOptionalCheckIds,
+        requestId: workflowDecisionRequestId({ taskId: value.taskId, revision: value.revision, digest: value.digest, decision: value.decision, reason, selectedOptionalCheckIds }),
       });
     },
   };
+}
+
+/** Retries of the same Slack modal submission reuse the broker's idempotency key. */
+function workflowDecisionRequestId(input: { taskId: string; revision: number; digest: string; decision: string; reason: string; selectedOptionalCheckIds: string[] }): string {
+  const digest = createHash("sha256").update(JSON.stringify({ ...input, selectedOptionalCheckIds: [...input.selectedOptionalCheckIds].sort() }), "utf8").digest("hex");
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
 }
 
 /** The broker's press event (E14), exactly what `isAdminChangePressEvent` accepts. */

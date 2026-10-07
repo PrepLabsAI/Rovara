@@ -285,7 +285,12 @@ describe("Slack native workflow review controls", () => {
       private_metadata: (opened?.private_metadata),
       state: { values: { workflow_checks: { selected_options: { selected_options: [{ value: "coverage" }, { value: "forged" }] } } } },
     } });
+    await handlers.handleSubmission({ user: { id: requester }, view: {
+      private_metadata: (opened?.private_metadata),
+      state: { values: { workflow_checks: { selected_options: { selected_options: [{ value: "coverage" }, { value: "forged" }] } } } },
+    } });
     expect(submitted[0]).toMatchObject({ taskId, userId: requester, thread, expectedRevision: workflow.revision, artifactDigest: digest, decision: "APPROVE", selectedOptionalCheckIds: ["coverage"] });
+    expect(submitted[1]?.requestId).toBe(submitted[0]?.requestId);
   });
 
   it("refuses another Slack member and refuses a stale plan button", async () => {

@@ -620,9 +620,15 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
     }
     if (isSlackWorkflowDecisionEvent(event)) {
       try {
-        return json(await decideSlackWorkflow(dependencies, tasks, event), "slack-ingress");
+        const result = await decideSlackWorkflow(dependencies, tasks, event);
+        console.log(JSON.stringify({ component: "broker", event: "slack.workflow_decision_saved", taskId: event.taskId, requestId: event.requestId }));
+        return json(result, "slack-ingress");
       } catch (error) {
-        if (error instanceof AgentXError) return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
+        if (error instanceof AgentXError) {
+          console.log(JSON.stringify({ component: "broker", event: "slack.workflow_decision_rejected", taskId: event.taskId, requestId: event.requestId, errorCode: error.code, reason: stripCode(error.message, error.code) }));
+          return json({ error: { code: error.code, message: stripCode(error.message, error.code) } }, "slack-ingress", error.statusCode);
+        }
+        console.log(JSON.stringify({ component: "broker", event: "slack.workflow_decision_failed", taskId: event.taskId, requestId: event.requestId, errorName: error instanceof Error ? error.name : "unknown" }));
         return unexpectedErrorAnswer(error, "slack-ingress");
       }
     }
@@ -4808,15 +4814,30 @@ async function completedWorkflowItems(
       const checkedRepositories = Array.isArray(reported.workflowCheckCandidateRepositories) ? reported.workflowCheckCandidateRepositories : [];
       const checks = CheckReportSchema.safeParse(reported.checks);
       const verifying = { ...blockWorkflow(task.workflow, "candidate checks are being recorded", now), stage: "VERIFY" as const };
+      let verificationFailure = "AgentX could not verify the selected checks for the final code candidate.";
       try {
+        if (!checks.success) {
+          verificationFailure = "AgentX could not read a valid check report for the final code candidate.";
+          throw new Error("invalid check report");
+        }
+        if (checks.data.status !== "verified") {
+          verificationFailure = checks.data.notVerifiedReason === "no_checks"
+            ? "No checks ran: this project has no required checks and the task selected no optional checks. Configure or select at least one check, then retry."
+            : `AgentX could not verify the selected checks (${checks.data.notVerifiedReason ?? checks.data.status}). Retry after resolving the check runner issue.`;
+          throw new Error("checks were not verified");
+        }
         const project = await requireProject(dependencies, task.project, task.startingRevision);
         const expectedRepositoryIds = project.definition.repositories.map((repository) => repository.name).sort();
         const candidateInput = repositories as CandidateRepository[];
         const candidate = createCandidateManifest(candidateInput);
         const checkedCandidate = createCandidateManifest(checkedRepositories as CandidateRepository[]);
-        if (candidate.repositories.map((repository) => repository.repositoryId).sort().join("\n") !== expectedRepositoryIds.join("\n")
-          || checkedCandidate.digest !== candidate.digest || !checks.success) {
-          throw new Error("candidate or checks are incomplete");
+        if (candidate.repositories.map((repository) => repository.repositoryId).sort().join("\n") !== expectedRepositoryIds.join("\n")) {
+          verificationFailure = "AgentX could not identify every repository in the final code candidate.";
+          throw new Error("candidate repositories are incomplete");
+        }
+        if (checkedCandidate.digest !== candidate.digest) {
+          verificationFailure = "The code changed after its checks ran. Run the checks again on the latest code.";
+          throw new Error("checked candidate is stale");
         }
         const selectedChecks = task.workflow.checkPolicy === undefined ? [] : [
           ...task.workflow.checkPolicy.required,
@@ -4825,6 +4846,10 @@ async function completedWorkflowItems(
         const results = selectedChecks.length > 0
           ? selectedChecks.map((check, index) => ({ checkId: check.id, status: checks.data.status === "verified" && checks.data.checks[index]?.after === "passed" ? "PASS" as const : checks.data.checks[index] === undefined ? "UNKNOWN" as const : "FAILED" as const }))
           : checks.data.checks.map((check) => ({ checkId: check.id, status: checks.data.status === "verified" && check.after === "passed" ? "PASS" as const : check.after === "not_run" ? "UNKNOWN" as const : "FAILED" as const }));
+        if (results.length === 0) {
+          verificationFailure = "No required or selected optional checks ran. Configure or select at least one check, then retry.";
+          throw new Error("there are no selected check results");
+        }
         next = recordWorkflowVerification(verifying, {
           candidate,
           checks: {
@@ -4836,8 +4861,9 @@ async function completedWorkflowItems(
           },
           now,
         });
-      } catch {
-        next = blockWorkflow(verifying, "implementation finished without complete candidate-bound check evidence", now);
+      } catch (error) {
+        console.log(JSON.stringify({ component: "broker", event: "workflow.verification_blocked", taskId: task.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown", reason: verificationFailure }));
+        next = blockWorkflow(verifying, verificationFailure, now);
       }
     }
   } else if (operation.workflowMode === "REVIEW") {

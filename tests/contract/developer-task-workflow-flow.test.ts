@@ -256,6 +256,8 @@ describe("native developer task workflow", () => {
     await finishPhase("1. Add reset request UI. 2. Add expiry test.", "IMPLEMENTATION_PLAN");
     const implementation = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.workflowMode === "IMPLEMENT");
     expect(implementation).toBeDefined();
+    const implementationInvocation = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === implementation?.id)[0]?.invocation as { payload?: { prompt?: string } };
+    expect(implementationInvocation.payload?.prompt).toContain("Do not push branches or create pull requests; AgentX handles publication after the required gates.");
   });
 
   it("stores a control-plane-digested plan and only queues implementation after owner approval", async () => {
@@ -369,9 +371,10 @@ describe("native developer task workflow", () => {
     const feedbackInvocation = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === feedbackOperation?.id)[0]?.invocation as { payload?: { prompt?: string } };
     expect(feedbackInvocation.payload?.prompt).toContain("Handle the empty-input case");
     expect(feedbackInvocation.payload?.prompt).toContain("Do not reply to GitHub");
+    expect(feedbackInvocation.payload?.prompt).toContain("Do not reply to GitHub, push branches, or create pull requests; AgentX handles publication after the required gates.");
   });
 
-  it("blocks verification when the code checked differs from the final candidate", async () => {
+  it("blocks verification with a clear reason when the code changed after checks ran", async () => {
     const harness = await createDeveloperTaskBroker();
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
       requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK",
@@ -399,8 +402,64 @@ describe("native developer task workflow", () => {
       workflowReviews: ["CRITIC", "SECURITY"].map((role) => ({ candidateDigest: changedAfterCheck.digest, role, provider: "test-model", version: "test-model-v1", status: "PASS", findings: [], readOnly: true, recordedAt: "2026-10-05T12:00:00.000Z" })),
     } });
     const result = (await harness.dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body.task as { workflow: { stage: string; state: string; blockReason?: string; verification?: unknown } };
-    expect(result.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: "implementation finished without complete candidate-bound check evidence" });
+    expect(result.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: "The code changed after its checks ran. Run the checks again on the latest code." });
     expect(result.workflow).not.toHaveProperty("verification");
+  });
+
+  it("records the owner's optional check choice and gives that exact command to the worker check runner", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
+      requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK",
+    });
+    const task = started.body.task as { taskId: string };
+    const workspaceId = String(harness.db.get(`DEVTASK#${task.taskId}`, "META")?.workspaceId);
+    const prepare = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.kind === "prepare");
+    await harness.finish(workspaceId, String(prepare?.id), "SUCCEEDED");
+    const planning = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.kind === "task");
+    const plan = "# Plan\n\nFix retry handling and add a regression test.\n";
+    await harness.artifact(workspaceId, String(planning?.id), "plan.md", plan);
+    await harness.finish(workspaceId, String(planning?.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    const waiting = (await harness.dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body.task as { workflow: { revision: number; artifacts: Array<{ sha256: string }> } };
+    const taskRecord = harness.db.get(`DEVTASK#${task.taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
+    const selectedCheck = { id: "diff-check", label: "Patch whitespace", command: { cwd: "repo/demo", executable: "git", args: ["diff", "--check"], timeoutSeconds: 30 } };
+    harness.db.set({ ...taskRecord, workflow: { ...taskRecord.workflow, checkPolicy: { required: [], optional: [selectedCheck], selectedOptionalIds: [] } } });
+
+    const decision = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/workflow/decision`, {
+      requestId: randomUUID(), expectedRevision: waiting.workflow.revision, decision: "APPROVE", reason: "Proceed", artifactDigest: waiting.workflow.artifacts.at(-1)?.sha256,
+      selectedOptionalCheckIds: ["diff-check"],
+    });
+    expect(decision.status).toBe(200);
+    expect((decision.body.task as { workflow: { checkPolicy: { selectedOptionalIds: string[] } } }).workflow.checkPolicy.selectedOptionalIds).toEqual(["diff-check"]);
+    const implementation = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.workflowMode === "IMPLEMENT");
+    const invocation = harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === implementation?.id)[0]?.invocation as { payload?: { readiness?: unknown[] } };
+    expect(invocation.payload?.readiness).toEqual([selectedCheck.command]);
+  });
+
+  it("explains that verification stopped because no required or selected optional check ran", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
+      requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK",
+    });
+    const task = started.body.task as { taskId: string };
+    const workspaceId = String(harness.db.get(`DEVTASK#${task.taskId}`, "META")?.workspaceId);
+    const prepare = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.kind === "prepare");
+    await harness.finish(workspaceId, String(prepare?.id), "SUCCEEDED");
+    const planning = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.kind === "task");
+    const plan = "# Plan\n\nFix retry handling and add a regression test.\n";
+    await harness.artifact(workspaceId, String(planning?.id), "plan.md", plan);
+    await harness.finish(workspaceId, String(planning?.id), "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    const waiting = (await harness.dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body.task as { workflow: { revision: number; artifacts: Array<{ sha256: string }> } };
+    await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/workflow/decision`, {
+      requestId: randomUUID(), expectedRevision: waiting.workflow.revision, decision: "APPROVE", reason: "Proceed", artifactDigest: waiting.workflow.artifacts.at(-1)?.sha256,
+    });
+    const implementation = harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find((item) => item.workflowMode === "IMPLEMENT");
+    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
+    await harness.finish(workspaceId, String(implementation?.id), "SUCCEEDED", { result: {
+      workflowCandidateRepositories: candidate.repositories,
+      checks: { status: "not_verified", notVerifiedReason: "no_checks", source: "none", preambleVersion: "1", preambleSha256: "c".repeat(64), checks: [], extraTry: "not_needed", agentClaim: "failure" },
+    } });
+    const result = (await harness.dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body.task as { workflow: { stage: string; state: string; blockReason?: string } };
+    expect(result.workflow).toMatchObject({ stage: "VERIFY", state: "BLOCKED", blockReason: "No checks ran: this project has no required checks and the task selected no optional checks. Configure or select at least one check, then retry." });
   });
 
   it("keeps an interrupted plan blocked and requires a new read-only planning run to recover", async () => {
