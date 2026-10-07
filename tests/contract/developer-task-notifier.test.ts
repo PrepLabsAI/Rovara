@@ -235,12 +235,12 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
   it("removes stale buttons without growing a long fallback approval message", async () => {
     const plan = "P".repeat(32_700);
     const updates: Array<{ channel: string; ts: string; text: string; blocks: unknown[] }> = [];
-    let originalText: string | undefined;
+    const originalText: { value?: string } = {};
     const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
       readArtifact: async () => plan,
       createPlanCanvas: async () => { throw new SlackPostError("free_teams_cannot_create_standalone_canvases"); },
       update: async (input) => {
-        if (originalText !== undefined && input.text.length > originalText.length) throw new SlackPostError("msg_too_long");
+        if (originalText.value !== undefined && input.text.length > originalText.value.length) throw new SlackPostError("msg_too_long");
         updates.push(input);
       },
     });
@@ -257,7 +257,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.pump();
 
     const approvalCard = h.posts.at(-1)!;
-    originalText = approvalCard.text;
+    originalText.value = approvalCard.text;
     expect(approvalCard.text.length).toBeGreaterThan(32_768);
     const saved = h.db.get(`DEVTASK#${h.taskId}`, "META") as { workflow: { revision: number; artifacts: Array<{ sha256: string }> } };
     const decision = await h.dev(MAYA, "POST", `/v1/dev/tasks/${h.taskId}/workflow/decision`, {
