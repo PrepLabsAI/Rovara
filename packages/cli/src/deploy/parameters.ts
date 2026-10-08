@@ -159,6 +159,23 @@ function resolvedImage(answers: InstallAnswers, which: "worker" | "slack", outpu
   return privateImageUri(requiredImage(answers.release, which), imageTarget(answers, prefix));
 }
 
+/** The Slack execution role is granted pull access only to the same-account, same-region ECR repo selected for this image. */
+function ecrRepositoryName(uri: string, answers: Pick<InstallAnswers, "account" | "region" | "partition">): string {
+  const suffix = ECR_HOST_SUFFIX[answers.partition ?? "aws"];
+  if (suffix === undefined) throw new Error(`unknown AWS partition ${answers.partition}`);
+  const host = `${answers.account}.dkr.ecr.${answers.region}.${suffix}/`;
+  if (!uri.startsWith(host)) throw new Error("the Slack image must be in a private ECR repository in this AWS account and region");
+  const repository = uri.slice(host.length).split("@", 1)[0] ?? "";
+  // Export bundles render values they cannot know until the access stack is deployed as markers.
+  // Preserve this one known marker prefix while still validating every image-derived path segment.
+  const markerPrefix = "{{output:access.PullThroughPrefix}}/";
+  const repositoryPath = repository.startsWith(markerPrefix) ? repository.slice(markerPrefix.length) : repository;
+  if (!repositoryPath || !/^[a-z0-9]+(?:[._-][a-z0-9]+)*(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$/.test(repositoryPath)) {
+    throw new Error("the Slack image has an invalid ECR repository name");
+  }
+  return repository;
+}
+
 /** Every release package deployed with `part`: the asset parameters that stack's template declares. */
 function packageParameters(release: ReleaseManifest, part: DeployPart, outputs: Partial<Record<DeployPart, StackOutputs>>, env: string): Record<string, string> {
   const params: Record<string, string> = {};
@@ -275,9 +292,11 @@ export function stackParameters(part: DeployPart, answers: InstallAnswers, outpu
     }
 
     case "slack": {
+      const slackImage = resolvedImage(answers, "slack", outputs);
       return {
         ...base,
-        OrchestratorImageUri: resolvedImage(answers, "slack", outputs),
+        OrchestratorImageUri: slackImage,
+        OrchestratorImageRepositoryName: ecrRepositoryName(slackImage, answers),
         TaskRoleArn: required(outputs, "control-plane", "SlackOrchestratorTaskRoleArn", answers.env),
         ControlPlaneUrl: required(outputs, "control-plane", "ApiEndpoint", answers.env),
         SlackRequestQueueUrl: required(outputs, "control-plane", "SlackRequestQueueUrl", answers.env),

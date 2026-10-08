@@ -674,17 +674,26 @@ describe("templates engine", () => {
     expect(fake.inputs("UpdateTerminationProtection")).toEqual([]);
   });
 
-  it("fails a change set that fails validation with its reason, and deletes it", async () => {
+  it("includes CloudFormation validation events before deleting a failed change set", async () => {
     const fake = fakeClients({
       PutObject: [{}],
       DescribeStacks: [stack("UPDATE_COMPLETE")],
       CreateChangeSet: [{}],
       DescribeChangeSet: [{ Status: "FAILED", StatusReason: "Template format error: Unresolved resource dependencies [Missing]" }],
+      DescribeEvents: [{ OperationEvents: [{
+        EventType: "VALIDATION_ERROR",
+        ValidationName: "PROPERTY_VALIDATION",
+        ValidationStatus: "FAILED",
+        ValidationPath: "/Resources/ActionLogsDelivery/Properties/DeliverySourceName",
+        ValidationStatusReason: "The referenced delivery source does not exist",
+      }] }],
       DeleteChangeSet: [{}],
     });
     await expect(deployer(fake).deploy(request("foundation"))).rejects.toThrow(
-      "change set for agentx-staging-foundation failed: Template format error: Unresolved resource dependencies [Missing]",
+      "change set for agentx-staging-foundation failed: Template format error: Unresolved resource dependencies [Missing]; CloudFormation validation: PROPERTY_VALIDATION at /Resources/ActionLogsDelivery/Properties/DeliverySourceName: The referenced delivery source does not exist",
     );
+    expect(fake.names().indexOf("cloudFormation:DescribeEvents")).toBeLessThan(fake.names().indexOf("cloudFormation:DeleteChangeSet"));
+    expect(fake.inputs("DescribeEvents")).toEqual([{ StackName: "agentx-staging-foundation", ChangeSetName: CHANGE_SET }]);
     expect(fake.inputs("DeleteChangeSet")).toEqual([{ StackName: "agentx-staging-foundation", ChangeSetName: CHANGE_SET }]);
     expect(fake.inputs("ExecuteChangeSet")).toEqual([]);
   });

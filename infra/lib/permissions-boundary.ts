@@ -87,7 +87,7 @@ export function applyPermissionsBoundaryParameter(stack: Stack, env: string, opt
     type: "String",
     default: "",
     allowedPattern: "^$|^arn:aws[a-z-]*:iam::[0-9]{12}:policy/.+$",
-    description: "Optional IAM permissions boundary policy ARN applied to every role this environment creates; empty uses the default boundary",
+    description: "Optional IAM boundary ARN; empty uses AgentX's default",
   });
   const condition = new CfnCondition(stack, CONDITION_ID, {
     expression: Fn.conditionNot(Fn.conditionEquals(parameter.valueAsString, "")),

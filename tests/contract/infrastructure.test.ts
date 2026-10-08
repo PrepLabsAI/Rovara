@@ -134,6 +134,7 @@ describe("hosted Slack orchestrator service", () => {
       NetworkConfiguration: { AwsvpcConfiguration: Match.objectLike({ AssignPublicIp: "DISABLED", Subnets: { Ref: "PrivateSubnetIds" } }) },
     });
     template.hasParameter("OrchestratorImageUri", { AllowedPattern: "^.+@sha256:[a-f0-9]{64}$" });
+    template.hasParameter("OrchestratorImageRepositoryName", { AllowedPattern: "^(?:\\{\\{output:access\\.PullThroughPrefix\\}\\}/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$" });
   });
 
   it("allows only outbound HTTPS and pulls only the orchestrator image", () => {
@@ -144,7 +145,9 @@ describe("hosted Slack orchestrator service", () => {
     const statements = policyStatements(template);
     expect(statements.filter((statement) => statement.Resource === "*").flatMap(actionsOf)).toEqual(["ecr:GetAuthorizationToken"]);
     const pull = statements.find((statement) => actionsOf(statement).includes("ecr:BatchGetImage"));
-    expect(JSON.stringify(pull?.Resource)).toContain("repository/agentx-slack-orchestrator");
+    expect(pull?.Sid).toBe("EcrSelectedImage");
+    expect(JSON.stringify(pull?.Resource)).toContain("repository/");
+    expect(JSON.stringify(pull?.Resource)).toContain("OrchestratorImageRepositoryName");
   });
 });
 
