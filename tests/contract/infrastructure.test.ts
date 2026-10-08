@@ -58,6 +58,29 @@ describe("hosted Slack control-plane infrastructure", () => {
     });
   });
 
+  it("exposes a broker-verified GitHub webhook endpoint without a user JWT", () => {
+    template.hasResourceProperties("AWS::ApiGatewayV2::Route", {
+      RouteKey: "POST /v1/github/webhooks",
+      AuthorizationType: "NONE",
+      Target: { "Fn::Join": ["", ["integrations/", { Ref: Match.stringLikeRegexp("^BrokerIntegration") }]] },
+    });
+    template.hasOutput("GithubWebhookUrl", {});
+  });
+
+  it("indexes due GitHub webhook retries and invokes the broker from a bounded recovery schedule", () => {
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      GlobalSecondaryIndexes: Match.arrayWith([Match.objectLike({
+        IndexName: "github-webhook-recovery",
+        KeySchema: [{ AttributeName: "webhookRecoveryPk", KeyType: "HASH" }, { AttributeName: "webhookRecoverySk", KeyType: "RANGE" }],
+      })]),
+    });
+    template.hasResourceProperties("AWS::Scheduler::Schedule", {
+      ScheduleExpression: "rate(1 minute)",
+      FlexibleTimeWindow: { Mode: "OFF" },
+      Target: Match.objectLike({ Input: '{"source":"agentx.github-webhook-recovery"}', RetryPolicy: { MaximumRetryAttempts: 2, MaximumEventAgeInSeconds: 300 } }),
+    });
+  });
+
   it("invokes the broker every minute to recover lost workflow dispatches", () => {
     template.hasResourceProperties("AWS::Scheduler::Schedule", { ScheduleExpression: "rate(1 minute)", FlexibleTimeWindow: { Mode: "OFF" },
       Target: Match.objectLike({ Input: '{"source":"agentx.workflow-dispatch-recovery"}', RetryPolicy: { MaximumRetryAttempts: 2, MaximumEventAgeInSeconds: 300 } }) });
@@ -70,10 +93,10 @@ describe("hosted Slack control-plane infrastructure", () => {
     });
   });
 
-  it("lets only this account's own schedules assume the scheduler recovery role (confused deputy)", () => {
+  it("lets only this account's own schedules assume the scheduler recovery roles (confused deputy)", () => {
     const roles = Object.entries(template.findResources("AWS::IAM::Role"))
-      .filter(([id]) => id.startsWith("WorkflowDispatchRecoveryRole"));
-    expect(roles).toHaveLength(1);
+      .filter(([id]) => id.startsWith("GithubWebhookRecoveryRole") || id.startsWith("WorkflowDispatchRecoveryRole"));
+    expect(roles).toHaveLength(2);
     for (const [, role] of roles) {
       expect((role as { Properties: { AssumeRolePolicyDocument: { Statement: unknown[] } } }).Properties.AssumeRolePolicyDocument.Statement).toEqual([expect.objectContaining({
         Principal: { Service: "scheduler.amazonaws.com" },

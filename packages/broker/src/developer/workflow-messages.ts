@@ -258,8 +258,8 @@ function waitingForMerge(workflow: WorkflowSnapshot): string | undefined {
   const merged = required.filter((pullRequest) => pullRequest.state === "MERGED").length;
   if (merged === 0) {
     return required.length === 1
-      ? `Draft pull request opened: ${name(required[0]!)}. Review it and merge it on GitHub, then close this task here.`
-      : `Draft pull requests opened: ${required.map(name).join(", ")}. Review them and merge them on GitHub, then close this task here.`;
+      ? `Draft pull request opened: ${name(required[0]!)}. Review it and merge it on GitHub; I'll finish this task when it's merged.`
+      : `Draft pull requests opened: ${required.map(name).join(", ")}. Review them and merge them on GitHub; I'll finish this task when they're all merged.`;
   }
   const remaining = required.filter((pullRequest) => pullRequest.state !== "MERGED")
     .map((pullRequest) => `${name(pullRequest)} is still ${pullRequest.state === "CLOSED" ? "closed" : "open"}.`).join(" ");
@@ -322,7 +322,7 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
     case "REVIEW/BLOCKED": return reviewBlocked(context, exits);
     case "PULL_REQUEST/READY": return plain(`Checks and reviews passed. Opening a draft pull request.${partialReviewNote(workflow)}`);
     case "PULL_REQUEST/BLOCKED": return { text: `Checks and reviews passed. ${plainBlockReason(workflow.blockReason)}`, buttons: [exits.retryPublish, exits.close] };
-    // AgentX does not follow the pull request on GitHub: the owner closes the task once it is merged (it stays on GitHub).
+    // The owner can close the task while its pull request is open (the pull request stays on GitHub).
     case "WAIT_FOR_MERGE/WAITING": {
       const text = waitingForMerge(workflow);
       return text === undefined ? undefined : { text, buttons: [exits.close] };
