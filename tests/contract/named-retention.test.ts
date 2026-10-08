@@ -51,9 +51,15 @@ describe("retained resources in a named environment", () => {
     }
   });
 
-  it("leave only the Cognito user pool as Retain: its deletion protection would fail a rollback's delete, and its name is not unique, so it never blocks a retry", () => {
+  it("retains the Cognito user pool and attempt-specific Slack diagnostic records", () => {
     const retained = Object.entries(named).flatMap(([stackName, resources]) => kept(resources, "Retain").map((entry) => `${stackName} ${entry}`));
-    expect(retained).toEqual(["agentx-staging-identity UserPool AWS::Cognito::UserPool"]);
+    expect(retained).toEqual([
+      "agentx-staging-identity UserPool AWS::Cognito::UserPool",
+      "agentx-staging-slack ActionLogs AWS::Logs::LogGroup",
+      "agentx-staging-slack ActionLogsKey AWS::KMS::Key",
+      "agentx-staging-slack ActionLogsSource AWS::Logs::DeliverySource",
+      "agentx-staging-slack Logs AWS::Logs::LogGroup",
+    ]);
   });
 
   it("do not change the legacy deployment", () => {

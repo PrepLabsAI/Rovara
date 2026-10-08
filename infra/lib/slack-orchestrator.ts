@@ -15,7 +15,9 @@ import {
   aws_cloudwatch_actions as cloudwatchActions,
   aws_ec2 as ec2,
   aws_ecs as ecs,
+  aws_events as events,
   aws_iam as iam,
+  aws_kms as kms,
   aws_logs as logs,
   aws_sns as sns,
 } from "aws-cdk-lib";
@@ -39,6 +41,11 @@ export class SlackOrchestratorStack extends Stack {
       type: "String",
       allowedPattern: "^.+@sha256:[a-f0-9]{64}$",
       description: "Immutable private ECR linux/arm64 Slack orchestrator image URI",
+    });
+    const imageRepositoryName = new CfnParameter(this, "OrchestratorImageRepositoryName", {
+      type: "String",
+      allowedPattern: "^(?:\\{\\{output:access\\.PullThroughPrefix\\}\\}/)?[a-z0-9]+(?:[._-][a-z0-9]+)*(?:/[a-z0-9]+(?:[._-][a-z0-9]+)*)*$",
+      description: "ECR repository containing the selected Slack image",
     });
     const taskRoleArn = new CfnParameter(this, "TaskRoleArn", {
       type: "String",
@@ -86,10 +93,109 @@ export class SlackOrchestratorStack extends Stack {
       }],
       tags: [{ key: "Application", value: "AgentX" }],
     });
-    const logGroup = new logs.LogGroup(this, "Logs", {
-      retention: logs.RetentionDays.ONE_MONTH,
-      removalPolicy: RemovalPolicy.DESTROY,
+    const cluster = new ecs.CfnCluster(this, "Cluster", {
+      clusterSettings: [{ name: "containerInsights", value: "disabled" }],
+      tags: [{ key: "Application", value: "AgentX" }],
     });
+    const stackAttempt = Fn.select(2, Fn.split("/", this.stackId));
+    const attemptShort = Fn.select(0, Fn.split("-", stackAttempt));
+    const logGroup = new logs.LogGroup(this, "Logs", {
+      ...(naming.env === undefined ? {} : { logGroupName: Fn.join("", ["/agentx/", naming.env, "/slack/", stackAttempt, "/application"]) }),
+      retention: logs.RetentionDays.ONE_MONTH,
+      removalPolicy: naming.env === undefined ? RemovalPolicy.DESTROY : RemovalPolicy.RETAIN,
+    });
+    if (naming.env !== undefined) (logGroup.node.defaultChild as logs.CfnLogGroup).addMetadata("agentx:retain-on-create-rollback", true);
+
+    let actionLogGroup: logs.LogGroup | undefined;
+    let actionLogDelivery: logs.CfnDelivery | undefined;
+    let deploymentFailureRule: events.CfnRule | undefined;
+    if (naming.env !== undefined) {
+      const actionKey = new kms.Key(this, "ActionLogsKey", {
+        description: `AgentX ${naming.env} ECS action log encryption`,
+        enableKeyRotation: true,
+        removalPolicy: RemovalPolicy.RETAIN,
+      });
+      const actionLogGroupName = Fn.join("", ["/aws/vendedlogs/ecs/action-logs/agentx-", naming.env, "-", stackAttempt]);
+      const actionLogGroupArn = Fn.join("", ["arn:", Aws.PARTITION, ":logs:", Aws.REGION, ":", Aws.ACCOUNT_ID, ":log-group:", actionLogGroupName]);
+      const actionLogStreamArn = Fn.join("", [actionLogGroupArn, ":log-stream:*"]);
+      actionLogGroup = new logs.LogGroup(this, "ActionLogs", {
+        logGroupName: actionLogGroupName,
+        retention: logs.RetentionDays.ONE_MONTH,
+        encryptionKey: actionKey,
+        removalPolicy: RemovalPolicy.RETAIN,
+      });
+      (actionKey.node.defaultChild as kms.CfnKey).addMetadata("agentx:retain-on-create-rollback", true);
+      const actionLogGroupResource = actionLogGroup.node.defaultChild as logs.CfnLogGroup;
+      actionLogGroupResource.addMetadata("agentx:retain-on-create-rollback", true);
+      actionLogGroupResource.addPropertyOverride("ResourcePolicyDocument", {
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Sid: "AllowEcsActionLogDelivery",
+            Effect: "Allow",
+            Principal: { Service: "delivery.logs.amazonaws.com" },
+            Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
+            Resource: actionLogStreamArn,
+            Condition: {
+              StringEquals: { "aws:SourceAccount": this.account },
+              ArnLike: { "aws:SourceArn": cluster.attrArn },
+            },
+          },
+          {
+            Sid: "AllowEcsDeploymentFailureEvents",
+            Effect: "Allow",
+            Principal: { Service: "events.amazonaws.com" },
+            Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
+            Resource: actionLogStreamArn,
+          },
+        ],
+      });
+      actionKey.addToResourcePolicy(new iam.PolicyStatement({
+        sid: "AllowCloudWatchLogsEncryptionForActionLogGroup",
+        principals: [new iam.ServicePrincipal(Fn.join("", ["logs.", Aws.REGION, ".amazonaws.com"]))],
+        actions: ["kms:Encrypt", "kms:Decrypt", "kms:ReEncrypt*", "kms:GenerateDataKey*", "kms:Describe*"],
+        resources: ["*"],
+        conditions: { ArnLike: { "kms:EncryptionContext:aws:logs:arn": Fn.join("", [
+          "arn:", Aws.PARTITION, ":logs:", Aws.REGION, ":", Aws.ACCOUNT_ID, ":log-group:", actionLogGroupName,
+        ]) } },
+      }));
+
+      const actionSource = new logs.CfnDeliverySource(this, "ActionLogsSource", {
+        name: Fn.join("", ["agentx-", naming.env, "-", attemptShort, "-action-source"]),
+        resourceArn: cluster.attrArn,
+        logType: "ACTION_LOGS",
+      });
+      // Preserve the per-attempt diagnostic source if a first stack create rolls back. The
+      // delivery itself must be removed before this source on rollback/delete.
+      actionSource.applyRemovalPolicy(RemovalPolicy.RETAIN);
+      actionSource.addMetadata("agentx:retain-on-create-rollback", true);
+      const actionDestination = new logs.CfnDeliveryDestination(this, "ActionLogsDestination", {
+        name: Fn.join("", ["agentx-", naming.env, "-", attemptShort, "-action-dest"]),
+        deliveryDestinationType: "CWL",
+        destinationResourceArn: actionLogGroup.logGroupArn,
+        outputFormat: "json",
+      });
+      actionLogDelivery = new logs.CfnDelivery(this, "ActionLogsDelivery", {
+        deliverySourceName: actionSource.name,
+        deliveryDestinationArn: actionDestination.attrArn,
+      });
+      actionLogDelivery.addResourceDependency(actionLogGroupResource);
+      actionLogDelivery.addResourceDependency(actionSource);
+      actionLogDelivery.addResourceDependency(actionDestination);
+
+      deploymentFailureRule = new events.CfnRule(this, "ServiceDeploymentFailureEvents", {
+        description: `ECS deployment failure events for AgentX ${naming.env} Slack test attempt`,
+        name: Fn.join("", ["agentx-", naming.env, "-", attemptShort, "-service-failures"]),
+        state: "ENABLED",
+        eventPattern: {
+          source: ["aws.ecs"],
+          detailType: ["ECS Deployment State Change"],
+          detail: { eventName: ["SERVICE_DEPLOYMENT_FAILED"] },
+          resources: [{ prefix: Fn.join("", ["arn:", Aws.PARTITION, ":ecs:", Aws.REGION, ":", Aws.ACCOUNT_ID, ":service/", cluster.ref, "/"]) }],
+        },
+        targets: [{ id: "ActionLogs", arn: actionLogGroup.logGroupArn }],
+      });
+    }
     // The awslogs driver does not extract embedded metric format, so the service logs
     // {"event":"metric","metric":<name>,"count":<n>} lines and these filters publish them.
     const serviceMetric = (metric: string, dimensions?: Record<string, string>) => {
@@ -208,8 +314,9 @@ export class SlackOrchestratorStack extends Stack {
       resources: ["*"],
     }));
     executionRole.addToPolicy(new iam.PolicyStatement({
+      sid: "EcrSelectedImage",
       actions: ["ecr:BatchCheckLayerAvailability", "ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer"],
-      resources: [`arn:${this.partition}:ecr:${this.region}:${this.account}:repository/${AGENTX_SLACK_ORCHESTRATOR_REPOSITORY}`],
+      resources: [Fn.sub(`arn:\${AWS::Partition}:ecr:\${AWS::Region}:\${AWS::AccountId}:repository/\${RepositoryName}`, { RepositoryName: imageRepositoryName.valueAsString })],
     }));
     // Under environment naming, the Slack service pulls AgentX images through the ECR pull-through
     // cache: the first pull of any tag imports it into the environment's cache prefix, which needs
@@ -231,10 +338,6 @@ export class SlackOrchestratorStack extends Stack {
     }
     logGroup.grantWrite(executionRole);
 
-    const cluster = new ecs.CfnCluster(this, "Cluster", {
-      clusterSettings: [{ name: "containerInsights", value: "disabled" }],
-      tags: [{ key: "Application", value: "AgentX" }],
-    });
     const taskDefinition = new ecs.CfnTaskDefinition(this, "TaskDefinition", {
       family: naming.taskFamily,
       requiresCompatibilities: ["FARGATE"],
@@ -293,6 +396,8 @@ export class SlackOrchestratorStack extends Stack {
         },
       },
     });
+    if (actionLogDelivery !== undefined) service.addResourceDependency(actionLogDelivery);
+    if (deploymentFailureRule !== undefined) service.addResourceDependency(deploymentFailureRule);
 
     new CfnOutput(this, "ClusterName", { value: cluster.ref });
     new CfnOutput(this, "ServiceName", { value: service.attrName });

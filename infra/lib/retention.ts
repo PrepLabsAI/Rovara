@@ -12,6 +12,9 @@ const ALWAYS_RETAIN = new Set(["AWS::Cognito::UserPool"]);
 export class RetainExceptOnCreate implements IAspect {
   visit(node: IConstruct): void {
     if (!CfnResource.isCfnResource(node) || ALWAYS_RETAIN.has(node.cfnResourceType)) return;
+    // Diagnostic records are attempt-specific and intentionally survive even a failed initial
+    // create so operators can inspect why the deployment rolled back.
+    if (node.getMetadata("agentx:retain-on-create-rollback") === true) return;
     if (node.cfnOptions.deletionPolicy === CfnDeletionPolicy.RETAIN) node.cfnOptions.deletionPolicy = CfnDeletionPolicy.RETAIN_EXCEPT_ON_CREATE;
   }
 }

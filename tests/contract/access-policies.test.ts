@@ -15,6 +15,16 @@ const ROLE_SCOPED_POLICY_ACTIONS = ["iam:PutRolePolicy", "iam:DeleteRolePolicy",
 const actions = (statements: ReturnType<typeof serviceRoleStatements>) => statements.flatMap((s) => s.Action);
 
 describe("service role policy", () => {
+  it("lets CloudFormation validate only this environment's ECS failure-event rule", () => {
+    const statement = serviceRoleStatements(scope).find((s) => s.Sid === "EcsFailureEventsRule")!;
+    expect(statement).toEqual({
+      Sid: "EcsFailureEventsRule",
+      Effect: "Allow",
+      Action: ["events:*"],
+      Resource: "arn:aws:events:us-east-1:123456789012:rule/agentx-staging-*-service-failures",
+    });
+  });
+
   it("scopes every IAM action to the environment's role path, except service-linked roles", () => {
     for (const statement of serviceRoleStatements(scope).filter((s) => s.Action.some((a) => a.startsWith("iam:")))) {
       const resources = [statement.Resource].flat();
@@ -223,6 +233,16 @@ describe("default permission boundary", () => {
     for (const service of ["iam", "organizations", "account", "sts"]) expect(BOUNDARY_SERVICES).not.toContain(service);
     // The service role's own wildcard services must all pass the boundary it runs under.
     expect(SERVICE_ROLE_SERVICES.filter((s) => !BOUNDARY_SERVICES.includes(s))).toEqual([]);
+  });
+
+  it("allows the narrowly scoped ECS failure-rule validation read", () => {
+    expect(allows.find((s) => s.Sid === "EcsFailureEventsRule")).toEqual({
+      Sid: "EcsFailureEventsRule",
+      Effect: "Allow",
+      Action: ["events:*"],
+      Resource: "arn:aws:events:us-east-1:123456789012:rule/agentx-staging-*-service-failures",
+    });
+    expect(allows.find((s) => s.Sid === "Services")!.Action).not.toContain("events:*");
   });
 
   it("allows only sts:GetCallerIdentity from STS, never AssumeRole", () => {
