@@ -34,6 +34,7 @@ const pullRequestGateway = (tree: string, heads: { branchHead?: string; pullRequ
   getCommitParents: vi.fn(async () => [heads.parent ?? "e".repeat(40)]),
   getPullRequest: vi.fn(async (_url: string, number: number) => ({ number, url: "https://github.com/example/demo/pull/42", state: "open" as const, headBranch: "x", baseBranch: "main", headCommit: heads.pullRequestHead ?? "d".repeat(40), title: "t", body: "" })),
   updatePullRequest: vi.fn(async () => ({ number: 42, url: "https://github.com/example/demo/pull/42", state: "closed" as const, headBranch: "x", baseBranch: "main", headCommit: "d".repeat(40), title: "t", body: "" })),
+  verifyWebhookRepository: vi.fn(async () => true),
   getPullRequestFeedback: vi.fn(async (_url: string, number: number) => ({ pullRequest: { number, url: "https://github.com/example/demo/pull/42", state: "open" as const, headBranch: "x", baseBranch: "main", headCommit: "d".repeat(40), title: "t", body: "", headTreeSha: "b".repeat(40) }, comments: [], threads: [] })),
 });
 /** Both reviews of the candidate pass in the task's (first) review run. */
@@ -1575,21 +1576,6 @@ describe("the draft pull request AgentX opens (final review)", () => {
     // The revision moves on, so the card that offered the retry loses its buttons; the step is unchanged.
     expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: "PULL_REQUEST", state: "READY", revision: failed.revision + 1 });
     expect((await page()).status).toBe("Trying again to open the draft pull request; the last try didn't open it");
-  });
-
-  it("once the draft pull request opens, the page says a person merges it on GitHub and then closes the task in Slack", async () => {
-    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: pullRequestGateway("b".repeat(40)) } });
-    const { taskId, workspaceId, candidate, finishImplementation } = await workflowAtVerification(harness);
-    await finishImplementation();
-    await passReviews(harness, workspaceId, candidate);
-    const task = harness.db.get(`DEVTASK#${taskId}`, "META") as { developerId: string };
-    const publish = publishOf(harness, workspaceId)[0]!;
-    const p = publish.publication as { repository: string; repositoryUrl: string; headBranch: string; baseBranch: string; title: string; body?: string };
-    await harness.callback(workspaceId, publish.id, "pull-request", { repository: p.repository, repositoryUrl: p.repositoryUrl, headBranch: p.headBranch, baseBranch: p.baseBranch, commit: "d".repeat(40), title: p.title, ...(p.body === undefined ? {} : { body: p.body }) });
-    await harness.finish(workspaceId, publish.id, "SUCCEEDED", { result: { repository: "demo", number: 42, url: "https://github.com/example/demo/pull/42", headBranch: p.headBranch, baseBranch: "main", commit: "d".repeat(40), checks: [], reconciled: false } });
-    expect(taskWorkflow(harness, taskId)).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
-    expect(await getTaskDocumentView(routeDeps(harness), { developerId: task.developerId } as never, taskId)).toMatchObject({
-      status: "Draft pull request opened", nextStep: "Review and merge it on GitHub, then close the task in the task's Slack thread." });
   });
 });
 

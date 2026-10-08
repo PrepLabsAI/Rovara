@@ -249,6 +249,13 @@ export class ControlPlaneStack extends Stack {
       sortKey: { name: WORKSPACE_PROJECT_INDEX.sortKey, type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
+    // Sparse due-time index: only received, retryable, or leased GitHub deliveries carry these keys.
+    state.addGlobalSecondaryIndex({
+      indexName: "github-webhook-recovery",
+      partitionKey: { name: "webhookRecoveryPk", type: dynamodb.AttributeType.STRING },
+      sortKey: { name: "webhookRecoverySk", type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
     // Gap 6: sparse due-time index over workflow dispatch rows, so the recovery sweep reads due rows first.
     state.addGlobalSecondaryIndex({
       indexName: WORKFLOW_DISPATCH_DUE_INDEX.name,
@@ -640,11 +647,33 @@ export class ControlPlaneStack extends Stack {
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
-    // Confused-deputy guard: only this account's own EventBridge schedules may assume the recovery role.
+    // GitHub signs webhook bodies itself; the broker verifies its HMAC and linked repository scope.
+    new apigwv2.CfnRoute(this, "GithubWebhookRoute", {
+      apiId: api.ref,
+      routeKey: "POST /v1/github/webhooks",
+      target: `integrations/${integration.ref}`,
+      authorizationType: "NONE",
+    });
+    // Confused-deputy guard: only this account's own EventBridge schedules may assume the recovery roles.
     const schedulerPrincipal = new iam.ServicePrincipal("scheduler.amazonaws.com", { conditions: {
       StringEquals: { "aws:SourceAccount": this.account },
       ArnLike: { "aws:SourceArn": `arn:${this.partition}:scheduler:${this.region}:${this.account}:schedule/*` },
     } });
+    const githubRecoveryRole = new iam.Role(this, "GithubWebhookRecoveryRole", {
+      assumedBy: schedulerPrincipal,
+    });
+    broker.grantInvoke(githubRecoveryRole);
+    new scheduler.CfnSchedule(this, "GithubWebhookRecoverySchedule", {
+      flexibleTimeWindow: { mode: "OFF" },
+      scheduleExpression: "rate(1 minute)",
+      state: "ENABLED",
+      target: {
+        arn: broker.functionArn,
+        roleArn: githubRecoveryRole.roleArn,
+        input: JSON.stringify({ source: "agentx.github-webhook-recovery" }),
+        retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 300 },
+      },
+    });
     // Gap 6: re-run any workflow dispatch (an automatic review start) left behind after its result committed.
     const workflowDispatchRecoveryRole = new iam.Role(this, "WorkflowDispatchRecoveryRole", {
       assumedBy: schedulerPrincipal,
@@ -916,6 +945,7 @@ export class ControlPlaneStack extends Stack {
     new CfnOutput(this, "ArtifactBucketName", { value: artifacts.bucketName });
     new CfnOutput(this, "DispatchDeadLetterQueueUrl", { value: deadLetterQueue.queueUrl });
     new CfnOutput(this, "SlackEventsUrl", { value: `${api.attrApiEndpoint}/v1/slack/events` });
+    new CfnOutput(this, "GithubWebhookUrl", { value: `${api.attrApiEndpoint}/v1/github/webhooks` });
     new CfnOutput(this, "SlackInteractivityUrl", { value: `${api.attrApiEndpoint}/v1/slack/interactions` });
     new CfnOutput(this, "SlackSecretArn", { value: slackSecret.secretArn });
     new CfnOutput(this, "SlackRequestQueueUrl", { value: slackRequestQueue.queueUrl });

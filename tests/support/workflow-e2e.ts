@@ -128,6 +128,7 @@ export class FakeGitHub {
       if (update.state !== undefined) pullRequest.state = update.state;
       return this.details(pullRequest);
     },
+    verifyWebhookRepository: async (): Promise<boolean> => true,
     getBranchHead: async (_repositoryUrl: string, branch: string): Promise<string> => {
       const pushed = this.pushes.get(branch);
       if (pushed === undefined) throw new Error(`GitHub has no branch ${branch}`);

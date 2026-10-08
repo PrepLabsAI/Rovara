@@ -781,6 +781,41 @@ export function registerWorkflowPullRequest(currentInput: unknown, pullRequestIn
   });
 }
 
+export function observeWorkflowPullRequest(currentInput: unknown, observationInput: unknown, now: string): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  const observation = z.object({
+    repositoryId: z.string().trim().min(1).max(200),
+    number: z.number().int().positive(),
+    candidateDigest: DigestSchema,
+    state: z.enum(["OPEN", "CLOSED", "MERGED", "UNKNOWN"]),
+    source: z.literal("GITHUB_API"),
+    observedAt: z.string().datetime(),
+  }).strict().safeParse(observationInput);
+  if (!observation.success || (current.stage !== "WAIT_FOR_MERGE" && current.stage !== "MERGED") || current.pullRequests === undefined) {
+    throw new WorkflowTransitionError("workflow is not waiting for GitHub pull request observations");
+  }
+  const existing = current.pullRequests.find((pullRequest) => pullRequest.repositoryId === observation.data.repositoryId
+    && pullRequest.number === observation.data.number);
+  if (existing === undefined || existing.candidateDigest !== observation.data.candidateDigest) {
+    throw new WorkflowTransitionError("GitHub observation does not match an expected candidate pull request");
+  }
+  const pullRequests = current.pullRequests.map((pullRequest) => pullRequest === existing
+    ? { ...pullRequest, state: observation.data.state, observedAt: observation.data.observedAt }
+    : pullRequest);
+  const complete = pullRequests.filter((pullRequest) => pullRequest.required).every((pullRequest) => pullRequest.state === "MERGED");
+  const { outcome: _priorOutcome, ...withoutPriorOutcome } = current;
+  void _priorOutcome;
+  return WorkflowSnapshotSchema.parse({
+    ...withoutPriorOutcome,
+    revision: current.revision + 1,
+    stage: complete ? "MERGED" : "WAIT_FOR_MERGE",
+    state: complete ? "COMPLETE" : "WAITING",
+    ...(complete ? { outcome: "MERGED" as const } : {}),
+    pullRequests,
+    updatedAt: now,
+  });
+}
+
 function validSnapshot(input: unknown): WorkflowSnapshot {
   const parsed = WorkflowSnapshotSchema.safeParse(input);
   if (!parsed.success) throw new WorkflowTransitionError("workflow snapshot is invalid");
