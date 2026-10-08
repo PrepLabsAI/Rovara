@@ -192,7 +192,8 @@ export interface ChosenRequest { choiceId: string; instructions: string; request
 export interface WorkflowChoiceStore {
   /** Throws WorkflowChoiceWaitingError when a choice is already waiting in the thread. */
   save(input: { thread: SlackThread; userId: string; instructions: string }): Promise<{ choiceId: string }>;
-  pending(thread: SlackThread): Promise<{ choiceId: string; userId: string } | undefined>;
+  /** `suggested`: Task 21's routed card, which (unlike the plain Quick or Full question) also takes `answer`. */
+  pending(thread: SlackThread): Promise<{ choiceId: string; userId: string; suggested?: true } | undefined>;
   /**
    * Fixes the path for the waiting request and holds it while it starts (a short lease), returning it to start. The
    * same path again, once `release`d, returns it again, so a start that failed can be retried.
@@ -253,7 +254,8 @@ export function createDynamoWorkflowChoiceStore(input: { documentClient: Documen
     },
     async pending(thread) {
       const item = await read(thread);
-      return item === undefined ? undefined : { choiceId: item.choiceId as string, userId: item.userId as string };
+      return item === undefined ? undefined : { choiceId: item.choiceId as string, userId: item.userId as string,
+        ...(chosenRequest(item).suggestion === undefined ? {} : { suggested: true as const }) };
     },
     async choose({ thread, userId, workflowPath, choiceId }) {
       const refusal = (item: Record<string, unknown> | undefined): Exclude<WorkflowChoiceOutcome, "started"> | undefined => {

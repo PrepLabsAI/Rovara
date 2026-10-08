@@ -46,6 +46,8 @@ function harness(options: {
   routing?: { fail?: number };
   /** Task 21: the requester's typed `answer` sends the waiting request to the chat agent. */
   answerChoice?: { outcome?: WorkflowChoiceOutcome };
+  /** Task 21: the waiting choice is a routed card (it carries a suggestion), so it also takes `answer`. */
+  suggestedChoice?: boolean;
 } = {}) {
   const stopCalls: Array<{ thread: unknown; userId: string }> = [];
   const workflowStarts: Array<{ thread: unknown; userId: string; instructions: string; requestId: string }> = [];
@@ -168,7 +170,7 @@ function harness(options: {
       pendingWorkflowChoice: async (thread: { threadTs: string }) => {
         pendingLookups.push(thread.threadTs);
         const userId = options.pendingChoice?.[thread.threadTs];
-        return userId === undefined ? undefined : { choiceId: "11111111-1111-4111-8111-111111111111", userId };
+        return userId === undefined ? undefined : { choiceId: "11111111-1111-4111-8111-111111111111", userId, ...(options.suggestedChoice === true ? { suggested: true as const } : {}) };
       },
     }),
     ...(options.routing === undefined ? {} : {
@@ -1025,7 +1027,7 @@ describe("starting a task from a Slack mention (gap 3)", () => {
     });
 
     it("reads the requester's typed `answer` or `just answer` in a waiting thread, by mention or plain reply", async () => {
-      const waiting = harness({ ...starting, ...waitingForPratik, answerChoice: {} });
+      const waiting = harness({ ...starting, ...waitingForPratik, answerChoice: {}, suggestedChoice: true });
       await send(waiting.handler, threadReply("EvAnswer1", `<@${bot}> just answer`));
       await send(waiting.handler, threadReply("EvAnswer2", "answer please", { type: "message" }));
       expect(waiting.answers).toEqual([{ thread: choiceThread, userId: pratik }, { thread: choiceThread, userId: pratik }]);
@@ -1037,13 +1039,26 @@ describe("starting a task from a Slack mention (gap 3)", () => {
       await send(waiting.handler, threadReply("EvAnswer3", "answer", { type: "message", user: "U0TEAMMATE1" }));
       expect(waiting.claimedEvents()).toEqual(["EvAnswer1", "EvAnswer2"]);
       // A refusal is said privately.
-      const refused = harness({ ...starting, ...waitingForPratik, answerChoice: { outcome: "starting" } });
+      const refused = harness({ ...starting, ...waitingForPratik, answerChoice: { outcome: "starting" }, suggestedChoice: true });
       await send(refused.handler, threadReply("EvAnswer4", `<@${bot}> answer`));
       expect(refused.ephemerals.map((entry) => entry.text)).toEqual([workflowChoiceRefusal("starting")]);
       // Where `answer` cannot be sent to the chat agent, it is an ordinary reply.
-      const without = harness({ ...starting, ...waitingForPratik });
+      const without = harness({ ...starting, ...waitingForPratik, suggestedChoice: true });
       await send(without.handler, threadReply("EvAnswer5", `<@${bot}> answer`));
       expect(without.queue.map((entry) => entry.message.text)).toEqual(["answer"]);
+    });
+
+    it("leaves `answer` alone on the plain Quick or Full question, which takes only a path", async () => {
+      const plainQuestion = harness({ ...starting, ...waitingForPratik, answerChoice: {} });
+      // A plain reply is not claimed at all; a mention is an ordinary chat request in the thread.
+      await send(plainQuestion.handler, threadReply("EvAnswer6", "just answer", { type: "message" }));
+      await send(plainQuestion.handler, threadReply("EvAnswer7", `<@${bot}> answer`));
+      expect(plainQuestion.answers).toEqual([]);
+      expect(plainQuestion.claimedEvents()).toEqual(["EvAnswer7"]);
+      expect(plainQuestion.queue.map((entry) => entry.message.text)).toEqual(["answer"]);
+      // A path still answers it.
+      await send(plainQuestion.handler, threadReply("EvAnswer8", "quick", { type: "message" }));
+      expect(plainQuestion.workflowSelections).toEqual([{ thread: choiceThread, userId: pratik, workflowPath: "QUICK" }]);
     });
   });
 

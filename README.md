@@ -349,12 +349,13 @@ model set at `agentx init`) whether the request is a question or a change:
   card with **Just answer**, **Quick** and **Full**, each explained in one line.
 
 Nothing that changes code starts without a click. On a suggestion card, press **Start** for the
-suggested path, the other path's button to switch, or **Just answer** to send the request to the chat
-agent instead. You can also reply `quick`, `full` or `answer` in the thread. Only the person who
-asked can choose. To skip routing, start the request with a prefix: `@AgentX quick: fix the typo on
-the pricing page` or `@AgentX full: add single sign-on` start on that path, `@AgentX workflow: ...`
-asks Quick or Full without a suggestion, and `@AgentX chat: ...` goes straight to the chat agent. When approving the coding plan, the task owner can choose
-extra project-approved checks; required project readiness checks are always included.
+suggested path, the other path's button to switch, or **Just answer** to send the request to the
+chat agent instead. You can also reply `quick`, `full` or `answer` in the thread. Only the person
+who asked can choose. To skip routing, start the request with a prefix: `@AgentX quick: fix the typo
+on the pricing page` or `@AgentX full: add single sign-on` start on that path, `@AgentX workflow:
+...` asks Quick or Full without a suggestion, and `@AgentX chat: ...` goes straight to the chat
+agent. When approving the coding plan, the task owner can choose extra project-approved checks;
+required project readiness checks are always included.
 
 To talk to the chat agent instead, start the request with `chat:`:
 

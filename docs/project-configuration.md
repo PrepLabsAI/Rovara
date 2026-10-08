@@ -322,16 +322,18 @@ The model only suggests: nothing that changes code starts until the requester pr
 path's button. **Just answer** sends the original request to the chat agent. Once a choice is made,
 the card loses its buttons and says who chose what. Only the person who asked can choose: they press
 a button, or reply `quick`, `full` or `answer` in the thread (with or without mentioning AgentX;
-loose answers such as `Quick please`, `let's do full` or `just answer` count). A teammate's answer is
-ignored. The card waits for a day. The Slack service logs one `route.classified` line per request
-(kind, outcome `ok` / `invalid` / `timeout` / `unavailable`, latency, choice ID) and the Slack ingress
-logs one `route.choice` line per choice (`suggestion_accepted`, `switched_path`, `picked_path` or
+loose answers such as `Quick please`, `let's do full` or `just answer` count; `answer` works only on
+a suggestion card, not on the `workflow:` question). A teammate's answer is ignored. The card waits
+for a day. The Slack service logs one `route.classified` line per request (kind, outcome `ok` /
+`invalid` / `timeout` / `unavailable`, latency, choice ID) and the Slack ingress logs one
+`route.choice` line per choice (`suggestion_accepted`, `switched_path`, `picked_path` or
 `just_answer`), never the message text or the model's reason.
 
-Prefixes skip routing and never call the model: a request that starts with `quick:` or `full:` (or the
-older `workflow quick:` / `workflow full:`) starts on that path; `workflow:` asks Quick or Full with
-no suggestion; `chat:` goes to the chat agent. Replies inside existing threads are never routed. A thread holds one waiting question at a time. In a thread with no
-question waiting, a reply such as `@AgentX full please` goes to the chat agent like any other.
+Prefixes skip routing and never call the model: a request that starts with `quick:` or `full:` (or
+the older `workflow quick:` / `workflow full:`) starts on that path; `workflow:` asks Quick or Full
+with no suggestion; `chat:` goes to the chat agent. Replies inside existing threads are never
+routed. A thread holds one waiting question at a time. In a thread with no question waiting, a reply
+such as `@AgentX full please` goes to the chat agent like any other.
 
 **Changed behavior:** a plain top-level mention used to go to the chat agent. A question still does,
 after routing; to always reach the chat agent, start the request with `chat:`, for example

@@ -464,6 +464,7 @@ export async function createWorkflowE2E(options: {
       await routeSlackRequest(message, {
         ...(route === undefined ? {} : { route: async (text: string) => { routeCalls.push(text); return route(text); } }),
         offer: offerChoice, answer: async (question) => { chatQueue.push(question); }, finish: async () => undefined,
+        notify: async (thread, text) => { slack.post({ channel: thread.channelId, threadTs: thread.threadTs, text }); },
         log: (event, fields) => { routeLogs.push({ event, fields }); },
       });
     }

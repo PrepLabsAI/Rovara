@@ -144,14 +144,15 @@ describe("the Slack service's routing (Task 21)", () => {
       }
       return slack.post({ channel: target.channelId, threadTs: target.threadTs, text, ...(blocks === undefined ? {} : { blocks }) }).ts;
     } });
-    return { db, slack, logs, log, offer, store: createDynamoWorkflowChoiceStore({ documentClient: db, tableName: "threads" }) };
+    const notify = async (target: typeof thread, text: string) => { slack.post({ channel: target.channelId, threadTs: target.threadTs, text }); };
+    return { db, slack, logs, log, offer, notify, store: createDynamoWorkflowChoiceStore({ documentClient: db, tableName: "threads" }) };
   };
 
   it("offers the three choices when no router is available, or the router itself throws", async () => {
     for (const route of [undefined, async () => { throw new Error("boom"); }]) {
-      const { slack, logs, log, offer } = setup();
+      const { slack, logs, log, offer, notify } = setup();
       const answered: SlackRequestMessage[] = [];
-      await routeSlackRequest(message, { ...(route === undefined ? {} : { route }), offer, answer: async (question) => { answered.push(question); }, finish: async () => undefined, log });
+      await routeSlackRequest(message, { ...(route === undefined ? {} : { route }), offer, notify, answer: async (question) => { answered.push(question); }, finish: async () => undefined, log });
       expect(answered).toEqual([]);
       expect(JSON.stringify(slack.lastPostWithAction(WORKFLOW_PATH_ANSWER_ACTION).blocks)).toContain("\"Quick\"");
       expect(logs[0]).toEqual({ event: "route.classified", fields: { eventId: message.eventId, choiceId: routedChoiceId(message.eventId), kind: "unclear",
@@ -160,9 +161,9 @@ describe("the Slack service's routing (Task 21)", () => {
   });
 
   it("keeps the card's choice with its message, so a typed answer can retire it, and counts the request done", async () => {
-    const { slack, log, offer, store } = setup();
+    const { slack, log, offer, notify, store } = setup();
     const finished: string[] = [];
-    await routeSlackRequest(message, { route: async () => ({ kind: "large_change", outcome: "ok" }), offer, answer: async () => undefined,
+    await routeSlackRequest(message, { route: async () => ({ kind: "large_change", outcome: "ok" }), offer, notify, answer: async () => undefined,
       finish: async (subject) => { finished.push(subject); }, log });
     const card = slack.lastPostWithAction(WORKFLOW_PATH_FULL_ACTION);
     expect(await store.choose({ thread, userId: message.userId, workflowPath: "FULL" })).toEqual({ choiceId: routedChoiceId(message.eventId),
@@ -170,30 +171,64 @@ describe("the Slack service's routing (Task 21)", () => {
     expect(finished).toEqual([`${thread.teamId}/${thread.channelId}/${thread.threadTs}`]);
   });
 
-  it("saves the same choice again for a redelivered request, and asks nothing once it was answered", async () => {
-    const { db, slack, logs, log, offer, store } = setup();
-    const deps = { route: async () => ({ kind: "small_change" as const, outcome: "ok" as const }), offer, answer: async () => undefined, finish: async () => undefined, log };
+  it("posts one card per request: a redelivery after the card went out, or after an answer, posts nothing", async () => {
+    const { db, slack, logs, log, offer, notify, store } = setup();
+    const finished: string[] = [];
+    const deps = { route: async () => ({ kind: "small_change" as const, outcome: "ok" as const }), offer, notify, answer: async () => undefined,
+      finish: async (subject: string) => { finished.push(subject); }, log };
     await routeSlackRequest(message, deps);
     await routeSlackRequest(message, deps);
-    expect(slack.posts).toHaveLength(2);
-    expect(db.find((item) => String(item.pk).startsWith("WORKFLOW_CHOICE#"))).toHaveLength(1);
-    expect(await store.choose({ thread, userId: message.userId, workflowPath: "QUICK" })).toMatchObject({ choiceId: routedChoiceId(message.eventId) });
+    expect(slack.posts).toHaveLength(1);
+    expect(db.find((item) => String(item.pk).startsWith("WORKFLOW_CHOICE#"))).toEqual([expect.objectContaining({ messageTs: slack.posts[0]!.ts })]);
+    expect(logs.filter((entry) => entry.event === "route.choice_not_saved")).toHaveLength(1);
+    // The first card still works.
+    expect(await store.choose({ thread, userId: message.userId, workflowPath: "QUICK" })).toMatchObject({ choiceId: routedChoiceId(message.eventId), messageTs: slack.posts[0]!.ts });
     await routeSlackRequest(message, deps);
-    expect(slack.posts).toHaveLength(2);
-    expect(logs.map((entry) => entry.event)).toContain("route.choice_not_saved");
+    expect(slack.posts).toHaveLength(1);
+    expect(logs.filter((entry) => entry.event === "route.choice_not_saved")).toHaveLength(2);
+    expect(finished).toHaveLength(3);
   });
 
-  it("leaves nothing waiting and says so in one line when Slack refuses the card", async () => {
-    const { db, slack, logs, log, offer } = setup({ refuse: "invalid_blocks" });
-    await routeSlackRequest(message, { route: async () => ({ kind: "small_change", outcome: "ok" }), offer, answer: async () => undefined, finish: async () => undefined, log });
+  it("saves the same choice again for a redelivery whose card never went out, and posts it then", async () => {
+    const { db, slack, log, notify } = setup();
+    const flaky = createChoiceOffer({ documentClient: db, tableName: "threads", log, post: async () => {
+      throw Object.assign(new Error("socket hang up"), { name: "FetchError" });
+    } });
+    const working = createChoiceOffer({ documentClient: db, tableName: "threads", log,
+      post: async (target, text, blocks) => slack.post({ channel: target.channelId, threadTs: target.threadTs, text, ...(blocks === undefined ? {} : { blocks }) }).ts });
+    // The post failed: the choice was discarded and the requester told, so a later delivery saves it again and posts it.
+    const deps = { route: async () => ({ kind: "small_change" as const, outcome: "ok" as const }), notify, answer: async () => undefined, finish: async () => undefined, log };
+    await routeSlackRequest(message, { ...deps, offer: flaky });
+    await routeSlackRequest(message, { ...deps, offer: working });
+    expect(slack.posts.map((post) => post.text)).toEqual([ROUTE_CARD_FAILED_TEXT, expect.stringContaining("Looks like a small change.") as unknown]);
+  });
+
+  it("leaves nothing waiting, says so in one line and counts the request done when Slack refuses the card", async () => {
+    const { db, slack, logs, log, offer, notify } = setup({ refuse: "invalid_blocks" });
+    const finished: string[] = [];
+    await expect(routeSlackRequest(message, { route: async () => ({ kind: "small_change", outcome: "ok" }), offer, notify, answer: async () => undefined,
+      finish: async (subject) => { finished.push(subject); }, log })).resolves.toBeUndefined();
     expect(db.find((item) => String(item.pk).startsWith("WORKFLOW_CHOICE#"))).toEqual([]);
     expect(slack.posts.map((post) => post.text)).toEqual([ROUTE_CARD_FAILED_TEXT]);
-    expect(logs.map((entry) => entry.event)).toContain("route.card_failed");
+    expect(logs.map((entry) => entry.event)).toEqual(expect.arrayContaining(["route.card_failed", "route.offer_failed"]));
+    expect(finished).toHaveLength(1);
+  });
+
+  it("tells the requester at once, rather than waiting for a redelivery, when the choice cannot be saved", async () => {
+    const { slack, logs, log, notify } = setup();
+    const broken = createChoiceOffer({ documentClient: { send: async () => { throw Object.assign(new Error("DynamoDB unavailable"), { name: "InternalServerError" }); } },
+      tableName: "threads", log, post: async () => { throw new Error("no card may be posted"); } });
+    const finished: string[] = [];
+    await expect(routeSlackRequest(message, { route: async () => ({ kind: "large_change", outcome: "ok" }), offer: broken, notify, answer: async () => undefined,
+      finish: async (subject) => { finished.push(subject); }, log })).resolves.toBeUndefined();
+    expect(slack.posts.map((post) => post.text)).toEqual([ROUTE_CARD_FAILED_TEXT]);
+    expect(logs.find((entry) => entry.event === "route.offer_failed")?.fields).toEqual({ eventId: message.eventId, choiceId: routedChoiceId(message.eventId), errorName: "InternalServerError" });
+    expect(finished).toEqual([`${thread.teamId}/${thread.channelId}/${thread.threadTs}`]);
   });
 
   it("does not fail the request when the done count cannot be lowered", async () => {
-    const { logs, log, offer } = setup();
-    await expect(routeSlackRequest(message, { route: async () => ({ kind: "unclear", outcome: "ok" }), offer, answer: async () => undefined,
+    const { logs, log, offer, notify } = setup();
+    await expect(routeSlackRequest(message, { route: async () => ({ kind: "unclear", outcome: "ok" }), offer, notify, answer: async () => undefined,
       finish: async () => { throw Object.assign(new Error("DynamoDB unavailable"), { name: "InternalServerError" }); }, log })).resolves.toBeUndefined();
     expect(logs.at(-1)).toEqual({ event: "route.finish_failed", fields: { eventId: message.eventId, errorName: "InternalServerError" } });
   });

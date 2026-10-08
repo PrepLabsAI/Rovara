@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from "vitest";
 import {
   SlackWorkflowStartError,
   WorkflowChoiceWaitingError,
+  answerChosenRequest,
+  answerRequestEventId,
   createDynamoWorkflowChoiceStore,
   handOffChosenWorkflow,
   isHandedOffWorkflowStart,
@@ -278,6 +280,25 @@ describe("the pending Quick or Full choice", () => {
     expect(isHandedOffWorkflowStart({ ...event, choiceId: "nope" })).toBe(false);
     expect(isHandedOffWorkflowStart({ ...event, responseUrl: "https://attacker.example/hooks.slack.com/" })).toBe(false);
     expect(isHandedOffWorkflowStart({ ...event, messageTs: "soon" })).toBe(false);
+  });
+
+  it("gives the hold back and rethrows when Just answer cannot reach the chat queue (Task 21)", async () => {
+    const db = new FakeDynamoDb();
+    const choices = store(db);
+    const { choiceId } = await choices.save({ thread, userId: requester, instructions: "What does retry.ts do?" });
+    const queued: Array<Record<string, unknown>> = [];
+    let fail = true;
+    const deps = { store: choices, enqueueAnswer: async (answer: Record<string, unknown>) => {
+      if (fail) throw new Error("SQS unavailable");
+      queued.push(answer);
+    } };
+    await expect(answerChosenRequest(deps, { thread, userId: requester, choiceId })).rejects.toThrow("SQS unavailable");
+    expect(await choices.pending(thread)).toEqual({ choiceId, userId: requester });
+    fail = false;
+    expect(await answerChosenRequest(deps, { thread, userId: other, choiceId })).toBe("not_requester");
+    expect(await answerChosenRequest(deps, { thread, userId: requester, choiceId })).toBe("started");
+    expect(queued).toEqual([{ thread, userId: requester, text: "What does retry.ts do?", eventId: answerRequestEventId(choiceId) }]);
+    expect(await choices.pending(thread)).toBeUndefined();
   });
 
   it("gives the hold back when the start cannot be handed over (Task 19)", async () => {

@@ -33,6 +33,8 @@ export interface RequestRoutingDependencies {
   route?: RequestRouter;
   /** Saves the request for its requester's choice and posts its card. */
   offer(input: ChoiceOffer): Promise<void>;
+  /** Posts a plain line in the thread: the card-failed notice when the card could not be saved or posted. */
+  notify(thread: SlackThread, text: string): Promise<void>;
   /** Answers the request as the chat agent does any chat request. */
   answer(message: SlackRequestMessage): Promise<void>;
   /** Tells the thread's queued-request count that this request is done (the chat agent's path does so itself). */
@@ -64,7 +66,15 @@ export async function routeSlackRequest(message: SlackRequestMessage, deps: Requ
     await deps.answer(message);
     return;
   }
-  await deps.offer({ thread: message.thread, userId: message.userId, instructions: message.text, choiceId, suggestion: route.kind });
+  try {
+    await deps.offer({ thread: message.thread, userId: message.userId, instructions: message.text, choiceId, suggestion: route.kind });
+  } catch (error) {
+    // Never retried: a redelivery would only come after the queue's 15-minute visibility timeout. The requester is told
+    // at once, and the request counts as done, as the chat agent's path does with a request it could not run.
+    deps.log("route.offer_failed", { eventId: message.eventId, choiceId, errorName: errorName(error) });
+    await deps.notify(message.thread, ROUTE_CARD_FAILED_TEXT)
+      .catch((postError: unknown) => deps.log("route.card_failed_notice_failed", { eventId: message.eventId, errorName: errorName(postError) }));
+  }
   try {
     await deps.finish(slackThreadSubject(message.thread));
   } catch (error) {
@@ -76,7 +86,8 @@ export async function routeSlackRequest(message: SlackRequestMessage, deps: Requ
 /**
  * The card's offer on the Slack threads table, as the Slack ingress saves a Quick or Full choice: the same item, so its
  * buttons and typed answers work the same. A redelivered request saves the same choice again (until it is answered),
- * and posts its card again. A card Slack refused leaves nothing waiting, and the requester is told in one line.
+ * but posts no second card once the first one went out. A card that could not be posted leaves nothing waiting and
+ * throws, so the router tells the requester.
  */
 export function createChoiceOffer(deps: {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -105,9 +116,7 @@ export function createChoiceOffer(deps: {
       await deps.documentClient.send(new DeleteCommand({ TableName: deps.tableName, Key: workflowChoiceKey(input.thread),
         ConditionExpression: "choiceId = :choiceId", ExpressionAttributeValues: { ":choiceId": input.choiceId } }))
         .catch((deleteError: unknown) => deps.log("route.choice_discard_failed", { choiceId: input.choiceId, errorName: errorName(deleteError) }));
-      await deps.post(input.thread, ROUTE_CARD_FAILED_TEXT)
-        .catch((postError: unknown) => deps.log("route.card_failed_notice_failed", { choiceId: input.choiceId, errorName: errorName(postError) }));
-      return;
+      throw error;
     }
     if (ts === undefined) return;
     try {

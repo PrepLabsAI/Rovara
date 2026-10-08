@@ -28,7 +28,12 @@ import {
   workflowCheckControls,
   workflowSlackHandlers,
 } from "../../packages/broker/src/aws/slack-interactivity.js";
-import { SlackWorkflowStartError, workflowChoiceRefusal } from "../../packages/broker/src/aws/slack-workflow-choice.js";
+import { SlackWorkflowStartError, answerChosenRequest, answerRequestEventId, createDynamoWorkflowChoiceStore, workflowChoiceRefusal } from "../../packages/broker/src/aws/slack-workflow-choice.js";
+import { createAnswerQueue } from "../../packages/broker/src/aws/slack-ingress.js";
+import { workflowChoicePut } from "../../packages/contracts/src/index.js";
+import { PutCommand } from "@aws-sdk/lib-dynamodb";
+import type { SendMessageCommand } from "@aws-sdk/client-sqs";
+import { FakeDynamoDb } from "../support/fake-dynamodb.js";
 import { StrictSlackWeb } from "../support/strict-slack.js";
 
 // Every workflow modal a test opens is checked against Slack's limits.
@@ -961,6 +966,42 @@ describe("Quick or Full buttons (gap 3)", () => {
     await forged.handler(press("agentx_workflow_path_full", requester, JSON.stringify({ choiceId: "nope" })));
     expect(forged.choices).toEqual([]);
     expect(forged.ephemeral).toEqual(["This choice is no longer waiting.", "This choice is no longer waiting."]);
+  });
+
+  it("gives Just answer back when the chat queue fails, so a second press queues the request once (Task 21)", async () => {
+    const db = new FakeDynamoDb();
+    const store = createDynamoWorkflowChoiceStore({ documentClient: db, tableName: "threads" });
+    await db.send(new PutCommand({ TableName: "threads", ...workflowChoicePut({ thread, userId: requester, instructions: "What does retry.ts do?", choiceId, nowMs: Date.now(), suggestion: "unclear" }) }));
+    const sent: SendMessageCommand[] = [];
+    const counts: number[] = [];
+    let failures = 1;
+    const enqueueAnswer = createAnswerQueue({ queueUrl: "https://sqs.us-east-1.amazonaws.com/123456789012/requests.fifo",
+      sqs: { send: async (command) => {
+        if (failures > 0) { failures -= 1; throw Object.assign(new Error("SQS unavailable"), { name: "ServiceUnavailable" }); }
+        sent.push(command);
+      } },
+      changePending: async (_subject, delta) => { counts.push(delta); return 0; } });
+    const enqueueCalls: string[] = [];
+    const workflow = workflowSlackHandlers({
+      loadTask: async () => undefined, openView: async () => undefined, submit: async () => undefined,
+      answerWorkflowChoice: (input) => answerChosenRequest({ store, enqueueAnswer: async (answer) => { enqueueCalls.push(answer.eventId); await enqueueAnswer(answer); } }, input),
+    });
+    const h = harness({ workflow });
+    expect((await h.handler(press("agentx_workflow_path_answer"))).statusCode).toBe(200);
+    // The queue failed: the member hears how to try again, the count is undone, and the hold is given back.
+    expect(h.ephemeral).toEqual(["I couldn't take that choice. Press the button again, or reply `answer`."]);
+    expect(counts).toEqual([1, -1]);
+    expect(sent).toEqual([]);
+    expect(await store.pending(thread)).toEqual({ choiceId, userId: requester, suggested: true });
+    expect((await h.handler(press("agentx_workflow_path_answer"))).statusCode).toBe(200);
+    expect(counts).toEqual([1, -1, 1]);
+    expect(sent).toHaveLength(1);
+    // The same request ID on every try, derived from the choice, so SQS drops a copy.
+    expect(enqueueCalls).toEqual([answerRequestEventId(choiceId), answerRequestEventId(choiceId)]);
+    expect(answerRequestEventId(choiceId)).toBe(`Ev${choiceId.replace(/-/g, "")}`);
+    expect(sent[0]!.input.MessageDeduplicationId).toBe(answerRequestEventId(choiceId));
+    expect(JSON.parse(sent[0]!.input.MessageBody ?? "{}")).toMatchObject({ eventId: answerRequestEventId(choiceId), text: "What does retry.ts do?", userId: requester, thread });
+    expect(await store.pending(thread)).toBeUndefined();
   });
 
   it("explains a refused start in plain words", async () => {

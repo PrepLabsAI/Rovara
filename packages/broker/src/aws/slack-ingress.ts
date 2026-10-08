@@ -98,7 +98,7 @@ export interface SlackIngressDependencies {
   /** Starts the request waiting in the thread on the requester's chosen path. A refused start throws SlackWorkflowStartError. */
   chooseWorkflowPath?: (input: { thread: SlackThread; userId: string; workflowPath: WorkflowPath }) => Promise<WorkflowChoiceOutcome>;
   /** Who a Quick or Full choice waiting in the thread belongs to, so their plain `quick` or `full` reply is read. */
-  pendingWorkflowChoice?: (thread: SlackThread) => Promise<{ choiceId: string; userId: string } | undefined>;
+  pendingWorkflowChoice?: (thread: SlackThread) => Promise<{ choiceId: string; userId: string; suggested?: true } | undefined>;
   /**
    * Task 21: queues a plain top-level request (no `quick:`, `full:`, `workflow…:` or `chat:`) for the Slack service to
    * route after Slack has its answer: a question goes to the chat agent, a change gets a card suggesting Quick or Full.
@@ -396,7 +396,7 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       let waiting = mention.kind === "message";
       if (!waiting) {
         try {
-          waiting = await dependencies.pendingWorkflowChoice(thread) !== undefined;
+          waiting = answers(pathAnswer, await dependencies.pendingWorkflowChoice(thread));
         } catch (error) {
           await releaseQuietly(dependencies, log, mention.eventId, "workflow.choice_release_failed");
           log("workflow.choice_lookup_failed", { eventId: mention.eventId, errorName: errorName(error) });
@@ -584,8 +584,17 @@ async function isChoiceAnswer(dependencies: SlackIngressDependencies, mention: M
   if (dependencies.pendingWorkflowChoice === undefined || dependencies.chooseWorkflowPath === undefined) return false;
   if (mention.botUserId !== undefined && mention.text.includes(`<@${mention.botUserId}>`)) return false;
   if (choiceReply(dependencies, slackRequestText(mention.text, mention.botUserId)) === undefined) return false;
+  const reply = choiceReply(dependencies, slackRequestText(mention.text, mention.botUserId))!;
   const pending = await dependencies.pendingWorkflowChoice(mention.thread);
-  return pending !== undefined && pending.userId === mention.userId;
+  return answers(reply, pending) && pending!.userId === mention.userId;
+}
+
+/**
+ * Whether `reply` answers the choice waiting in the thread. Task 21: `answer` answers only a routed card (one that
+ * carries a suggestion); the plain Quick or Full question (`workflow:`) is answered by a path alone.
+ */
+function answers(reply: WorkflowChoice, pending: { suggested?: true } | undefined): boolean {
+  return pending !== undefined && (reply !== "ANSWER" || pending.suggested === true);
 }
 
 /** A loose answer to a waiting choice: `quick` or `full`, and (Task 21) `answer` where this ingress can send it to the chat agent. */

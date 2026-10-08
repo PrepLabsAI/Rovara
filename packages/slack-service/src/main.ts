@@ -373,6 +373,7 @@ log("service.started", {
 const offerChoice = createChoiceOffer({ documentClient, tableName: threadsTableName, post: (thread, text, blocks) => postToSlack(thread.channelId, thread.threadTs, text, blocks), log });
 await runConsumer(queue, (message, { route, ...context }) => route === "suggest"
   ? routeSlackRequest(message, { ...(requestRouter === undefined ? {} : { route: requestRouter }), offer: offerChoice,
+    notify: async (thread, text) => { await postToSlack(thread.channelId, thread.threadTs, text); },
     answer: (question) => processRequest(question, context), finish: (subject) => threads.finish(subject), log })
   : processRequest(message, context), {
   concurrency,

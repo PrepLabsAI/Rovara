@@ -92,7 +92,8 @@ export function workflowChoiceKey(thread: SlackThread): { pk: string; sk: "META"
 
 /**
  * The PutItem input (without the table) that saves a request waiting for its requester's choice. It fails when the
- * thread already has a live choice, unless that is this same choice not yet answered (a redelivered routed request).
+ * thread already has a live choice, unless that is this same choice, not yet answered and its card never posted (a
+ * redelivered routed request).
  */
 export function workflowChoicePut(input: { thread: SlackThread; userId: string; instructions: string; choiceId: string; nowMs: number; suggestion?: RequestSuggestion }): {
   Item: Record<string, unknown>;
@@ -108,7 +109,9 @@ export function workflowChoicePut(input: { thread: SlackThread; userId: string; 
       expiresAt: nowSeconds + WORKFLOW_CHOICE_RETENTION_SECONDS, ...(input.suggestion === undefined ? {} : { suggestion: input.suggestion }),
     },
     // An expired choice the table has not removed yet does not block a new one.
-    ConditionExpression: "attribute_not_exists(pk) OR expiresAt <= :now OR (choiceId = :choiceId AND attribute_not_exists(selectedPath))",
+    // The same choice is saved again only while it is unanswered and its card was never posted (a redelivered request
+    // whose card did not go out), so a redelivery never posts a second card.
+    ConditionExpression: "attribute_not_exists(pk) OR expiresAt <= :now OR (choiceId = :choiceId AND attribute_not_exists(selectedPath) AND attribute_not_exists(messageTs))",
     ExpressionAttributeValues: { ":now": nowSeconds, ":choiceId": choiceId },
   };
 }
