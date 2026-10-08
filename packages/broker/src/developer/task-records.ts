@@ -24,6 +24,8 @@ import {
   type DeveloperTaskShare,
   type DeveloperTaskStatus,
   type Operation,
+  type WorkflowSnapshot,
+  type WorkflowReviewBase,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import type { ShareDecision } from "./share.js";
@@ -54,9 +56,18 @@ export interface DeveloperTaskRecord {
   share?: TaskShare;
   /** C1: every write of `share` replaces the whole map, conditioned on this number. */
   shareVersion?: number;
+  /** Serializes append-only task Canvas lineage mutations without advancing workflow revision. */
+  canvasLineageVersion?: number;
   createdAt: string;
   updatedAt: string;
   closedAt?: string;
+  workflow?: WorkflowSnapshot;
+  /** The commit each repository's preparation checked out, from the prepare result; the task's base until one is pinned. */
+  preparedBase?: WorkflowReviewBase;
+  /** Gap 2: how many thread replies are saved for the task (NOTE# items). */
+  threadNoteCount?: number;
+  /** Gap 2: the newest saved reply's receivedAt already given to a planning or coding step; each reply is given once. */
+  threadNotesFedThrough?: string;
 }
 
 /** C1: a shared task's thread, as the task record keeps it. */
@@ -127,13 +138,35 @@ export interface DeveloperTaskPointerRecord {
   firstRequestId: string;
   /** The first instructions, until the prepare's result queues them (R3). */
   pendingPrompt?: string;
+  /** The first plan-only operation is selected by the broker, never by the request. */
+  pendingWorkflowMode?: "PLAN" | "IMPLEMENT";
   /** Set when the task was cancelled before its instructions ran (R16). */
   cancelledAt?: string;
+}
+
+/** GITHUB_PR#<owner/repo> / PR#<number>: exact reverse link from a published PR to its task. */
+export interface GithubWorkflowPullRequestRecord {
+  pk: string;
+  sk: string;
+  entityType: "GITHUB_WORKFLOW_PR";
+  repositoryFullName: string;
+  repositoryId: string;
+  number: number;
+  url: string;
+  taskId: string;
+  workspaceId: string;
+  candidateDigest: string;
+  createdAt: string;
 }
 
 export const taskKey = (taskId: string) => ({ pk: `DEVTASK#${taskId}`, sk: "META" as const });
 export const taskIndexKey = (developerId: string, createdAt: string, taskId: string) => ({ pk: `DEVELOPER#${developerId}`, sk: `TASK#${createdAt}#${taskId}` });
 export const taskPointerKey = (workspaceId: string) => ({ pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK" as const });
+export function githubWorkflowPullRequestKey(repositoryFullName: string, number: number) {
+  const match = /^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)$/.exec(repositoryFullName);
+  if (!match || !Number.isSafeInteger(number) || number < 1) throw new Error("GitHub pull request identity is invalid");
+  return { pk: `GITHUB_PR#${repositoryFullName.toLowerCase()}`, sk: `PR#${String(number).padStart(10, "0")}` };
+}
 export const startIdempotencyKey = (developerId: string, requestId: string) => ({ pk: `IDEMPOTENCY#${developerId}#DEVTASK`, sk: `REQUEST#${requestId}` });
 
 export const taskOwnerSubject = (developerId: string, taskId: string): string => `${developerId}/${taskId}`;

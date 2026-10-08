@@ -39,6 +39,14 @@ export class ClassifierError extends Error {
   }
 }
 
+/** The classifier model did not answer before its deadline. */
+export class ClassifierTimeoutError extends ClassifierError {
+  constructor(message: string) {
+    super(message);
+    this.name = "ClassifierTimeoutError";
+  }
+}
+
 /** Decides a write no rule settled. It throws when it cannot decide; the gate then asks (FR-020). */
 export type ActionClassifier = (input: ClassifierInput) => Promise<ClassifierVerdict>;
 
@@ -152,39 +160,54 @@ export async function createModelClassifier(options: {
   const timeoutMs = usableClassifierTimeout(options.timeoutMs);
   return async (input) => {
     if (!model) throw new ClassifierError("the classifier model is unavailable");
-    const controller = new AbortController();
-    const signal = input.signal === undefined ? controller.signal : AbortSignal.any([input.signal, controller.signal]);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let onAbort: (() => void) | undefined;
-    // A provider that ignores the signal still cannot hold the turn past the deadline or the
-    // turn's own cancellation.
-    const deadline = new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => {
-        controller.abort();
-        reject(new ClassifierError(`the classifier did not answer within ${timeoutMs} ms`));
-      }, timeoutMs);
-      onAbort = () => {
-        controller.abort();
-        reject(new ClassifierError("the classifier was cancelled"));
-      };
-      if (input.signal?.aborted) onAbort();
-      else input.signal?.addEventListener("abort", onAbort, { once: true });
-    });
-    try {
-      if (input.signal?.aborted) await deadline;
-      const message = await Promise.race([runtime.completeSimple(model, classifierContext(input), { signal, maxTokens: 200, temperature: 0 }), deadline]);
-      const usage = { input: message.usage.input, output: message.usage.output, cost: message.usage.cost.total };
-      // Never the provider's own error text: it can name the account, role or request (gate reasons
-      // reach turn records and logs). The stop reason is one of two fixed words.
-      if (message.stopReason === "error" || message.stopReason === "aborted") {
-        throw new ClassifierError(`the classifier model returned an error (stop reason: ${message.stopReason})`, usage);
-      }
-      const verdict = parseVerdict(message.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n"));
-      if (!verdict) throw new ClassifierError("the classifier's answer was not a verdict", usage);
-      return { ...verdict, usage };
-    } finally {
-      clearTimeout(timer);
-      if (onAbort) input.signal?.removeEventListener("abort", onAbort);
+    const message = await completeBeforeDeadline(runtime, model, classifierContext(input), { timeoutMs, signal: input.signal, maxTokens: 200 });
+    const usage = { input: message.usage.input, output: message.usage.output, cost: message.usage.cost.total };
+    // Never the provider's own error text: it can name the account, role or request (gate reasons
+    // reach turn records and logs). The stop reason is one of two fixed words.
+    if (message.stopReason === "error" || message.stopReason === "aborted") {
+      throw new ClassifierError(`the classifier model returned an error (stop reason: ${message.stopReason})`, usage);
     }
+    const verdict = parseVerdict(message.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n"));
+    if (!verdict) throw new ClassifierError("the classifier's answer was not a verdict", usage);
+    return { ...verdict, usage };
   };
+}
+
+/** A model the classifier's runtime knows. */
+export type ClassifierModel = NonNullable<ReturnType<ModelRuntime["getModel"]>>;
+
+/**
+ * One small-model completion that gives up at `timeoutMs`, or when `signal` aborts, with a ClassifierError: a provider
+ * that ignores the signal still cannot hold the caller past the deadline or its own cancellation. Shared by the action
+ * gate's classifier and (Task 21) the Slack request router, which use the same model setting.
+ */
+export async function completeBeforeDeadline(
+  runtime: ModelRuntime,
+  model: ClassifierModel,
+  context: ClassifierContext,
+  options: { timeoutMs: number; signal?: AbortSignal | undefined; maxTokens: number },
+): Promise<Awaited<ReturnType<ModelRuntime["completeSimple"]>>> {
+  const controller = new AbortController();
+  const signal = options.signal === undefined ? controller.signal : AbortSignal.any([options.signal, controller.signal]);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let onAbort: (() => void) | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      reject(new ClassifierTimeoutError(`the classifier did not answer within ${options.timeoutMs} ms`));
+    }, options.timeoutMs);
+    onAbort = () => {
+      controller.abort();
+      reject(new ClassifierError("the classifier was cancelled"));
+    };
+    if (options.signal?.aborted) onAbort();
+    else options.signal?.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    if (options.signal?.aborted) await deadline;
+    return await Promise.race([runtime.completeSimple(model, context, { signal, maxTokens: options.maxTokens, temperature: 0 }), deadline]);
+  } finally {
+    clearTimeout(timer);
+    if (onAbort) options.signal?.removeEventListener("abort", onAbort);
+  }
 }

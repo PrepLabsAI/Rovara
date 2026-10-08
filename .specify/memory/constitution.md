@@ -1,3 +1,15 @@
+<!-- Sync impact: 4.0.0 -> 4.1.0 (adds a native, human-gated task workflow without adding an orchestrator model).
+Principles modified: I. One orchestrator, remote coding (the control plane remains the only workflow
+coordinator; it may pause for an attributable human decision and resume only on an authenticated
+command); V. Evidence-based incremental delivery (workflow stages and their evidence obligations
+are versioned, candidate-bound, and recoverable).
+Principle added: VI. Human-gated task workflow (AgentX may run a native task-to-PR lifecycle with
+typed stages, durable decisions, explicit skips, separately executed checks, and read-only review;
+no automatic merge or deployment).
+Sections modified: Scope and Operational Constraints (workflow pauses are allowed at named gates).
+CharterArc integration is outside this feature. Design and verification are recorded in specs/056,
+specs/057, and specs/058.
+Follow-up TODOs: none. -->
 <!-- Sync impact: 3.0.0 -> 4.0.0 (reverses spec 008's Slack-only rule for developers' AI tools).
 Principles modified: I. One orchestrator, remote coding (the Slack orchestrator stays the only
 orchestrator model; a second client, the developer task API, may drive coding work for a signed-in
@@ -114,6 +126,17 @@ verification. Mock success MUST NOT be reported as verified AWS behavior. Depend
 and environment image digests MUST be pinned when implemented. Complexity requires a recorded
 need; optional features MUST NOT delay the first complete coding workflow.
 
+### VI. Human-gated task workflow
+
+AgentX MAY maintain a versioned task workflow that pauses at named human decision gates. One
+control-plane workflow coordinator owns state transitions; Slack and developer MCP are clients,
+not separate orchestrators. A gate MUST record the authenticated actor, decision, reason, task,
+workflow revision, and candidate digest where applicable. A worker or reviewer MUST NOT approve
+its own output or change workflow state directly. A skip is an explicit, attributable outcome,
+never a pass. A new candidate or workflow-contract revision invalidates dependent approvals,
+checks, and reviews. GitHub remains authoritative for issue and pull-request state; a person merges
+pull requests. This principle grants no automatic merge, deployment, or production authority.
+
 ## Scope and Operational Constraints
 
 The production target is pi on Amazon EC2 with persistent EBS-backed
@@ -121,9 +144,9 @@ workspace instances. Use a versioned development image and administrator-held Ag
 configuration.
 Dev Container metadata, automatic checkpoints, concurrent writers within one workspace,
 automatic merging, and deployment of generated applications are outside the initial release.
-These may be specified separately. All orchestration is unattended. It runs in the hosted Slack
-orchestrator, or, for developer tasks, in the remote worker with the developer's own instructions,
-as Principle I describes.
+These may be specified separately. The coordinator runs unattended except when a workflow reaches
+a named human decision gate; it waits for an authenticated decision and resumes from durable state.
+Coding remains in remote workers, as Principle I describes.
 
 Historical deployment modes remain readable for audit only. New registrations and execution MUST
 use `ec2-ebs` on every install, including self-hosted installs.
@@ -147,4 +170,4 @@ Amendments MUST identify changed principles and update affected specifications a
 Use semantic versioning: major for incompatible principles, minor for new principles, patch
 for clarifications. Reviewers MUST identify and resolve violations before declaring delivery complete.
 
-**Version**: 4.0.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-09-27
+**Version**: 4.1.0 | **Ratified**: 2026-09-17 | **Last Amended**: 2026-10-05

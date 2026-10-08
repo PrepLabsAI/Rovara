@@ -76,6 +76,32 @@ describe("ec2-ebs delivery", () => {
     }
     const postedPayload = (post: ReturnType<typeof delivery>["post"]) => (JSON.parse(post.mock.calls[0]![1].body) as { payload: Record<string, unknown> }).payload;
 
+    it("refuses a pinned task base before POST unless the worker advertises it", async () => {
+      const workflowBase = [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }];
+      const refused = delivery({ workerFeatures: async () => ["task.workflowMode", "task.workflowReview"] });
+      const record = taskRecord({ workflowMode: "REVIEW", workflowBase });
+      await expect(refused.deliver(record, record.invocation)).rejects.toThrow(/workflow reviews need a worker that receives the task's pinned base commit/);
+      expect(refused.post).not.toHaveBeenCalled();
+
+      const accepted = delivery({ workerFeatures: async () => ["task.workflowMode", "task.workflowReview", "task.workflowBase"] });
+      expect(await accepted.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(accepted.post).workflowBase).toEqual(workflowBase);
+    });
+
+    it("sends a workflow mode only to a worker that advertises the read-only tool boundary", async () => {
+      const { deliver, post } = delivery({ workerFeatures: async () => ["task.workflowMode"] });
+      const record = taskRecord({ workflowMode: "PLAN" });
+      expect(await deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(post).workflowMode).toBe("PLAN");
+    });
+
+    it("refuses workflow dispatch when a worker cannot prove it enforces the requested tool boundary", async () => {
+      const { deliver, post } = delivery({ workerFeatures: async () => [] });
+      const record = taskRecord({ workflowMode: "PLAN" });
+      await expect(deliver(record, record.invocation)).rejects.toThrow(/workflow mode requires a compatible worker/);
+      expect(post).not.toHaveBeenCalled();
+    });
+
     it("keeps the readiness for a worker whose /ping lists it", async () => {
       const workerFeatures = vi.fn<NonNullable<Ec2DeliveryDependencies["workerFeatures"]>>(async () => ["task.readiness"]);
       const { deliver, post } = delivery({ workerFeatures });
@@ -145,6 +171,30 @@ describe("ec2-ebs delivery", () => {
       return { ...record, invocation };
     }
     const postedPayload = (post: ReturnType<typeof delivery>["post"]) => (JSON.parse(post.mock.calls[0]![1].body) as { payload: Record<string, unknown> }).payload;
+
+    it("refuses a publication bound to a checked tree before POST unless the worker advertises it, and never drops the tree", async () => {
+      const record = publishRecord({ candidateTreeSha: "b".repeat(40) });
+      const refused = delivery({ workerFeatures: async () => ["publish.reportChecks"] });
+      await expect(refused.deliver(record, record.invocation)).rejects.toThrow(/publishes exactly the checked tree/);
+      expect(refused.post).not.toHaveBeenCalled();
+      const unprobed = delivery();
+      await expect(unprobed.deliver(record, record.invocation)).rejects.toThrow(/publishes exactly the checked tree/);
+      expect(unprobed.post).not.toHaveBeenCalled();
+
+      const accepted = delivery({ workerFeatures: async () => ["publish.candidateTree"] });
+      expect(await accepted.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(accepted.post).candidateTreeSha).toBe("b".repeat(40));
+    });
+
+    it("refuses a publication carrying the task's pinned base before POST unless the worker advertises it, and never drops it", async () => {
+      const record = publishRecord({ candidateTreeSha: "b".repeat(40), workflowBaseCommit: "c".repeat(40) });
+      const refused = delivery({ workerFeatures: async () => ["publish.candidateTree"] });
+      await expect(refused.deliver(record, record.invocation)).rejects.toThrow(/task's pinned base commit/);
+      expect(refused.post).not.toHaveBeenCalled();
+      const accepted = delivery({ workerFeatures: async () => ["publish.candidateTree", "publish.workflowBase"] });
+      expect(await accepted.deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(accepted.post).workflowBaseCommit).toBe("c".repeat(40));
+    });
 
     it("keeps reportChecks for a worker whose /ping lists it", async () => {
       const { deliver, post } = delivery({ workerFeatures: async () => ["publish.reportChecks"] });

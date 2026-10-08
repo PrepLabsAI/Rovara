@@ -17,9 +17,15 @@ import { SLACK_APPS_URL, slackAppCard, type SlackCardInput, slackUrlsCard, type 
 import { STEP_PLAN } from "./ui/journey.js";
 import { checkSlackClientId, checkSlackClientSecret, hasStoredSlackClient, SIGNIN_FLAG_NAMES, slackClientIdProblem, type SigninFlags } from "../signin/collect.js";
 
-// channels:join, channels:read and groups:read serve 15d2's `channel add`; users:read.email and
-// im:write serve developer sign-in (spec 025 FR-044). Adding scopes later forces a reinstall (R10).
-export const SLACK_BOT_SCOPES: readonly string[] = ["app_mentions:read", "channels:join", "channels:read", "chat:write", "groups:read", "im:write", "users:read", "users:read.email"];
+// canvases:write creates task detail Canvases; files:read resolves each Canvas permalink. These
+// links appear in Slack workflow messages. channels:join, channels:read and groups:read serve
+// `channel add`; users:read.email and im:write serve developer sign-in (spec 025 FR-044).
+// channels:history and groups:history deliver the message.channels and message.groups events: every reply
+// in a Slack-started task's thread is saved as input for its next step (gap 2), and the ingress ignores,
+// without storing, every other channel message. Adding scopes later forces a reinstall (R10).
+export const SLACK_BOT_SCOPES: readonly string[] = ["app_mentions:read", "canvases:write", "channels:history", "channels:join", "channels:read", "chat:write", "files:read", "groups:history", "groups:read", "im:write", "users:read", "users:read.email"];
+/** The Events API subscriptions: mentions, and messages in public and private channels the bot is in. */
+export const SLACK_BOT_EVENTS: readonly string[] = ["app_mention", "message.channels", "message.groups"];
 /** Sign in with Slack (OpenID Connect). */
 export const SLACK_USER_SCOPES: readonly string[] = ["email", "openid", "profile"];
 /** What developer sign-in needs of the bot token: users.info, users.lookupByEmail, conversations.members, and 25e's DMs. */
@@ -86,7 +92,7 @@ export function slackAppManifest(input: { appName: string; eventsUrl: string; in
     features: { bot_user: { display_name: slackBotDisplayName(input.appName), always_online: true } },
     oauth_config: { redirect_urls: [input.signInCallbackUrl], scopes: { bot: [...SLACK_BOT_SCOPES], user: [...SLACK_USER_SCOPES] } },
     settings: {
-      event_subscriptions: { request_url: input.eventsUrl, bot_events: ["app_mention"] },
+      event_subscriptions: { request_url: input.eventsUrl, bot_events: [...SLACK_BOT_EVENTS] },
       interactivity: { is_enabled: true, request_url: input.interactivityUrl },
       org_deploy_enabled: false,
       socket_mode_enabled: false,

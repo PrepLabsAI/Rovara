@@ -44,7 +44,7 @@ Rovara has no merge path.
 | ------ | ----------------------- | --------------------------------------------------------------------------------------------- |
 | **01** | Install in your account | `agentx init` sets up the stacks, a GitHub App, a Slack app and your first project.           |
 | **02** | Bind a project          | Point a Slack channel at a project: its repositories, setup steps and readiness checks.       |
-| **03** | Delegate and review     | _"@AgentX fix the navigation bug and run the tests."_ Read the check report, then ask for a PR. |
+| **03** | Delegate and review     | _"@AgentX fix the navigation bug."_ Start the suggested Quick or Full path, approve the plan, then review the draft PR. |
 
 <br/>
 
@@ -333,11 +333,54 @@ Pass `--no-ui` to stay in the terminal. See [Installing Rovara](docs/install.md)
 In the bound channel:
 
 ```text
-@AgentX inspect the project and implement the navigation fix. Run the relevant tests.
-@AgentX create a pull request for the personal-website repository titled "Improve navigation".
-@AgentX stop
-@AgentX close this workspace
+@AgentX Add password reset to the account page
 ```
+
+A plain `@AgentX` request is routed first. AgentX asks its small safety-check model (the classifier
+model set at `agentx init`) whether the request is a question or a change:
+
+- **A question** (_"@AgentX what does retry.ts do?"_) is answered in the thread by the chat agent. No
+  task is created.
+- **A small change** gets a card suggesting **Quick**: AgentX writes a short coding plan for you to
+  approve, then codes it, runs the checks and reviews, and opens a draft pull request.
+- **A bigger change** gets a card suggesting **Full**: AgentX writes requirements, then a design,
+  then a coding plan, and you approve each one before any code changes.
+- **Anything unclear** (or when the model is slow, unavailable or gives an unusable answer) gets a
+  card with **Just answer**, **Quick** and **Full**, each explained in one line.
+
+Nothing that changes code starts without a click. On a suggestion card, press **Start** for the
+suggested path, the other path's button to switch, or **Just answer** to send the request to the
+chat agent instead. You can also reply `quick`, `full` or `answer` in the thread. Only the person
+who asked can choose. To skip routing, start the request with a prefix: `@AgentX quick: fix the typo
+on the pricing page` or `@AgentX full: add single sign-on` start on that path, `@AgentX workflow:
+...` asks Quick or Full without a suggestion, and `@AgentX chat: ...` goes straight to the chat
+agent. When approving the coding plan, the task owner can choose extra project-approved checks;
+required project readiness checks are always included.
+
+To talk to the chat agent instead, start the request with `chat:`:
+
+```text
+@AgentX chat: inspect the project and implement the navigation fix. Run the relevant tests.
+@AgentX chat: create a pull request for the personal-website repository titled "Improve navigation".
+```
+
+In a thread the chat agent is already answering, mention AgentX as before (no `chat:` needed), for
+example `@AgentX stop` or `@AgentX close this workspace`.
+
+> **Changed:** a plain top-level `@AgentX <request>` used to go to the chat agent. It is now routed:
+> a question still reaches the chat agent, and a change gets a card suggesting Quick or Full in every
+> bound channel. Add `chat:` to always reach the chat agent.
+
+Every reply in a task's thread, from the owner or a teammate, is saved for the task's next step.
+Only the owner's buttons move the task on. After the coding plan is approved, the checks and reviews
+run on their own. If a review finds a problem, the owner can press **Send back to coding**. When
+everything passes, AgentX opens a draft pull request and posts the link in the thread.
+
+> **Reinstall the Slack app on an existing install.** Saving replies that do not mention AgentX
+> needs the `channels:history` and `groups:history` bot scopes and the `message.channels` and
+> `message.groups` events. Update the app from the manifest `agentx init` generates, then reinstall
+> it to the workspace. Until then only `@AgentX` replies are saved. AgentX ignores channel messages
+> outside task threads. See [Replies in a Slack task's thread](docs/project-configuration.md#replies-in-a-slack-tasks-thread).
 
 From your own machine (no AWS credentials needed):
 

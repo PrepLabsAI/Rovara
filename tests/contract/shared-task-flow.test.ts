@@ -3,7 +3,7 @@
 // service's processor, against the broker in process. Fake Slack, fake worker, the fake table.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
-import { CLOSED_SHARED_NOTICE, VIEW_ONLY_NOTICE, parseSlackThreadSubject, turnRecordKeys, type ChannelInfoRequest, type ChannelInfoResponse, type ChannelMembersRequest, type ChannelMembersResponse, type SlackRequestMessage, type TurnRecord } from "../../packages/contracts/src/index.js";
+import { CLOSED_SHARED_NOTICE, VIEW_ONLY_NOTICE, createWorkflowSnapshot, parseSlackThreadSubject, turnRecordKeys, type ChannelInfoRequest, type ChannelInfoResponse, type ChannelMembersRequest, type ChannelMembersResponse, type SlackRequestMessage, type TurnRecord } from "../../packages/contracts/src/index.js";
 import { createNotifierHandler } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import { STUCK_SETUP_MESSAGE, sweepStuckSetups } from "../../packages/broker/src/aws/stuck-setup.js";
 import type { Notice, StreamRecord } from "../../packages/broker/src/developer/notifications.js";
@@ -265,6 +265,69 @@ describe("the owner's answers, end to end", () => {
     expect((await tool("agentx_get_task", { task_id: taskId })).value).toMatchObject({ status: "CANCELLED" });
     await slack.pump();
     expect(slack.posts.at(-1)).toMatchObject({ threadTs: taskRecord(harness, taskId).share.threadTs, text: "The task ended CANCELLED." });
+  });
+
+  it("refuses a teammate's ordinary thread turn on a gated task shared in continue mode, and queues nothing (gap 10a)", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const slack = notifier(harness);
+    const { tool } = await signedInClient(harness, MAYA);
+    const { taskId, subject, workspaceId } = await startShared(harness, slack, tool, "continue");
+    await harness.finish(workspaceId, String(activeOperation(harness, workspaceId)), "SUCCEEDED");
+    await harness.finish(workspaceId, String(activeOperation(harness, workspaceId)), "SUCCEEDED");
+    const operations = () => harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION");
+    const conversationId = String((harness.db.get(`DEVTASK#${taskId}`, "META") as { conversationId: string }).conversationId);
+    const turn = () => teammate(harness.handler, subject, PRIYA, "POST", `/v1/service/workspaces/${workspaceId}/tasks`, { requestId: randomUUID(), conversationId, prompt: "push it now" });
+    // Control: the same teammate turn runs on a task without the gated flow.
+    const legacy = await turn();
+    expect(legacy.status).toBe(202);
+    await harness.finish(workspaceId, String((legacy.body.operation as { id: string }).id), "SUCCEEDED");
+
+    const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown>;
+    harness.db.set({ ...record, workflow: createWorkflowSnapshot({ taskId, ownerId: "b".repeat(64), now: new Date().toISOString() }) });
+    const before = operations().length;
+    const refused = await turn();
+    expect(refused.body.error).toMatchObject({ code: "WORKSPACE_BUSY" });
+    expect(String((refused.body.error as { message: string }).message)).not.toMatch(/workflow/i);
+    expect(operations()).toHaveLength(before);
+    expect(activeOperation(harness, workspaceId)).toBeUndefined();
+  });
+
+  it("refuses a teammate's pull request and pull request change on a gated task shared in continue mode, and queues or pushes nothing (ruling A)", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const slack = notifier(harness);
+    const { tool } = await signedInClient(harness, MAYA);
+    const { taskId, subject, workspaceId } = await startShared(harness, slack, tool, "continue");
+    await harness.finish(workspaceId, String(activeOperation(harness, workspaceId)), "SUCCEEDED");
+    await harness.finish(workspaceId, String(activeOperation(harness, workspaceId)), "SUCCEEDED");
+    const operations = () => harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION");
+    const outbox = () => harness.db.find((item) => item.entityType === "OUTBOX");
+    const open = (requestId: string = randomUUID()) => teammate(harness.handler, subject, PRIYA, "POST", `/v1/service/workspaces/${workspaceId}/pull-requests`, { requestId, repository: "demo", title: "ship it" });
+    const savedRequestId = randomUUID();
+    // Control: the same teammate request opens a pull request on a task without the gated flow.
+    const legacy = await open(savedRequestId);
+    expect(legacy.status).toBe(202);
+    await harness.finish(workspaceId, String((legacy.body.operation as { id: string }).id), "FAILED", { error: "control publication ends" });
+
+    const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown>;
+    harness.db.set({ ...record, workflow: createWorkflowSnapshot({ taskId, ownerId: "b".repeat(64), now: new Date().toISOString() }) });
+    const before = { operations: operations().length, outbox: outbox().length };
+    const refused = await open();
+    expect(refused.body.error).toMatchObject({ code: "CONFIG_INVALID", message: "AgentX opens the draft pull request for this task itself once checks and reviews pass" });
+    // A request saved before the gate still answers with its own operation: the refusal comes after the replay lookup.
+    const replay = await open(savedRequestId);
+    expect(replay.status).toBe(202);
+    expect((replay.body.operation as { id: string }).id).toBe((legacy.body.operation as { id: string }).id);
+    for (const action of ["close", "replace", "revert"] as const) {
+      const change = await teammate(harness.handler, subject, PRIYA, "POST", `/v1/service/workspaces/${workspaceId}/pull-request-actions`, { requestId: randomUUID(), repository: "demo", pullRequestNumber: 7, action });
+      expect(change.body.error).toMatchObject({ code: "CONFIG_INVALID" });
+      expect(String((change.body.error as { message: string }).message)).not.toMatch(/workflow/i);
+    }
+    expect(operations()).toHaveLength(before.operations);
+    expect(outbox()).toHaveLength(before.outbox);
+    expect(activeOperation(harness, workspaceId)).toBeUndefined();
+    const github = harness.brokerInput.githubPullRequests as { reconcilePullRequest: ReturnType<typeof vi.fn>; getPullRequest: ReturnType<typeof vi.fn> };
+    expect(github.reconcilePullRequest).not.toHaveBeenCalled();
+    expect(github.getPullRequest).not.toHaveBeenCalled();
   });
 
   it("refuses to share into a private channel the developer has not joined and posts nothing, then shares once she joins (Q10)", async () => {

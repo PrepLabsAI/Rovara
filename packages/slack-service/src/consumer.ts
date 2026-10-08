@@ -9,6 +9,8 @@ export interface QueueMessage {
   receiveCount: number;
   /** How many earlier requests the ingress queued this one behind; absent from an older ingress. */
   queuedBehind?: number;
+  /** Task 21: the ingress asks for this plain request to be routed (a question or a change) before anything runs. */
+  route?: "suggest";
 }
 
 export interface QueueClient {
@@ -32,6 +34,8 @@ export interface ConsumerOptions {
 export type RequestHandler = (message: SlackRequestMessage, context: {
   finalAttempt: boolean;
   queuedBehind?: number;
+  /** Task 21: route this plain request first (see QueueMessage.route). */
+  route?: "suggest";
   redelivered?: boolean;
   /** Issue 157: aborted at the hand-off deadline after the stop. */
   handoff?: AbortSignal;
@@ -125,6 +129,7 @@ export async function processGroup(
         await handle(parsed.data, {
           finalAttempt: entry.receiveCount >= options.maxReceiveCount,
           ...(entry.queuedBehind === undefined ? {} : { queuedBehind: entry.queuedBehind }),
+          ...(entry.route === undefined ? {} : { route: entry.route }),
           // SQS redelivers after the visibility timeout expires on an earlier, non-final attempt; the
           // member was told "Working on it now" for that attempt, so a fresh one says so again rather
           // than restarting silently.

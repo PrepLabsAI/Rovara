@@ -86,6 +86,28 @@ describe("notices from the stream (C7, C8)", () => {
     expect([first[0]!.id, second[0]!.id]).toEqual([`${task.taskId}:mode:e5`, `${task.taskId}:mode:e6`]);
   });
 
+  it("notifies the shared thread when an owner approves the plan or requests changes", () => {
+    const taskId = randomUUID();
+    const waiting = { entityType: "DEVELOPER_TASK", taskId, workflow: { revision: 2, state: "WAITING", stage: "PLAN_REVIEW" } };
+    const approved = { ...waiting, workflow: { revision: 3, state: "RUNNING", stage: "IMPLEMENT" } };
+    expect(noticesOf(waiting, approved, "2026-10-05T12:00:00.000Z", "approve")).toEqual([
+      { id: `${taskId}:workflow:3`, kind: "workflow", taskId, at: "2026-10-05T12:00:00.000Z", workflowRevision: 3 },
+    ]);
+    expect(noticesOf(waiting, { ...waiting, workflow: { revision: 3, state: "RUNNING", stage: "PLAN" } }, "2026-10-05T12:00:00.000Z", "changes")[0]?.kind).toBe("workflow");
+  });
+
+  it("notifies on every step change, keyed by its revision, but not for the task's first step or a change that kept the revision", () => {
+    const taskId = randomUUID();
+    const running = { entityType: "DEVELOPER_TASK", taskId, workflow: { revision: 5, state: "WAITING", stage: "REVIEW" } };
+    expect(noticesOf(running, { ...running, workflow: { revision: 6, state: "RUNNING", stage: "REVIEW" } }, "2026-10-05T12:00:00.000Z", "e7")).toEqual([
+      { id: `${taskId}:workflow:6`, kind: "workflow", taskId, at: "2026-10-05T12:00:00.000Z", workflowRevision: 6 },
+    ]);
+    expect(noticesOf(running, { ...running, workflow: { ...running.workflow, canvasLineageVersion: 1 } }, "t", "e8")).toEqual([]);
+    expect(noticesOf({ entityType: "DEVELOPER_TASK", taskId }, running, "t", "e9")).toEqual([]);
+    // Without a stream event the notice could not be told apart from a replayed write.
+    expect(noticesOf(running, { ...running, workflow: { revision: 6, state: "RUNNING", stage: "REVIEW" } }, "t", "")).toEqual([]);
+  });
+
   it("records no stream event for deleting an item that does not exist", async () => {
     const { db, stream } = await started({});
     stream.take();

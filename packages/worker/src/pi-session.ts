@@ -35,6 +35,7 @@ import {
 import type { PiCacheRetention } from "./usage.js";
 
 export type PiThinkingLevel = ThinkingLevel;
+export type PiWorkflowMode = "PLAN" | "IMPLEMENT" | "REVIEW";
 
 export interface WorkspaceModelConfiguration {
   provider: string;
@@ -66,6 +67,8 @@ export interface PiSessionInput {
   sessionDirectory: string;
   agentDirectory: string;
   model: WorkspaceModelConfiguration;
+  /** Read-only planning tools until a server-authorized approval starts implementation. */
+  workflowMode?: PiWorkflowMode;
   /** AgentX's workspace note, then each prepared repository's own context file, which Pi cannot discover from the root. */
   contextFiles: RepositoryContextFile[];
   /** Where the agent's shell runs instead of the worker: the project's devcontainer (#121). */
@@ -87,6 +90,7 @@ export async function createWorkspacePiSession(
   input: {
     rootPath: string;
     model: WorkspaceModelConfiguration;
+    workflowMode?: PiWorkflowMode;
     conversationId?: string;
     onDiagnostic?: (message: string) => void;
     bashOperations?: BashOperations;
@@ -108,6 +112,7 @@ export async function createWorkspacePiSession(
     sessionDirectory,
     agentDirectory,
     model: input.model,
+    ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
     contextFiles,
     ...(input.conversationId === undefined ? {} : { conversationId: input.conversationId }),
     ...(input.bashOperations === undefined ? {} : { bashOperations: input.bashOperations }),
@@ -123,6 +128,7 @@ export async function openRegisteredWorkspacePiSession(
   input: {
     rootPath: string;
     model: WorkspaceModelConfiguration;
+    workflowMode?: PiWorkflowMode;
     conversationId: string;
     sessionFile: string;
     onDiagnostic?: (message: string) => void;
@@ -149,6 +155,7 @@ export async function openRegisteredWorkspacePiSession(
     sessionDirectory,
     agentDirectory,
     model: input.model,
+    ...(input.workflowMode === undefined ? {} : { workflowMode: input.workflowMode }),
     contextFiles,
     conversationId: input.conversationId,
     sessionFile,
@@ -231,17 +238,18 @@ async function createDefaultSession(
         `an AgentX Pi extension failed to load (an AgentX fault; retrying will not help): ${loadErrors.map((error) => `${error.path}: ${error.error}`).join("; ")}`,
       ));
     }
+    const capabilities = piTaskToolCapabilities(input.workflowMode ?? "IMPLEMENT");
     const { session } = await createAgentSession({
       cwd: input.cwd,
       agentDir: input.agentDirectory,
       modelRuntime,
       model,
       thinkingLevel: requestedLevel ?? (model.reasoning ? "medium" : "off"),
-      tools: ["read", "bash", "edit", "write", "grep", "find", "ls"],
+      tools: capabilities.tools,
       // A custom tool with a built-in's name replaces it.
       customTools: [
-        agentShellTool(input.cwd, input.bashOperations),
-        ...(input.devcontainerPaths === undefined ? [] : devcontainerFileTools(input.cwd, input.devcontainerPaths)),
+        ...(capabilities.shell ? [agentShellTool(input.cwd, input.bashOperations)] : []),
+        ...(!capabilities.customFileTools || input.devcontainerPaths === undefined ? [] : devcontainerFileTools(input.cwd, input.devcontainerPaths)),
       ],
       resourceLoader,
       settingsManager,
@@ -441,4 +449,14 @@ function assertContained(parent: string, child: string): void {
   if (path === ".." || path.startsWith(`..${sep}`) || isAbsolute(path)) {
     throw agentXError("FORBIDDEN", "pi session path escaped /mnt/workspace/agent-sessions");
   }
+}
+
+/** Pi's actual tool surface for a task phase; PLAN deliberately omits bash and all write tools. */
+export function piTaskToolCapabilities(mode: PiWorkflowMode): {
+  tools: string[];
+  customFileTools: boolean;
+  shell: boolean;
+} {
+  if (mode === "PLAN" || mode === "REVIEW") return { tools: ["read", "grep", "find", "ls"], customFileTools: false, shell: false };
+  return { tools: ["read", "bash", "edit", "write", "grep", "find", "ls"], customFileTools: true, shell: true };
 }

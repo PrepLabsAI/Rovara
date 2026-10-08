@@ -1,17 +1,32 @@
+import { execFile as execFileCallback } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { lstat, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
-import { dirname, isAbsolute, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { promisify } from "node:util";
 import {
   DEFAULT_DEVCONTAINER_CONFIG_PATH,
+  agentXError,
   type ProjectCommand,
   type StoredProjectDefinition,
 } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { runCollected, TIMEOUT_KILL_GRACE_MS } from "./collected-process.js";
+import {
+  DOCKER_DATA_DIRECTORY,
+  DOCKER_DATA_VISIBLE,
+  containerProblems,
+  devcontainerConfigRefusal,
+  parseJsonc,
+  hostPathResolver,
+  type ContainerInspection,
+} from "./devcontainer-policy.js";
 import { AGENTX_GIT_IDENTITY_ENVIRONMENT } from "./git.js";
 import type { CommandResult } from "./readiness.js";
 
+const execFile = promisify(execFileCallback);
 const UP_TIMEOUT_MS = 20 * 60_000;
+const DOCKER_CALL_TIMEOUT_MS = 60_000;
 /** How long one exec that signals a command's process group in the container may take (#174). */
 const KILL_EXEC_TIMEOUT_MS = 10_000;
 /**
@@ -129,7 +144,34 @@ export interface DevcontainerCli {
       onStderr?: (data: Buffer) => void;
     },
   ): Promise<DevcontainerProcess>;
+  /**
+   * What AgentX checks against its rules (devcontainer-policy.ts): the full configuration before `up`, and the container
+   * as Docker ran it after, removed when it breaks them. The bundled CLI has these; a test seam without them skips both.
+   */
+  checks?: DevcontainerChecks;
 }
+
+/** The configuration `devcontainer up` would use, read by the devcontainer CLI without starting anything. */
+export interface DevcontainerFullConfiguration {
+  /** devcontainer.json as the CLI reads it. */
+  configuration: unknown;
+  /** With every feature's and the image's own `devcontainer.metadata` settings merged in. */
+  mergedConfiguration: unknown;
+  /** Each feature as the CLI fetched it, with the digest of what it fetched. */
+  featuresConfiguration?: unknown;
+  /** The CLI's mount of the repository folder. */
+  workspaceMount?: string;
+}
+
+export interface DevcontainerChecks {
+  fullConfiguration(target: DevcontainerTarget): Promise<DevcontainerFullConfiguration>;
+  inspect(containerId: string): Promise<ContainerInspection>;
+  /** Stops and deletes the container. */
+  remove(containerId: string): Promise<void>;
+}
+
+/** The empty volume mounted over the workspace's Docker data folder in every dev container. */
+export const DOCKER_DATA_MASK_VOLUME = "agentx-docker-data-mask";
 
 export function devcontainerTarget(rootPath: string, project: StoredProjectDefinition): DevcontainerTarget | undefined {
   const devcontainer = project.devcontainer;
@@ -164,10 +206,189 @@ export function preparedDevcontainerTarget(
  * stopped), and runs its lifecycle commands. Idempotent.
  */
 export async function ensureDevcontainer(cli: DevcontainerCli, target: DevcontainerTarget): Promise<DevcontainerUpResult> {
+  await assertDevcontainerConfigAllowed(target);
+  const lockfile = cli.checks === undefined ? undefined : await assertFullConfigurationAllowed(cli.checks, target);
+  // `up` fetches remote features again. With a lockfile of the digests just checked, and --frozen-lockfile, it uses
+  // exactly that content or fails before it builds anything.
+  const start = (data: string | undefined) => lockfile === undefined
+    ? startDevcontainer(cli, target, data, false)
+    : withFeatureLockfile(target, lockfile, () => startDevcontainer(cli, target, data, true));
+  // On an EC2 worker the workspace volume also holds Docker's data root, which is not the project's: a volume
+  // mounted over it inside the dev container hides it there.
+  const dockerDataPath = join(target.rootPath, DOCKER_DATA_DIRECTORY);
+  const hasDockerData = (await stat(dockerDataPath).catch(() => undefined))?.isDirectory() === true;
+  const started = await start(hasDockerData ? dockerDataPath : undefined);
+  if (cli.checks === undefined) return started;
+  let problems = await startedContainerProblems(cli.checks, started.containerId, target, hasDockerData ? dockerDataPath : undefined);
+  let current = started;
+  if (problems.length === 1 && problems[0] === DOCKER_DATA_VISIBLE) {
+    // A container created before AgentX hid the Docker data folder: created again, with it hidden.
+    await removeStartedContainer(cli.checks, current.containerId);
+    current = await start(dockerDataPath);
+    problems = await startedContainerProblems(cli.checks, current.containerId, target, dockerDataPath);
+  }
+  if (problems.length > 0) {
+    await removeStartedContainer(cli.checks, current.containerId);
+    throw agentXError("CONFIG_INVALID", `The dev container for ${relative(target.rootPath, target.workspaceFolder) || "."} was started with ${problems.join(", ")}, which AgentX does not allow, so AgentX removed it. A dev container feature or the image's devcontainer.metadata label can ask for these; see "Dev container" in docs/project-configuration.md.`.slice(0, 1_000));
+  }
+  return current;
+}
+
+/** Refuses a devcontainer.json that asks Docker for part of the worker host (devcontainer-policy.ts). */
+async function assertDevcontainerConfigAllowed(target: DevcontainerTarget): Promise<void> {
+  const shown = relative(target.rootPath, target.configPath);
+  let text: string;
+  try {
+    text = await readFile(target.configPath, "utf8");
+  } catch (error) {
+    // No config: `devcontainer up` says so.
+    if ((error as { code?: unknown }).code === "ENOENT") return;
+    throw agentXError("CONFIG_INVALID", `AgentX could not read the dev container config ${shown}: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512));
+  }
+  let config: unknown;
+  try {
+    config = parseJsonc(text);
+  } catch {
+    throw agentXError("CONFIG_INVALID", `AgentX could not read the dev container config ${shown} as JSON with comments, so it did not start it`);
+  }
+  const reason = devcontainerConfigRefusal(config, policyContext(target));
+  if (reason !== undefined) {
+    throw agentXError("CONFIG_INVALID", `The dev container config ${shown} uses ${reason}, which AgentX does not allow: it would give code in the container the worker host. Remove it; see "Dev container" in docs/project-configuration.md for what is allowed.`.slice(0, 1_000));
+  }
+}
+
+function policyContext(target: DevcontainerTarget) {
+  return {
+    rootPath: target.rootPath,
+    workspaceFolder: target.workspaceFolder,
+    configFolder: dirname(target.configPath),
+    resolvePath: hostPathResolver(target.rootPath),
+  };
+}
+
+/**
+ * Refuses, before any container starts, what the dev container's features or its image's `devcontainer.metadata` label
+ * would add: the devcontainer CLI merges them into the configuration `up` uses, and reads that without starting anything.
+ */
+async function assertFullConfigurationAllowed(checks: DevcontainerChecks, target: DevcontainerTarget): Promise<FeatureLockfile> {
+  let full: DevcontainerFullConfiguration;
+  try {
+    full = await checks.fullConfiguration(target);
+  } catch (error) {
+    throw new Error(`AgentX could not read the dev container's full configuration (with its features and image), so it did not start it: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512), { cause: error });
+  }
+  const context = policyContext(target);
+  const reason = devcontainerConfigRefusal(full.configuration, context)
+    ?? devcontainerConfigRefusal(full.mergedConfiguration, context)
+    ?? (full.workspaceMount === undefined ? undefined : devcontainerConfigRefusal({ workspaceMount: full.workspaceMount }, context));
+  if (reason !== undefined) {
+    throw agentXError("CONFIG_INVALID", `The dev container config ${relative(target.rootPath, target.configPath)}, with its features and image, uses ${reason}, which AgentX does not allow: it would give code in the container the worker host. AgentX did not start it; see "Dev container" in docs/project-configuration.md for what is allowed.`.slice(0, 1_000));
+  }
+  return featureLockfile(full.featuresConfiguration, relative(target.rootPath, target.configPath));
+}
+
+/** A devcontainer lockfile: the exact content of each remote feature, by digest. */
+export interface FeatureLockfile {
+  features: Record<string, { version: unknown; resolved: string; integrity: string; dependsOn?: string[] }>;
+}
+
+/**
+ * The lockfile for the features the CLI fetched for the check, in the CLI's own format, so that `up --frozen-lockfile`
+ * accepts it only when it fetches the same content. A local feature (in .devcontainer) needs no entry. A feature the
+ * CLI cannot pin (one fetched from a GitHub release, or without a digest) is refused, naming it.
+ */
+export function featureLockfile(featuresConfiguration: unknown, shownConfigPath: string): FeatureLockfile {
+  const sets = (featuresConfiguration as { featureSets?: unknown } | null | undefined)?.featureSets;
+  const entries: Array<[string, FeatureLockfile["features"][string]]> = [];
+  for (const set of Array.isArray(sets) ? sets as unknown[] : []) {
+    const featureSet = set as {
+      sourceInformation?: { type?: unknown; userFeatureId?: unknown; tarballUri?: unknown; featureRef?: { registry?: unknown; path?: unknown } };
+      computedDigest?: unknown;
+      features?: Array<{ version?: unknown; dependsOn?: unknown }>;
+    };
+    const source = featureSet.sourceInformation;
+    const id = typeof source?.userFeatureId === "string" ? source.userFeatureId : "(unnamed)";
+    if (source?.type === "file-path") continue;
+    const digest = featureSet.computedDigest;
+    let resolved: string | undefined;
+    if (source?.type === "oci" && typeof source.featureRef?.registry === "string" && typeof source.featureRef.path === "string") {
+      resolved = `${source.featureRef.registry}/${source.featureRef.path}@${String(digest)}`;
+    } else if (source?.type === "direct-tarball" && typeof source.tarballUri === "string") {
+      resolved = source.tarballUri;
+    }
+    if (resolved === undefined || typeof digest !== "string" || !/^sha256:[0-9a-f]{64}$/u.test(digest)) {
+      throw agentXError("CONFIG_INVALID", `The dev container config ${shownConfigPath} uses the feature ${id}, which AgentX cannot pin to the content it checked. Use a feature published to an OCI registry, a tarball URL, or a local feature in .devcontainer.`.slice(0, 1_000));
+    }
+    const feature = featureSet.features?.[0];
+    const dependsOn = feature?.dependsOn !== null && typeof feature?.dependsOn === "object" ? Object.keys(feature.dependsOn) : [];
+    entries.push([id, { version: feature?.version, resolved, integrity: digest, ...(dependsOn.length > 0 ? { dependsOn } : {}) }]);
+  }
+  entries.sort((left, right) => left[0].localeCompare(right[0]));
+  return { features: Object.fromEntries(entries) };
+}
+
+/** Where the devcontainer CLI reads the lockfile: next to devcontainer.json. */
+export function featureLockfilePath(configPath: string): string {
+  return join(dirname(configPath), basename(configPath).startsWith(".") ? ".devcontainer-lock.json" : "devcontainer-lock.json");
+}
+
+/**
+ * Runs `start` with AgentX's lockfile in the place the CLI reads it, then puts back what was there (the repository's own
+ * lockfile, or nothing), so the repository is left as it was. Refuses a lockfile path that is not a plain file of the
+ * workspace (a link, for example).
+ */
+async function withFeatureLockfile<T>(target: DevcontainerTarget, lockfile: FeatureLockfile, start: () => Promise<T>): Promise<T> {
+  const path = featureLockfilePath(target.configPath);
+  const shown = relative(target.rootPath, path);
+  const existing = await lstat(path).catch((error: unknown) => {
+    if ((error as { code?: unknown }).code === "ENOENT") return undefined;
+    throw error;
+  });
+  if (hostPathResolver(target.rootPath)(path) !== path || (existing !== undefined && !existing.isFile())) {
+    throw agentXError("CONFIG_INVALID", `The dev container lockfile ${shown} is not a plain file in the workspace, so AgentX did not start the dev container`);
+  }
+  const previous = existing === undefined ? undefined : await readFile(path);
+  await writeFile(path, `${JSON.stringify(lockfile, null, 2)}\n`, "utf8");
+  try {
+    return await start();
+  } finally {
+    if (previous === undefined) await rm(path, { force: true });
+    else await writeFile(path, previous);
+  }
+}
+
+async function startedContainerProblems(
+  containers: DevcontainerChecks,
+  containerId: string,
+  target: DevcontainerTarget,
+  dockerDataPath: string | undefined,
+): Promise<string[]> {
+  let inspection: ContainerInspection;
+  try {
+    inspection = await containers.inspect(containerId);
+  } catch (error) {
+    await removeStartedContainer(containers, containerId);
+    throw new Error(`AgentX could not check the dev container it started, so it removed it: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512), { cause: error });
+  }
+  return containerProblems(inspection, { rootPath: target.rootPath, resolvePath: hostPathResolver(target.rootPath), ...(dockerDataPath === undefined ? {} : { dockerDataPath }) });
+}
+
+async function removeStartedContainer(containers: DevcontainerChecks, containerId: string): Promise<void> {
+  try {
+    await containers.remove(containerId);
+  } catch (error) {
+    // Publication removes every leftover container before it pushes, and fails when it cannot.
+    throw new Error(`AgentX could not remove a dev container it does not allow: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512), { cause: error });
+  }
+}
+
+async function startDevcontainer(cli: DevcontainerCli, target: DevcontainerTarget, dockerDataPath: string | undefined, frozenLockfile: boolean): Promise<DevcontainerUpResult> {
   const result = await cli.run([
     "up",
     ...targetArgs(target),
+    ...(frozenLockfile ? ["--frozen-lockfile"] : []),
     "--mount", `type=bind,source=${target.rootPath},target=${target.rootPath}`,
+    ...(dockerDataPath === undefined ? [] : ["--mount", `type=volume,source=${DOCKER_DATA_MASK_VOLUME},target=${dockerDataPath}`]),
     "--log-format", "json",
   ], { timeoutMs: UP_TIMEOUT_MS });
   const outcome = lastJsonLine(result.stdout);
@@ -383,13 +604,48 @@ function devcontainerExec(cli: DevcontainerCli, target: DevcontainerTarget): Con
 }
 
 /** The `devcontainer` CLI bundled with the worker, run with this Node. */
-export function createDevcontainerCli(): DevcontainerCli {
+export function createDevcontainerCli(options: { dockerPath?: string } = {}): DevcontainerCli {
   const require = createRequire(import.meta.url);
   const script = resolve(dirname(require.resolve("@devcontainers/cli/package.json")), "devcontainer.js");
+  const docker = options.dockerPath ?? "docker";
+  const run: DevcontainerCli["run"] = (args, runOptions) => runCollected(process.execPath, [
+    script,
+    ...(options.dockerPath === undefined || args[0] === undefined ? args : [args[0], "--docker-path", options.dockerPath, ...args.slice(1)]),
+  ], runOptions);
   return {
-    run(args, options) {
-      return runCollected(process.execPath, [script, ...args], options);
+    run,
+    // The same `docker` the devcontainer CLI runs.
+    checks: {
+      async fullConfiguration(target) {
+        const result = await run(["read-configuration", ...targetArgs(target), "--include-merged-configuration", "--include-features-configuration", "--log-format", "json"], { timeoutMs: UP_TIMEOUT_MS });
+        return fullConfigurationFromOutput(result);
+      },
+      async inspect(containerId) {
+        const { stdout } = await execFile(docker, ["inspect", "--type", "container", containerId], { encoding: "utf8", timeout: DOCKER_CALL_TIMEOUT_MS, maxBuffer: 16 * 1024 * 1024 });
+        const parsed: unknown = JSON.parse(stdout);
+        if (!Array.isArray(parsed) || parsed.length !== 1 || parsed[0] === null || typeof parsed[0] !== "object") throw new Error("docker inspect did not describe one container");
+        return parsed[0] as ContainerInspection;
+      },
+      async remove(containerId) {
+        await execFile(docker, ["rm", "--force", containerId], { encoding: "utf8", timeout: DOCKER_CALL_TIMEOUT_MS });
+      },
     },
+  };
+}
+
+/** `devcontainer read-configuration --include-merged-configuration`'s answer, or why there is none. */
+export function fullConfigurationFromOutput(result: DevcontainerProcess): DevcontainerFullConfiguration {
+  const answer = lastJsonLine(result.stdout);
+  if (result.exitCode !== 0 || answer === undefined || answer.mergedConfiguration === null || typeof answer.mergedConfiguration !== "object") {
+    const reason = result.timedOut === true ? "timed out" : (`${result.stdout}\n${result.stderr}`.trim().split("\n").at(-1) ?? "").slice(0, 300);
+    throw new Error(`devcontainer read-configuration failed${reason ? `: ${reason}` : ` (exit ${String(result.exitCode)})`}`);
+  }
+  const workspace = answer.workspace as { workspaceMount?: unknown } | undefined;
+  return {
+    configuration: answer.configuration,
+    mergedConfiguration: answer.mergedConfiguration,
+    ...(answer.featuresConfiguration === undefined ? {} : { featuresConfiguration: answer.featuresConfiguration }),
+    ...(typeof workspace?.workspaceMount === "string" ? { workspaceMount: workspace.workspaceMount } : {}),
   };
 }
 

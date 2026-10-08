@@ -1,7 +1,9 @@
 // Spec 025 Testing section: the MCP SDK's client drives `agentx mcp`'s server against the broker in
 // process, through User Stories 1 and 2. The client lists the tools first, as real AI tools do, so
 // every error result is also checked against SDK 1.30.1's output-schema validation (ruling F3).
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
+import { DeveloperTaskResponseSchema, WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, type WorkflowSnapshot } from "@agentx/contracts";
 import { MAYA, OMAR, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { URL_BASE, signedInClient } from "../support/mcp-broker-client.js";
 
@@ -69,6 +71,34 @@ describe("hand off a task from an AI tool and move on (US1)", () => {
     expect(await tool("agentx_list_projects")).toMatchObject({ isError: true, error: { code: "SIGN_IN_REQUIRED", next_step: `run npx @preplabsai/rovara-code login ${URL_BASE}` } });
     // The server keeps answering after a sign-in error: it does not crash.
     expect(await tool("agentx_whoami")).toMatchObject({ isError: true, error: { code: "SIGN_IN_REQUIRED" } });
+  });
+});
+
+describe("a saved plan that fails its digest check", () => {
+  it("is shown blocked by GET task and agentx_get_task, in plain words, and is never stored blocked", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const { tool } = await signedInClient(harness, MAYA);
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK" });
+    const taskId = (started.body.task as { taskId: string }).taskId;
+    const workspaceId = workspaceOf(harness, taskId);
+    await harness.finish(workspaceId, activeOf(harness, workspaceId), "SUCCEEDED", { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } });
+    const planning = activeOf(harness, workspaceId);
+    await harness.artifact(workspaceId, planning, "plan.md", "# Plan\n\n1. Fix retry handling.\n");
+    await harness.finish(workspaceId, planning, "SUCCEEDED", { result: { workflowMode: "PLAN" } });
+    const stored = (harness.db.get(`DEVTASK#${taskId}`, "META") as { workflow: WorkflowSnapshot }).workflow;
+    expect(stored).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+    // The saved bytes change after their digest was recorded.
+    harness.s3.objects.set(stored.artifacts.at(-1)!.objectKey, "# Plan\n\n1. Something else.\n");
+
+    const viewed = await harness.dev(MAYA, "GET", `/v1/dev/tasks/${taskId}`);
+    expect(viewed.status).toBe(200);
+    expect(DeveloperTaskResponseSchema.parse(viewed.body).task.workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.documentUnverified });
+    const read = await tool("agentx_get_task", { task_id: taskId });
+    expect(read.isError).toBe(false);
+    expect(JSON.stringify(read.value)).toContain(WORKFLOW_BLOCK_REASONS.documentUnverified);
+    // Only the view is blocked: the stored task still waits, and a blocked approval can't be stored.
+    expect((harness.db.get(`DEVTASK#${taskId}`, "META") as { workflow: WorkflowSnapshot }).workflow).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
+    expect(WorkflowSnapshotSchema.safeParse({ ...stored, state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.documentUnverified }).success).toBe(false);
   });
 });
 

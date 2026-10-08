@@ -12,7 +12,9 @@ import {
   SQSClient,
 } from "@aws-sdk/client-sqs";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
-import { SLACK_QUEUED_BEHIND_ATTRIBUTE, confirmationBlocks, queuedBehindOf, sharedNoticeClaim, type SlackRequestMessage } from "@agentx/contracts";
+import {
+  SLACK_QUEUED_BEHIND_ATTRIBUTE, SLACK_ROUTE_ATTRIBUTE, confirmationBlocks, queuedBehindOf, routeOf, sharedNoticeClaim, type SlackRequestMessage,
+} from "@agentx/contracts";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { runOrchestratorTurn } from "@agentx/orchestrator/orchestrator";
 import { createDynamoActiveTurnStore } from "./active-turn-store.js";
@@ -24,7 +26,8 @@ import { createSlackUserNames } from "./user-names.js";
 import { createEvalBatchWatchApi, createThreadApi } from "./thread-api.js";
 import { SlackApiError, runEvalBatchWatcher } from "./eval-batch-watcher.js";
 import { HANDOFF_MILLISECONDS, activeTurnFromItem, turnNoteFromItem } from "./interrupted-turn.js";
-import { classifierTimeoutMs, createHostedClassifier, createHostedSlackRuntime, gateDecisionLogFields, runHostedTurn } from "./runtime.js";
+import { classifierTimeoutMs, createHostedClassifier, createHostedRequestRouter, createHostedSlackRuntime, gateDecisionLogFields, runHostedTurn } from "./runtime.js";
+import { createChoiceOffer, routeSlackRequest } from "./request-routing.js";
 import { DynamoTurnRecordWriter } from "./turn-records.js";
 
 const MAX_RECEIVE_COUNT = 5;
@@ -75,6 +78,8 @@ const { classifier, available: classifierAvailable } = await createHostedClassif
   model: classifierModel, timeoutMs: gateClassifierTimeoutMs, log,
 });
 const confirmations = createDynamoConfirmationStore(documentClient, threadsTableName, Date.now, log);
+// Task 21: plain top-level requests are routed with the same model setting, credentials and timeout (capped at 4 seconds).
+const requestRouter = await createHostedRequestRouter({ classifierAvailable, model: classifierModel, timeoutMs: gateClassifierTimeoutMs, log });
 
 let botToken: { value: Promise<string>; loadedAt: number } | undefined;
 function slackBotToken(): Promise<string> {
@@ -310,16 +315,18 @@ const queue: QueueClient = {
       WaitTimeSeconds: 20,
       VisibilityTimeout: VISIBILITY_SECONDS,
       MessageSystemAttributeNames: ["MessageGroupId", "ApproximateReceiveCount"],
-      MessageAttributeNames: [SLACK_QUEUED_BEHIND_ATTRIBUTE],
+      MessageAttributeNames: [SLACK_QUEUED_BEHIND_ATTRIBUTE, SLACK_ROUTE_ATTRIBUTE],
     }));
     return (response.Messages ?? []).map((message) => {
       const queuedBehind = queuedBehindOf(message.MessageAttributes);
+      const route = routeOf(message.MessageAttributes);
       return {
         body: message.Body ?? "",
         receiptHandle: message.ReceiptHandle ?? "",
         groupId: message.Attributes?.MessageGroupId ?? "",
         receiveCount: Number.parseInt(message.Attributes?.ApproximateReceiveCount ?? "1", 10),
         ...(queuedBehind === undefined ? {} : { queuedBehind }),
+        ...(route === undefined ? {} : { route }),
       };
     });
   },
@@ -361,23 +368,14 @@ const batchWatcher = runEvalBatchWatcher({
 
 log("service.started", {
   concurrency, provider: model.provider, model: model.modelId,
-  classifierProvider: classifierModel.provider, classifierModel: classifierModel.modelId, classifierAvailable,
+  classifierProvider: classifierModel.provider, classifierModel: classifierModel.modelId, classifierAvailable, requestRouting: requestRouter !== undefined,
 });
-await runConsumer(queue, (message, context) => processSlackRequest(message, {
-  api: threadApi,
-  threads,
-  runTurn,
-  post: async (thread, text) => { await postToSlack(thread.channelId, thread.threadTs, text); },
-  log,
-  confirmations,
-  postConfirmation: async (thread, confirmation, text) => { await postToSlack(thread.channelId, thread.threadTs, text, confirmationBlocks(text, confirmation.confirmationId)); },
-  postWithBlocks: async (thread, text, blocks) => { await postToSlack(thread.channelId, thread.threadTs, text, blocks); },
-  // Issue 219: a progress post Slack does not answer is given up after ten seconds.
-  postProgress: (thread, text) => postToSlack(thread.channelId, thread.threadTs, text, undefined, AbortSignal.timeout(10_000)),
-  updateMessage: (thread, ts, text) => updateInSlack(thread.channelId, ts, text),
-  turnRecords: new DynamoTurnRecordWriter(documentClient, turnRecordsTableName),
-  userName: slackUserName,
-}, context), {
+const offerChoice = createChoiceOffer({ documentClient, tableName: threadsTableName, post: (thread, text, blocks) => postToSlack(thread.channelId, thread.threadTs, text, blocks), log });
+await runConsumer(queue, (message, { route, ...context }) => route === "suggest"
+  ? routeSlackRequest(message, { ...(requestRouter === undefined ? {} : { route: requestRouter }), offer: offerChoice,
+    notify: async (thread, text) => { await postToSlack(thread.channelId, thread.threadTs, text); },
+    answer: (question) => processRequest(question, context), finish: (subject) => threads.finish(subject), log })
+  : processRequest(message, context), {
   concurrency,
   maxReceiveCount: MAX_RECEIVE_COUNT,
   visibilitySeconds: VISIBILITY_SECONDS,
@@ -386,6 +384,24 @@ await runConsumer(queue, (message, context) => processSlackRequest(message, {
   handoffMilliseconds: HANDOFF_MILLISECONDS,
   log,
 });
+
+function processRequest(message: SlackRequestMessage, context: Parameters<typeof processSlackRequest>[2]): Promise<void> {
+  return processSlackRequest(message, {
+    api: threadApi,
+    threads,
+    runTurn,
+    post: async (thread, text) => { await postToSlack(thread.channelId, thread.threadTs, text); },
+    log,
+    confirmations,
+    postConfirmation: async (thread, confirmation, text) => { await postToSlack(thread.channelId, thread.threadTs, text, confirmationBlocks(text, confirmation.confirmationId)); },
+    postWithBlocks: async (thread, text, blocks) => { await postToSlack(thread.channelId, thread.threadTs, text, blocks); },
+    // Issue 219: a progress post Slack does not answer is given up after ten seconds.
+    postProgress: (thread, text) => postToSlack(thread.channelId, thread.threadTs, text, undefined, AbortSignal.timeout(10_000)),
+    updateMessage: (thread, ts, text) => updateInSlack(thread.channelId, ts, text),
+    turnRecords: new DynamoTurnRecordWriter(documentClient, turnRecordsTableName),
+    userName: slackUserName,
+  }, context);
+}
 // The watcher stops at its next pause; a pass still waiting on Slack or the broker is not waited for long (issue 157).
 await Promise.race([batchWatcher, new Promise((resolve) => setTimeout(resolve, 2_000).unref())]);
 log("service.stopped", {});

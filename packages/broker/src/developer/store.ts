@@ -11,9 +11,9 @@ import {
 } from "@agentx/contracts";
 import { pkceChallengeMatches, randomToken, sha256Hex } from "./tokens.js";
 
-export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number }
+export interface AuthRequestRecord { id: string; clientRedirectUri: string; clientState: string; codeChallenge: string; nonce: string; method?: DeveloperSignInMethod; consumedAt?: string; expiresAt: number; browserReturnTo?: string }
 export interface DeveloperRecord { developerId: string; provider: DeveloperSignInMethod; issuer: string; subject: string; displayName: string; email?: string; slackUserId?: string; firstSignInAt: string; lastSignInAt: string; revoked: boolean; sessionsEndedAt?: string }
-export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string }
+export interface SessionRecord { sessionId: string; developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; startedAt: string; endsAt: number; reviewExpiresAt?: number; lastRefreshAt?: string; revokedAt?: string; revokedReason?: string }
 
 /** A method's enabled-since cutoff from its environment variable, epoch seconds; "0", empty or unreadable means none. */
 export function methodSince(text: string | undefined): number | undefined {
@@ -206,7 +206,7 @@ export class DeveloperSignInStore {
     return { developerId: record.developerId, amr: record.amr, ...(record.slackUserId === undefined ? {} : { slackUserId: record.slackUserId }) };
   }
 
-  async createSession(input: { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string }): Promise<{ session: SessionRecord; refreshToken: string }> {
+  async createSession(input: { developerId: string; amr: DeveloperSignInMethod; slackUserId?: string; reviewExpiresAt?: number }): Promise<{ session: SessionRecord; refreshToken: string }> {
     const session: SessionRecord = { ...input, sessionId: randomUUID(), startedAt: this.iso(), endsAt: this.seconds() + DEVELOPER_SESSION_SECONDS };
     const refreshToken = randomToken("agxr_");
     await this.input.documentClient.send(new TransactWriteCommand({

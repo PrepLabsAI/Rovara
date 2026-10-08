@@ -9,6 +9,7 @@ import { processGroup, runConsumer, type QueueClient, type QueueMessage } from "
 import { deterministicUuid, requestIdSequence } from "../../packages/slack-service/src/ids.js";
 import {
   isCloseWorkspaceRequest,
+  isDiscardCloseWorkspaceRequest,
   processSlackRequest,
   type ProcessorDependencies,
   type ThreadState,
@@ -52,6 +53,7 @@ function processorHarness(options: {
   ensureError?: Error;
   closeStart?: SlackWorkspaceCloseStartResult;
   closeOperation?: { status: string; error?: string; result?: unknown };
+  closeDiscarded?: boolean;
 } = {}) {
   const posts: string[] = [];
   const turns: TurnInput[] = [];
@@ -75,6 +77,7 @@ function processorHarness(options: {
         operationId,
         closedAt: "2026-09-24T08:00:00.000Z",
         storageReleased: true,
+        ...(options.closeDiscarded ? { discardedUnpublished: true } : {}),
       }),
       waitForOperation: async () => options.closeOperation ?? { status: options.preparation ?? "SUCCEEDED" },
       createConversation,
@@ -210,6 +213,24 @@ describe("Slack close command matching (#103)", () => {
     expect(isCloseWorkspaceRequest(`close${" ".repeat(300)}workspace`)).toBe(false);
     expect(isCloseWorkspaceRequest(`${"!".repeat(40_000)}a`)).toBe(false);
   });
+
+  it.each([
+    "discard unpublished work and close this workspace",
+    "<@U123> please discard unpublished work and close the workspace",
+    "DISCARD UNPUBLISHED WORK AND CLOSE MY WORKSPACE!",
+  ])("accepts the explicit discard-and-close instruction %j", (text) => {
+    expect(isDiscardCloseWorkspaceRequest(text)).toBe(true);
+    expect(isCloseWorkspaceRequest(text)).toBe(false);
+  });
+
+  it.each([
+    "discard and close this workspace",
+    "discard unpublished work",
+    "discard unpublished work and close this workspace after the PR merges",
+    "close the workspace",
+  ])("does not treat %j as discard authorization", (text) => {
+    expect(isDiscardCloseWorkspaceRequest(text)).toBe(false);
+  });
 });
 
 describe("Slack request processing", () => {
@@ -274,6 +295,22 @@ describe("Slack request processing", () => {
     expect(harness.closed).toHaveLength(0);
   });
 
+  it("closes after the explicit discard phrase and confirms the discard", async () => {
+    const operationId = "55555555-5555-4555-8555-555555555555";
+    const harness = processorHarness({
+      closeStart: { outcome: "PREFLIGHT", workspaceId, operationId, status: "ACCEPTED" },
+      closeOperation: { status: "SUCCEEDED", result: { safeToClose: false, repositories: [{ name: "demo", reasons: ["untracked_files"] }] } },
+      closeDiscarded: true,
+    });
+    await processSlackRequest(slackMessage({ text: "<@UAGENTX> discard unpublished work and close this workspace" }), harness.dependencies, { finalAttempt: false });
+    expect(harness.startClose).toHaveBeenCalledWith(expect.any(String), true);
+    expect(harness.posts).toEqual([
+      "Checking this workspace for unpublished work before closing it.",
+      "Workspace closed. Its unpublished changes were discarded, and its isolated storage was released.",
+    ]);
+    expect(harness.closed).toEqual([{ workspaceId, closedAt: "2026-09-24T08:00:00.000Z" }]);
+  });
+
   it("escapes Slack control characters in the preflight failure notice (M5)", async () => {
     const operationId = "55555555-5555-4555-8555-555555555555";
     const harness = processorHarness({
@@ -291,6 +328,14 @@ describe("Slack request processing", () => {
     await processSlackRequest(slackMessage(), harness.dependencies, { finalAttempt: false });
     expect(harness.turns).toHaveLength(0);
     expect(harness.posts).toEqual(["This thread's workspace is closed. Start a new Slack thread to create a fresh workspace."]);
+  });
+
+  it("tells the thread starter when a retried close had discarded unpublished changes", async () => {
+    const harness = processorHarness({
+      closeStart: { outcome: "CLOSED", workspaceId, closedAt: "2026-09-24T08:00:00.000Z", discardedUnpublished: true },
+    });
+    await processSlackRequest(slackMessage({ text: "discard unpublished work and close this workspace" }), harness.dependencies, { finalAttempt: false });
+    expect(harness.posts).toEqual(["This thread's workspace is already closed. Its unpublished changes were discarded, and its isolated storage was released."]);
   });
 
   it("sets up a new thread's workspace, then runs the request with the project instructions", async () => {

@@ -6,18 +6,49 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import type { WorkerInvocation } from "@agentx/contracts";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { allowGitFileTransportForTests } from "../../packages/worker/src/git.js";
 import { maintainPullRequest } from "../../packages/worker/src/maintain-pull-request.js";
 import type { DevcontainerCli, DevcontainerProcess } from "../../packages/worker/src/devcontainer.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories: string[] = [];
 
+// The fixtures' remotes are local bare repositories, which AgentX's hardened Git (HTTPS only) allows
+// through its test seam; every other hardened setting stays in force.
+// No real credential helper, global or system config, or HOME takes part either.
+let disallowFileTransport: () => void = () => undefined;
+beforeEach(async () => {
+  disallowFileTransport = allowGitFileTransportForTests();
+  const home = await mkdtemp(join(tmpdir(), "agentx-git-home-"));
+  temporaryDirectories.push(home);
+  vi.stubEnv("HOME", home);
+  vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+  vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
+});
+
 afterEach(async () => {
+  disallowFileTransport();
+  vi.unstubAllEnvs();
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
 describe("pull request maintenance", () => {
+  it("refuses to append to a Git LFS repository, and pushes nothing", async () => {
+    const fixture = await createFixture("append");
+    await writeFile(join(fixture.checkout, ".gitattributes"), "*.bin filter=lfs diff=lfs merge=lfs -text\n", "utf8");
+    await writeFile(join(fixture.checkout, "model.bin"), "weights\n", "utf8");
+    await expect(maintainPullRequest({
+      rootPath: fixture.root,
+      invocation: fixture.invocation,
+      credentialProvider: async () => ({}),
+      pullRequestUpdateSink: vi.fn(),
+    })).rejects.toThrow(
+      "CONFIG_INVALID: Git LFS repositories are not supported yet: this repository stores files with Git LFS (filter=lfs in .gitattributes).",
+    );
+    expect(await git(fixture.bare, ["rev-parse", `refs/heads/${fixture.headBranch}`])).toBe(`${fixture.pullRequestHead}\n`);
+  });
+
   it("redacts a Git error before it is cut (#170 review)", async () => {
     const token = `ghp_${"M1n2B3v4C5".repeat(4)}`;
     // Git names the missing remote, whose path holds a token, in its error.

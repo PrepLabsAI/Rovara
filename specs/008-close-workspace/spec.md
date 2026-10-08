@@ -4,7 +4,7 @@
 
 **Created**: 2026-09-24
 
-**Status**: Implemented and validated locally; AWS deployment pending
+**Status**: Implemented; owner-authorized discard extension in progress
 
 **Input**: User description: "Issue #24: close a workspace from its attached Slack thread and release its resources."
 
@@ -56,6 +56,19 @@ Repeated delivery, partial cleanup failures, and later messages preserve one und
 2. **Given** resource deletion succeeds but recording completion is interrupted, **When** the close is retried, **Then** already-absent resources are treated as cleaned up and the workspace reaches the closed state.
 3. **Given** a workspace is closed, **When** a later message arrives in its Slack thread, **Then** AgentX says the workspace is closed and does not create or resume a workspace.
 
+### User Story 4 - Explicitly discard unpublished work while closing (Priority: P2)
+
+The workspace owner can explicitly request that AgentX discard unpublished repository state and close the isolated workspace. AgentX records the requester and the preflight findings, then deletes the workspace's dedicated compute and storage through the normal fenced close lifecycle. Ordinary close requests continue to refuse unpublished work.
+
+**Independent Test**: With uncommitted, untracked, and unpushed changes in a workspace, request `discard unpublished work and close this workspace` as the Slack thread starter or call the developer-task close tool with `discard_unpublished: true`. Verify only that owner's workspace closes, storage is deleted once, counters are released once, and the durable task/operation audit remains.
+
+**Acceptance Scenarios**:
+
+1. **Given** an idle workspace contains unpublished work, **When** its authenticated owner explicitly requests discard and close, **Then** AgentX records the request and preflight findings, fences the workspace, deletes its dedicated compute and storage, and marks it closed.
+2. **Given** an ordinary close request contains no discard authorization, **When** preflight finds unpublished work, **Then** AgentX keeps the workspace and its storage and reports the findings as before.
+3. **Given** a Slack member other than the thread starter requests discard, **When** AgentX receives the request, **Then** it refuses without starting deletion or exposing workspace findings.
+4. **Given** a discard close is retried or its completion races, **When** AgentX processes the repeat, **Then** it reuses the existing close operation and releases storage and quota at most once.
+
 ### Edge Cases
 
 - A close message arrives while preparation, a task, publication, maintenance, resume, or cancellation owns the workspace.
@@ -85,6 +98,9 @@ Repeated delivery, partial cleanup failures, and later messages preserve one und
 - **FR-014**: Later messages in a closed thread MUST receive a closed-workspace response and MUST NOT provision a replacement. Creating a fresh workspace in that thread is outside this feature.
 - **FR-015**: Other threads, personal identities, and callers other than the configured Slack orchestrator role MUST NOT close or discover the workspace.
 - **FR-016**: The demo deployment mode MUST record closure and remove its resumable orchestrator state, while clearly reporting that the platform provides no production EBS session to delete.
+- **FR-017**: A separate, explicit owner-authorized discard-and-close action MAY remove unpublished repository state by deleting the isolated workspace storage through the existing fenced close lifecycle. Ordinary close MUST retain its existing unpublished-work refusal.
+- **FR-018**: Slack discard-and-close MUST require the thread starter; developer-task discard-and-close MUST require the task owner. The accepted close operation MUST durably record that discard was explicitly authorized, its requester, and the close preflight result.
+- **FR-019**: Discard-and-close MUST NOT invoke coding tools or mutate/publish repository contents. It MUST delete only the exact workspace's dedicated compute and storage, and preserve the durable task/operation audit and quota/idempotency guarantees.
 
 ### Key Entities
 

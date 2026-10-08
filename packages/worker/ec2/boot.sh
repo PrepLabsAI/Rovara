@@ -280,7 +280,9 @@ EOF
 # reaches the instance role's credentials through IMDS with a hop limit of 1. It also gets the host's
 # Docker socket, to run the project's devcontainer (#121): root on this instance, which serves only
 # this workspace. The workspace is mounted at the same path as on the host, so the bind mounts the
-# devcontainer CLI asks the host's Docker for name the same files.
+# devcontainer CLI asks the host's Docker for name the same files. Before a push the worker removes
+# every container but its own (packages/worker/src/workspace-containers.ts), so this unit must stay
+# the only container the boot starts.
 write_worker_unit() {
   local region=$1 instance_id=$2 docker docker_gid
   docker=$(command -v docker)

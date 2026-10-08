@@ -2366,6 +2366,25 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::Lambda::Function",
     },
+    "BrokerEventInvokeConfig7F5E47E2": {
+      "Properties": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": {
+              "Fn::GetAtt": [
+                "SlackHandOffFailureQueue0ACCAF94",
+                "Arn",
+              ],
+            },
+          },
+        },
+        "FunctionName": {
+          "Ref": "BrokerE1355FD6",
+        },
+        "Qualifier": "$LATEST",
+      },
+      "Type": "AWS::Lambda::EventInvokeConfig",
+    },
     "BrokerIntegration": {
       "Properties": {
         "ApiId": {
@@ -3090,6 +3109,20 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               ],
             },
             {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackHandOffFailureQueue0ACCAF94",
+                  "Arn",
+                ],
+              },
+            },
+            {
               "Action": "dynamodb:GetItem",
               "Condition": {
                 "ForAllValues:StringLike": {
@@ -3209,6 +3242,7 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       "DependsOn": [
         "DeveloperSignInAuthRoute98555360",
         "DeveloperSignInDevRoute4BB932E2",
+        "DeveloperSignInFeedbackReviewRoute881C7CFE",
       ],
       "Properties": {
         "ApiId": {
@@ -3216,6 +3250,10 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         },
         "AutoDeploy": true,
         "RouteSettings": {
+          "ANY /review/{proxy+}": {
+            "ThrottlingBurstLimit": 50,
+            "ThrottlingRateLimit": 20,
+          },
           "ANY /v1/auth/{proxy+}": {
             "ThrottlingBurstLimit": 50,
             "ThrottlingRateLimit": 20,
@@ -3260,6 +3298,27 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         },
         "AuthorizationType": "NONE",
         "RouteKey": "ANY /v1/dev/{proxy+}",
+        "Target": {
+          "Fn::Join": [
+            "",
+            [
+              "integrations/",
+              {
+                "Ref": "BrokerIntegration",
+              },
+            ],
+          ],
+        },
+      },
+      "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "DeveloperSignInFeedbackReviewRoute881C7CFE": {
+      "Properties": {
+        "ApiId": {
+          "Ref": "HttpApi",
+        },
+        "AuthorizationType": "NONE",
+        "RouteKey": "ANY /review/{proxy+}",
         "Target": {
           "Fn::Join": [
             "",
@@ -3727,6 +3786,15 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         "Environment": {
           "Variables": {
             "AGENTX_METRICS_NAMESPACE": "AgentX/staging",
+            "ARTIFACT_BUCKET_NAME": {
+              "Ref": "Artifacts82DD59A1",
+            },
+            "CONTROL_PLANE_URL": {
+              "Fn::GetAtt": [
+                "HttpApi",
+                "ApiEndpoint",
+              ],
+            },
             "NOTICE_QUEUE_URL": {
               "Ref": "DeveloperTaskNotifierNoticeQueue56CA42FC",
             },
@@ -3861,6 +3929,24 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Effect": "Allow",
               "Resource": {
                 "Ref": "SlackSecretEA96F13F",
+              },
+            },
+            {
+              "Action": "s3:GetObject",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/private/*/*/*/*",
+                  ],
+                ],
               },
             },
             {
@@ -4217,6 +4303,9 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             },
             {
               "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["ADMIN_CHANGE"]}}}}",
+            },
+            {
+              "Pattern": "{"dynamodb":{"NewImage":{"entityType":{"S":["WORKFLOW_ACTION_REFUSAL"]}}}}",
             },
           ],
         },
@@ -8893,6 +8982,58 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::ApiGatewayV2::Route",
     },
+    "SlackHandOffFailureQueue0ACCAF94": {
+      "DeletionPolicy": "Delete",
+      "Properties": {
+        "MessageRetentionPeriod": 1209600,
+        "SqsManagedSseEnabled": true,
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+      },
+      "Type": "AWS::SQS::Queue",
+      "UpdateReplacePolicy": "Delete",
+    },
+    "SlackHandOffFailuresAlarm4D063F81": {
+      "Properties": {
+        "AlarmActions": [
+          {
+            "Ref": "OperatorAlertsA2431256",
+          },
+        ],
+        "AlarmDescription": "An AgentX background request (a Slack button press or a scheduled retry) was lost: Lambda could not run it, and it is in the Slack hand-off failure queue. Check the queue, and the broker and Slack ingress logs for its task or request ID.",
+        "AlarmName": "agentx-staging-SlackHandOffFailures",
+        "ComparisonOperator": "GreaterThanOrEqualToThreshold",
+        "Dimensions": [
+          {
+            "Name": "QueueName",
+            "Value": {
+              "Fn::GetAtt": [
+                "SlackHandOffFailureQueue0ACCAF94",
+                "QueueName",
+              ],
+            },
+          },
+        ],
+        "EvaluationPeriods": 1,
+        "MetricName": "NumberOfMessagesSent",
+        "Namespace": "AWS/SQS",
+        "Period": 300,
+        "Statistic": "Sum",
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+        "Threshold": 1,
+        "TreatMissingData": "notBreaching",
+      },
+      "Type": "AWS::CloudWatch::Alarm",
+    },
     "SlackIngress5C88FFA0": {
       "DependsOn": [
         "SlackIngressServiceRoleDefaultPolicy6F2F26FC",
@@ -8999,6 +9140,25 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::Lambda::Permission",
     },
+    "SlackIngressEventInvokeConfig871542E2": {
+      "Properties": {
+        "DestinationConfig": {
+          "OnFailure": {
+            "Destination": {
+              "Fn::GetAtt": [
+                "SlackHandOffFailureQueue0ACCAF94",
+                "Arn",
+              ],
+            },
+          },
+        },
+        "FunctionName": {
+          "Ref": "SlackIngress5C88FFA0",
+        },
+        "Qualifier": "$LATEST",
+      },
+      "Type": "AWS::Lambda::EventInvokeConfig",
+    },
     "SlackIngressIntegration": {
       "Properties": {
         "ApiId": {
@@ -9065,6 +9225,32 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
       },
       "Type": "AWS::Logs::LogGroup",
       "UpdateReplacePolicy": "Delete",
+    },
+    "SlackIngressSelfInvokeB586B3A0": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackIngress5C88FFA0",
+                  "Arn",
+                ],
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "SlackIngressSelfInvokeB586B3A0",
+        "Roles": [
+          {
+            "Ref": "SlackIngressServiceRole8DA92EC7",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
     },
     "SlackIngressServiceRole8DA92EC7": {
       "Properties": {
@@ -9306,6 +9492,52 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               "Resource": {
                 "Fn::GetAtt": [
                   "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": "dynamodb:GetItem",
+              "Condition": {
+                "ForAllValues:StringEquals": {
+                  "dynamodb:Attributes": [
+                    "pk",
+                    "sk",
+                    "slackUserId",
+                    "share",
+                    "workflow",
+                  ],
+                },
+                "ForAllValues:StringLike": {
+                  "dynamodb:LeadingKeys": [
+                    "DEVTASK#*",
+                  ],
+                },
+                "Null": {
+                  "dynamodb:Attributes": "false",
+                },
+                "StringEqualsIfExists": {
+                  "dynamodb:Select": "SPECIFIC_ATTRIBUTES",
+                },
+              },
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "State1C20CC9A",
+                  "Arn",
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackHandOffFailureQueue0ACCAF94",
                   "Arn",
                 ],
               },
@@ -9866,6 +10098,14 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
             "AttributeName": "workspaceCreatedAt",
             "AttributeType": "S",
           },
+          {
+            "AttributeName": "dispatchDuePk",
+            "AttributeType": "S",
+          },
+          {
+            "AttributeName": "dispatchDueSk",
+            "AttributeType": "S",
+          },
         ],
         "BillingMode": "PAY_PER_REQUEST",
         "GlobalSecondaryIndexes": [
@@ -9894,6 +10134,22 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               },
               {
                 "AttributeName": "workspaceCreatedAt",
+                "KeyType": "RANGE",
+              },
+            ],
+            "Projection": {
+              "ProjectionType": "ALL",
+            },
+          },
+          {
+            "IndexName": "workflow-dispatch-due",
+            "KeySchema": [
+              {
+                "AttributeName": "dispatchDuePk",
+                "KeyType": "HASH",
+              },
+              {
+                "AttributeName": "dispatchDueSk",
                 "KeyType": "RANGE",
               },
             ],
@@ -10022,6 +10278,154 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
         },
       },
       "Type": "AWS::ApiGatewayV2::Route",
+    },
+    "WorkflowDispatchRecoveryRole3D444D9C": {
+      "Properties": {
+        "AssumeRolePolicyDocument": {
+          "Statement": [
+            {
+              "Action": "sts:AssumeRole",
+              "Condition": {
+                "ArnLike": {
+                  "aws:SourceArn": {
+                    "Fn::Join": [
+                      "",
+                      [
+                        "arn:",
+                        {
+                          "Ref": "AWS::Partition",
+                        },
+                        ":scheduler:",
+                        {
+                          "Ref": "AWS::Region",
+                        },
+                        ":",
+                        {
+                          "Ref": "AWS::AccountId",
+                        },
+                        ":schedule/*",
+                      ],
+                    ],
+                  },
+                },
+                "StringEquals": {
+                  "aws:SourceAccount": {
+                    "Ref": "AWS::AccountId",
+                  },
+                },
+              },
+              "Effect": "Allow",
+              "Principal": {
+                "Service": "scheduler.amazonaws.com",
+              },
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "Path": "/agentx/staging/",
+        "PermissionsBoundary": {
+          "Fn::If": [
+            "HasPermissionsBoundary",
+            {
+              "Ref": "PermissionsBoundaryArn",
+            },
+            {
+              "Fn::Join": [
+                "",
+                [
+                  "arn:",
+                  {
+                    "Ref": "AWS::Partition",
+                  },
+                  ":iam::",
+                  {
+                    "Ref": "AWS::AccountId",
+                  },
+                  ":policy/agentx/staging/agentx-staging-boundary",
+                ],
+              ],
+            },
+          ],
+        },
+        "Tags": [
+          {
+            "Key": "agentx:env",
+            "Value": "staging",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Role",
+    },
+    "WorkflowDispatchRecoveryRoleDefaultPolicy083213B6": {
+      "Properties": {
+        "PolicyDocument": {
+          "Statement": [
+            {
+              "Action": "lambda:InvokeFunction",
+              "Effect": "Allow",
+              "Resource": [
+                {
+                  "Fn::GetAtt": [
+                    "BrokerE1355FD6",
+                    "Arn",
+                  ],
+                },
+                {
+                  "Fn::Join": [
+                    "",
+                    [
+                      {
+                        "Fn::GetAtt": [
+                          "BrokerE1355FD6",
+                          "Arn",
+                        ],
+                      },
+                      ":*",
+                    ],
+                  ],
+                },
+              ],
+            },
+          ],
+          "Version": "2012-10-17",
+        },
+        "PolicyName": "WorkflowDispatchRecoveryRoleDefaultPolicy083213B6",
+        "Roles": [
+          {
+            "Ref": "WorkflowDispatchRecoveryRole3D444D9C",
+          },
+        ],
+      },
+      "Type": "AWS::IAM::Policy",
+    },
+    "WorkflowDispatchRecoverySchedule": {
+      "Properties": {
+        "FlexibleTimeWindow": {
+          "Mode": "OFF",
+        },
+        "ScheduleExpression": "rate(1 minute)",
+        "State": "ENABLED",
+        "Target": {
+          "Arn": {
+            "Fn::GetAtt": [
+              "BrokerE1355FD6",
+              "Arn",
+            ],
+          },
+          "Input": "{"source":"agentx.workflow-dispatch-recovery"}",
+          "RetryPolicy": {
+            "MaximumEventAgeInSeconds": 300,
+            "MaximumRetryAttempts": 2,
+          },
+          "RoleArn": {
+            "Fn::GetAtt": [
+              "WorkflowDispatchRecoveryRole3D444D9C",
+              "Arn",
+            ],
+          },
+        },
+      },
+      "Type": "AWS::Scheduler::Schedule",
     },
   },
   "Rules": {

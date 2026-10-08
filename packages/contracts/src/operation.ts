@@ -203,6 +203,10 @@ export const OperationSchema = z
     workspaceId: z.string().uuid(),
     conversationId: z.string().uuid().optional(),
     kind: OperationKindSchema,
+    /** Explicit owner authorization to delete unpublished state during a close operation. */
+    discardUnpublished: z.boolean().optional(),
+    /** Server-selected task mode; absent on legacy operations and non-task operations. */
+    workflowMode: z.enum(["PLAN", "IMPLEMENT", "REVIEW", "CHECKS"]).optional(),
     requestId: z.string().uuid(),
     payloadHash: z.string().regex(/^[a-f0-9]{64}$/),
     status: OperationStatusSchema,
@@ -213,6 +217,11 @@ export const OperationSchema = z
     result: z.unknown().optional(),
     error: z.string().max(16_384).optional(),
     requestedBy: OperationRequesterSchema.optional(),
+  })
+  .superRefine((operation, context) => {
+    if (operation.discardUnpublished === true && operation.kind !== "close") {
+      context.addIssue({ code: "custom", path: ["discardUnpublished"], message: "discardUnpublished is only valid for close operations" });
+    }
   })
   .strict();
 

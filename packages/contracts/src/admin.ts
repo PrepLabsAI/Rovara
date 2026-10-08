@@ -224,7 +224,7 @@ export const HEALTH_ALARM_SUFFIXES = [
   "EvalBatchTickErrors", "EvalBatchWatcherErrors", "EvalExecutionsFailed",
   "ReconcilerLostInstances", "ReconcilerQuarantinedVolumes", "ReconcilerStuckProvisioning", "RecordingFailures",
   "SessionDeleterFailures", "SessionProvisionerFailures", "SessionReaperErrors", "SessionReconcilerErrors",
-  "SlackDeadLetters", "SlackDeliveryFailed", "SlowTurns", "StuckCancels", "TestAlarm", "TurnErrors", "UnwaitedTaskFailures",
+  "SlackDeadLetters", "SlackDeliveryFailed", "SlackHandOffFailures", "SlowTurns", "StuckCancels", "TestAlarm", "TurnErrors", "UnwaitedTaskFailures",
 ] as const;
 /** The listed alarms an environment creates only on Amazon Bedrock, so their absence is expected. */
 export const HEALTH_ALARM_CONDITIONAL_SUFFIXES = ["BedrockThrottling", "ClassifierThrottling"] as const satisfies ReadonlyArray<typeof HEALTH_ALARM_SUFFIXES[number]>;

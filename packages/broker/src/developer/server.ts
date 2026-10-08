@@ -4,7 +4,7 @@
 // (channel members, channel names for R10, 25d's email lookup and bot token check, and 25e's
 // admin-ended sessions and channel by name).
 // Nothing here logs or echoes a secret, a code, a token or a caught error's message.
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import {
   AGENTX_CLI_CLIENT_ID,
   ChannelInfoRequestSchema,
@@ -35,7 +35,7 @@ import { adaptHttpApiEvent, ownerKeyForSubject, type HttpApiV2Event } from "../a
 import { ProviderNotConfiguredError, ProviderUnavailableError, type ProviderResult, type SignInProvider } from "./providers.js";
 import type { SlackDirectory } from "./slack-directory.js";
 import { endedByAdmin, startedBeforeMethodOn, type AuthRequestRecord, type DeveloperSignInStore, type SessionRecord } from "./store.js";
-import { issueAccessToken, type TokenSigner } from "./tokens.js";
+import { issueAccessToken, pkceChallengeMatches, type TokenSigner } from "./tokens.js";
 
 /** `since` (epoch seconds, FR-045): when the method was last turned on. A session started before it
  * was ended by the disable in between, so it never comes back when the method is on again. */
@@ -49,11 +49,16 @@ export interface DeveloperIdentityDependencies {
   now: () => number;
   log: (entry: Record<string, unknown>) => void;
 }
-export interface HttpResult { statusCode: number; headers: Record<string, string>; body: string }
+export interface HttpResult { statusCode: number; headers: Record<string, string>; body: string; cookies?: string[] }
 /** The invoke's answer: the broker's contract, plus a refusal for a request that is not one. */
 export type ChannelMembersResult = ChannelMembersResponse | { ok: false; error: "invalid_request" };
 
 const CHALLENGE = /^[A-Za-z0-9_-]{43,128}$/;
+// The PR-feedback review page, or (Task 18) the read-only task page.
+const REVIEW_RETURN_TO = /^\/review\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:\/task)?$/i;
+const REVIEW_PKCE_COOKIE = "__Host-agentx_review_pkce";
+const REVIEW_SESSION_COOKIE = "__Host-agentx_review_session";
+const REVIEW_SESSION_MAX_AGE_SECONDS = 900;
 const JSON_HEADERS = { "content-type": "application/json", "cache-control": "no-store", pragma: "no-cache" };
 const HTML_HEADERS = {
   "content-type": "text/html; charset=utf-8",
@@ -176,6 +181,35 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     })));
   }
 
+  async function authorizeBrowser(query: URLSearchParams): Promise<HttpResult> {
+    const returnTo = query.get("return_to") ?? "";
+    if (!REVIEW_RETURN_TO.test(returnTo)) return page(400, "Invalid review link", ["Open the review from Slack and sign in again."]);
+    const methods = enabledMethods(deps);
+    if (methods.length === 0) return page(503, "Sign-in is unavailable", ["Ask an AgentX administrator to enable a sign-in method."]);
+    const verifier = randomBytes(32).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const auth = await store.createAuthRequest({
+      clientRedirectUri: endpoint("/browser/callback"), clientState: randomBytes(24).toString("base64url"),
+      codeChallenge: challenge, nonce: randomBytes(32).toString("base64url"), browserReturnTo: returnTo,
+    });
+    const cookie = `${REVIEW_PKCE_COOKIE}=${verifier}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=600`;
+    if (methods.length === 1) {
+      const selected = await store.chooseMethod(auth.id, methods[0]!);
+      if (selected === undefined) return page(400, "This sign-in link expired", ["Open the review from Slack and try again."]);
+      try {
+        const target = await provider(methods[0]!).authorizeUrl({ state: auth.id, nonce: auth.nonce, redirectUri: endpoint(`/callback/${methods[0]}`) });
+        return { ...redirect(target), cookies: [cookie] };
+      } catch (error) {
+        deps.log({ event: "signin.browser_authorize_failed", method: methods[0], error: errorName(error) });
+        return { ...page(503, "Sign-in is unavailable", ["Try opening the review again in a moment."]), cookies: [cookie] };
+      }
+    }
+    return { ...page(200, "Sign in to AgentX", [`Environment: ${config.env}`], methods.map(method => ({
+      href: `${endpoint("/authorize")}?request=${encodeURIComponent(auth.id)}&method=${method}`,
+      label: `Sign in with ${methodLabel(method)}`,
+    }))), cookies: [cookie] };
+  }
+
   /** Once the CLI's redirect URI and state are known, any failure goes back to the CLI, so it never
    * waits out its timeout behind a 500 page. Only the error's name is logged. */
   function serverError(error: unknown, path: string, clientRedirect: string, clientState: string): HttpResult {
@@ -205,32 +239,57 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     throw error;
   }
 
-  async function callback(method: DeveloperSignInMethod, query: URLSearchParams): Promise<HttpResult> {
+  const browserReturn = (returnTo: string, signedIn: boolean, sessionId?: string): HttpResult => ({
+    statusCode: 302,
+    headers: { location: returnTo, "cache-control": "no-store", "referrer-policy": "no-referrer" },
+    body: "",
+    cookies: [
+      `${REVIEW_PKCE_COOKIE}=; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=0`,
+      ...(signedIn && sessionId !== undefined ? [`${REVIEW_SESSION_COOKIE}=${sessionId}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=${REVIEW_SESSION_MAX_AGE_SECONDS}`] : []),
+    ],
+  });
+
+  async function callback(method: DeveloperSignInMethod, query: URLSearchParams, headers: Record<string, string | undefined>): Promise<HttpResult> {
     const state = query.get("state") ?? "";
     const pending = state === "" ? undefined : await store.getAuthRequest(state);
     if (pending === undefined || pending.method !== method) return expired();
     // Single use: the state (and with it the nonce) is consumed before anything else happens.
     const request = await store.consumeAuthRequest(state, method);
     if (request === undefined) return page(400, "This sign-in link was already used", ["Run agentx login again."]);
+    if (request.browserReturnTo !== undefined) {
+      const verifier = (headers.cookie ?? "").split(";").map(part => part.trim()).find(part => part.startsWith(`${REVIEW_PKCE_COOKIE}=`))?.slice(REVIEW_PKCE_COOKIE.length + 1);
+      if (!REVIEW_RETURN_TO.test(request.browserReturnTo) || verifier === undefined || !pkceChallengeMatches(verifier, request.codeChallenge)) {
+        return page(400, "This review sign-in link expired", ["Open the review from Slack and sign in again."]);
+      }
+    }
     try {
       return await completeSignIn(method, request, query.get("code"));
     } catch (error) {
       // The state is spent, so tell the CLI now rather than leave it waiting for its timeout.
+      if (request.browserReturnTo !== undefined) {
+        deps.log({ event: "signin.browser_error", method, error: errorName(error) });
+        return browserReturn(request.browserReturnTo, false);
+      }
       return serverError(error, `/v1/auth/callback/${method}`, request.clientRedirectUri, request.clientState);
     }
   }
 
   async function completeSignIn(method: DeveloperSignInMethod, request: AuthRequestRecord, code: string | null): Promise<HttpResult> {
     const client = (params: Record<string, string>) => toClient(request.clientRedirectUri, { ...params, state: request.clientState });
-    if (code === null) return client({ error: "access_denied", error_description: `the sign-in was cancelled at ${methodLabel(method)}; run agentx login again` });
+    if (request.browserReturnTo !== undefined && !REVIEW_RETURN_TO.test(request.browserReturnTo)) return page(400, "Invalid review link", ["Open the review from Slack and sign in again."]);
+    if (code === null) return request.browserReturnTo === undefined
+      ? client({ error: "access_denied", error_description: `the sign-in was cancelled at ${methodLabel(method)}; run agentx login again` })
+      : browserReturn(request.browserReturnTo, false);
     let result: ProviderResult;
     try {
       result = await provider(method).complete({ code, nonce: request.nonce, redirectUri: endpoint(`/callback/${method}`) });
     } catch (error) {
+      if (request.browserReturnTo !== undefined) throw error;
       return providerFailure(error, method, request.clientRedirectUri, request.clientState);
     }
     if (!result.ok) {
       deps.log({ event: "signin.refused", method, reason: result.reason });
+      if (request.browserReturnTo !== undefined) return browserReturn(request.browserReturnTo, false);
       // A provider may quietly reuse the refused account's session on the next try, so say how to switch.
       const hint = result.wrongAccount === true ? `. If you signed in with the wrong account, sign out of ${methodLabel(method)} or use a private window, then try again.` : "";
       return client({ error: "access_denied", error_description: `${result.reason}${hint}` });
@@ -240,6 +299,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     const existing = await store.getDeveloper(developerId);
     if (existing?.revoked === true) {
       deps.log({ event: "signin.refused", method, reason: "developer_revoked", developerId });
+      if (request.browserReturnTo !== undefined) return browserReturn(request.browserReturnTo, false);
       return client({ error: "access_denied", error_description: "your AgentX sign-in was turned off by an admin; contact an admin" });
     }
     let slackUserId = identity.slackUserId;
@@ -254,6 +314,14 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
       ...(identity.email === undefined ? {} : { email: identity.email }),
       ...(slackUserId === undefined ? {} : { slackUserId }),
     });
+    if (request.browserReturnTo !== undefined) {
+      const { session } = await store.createSession({ developerId, amr: method,
+        ...(slackUserId === undefined ? {} : { slackUserId }),
+        reviewExpiresAt: Math.floor(deps.now() / 1000) + REVIEW_SESSION_MAX_AGE_SECONDS,
+      });
+      deps.log({ event: "signin.browser_succeeded", method, developerId });
+      return browserReturn(request.browserReturnTo, true, session.sessionId);
+    }
     const agentxCode = await store.issueCode({ developerId, amr: method, ...(slackUserId === undefined ? {} : { slackUserId }), codeChallenge: request.codeChallenge, redirectUri: request.clientRedirectUri });
     deps.log({ event: "signin.succeeded", method, developerId, linkedToSlack: slackUserId !== undefined });
     return client({ code: agentxCode });
@@ -376,7 +444,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     subject_types_supported: ["public"], id_token_signing_alg_values_supported: ["RS256"], scopes_supported: ["openid"],
   });
 
-  async function route(method: string, pathname: string, url: URL, body: string | undefined): Promise<HttpResult> {
+  async function route(method: string, pathname: string, url: URL, body: string | undefined, headers: Record<string, string | undefined>): Promise<HttpResult> {
     if (method === "GET") {
       switch (pathname) {
         case "/v1/auth/.well-known/openid-configuration":
@@ -387,10 +455,12 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
           return jsonResult(200, configuration());
         case "/v1/auth/authorize":
           return authorize(url.searchParams);
+        case "/v1/auth/browser/authorize":
+          return authorizeBrowser(url.searchParams);
         case "/v1/auth/callback/slack":
-          return callback("slack", url.searchParams);
+          return callback("slack", url.searchParams, headers);
         case "/v1/auth/callback/oidc":
-          return callback("oidc", url.searchParams);
+          return callback("oidc", url.searchParams, headers);
       }
     }
     if (method === "POST" && pathname === "/v1/auth/token") return token(new URLSearchParams(body ?? ""));
@@ -398,7 +468,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     return jsonResult(404, { error: "not_found" });
   }
 
-  const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname.startsWith("/v1/auth/callback/");
+  const isPage = (pathname: string) => pathname === "/v1/auth/authorize" || pathname === "/v1/auth/browser/authorize" || pathname.startsWith("/v1/auth/callback/");
 
   return async (
     event: HttpApiV2Event | ChannelMembersRequest | ChannelInfoRequest | SlackUserByEmailRequest | SlackAuthCheckRequest | EndDeveloperSessionsRequest | ChannelByNameRequest,
@@ -439,7 +509,7 @@ export function createDeveloperIdentityHandler(deps: DeveloperIdentityDependenci
     const request = adaptHttpApiEvent(event);
     const url = new URL(request.path, "https://agentx.invalid");
     try {
-      return await route(request.method, url.pathname, url, request.body);
+      return await route(request.method, url.pathname, url, request.body, request.headers);
     } catch (error) {
       // Only the error's name: a KMS or AWS message can carry a key ARN or other detail.
       deps.log({ event: "signin.error", path: url.pathname, error: errorName(error) });

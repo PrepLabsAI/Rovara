@@ -11,7 +11,7 @@ import { copyFile, mkdtemp, rm, rmdir, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { gitSafeEnvironment } from "../git.js";
+import { assertNoEmbeddedRepositories, gitHardenedEnvironment } from "../git.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT_BYTES = 268_435_456;
@@ -116,6 +116,7 @@ async function restore(directory: string, agentTree: string): Promise<void> {
  */
 async function workingTree(directory: string): Promise<string> {
   return withTemporaryIndex(directory, true, async (env) => {
+    await assertNoEmbeddedRepositories(directory, { ...(await gitHardenedEnvironment(directory)), ...env });
     await git(directory, ["add", "--all", "--", "."], env);
     return git(directory, ["write-tree"], env);
   });
@@ -181,12 +182,12 @@ async function withTemporaryIndex<T>(
   }
 }
 
-/** Runs Git in `directory` with the worker's safe-directory setting. Exported for tests. */
+/** Runs Git in `directory` under AgentX's hardened Git environment, with `env` over it. Exported for tests. */
 export async function git(directory: string, args: string[], env: Record<string, string> = {}, trim = true, input?: string): Promise<string> {
   const child = execFileAsync("git", ["-C", directory, ...args], {
     timeout: GIT_TIMEOUT_MS,
     maxBuffer: MAX_GIT_OUTPUT_BYTES,
-    env: { ...gitSafeEnvironment(directory), ...env },
+    env: { ...(await gitHardenedEnvironment(directory)), ...env },
   });
   const stdin = child.child.stdin;
   if (stdin !== null) {
