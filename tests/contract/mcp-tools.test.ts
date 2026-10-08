@@ -280,7 +280,7 @@ describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 
         { operationId: "88888888-8888-4888-8888-888888888888", candidateDigest, role: "CRITIC", provider: "test", version: "1", status: "PASS", findings: ["private reviewer text"], readOnly: true, recordedAt: "2026-10-07T20:01:00.000Z" },
         { operationId: "99999999-9999-4999-8999-999999999999", candidateDigest, role: "SECURITY", provider: "test", version: "1", status: "FAILED", failureReason: "INVALID_SHAPE", findings: [], readOnly: true, recordedAt: "2026-10-07T20:01:00.000Z" },
       ],
-    } as NonNullable<DeveloperTaskView["workflow"]>;
+    } as unknown as NonNullable<DeveloperTaskView["workflow"]>;
     const mcp = await connect({ getTask: async () => view("SUCCEEDED", { workflow }) });
     const result = await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
     expect(result.structuredContent).toMatchObject({ workflow: {
