@@ -330,6 +330,29 @@ export const WorkflowFeedbackApprovalBindingSchema = z.object({
 export type WorkflowFeedbackApprovalBinding = z.infer<typeof WorkflowFeedbackApprovalBindingSchema>;
 export type WorkflowFeedbackDecision = z.infer<typeof WorkflowFeedbackDecisionSchema>;
 
+/** Proves a durable worker dispatch is limited to findings and PR snapshots in its approved report. */
+export function workflowFeedbackApprovalMatchesReview(
+  approval: WorkflowFeedbackApprovalBinding,
+  reviewInput: { bundleRefs: WorkflowFeedbackBundleRef[]; reviewRef: WorkflowFeedbackReviewRef },
+): boolean {
+  const { bundleRefs, reviewRef } = reviewInput;
+  const sameStrings = (left: string[], right: string[]) => JSON.stringify([...left].sort()) === JSON.stringify([...right].sort());
+  const selected = reviewRef.findingRefs.filter(finding => approval.selectedFindingIds.includes(finding.id));
+  const selectedComments = [...new Set(selected.flatMap(finding => finding.commentIds))];
+  return reviewRef.sha256 === approval.reviewDigest && reviewRef.proposalDigest === approval.proposalDigest
+    && sameStrings(bundleRefs.map(bundle => bundle.sha256), approval.bundleDigests)
+    && sameStrings(reviewRef.bundleDigests, approval.bundleDigests)
+    && approval.selectedFindingIds.length === new Set(approval.selectedFindingIds).size
+    && approval.selectedCommentIds.length === new Set(approval.selectedCommentIds).size
+    && selected.length === approval.selectedFindingIds.length
+    && sameStrings(selectedComments, approval.selectedCommentIds)
+    && reviewRef.candidateBindings.length === bundleRefs.length
+    && bundleRefs.every(bundle => bundle.candidateDigest === approval.candidateDigest && reviewRef.candidateBindings.some(candidate => candidate.repositoryId === bundle.repositoryId
+      && candidate.number === bundle.number && candidate.headSha === bundle.headSha
+      && candidate.candidateDigest === bundle.candidateDigest && candidate.commentSetDigest === bundle.commentSetDigest
+      && candidate.bundleDigest === bundle.sha256));
+}
+
 const ReviewedWorkflowFeedbackSchema = z.object({
   bundleRefs: z.array(WorkflowFeedbackBundleRefSchema).min(1).max(32), reviewRef: WorkflowFeedbackReviewRefSchema,
   status: z.enum(["PENDING", "APPROVED", "CHANGES_REQUESTED", "DISMISSED"]),
@@ -813,6 +836,129 @@ export function observeWorkflowPullRequest(currentInput: unknown, observationInp
     ...(complete ? { outcome: "MERGED" as const } : {}),
     pullRequests,
     updatedAt: now,
+  });
+}
+
+/** Saves recoverable review input without inventing an independent report or code authority. */
+export function collectWorkflowFeedbackBundles(currentInput: unknown, input: {
+  bundleRefs: unknown; threadObservations: unknown;
+}, now: string): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  const collected = WorkflowFeedbackReviewSchema.safeParse({ ...input, status: "COLLECTING" });
+  if (!collected.success || collected.data.status !== "COLLECTING"
+    || current.stage !== "WAIT_FOR_MERGE" || current.state !== "WAITING"
+    || current.pullRequests?.some(pr => (pr.state === "OPEN" || pr.state === "UNKNOWN")
+      && !collected.data.bundleRefs.some(b => b.repositoryId === pr.repositoryId && b.number === pr.number))
+    || collected.data.bundleRefs.some(b => b.taskId !== current.taskId || b.candidateDigest !== current.candidate?.digest
+      || !current.candidate.repositories.some(r => r.repositoryId === b.repositoryId && r.treeSha === b.headTreeSha)
+      || !current.pullRequests?.some(pr => pr.repositoryId === b.repositoryId && pr.number === b.number
+        && pr.headSha === b.headSha && pr.candidateDigest === b.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN")))) {
+    throw new WorkflowTransitionError("collected feedback does not match the current linked PR set");
+  }
+  const previousReport = current.feedbackReview?.reviewRef;
+  const history = [...(current.feedbackReviewHistory ?? [])];
+  if (previousReport && !history.some(r => r.sha256 === previousReport.sha256)) history.push(previousReport);
+  return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, feedback: undefined,
+    feedbackReview: collected.data, feedbackReviewHistory: history, feedbackDispatchApproval: undefined, updatedAt: now });
+}
+
+/** Registers immutable reconciled inputs and a separate AI advisory report; never starts code. */
+export function requestWorkflowFeedbackReview(currentInput: unknown, input: { bundleRefs: unknown; reviewRef: unknown }, now: string): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  const review = ReviewedWorkflowFeedbackSchema.safeParse({ bundleRefs: input.bundleRefs, reviewRef: input.reviewRef, status: "PENDING" });
+  if (!review.success || current.stage !== "WAIT_FOR_MERGE" || current.state !== "WAITING"
+    || review.data.reviewRef.taskId !== current.taskId
+    || (review.data.reviewRef.status === "COMPLETE" && current.pullRequests?.some(pr =>
+      (pr.state === "OPEN" || pr.state === "UNKNOWN") && !review.data.bundleRefs.some(bundle =>
+        bundle.repositoryId === pr.repositoryId && bundle.number === pr.number)))
+    || review.data.bundleRefs.some(bundle =>
+      bundle.taskId !== current.taskId || bundle.candidateDigest !== current.candidate?.digest
+      || !current.candidate?.repositories.some(repo => repo.repositoryId === bundle.repositoryId && repo.treeSha === bundle.headTreeSha)
+      || !current.pullRequests?.some(pr => pr.repositoryId === bundle.repositoryId && pr.number === bundle.number
+        && pr.headSha === bundle.headSha && pr.candidateDigest === bundle.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN")))) {
+    throw new WorkflowTransitionError("feedback review does not match current linked PR candidates or comment set");
+  }
+  return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, feedbackReview: { ...review.data, threadObservations: current.feedbackReview?.threadObservations }, updatedAt: now });
+}
+
+/** Completes the broker-dispatched critic operation for the exact collecting revision. */
+export function completeWorkflowFeedbackReview(currentInput: unknown, input: {
+  expectedRevision: number; taskId: string; candidateDigest: string; operationId: string;
+  bundleRefs: unknown; reviewRef: unknown;
+}, now: string): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  const review = ReviewedWorkflowFeedbackSchema.safeParse({ bundleRefs: input.bundleRefs, reviewRef: input.reviewRef, status: "PENDING" });
+  if (!review.success) throw new WorkflowTransitionError("feedback critic report metadata is invalid");
+  if (current.revision !== input.expectedRevision || current.taskId !== input.taskId
+    || current.stage !== "WAIT_FOR_MERGE" || current.state !== "RUNNING"
+    || current.candidate?.digest !== input.candidateDigest || current.feedbackReview?.status !== "COLLECTING") {
+    throw new WorkflowTransitionError("feedback critic report is stale for the current task revision or candidate");
+  }
+  if (!review.success || review.data.reviewRef.operationId !== input.operationId || review.data.reviewRef.taskId !== current.taskId) {
+    throw new WorkflowTransitionError("feedback critic report does not belong to the active operation and task");
+  }
+  if (review.data.bundleRefs.length !== current.feedbackReview.bundleRefs.length
+    || current.feedbackReview.bundleRefs.some(bundle => !review.data.bundleRefs.some(ref => ref.sha256 === bundle.sha256 && ref.objectKey === bundle.objectKey))) {
+    throw new WorkflowTransitionError("feedback critic report does not use the exact collected bundle set");
+  }
+  if (review.data.bundleRefs.some(bundle => bundle.taskId !== current.taskId || bundle.candidateDigest !== input.candidateDigest
+    || !current.candidate?.repositories.some(repo => repo.repositoryId === bundle.repositoryId && repo.treeSha === bundle.headTreeSha)
+    || !current.pullRequests?.some(pr => pr.repositoryId === bundle.repositoryId && pr.number === bundle.number
+      && pr.headSha === bundle.headSha && pr.candidateDigest === bundle.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN")))) {
+    throw new WorkflowTransitionError("feedback critic report includes a bundle outside the current linked candidates");
+  }
+  return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1, state: "WAITING",
+    feedbackReview: { ...review.data, threadObservations: current.feedbackReview.threadObservations }, updatedAt: now });
+}
+
+/** Requires fresh bindings supplied by the reconciler; dispatch must independently reconcile again. */
+export function decideWorkflowFeedbackFindings(currentInput: unknown, input: {
+  requestId: string; expectedRevision: number; reviewDigest: string; proposalDigest: string;
+  bundleDigests: string[]; selectedFindingIds: string[]; decision: "APPROVE" | "REQUEST_CHANGES" | "DISMISS"; ownerNote?: string;
+}, actor: { actorId: string; role: "TASK_OWNER" | "PROJECT_ADMIN" }, now: string): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  const review = current.feedbackReview;
+  if (actor.role !== "TASK_OWNER" || actor.actorId !== current.ownerId || !ActorIdSchema.safeParse(actor.actorId).success) {
+    throw new WorkflowTransitionError("only the task owner can decide PR feedback findings");
+  }
+  if (current.stage !== "WAIT_FOR_MERGE" || current.state !== "WAITING" || current.revision !== input.expectedRevision
+    || review === undefined || review.status !== "PENDING" || (input.decision === "APPROVE" && review.reviewRef.status !== "COMPLETE")
+    || (review.reviewRef.status === "COMPLETE" && current.pullRequests?.some(pr =>
+      (pr.state === "OPEN" || pr.state === "UNKNOWN") && !review.bundleRefs.some(bundle =>
+        bundle.repositoryId === pr.repositoryId && bundle.number === pr.number)))
+    || review.reviewRef.sha256 !== input.reviewDigest || review.reviewRef.proposalDigest !== input.proposalDigest
+    || input.bundleDigests.length !== review.bundleRefs.length || new Set(input.bundleDigests).size !== input.bundleDigests.length
+    || !review.bundleRefs.every(b => input.bundleDigests.includes(b.sha256) && b.candidateDigest === current.candidate?.digest
+      && current.candidate.repositories.some(repo => repo.repositoryId === b.repositoryId && repo.treeSha === b.headTreeSha)
+      && current.pullRequests?.some(pr => pr.repositoryId === b.repositoryId && pr.number === b.number
+        && pr.headSha === b.headSha && pr.candidateDigest === b.candidateDigest && (pr.state === "OPEN" || pr.state === "UNKNOWN")))
+    || current.decisions.some(d => d.requestId === input.requestId)
+    || current.feedbackDecisions?.some(d => d.requestId === input.requestId)) {
+    throw new WorkflowTransitionError("feedback finding decision is stale, incomplete or already used");
+  }
+  const selected = review.reviewRef.findingRefs.filter(f => input.selectedFindingIds.includes(f.id));
+  if (selected.length !== input.selectedFindingIds.length) throw new WorkflowTransitionError("feedback finding selection is invalid");
+  const affected = review.bundleRefs.filter(b => selected.some(f => f.bundleDigest === b.sha256));
+  const decision = WorkflowFeedbackDecisionSchema.safeParse({
+    schemaVersion: 1, requestId: input.requestId, workflowRevision: current.revision,
+    decision: input.decision, actorId: actor.actorId, actorRole: "TASK_OWNER", reviewDigest: input.reviewDigest,
+    proposalDigest: input.proposalDigest, bundleDigests: input.bundleDigests, selectedFindingIds: input.selectedFindingIds,
+    selectedCommentIds: [...new Set(selected.flatMap(f => f.commentIds))],
+    candidates: affected.map(b => ({ repositoryId: b.repositoryId, number: b.number, headSha: b.headSha,
+      candidateDigest: b.candidateDigest, commentSetDigest: b.commentSetDigest, bundleDigest: b.sha256 })),
+    ...(input.ownerNote === undefined ? {} : { ownerNote: input.ownerNote }), at: now,
+  });
+  if (!decision.success) throw new WorkflowTransitionError("feedback finding decision is invalid");
+  const notes = current.feedbackNotes ?? [];
+  const feedbackNotes = input.decision === "APPROVE" ? notes : [...notes, WorkflowFeedbackNoteSchema.parse({
+    schemaVersion: 1, requestId: input.requestId, actorId: actor.actorId, source: input.decision,
+    sourceId: input.requestId, text: input.ownerNote, at: now,
+  })];
+  // Retain source PR identities and the old candidate for reconciliation; new verification invalidates its evidence.
+  return WorkflowSnapshotSchema.parse({ ...current, revision: current.revision + 1,
+    ...(input.decision === "APPROVE" ? { stage: "IMPLEMENT", state: "READY" } : {}),
+    feedbackReview: { ...review, status: input.decision === "APPROVE" ? "APPROVED" : input.decision === "REQUEST_CHANGES" ? "CHANGES_REQUESTED" : "DISMISSED" },
+    feedbackDecisions: [...(current.feedbackDecisions ?? []), decision.data], feedbackNotes, updatedAt: now,
   });
 }
 

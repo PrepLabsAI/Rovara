@@ -1,5 +1,5 @@
 // tests/contract/slack-interactivity.test.ts
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CONFIRMATION_TTL_MS,
@@ -771,8 +771,109 @@ describe("Slack native workflow review controls", () => {
   });
 });
 
+function feedbackReviewWorkflow(taskId: string) {
+  const now = new Date(nowSeconds * 1_000).toISOString();
+  const candidate = createCandidateManifest([{ repositoryId: "payments", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }]);
+  const comment = { id: "comment-1", kind: "DISCUSSION" as const, url: "https://github.com/acme/payments/pull/11#issuecomment-1",
+    author: "reviewer", updatedAt: now, bodyDigest: createHash("sha256").update("private comment").digest("hex"), bodyBytes: 15 };
+  const bundleDigest = "c".repeat(64);
+  const bundleRef = { schemaVersion: 1 as const, taskId, repositoryId: "payments", number: 11, headSha: "a".repeat(40),
+    candidateDigest: candidate.digest, commentSetDigest: "d".repeat(64), producer: "agentx-github-reconciler", version: "1", recordedAt: now,
+    comments: [comment], sha256: bundleDigest, objectKey: `private/owner/workspace/feedback/${bundleDigest}.json` };
+  const reviewDigest = "e".repeat(64);
+  const proposalDigest = "f".repeat(64);
+  const findingRef = { id: "finding-1", bundleDigest, commentIds: [comment.id], priority: "MUST_FIX" as const,
+    assessment: "ACTIONABLE" as const, recommended: true };
+  const reviewRef = { schemaVersion: 1 as const, taskId, workflowRevision: 4, operationMode: "FEEDBACK_REVIEW" as const,
+    qualification: "AI_GENERATED_ADVISORY" as const, sha256: reviewDigest, objectKey: `private/owner/workspace/reviews/${reviewDigest}.json`,
+    proposalDigest, taskRequirementsDigest: "1".repeat(64), candidateBindings: [{ repositoryId: "payments", number: 11, headSha: "a".repeat(40),
+      candidateDigest: candidate.digest, commentSetDigest: bundleRef.commentSetDigest, bundleDigest }], operationId: "11111111-1111-4111-8111-111111111111",
+    provider: "scripted", version: "1", status: "COMPLETE" as const, bundleDigests: [bundleDigest], findingRefs: [findingRef], recordedAt: now };
+  const workflow = WorkflowSnapshotSchema.parse({
+    ...createWorkflowSnapshot({ taskId, ownerId: "b".repeat(64), now }), revision: 4, stage: "WAIT_FOR_MERGE", state: "WAITING", candidate,
+    verification: { candidateDigest: candidate.digest, producer: "agentx-broker", environmentId: "test", recordedAt: now, results: [{ checkId: "unit", status: "PASS" }] },
+    reviews: ["CRITIC", "SECURITY"].map(role => ({ operationId: "22222222-2222-4222-8222-222222222222", candidateDigest: candidate.digest,
+      role, provider: "scripted", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now })),
+    pullRequests: [{ repositoryId: "payments", number: 11, url: "https://github.com/acme/payments/pull/11", candidateDigest: candidate.digest, required: true, state: "OPEN" }],
+    feedbackReview: { status: "PENDING", bundleRefs: [bundleRef], reviewRef },
+  });
+  return { workflow, reviewDigest, proposalDigest, bundleDigests: [bundleDigest] };
+}
+
 const RETRY_NOTICE = "I couldn't take that click. Press the button again, or reply `@AgentX yes`.";
 const PROCESS_NOTICE = "I couldn't process that click. Press the button again, or reply `@AgentX yes`.";
+
+describe("Slack PR feedback review actions", () => {
+  const taskId = "11111111-1111-4111-8111-111111111111";
+  const review = feedbackReviewWorkflow(taskId);
+  const task = { slackUserId: requester, share: thread, workflow: review.workflow };
+  const bundleSetDigest = createHash("sha256").update(JSON.stringify(review.bundleDigests), "utf8").digest("hex");
+  const value = JSON.stringify({ taskId, expectedRevision: 4, reviewDigest: review.reviewDigest,
+    proposalDigest: review.proposalDigest, bundleSetDigest, selection: "RECOMMENDED" });
+  const action: SlackBlockAction = { actionId: "agentx_feedback_review_recommended", value, userId: requester,
+    userTeamId: thread.teamId, workspaceTeamId: thread.teamId, enterpriseId: "", userEnterpriseId: "",
+    requestStartedAt: nowSeconds * 1_000, thread, messageTs: "1695500001.000002", messageText: "Review ready",
+    responseUrl: "https://hooks.slack.com/actions/T0BSHLLUGBD/1/abc", triggerId: "1.2.3", actionTs: "1695500002.000003" };
+
+  it("routes the exact recommended selection to the task decision callback without trusting Slack finding IDs", async () => {
+    const submitted: Array<Record<string, unknown>> = [];
+    const handlers = workflowSlackHandlers({ loadTask: async () => task, openView: async () => undefined,
+      submit: async () => undefined, submitFeedback: async input => { submitted.push(input); } });
+    await handlers.handleAction(action);
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).toMatchObject({ taskId, userId: requester, thread, expectedRevision: 4,
+      reviewDigest: review.reviewDigest, proposalDigest: review.proposalDigest, bundleDigests: review.bundleDigests,
+      selection: "RECOMMENDED", decision: "APPROVE" });
+    expect(submitted[0]?.requestId).toEqual(expect.any(String));
+    expect(submitted[0]).not.toHaveProperty("findingIds");
+  });
+
+  it("rejects wrong owners, other threads, and stale review digests", async () => {
+    const handlers = workflowSlackHandlers({ loadTask: async () => task, openView: async () => undefined,
+      submit: async () => undefined, submitFeedback: async () => undefined });
+    await expect(handlers.handleAction({ ...action, userId: other })).rejects.toThrow(/Only/);
+    await expect(handlers.handleAction({ ...action, thread: { ...thread, channelId: "C9999999999" } })).rejects.toThrow(/another Slack/);
+    await expect(handlers.handleAction({ ...action, value: JSON.stringify({ taskId, expectedRevision: 4,
+      reviewDigest: "9".repeat(64), proposalDigest: review.proposalDigest, bundleSetDigest, selection: "RECOMMENDED" }) })).rejects.toThrow(/changed/);
+  });
+
+  it("opens Request changes and submits the owner's short note as a non-dispatching decision", async () => {
+    let opened: Record<string, unknown> | undefined;
+    const submitted: Array<Record<string, unknown>> = [];
+    const handlers = workflowSlackHandlers({ loadTask: async () => task,
+      openView: async (trigger, view) => { await strict.openView(trigger, view); opened = view; }, submit: async () => undefined,
+      submitFeedback: async input => { submitted.push(input); } });
+    await handlers.handleAction({ ...action, actionId: "agentx_feedback_review_changes" });
+    expect(opened).toMatchObject({ callback_id: "agentx_feedback_review_changes_submission" });
+    const modal = opened as Record<string, unknown>;
+    const metadata = JSON.parse(String(modal.private_metadata)) as Record<string, unknown>;
+    await handlers.handleSubmission({ team: { id: thread.teamId }, user: { id: requester, team_id: thread.teamId }, view: { callback_id: modal.callback_id,
+      private_metadata: modal.private_metadata, state: { values: { feedback_note: { reason: { value: "Please reconsider the edge case." } } } } } });
+    expect(submitted).toHaveLength(1);
+    expect(submitted[0]).toMatchObject({ taskId, userId: requester, thread, expectedRevision: 4,
+      reviewDigest: review.reviewDigest, proposalDigest: review.proposalDigest, bundleDigests: review.bundleDigests,
+      selection: "RECOMMENDED", decision: "REQUEST_CHANGES", ownerNote: "Please reconsider the edge case.", requestId: metadata.requestId });
+  });
+
+  it("rejects missing, mismatched, or Slack Connect modal workspace identities", async () => {
+    let opened: Record<string, unknown> | undefined;
+    const submitted: Array<Record<string, unknown>> = [];
+    const handlers = workflowSlackHandlers({ loadTask: async () => task,
+      openView: async (trigger, view) => { await strict.openView(trigger, view); opened = view; }, submit: async () => undefined,
+      submitFeedback: async input => { submitted.push(input); } });
+    await handlers.handleAction({ ...action, actionId: "agentx_feedback_review_changes" });
+    const modal = opened as Record<string, unknown>;
+    const submit = (identity: { team?: unknown; user?: unknown }) => handlers.handleSubmission({ ...identity, view: {
+      callback_id: modal.callback_id, private_metadata: modal.private_metadata,
+      state: { values: { feedback_note: { reason: { value: "Please reconsider this." } } } },
+    } });
+    await expect(submit({ user: { id: requester, team_id: thread.teamId } })).rejects.toThrow(/workspace/);
+    await expect(submit({ team: { id: thread.teamId }, user: { id: requester } })).rejects.toThrow(/workspace/);
+    await expect(submit({ team: { id: "T9999999999" }, user: { id: requester, team_id: thread.teamId } })).rejects.toThrow(/workspace/);
+    await expect(submit({ team: { id: thread.teamId }, user: { id: requester, team_id: "T9999999999" } })).rejects.toThrow(/workspace/);
+    expect(submitted).toHaveLength(0);
+  });
+});
 
 /** A handler whose confirmation dependencies can each be replaced, recording what it did. */
 function custom(overrides: Partial<ConfirmationClickDependencies> = {}) {

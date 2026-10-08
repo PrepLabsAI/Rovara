@@ -118,6 +118,11 @@ export interface SlackIngressDependencies {
     claimNotice: (threadSubject: string, nowSeconds: number, kind: "view" | "closed") => Promise<boolean>;
   };
   /**
+   * Captures an explicit, signed @AgentX reply only for a task the current owner can access. Used in a shared
+   * thread that is not a Slack-started task's own thread; that thread's replies go to `recordThreadNote`.
+   */
+  captureFeedbackNote?: (input: { taskId: string; thread: SlackThread; userId: string; eventId: string; messageTs: string; text: string }) => Promise<{ captured: boolean }>;
+  /**
    * Gap 2: saves any reply, mention or not and from anyone, in a Slack-started task's open thread as input for
    * the task's next step. "refused" is an expected answer (the task closed, or its note limit is reached); a
    * throw means the reply could not be saved, and Slack retries it. Absent: such replies are not read.
@@ -197,6 +202,23 @@ export async function stopTaskThroughBroker(invoke: (event: Record<string, unkno
 }
 
 type SharedThreadLookup = { mode: "view" | "continue"; closed: boolean; taskId?: string; workflowThread?: true };
+
+/**
+ * An owner's @AgentX reply in a shared thread, offered to the broker's `feedback-note` event as a PR feedback
+ * note. A 4xx answer is an expected refusal; a 5xx answer, or one that cannot be read, throws so Slack retries.
+ */
+export async function captureFeedbackNoteThroughBroker(
+  invoke: (event: Record<string, unknown>) => Promise<BrokerReply>,
+  input: { taskId: string; thread: SlackThread; userId: string; eventId: string; messageTs: string; text: string },
+): Promise<{ captured: boolean }> {
+  const reply = await invoke({ source: "agentx.slack-ingress", action: "feedback-note", ...input });
+  const status = reply.statusCode ?? 500;
+  // A refusal (not the owner, too long, another thread) is expected: not captured, never a Slack retry.
+  if (status >= 400 && status < 500) return { captured: false };
+  const body = status === 200 ? asRecord(JSON.parse(reply.body ?? "{}")) : {};
+  if (typeof body.captured !== "boolean") throw new Error("broker feedback note failed");
+  return { captured: body.captured };
+}
 
 /**
  * Gap 2: records a reply in a Slack-started task's own open thread through the broker's `thread-note` event, with
@@ -312,6 +334,22 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       // Nothing said in the thread is ever queued as an ordinary request.
       if (shared?.workflowThread === true && !shared.closed && shared.taskId !== undefined) {
         return workflowThreadReply(dependencies, log, mention, shared.taskId, replyText, memberCheckError);
+      }
+      if (mention.isThreadReply && shared?.taskId !== undefined && dependencies.captureFeedbackNote !== undefined
+        && memberCheckError === undefined && replyText.length > 0 && Buffer.byteLength(replyText, "utf8") <= 1_000) {
+        try {
+          const result = await dependencies.captureFeedbackNote({ taskId: shared.taskId, thread, userId: mention.userId,
+            eventId: mention.eventId, messageTs: mention.messageTs, text: replyText });
+          if (result.captured) {
+            await post(dependencies, log, thread, "Note saved. Use the AgentX review details link above to choose what happens next.", "feedback_note.acknowledgement_failed");
+            log("feedback_note.captured", { eventId: mention.eventId, taskId: shared.taskId });
+            return respond(200, { ok: true });
+          }
+        } catch (error) {
+          await releaseQuietly(dependencies, log, mention.eventId, "feedback_note.release_failed");
+          log("feedback_note.capture_failed", { eventId: mention.eventId, errorName: errorName(error) });
+          return respond(500, { error: "reply could not be saved" });
+        }
       }
       // A closed thread gets the closed notice whoever started it; the view-only notice is never
       // posted in the thread of a task started in Slack.
@@ -1038,6 +1076,9 @@ function createAwsSlackIngressHandler() {
       // The broker holds the state table and callback key; this Lambda gets neither (#126).
       async stopTask(thread: SlackThread, userId: string) {
         return stopTaskThroughBroker(invokeBroker, thread, userId);
+      },
+      async captureFeedbackNote(input: { taskId: string; thread: SlackThread; userId: string; eventId: string; messageTs: string; text: string }) {
+        return captureFeedbackNoteThroughBroker(invokeBroker, input);
       },
       async startWorkflow(input: SlackWorkflowStartInput) {
         await invokeWorkflow(input);

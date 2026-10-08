@@ -1,6 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { AGENTX_PREAMBLE_VERSION, WorkerInvocationSchema, WORKFLOW_PLAN_MAX_BYTES, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, redactText, reportStatus, type CheckReport, type CandidateRepository, type WorkflowReviewReport, type WorkerInvocation } from "@agentx/contracts";
+import { AGENTX_PREAMBLE_VERSION, WorkerInvocationSchema, WORKFLOW_PLAN_MAX_BYTES, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, redactText, reportStatus, type CheckReport, type CandidateRepository, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, recorderFingerprint, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
@@ -25,9 +25,10 @@ import {
 } from "./pi-session.js";
 import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
+import type { FeedbackApprovalAuthorizer, FeedbackBundleReader } from "./callback-client.js";
 import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
 import { readCandidateRepositories, type CandidateRepositoryInput } from "./verification/candidate.js";
-import { runWorkflowReviews } from "./verification/review.js";
+import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, verificationExtension } from "./verification/extension.js";
 import { gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
@@ -45,12 +46,13 @@ export interface TaskInvocationResult {
   reopened: boolean;
   /** Spec 051 FR-007: AgentX's check of the agent's work, with outputs cut to fit (compactCheckReport). */
   checks?: CheckReport;
-  workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS";
+  workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW";
   /** Worker-reported Git object identities; the broker recomputes and stores the canonical digest. */
   workflowCandidateRepositories?: Array<{ repositoryId: string; commitSha: string; treeSha: string }>;
   /** Repository identities captured when the final successful check round ended. */
   workflowCheckCandidateRepositories?: Array<{ repositoryId: string; commitSha: string; treeSha: string }>;
   workflowReviews?: WorkflowReviewReport[];
+  workflowFeedbackReviewResult?: { taskId: string; workflowRevision: number; candidateDigest: string; outputDigest: string; artifactName: string; status: WorkflowFeedbackReviewReport["status"] };
 }
 
 export async function runTaskInvocation(
@@ -60,6 +62,8 @@ export async function runTaskInvocation(
     model: WorkspaceModelConfiguration;
     eventSink: EventBatchSink;
     artifactSink: ArtifactSink;
+    feedbackBundleReader?: FeedbackBundleReader;
+    authorizeFeedbackApproval?: FeedbackApprovalAuthorizer;
     piAdapter?: PiSessionAdapter;
     cancellationController?: WorkerCancellationController;
     devcontainerCli?: DevcontainerCli;
@@ -73,11 +77,53 @@ export async function runTaskInvocation(
 ): Promise<TaskInvocationResult> {
   const invocation = WorkerInvocationSchema.parse(untrustedInvocation);
   if (invocation.kind !== "task") throw agentXError("CONFIG_INVALID", "runTaskInvocation requires a task");
+  const approval = invocation.payload.workflowFeedbackApproval;
+  if (approval !== undefined) {
+    if (dependencies.authorizeFeedbackApproval === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the worker cannot verify its PR feedback approval");
+    await dependencies.authorizeFeedbackApproval(approval);
+  }
   const manifest = JSON.parse(
     await readFile(resolve(dependencies.rootPath, ".agentx/preparation-manifest.json"), "utf8"),
   ) as PreparationManifest;
   if (!manifest.complete || manifest.projectRevision !== invocation.projectRevision) {
     throw agentXError("WORKSPACE_NOT_READY", "workspace manifest is incomplete or revision-mismatched");
+  }
+  if (invocation.payload.workflowMode === "FEEDBACK_REVIEW") {
+    const binding = invocation.payload.workflowFeedbackReview!;
+    if (dependencies.feedbackBundleReader === undefined) throw agentXError("RUNTIME_UNAVAILABLE", "the worker cannot read the task's approved feedback bundles");
+    const root = await realpath(resolve(dependencies.rootPath));
+    const repositoryInputs = candidateInputs(manifest, root, invocation.payload.workflowBase);
+    const candidateRepositories = await readCandidateRepositories(repositoryInputs);
+    const candidate = createCandidateManifest(candidateRepositories);
+    if (candidate.digest !== binding.candidateDigest) throw agentXError("OPERATION_INTERRUPTED", "the candidate changed before PR feedback review");
+    const stop = new AbortController();
+    const unregister = dependencies.cancellationController?.register(invocation.operationId, { abort: async () => stop.abort() });
+    const events = new EventBatcher(dependencies.eventSink);
+    try {
+      await events.append("progress", { message: "AgentX is reviewing the latest feedback on the linked pull requests." });
+      const collected = await dependencies.feedbackBundleReader(binding);
+      const execution = await runWorkflowFeedbackReview({
+        operationId: invocation.operationId, taskId: binding.taskId, workflowRevision: binding.workflowRevision,
+        taskRequirements: collected.taskRequirements,
+        rootPath: dependencies.rootPath, model: dependencies.model, candidate: candidateRepositories,
+        repositories: repositoryInputs, bundles: collected.bundles, artifactSink: dependencies.artifactSink,
+        ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,
+        onProgress: message => { void events.append("progress", { message }).catch(() => undefined); },
+      });
+      const workflowFeedbackReviewResult = {
+        taskId: binding.taskId, workflowRevision: binding.workflowRevision, candidateDigest: binding.candidateDigest,
+        outputDigest: execution.outputDigest, artifactName: execution.artifactName, status: execution.report.status,
+      };
+      await events.append("result", { status: "SUCCEEDED", workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult });
+      await events.flush();
+      return { conversationId: invocation.payload.conversationId, reopened: false, workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReviewResult };
+    } catch (error) {
+      await events.append("error", { message: redactText(error instanceof Error ? error.message : "feedback review failed") }).catch(() => undefined);
+      await events.flush().catch(() => undefined);
+      throw error;
+    } finally {
+      unregister?.();
+    }
   }
 
   // The agent's shell runs in the project's devcontainer (#121), started first: on a resumed
@@ -730,7 +776,8 @@ function eventType(event: unknown): "progress" | "tool_start" | "tool_end" {
 /**
  * The candidate inputs for every prepared repository, each with the task's base commit: the base the broker pinned
  * when it sent one, otherwise the commit preparation resolved (absent for an old manifest without a usable commit).
- * Every workflow stage reads its candidate through this, so IMPLEMENT, CHECKS and REVIEW digests all include the base.
+ * Every workflow stage reads its candidate through this, so IMPLEMENT, CHECKS, REVIEW and FEEDBACK_REVIEW digests
+ * all include the base.
  */
 function candidateInputs(
   manifest: PreparationManifest,

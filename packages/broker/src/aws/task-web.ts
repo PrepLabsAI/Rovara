@@ -34,7 +34,7 @@ export interface TaskWebDependencies {
   getTaskDocumentView(caller: DeveloperCaller, taskId: string): Promise<TaskDocumentView>;
 }
 
-/** `/review/<task ID>/task`: the task page's path; every other `/review/` path is not found. */
+/** `/review/<task ID>/task`: the task page's path; every other `/review/` path is the PR-feedback page's. */
 export const TASK_PAGE = /^\/review\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/task$/i;
 const HIDDEN = new Set(["FORBIDDEN", "TASK_NOT_FOUND", "NOT_FOUND"]);
 

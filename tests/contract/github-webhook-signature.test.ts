@@ -1,9 +1,10 @@
 import { createHmac } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, type WorkflowSnapshot } from "../../packages/contracts/src/task-workflow.js";
-import { claimGithubWebhookDelivery, completeGithubWebhookDelivery, findLinkedGithubWorkflowPullRequest, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, receiveGithubWebhook, reconcileTaskPullRequestFeedback, reserveGithubWebhookDelivery, verifyGithubWebhookSignature } from "../../packages/broker/src/aws/github-webhooks.js";
+import { createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, type WorkflowSnapshot, type WorkflowFeedbackBundle } from "../../packages/contracts/src/task-workflow.js";
+import { claimGithubWebhookDelivery, completeGithubWebhookDelivery, findLinkedGithubWorkflowPullRequest, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, receiveGithubWebhook, reconcileTaskPullRequestFeedback, reserveGithubWebhookDelivery, verifyGithubWebhookSignature, verifyTaskPullRequestFeedbackCurrent } from "../../packages/broker/src/aws/github-webhooks.js";
 import type { ReconcileTaskPullRequestFeedbackInput } from "../../packages/broker/src/aws/github-webhooks.js";
 import type { GitHubPullRequestFeedback } from "../../packages/broker/src/github-app.js";
+import type { FeedbackReviewMeasure } from "../../packages/broker/src/developer/feedback-review-measures.js";
 
 function commandInput(command: unknown): { constructor: { name: string }; input: Record<string, unknown> } {
   return command as { constructor: { name: string }; input: Record<string, unknown> };
@@ -343,6 +344,7 @@ describe("task-wide current PR feedback reconciliation", () => {
   async function fixture() {
     const module = {
       reconcileTaskPullRequestFeedback: (input: ReconcileTaskPullRequestFeedbackInput) => reconcileTaskPullRequestFeedback(input),
+      verifyTaskPullRequestFeedbackCurrent: (input: ReconcileTaskPullRequestFeedbackInput) => verifyTaskPullRequestFeedbackCurrent(input),
     };
     const taskId = "550e8400-e29b-41d4-a716-446655440012";
     const now = "2026-10-05T12:00:00.000Z";
@@ -360,7 +362,9 @@ describe("task-wide current PR feedback reconciliation", () => {
     let publishedState: "open" | "merged" = "open";
     let conflict = false;
     let wrongScope = false;
+    const artifacts: Array<{ bundle: WorkflowFeedbackBundle; bytes: string }> = [];
     const reads: string[] = [];
+    const measures: FeedbackReviewMeasure[] = [];
     const input: ReconcileTaskPullRequestFeedbackInput = {
       documentClient: { send: async (command: unknown) => {
         const key = objectInput(commandInput(command).input.Key);
@@ -376,23 +380,40 @@ describe("task-wide current PR feedback reconciliation", () => {
           headBranch: "feature", baseBranch: "main", headCommit: publishedHeadSha, headTreeSha: publishedHeadTreeSha, title: "Fix retry", body: "" },
           comments: number === 1 ? [comment("review:1"), ...inlineIds.map(comment)] : [comment("discussion:3")], threads: number === 1 ? [{ id: "thread-1", resolved, commentIds: inlineIds }] : [] };
       },
+      persistBundle: async (bundle, bytes: string, sha256: string) => { artifacts.push({ bundle, bytes }); return `tasks/${taskId}/feedback/${sha256}.json`; },
       saveWorkflow: async (_taskId: string, revision: number, next: WorkflowSnapshot) => {
         if (conflict) { conflict = false; workflow = { ...workflow, revision: workflow.revision + 1 }; currentBody = "newer edit after race"; throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" }); }
         if (revision !== workflow.revision) throw Object.assign(new Error("conditional"), { name: "ConditionalCheckFailedException" });
         workflow = next;
-      }, now,
+      }, measure: (entry) => { measures.push(entry); }, now,
     };
-    return { module, input, reads, workflow: () => workflow,
+    return { module, input, artifacts, reads, measures, workflow: () => workflow, setWorkflow: (next: WorkflowSnapshot) => { workflow = next; },
       setPublishedHeadSha: (sha: string) => { publishedHeadSha = sha; workflow = WorkflowSnapshotSchema.parse({ ...workflow, pullRequests: workflow.pullRequests?.map(pr => ({ ...pr, headSha: sha })) }); },
       setRemotePr: (state: "open" | "merged", headSha: string, headTreeSha: string) => { publishedState = state; publishedHeadSha = headSha; publishedHeadTreeSha = headTreeSha; },
       edit: (body: string) => { currentBody = body; }, addInline: () => { inlineIds.push("review_comment:5"); }, reopen: () => { resolved = false; }, deleteInline: () => { inlineIds = []; }, conflict: () => { conflict = true; }, wrongScope: () => { wrongScope = true; } };
   }
+  it("persists both current PR bundles and ignores duplicate or delayed event bodies", async () => {
+    const f = await fixture();
+    expect(f.module.reconcileTaskPullRequestFeedback).toBeTypeOf("function");
+    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
+    expect(f.workflow().feedbackReview?.status).toBe("COLLECTING");
+    expect(f.workflow().feedbackReview?.bundleRefs.map((b) => b.repositoryId)).toEqual(["api", "ui"]);
+    expect(f.artifacts[0]?.bundle.comments.map((c) => c.id)).toEqual(["review:1"]);
+    expect(f.artifacts[1]?.bundle.comments[0]?.body).toBe("current authoritative body");
+    const revision = f.workflow().revision;
+    expect(await f.module.reconcileTaskPullRequestFeedback({ ...f.input, deliveryId: "delayed-old-event" })).toBe(false);
+    expect(f.workflow().revision).toBe(revision);
+    f.edit("edited current body");
+    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
+    expect(f.artifacts.at(-1)?.bundle.comments[0]?.body).toBe("edited current body");
+  });
   it("accepts a publication commit different from the checked workspace commit when GitHub confirms the exact candidate tree", async () => {
     const f = await fixture();
     f.setPublishedHeadSha("d".repeat(40));
     expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
     expect(f.workflow().state).toBe("WAITING");
-    expect(f.workflow().pullRequests?.map((pr) => pr.state)).toEqual(["OPEN", "OPEN"]);
+    expect(f.workflow().feedbackReview?.status).toBe("COLLECTING");
+    expect(f.artifacts[0]?.bundle).toMatchObject({ headSha: "d".repeat(40), headTreeSha: "b".repeat(40), candidateDigest: f.workflow().candidate?.digest });
   });
   it("does not complete when a linked PR changes candidate before it is merged", async () => {
     const f = await fixture();
@@ -401,9 +422,33 @@ describe("task-wide current PR feedback reconciliation", () => {
     expect(f.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED" });
     expect(f.workflow().pullRequests?.[0]?.state).not.toBe("MERGED");
   });
+  it("includes new activity on a resolved thread, reopened threads, and observes deletions", async () => {
+    const f = await fixture(); expect(f.module.reconcileTaskPullRequestFeedback).toBeTypeOf("function");
+    await f.module.reconcileTaskPullRequestFeedback(f.input);
+    f.addInline(); await f.module.reconcileTaskPullRequestFeedback(f.input);
+    expect(f.artifacts.at(-2)?.bundle.comments.map((c) => c.id)).toEqual(["review:1", "review_comment:5"]);
+    const revision = f.workflow().revision;
+    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(false);
+    expect(f.workflow().revision).toBe(revision);
+    f.reopen(); await f.module.reconcileTaskPullRequestFeedback(f.input);
+    expect(f.artifacts.at(-2)?.bundle.comments.map((c) => c.id)).toEqual(["review:1", "review_comment:4", "review_comment:5"]);
+    f.deleteInline(); await f.module.reconcileTaskPullRequestFeedback(f.input);
+    expect(f.artifacts.at(-2)?.bundle.comments.map((c) => c.id)).toEqual(["review:1"]);
+  });
+  it("counts reopened feedback only after a committed reconciliation, without comment or task data", async () => {
+    const f = await fixture();
+    await f.module.reconcileTaskPullRequestFeedback(f.input); // establish the resolved-thread baseline
+    f.addInline();
+    await f.module.reconcileTaskPullRequestFeedback(f.input);
+    expect(f.measures).toEqual([{ event: "feedback_review.measure", measure: "feedback_reopened", count: 1, at: f.input.now }]);
+    expect(JSON.stringify(f.measures)).not.toMatch(/task|reviewer|comment|diff|current authoritative body/i);
+    await f.module.reconcileTaskPullRequestFeedback(f.input); // duplicate/replay does not increment the count
+    expect(f.measures).toHaveLength(1);
+  });
   it("recollects authoritative data after a concurrent revision conflict", async () => {
     const f = await fixture(); expect(f.module.reconcileTaskPullRequestFeedback).toBeTypeOf("function"); f.conflict();
-    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
+    await f.module.reconcileTaskPullRequestFeedback(f.input);
+    expect(f.artifacts.at(-1)?.bundle.comments[0]?.body).toBe("newer edit after race");
     expect(f.reads).toHaveLength(4);
   });
   it("keeps delayed events idempotent after every linked PR is observed merged", async () => {
@@ -416,8 +461,74 @@ describe("task-wide current PR feedback reconciliation", () => {
     expect(await f.module.reconcileTaskPullRequestFeedback(input)).toBe(false);
     expect(f.workflow().revision).toBe(revision);
   });
+  it("rechecks current PR heads and normalized comment digests at worker start", async () => {
+    const f = await fixture();
+    await f.module.reconcileTaskPullRequestFeedback(f.input);
+    const current = f.workflow();
+    const review = current.feedbackReview;
+    if (!review || review.status !== "COLLECTING") throw new Error("feedback review was not collected");
+    const selectedCommentIds = review.bundleRefs.flatMap((bundle) => bundle.comments.map((comment) => comment.id));
+    const candidateDigest = current.candidate?.digest;
+    if (!candidateDigest) throw new Error("workflow candidate missing");
+    const reviewDigest = "c".repeat(64);
+    const proposalDigest = "d".repeat(64);
+    const bundleDigests = review.bundleRefs.map((ref) => ref.sha256);
+    const candidateBindings = review.bundleRefs.map((bundle) => ({ repositoryId: bundle.repositoryId, number: bundle.number,
+      headSha: bundle.headSha, candidateDigest, commentSetDigest: bundle.commentSetDigest, bundleDigest: bundle.sha256 }));
+    const approval = { taskId: current.taskId, requestId: "550e8400-e29b-41d4-a716-446655440099", ownerId: current.ownerId,
+      decisionWorkflowRevision: current.revision, activeWorkflowRevision: current.revision + 1, reviewDigest: "c".repeat(64),
+      proposalDigest, bundleDigests, candidateDigest,
+      selectedFindingIds: ["finding-1"], selectedCommentIds };
+    f.setWorkflow({ ...current, revision: approval.activeWorkflowRevision, stage: "IMPLEMENT", state: "RUNNING",
+      feedbackReview: { ...review, status: "APPROVED", reviewRef: { schemaVersion: 1, taskId: current.taskId, workflowRevision: current.revision,
+        operationMode: "FEEDBACK_REVIEW", qualification: "AI_GENERATED_ADVISORY", proposalDigest, taskRequirementsDigest: "e".repeat(64),
+        candidateBindings, operationId: "11111111-1111-4111-8111-111111111111", provider: "test", version: "1", status: "COMPLETE",
+        bundleDigests, findingRefs: [], recordedAt: "2026-10-05T12:00:00.000Z", sha256: reviewDigest, objectKey: `tasks/${current.taskId}/reviews/${reviewDigest}.json` } },
+      feedbackDispatchApproval: approval, feedbackDecisions: [{ requestId: approval.requestId, workflowRevision: approval.decisionWorkflowRevision,
+        schemaVersion: 1, decision: "APPROVE", actorId: current.ownerId, actorRole: "TASK_OWNER", reviewDigest: approval.reviewDigest,
+        proposalDigest: approval.proposalDigest, bundleDigests: approval.bundleDigests, selectedFindingIds: approval.selectedFindingIds,
+        selectedCommentIds, candidates: [], at: "2026-10-05T12:00:00.000Z" }] });
+    const candidateIsCurrent = await f.module.verifyTaskPullRequestFeedbackCurrent(f.input);
+    expect(candidateIsCurrent).toBe(true);
+    f.edit("changed after approval");
+    expect(await f.module.verifyTaskPullRequestFeedbackCurrent(f.input)).toBe(false);
+  });
+  it("routes broker feedback events into immutable bundles before saving the collection", async () => {
+    const f = await fixture();
+    await (await import("../support/slack-broker.js")).loadSlackBroker();
+    const broker = await import("../../packages/broker/src/aws/broker.js");
+    expect(broker.processGithubWorkflowEvent).toBeTypeOf("function");
+    const stored = new Map<string, string>();
+    const dependencies = {
+      tableName: "state", artifactBucketName: "artifacts",
+      documentClient: { send: async (rawCommand: unknown) => {
+        const command = commandInput(rawCommand);
+        if (command.constructor.name === "UpdateCommand") {
+          const values = objectInput(command.input.ExpressionAttributeValues);
+          if (typeof values[":revision"] !== "number") throw new Error("missing workflow revision");
+          await f.input.saveWorkflow("task", values[":revision"], WorkflowSnapshotSchema.parse(values[":workflow"])); return {};
+        }
+        const key = objectInput(command.input.Key);
+        if (typeof key.pk === "string" && key.pk.startsWith("DEVTASK#")) return { Item: { ...(await f.input.loadTask("task")), ownerKey: "owner", workspaceId: "workspace" } };
+        if (typeof key.pk === "string" && key.pk.startsWith("PROJECT#")) return { Item: { definition: { repositories: ["api", "ui"].map(name => ({ name, url: `https://github.com/acme/${name}.git` })) } } };
+        return f.input.documentClient.send(command);
+      } },
+      s3: { send: async (rawCommand: unknown) => {
+        const input = commandInput(rawCommand).input;
+        if (typeof input.Key !== "string" || typeof input.Body !== "string") throw new Error("invalid artifact command");
+        expect(input.IfNoneMatch).toBe("*"); stored.set(input.Key, input.Body); return {};
+      } },
+      githubPullRequests: { getPullRequestFeedback: (url: string, number: number) => f.input.getCurrentFeedback(url, number) },
+    };
+    await broker.processGithubWorkflowEvent(dependencies as never, { kind: "PR_COMMENT", action: "edited", installationId: 7, repositoryId: 9,
+      fullName: "acme/api", number: 1, comment: { id: 999, source: "review", body: "stale webhook body", truncated: false, url: "https://github.com/acme/api/pull/1#pullrequestreview-999", author: "reviewer" } }, "delivery-1");
+    expect(f.workflow().feedbackReview?.bundleRefs).toHaveLength(2);
+    expect(stored.size).toBe(2);
+    expect([...stored.values()].every(bytes => !bytes.includes("stale webhook body"))).toBe(true);
+  });
   it("refuses current API results outside the pinned task PR scope without publishing bundles", async () => {
     const f = await fixture(); expect(f.module.reconcileTaskPullRequestFeedback).toBeTypeOf("function"); f.wrongScope();
     await expect(f.module.reconcileTaskPullRequestFeedback(f.input)).rejects.toThrow(/scope/);
+    expect(f.artifacts).toHaveLength(0);
   });
 });

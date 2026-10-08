@@ -1,10 +1,11 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { WORKFLOW_BLOCK_REASONS, WorkflowSnapshotSchema, observeWorkflowPullRequest, type WorkflowSnapshot } from "@agentx/contracts";
+import { WORKFLOW_BLOCK_REASONS, WorkflowFeedbackBundleSchema, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleRefSchema, WorkflowSnapshotSchema, collectWorkflowFeedbackBundles, type WorkflowFeedbackBundle, type WorkflowFeedbackBundleRef, type WorkflowFeedbackThreadObservation, observeWorkflowPullRequest, type WorkflowSnapshot } from "@agentx/contracts";
 import { githubWorkflowPullRequestKey, type GithubWorkflowPullRequestRecord } from "../developer/task-records.js";
 import { parseGitHubRepository, type GitHubPullRequestFeedback } from "../github-app.js";
 import { isConditional } from "./broker-shared.js";
+import { feedbackReopenedMeasure, type FeedbackReviewMeasure } from "../developer/feedback-review-measures.js";
 
 const DELIVERY_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const GitHubWebhookPayloadSchema = z.object({
@@ -125,7 +126,11 @@ export interface ReconcileTaskPullRequestFeedbackInput {
   loadTask(taskId: string): Promise<{ project: string; startingRevision: number; workflow?: WorkflowSnapshot } | undefined>;
   repositoryUrl(project: string, revision: number, repositoryId: string): Promise<string | undefined>;
   getCurrentFeedback(repositoryUrl: string, number: number): Promise<GitHubPullRequestFeedback>;
+  /** Writes exact payload bytes to immutable content-addressed storage; never overwrites an artifact. */
+  persistBundle(bundle: WorkflowFeedbackBundle, bytes: string, sha256: string): Promise<string>;
   saveWorkflow(taskId: string, expectedRevision: number, workflow: WorkflowSnapshot): Promise<void>;
+  /** Aggregate-only telemetry callback; must not add task/comment/user context. */
+  measure?(entry: FeedbackReviewMeasure): void;
   now: string;
 }
 
@@ -171,21 +176,135 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
       if (pr.state !== state) next = observeWorkflowPullRequest(next, { repositoryId: pr.repositoryId, number: pr.number,
         candidateDigest: pr.candidateDigest, state, source: "GITHUB_API", observedAt: input.now }, input.now);
     }
-    if (changedHead) {
-      if (next === current && current.state === "BLOCKED") return false;
+    const open = reads.filter(r => r.feedback.pullRequest.state === "open");
+    let reopenedFeedback = false;
+    if (changedHead || open.length === 0) {
+      if (!current.feedbackReview && next === current
+        && (!changedHead || current.state === "BLOCKED")) return false;
+      const previousReport = current.feedbackReview?.reviewRef;
+      const history = [...(current.feedbackReviewHistory ?? [])];
+      if (previousReport && !history.some(r => r.sha256 === previousReport.sha256)) history.push(previousReport);
       next = WorkflowSnapshotSchema.parse({ ...next, revision: next.revision + 1,
-        state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.pullRequestChanged, updatedAt: input.now });
-    } else if (next === current) {
-      return false;
+        ...(changedHead ? { state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.pullRequestChanged } : {}),
+        feedbackReview: undefined, feedbackReviewHistory: history, updatedAt: input.now });
+    } else {
+      const observations: WorkflowFeedbackThreadObservation[] = [];
+      const bundles = open.map(({ pr, feedback }): WorkflowFeedbackBundle => {
+        const comments = feedback.comments.map(c => ({ ...c, bodyDigest: digest(c.body), bodyBytes: Buffer.byteLength(c.body, "utf8") }));
+        const eligible = new Set(comments.filter(c => c.kind !== "REVIEW_COMMENT").map(c => c.id));
+        const threadIds = new Set<string>();
+        for (const thread of feedback.threads) {
+          if (threadIds.has(thread.id)) throw new GithubWebhookRetryableError("duplicate thread state");
+          threadIds.add(thread.id);
+          const members = thread.commentIds.map(id => comments.find(c => c.id === id && c.threadId === thread.id));
+          if (members.some(c => c === undefined) || new Set(thread.commentIds).size !== thread.commentIds.length) throw new GithubWebhookRetryableError("thread comment state is incomplete");
+          const prior = current.feedbackReview?.threadObservations?.find(t => t.repositoryId === pr.repositoryId && t.number === pr.number && t.threadId === thread.id);
+          const ids = members.flatMap(comment => {
+            if (!comment) return [];
+            if (!thread.resolved) return [comment.id];
+            // A resolved thread starts excluded. Once observed resolved, new/edited feedback remains eligible across retries.
+            const previous = prior?.comments.find(c => c.id === comment.id);
+            return prior?.resolved && (!previous || previous.updatedAt !== comment.updatedAt || previous.bodyDigest !== comment.bodyDigest
+              || prior.eligibleCommentIds.includes(comment.id)) ? [comment.id] : [];
+          });
+          if (prior?.resolved && (!thread.resolved || ids.some(id => !prior.eligibleCommentIds.includes(id)))) reopenedFeedback = true;
+          ids.forEach(id => eligible.add(id));
+          observations.push({ repositoryId: pr.repositoryId, number: pr.number, threadId: thread.id, resolved: thread.resolved,
+            comments: members.map(c => ({ id: c!.id, updatedAt: c!.updatedAt, bodyDigest: c!.bodyDigest })).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0), eligibleCommentIds: ids.sort() });
+        }
+        if (comments.some(c => c.kind === "REVIEW_COMMENT" && (!c.threadId || !threadIds.has(c.threadId)))) throw new GithubWebhookRetryableError("inline thread state is incomplete");
+        // Approval authorizes future work. It does not establish that GitHub feedback was addressed.
+        const selected = comments.filter(c => eligible.has(c.id)).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+        const normalizedComments = WorkflowFeedbackBundleCommentsSchema.parse(selected);
+        const normalized = WorkflowFeedbackBundleSchema.parse({ schemaVersion: 1, taskId: current.taskId, repositoryId: pr.repositoryId, number: pr.number,
+          headSha: feedback.pullRequest.headCommit, headTreeSha: feedback.pullRequest.headTreeSha,
+          candidateDigest: current.candidate!.digest, commentSetDigest: digest(JSON.stringify(normalizedComments)),
+          producer: "agentx-github-reconciler", version: "1", recordedAt: input.now, comments: normalizedComments, sourceDeliveryIds: [input.deliveryId] });
+        return WorkflowFeedbackBundleSchema.parse({ ...normalized, commentSetDigest: digest(JSON.stringify(normalized.comments)) });
+      });
+      observations.sort((a, b) => a.repositoryId.localeCompare(b.repositoryId) || a.number - b.number || a.threadId.localeCompare(b.threadId));
+      const prior = current.feedbackReview;
+      const same = prior && prior.bundleRefs.length === bundles.length && bundles.every(b => prior.bundleRefs.some(p =>
+        p.repositoryId === b.repositoryId && p.number === b.number && p.headSha === b.headSha && p.candidateDigest === b.candidateDigest && p.commentSetDigest === b.commentSetDigest));
+      if (same && JSON.stringify(prior.threadObservations ?? []) === JSON.stringify(observations) && next === current) return false;
+      const refs: WorkflowFeedbackBundleRef[] = [];
+      for (const bundle of bundles) {
+        const bytes = JSON.stringify(bundle); const sha256 = digest(bytes);
+        const objectKey = await input.persistBundle(bundle, bytes, sha256);
+        const { sourceDeliveryIds: deliveryIds, comments, ...metadata } = bundle;
+        void deliveryIds;
+        refs.push(WorkflowFeedbackBundleRefSchema.parse({ ...metadata, sha256, objectKey, comments: comments.map(({ body, ...ref }) => { void body; return ref; }) }));
+      }
+      next = collectWorkflowFeedbackBundles(next, { bundleRefs: refs, threadObservations: observations }, input.now);
     }
     try {
       await input.saveWorkflow(linked.taskId, current.revision, next);
+      if (reopenedFeedback) {
+        const measure = feedbackReopenedMeasure(input.now);
+        if (measure !== undefined) input.measure?.(measure);
+      }
       return true;
     }
     catch (error) { if (!isConditional(error)) throw error; }
   }
   throw new GithubWebhookRetryableError("workflow kept changing during feedback reconciliation");
 }
+
+/** Re-fetches every linked PR at worker start and proves the saved approval still covers that exact snapshot. */
+export async function verifyTaskPullRequestFeedbackCurrent(input: Pick<ReconcileTaskPullRequestFeedbackInput, "documentClient" | "tableName" | "loadTask" | "repositoryUrl" | "getCurrentFeedback" | "repositoryFullName" | "number">): Promise<boolean> {
+  const linked = await findLinkedGithubWorkflowPullRequest(input);
+  if (!linked) return false;
+  const task = await input.loadTask(linked.taskId);
+  const workflow = task?.workflow;
+  const approval = workflow?.feedbackDispatchApproval;
+  const review = workflow?.feedbackReview;
+  if (!task || !workflow || !approval || !review || review.status !== "APPROVED" || workflow.candidate?.digest !== approval.candidateDigest) return false;
+  const prs = [...(workflow.pullRequests ?? [])].filter(pr => pr.state === "OPEN" || pr.state === "UNKNOWN")
+    .sort((a, b) => a.repositoryId.localeCompare(b.repositoryId) || a.number - b.number);
+  if (prs.length !== review.bundleRefs.length) return false;
+  const observations: WorkflowFeedbackThreadObservation[] = [];
+  for (const pr of prs) {
+    const url = await input.repositoryUrl(task.project, task.startingRevision, pr.repositoryId);
+    if (!url) return false;
+    const fullName = (() => { const parsed = parseGitHubRepository(url); return `${parsed.owner}/${parsed.name}`; })();
+    const index = await findLinkedGithubWorkflowPullRequest({ ...input, repositoryFullName: fullName, number: pr.number });
+    if (!index || index.taskId !== linked.taskId || index.repositoryId !== pr.repositoryId || index.url !== pr.url || index.candidateDigest !== approval.candidateDigest) return false;
+    const feedback = await input.getCurrentFeedback(url, pr.number);
+    if (feedback.pullRequest.state !== "open" || feedback.pullRequest.headCommit !== pr.headSha
+      || feedback.pullRequest.headTreeSha !== workflow.candidate.repositories.find(repo => repo.repositoryId === pr.repositoryId)?.treeSha
+      || feedback.pullRequest.url !== pr.url || feedback.comments.some(comment => !comment.url.startsWith(`${pr.url}#`))) return false;
+    const comments = feedback.comments.map(comment => ({ ...comment, bodyDigest: digest(comment.body), bodyBytes: Buffer.byteLength(comment.body, "utf8") }));
+    const eligible = new Set(comments.filter(comment => comment.kind !== "REVIEW_COMMENT").map(comment => comment.id));
+    const seenThreads = new Set<string>();
+    for (const thread of feedback.threads) {
+      if (seenThreads.has(thread.id)) return false;
+      seenThreads.add(thread.id);
+      const members = thread.commentIds.map(id => comments.find(comment => comment.id === id && comment.threadId === thread.id));
+      if (members.some(comment => comment === undefined) || new Set(thread.commentIds).size !== thread.commentIds.length) return false;
+      const prior = review.threadObservations?.find(item => item.repositoryId === pr.repositoryId && item.number === pr.number && item.threadId === thread.id);
+      const eligibleIds = members.flatMap(comment => {
+        if (!comment) return [];
+        if (!thread.resolved) return [comment.id];
+        const previous = prior?.comments.find(item => item.id === comment.id);
+        return prior?.resolved && (!previous || previous.updatedAt !== comment.updatedAt || previous.bodyDigest !== comment.bodyDigest
+          || prior.eligibleCommentIds.includes(comment.id)) ? [comment.id] : [];
+      }).sort();
+      eligibleIds.forEach(id => eligible.add(id));
+      observations.push({ repositoryId: pr.repositoryId, number: pr.number, threadId: thread.id, resolved: thread.resolved,
+        comments: members.map(comment => ({ id: comment!.id, updatedAt: comment!.updatedAt, bodyDigest: comment!.bodyDigest })).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0), eligibleCommentIds: eligibleIds });
+    }
+    if (comments.some(comment => comment.kind === "REVIEW_COMMENT" && (!comment.threadId || !seenThreads.has(comment.threadId)))) return false;
+    const selected = comments.filter(comment => eligible.has(comment.id)).sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+    const normalizedComments = WorkflowFeedbackBundleCommentsSchema.parse(selected);
+    const ref = review.bundleRefs.find(bundle => bundle.repositoryId === pr.repositoryId && bundle.number === pr.number);
+    if (!ref || ref.candidateDigest !== approval.candidateDigest || ref.headSha !== feedback.pullRequest.headCommit
+      || ref.headTreeSha !== feedback.pullRequest.headTreeSha
+      || ref.commentSetDigest !== digest(JSON.stringify(normalizedComments))) return false;
+  }
+  observations.sort((a, b) => a.repositoryId.localeCompare(b.repositoryId) || a.number - b.number || a.threadId.localeCompare(b.threadId));
+  return JSON.stringify(review.threadObservations ?? []) === JSON.stringify(observations);
+}
+function digest(value: string): string { return createHash("sha256").update(value, "utf8").digest("hex"); }
 
 function removeControlCharacters(value: string): string {
   return [...value].map((character) => {

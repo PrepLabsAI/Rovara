@@ -2,7 +2,7 @@
 // broker builds it (createDeveloperTaskActions) over the existing handlers, so the routes never
 // reach into broker.ts internals.
 import type { TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
-import type { ChannelTurn, Operation, OperationRequest, ProjectCommand, PullRequestRequest, WorkflowReviewBase, WorkspaceInstance } from "@agentx/contracts";
+import type { ChannelTurn, Operation, OperationRequest, ProjectCommand, PullRequestRequest, WorkflowFeedbackApprovalBinding, WorkflowReviewBase, WorkspaceInstance } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import type { StoredEvent } from "../developer/task-records.js";
 import type { RegisteredProjectRecord } from "./broker.js";
@@ -43,7 +43,7 @@ export interface DeveloperTaskActions {
   /** The workspace's pull requests, across all pages. Unchecked: callers must load the owned task and check project access first. */
   pullRequests(workspaceId: string): Promise<StoredPullRequest[]>;
   /** `sharedTask`: the task is shared, so the worker's prompt gets the re-read line (25c note 1). */
-  acceptTask(identity: AuthenticatedIdentity, workspaceId: string, request: OperationRequest, extra: ExtraItems, options?: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowBase?: WorkflowReviewBase }): Promise<{ operation: Operation; duplicate: boolean }>;
+  acceptTask(identity: AuthenticatedIdentity, workspaceId: string, request: OperationRequest, extra: ExtraItems, options?: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string }; workflowFeedbackApproval?: WorkflowFeedbackApprovalBinding; workflowBase?: WorkflowReviewBase }): Promise<{ operation: Operation; duplicate: boolean }>;
   /**
    * `workflowCandidate`: the workflow's own draft publication of the tree its checks and reviews passed on, the only
    * pull request a workflow task's workspace accepts. The worker refuses a workspace that no longer has that tree, and
