@@ -3966,6 +3966,27 @@ exports[`named environment templates > agentx-staging-control-plane is unchanged
               },
             },
             {
+              "Action": [
+                "s3:GetObject",
+                "s3:PutObject",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::Join": [
+                  "",
+                  [
+                    {
+                      "Fn::GetAtt": [
+                        "Artifacts82DD59A1",
+                        "Arn",
+                      ],
+                    },
+                    "/private/task-closeouts/*/*",
+                  ],
+                ],
+              },
+            },
+            {
               "Action": "dynamodb:ListStreams",
               "Effect": "Allow",
               "Resource": "*",

@@ -33,6 +33,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
   readArtifact?: (key: string) => Promise<string>;
   update?: (input: { channel: string; ts: string; text: string; blocks: unknown[] }) => Promise<void>;
   createPlanCanvas?: (input: { channel: string; taskId: string; title: string; version: number; markdown: string }) => Promise<{ canvasId: string; permalink: string }>;
+  closeTaskCanvases?: (taskId: string, expectedManifestDigest?: string) => Promise<{ status: "COMPLETE" | "ARCHIVE_PENDING"; reason?: string }>;
   reviewUrlBase?: string;
 } = {}) {
   const harness = await createDeveloperTaskBroker();
@@ -62,6 +63,7 @@ async function notifierHarness(body: Record<string, unknown> = { shareToChannel:
     postEphemeral: async (input) => { strict.postEphemeral(input); },
     ...(options.readArtifact === undefined ? {} : { readArtifact: options.readArtifact }),
     ...(options.createPlanCanvas === undefined ? {} : { createPlanCanvas: options.createPlanCanvas }),
+    ...(options.closeTaskCanvases === undefined ? {} : { closeTaskCanvases: options.closeTaskCanvases }),
     ...(options.reviewUrlBase === undefined ? {} : { reviewUrlBase: options.reviewUrlBase }),
     now: () => clock, log: (entry) => logs.push(entry), deliveryFailed,
   });
@@ -485,6 +487,50 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     expect(texts).not.toContain("The plan is done");
     expect(texts).not.toContain(SECRET);
     expect(texts).toContain("I couldn't finish the coding plan.");
+  });
+
+  it("automatically retries terminal Canvas cleanup without requiring an owner re-drive", async () => {
+    let attempt = 0;
+    const closeTaskCanvases = vi.fn(async () => {
+      attempt += 1;
+      return attempt === 1 ? { status: "ARCHIVE_PENDING" as const, reason: "canvas_not_found" } : { status: "COMPLETE" as const };
+    });
+    const h = await notifierHarness({ shareToChannel: false, workflow: true, workflowPath: "QUICK" }, { closeTaskCanvases });
+    const terminalNotice: Notice = { id: `${h.taskId}:canvas_closeout:4`, kind: "canvas_closeout", taskId: h.taskId,
+      at: new Date(h.now()).toISOString(), expectedWorkflowRevision: 4 };
+    const deliver = async () => h.handle({ Records: [{ eventSource: "aws:sqs", messageId: "terminal-closeout", receiptHandle: "receipt",
+      body: JSON.stringify(terminalNotice), attributes: { ApproximateReceiveCount: "1" } }] });
+
+    const first = await deliver();
+    expect(first.batchItemFailures).toEqual([{ itemIdentifier: "terminal-closeout" }]);
+    expect(h.retryLater).toHaveBeenCalledWith("receipt", expect.any(Number));
+    expect(closeTaskCanvases).toHaveBeenCalledTimes(1);
+    const retried = await deliver();
+
+    expect(retried.batchItemFailures).toEqual([]);
+    expect(closeTaskCanvases).toHaveBeenCalledTimes(2);
+  });
+
+  it("retries owner re-drives against the supplied manifest digest until closeout completes", async () => {
+    const manifestDigest = "a".repeat(64);
+    let closeoutAttempt = 0;
+    const closeoutCalls: Array<[string, string | undefined, number | undefined]> = [];
+    const closeTaskCanvases = async (taskId: string, digest?: string, workflowRevision?: number) => {
+      closeoutCalls.push([taskId, digest, workflowRevision]);
+      closeoutAttempt += 1;
+      return closeoutAttempt === 1 ? { status: "ARCHIVE_PENDING" as const, reason: "timeout" } : { status: "COMPLETE" as const };
+    };
+    const h = await notifierHarness({ shareToChannel: false, workflow: true, workflowPath: "QUICK" }, { closeTaskCanvases });
+    const pendingNotice: Notice = { id: `${h.taskId}:canvas_closeout_retry:req`, kind: "canvas_closeout", taskId: h.taskId,
+      at: new Date(h.now() - 2 * 60 * 60 * 1000).toISOString(), manifestDigest, expectedWorkflowRevision: 3 };
+    const deliver = async () => h.handle({ Records: [{ eventSource: "aws:sqs", messageId: "closeout", receiptHandle: "receipt",
+      body: JSON.stringify(pendingNotice), attributes: { ApproximateReceiveCount: "1" } }] });
+    const first = await deliver();
+    expect(first.batchItemFailures).toEqual([{ itemIdentifier: "closeout" }]);
+    expect(h.retryLater).toHaveBeenCalledWith("receipt", expect.any(Number));
+    const second = await deliver();
+    expect(second.batchItemFailures).toEqual([]);
+    expect(closeoutCalls).toEqual([[h.taskId, manifestDigest, 3], [h.taskId, manifestDigest, 3]]);
   });
 
   it("posts a short plan-ready note with a link to the saved Canvas details", async () => {

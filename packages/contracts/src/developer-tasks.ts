@@ -205,6 +205,9 @@ export type DeveloperTaskActionRequest = z.infer<typeof DeveloperTaskActionReque
 export const DeveloperTaskCloseRequestSchema = z.object({ requestId: RequestIdSchema, discard_unpublished: z.boolean().optional() }).strict();
 export type DeveloperTaskCloseRequest = z.infer<typeof DeveloperTaskCloseRequestSchema>;
 
+export const CanvasCloseoutRetryRequestSchema = z.object({ requestId: RequestIdSchema, workflowRevision: z.number().int().positive(), manifestDigest: z.string().regex(/^[a-f0-9]{64}$/).optional() }).strict();
+export type CanvasCloseoutRetryRequest = z.infer<typeof CanvasCloseoutRetryRequestSchema>;
+
 /** The owner asks AgentX to open the task's draft pull request again, at the workflow revision they saw. */
 export const WorkflowPublishRetryRequestSchema = z.object({ requestId: RequestIdSchema, expectedRevision: z.number().int().positive() }).strict();
 export type WorkflowPublishRetryRequest = z.infer<typeof WorkflowPublishRetryRequestSchema>;
