@@ -9,7 +9,7 @@ import {
   type WorkerInvocation,
   type PullRequestLifecycleResult,
 } from "@agentx/contracts";
-import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME, gitSafeEnvironment } from "./git.js";
+import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME, assertNoEmbeddedRepositories, assertNoLfsFiles, gitHardenedEnvironment } from "./git.js";
 import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
 import type { PullRequestUpdateSink } from "./callback-client.js";
 import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
@@ -56,7 +56,8 @@ export async function maintainPullRequest(options: {
 
   const credential = await options.credentialProvider(repository);
   await credentialedGit(repositoryPath, [
-    "-C", repositoryPath, "fetch", "--no-tags", "origin",
+    // From the registered URL, never the remote's name, so a repository remote setting cannot redirect it.
+    "-C", repositoryPath, "fetch", "--no-tags", repository.url,
     `refs/heads/${invocation.payload.headBranch}:refs/remotes/origin/${invocation.payload.headBranch}`,
     `refs/heads/${invocation.payload.baseBranch}:refs/remotes/origin/${invocation.payload.baseBranch}`,
   ], credential, "Git fetch failed");
@@ -64,7 +65,7 @@ export async function maintainPullRequest(options: {
   if (remoteHead !== invocation.payload.expectedHeadCommit) {
     throw agentXError("STALE_FENCE", "pull request head changed since AgentX last observed it");
   }
-  const conflicts = await git(repositoryPath, ["diff", "--name-only", "--diff-filter=U"]);
+  const conflicts = await git(repositoryPath, ["diff", "--name-only", "--diff-filter=U", "--ignore-submodules=dirty"]);
   if (conflicts.trim()) throw agentXError("CONFIG_INVALID", "repository has unresolved merge conflicts");
 
   let commit: string;
@@ -74,13 +75,21 @@ export async function maintainPullRequest(options: {
     if (!(await isAncestor(repositoryPath, remoteHead, currentHead))) {
       throw agentXError("STALE_FENCE", "workspace history is not a fast-forward of the pull request head");
     }
-    const status = await git(repositoryPath, ["status", "--porcelain=v1", "--untracked-files=all"]);
+    const status = await git(repositoryPath, ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=dirty"]);
     if (currentHead === remoteHead && !status.trim()) {
       throw agentXError("CONFIG_INVALID", "repository has no new changes to append");
     }
     const checks = await runReadinessChecks(rootPath, invocation, manifest, readinessOptions);
     if (checks.some((check) => check.outcome !== "passed")) {
       throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
+    }
+    try {
+      const env = await gitHardenedEnvironment(repositoryPath);
+      await assertNoEmbeddedRepositories(repositoryPath, env);
+      await assertNoLfsFiles(repositoryPath, env);
+    } catch (error) {
+      if (error instanceof AgentXError) throw error;
+      throw agentXError("CONFIG_INVALID", "Git could not read the repository's files");
     }
     await git(repositoryPath, ["add", "--all"]);
     const workspaceTree = (await git(repositoryPath, ["write-tree"])).trim();
@@ -98,12 +107,13 @@ export async function maintainPullRequest(options: {
       repositoryPath,
       invocation,
       repository.name,
+      repository.url,
       repository.codeBuildGates ?? [],
       commit,
       credential,
       options.codeBuildSink,
     );
-    await push(repositoryPath, invocation.payload.headBranch, credential);
+    await push(repositoryPath, repository.url, invocation.payload.headBranch, credential);
     const callback = await options.pullRequestUpdateSink({
       repository: repository.name,
       pullRequestNumber: invocation.payload.pullRequestNumber,
@@ -121,7 +131,7 @@ export async function maintainPullRequest(options: {
     });
   }
 
-  const status = await git(repositoryPath, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  const status = await git(repositoryPath, ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=dirty"]);
   if (status.trim()) throw agentXError("CONFIG_INVALID", "sync requires a clean repository");
   await git(repositoryPath, ["checkout", "--force", "-B", invocation.payload.headBranch, remoteHead]);
   const remoteBase = (await git(repositoryPath, ["rev-parse", `refs/remotes/origin/${invocation.payload.baseBranch}^{commit}`])).trim();
@@ -157,12 +167,13 @@ export async function maintainPullRequest(options: {
       repositoryPath,
       invocation,
       repository.name,
+      repository.url,
       repository.codeBuildGates ?? [],
       commit,
       credential,
       options.codeBuildSink,
     );
-  if (!reconciled) await push(repositoryPath, invocation.payload.headBranch, credential);
+  if (!reconciled) await push(repositoryPath, repository.url, invocation.payload.headBranch, credential);
   const callback = await options.pullRequestUpdateSink({
     repository: repository.name,
     pullRequestNumber: invocation.payload.pullRequestNumber,
@@ -184,6 +195,7 @@ async function validateCandidate(
   repositoryPath: string,
   invocation: MaintainInvocation,
   repository: string,
+  url: string,
   gates: NonNullable<MaintainInvocation["payload"]["project"]["repositories"][number]["codeBuildGates"]>,
   commit: string,
   credential: Awaited<ReturnType<RepositoryCredentialProvider>>,
@@ -191,7 +203,7 @@ async function validateCandidate(
 ) {
   if (gates.length === 0) return [];
   const validationBranch = `agentx/${invocation.operationId}`;
-  await push(repositoryPath, validationBranch, credential);
+  await push(repositoryPath, url, validationBranch, credential);
   return runCodeBuildGates({
     repository,
     commit,
@@ -200,8 +212,14 @@ async function validateCandidate(
   });
 }
 
-async function push(directory: string, branch: string, credential: Awaited<ReturnType<RepositoryCredentialProvider>>) {
-  await credentialedGit(directory, ["-C", directory, "push", "--porcelain", "origin", `HEAD:refs/heads/${branch}`], credential, "Git push failed");
+/**
+ * Pushes HEAD to the registered URL, never the remote's name: a repository's remote.origin.pushurl would send the
+ * push, and the token with it, elsewhere. Then records origin's tracking branch, as a push to origin would have.
+ */
+async function push(directory: string, url: string, branch: string, credential: Awaited<ReturnType<RepositoryCredentialProvider>>) {
+  assertCredentialFreeRemote(url);
+  await credentialedGit(directory, ["-C", directory, "push", "--porcelain", url, `HEAD:refs/heads/${branch}`], credential, "Git push failed");
+  await git(directory, ["update-ref", `refs/remotes/origin/${branch}`, "HEAD"]);
 }
 
 async function credentialedGit(
@@ -213,6 +231,8 @@ async function credentialedGit(
   try {
     await runGitWithCredential({ directory, args, credential, timeout: 300_000, maxBuffer: MAX_GIT_OUTPUT });
   } catch (error) {
+    // A refusal of the repository's own config is the project's to fix, not a runtime failure.
+    if (error instanceof AgentXError) throw error;
     throw agentXError("RUNTIME_UNAVAILABLE", sanitize(error instanceof Error ? error.message : fallback));
   }
 }
@@ -220,7 +240,7 @@ async function credentialedGit(
 async function isAncestor(directory: string, ancestor: string, descendant: string): Promise<boolean> {
   try {
     await execFileAsync("git", ["-C", directory, "merge-base", "--is-ancestor", ancestor, descendant], {
-      timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT, env: gitSafeEnvironment(directory),
+      timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT, env: await gitHardenedEnvironment(directory),
     });
     return true;
   } catch (error) {
@@ -259,10 +279,14 @@ async function loadManifest(rootPath: string, invocation: MaintainInvocation): P
   }
 }
 
+/**
+ * Git under a hardened environment computed for each call: readiness checks (project code) run between these calls
+ * and could change the repository's config, so an environment computed before them would be stale.
+ */
 async function git(directory: string, args: readonly string[]): Promise<string> {
   try {
     const result = await execFileAsync("git", ["-C", directory, ...args], {
-      timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT, encoding: "utf8", env: gitSafeEnvironment(directory),
+      timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT, encoding: "utf8", env: await gitHardenedEnvironment(directory),
     });
     return result.stdout;
   } catch (error) {

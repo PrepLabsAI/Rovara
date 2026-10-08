@@ -41,13 +41,15 @@ async function realPi(responses: FauxResponseStep[]) {
 
 async function run(adapter: PiSessionAdapter, cancellationController?: WorkerCancellationController, invocation = taskInvocation()) {
   const events: WorkerEvent[] = [];
+  const artifacts: Array<{ name: string; mediaType: string; content: string }> = [];
+  let result: Awaited<ReturnType<typeof runTaskInvocation>> | undefined;
   const outcome = await runTaskInvocation(invocation, {
     rootPath: await preparedRoot(), model: { provider: FAUX_MODEL.provider, modelId: FAUX_MODEL.modelId }, piAdapter: adapter,
-    eventSink: async (batch) => { events.push(...batch); }, artifactSink: async () => undefined,
+    eventSink: async (batch) => { events.push(...batch); }, artifactSink: async (artifact) => { artifacts.push(artifact); },
     ...(cancellationController === undefined ? {} : { cancellationController }),
-  }).then(() => "SUCCEEDED" as const, (error: unknown) => error);
+  }).then((value) => { result = value; return "SUCCEEDED" as const; }, (error: unknown) => error);
   const usage = events.find((event) => event.type === "usage")?.payload as { outcome?: string } | undefined;
-  return { outcome, usageOutcome: usage?.outcome, events };
+  return { outcome, result, usageOutcome: usage?.outcome, events, artifacts };
 }
 
 describe("a task whose model call fails", () => {
@@ -89,6 +91,18 @@ describe("a task whose model call fails", () => {
     const { outcome, usageOutcome } = await run(adapter);
     expect(outcome).toBe("SUCCEEDED");
     expect(usageOutcome).toBe("SUCCEEDED");
+  });
+
+  it("saves a plan without running code checks or publishing a workspace diff", async () => {
+    const adapter = await realPi([fauxAssistantMessage("## Plan\\n\\n1. Update the route.\\n2. Add a focused test.")]);
+    const invocation = { ...taskInvocation(), payload: { ...taskInvocation().payload, workflowMode: "PLAN" as const } };
+    const { result, artifacts, events } = await run(adapter, undefined, invocation);
+
+    expect(result).toMatchObject({ workflowMode: "PLAN" });
+    expect(artifacts.find((artifact) => artifact.name === "plan.md")?.content).toContain("Update the route");
+    expect(artifacts.some((artifact) => artifact.name === "checks.json")).toBe(false);
+    expect(artifacts.some((artifact) => artifact.name === "workspace.diff")).toBe(false);
+    expect(events.find((event) => event.type === "result")?.payload).toMatchObject({ workflowMode: "PLAN" });
   });
 
   it("reports a cancelled turn as CANCELLED, not as a success", async () => {

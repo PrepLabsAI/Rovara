@@ -8,7 +8,7 @@ export interface StreamRecord {
   eventName?: string;
   dynamodb?: { ApproximateCreationDateTime?: number; NewImage?: Record<string, AttributeValue>; OldImage?: Record<string, AttributeValue> };
 }
-export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request" | "admin_change_dm" | "admin_change_outcome" | "admin_change_expiry";
+export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request" | "workflow" | "admin_change_dm" | "admin_change_outcome" | "admin_change_expiry" | "workflow_refusal";
 export interface Notice {
   /** Fixed per change, so a repeated delivery posts once (C9). */
   id: string;
@@ -23,6 +23,8 @@ export interface Notice {
   changeId?: string;
   /** #217: the queue holds the notice until this time (at most 15 minutes); set only on a notice the notifier schedules itself. */
   notBefore?: string;
+  /** A workflow notice's revision: delivered only while the task is still at it, so a stale step is never said. */
+  workflowRevision?: number;
 }
 
 const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
@@ -38,6 +40,13 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
       const before = record(previous?.share);
       const after = record(next.share);
       const notices: Notice[] = [];
+      const beforeWorkflow = record(previous?.workflow);
+      const afterWorkflow = record(next.workflow);
+      if (afterWorkflow !== undefined && beforeWorkflow !== undefined && afterWorkflow.revision !== beforeWorkflow.revision && eventId !== "") {
+        // Gap 5: every step change, keyed by its revision; the notifier words it, or says nothing, when it is delivered.
+        // The task's first step is not one: the start message (or Slack's Quick or Full answer) already says it.
+        notices.push({ id: `${taskId}:workflow:${String(afterWorkflow.revision)}`, kind: "workflow", taskId, at, workflowRevision: Number(afterWorkflow.revision) });
+      }
       if (after !== undefined && before === undefined) notices.push({ id: `${taskId}:start`, kind: "start", taskId, at });
       // A mode notice is named by its stream event; without one, two changes would collapse into one ID.
       else if (after !== undefined && before !== undefined && after.mode !== before.mode && eventId !== "") {
@@ -64,6 +73,13 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
       if (next.kind === "publish" && next.status === "SUCCEEDED") return [{ ...base, id: `${base.operationId}:pull_request`, kind: "pull_request" }];
       if (next.kind === "task" || next.kind === "publish") return [{ ...base, id: `${base.operationId}:ended`, kind: "ended" }];
       return [];
+    }
+    // Task 19: a Slack press the broker refused, told privately to whoever pressed. Once, when it is written.
+    case "WORKFLOW_ACTION_REFUSAL": {
+      const taskId = text(next.taskId);
+      const sk = text(next.sk);
+      if (previous !== undefined || taskId === "" || !sk.startsWith("REFUSAL#")) return [];
+      return [{ id: `${taskId}:refusal:${sk}`, kind: "workflow_refusal", taskId, at }];
     }
     case "ADMIN_CHANGE": {
       // Spec 025 E13: the Slack step started, or a change with a message ended. Only stored

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { WorkflowReviewBaseSchema } from "./task-workflow.js";
 import { ProjectCommandSchema, StoredProjectDefinitionSchema } from "./project.js";
 import { ModelSelectionSchema, type ModelSelection } from "./models.js";
 
@@ -11,7 +12,7 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "publish.reportChecks"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number];
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
@@ -44,6 +45,13 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         prompt: z.string().min(1).max(65_536),
         /** The control plane's record that this conversation already owns a saved session. */
         conversationStarted: z.boolean().optional(),
+        /** The broker-selected tool boundary for the current native workflow stage (spec 056). */
+        workflowMode: z.enum(["PLAN", "IMPLEMENT", "REVIEW", "CHECKS"]).optional(),
+        /**
+         * The task's pinned base commit per repository (the workflow's reviewBase). The worker records it in the
+         * candidate and reviewers see the diff from it. Sent only to a worker whose /ping lists "task.workflowBase".
+         */
+        workflowBase: WorkflowReviewBaseSchema.optional(),
         model: ModelSelectionSchema.optional(),
         modelSelectionDiagnostic: z.string().min(1).max(512).optional(),
         /**
@@ -82,6 +90,18 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          * to a worker whose /ping lists "publish.reportChecks".
          */
         reportChecks: z.literal(true).optional(),
+        /**
+         * The tree the task's checks and reviews passed on. The worker publishes exactly this tree on the task's base and
+         * refuses before pushing when the workspace no longer matches it. Sent only to a worker whose /ping lists
+         * "publish.candidateTree"; never dropped for an older one.
+         */
+        candidateTreeSha: z.string().regex(/^[a-f0-9]{40}$/).optional(),
+        /**
+         * The base commit the broker pinned for the task in this repository: the published commit's only parent, in
+         * place of the commit the workspace's (agent-writable) preparation manifest records. Only with candidateTreeSha.
+         * Sent only to a worker whose /ping lists "publish.workflowBase"; never dropped for an older one.
+         */
+        workflowBaseCommit: z.string().regex(/^[a-f0-9]{40}$/).optional(),
       })
       .strict()
       .superRefine((value, context) => {
@@ -96,6 +116,12 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         }
         if (value.mode !== "revert" && value.revertCommit !== undefined) {
           context.addIssue({ code: "custom", message: "revertCommit is allowed only in revert mode" });
+        }
+        if (value.mode !== "create" && value.candidateTreeSha !== undefined) {
+          context.addIssue({ code: "custom", message: "candidateTreeSha is allowed only in create mode" });
+        }
+        if (value.workflowBaseCommit !== undefined && value.candidateTreeSha === undefined) {
+          context.addIssue({ code: "custom", message: "workflowBaseCommit is allowed only with candidateTreeSha" });
         }
       }),
   }).strict(),

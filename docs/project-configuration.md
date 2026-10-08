@@ -68,6 +68,31 @@ worker image.
 | `credentialRef` | The GitHub App credential reference configured on the control plane. The file never holds a key or token. |
 | `codeBuildGates` | Optional. Up to 8 CodeBuild gates, each with a `name`, a `projectName` matching the deployment's allowed prefix, and `timeoutMinutes` from 5 to 420. The total timeout per repository is at most 420 minutes. See [Configure CodeBuild gates](pull-requests.md#configure-codebuild-gates). |
 
+When AgentX itself runs Git in a workspace repository (to read the agent's changes, publish them or
+update a pull request), it ignores what that repository's Git config asks Git to run:
+
+- **Filters.** Only Git LFS filters (`filter=lfs`) are honoured, and only with the standard
+  `git-lfs` commands. Every other filter is switched off, so files are staged exactly as they are
+  on disk. An encryption filter such as git-crypt therefore stages **plaintext**: do not register
+  a repository that relies on one.
+- **Git LFS.** Git LFS repositories are not supported yet. Publishing a pull request, or appending
+  to one, is refused when any file has `filter=lfs`, because AgentX runs no hooks and Git LFS's
+  pre-push upload would not happen.
+- **Hooks, signing and helpers.** Hooks, fsmonitor, commit signing, credential helpers, custom
+  merge drivers (Git's own text merge is used) and diff `textconv` commands do not run.
+- **Remotes.** Fetches and pushes go to the registered `url` over HTTPS only, and never through a
+  proxy (including the worker's `HTTPS_PROXY`). A fetch or push is refused while the repository's
+  config sets any `url.*`, `http.*` or `remote.*` key other than `remote.origin.url` and
+  `remote.origin.fetch`, or `extensions.partialClone`. The refusal names the keys to unset.
+- **Submodules and nested repositories.** AgentX tasks do not yet support projects whose `setup`
+  initialises Git submodules (for example `git submodule update --init`), or a nested repository
+  the agent creates and records. While a submodule is checked out, AgentX refuses to read the
+  agent's changes, publish or update a pull request, and the error names the submodule's path.
+  An uninitialised submodule (an empty directory) is fine.
+
+Setup and readiness commands are the project's own code and run with the worker's normal Git
+settings.
+
 ### Commands
 
 Each `setup` and `readiness` entry has `cwd` (relative to the workspace), `executable`, `args` (up
@@ -135,6 +160,46 @@ revision does not move an existing workspace's checks into it. Before the checks
 or a pull request update, Rovara starts the dev container (this does nothing when it is already
 running). If it does not start, nothing is pushed.
 
+The dev container runs on the worker host's Docker, and its config is a file in your repository that
+the agent can edit. So every time AgentX starts the container it checks the configuration first:
+`devcontainer.json` itself, and the full configuration the devcontainer CLI would use, with the
+settings of every feature and of the image's own `devcontainer.metadata` label merged in. Anything
+below is refused, with a message naming the setting, before any container starts:
+
+| Refused | Why |
+|---|---|
+| `initializeCommand` | It runs on the worker host itself, not in the container. |
+| `dockerComposeFile` | The Compose services' settings cannot be checked. |
+| `privileged: true`, `securityOpt`, or any `capAdd` other than `SYS_PTRACE` | They grant powers over the host. |
+| `runArgs` with `--privileged`, `--pid`, `--ipc=host` or `container:…`, `--network=host` (or `--net`) or `container:…`, `--userns=host`, `--uts=host`, `--cgroupns=host`, `--cap-add` (other than `SYS_PTRACE`), `--security-opt`, `--device`, `--device-cgroup-rule`, `--gpus` or `--volumes-from` | They share the host's (or the worker's) processes, network, devices or files. |
+| A bind mount (`mounts`, `workspaceMount`, or `-v`/`--volume`/`--mount` in `runArgs`) of `/`, `/var/run/docker.sock`, the workspace root itself, its `.docker` folder, or any path outside the workspace, including through a link (whether or not its target exists), or a path AgentX cannot check | They expose host files or the Docker socket. |
+| A feature AgentX cannot pin to the content it checked (one fetched from a GitHub release) | Its content could change before the container is built. |
+| A volume with `volume-opt` or `volume-driver` options | Such a volume can be a bind mount of any host path. |
+| `build.context` or `build.dockerfile` outside the workspace | The build would read host files. |
+| `build.options` with `--network=host` or `container:…`, `--output`/`-o`, `--iidfile`, `--metadata-file`, `--allow`, `--security-opt`, `--secret`, `--ssh`, `--build-context`, `--cache-to` or `--file`/`-f` | They reach the host's network, extra privileges, or files outside the build. |
+
+Everything else is allowed: `image` or `build` (with options such as `--build-arg`, `--target`,
+`--pull` or `--add-host`), `features`, `containerEnv`, `remoteUser`, lifecycle commands such as
+`postCreateCommand`, `capAdd: ["SYS_PTRACE"]` or `--cap-add=SYS_PTRACE` (debuggers need it to trace
+the container's own processes), `runArgs` such as `--env` or `--cpus`, named volumes, `tmpfs`
+mounts, and bind mounts of folders inside the workspace (for example
+`source=${localWorkspaceFolder}/.cache,target=/cache,type=bind`).
+
+Features may come from an OCI registry (such as `ghcr.io/devcontainers/features/node:1`), a
+tarball URL, or a folder in `.devcontainer`. The container is built from exactly the feature
+content AgentX checked: AgentX gives the devcontainer CLI a lockfile of that content's digests and
+starts the container with `--frozen-lockfile`, so content that changed since the check stops the
+start before anything is built. While the container starts, AgentX's lockfile takes the place of
+the repository's `devcontainer-lock.json`, which is put back afterwards; tag references resolve to
+the version available when the check runs, not to the repository's lockfile.
+
+After the container starts, AgentX checks it again as Docker ran it; a container that breaks the
+rules is removed and the step fails. AgentX mounts the whole workspace into the container at the
+same path, with the workspace's `.docker` folder (Docker's own data) hidden by an empty volume. A
+container created before AgentX hid that folder is created again once. Before each publication
+AgentX removes the dev container (see the security notes below), so the next step creates it again;
+creating it reruns its creation commands, such as `onCreateCommand` and `postCreateCommand`.
+
 ### Models
 
 ```yaml
@@ -199,12 +264,20 @@ developerTasks:
     default: view          # or continue
     allowContinue: true
   channelMembersMayUse: true
+  optionalWorkflowChecks:
+    - id: coverage
+      label: Coverage report
+      command:
+        cwd: repo/payments-api
+        executable: npm
+        args: [run, coverage]
+        timeoutSeconds: 600
 ```
 
 Every field is optional; the values above are the defaults, and a project without the block uses
 them.
 
-- `enabled`: whether developers may start tasks on this project from an AI tool.
+- `enabled`: whether developers may start tasks on this project from an AI tool or Slack workflow.
 - `channelMembersMayUse`: whether members of the project's bound Slack channels may use it from
   an AI tool. With `false`, only people an admin granted access to the project directly may.
   Direct grants arrive with spec 025 phase 25e (the admin tool `agentx_admin_grant_project_access`);
@@ -212,8 +285,115 @@ them.
 - `share`: with `required`, every task is shared into a bound channel when it starts.
 - `shareMode.default`: the mode a shared task gets when none is asked for.
 - `shareMode.allowContinue`: with `false`, every shared task is view only.
+- `optionalWorkflowChecks`: up to 20 named, project-approved extra commands. In a Slack workflow,
+  the task owner can choose among these when approving the plan. Project `readiness` checks are
+  always included and cannot be turned off. The chosen optional IDs are saved with the plan
+  decision, and a new plan starts with no optional checks selected.
 
 See [Sharing a task to Slack](mcp-install.md#sharing-a-task-to-slack).
+
+#### Starting a task from Slack
+
+In every bound channel, a plain top-level `@AgentX <request>` starts a task on the channel's project.
+AgentX asks in the thread how to handle it, with a button for each path:
+
+- **Quick**: a short coding plan for the owner to approve, then coding, checks, reviews and a draft
+  pull request.
+- **Full**: requirements, then a design, then a coding plan, each approved by the owner before any
+  code changes.
+
+Only the person who asked can choose: they press a button, or reply `quick` or `full` in the thread
+(with or without mentioning AgentX; loose answers such as `Quick please` or `let's do full` count).
+A teammate's answer is ignored. The question waits for a day. A request that starts with `quick:` or
+`full:` (or the older `workflow quick:` / `workflow full:`) skips the question and starts on that
+path; `workflow:` asks it. A thread holds one waiting question at a time. In a thread with no
+question waiting, a reply such as `@AgentX full please` goes to the chat agent like any other.
+
+**Changed behavior:** a plain top-level mention used to go to the chat agent. To reach the chat agent
+now, start the request with `chat:`, for example `@AgentX chat: what does retry.ts do?`. Mentions in
+a thread the chat agent is already answering still go to it without `chat:`.
+
+When a task cannot start, AgentX says why in the thread: the open-task limit, a thread that already
+has a task, or a channel not connected to a project the person can use. Anything else gets a
+reference to give an AgentX admin (the Slack event ID, or for a button press the choice's ID).
+Starting tasks from Slack needs shared tasks (`SHARED_TASKS`) on
+for the Slack ingress; without them AgentX answers every start with a message asking an admin to turn
+them on.
+
+#### Replies in a Slack task's thread
+
+Every reply in the thread of a task started in Slack is saved as input for the task's next step,
+whether or not it mentions AgentX and whoever posts it. The next plan or coding step sees the
+replies no earlier step was given, marked as the owner's or a teammate's; each reply is given once.
+Replies never move the task on: only the task owner's buttons do. An `@AgentX` reply gets a private
+"Saved" acknowledgement; a plain reply gets no answer. AgentX keeps up to 200 replies per task, and
+keeps the first 2,000 characters of a longer reply. When many replies arrive between two steps, only the
+newest, about 8 KB of them, are passed to the next step. Text in a reply posted with a file is saved; the
+file is not. To stop the task from its thread, its owner sends `@AgentX stop`: a plain `stop` without
+the mention is saved as a reply like any other.
+
+To receive replies that do not mention it, the Slack app needs the `channels:history` and
+`groups:history` bot scopes and the `message.channels` and `message.groups` bot events. The app
+manifest `agentx init` generates includes them. **An existing install must reinstall the Slack app**
+(update the app from the new manifest, then reinstall it to the workspace) to receive thread replies;
+until then only `@AgentX` replies are saved. AgentX reads channel messages only to find replies in
+task threads: it ignores, and does not store, any channel message outside a task's thread.
+
+#### From approval to a draft pull request
+
+A task started in Slack can finish in its thread, with no MCP client and no admin help. Each
+approval card is a short message: what is waiting, up to three summary lines and a link to the full
+document (a Slack Canvas, or the AgentX task page when the workspace cannot create Canvases). Once
+the owner decides, the card loses its buttons and says who decided.
+
+After the coding plan is approved, AgentX codes it, runs the required checks and the selected
+optional checks on that exact code, and then starts the code and security reviews by itself. Only
+problems the change introduced block. An older problem outside the changed lines is noted but does
+not block. When a review finds a problem, the thread lists it with **Send back to coding**, **Retry
+reviews** and **Close task**. Send back gives the problems to the coding step, and the checks and
+reviews run again on the new code. When the checks and reviews pass, AgentX opens a draft pull request
+of exactly the checked code and posts the link in the thread. People review and merge it on GitHub.
+
+#### Security notes: who can reach the push token
+
+The coding, check and review runs never get a push token. Only the separate publish step does, and
+it keeps the token away from code the agent or the project controls:
+
+- A task's draft pull request runs no project command. Its checks already ran on the same code
+  before its reviews, and the publish step confirms the code is still that code.
+- Before every credential request (a fetch of the latest base for an ordinary pull request or a
+  revert, and the push itself, which comes after the readiness checks), the publish step stops the
+  processes and containers started by the task: every container on the worker other than the
+  worker's own, and every process left running from the workspace. It repeats both until neither
+  finds anything, checks for containers once more, and asks for nothing if it cannot confirm they are
+  all gone. In the deployed worker that means every process in the worker container other than the
+  worker itself and its parent; one it is not allowed to stop also blocks the publication. Run
+  elsewhere (a developer machine), it means every process of the worker's user whose working
+  directory is in the workspace, and no container is touched.
+- The push runs from a temporary Git repository that AgentX makes for that push alone. It borrows
+  the workspace's Git objects and reads nothing else from the workspace: not its `.git/config`,
+  hooks or attributes. The commit is pushed by its ID to the repository's registered URL. GitHub
+  checks every object it receives, so the borrowed objects cannot change what the commit holds.
+- The token is never put in any process's environment, and is removed when the push ends.
+- The published commit's parent is the base commit AgentX pinned for the task, never one the
+  workspace reports. The broker checks the pull request's commit, its code and its parent on GitHub.
+
+Known limitation: on EC2 workers, when a project has no dev container, the coding step currently runs
+with the worker's Docker access. Before publishing, AgentX stops processes and containers started by
+the task and pushes from an isolated repository, but that does not undo anything done earlier in the
+task. With a dev container that follows the rules in "Dev container" above, the agent's shell and the
+project's commands run in that container, without Docker access. Running AI-written code as a
+separate user without Docker access is tracked in
+[#325](https://github.com/PrepLabsAI/Rovara/issues/325).
+
+#### Security follow-ups
+
+Tracked in [#325](https://github.com/PrepLabsAI/Rovara/issues/325):
+
+1. Run agent and project code as a separate operating-system user with no Docker access.
+2. Dev-container-only Docker: only AgentX's own dev container launcher reaches Docker; projects
+   without a dev container get no Docker access.
+3. Apply the same process and container stop before the credential of a pull request update.
 
 ## Checks: how Rovara verifies the agent's work (spec 051)
 

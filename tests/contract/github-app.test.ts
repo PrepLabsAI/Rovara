@@ -234,6 +234,75 @@ describe("GitHub App repository credentials", () => {
     expect(lookupCount).toBe(2);
   });
 
+  it("reads a commit's parents with a contents-read token, and refuses an answer it cannot read", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const provider = appProvider({
+      credentialRef: "github-agentx-sdlc",
+      appId: "5002502",
+      getPrivateKey: async () => pem,
+      fetchImplementation: async (url) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "lookup-token" }), { status: 201 });
+        if (requestUrl.endsWith(`/git/commits/${"e".repeat(40)}`)) return new Response(JSON.stringify({ tree: { sha: "d".repeat(40) }, parents: [{ sha: "a".repeat(40) }] }), { status: 200 });
+        if (requestUrl.endsWith(`/git/commits/${"b".repeat(40)}`)) return new Response(JSON.stringify({ tree: { sha: "d".repeat(40) }, parents: [{ sha: "../x" }] }), { status: 200 });
+        return new Response("not found", { status: 404 });
+      },
+    });
+    await expect(provider.getCommitParents("https://github.com/ps06756/personal-website-test.git", "e".repeat(40))).resolves.toEqual(["a".repeat(40)]);
+    await expect(provider.getCommitParents("https://github.com/ps06756/personal-website-test.git", "b".repeat(40))).rejects.toThrow(/parent/);
+    await expect(provider.getCommitParents("https://github.com/ps06756/personal-website-test.git", "f".repeat(40))).rejects.toThrow(/HTTP 404/);
+  });
+
+  it("confirms a task's starting commit with a contents-read token and refuses one GitHub does not have", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const provider = appProvider({
+      credentialRef: "github-agentx-sdlc",
+      appId: "5002502",
+      getPrivateKey: async () => pem,
+      fetchImplementation: async (url, init) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        requests.push({ url: requestUrl, init });
+        if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "lookup-token" }), { status: 201 });
+        if (requestUrl.endsWith(`/git/commits/${"e".repeat(40)}`)) return new Response(JSON.stringify({ tree: { sha: "d".repeat(40) } }), { status: 200 });
+        return new Response("not found", { status: 404 });
+      },
+    });
+    await expect(provider.getCommitTree("https://github.com/ps06756/personal-website-test.git", "e".repeat(40))).resolves.toBe("d".repeat(40));
+    const tokenBody = requests[0]?.init?.body;
+    if (typeof tokenBody !== "string") throw new Error("expected token body");
+    expect((JSON.parse(tokenBody) as { permissions: unknown }).permissions).toEqual({ contents: "read" });
+    expect(requests[1]?.url).toBe(`https://api.github.com/repos/ps06756/personal-website-test/git/commits/${"e".repeat(40)}`);
+    await expect(provider.getCommitTree("https://github.com/ps06756/personal-website-test.git", "f".repeat(40))).rejects.toThrow(/HTTP 404/);
+    await expect(provider.getCommitTree("https://github.com/ps06756/personal-website-test.git", "../x")).rejects.toThrow(/invalid/);
+  });
+
+  it("reads a publication branch's head commit with a contents-read token and refuses other branch names", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const branch = "agentx/00000000-0000-4000-8000-000000000001";
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
+    const provider = appProvider({
+      credentialRef: "github-agentx-sdlc", appId: "5002502", getPrivateKey: async () => pem,
+      fetchImplementation: async (url, init) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        requests.push({ url: requestUrl, init });
+        if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "lookup-token" }), { status: 201 });
+        if (requestUrl.endsWith(`/git/ref/heads/${branch}`)) return new Response(JSON.stringify({ ref: `refs/heads/${branch}`, object: { type: "commit", sha: "e".repeat(40) } }), { status: 200 });
+        return new Response("not found", { status: 404 });
+      },
+    });
+    await expect(provider.getBranchHead("https://github.com/ps06756/personal-website-test.git", branch)).resolves.toBe("e".repeat(40));
+    const tokenBody = requests[0]?.init?.body;
+    if (typeof tokenBody !== "string") throw new Error("expected token body");
+    expect((JSON.parse(tokenBody) as { permissions: unknown }).permissions).toEqual({ contents: "read" });
+    expect(requests[1]?.url).toBe(`https://api.github.com/repos/ps06756/personal-website-test/git/ref/heads/${branch}`);
+    await expect(provider.getBranchHead("https://github.com/ps06756/personal-website-test.git", "agentx/00000000-0000-4000-8000-000000000002")).rejects.toThrow(/HTTP 404/);
+    await expect(provider.getBranchHead("https://github.com/ps06756/personal-website-test.git", "main")).rejects.toThrow(/invalid/);
+  });
+
   it("looks up canonical pull request state with read-only permissions", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
@@ -522,3 +591,71 @@ function pullRequestFixture(): Record<string, unknown> {
     body: "Current body",
   };
 }
+
+
+describe("current PR feedback API reads", () => {
+  function fixture(options: { wrongScope?: boolean; changedHead?: boolean; nested?: boolean; exactReviewTime?: boolean } = {}) {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const root = "https://github.com/ps06756/personal-website-test/pull/42";
+    const api = "https://api.github.com/repos/ps06756/personal-website-test";
+    let reads = 0;
+    const requests: string[] = [];
+    const page = (nodes: unknown[], hasNextPage = false, endCursor: string | null = null) => ({ nodes, pageInfo: { hasNextPage, endCursor } });
+    const comment = (id: number, anchor: string) => ({ id, body: `comment ${id}`, html_url: `${root}#${anchor}${id}`, user: { login: "reviewer" }, updated_at: "2026-10-05T12:00:00Z", submitted_at: "2026-10-05T12:00:00Z", path: "src/file.ts", line: 3, pull_request_url: `${api}/pulls/42`, issue_url: `${api}/issues/42` });
+    const provider = appProvider({ credentialRef: "github-app", appId: "123", getPrivateKey: async () => privateKey.export({ type: "pkcs8", format: "pem" }).toString(),
+      fetchImplementation: async (url, init) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url; requests.push(requestUrl);
+        if (requestUrl.endsWith("access_tokens")) return new Response(JSON.stringify({ token: "fixture" }));
+        if (requestUrl === `${api}/pulls/42`) return Response.json({ ...pullRequestFixture(), head: { ref: "branch", sha: options.changedHead && reads++ ? "b".repeat(40) : "a".repeat(40) } });
+        if (requestUrl.includes("/git/commits/")) return Response.json({ tree: { sha: "b".repeat(40) } });
+        if (requestUrl === "https://api.github.com/graphql") {
+          const requestBody = typeof init?.body === "string" ? init.body : "";
+          const request = JSON.parse(requestBody) as { variables: Record<string, unknown>; query: string };
+          const variables = request.variables;
+          if (request.query.includes("reviews(first")) return Response.json({ data: { repository: { nameWithOwner: "ps06756/personal-website-test", pullRequest: { number: 42, headRefOid: "a".repeat(40), reviews: page([{ fullDatabaseId: 1, body: "comment 1", updatedAt: "2026-10-05T13:00:00Z", url: `${root}#pullrequestreview-1` }]) } } } });
+          const threadId = typeof variables.threadId === "string" ? variables.threadId : undefined;
+          const connection = page([{ fullDatabaseId: 2 }], !!options.nested && !threadId, "comment-next");
+          const thread = { id: "thread-1", isResolved: true, repository: { nameWithOwner: "ps06756/personal-website-test" }, pullRequest: { number: 42 }, comments: threadId ? page([{ fullDatabaseId: 4 }]) : connection };
+          return Response.json({ data: threadId ? { node: thread } : { repository: { nameWithOwner: "ps06756/personal-website-test", pullRequest: { number: 42, headRefOid: "a".repeat(40), reviewThreads: page([thread]) } } } });
+        }
+        if (requestUrl.includes("/reviews?")) {
+          const review = comment(1, "pullrequestreview-");
+          if (options.exactReviewTime) { const { updated_at: _updatedAt, ...withoutUpdatedAt } = review; void _updatedAt; return Response.json([withoutUpdatedAt]); }
+          return Response.json([review]);
+        }
+        if (requestUrl.includes("/pulls/42/comments?")) return Response.json(options.nested ? [comment(2, "discussion_r"), comment(4, "discussion_r")] : [comment(2, "discussion_r")]);
+        if (requestUrl.includes("/issues/42/comments?")) {
+          if (requestUrl.includes("page=2")) return Response.json([{ ...comment(3, "issuecomment-"), ...(options.wrongScope ? { html_url: "https://github.com/other/repo/pull/42#issuecomment-3" } : {}) }]);
+          return new Response("[]", { headers: { link: `<${api}/issues/42/comments?per_page=100&page=2>; rel="next"` } });
+        }
+        throw new Error(`unexpected request ${requestUrl}`);
+      } });
+    return { provider, requests };
+  }
+  it("collects paginated discussion, review bodies and inline comment IDs with current thread state", async () => {
+    const { provider, requests } = fixture({ nested: true });
+    expect(typeof provider.getPullRequestFeedback).toBe("function");
+    const result = await provider.getPullRequestFeedback("https://github.com/ps06756/personal-website-test.git", 42);
+    expect(result.pullRequest.headCommit).toBe("a".repeat(40));
+    expect(result.pullRequest.headTreeSha).toBe("b".repeat(40));
+    expect(result.comments.map(c => c.id)).toEqual(["review:1", "review_comment:2", "review_comment:4", "discussion:3"]);
+    expect(result.comments[1]).toMatchObject({ threadId: "thread-1", body: "comment 2", path: "src/file.ts", line: 3 });
+    expect(result.threads).toEqual([{ id: "thread-1", resolved: true, commentIds: ["review_comment:2", "review_comment:4"] }]);
+    expect(requests).toContain("https://api.github.com/repos/ps06756/personal-website-test/issues/42/comments?per_page=100&page=2");
+  });
+  it("binds review bodies to their current edit time when REST exposes only submitted_at", async () => {
+    const { provider } = fixture({ exactReviewTime: true });
+    const result = await provider.getPullRequestFeedback("https://github.com/ps06756/personal-website-test.git", 42);
+    expect(result.comments.find(c => c.id === "review:1")?.updatedAt).toBe("2026-10-05T13:00:00.000Z");
+  });
+  it("refuses comments returned outside the exact linked repository and PR", async () => {
+    const { provider } = fixture({ wrongScope: true });
+    expect(typeof provider.getPullRequestFeedback).toBe("function");
+    await expect(provider.getPullRequestFeedback("https://github.com/ps06756/personal-website-test.git", 42)).rejects.toThrow(/scope|canonical/);
+  });
+  it("refuses a head change during paginated feedback collection", async () => {
+    const { provider } = fixture({ changedHead: true });
+    expect(typeof provider.getPullRequestFeedback).toBe("function");
+    await expect(provider.getPullRequestFeedback("https://github.com/ps06756/personal-website-test.git", 42)).rejects.toThrow(/changed/);
+  });
+});

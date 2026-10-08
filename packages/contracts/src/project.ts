@@ -254,6 +254,13 @@ export const LEGACY_PROJECT_FIELDS = ["schemaVersion", "controlPlaneUrl", "auth"
 
 export const DeveloperShareModeSchema = z.enum(["view", "continue"]);
 
+export const WorkflowOptionalCheckSchema = z.object({
+  id: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/),
+  label: z.string().trim().min(1).max(80),
+  command: ProjectCommandSchema,
+}).strict();
+export type WorkflowOptionalCheck = z.infer<typeof WorkflowOptionalCheckSchema>;
+
 /** Spec 025 FR-014: how a project treats tasks started from an AI tool. Part of the revision. */
 export const DeveloperTaskPolicySchema = z
   .object({
@@ -267,8 +274,17 @@ export const DeveloperTaskPolicySchema = z
       .strict()
       .default({ default: "view", allowContinue: true }),
     channelMembersMayUse: z.boolean().default(true),
+    /** Project-approved extra checks task owners may select for the native workflow. */
+    optionalWorkflowChecks: z.array(WorkflowOptionalCheckSchema).max(20).optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((policy, context) => {
+    const ids = new Set<string>();
+    for (const [index, check] of (policy.optionalWorkflowChecks ?? []).entries()) {
+      if (ids.has(check.id)) context.addIssue({ code: "custom", path: ["optionalWorkflowChecks", index, "id"], message: "optional workflow check IDs must be unique" });
+      ids.add(check.id);
+    }
+  });
 export type DeveloperTaskPolicy = z.output<typeof DeveloperTaskPolicySchema>;
 export const DEFAULT_DEVELOPER_TASK_POLICY: DeveloperTaskPolicy = DeveloperTaskPolicySchema.parse({});
 

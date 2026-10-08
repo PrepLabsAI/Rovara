@@ -5,11 +5,18 @@ import { CLOSED_SHARED_NOTICE, SlackRequestMessageSchema, VIEW_ONLY_NOTICE, shar
 import {
   createSlackIngressHandler,
   parseSlackSecrets,
+  recordThreadNoteThroughBroker,
+  stopTaskThroughBroker,
+  SLACK_TASK_THREADS_OFF_NOTICE,
+  SlackWorkflowStartError,
   slackIngressSettings,
   validSignature,
 } from "../../packages/broker/src/aws/slack-ingress.js";
 import type { SlackMemberCheck } from "../../packages/broker/src/aws/slack-members.js";
+import { WORKFLOW_CHOICE_WAITING_NOTICE, WorkflowChoiceWaitingError, workflowChoiceRefusal, workflowStartedNotice, workflowStartFailureNotice, type WorkflowChoiceOutcome } from "../../packages/broker/src/aws/slack-workflow-choice.js";
 import { FakeDynamoDb } from "../support/fake-dynamodb.js";
+import { chatPostEphemeral } from "../../packages/broker/src/aws/slack-web.js";
+import { StrictSlackWeb } from "../support/strict-slack.js";
 
 const signingSecret = "8f742231b10e8888abcd99yyyzzz85a5";
 const team = "T0BSHLLUGBD";
@@ -27,10 +34,22 @@ function harness(options: {
   failCount?: number;
   failRelease?: number;
   failDecrement?: number;
-  stop?: { outcome?: "CANCEL_REQUESTED" | "NOTHING_RUNNING"; throws?: boolean };
-  shared?: { threads: Record<string, { mode: "view" | "continue"; closed?: boolean }>; lookupThrows?: boolean; claimThrows?: boolean };
+  stop?: { outcome?: "CANCEL_REQUESTED" | "NOTHING_RUNNING" | "NOT_OWNER"; throws?: boolean };
+  workflowStart?: { throws?: boolean; errorCode?: string };
+  workflowChoice?: { throws?: boolean; waiting?: boolean };
+  workflowSelection?: { outcome?: WorkflowChoiceOutcome; throws?: boolean; errorCode?: string };
+  /** threadTs to the requester of the Quick or Full choice waiting there. */
+  pendingChoice?: Record<string, string>;
+  shared?: { threads: Record<string, { mode: "view" | "continue"; closed?: boolean; taskId?: string; workflowThread?: true }>; lookupThrows?: boolean; claimThrows?: boolean };
+  threadNote?: { outcome?: "captured" | "duplicate" | "refused"; throws?: boolean };
 } = {}) {
   const stopCalls: Array<{ thread: unknown; userId: string }> = [];
+  const workflowStarts: Array<{ thread: unknown; userId: string; instructions: string; requestId: string }> = [];
+  const workflowChoices: Array<{ thread: unknown; userId: string; instructions: string; requestId: string }> = [];
+  const workflowSelections: Array<{ thread: unknown; userId: string; workflowPath: "QUICK" | "FULL" }> = [];
+  const pendingLookups: string[] = [];
+  const threadNotes: Array<{ taskId: string; thread: unknown; userId: string; messageTs: string; eventId: string; text: string }> = [];
+  const ephemerals: Array<{ channel: string; threadTs: string; user: string; text: string }> = [];
   const memberChecks: string[] = [];
   const clock = { seconds: nowSeconds };
   const turnWindows: Array<{ subject: string; windowStart: number; expiresAt: number }> = [];
@@ -38,6 +57,7 @@ function harness(options: {
   const turnCounts = new Map<string, number>();
   // The hourly claim is the one the AWS wiring sends (F13), evaluated by the fake table.
   const threadsTable = new FakeDynamoDb();
+  const strict = new StrictSlackWeb();
   const noticedAt = (subject: string) => sharedNoticeKeyItem(threadsTable, subject)?.noticedAt;
   let countFailures = options.failCount ?? 0;
   let decrementFailures = options.failDecrement ?? 0;
@@ -80,14 +100,21 @@ function harness(options: {
     },
     postMessage: async (input: { channel: string; threadTs: string; text: string }) => {
       if (options.failPost) throw new Error("Slack unavailable");
+      await strict.postMessage(input);
       posts.push(input);
+    },
+    postEphemeral: async (input: { channel: string; threadTs: string; user: string; text: string }) => {
+      if (options.failPost) throw new Error("Slack unavailable");
+      strict.postEphemeral(input);
+      ephemerals.push(input);
     },
     ...(options.shared === undefined ? {} : {
       sharedTask: {
         lookup: async (thread: { threadTs: string }) => {
           if (options.shared?.lookupThrows) throw Object.assign(new Error("DynamoDB unavailable"), { name: "InternalServerError" });
           const found = options.shared?.threads[thread.threadTs];
-          return found === undefined ? undefined : { mode: found.mode, closed: found.closed ?? false };
+          return found === undefined ? undefined : { mode: found.mode, closed: found.closed ?? false, ...(found.taskId === undefined ? {} : { taskId: found.taskId }),
+            ...(found.workflowThread === true ? { workflowThread: true as const } : {}) };
         },
         claimNotice: async (subject: string, now: number, kind: "view" | "closed") => {
           if (options.shared?.claimThrows) throw Object.assign(new Error("DynamoDB unavailable"), { name: "InternalServerError" });
@@ -108,6 +135,40 @@ function harness(options: {
         stopCalls.push({ thread, userId });
         if (options.stop?.throws) throw new Error("broker unavailable");
         return options.stop?.outcome ?? "CANCEL_REQUESTED";
+      },
+    }),
+    ...(options.workflowStart === undefined ? {} : {
+      startWorkflow: async (input: { thread: unknown; userId: string; instructions: string; requestId: string }) => {
+        workflowStarts.push(input);
+        if (options.workflowStart?.throws) throw new SlackWorkflowStartError(options.workflowStart.errorCode ?? "UNKNOWN");
+      },
+    }),
+    ...(options.workflowChoice === undefined ? {} : {
+      requestWorkflowChoice: async (input: { thread: unknown; userId: string; instructions: string; requestId: string }) => {
+        workflowChoices.push(input);
+        if (options.workflowChoice?.waiting) throw new WorkflowChoiceWaitingError();
+        if (options.workflowChoice?.throws) throw new Error("Slack unavailable");
+      },
+    }),
+    ...(options.workflowSelection === undefined ? {} : {
+      chooseWorkflowPath: async (input: { thread: unknown; userId: string; workflowPath: "QUICK" | "FULL" }) => {
+        workflowSelections.push(input);
+        if (options.workflowSelection?.throws) throw new SlackWorkflowStartError(options.workflowSelection.errorCode ?? "UNKNOWN");
+        return options.workflowSelection?.outcome ?? "started";
+      },
+    }),
+    ...(options.pendingChoice === undefined ? {} : {
+      pendingWorkflowChoice: async (thread: { threadTs: string }) => {
+        pendingLookups.push(thread.threadTs);
+        const userId = options.pendingChoice?.[thread.threadTs];
+        return userId === undefined ? undefined : { choiceId: "11111111-1111-4111-8111-111111111111", userId };
+      },
+    }),
+    ...(options.threadNote === undefined ? {} : {
+      recordThreadNote: async (input: { taskId: string; thread: unknown; userId: string; messageTs: string; eventId: string; text: string }) => {
+        threadNotes.push(input);
+        if (options.threadNote?.throws) throw new Error("private note body must not appear in this error");
+        return { outcome: options.threadNote?.outcome ?? "captured" };
       },
     }),
     ...(options.turnsPerMinute === undefined ? {} : {
@@ -145,7 +206,8 @@ function harness(options: {
       },
     }),
   });
-  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls, noticedAt };
+  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls, workflowStarts, workflowChoices, workflowSelections, pendingLookups, threadNotes, ephemerals, noticedAt,
+    claimedEvents: () => [...claimed] };
 }
 
 function sharedNoticeKeyItem(table: FakeDynamoDb, subject: string): { noticedAt?: unknown } | undefined {
@@ -223,6 +285,76 @@ describe("Slack request signatures", () => {
 });
 
 describe("Slack mention ingress", () => {
+
+  it("records every reply in a workflow task thread, mention or not, and never asks Slack to retry a refusal", async () => {
+    const workflowThread = { "1695500000.000001": { mode: "view" as const, taskId: "11111111-1111-4111-8111-111111111111", workflowThread: true as const } };
+    const h = harness({ shared: { threads: workflowThread }, threadNote: { outcome: "captured" } });
+    const reply = (eventId: string, event: Record<string, unknown>) => signedEvent(mention({ eventId, event: { thread_ts: "1695500000.000001", ...event } }));
+    expect((await send(h.handler, reply("EvNote01", { ts: "1695500002.000007", text: `<@${bot}> Please keep the old flag.` }))).status).toBe(200);
+    expect((await send(h.handler, reply("EvNote02", { type: "message", channel_type: "channel", ts: "1695500002.000007", text: `<@${bot}> Please keep the old flag.` }))).status).toBe(200);
+    expect((await send(h.handler, reply("EvNote03", { type: "message", channel_type: "channel", user: "U0TEAMMATE1", ts: "1695500003.000001", text: "Also check the mobile layout" }))).status).toBe(200);
+    expect(h.threadNotes.map((note) => [note.userId, note.messageTs, note.text])).toEqual([
+      [pratik, "1695500002.000007", "Please keep the old flag."],
+      [pratik, "1695500002.000007", "Please keep the old flag."],
+      ["U0TEAMMATE1", "1695500003.000001", "Also check the mobile layout"],
+    ]);
+    expect(h.queue).toHaveLength(0);
+    expect(h.posts.map((post) => post.text)).not.toContain(VIEW_ONLY_NOTICE);
+    expect(JSON.stringify(h.logs)).not.toContain("old flag");
+    const refused = harness({ shared: { threads: workflowThread }, threadNote: { outcome: "refused" } });
+    expect((await send(refused.handler, reply("EvNote04", { ts: "1695500004.000001", text: "late note" }))).status).toBe(200);
+    const down = harness({ shared: { threads: workflowThread }, threadNote: { throws: true } });
+    expect((await send(down.handler, reply("EvNote05", { ts: "1695500005.000001", text: "note" }))).status).toBe(500);
+  });
+
+  it("ignores channel messages outside workflow threads without claiming them", async () => {
+    const h = harness({ shared: { threads: {} }, threadNote: {} });
+    await send(h.handler, signedEvent(mention({ eventId: "EvPlain1", event: { type: "message", thread_ts: "1695500009.000001", ts: "1695500009.000002", text: "unrelated chat" } })));
+    await send(h.handler, signedEvent(mention({ eventId: "EvPlain2", event: { type: "message", ts: "1695500010.000001", text: "top level chat" } })));
+    await send(h.handler, signedEvent(mention({ eventId: "EvPlain3", event: { type: "message", subtype: "message_changed", thread_ts: "1695500000.000001", ts: "1695500011.000001", text: "edit" } })));
+    expect(h.threadNotes).toEqual([]); expect(h.queue).toEqual([]); expect(h.posts).toEqual([]); expect(h.claimedEvents()).toEqual([]);
+  });
+
+  it("acknowledges a saved mention privately, stays silent for a plain reply, and releases the claim when saving fails", async () => {
+    const threads = { "1695500000.000001": { mode: "view" as const, taskId: "11111111-1111-4111-8111-111111111111", workflowThread: true as const } };
+    const h = harness({ shared: { threads }, threadNote: { outcome: "captured" } });
+    await send(h.handler, signedEvent(mention({ eventId: "EvAck01", event: { thread_ts: "1695500000.000001", ts: "1695500006.000001", text: `<@${bot}> Keep the copy short.` } })));
+    await send(h.handler, signedEvent(mention({ eventId: "EvAck02", event: { type: "message", thread_ts: "1695500000.000001", ts: "1695500006.000002", text: "Agreed" } })));
+    expect(h.ephemerals).toEqual([{ channel, threadTs: "1695500000.000001", user: pratik, text: "Saved. I'll include this at the next step." }]);
+    expect(h.posts).toEqual([]);
+    // A plain reply in a workflow thread is claimed, so Slack's retry of it is not saved twice.
+    expect(h.claimedEvents()).toEqual(["EvAck01", "EvAck02"]);
+    // The broker cannot be reached: the claim is released, so Slack's retry is handled as new.
+    const down = harness({ shared: { threads }, threadNote: { throws: true } });
+    const event = signedEvent(mention({ eventId: "EvAck03", event: { type: "message", thread_ts: "1695500000.000001", ts: "1695500006.000003", text: "Retry me" } }));
+    expect((await send(down.handler, event)).status).toBe(500);
+    expect(down.claimedEvents()).toEqual([]);
+    expect(JSON.stringify(down.logs)).not.toContain("Retry me");
+    // An empty mention and a bare plain reply save nothing.
+    const quiet = harness({ shared: { threads }, threadNote: {} });
+    await send(quiet.handler, signedEvent(mention({ eventId: "EvAck04", event: { thread_ts: "1695500000.000001", ts: "1695500006.000004", text: `<@${bot}>   ` } })));
+    await send(quiet.handler, signedEvent(mention({ eventId: "EvAck05", event: { type: "message", thread_ts: "1695500000.000001", ts: "1695500006.000005", text: "   " } })));
+    expect(quiet.threadNotes).toEqual([]);
+    expect(quiet.posts).toEqual([]);
+  });
+
+  it("does not save the plain-message copy of an @AgentX stop as a note", async () => {
+    const threads = { "1695500000.000001": { mode: "view" as const, taskId: "11111111-1111-4111-8111-111111111111", workflowThread: true as const } };
+    const h = harness({ shared: { threads }, threadNote: {}, stop: { outcome: "CANCEL_REQUESTED" } });
+    await send(h.handler, signedEvent(mention({ eventId: "EvStopCopy1", event: { thread_ts: "1695500000.000001", ts: "1695500007.000001", text: `<@${bot}> stop` } })));
+    await send(h.handler, signedEvent(mention({ eventId: "EvStopCopy2", event: { type: "message", thread_ts: "1695500000.000001", ts: "1695500007.000001", text: `<@${bot}> stop` } })));
+    expect(h.stopCalls).toHaveLength(1);
+    expect(h.threadNotes).toEqual([]);
+  });
+
+  it("ignores a reply in a workflow thread when the ingress cannot look up task threads", async () => {
+    const h = harness({ threadNote: {} });
+    await send(h.handler, signedEvent(mention({ eventId: "EvNoShared1", event: { type: "message", thread_ts: "1695500000.000001", ts: "1695500008.000001", text: "a reply" } })));
+    expect(h.threadNotes).toEqual([]);
+    expect(h.claimedEvents()).toEqual([]);
+    expect(h.logs.at(-1)).toMatchObject({ event: "event.ignored", fields: { reason: "not_task_thread" } });
+  });
+
   it("queues a new thread's mention in its thread lane and acknowledges it", async () => {
     const { handler, queue, posts } = harness();
     const response = await send(handler, signedEvent(mention(), { base64: true }));
@@ -698,6 +830,146 @@ describe("the stop command (#126)", () => {
     await send(handler, stopMention("stop"));
     expect(queue.map((entry) => entry.message.text)).toEqual(["stop"]);
   });
+
+});
+
+describe("starting a task from a Slack mention (gap 3)", () => {
+  const starting = { shared: { threads: {} }, workflowStart: {}, workflowChoice: {}, workflowSelection: {} };
+  /** The choice thread below has a Quick or Full question waiting for pratik. */
+  const waitingForPratik = { pendingChoice: { "1695500000.000100": pratik } };
+  const topThread = { teamId: team, channelId: channel, threadTs: "1695500000.000001" };
+  const choiceThread = { teamId: team, channelId: channel, threadTs: "1695500000.000100" };
+  const threadReply = (eventId: string, text: string, event: Record<string, unknown> = {}) =>
+    signedEvent(mention({ eventId, event: { ts: "1695500000.000200", thread_ts: "1695500000.000100", text, ...event } }));
+
+  it("asks Quick or Full for a plain mention, and queues nothing for the chat agent", async () => {
+    const { handler, queue, posts, workflowStarts, workflowChoices } = harness(starting);
+    await send(handler, signedEvent(mention({ eventId: "EvPlainStart1", event: { text: `<@${bot}> Add password reset` } })));
+    expect(workflowChoices).toEqual([{ thread: topThread, userId: pratik, instructions: "Add password reset", requestId: "EvPlainStart1" }]);
+    expect(workflowStarts).toEqual([]);
+    expect(queue).toEqual([]);
+    // The question itself is posted by the choice wiring, with its buttons.
+    expect(posts).toEqual([]);
+  });
+
+  it("keeps the chat agent reachable with chat:, in an existing chat thread, and for a stop with nothing running", async () => {
+    const { handler, queue, workflowChoices, workflowStarts } = harness({ ...starting, stop: { outcome: "NOTHING_RUNNING" } });
+    await send(handler, signedEvent(mention({ eventId: "EvChat1", event: { text: `<@${bot}> chat: what does retry.ts do?` } })));
+    await send(handler, threadReply("EvChat2", `<@${bot}> also bump the version`));
+    await send(handler, signedEvent(mention({ eventId: "EvChat3", event: { ts: "1695500000.000300", text: `<@${bot}> stop` } })));
+    expect(queue.map((entry) => entry.message.text)).toEqual(["what does retry.ts do?", "also bump the version", "stop"]);
+    expect(workflowChoices).toEqual([]);
+    expect(workflowStarts).toEqual([]);
+  });
+
+  it("keeps plain mentions on the chat agent when this ingress cannot start tasks", async () => {
+    const { handler, queue } = harness({ shared: { threads: {} } });
+    await send(handler, signedEvent(mention({ eventId: "EvNoBroker1", event: { text: `<@${bot}> Add password reset` } })));
+    expect(queue.map((entry) => entry.message.text)).toEqual(["Add password reset"]);
+  });
+
+  it("starts a task on the path a prefix names, in any thread, and confirms it in one line", async () => {
+    const { handler, queue, posts, workflowStarts, workflowChoices } = harness(starting);
+    await send(handler, signedEvent(mention({ eventId: "EvQuick1", event: { text: `<@${bot}> quick: fix the typo` } })));
+    await send(handler, signedEvent(mention({ eventId: "EvFull1", event: { ts: "1695500000.000300", text: `<@${bot}> workflow full: Add SSO` } })));
+    await send(handler, threadReply("EvFull2", `<@${bot}> full: Add SSO here`));
+    expect(workflowStarts).toEqual([
+      { thread: topThread, userId: pratik, instructions: "fix the typo", workflowPath: "QUICK", requestId: "EvQuick1" },
+      { thread: { ...topThread, threadTs: "1695500000.000300" }, userId: pratik, instructions: "Add SSO", workflowPath: "FULL", requestId: "EvFull1" },
+      { thread: choiceThread, userId: pratik, instructions: "Add SSO here", workflowPath: "FULL", requestId: "EvFull2" },
+    ]);
+    expect(posts.map((post) => post.text)).toEqual([workflowStartedNotice("QUICK"), workflowStartedNotice("FULL"), workflowStartedNotice("FULL")]);
+    expect(workflowChoices).toEqual([]);
+    expect(queue).toEqual([]);
+  });
+
+  it("accepts a loose answer by mention, and confirms the start", async () => {
+    const { handler, queue, posts, workflowSelections } = harness({ ...starting, ...waitingForPratik });
+    await send(handler, threadReply("EvPick1", `<@${bot}> quick please`));
+    expect(workflowSelections).toEqual([{ thread: choiceThread, userId: pratik, workflowPath: "QUICK" }]);
+    expect(posts.map((post) => post.text)).toEqual([workflowStartedNotice("QUICK")]);
+    expect(queue).toEqual([]);
+  });
+
+  it("answers privately when an answer starts nothing", async () => {
+    for (const outcome of ["not_requester", "other_path", "starting", "none"] as const) {
+      const h = harness({ ...starting, ...waitingForPratik, workflowSelection: { outcome } });
+      await send(h.handler, threadReply(`EvPick-${outcome}`, `<@${bot}> Full`));
+      expect(h.ephemerals.map((entry) => [entry.user, entry.text])).toEqual([[pratik, workflowChoiceRefusal(outcome)]]);
+      expect(h.posts).toEqual([]);
+      expect(h.queue).toEqual([]);
+    }
+    expect(workflowChoiceRefusal("not_requester")).toBe("Only the person who asked can choose.");
+  });
+
+  it("leaves a path-like reply in a thread with no question waiting to the chat agent", async () => {
+    const { handler, queue, posts, workflowSelections } = harness({ ...starting, pendingChoice: {} });
+    await send(handler, threadReply("EvChatPath1", `<@${bot}> full please`));
+    await send(handler, threadReply("EvChatPath2", `<@${bot}> let's do full`));
+    expect(workflowSelections).toEqual([]);
+    expect(queue.map((entry) => entry.message.text)).toEqual(["full please", "let's do full"]);
+    expect(posts.map((post) => post.text)).not.toContain(SLACK_TASK_THREADS_OFF_NOTICE);
+  });
+
+  it("asks for the request when a mention names only a path", async () => {
+    const { handler, posts, workflowChoices, workflowStarts, queue } = harness(starting);
+    await send(handler, signedEvent(mention({ eventId: "EvPathOnly1", event: { text: `<@${bot}> quick` } })));
+    await send(handler, signedEvent(mention({ eventId: "EvPathOnly2", event: { ts: "1695500000.000300", text: `<@${bot}> Full please` } })));
+    expect(workflowChoices).toEqual([]);
+    expect(workflowStarts).toEqual([]);
+    expect(queue).toEqual([]);
+    expect(posts.map((post) => post.text)).toEqual(Array.from({ length: 2 }, () => "Add your request after it, for example `quick: fix the login typo`."));
+  });
+
+  it("says a question is already waiting when a new request is made in its thread", async () => {
+    const { handler, posts } = harness({ ...starting, workflowChoice: { waiting: true } });
+    await send(handler, threadReply("EvSecondRequest1", `<@${bot}> workflow: add SSO too`));
+    expect(posts.map((post) => post.text)).toEqual([WORKFLOW_CHOICE_WAITING_NOTICE]);
+  });
+
+  it("accepts a plain reply in a thread waiting for the requester's choice, and claims no other channel message", async () => {
+    const plain = (eventId: string, text: string, user = pratik) => threadReply(eventId, text, { type: "message", user });
+    const waiting = harness({ ...starting, pendingChoice: { "1695500000.000100": pratik } });
+    await send(waiting.handler, plain("EvPlainPick1", "full"));
+    expect(waiting.workflowSelections).toEqual([{ thread: choiceThread, userId: pratik, workflowPath: "FULL" }]);
+    expect(waiting.claimedEvents()).toEqual(["EvPlainPick1"]);
+    expect(waiting.posts.map((post) => post.text)).toEqual([workflowStartedNotice("FULL")]);
+    // Another member's answer, any other text, and the plain copy of an @AgentX answer are left alone, unclaimed.
+    await send(waiting.handler, plain("EvPlainPick2", "quick", "U0TEAMMATE1"));
+    await send(waiting.handler, plain("EvPlainPick3", "sounds good"));
+    await send(waiting.handler, plain("EvPlainPick4", `<@${bot}> quick`));
+    expect(waiting.workflowSelections).toHaveLength(1);
+    expect(waiting.claimedEvents()).toEqual(["EvPlainPick1"]);
+    expect(waiting.pendingLookups).toEqual(["1695500000.000100", "1695500000.000100"]);
+    // With no choice waiting in the thread, the answer is ignored and not claimed.
+    const nothing = harness({ ...starting, pendingChoice: {} });
+    await send(nothing.handler, plain("EvPlainPick5", "full"));
+    expect(nothing.workflowSelections).toEqual([]);
+    expect(nothing.claimedEvents()).toEqual([]);
+    expect(nothing.queue).toEqual([]);
+  });
+
+  it("explains a start failure in plain words with a reference", async () => {
+    const failing = harness({ ...starting, workflowStart: { throws: true, errorCode: "UNKNOWN" } });
+    await send(failing.handler, signedEvent(mention({ eventId: "EvStartFail1", event: { text: `<@${bot}> quick: Add password reset` } })));
+    expect(failing.posts.at(-1)?.text).toBe(workflowStartFailureNotice("UNKNOWN", "EvStartFail1"));
+    expect(failing.posts.at(-1)?.text).toContain("EvStartFail1");
+    const limited = harness({ ...starting, ...waitingForPratik, workflowSelection: { throws: true, errorCode: "WORKSPACE_LIMIT" } });
+    await send(limited.handler, threadReply("EvStartFail2", `<@${bot}> quick`));
+    expect(limited.posts.at(-1)?.text).toContain("open-task limit");
+  });
+
+  it("refuses to start or choose a Slack task with an admin message when the ingress cannot read task threads", async () => {
+    const { handler, posts, queue, workflowStarts, workflowChoices, workflowSelections } = harness({ workflowStart: {}, workflowChoice: {}, workflowSelection: {}, ...waitingForPratik });
+    await send(handler, signedEvent(mention({ eventId: "EvNoThreads1", event: { text: `<@${bot}> quick: Add password reset` } })));
+    await send(handler, signedEvent(mention({ eventId: "EvNoThreads2", event: { text: `<@${bot}> Add password reset` } })));
+    await send(handler, threadReply("EvNoThreads3", `<@${bot}> Full`));
+    expect(workflowStarts).toEqual([]);
+    expect(workflowChoices).toEqual([]);
+    expect(workflowSelections).toEqual([]);
+    expect(queue).toEqual([]);
+    expect(posts.map((post) => post.text)).toEqual(Array.from({ length: 3 }, () => SLACK_TASK_THREADS_OFF_NOTICE));
+  });
 });
 
 describe("shared task threads (spec 025 FR-035, C10)", () => {
@@ -809,5 +1081,88 @@ describe("shared task threads (spec 025 FR-035, C10)", () => {
     await send(h.handler, reply("Ev0000000110", `<@${bot}> ${secret}`));
     expect(JSON.stringify(h.logs)).not.toContain(secret);
     expect(h.logs).toContainEqual({ event: "shared_task.not_run", fields: { eventId: "Ev0000000110", closed: false, notified: true } });
+  });
+
+  it("never answers the task owner with the view-only notice in their own Slack workflow thread", async () => {
+    const h = harness({ shared: { threads: { "1695500000.000001": { mode: "view", taskId: "11111111-1111-4111-8111-111111111111", workflowThread: true } } } });
+    await send(h.handler, signedEvent(mention({ eventId: "EvOwner01", event: { thread_ts: "1695500000.000001", ts: "1695500002.000001", text: `<@${bot}> looks good so far` } })));
+    expect(h.posts.map((post) => post.text)).not.toContain(VIEW_ONLY_NOTICE);
+    expect(h.queue).toHaveLength(0);
+  });
+
+  it("sends a stop in a Slack workflow thread to the broker, which decides, and never queues it", async () => {
+    const threads = { "1695500000.000001": { mode: "view" as const, taskId: "11111111-1111-4111-8111-111111111111", workflowThread: true as const } };
+    const stopped = harness({ shared: { threads }, stop: { outcome: "CANCEL_REQUESTED" } });
+    await send(stopped.handler, signedEvent(mention({ eventId: "EvOwnerStop1", event: { thread_ts: "1695500000.000001", ts: "1695500002.000002", text: `<@${bot}> stop` } })));
+    expect(stopped.stopCalls).toHaveLength(1);
+    expect(stopped.stopCalls[0]?.userId).toBe(pratik);
+    expect(stopped.stopCalls[0]?.thread).toMatchObject({ teamId: team, channelId: channel, threadTs: "1695500000.000001" });
+    expect(stopped.posts.map((post) => post.text)).toEqual(["Stopping the running task. I'll reply here once it has stopped."]);
+    expect(stopped.queue).toHaveLength(0);
+    const refused = harness({ shared: { threads }, stop: { outcome: "NOTHING_RUNNING" } });
+    await send(refused.handler, signedEvent(mention({ eventId: "EvMateStop1", event: { thread_ts: "1695500000.000001", ts: "1695500002.000003", text: `<@${bot}> stop` } })));
+    expect(refused.stopCalls).toHaveLength(1);
+    expect(refused.posts.map((post) => post.text)).not.toContain(VIEW_ONLY_NOTICE);
+    expect(refused.queue).toHaveLength(0);
+    // Nothing to stop: only the sender hears so, privately.
+    expect(refused.posts).toEqual([]);
+    expect(refused.ephemerals).toEqual([{ channel, threadTs: "1695500000.000001", user: pratik, text: "Nothing is running for this task right now." }]);
+    expect(stopped.ephemerals).toEqual([]);
+    // A teammate's stop while the owner's task runs: told privately who can stop it, never "nothing is running".
+    const teammate = harness({ shared: { threads }, stop: { outcome: "NOT_OWNER" } });
+    await send(teammate.handler, signedEvent(mention({ eventId: "EvMateStop2", event: { user: "U0TEAMMATE1", thread_ts: "1695500000.000001", ts: "1695500002.000005", text: `<@${bot}> stop` } })));
+    expect(teammate.stopCalls.map((call) => call.userId)).toEqual(["U0TEAMMATE1"]);
+    expect(teammate.posts).toEqual([]);
+    expect(teammate.queue).toEqual([]);
+    expect(teammate.ephemerals).toEqual([{ channel, threadTs: "1695500000.000001", user: "U0TEAMMATE1", text: "Only the person who started this task can stop it." }]);
+  });
+
+  it("saves the text of a reply posted with a file, and saves a plain \"stop\" as a reply rather than stopping", async () => {
+    const threads = { "1695500000.000001": { mode: "view" as const, taskId: "11111111-1111-4111-8111-111111111111", workflowThread: true as const } };
+    const h = harness({ shared: { threads }, threadNote: {}, stop: {} });
+    await send(h.handler, signedEvent(mention({ eventId: "EvFile01", event: { type: "message", subtype: "file_share", thread_ts: "1695500000.000001", ts: "1695500003.000010", text: "Here is the mockup", files: [{ id: "F0123" }] } })));
+    await send(h.handler, signedEvent(mention({ eventId: "EvPlainStop", event: { type: "message", thread_ts: "1695500000.000001", ts: "1695500003.000011", text: "stop" } })));
+    expect(h.threadNotes.map((note) => note.text)).toEqual(["Here is the mockup", "stop"]);
+    expect(h.stopCalls).toEqual([]);
+  });
+
+  it("still gives a closed Slack workflow thread the closed notice", async () => {
+    const h = harness({ shared: { threads: { "1695500000.000001": { mode: "view", closed: true, taskId: "11111111-1111-4111-8111-111111111111", workflowThread: true } } }, stop: {} });
+    await send(h.handler, signedEvent(mention({ eventId: "EvClosed01", event: { thread_ts: "1695500000.000001", ts: "1695500002.000004", text: `<@${bot}> stop` } })));
+    expect(h.posts.map((post) => post.text)).toEqual([CLOSED_SHARED_NOTICE]);
+    expect(h.stopCalls).toEqual([]);
+    expect(h.queue).toHaveLength(0);
+  });
+});
+
+describe("the broker adapters for thread replies (no 500 for an expected refusal)", () => {
+  const input = { taskId: "11111111-1111-4111-8111-111111111111", thread: { teamId: team, channelId: channel, threadTs: "1695500000.000001" }, userId: "U0TEAMMATE1", messageTs: "1695500002.000001", eventId: "EvAdapt1", text: "A note" };
+  const answering = (statusCode: number, body: unknown) => async () => ({ statusCode, body: JSON.stringify(body) });
+
+  it("answers the broker's outcome, a refusal for any 4xx, and throws for a broker failure", async () => {
+    expect(await recordThreadNoteThroughBroker(answering(200, { outcome: "duplicate" }), input)).toEqual({ outcome: "duplicate" });
+    expect(await recordThreadNoteThroughBroker(answering(403, { error: { code: "FORBIDDEN" } }), input)).toEqual({ outcome: "refused" });
+    expect(await recordThreadNoteThroughBroker(answering(400, { error: { code: "CONFIG_INVALID" } }), input)).toEqual({ outcome: "refused" });
+    await expect(recordThreadNoteThroughBroker(answering(500, { error: "x" }), input)).rejects.toThrow(/thread note failed/);
+    await expect(recordThreadNoteThroughBroker(answering(200, { outcome: "maybe" }), input)).rejects.toThrow(/thread note failed/);
+  });
+
+  it("reads the stop outcome, including a teammate's NOT_OWNER, and throws for anything else", async () => {
+    const thread = { teamId: team, channelId: channel, threadTs: "1695500000.000001" };
+    expect(await stopTaskThroughBroker(answering(200, { outcome: "NOT_OWNER" }), thread, "U0TEAMMATE1")).toBe("NOT_OWNER");
+    expect(await stopTaskThroughBroker(answering(200, { outcome: "CANCEL_REQUESTED", targetOperationId: "x" }), thread, pratik)).toBe("CANCEL_REQUESTED");
+    await expect(stopTaskThroughBroker(answering(200, { outcome: "MAYBE" }), thread, pratik)).rejects.toThrow(/stop failed/);
+    await expect(stopTaskThroughBroker(answering(403, { error: { code: "FORBIDDEN" } }), thread, pratik)).rejects.toThrow(/stop failed/);
+  });
+
+});
+
+describe("chat.postEphemeral", () => {
+  it("sends a private message to one person in the thread, and reports Slack's error code", async () => {
+    const strict = new StrictSlackWeb();
+    await chatPostEphemeral("xoxb-test", { channel, threadTs: "1695500000.000001", user: pratik, text: "Saved." }, strict.fetch);
+    expect(strict.ephemerals).toEqual([{ channel, threadTs: "1695500000.000001", user: pratik, text: "Saved." }]);
+    strict.failNext("chat.postEphemeral", "user_not_in_channel");
+    await expect(chatPostEphemeral("xoxb-test", { channel, user: pratik, text: "Saved." }, strict.fetch)).rejects.toMatchObject({ slackError: "user_not_in_channel" });
   });
 });

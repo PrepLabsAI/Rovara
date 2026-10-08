@@ -8,7 +8,7 @@ import {
   type WorkspaceClosePreflightResult,
   type WorkspaceCloseReason,
 } from "@agentx/contracts";
-import { gitSafeEnvironment } from "./git.js";
+import { gitHardenedEnvironment } from "./git.js";
 import type { PreparationManifest } from "./prepare.js";
 import { storedCommandOutput } from "./command-failure.js";
 
@@ -35,7 +35,7 @@ export async function inspectWorkspaceForClose(rootPathValue: string): Promise<W
     const directory = await realpath(configured);
     assertContained(rootPath, directory);
     const reasons: WorkspaceCloseReason[] = [];
-    const status = await git(directory, ["status", "--porcelain=v1", "--untracked-files=all"]);
+    const status = await git(directory, ["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=dirty"]);
     const statusLines = status.split("\n").filter(Boolean);
     if (statusLines.some((line) => !line.startsWith("??"))) reasons.push("worktree_changes");
     if (statusLines.some((line) => line.startsWith("??"))) reasons.push("untracked_files");
@@ -56,7 +56,7 @@ async function git(directory: string, args: readonly string[]): Promise<string> 
       timeout: 120_000,
       maxBuffer: MAX_GIT_OUTPUT,
       encoding: "utf8",
-      env: gitSafeEnvironment(directory),
+      env: await gitHardenedEnvironment(directory),
     });
     return result.stdout;
   } catch (error) {

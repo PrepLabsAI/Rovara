@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { promisify } from "node:util";
 import type { PreparationManifest } from "./prepare.js";
 import { redactCredentials } from "./events.js";
-import { gitSafeEnvironment } from "./git.js";
+import { gitHardenedEnvironment } from "./git.js";
 
 const execFileAsync = promisify(execFile);
 const MAX_GIT_OUTPUT_BYTES = 67_108_864;
@@ -39,17 +39,18 @@ export async function publishWorkspaceDiff(rootPath: string, sink: ArtifactSink)
   let changed = false;
   for (const repository of manifest.repositories) {
     const directory = resolve(rootPath, repository.path);
-    const head = await gitHead(directory);
-    const base = await startingCommit(directory, repository.resolvedCommit);
+    const env = await gitHardenedEnvironment(directory);
+    const head = await gitHead(directory, env);
+    const base = await startingCommit(directory, repository.resolvedCommit, env);
     const { stdout } = await execFileAsync(
       "git",
-      ["-C", directory, "diff", "--no-ext-diff", "--binary", base ?? "HEAD", "--"],
-      { timeout: 60_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
+      ["-C", directory, "diff", ...SAFE_DIFF_OPTIONS, "--binary", base ?? "HEAD", "--"],
+      { timeout: 60_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env },
     );
     const { stdout: status } = await execFileAsync(
       "git",
-      ["-C", directory, "status", "--short", "--untracked-files=all"],
-      { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
+      ["-C", directory, "status", "--short", "--untracked-files=all", "--ignore-submodules=dirty"],
+      { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env },
     );
     // The same rule as publication: a HEAD that is not the recorded commit is a change.
     if (status.trim() !== "" || head !== repository.resolvedCommit) changed = true;
@@ -65,12 +66,18 @@ export async function publishWorkspaceDiff(rootPath: string, sink: ArtifactSink)
   return { changed };
 }
 
+/**
+ * Options for every diff AgentX reads from a workspace repository: no external diff or textconv command the repository
+ * configures, and no Git run inside a nested repository (under its own config) to see whether its files changed.
+ */
+const SAFE_DIFF_OPTIONS = ["--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty"] as const;
+
 /** The repository's HEAD commit. */
-async function gitHead(directory: string, signal?: AbortSignal): Promise<string> {
+async function gitHead(directory: string, env: NodeJS.ProcessEnv, signal?: AbortSignal): Promise<string> {
   const { stdout } = await execFileAsync(
     "git",
     ["-C", directory, "rev-parse", "HEAD"],
-    { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory), ...(signal === undefined ? {} : { signal }) },
+    { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env, ...(signal === undefined ? {} : { signal }) },
   );
   return stdout.trim();
 }
@@ -80,13 +87,13 @@ async function gitHead(directory: string, signal?: AbortSignal): Promise<string>
  * pruned, or an old manifest holds no commit ID) the diff falls back to HEAD, shows only
  * uncommitted changes and says so; `changed` still counts the moved HEAD.
  */
-async function startingCommit(directory: string, resolvedCommit: string): Promise<string | undefined> {
+async function startingCommit(directory: string, resolvedCommit: string, env: NodeJS.ProcessEnv): Promise<string | undefined> {
   if (!/^[0-9a-f]{40}(?:[0-9a-f]{24})?$/.test(resolvedCommit)) return undefined;
   try {
     await execFileAsync(
       "git",
       ["-C", directory, "cat-file", "-e", `${resolvedCommit}^{commit}`],
-      { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory) },
+      { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env },
     );
     return resolvedCommit;
   } catch {
@@ -137,16 +144,18 @@ export async function repositoriesFingerprint(
   const hash = createHash("sha256");
   for (const { name, directory } of repositories) {
     signal?.throwIfAborted();
-    const head = await gitHead(directory, signal);
+    // Computed for each read: the agent may change the repository's config between reads.
+    const env = await gitHardenedEnvironment(directory);
+    const head = await gitHead(directory, env, signal);
     const { stdout: status } = await execFileAsync(
       "git",
-      ["-C", directory, "status", "--porcelain", "-z", "--untracked-files=all"],
-      { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory), ...(signal === undefined ? {} : { signal }) },
+      ["-C", directory, "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=dirty"],
+      { timeout: 30_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env, ...(signal === undefined ? {} : { signal }) },
     );
     const { stdout: diff } = await execFileAsync(
       "git",
-      ["-C", directory, "diff", "--no-ext-diff", "--binary", "HEAD", "--"],
-      { timeout: 60_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env: gitSafeEnvironment(directory), ...(signal === undefined ? {} : { signal }) },
+      ["-C", directory, "diff", ...SAFE_DIFF_OPTIONS, "--binary", "HEAD", "--"],
+      { timeout: 60_000, maxBuffer: MAX_GIT_OUTPUT_BYTES, env, ...(signal === undefined ? {} : { signal }) },
     );
     hash.update(`${name}\u0000${head}\u0000${status}\u0000${diff}\u0000`);
     let statted = 0;

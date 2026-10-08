@@ -58,6 +58,33 @@ describe("hosted Slack control-plane infrastructure", () => {
     });
   });
 
+  it("invokes the broker every minute to recover lost workflow dispatches", () => {
+    template.hasResourceProperties("AWS::Scheduler::Schedule", { ScheduleExpression: "rate(1 minute)", FlexibleTimeWindow: { Mode: "OFF" },
+      Target: Match.objectLike({ Input: '{"source":"agentx.workflow-dispatch-recovery"}', RetryPolicy: { MaximumRetryAttempts: 2, MaximumEventAgeInSeconds: 300 } }) });
+    // The sweep reads due rows through a sparse due-time index, so rows waiting out a backoff never hide due ones.
+    template.hasResourceProperties("AWS::DynamoDB::Table", {
+      GlobalSecondaryIndexes: Match.arrayWith([Match.objectLike({
+        IndexName: "workflow-dispatch-due",
+        KeySchema: [{ AttributeName: "dispatchDuePk", KeyType: "HASH" }, { AttributeName: "dispatchDueSk", KeyType: "RANGE" }],
+      })]),
+    });
+  });
+
+  it("lets only this account's own schedules assume the scheduler recovery role (confused deputy)", () => {
+    const roles = Object.entries(template.findResources("AWS::IAM::Role"))
+      .filter(([id]) => id.startsWith("WorkflowDispatchRecoveryRole"));
+    expect(roles).toHaveLength(1);
+    for (const [, role] of roles) {
+      expect((role as { Properties: { AssumeRolePolicyDocument: { Statement: unknown[] } } }).Properties.AssumeRolePolicyDocument.Statement).toEqual([expect.objectContaining({
+        Principal: { Service: "scheduler.amazonaws.com" },
+        Condition: {
+          StringEquals: { "aws:SourceAccount": { Ref: "AWS::AccountId" } },
+          ArnLike: { "aws:SourceArn": { "Fn::Join": ["", ["arn:", { Ref: "AWS::Partition" }, ":scheduler:", { Ref: "AWS::Region" }, ":", { Ref: "AWS::AccountId" }, ":schedule/*"]] } },
+        },
+      })]);
+    }
+  });
+
   it("queues Slack requests in a FIFO queue with a dead-letter queue after five receives", () => {
     template.hasResourceProperties("AWS::SQS::Queue", {
       FifoQueue: true,

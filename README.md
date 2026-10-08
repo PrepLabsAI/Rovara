@@ -44,7 +44,7 @@ Rovara has no merge path.
 | ------ | ----------------------- | --------------------------------------------------------------------------------------------- |
 | **01** | Install in your account | `agentx init` sets up the stacks, a GitHub App, a Slack app and your first project.           |
 | **02** | Bind a project          | Point a Slack channel at a project: its repositories, setup steps and readiness checks.       |
-| **03** | Delegate and review     | _"@AgentX fix the navigation bug and run the tests."_ Read the check report, then ask for a PR. |
+| **03** | Delegate and review     | _"@AgentX fix the navigation bug."_ Pick Quick or Full, approve the plan, then review the draft PR. |
 
 <br/>
 
@@ -333,11 +333,44 @@ Pass `--no-ui` to stay in the terminal. See [Installing Rovara](docs/install.md)
 In the bound channel:
 
 ```text
-@AgentX inspect the project and implement the navigation fix. Run the relevant tests.
-@AgentX create a pull request for the personal-website repository titled "Improve navigation".
-@AgentX stop
-@AgentX close this workspace
+@AgentX Add password reset to the account page
 ```
+
+A plain `@AgentX` request starts a task. AgentX asks in the thread how to handle it:
+
+- **Quick**: AgentX writes a short coding plan for you to approve, then codes it, runs the checks
+  and reviews, and opens a draft pull request.
+- **Full**: AgentX writes requirements, then a design, then a coding plan, and you approve each one
+  before any code changes.
+
+Press a button, or reply `quick` or `full` in the thread (only the person who asked can choose). To
+skip the question, start the request with the path: `@AgentX quick: fix the typo on the pricing page`
+or `@AgentX full: add single sign-on`. When approving the coding plan, the task owner can choose
+extra project-approved checks; required project readiness checks are always included.
+
+To talk to the chat agent instead, start the request with `chat:`:
+
+```text
+@AgentX chat: inspect the project and implement the navigation fix. Run the relevant tests.
+@AgentX chat: create a pull request for the personal-website repository titled "Improve navigation".
+```
+
+In a thread the chat agent is already answering, mention AgentX as before (no `chat:` needed), for
+example `@AgentX stop` or `@AgentX close this workspace`.
+
+> **Changed:** a plain top-level `@AgentX <request>` used to go to the chat agent. It now starts a
+> task with the Quick or Full question in every bound channel. Add `chat:` to reach the chat agent.
+
+Every reply in a task's thread, from the owner or a teammate, is saved for the task's next step.
+Only the owner's buttons move the task on. After the coding plan is approved, the checks and reviews
+run on their own. If a review finds a problem, the owner can press **Send back to coding**. When
+everything passes, AgentX opens a draft pull request and posts the link in the thread.
+
+> **Reinstall the Slack app on an existing install.** Saving replies that do not mention AgentX
+> needs the `channels:history` and `groups:history` bot scopes and the `message.channels` and
+> `message.groups` events. Update the app from the manifest `agentx init` generates, then reinstall
+> it to the workspace. Until then only `@AgentX` replies are saved. AgentX ignores channel messages
+> outside task threads. See [Replies in a Slack task's thread](docs/project-configuration.md#replies-in-a-slack-tasks-thread).
 
 From your own machine (no AWS credentials needed):
 

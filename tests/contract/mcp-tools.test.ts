@@ -2,9 +2,9 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { describe, expect, it, vi } from "vitest";
-import type { DeveloperTaskView } from "@agentx/contracts";
+import { WORKFLOW_REVIEW_FAILURE_REASONS, type DeveloperTaskView } from "@agentx/contracts";
 import {
-  DEVELOPER_TOOLS, NEXT_STEPS, REQUIRED_SERVER_MINOR, ToolError, UPGRADE_AGENTX_STEP, compatibilityChecker, createAgentXMcpServer,
+  DEVELOPER_TOOLS, NEXT_STEPS, REQUIRED_SERVER_MINOR, ToolError, UPGRADE_AGENTX_STEP, compatibilityChecker, createAgentXMcpServer, httpControlPlaneClient,
   type ControlPlaneClient, type ToolContext,
 } from "../../packages/mcp/src/index.js";
 import { toolError } from "../support/mcp-tool-error.js";
@@ -40,8 +40,9 @@ describe("the tool list (FR-027, FR-028, SC-010)", () => {
     const { tools } = await (await connect({})).listTools();
     expect(tools.map((tool) => tool.name)).toEqual(DEVELOPER_TOOLS.map((tool) => tool.name));
     expect(tools.map((tool) => tool.name)).toEqual([
-      "agentx_whoami", "agentx_list_projects", "agentx_start_task", "agentx_get_task", "agentx_wait_for_task",
-      "agentx_list_tasks", "agentx_continue_task", "agentx_cancel_task", "agentx_close_task", "agentx_share_task", "agentx_open_pull_request",
+      "agentx_whoami", "agentx_list_projects", "agentx_start_task", "agentx_start_workflow", "agentx_get_task", "agentx_wait_for_task",
+      "agentx_list_tasks", "agentx_continue_task", "agentx_decide_workflow", "agentx_review_workflow_candidate", "agentx_retry_workflow",
+      "agentx_send_workflow_back", "agentx_retry_workflow_publish", "agentx_cancel_task", "agentx_close_task", "agentx_share_task", "agentx_open_pull_request",
     ]);
     for (const tool of tools) expect(tool.outputSchema, tool.name).toBeDefined();
     expect(JSON.stringify(tools)).not.toContain("\u2014");
@@ -232,6 +233,163 @@ describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 
     expect(new Set([...starts, continues[0]]).size).toBe(5);
     expect(continues[1]).toBe(continues[0]);
     expect(continued.structuredContent).toMatchObject({ request_id: continues[0] });
+  });
+
+  it("starts the native workflow only through its explicit tool", async () => {
+    const startTask = vi.fn(async () => view("STARTING"));
+    const mcp = await connect({ startTask }, { newRequestId: counter() });
+    await mcp.callTool({ name: "agentx_start_workflow", arguments: { project: "payments", instructions: "Fix retry handling", workflow_path: "quick" } });
+    await mcp.callTool({ name: "agentx_start_workflow", arguments: { project: "payments", instructions: "Full scope", workflow_path: "full" } });
+    expect(startTask).toHaveBeenNthCalledWith(1, expect.objectContaining({ project: "payments", workflow: true, workflowPath: "QUICK" }));
+    expect(startTask).toHaveBeenNthCalledWith(2, expect.objectContaining({ project: "payments", workflow: true, workflowPath: "FULL" }));
+  });
+
+  it("requires an explicit workflow path instead of silently choosing Quick", async () => {
+    const startTask = vi.fn(async () => view("STARTING"));
+    const mcp = await connect({ startTask }, { newRequestId: counter() });
+    const result = await mcp.callTool({ name: "agentx_start_workflow", arguments: { project: "payments", instructions: "Fix retry handling" } });
+    expect(result.isError).toBe(true);
+    expect(startTask).not.toHaveBeenCalled();
+  });
+
+  it("passes the exact revision and candidate digest when retrying blocked reviews", async () => {
+    const startWorkflowReviewTask = vi.fn(async () => view("RUNNING"));
+    const mcp = await connect({ startWorkflowReviewTask }, { newRequestId: counter() });
+    await mcp.callTool({ name: "agentx_review_workflow_candidate", arguments: {
+      task_id: TASK,
+      request_id: "77777777-7777-4777-8777-777777777777",
+      instructions: "Retry only the read-only reviews.",
+      expected_revision: 15,
+      candidate_digest: "70f85ca5fd7a46974d2bbcc762632dc1ed03d059f9ecc4cf544274655c9477ad",
+    } });
+    expect(startWorkflowReviewTask).toHaveBeenCalledWith(TASK, {
+      requestId: "77777777-7777-4777-8777-777777777777",
+      instructions: "Retry only the read-only reviews.",
+      expectedRevision: 15,
+      candidateDigest: "70f85ca5fd7a46974d2bbcc762632dc1ed03d059f9ecc4cf544274655c9477ad",
+    });
+  });
+
+  describe("exits for blocked workflow tasks (Task 16)", () => {
+    const fetchClient = () => {
+      const fetch = vi.fn(async () => new Response(JSON.stringify({ task: view("RUNNING") }), { status: 200, headers: { "content-type": "application/json" } }));
+      const client = httpControlPlaneClient({ session: async () => ({ baseUrl: "https://agentx.example.test", accessToken: "token", signInCommand: "login" }), fetch, sleep: async () => undefined, traceId: () => "trace-1" });
+      return { fetch, client };
+    };
+    const sent = (fetch: ReturnType<typeof fetchClient>["fetch"]) => {
+      const [url, init] = fetch.mock.calls[0]! as unknown as [string, RequestInit];
+      return { url, method: init.method, body: JSON.parse(init.body as string) as Record<string, unknown> };
+    };
+
+    it("sends a blocked change back to coding through the send-back route, with the request ID and revision", async () => {
+      const { fetch, client } = fetchClient();
+      const mcp = await connect(client);
+      const result = await mcp.callTool({ name: "agentx_send_workflow_back", arguments: {
+        task_id: TASK, request_id: "77777777-7777-4777-8777-777777777777", expected_revision: 15, instructions: "Fix the parser finding, keep the API.",
+      } });
+      expect(result.isError).toBeFalsy();
+      expect(sent(fetch)).toEqual({ url: `https://agentx.example.test/v1/dev/tasks/${TASK}/workflow/send-back`, method: "POST",
+        body: { requestId: "77777777-7777-4777-8777-777777777777", expectedRevision: 15, instructions: "Fix the parser finding, keep the API." } });
+      expect(result.structuredContent).toMatchObject({ request_id: "77777777-7777-4777-8777-777777777777" });
+    });
+
+    it("retries opening the draft pull request through the publish-retry route, with the request ID and revision", async () => {
+      const { fetch, client } = fetchClient();
+      const mcp = await connect(client);
+      const result = await mcp.callTool({ name: "agentx_retry_workflow_publish", arguments: {
+        task_id: TASK, request_id: "88888888-8888-4888-8888-888888888888", expected_revision: 21,
+      } });
+      expect(result.isError).toBeFalsy();
+      expect(sent(fetch)).toEqual({ url: `https://agentx.example.test/v1/dev/tasks/${TASK}/workflow/publish-retry`, method: "POST",
+        body: { requestId: "88888888-8888-4888-8888-888888888888", expectedRevision: 21 } });
+      expect(result.structuredContent).toMatchObject({ request_id: "88888888-8888-4888-8888-888888888888" });
+    });
+
+    it("retries checks over MCP with the expected revision through the retry route", async () => {
+      const { fetch, client } = fetchClient();
+      const mcp = await connect(client);
+      await mcp.callTool({ name: "agentx_retry_workflow", arguments: { task_id: TASK, request_id: "99999999-9999-4999-8999-999999999999", expected_revision: 9, instructions: "Run the checks again." } });
+      expect(sent(fetch)).toEqual({ url: `https://agentx.example.test/v1/dev/tasks/${TASK}/workflow/retry`, method: "POST",
+        body: { requestId: "99999999-9999-4999-8999-999999999999", expectedRevision: 9, instructions: "Run the checks again." } });
+    });
+
+    it("suggests running checks again, not sending back, when no check failed, and both ways on after the code changed under a ready change", async () => {
+      const candidateDigest = "70f85ca5fd7a46974d2bbcc762632dc1ed03d059f9ecc4cf544274655c9477ad";
+      const base = { path: "QUICK", artifacts: [], revision: 9,
+        candidate: { schemaVersion: 1, digest: candidateDigest, repositories: [{ repositoryId: "repo-1", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }] } };
+      const unknown = { ...base, stage: "VERIFY", state: "BLOCKED", blockReason: "AgentX could not verify the selected checks.",
+        verification: { candidateDigest, producer: "broker", environmentId: "test", recordedAt: "2026-10-07T20:00:00.000Z", results: [{ checkId: "unit", status: "UNKNOWN" }] } } as unknown as NonNullable<DeveloperTaskView["workflow"]>;
+      const unknownText = text(await (await connect({ getTask: async () => view("SUCCEEDED", { workflow: unknown }) })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } }));
+      expect(unknownText).toContain("agentx_retry_workflow and expected_revision 9");
+      expect(unknownText).not.toContain("agentx_send_workflow_back");
+      const failed = { ...unknown, verification: { ...(unknown as unknown as { verification: Record<string, unknown> }).verification, results: [{ checkId: "unit", status: "FAILED" }] } } as unknown as NonNullable<DeveloperTaskView["workflow"]>;
+      expect(text(await (await connect({ getTask: async () => view("SUCCEEDED", { workflow: failed }) })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } }))).toContain("agentx_send_workflow_back");
+      const ready = { ...base, stage: "PULL_REQUEST", state: "READY" } as unknown as NonNullable<DeveloperTaskView["workflow"]>;
+      const changed = view("FAILED", { workflow: ready, failure: { category: "publication_failed", message: "the code changed after its checks and reviews; AgentX did not publish it" } });
+      const changedText = text(await (await connect({ getTask: async () => changed })).callTool({ name: "agentx_get_task", arguments: { task_id: TASK } }));
+      expect(changedText).toContain("agentx_send_workflow_back with expected_revision 9");
+      expect(changedText).toContain("agentx_retry_workflow and expected_revision 9");
+    });
+
+    it("points a task blocked by review findings at sending it back to coding", async () => {
+      const candidateDigest = "70f85ca5fd7a46974d2bbcc762632dc1ed03d059f9ecc4cf544274655c9477ad";
+      const workflow = {
+        stage: "REVIEW", state: "BLOCKED", revision: 15, path: "QUICK", blockReason: "the critic review did not pass", artifacts: [],
+        candidate: { schemaVersion: 1, digest: candidateDigest, repositories: [{ repositoryId: "repo-1", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }] },
+        verification: { candidateDigest, producer: "broker", environmentId: "test", recordedAt: "2026-10-07T20:00:00.000Z", results: [{ checkId: "unit", status: "PASS" }] },
+        reviews: [{ operationId: "88888888-8888-4888-8888-888888888888", candidateDigest, role: "CRITIC", provider: "test", version: "1", status: "FINDINGS", findings: [{ text: "x", origin: "INTRODUCED" }], readOnly: true, recordedAt: "2026-10-07T20:01:00.000Z" }],
+      } as unknown as NonNullable<DeveloperTaskView["workflow"]>;
+      const mcp = await connect({ getTask: async () => view("SUCCEEDED", { workflow }) });
+      const result = await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+      expect(text(result)).toContain("agentx_send_workflow_back");
+      expect(text(result)).toContain("expected_revision 15");
+    });
+  });
+
+  it("shows safe persisted review state and the exact retry binding in task details", async () => {
+    const candidateDigest = "70f85ca5fd7a46974d2bbcc762632dc1ed03d059f9ecc4cf544274655c9477ad";
+    const workflow = {
+      stage: "REVIEW", state: "BLOCKED", revision: 15, path: "FULL", blockReason: "the security review did not pass",
+      artifacts: [],
+      candidate: { schemaVersion: 1, digest: candidateDigest, repositories: [{ repositoryId: "repo-1", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }] },
+      verification: { candidateDigest, producer: "broker", environmentId: "test", recordedAt: "2026-10-07T20:00:00.000Z", results: [{ checkId: "patch-whitespace", status: "PASS" }] },
+      reviews: [
+        { operationId: "88888888-8888-4888-8888-888888888888", candidateDigest, role: "CRITIC", provider: "test", version: "1", status: "PASS", findings: ["private reviewer text"], readOnly: true, recordedAt: "2026-10-07T20:01:00.000Z" },
+        { operationId: "99999999-9999-4999-8999-999999999999", candidateDigest, role: "SECURITY", provider: "test", version: "1", status: "FAILED", failureReason: "INVALID_SHAPE", findings: [], readOnly: true, recordedAt: "2026-10-07T20:01:00.000Z" },
+      ],
+    } as unknown as NonNullable<DeveloperTaskView["workflow"]>;
+    const mcp = await connect({ getTask: async () => view("SUCCEEDED", { workflow }) });
+    const result = await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+    expect(result.structuredContent).toMatchObject({ workflow: {
+      stage: "REVIEW", state: "BLOCKED", revision: 15, candidate_digest: candidateDigest,
+      verification: { candidate_digest: candidateDigest, results: [{ check_id: "patch-whitespace", status: "PASS" }] },
+      reviews: [
+        { role: "CRITIC", status: "PASS", candidate_digest: candidateDigest },
+        { role: "SECURITY", status: "FAILED", failure_reason: "INVALID_SHAPE", candidate_digest: candidateDigest },
+      ],
+    } });
+    expect(text(result)).toContain("expected_revision");
+    expect(text(result)).toContain(candidateDigest);
+    expect(JSON.stringify(result.structuredContent)).not.toContain("private reviewer text");
+  });
+
+  it("renders every review failure reason the contracts define, including a missing base and an unreadable diff", async () => {
+    const candidateDigest = "70f85ca5fd7a46974d2bbcc762632dc1ed03d059f9ecc4cf544274655c9477ad";
+    for (const failureReason of WORKFLOW_REVIEW_FAILURE_REASONS) {
+      const workflow = {
+        stage: "REVIEW", state: "BLOCKED", revision: 15, path: "QUICK", artifacts: [],
+        candidate: { schemaVersion: 1, digest: candidateDigest, repositories: [{ repositoryId: "repo-1", commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }] },
+        reviews: (["CRITIC", "SECURITY"] as const).map((role) => ({ operationId: "88888888-8888-4888-8888-888888888888", candidateDigest, role, provider: "test", version: "1",
+          status: "UNKNOWN", failureReason, findings: [], readOnly: true, recordedAt: "2026-10-07T20:01:00.000Z" })),
+      } as unknown as NonNullable<DeveloperTaskView["workflow"]>;
+      const mcp = await connect({ getTask: async () => view("SUCCEEDED", { workflow }) });
+      const result = await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+      expect(result.isError, failureReason).not.toBe(true);
+      expect(result.structuredContent, failureReason).toMatchObject({ workflow: { reviews: [
+        { role: "CRITIC", status: "UNKNOWN", failure_reason: failureReason }, { role: "SECURITY", status: "UNKNOWN", failure_reason: failureReason },
+      ] } });
+    }
+    expect(WORKFLOW_REVIEW_FAILURE_REASONS).toEqual(expect.arrayContaining(["BASE_UNAVAILABLE", "DIFF_UNAVAILABLE"]));
   });
 
   it("repeats an identical pull request call with the same requestId, and returns it", async () => {
@@ -510,6 +668,14 @@ describe("agentx_open_pull_request and agentx_close_task return at once (R22, Ow
     expect(result.structuredContent).not.toHaveProperty("timed_out");
     expect(closeTask).toHaveBeenCalledTimes(1);
     expect(text(result)).toContain("agentx_get_task");
+  });
+
+  it("passes discard authorization only when the task owner explicitly selects it", async () => {
+    const closeTask = vi.fn(async () => ({ task: view("CLOSED"), closed: true, discardedUnpublished: true }));
+    const result = await (await connect({ closeTask })).callTool({ name: "agentx_close_task", arguments: { task_id: TASK, discard_unpublished: true } });
+    expect(closeTask).toHaveBeenCalledWith(TASK, expect.any(String), true);
+    expect(result.structuredContent).toMatchObject({ closed: true });
+    expect(text(result)).toContain("unpublished workspace changes were discarded");
   });
 
   it("uses AgentX's own words for a close that is not done, redacted", async () => {

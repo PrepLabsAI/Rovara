@@ -1,22 +1,27 @@
 import { execFile } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
+import { createServer } from "node:http";
 import { chmod, mkdir, mkdtemp, readFile, realpath, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 import { ProjectDefinitionSchema, type ProjectDefinition, type WorkerInvocation } from "@agentx/contracts";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   containerBashOperations,
+  createDevcontainerCli,
   devcontainerBashOperations,
   devcontainerTarget,
   ensureDevcontainer,
+  featureLockfile,
   preparedDevcontainerTarget,
   runDevcontainerCommand,
   type ContainerExec,
   type DevcontainerCli,
+  type DevcontainerFullConfiguration,
   type DevcontainerProcess,
 } from "../../packages/worker/src/devcontainer.js";
+import type { ContainerInspection } from "../../packages/worker/src/devcontainer-policy.js";
 import { TIMEOUT_KILL_GRACE_MS, runCollected, tailCollector } from "../../packages/worker/src/collected-process.js";
 import type { PiSessionAdapter, PiSessionInput } from "../../packages/worker/src/pi-session.js";
 import { prepareWorkspace } from "../../packages/worker/src/prepare.js";
@@ -107,6 +112,272 @@ describe("the devcontainer CLI seam", () => {
       run: async () => ({ exitCode: 1, stdout: "{\"outcome\":\"error\",\"message\":\"Command failed\",\"description\":\"image not found\"}", stderr: "" }),
     };
     await expect(ensureDevcontainer(failing, target)).rejects.toThrow("devcontainer did not start: Command failed: image not found");
+  });
+
+  describe("what the dev container may ask Docker for (docker containment)", () => {
+    const ordinary: ContainerInspection = { HostConfig: { Privileged: false, NetworkMode: "bridge", IpcMode: "private" }, Mounts: [] };
+
+    async function workspaceWith(config: string, options: { dockerData?: boolean } = {}) {
+      const root = await realpath(await mkdtemp(join(tmpdir(), "agentx-dc-policy-")));
+      await mkdir(join(root, "repo/sample/.devcontainer"), { recursive: true });
+      await writeFile(join(root, "repo/sample/.devcontainer/devcontainer.json"), config, "utf8");
+      if (options.dockerData === true) await mkdir(join(root, ".docker"));
+      return { rootPath: root, workspaceFolder: join(root, "repo/sample"), configPath: join(root, "repo/sample/.devcontainer/devcontainer.json") };
+    }
+
+    /**
+     * A fake CLI whose `up` starts container `id-<n>`, whose full configuration is `full`, and whose Docker reports
+     * `inspections` in turn.
+     */
+    function dockerCli(inspections: Array<(target: string) => ContainerInspection>, full: DevcontainerFullConfiguration = { configuration: {}, mergedConfiguration: {} }) {
+      const calls: string[][] = [];
+      const removed: string[] = [];
+      const lockfiles: Array<string | undefined> = [];
+      let started = 0;
+      const cli: DevcontainerCli = {
+        run: async (args) => {
+          calls.push([...args]);
+          lockfiles.push(await readFile(join(dirname(args[4] ?? ""), "devcontainer-lock.json"), "utf8").catch(() => undefined));
+          started += 1;
+          return { exitCode: 0, stdout: `{"outcome":"success","containerId":"id-${started}","remoteUser":"node","remoteWorkspaceFolder":"/workspaces/sample"}`, stderr: "" };
+        },
+        checks: {
+          fullConfiguration: async () => full,
+          inspect: async () => (inspections.shift() ?? (() => ordinary))(""),
+          remove: async (id) => { removed.push(id); },
+        },
+      };
+      return { cli, calls, removed, lockfiles };
+    }
+
+    it("refuses a config that asks for the host, before anything starts", async () => {
+      for (const [config, setting] of [
+        ['{ "image": "node:22", "runArgs": ["--privileged"] }', "runArgs --privileged"],
+        ['{ "image": "node:22", "runArgs": ["-v", "/var/run/docker.sock:/var/run/docker.sock"] }', "runArgs a bind mount of /var/run/docker.sock"],
+        ['{ "image": "node:22", // comment\n "initializeCommand": "echo hello", }', "initializeCommand (it runs on the worker host)"],
+        ['{ "image": "node:22", "mounts": ["source=/,target=/host,type=bind"] }', "mounts with a bind mount of /"],
+      ] as const) {
+        const target = await workspaceWith(config);
+        const { cli, calls } = dockerCli([]);
+        await expect(ensureDevcontainer(cli, target)).rejects.toMatchObject({
+          code: "CONFIG_INVALID",
+          message: expect.stringContaining(`The dev container config repo/sample/.devcontainer/devcontainer.json uses ${setting}, which AgentX does not allow`) as unknown,
+        });
+        expect(calls).toEqual([]);
+      }
+      const unreadable = await workspaceWith("{ not json");
+      await expect(ensureDevcontainer(dockerCli([]).cli, unreadable)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("could not read the dev container config") as unknown });
+    });
+
+    it("refuses a bind mount through a link in the repository that leads out of the workspace, whether or not its target exists", async () => {
+      for (const linkTarget of ["/", `/agentx-missing-${randomUUID()}`]) {
+        const target = await workspaceWith('{ "image": "node:22", "mounts": ["source=${localWorkspaceFolder}/outside,target=/e,type=bind"] }');
+        await symlink(linkTarget, join(target.workspaceFolder, "outside"));
+        const { cli, calls } = dockerCli([]);
+        await expect(ensureDevcontainer(cli, target)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining(`mounts with a bind mount of ${join(target.workspaceFolder, "outside")},`) as unknown });
+        expect(calls).toEqual([]);
+      }
+    });
+
+    it("refuses, before anything starts, what the full configuration adds through features or the image", async () => {
+      const target = await workspaceWith('{ "image": "node:22", "features": { "./local-feature": {} } }');
+      const { cli, calls } = dockerCli([], { configuration: { image: "node:22" }, mergedConfiguration: { image: "node:22", privileged: true, mounts: [] } });
+      await expect(ensureDevcontainer(cli, target)).rejects.toMatchObject({
+        code: "CONFIG_INVALID",
+        message: expect.stringContaining("The dev container config repo/sample/.devcontainer/devcontainer.json, with its features and image, uses privileged, which AgentX does not allow") as unknown,
+      });
+      expect(calls).toEqual([]);
+      const failing: DevcontainerCli = { ...cli, checks: { ...cli.checks!, fullConfiguration: async () => { throw new Error("image not found"); } } };
+      await expect(ensureDevcontainer(failing, target)).rejects.toThrow(/could not read the dev container's full configuration.*image not found/);
+      expect(calls).toEqual([]);
+    });
+
+    it("builds the lockfile in the devcontainer CLI's format, and refuses a feature it cannot pin", () => {
+      const digest = (letter: string) => `sha256:${letter.repeat(64)}`;
+      expect(featureLockfile({ featureSets: [
+        { sourceInformation: { type: "oci", userFeatureId: "registry.example/b/feature:2", featureRef: { registry: "registry.example", path: "b/feature" } }, computedDigest: digest("b"), features: [{ version: "2.0.1", dependsOn: { "registry.example/a/base:1": {} } }] },
+        { sourceInformation: { type: "file-path", userFeatureId: "./local" }, features: [{ version: "0.1.0" }] },
+        { sourceInformation: { type: "direct-tarball", userFeatureId: "https://example.test/devcontainer-feature-a.tgz", tarballUri: "https://example.test/devcontainer-feature-a.tgz" }, computedDigest: digest("c"), features: [{ version: "1.0.0" }] },
+      ] }, "repo/.devcontainer/devcontainer.json")).toEqual({ features: {
+        "https://example.test/devcontainer-feature-a.tgz": { version: "1.0.0", resolved: "https://example.test/devcontainer-feature-a.tgz", integrity: digest("c") },
+        "registry.example/b/feature:2": { version: "2.0.1", resolved: `registry.example/b/feature@${digest("b")}`, integrity: digest("b"), dependsOn: ["registry.example/a/base:1"] },
+      } });
+      expect(featureLockfile(undefined, "x")).toEqual({ features: {} });
+      for (const featureSets of [
+        [{ sourceInformation: { type: "github-repo", userFeatureId: "owner/repo/feature" }, features: [{}] }],
+        [{ sourceInformation: { type: "oci", userFeatureId: "registry.example/c/feature:1", featureRef: { registry: "registry.example", path: "c/feature" } }, features: [{}] }],
+      ]) {
+        expect(() => featureLockfile({ featureSets }, "repo/.devcontainer/devcontainer.json")).toThrow(/uses the feature .*feature.*, which AgentX cannot pin to the content it checked/);
+      }
+    });
+
+    it("refuses a lockfile path that is a link", async () => {
+      const target = await workspaceWith('{ "image": "node:22" }');
+      await symlink(join(target.rootPath, "elsewhere.json"), join(target.workspaceFolder, ".devcontainer/devcontainer-lock.json"));
+      const { cli, calls } = dockerCli([]);
+      await expect(ensureDevcontainer(cli, target)).rejects.toMatchObject({ code: "CONFIG_INVALID", message: expect.stringContaining("is not a plain file in the workspace") as unknown });
+      expect(calls).toEqual([]);
+    });
+
+    describe("with the bundled devcontainer CLI, a local feature registry and a stand-in for docker", () => {
+      /** An OCI registry on localhost serving one feature, `localhost:<port>/demo/feature:1`, whose content can change. */
+      async function featureRegistry(directory: string) {
+        const sha = (bytes: Buffer) => `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+        const versions = await Promise.all([{}, { privileged: true }].map(async (extra, index) => {
+          const folder = join(directory, `feature-${index}`);
+          await mkdir(folder);
+          await writeFile(join(folder, "devcontainer-feature.json"), JSON.stringify({ id: "feature", version: "1.0.0", ...extra }), "utf8");
+          await writeFile(join(folder, "install.sh"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+          await run("tar", ["-cf", join(directory, `feature-${index}.tar`), "-C", folder, "./devcontainer-feature.json", "./install.sh"]);
+          const blob = await readFile(join(directory, `feature-${index}.tar`));
+          const manifest = Buffer.from(JSON.stringify({
+            schemaVersion: 2, mediaType: "application/vnd.oci.image.manifest.v1+json",
+            config: { mediaType: "application/vnd.devcontainers", digest: sha(Buffer.from("{}")), size: 2 },
+            layers: [{ mediaType: "application/vnd.devcontainers.layer.v1+tar", digest: sha(blob), size: blob.length, annotations: { "org.opencontainers.image.title": "devcontainer-feature-feature.tgz" } }],
+          }));
+          return { blob, manifest };
+        }));
+        const state = { current: 0, manifestRequests: 0, changeAfterFirstManifest: false };
+        const server = createServer((request, response) => {
+          const url = request.url ?? "";
+          if (url.includes("/manifests/")) {
+            const version = versions[state.current]!;
+            state.manifestRequests += 1;
+            if (state.changeAfterFirstManifest) state.current = 1;
+            response.writeHead(200, { "content-type": "application/vnd.oci.image.manifest.v1+json", "docker-content-digest": sha(version.manifest) });
+            response.end(version.manifest);
+          } else if (url.includes("/blobs/")) {
+            const version = versions.find((entry) => url.endsWith(sha(entry.blob)));
+            response.writeHead(version === undefined ? 404 : 200);
+            response.end(version?.blob);
+          } else {
+            response.writeHead(404);
+            response.end();
+          }
+        });
+        await new Promise<void>((resolveListen) => server.listen(0, "127.0.0.1", resolveListen));
+        const { port } = server.address() as { port: number };
+        return { feature: `localhost:${port}/demo/feature:1`, state, close: () => new Promise((resolveClose) => server.close(resolveClose)) };
+      }
+
+      async function setUp() {
+        const target = await workspaceWith("{}");
+        vi.stubEnv("HOME", target.rootPath);
+        vi.stubEnv("DOCKER_CONFIG", join(target.rootPath, "docker-config"));
+        const registry = await featureRegistry(target.rootPath);
+        await writeFile(target.configPath, JSON.stringify({ image: "example/image:1", features: { [registry.feature]: {} } }), "utf8");
+        const log = join(target.rootPath, "docker-calls.log");
+        const docker = join(target.rootPath, "docker-stand-in");
+        const image = JSON.stringify([{ Id: "sha256:1", Architecture: "amd64", Os: "linux", Config: { User: "root", Env: [], Labels: {} } }]);
+        await writeFile(docker, `#!/bin/sh\necho "$*" >> '${log}'\ncase "$*" in "inspect --type image"*) echo '${image}';; esac\nexit 0\n`, { mode: 0o755 });
+        return { target, registry, docker, calls: async () => (await readFile(log, "utf8")).trim().split("\n") };
+      }
+
+      afterEach(() => { vi.unstubAllEnvs(); });
+
+      it("does not use feature content that changed after the check: the start fails before anything is built", async () => {
+        const { target, registry, docker, calls } = await setUp();
+        try {
+          registry.state.changeAfterFirstManifest = true;
+          await expect(ensureDevcontainer(createDevcontainerCli({ dockerPath: docker }), target)).rejects.toThrow(/devcontainer did not start: Digest did not match/);
+          expect(registry.state.manifestRequests).toBe(2);
+          expect((await calls()).filter((call) => /^(build|buildx build|run|create|start) /u.test(call))).toEqual([]);
+          await expect(readFile(join(target.workspaceFolder, ".devcontainer/devcontainer-lock.json"), "utf8")).rejects.toThrow();
+        } finally {
+          await registry.close();
+        }
+      });
+
+      it("uses the feature content it checked when it has not changed", async () => {
+        const { target, registry, docker, calls } = await setUp();
+        try {
+          // The stand-in does not run containers, so the start still fails, but only after the CLI accepted the lockfile.
+          await expect(ensureDevcontainer(createDevcontainerCli({ dockerPath: docker }), target)).rejects.not.toThrow(/Lockfile|Digest/);
+          expect((await calls()).some((call) => /^(buildx )?build /u.test(call))).toBe(true);
+        } finally {
+          await registry.close();
+        }
+      });
+    });
+
+    describe("with the bundled devcontainer CLI and a stand-in for docker", () => {
+      /** A `docker` that records its arguments and describes every image with `label` as its devcontainer.metadata. */
+      async function standInDocker(directory: string, label: unknown[]) {
+        const path = join(directory, "docker-stand-in");
+        const log = join(directory, "docker-calls.log");
+        const image = JSON.stringify([{ Id: "sha256:1", Architecture: "amd64", Os: "linux", Config: { User: "root", Env: [], Labels: { "devcontainer.metadata": JSON.stringify(label) } } }]);
+        await writeFile(path, `#!/bin/sh\necho "$*" >> '${log}'\ncase "$*" in *inspect*) cat <<'JSON'\n${image}\nJSON\n;; esac\nexit 0\n`, { mode: 0o755 });
+        return { path, calls: async () => (await readFile(log, "utf8")).trim().split("\n") };
+      }
+
+      it("refuses a local feature that asks for a privileged container, before any container starts", async () => {
+        const target = await workspaceWith('{ "image": "example/image:1", "features": { "./local-feature": {} } }');
+        await mkdir(join(target.workspaceFolder, ".devcontainer/local-feature"));
+        await writeFile(join(target.workspaceFolder, ".devcontainer/local-feature/devcontainer-feature.json"), JSON.stringify({ id: "local-feature", version: "1.0.0", privileged: true }), "utf8");
+        const docker = await standInDocker(target.rootPath, []);
+        await expect(ensureDevcontainer(createDevcontainerCli({ dockerPath: docker.path }), target)).rejects.toMatchObject({
+          code: "CONFIG_INVALID", message: expect.stringContaining("with its features and image, uses privileged") as unknown,
+        });
+        expect((await docker.calls()).every((call) => call.startsWith("ps ") || call.startsWith("inspect --type image "))).toBe(true);
+      });
+
+      it("refuses an image whose devcontainer.metadata label asks for a host mount, before any container starts", async () => {
+        const target = await workspaceWith('{ "image": "example/image:1" }');
+        const docker = await standInDocker(target.rootPath, [{ mounts: ["source=/,target=/host,type=bind"] }]);
+        await expect(ensureDevcontainer(createDevcontainerCli({ dockerPath: docker.path }), target)).rejects.toMatchObject({
+          code: "CONFIG_INVALID", message: expect.stringContaining("with its features and image, uses mounts with a bind mount of /,") as unknown,
+        });
+        expect((await docker.calls()).every((call) => call.startsWith("ps ") || call.startsWith("inspect --type image "))).toBe(true);
+      });
+    });
+
+    it("starts an ordinary dev container with the Docker data folder hidden, and checks it as Docker ran it", async () => {
+      const target = await workspaceWith('{\n  "image": "node:22",\n  "features": { "ghcr.io/devcontainers/features/node:1": {} },\n  "runArgs": ["--env", "CI=1"],\n}\n', { dockerData: true });
+      const digest = `sha256:${"a".repeat(64)}`;
+      const featuresConfiguration = { featureSets: [{
+        sourceInformation: { type: "oci", userFeatureId: "ghcr.io/devcontainers/features/node:1", featureRef: { registry: "ghcr.io", path: "devcontainers/features/node" } },
+        computedDigest: digest,
+        features: [{ version: "1.6.0" }],
+      }] };
+      const { cli, calls, removed, lockfiles } = dockerCli([() => ({ ...ordinary, Mounts: [
+        { Type: "bind", Source: target.rootPath, Destination: target.rootPath },
+        { Type: "volume", Source: "/var/lib/docker/volumes/agentx-docker-data-mask/_data", Destination: join(target.rootPath, ".docker") },
+      ] })], { configuration: {}, mergedConfiguration: {}, featuresConfiguration });
+      await writeFile(join(target.workspaceFolder, ".devcontainer/devcontainer-lock.json"), "the project's own lockfile\n", "utf8");
+      await expect(ensureDevcontainer(cli, target)).resolves.toMatchObject({ containerId: "id-1" });
+      // During `up`, the lockfile of exactly what was checked; afterwards, the project's own again.
+      expect(lockfiles.map((text) => text === undefined ? undefined : JSON.parse(text) as unknown)).toEqual([{ features: {
+        "ghcr.io/devcontainers/features/node:1": { version: "1.6.0", resolved: `ghcr.io/devcontainers/features/node@${digest}`, integrity: digest },
+      } }]);
+      await expect(readFile(join(target.workspaceFolder, ".devcontainer/devcontainer-lock.json"), "utf8")).resolves.toBe("the project's own lockfile\n");
+      expect(calls).toEqual([[
+        "up", "--workspace-folder", target.workspaceFolder, "--config", target.configPath, "--frozen-lockfile",
+        "--mount", `type=bind,source=${target.rootPath},target=${target.rootPath}`,
+        "--mount", `type=volume,source=agentx-docker-data-mask,target=${join(target.rootPath, ".docker")}`,
+        "--log-format", "json",
+      ]]);
+      expect(removed).toEqual([]);
+    });
+
+    it("creates again a container made before the Docker data folder was hidden (a resumed workspace)", async () => {
+      const target = await workspaceWith('{ "image": "node:22" }', { dockerData: true });
+      const unmasked = { ...ordinary, Mounts: [{ Type: "bind", Source: target.rootPath, Destination: target.rootPath }] };
+      const masked = { ...ordinary, Mounts: [...unmasked.Mounts, { Type: "volume", Destination: join(target.rootPath, ".docker") }] };
+      const { cli, calls, removed } = dockerCli([() => unmasked, () => masked]);
+      await expect(ensureDevcontainer(cli, target)).resolves.toMatchObject({ containerId: "id-2" });
+      expect(removed).toEqual(["id-1"]);
+      expect(calls).toHaveLength(2);
+    });
+
+    it("removes and refuses a container a feature or the image's metadata made privileged", async () => {
+      const target = await workspaceWith('{ "image": "node:22", "features": { "ghcr.io/devcontainers/features/docker-in-docker:2": {} } }');
+      const { cli, removed } = dockerCli([() => ({ HostConfig: { Privileged: true }, Mounts: [{ Type: "bind", Source: "/var/run/docker.sock", Destination: "/var/run/docker.sock" }] })]);
+      await expect(ensureDevcontainer(cli, target)).rejects.toMatchObject({
+        code: "CONFIG_INVALID",
+        message: expect.stringContaining("The dev container for repo/sample was started with privileged, a bind mount of /var/run/docker.sock, which AgentX does not allow, so AgentX removed it") as unknown,
+      });
+      expect(removed).toEqual(["id-1"]);
+    });
   });
 
   it("says a devcontainer start timed out, and after how long (#154 review)", async () => {
@@ -619,7 +890,7 @@ describe("a task's test commands, written with the container's paths", () => {
 
   it("records and replays `cd /workspaces/sample && npm test` from the host folder, in the container", async () => {
     const { checks, replays, checkout } = await taskThatRan(["cd /workspaces/sample && npm test", "cd /workspaces/sample/src && npm test"], (dir) => mkdir(join(dir, "src")));
-    expect(checks.checks.map((entry) => ({ label: entry.label, after: entry.after }))).toEqual([
+    expect(checks?.checks?.map((entry) => ({ label: entry.label, after: entry.after }))).toEqual([
       { label: "cd repo/sample && npm test", after: "passed" },
       { label: "cd repo/sample/src && npm test", after: "passed" },
     ]);
@@ -638,7 +909,7 @@ describe("a task's test commands, written with the container's paths", () => {
   it("refuses at replay a sub path that is a link out of the workspace, and runs nothing for it", async () => {
     const outside = await mkdtemp(join(tmpdir(), "agentx-devcontainer-outside-"));
     const { checks, replays } = await taskThatRan(["cd /workspaces/sample/escape && npm test"], (dir) => symlink(outside, join(dir, "escape")));
-    expect(checks.checks).toEqual([expect.objectContaining({ after: "not_run" })]);
+    expect(checks?.checks).toEqual([expect.objectContaining({ after: "not_run" })]);
     expect(replays).toEqual([]);
   });
 });

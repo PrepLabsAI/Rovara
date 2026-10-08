@@ -79,7 +79,10 @@ COPY --from=build /opt/agentx/packages/model-runtime ./packages/model-runtime
 COPY --from=build /opt/agentx/packages/contracts ./packages/contracts
 COPY --from=build /opt/agentx/packages/worker ./packages/worker
 
+# AGENTX_WORKER_PROCESS_SCOPE: this container is the worker's own process namespace, so before a push every other
+# process of the worker's user in it is stopped (packages/worker/src/workspace-processes.ts).
 ENV AGENTX_WORKSPACE_ROOT=/mnt/workspace \
+    AGENTX_WORKER_PROCESS_SCOPE=container \
     NODE_ENV=production \
     PORT=8080
 EXPOSE 8080

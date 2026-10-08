@@ -135,6 +135,59 @@ describe("authorize (FR-001, FR-002)", () => {
   });
 });
 
+describe("browser sign-in for an AgentX feedback review", () => {
+  const reviewPath = "/review/11111111-1111-4111-8111-111111111111";
+
+  it("accepts only a local review return path and does not accept forwarded URLs", async () => {
+    const h = identityHarness({ slackUsers: [maya] });
+    const good = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(reviewPath)}`));
+    expect(good.statusCode).toBe(302);
+    expect(new URL(good.headers.location!).origin).toBe("https://slack.com");
+    expect(good.cookies?.some(cookie => cookie.includes("__Host-agentx_review_pkce="))).toBe(true);
+    // Task 18: the read-only task page signs in the same way.
+    const taskPage = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(`${reviewPath}/task`)}`));
+    expect(taskPage.statusCode).toBe(302);
+    expect(new URL(taskPage.headers.location!).origin).toBe("https://slack.com");
+    for (const returnTo of ["https://evil.test/review/a", "//evil.test/review/a", "/v1/admin", "/review/../v1/admin", `${reviewPath}/task/../x`, `${reviewPath}/tasks`]) {
+      const refused = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(returnTo)}`));
+      expect(refused.statusCode).toBe(400);
+      expect(refused.headers.location).toBeUndefined();
+    }
+  });
+
+  it("sets a short-lived opaque secure session cookie only after state and PKCE-bound Slack sign-in", async () => {
+    const h = identityHarness({ slackUsers: [maya] });
+    const start = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(reviewPath)}`));
+    const providerUrl = new URL(start.headers.location!);
+    const callback = h.slack.approve(start.headers.location!, maya.userId);
+    const callbackEvent = httpEvent("GET", callback);
+    callbackEvent.headers = { cookie: start.cookies!.find(cookie => cookie.startsWith("__Host-agentx_review_pkce="))!.split(";", 1)[0] };
+    const result = await h.http(callbackEvent);
+    expect(result.statusCode).toBe(302);
+    expect(result.headers.location).toBe(reviewPath);
+    expect(providerUrl.searchParams.get("state")).not.toBeNull();
+    expect(result.cookies).toHaveLength(2);
+    expect(result.cookies?.find(cookie => cookie.startsWith("__Host-agentx_review_session="))).toMatch(/__Host-agentx_review_session=[0-9a-f-]{36}; Secure; HttpOnly; SameSite=Lax; Path=\/; Max-Age=900/);
+    expect(result.cookies?.find(cookie => cookie.startsWith("__Host-agentx_review_pkce="))).toContain("Max-Age=0");
+    expect(result.headers.location).not.toContain("code=");
+    const sessionCookie = result.cookies?.find(cookie => cookie.startsWith("__Host-agentx_review_session="));
+    if (sessionCookie === undefined) throw new Error("browser review session cookie is required");
+    const sessionId = sessionCookie.split("=", 2)[1]!.split(";", 1)[0]!;
+    expect(h.db.get(`SESSION#${sessionId}`, "META")).toMatchObject({ developerId: mayaId, amr: "slack", reviewExpiresAt: Math.floor(h.now() / 1000) + 900 });
+    expect(h.logs.some(line => JSON.stringify(line).includes(sessionId))).toBe(false);
+  });
+
+  it("refuses the callback if its browser PKCE verifier is missing or incorrect", async () => {
+    const h = identityHarness({ slackUsers: [maya] });
+    const start = await h.http(httpEvent("GET", `/v1/auth/browser/authorize?return_to=${encodeURIComponent(reviewPath)}`));
+    const callback = h.slack.approve(start.headers.location!, maya.userId);
+    const refused = await h.http(httpEvent("GET", callback));
+    expect(refused.statusCode).toBe(400);
+    expect((refused.cookies ?? []).some(cookie => cookie.startsWith("__Host-agentx_review_session="))).toBe(false);
+    expect(h.db.get(`DEVELOPER#${mayaId}`, "META")).toBeUndefined();
+  });
+});
+
 describe("Sign in with Slack end to end (US4 scenario 1, FR-003, FR-005, FR-008)", () => {
   it("issues a code to the loopback, then an access token the broker accepts and a refresh token", async () => {
     const h = identityHarness({ slackUsers: [maya] });

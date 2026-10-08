@@ -16,7 +16,7 @@ async function finished(options: { memberLimit?: number } = {}) {
   const active = () => String((harness.db.get(`WORKSPACE#${task.workspaceId}`, "META") as { activeOperationId: string }).activeOperationId);
   await harness.finish(task.workspaceId, active(), "SUCCEEDED");
   await harness.finish(task.workspaceId, active(), "SUCCEEDED");
-  const close = (requestId: string) => harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId });
+  const close = (requestId: string, discardUnpublished = false) => harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/close`, { requestId, ...(discardUnpublished ? { discard_unpublished: true } : {}) });
   const member = () => harness.db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${MAYA.slackUserId}`);
   return { ...harness, taskId, task, active, close, member };
 }
@@ -68,6 +68,44 @@ describe("closing a task (R15)", () => {
     expect((await close(requestId)).body).toMatchObject({ closed: false, unpublished: [{ repository: "demo", reasons: ["worktree_changes"] }], task: { status: "SUCCEEDED" } });
     expect(db.get(`WORKSPACE#${task.workspaceId}`, "META")).toMatchObject({ status: "READY" });
     expect(member()).toMatchObject({ count: 1 });
+  });
+
+  it("discards unpublished workspace state only when the owner explicitly authorizes it", async () => {
+    const { db, close, task, taskId, active, finish, deleteEc2Session, member } = await finished();
+    const requestId = randomUUID();
+    const accepted = await close(requestId, true);
+    expect(accepted.body).toMatchObject({ closed: false, task: { closing: true } });
+    const closeId = active();
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, `OPERATION#${closeId}`)).toMatchObject({
+      kind: "close",
+      discardUnpublished: true,
+      requestedBy: { kind: "developer", developerId: MAYA.developerId },
+    });
+    await finish(task.workspaceId, closeId, "SUCCEEDED", {
+      result: { safeToClose: false, repositories: [{ name: "demo", reasons: ["worktree_changes", "untracked_files"] }] },
+    });
+    expect(deleteEc2Session).toHaveBeenCalledWith(task.workspaceId);
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, "META")).toMatchObject({ status: "CLOSED" });
+    expect(db.get(`DEVTASK#${taskId}`, "META")).toHaveProperty("closedAt");
+    expect(member()).toMatchObject({ count: 0 });
+    expect(closePhases(db, taskId)).toEqual(["accepted:accepted", "completed:succeeded"]);
+    const retried = await close(requestId, true);
+    expect(retried.body).toMatchObject({ closed: true, discardedUnpublished: true });
+  });
+
+  it("does not discard the workspace when the authorized close preflight fails", async () => {
+    const { db, close, task, taskId, active, finish, deleteEc2Session, member } = await finished();
+    const requestId = randomUUID();
+    await close(requestId, true);
+    const closeId = active();
+
+    await finish(task.workspaceId, closeId, "FAILED", { error: "workspace inspection failed" });
+
+    expect(deleteEc2Session).not.toHaveBeenCalledWith(task.workspaceId);
+    expect(db.get(`WORKSPACE#${task.workspaceId}`, "META")).toMatchObject({ status: "READY", closeError: "workspace inspection failed" });
+    expect(db.get(`DEVTASK#${taskId}`, "META")).not.toHaveProperty("closedAt");
+    expect(member()).toMatchObject({ count: 1 });
+    expect(closePhases(db, taskId)).toEqual(["accepted:accepted"]);
   });
 
   it("shows the refused close on the task itself, so the AI tool can check back with agentx_get_task (R22)", async () => {

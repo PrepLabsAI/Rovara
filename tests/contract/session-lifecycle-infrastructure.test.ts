@@ -97,7 +97,7 @@ describe("EC2 session lifecycle infrastructure (issue #83)", () => {
       SecurityGroupIds: [{ Ref: "SessionManagerSecurityGroupId" }],
     });
     expect((reaper.Properties.Environment as { Variables: Record<string, unknown> }).Variables).toMatchObject({ AGENTX_METRICS_NAMESPACE: "AgentX" });
-    const [[, schedule]] = ofType("AWS::Scheduler::Schedule") as [[string, Resource]];
+    const [, schedule] = ofType("AWS::Scheduler::Schedule").find(([, candidate]) => JSON.stringify(candidate.Properties.Target).includes(reaperId))!;
     expect(schedule.Properties.ScheduleExpression).toBe("rate(1 minute)");
     expect(JSON.stringify(schedule.Properties.Target)).toContain(reaperId);
     const roleId = (reaper.Properties.Role as { "Fn::GetAtt": [string] })["Fn::GetAtt"][0];

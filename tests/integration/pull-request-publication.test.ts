@@ -1,11 +1,13 @@
 import { execFile } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import type { WorkerInvocation } from "@agentx/contracts";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { AgentXError, agentXError, type WorkerInvocation } from "@agentx/contracts";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { allowGitFileTransportForTests } from "../../packages/worker/src/git.js";
 import { publishWorkspace, runReadinessChecks } from "../../packages/worker/src/publish.js";
 import { storedCommandOutput } from "../../packages/worker/src/command-failure.js";
 import { TIMEOUT_KILL_GRACE_MS } from "../../packages/worker/src/collected-process.js";
@@ -13,11 +15,27 @@ import type { DevcontainerCli, DevcontainerProcess } from "../../packages/worker
 import type { PreparationManifest } from "../../packages/worker/src/prepare.js";
 import { createWorkerCallbackSinks, type PullRequestSink } from "../../packages/worker/src/callback-client.js";
 import { projectCheckKey, recordProjectOutcomes } from "../../packages/worker/src/verification/check-history.js";
+import { readCandidateRepositories } from "../../packages/worker/src/verification/candidate.js";
 
 const execFileAsync = promisify(execFile);
 const temporaryDirectories: string[] = [];
 
+// The fixtures' remotes are local bare repositories, which AgentX's hardened Git (HTTPS only) allows
+// through its test seam; every other hardened setting stays in force.
+// No real credential helper, global or system config, or HOME takes part either.
+let disallowFileTransport: () => void = () => undefined;
+beforeEach(async () => {
+  disallowFileTransport = allowGitFileTransportForTests();
+  const home = await mkdtemp(join(tmpdir(), "agentx-git-home-"));
+  temporaryDirectories.push(home);
+  vi.stubEnv("HOME", home);
+  vi.stubEnv("GIT_CONFIG_NOSYSTEM", "1");
+  vi.stubEnv("GIT_CONFIG_GLOBAL", "/dev/null");
+});
+
 afterEach(async () => {
+  disallowFileTransport();
+  vi.unstubAllEnvs();
   await Promise.all(temporaryDirectories.splice(0).map((path) => rm(path, { recursive: true, force: true })));
 });
 
@@ -86,6 +104,167 @@ describe("pull request publication", () => {
     expect(pullRequestSink).not.toHaveBeenCalled();
     await expect(git(fixture.bare, ["rev-parse", `refs/heads/${fixture.invocation.payload.headBranch}`]))
       .rejects.toThrow();
+  });
+
+  it("publishes exactly the checked tree on the task's base and refuses a tree that changed before pushing", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "WORK.md"), "checked work\n", "utf8");
+    const [candidate] = await readCandidateRepositories([{ repositoryId: "demo", directory: fixture.checkout }]);
+    await writeFile(join(fixture.seed, "UPSTREAM.md"), "upstream\n", "utf8");
+    await git(fixture.seed, ["add", "UPSTREAM.md"]);
+    await git(fixture.seed, ["-c", "user.name=U", "-c", "user.email=u@example.test", "commit", "-m", "upstream moved"]);
+    await git(fixture.seed, ["push", "origin", "main"]);
+    const manifest = JSON.parse(await readFile(join(fixture.root, ".agentx/preparation-manifest.json"), "utf8")) as PreparationManifest;
+    const invocation = { ...fixture.invocation, payload: { ...fixture.invocation.payload, candidateTreeSha: candidate!.treeSha } } as typeof fixture.invocation;
+    const result = await publishWorkspace({ rootPath: fixture.root, invocation, credentialProvider: async () => ({}), pullRequestSink: async () => ({ number: 14, url: "https://github.com/example/demo/pull/14", reconciled: false }) });
+    expect((await git(fixture.checkout, ["rev-parse", `${result.commit}^{tree}`])).trim()).toBe(candidate!.treeSha);
+    expect((await git(fixture.checkout, ["rev-parse", `${result.commit}^`])).trim()).toBe(manifest.repositories[0]!.resolvedCommit);
+    await writeFile(join(fixture.checkout, "WORK.md"), "changed after review\n", "utf8");
+    const sink = vi.fn();
+    const changed = { ...invocation, payload: { ...invocation.payload, headBranch: `agentx/${randomUUID()}` } } as typeof invocation;
+    await expect(publishWorkspace({ rootPath: fixture.root, invocation: changed, credentialProvider: async () => ({}), pullRequestSink: sink })).rejects.toThrow(/changed after its checks and reviews/);
+    expect(sink).not.toHaveBeenCalled();
+    await expect(git(fixture.bare, ["rev-parse", `refs/heads/${changed.payload.headBranch}`])).rejects.toThrow();
+  });
+
+  it("reuses its own commit when the same checked-tree publication retries on its branch", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "WORK.md"), "checked work\n", "utf8");
+    const [candidate] = await readCandidateRepositories([{ repositoryId: "demo", directory: fixture.checkout }]);
+    const invocation = { ...fixture.invocation, payload: { ...fixture.invocation.payload, candidateTreeSha: candidate!.treeSha } } as typeof fixture.invocation;
+    const sink = async () => ({ number: 15, url: "https://github.com/example/demo/pull/15", reconciled: false });
+    const first = await publishWorkspace({ rootPath: fixture.root, invocation, credentialProvider: async () => ({}), pullRequestSink: sink });
+    const again = await publishWorkspace({ rootPath: fixture.root, invocation, credentialProvider: async () => ({}), pullRequestSink: sink });
+    expect(again.commit).toBe(first.commit);
+    expect((await git(fixture.bare, ["rev-parse", `refs/heads/${invocation.payload.headBranch}`])).trim()).toBe(first.commit);
+  });
+
+  describe("against a repository whose config the agent controls", () => {
+    const publishFixture = (
+      fixture: Awaited<ReturnType<typeof createFixture>>,
+      invocation: Extract<WorkerInvocation, { kind: "publish" }> = fixture.invocation,
+    ) => publishWorkspace({
+      rootPath: fixture.root,
+      invocation,
+      credentialProvider: async () => ({ token: "push-token" }),
+      pullRequestSink: async () => ({ number: 12, url: "https://github.com/example/demo/pull/12", reconciled: false }),
+    });
+    const markersIn = async (directory: string) => (await readdir(directory)).filter((name) => name.startsWith("agentx-ran-"));
+
+    it("never runs the repository's filters, hooks or fsmonitor while publishing", async () => {
+      const fixture = await createFixture();
+      const marker = join(fixture.root, `agentx-ran-${crypto.randomUUID()}`);
+      for (const [key, value] of [
+        ["filter.evil.clean", `sh -c 'touch ${marker}.clean; tr a-z A-Z'`],
+        ["filter.evil.smudge", `sh -c 'touch ${marker}.smudge; cat'`],
+        ["filter.evil.process", `sh -c 'touch ${marker}.process'`],
+        ["filter.evil.required", "true"],
+        ["core.fsmonitor", `sh -c 'touch ${marker}.fsmonitor'`],
+      ] as const) await git(fixture.checkout, ["config", key, value]);
+      for (const hook of ["post-checkout", "pre-push", "reference-transaction", "pre-commit", "post-commit"]) {
+        await writeFile(join(fixture.checkout, ".git", "hooks", hook), `#!/bin/sh\ntouch '${marker}.${hook}'\n`, { mode: 0o755 });
+      }
+      await writeFile(join(fixture.checkout, ".gitattributes"), "*.md filter=evil\n", "utf8");
+      await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+
+      const result = await publishFixture(fixture);
+
+      expect(await git(fixture.bare, ["show", `${result.commit}:README.md`])).toBe("changed\n");
+      expect(await markersIn(fixture.root)).toEqual([]);
+      // The push went to the registered URL; as a push to origin would have, the tracking branch records it.
+      expect((await git(fixture.checkout, ["rev-parse", `refs/remotes/origin/${result.headBranch}`])).trim()).toBe(result.commit);
+    });
+
+    it("merges the latest base with Git's own text merge, never the repository's merge driver", async () => {
+      const fixture = await createFixture(true, "remote.git", { seedFiles: { "lines.txt": "1\n2\n3\n4\n5\n6\n7\n8\n" } });
+      await writeFile(join(fixture.seed, "lines.txt"), "1\n2\n3\n4\n5\n6\n7\nEIGHT\n", "utf8");
+      await git(fixture.seed, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-am", "base change"]);
+      await git(fixture.seed, ["push", "origin", "main"]);
+      const marker = join(fixture.root, `agentx-ran-${crypto.randomUUID()}`);
+      await git(fixture.checkout, ["config", "merge.evil.driver", `touch ${marker}.merge; exit 0`]);
+      await writeFile(join(fixture.checkout, ".gitattributes"), "lines.txt merge=evil\n", "utf8");
+      await writeFile(join(fixture.checkout, "lines.txt"), "ONE\n2\n3\n4\n5\n6\n7\n8\n", "utf8");
+
+      const result = await publishFixture(fixture);
+
+      expect(await git(fixture.bare, ["show", `${result.commit}:lines.txt`])).toBe("ONE\n2\n3\n4\n5\n6\n7\nEIGHT\n");
+      expect(await markersIn(fixture.root)).toEqual([]);
+    });
+
+    it("refuses to push when the repository sets a push URL for origin", async () => {
+      const fixture = await createFixture();
+      const attacker = join(fixture.root, "attacker.git");
+      await git(fixture.root, ["init", "--bare", "--initial-branch=main", attacker]);
+      await git(fixture.checkout, ["config", "remote.origin.pushurl", pathToFileURL(attacker).href]);
+      await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+
+      await expect(publishFixture(fixture)).rejects.toThrow(/^CONFIG_INVALID: .*remote\.origin\.pushurl.*Unset them/u);
+
+      expect(await git(attacker, ["for-each-ref"])).toBe("");
+      await expect(git(fixture.bare, ["rev-parse", `refs/heads/${fixture.invocation.payload.headBranch}`])).rejects.toThrow();
+    });
+
+    it("refuses to fetch or push when the repository rewrites the remote's URL", async () => {
+      const fixture = await createFixture();
+      const attacker = join(fixture.root, "attacker.git");
+      await git(fixture.root, ["init", "--bare", "--initial-branch=main", attacker]);
+      await git(fixture.checkout, ["config", `url.${pathToFileURL(attacker).href}.pushInsteadOf`, pathToFileURL(fixture.bare).href]);
+      await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+
+      await expect(publishFixture(fixture)).rejects.toThrow(/^CONFIG_INVALID: .*url\..*\.pushinsteadof.*Unset them/u);
+
+      expect(await git(attacker, ["for-each-ref"])).toBe("");
+      await expect(git(fixture.bare, ["rev-parse", `refs/heads/${fixture.invocation.payload.headBranch}`])).rejects.toThrow();
+    });
+
+    it("refuses to push when the repository configures the registered URL itself as a remote with another push URL", async () => {
+      const fixture = await createFixture();
+      const attacker = join(fixture.root, "attacker.git");
+      await git(fixture.root, ["init", "--bare", "--initial-branch=main", attacker]);
+      // Git treats any URL as a possible remote name, so this redirects `git push <registered url>`.
+      const key = `remote.${pathToFileURL(fixture.bare).href}.pushurl`;
+      await git(fixture.checkout, ["config", key, pathToFileURL(attacker).href]);
+      await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+
+      const refusal = await publishFixture(fixture).then(() => undefined, (error: unknown) => error);
+
+      expect(refusal).toBeInstanceOf(AgentXError);
+      expect((refusal as AgentXError).code).toBe("CONFIG_INVALID");
+      expect((refusal as AgentXError).message).toContain(key);
+      expect(await git(attacker, ["for-each-ref"])).toBe("");
+    });
+
+    it("refuses a Git LFS repository before it stages anything", async () => {
+      const fixture = await createFixture();
+      await writeFile(join(fixture.checkout, ".gitattributes"), "*.bin filter=lfs diff=lfs merge=lfs -text\n", "utf8");
+      await writeFile(join(fixture.checkout, "model.bin"), "weights\n", "utf8");
+
+      await expect(publishFixture(fixture)).rejects.toThrow(
+        "CONFIG_INVALID: Git LFS repositories are not supported yet: this repository stores files with Git LFS (filter=lfs in .gitattributes).",
+      );
+      await expect(git(fixture.bare, ["rev-parse", `refs/heads/${fixture.invocation.payload.headBranch}`])).rejects.toThrow();
+    });
+
+    it("signs nothing and runs no signing program when the repository asks for signed commits", async () => {
+      const fixture = await createFixture();
+      await writeFile(join(fixture.seed, "MERGED.md"), "squashed feature\n", "utf8");
+      await git(fixture.seed, ["add", "MERGED.md"]);
+      await git(fixture.seed, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "squashed feature"]);
+      const revertCommit = (await git(fixture.seed, ["rev-parse", "HEAD"])).trim();
+      await git(fixture.seed, ["push", "origin", "main"]);
+      const marker = join(fixture.root, `agentx-ran-${crypto.randomUUID()}`);
+      const program = join(fixture.root, "sign.sh");
+      await writeFile(program, `#!/bin/sh\ntouch '${marker}.gpg'\nexit 1\n`, { mode: 0o755 });
+      for (const [key, value] of [["commit.gpgSign", "true"], ["gpg.program", program]] as const) await git(fixture.checkout, ["config", key, value]);
+
+      const result = await publishFixture(fixture, {
+        ...fixture.invocation,
+        payload: { ...fixture.invocation.payload, mode: "revert", targetPullRequestNumber: 5, revertCommit },
+      });
+
+      expect(result).toMatchObject({ action: "revert" });
+      expect(await markersIn(fixture.root)).toEqual([]);
+    });
   });
 
   it("runs registered checks, creates a deterministic commit, pushes without credentials, and requests a PR", async () => {
@@ -858,6 +1037,178 @@ describe("publication with a failing check reports it (spec 051, P-2)", () => {
   });
 });
 
+describe("the push token never meets code the agent or a project controls (final review I1)", () => {
+  const sink = async () => ({ number: 21, url: "https://github.com/example/demo/pull/21", reconciled: false });
+  async function checkedInvocation(fixture: Awaited<ReturnType<typeof createFixture>>, extra: Record<string, unknown> = {}) {
+    const [candidate] = await readCandidateRepositories([{ repositoryId: "demo", directory: fixture.checkout }]);
+    return { ...fixture.invocation, payload: { ...fixture.invocation.payload, candidateTreeSha: candidate!.treeSha, reportChecks: true, ...extra } } as typeof fixture.invocation;
+  }
+  function withReadiness(invocation: Extract<WorkerInvocation, { kind: "publish" }>, readiness: Extract<WorkerInvocation, { kind: "publish" }>["payload"]["project"]["readiness"]): typeof invocation {
+    const copy = structuredClone(invocation);
+    copy.payload.project.readiness = readiness;
+    return copy;
+  }
+
+  it("runs no readiness command, and starts no devcontainer, for a publication of the checked tree", async () => {
+    const fixture = await createFixture(true, "remote.git", { devcontainer: true });
+    await writeFile(join(fixture.checkout, "WORK.md"), "checked work\n", "utf8");
+    const marker = join(fixture.root, "readiness-ran");
+    const invocation = withReadiness(await checkedInvocation(fixture), [{
+      cwd: "repo/demo", executable: process.execPath, args: ["-e", `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran")`], timeoutSeconds: 10,
+    }]);
+    const devcontainer = vi.fn();
+    const result = await publishWorkspace({ rootPath: fixture.root, invocation, credentialProvider: async () => ({}), pullRequestSink: sink,
+      devcontainerCli: { run: devcontainer } });
+    await expect(readFile(marker, "utf8")).rejects.toThrow();
+    expect(devcontainer).not.toHaveBeenCalled();
+    expect(result.checks).toEqual([]);
+    expect((await git(fixture.bare, ["rev-parse", `refs/heads/${invocation.payload.headBranch}`])).trim()).toBe(result.commit);
+  });
+
+  it("pushes to the registered URL whatever the workspace's Git config says: push URLs, URL rewrites and hooks are never read", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "WORK.md"), "checked work\n", "utf8");
+    const invocation = await checkedInvocation(fixture);
+    const attacker = join(fixture.root, "attacker.git");
+    await git(fixture.root, ["init", "--bare", "--initial-branch=main", attacker]);
+    const marker = join(fixture.root, "hook-ran");
+    const hooks = join(fixture.root, "evil-hooks");
+    await mkdir(hooks);
+    await writeFile(join(hooks, "pre-push"), `#!/bin/sh\ntouch '${marker}'\n`, { mode: 0o755 });
+    // Planted where a leftover process would plant it: after AgentX read the config for its own checks.
+    for (const [key, value] of [
+      ["remote.origin.pushurl", pathToFileURL(attacker).href],
+      [`url.${pathToFileURL(attacker).href}.pushInsteadOf`, pathToFileURL(fixture.bare).href],
+      [`remote.${pathToFileURL(fixture.bare).href}.pushurl`, pathToFileURL(attacker).href],
+      ["core.hooksPath", hooks],
+    ] as const) await git(fixture.checkout, ["config", key, value]);
+
+    const result = await publishWorkspace({ rootPath: fixture.root, invocation, credentialProvider: async () => ({}), pullRequestSink: sink });
+
+    expect((await git(fixture.bare, ["rev-parse", `refs/heads/${invocation.payload.headBranch}`])).trim()).toBe(result.commit);
+    expect(await git(attacker, ["for-each-ref"])).toBe("");
+    await expect(readFile(marker, "utf8")).rejects.toThrow();
+  });
+
+  it("stops every process left in the workspace before it asks for the push credential, and pushes nothing when it cannot", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "WORK.md"), "checked work\n", "utf8");
+    const invocation = await checkedInvocation(fixture);
+    const order: string[] = [];
+    await publishWorkspace({ rootPath: fixture.root, invocation, pullRequestSink: sink,
+      stopWorkspaceProcesses: async (root) => { order.push(`stop ${root}`); },
+      credentialProvider: async () => { order.push("credential"); return {}; } });
+    expect(order).toEqual([`stop ${await realpath(fixture.root)}`, "credential"]);
+
+    const refusedBranch = { ...invocation, payload: { ...invocation.payload, headBranch: `agentx/${randomUUID()}` } } as typeof invocation;
+    const credentialProvider = vi.fn(async () => ({}));
+    await expect(publishWorkspace({ rootPath: fixture.root, invocation: refusedBranch, pullRequestSink: sink, credentialProvider,
+      stopWorkspaceProcesses: async () => { throw new Error("AgentX could not stop every process left in the workspace, so it did not push"); } }))
+      .rejects.toThrow(/could not stop every process/);
+    expect(credentialProvider).not.toHaveBeenCalled();
+    await expect(git(fixture.bare, ["rev-parse", `refs/heads/${refusedBranch.payload.headBranch}`])).rejects.toThrow();
+  });
+
+  it("removes every container but the worker's and stops every process, repeating until neither finds anything, before it asks for the push credential; and pushes nothing when either fails (docker containment)", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "WORK.md"), "checked work\n", "utf8");
+    const invocation = await checkedInvocation(fixture);
+    const order: string[] = [];
+    // The first round finds a container and a process; the second finds nothing.
+    const found = { containers: [2, 0], processes: [1, 0] };
+    await publishWorkspace({ rootPath: fixture.root, invocation, pullRequestSink: sink,
+      sweepWorkspaceContainers: async () => { order.push("containers"); return { removed: found.containers.shift() ?? 0 }; },
+      stopWorkspaceProcesses: async () => { order.push("processes"); return { stopped: found.processes.shift() ?? 0 }; },
+      credentialProvider: async () => { order.push("credential"); return {}; } });
+    expect(order).toEqual(["containers", "processes", "containers", "processes", "containers", "credential"]);
+
+    for (const failure of [
+      { sweepWorkspaceContainers: async () => { throw agentXError("RUNTIME_UNAVAILABLE", "AgentX could not reach Docker to check for containers left from the workspace, so it did not push"); } },
+      { sweepWorkspaceContainers: async () => ({ removed: 1 }) },
+    ]) {
+      const refused = { ...invocation, payload: { ...invocation.payload, headBranch: `agentx/${randomUUID()}` } } as typeof invocation;
+      const credentialProvider = vi.fn(async () => ({}));
+      await expect(publishWorkspace({ rootPath: fixture.root, invocation: refused, pullRequestSink: sink, credentialProvider,
+        stopWorkspaceProcesses: async () => ({ stopped: 0 }), ...failure }))
+        .rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE", message: expect.stringMatching(/did not push/) as unknown });
+      expect(credentialProvider).not.toHaveBeenCalled();
+      await expect(git(fixture.bare, ["rev-parse", `refs/heads/${refused.payload.headBranch}`])).rejects.toThrow();
+    }
+  });
+
+  it("stops the task's processes and containers before every credential request, in an ordinary publication and in a revert (docker containment)", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "README.md"), "changed\n", "utf8");
+    const order: string[] = [];
+    const steps = {
+      sweepWorkspaceContainers: async () => { order.push("containers"); return { removed: 0 }; },
+      stopWorkspaceProcesses: async () => { order.push("processes"); return { stopped: 0 }; },
+      credentialProvider: async () => { order.push("credential"); return {}; },
+    };
+    await publishWorkspace({ rootPath: fixture.root, invocation: fixture.invocation, pullRequestSink: sink, ...steps });
+    expect(order).toEqual(["containers", "processes", "containers", "credential", "containers", "processes", "containers", "credential"]);
+
+    const revertFixture = await createFixture();
+    await writeFile(join(revertFixture.seed, "MERGED.md"), "squashed feature\n", "utf8");
+    await git(revertFixture.seed, ["add", "MERGED.md"]);
+    await git(revertFixture.seed, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "squashed feature"]);
+    const revertCommit = (await git(revertFixture.seed, ["rev-parse", "HEAD"])).trim();
+    await git(revertFixture.seed, ["push", "origin", "main"]);
+    order.length = 0;
+    await publishWorkspace({ rootPath: revertFixture.root, pullRequestSink: sink, ...steps,
+      invocation: { ...revertFixture.invocation, payload: { ...revertFixture.invocation.payload, mode: "revert", targetPullRequestNumber: 5, revertCommit } } });
+    expect(order).toEqual(["containers", "processes", "containers", "credential", "containers", "processes", "containers", "credential"]);
+
+    const refusedFixture = await createFixture();
+    await writeFile(join(refusedFixture.checkout, "README.md"), "changed\n", "utf8");
+    const credentialProvider = vi.fn(async () => ({}));
+    await expect(publishWorkspace({ rootPath: refusedFixture.root, invocation: refusedFixture.invocation, pullRequestSink: sink, credentialProvider,
+      stopWorkspaceProcesses: async () => ({ stopped: 0 }),
+      sweepWorkspaceContainers: async () => { throw agentXError("RUNTIME_UNAVAILABLE", "AgentX could not reach Docker, so it did not push"); } }))
+      .rejects.toMatchObject({ code: "RUNTIME_UNAVAILABLE" });
+    expect(credentialProvider).not.toHaveBeenCalled();
+  });
+
+  it("really stops a process a check left running in the workspace", async () => {
+    const fixture = await createFixture();
+    await writeFile(join(fixture.checkout, "WORK.md"), "work\n", "utf8");
+    const pidFile = join(fixture.root, "leftover.pid");
+    // The check starts a process in its own session that outlives it, as a daemon would.
+    const invocation = withReadiness(fixture.invocation, [{
+      cwd: "repo/demo", executable: process.execPath, timeoutSeconds: 10,
+      args: ["-e", `const c = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: "ignore" }); require("node:fs").writeFileSync(${JSON.stringify(pidFile)}, String(c.pid)); c.unref();`],
+    }]);
+    await publishWorkspace({ rootPath: fixture.root, invocation, credentialProvider: async () => ({}), pullRequestSink: sink });
+    const pid = Number(await readFile(pidFile, "utf8"));
+    expect(Number.isInteger(pid) && pid > 0).toBe(true);
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  it("builds the published commit on the base the broker pinned, not the workspace manifest's", async () => {
+    const fixture = await createFixture();
+    const pinned = (await git(fixture.checkout, ["rev-parse", "HEAD"])).trim();
+    // The agent commits on its own and points the (agent-writable) manifest at its commit.
+    await writeFile(join(fixture.checkout, "AGENT.md"), "agent commit\n", "utf8");
+    await git(fixture.checkout, ["add", "AGENT.md"]);
+    await git(fixture.checkout, ["-c", "user.name=Agent", "-c", "user.email=agent@example.test", "commit", "-m", "agent"]);
+    const agentCommit = (await git(fixture.checkout, ["rev-parse", "HEAD"])).trim();
+    const manifest = await manifestOf(fixture);
+    manifest.repositories[0]!.resolvedCommit = agentCommit;
+    await writeFile(join(fixture.root, ".agentx", "preparation-manifest.json"), JSON.stringify(manifest), "utf8");
+    await writeFile(join(fixture.checkout, "WORK.md"), "checked work\n", "utf8");
+    const invocation = await checkedInvocation(fixture, { workflowBaseCommit: pinned });
+
+    const result = await publishWorkspace({ rootPath: fixture.root, invocation, credentialProvider: async () => ({}), pullRequestSink: sink });
+
+    expect((await git(fixture.checkout, ["rev-parse", `${result.commit}^`])).trim()).toBe(pinned);
+    expect((await git(fixture.checkout, ["rev-parse", `${result.commit}^{tree}`])).trim()).toBe((invocation.payload as { candidateTreeSha?: string }).candidateTreeSha);
+
+    const missing = { ...invocation, payload: { ...invocation.payload, headBranch: `agentx/${randomUUID()}`, workflowBaseCommit: "e".repeat(40) } } as typeof invocation;
+    await expect(publishWorkspace({ rootPath: fixture.root, invocation: missing, credentialProvider: async () => ({}), pullRequestSink: sink }))
+      .rejects.toThrow(/base commit is missing/);
+  });
+});
+
 const NO_BASH = 'OCI runtime exec failed: exec failed: unable to start container process: exec: "bash": executable file not found in $PATH: unknown';
 const UP_OUTPUT = "{\"outcome\":\"success\",\"containerId\":\"f832494aef96\",\"remoteUser\":\"node\",\"remoteWorkspaceFolder\":\"/workspaces/demo\"}";
 
@@ -902,7 +1253,7 @@ async function filesUnder(directory: string): Promise<string[]> {
 async function createFixture(
   checkPasses: boolean | "timeout" = true,
   remoteName = "remote.git",
-  options: { devcontainer?: boolean } = {},
+  options: { devcontainer?: boolean; seedFiles?: Record<string, string> } = {},
 ) {
   const root = await mkdtemp(join(tmpdir(), "agentx-publish-test-"));
   temporaryDirectories.push(root);
@@ -912,7 +1263,8 @@ async function createFixture(
   await git(root, ["init", "--bare", "--initial-branch=main", bare]);
   await git(root, ["init", "--initial-branch=main", seed]);
   await writeFile(join(seed, "README.md"), "initial\n", "utf8");
-  await git(seed, ["add", "README.md"]);
+  for (const [name, content] of Object.entries(options.seedFiles ?? {})) await writeFile(join(seed, name), content, "utf8");
+  await git(seed, ["add", "README.md", ...Object.keys(options.seedFiles ?? {})]);
   await git(seed, ["-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "commit", "-m", "initial"]);
   await git(seed, ["remote", "add", "origin", pathToFileURL(bare).href]);
   await git(seed, ["push", "origin", "main"]);

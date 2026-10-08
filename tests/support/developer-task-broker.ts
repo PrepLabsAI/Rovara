@@ -37,7 +37,10 @@ export function memoryS3() {
       const range = /^bytes=0-(\d+)$/.exec(command.input.Range ?? "");
       const bytes = Buffer.from(body, "utf8");
       const served = range ? bytes.subarray(0, Number(range[1]) + 1) : bytes;
-      return { Body: { transformToString: async (encoding = "utf8") => served.toString(encoding as BufferEncoding) } };
+      return { ContentLength: served.byteLength, Body: {
+        transformToByteArray: async () => Uint8Array.from(served),
+        transformToString: async (encoding = "utf8") => served.toString(encoding as BufferEncoding),
+      } };
     }
     throw new Error(`memoryS3 does not handle ${command.constructor.name}`);
   });
