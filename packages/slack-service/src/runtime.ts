@@ -1,6 +1,7 @@
 import { ClassifierError, createModelClassifier, usableClassifierTimeout } from "@agentx/orchestrator/action-classifier";
 import { createGateSession, type ActionClassifier, type GateDecision } from "@agentx/orchestrator/action-gate";
 import { createOrchestratorRuntime, type OrchestratorOptions } from "@agentx/orchestrator/orchestrator";
+import { createModelRequestRouter, type RequestRouter } from "@agentx/orchestrator/request-router";
 import { TURN_GATE_REASON_LIMIT, redactAndCap } from "@agentx/contracts";
 import type { ServiceLog, TurnInput } from "./processor.js";
 
@@ -74,6 +75,30 @@ export async function createHostedClassifier(options: {
       provider: options.model.provider, model: options.model.modelId, errorName: error instanceof Error ? error.name : "unknown",
     });
     return { classifier: async () => { throw new ClassifierError("the classifier is unavailable"); }, available: false };
+  }
+}
+
+/**
+ * Task 21: the router for plain top-level requests, on the classifier's own model and timeout (capped for routing).
+ * Made only where the classifier is available; if it cannot be made, the service logs why (the error class only) and
+ * every routed request gets the three-choice card.
+ */
+export async function createHostedRequestRouter(options: {
+  classifierAvailable: boolean;
+  model: { provider: string; modelId: string };
+  timeoutMs: number;
+  log: ServiceLog;
+  modelRuntime?: Parameters<typeof createModelRequestRouter>[0]["modelRuntime"];
+}): Promise<RequestRouter | undefined> {
+  if (!options.classifierAvailable) return undefined;
+  try {
+    return await createModelRequestRouter({
+      model: options.model, timeoutMs: options.timeoutMs, failOnUnknownModel: true,
+      ...(options.modelRuntime === undefined ? {} : { modelRuntime: options.modelRuntime }),
+    });
+  } catch (error) {
+    options.log("route.router_unavailable", { provider: options.model.provider, model: options.model.modelId, errorName: error instanceof Error ? error.name : "unknown" });
+    return undefined;
   }
 }
 

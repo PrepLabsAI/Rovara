@@ -32,11 +32,15 @@ import {
   type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
-import { SLACK_TASK_THREADS_OFF_NOTICE, parseSlackSecrets, validSignature, type SlackIngressLog, type SlackSecrets } from "./slack-ingress.js";
+import {
+  SLACK_TASK_THREADS_OFF_NOTICE, createAnswerQueue, parseSlackSecrets, threadPendingCounter, validSignature, type SlackIngressLog, type SlackSecrets,
+} from "./slack-ingress.js";
 import {
   SlackWorkflowStartError,
+  WORKFLOW_PATH_ANSWER_ACTION,
   WORKFLOW_PATH_FULL_ACTION,
   WORKFLOW_PATH_QUICK_ACTION,
+  answerChosenRequest,
   createDynamoWorkflowChoiceStore,
   handOffChosenWorkflow,
   isHandedOffWorkflowStart,
@@ -343,6 +347,7 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
           const message = error instanceof WorkflowInteractionRefusal ? error.message
             : error instanceof WorkflowDecisionSubmissionError ? "I couldn't save that decision. Try again."
             : action.actionId === WORKFLOW_PATH_QUICK_ACTION || action.actionId === WORKFLOW_PATH_FULL_ACTION ? "I couldn't take that choice. Press the button again, or reply `quick` or `full`."
+            : action.actionId === WORKFLOW_PATH_ANSWER_ACTION ? "I couldn't take that choice. Press the button again, or reply `answer`."
             : action.actionId === "agentx_workflow_retry_reviews" ? "I couldn't start the review retry. Use the latest AgentX task update and try again."
             : action.actionId === "agentx_workflow_retry_publish" ? "I couldn't retry opening the pull request. Use the latest AgentX task update and try again."
             : action.actionId === "agentx_workflow_send_back" ? "I couldn't send the task back to coding. Use the latest AgentX task update and try again."
@@ -642,6 +647,12 @@ export function createAwsSlackInteractivityHandler() {
       if (process.env.SHARED_TASKS !== "enabled") throw new WorkflowInteractionRefusal(SLACK_TASK_THREADS_OFF_NOTICE);
       return handOffChosenWorkflow({ store: choices, handOff: (event) => handOffToSelf(lambda, event) }, input);
     },
+    // Task 21: queuing for the chat agent is quick (DynamoDB and SQS), so it runs while Slack waits.
+    async answerWorkflowChoice(input) {
+      if (process.env.SHARED_TASKS !== "enabled") throw new WorkflowInteractionRefusal(SLACK_TASK_THREADS_OFF_NOTICE);
+      return answerChosenRequest({ store: choices, enqueueAnswer: createAnswerQueue({ sqs, queueUrl, changePending: threadPendingCounter(documentClient, threadsTableName) }),
+        updateQuestion: async (question) => slackApi((await secrets()).botToken, "chat.update", question) }, input);
+    },
     respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text),
   }) : undefined;
   // The handed-off start runs inside this Lambda's own 10 seconds: a broker that has not answered in 7 is given up on,
@@ -778,6 +789,11 @@ export function workflowSlackHandlers(deps: {
    * the question's own message, which loses its buttons only once the task actually started.
    */
   chooseWorkflowPath?(input: { thread: SlackThread; userId: string; workflowPath: WorkflowPath; choiceId: string; responseUrl: string; messageTs: string }): Promise<WorkflowChoiceOutcome>;
+  /**
+   * Task 21: "Just answer" on a routed card: the request waiting in the thread goes to the chat agent instead, and the
+   * card loses its buttons. "started" means it is queued; only the requester's press counts.
+   */
+  answerWorkflowChoice?(input: { thread: SlackThread; userId: string; choiceId: string; messageTs: string }): Promise<WorkflowChoiceOutcome>;
   /** Answers the member who pressed a button, privately (Slack's response_url). */
   respondEphemeral?(responseUrl: string, text: string): Promise<void>;
 }) {
@@ -893,6 +909,16 @@ export function workflowSlackHandlers(deps: {
   };
   return {
     async handleAction(action: SlackBlockAction) {
+      if (action.actionId === WORKFLOW_PATH_ANSWER_ACTION) {
+        let choiceId: unknown;
+        try { choiceId = asRecord(JSON.parse(action.value)).choiceId; } catch { choiceId = undefined; }
+        if (typeof choiceId !== "string" || !CHANGE_ID.test(choiceId)) throw new WorkflowInteractionRefusal(CHOICE_NOT_WAITING);
+        if (deps.answerWorkflowChoice === undefined) throw new Error("Just answer is not configured");
+        const outcome = await deps.answerWorkflowChoice({ thread: action.thread, userId: action.userId, choiceId, messageTs: action.messageTs });
+        if (outcome !== "started") throw new WorkflowInteractionRefusal(workflowChoiceRefusal(outcome));
+        // The card already says so; the chat agent's reply is the answer.
+        return;
+      }
       if (action.actionId === WORKFLOW_PATH_QUICK_ACTION || action.actionId === WORKFLOW_PATH_FULL_ACTION) {
         let choiceId: unknown;
         try { choiceId = asRecord(JSON.parse(action.value)).choiceId; } catch { choiceId = undefined; }

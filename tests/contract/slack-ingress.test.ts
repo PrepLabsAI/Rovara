@@ -42,12 +42,19 @@ function harness(options: {
   pendingChoice?: Record<string, string>;
   shared?: { threads: Record<string, { mode: "view" | "continue"; closed?: boolean; taskId?: string; workflowThread?: true }>; lookupThrows?: boolean; claimThrows?: boolean };
   threadNote?: { outcome?: "captured" | "duplicate" | "refused"; throws?: boolean };
+  /** Task 21: plain top-level requests are queued for the Slack service to route; `fail` routes throw first. */
+  routing?: { fail?: number };
+  /** Task 21: the requester's typed `answer` sends the waiting request to the chat agent. */
+  answerChoice?: { outcome?: WorkflowChoiceOutcome };
 } = {}) {
   const stopCalls: Array<{ thread: unknown; userId: string }> = [];
   const workflowStarts: Array<{ thread: unknown; userId: string; instructions: string; requestId: string }> = [];
   const workflowChoices: Array<{ thread: unknown; userId: string; instructions: string; requestId: string }> = [];
   const workflowSelections: Array<{ thread: unknown; userId: string; workflowPath: "QUICK" | "FULL" }> = [];
   const pendingLookups: string[] = [];
+  const routed: Array<{ message: SlackRequestMessage; groupId: string }> = [];
+  const answers: Array<{ thread: unknown; userId: string }> = [];
+  let routeFailures = options.routing?.fail ?? 0;
   const threadNotes: Array<{ taskId: string; thread: unknown; userId: string; messageTs: string; eventId: string; text: string }> = [];
   const ephemerals: Array<{ channel: string; threadTs: string; user: string; text: string }> = [];
   const memberChecks: string[] = [];
@@ -164,6 +171,21 @@ function harness(options: {
         return userId === undefined ? undefined : { choiceId: "11111111-1111-4111-8111-111111111111", userId };
       },
     }),
+    ...(options.routing === undefined ? {} : {
+      routeRequest: async (message: SlackRequestMessage, groupId: string) => {
+        if (routeFailures > 0) {
+          routeFailures -= 1;
+          throw new Error("SQS unavailable");
+        }
+        routed.push({ message, groupId });
+      },
+    }),
+    ...(options.answerChoice === undefined ? {} : {
+      answerWorkflowChoice: async (input: { thread: unknown; userId: string }) => {
+        answers.push(input);
+        return options.answerChoice?.outcome ?? "started";
+      },
+    }),
     ...(options.threadNote === undefined ? {} : {
       recordThreadNote: async (input: { taskId: string; thread: unknown; userId: string; messageTs: string; eventId: string; text: string }) => {
         threadNotes.push(input);
@@ -207,7 +229,7 @@ function harness(options: {
     }),
   });
   return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls, workflowStarts, workflowChoices, workflowSelections, pendingLookups, threadNotes, ephemerals, noticedAt,
-    claimedEvents: () => [...claimed] };
+    routed, answers, claimedEvents: () => [...claimed] };
 }
 
 function sharedNoticeKeyItem(table: FakeDynamoDb, subject: string): { noticedAt?: unknown } | undefined {
@@ -947,6 +969,82 @@ describe("starting a task from a Slack mention (gap 3)", () => {
     expect(nothing.workflowSelections).toEqual([]);
     expect(nothing.claimedEvents()).toEqual([]);
     expect(nothing.queue).toEqual([]);
+  });
+
+  describe("smart routing for plain top-level requests (Task 21)", () => {
+    const routing = { ...starting, routing: {} };
+
+    it("queues a plain top-level request for the Slack service to route, and says nothing itself", async () => {
+      const { handler, routed, queue, posts, workflowChoices, workflowStarts, pending, claimedEvents } = harness(routing);
+      expect((await send(handler, signedEvent(mention({ eventId: "EvRoute1", event: { text: `<@${bot}> Fix the typo on the login page` } })))).status).toBe(200);
+      expect(routed.map((entry) => [entry.message.eventId, entry.message.text, entry.message.thread])).toEqual([["EvRoute1", "Fix the typo on the login page", topThread]]);
+      expect(routed[0]!.groupId).toBe(createHash("sha256").update(`${team}/${channel}/1695500000.000001`).digest("hex"));
+      expect(SlackRequestMessageSchema.parse(routed[0]!.message)).toEqual(routed[0]!.message);
+      // Counted like any queued request, which the Slack service lowers when it is done.
+      expect([...pending.values()]).toEqual([1]);
+      expect(queue).toEqual([]);
+      expect(workflowChoices).toEqual([]);
+      expect(workflowStarts).toEqual([]);
+      expect(posts).toEqual([]);
+      expect(claimedEvents()).toEqual(["EvRoute1"]);
+    });
+
+    it("never routes a prefixed request, a reply in a thread, or a path named alone", async () => {
+      const { handler, routed, queue, workflowChoices, workflowStarts, posts } = harness(routing);
+      await send(handler, signedEvent(mention({ eventId: "EvRoute2", event: { text: `<@${bot}> chat: what does retry.ts do?` } })));
+      await send(handler, signedEvent(mention({ eventId: "EvRoute3", event: { ts: "1695500000.000301", text: `<@${bot}> quick: fix the typo` } })));
+      await send(handler, signedEvent(mention({ eventId: "EvRoute4", event: { ts: "1695500000.000302", text: `<@${bot}> full: add SSO` } })));
+      await send(handler, signedEvent(mention({ eventId: "EvRoute5", event: { ts: "1695500000.000303", text: `<@${bot}> workflow quick: fix the typo` } })));
+      await send(handler, signedEvent(mention({ eventId: "EvRoute6", event: { ts: "1695500000.000304", text: `<@${bot}> workflow full: add SSO` } })));
+      await send(handler, signedEvent(mention({ eventId: "EvRoute7", event: { ts: "1695500000.000305", text: `<@${bot}> workflow: add SSO` } })));
+      await send(handler, threadReply("EvRoute8", `<@${bot}> also bump the version`));
+      await send(handler, signedEvent(mention({ eventId: "EvRoute9", event: { ts: "1695500000.000306", text: `<@${bot}> quick` } })));
+      expect(routed).toEqual([]);
+      expect(queue.map((entry) => entry.message.text)).toEqual(["what does retry.ts do?", "also bump the version"]);
+      expect(workflowStarts.map((start) => start.instructions)).toEqual(["fix the typo", "add SSO", "fix the typo", "add SSO"]);
+      expect(workflowChoices.map((choice) => choice.instructions)).toEqual(["add SSO"]);
+      expect(posts.at(-1)?.text).toBe("Add your request after it, for example `quick: fix the login typo`.");
+    });
+
+    it("answers 500 and undoes every record when the request could not be queued, so Slack's retry is new", async () => {
+      const { handler, routed, pending, claimedEvents, posts } = harness({ ...routing, routing: { fail: 1 } });
+      const event = signedEvent(mention({ eventId: "EvRoute10", event: { text: `<@${bot}> Add SSO` } }));
+      expect((await send(handler, event)).status).toBe(500);
+      expect(claimedEvents()).toEqual([]);
+      expect([...pending.values()]).toEqual([0]);
+      expect((await send(handler, event)).status).toBe(200);
+      expect(routed.map((entry) => entry.message.eventId)).toEqual(["EvRoute10"]);
+      expect(posts).toEqual([]);
+    });
+
+    it("still says where task threads are off, and routes nothing", async () => {
+      const { handler, routed, posts } = harness({ workflowStart: {}, workflowChoice: {}, routing: {} });
+      await send(handler, signedEvent(mention({ eventId: "EvRoute11", event: { text: `<@${bot}> Add SSO` } })));
+      expect(routed).toEqual([]);
+      expect(posts.map((post) => post.text)).toEqual([SLACK_TASK_THREADS_OFF_NOTICE]);
+    });
+
+    it("reads the requester's typed `answer` or `just answer` in a waiting thread, by mention or plain reply", async () => {
+      const waiting = harness({ ...starting, ...waitingForPratik, answerChoice: {} });
+      await send(waiting.handler, threadReply("EvAnswer1", `<@${bot}> just answer`));
+      await send(waiting.handler, threadReply("EvAnswer2", "answer please", { type: "message" }));
+      expect(waiting.answers).toEqual([{ thread: choiceThread, userId: pratik }, { thread: choiceThread, userId: pratik }]);
+      // The chat agent's reply is the answer: nothing else is posted, and nothing is queued here.
+      expect(waiting.posts).toEqual([]);
+      expect(waiting.queue).toEqual([]);
+      expect(waiting.workflowSelections).toEqual([]);
+      // Another member's plain `answer` is left alone, unclaimed.
+      await send(waiting.handler, threadReply("EvAnswer3", "answer", { type: "message", user: "U0TEAMMATE1" }));
+      expect(waiting.claimedEvents()).toEqual(["EvAnswer1", "EvAnswer2"]);
+      // A refusal is said privately.
+      const refused = harness({ ...starting, ...waitingForPratik, answerChoice: { outcome: "starting" } });
+      await send(refused.handler, threadReply("EvAnswer4", `<@${bot}> answer`));
+      expect(refused.ephemerals.map((entry) => entry.text)).toEqual([workflowChoiceRefusal("starting")]);
+      // Where `answer` cannot be sent to the chat agent, it is an ordinary reply.
+      const without = harness({ ...starting, ...waitingForPratik });
+      await send(without.handler, threadReply("EvAnswer5", `<@${bot}> answer`));
+      expect(without.queue.map((entry) => entry.message.text)).toEqual(["answer"]);
+    });
   });
 
   it("explains a start failure in plain words with a reference", async () => {

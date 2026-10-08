@@ -86,12 +86,20 @@ describe("Slack-only workflow, end to end in one process", () => {
     const OLDER = "farewell takes an untyped name.";
     const e2e = await createWorkflowE2E({ optionalChecks: [LINT], model: { plan: PLAN, edits: EDITS,
       // The code review notes an older problem in a file the change never touched: advisory, so it does not block.
-      reviews: { CODE: [reviewerReply.json([{ text: OLDER, origin: "PRE_EXISTING", severity: "LOW", file: "repo/demo/farewell.ts", line: 1 }])] } } });
-    // A plain request asks Quick or Full; the requester's button starts it.
+      reviews: { CODE: [reviewerReply.json([{ text: OLDER, origin: "PRE_EXISTING", severity: "LOW", file: "repo/demo/farewell.ts", line: 1 }])] } },
+      // Task 21: the classifier model sorts the plain request as a small change.
+      route: () => ({ kind: "small_change", outcome: "ok" }) });
+    // A plain request is routed: a small change gets a card suggesting Quick, and nothing starts until the requester's Start.
     expect(await e2e.mention("Add a greet(name) function")).toBe(200);
-    expect(e2e.slack.lastPostWithAction("agentx_workflow_path_quick").text).toContain("How should I handle this?");
+    expect(e2e.routeCalls).toEqual(["Add a greet(name) function"]);
+    const routedCard = e2e.slack.lastPostWithAction("agentx_workflow_path_quick");
+    expect(routedCard.text).toContain("Looks like a small change. I'll use Quick.");
+    expect(e2e.db.find((item) => String(item.pk).startsWith("DEVTASK#"))).toEqual([]);
     await e2e.click("agentx_workflow_path_quick");
     expect(e2e.slack.updates.at(-1)?.text).toContain("chose Quick.");
+    // The card is retired: its suggestion kept, its buttons gone.
+    expect(JSON.stringify(e2e.slack.updates.at(-1)?.blocks)).toContain("Looks like a small change.");
+    expect(JSON.stringify(e2e.slack.updates.at(-1)?.blocks)).not.toContain("\"actions\"");
     expect(e2e.workflow().path).toBe("QUICK");
     await e2e.settle();
     expect(e2e.slack.lastPostWithAction("agentx_workflow_approve").text).toContain("coding plan");
@@ -369,6 +377,80 @@ describe("Slack-only workflow, end to end in one process", () => {
     expect(await e2e.mention("chat: what does greeting.ts export?")).toBe(200);
     expect(e2e.chatQueue).toEqual([expect.objectContaining({ text: "what does greeting.ts export?" })]);
     expect(e2e.slack.posts.some((post) => post.blocks !== undefined)).toBe(false);
+  }, 60_000);
+
+  it("answers a plain question through the chat agent, with no card and no task (Task 21)", async () => {
+    const e2e = await createWorkflowE2E({ route: () => ({ kind: "question", outcome: "ok" }) });
+    expect(await e2e.mention("What does greeting.ts export?")).toBe(200);
+    expect(e2e.chatQueue).toEqual([expect.objectContaining({ text: "What does greeting.ts export?", userId: MAYA.slackUserId })]);
+    expect(e2e.slack.posts).toEqual([]);
+    expect(e2e.db.find((item) => String(item.pk).startsWith("DEVTASK#") || String(item.pk).startsWith("WORKFLOW_CHOICE#"))).toEqual([]);
+    expect(e2e.routeLogs).toEqual([{ event: "route.classified", fields: expect.objectContaining({ kind: "question", outcome: "ok" }) as unknown }]);
+    // Never the message's text in a log.
+    expect(JSON.stringify(e2e.routeLogs)).not.toContain("greeting.ts");
+  }, 60_000);
+
+  it("skips the model for every prefix (Task 21)", async () => {
+    const e2e = await createWorkflowE2E({ route: () => { throw new Error("the model must not be asked"); } });
+    expect(await e2e.mention("chat: what does greeting.ts export?")).toBe(200);
+    expect(await e2e.mention("workflow: add a greet(name) function", { ts: "1695500100.000001", threadTs: "1695500100.000001" })).toBe(200);
+    expect(e2e.slack.lastPostWithAction("agentx_workflow_path_quick").text).toContain("How should I handle this?");
+    expect(await e2e.mention("quick: add a greet(name) function", { ts: "1695500200.000001", threadTs: "1695500200.000001" })).toBe(200);
+    expect(e2e.workflow().path).toBe("QUICK");
+    expect(e2e.routeCalls).toEqual([]);
+  }, 60_000);
+
+  it("starts the other path from Use Full instead, refuses anyone else's press, and retires the card (Task 21)", async () => {
+    const e2e = await createWorkflowE2E({ route: () => ({ kind: "small_change", outcome: "ok" }) });
+    expect(await e2e.mention("Add a greet(name) function")).toBe(200);
+    await e2e.click("agentx_workflow_path_full", { user: "U0TEAMMATE1" });
+    expect(e2e.slack.responses.at(-1)?.text).toBe("Only the person who asked can choose.");
+    await e2e.click("agentx_workflow_path_answer", { user: "U0TEAMMATE1" });
+    expect(e2e.slack.responses.at(-1)?.text).toBe("Only the person who asked can choose.");
+    expect(e2e.db.find((item) => String(item.pk).startsWith("DEVTASK#"))).toEqual([]);
+    expect(e2e.chatQueue).toEqual([]);
+    await e2e.click("agentx_workflow_path_full");
+    expect(e2e.workflow().path).toBe("FULL");
+    const retired = e2e.slack.updates.at(-1);
+    expect(retired?.text).toContain(`<@${MAYA.slackUserId}> chose Full.`);
+    expect(retired?.blocks.some((block) => (block as { type: string }).type === "actions")).toBe(false);
+    const choice = logged().map((line) => JSON.parse(line) as Record<string, unknown>).find((line) => line.event === "route.choice");
+    expect(choice).toMatchObject({ suggestion: "small_change", chosen: "FULL", choice: "switched_path" });
+    expect(choice?.choiceId).toBe(e2e.routeLogs[0]?.fields.choiceId);
+  }, 60_000);
+
+  it("sends the original request to the chat agent from Just answer, or a typed answer, and starts no task (Task 21)", async () => {
+    const e2e = await createWorkflowE2E({ route: () => ({ kind: "large_change", outcome: "ok" }) });
+    expect(await e2e.mention("Rework how greetings are stored")).toBe(200);
+    expect(e2e.slack.lastPostWithAction("agentx_workflow_path_full").text).toContain("Looks like a bigger change. I'll use Full");
+    await e2e.click("agentx_workflow_path_answer");
+    expect(e2e.chatQueue).toEqual([expect.objectContaining({ text: "Rework how greetings are stored", userId: MAYA.slackUserId })]);
+    expect(e2e.slack.updates.at(-1)?.text).toBe(`<@${MAYA.slackUserId}> asked for an answer. I'll reply here.`);
+    expect(e2e.slack.updates.at(-1)?.blocks.some((block) => (block as { type: string }).type === "actions")).toBe(false);
+    // The spent card starts nothing more.
+    await e2e.click("agentx_workflow_path_full");
+    expect(e2e.slack.responses.at(-1)?.text).toBe("This choice is no longer waiting.");
+    expect(e2e.db.find((item) => String(item.pk).startsWith("DEVTASK#"))).toEqual([]);
+    expect(logged().some((line) => line.includes("\"event\":\"route.choice\"") && line.includes("\"choice\":\"just_answer\""))).toBe(true);
+
+    // A typed `just answer`, in plain words, does the same.
+    const typed = await createWorkflowE2E({ route: () => ({ kind: "small_change", outcome: "ok" }) });
+    expect(await typed.mention("Fix the greeting typo")).toBe(200);
+    expect(await typed.mention("just answer", { type: "message" })).toBe(200);
+    expect(typed.chatQueue).toEqual([expect.objectContaining({ text: "Fix the greeting typo" })]);
+    expect(typed.db.find((item) => String(item.pk).startsWith("DEVTASK#"))).toEqual([]);
+  }, 60_000);
+
+  it("offers Just answer, Quick and Full when the classifier times out, and Start is never pressed for the requester (Task 21)", async () => {
+    const e2e = await createWorkflowE2E({ route: () => ({ kind: "unclear", outcome: "timeout" }) });
+    expect(await e2e.mention("Make greetings better")).toBe(200);
+    const card = e2e.slack.lastPostWithAction("agentx_workflow_path_answer");
+    expect(card.text).toContain("How should I handle this?");
+    expect(JSON.stringify(card.blocks)).not.toContain("\"Start\"");
+    expect(e2e.routeLogs[0]).toMatchObject({ event: "route.classified", fields: { kind: "unclear", outcome: "timeout" } });
+    expect(e2e.db.find((item) => String(item.pk).startsWith("DEVTASK#"))).toEqual([]);
+    await e2e.click("agentx_workflow_path_quick");
+    expect(e2e.workflow().path).toBe("QUICK");
   }, 60_000);
 });
 

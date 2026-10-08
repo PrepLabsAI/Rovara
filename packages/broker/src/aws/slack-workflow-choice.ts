@@ -3,16 +3,29 @@
 // ingress and the interactivity handler.
 import { randomUUID } from "node:crypto";
 import { DeleteCommand, GetCommand, PutCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { SlackMessageTimestampSchema, SlackThreadSchema, SlackUserIdSchema, workflowRequestId, type SlackThread } from "@agentx/contracts";
-import { WORKFLOW_PATH_FULL_ACTION, WORKFLOW_PATH_QUICK_ACTION } from "../developer/workflow-actions.js";
+import {
+  REQUEST_ROUTE_KINDS,
+  SlackMessageTimestampSchema,
+  SlackThreadSchema,
+  SlackUserIdSchema,
+  routeChoiceLabel,
+  suggestionCardText,
+  workflowChoiceKey,
+  workflowChoicePut,
+  workflowChoiceQuestionUpdate,
+  workflowRequestId,
+  type RequestSuggestion,
+  type SlackThread,
+} from "@agentx/contracts";
+import { WORKFLOW_PATH_ANSWER_ACTION, WORKFLOW_PATH_FULL_ACTION, WORKFLOW_PATH_QUICK_ACTION } from "../developer/workflow-actions.js";
 import { answeredWorkflowCard } from "../developer/workflow-messages.js";
 
 export type WorkflowPath = "QUICK" | "FULL";
+/** Task 21: what a requester can choose for a waiting request: a path, or an answer from the chat agent instead. */
+export type WorkflowChoice = WorkflowPath | "ANSWER";
 
-export { WORKFLOW_PATH_FULL_ACTION, WORKFLOW_PATH_QUICK_ACTION };
+export { WORKFLOW_PATH_ANSWER_ACTION, WORKFLOW_PATH_FULL_ACTION, WORKFLOW_PATH_QUICK_ACTION };
 
-/** How long a Quick or Full choice waits for its requester. */
-const WORKFLOW_CHOICE_RETENTION_SECONDS = 24 * 60 * 60;
 /** How long one answer holds the request while it starts, so a second answer at the same time starts nothing. */
 const WORKFLOW_CHOICE_START_LEASE_SECONDS = 30;
 /** Broker refusals that the same request would meet again: the choice is dropped, so the thread is free for a new one. */
@@ -25,6 +38,13 @@ export function parseWorkflowPathReply(text: string): WorkflowPath | undefined {
   const match = PATH_REPLY.exec(text.trim());
   if (match === null) return undefined;
   return match[1]!.toUpperCase() === "FULL" ? "FULL" : "QUICK";
+}
+
+const ANSWER_REPLY = /^(?:just\s+)?answer(?:\s+(?:please|pls|it|me))?[\s.!]*$/i;
+
+/** Task 21: a requester's loose answer to a waiting choice: a path, or `answer` / `just answer` for the chat agent. */
+export function parseWorkflowChoiceReply(text: string): WorkflowChoice | undefined {
+  return parseWorkflowPathReply(text) ?? (ANSWER_REPLY.test(text.trim()) ? "ANSWER" : undefined);
 }
 
 export type WorkflowStartRequest = { kind: "start"; path?: WorkflowPath; instructions: string } | { kind: "chat"; text: string };
@@ -75,9 +95,9 @@ function firstStep(path: WorkflowPath): string {
  * Task 15/19: the Quick or Full question once `userId` answered it (by button or by reply): the question kept, its
  * buttons gone, and who chose which path beneath it, with the first step.
  */
-export function workflowChoiceAnsweredMessage(userId: string, path: WorkflowPath): { text: string; blocks: Array<Record<string, unknown>> } {
-  const chosen = workflowChosenNotice(userId, path);
-  return { text: chosen, blocks: answeredWorkflowCard(QUESTION_TEXT, chosen) };
+export function workflowChoiceAnsweredMessage(userId: string, path: WorkflowChoice, suggestion?: RequestSuggestion): { text: string; blocks: Array<Record<string, unknown>> } {
+  const chosen = path === "ANSWER" ? `<@${userId}> asked for an answer. I'll reply here.` : workflowChosenNotice(userId, path);
+  return { text: chosen, blocks: answeredWorkflowCard(suggestion === undefined ? QUESTION_TEXT : suggestionCardText(suggestion), chosen) };
 }
 
 /** The one-line confirmation that a task started on `path`. */
@@ -162,8 +182,11 @@ export async function startWorkflowThroughBroker(invoke: (event: Record<string, 
  */
 export type WorkflowChoiceOutcome = "started" | "none" | "not_requester" | "other_path" | "starting";
 
-/** A waiting request its requester chose a path for: what starts, and the question's message when it is known. */
-export interface ChosenRequest { choiceId: string; instructions: string; requestId: string; messageTs?: string }
+/**
+ * A waiting request its requester chose a path for: what starts, the question's message when it is known, and (Task 21)
+ * what the routed card suggested.
+ */
+export interface ChosenRequest { choiceId: string; instructions: string; requestId: string; messageTs?: string; suggestion?: RequestSuggestion }
 
 /** A request waiting in its thread for its requester's Quick or Full choice. */
 export interface WorkflowChoiceStore {
@@ -174,29 +197,30 @@ export interface WorkflowChoiceStore {
    * Fixes the path for the waiting request and holds it while it starts (a short lease), returning it to start. The
    * same path again, once `release`d, returns it again, so a start that failed can be retried.
    */
-  choose(input: { thread: SlackThread; userId: string; workflowPath: WorkflowPath; choiceId?: string }): Promise<ChosenRequest | Exclude<WorkflowChoiceOutcome, "started">>;
+  choose(input: { thread: SlackThread; userId: string; workflowPath: WorkflowChoice; choiceId?: string }): Promise<ChosenRequest | Exclude<WorkflowChoiceOutcome, "started">>;
   /** Task 19: the question's own message, so a typed answer can take its buttons away. */
   attachQuestion(thread: SlackThread, choiceId: string, messageTs: string): Promise<void>;
   /** Task 19: the request `choose` holds for `userId` on `workflowPath`, read again where its start runs; else undefined. */
-  held(input: { thread: SlackThread; userId: string; workflowPath: WorkflowPath; choiceId: string }): Promise<ChosenRequest | undefined>;
+  held(input: { thread: SlackThread; userId: string; workflowPath: WorkflowChoice; choiceId: string }): Promise<ChosenRequest | undefined>;
   /** Ends the hold `choose` took, after a start that did not go through. */
   release(thread: SlackThread, choiceId: string): Promise<void>;
   /** Forgets the request once its task started. */
-  complete(thread: SlackThread, workflowPath: WorkflowPath): Promise<void>;
+  complete(thread: SlackThread, workflowPath: WorkflowChoice): Promise<void>;
   /** Forgets a request whose question could not be posted, or whose start can never go through. */
   discard(thread: SlackThread, choiceId: string): Promise<void>;
 }
 
 type DocumentClient = { send(command: unknown): Promise<unknown> };
 
+const SUGGESTIONS: ReadonlySet<string> = new Set(REQUEST_ROUTE_KINDS.filter((kind) => kind !== "question"));
+
 function chosenRequest(item: Record<string, unknown>): ChosenRequest {
   return { choiceId: item.choiceId as string, instructions: item.instructions as string, requestId: item.requestId as string,
-    ...(typeof item.messageTs === "string" ? { messageTs: item.messageTs } : {}) };
+    ...(typeof item.messageTs === "string" ? { messageTs: item.messageTs } : {}),
+    ...(typeof item.suggestion === "string" && SUGGESTIONS.has(item.suggestion) ? { suggestion: item.suggestion as RequestSuggestion } : {}) };
 }
 
-function choiceKey(thread: SlackThread): { pk: string; sk: string } {
-  return { pk: `WORKFLOW_CHOICE#${thread.teamId}#${thread.channelId}#${thread.threadTs}`, sk: "META" };
-}
+const choiceKey = workflowChoiceKey;
 
 function conditionFailed(error: unknown): boolean {
   return error instanceof Error && error.name === "ConditionalCheckFailedException";
@@ -218,19 +242,9 @@ export function createDynamoWorkflowChoiceStore(input: { documentClient: Documen
   return {
     async save({ thread, userId, instructions }) {
       const choiceId = randomUUID();
-      const at = now();
       try {
-        await documentClient.send(new PutCommand({
-          TableName: tableName,
-          Item: {
-            ...choiceKey(thread), entityType: "WORKFLOW_PATH_CHOICE", choiceId, teamId: thread.teamId, channelId: thread.channelId,
-            threadTs: thread.threadTs, userId, instructions, requestId: choiceId, createdAt: new Date(at).toISOString(),
-            expiresAt: Math.floor(at / 1_000) + WORKFLOW_CHOICE_RETENTION_SECONDS,
-          },
-          // An expired choice the table has not removed yet does not block a new one.
-          ConditionExpression: "attribute_not_exists(pk) OR expiresAt <= :now",
-          ExpressionAttributeValues: { ":now": Math.floor(at / 1_000) },
-        }));
+        // The same item the Slack service saves for a routed request (Task 21).
+        await documentClient.send(new PutCommand({ TableName: tableName, ...workflowChoicePut({ thread, userId, instructions, choiceId, nowMs: now() }) }));
       } catch (error) {
         if (conditionFailed(error)) throw new WorkflowChoiceWaitingError({ cause: error });
         throw error;
@@ -269,10 +283,7 @@ export function createDynamoWorkflowChoiceStore(input: { documentClient: Documen
     },
     async attachQuestion(thread, choiceId, messageTs) {
       try {
-        await documentClient.send(new UpdateCommand({
-          TableName: tableName, Key: choiceKey(thread), UpdateExpression: "SET messageTs = :ts",
-          ConditionExpression: "choiceId = :choiceId", ExpressionAttributeValues: { ":ts": messageTs, ":choiceId": choiceId },
-        }));
+        await documentClient.send(new UpdateCommand({ TableName: tableName, ...workflowChoiceQuestionUpdate(thread, choiceId, messageTs) }));
       } catch (error) {
         // Already answered and forgotten: nothing is left to attach to.
         if (!conditionFailed(error)) throw error;
@@ -344,6 +355,13 @@ export interface ChosenWorkflowDependencies {
   updateQuestion?(input: { channel: string; ts: string; text: string; blocks: Array<Record<string, unknown>> }): Promise<void>;
 }
 
+/** Task 21: one structured line per choice made on a routed card, keyed by the choice; never the request's text. */
+function logRouteChoice(chosen: ChosenRequest, path: WorkflowChoice): void {
+  if (chosen.suggestion === undefined) return;
+  console.log(JSON.stringify({ component: "slack-workflow-choice", event: "route.choice", choiceId: chosen.choiceId, suggestion: chosen.suggestion,
+    chosen: path, choice: routeChoiceLabel(chosen.suggestion, path) }));
+}
+
 /**
  * Starts a request `choose` holds and forgets it. A failed start throws (a refusal as SlackWorkflowStartError): a
  * refusal the same request would meet again drops the choice; any other failure leaves it waiting on that path, so the
@@ -372,9 +390,10 @@ export async function finishChosenWorkflow(
     // The task started; the leftover choice only answers "already starting" or expires.
     logChoice("workflow.choice_complete_failed", error);
   }
+  logRouteChoice(chosen, input.workflowPath);
   if (chosen.messageTs !== undefined && deps.updateQuestion !== undefined) {
     try {
-      await deps.updateQuestion({ channel: input.thread.channelId, ts: chosen.messageTs, ...workflowChoiceAnsweredMessage(input.userId, input.workflowPath) });
+      await deps.updateQuestion({ channel: input.thread.channelId, ts: chosen.messageTs, ...workflowChoiceAnsweredMessage(input.userId, input.workflowPath, chosen.suggestion) });
     } catch (error) {
       // The task started; a question left with its buttons only answers "no longer waiting" if pressed again.
       logChoice("workflow.choice_question_update_failed", error);
@@ -394,6 +413,58 @@ export async function startChosenWorkflow(
   if (typeof chosen === "string") return chosen;
   // A button press names the question's message itself, in case it was never recorded with the request.
   await finishChosenWorkflow(deps, input, { ...chosen, ...(chosen.messageTs === undefined && input.messageTs !== undefined ? { messageTs: input.messageTs } : {}) });
+  return "started";
+}
+
+/**
+ * Task 21: the Slack event ID of the chat request a "Just answer" choice queues. It is derived from the choice, so a
+ * repeated answer queues the same request (SQS drops the copy) and the chat agent's records never meet another event's.
+ */
+export function answerRequestEventId(choiceId: string): string {
+  return `Ev${choiceId.replace(/-/g, "")}`;
+}
+
+/** What answering a waiting request needs: the store, the chat queue, and (optionally) the question's edit. */
+export interface AnsweredRequestDependencies {
+  store: WorkflowChoiceStore;
+  /** Queues `text` for the chat agent in the thread, as the Slack event `eventId`. */
+  enqueueAnswer(input: { thread: SlackThread; userId: string; text: string; eventId: string }): Promise<void>;
+  /** Replaces the question once its request went to the chat agent (chat.update); best effort. */
+  updateQuestion?(input: { channel: string; ts: string; text: string; blocks: Array<Record<string, unknown>> }): Promise<void>;
+}
+
+/**
+ * Task 21: the requester's "Just answer" (a button or a typed `answer`): the waiting request goes to the chat agent and
+ * is forgotten, and the question loses its buttons. Only the requester's answer counts; nothing starts a task. A queue
+ * that failed gives the hold back and throws, so the same answer can be given again.
+ */
+export async function answerChosenRequest(
+  deps: AnsweredRequestDependencies,
+  input: { thread: SlackThread; userId: string; choiceId?: string; messageTs?: string },
+): Promise<WorkflowChoiceOutcome> {
+  const chosen = await deps.store.choose({ thread: input.thread, userId: input.userId, workflowPath: "ANSWER", ...(input.choiceId === undefined ? {} : { choiceId: input.choiceId }) });
+  if (typeof chosen === "string") return chosen;
+  try {
+    await deps.enqueueAnswer({ thread: input.thread, userId: input.userId, text: chosen.instructions, eventId: answerRequestEventId(chosen.choiceId) });
+  } catch (error) {
+    await deps.store.release(input.thread, chosen.choiceId).catch((releaseError: unknown) => logChoice("workflow.choice_release_failed", releaseError));
+    throw error;
+  }
+  try {
+    await deps.store.complete(input.thread, "ANSWER");
+  } catch (error) {
+    // The request is queued; the leftover choice only answers "already starting" or expires.
+    logChoice("workflow.choice_complete_failed", error);
+  }
+  logRouteChoice(chosen, "ANSWER");
+  const messageTs = chosen.messageTs ?? input.messageTs;
+  if (messageTs !== undefined && deps.updateQuestion !== undefined) {
+    try {
+      await deps.updateQuestion({ channel: input.thread.channelId, ts: messageTs, ...workflowChoiceAnsweredMessage(input.userId, "ANSWER", chosen.suggestion) });
+    } catch (error) {
+      logChoice("workflow.choice_question_update_failed", error);
+    }
+  }
   return "started";
 }
 

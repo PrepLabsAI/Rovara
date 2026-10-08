@@ -10,10 +10,12 @@ import { promisify } from "node:util";
 import {
   SharedTaskRecordSchema,
   SlackChannelBindingSchema,
+  SlackRequestMessageSchema,
   WorkerInvocationSchema,
   WorkflowSnapshotSchema,
   sharedTaskKey,
   type ProjectCommand,
+  type SlackRequestMessage,
   type SlackThread,
   type WorkerInvocation,
   type WorkflowOptionalCheck,
@@ -24,7 +26,9 @@ import type { HttpApiV2Event } from "../../packages/broker/src/aws/lambda.js";
 import { createNotifierHandler } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import { createSlackIngressHandler, recordThreadNoteThroughBroker, startWorkflowThroughBroker } from "../../packages/broker/src/aws/slack-ingress.js";
 import { createSlackInteractivityHandler, invokeWorkflowDecision, workflowSlackHandlers } from "../../packages/broker/src/aws/slack-interactivity.js";
-import { createDynamoWorkflowChoiceStore, offerWorkflowChoice, startChosenWorkflow, type SlackWorkflowStartInput } from "../../packages/broker/src/aws/slack-workflow-choice.js";
+import { answerChosenRequest, createDynamoWorkflowChoiceStore, offerWorkflowChoice, startChosenWorkflow, type SlackWorkflowStartInput } from "../../packages/broker/src/aws/slack-workflow-choice.js";
+import { createChoiceOffer, routeSlackRequest } from "../../packages/slack-service/src/request-routing.js";
+import type { RequestRoute } from "../../packages/orchestrator/src/request-router.js";
 import type { Notice } from "../../packages/broker/src/developer/notifications.js";
 import type { GitHubPullRequestDetails, GitHubPullRequestFeedback, GitHubPullRequestInput, GitHubPullRequestResult, GitHubPullRequestUpdate } from "../../packages/broker/src/github-app.js";
 import { RepositoryGrantService } from "../../packages/broker/src/repository-access.js";
@@ -221,6 +225,11 @@ export async function createWorkflowE2E(options: {
   optionalChecks?: WorkflowOptionalCheck[];
   /** Runs in the worker just before it publishes, with the repository's directory (to change the workspace, say). */
   beforePublish?: (repositoryDirectory: string) => Promise<void>;
+  /**
+   * Task 21: the scripted classifier model that routes a plain top-level mention in the Slack service. Absent: the
+   * classifier is unavailable, so every plain mention gets the Just answer / Quick / Full card.
+   */
+  route?: (text: string) => RequestRoute | Promise<RequestRoute>;
 } = {}) {
   const github = new FakeGitHub();
   const harness = await createDeveloperTaskBroker({
@@ -438,6 +447,27 @@ export async function createWorkflowE2E(options: {
   const choices = createDynamoWorkflowChoiceStore({ documentClient: db, tableName: "slack-threads" });
   const chooseWorkflowPath = (input: Parameters<typeof startChosenWorkflow>[1]) => startChosenWorkflow({ store: choices, startWorkflow,
     updateQuestion: async (question) => { slack.update(question); } }, input);
+  // Task 21: "Just answer" queues the waiting request for the chat agent, on the production store and adapters.
+  const answerWorkflowChoice = (input: Parameters<typeof answerChosenRequest>[1]) => answerChosenRequest({ store: choices,
+    enqueueAnswer: async (answer) => { chatQueue.push(SlackRequestMessageSchema.parse({ version: 1, ...answer, receivedAt: new Date().toISOString() })); },
+    updateQuestion: async (question) => { slack.update(question); } }, input);
+  // Task 21: the Slack service's side of a plain top-level mention: route it, then answer it or post its card.
+  const routedQueue: SlackRequestMessage[] = [];
+  const routeLogs: Array<{ event: string; fields: Readonly<Record<string, string | number | boolean>> }> = [];
+  const routeCalls: string[] = [];
+  const offerChoice = createChoiceOffer({ documentClient: db, tableName: "slack-threads",
+    post: async (thread, text, blocks) => slack.post({ channel: thread.channelId, threadTs: thread.threadTs, text, ...(blocks === undefined ? {} : { blocks }) }).ts,
+    log: (event, fields) => { routeLogs.push({ event, fields }); } });
+  const runRoutedRequests = async () => {
+    for (const message of routedQueue.splice(0, routedQueue.length)) {
+      const route = options.route;
+      await routeSlackRequest(message, {
+        ...(route === undefined ? {} : { route: async (text: string) => { routeCalls.push(text); return route(text); } }),
+        offer: offerChoice, answer: async (question) => { chatQueue.push(question); }, finish: async () => undefined,
+        log: (event, fields) => { routeLogs.push({ event, fields }); },
+      });
+    }
+  };
   const ingress = createSlackIngressHandler({
     secrets: async () => ({ signingSecret: SIGNING_SECRET, botToken: "xoxb-e2e" }),
     getBinding: async (teamId, channelId) => {
@@ -457,6 +487,8 @@ export async function createWorkflowE2E(options: {
     requestWorkflowChoice: (input) => offerWorkflowChoice({ store: choices, postMessage: async (message) => slack.post(message) }, input),
     chooseWorkflowPath,
     pendingWorkflowChoice: (thread) => choices.pending(thread),
+    routeRequest: async (message) => { routedQueue.push(message); },
+    answerWorkflowChoice,
     // The production adapters: a reply in the task's thread goes to the broker's thread-note event, and its
     // private acknowledgement through the strict Slack double.
     recordThreadNote: (input) => recordThreadNoteThroughBroker(invokeBroker(handler), input),
@@ -495,6 +527,7 @@ export async function createWorkflowE2E(options: {
       retryImplementation: (input) => brokerEvent(handler, "workflow-retry", input),
       close: (input) => brokerEvent(handler, "workflow-close", input),
       chooseWorkflowPath,
+      answerWorkflowChoice,
       respondEphemeral: (url, text) => slack.respondEphemeral(url, text),
     }),
   });
@@ -506,7 +539,7 @@ export async function createWorkflowE2E(options: {
 
   let sequence = 0;
   return {
-    db, handler, slack, github, repoDirectory, baseCommit, prompts, turns, chatQueue, checkRuns, brokerCalls, credentialAttempts,
+    db, handler, slack, github, repoDirectory, baseCommit, prompts, turns, chatQueue, checkRuns, brokerCalls, credentialAttempts, routeCalls, routeLogs,
 
     /** A signed Events API callback for a message in the test thread; answers the HTTP status. */
     async mention(text: string, mentionOptions: { user?: string; threadTs?: string; type?: "app_mention" | "message"; ts?: string } = {}): Promise<number> {
@@ -523,7 +556,10 @@ export async function createWorkflowE2E(options: {
           text: type === "app_mention" ? `<@${BOT_USER}> ${text}` : text,
         },
       };
-      return (await ingress(signedRequest("/v1/slack/events", JSON.stringify(payload)))).statusCode;
+      const status = (await ingress(signedRequest("/v1/slack/events", JSON.stringify(payload)))).statusCode;
+      // The Slack service takes a routed request off the queue after Slack has its answer.
+      await runRoutedRequests();
+      return status;
     },
 
     /** Presses the button `actionId` on the latest message that carries it. */

@@ -294,23 +294,48 @@ See [Sharing a task to Slack](mcp-install.md#sharing-a-task-to-slack).
 
 #### Starting a task from Slack
 
-In every bound channel, a plain top-level `@AgentX <request>` starts a task on the channel's project.
-AgentX asks in the thread how to handle it, with a button for each path:
+In every bound channel, a plain top-level `@AgentX <request>` (no prefix) is routed. Slack gets its
+answer at once; the Slack service then asks the safety-check model, the same classifier model the
+action gate uses (`classifierModel` and `classifierProvider` from `agentx init`, the stack parameters
+GateClassifierModelId and GateClassifierProvider, read by the service as `AGENTX_GATE_CLASSIFIER_MODEL`
+and `AGENTX_GATE_CLASSIFIER_PROVIDER`), to sort the request. The model sees a fixed instruction and the
+message text only, never repository content, and waits at most the classifier's timeout
+(`AGENTX_GATE_CLASSIFIER_TIMEOUT_MS`), capped at 4 seconds. There is no separate routing model setting.
+
+- **Question**: the chat agent answers in the thread, as for `chat:`. No task is created.
+- **Small change**: a card says "Looks like a small change. I'll use Quick." with **Start** (Quick),
+  **Use Full instead** and **Just answer**.
+- **Large change**: a card suggests Full (requirements, design, then a coding plan) with **Start**
+  (Full), **Use Quick instead** and **Just answer**.
+- **Unclear**, or the model timed out, gave an unusable answer, failed, or the classifier is not
+  available in this environment: a card offers **Just answer**, **Quick** and **Full**, each explained
+  in one line.
+
+The paths:
 
 - **Quick**: a short coding plan for the owner to approve, then coding, checks, reviews and a draft
   pull request.
 - **Full**: requirements, then a design, then a coding plan, each approved by the owner before any
   code changes.
 
-Only the person who asked can choose: they press a button, or reply `quick` or `full` in the thread
-(with or without mentioning AgentX; loose answers such as `Quick please` or `let's do full` count).
-A teammate's answer is ignored. The question waits for a day. A request that starts with `quick:` or
-`full:` (or the older `workflow quick:` / `workflow full:`) skips the question and starts on that
-path; `workflow:` asks it. A thread holds one waiting question at a time. In a thread with no
+The model only suggests: nothing that changes code starts until the requester presses **Start** or a
+path's button. **Just answer** sends the original request to the chat agent. Once a choice is made,
+the card loses its buttons and says who chose what. Only the person who asked can choose: they press
+a button, or reply `quick`, `full` or `answer` in the thread (with or without mentioning AgentX;
+loose answers such as `Quick please`, `let's do full` or `just answer` count). A teammate's answer is
+ignored. The card waits for a day. The Slack service logs one `route.classified` line per request
+(kind, outcome `ok` / `invalid` / `timeout` / `unavailable`, latency, choice ID) and the Slack ingress
+logs one `route.choice` line per choice (`suggestion_accepted`, `switched_path`, `picked_path` or
+`just_answer`), never the message text or the model's reason.
+
+Prefixes skip routing and never call the model: a request that starts with `quick:` or `full:` (or the
+older `workflow quick:` / `workflow full:`) starts on that path; `workflow:` asks Quick or Full with
+no suggestion; `chat:` goes to the chat agent. Replies inside existing threads are never routed. A thread holds one waiting question at a time. In a thread with no
 question waiting, a reply such as `@AgentX full please` goes to the chat agent like any other.
 
-**Changed behavior:** a plain top-level mention used to go to the chat agent. To reach the chat agent
-now, start the request with `chat:`, for example `@AgentX chat: what does retry.ts do?`. Mentions in
+**Changed behavior:** a plain top-level mention used to go to the chat agent. A question still does,
+after routing; to always reach the chat agent, start the request with `chat:`, for example
+`@AgentX chat: what does retry.ts do?`. Mentions in
 a thread the chat agent is already answering still go to it without `chat:`.
 
 When a task cannot start, AgentX says why in the thread: the open-task limit, a thread that already

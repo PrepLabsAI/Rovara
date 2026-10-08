@@ -12,6 +12,7 @@ import { SendMessageCommand, SQSClient } from "@aws-sdk/client-sqs";
 import { InvokeCommand, LambdaClient } from "@aws-sdk/client-lambda";
 import {
   CLOSED_SHARED_NOTICE,
+  routeAttributes,
   SharedTaskRecordSchema,
   SlackChannelBindingSchema,
   SlackChannelIdSchema,
@@ -38,10 +39,12 @@ import { chatPostEphemeral, chatUpdate } from "./slack-web.js";
 import {
   SlackWorkflowStartError,
   WORKFLOW_CHOICE_WAITING_NOTICE,
+  answerChosenRequest,
   WorkflowChoiceWaitingError,
   createDynamoWorkflowChoiceStore,
   isHandedOffWorkflowStart,
   offerWorkflowChoice,
+  parseWorkflowChoiceReply,
   parseWorkflowPathReply,
   parseWorkflowStartRequest,
   startChosenWorkflow,
@@ -52,6 +55,7 @@ import {
   type BrokerReply,
   type HandedOffWorkflowStart,
   type SlackWorkflowStartInput,
+  type WorkflowChoice,
   type WorkflowChoiceOutcome,
   type WorkflowPath,
 } from "./slack-workflow-choice.js";
@@ -95,6 +99,14 @@ export interface SlackIngressDependencies {
   chooseWorkflowPath?: (input: { thread: SlackThread; userId: string; workflowPath: WorkflowPath }) => Promise<WorkflowChoiceOutcome>;
   /** Who a Quick or Full choice waiting in the thread belongs to, so their plain `quick` or `full` reply is read. */
   pendingWorkflowChoice?: (thread: SlackThread) => Promise<{ choiceId: string; userId: string } | undefined>;
+  /**
+   * Task 21: queues a plain top-level request (no `quick:`, `full:`, `workflow…:` or `chat:`) for the Slack service to
+   * route after Slack has its answer: a question goes to the chat agent, a change gets a card suggesting Quick or Full.
+   * Absent: such a request asks Quick or Full here (`requestWorkflowChoice`), as before.
+   */
+  routeRequest?: (message: SlackRequestMessage, messageGroupId: string) => Promise<void>;
+  /** Task 21: the requester's typed `answer` to a waiting choice: its request goes to the chat agent instead. Absent: `answer` is not read. */
+  answerWorkflowChoice?: (input: { thread: SlackThread; userId: string }) => Promise<WorkflowChoiceOutcome>;
   /**
    * Spec 025 FR-035: shared task threads. Absent (the legacy deployment): every thread is ordinary.
    * `lookup` gives the thread's mode, or undefined for an ordinary thread, and throws when it cannot
@@ -376,9 +388,9 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       }
       // Nothing is running: the request goes to the orchestrator like any other.
     }
-    // Gap 3: in a thread with a Quick or Full question waiting, a loose `quick` or `full` answers it. Anywhere else
-    // (an ordinary chat thread) such a reply is the chat agent's, like any other.
-    const pathAnswer = mention.isThreadReply ? parseWorkflowPathReply(text) : undefined;
+    // Gap 3: in a thread with a Quick or Full question waiting, a loose `quick` or `full` answers it (Task 21: and
+    // `answer` sends it to the chat agent). Anywhere else (an ordinary chat thread) such a reply is the chat agent's.
+    const pathAnswer = mention.isThreadReply ? choiceReply(dependencies, text) : undefined;
     if (pathAnswer !== undefined && dependencies.chooseWorkflowPath && dependencies.pendingWorkflowChoice) {
       // A plain message got here only as its requester's answer to a waiting choice (checked before the claim).
       let waiting = mention.kind === "message";
@@ -403,7 +415,11 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       if (request.kind === "chat") {
         chatText = request.text;
       } else if (!plainThreadRequest && !isStopCommand(text)) {
-        return startFromMention(dependencies, log, mention, request);
+        // Task 21: a plain top-level request (no prefix: the instructions are the whole text) is routed by the Slack
+        // service, after Slack has its answer; `workflow:` still asks Quick or Full here.
+        const routed = dependencies.routeRequest !== undefined && !mention.isThreadReply && request.path === undefined && request.instructions === text.trim();
+        return startFromMention(dependencies, log, mention, request,
+          routed ? () => queueRequest(dependencies, log, mention, request.instructions, countedWindowStart, now, true) : undefined);
       }
     }
     if (!chatText) {
@@ -411,44 +427,65 @@ export function createSlackIngressHandler(dependencies: SlackIngressDependencies
       log("mention.empty", { eventId: mention.eventId });
       return respond(200, { ok: true });
     }
-    const message = SlackRequestMessageSchema.parse({
-      version: 1,
-      eventId: mention.eventId,
-      thread,
-      userId: mention.userId,
-      text: chatText,
-      receivedAt: new Date(now()).toISOString(),
-    });
-    const pending = await dependencies.changePending(subject, 1);
-    const ahead = pending - 1;
-    try {
-      await dependencies.enqueue(message, createHash("sha256").update(subject).digest("hex"), Math.max(ahead, 0));
-    } catch {
-      // Undo all records so Slack's retry of this event is processed as new.
-      await dependencies.changePending(subject, -1);
-      if (dependencies.turnLimit && countedWindowStart !== undefined) {
-        try {
-          await dependencies.turnLimit.releaseTurn(subject, countedWindowStart);
-        } catch (error) {
-          // A missed decrement only means a retried event's turn is briefly over-counted; log it,
-          // do not throw, and still release the claim so Slack's retry is processed as new.
-          log("turn_limit.decrement_failed", { eventId: mention.eventId, errorName: errorName(error) });
-        }
-      }
-      await releaseQuietly(dependencies, log, mention.eventId, "enqueue.release_failed");
-      log("mention.enqueue_failed", { eventId: mention.eventId });
-      return respond(500, { error: "request could not be queued" });
-    }
-    log("mention.accepted", { eventId: mention.eventId, pendingInThread: pending });
-    // A message that is only a confirmation answer is answered by the confirmation itself (or the
-    // turn it runs), so "Got it" would be noise. Waiting behind earlier requests is still said.
-    if (ahead > 0) {
-      await post(dependencies, log, thread, `Got it. This is queued behind ${ahead} earlier request${ahead === 1 ? "" : "s"} in this thread.`);
-    } else if (parseConfirmationReply(chatText) === undefined) {
-      await post(dependencies, log, thread, "Got it. I'm on it and will reply in this thread.");
-    }
-    return respond(200, { ok: true });
+    return queueRequest(dependencies, log, mention, chatText, countedWindowStart, now, false);
   };
+}
+
+/**
+ * Queues a claimed request for the Slack service, in its thread's order: for the chat agent, or (`routed`, Task 21) for
+ * the service to route first. A queue that failed undoes every record of the event and answers 500, so Slack retries it.
+ */
+async function queueRequest(
+  dependencies: SlackIngressDependencies,
+  log: SlackIngressLog,
+  mention: Mention,
+  text: string,
+  countedWindowStart: number | undefined,
+  now: () => number,
+  routed: boolean,
+): Promise<HttpResponse> {
+  const { thread } = mention;
+  const subject = slackThreadSubject(thread);
+  const message = SlackRequestMessageSchema.parse({
+    version: 1,
+    eventId: mention.eventId,
+    thread,
+    userId: mention.userId,
+    text,
+    receivedAt: new Date(now()).toISOString(),
+  });
+  const pending = await dependencies.changePending(subject, 1);
+  const ahead = pending - 1;
+  const groupId = createHash("sha256").update(subject).digest("hex");
+  try {
+    await (routed ? dependencies.routeRequest!(message, groupId) : dependencies.enqueue(message, groupId, Math.max(ahead, 0)));
+  } catch {
+    // Undo all records so Slack's retry of this event is processed as new.
+    await dependencies.changePending(subject, -1);
+    if (dependencies.turnLimit && countedWindowStart !== undefined) {
+      try {
+        await dependencies.turnLimit.releaseTurn(subject, countedWindowStart);
+      } catch (error) {
+        // A missed decrement only means a retried event's turn is briefly over-counted; log it,
+        // do not throw, and still release the claim so Slack's retry is processed as new.
+        log("turn_limit.decrement_failed", { eventId: mention.eventId, errorName: errorName(error) });
+      }
+    }
+    await releaseQuietly(dependencies, log, mention.eventId, "enqueue.release_failed");
+    log("mention.enqueue_failed", { eventId: mention.eventId });
+    return respond(500, { error: "request could not be queued" });
+  }
+  log("mention.accepted", { eventId: mention.eventId, pendingInThread: pending, ...(routed ? { routed: true } : {}) });
+  // A routed request is answered by its card or its chat reply within seconds, so "Got it" would be noise.
+  if (routed) return respond(200, { ok: true });
+  // A message that is only a confirmation answer is answered by the confirmation itself (or the
+  // turn it runs), so "Got it" would be noise. Waiting behind earlier requests is still said.
+  if (ahead > 0) {
+    await post(dependencies, log, thread, `Got it. This is queued behind ${ahead} earlier request${ahead === 1 ? "" : "s"} in this thread.`);
+  } else if (parseConfirmationReply(text) === undefined) {
+    await post(dependencies, log, thread, "Got it. I'm on it and will reply in this thread.");
+  }
+  return respond(200, { ok: true });
 }
 
 export function validSignature(
@@ -546,26 +583,35 @@ async function threadsOff(dependencies: SlackIngressDependencies, log: SlackIngr
 async function isChoiceAnswer(dependencies: SlackIngressDependencies, mention: Mention): Promise<boolean> {
   if (dependencies.pendingWorkflowChoice === undefined || dependencies.chooseWorkflowPath === undefined) return false;
   if (mention.botUserId !== undefined && mention.text.includes(`<@${mention.botUserId}>`)) return false;
-  if (parseWorkflowPathReply(slackRequestText(mention.text, mention.botUserId)) === undefined) return false;
+  if (choiceReply(dependencies, slackRequestText(mention.text, mention.botUserId)) === undefined) return false;
   const pending = await dependencies.pendingWorkflowChoice(mention.thread);
   return pending !== undefined && pending.userId === mention.userId;
 }
 
+/** A loose answer to a waiting choice: `quick` or `full`, and (Task 21) `answer` where this ingress can send it to the chat agent. */
+function choiceReply(dependencies: SlackIngressDependencies, text: string): WorkflowChoice | undefined {
+  const reply = parseWorkflowChoiceReply(text);
+  return reply === "ANSWER" && dependencies.answerWorkflowChoice === undefined ? undefined : reply;
+}
+
 /** Gap 3: a Quick or Full answer in a thread. Only the requester's answer starts the request waiting there. */
-async function chooseFromThread(dependencies: SlackIngressDependencies, log: SlackIngressLog, mention: Mention, workflowPath: WorkflowPath): Promise<HttpResponse> {
+async function chooseFromThread(dependencies: SlackIngressDependencies, log: SlackIngressLog, mention: Mention, workflowPath: WorkflowChoice): Promise<HttpResponse> {
   const { thread, eventId } = mention;
   if (dependencies.sharedTask === undefined) return threadsOff(dependencies, log, thread, eventId);
   let outcome: WorkflowChoiceOutcome;
   try {
-    outcome = await dependencies.chooseWorkflowPath!({ thread, userId: mention.userId, workflowPath });
+    // Task 21: `answer` sends the waiting request to the chat agent, whose reply is the answer; nothing is posted here.
+    outcome = workflowPath === "ANSWER"
+      ? await dependencies.answerWorkflowChoice!({ thread, userId: mention.userId })
+      : await dependencies.chooseWorkflowPath!({ thread, userId: mention.userId, workflowPath });
   } catch (error) {
     log("workflow.choice_failed", { eventId, errorName: errorName(error) });
     await post(dependencies, log, thread, startFailureNotice(error, eventId), "workflow.choice_failure_notice_failed");
     return respond(200, { ok: true });
   }
-  log("workflow.choice", { eventId, outcome });
+  log("workflow.choice", { eventId, outcome, ...(workflowPath === "ANSWER" ? { chosen: "ANSWER" } : {}) });
   if (outcome === "started") {
-    await post(dependencies, log, thread, workflowStartedNotice(workflowPath), "workflow.start_notice_failed");
+    if (workflowPath !== "ANSWER") await post(dependencies, log, thread, workflowStartedNotice(workflowPath), "workflow.start_notice_failed");
   } else {
     await ephemeral(dependencies, log, thread, mention.userId, workflowChoiceRefusal(outcome));
   }
@@ -578,6 +624,8 @@ async function startFromMention(
   log: SlackIngressLog,
   mention: Mention,
   request: { path?: WorkflowPath; instructions: string },
+  /** Task 21: queues a plain top-level request for the Slack service to route, instead of asking Quick or Full here. */
+  route?: () => Promise<HttpResponse>,
 ): Promise<HttpResponse> {
   const { thread, eventId } = mention;
   if (dependencies.sharedTask === undefined) return threadsOff(dependencies, log, thread, eventId);
@@ -592,6 +640,7 @@ async function startFromMention(
     log("mention.path_without_request", { eventId });
     return respond(200, { ok: true });
   }
+  if (request.path === undefined && route !== undefined) return route();
   try {
     if (request.path === undefined) {
       if (dependencies.requestWorkflowChoice === undefined) {
@@ -773,6 +822,46 @@ export function parseSlackSecrets(secretString: string): SlackSecrets {
   return { signingSecret: value.signingSecret, botToken: value.botToken };
 }
 
+/**
+ * Task 21: queues a waiting request its requester sent to the chat agent ("Just answer"), counted like any queued
+ * request of its thread. It carries no queued-behind count, so the chat agent says when it starts.
+ */
+export function createAnswerQueue(input: {
+  sqs: { send(command: SendMessageCommand): Promise<unknown> };
+  queueUrl: string;
+  changePending: (threadSubject: string, delta: 1 | -1) => Promise<number>;
+  now?: () => number;
+}): (answer: { thread: SlackThread; userId: string; text: string; eventId: string }) => Promise<void> {
+  const now = input.now ?? Date.now;
+  return async (answer) => {
+    const message = SlackRequestMessageSchema.parse({ version: 1, eventId: answer.eventId, thread: answer.thread, userId: answer.userId,
+      text: answer.text, receivedAt: new Date(now()).toISOString() });
+    const subject = slackThreadSubject(answer.thread);
+    await input.changePending(subject, 1);
+    try {
+      await input.sqs.send(new SendMessageCommand({ QueueUrl: input.queueUrl, MessageBody: JSON.stringify(message),
+        MessageGroupId: createHash("sha256").update(subject).digest("hex"), MessageDeduplicationId: message.eventId }));
+    } catch (error) {
+      await input.changePending(subject, -1).catch(() => undefined);
+      throw error;
+    }
+  };
+}
+
+/** The Slack threads table's count of a thread's queued requests, which the Slack service lowers as each one finishes. */
+export function threadPendingCounter(documentClient: { send(command: UpdateCommand): Promise<{ Attributes?: Record<string, unknown> }> }, tableName: string) {
+  return async (threadSubject: string, delta: 1 | -1): Promise<number> => {
+    const response = await documentClient.send(new UpdateCommand({
+      TableName: tableName,
+      Key: { pk: `THREAD#${threadSubject}`, sk: "META" },
+      UpdateExpression: "ADD pendingRequests :delta",
+      ExpressionAttributeValues: { ":delta": delta },
+      ReturnValues: "UPDATED_NEW",
+    }));
+    return Number(response.Attributes?.pendingRequests ?? 0);
+  };
+}
+
 function createAwsSlackIngressHandler() {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
   const documentClient = DynamoDBDocumentClient.from(new DynamoDBClient(clientConfiguration), {
@@ -817,6 +906,8 @@ function createAwsSlackIngressHandler() {
     await startWorkflowThroughBroker(invokeBroker, input);
   };
   const choices = createDynamoWorkflowChoiceStore({ documentClient, tableName: threadsTableName });
+  const changePending = threadPendingCounter(documentClient, threadsTableName);
+  const enqueueAnswer = createAnswerQueue({ sqs, queueUrl, changePending });
   return createSlackIngressHandler({
     secrets,
     appPosted: { accept: settings.acceptAppPosted, checkMember },
@@ -889,17 +980,17 @@ function createAwsSlackIngressHandler() {
       async pendingWorkflowChoice(thread: SlackThread) {
         return choices.pending(thread);
       },
+      // Task 21: the Slack service routes a plain top-level request; the queue mark (not the body) says so.
+      async routeRequest(message: SlackRequestMessage, messageGroupId: string) {
+        await sqs.send(new SendMessageCommand({ QueueUrl: queueUrl, MessageBody: JSON.stringify(message), MessageGroupId: messageGroupId,
+          MessageDeduplicationId: message.eventId, MessageAttributes: routeAttributes() }));
+      },
+      async answerWorkflowChoice(input: { thread: SlackThread; userId: string }) {
+        return answerChosenRequest({ store: choices, enqueueAnswer: (answer) => enqueueAnswer(answer),
+          updateQuestion: async (question) => chatUpdate((await secrets()).botToken, question) }, input);
+      },
     }),
-    async changePending(threadSubject, delta) {
-      const response = await documentClient.send(new UpdateCommand({
-        TableName: threadsTableName,
-        Key: { pk: `THREAD#${threadSubject}`, sk: "META" },
-        UpdateExpression: "ADD pendingRequests :delta",
-        ExpressionAttributeValues: { ":delta": delta },
-        ReturnValues: "UPDATED_NEW",
-      }));
-      return Number(response.Attributes?.pendingRequests ?? 0);
-    },
+    changePending,
     async enqueue(message, messageGroupId, queuedBehind) {
       await sqs.send(new SendMessageCommand({
         QueueUrl: queueUrl,
