@@ -335,6 +335,18 @@ describe("native developer task workflow", () => {
     } });
     const reviewBlocked = (await harness.dev(MAYA, "GET", `/v1/dev/tasks/${task.taskId}`)).body.task as { workflow: { revision: number; stage: string; state: string; candidate?: { digest: string }; reviews?: Array<{ operationId: string; role: string; candidateDigest: string }> } };
     expect(reviewBlocked.workflow).toMatchObject({ stage: "REVIEW", state: "BLOCKED", candidate: { digest: candidate.digest } });
+    const missingRevisionRetry = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/workflow/review`, { requestId: randomUUID(), candidateDigest: candidate.digest, instructions: "Retry" });
+    expect(missingRevisionRetry.body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    const missingDigestRetry = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/workflow/review`, { requestId: randomUUID(), expectedRevision: reviewBlocked.workflow.revision, instructions: "Retry" });
+    expect(missingDigestRetry.body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    const wrongDigestRetry = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/workflow/review`, { requestId: randomUUID(), expectedRevision: reviewBlocked.workflow.revision, candidateDigest: "f".repeat(64), instructions: "Retry" });
+    expect(wrongDigestRetry.body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
+    const blockedRecord = harness.db.get(`DEVTASK#${task.taskId}`, "META") as Record<string, unknown> & { workflow: { verification?: { candidateDigest: string } } };
+    const originalWorkflow = blockedRecord.workflow;
+    harness.db.set({ ...blockedRecord, workflow: { ...originalWorkflow, verification: { ...originalWorkflow.verification, candidateDigest: "f".repeat(64) } } });
+    const mismatchedEvidenceRetry = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/workflow/review`, { requestId: randomUUID(), expectedRevision: reviewBlocked.workflow.revision, candidateDigest: candidate.digest, instructions: "Retry" });
+    expect(mismatchedEvidenceRetry.body.error).toMatchObject({ code: "CONFIG_INVALID" });
+    harness.db.set(blockedRecord);
     const staleReviewRetry = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/workflow/review`, { requestId: randomUUID(), expectedRevision: reviewBlocked.workflow.revision - 1, candidateDigest: candidate.digest, instructions: "Retry" });
     expect(staleReviewRetry.body.error).toMatchObject({ code: "IDEMPOTENCY_CONFLICT" });
     const reviewRetry = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${task.taskId}/workflow/review`, { requestId: randomUUID(), expectedRevision: reviewBlocked.workflow.revision, candidateDigest: candidate.digest, instructions: "Retry reviews on the same candidate" });

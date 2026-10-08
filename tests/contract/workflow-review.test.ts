@@ -189,4 +189,53 @@ describe("workflow reviewer output", () => {
       await rm(rootPath, { recursive: true, force: true });
     }
   });
+
+  it("keeps reviews blocked when the format retry is still malformed", async () => {
+    const rootPath = await mkdtemp(join(tmpdir(), "agentx-review-json-still-invalid-"));
+    const repositoryDirectory = join(rootPath, "repo", "payments");
+    await mkdir(repositoryDirectory, { recursive: true });
+    const git = async (...args: string[]) => { await execFile("git", ["-C", repositoryDirectory, ...args], { encoding: "utf8" }); };
+    await git("init", "--quiet");
+    await git("config", "user.email", "review@example.invalid");
+    await git("config", "user.name", "Review Test");
+    await writeFile(join(repositoryDirectory, "app.ts"), "export const value = 1;\n");
+    await git("add", "app.ts");
+    await git("commit", "--quiet", "-m", "baseline");
+    let responseIndex = 0;
+    let listener: ((event: unknown) => void) | undefined;
+    const adapter: PiSessionAdapter = {
+      async create(input) {
+        const sessionFile = join(input.sessionDirectory, `${input.conversationId}.jsonl`);
+        await writeFile(sessionFile, "{}");
+        return {
+          conversationId: input.conversationId ?? "review-session",
+          sessionFile,
+          async prompt() {
+            responseIndex += 1;
+            listener?.({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Review complete. No findings." }] } });
+          },
+          async abort() {},
+          getModel: () => ({ provider: "test", modelId: "review-v1" }),
+          getSessionStats: () => ({ tokens: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, total: 2 }, cost: 0 } as never),
+          subscribe(callback) { listener = callback; return () => { listener = undefined; }; },
+          dispose() {},
+        };
+      },
+    };
+    try {
+      const { readCandidateRepositories } = await import("../../packages/worker/src/verification/candidate.js");
+      const repositories = [{ repositoryId: "payments", directory: repositoryDirectory }];
+      const candidate = await readCandidateRepositories(repositories);
+      const reports = await runWorkflowReviews({
+        operationId: "11111111-1111-4111-8111-111111111111",
+        rootPath, model: { provider: "test", modelId: "review-v1" }, candidate, repositories, piAdapter: adapter,
+      });
+      expect(responseIndex).toBe(4);
+      expect(reports.map(({ status, failureReason }) => [status, failureReason])).toEqual([
+        ["UNKNOWN", "INVALID_JSON"], ["UNKNOWN", "INVALID_JSON"],
+      ]);
+    } finally {
+      await rm(rootPath, { recursive: true, force: true });
+    }
+  });
 });
