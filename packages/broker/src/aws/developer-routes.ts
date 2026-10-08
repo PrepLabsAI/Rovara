@@ -35,9 +35,10 @@ import {
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { DeveloperTaskActions } from "./developer-task-actions.js";
-import { getTaskDocumentView, routeDeveloperTaskRequest, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
+import { getTaskDocumentView, getWorkflowFeedbackReview, routeDeveloperTaskRequest, submitWorkflowFeedbackDecision, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
-import { createTaskWeb } from "./task-web.js";
+import { createFeedbackReviewWeb } from "./feedback-review-web.js";
+import { TASK_PAGE, createTaskWeb } from "./task-web.js";
 
 export interface DeveloperApiConfiguration {
   issuer: string; env: string; methods: { slack: boolean; oidc: boolean }; slackTeamId?: string;
@@ -67,6 +68,8 @@ export interface DeveloperRouteDependencies {
   now: () => number;
   /** The developer task routes' broker actions; without them /v1/dev/tasks* answers NOT_FOUND. */
   tasks?: DeveloperTaskActions;
+  /** Reconciles all already-linked PRs using GitHub's current API state before owner decisions. */
+  refreshTaskFeedback?(taskId: string): Promise<void>;
 }
 export interface DeveloperCaller { developerId: string; sessionId: string; amr: DeveloperSignInMethod; name: string; slackUserId?: string; email?: string }
 
@@ -567,6 +570,7 @@ export function developerTaskRouteDependencies(
     ...(deps.developer.slackTeamId === undefined ? {} : { slackTeamId: deps.developer.slackTeamId }),
     issuer: deps.developer.issuer,
     actions: deps.tasks!,
+    ...(deps.refreshTaskFeedback === undefined ? {} : { refreshTaskFeedback: deps.refreshTaskFeedback.bind(deps) }),
     ...(initialSlackThread === undefined ? {} : { initialSlackThread }),
     checkAccess: (project) => checkProjectAccess(deps, caller, project),
     channelMember: async (slackUserId, channelId) => {
@@ -595,11 +599,21 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
       try { return await authenticateDeveloperSessionId(deps, sessionId); }
       catch { return undefined; }
     };
-    // Task 18: the read-only task page; it answers every other /review/ path as not found.
-    return createTaskWeb({
+    // Task 18: the read-only task page; every other /review/ path is the PR-feedback review.
+    if (TASK_PAGE.test(url.pathname)) {
+      return createTaskWeb({
+        authenticateSession,
+        getTaskDocumentView: (caller, taskId) => getTaskDocumentView(developerTaskRouteDependencies(deps, caller), caller, taskId),
+      })(request, url);
+    }
+    const web = createFeedbackReviewWeb({
+      origin: new URL(deps.developer.issuer).origin,
       authenticateSession,
-      getTaskDocumentView: (caller, taskId) => getTaskDocumentView(developerTaskRouteDependencies(deps, caller), caller, taskId),
-    })(request, url);
+      getWorkflowFeedbackReview: (caller, taskId) => getWorkflowFeedbackReview(developerTaskRouteDependencies(deps, caller), caller, taskId),
+      submitWorkflowFeedbackDecision: (caller, taskId, input) => submitWorkflowFeedbackDecision(developerTaskRouteDependencies(deps, caller), caller, taskId, input),
+      now: deps.now,
+    });
+    return web(request, url);
   }
   // Never request.jwtClaims: no API Gateway authorizer runs on /v1/dev/* (D17).
   const caller = await authenticateDeveloper(deps, await deps.developer.verifyAccessToken(request.headers.authorization));

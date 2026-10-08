@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 import {
   WorkflowFeedbackBundleSchema, WorkflowFeedbackBundleRefSchema, WorkflowFeedbackReviewReportSchema, WorkflowFeedbackReviewRefSchema, WorkflowFeedbackFindingSchema,
   WorkflowFeedbackNoteSchema,
+  requestWorkflowFeedbackReview, decideWorkflowFeedbackFindings,
+  completeWorkflowFeedbackReview,
   WorkflowTransitionError,
   createCandidateManifest,
   CandidateManifestSchema,
@@ -73,6 +75,19 @@ describe("native task workflow contracts", () => {
     expect(WorkflowFeedbackReviewReportSchema.safeParse({ ...report, reviewerId: "independent-reviewer", readOnly: true }).success).toBe(false);
     expect(WorkflowFeedbackReviewReportSchema.safeParse({ ...report, qualification: "INDEPENDENT_EVIDENCE" }).success).toBe(false);
     expect(WorkflowFeedbackReviewReportSchema.safeParse({ ...report, operationMode: "IMPLEMENT" }).success).toBe(false);
+  });
+  it("matches dispatch approval to the exact selected report findings, source comments, PR set, and heads", () => {
+    const binding = { taskId, requestId: "11111111-1111-4111-8111-111111111111", ownerId,
+      decisionWorkflowRevision: 4, activeWorkflowRevision: 6, reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64),
+      bundleDigests: ["c".repeat(64)], candidateDigest: "d".repeat(64), selectedFindingIds: ["finding-1"], selectedCommentIds: ["comment-1"] };
+    const review = { bundleRefs: [{ repositoryId: "demo", number: 42, headSha: "e".repeat(40), candidateDigest: binding.candidateDigest, sha256: binding.bundleDigests[0] }],
+      reviewRef: { sha256: binding.reviewDigest, proposalDigest: binding.proposalDigest, bundleDigests: binding.bundleDigests,
+        candidateBindings: [{ repositoryId: "demo", number: 42, headSha: "e".repeat(40), candidateDigest: binding.candidateDigest, bundleDigest: binding.bundleDigests[0] }],
+        findingRefs: [{ id: "finding-1", bundleDigest: binding.bundleDigests[0], commentIds: ["comment-1"], priority: "MUST_FIX", assessment: "ACTIONABLE", recommended: true }] } };
+    expect(workflowContracts.workflowFeedbackApprovalMatchesReview(binding as never, review as never)).toBe(true);
+    expect(workflowContracts.workflowFeedbackApprovalMatchesReview({ ...binding, selectedCommentIds: ["comment-2"] }, review as never)).toBe(false);
+    expect(workflowContracts.workflowFeedbackApprovalMatchesReview({ ...binding, selectedFindingIds: ["finding-1", "finding-2"] }, review as never)).toBe(false);
+    expect(workflowContracts.workflowFeedbackApprovalMatchesReview({ ...binding, bundleDigests: ["f".repeat(64)] }, review as never)).toBe(false);
   });
   it("computes a stable candidate digest from sorted repository identities and exact commits", () => {
     const left = { repositoryId: "repo-b", commitSha: "b".repeat(40), treeSha: "2".repeat(40) };
@@ -404,6 +419,34 @@ describe("immutable multi-PR feedback reviews", () => {
       proposalDigest: reviewRef.proposalDigest, bundleDigests: reviewRef.bundleDigests, selectedFindingIds: ["finding-0"], decision: "APPROVE" as const };
     return { current, bundleRefs, reviewRef, request };
   }
+  it("persists collected bundles before a reviewer exists and fences old approvals", () => {
+    const { current, bundleRefs, reviewRef, request } = fixture();
+    expect(workflowContracts.collectWorkflowFeedbackBundles).toBeTypeOf("function");
+    const reviewed = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef }, now);
+    const collected = workflowContracts.collectWorkflowFeedbackBundles(reviewed, { bundleRefs, threadObservations: [] }, now);
+    expect(collected.feedbackReview).toMatchObject({ status: "COLLECTING", bundleRefs });
+    expect(collected.feedbackReview?.reviewRef).toBeUndefined();
+    expect(collected.feedbackReviewHistory).toEqual([reviewRef]);
+    expect(collected.stage).toBe("WAIT_FOR_MERGE");
+    expect(() => decideWorkflowFeedbackFindings(collected, { ...request, expectedRevision: collected.revision }, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+    expect(() => workflowContracts.collectWorkflowFeedbackBundles(current, { bundleRefs: [bundleRefs[0]], threadObservations: [] }, now)).toThrow();
+  });
+  it("returns the exact active critic report to a waiting owner decision", () => {
+    const { current, bundleRefs, reviewRef } = fixture();
+    const collected = workflowContracts.collectWorkflowFeedbackBundles(current, { bundleRefs, threadObservations: [] }, now);
+    const running = { ...collected, revision: collected.revision + 1, state: "RUNNING" as const };
+    expect(running).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "RUNNING", feedbackReview: { status: "COLLECTING", bundleRefs } });
+    expect(WorkflowFeedbackReviewRefSchema.safeParse(reviewRef).success).toBe(true);
+    const complete = completeWorkflowFeedbackReview(running, {
+      expectedRevision: running.revision, taskId, candidateDigest: current.candidate!.digest,
+      operationId: reviewRef.operationId, bundleRefs, reviewRef,
+    }, now);
+    expect(complete).toMatchObject({ revision: running.revision + 1, state: "WAITING", feedbackReview: { status: "PENDING", reviewRef } });
+    expect(() => completeWorkflowFeedbackReview(running, {
+      expectedRevision: running.revision, taskId, candidateDigest: current.candidate!.digest,
+      operationId: "22222222-2222-4222-8222-222222222222", bundleRefs, reviewRef,
+    }, now)).toThrow(WorkflowTransitionError);
+  });
   it("serializes artifact bodies before hashing and validates storage envelopes after round-trip", () => {
     const { bundleRefs, reviewRef } = fixture();
     const { sha256: _bundleDigest, objectKey: _bundleKey, ...bundleMetadata } = bundleRefs[0]!;
@@ -437,6 +480,67 @@ describe("immutable multi-PR feedback reviews", () => {
     expect(createHash("sha256").update(reportBytes).digest("hex")).toBe(reportRef.sha256);
     expect(WorkflowFeedbackReviewReportSchema.safeParse({ ...decoded, sha256: reportDigest, objectKey: reportRef.objectKey }).success).toBe(false);
   });
+  it("permits attributed changes or dismissal of incomplete reports while refusing approval and stale actors", () => {
+    const { current, bundleRefs, reviewRef, request } = fixture();
+    for (const status of ["BLOCKED", "FAILED", "INTERRUPTED", "UNKNOWN"] as const) {
+      const reviewed = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef: { ...reviewRef, status, blockReason: "critic could not verify this report" } }, now);
+      expect(() => decideWorkflowFeedbackFindings(reviewed, request, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+      for (const decision of ["REQUEST_CHANGES", "DISMISS"] as const) {
+        const noteRequest = { ...request, decision, selectedFindingIds: [], ownerNote: "Review could not complete; revisit." };
+        const result = decideWorkflowFeedbackFindings(reviewed, noteRequest, { actorId: ownerId, role: "TASK_OWNER" }, now);
+        expect(result.stage).toBe("WAIT_FOR_MERGE");
+        expect(result.feedbackNotes?.[0]).toMatchObject({ actorId: ownerId, source: decision, text: noteRequest.ownerNote });
+        const { ownerNote: _ownerNote, ...withoutOwnerNote } = noteRequest;
+        void _ownerNote;
+        expect(() => decideWorkflowFeedbackFindings(reviewed, withoutOwnerNote, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+        expect(() => decideWorkflowFeedbackFindings(reviewed, { ...noteRequest, expectedRevision: 99 }, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+        expect(() => decideWorkflowFeedbackFindings(reviewed, { ...noteRequest, reviewDigest: hash("f") }, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+        expect(() => decideWorkflowFeedbackFindings(reviewed, noteRequest, { actorId: hash("f"), role: "TASK_OWNER" }, now)).toThrow();
+      }
+    }
+  });
+  it("rejects a complete review omitting any currently open linked PR", () => {
+    const { current, bundleRefs, reviewRef } = fixture();
+    expect(() => requestWorkflowFeedbackReview(current, { bundleRefs: [bundleRefs[0]],
+      reviewRef: { ...reviewRef, bundleDigests: [bundleRefs[0]!.sha256], findingRefs: [reviewRef.findingRefs[0]!] } }, now)).toThrow();
+  });
+  it("refuses approval when a linked PR becomes open after complete review registration", () => {
+    const { current, bundleRefs, reviewRef, request } = fixture();
+    const closed = { ...current, pullRequests: current.pullRequests!.map(pr => pr.repositoryId === "ui" ? { ...pr, state: "CLOSED" } : pr) };
+    const onlyApiReview = { ...reviewRef, bundleDigests: [bundleRefs[0]!.sha256],
+      candidateBindings: [reviewRef.candidateBindings[0]!], findingRefs: [reviewRef.findingRefs[0]!] };
+    const reviewed = requestWorkflowFeedbackReview(closed, { bundleRefs: [bundleRefs[0]],
+      reviewRef: onlyApiReview }, now);
+    const reopened = { ...reviewed, revision: reviewed.revision + 1, pullRequests: current.pullRequests };
+    expect(() => decideWorkflowFeedbackFindings(reopened, { ...request, expectedRevision: reopened.revision, bundleDigests: [bundleRefs[0]!.sha256] },
+      { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+  });
+  it("retains open PR bundles with zero eligible comments and rejects complete reviews omitting an open linked PR", () => {
+    const { current, bundleRefs, reviewRef } = fixture();
+    const bundles = [{ ...bundleRefs[0]!, comments: [] }, bundleRefs[1]!];
+    const ref = { ...reviewRef, findingRefs: [reviewRef.findingRefs[1]!] };
+    const result = requestWorkflowFeedbackReview(current, { bundleRefs: bundles, reviewRef: ref }, now);
+    expect(result.feedbackReview?.bundleRefs[0]?.comments).toEqual([]);
+    const { sha256: _digest, objectKey: _key, ...emptyPayload } = bundles[0]!;
+    void _digest; void _key;
+    expect(WorkflowFeedbackBundleSchema.safeParse({ ...emptyPayload, commentSetDigest: createHash("sha256").update("[]", "utf8").digest("hex"), sourceDeliveryIds: [] }).success).toBe(true);
+    const omitted = { ...reviewRef, bundleDigests: [bundleRefs[0]!.sha256], candidateBindings: [reviewRef.candidateBindings[0]!],
+      findingRefs: [reviewRef.findingRefs[0]!] };
+    expect(() => requestWorkflowFeedbackReview(current, { bundleRefs: [bundleRefs[0]], reviewRef: omitted }, now)).toThrow();
+    const emptyReview = requestWorkflowFeedbackReview(current, { bundleRefs: bundleRefs.map(b => ({ ...b, comments: [] })), reviewRef: { ...reviewRef, findingRefs: [] } }, now);
+    expect(emptyReview.feedbackReview?.reviewRef?.findingRefs).toEqual([]);
+    const closedCurrent = { ...current, pullRequests: current.pullRequests!.map(pr => pr.repositoryId === "ui" ? { ...pr, state: "CLOSED" } : pr) };
+    expect(requestWorkflowFeedbackReview(closedCurrent, { bundleRefs: [bundleRefs[0]], reviewRef: omitted }, now).feedbackReview?.bundleRefs).toHaveLength(1);
+  });
+  it("retains two exact heads and grouped source IDs while excluding full bodies from snapshot references", () => {
+    const { current, bundleRefs, reviewRef } = fixture();
+    const reviewed = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef }, now);
+    expect(reviewed.feedbackReview?.bundleRefs.map(b => b.headSha)).toEqual(["d".repeat(40), "d".repeat(40)]);
+    expect(reviewed.feedbackReview?.reviewRef?.findingRefs[0]?.commentIds).toEqual(["api-0", "api-1"]);
+    expect(reviewed.feedbackReview?.bundleRefs[0]?.comments[0]?.threadId).toBe("thread-api");
+    expect(JSON.stringify(reviewed)).not.toContain('"body":');
+    expect(() => requestWorkflowFeedbackReview(current, { bundleRefs: [{ ...bundleRefs[0], comments: [{ ...bundleRefs[0]!.comments[0], body: "large comment" }] }, bundleRefs[1]], reviewRef }, now)).toThrow();
+  });
   it("validates all priorities separately from all seven assessments and full artifact evidence", () => {
     const { bundleRefs, reviewRef } = fixture();
     const { sha256: _bundleSha, objectKey: _bundleKey, ...bundlePayload } = bundleRefs[0]!;
@@ -454,6 +558,40 @@ describe("immutable multi-PR feedback reviews", () => {
     expect(WorkflowFeedbackBundleSchema.safeParse({ ...bundlePayload, comments: bundleRefs[0]!.comments.map(c => ({ ...c, body: "edited" })), sourceDeliveryIds: ["delivery-1"] }).success).toBe(false);
     expect(WorkflowFeedbackReviewReportSchema.safeParse({ ...reviewPayload, findings: [finding] }).success).toBe(false);
     expect(WorkflowFeedbackReviewReportSchema.safeParse({ ...reviewPayload, findings: [finding, { ...finding, ...reviewRef.findingRefs[1] }] }).success).toBe(true);
+  });
+  it("approves a strict subset with immutable decision bindings and keeps every unselected finding", () => {
+    const { current, bundleRefs, reviewRef, request } = fixture();
+    const reviewed = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef }, now);
+    const approved = decideWorkflowFeedbackFindings(reviewed, request, { actorId: ownerId, role: "TASK_OWNER" }, now);
+    expect(approved).toMatchObject({ stage: "IMPLEMENT", state: "READY" });
+    expect(approved.feedbackDecisions?.[0]).toMatchObject({ selectedFindingIds: ["finding-0"], selectedCommentIds: ["api-0", "api-1"], reviewDigest: reviewRef.sha256, proposalDigest: reviewRef.proposalDigest, actorId: ownerId });
+    expect(approved.feedbackDecisions?.[0]?.candidates).toEqual([{ repositoryId: "api", number: 1, headSha: "d".repeat(40), candidateDigest: current.candidate!.digest, commentSetDigest: hash("c"), bundleDigest: hash("e") }]);
+    expect(approved.feedbackReview?.reviewRef?.findingRefs).toHaveLength(2);
+    expect(approved.pullRequests).toEqual(current.pullRequests);
+    expect(() => decideWorkflowFeedbackFindings(approved, request, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+  });
+  it("rejects stale or invalid digests, unknown selections, incomplete reports and cross-candidate groups", () => {
+    const { current, bundleRefs, reviewRef, request } = fixture();
+    const reviewed = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef }, now);
+    for (const patch of [{ reviewDigest: hash("f") }, { proposalDigest: "invalid" }, { bundleDigests: [hash("a")] }, { expectedRevision: 99 }, { selectedFindingIds: [] }, { selectedFindingIds: ["unknown"] }, { selectedFindingIds: ["finding-0", "finding-0"] }])
+      expect(() => decideWorkflowFeedbackFindings(reviewed, { ...request, ...patch }, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+    expect(() => decideWorkflowFeedbackFindings(reviewed, request, { actorId: hash("f"), role: "TASK_OWNER" }, now)).toThrow();
+    expect(() => requestWorkflowFeedbackReview(current, { bundleRefs: [{ ...bundleRefs[0], headSha: "f".repeat(40) }, bundleRefs[1]], reviewRef }, now)).toThrow();
+    expect(() => requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef: { ...reviewRef, findingRefs: [{ ...reviewRef.findingRefs[0], commentIds: ["ui-0"] }, reviewRef.findingRefs[1]] } }, now)).toThrow();
+    const blocked = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef: { ...reviewRef, status: "BLOCKED", blockReason: "critic could not verify this report" } }, now);
+    expect(() => decideWorkflowFeedbackFindings(blocked, request, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+  });
+  it("records attributed change notes and dismissal reasons without resolving GitHub comments", () => {
+    const { current, bundleRefs, reviewRef, request } = fixture();
+    const reviewed = requestWorkflowFeedbackReview(current, { bundleRefs, reviewRef }, now);
+    for (const decision of ["REQUEST_CHANGES", "DISMISS"] as const) {
+      expect(() => decideWorkflowFeedbackFindings(reviewed, { ...request, decision, selectedFindingIds: [] }, { actorId: ownerId, role: "TASK_OWNER" }, now)).toThrow();
+      const decided = decideWorkflowFeedbackFindings(reviewed, { ...request, decision, selectedFindingIds: [], ownerNote: "Please explain the edge case." }, { actorId: ownerId, role: "TASK_OWNER" }, now);
+      expect(decided.stage).toBe("WAIT_FOR_MERGE");
+      expect(decided.feedbackNotes?.[0]).toMatchObject({ actorId: ownerId, text: "Please explain the edge case.", source: decision });
+      expect(decided.pullRequests).toEqual(current.pullRequests);
+    }
+    expect(WorkflowSnapshotSchema.safeParse(createWorkflowSnapshot({ taskId, ownerId, now })).success).toBe(true);
   });
 });
 

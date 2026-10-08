@@ -38,7 +38,8 @@ export interface OperationRecord extends Operation {
   targetOperationId?: string;
   /** The project revision whose non-disk settings applied, which may be newer than the workspace's. */
   settingsRevision?: number;
-  workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | undefined;
+  workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | "FEEDBACK_REVIEW" | undefined;
+  workflowFeedbackReview?: { taskId: string; workflowRevision: number; candidateDigest: string } | undefined;
   publication?: {
     repository: string;
     repositoryUrl: string;
@@ -80,7 +81,7 @@ export interface CallbackClaims {
   workspaceId: string;
   operationId: string;
   fence: number;
-  actions: Array<"events" | "artifacts" | "result" | "pull-request" | "pull-request-update" | "codebuild">;
+  actions: Array<"events" | "artifacts" | "result" | "feedback-bundles" | "feedback-approval" | "pull-request" | "pull-request-update" | "codebuild">;
   expiresAt: number;
 }
 
@@ -126,6 +127,7 @@ export function publicOperation(record: OperationRecord): Operation {
     kind: record.kind,
     ...(record.discardUnpublished === true ? { discardUnpublished: true } : {}),
     ...(record.workflowMode === undefined ? {} : { workflowMode: record.workflowMode }),
+    ...(record.workflowFeedbackReview === undefined ? {} : { workflowFeedbackReview: record.workflowFeedbackReview }),
     requestId: record.requestId,
     payloadHash: record.payloadHash,
     status: record.status,
@@ -177,6 +179,8 @@ export function issueCapability(
   operationId: string,
   fence: number,
   allowPullRequest = false,
+  allowFeedbackBundles = false,
+  allowFeedbackApproval = false,
 ): string {
   const claims: CallbackClaims = {
     workspaceId,
@@ -186,6 +190,8 @@ export function issueCapability(
       "artifacts",
       "events",
       "result",
+      ...(allowFeedbackBundles ? ["feedback-bundles" as const] : []),
+      ...(allowFeedbackApproval ? ["feedback-approval" as const] : []),
       ...(allowPullRequest
         ? ["pull-request" as const, "pull-request-update" as const, "codebuild" as const]
         : []),

@@ -8,7 +8,7 @@ export interface StreamRecord {
   eventName?: string;
   dynamodb?: { ApproximateCreationDateTime?: number; NewImage?: Record<string, AttributeValue>; OldImage?: Record<string, AttributeValue> };
 }
-export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request" | "workflow" | "admin_change_dm" | "admin_change_outcome" | "admin_change_expiry" | "workflow_refusal";
+export type NoticeKind = "start" | "mode" | "closed" | "cancelled" | "ready" | "setup_failed" | "ended" | "pull_request" | "workflow" | "github_feedback" | "admin_change_dm" | "admin_change_outcome" | "admin_change_expiry" | "workflow_refusal";
 export interface Notice {
   /** Fixed per change, so a repeated delivery posts once (C9). */
   id: string;
@@ -23,9 +23,15 @@ export interface Notice {
   changeId?: string;
   /** #217: the queue holds the notice until this time (at most 15 minutes); set only on a notice the notifier schedules itself. */
   notBefore?: string;
+  /** Active immutable PR-feedback report announced by this notice. */
+  feedbackReviewDigest?: string;
   /** A workflow notice's revision: delivered only while the task is still at it, so a stale step is never said. */
   workflowRevision?: number;
 }
+
+/** Stable key shared by notice production and the owner-decision latency measurement. */
+export const feedbackReviewNoticeId = (taskId: string, reviewDigest: string, workflowRevision: number): string =>
+  `${taskId}:feedback_review:${reviewDigest}:${workflowRevision}`;
 
 const TERMINAL = new Set(["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]);
 /** Spec 025 E2: the statuses an admin change ends in. */
@@ -42,7 +48,17 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
       const notices: Notice[] = [];
       const beforeWorkflow = record(previous?.workflow);
       const afterWorkflow = record(next.workflow);
-      if (afterWorkflow !== undefined && beforeWorkflow !== undefined && afterWorkflow.revision !== beforeWorkflow.revision && eventId !== "") {
+      const beforeReview = record(beforeWorkflow?.feedbackReview);
+      const afterReview = record(afterWorkflow?.feedbackReview);
+      const beforeReviewRef = record(beforeReview?.reviewRef);
+      const afterReviewRef = record(afterReview?.reviewRef);
+      const oldNotes = Array.isArray(beforeWorkflow?.feedbackNotes) ? beforeWorkflow.feedbackNotes.length : 0;
+      const newNotes = Array.isArray(afterWorkflow?.feedbackNotes) ? afterWorkflow.feedbackNotes.length : 0;
+      if (afterReview?.status === "PENDING" && afterReviewRef?.status === "COMPLETE" && typeof afterReviewRef.sha256 === "string"
+        && (afterReviewRef.sha256 !== beforeReviewRef?.sha256 || newNotes !== oldNotes)) {
+        notices.push({ id: feedbackReviewNoticeId(taskId, afterReviewRef.sha256, Number(afterWorkflow?.revision)), kind: "github_feedback", taskId, at,
+          feedbackReviewDigest: afterReviewRef.sha256 });
+      } else if (afterWorkflow !== undefined && beforeWorkflow !== undefined && afterWorkflow.revision !== beforeWorkflow.revision && eventId !== "") {
         // Gap 5: every step change, keyed by its revision; the notifier words it, or says nothing, when it is delivered.
         // The task's first step is not one: the start message (or Slack's Quick or Full answer) already says it.
         notices.push({ id: `${taskId}:workflow:${String(afterWorkflow.revision)}`, kind: "workflow", taskId, at, workflowRevision: Number(afterWorkflow.revision) });
