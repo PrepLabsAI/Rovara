@@ -83,7 +83,14 @@ const TaskShape = {
   artifacts: z.array(z.object({ name: z.string(), size: z.number().optional() })).optional(),
   pull_requests: z.array(z.object({ repository: z.string(), number: z.number(), url: z.string(), state: z.string() })).optional(),
   unpublished: z.array(z.object({ repository: z.string(), reasons: z.array(z.string()) })).optional(),
-  workflow: z.object({ stage: z.string(), state: z.string(), revision: z.number(), path: z.enum(["QUICK", "FULL"]).optional(), review_phase: z.string().optional(), block_reason: z.string().optional(), approval_document: z.object({ type: z.string(), sha256: z.string(), version: z.number(), content: z.string().optional() }).optional(), plan: z.object({ sha256: z.string(), version: z.number(), content: z.string().optional() }).optional() }).optional(),
+  workflow: z.object({
+    stage: z.string(), state: z.string(), revision: z.number(), path: z.enum(["QUICK", "FULL"]).optional(), review_phase: z.string().optional(), block_reason: z.string().optional(),
+    candidate_digest: z.string().optional(),
+    verification: z.object({ candidate_digest: z.string(), results: z.array(z.object({ check_id: z.string(), status: z.enum(["PASS", "FAILED", "UNKNOWN"]) })) }).optional(),
+    reviews: z.array(z.object({ role: z.enum(["CRITIC", "SECURITY"]), status: z.enum(["PASS", "FINDINGS", "FAILED", "INTERRUPTED", "UNKNOWN"]), candidate_digest: z.string(), failure_reason: z.enum(["RESPONSE_MISSING", "RESPONSE_TOO_LARGE", "INVALID_JSON", "INVALID_SHAPE", "TIMEOUT", "INTERRUPTED", "CANDIDATE_CHANGED", "SESSION_FAILED", "USAGE_UNAVAILABLE"]).optional(), recorded_at: z.string() })).optional(),
+    approval_document: z.object({ type: z.string(), sha256: z.string(), version: z.number(), content: z.string().optional() }).optional(),
+    plan: z.object({ sha256: z.string(), version: z.number(), content: z.string().optional() }).optional(),
+  }).optional(),
   /** Only on start, continue and wait, which may wait (R21). */
   timed_out: z.boolean().optional(),
   /** A wait that stopped early because checking on the task failed; not a timeout. */
@@ -129,6 +136,15 @@ function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string,
         path: task.workflow.path,
         ...(task.workflow.reviewPhase === undefined ? {} : { review_phase: task.workflow.reviewPhase }),
         ...(task.workflow.blockReason === undefined ? {} : { block_reason: task.workflow.blockReason }),
+        ...(task.workflow.candidate === undefined ? {} : { candidate_digest: task.workflow.candidate.digest }),
+        ...(task.workflow.verification === undefined ? {} : { verification: {
+          candidate_digest: task.workflow.verification.candidateDigest,
+          results: task.workflow.verification.results.map((result) => ({ check_id: result.checkId, status: result.status })),
+        } }),
+        ...(task.workflow.reviews === undefined ? {} : { reviews: task.workflow.reviews.map((review) => ({
+          role: review.role, status: review.status, candidate_digest: review.candidateDigest,
+          ...(review.failureReason === undefined ? {} : { failure_reason: review.failureReason }), recorded_at: review.recordedAt,
+        })) }),
         ...(activeArtifact === undefined ? {} : {
           approval_document: { type: activeArtifact.type, sha256: activeArtifact.sha256, version: activeArtifact.version, ...(task.workflow.planContent === undefined ? {} : { content: task.workflow.planContent }) },
         }),
@@ -145,6 +161,16 @@ function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string,
 function nextFor(task: DeveloperTaskView): string {
   if (task.workflow?.state === "WAITING" && task.workflow.stage === "PLAN_REVIEW") {
     return "Review the current approval_document, then use agentx_decide_workflow with its exact sha256 and expected revision. Quick has one approval; Full has requirements, design, and coding-plan approvals before implementation.";
+  }
+  if (task.workflow?.state === "BLOCKED" && task.workflow.stage === "REVIEW") {
+    const workflow = task.workflow;
+    const retryable = workflow.reviews?.some((review) => ["UNKNOWN", "FAILED", "INTERRUPTED"].includes(review.status)) === true;
+    const checksPassed = workflow.verification !== undefined && workflow.candidate !== undefined
+      && workflow.verification.candidateDigest === workflow.candidate.digest
+      && workflow.verification.results.every((result) => result.status === "PASS");
+    if (retryable && checksPassed && workflow.candidate !== undefined) {
+      return `The review is blocked: ${workflow.blockReason ?? "a review has no verifiable result"}. Retry only the read-only reviews with agentx_review_workflow_candidate, expected_revision ${workflow.revision}, and candidate_digest ${workflow.candidate.digest}. No code editing will run.`;
+    }
   }
   if (task.workflow?.state === "BLOCKED" && task.workflow.stage === "PLAN") return `The plan run was interrupted or could not save its plan. To recover, use agentx_retry_workflow to start another read-only planning run.`;
   if (task.workflow?.state === "BLOCKED") return `The workflow is blocked: ${task.workflow.blockReason ?? "required evidence is missing"}. Review it before continuing.`;
@@ -470,13 +496,21 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
   {
     name: "agentx_review_workflow_candidate",
     title: "Run independent code and security reviews",
-    description: "Starts a separate read-only review operation after checks pass. It reviews the current candidate and cannot edit it. Use only when agentx_get_task shows stage REVIEW and state WAITING.",
-    inputSchema: { task_id: taskIdInput, request_id: requestIdInput, instructions: instructionsInput },
+    description: "Starts separate read-only code and security reviews after checks pass. It cannot edit the candidate. Use when agentx_get_task shows stage REVIEW and state WAITING. To retry a blocked review, use its exact expected_revision and candidate_digest from agentx_get_task; the retry is rejected if the candidate or checks changed.",
+    inputSchema: {
+      task_id: taskIdInput, request_id: requestIdInput, instructions: instructionsInput,
+      expected_revision: z.number().int().positive().optional().describe("required when retrying a blocked review; copy the current workflow revision from agentx_get_task"),
+      candidate_digest: z.string().regex(/^[a-f0-9]{64}$/).optional().describe("required when retrying a blocked review; copy the current candidate digest from agentx_get_task"),
+    },
     outputSchema: ActionShape,
     async handler(context, input, call) {
       const instructions = input.instructions as string;
-      const id = requestIdFor(context, call, input, ["agentx_review_workflow_candidate", input.task_id, instructions]);
-      const task = await context.client.startWorkflowReviewTask(input.task_id as string, { requestId: id, instructions });
+      const id = requestIdFor(context, call, input, ["agentx_review_workflow_candidate", input.task_id, instructions, optional(input.expected_revision), optional(input.candidate_digest)]);
+      const task = await context.client.startWorkflowReviewTask(input.task_id as string, {
+        requestId: id, instructions,
+        ...(input.expected_revision === undefined ? {} : { expectedRevision: input.expected_revision as number }),
+        ...(input.candidate_digest === undefined ? {} : { candidateDigest: input.candidate_digest as string }),
+      });
       return afterAction(context, call, "agentx_review_workflow_candidate", task, 0, id);
     },
   },

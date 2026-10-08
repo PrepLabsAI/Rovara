@@ -251,6 +251,51 @@ describe("request IDs when the AI tool leaves request_id out (Task 15 fix round 
     expect(startTask).not.toHaveBeenCalled();
   });
 
+  it("passes the exact revision and candidate digest when retrying blocked reviews", async () => {
+    const startWorkflowReviewTask = vi.fn(async () => view("RUNNING"));
+    const mcp = await connect({ startWorkflowReviewTask }, { newRequestId: counter() });
+    await mcp.callTool({ name: "agentx_review_workflow_candidate", arguments: {
+      task_id: TASK,
+      request_id: "77777777-7777-4777-8777-777777777777",
+      instructions: "Retry only the read-only reviews.",
+      expected_revision: 15,
+      candidate_digest: "70f85ca5fd7a46974d2bbcc762632dc1ed03d059f9ecc4cf544274655c9477ad",
+    } });
+    expect(startWorkflowReviewTask).toHaveBeenCalledWith(TASK, {
+      requestId: "77777777-7777-4777-8777-777777777777",
+      instructions: "Retry only the read-only reviews.",
+      expectedRevision: 15,
+      candidateDigest: "70f85ca5fd7a46974d2bbcc762632dc1ed03d059f9ecc4cf544274655c9477ad",
+    });
+  });
+
+  it("shows safe persisted review state and the exact retry binding in task details", async () => {
+    const candidateDigest = "70f85ca5fd7a46974d2bbcc762632dc1ed03d059f9ecc4cf544274655c9477ad";
+    const workflow = {
+      stage: "REVIEW", state: "BLOCKED", revision: 15, path: "FULL", blockReason: "the security review did not pass",
+      artifacts: [],
+      candidate: { schemaVersion: 1, digest: candidateDigest, repositories: [{ repositoryId: "repo-1", commitSha: "a".repeat(40), treeSha: "b".repeat(40) }] },
+      verification: { candidateDigest, producer: "broker", environmentId: "test", recordedAt: "2026-10-07T20:00:00.000Z", results: [{ checkId: "patch-whitespace", status: "PASS" }] },
+      reviews: [
+        { operationId: "88888888-8888-4888-8888-888888888888", candidateDigest, role: "CRITIC", provider: "test", version: "1", status: "PASS", findings: ["private reviewer text"], readOnly: true, recordedAt: "2026-10-07T20:01:00.000Z" },
+        { operationId: "99999999-9999-4999-8999-999999999999", candidateDigest, role: "SECURITY", provider: "test", version: "1", status: "FAILED", failureReason: "INVALID_SHAPE", findings: [], readOnly: true, recordedAt: "2026-10-07T20:01:00.000Z" },
+      ],
+    } as NonNullable<DeveloperTaskView["workflow"]>;
+    const mcp = await connect({ getTask: async () => view("SUCCEEDED", { workflow }) });
+    const result = await mcp.callTool({ name: "agentx_get_task", arguments: { task_id: TASK } });
+    expect(result.structuredContent).toMatchObject({ workflow: {
+      stage: "REVIEW", state: "BLOCKED", revision: 15, candidate_digest: candidateDigest,
+      verification: { candidate_digest: candidateDigest, results: [{ check_id: "patch-whitespace", status: "PASS" }] },
+      reviews: [
+        { role: "CRITIC", status: "PASS", candidate_digest: candidateDigest },
+        { role: "SECURITY", status: "FAILED", failure_reason: "INVALID_SHAPE", candidate_digest: candidateDigest },
+      ],
+    } });
+    expect(text(result)).toContain("expected_revision");
+    expect(text(result)).toContain(candidateDigest);
+    expect(JSON.stringify(result.structuredContent)).not.toContain("private reviewer text");
+  });
+
   it("repeats an identical pull request call with the same requestId, and returns it", async () => {
     const openPullRequest = vi.fn(async () => ({ task: view("SUCCEEDED"), operationId: "55555555-5555-4555-8555-555555555555", operationStatus: "ACCEPTED" as const }));
     const mcp = await connect({ openPullRequest }, { newRequestId: counter() });

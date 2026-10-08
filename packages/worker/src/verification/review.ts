@@ -347,12 +347,13 @@ export async function runWorkflowReviews(input: {
           if (input.signal.aborted) abortListener();
         }
       });
-      const promptResult = await Promise.race([
-        session.prompt([
+      const reviewPrompt = [
         `Read-only ${role.toLowerCase()} review of the current candidate. Candidate digest: ${manifest.digest}.`,
         focus,
         "Do not edit files, run commands, or change state. Return only JSON with this shape: {\"findings\":[\"short actionable finding\"]}. Return an empty findings array only when you found no issue. If you cannot complete the review, return {\"findings\":[\"Review incomplete: ...\"]}.",
-        ].join("\n\n")).then(() => "COMPLETED" as const),
+      ].join("\n\n");
+      const promptResult = await Promise.race([
+        session.prompt(reviewPrompt).then(() => "COMPLETED" as const),
         stopped,
       ]);
       if (promptResult !== "COMPLETED") {
@@ -364,9 +365,29 @@ export async function runWorkflowReviews(input: {
         try { void session.abort().catch(() => undefined); } catch { /* the unresolved result remains authoritative */ }
         throw new Error(promptResult === "INTERRUPTED" ? "review interrupted" : "review timed out");
       }
+      parsed = response === undefined ? parsed : parseWorkflowReviewerResponse(response);
+      if (parsed.failureReason === "INVALID_JSON" || parsed.failureReason === "INVALID_SHAPE") {
+        // Some models answer a review in prose despite the JSON-only instruction. Give the
+        // same read-only reviewer one bounded chance to encode its result in the contract.
+        // A malformed second response still fails closed below.
+        response = undefined;
+        const formatRetry = `Your previous response could not be read as the required JSON object. Return only one JSON object in exactly this shape: {"findings":[]}. Put each actionable issue in the findings array. Use an empty array only if you found no issue. Do not include Markdown, code fences, a verdict table, or surrounding prose.`;
+        const retryResult = await Promise.race([
+          session.prompt(formatRetry).then(() => "COMPLETED" as const),
+          stopped,
+        ]);
+        if (retryResult !== "COMPLETED") {
+          if (retryResult === "INTERRUPTED") {
+            interrupted = true;
+            statusOverride = "INTERRUPTED";
+          }
+          try { void session.abort().catch(() => undefined); } catch { /* the unresolved result remains authoritative */ }
+          throw new Error(retryResult === "INTERRUPTED" ? "review interrupted" : "review timed out");
+        }
+        parsed = response === undefined ? { status: "UNKNOWN", findings: [], failureReason: "RESPONSE_MISSING" } : parseWorkflowReviewerResponse(response);
+      }
       const after = createCandidateManifest(await readCandidateRepositories(input.repositories));
       if (after.digest !== manifest.digest) throw new Error("candidate changed during review");
-      parsed = response === undefined ? parsed : parseWorkflowReviewerResponse(response);
       usageOutcome = "SUCCEEDED";
     } catch (error) {
       const message = error instanceof Error ? error.message : "";
