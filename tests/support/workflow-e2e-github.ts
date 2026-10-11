@@ -251,6 +251,13 @@ export class FakeGitHub {
     this.find(number).state = "closed";
   }
 
+  /** Someone reopens a pull request closed without merging. */
+  reopen(number: number): void {
+    const pullRequest = this.find(number);
+    if (pullRequest.state !== "closed") throw new Error(`pull request #${number} is not closed`);
+    pullRequest.state = "open";
+  }
+
   /** Someone merges the pull request on GitHub, at its current head. */
   merge(number: number): void {
     const pullRequest = this.find(number);

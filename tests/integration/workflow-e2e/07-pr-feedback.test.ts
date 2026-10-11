@@ -286,6 +286,10 @@ describe("Suite 7: PR feedback loop", () => {
     const pullRequest = await openDraftPr(e2e);
     const opened = pullRequest.commit;
     await commented(e2e, pullRequest.number, "Make the sentence shorter.", "maya");
+    // The replacement check is shown in full on the card the owner approves.
+    const proposal = visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text);
+    expect(proposal).toContain(`Updates checks: \`${OLD_CHECK.label}\` → \`${NEW_CHECK.label}\``);
+    expect(proposal).toContain(`Adds check \`${NEW_CHECK.label}\`: \`grep -q "${NEW}" README.md\` in \`repo/demo\``);
     await e2e.click("agentx_feedback_review_recommended");
     await e2e.settle();
     expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));

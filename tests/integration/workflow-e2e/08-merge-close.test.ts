@@ -3,6 +3,7 @@
 // while it is pushed [LIVE-BUG B4], at someone else's head), closing from Slack (while waiting for the merge, and a
 // blocked task's discard), a teammate's Close, and the Canvas closeout.
 import { describe, expect, it } from "vitest";
+import { WORKFLOW_BLOCK_REASONS } from "@agentx/contracts";
 import { CLOSED_REPLY } from "../../../packages/broker/src/developer/share-messages.js";
 import { createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import { EDITS, FIXED, MERGED, PLAN, TEAMMATE, actionIds, atPlanReview, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";
@@ -123,7 +124,30 @@ describe("Suite 8: merge and close", () => {
     expect(said(e2e).at(-1)).toBe("I stopped following the pull request. The pull request on GitHub no longer holds the checked code, so I won't finish this task from it. Close the task.");
   }, 120_000);
 
-  it.todo("8.7 D3: a pull request closed on GitHub without merging is said as closed (open decision D3; today it reads as \"no longer holds the checked code\")");
+  it("8.7 a pull request closed on GitHub without merging stops the task with Close; reopened and merged, it completes", async () => {
+    // Found by this scenario: the close was recorded but the task kept waiting, and the thread said "Draft pull request
+    // opened: PR #1. Review it and merge it on GitHub..." again for a pull request that was closed. The words are open
+    // decision D3's recommendation.
+    const { e2e, pullRequest } = await waiting();
+    e2e.github.close(pullRequest.number);
+    expect((await e2e.webhook({ kind: "pull_request", action: "closed", number: pullRequest.number, merged: false })).status).toBe(200);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.pullRequestClosed });
+    const card = e2e.slack.posts.at(-1)!;
+    expect(card.text).toBe("The pull request was closed on GitHub without merging. Reopen it there, or close this task.");
+    expect(actionIds(card)).toEqual(["agentx_workflow_close"]);
+    expect(said(e2e).filter((text) => text.startsWith("Draft pull request opened"))).toHaveLength(1);
+    e2e.github.reopen(pullRequest.number);
+    expect((await e2e.webhook({ kind: "pull_request", action: "reopened", number: pullRequest.number })).status).toBe(200);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    await mergeWebhook(e2e, pullRequest.number);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
+    expect(said(e2e).at(-1)).toBe(MERGED);
+  }, 120_000);
+
+  it.todo("8.7 D3: what the thread says when a closed pull request is reopened (open decision D3; today it says \"Draft pull request opened\" again)");
 
   it("8.8 closing from Slack while waiting for the merge: confirmed, said, the PR stays open, and a later merge is ignored", async () => {
     const { e2e, pullRequest } = await waiting();
