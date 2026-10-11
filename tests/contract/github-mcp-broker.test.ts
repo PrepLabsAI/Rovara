@@ -75,6 +75,9 @@ describe("thread-authenticated GitHub MCP routes", () => {
     }) };
     const credentials = vi.fn(async () => ({ owner: "example", repo: "demo", token: "server-secret" }));
     const call = vi.fn(async () => ({ content: [{ type: "text", text: "created" }] }));
+    const resolveCredential = vi.fn<ConstructorParameters<typeof RepositoryGrantService>[1]>(async () => {
+      throw new Error("this synthetic broker route must not resolve a repository credential");
+    });
     const connect = vi.fn(async () => ({
       tools: [{ name: "issue_write", description: "Create an issue", inputSchema: { type: "object", properties: {
         owner: { type: "string" }, repo: { type: "string" }, title: { type: "string" }, method: { type: "string", enum: ["create"] },
@@ -83,7 +86,7 @@ describe("thread-authenticated GitHub MCP routes", () => {
     const handler = createAwsBrokerHandler({
       documentClient: documentClient as never, s3: {} as never, tableName: "state", artifactBucketName: "artifacts",
       issuer, adminClaim: "groups", adminValues: ["admins"], callbackSigningKey: "c".repeat(64),
-      repositoryGrants: new RepositoryGrantService({ resolve: async () => ({}) }),
+      repositoryGrants: new RepositoryGrantService(Buffer.alloc(32, 0x5a), resolveCredential),
       githubPullRequests: {} as never, codeBuild: {} as never, githubMcp: { credentials, connect },
       slack: { orchestratorRoleArn, memberWorkspaceLimit: 3, organizationWorkspaceLimit: 20 },
     });
@@ -128,6 +131,7 @@ describe("thread-authenticated GitHub MCP routes", () => {
     expect((await request("POST", thread, { ...input, token: "caller-controlled" })).statusCode).toBe(400);
     expect(call).toHaveBeenCalledExactlyOnceWith("issue_write", { method: "create", title: "Native tool", owner: "example", repo: "demo" });
     expect(credentials).toHaveBeenLastCalledWith(repository, "write");
+    expect(resolveCredential).not.toHaveBeenCalled();
     // The invocation records the revision whose policy authorized it, not the workspace's.
     expect(records.get(key(`WORKSPACE#${workspaceId}`, `GITHUB_MCP#${input.requestId}`))).toMatchObject({
       settingsRevision: 2,
