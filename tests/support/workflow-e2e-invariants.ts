@@ -25,6 +25,8 @@ export interface JourneyLedgerEntry {
   ownerDecisions: number;
   /** The owner's approvals of PR feedback fixes the task held when the run started. */
   feedbackApprovals: number;
+  /** A coding run the task owner asked for again with Retry coding (the broker's record of that press). */
+  ownerRetry?: boolean;
 }
 
 type Item = Record<string, unknown>;
@@ -82,7 +84,8 @@ function checkClick(journey: JourneyView): string[] {
     if (entry.kind === "task" && entry.mode === "IMPLEMENT") {
       const clicks = entry.ownerDecisions + entry.feedbackApprovals;
       const before = previous === undefined ? 0 : previous.ownerDecisions + previous.feedbackApprovals;
-      if (clicks <= before) violations.push(`INV-CLICK: coding run ${entry.operationId} started with no owner decision since the previous coding run`);
+      // A retry of coding that stopped re-runs the approved plan at the owner's own press.
+      if (clicks <= before && entry.ownerRetry !== true) violations.push(`INV-CLICK: coding run ${entry.operationId} started with no owner decision since the previous coding run`);
       previous = entry;
     }
     if (entry.kind === "maintain") {
