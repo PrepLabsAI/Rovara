@@ -11,4 +11,14 @@ describe("canonical JSON", () => {
     expect(sameJsonContent({ list: [1, 2] }, { list: [2, 1] })).toBe(false);
     expect(sameJsonContent({ a: 1 }, { a: "1" })).toBe(false);
   });
+
+  it("refuses values that are not plain JSON, so two different Dates (or Maps) never read as the same", () => {
+    expect(() => sameJsonContent(new Date(1), new Date(2))).toThrow(/plain JSON/);
+    expect(() => sameJsonContent({ at: new Date(1) }, { at: new Date(1) })).toThrow(/plain JSON/);
+    expect(() => canonicalJson(new Map([["a", 1]]))).toThrow(/plain JSON/);
+    class Point { x = 1; }
+    expect(() => canonicalJson([new Point()])).toThrow(/plain JSON/);
+    // An object with no prototype is still plain.
+    expect(sameJsonContent(Object.assign(Object.create(null) as object, { a: 1 }), { a: 1 })).toBe(true);
+  });
 });

@@ -1,12 +1,15 @@
-function isPlainRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-/** A copy of `value` with every object's keys in alphabetical order, at every level; undefined members are dropped. */
+/**
+ * A copy of `value` with every object's keys in alphabetical order, at every level; undefined members are dropped.
+ * Only plain JSON is accepted: an object whose prototype is not Object.prototype or null (a Date, a Map, a class
+ * instance) throws, because its keys do not say what it holds and two different ones would read as the same.
+ */
 export function sortKeys(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sortKeys);
-  if (isPlainRecord(value)) {
-    return Object.fromEntries(Object.keys(value).sort().filter((key) => value[key] !== undefined).map((key) => [key, sortKeys(value[key])]));
+  if (typeof value === "object" && value !== null) {
+    const prototype = Object.getPrototypeOf(value) as unknown;
+    if (prototype !== Object.prototype && prototype !== null) throw new TypeError("canonical JSON accepts plain JSON values only");
+    const record = value as Record<string, unknown>;
+    return Object.fromEntries(Object.keys(record).sort().filter((key) => record[key] !== undefined).map((key) => [key, sortKeys(record[key])]));
   }
   return value;
 }
