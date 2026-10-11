@@ -361,7 +361,10 @@ export async function runTaskInvocation(
   const unsubscribe = session.subscribe((event) => {
     if (eventType(event) === "tool_end") toolEvidence.push(redactCredentials(event));
     fileChanges.observe(event);
-    void events.append(eventType(event), event).catch(() => undefined);
+    // A streaming update carries the whole message so far: forwarding each one sends the control plane every prefix of a
+    // long answer or file write (quadratic, and one can outgrow a 400 KB table item). The finished message (message_end)
+    // is what the event log keeps.
+    if ((event as { type?: unknown } | undefined)?.type !== "message_update") void events.append(eventType(event), event).catch(() => undefined);
     const outcome = assistantOutcome(event);
     if (outcome !== undefined) {
       lastAssistant = outcome;
