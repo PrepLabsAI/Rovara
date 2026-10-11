@@ -161,7 +161,7 @@ import { can, pageAccess, resolveTaskAccess } from "../developer/task-access.js"
 import { inertReplyText } from "../developer/prompt-text.js";
 import {
   commentCounterKey, commentKey, counterTouch, createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, listTaskComments, openCommentsFor,
-  setSuggestion, suggestionsFor, type PageActor,
+  currentStepDocument, setSuggestion, suggestionsFor, type PageActor,
 } from "../developer/page-comments.js";
 import {
   COMMENT_ANSWERS_INSTRUCTION, COMMENT_CHANGED_MESSAGE, REQUEST_CHANGES_NEEDS_INPUT, decisionDetailKey, ownerAnswersFor, ownerAnswersSentence, pageCommentsPromptSection,
@@ -2324,7 +2324,7 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
   const checks = workflowSelectedChecks(checkPolicy)
     .map((check) => {
       const status = results.find((result) => result.checkId === check.id)?.status;
-      return { label: check.label, passed: status === "PASS" ? true : status === "FAILED" ? false : undefined, ...(status === "UNKNOWN" ? { unclear: true as const } : {}),
+      return { id: check.id, label: check.label, passed: status === "PASS" ? true : status === "FAILED" ? false : undefined, ...(status === "UNKNOWN" ? { unclear: true as const } : {}),
         ...(proposedIds.has(check.id) ? { proposed: true as const } : {}), ...(proves?.[check.id] === undefined ? {} : { proves: proves[check.id]! }) };
     });
   // Model-written: the page escapes it. Review only is said once a coding plan exists to have proposed nothing.
@@ -2412,6 +2412,41 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
     ...(acceptedFindings.length === 0 ? {} : { acceptedFindings }),
     pullRequests: (workflow?.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state })),
     history, access: pageAccess(access), comments, suggestions: shownSuggestions,
+    ...await pageDecidingView(deps, { task, caller, comments, suggestions: shownSuggestions }),
+  };
+}
+
+/**
+ * Spec 061 slice 2, what the page needs to answer, comment and decide: the comments and suggestions as this reader sees
+ * them, the document waiting for its owner (if any), the comment counter, and the coding plan's optional checks. A
+ * counter that cannot be read is 0; the page's poll catches up.
+ */
+async function pageDecidingView(
+  deps: DeveloperTaskRouteDependencies,
+  input: { task: DeveloperTaskRecord; caller: DeveloperCaller; comments: readonly TaskComment[]; suggestions: readonly TaskSuggestion[] },
+): Promise<Pick<TaskDocumentView, "pageComments" | "pageSuggestions" | "waiting" | "commentSeq" | "optionalChecks">> {
+  const { task, caller } = input;
+  const workflow = task.workflow;
+  const stepDocument = currentStepDocument(workflow);
+  const waitingArtifact = workflow?.stage === "PLAN_REVIEW" && workflow.state === "WAITING" && task.closedAt === undefined && stepDocument !== undefined
+    ? workflow.artifacts.filter((artifact) => artifact.type === stepDocument).sort((left, right) => right.version - left.version)[0] : undefined;
+  const kind = waitingArtifact === undefined ? undefined : TASK_PAGE_DOCUMENTS.find((item) => item.type === waitingArtifact.type)?.kind;
+  let commentSeq = 0;
+  try {
+    const counter = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: commentCounterKey(task.taskId), ConsistentRead: true })) as { Item?: { seq?: unknown } };
+    if (typeof counter.Item?.seq === "number") commentSeq = counter.Item.seq;
+  } catch (error) {
+    log(deps, { event: "developer.task_page_comment_counter_unavailable", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" });
+  }
+  const policy = workflow?.checkPolicy;
+  return {
+    pageComments: pageCommentViews(input.comments, { readerId: caller.developerId, now: deps.now(), artifacts: workflow?.artifacts ?? [] }),
+    pageSuggestions: input.suggestions.map((suggestion) => ({
+      document: suggestion.document, decisionId: suggestion.decisionId, optionId: suggestion.optionId, name: suggestion.name, you: suggestion.developerId === caller.developerId,
+    })),
+    ...(waitingArtifact === undefined || kind === undefined ? {} : { waiting: { kind, version: waitingArtifact.version, artifactDigest: waitingArtifact.sha256 } }),
+    commentSeq,
+    optionalChecks: (policy?.optional ?? []).map((check) => ({ id: check.id, label: check.label, selected: (policy?.selectedOptionalIds ?? []).includes(check.id) })),
   };
 }
 

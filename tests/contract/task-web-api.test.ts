@@ -266,6 +266,23 @@ describe("task page API through the broker", () => {
     }
   });
 
+  it("the page itself shows the owner's answer controls and a teammate's comment, with the data the script reads", async () => {
+    const t = await sharedTask();
+    const posted = await t.send(LEE, "POST", `/review/${t.id}/task/api/comments`, { ...commentBody, requestId: randomUUID(), text: "Above <b>reads</b> better." });
+    expect(posted.statusCode).toBe(201);
+    const owner = await t.send(MAYA, "GET", `/review/${t.id}/task`);
+    expect(owner.statusCode).toBe(200);
+    expect(owner.body).toContain('type="radio" name="answer-d1"');
+    expect(owner.body).toContain('class="decide-bar"');
+    expect(owner.body).toContain("Above &lt;b&gt;reads&lt;/b&gt; better.");
+    const island = JSON.parse(/<script type="application\/json" id="agentx-page-data">([\s\S]*?)<\/script>/.exec(owner.body)![1]!) as { current: { version: number; artifactDigest: string; openCommentIds: string[] }; commentSeq: number; revision: number };
+    expect(island).toMatchObject({ revision: t.revision, commentSeq: 1, current: { version: 1, artifactDigest: t.sha256, openCommentIds: [(posted.json.comment as { id: string }).id] } });
+    const teammate = await t.send(LEE, "GET", `/review/${t.id}/task`);
+    expect(teammate.body).toContain("Only owners decide.");
+    expect(teammate.body).not.toContain('type="radio"');
+    expect(teammate.body).toContain("You can read and comment on this task.");
+  });
+
   it("the feedback review routes are unchanged", async () => {
     const t = await sharedTask();
     // The PR feedback page and its API still answer their own paths: this task has no review, so both say not found in their own words.

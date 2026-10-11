@@ -568,7 +568,7 @@ describe("the task page's documents, versions and history", () => {
     expect(body).toContain("<main>");
     expect(body).toContain('<nav aria-label="Progress">');
     expect(body.match(/<h1>/g)).toHaveLength(1);
-    expect(body).toContain('<meta name="viewport" content="width=device-width,initial-scale=1">');
+    expect(body).toContain('<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">');
     expect(body).toContain("@media (prefers-color-scheme:dark)");
     expect(body).toMatch(/summary:focus\{outline/);
     expect(body).toMatch(/a:focus[^{]*\{outline/);
@@ -1077,7 +1077,9 @@ describe("the task page through the broker", () => {
       expect(owner.body).toContain("<summary>Earlier versions (1)</summary>");
       expect(owner.body).toContain("This is v1. v2 is the current one.");
       expect(owner.body).toContain("Changed since v1");
-      const history = owner.body.slice(owner.body.indexOf('id="history"'));
+      // The History section only: the page's data and dialog follow it.
+      const historyStart = owner.body.indexOf('id="history"');
+      const history = owner.body.slice(historyStart, owner.body.indexOf("</section>", historyStart));
       expect(history).toContain("Coding plan v1 was written");
       expect(history).toContain("Coding plan v2 was written");
       expect(history).toContain("A project admin approved Coding plan v2");
@@ -1090,7 +1092,7 @@ describe("the task page through the broker", () => {
       expect(owner.body).toMatch(/Coding plan v2 · approved/);
       expect(owner.body).not.toMatch(/thread repl/i);
       const reader = await open(TEAMMATE);
-      expect(reader.body).toContain("You can read this task.");
+      expect(reader.body).toContain("You can read and comment on this task.");
       expect(owner.body).toContain("You're the task owner.");
     });
 
@@ -1163,5 +1165,97 @@ describe("the task page and its API (slice 2)", () => {
     expect(seen).toEqual([path]);
     const without = createTaskWeb({ authenticateSession: async () => caller, getTaskDocumentView: async () => view });
     expect((await without(request(path, SESSION), new URL(`https://agentx.example.test${path}`))).statusCode).toBe(404);
+  });
+});
+
+describe("deciding and commenting on the task page (slice 2)", () => {
+  const BANNED = /\b(candidate|revision|digest|operation|artifact|workflow|invalid json)\b|\b(SUCCEEDED|FAILED|INTERRUPTED|CANCELLED)\b|ended (SUCCEEDED|FAILED)/i;
+  const owner = { role: "owner" as const, canComment: true, canSuggest: false, canDecide: true, canAsk: true };
+  const commenter = { role: "commenter" as const, canComment: true, canSuggest: true, canDecide: false, canAsk: true };
+  const digest = "f".repeat(64);
+  // Plain model text, so the banned-words sweep tests the page's own words.
+  const plain = { title: "Retry payments", why: [{ text: "Payments are dropped today.", author: "Priya" }] };
+  const plans = (question = "How many times should a payment be retried?") => [
+    structuredDoc("coding plan", 1, planDocument(plain), { current: false }),
+    structuredDoc("coding plan", 2, planDocument({ ...plain, decisions: [{ ...planDocument().decisions[0]!, question }] })),
+  ];
+  const deciding = (extra: Partial<TaskDocumentView> = {}) => render({
+    documents: plans(), waiting: { kind: "coding plan", version: 2, artifactDigest: digest }, revision: 7, commentSeq: 3, access: owner, ...extra,
+  });
+
+  it("the owner sees the sticky bar on the waiting document only", async () => {
+    const { body } = await deciding();
+    expect(count(body, /class="decide-bar"/g)).toBe(1);
+    const bar = body.slice(body.indexOf('<div class="decide-bar"'));
+    expect(bar).toMatch(/^<div class="decide-bar" role="region" aria-label="Decide">/);
+    expect(bar).toContain("1 to answer");
+    expect(bar).toMatch(/<button type="button" id="decide-approve"[^>]*hidden>Approve<\/button>/);
+    expect(bar).toMatch(/<button type="button" id="decide-request-changes"[^>]*hidden>Request changes<\/button>/);
+    // The bar sits with the current coding plan, not the earlier version.
+    expect(body.indexOf('class="decide-bar"')).toBeGreaterThan(body.indexOf('id="coding-plan-v2"'));
+    expect(body).toContain('<dialog id="decide-dialog" aria-labelledby="decide-title">');
+    expect(body).toContain('type="radio" name="answer-d1"');
+    expect(body).toContain("You're the task owner.");
+    expect(body).not.toContain("Decisions are made in Slack.");
+    // Nothing waiting: no bar and no dialog.
+    const idle = (await render({ documents: plans(), access: owner })).body;
+    expect(idle).not.toContain('class="decide-bar"');
+    expect(idle).not.toContain('id="decide-dialog"');
+    expect(idle).not.toContain('type="radio"');
+  });
+
+  it("others see Only owners decide", async () => {
+    const { body } = await deciding({ access: commenter });
+    const bar = body.slice(body.indexOf('<div class="decide-bar"'));
+    expect(bar).toContain("Only owners decide.");
+    expect(body).not.toContain('id="decide-approve"');
+    expect(body).not.toContain('id="decide-dialog"');
+    expect(body).not.toContain('type="radio"');
+    expect(body).toContain("You can read and comment on this task.");
+  });
+
+  it("the page data island escapes script-closing text", async () => {
+    const answer = await deciding({ documents: plans("Close </script><script>alert(1)</script> here?"), title: "</script><!--" });
+    const island = /<script type="application\/json" id="agentx-page-data">([\s\S]*?)<\/script>/.exec(answer.body);
+    expect(island).not.toBeNull();
+    expect(island![1]).not.toMatch(/<\/script|<!--|<script/i);
+    const data = JSON.parse(island![1]!) as { taskId: string; csrf: string; revision: number; role: string; canDecide: boolean; commentSeq: number; current: { anchor: string; version: number; artifactDigest: string; decisions: Array<{ question: string; recommended: string; options: string[]; labels: Record<string, string> }> } };
+    expect(data).toMatchObject({ taskId, revision: 7, role: "owner", canDecide: true, commentSeq: 3, current: { anchor: "coding-plan", version: 2, artifactDigest: digest } });
+    expect(data.current.decisions[0]).toMatchObject({ question: "Close </script><script>alert(1)</script> here?", recommended: "three", options: ["three", "five"], labels: { three: "Three times", five: "Five times" } });
+    expect(answer.headers["set-cookie"]).toContain(`__Host-agentx_review_csrf=${data.csrf};`);
+    // Only the nonce'd script runs: the data island is not a script the page executes.
+    const nonce = /<script nonce="([^"]+)">/.exec(answer.body)![1]!;
+    expect(answer.body.match(/<script nonce=/g)).toHaveLength(1);
+    expect(answer.headers["content-security-policy"]).toContain(`script-src 'nonce-${nonce}'`);
+    // A reader who can do nothing gets no island.
+    expect((await render({ documents: plans() })).body).not.toContain("agentx-page-data");
+  });
+
+  it("every new string avoids the banned words", async () => {
+    const comments = [
+      { id: "00000000-0000-4000-8000-000000000001", document: "plan" as const, version: 1, target: { kind: "claim" as const, id: "1" }, author: { kind: "person" as const, name: "Sam", owner: false, you: false }, text: "Looks fine.", createdAt: "2026-10-11T10:00:00.000Z", edited: true, deleted: false, sent: true, rev: 2, agentx: "not_answered" as const },
+      { id: "00000000-0000-4000-8000-000000000002", document: "plan" as const, version: 2, target: { kind: "document" as const }, author: { kind: "person" as const, name: "Priya", owner: true, you: true }, text: "", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: true, sent: false, rev: 2 },
+      { id: "00000000-0000-4000-8000-000000000003", document: "plan" as const, version: 2, target: { kind: "claim" as const, id: "2" }, author: { kind: "person" as const, name: "Priya", owner: true, you: true }, text: "Why?", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: false, sent: false, rev: 1, agentx: "couldnt" as const },
+      { id: "00000000-0000-4000-8000-000000000004", parentId: "00000000-0000-4000-8000-000000000001", document: "plan" as const, version: 1, target: { kind: "claim" as const, id: "1" }, author: { kind: "agentx" as const, name: "AgentX", owner: false, you: false }, text: "Kept.", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: false, sent: false, rev: 1, planner: { outcome: "not_changed" as const, version: 2 } },
+    ];
+    for (const access of [owner, commenter]) {
+      const { body } = await deciding({ access, pageComments: comments, pageSuggestions: [{ document: "plan", decisionId: "d1", optionId: "five", name: "Sam", you: false }] });
+      expect(visible(body).match(BANNED)?.[0]).toBeUndefined();
+      const labels = [...body.matchAll(/aria-label="([^"]*)"/g)].map((match) => match[1]).join(" ");
+      expect(labels).not.toMatch(BANNED);
+    }
+  });
+
+  it("phone layout rules: sticky bar, 2.75rem controls, full-screen dialog under 35rem", async () => {
+    const { body } = await deciding();
+    expect(body).toContain('<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">');
+    const style = TASK_PAGE_STYLE.replace(/\s+/g, "");
+    expect(style).toContain(".decide-bar{position:sticky;bottom:0;display:flex;flex-wrap:wrap;gap:.5rem;padding-bottom:calc(.5rem+env(safe-area-inset-bottom))");
+    expect(style).toContain("button,.decide-bar button{min-height:2.75rem".replace(/\s+/g, ""));
+    expect(style).toContain("textarea{width:100%;max-width:100%");
+    expect(style).toContain("dialog{width:min(40rem,100vw);max-height:100dvh");
+    expect(style).toContain("@media(max-width:35rem){dialog{margin:0;width:100vw;max-width:100vw;height:100dvh");
+    expect(style).toMatch(/\.comment-text\{[^}]*overflow-wrap:anywhere/);
+    expect(style).toMatch(/textarea:focus/);
   });
 });

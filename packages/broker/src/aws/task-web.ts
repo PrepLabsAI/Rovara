@@ -8,6 +8,7 @@ import type { TaskRole } from "../developer/task-access.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { checksAnchor, renderPlanDocument, type PlanAnchor } from "./plan-page/render-plan.js";
+import type { PageCommentView, PageSuggestionView } from "./plan-page/comments.js";
 import { TASK_PAGE_SCRIPT, TASK_PAGE_STYLE } from "./task-page-assets.js";
 import { TASK_PAGE_API_PREFIX } from "./task-web-api.js";
 import {
@@ -42,7 +43,7 @@ export interface TaskDocumentView {
   /** Documents whose saved copy failed its check: named, never shown. */
   unverified?: TaskDocumentKind[];
   /** `unclear`: the check ran but its result couldn't be told; `proposed`: AgentX proposed it in the coding plan; `proves`: the claims a structured coding plan says it proves. */
-  checks: Array<{ label: string; passed: boolean | undefined; unclear?: true; proposed?: true; proves?: string[] }>;
+  checks: Array<{ /** The check's ID, so comments can name it. */ id?: string; label: string; passed: boolean | undefined; unclear?: true; proposed?: true; proves?: string[] }>;
   /** One plain sentence about the checks: that none apply (review only), or that the proposed ones could not be read. */
   checksNote?: string;
   /** Whether the checks have run on the current code. When left out, the page reads it from the checks' own results. */
@@ -60,6 +61,16 @@ export interface TaskDocumentView {
   comments?: TaskComment[];
   /** The suggestions that still apply to each document's current version. */
   suggestions?: TaskSuggestion[];
+  /** The comments as this reader sees them (names, owner flags, "you"; no IDs of people). */
+  pageComments?: PageCommentView[];
+  /** The suggestions as this reader sees them, by document. */
+  pageSuggestions?: Array<PageSuggestionView & { document: "requirements" | "design" | "plan" }>;
+  /** The document waiting for its owner's decision, when one is. */
+  waiting?: { kind: TaskDocumentKind; version: number; artifactDigest: string };
+  /** Moves whenever a comment, reply or suggestion is written; the page's script compares it. */
+  commentSeq?: number;
+  /** The coding plan's optional checks, and whether each is chosen now. */
+  optionalChecks?: Array<{ id: string; label: string; selected: boolean }>;
 }
 
 export interface TaskWebDependencies {
@@ -191,8 +202,18 @@ async function documentsHtml(view: TaskDocumentView, request: TaskPageRequest): 
       if (document.format === "markdown") return markdownDocument(entry.anchor, entry.label, document, currentDocument.version);
       const before = versions[versions.indexOf(document) - 1];
       const checks = entry.kind === "coding plan" && document === currentDocument
-        ? view.checks.map((check) => ({ label: check.label, proposed: check.proposed === true, proves: check.proves ?? [], status: checkWords(check) })) : undefined;
+        ? view.checks.map((check) => ({ ...(check.id === undefined ? {} : { id: check.id }), label: check.label, proposed: check.proposed === true, proves: check.proves ?? [], status: checkWords(check) })) : undefined;
+      const isCurrent = document === currentDocument;
+      const slice2 = !isCurrent || view.access === undefined ? {} : {
+        comments: view.pageComments ?? [],
+        suggestions: (view.pageSuggestions ?? []).filter((suggestion) => suggestion.document === entry.planKind)
+          .map(({ decisionId, optionId, name, you }) => ({ decisionId, optionId, name, you })),
+        access: { canComment: view.access.canComment, canSuggest: view.access.canSuggest, canDecide: view.access.canDecide },
+        deciding: view.access.canDecide && view.waiting?.kind === entry.kind && view.waiting.version === document.version,
+        plans: new Map(versions.flatMap((item) => item.format === "structured" ? [[item.version, item.plan] as const] : [])),
+      };
       return await renderPlanDocument({
+        ...slice2,
         anchor: entry.anchor, kind: entry.planKind, version: document.version, approved: document.approved, current: document === currentDocument,
         currentVersion: currentDocument.version, plan: document.plan, ...(document.evidence === undefined ? {} : { evidence: document.evidence }),
         ...(document.createdAt === undefined ? {} : { createdAt: document.createdAt }), ...(view.now === undefined ? {} : { now: view.now }),
@@ -250,8 +271,70 @@ function progressStrip(view: TaskDocumentView, targets: ChipTargets): string {
   return `<nav aria-label="Progress"><ol class="progress">${items.join("")}</ol></nav>`;
 }
 
+/** JSON for a data island inside the page: nothing in it can close the element or start markup. */
+const scriptJson = (value: unknown): string => JSON.stringify(value).replace(/[<>&\u2028\u2029]/g, (character) => ({
+  "<": "\\u003c", ">": "\\u003e", "&": "\\u0026", "\u2028": "\\u2028", "\u2029": "\\u2029",
+})[character]!);
+
+const KIND_ANCHOR: Record<TaskDocumentKind, PlanAnchor> = { requirements: "requirements", design: "design", "coding plan": "coding-plan" };
+const KIND_LABEL: Record<TaskDocumentKind, string> = { requirements: "Requirements", design: "Design", "coding plan": "Coding plan" };
+
+/** The waiting document, when it is a structured one on the page. */
+function waitingDocument(view: TaskDocumentView): Extract<TaskDocumentEntry, { format: "structured" }> | undefined {
+  const waiting = view.waiting;
+  if (waiting === undefined) return undefined;
+  const found = view.documents.find((document) => document.kind === waiting.kind && document.version === waiting.version);
+  return found?.format === "structured" ? found : undefined;
+}
+
+/** What the page's script reads (spec 061 slice 2): who the reader is to the task, and the waiting document's decisions. Model text is redacted. */
+function pageData(view: TaskDocumentView, csrf: string): Record<string, unknown> {
+  const access = view.access!;
+  const waiting = view.waiting;
+  const structured = waitingDocument(view);
+  const planKind = waiting === undefined ? undefined : ANCHORS.find((entry) => entry.kind === waiting.kind)?.planKind;
+  const current = waiting === undefined ? undefined : {
+    anchor: KIND_ANCHOR[waiting.kind], label: KIND_LABEL[waiting.kind], version: waiting.version, artifactDigest: waiting.artifactDigest,
+    decisions: (structured?.plan.decisions ?? []).map((decision) => ({
+      id: decision.id, question: redactText(decision.question), recommended: decision.recommended, options: decision.options.map((option) => option.id),
+      labels: Object.fromEntries(decision.options.map((option) => [option.id, redactText(option.label)])),
+    })),
+    openCommentIds: (view.pageComments ?? []).filter((comment) => comment.author.kind === "person" && !comment.deleted && !comment.sent
+      && comment.document === planKind && comment.version <= waiting.version).map((comment) => comment.id),
+    optionalChecks: waiting.kind === "coding plan" ? (view.optionalChecks ?? []).map((check) => ({ id: check.id, label: redactText(check.label), selected: check.selected })) : [],
+  };
+  return {
+    taskId: view.taskId, csrf, revision: view.revision ?? 0, role: access.role, canDecide: access.canDecide, canComment: access.canComment,
+    canSuggest: access.canSuggest, canAsk: access.canAsk, ...(current === undefined ? {} : { current }), commentSeq: view.commentSeq ?? 0,
+  };
+}
+
+/** The bar at the bottom of the page while a document waits: the owner's answer count and buttons (on with the script), or who decides. */
+function decideBar(view: TaskDocumentView): string {
+  if (view.waiting === undefined || view.access === undefined) return "";
+  if (!view.access.canDecide) return '<div class="decide-bar" role="region" aria-label="Decide"><p>Only owners decide.</p></div>';
+  const count = waitingDocument(view)?.plan.decisions.length ?? 0;
+  const label = count === 0 ? "All answered" : `${count} to answer`;
+  return '<div class="decide-bar" role="region" aria-label="Decide">'
+    + `<p><button type="button" id="decide-next" hidden>${label}</button><span id="decide-count">${label}</span></p>`
+    + '<button type="button" id="decide-approve" hidden>Approve</button> <button type="button" id="decide-request-changes" hidden>Request changes</button></div>';
+}
+
+/** The one confirmation dialog; the page's script fills it with text only. */
+function decideDialog(view: TaskDocumentView): string {
+  if (view.waiting === undefined || view.access?.canDecide !== true) return "";
+  const section = (id: string, heading: string, extra = "") => `<section id="${id}" hidden><h3 id="${id}-title">${heading}</h3><ul id="${id}-list"></ul>${extra}</section>`;
+  return '<dialog id="decide-dialog" aria-labelledby="decide-title"><h2 id="decide-title"></h2>'
+    + section("decide-changed", "Your answers that differ from AgentX's")
+    + section("decide-unanswered", "Not answered yet, so AgentX's answer is used")
+    + section("decide-comments", "Comments to send", '<p id="decide-cap" class="muted" hidden>You can send up to 25 comments at a time; the rest stay open for the next version.</p>')
+    + section("decide-checks", "Optional checks")
+    + '<label for="decide-note" id="decide-note-label">Note for AgentX (optional)</label><textarea id="decide-note" maxlength="500"></textarea>'
+    + '<p id="decide-error" class="error" role="alert" hidden></p><p id="decide-status" role="status" aria-live="polite"></p>'
+    + '<p class="dialog-actions"><button type="button" id="decide-submit">Approve and continue</button> <button type="button" id="decide-cancel">Cancel</button></p></dialog>';
+}
+
 async function page(view: TaskDocumentView, nonce: string, request: TaskPageRequest, csrf?: string): Promise<string> {
-  void csrf;
   const unverified = (view.unverified ?? []).map((kind) => `<p><strong>The saved ${escapeHtml(kind)} couldn't be verified, so it isn't shown.</strong></p>`).join("");
   const noDocuments = view.documents.length === 0 && unverified === "" ? "<p class=\"muted\">No document has been written yet.</p>" : "";
   const documents = await documentsHtml(view, request);
@@ -291,21 +374,24 @@ async function page(view: TaskDocumentView, nonce: string, request: TaskPageRequ
       const linked = entry.link !== undefined && /^#[A-Za-z0-9-]+$/.test(entry.link);
       return `<li><time datetime="${escapeHtml(entry.at)}">${escapeHtml(historyTime(entry.at))}</time> ${linked ? `<a href="${escapeHtml(entry.link)}">${text}</a>` : text}</li>`;
     }).join("")}</ol>`;
-  const role = view.role === "owner" ? "You're the task owner." : "You can read this task.";
+  const owns = view.access === undefined ? view.role === "owner" : view.access.role === "owner";
+  const role = owns ? "You're the task owner." : view.access?.canComment === true ? "You can read and comment on this task." : "You can read this task.";
+  const slackOnly = view.access?.canDecide === true ? "" : '<p class="muted">Decisions are made in Slack.</p>';
+  const island = csrf === undefined || view.access === undefined ? "" : `<script type="application/json" id="agentx-page-data">${scriptJson(pageData(view, csrf))}</script>`;
   // Hidden until the script sees the task moved on; without scripts it never shows and the page reads as before.
   const movedOn = `<div id="moved-on" class="moved-on" role="status" hidden data-version="${escapeHtml(view.revision ?? 0)}" data-stage="${escapeHtml(view.stage)}"`
     + ` data-check="/review/${escapeHtml(view.taskId)}/task/status"><p>This task has moved on. Refresh to see the latest.</p>`
     + `<button type="button" id="moved-on-refresh">Refresh</button></div>`;
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>AgentX task · ${escapeHtml(view.title)}</title>`
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>AgentX task · ${escapeHtml(view.title)}</title>`
     + `<style nonce="${nonce}">${TASK_PAGE_STYLE}</style></head><body>${movedOn}`
     + `<header><h1>${escapeHtml(view.title)}</h1><p class="muted">${role}</p>${progressStrip(view, { checks: checks !== undefined && checks !== "" })}`
-    + `<p><strong>${escapeHtml(view.status)}</strong></p><p>Next: ${escapeHtml(view.nextStep)}</p><p class="muted">Decisions are made in Slack.</p></header>`
+    + `<p><strong>${escapeHtml(view.status)}</strong></p><p>Next: ${escapeHtml(view.nextStep)}</p>${slackOnly}</header>`
     + `<main>${unverified}${documents}${noDocuments}`
     + (checks === undefined || checks === "" ? "" : `<section id="checks" aria-label="Checks"><h2>Checks</h2>${checks}</section>`)
     + `<section id="findings" aria-label="Review findings"><h2>Review findings</h2>${findings}</section>`
     + `<section id="pull-requests" aria-label="Pull requests"><h2>Pull requests</h2>${pullRequests}</section>`
     + `<section id="history" aria-label="History"><h2>History</h2>${historyHtml}</section>`
-    + `</main><script nonce="${nonce}">${TASK_PAGE_SCRIPT}</script></body></html>`;
+    + `${decideBar(view)}</main>${decideDialog(view)}${island}<script nonce="${nonce}">${TASK_PAGE_SCRIPT}</script></body></html>`;
 }
 
 

@@ -5,6 +5,7 @@
 import { diffPlanDocuments, redactText, type PlanClaim, type PlanDecision, type PlanDocument, type PlanDocumentKind, type PlanEvidenceBundle, type PlanEvidenceInput } from "@agentx/contracts";
 import { escapeHtml } from "../web-session.js";
 import { renderDiagram } from "./diagrams.js";
+import { commentCountBadge, renderThreads, suggestionLines, targetKey, type PageCommentView, type PageSuggestionView } from "./comments.js";
 
 export type PlanAnchor = "requirements" | "design" | "coding-plan";
 
@@ -18,8 +19,18 @@ export interface RenderPlanInput {
   createdAt?: string; now?: number;
   previous?: { version: number; plan: PlanDocument };
   approvedEarlier?: PlanDocument;
-  checks?: Array<{ label: string; proposed: boolean; proves: string[]; status: string }>;
+  checks?: Array<{ id?: string; label: string; proposed: boolean; proves: string[]; status: string }>;
   openWhatChanged: boolean;
+  /** Spec 061 slice 2, the current version only: the task's comments (any document; this one's up to this version show). */
+  comments?: PageCommentView[];
+  /** The suggestions that apply to this version. */
+  suggestions?: PageSuggestionView[];
+  /** What the reader may do on the page. */
+  access?: { canComment: boolean; canSuggest: boolean; canDecide: boolean };
+  /** The owner answers this version's decisions here: it is current and waits for their decision. */
+  deciding?: boolean;
+  /** Every structured version of this document by number, to quote a removed claim's words. */
+  plans?: ReadonlyMap<number, PlanDocument>;
 }
 
 /** How many claims, per level, and how many decisions in all, show before the rest fold away. */
@@ -54,6 +65,15 @@ interface Context {
   changedIds: Set<string>;
   changedAfterApprovalIds: Set<string>;
   decisionsInClaims: Map<string, PlanDecision[]>;
+  /** The threads shown on this version, by place ("claim:2.1"); empty unless this is the current version and comments were given. */
+  threads: Map<string, PageCommentView[]>;
+  commenting: boolean;
+}
+
+/** The threads on one place of the document, with the Comment control for someone who may comment; "" when comments are not shown. */
+function threadsHtml(context: Context, key: string, options: { label?: string; open?: boolean } = {}): string {
+  if (context.input.comments === undefined || !context.input.current) return "";
+  return renderThreads(context.threads.get(key) ?? [], { shownVersion: context.input.version, canComment: context.commenting, target: key, ...options });
 }
 
 const claimHref = (context: Context, claimId: string): string => `#${escapeHtml(claimAnchor(context.input.anchor, context.input.version, claimId))}`;
@@ -117,12 +137,30 @@ async function evidenceHtml(context: Context, claim: PlanClaim, index: number, i
 }
 
 function decisionHtml(context: Context, decision: PlanDecision, withLink: boolean): string {
+  const where = withLink ? `<p class="decision-claim">On claim ${claimLink(context, decision.claimId)}</p>` : "";
+  const id = escapeHtml(decisionAnchor(context, decision.id));
+  const note = '<p class="decision-note">Approve in Slack uses AgentX\'s answer.</p>';
+  const key = `decision:${decision.id}`;
+  const suggestions = context.input.current ? (context.input.suggestions ?? []).filter((suggestion) => suggestion.decisionId === decision.id) : [];
+  const after = `${note}${suggestionLines(suggestions, decision.options)}${threadsHtml(context, key)}`;
+  if (context.input.deciding === true && context.input.current) {
+    // The owner's answer controls: one radio per option, AgentX's answer chosen to start with.
+    const options = decision.options.map((option) => {
+      const recommended = option.id === decision.recommended;
+      const inputId = escapeHtml(`answer-${decisionAnchor(context, decision.id)}-${option.id}`);
+      return `<li class="option${recommended ? " recommended" : ""}"><input type="radio" name="answer-${t(decision.id)}" value="${t(option.id)}" id="${inputId}"${recommended ? " checked" : ""}>`
+        + `<label for="${inputId}"><span class="option-label">${t(option.label)}</span>${recommended ? ' <span class="badge badge-recommended">AgentX recommends</span>' : ""} <span class="consequence">${t(option.consequence)}</span></label></li>`;
+    }).join("");
+    return `<div class="decision" id="${id}" data-decision="${t(decision.id)}"><fieldset class="answer"><legend><span class="decision-id">${t(decision.id)}</span> ${t(decision.question)}</legend>${where}<ul class="options">${options}</ul></fieldset>${after}</div>`;
+  }
+  const suggesting = context.input.current && context.input.access?.canSuggest === true;
+  const mine = suggestions.find((suggestion) => suggestion.you)?.optionId;
   const options = decision.options.map((option) => {
     const recommended = option.id === decision.recommended;
-    return `<li class="option${recommended ? " recommended" : ""}"><span class="option-label">${t(option.label)}</span>${recommended ? ' <span class="badge badge-recommended">AgentX recommends</span>' : ""} <span class="consequence">${t(option.consequence)}</span></li>`;
+    const suggest = !suggesting ? "" : ` <button type="button" class="suggest" data-decision="${t(decision.id)}" data-option="${t(option.id)}"${mine === option.id ? ' data-mine="true"' : ""} hidden>${mine === option.id ? "You suggest this · Undo" : "Suggest this"}</button>`;
+    return `<li class="option${recommended ? " recommended" : ""}"><span class="option-label">${t(option.label)}</span>${recommended ? ' <span class="badge badge-recommended">AgentX recommends</span>' : ""} <span class="consequence">${t(option.consequence)}</span>${suggest}</li>`;
   }).join("");
-  const where = withLink ? `<p class="decision-claim">On claim ${claimLink(context, decision.claimId)}</p>` : "";
-  return `<div class="decision" id="${escapeHtml(decisionAnchor(context, decision.id))}" data-decision="${t(decision.id)}"><p class="decision-question"><span class="decision-id">${t(decision.id)}</span> ${t(decision.question)}</p>${where}<ul class="options">${options}</ul><p class="decision-note">Approving in Slack uses AgentX's recommended answer.</p></div>`;
+  return `<div class="decision" id="${id}" data-decision="${t(decision.id)}"><p class="decision-question"><span class="decision-id">${t(decision.id)}</span> ${t(decision.question)}</p>${where}<ul class="options">${options}</ul>${after}</div>`;
 }
 
 function badges(context: Context, claim: PlanClaim): string {
@@ -140,7 +178,9 @@ async function claimHtml(context: Context, claim: PlanClaim, level: number, open
   const decisions = (context.decisionsInClaims.get(claim.id) ?? []).map((decision) => decisionHtml(context, decision, false)).join("");
   const children = await claimList(context, claim.children ?? [], level + 1);
   const id = claimAnchor(context.input.anchor, context.input.version, claim.id);
-  return `<details id="${escapeHtml(id)}" class="claim level-${level}"${open ? " open" : ""}><summary><span class="claim-id">${t(claim.id)}</span> <span class="claim-text">${t(claim.text)}</span>${badges(context, claim)}</summary><div class="claim-body">${evidence.join("")}${decisions}${children}</div></details>`;
+  const key = `claim:${claim.id}`;
+  const count = commentCountBadge(context.threads.get(key)?.length ?? 0);
+  return `<details id="${escapeHtml(id)}" class="claim level-${level}"${open ? " open" : ""}><summary><span class="claim-id">${t(claim.id)}</span> <span class="claim-text">${t(claim.text)}</span>${badges(context, claim)}${count}</summary><div class="claim-body">${evidence.join("")}${decisions}${children}${threadsHtml(context, key)}</div></details>`;
 }
 
 /** The first five claims of a level, then the rest folded away. Only the first five claims of level 1 start open. */
@@ -158,7 +198,7 @@ async function claimList(context: Context, claims: PlanClaim[], level: number): 
 
 /** Every decision, in ranked order, as a link to the decision itself; nothing when the plan has none. */
 function decisionListHtml(context: Context, plan: PlanDocument): string {
-  if (plan.decisions.length === 0) return "";
+  if (plan.decisions.length === 0) return '<p class="no-decisions">No decisions needed</p>';
   const items = plan.decisions.map((decision) => {
     const question = escapeHtml(cut(redactText(decision.question), DECISION_QUESTION_MAX_CHARS));
     return `<li><a class="decision-link" href="#${escapeHtml(decisionAnchor(context, decision.id))}">${t(decision.id)} \u2014 ${question} (on claim ${t(decision.claimId)})</a></li>`;
@@ -223,8 +263,54 @@ function checksHtml(context: Context): string {
   const { checks } = context.input;
   if (checks === undefined || checks.length === 0) return "";
   // Class names let the stylesheet keep the short columns whole and, on a phone, stack each check as one block.
-  const rows = checks.map((check) => `<tr><td class="check-label">${t(check.label)}</td><td class="check-from">${check.proposed ? "Proposed" : "Project"}</td><td class="check-proves">${check.proves.length === 0 ? "None" : check.proves.map((id) => provesLink(context, id)).join(", ")}</td><td class="check-status">${t(check.status)}</td></tr>`).join("");
-  return `<section id="${escapeHtml(checksAnchor(context.input.version))}" class="checks"><h3>Checks</h3><table><thead><tr><th class="check-label">Check</th><th class="check-from">From</th><th class="check-proves">Proves</th><th class="check-status">Status</th></tr></thead><tbody>${rows}</tbody></table></section>`;
+  const commentControl = (check: NonNullable<RenderPlanInput["checks"]>[number]) => check.id === undefined || !context.commenting || context.input.comments === undefined || !context.input.current ? ""
+    : ` <button type="button" class="comment-open" data-target="check:${t(check.id)}" hidden>Comment</button>`;
+  const threads = checks.map((check) => check.id === undefined ? "" : threadsHtml(context, `check:${check.id}`, { label: check.label, open: false })).join("");
+  const rows = checks.map((check) => `<tr><td class="check-label">${t(check.label)}${commentControl(check)}</td><td class="check-from">${check.proposed ? "Proposed" : "Project"}</td><td class="check-proves">${check.proves.length === 0 ? "None" : check.proves.map((id) => provesLink(context, id)).join(", ")}</td><td class="check-status">${t(check.status)}</td></tr>`).join("");
+  return `<section id="${escapeHtml(checksAnchor(context.input.version))}" class="checks"><h3>Checks</h3><table><thead><tr><th class="check-label">Check</th><th class="check-from">From</th><th class="check-proves">Proves</th><th class="check-status">Status</th></tr></thead><tbody>${rows}</tbody></table>${threads}</section>`;
+}
+
+/** "Comments on this document": the whole-document threads, and the Comment control for someone who may comment. */
+function documentCommentsHtml(context: Context): string {
+  const threads = threadsHtml(context, "document");
+  return threads === "" ? "" : `<section class="doc-comments"><h3>Comments on this document</h3>${threads}</section>`;
+}
+
+/** Whether this version still has the place a thread is on. */
+function placeExists(context: Context, key: string): boolean {
+  const { plan, checks } = context.input;
+  if (key === "document") return true;
+  const [kind, id] = [key.slice(0, key.indexOf(":")), key.slice(key.indexOf(":") + 1)];
+  if (kind === "claim") return flatten(plan.claims).some((claim) => claim.id === id);
+  if (kind === "decision") return plan.decisions.some((decision) => decision.id === id);
+  return (checks ?? []).some((check) => check.id === id);
+}
+
+/**
+ * "Removed claims": threads whose claim, decision or check this version no longer has, each with the words it had in
+ * the version the comment was written on, and the first version without it.
+ */
+function removedHtml(context: Context): string {
+  const { input } = context;
+  const entries = [...context.threads.entries()].filter(([key]) => !placeExists(context, key)).map(([key, comments]) => {
+    const first = comments.find((comment) => comment.parentId === undefined) ?? comments[0]!;
+    const target = first.target;
+    let words = "";
+    let removedIn = input.version;
+    if (target.kind === "claim") {
+      const written = input.plans?.get(first.version);
+      const claim = written === undefined ? undefined : flatten(written.claims).find((entry) => entry.id === target.id);
+      words = claim === undefined ? "" : ` ${t(claim.text)}`;
+      for (let next = first.version + 1; next < input.version; next += 1) {
+        const later = input.plans?.get(next);
+        if (later !== undefined && !flatten(later.claims).some((entry) => entry.id === target.id)) { removedIn = next; break; }
+      }
+    }
+    const name = target.kind === "claim" ? `<span class="claim-id">${t(target.id)}</span>` : target.kind === "document" ? "" : `${target.kind} ${t(target.id)}`;
+    const threads = renderThreads(comments, { shownVersion: input.version, canComment: context.commenting, target: key, open: false });
+    return `<div class="removed-claim"><p class="removed-text">${name}${words} (removed in v${removedIn})</p>${threads}</div>`;
+  });
+  return entries.length === 0 ? "" : `<section class="removed-claims"><h3>Removed claims</h3>${entries.join("")}</section>`;
 }
 
 /** The structured document as an HTML fragment: heading and status, what changed, why, claims, decisions, lists, checks. */
@@ -236,7 +322,13 @@ export async function renderPlanDocument(input: RenderPlanInput): Promise<string
   const changedAfterApprovalIds = new Set(flatten(plan.claims).filter((claim) => approvedText.has(claim.id) && approvedText.get(claim.id) !== claim.text).map((claim) => claim.id));
   const decisionsInClaims = new Map<string, PlanDecision[]>();
   for (const decision of plan.decisions.slice(0, SHOWN)) decisionsInClaims.set(decision.claimId, [...(decisionsInClaims.get(decision.claimId) ?? []), decision]);
+  // The current version shows its document's comments up to this version: on their place when it still exists, else under Removed claims.
+  const shownComments = input.current ? (input.comments ?? []).filter((comment) => comment.document === input.kind && comment.version <= version) : [];
+  const threads = new Map<string, PageCommentView[]>();
+  for (const comment of shownComments) threads.set(targetKey(comment.target), [...(threads.get(targetKey(comment.target)) ?? []), comment]);
   const context: Context = {
+    threads,
+    commenting: input.access?.canComment === true,
     input,
     excerpts: new Map((input.evidence?.excerpts ?? []).map((excerpt) => [`${excerpt.claimId}#${excerpt.index}`, excerpt])),
     newIds: new Set(diff?.added ?? []),
@@ -264,6 +356,8 @@ export async function renderPlanDocument(input: RenderPlanInput): Promise<string
     notChangingHtml(context, plan.notChanging),
     list("Risks", "risks", plan.risks),
     checksHtml(context),
+    documentCommentsHtml(context),
+    removedHtml(context),
     "</section>",
   ].join("");
 }

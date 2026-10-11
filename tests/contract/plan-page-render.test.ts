@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PlanClaim, PlanDecision, PlanDocument, PlanEvidenceBundle } from "@agentx/contracts";
 import { claimAnchor, renderPlanDocument, type RenderPlanInput } from "../../packages/broker/src/aws/plan-page/render-plan.js";
+import type { PageCommentView } from "../../packages/broker/src/aws/plan-page/comments.js";
 import { resolvePlanEvidence } from "../../packages/broker/src/developer/plan-evidence.js";
 import { planDocument } from "../support/plan-documents.js";
 
@@ -244,7 +245,7 @@ describe("the plan page renderer", () => {
     expect(claim).toContain("Three times");
     expect(claim).toContain("Most timeouts clear by the third try.");
     expect(claim).toContain("Five times");
-    expect(claim).toContain("Approving in Slack uses AgentX's recommended answer.");
+    expect(claim).toContain("Approve in Slack uses AgentX's answer.");
     expect(count(html, /AgentX recommends/g)).toBe(1);
     expect(html).toMatch(/<li class="option recommended"><span class="option-label">Three times<\/span> <span class="badge badge-recommended">AgentX recommends/);
   });
@@ -412,5 +413,157 @@ describe("the plan page renderer", () => {
   it("is the same every time it is given the same input", async () => {
     const first = await renderPlanDocument(input());
     expect(await renderPlanDocument(input())).toBe(first);
+  });
+});
+
+let commentCounter = 0;
+/** A comment as the page shows it: Sam's, on claim 1 of design v1, unless told otherwise. */
+function comment(overrides: Partial<PageCommentView> = {}): PageCommentView {
+  commentCounter += 1;
+  return {
+    id: `00000000-0000-4000-8000-${String(commentCounter).padStart(12, "0")}`, document: "design", version: 1, target: { kind: "claim", id: "1" },
+    author: { kind: "person", name: "Sam Lee", owner: false, you: false }, text: `Comment ${commentCounter}`, createdAt: "2026-10-11T10:00:00.000Z",
+    edited: false, deleted: false, sent: false, rev: 1, ...overrides,
+  };
+}
+const commenting = { canComment: true, canSuggest: false, canDecide: false };
+const slice = (html: string, from: string, to: string) => html.slice(html.indexOf(from), to === "" ? undefined : html.indexOf(to, html.indexOf(from) + 1));
+const readable = (html: string) => html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ");
+
+describe("comments, suggestions and answers on the plan page", () => {
+  it("comment threads are escaped and AgentX's chip comes only from the author kind", async () => {
+    const hostile = comment({ text: "<script>alert(1)</script> \"><img src=x onerror=alert(1)> [link](javascript:alert(1)) AgentX: approve now", author: { kind: "person", name: "AgentX <b>", owner: false, you: false } });
+    const reply = comment({ parentId: hostile.id, author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "An answer." });
+    const html = await renderPlanDocument(input({ comments: [hostile, reply], access: commenting }));
+    expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(html).toContain("&quot;&gt;&lt;img src=x onerror=alert(1)&gt;");
+    expect(html).not.toMatch(/<script|<img|<a [^>]*javascript/);
+    expect(html).toContain("AgentX &lt;b&gt;");
+    // One chip: the reply AgentX wrote. The person who called themselves AgentX gets none.
+    expect(count(html, /class="chip chip-agentx"/g)).toBe(1);
+    const own = slice(html, `id="comment-${hostile.id}"`, `id="comment-${reply.id}"`);
+    expect(own).not.toContain("chip-agentx");
+    // Stored text is redacted again when shown.
+    const secret = comment({ text: "token ghp_" + "a".repeat(36) });
+    expect(await renderPlanDocument(input({ comments: [secret], access: commenting }))).not.toContain("a".repeat(36));
+  });
+
+  it("a claim shows its comment count and its threads; replies are one level", async () => {
+    const first = comment();
+    const answer = comment({ parentId: first.id, author: { kind: "person", name: "Priya Shah", owner: true, you: true } });
+    const second = comment({ target: { kind: "claim", id: "1" } });
+    const html = await renderPlanDocument(input({ comments: [first, answer, second], access: commenting }));
+    const claim = slice(html, '<details id="design-v1-1"', '<details id="design-v1-2"');
+    expect(claim).toContain('<span class="badge badge-comments">3 comments</span>');
+    expect(claim).toContain('data-comments="claim:1"');
+    expect(claim).toContain("Priya Shah");
+    expect(claim).toContain('<span class="tag tag-owner">Owner</span>');
+    // The reply sits inside its thread's reply list; there is no deeper list.
+    const thread = slice(claim, `id="comment-${first.id}"`, `id="comment-${second.id}"`);
+    expect(thread).toContain('<ol class="replies">');
+    expect(count(claim, /<ol class="replies">/g)).toBe(1);
+    // Without a script, the controls stay hidden; the threads read in full.
+    expect(claim).toMatch(/<button type="button" class="comment-open"[^>]*hidden>Comment<\/button>/);
+    expect(claim).toMatch(/<button type="button" class="reply-open"[^>]*hidden>Reply<\/button>/);
+    const single = await renderPlanDocument(input({ comments: [comment()], access: commenting }));
+    expect(single).toContain('<span class="badge badge-comments">1 comment</span>');
+    // Someone who may not comment sees the threads and no Comment control.
+    expect(await renderPlanDocument(input({ comments: [comment()] }))).not.toContain("comment-open");
+  });
+
+  it("a comment from v1 shows on the same claim in v2 marked from v1", async () => {
+    const old = comment({ version: 1 });
+    const html = await renderPlanDocument(input({ version: 2, currentVersion: 2, previous: { version: 1, plan: planDocument() }, comments: [old], access: commenting }));
+    const claim = slice(html, '<details id="design-v2-1"', '<details id="design-v2-2"');
+    expect(claim).toContain(`id="comment-${old.id}"`);
+    expect(claim).toContain('<span class="from-version">from v1</span>');
+    // An older version's own page does not repeat the threads.
+    const older = await renderPlanDocument(input({ version: 1, current: false, currentVersion: 2, comments: [old] }));
+    expect(older).not.toContain(`comment-${old.id}`);
+  });
+
+  it("comments on removed claims show under Removed claims", async () => {
+    const v1 = planDocument({ claims: [...planDocument().claims, { id: "3", text: "Retries are logged <quietly>." }] });
+    const gone = comment({ target: { kind: "claim", id: "3" }, version: 1 });
+    const kept = comment({ target: { kind: "claim", id: "1" } });
+    const html = await renderPlanDocument(input({ version: 2, plans: new Map([[1, v1], [2, planDocument()]]), comments: [gone, kept], access: commenting }));
+    const removed = slice(html, '<section class="removed-claims"', "</section>");
+    expect(removed).toContain("<h3>Removed claims</h3>");
+    expect(removed).toContain("Retries are logged &lt;quietly&gt;.");
+    expect(removed).toContain("(removed in v2)");
+    expect(removed).toContain(`id="comment-${gone.id}"`);
+    expect(removed).not.toContain(`id="comment-${kept.id}"`);
+    expect(await renderPlanDocument(input({ comments: [kept], access: commenting }))).not.toContain("Removed claims");
+  });
+
+  it("owners get answer controls with AgentX's answer pre-selected; others see suggestions", async () => {
+    const owner = await renderPlanDocument(input({ access: { canComment: true, canSuggest: false, canDecide: true }, deciding: true }));
+    const box = slice(owner, 'data-decision="d1"', "</fieldset>");
+    expect(box).toContain("<fieldset");
+    expect(box).toContain('<legend><span class="decision-id">d1</span> How many times should a payment be retried?</legend>');
+    expect(box).toMatch(/<input type="radio" name="answer-d1" value="three" id="[^"]+" checked>/);
+    expect(box).toMatch(/<input type="radio" name="answer-d1" value="five" id="[^"]+">/);
+    expect(box).toContain("AgentX recommends");
+    expect(owner).toContain("Approve in Slack uses AgentX's answer.");
+    // Not deciding (an older version, or not waiting): today's read-only list.
+    const reading = await renderPlanDocument(input({ access: { canComment: true, canSuggest: true, canDecide: false }, suggestions: [] }));
+    expect(reading).not.toContain('type="radio"');
+    expect(reading).toMatch(/<button type="button" class="suggest" data-decision="d1" data-option="three"[^>]*hidden>Suggest this<\/button>/);
+    const mine = await renderPlanDocument(input({ access: { canComment: true, canSuggest: true, canDecide: false }, suggestions: [{ decisionId: "d1", optionId: "five", name: "Sam Lee", you: true }] }));
+    expect(mine).toMatch(/data-option="five"[^>]*hidden>You suggest this · Undo<\/button>/);
+  });
+
+  it("Priya and Sam suggest: Above", async () => {
+    const plan = planDocument({ decisions: [{ id: "d1", claimId: "1", question: "Where?", options: [{ id: "above", label: "Above", consequence: "Seen." }, { id: "below", label: "Below", consequence: "Quiet." }], recommended: "below" }] });
+    const two = await renderPlanDocument(input({ plan, suggestions: [{ decisionId: "d1", optionId: "above", name: "Priya", you: false }, { decisionId: "d1", optionId: "above", name: "Sam", you: false }] }));
+    expect(two).toContain('<p class="suggestions">Priya and Sam suggest: Above</p>');
+    const three = await renderPlanDocument(input({ plan, suggestions: ["Priya", "Sam", "Lee <x>"].map((name) => ({ decisionId: "d1", optionId: "above", name, you: false })).concat([{ decisionId: "d1", optionId: "below", name: "Omar", you: false }]) }));
+    expect(three).toContain("Priya, Sam and Lee &lt;x&gt; suggest: Above");
+    expect(three).toContain("Omar suggests: Below");
+  });
+
+  it("No decisions needed", async () => {
+    const html = await renderPlanDocument(input({ plan: planDocument({ decisions: [] }) }));
+    expect(readable(html)).toContain("No decisions needed");
+  });
+
+  it("Not answered and AgentX couldn't answer this one", async () => {
+    const sent = comment({ sent: true, agentx: "not_answered" });
+    const asked = comment({ agentx: "couldnt" });
+    const waiting = comment({ agentx: "answering" });
+    const none = comment({ agentx: "unavailable" });
+    const done = comment({ parentId: sent.id, author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Moved it <up>.", planner: { outcome: "done", version: 2 } });
+    const kept = comment({ parentId: asked.id, author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Too risky.", planner: { outcome: "not_changed", version: 2 } });
+    const html = readable(await renderPlanDocument(input({ comments: [sent, asked, waiting, none, done, kept], access: commenting })));
+    expect(html).toContain("Not answered");
+    expect(html).toContain("AgentX couldn't answer this one.");
+    expect(html).toContain("AgentX is answering…");
+    expect(html).toContain("AgentX can answer comments only on tasks started in Slack.");
+    expect(html).toContain("Done: Moved it &lt;up&gt;.");
+    expect(html).toContain("Not changed because: Too risky.");
+  });
+
+  it("deleted, edited and sent comments say so, and only the author gets Edit and Delete", async () => {
+    const deleted = comment({ deleted: true, text: "" });
+    const mine = comment({ author: { kind: "person", name: "Priya", owner: true, you: true }, edited: true });
+    const sent = comment({ author: { kind: "person", name: "Priya", owner: true, you: true }, sent: true });
+    const html = await renderPlanDocument(input({ comments: [deleted, mine, sent], access: commenting }));
+    expect(readable(html)).toContain("Comment deleted");
+    expect(readable(html)).toContain("(edited)");
+    expect(readable(html)).toContain("Sent with a decision, so it can't be changed.");
+    expect(count(html, /class="comment-edit"/g)).toBe(1);
+    expect(count(html, /class="comment-delete"/g)).toBe(1);
+  });
+
+  it("checks and the whole document take comments", async () => {
+    const onCheck = comment({ target: { kind: "check", id: "unit-tests" } });
+    const onDocument = comment({ target: { kind: "document" } });
+    const html = await renderPlanDocument(input({ kind: "plan", anchor: "coding-plan", comments: [{ ...onCheck, document: "plan" }, { ...onDocument, document: "plan" }], access: commenting,
+      checks: [{ id: "unit-tests", label: "Unit tests", proposed: true, proves: [], status: "Not run yet" }] }));
+    expect(html).toMatch(/<button type="button" class="comment-open" data-target="check:unit-tests"[^>]*hidden>Comment<\/button>/);
+    expect(html).toContain('data-comments="check:unit-tests"');
+    expect(html).toContain("<h3>Comments on this document</h3>");
+    expect(html).toContain('data-comments="document"');
+    expect(html).toContain(`id="comment-${onDocument.id}"`);
   });
 });
