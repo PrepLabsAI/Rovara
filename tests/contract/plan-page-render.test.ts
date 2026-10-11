@@ -139,15 +139,15 @@ describe("the plan page renderer", () => {
   });
 
   it("wraps long evidence rows while preserving source line identity and hostile text", async () => {
-    const source = `${"x".repeat(800)}\t<svg onload=alert(1)>`;
+    const source = `${"x".repeat(800)}\t<tag attr="quoted">&`;
     const html = await renderPlanDocument(input({ evidence: {
       schemaVersion: 1,
       excerpts: [{ claimId: "1", index: 0, path: "src/long.ts", startLine: 41, endLine: 42, status: "ok", lines: [source, "\tsecond\trow"] }],
     } }));
     expect(html).toContain('<span class="code-line"><span class="ln">41</span><span class="code-text">');
     expect(html).toContain('<span class="ln">42</span><span class="code-text">\tsecond\trow</span></span>');
-    expect(html).toContain(`${"x".repeat(800)}\t&lt;svg onload=alert(1)&gt;`);
-    expect(html).not.toContain("<svg onload");
+    expect(html).toContain(`${"x".repeat(800)}\t&lt;tag attr=&quot;quoted&quot;&gt;&amp;`);
+    expect(html).not.toContain('<tag attr="quoted">&');
     expect((html.match(/class="code-line"/g) ?? [])).toHaveLength(2);
   });
 
@@ -501,12 +501,12 @@ describe("comments, suggestions and answers on the plan page", () => {
     });
     const comments = ["1", "1.1", "1.1.1"].map((id) => comment({ target: { kind: "claim", id } }));
     comments.push(comment({ target: { kind: "decision", id: "d1" } }));
-    const html = await renderPlanDocument(input({ plan, comments, access: commenting, checks: [{ id: "check-1", label: "<img src=x onerror=alert(1)>", proposed: false, status: "ready", proves: [] }] }));
-    for (const [key, label] of [["claim:1", "Comment on 1"], ["claim:1.1", "Comment on 1.1"], ["claim:1.1.1", "Comment on 1.1.1"], ["decision:d1", "Comment on this decision"], ["check:check-1", "Comment on &lt;img src=x onerror=alert(1)&gt;"]] as const) {
+    const html = await renderPlanDocument(input({ plan, comments, access: commenting, checks: [{ id: "check-1", label: 'Runner <label> & "fast"', proposed: false, status: "ready", proves: [] }] }));
+    for (const [key, label] of [["claim:1", "Comment on 1"], ["claim:1.1", "Comment on 1.1"], ["claim:1.1.1", "Comment on 1.1.1"], ["decision:d1", "Comment on this decision"], ["check:check-1", "Comment on Runner &lt;label&gt; &amp; &quot;fast&quot;"]] as const) {
       expect(html).toContain(`<button type="button" class="comment-open" data-target="${key}"`);
       expect(html).toContain(`>${label}</button>`);
     }
-    expect(html).not.toContain("<img src=x onerror=alert(1)>");
+    expect(html).not.toContain('Runner <label> & "fast"');
     const closed = await renderPlanDocument(input({ plan, comments, access: { ...commenting, canComment: false } }));
     expect(closed).not.toContain('class="comment-open"');
     const priorVersion = await renderPlanDocument(input({ plan, comments, current: false, currentVersion: 2, access: commenting }));
