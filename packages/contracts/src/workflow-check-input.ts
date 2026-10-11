@@ -81,6 +81,7 @@ export function workflowCheckCommandText(command: { executable: string; args: re
 /** The longest command (program and arguments joined by spaces) a corrected check from PR feedback may have. */
 export const WORKFLOW_FEEDBACK_CHECK_COMMAND_MAX = 300;
 const PLAIN_TEXT = /^[\x20-\x7e]*$/;
+const PLAIN_FOLDER = /^[A-Za-z0-9._/+-]+$/;
 /** The longest folder a corrected check from PR feedback may run in. */
 export const WORKFLOW_FEEDBACK_CHECK_FOLDER_MAX = 120;
 
@@ -100,6 +101,8 @@ export function feedbackReplacementCheckProblem(value: unknown, repositoryPaths?
   const rawLabel = (value as { label: string }).label;
   const plainCode = (text: string) => PLAIN_TEXT.test(text) && !text.includes("`") && !text.includes("$(");
   if (!plainCode(cwd) || cwd.length > WORKFLOW_FEEDBACK_CHECK_FOLDER_MAX) return "keep its folder to at most 120 plain characters without ` or $(";
+  // The folder as given: the schema trims it, and a space at either end (or inside) would run elsewhere than the card reads.
+  if (!PLAIN_FOLDER.test((value as { cwd: string }).cwd)) return "keep its folder to letters, digits and . _ / + - only, with no spaces";
   if ([rawLabel, label, executable].some((text) => !PLAIN_TEXT.test(text)) || !args.every(plainCode) || command.length > WORKFLOW_FEEDBACK_CHECK_COMMAND_MAX) {
     return "keep the command to at most 300 plain characters without ` or $(";
   }

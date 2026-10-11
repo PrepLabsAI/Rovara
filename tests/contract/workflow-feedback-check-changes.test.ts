@@ -96,6 +96,17 @@ describe("check changes of an approved PR feedback fix", () => {
       expect(cwd.length <= 120 || cwd.length === 121).toBe(true);
       expect(feedbackReplacementCheckProblem({ ...replacement, cwd }, ["repo/demo"])).toBe("keep its folder to at most 120 plain characters without ` or $(");
     });
+    const FOLDER = "keep its folder to letters, digits and . _ / + - only, with no spaces";
+    it.each([
+      ["a trailing space", "repo/demo/sub "],
+      ["a space after the slash", "repo/demo/ "],
+      ["a space inside", "repo/demo/a b"],
+    ])("refuses a folder with %s, so the owner reads exactly where it runs", (_name, cwd) => {
+      expect(feedbackReplacementCheckProblem({ ...replacement, cwd }, ["repo/demo"])).toBe(FOLDER);
+    });
+    it("accepts a folder of plain path characters", () => {
+      expect(feedbackReplacementCheckProblem({ ...replacement, cwd: "repo/demo/sub" }, ["repo/demo"])).toBeUndefined();
+    });
     it("accepts a plain command of exactly 300 characters, and still applies the plan's rules", () => {
       const longest = { ...replacement, args: ["-q", "x".repeat(300 - "grep -q  README.md".length), "README.md"] };
       expect([longest.executable, ...longest.args].join(" ")).toHaveLength(300);
