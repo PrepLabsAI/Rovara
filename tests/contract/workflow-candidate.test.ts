@@ -147,7 +147,12 @@ describe("candidate repository capture", () => {
     const candidates = await readCandidateRepositories(inputs);
     expect(await candidateUnchangedSinceBase(inputs, candidates)).toBe(true);
     // A repository with no recorded base can't be shown unchanged, so the candidate isn't refused as "no code changed".
-    const withoutBase = candidates.map((candidate) => (candidate.repositoryId === "ledger" ? { ...candidate, baseCommitSha: undefined } : candidate));
+    const withoutBase = candidates.map((candidate) => {
+      if (candidate.repositoryId !== "ledger") return candidate;
+      const { baseCommitSha: _base, ...rest } = candidate;
+      void _base;
+      return rest;
+    });
     expect(await candidateUnchangedSinceBase(inputs, withoutBase)).toBe(false);
   });
 });
