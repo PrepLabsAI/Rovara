@@ -722,7 +722,8 @@ export async function createWorkflowE2E(options: {
     handlers: [],
     respondEphemeral: (url, text) => slack.respondEphemeral(url, text),
     workflow: workflowSlackHandlers({
-      loadTask: async (id) => db.get(`DEVTASK#${id}`, "META"),
+      // A read's own copy, as a DynamoDB read is: the handler must not see (or change) the table's live item.
+      loadTask: async (id) => db.reorder(structuredClone(db.get(`DEVTASK#${id}`, "META"))),
       openView: (triggerId, view) => slack.openView(triggerId, view),
       submit: (input) => brokerEvent(handler, "workflow-decision", input),
       retryChecks: (input) => brokerEvent(handler, "workflow-retry", input),

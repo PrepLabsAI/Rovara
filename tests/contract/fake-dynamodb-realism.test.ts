@@ -66,15 +66,45 @@ describe("FakeDynamoDb realism defaults", () => {
     expect(Object.keys(first.nested as object)).not.toEqual(Object.keys(item.nested as object));
     // Not a reversal: a reversed write order would read back in the write order after one round trip.
     expect(Object.keys(first)).not.toEqual(Object.keys(item).reverse());
-    // Writing back what was read, or the same content in any other order, reads back in the one order the key set has.
+    // Reading again gives the same order; writing back what was read never reads back in the order it was written.
+    const again = (await db.send(new GetCommand({ TableName: TABLE, Key: { pk: "ITEM#1", sk: "META" } })) as { Item: Record<string, unknown> }).Item;
+    expect(JSON.stringify(again)).toBe(JSON.stringify(first));
     await db.send(new PutCommand({ TableName: TABLE, Item: first }));
     const second = (await db.send(new GetCommand({ TableName: TABLE, Key: { pk: "ITEM#1", sk: "META" } })) as { Item: Record<string, unknown> }).Item;
-    expect(Object.keys(second)).toEqual(Object.keys(first));
-    expect(JSON.stringify(second)).toBe(JSON.stringify(first));
+    expect(second).toEqual(item);
+    expect(Object.keys(second)).not.toEqual(Object.keys(first));
+    // The same content written in another order reads back in the one order its key set has.
     const shuffled = Object.fromEntries(Object.entries(item).sort(([left], [right]) => right.localeCompare(left)));
     await db.send(new PutCommand({ TableName: TABLE, Item: shuffled }));
     const third = (await db.send(new QueryCommand({ TableName: TABLE, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": "ITEM#1" } })) as { Items: Array<Record<string, unknown>> }).Items[0]!;
     expect(JSON.stringify(third)).toBe(JSON.stringify(first));
+  });
+
+  it("never hands back a map of two or more attributes in the order it was written, two-key maps included", () => {
+    const db = new FakeDynamoDb();
+    for (const keys of [["a", "b"], ["b", "a"], ["x", "y", "z"], ["status", "at"], ["at", "status"]]) {
+      const map = Object.fromEntries(keys.map((key) => [key, 1]));
+      expect(Object.keys(db.reorder(map) as object)).not.toEqual(keys);
+      expect(Object.keys((db.reorder({ nested: map }) as { nested: object }).nested)).not.toEqual(keys);
+    }
+  });
+
+  it("seeds its map order from the test's name, so different tests see different orders", () => {
+    const here = Object.keys(new FakeDynamoDb().reorder(written()));
+    expect(Object.keys(new FakeDynamoDb().reorder(written()) as object)).toEqual(here);
+    expect(Object.keys(new FakeDynamoDb({ seed: 0x5eed }).reorder(written()) as object)).not.toEqual(here);
+  });
+
+  it("refuses a reserved word used unaliased in any expression, as DynamoDB does", async () => {
+    const db = new FakeDynamoDb();
+    expect(await validationError(db.send(new QueryCommand({ TableName: TABLE, KeyConditionExpression: "pk = :pk", FilterExpression: "status = :s",
+      ExpressionAttributeValues: { ":pk": "a", ":s": "x" } })))).toMatch(/reserved keyword: status/);
+    expect(await validationError(db.send(new GetCommand({ TableName: TABLE, Key: { pk: "a", sk: "b" }, ProjectionExpression: "pk, data" })))).toMatch(/reserved keyword: data/);
+    expect(await validationError(db.send(new UpdateCommand({ TableName: TABLE, Key: { pk: "a", sk: "b" }, UpdateExpression: "SET workflow.name = :n",
+      ExpressionAttributeValues: { ":n": "x" } })))).toMatch(/reserved keyword: name/);
+    await db.send(new UpdateCommand({ TableName: TABLE, Key: { pk: "a", sk: "b" }, UpdateExpression: "SET #status = :s", ConditionExpression: "attribute_not_exists(pk)",
+      ExpressionAttributeNames: { "#status": "status" }, ExpressionAttributeValues: { ":s": "x" } }));
+    expect(db.get("a", "b")).toMatchObject({ status: "x" });
   });
 
   it("orders maps by its own seed, so two tables need not agree", () => {

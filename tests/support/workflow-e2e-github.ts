@@ -65,8 +65,12 @@ export class FakeGitHub {
     this.prHeadReads = options.realism?.lag === false ? 0 : 1;
   }
 
-  /** How many reads of a pull request still show its old head after a push to its branch (default 1; 0 turns lag off). */
+  /**
+   * How many reads of a pull request still show its old head after a push to its branch (default 1). At least 1: turning
+   * lag off is only `new FakeGitHub({ realism: { lag: false } })`, with a comment saying why.
+   */
   lag(options: { prHeadReads: number }): void {
+    if (!Number.isInteger(options.prHeadReads) || options.prHeadReads < 1) throw new Error("lag({ prHeadReads }) takes 1 or more; turn lag off only with realism: { lag: false }");
     this.prHeadReads = options.prHeadReads;
   }
 
