@@ -289,6 +289,52 @@ describe("deciding and commenting on the task page, end to end", () => {
     expect(codingRuns(e2e)).toEqual([]);
   }, 120_000);
 
+  it("two tabs approve at once: one decision is recorded, and the other tab says who approved and keeps its work", async () => {
+    const e2e = await waitingPlan();
+    const first = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
+    const second = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
+    radio(first, "d1", "above").click();
+    radio(second, "d1", "below").click();
+    first.byId("decide-approve").click();
+    second.byId("decide-approve").click();
+    second.byId("decide-note").type_("Ship it.");
+    first.byId("decide-submit").click();
+    second.byId("decide-submit").click();
+    await Promise.all([first.settle(), second.settle()]);
+    expect(first.byId("decide-status").textContent).toBe("Sent. AgentX is on the next step.");
+    expect(second.byId("decide-error").textContent).toBe(`Already approved by ${MAYA.name} a moment ago.`);
+    expect(second.byId("decide-dialog").open).toBe(true);
+    expect(second.byId("decide-note").value).toBe("Ship it.");
+    expect(radio(second, "d1", "below").checked).toBe(true);
+    expect(e2e.workflow().decisions.filter((decision) => decision.decision === "APPROVE")).toEqual([expect.objectContaining({ via: "PAGE", answerOverrides: [{ decisionId: "d1", optionId: "above" }] })]);
+    await e2e.settle();
+    expect(codingRuns(e2e)).toHaveLength(1);
+  }, 120_000);
+
+  it("Slack approve while the page is open: the page says the task moved on, and its own approval says who approved", async () => {
+    const e2e = await waitingPlan();
+    const tab = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
+    const before = e2e.workflow().revision;
+    expect(tab.byId("moved-on").hidden).toBe(true);
+    await approveInSlack(e2e);
+    await e2e.settle();
+    // The page's next poll sees the newer state.
+    await tab.advance(20_000);
+    const state = tab.requests.filter((request) => request.path.endsWith("/api/state")).at(-1)!;
+    expect(state.status).toBe(200);
+    expect((state.answer as { revision: number }).revision).toBeGreaterThan(before);
+    expect(readable(tab.byId("moved-on"))).toBe("This task moved on. Show it");
+    // Pressing Approve on the old page is refused in plain words, and nothing more is decided.
+    tab.byId("decide-approve").click();
+    tab.byId("decide-submit").click();
+    await tab.settle();
+    const refused = tab.requests.filter((request) => request.path.endsWith("/api/decision")).at(-1)!;
+    expect(refused.status).toBe(409);
+    expect(tab.byId("decide-error").textContent).toBe(`Already approved by ${MAYA.name} a moment ago.`);
+    expect(e2e.workflow().decisions.filter((decision) => decision.decision === "APPROVE")).toHaveLength(1);
+    expect(codingRuns(e2e)).toHaveLength(1);
+  }, 120_000);
+
   it("a page left open past its token's life still posts: the refused request gets a fresh token and is sent once more", async () => {
     const e2e = await waitingPlan();
     const tab = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });

@@ -1321,7 +1321,9 @@ export async function decideTaskWorkflow(
   const actor = { actorId: task.ownerKey, role: "TASK_OWNER" as const };
   const decideOptions = { now: iso(deps), allowedSkipStages: [] as WorkflowStage[], ...(options.via === undefined ? {} : { via: options.via }) };
   const refused = (current: WorkflowSnapshot) => {
-    const ownerName = redactText(ownerLabel(task.developerName));
+    // Only the owner decides, so whoever is refused here is the owner: a task started in Slack keeps no name for them, but
+    // their sign-in does, so they read their own name rather than "the task owner".
+    const ownerName = redactText(ownerLabel(ownerLabel(task.developerName) === OWNER_LABEL ? caller.name : task.developerName));
     const message = refusalMessage({
       workflow: current, ownerName, artifactSha256: request.artifactDigest ?? "", now: deps.now(),
       labelOf: (type) => TASK_PAGE_DOCUMENTS.find((item) => item.type === type)?.label ?? "The document",
