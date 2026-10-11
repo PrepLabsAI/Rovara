@@ -26,7 +26,7 @@ describe("the task page live check", () => {
     const results = pageChecks(html);
     expect(results.filter((result) => !result.ok)).toEqual([]);
     expect(html).toContain(".evidence-code pre,.evidence-sketch pre{white-space:pre-wrap;overflow-wrap:anywhere;tab-size:2}");
-    expect(html).toContain(".code-line{display:grid;grid-template-columns:auto minmax(0,1fr)}");
+    expect(html).toContain(".code-line{display:inline-grid;grid-template-columns:auto minmax(0,1fr);vertical-align:top;width:100%}");
     expect(html).toContain(".checks table{display:block;overflow-x:auto");
     expect(html).not.toMatch(/(?:^|})pre\{[^}]*white-space/);
     expect(results.map((result) => result.name)).toEqual(expect.arrayContaining([
