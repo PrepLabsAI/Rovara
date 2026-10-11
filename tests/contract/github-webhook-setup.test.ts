@@ -145,6 +145,20 @@ describe("the GitHub REST client's webhook calls", () => {
     expect(calls[0]?.headers.authorization).toBe("Bearer the-jwt");
   });
 
+  it("lists a few recent deliveries with the app token and keeps only when, the status and the HTTP code", async () => {
+    const { calls, fetchImplementation } = recordingFetch([{ status: 200, body: [
+      { id: 1, guid: "g-1", delivered_at: "2026-09-26T23:00:00Z", redelivery: false, duration: 0.2, status: "OK", status_code: 202, event: "issue_comment", action: "created", url: "https://example.test/payload" },
+      { id: 2, delivered_at: "2026-09-26T22:00:00Z", status: "Invalid HTTP Response: 0" },
+      { id: 3, status_code: "bad" },
+    ] }]);
+    await expect(githubRestApi(fetchImplementation).listHookDeliveries("the-jwt")).resolves.toEqual([
+      { deliveredAt: "2026-09-26T23:00:00Z", status: "OK", statusCode: 202 },
+      { deliveredAt: "2026-09-26T22:00:00Z", status: "Invalid HTTP Response: 0", statusCode: 0 },
+    ]);
+    expect(calls[0]).toMatchObject({ method: "GET", url: "https://api.github.com/app/hook/deliveries?per_page=10" });
+    expect(calls[0]?.headers.authorization).toBe("Bearer the-jwt");
+  });
+
   it("sets the hook config with a JSON body", async () => {
     const { calls, fetchImplementation } = recordingFetch([{ status: 200, body: {} }]);
     await githubRestApi(fetchImplementation).setHookConfig("the-jwt", { url: URL, secret: HAND_SET });

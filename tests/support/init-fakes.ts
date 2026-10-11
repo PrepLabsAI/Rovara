@@ -304,7 +304,7 @@ export const TEST_PRIVATE_KEY = TEST_KEYS.privateKey.trim();
 export const TEST_PUBLIC_KEY = TEST_KEYS.publicKey;
 
 /** A GitHub that converts any code into an app owned by `owner`, installs it after `installAfterPolls` polls, and reports repository counts in turn. Installation tokens expire at `tokenExpiresAt` (default T0 plus one hour). */
-export function fakeGitHubApi(input: { owner?: string; ownerType?: string; installAfterPolls?: number; repositoryCounts?: number[]; installationId?: number; tokenExpiresAt?: number; hookUrl?: string; events?: string[]; webhookSecret?: string } = {}): GitHubApi & { conversions: string[]; polls: () => number; tokens: () => number; hookWrites: Array<{ url: string; secret: string }> } {
+export function fakeGitHubApi(input: { owner?: string; ownerType?: string; installAfterPolls?: number; repositoryCounts?: number[]; installationId?: number; tokenExpiresAt?: number; hookUrl?: string; events?: string[]; webhookSecret?: string; deliveries?: Array<{ deliveredAt: string; status: string; statusCode: number }> } = {}): GitHubApi & { conversions: string[]; polls: () => number; tokens: () => number; hookWrites: Array<{ url: string; secret: string }> } {
   const conversions: string[] = [];
   const hookWrites: Array<{ url: string; secret: string }> = [];
   let hook: { url?: string; contentType?: string; insecureSsl?: string } = input.hookUrl === undefined ? {} : { url: input.hookUrl, contentType: "json", insecureSsl: "0" };
@@ -320,6 +320,8 @@ export function fakeGitHubApi(input: { owner?: string; ownerType?: string; insta
     async convertManifest(code) { conversions.push(code); return { id: 424242, slug: "agentx-acme-staging", pem: TEST_PRIVATE_KEY, owner, ...(input.webhookSecret === undefined ? {} : { webhook_secret: input.webhookSecret }) }; },
     async getApp() { return { slug: "agentx-acme-staging", owner, events: input.events ?? ["pull_request", "pull_request_review", "pull_request_review_comment", "issue_comment"] }; },
     async getHookConfig() { return hook; },
+    // By default one delivery an hour before T0 that GitHub's endpoint accepted.
+    async listHookDeliveries() { return input.deliveries ?? [{ deliveredAt: new Date(T0 - 60 * 60 * 1000).toISOString(), status: "OK", statusCode: 202 }]; },
     async setHookConfig(_jwt, config) { hookWrites.push(config); hook = { url: config.url, contentType: "json", insecureSsl: "0" }; },
     async listInstallations() { polls += 1; return polls > (input.installAfterPolls ?? 0) ? [{ id: input.installationId ?? 777, account: { login: owner.login } }] : []; },
     async installationToken() { tokens += 1; return { token: "ghs_installation-token-value", expiresAt: input.tokenExpiresAt ?? T0 + 60 * 60 * 1000 }; },

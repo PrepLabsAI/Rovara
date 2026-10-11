@@ -159,6 +159,7 @@ import {
   INDEX_EXPIRY_ATTRIBUTE,
   indexExpiresAt,
   WORKFLOW_RESOLVE_FINDINGS_MAX,
+  sameJsonContent,
 } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import { adminReader, queryAllItems, routeAdminRead, type AdminReadDependencies } from "./admin-reads.js";
@@ -197,7 +198,7 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -1002,6 +1003,7 @@ const SLACK_PLAIN_REFUSALS: ReadonlyMap<string, string> = new Map([
   ["select at least one check before retrying verification", "Select at least one check, then try again."],
   ["choose checks that are approved for this project", "Choose from this project's checks, then try again."],
   [FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_BUSY],
+  [FEEDBACK_REVIEW_RETRY_CHANGED, FEEDBACK_REVIEW_RETRY_CHANGED],
   [FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_CHANGED_SINCE_CARD],
 ]);
 /**
@@ -1369,10 +1371,8 @@ async function registerProject(
   const key = projectKey(definition.name, definition.revision);
   const existing = await getItem<RegisteredProjectRecord>(dependencies, key);
   if (existing) {
-    if (
-      JSON.stringify(existing.definition) !== JSON.stringify(definition) ||
-      JSON.stringify(existing.runtimeBinding) !== JSON.stringify(runtimeBinding)
-    ) {
+    // The stored revision is read back from DynamoDB, which keeps no map's attribute order: compare content, not text.
+    if (!sameJsonContent(existing.definition, definition) || !sameJsonContent(existing.runtimeBinding, runtimeBinding)) {
       throw agentXError("PROJECT_REVISION_MISMATCH", "registered project revisions and runtime bindings are immutable");
     }
     // A revision stored before the static checks existed stays idempotent: report, never refuse.
@@ -5849,8 +5849,9 @@ async function completedPullRequestUpdateItems(
       // GitHub could not say: the pull request's own head stands.
     }
   }
+  // The pull request must still come from the branch AgentX pushed to: the same tree on another branch is not this push.
   const onReviewedTree = current.pullRequest.number === pullRequest.number && current.pullRequest.url === pullRequest.url
-    && headTree === binding.treeSha && head !== maintenance.expectedHeadCommit && /^[a-f0-9]{40}$/.test(head);
+    && current.pullRequest.headBranch === maintenance.headBranch && headTree === binding.treeSha && head !== maintenance.expectedHeadCommit && /^[a-f0-9]{40}$/.test(head);
   const ownFastForward = async (): Promise<boolean> => {
     if (record?.expectedHeadCommit === head) return true;
     try {

@@ -144,7 +144,7 @@ import { setupWatchKey } from "./stuck-setup.js";
 import { feedbackReviewNoticeId } from "../developer/notifications.js";
 import { feedbackNoticeToDecisionMeasure, feedbackRecommendationMeasure } from "../developer/feedback-review-measures.js";
 import { documentSummaryLines, isFeedbackReviewFailure, workflowDocumentName } from "../developer/workflow-messages.js";
-import type { TaskDocumentKind, TaskDocumentView } from "./task-web.js";
+import type { TaskDocumentKind, TaskDocumentView, TaskFreshness } from "./task-web.js";
 
 export interface DeveloperTaskRouteDependencies {
   documentClient: { send(command: unknown): Promise<unknown> };
@@ -2052,13 +2052,10 @@ const cutReason = (reason: string): string => {
 };
 
 /**
- * Task 18: what the read-only task page shows. The task's owner may read it, and so may a member of the Slack channel
- * the task is shared into (they see its thread already) who can also use the task's project (FR-048). Anyone else is
- * refused: a reader on this Slack workspace who can use the project (FR-047) is told whose approval to ask for, and
- * everyone else, including a reader whose checks failed, gets the answer a missing task gets. Each document is read
- * through its recorded key and shown only when its digest matches; review findings are the current code's.
+ * The task a task-page reader may see, and whether they own it. Not theirs, and no such task, both read as TASK_NOT_FOUND;
+ * only an eligible teammate who is not in the task's channel gets TASK_ACCESS_DENIED with the owner's name.
  */
-export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskDocumentView> {
+async function visibleTaskForPage(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<{ task: DeveloperTaskRecord; owner: boolean }> {
   const task = TASK_ID.test(taskId) ? await get<DeveloperTaskRecord>(deps, taskKey(taskId)) : undefined;
   const notFound = () => agentXError("TASK_NOT_FOUND", "no task here that you can see");
   if (task === undefined) throw notFound();
@@ -2087,6 +2084,24 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
       throw Object.assign(agentXError("TASK_ACCESS_DENIED", "you can't open this task yet"), { owners: [task.developerName] });
     }
   }
+  return { task, owner };
+}
+
+/** Where the task stands now, for the open task page's "moved on" check: the same access rule as the page, two values only. */
+export async function getTaskFreshness(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskFreshness> {
+  const { task } = await visibleTaskForPage(deps, caller, taskId);
+  return { revision: task.workflow?.revision ?? 0, stage: taskPageStep(task.workflow, task.closedAt !== undefined) };
+}
+
+/**
+ * Task 18: what the read-only task page shows. The task's owner may read it, and so may a member of the Slack channel
+ * the task is shared into (they see its thread already) who can also use the task's project (FR-048). Anyone else is
+ * refused: a reader on this Slack workspace who can use the project (FR-047) is told whose approval to ask for, and
+ * everyone else, including a reader whose checks failed, gets the answer a missing task gets. Each document is read
+ * through its recorded key and shown only when its digest matches; review findings are the current code's.
+ */
+export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskDocumentView> {
+  const { task, owner } = await visibleTaskForPage(deps, caller, taskId);
   const workflow = task.workflow;
   const documents: TaskDocumentView["documents"] = [];
   const unverified: TaskDocumentKind[] = [];
@@ -2217,7 +2232,7 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
   history.sort((left, right) => right.at.localeCompare(left.at));
   return {
     taskId, now: deps.now(), title: task.title, ...taskPageStage(workflow, task.closedAt !== undefined, owner, await publicationAttempts(deps, task)),
-    path: workflow?.path ?? "QUICK", stage: taskPageStep(workflow, task.closedAt !== undefined), role: owner ? "owner" : "reader",
+    path: workflow?.path ?? "QUICK", revision: workflow?.revision ?? 0, stage: taskPageStep(workflow, task.closedAt !== undefined), role: owner ? "owner" : "reader",
     documents, ...(unverified.length === 0 ? {} : { unverified }), checks, checksRan: results.length > 0, ...(checksNote === undefined ? {} : { checksNote }), findings,
     ...(acceptedFindings.length === 0 ? {} : { acceptedFindings }),
     pullRequests: (workflow?.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state })),
@@ -2586,6 +2601,8 @@ function feedbackReviewWorkspaceReady(task: DeveloperTaskRecord, workspace: Work
 const FEEDBACK_REVIEW_RETRY_STALE = "this review changed; use the latest AgentX message";
 /** Said to the owner when Retry review meets a workspace that cannot start the review now; nothing changed. */
 export const FEEDBACK_REVIEW_RETRY_BUSY = "AgentX is busy on this task; try Retry review again in a minute.";
+/** Said to the owner when Retry review lost to another change of the task (another press started the review): a new card follows. */
+export const FEEDBACK_REVIEW_RETRY_CHANGED = "This review changed; a new card is coming.";
 /** Said privately to the owner once the retried review has started. */
 const FEEDBACK_REVIEW_RETRY_STARTED = "Reviewing the feedback again.";
 
@@ -2611,9 +2628,8 @@ export async function retryTaskWorkflowFeedbackReview(
     && current.feedbackReviewHistory?.some(ref => ref.sha256 === input.reviewDigest && ref.status !== "COMPLETE")) {
     // Already retried: a review still collecting (never started) is started now; one running or done is left alone.
     if (review?.status !== "COLLECTING" || current.state !== "WAITING") return { started: false };
-    if (!feedbackReviewWorkspaceReady(task, workspace) || !await acceptFeedbackReview(deps, task, current, current)) {
-      throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_BUSY);
-    }
+    if (!feedbackReviewWorkspaceReady(task, workspace)) throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_BUSY);
+    if (!await acceptFeedbackReview(deps, task, current, current)) throw await feedbackRetryRefusal(deps, task, current);
     return { started: true, note: FEEDBACK_REVIEW_RETRY_STARTED };
   }
   let collecting: WorkflowSnapshot;
@@ -2623,10 +2639,20 @@ export async function retryTaskWorkflowFeedbackReview(
     if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_STALE);
     throw error;
   }
-  if (!feedbackReviewWorkspaceReady(task, workspace) || !await acceptFeedbackReview(deps, task, current, collecting)) {
-    throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_BUSY);
-  }
+  if (!feedbackReviewWorkspaceReady(task, workspace)) throw agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_BUSY);
+  if (!await acceptFeedbackReview(deps, task, current, collecting)) throw await feedbackRetryRefusal(deps, task, current);
   return { started: true, note: FEEDBACK_REVIEW_RETRY_STARTED };
+}
+
+/**
+ * Why a retry that found the workspace idle still could not start: the task is gone or closed (the press is out of date,
+ * and no card is coming), the task changed under it (another press won and started the review, so its new card is
+ * coming), or else the workspace really became busy.
+ */
+async function feedbackRetryRefusal(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, read: WorkflowSnapshot): Promise<AgentXError> {
+  const latest = await get<DeveloperTaskRecord>(deps, taskKey(task.taskId));
+  if (latest === undefined || latest.closedAt !== undefined) return agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_STALE);
+  return agentXError("CONFIG_INVALID", latest.workflow?.revision !== read.revision ? FEEDBACK_REVIEW_RETRY_CHANGED : FEEDBACK_REVIEW_RETRY_BUSY);
 }
 
 function slackEventRequestId(eventId: string): string {

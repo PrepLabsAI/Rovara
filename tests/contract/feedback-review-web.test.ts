@@ -172,6 +172,9 @@ describe("authenticated PR feedback review web journey", () => {
     const response = await createFeedbackReviewWeb(deps)(request("GET", `/review/${taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${taskId}`, origin));
     expect(response.statusCode).toBe(200);
     expect(response.body).toContain("Retry the review from the Slack thread of this task.");
+    // No count of an unfinished review's comments: it read none of them into findings.
+    expect(response.body).not.toContain("grouped into");
+    expect(response.body).toContain("The review didn't finish. Retry it from the task's Slack thread.");
     expect(response.body).not.toContain("Approve selected findings");
     expect(response.body).not.toContain("Request changes");
   });

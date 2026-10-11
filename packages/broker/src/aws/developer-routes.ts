@@ -35,10 +35,10 @@ import {
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { DeveloperTaskActions } from "./developer-task-actions.js";
-import { getTaskDocumentView, getWorkflowFeedbackReview, routeDeveloperTaskRequest, submitWorkflowFeedbackDecision, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
+import { getTaskDocumentView, getTaskFreshness, getWorkflowFeedbackReview, routeDeveloperTaskRequest, submitWorkflowFeedbackDecision, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { createFeedbackReviewWeb } from "./feedback-review-web.js";
-import { TASK_PAGE, createTaskWeb } from "./task-web.js";
+import { TASK_PAGE, TASK_STATUS, createTaskWeb } from "./task-web.js";
 
 export interface DeveloperApiConfiguration {
   issuer: string; env: string; methods: { slack: boolean; oidc: boolean }; slackTeamId?: string;
@@ -599,11 +599,12 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
       try { return await authenticateDeveloperSessionId(deps, sessionId); }
       catch { return undefined; }
     };
-    // Task 18: the read-only task page; every other /review/ path is the PR-feedback review.
-    if (TASK_PAGE.test(url.pathname)) {
+    // Task 18: the read-only task page and its "moved on" check; every other /review/ path is the PR-feedback review.
+    if (TASK_PAGE.test(url.pathname) || TASK_STATUS.test(url.pathname)) {
       return createTaskWeb({
         authenticateSession,
         getTaskDocumentView: (caller, taskId) => getTaskDocumentView(developerTaskRouteDependencies(deps, caller), caller, taskId),
+        getTaskFreshness: (caller, taskId) => getTaskFreshness(developerTaskRouteDependencies(deps, caller), caller, taskId),
       })(request, url);
     }
     const web = createFeedbackReviewWeb({
