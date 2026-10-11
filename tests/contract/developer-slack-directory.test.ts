@@ -213,6 +213,24 @@ describe("fresh task person proof", () => {
     }
   });
 
+  it("accepts absent optional eligibility flags and rejects unreadable present flags", async () => {
+    const eligible = { ok: true, user: { id: "U0MAYA001", team_id: TEAM, is_bot: false, real_name: "Maya Chen" } };
+    const fetchWithoutFlags: typeof globalThis.fetch = async (input) => requestUrl(input).pathname === "/api/users.info"
+      ? Response.json(eligible)
+      : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
+    const withoutFlags = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch: fetchWithoutFlags, now: () => T0 });
+    await expect(withoutFlags.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toMatchObject({ ok: true });
+
+    const malformedFlags: Array<Record<string, unknown>> = [{ deleted: [] }, { is_stranger: {} }];
+    for (const fields of malformedFlags) {
+      const fetch: typeof globalThis.fetch = async (input) => requestUrl(input).pathname === "/api/users.info"
+        ? Response.json({ ...eligible, user: { ...eligible.user, ...fields } })
+        : Response.json({ ok: true, members: [], response_metadata: { next_cursor: "" } });
+      const dir = slackDirectory({ teamId: TEAM, botToken: async () => BOT_TOKEN, fetch, now: () => T0 });
+      await expect(dir.taskPersonProof("U0MAYA001", ["C0PAY0001"])).resolves.toEqual({ ok: false, error: "ineligible" });
+    }
+  });
+
   it("fails closed on malformed members, partial paging, caps, and timeouts", async () => {
     const user = { ok: true, user: { id: "U0MAYA001", team_id: TEAM, deleted: false, is_bot: false, real_name: "Maya Chen" } };
     for (const members of [

@@ -237,7 +237,9 @@ export function slackDirectory(input: {
       }
       const user = userOf(userReply.body);
       const parsedId = SlackUserIdSchema.safeParse(user.id);
-      if (!parsedId.success || parsedId.data !== userId || !inTeam(user) || user.is_stranger === true) {
+      const readableEligibilityFlags = (user.deleted === undefined || typeof user.deleted === "boolean")
+        && (user.is_stranger === undefined || typeof user.is_stranger === "boolean");
+      if (!parsedId.success || parsedId.data !== userId || !readableEligibilityFlags || !inTeam(user) || user.is_stranger === true) {
         return { ok: false, error: "ineligible" };
       }
       const memberOf: string[] = [];
