@@ -33,6 +33,9 @@ function go(){
   var first=el.firstElementChild;
   if(first&&first.tagName==="DETAILS")first.open=true;
   el.scrollIntoView({block:"start"});
+  // Keyboard and screen-reader users land on the target too, not on the link they used.
+  if(!el.hasAttribute("tabindex"))el.setAttribute("tabindex","-1");
+  if(typeof el.focus==="function")el.focus({preventScroll:true});
   el.classList.add("flash");
   setTimeout(function(){el.classList.remove("flash");},2000);
 }
@@ -233,21 +236,26 @@ export const TASK_PAGE_DECIDING_COPY = {
   owner: "Owner",
   agentx: "AgentX",
   agentxAi: "AgentX (AI)",
-  answeringWho: "· answering ",
+  answeringWho: "answering ",
   skipped: "Edited after it was asked, so AgentX didn't answer.",
   reply: "Reply",
   done: "Done",
   notChanged: "Not changed",
-  becauseColon: " because: ",
-  because: " because ",
+  becauseColon: ": ",
   doneIn: " in ",
-  plannerResult: "· result",
   seeClaim: "See ",
   claimWord: "claim ",
+  inWord: " in ",
+  fromWord: "from ",
+  versionWord: " v",
   inRequirements: "the requirements",
   inDesign: "the design",
   inPlan: "the coding plan",
-  sentToCoding: "Sent to coding with the owner's approval.",
+  nameRequirements: "requirements",
+  nameDesign: "design",
+  namePlan: "coding plan",
+  dot: "· ",
+  sentToCoding: "Sent to coding when the plan was approved.",
   answering: "AgentX is answering…",
   couldnt: "AgentX couldn't answer this one.",
   notAnswered: "Not answered",
@@ -424,7 +432,15 @@ function containerFor(section,key){
 /* ---------- showing a comment ---------- */
 var STATES={answering:COPY.answering,couldnt:COPY.couldnt,not_answered:COPY.notAnswered,unavailable:COPY.askUnavailable,skipped:COPY.skipped,sent_to_coding:COPY.sentToCoding};
 var DOC_ANCHORS={requirements:"requirements",design:"design",plan:"coding-plan"};
-var IN_DOCS={requirements:COPY.inRequirements,design:COPY.inDesign,plan:COPY.inPlan};
+function claimAnchor(anchor,version,claimId){return anchor+"-v"+version+"-"+claimId.replace(/\./g,"-");}
+var DOC_WORDS={requirements:{the:COPY.inRequirements,bare:COPY.nameRequirements},design:{the:COPY.inDesign,bare:COPY.nameDesign},plan:{the:COPY.inPlan,bare:COPY.namePlan}};
+function dotted(text){
+  // The separator dot is for the eye; a screen reader skips it.
+  var span=make("span",{"class":"answering"});
+  span.appendChild(make("span",{"aria-hidden":"true"},COPY.dot));
+  span.appendChild(document.createTextNode(text));
+  return span;
+}
 var CLAIM_ID=/^[1-9][0-9]{0,2}(?:\.[1-9][0-9]{0,2}){0,2}$/;
 function shortTime(at){var d=new Date(at);if(isNaN(d.getTime()))return "";var iso=d.toISOString();return iso.slice(0,10)+" "+iso.slice(11,16)+" UTC";}
 function validComment(c){return c&&typeof c==="object"&&UUID.test(str(c.id))&&(c.parentId===undefined||UUID.test(str(c.parentId)))&&c.author&&typeof c.author==="object"&&typeof c.version==="number";}
@@ -436,13 +452,14 @@ function commentNode(c,shownVersion,isReply){
     // An answer to someone's question: labelled as AI, with the asker's name from the page's own record.
     meta.appendChild(make("span",{"class":"chip chip-agentx"},COPY.agentxAi));
     meta.appendChild(document.createTextNode(" "));
-    meta.appendChild(make("span",{"class":"answering"},COPY.answeringWho+c.answering));
+    meta.appendChild(dotted(COPY.answeringWho+c.answering));
   }
   else if(agentx&&c.planner&&typeof c.planner==="object"){
     // The planner's outcome, apart from AgentX's own answer to a question.
     meta.appendChild(make("span",{"class":"chip chip-agentx"},COPY.agentx));
     meta.appendChild(document.createTextNode(" "));
-    meta.appendChild(make("span",{"class":"answering"},COPY.plannerResult));
+    var words=has(DOC_WORDS,c.planner.document)?DOC_WORDS[c.planner.document].bare:"";
+    meta.appendChild(dotted(COPY.fromWord+words+COPY.versionWord+Number(c.planner.version)));
   }
   else if(agentx){meta.appendChild(make("span",{"class":"chip chip-agentx"},COPY.agentx));}
   else{
@@ -458,15 +475,17 @@ function commentNode(c,shownVersion,isReply){
   else if(agentx&&c.planner&&typeof c.planner==="object"){
     // After an Approve the comment was handled in the next document; after Request changes, in the same one again.
     var handledIn=has(DOC_ANCHORS,c.planner.in)?c.planner.in:"";
-    var handled=handledIn===""?"":COPY.doneIn+IN_DOCS[handledIn];
-    var lead=c.planner.outcome==="done"?COPY.done+handled+": ":handled===""?COPY.notChanged+COPY.becauseColon:COPY.notChanged+handled+COPY.because;
+    var handled=handledIn===""?"":COPY.doneIn+DOC_WORDS[handledIn].the;
+    var lead=handled===""?(c.planner.outcome==="done"?COPY.done+COPY.becauseColon:COPY.notChanged+" because: "):(c.planner.outcome==="done"?COPY.done:COPY.notChanged)+handled+COPY.becauseColon;
     article.appendChild(make("p",{"class":"comment-text"},lead+str(c.text)));
     var claim=typeof c.planner.claim==="string"&&CLAIM_ID.test(c.planner.claim)?c.planner.claim:"";
-    var where=handledIn!==""?handledIn:has(DOC_ANCHORS,c.document)?c.document:"";
-    if(claim!==""&&where!==""){
+    var where=has(DOC_ANCHORS,c.planner.document)?c.planner.document:"";
+    var shown=Number(c.planner.version);
+    if(claim!==""&&where!==""&&shown>0){
+      // The link is to that version's own claim, which a later version may have renumbered.
       var seen=make("p",{"class":"comment-link"},COPY.seeClaim);
-      seen.appendChild(make("a",{"class":"claim-link",href:"#"+DOC_ANCHORS[where]+"/"+claim},COPY.claimWord+claim));
-      seen.appendChild(document.createTextNode(handled+"."));
+      seen.appendChild(make("a",{"class":"claim-link",href:"#"+claimAnchor(DOC_ANCHORS[where],shown,claim)},COPY.claimWord+claim));
+      seen.appendChild(document.createTextNode(COPY.inWord+DOC_WORDS[where].bare+COPY.versionWord+shown+"."));
       article.appendChild(seen);
     }
   }
@@ -925,8 +944,8 @@ function openDialog(kind,button){
   clear(changed);clear(unanswered);
   for(var i=0;i<decisions.length;i++){
     var d=decisions[i],chosen=answers[d.id],question=str(d.question),rec=str(d.labels[d.recommended]);
-    if(chosen!==d.recommended)changed.appendChild(make("li",null,d.id+" "+question+COPY.youChose+str(d.labels[chosen])+COPY.recommendedOpen+rec+COPY.recommendedClose));
-    else if(!opened[d.id])unanswered.appendChild(make("li",null,d.id+" "+question+": "+rec));
+    if(chosen!==d.recommended)changed.appendChild(make("li",null,question+COPY.youChose+str(d.labels[chosen])+COPY.recommendedOpen+rec+COPY.recommendedClose));
+    else if(!opened[d.id])unanswered.appendChild(make("li",null,question+": "+rec));
   }
   section("decide-changed",changed.children.length>0);
   section("decide-unanswered",unanswered.children.length>0);

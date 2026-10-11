@@ -441,6 +441,33 @@ function line(value: string): string {
   return redactText(value).replace(/\s+/g, " ").trim();
 }
 
+/**
+ * How a planner credits a page comment in a quote's author. It writes the comment's ref in the words "comment c1"; when
+ * the plan is stored AgentX swaps that for `comment:<comment ID>`, which stays true in every later version (a ref only
+ * means something in the step that gave it). Neither form is ever shown to a person.
+ */
+export const COMMENT_AUTHOR_PREFIX = "comment:";
+
+/** The ref ("c1") a quote's author names in the words "comment c1": "owner (comment c1)", "comment c1". Undefined without the word "comment". */
+export function commentRefInAuthor(author: string): string | undefined {
+  return /\bcomment\s+(c[1-9][0-9]{0,2})\b/iu.exec(author)?.[1]?.toLowerCase();
+}
+
+/** The comment ID a stored quote's author names (`comment:<ID>`). */
+export function commentIdInAuthor(author: string): string | undefined {
+  return /^comment:([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/iu.exec(author.trim())?.[1]?.toLowerCase();
+}
+
+/** What AgentX writes in a quote's author for a comment reference it cannot place (one its step never gave the planner). */
+export const UNPLACED_COMMENT_AUTHOR = "a comment";
+
+/** Whether a quote's author credits a page comment, in either form or as one that could not be placed. */
+export const creditsPageComment = (author: string): boolean =>
+  commentRefInAuthor(author) !== undefined || commentIdInAuthor(author) !== undefined || author.trim().toLowerCase() === UNPLACED_COMMENT_AUTHOR;
+
+/** A quote's author as plain words for a Markdown copy: a page comment is "a comment", never its ref or ID. */
+export const plainQuoteAuthor = (author: string): string => (creditsPageComment(author) ? "a comment" : author);
+
 /** What a check proves: a claim ID as written, or `nc2` as "Not changing 2". */
 function provedItem(id: string): string {
   const position = notChangingReference(id);
@@ -497,7 +524,7 @@ function evidenceLines(evidence: PlanEvidenceInput, indent: string): string[] {
     case "stateMachine":
       return [`${lead}${planDiagramText(evidence)}`];
     case "quote":
-      return [`${lead}quote — "${line(evidence.text)}" (${line(evidence.author)})`];
+      return [`${lead}quote — "${line(evidence.text)}" (${line(plainQuoteAuthor(evidence.author))})`];
   }
 }
 
@@ -597,7 +624,7 @@ export function planDocumentMarkdown(plan: PlanDocument, input: {
   const out: string[] = [
     `# ${KIND_TITLES[input.kind]} v${input.version} (sha256 ${input.sha256.slice(0, 12)}): ${line(plan.title)}`,
     "## Why",
-    ...plan.why.map((entry) => `> ${line(entry.text)} (from ${line(entry.author)})`),
+    ...plan.why.map((entry) => `> ${line(entry.text)} (from ${line(plainQuoteAuthor(entry.author))})`),
     "## Claims",
     ...plan.claims.flatMap((claim) => claimLines(claim, 0, ownerChoice)),
   ];

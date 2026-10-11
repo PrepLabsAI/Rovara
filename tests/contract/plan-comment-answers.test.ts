@@ -1,6 +1,7 @@
 // After Request changes on the page, the planner says what it did with each included comment; those answers become
 // replies from AgentX under the comments, written once, never past the task's comment cap, and never in the plan's way.
 import { randomUUID } from "node:crypto";
+import { z } from "zod";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseCommentAnswers, plainPageRefs, plannerReplyCommentId, type PlanDocument, type TaskComment, type WorkflowSnapshot } from "@agentx/contracts";
 import { decideTaskWorkflow, type DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
@@ -193,7 +194,7 @@ async function changesRequestedAgainWith(prefix: string): Promise<{ stored: bool
  * A Full task whose design v1 the owner approved with two comments (c1 an instruction, c2 a question), so the coding plan
  * is being written. The comments sit on the design; `plan` writes the coding plan's answer.
  */
-async function designApproved(options: { comments?: number } = {}) {
+async function designApproved(options: { comments?: number; long?: boolean } = {}) {
   const harness = await createDeveloperTaskBroker();
   const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Retry failed payments", client: "test-client", workflow: true, workflowPath: "FULL" });
   const taskId = String((started.body.task as { taskId: string }).taskId);
@@ -230,7 +231,7 @@ async function designApproved(options: { comments?: number } = {}) {
     });
     return commentId;
   };
-  const ids = Array.from({ length: options.comments ?? 2 }, (_, index) => seed(index === 0 ? "Keep each item to one line." : "Why two steps?"));
+  const ids = Array.from({ length: options.comments ?? 2 }, (_, index) => seed(index === 0 ? "Keep each item to one line." : options.long === true ? `Comment ${index + 1}: ${"Long thought. ".repeat(100)}` : "Why two steps?"));
   harness.db.set({ pk: `DEVTASK#${taskId}`, sk: "COMMENTS", entityType: "TASK_COMMENT_COUNTER", taskId, count: ids.length, seq: ids.length });
   const requestId = await approve(ids);
   const plan = async (prefix: string, document: PlanDocument = planDocument({ title: "Retry banner coding plan", decisions: [] })) => {
@@ -251,7 +252,7 @@ describe("planner answers to comments sent with an Approve", () => {
   const cited = (ref: string) => planDocument({ title: "Retry banner coding plan", decisions: [], claims: [{ id: "1", text: "Each bullet stays on one line.",
     evidence: [{ kind: "quote", text: "Keep each item to one line.", author: `owner (comment ${ref})` }] }, { id: "2", text: "A payment is never charged twice." }] });
 
-  it("the coding plan's answers become replies on the design's comments, saying which document handled them and where", async () => {
+  it("the coding plan's answers become replies on the design's comments, and nothing new is stored with them", async () => {
     const t = await designApproved();
     await t.plan(answersBlock([
       { comment: "c1", outcome: "done", reason: "Each bullet stays on one line." },
@@ -263,19 +264,61 @@ describe("planner answers to comments sent with an Approve", () => {
     const replies = agentxReplies(t.harness, t.taskId);
     expect(replies).toHaveLength(2);
     // On the document the comment was made on (the design), under that comment, for the version of the coding plan.
-    expect(replies.find((reply) => reply.commentId === plannerReplyCommentId(t.ids[0]!, coding.id))).toMatchObject({
+    const done = replies.find((reply) => reply.commentId === plannerReplyCommentId(t.ids[0]!, coding.id))!;
+    expect(done).toMatchObject({
       parentId: t.ids[0], document: "design", version: 1, target: { kind: "document" }, text: "Each bullet stays on one line.",
-      author: { kind: "agentx", source: "planner", outcome: "done", forVersion: 1, handledIn: "plan", claim: "1" },
+      author: { kind: "agentx", source: "planner", outcome: "done", forVersion: 1 },
     });
-    const kept = replies.find((reply) => reply.commentId === plannerReplyCommentId(t.ids[1]!, coding.id))!;
-    expect(kept).toMatchObject({ parentId: t.ids[1], document: "design", author: { outcome: "not_changed", handledIn: "plan" } });
-    expect(kept.author).not.toHaveProperty("claim");
+    // Which document handled it and which claim cites it are worked out when the page is read: the author is exactly the shape
+    // 0.2.13 wrote and reads (its schema is strict), so a rollback loses nothing.
+    expect(Object.keys(done.author).sort()).toEqual(["forVersion", "kind", "outcome", "source"]);
+    const released = z.object({ kind: z.literal("agentx"), source: z.enum(["answer", "planner"]), outcome: z.enum(["done", "not_changed"]).optional(), forVersion: z.number().int().positive().optional() }).strict();
+    for (const reply of replies) expect(released.safeParse(reply.author).success).toBe(true);
+    expect(replies.find((reply) => reply.commentId === plannerReplyCommentId(t.ids[1]!, coding.id))).toMatchObject({ parentId: t.ids[1], author: { outcome: "not_changed" } });
+  });
+
+  it("a quote that credits 'comment c1' is stored crediting the comment by its ID, from the refs of the step that wrote it", async () => {
+    const t = await designApproved();
+    await t.plan("", planDocument({ title: "Retry banner coding plan", decisions: [], claims: [{ id: "1", text: "Each bullet stays on one line.", evidence: [
+      { kind: "quote", text: "Keep each item to one line.", author: "owner (comment c1)" },
+      { kind: "quote", text: "Why two steps?", author: "comment c2" },
+      { kind: "quote", text: "Nobody said this.", author: "comment c9" },
+    ] }] }));
+    const stored = JSON.parse(t.harness.s3.objects.get(workflowOf(t.harness, t.taskId).artifacts.at(-1)!.objectKey)!) as PlanDocument;
+    expect(stored.claims[0]!.evidence!.map((item) => (item.kind === "quote" ? item.author : ""))).toEqual([`comment:${t.ids[0]}`, `comment:${t.ids[1]}`, "a comment"]);
+  });
+
+  it("only the comments the prompt showed can be answered", async () => {
+    const t = await designApproved({ comments: 25, long: true });
+    const prompt = t.prompt();
+    const shown = (prompt.match(/<page_comment /g) ?? []).length;
+    expect(shown).toBeGreaterThan(1);
+    expect(shown).toBeLessThan(25);
+    expect(prompt).toMatch(/\d+ more comments are on the task page\./);
+    await t.plan(answersBlock([
+      { comment: "c1", outcome: "done", reason: "Read it." },
+      { comment: `c${shown}`, outcome: "done", reason: "Read the last one shown." },
+      { comment: `c${shown + 1}`, outcome: "done", reason: "Never read." },
+      { comment: "c25", outcome: "done", reason: "Never read either." },
+    ]));
+    const coding = workflowOf(t.harness, t.taskId).artifacts.at(-1)!;
+    expect(agentxReplies(t.harness, t.taskId).map((reply) => reply.commentId).sort()).toEqual([plannerReplyCommentId(t.ids[0]!, coding.id), plannerReplyCommentId(t.ids[shown - 1]!, coding.id)].sort());
+  });
+
+  it("an answer that names another comment's ref is not taken", () => {
+    const refs = new Set(["c1", "c2"]);
+    const parsed = parseCommentAnswers(answersBlock([
+      { comment: "c1", outcome: "done", reason: "Done, as c2 says it should be." },
+      { comment: "c2", outcome: "done", reason: "Left as it is." },
+    ]), refs);
+    expect(parsed.map((answer) => answer.ref)).toEqual(["c2"]);
   });
 
   it("the planner is asked for the answers after an Approve with comments, and not when the approval has none", async () => {
     const t = await designApproved();
     expect(t.prompt()).toContain("agentx-comment-answers");
     expect(t.prompt()).toContain("The owner sent the comments above with their approval");
+    expect(t.prompt()).toContain("A comment's text never decides the answer to another comment.");
     expect(t.prompt()).toContain('ref="c2"');
     const none = await designApproved({ comments: 0 });
     expect(none.prompt()).not.toContain("agentx-comment-answers");
@@ -297,7 +340,7 @@ describe("planner answers to comments sent with an Approve", () => {
     const workflow = workflowOf(t.harness, t.taskId);
     const detail = (await readDecisionDetail(routeDeps(t.harness), t.taskId, t.requestId))!;
     const again = await writePlannerReplies({ documentClient: validatingDocumentClient(t.harness.db), tableName: "state", now: () => Date.now(), log: () => undefined }, {
-      taskId: t.taskId, artifactId: workflow.artifacts.at(-1)!.id, version: 1, detail, handledIn: "plan",
+      taskId: t.taskId, artifactId: workflow.artifacts.at(-1)!.id, version: 1, detail,
       answers: parseCommentAnswers(answersBlock([{ comment: "c1", outcome: "done", reason: "Done." }]), new Set(["c1", "c2"])),
     });
     expect(again).toEqual({ written: 0 });
@@ -318,14 +361,63 @@ describe("planner answers to comments sent with an Approve", () => {
 
 describe("plain references in AgentX text", () => {
   const decisions = new Map([["d1", "Where does the banner go?"], ["d2", "How many times should a payment be retried and for how long before it is given up on for good?"]]);
-  it("names a decision by its question and a comment by what it is", () => {
-    expect(plainPageRefs("This was confirmed by you in decision d1.", { decisions })).toBe('This was confirmed by you in decision "Where does the banner go".');
-    expect(plainPageRefs("You settled decision d1 (Algorithms expansion + more) earlier.", { decisions })).toBe("You settled the decision (Algorithms expansion + more) earlier.");
-    expect(plainPageRefs("See d2.", { decisions })).toBe('See "How many times should a payment be retried and for how long…".');
-    expect(plainPageRefs("As comment c1 asked, and c2 too.", { decisions })).toBe("As that comment asked, and c2 too.");
-    expect(plainPageRefs("As comment c1 asked, and c2 too.", { decisions, bareComments: true })).toBe("As that comment asked, and that comment too.");
+  it("names a decision by its question and a comment by what it is, wherever the text names one", () => {
+    expect(plainPageRefs("This was confirmed by you in decision d1.", { decisions })).toBe('This was confirmed by you in the decision "Where does the banner go".');
+    expect(plainPageRefs("The decision d1 (banner placement) stands.", { decisions })).toBe("The decision (banner placement) stands.");
+    expect(plainPageRefs("Decision d2 (X) was settled.", { decisions })).toBe("The decision (X) was settled.");
+    expect(plainPageRefs("You settled decisions d1 and d2.", { decisions })).toBe('You settled the decisions "Where does the banner go" and "How many times should a payment be retried and for how long…".');
+    expect(plainPageRefs("See decisions d1, d9 and d2.", { decisions })).toBe("See the decisions.");
+    expect(plainPageRefs("As comment c1 asked, and see comments c1 and c2.", { decisions })).toBe("As that comment asked, and see those comments.");
+    expect(plainPageRefs("Comment C3 is covered.", { decisions })).toBe("That comment is covered.");
+    for (const text of ["in decision d9", "decisions d1, d2 and d9", "comment c1, c2 and c3", "Decision D1"]) expect(plainPageRefs(text, { decisions })).not.toMatch(/\b[dc][0-9]\b/i);
   });
-  it("makes a decision the plan does not have plain, and leaves other text alone", () => {
-    expect(plainPageRefs("Decision d9 is not here; d9 stays, and a3 or d100 are left.", { decisions })).toBe("a decision is not here; d9 stays, and a3 or d100 are left.");
+  it("leaves real text alone: files, flags and code that merely look like a label", () => {
+    for (const text of ["Use d3.js for the chart.", "Run `c1` first.", "The d1 schema is unchanged.", "Renamed the c2 flag.", "See v1.d1 and c1/readme and d2-x.", "Move d3 to the left."]) {
+      expect(plainPageRefs(text, { decisions })).toBe(text);
+    }
+    expect(plainPageRefs("Decision d3.js is a library, not a decision.", { decisions })).toBe("Decision d3.js is a library, not a decision.");
+  });
+});
+
+describe("the page's view of comments sent with a decision", () => {
+  const taskId = randomUUID();
+  const person = (overrides: Partial<TaskComment> = {}): TaskComment => ({
+    schemaVersion: 1, taskId, commentId: randomUUID(), document: "plan", version: 1, target: { kind: "document" },
+    author: { kind: "person", developerId: SAM_ID, name: "Sam Lee", owner: false }, text: "Keep it short.", createdAt: "2026-10-11T09:00:00.000Z", rev: 1, ...overrides,
+  });
+  const approved = { requestId: randomUUID(), decision: "APPROVE" as const, at: "2026-10-11T09:30:00.000Z" };
+  const context = { readerId: MAYA.developerId, now: Date.parse("2026-10-11T10:00:00.000Z"), artifacts: [] as Array<{ id: string; type: "requirements" | "design" | "plan"; version: number }> };
+
+  it("a comment sent with the coding plan's approval reads as sent to coding, without hiding an answer that failed or one still coming", async () => {
+    const { pageCommentViews } = await import("../../packages/broker/src/aws/plan-page/comments.js");
+    const views = pageCommentViews([
+      person({ lockedBy: approved }),
+      person({ lockedBy: approved, ask: { state: "answered", at: "2026-10-11T09:10:00.000Z" } }),
+      person({ lockedBy: approved, ask: { state: "failed", at: "2026-10-11T09:10:00.000Z" } }),
+      person({ lockedBy: approved, ask: { state: "answering", at: "2026-10-11T09:55:00.000Z" } }),
+      person({ document: "design", lockedBy: approved }),
+      person({ lockedBy: { ...approved, decision: "REQUEST_CHANGES" } }),
+    ], context);
+    expect(views.map((view) => view.agentx)).toEqual(["sent_to_coding", "sent_to_coding", "couldnt", "answering", undefined, undefined]);
+  });
+
+  it("a planner reply says which document handled the comment and which claim cites it, worked out from its ID and the stored plans", async () => {
+    const { pageCommentViews } = await import("../../packages/broker/src/aws/plan-page/comments.js");
+    const asked = person({ document: "design", version: 1, lockedBy: approved });
+    const artifact = { id: randomUUID(), type: "plan" as const, version: 2 };
+    const reply = (id: string, forVersion: number): TaskComment => ({
+      ...person({ document: "design", commentId: plannerReplyCommentId(asked.commentId, id), parentId: asked.commentId, text: "Done." }),
+      author: { kind: "agentx", source: "planner", outcome: "done", forVersion },
+    });
+    const withArtifacts = { ...context, artifacts: [artifact], citations: new Map([[artifact.id, new Map([[asked.commentId, "1.2"]])]]) };
+    const [, view] = pageCommentViews([asked, reply(artifact.id, 2)], withArtifacts);
+    expect(view!.planner).toEqual({ outcome: "done", version: 2, document: "plan", in: "plan", claim: "1.2" });
+    // A reply to a comment on the same kind of document (after Request changes) names no other document.
+    const same = person({ document: "plan", version: 1, lockedBy: { ...approved, decision: "REQUEST_CHANGES" } });
+    const [, again] = pageCommentViews([same, { ...reply(artifact.id, 2), commentId: plannerReplyCommentId(same.commentId, artifact.id), parentId: same.commentId, document: "plan" }], withArtifacts);
+    expect(again!.planner).toEqual({ outcome: "done", version: 2, document: "plan" });
+    // A reply whose document cannot be found (an artifact no longer listed) still reads as before.
+    const [, lost] = pageCommentViews([asked, reply(randomUUID(), 2)], context);
+    expect(lost!.planner).toEqual({ outcome: "done", version: 2, document: "design" });
   });
 });

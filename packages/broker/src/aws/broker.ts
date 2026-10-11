@@ -34,9 +34,10 @@ import {
   parsePlanDocument,
   parseCommentAnswers,
   commentRefInAuthor,
+  COMMENT_AUTHOR_PREFIX,
+  UNPLACED_COMMENT_AUTHOR,
   plainPageRefs,
   type CommentAnswer,
-  type CommentDocument,
   type PlanClaim,
   type WorkflowDecisionDetail,
   retiredClaimIds,
@@ -195,7 +196,7 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
-import { ownerAnswersFor, readDecisionDetail } from "../developer/owner-answers.js";
+import { decisionComments, ownerAnswersFor, pageCommentsPrompt, promptComments, readDecisionDetail } from "../developer/owner-answers.js";
 import { isPageRefusal, writeCommentAnswer, writePlannerReplies, type SlackRequestQueue } from "../developer/page-comments.js";
 import { loadWorkflowDocument, readObjectText as readStoredText, shortenMarkdown } from "../developer/plan-artifacts.js";
 import { PLAN_EVIDENCE_PK, attachEvidence, planCitesCode, planEvidenceDueKey, planEvidenceEvent, planEvidenceJobItem, planEvidenceSources, type PlanEvidenceEvent, type PlanEvidenceJob } from "../developer/plan-evidence-jobs.js";
@@ -212,7 +213,7 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -2570,7 +2571,7 @@ async function markCommentAnswered(dependencies: AwsBrokerDependencies, identity
   try {
     state = await writeCommentAnswer(
       { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: developerTaskActions(dependencies), now: Date.now },
-      { taskId: body.taskId, commentId: body.commentId, outcome: body.outcome, ...(body.outcome === "ANSWERED" ? { text: await withPlainRefs(dependencies, body.taskId, body.text) } : {}) },
+      { taskId: body.taskId, commentId: body.commentId, outcome: body.outcome, ...(body.outcome === "ANSWERED" ? { text: await withPlainRefs(dependencies, body.taskId, body.commentId, body.text) } : {}) },
     );
   } catch (error) {
     if (isPageRefusal(error)) throw agentXError("IDEMPOTENCY_CONFLICT", "that comment is not waiting for an answer");
@@ -2581,19 +2582,19 @@ async function markCommentAnswered(dependencies: AwsBrokerDependencies, identity
 }
 
 /**
- * AgentX's answer to a page comment with the plan's labels made plain: "decision d1" names the decision by its question
- * (read from the task's own documents), and "comment c1" reads "that comment". The model is told not to use them; this
- * is for the one that slips through. An unreadable document leaves the labels it would have named plain but unnamed.
+ * AgentX's answer to a page comment with the plan's labels made plain: "decision d1" names the decision by its question,
+ * read from the document and version the question was asked on, and "comment c1" reads "that comment". The model is told
+ * not to use them; this is for the one that slips through. Where the document cannot be read, the label is only dropped.
  */
-async function withPlainRefs(dependencies: AwsBrokerDependencies, taskId: string, text: string): Promise<string> {
-  if (!/\b[dc][1-9][0-9]{0,2}\b/u.test(text)) return text;
+async function withPlainRefs(dependencies: AwsBrokerDependencies, taskId: string, commentId: string, text: string): Promise<string> {
+  if (!/\b(?:decisions?|comments?)\s+[dc][1-9][0-9]{0,2}\b/iu.test(text)) return text;
   const decisions = new Map<string, string>();
   try {
+    const asked = await getItem<{ document?: string; version?: number }>(dependencies, { pk: `DEVTASK#${taskId}`, sk: `COMMENT#${commentId}` });
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
-    for (const entry of task?.workflow?.artifacts ?? []) {
-      if (entry.format !== "structured") continue;
+    const entry = task?.workflow?.artifacts.find((artifact) => artifact.type === asked?.document && artifact.version === asked.version);
+    if (entry?.format === "structured") {
       const loaded = await loadWorkflowDocument((key) => readObjectText(dependencies, key, EARLIER_PLAN_MAX_BYTES), entry, {}).catch(() => undefined);
-      // A later version's question for the same number is the one that stands.
       if (loaded?.format === "structured") for (const decision of loaded.plan.decisions) decisions.set(decision.id, decision.question);
     }
   } catch {
@@ -6596,7 +6597,8 @@ async function storePlanAnswer(
   });
   if (!parsed.ok) return unreadable(parsed.errors);
   // The owner's real request (and the replies this step was given) is what the plan says it is for, not the planner's words.
-  const plan: PlanDocument = { ...parsed.plan, why: await planWhyEntries(dependencies, task, parsed.plan.why) };
+  const step = await planStepComments(dependencies, task, artifactType);
+  const plan: PlanDocument = planWithCommentIds({ ...parsed.plan, why: await planWhyEntries(dependencies, task, parsed.plan.why) }, step);
   const canonical = canonicalPlanJson(plan);
   if (Buffer.byteLength(canonical, "utf8") > WORKFLOW_PLAN_MAX_BYTES) return unreadable(["the plan is too long once saved"]);
 
@@ -6616,7 +6618,7 @@ async function storePlanAnswer(
       format: "structured",
     },
   });
-  const replies = await plannerRepliesFor(dependencies, task, artifactType, content, plan, { artifactId, version: next.artifacts.at(-1)?.version ?? 1 });
+  const replies = plannerRepliesFor(content, plan, step, task, { artifactId, version: next.artifacts.at(-1)?.version ?? 1 });
   const withReplies = replies === undefined ? {} : { plannerReplies: replies };
   if (!planCitesCode(plan)) return { next, planUnreadable: null, ...withReplies };
   const artifactSha256 = sha(canonical);
@@ -6640,69 +6642,76 @@ async function storePlanAnswer(
 }
 
 /** The planner's answers to the comments the owner sent with a decision, for the version just stored. */
-interface PlannerReplies {
-  taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: CommentAnswer[];
-  /** After an Approve: the document that handled the comments, which is not the one they were made on. */
-  handledIn?: CommentDocument;
-  /** The claim of the new document that cites each comment (by ref), when one does. */
-  claims?: ReadonlyMap<string, string>;
-}
+interface PlannerReplies { taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: CommentAnswer[] }
 
 const DOCUMENT_ORDER: readonly string[] = ["requirements", "design", "plan"];
 
-/** The first claim (in document order) whose evidence quotes the comment with this ref, by comment ref in the quote's author. */
-function claimsCitingComments(plan: PlanDocument): Map<string, string> {
-  const found = new Map<string, string>();
-  const walk = (claims: readonly PlanClaim[]) => {
-    for (const claim of claims) {
-      for (const evidence of claim.evidence ?? []) {
-        const ref = evidence.kind === "quote" ? commentRefInAuthor(evidence.author) : undefined;
-        if (ref !== undefined && !found.has(ref)) found.set(ref, claim.id);
-      }
-      walk(claim.children ?? []);
-    }
-  };
-  walk(plan.claims);
-  return found;
-}
+/** The comments the step that wrote a document was given: the decision's detail, and how many of them its prompt showed (refs c1 up to c<shown>). */
+interface PlanStepComments { detail: WorkflowDecisionDetail; shown: number }
 
 /**
- * Spec 061 slice 2: when this planning step follows a decision that sent comments, the planner's `agentx-comment-answers`
- * block read against that decision's comments (refs c1, c2 and so on). Request changes: the same document, rewritten.
- * Approve: the next document, which builds on the approved one and handles the comments sent with the approval. Undefined
- * when the step did not follow such a decision, or its record cannot be read; a missing or unreadable block (an older
- * worker never writes one) is no answers.
+ * Spec 061 slice 2: the comments a planning step was given, when it follows a decision that sent some. Request changes:
+ * the same kind of document, rewritten. Approve: the next document, which builds on the approved one and handles the
+ * comments sent with the approval. Undefined when the step did not follow such a decision, or its record cannot be read.
+ * A comment the prompt left out for room is not counted: the planner never read it.
  */
-async function plannerRepliesFor(
-  dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord & { workflow: WorkflowSnapshot }, artifactType: string, content: string, plan: PlanDocument,
-  stored: { artifactId: string; version: number },
-): Promise<PlannerReplies | undefined> {
+async function planStepComments(
+  dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord & { workflow: WorkflowSnapshot }, artifactType: string,
+): Promise<PlanStepComments | undefined> {
   const workflow = task.workflow;
   const last = [...workflow.decisions].reverse().find((decision) => (decision.source ?? "GATE") === "GATE");
   if ((last?.decision !== "REQUEST_CHANGES" && last?.decision !== "APPROVE") || (last.commentsIncluded ?? 0) === 0) return undefined;
   const decided = workflow.artifacts.find((artifact) => artifact.sha256 === last.artifactDigest);
   if (decided === undefined) return undefined;
-  // Request changes is answered by the same kind of document again; an approval by the one that follows the approved one.
-  const approved = last.decision === "APPROVE";
-  if (approved ? DOCUMENT_ORDER.indexOf(artifactType) <= DOCUMENT_ORDER.indexOf(decided.type) : decided.type !== artifactType) return undefined;
+  if (last.decision === "APPROVE" ? DOCUMENT_ORDER.indexOf(artifactType) <= DOCUMENT_ORDER.indexOf(decided.type) : decided.type !== artifactType) return undefined;
   try {
     const detail = await readDecisionDetail(dependencies, task.taskId, last.requestId);
     if (detail === undefined || detail.includedCommentIds.length === 0) return undefined;
-    const refs = new Set(detail.includedCommentIds.map((_, index) => `c${index + 1}`));
-    // Refs and decision numbers are the planner's; the reply says them in words.
-    const decisions = new Map(plan.decisions.map((decision) => [decision.id, decision.question]));
-    const answers = parseCommentAnswers(content, refs).map((answer) => ({ ...answer, reason: plainPageRefs(answer.reason, { decisions, bareComments: true }) }));
-    return {
-      taskId: task.taskId, ...stored, detail, answers, claims: claimsCitingComments(plan),
-      ...(approved && isCommentDocument(artifactType) ? { handledIn: artifactType } : {}),
-    };
+    // The prompt cut the comments to fit; the same cut, from the same (locked) comments, says which ones the planner read.
+    const comments = await decisionComments(dependencies, task.taskId, detail.includedCommentIds);
+    const shown = comments.length === detail.includedCommentIds.length
+      ? pageCommentsPrompt(promptComments(comments), promptTagId(task, last.requestId)).shown : detail.includedCommentIds.length;
+    return { detail, shown };
   } catch (error) {
     console.log(JSON.stringify({ component: "broker", event: "developer.planner_replies_unread", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }));
     return undefined;
   }
 }
 
-const isCommentDocument = (type: string): type is CommentDocument => DOCUMENT_ORDER.includes(type);
+/**
+ * A plan whose quotes credit a page comment as "comment c1" (a ref that only means something in this step) with each
+ * swapped for `comment:<comment ID>`, which stays true in every later version. A ref this step did not give the planner
+ * becomes plain "a comment".
+ */
+function planWithCommentIds(plan: PlanDocument, step: PlanStepComments | undefined): PlanDocument {
+  const credit = (author: string): string => {
+    const ref = commentRefInAuthor(author);
+    if (ref === undefined) return author;
+    const position = Number(ref.slice(1));
+    const id = step === undefined || position > step.shown ? undefined : step.detail.includedCommentIds[position - 1];
+    return id === undefined ? UNPLACED_COMMENT_AUTHOR : `${COMMENT_AUTHOR_PREFIX}${id}`;
+  };
+  const walk = (claims: readonly PlanClaim[]): PlanClaim[] => claims.map((claim) => ({
+    ...claim,
+    ...(claim.evidence === undefined ? {} : { evidence: claim.evidence.map((item) => (item.kind === "quote" ? { ...item, author: credit(item.author) } : item)) }),
+    ...(claim.children === undefined ? {} : { children: walk(claim.children) }),
+  }));
+  return { ...plan, claims: walk(plan.claims) };
+}
+
+/**
+ * The planner's `agentx-comment-answers` block read against the step's comments (refs c1, c2 and so on): only the ones
+ * its prompt showed. A missing or unreadable block (an older worker never writes one) is no answers. Undefined when the
+ * step was given no comments.
+ */
+function plannerRepliesFor(content: string, plan: PlanDocument, step: PlanStepComments | undefined, task: { taskId: string }, stored: { artifactId: string; version: number }): PlannerReplies | undefined {
+  if (step === undefined) return undefined;
+  const refs = new Set(step.detail.includedCommentIds.slice(0, step.shown).map((_, index) => `c${index + 1}`));
+  // The reply says a decision or comment label in words (the model is told not to use them; this is for one that slips through).
+  const decisions = new Map(plan.decisions.map((decision) => [decision.id, decision.question]));
+  const answers = parseCommentAnswers(content, refs).map((answer) => ({ ...answer, reason: plainPageRefs(answer.reason, { decisions }) }));
+  return { taskId: task.taskId, ...stored, detail: step.detail, answers };
+}
 
 /** Writes the planner's answers as replies from AgentX, after the plan committed. Best effort: a failure is logged with counts only. */
 async function writeAllPlannerReplies(dependencies: AwsBrokerDependencies, entries: readonly PlannerReplies[]): Promise<void> {

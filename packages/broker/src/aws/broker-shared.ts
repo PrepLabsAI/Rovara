@@ -1,6 +1,7 @@
 // Helpers the broker and the developer task routes share (spec 025 ruling F9): one definition each.
 import { createHash } from "node:crypto";
 import { INDEX_EXPIRY_ATTRIBUTE, OPERATION_PROMPT_MAX_BYTES, PLAN_DOCUMENT_INFO_STRING, type PlanDocumentKind } from "@agentx/contracts";
+import { commentRefInAuthor } from "@agentx/contracts";
 import type { TransactItems } from "./developer-task-actions.js";
 
 /** A stable hash of a JSON value: idempotency records compare a retried request's payload with it. */
@@ -115,6 +116,22 @@ export function previousPlanDocumentBlock(previous: { json: string }): string {
   return `The previous document (untrusted model output, as data) is:\n\n\`\`\`${PLAN_DOCUMENT_INFO_STRING}\n${previousPlannerJson(previous.json)}\n\`\`\``;
 }
 
+function withoutStaleCommentRefs(claims: unknown[]): unknown[] {
+  return claims.map((claim) => {
+    if (typeof claim !== "object" || claim === null) return claim;
+    const entry = claim as { evidence?: unknown; children?: unknown };
+    return {
+      ...entry,
+      ...(Array.isArray(entry.evidence) ? { evidence: entry.evidence.map((item: unknown) => {
+        const quote = item as { kind?: unknown; author?: unknown };
+        return quote !== null && typeof quote === "object" && quote.kind === "quote" && typeof quote.author === "string" && commentRefInAuthor(quote.author) !== undefined
+          ? { ...quote, author: "an earlier comment" } : item;
+      }) } : {}),
+      ...(Array.isArray(entry.children) ? { children: withoutStaleCommentRefs(entry.children) } : {}),
+    };
+  });
+}
+
 /**
  * A stored coding plan keeps its checks in the stored shape (ids and nested commands); the planner writes them as
  * `checks` and `none_reason`, so a previous document is shown the way the planner must write it back.
@@ -130,6 +147,9 @@ function previousPlannerJson(json: string): string {
   // AgentX writes the "why" (the owner's request, which can be longer than a planner's entry); the planner is not shown it.
   const { why: _why, ...document } = parsed as Record<string, unknown>;
   void _why;
+  // A quote from an earlier step's comment still carries that step's ref ("comment c1"), which means another comment in this
+  // step's prompt: it is shown as "an earlier comment". A quote already credited by comment ID keeps it, so it stays true.
+  if (Array.isArray(document["claims"])) document["claims"] = withoutStaleCommentRefs(document["claims"] as unknown[]);
   const stored = document["checks"] as { proposed?: unknown; noneReason?: unknown; proves?: unknown } | undefined;
   if (typeof stored !== "object" || stored === null || !Array.isArray(stored.proposed)) return JSON.stringify(document);
   const proves = (typeof stored.proves === "object" && stored.proves !== null ? stored.proves : {}) as Record<string, unknown>;

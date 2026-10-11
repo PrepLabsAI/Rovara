@@ -2,7 +2,7 @@
 // first level, with evidence, decisions, badges and what changed. A pure function of its input apart from the
 // drawing of diagrams. All model text is redacted and escaped here; the markup carries class names only (the page
 // owns the styles) and no inline style or event handler.
-import { commentRefInAuthor, diffPlanDocuments, plainCommentAuthor, redactText, type PlanClaim, type PlanDecision, type PlanDocument, type PlanDocumentKind, type PlanEvidenceBundle, type PlanEvidenceInput } from "@agentx/contracts";
+import { commentIdInAuthor, commentRefInAuthor, creditsPageComment, diffPlanDocuments, redactText, type PlanClaim, type PlanDecision, type PlanDocument, type PlanDocumentKind, type PlanEvidenceBundle, type PlanEvidenceInput } from "@agentx/contracts";
 import { escapeHtml } from "../web-session.js";
 import { renderDiagram } from "./diagrams.js";
 import { commentCountBadge, renderThreads, suggestionLines, targetKey, type PageCommentView, type PageSuggestionView } from "./comments.js";
@@ -33,8 +33,12 @@ export interface RenderPlanInput {
   deciding?: boolean;
   /** Every structured version of this document by number, to quote a removed claim's words. */
   plans?: ReadonlyMap<number, PlanDocument>;
-  /** The comments a quote's author names by ref ("comment c1"): who wrote each, and whether it is the reader's, so the quote reads "Your comment". */
-  commentRefs?: Record<string, { id: string; name: string; you: boolean }>;
+  /**
+   * For a quote that credits a page comment: the comments of the task by ID (who wrote each, whether it is the reader's,
+   * and its words), and, for a plan stored before comments were credited by ID, the comment each ref ("c1") meant.
+   */
+  quoteComments?: Record<string, { name: string; you: boolean; text: string }>;
+  commentRefs?: Record<string, string>;
 }
 
 /** How many claims, per level, and how many decisions in all, show before the rest fold away. */
@@ -121,16 +125,31 @@ function codeEvidence(context: Context, claim: PlanClaim, index: number, item: E
   return `<figure class="evidence evidence-code evidence-missing"><figcaption>${range}</figcaption>${note}<p class="evidence-status">${sentence}</p></figure>`;
 }
 
+/** Words as they are compared: lower case, one space between them, a trailing ellipsis and surrounding quote marks dropped. */
+const normalised = (value: string): string => value.toLowerCase().replace(/[“”"]/gu, " ").replace(/(\.{3}|…)\s*$/u, "").replace(/\s+/gu, " ").trim();
+
+/** Whether `quote` is in the words of `comment` (so the page may say the comment's author said it). */
+function quotedFrom(comment: string, quote: string): boolean {
+  const said = normalised(quote);
+  const words = normalised(comment);
+  return said.length >= 4 ? words.includes(said) : said.length > 0 && words === said;
+}
+
 /**
- * Who a quote credits. A planner credits a page comment by its ref ("owner (comment c1)"): the page says "Your comment"
- * or "Sam's comment", linked to the comment's thread, and never shows the ref. A ref it cannot place reads "A comment".
+ * Who a quote credits. A planner credits a page comment by reference ("comment c1", stored as the comment's ID). The page
+ * says "Your comment" or "Sam's comment", linked to the comment's thread, only when the quoted words are in that comment.
+ * Anything else, including a reference it cannot place, reads "A comment (paraphrased by AgentX)": the planner wrote those
+ * words, and a name must never sit on them. The reference itself is never shown.
  */
-function quoteAuthor(context: Context, author: string): string {
-  const ref = commentRefInAuthor(author);
-  if (ref === undefined) return t(author);
-  const comment = context.input.commentRefs?.[ref];
-  if (comment === undefined) return t(plainCommentAuthor(author));
-  return `<a href="#comment-${escapeHtml(comment.id)}">${comment.you ? "Your comment" : `${t(comment.name)}'s comment`}</a>`;
+function quoteAuthor(context: Context, item: Extract<PlanEvidenceInput, { kind: "quote" }>): string {
+  if (!creditsPageComment(item.author)) return t(item.author);
+  const ref = commentRefInAuthor(item.author);
+  const id = commentIdInAuthor(item.author) ?? (ref === undefined ? undefined : context.input.commentRefs?.[ref]);
+  const comment = id === undefined ? undefined : context.input.quoteComments?.[id];
+  if (id === undefined || comment === undefined) return "A comment (paraphrased by AgentX)";
+  const link = `href="#comment-${escapeHtml(id)}"`;
+  if (!quotedFrom(comment.text, item.text)) return `<a ${link}>A comment (paraphrased by AgentX)</a>`;
+  return `<a ${link}>${comment.you ? "Your comment" : `${t(comment.name)}'s comment`}</a>`;
 }
 
 async function evidenceHtml(context: Context, claim: PlanClaim, index: number, item: PlanEvidenceInput): Promise<string> {
@@ -140,7 +159,7 @@ async function evidenceHtml(context: Context, claim: PlanClaim, index: number, i
     case "sketch":
       return `<figure class="evidence evidence-sketch"><figcaption>Sketch: not in the repository yet <span class="lang">${t(item.language)}</span></figcaption>${item.note === undefined ? "" : `<p class="evidence-note">${t(item.note)}</p>`}<pre><code>${t(item.code)}</code></pre></figure>`;
     case "quote":
-      return `<blockquote class="evidence evidence-quote"><p>${t(item.text)}</p><footer>${quoteAuthor(context, item.author)}</footer></blockquote>`;
+      return `<blockquote class="evidence evidence-quote"><p>${t(item.text)}</p><footer>${quoteAuthor(context, item)}</footer></blockquote>`;
     case "flow":
     case "schema":
     case "stateMachine": {
@@ -167,7 +186,7 @@ function decisionHtml(context: Context, decision: PlanDecision, withLink: boolea
       return `<li class="option${recommended ? " recommended" : ""}" data-option="${t(option.id)}"><input type="radio" name="answer-${t(decision.id)}" value="${t(option.id)}" id="${inputId}"${recommended ? " checked" : ""}>`
         + `<label for="${inputId}"><span class="option-label">${t(option.label)}</span>${recommended ? ' <span class="badge badge-recommended">AgentX recommends</span>' : ""} <span class="consequence">${t(option.consequence)}</span></label></li>`;
     }).join("");
-    return `<div class="decision" id="${id}" data-decision="${t(decision.id)}"><fieldset class="answer"><legend><span class="decision-id">${t(decision.id)}</span> ${t(decision.question)}</legend>${where}<ul class="options">${options}</ul></fieldset>${after}</div>`;
+    return `<div class="decision" id="${id}" data-decision="${t(decision.id)}"><fieldset class="answer"><legend>${t(decision.question)}</legend>${where}<ul class="options">${options}</ul></fieldset>${after}</div>`;
   }
   const suggesting = context.input.current && context.input.access?.canSuggest === true;
   const mine = suggestions.find((suggestion) => suggestion.you)?.optionId;
@@ -176,7 +195,7 @@ function decisionHtml(context: Context, decision: PlanDecision, withLink: boolea
     const suggest = !suggesting ? "" : ` <button type="button" class="suggest" data-decision="${t(decision.id)}" data-option="${t(option.id)}"${mine === option.id ? ' data-mine="true"' : ""} hidden>${mine === option.id ? "You suggest this · Undo" : "Suggest this"}</button>`;
     return `<li class="option${recommended ? " recommended" : ""}" data-option="${t(option.id)}"><span class="option-label">${t(option.label)}</span>${recommended ? ' <span class="badge badge-recommended">AgentX recommends</span>' : ""} <span class="consequence">${t(option.consequence)}</span>${suggest}</li>`;
   }).join("");
-  return `<div class="decision" id="${id}" data-decision="${t(decision.id)}"><p class="decision-question"><span class="decision-id">${t(decision.id)}</span> ${t(decision.question)}</p>${where}<ul class="options">${options}</ul>${after}</div>`;
+  return `<div class="decision" id="${id}" data-decision="${t(decision.id)}"><p class="decision-question">${t(decision.question)}</p>${where}<ul class="options">${options}</ul>${after}</div>`;
 }
 
 function badges(context: Context, claim: PlanClaim): string {
@@ -217,7 +236,7 @@ function decisionListHtml(context: Context, plan: PlanDocument): string {
   if (plan.decisions.length === 0) return '<p class="no-decisions">No decisions needed</p>';
   const items = plan.decisions.map((decision) => {
     const question = escapeHtml(cut(redactText(decision.question), DECISION_QUESTION_MAX_CHARS));
-    return `<li><a class="decision-link" href="#${escapeHtml(decisionAnchor(context, decision.id))}">${t(decision.id)} \u2014 ${question} (on claim ${t(decision.claimId)})</a></li>`;
+    return `<li><a class="decision-link" href="#${escapeHtml(decisionAnchor(context, decision.id))}">${question} (on claim ${t(decision.claimId)})</a></li>`;
   }).join("");
   return `<nav class="decision-list" aria-label="Decisions"><p class="decision-list-title">Decisions:</p><ul>${items}</ul></nav>`;
 }
@@ -235,7 +254,7 @@ function whatChangedHtml(context: Context): string {
     const claim = from.get(id);
     return `<li>${linked ? claimLink(context, id) : `<span class="claim-id">${t(id)}</span>`} ${claim === undefined ? "" : t(claim.text)}</li>`;
   }).join("");
-  const decisionItems = (ids: string[], from: Map<string, PlanDecision>): string => ids.map((id) => `<li><span class="decision-id">${t(id)}</span> ${from.get(id) === undefined ? "" : t(from.get(id)!.question)}</li>`).join("");
+  const decisionItems = (ids: string[], from: Map<string, PlanDecision>): string => ids.map((id) => `<li>${from.get(id) === undefined ? "A decision" : t(from.get(id)!.question)}</li>`).join("");
   const group = (label: string, items: string): string => (items === "" ? "" : `<h4>${label}</h4><ul>${items}</ul>`);
   const body = [
     group("Added", claimItems(diff.added, now, true)),
@@ -251,7 +270,7 @@ function whatChangedHtml(context: Context): string {
 function whyHtml(plan: PlanDocument): string {
   const first = plan.why[0];
   if (first === undefined) return "";
-  const quotes = plan.why.map((quote) => `<blockquote class="why-quote"><p>${t(quote.text)}</p><footer>${t(quote.author)}</footer></blockquote>`).join("");
+  const quotes = plan.why.map((quote) => `<blockquote class="why-quote"><p>${t(quote.text)}</p><footer>${creditsPageComment(quote.author) ? "A comment" : t(quote.author)}</footer></blockquote>`).join("");
   return `<details class="why"><summary>${t(cut(redactText(first.text), WHY_SUMMARY_MAX_CHARS))}</summary>${quotes}</details>`;
 }
 

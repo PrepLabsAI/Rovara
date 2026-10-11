@@ -7,10 +7,10 @@
 // after v2 was written, replies and the thread limit, suggestions and their limit, AgentX's answers and their limits,
 // the planner's "Done:" / "Not changed because" replies with one comment left unanswered, and drafts surviving a reload.
 // 10.7 (review sessions on the PR feedback page) is covered by feedback-review-web.test.ts.
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { fauxAssistantMessage, fauxText } from "@earendil-works/pi-ai";
-import { SlackPageCommentMessageSchema, slackThreadSubject, type ChannelMembersRequest, type ChannelMembersResponse } from "@agentx/contracts";
+import { SlackPageCommentMessageSchema, slackThreadSubject, type ChannelMembersRequest, type ChannelMembersResponse, type PlanDocument } from "@agentx/contracts";
 import { createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import { MAYA, OMAR, grantProject } from "../../support/developer-task-broker.js";
 import { SLACK_CHANNEL, call, orchestratorPrincipal } from "../../support/slack-broker.js";
@@ -687,49 +687,54 @@ describe("Suite 10: page and auth", () => {
 
 // Comments sent with an Approve (not only with Request changes) are answered by the next document's planner, and the
 // coding plan's approval hands its comments to coding. The coding plan cites a comment as evidence; the page names the
-// comment's author instead of the planner's reference. Also AgentX's own answers to page questions never carry labels.
+// comment's author instead of the planner's reference, only where the quoted words are theirs. Also AgentX's own answers
+// to page questions never carry labels.
 describe("Suite 10: comments sent with an approval", () => {
   const REQUIREMENTS_PROMPT = /You are writing the requirements/;
   const DESIGN_PROMPT = /You are writing the design/;
+  const REVISE_PROMPT = /Revise the current coding plan/;
   const INSTRUCTION = "Keep each item to one line.";
   const QUESTION = "Why two steps?";
   const REQUIREMENTS = planDocument({ title: "Show a retry banner: requirements", decisions: [], claims: [{ id: "1", text: "People see a retry banner when a payment fails." }] });
   const DESIGN = planDocument({ title: "Show a retry banner: design", decisions: [], claims: [
     { id: "1", text: "People see a retry banner when a payment fails.", children: [{ id: "1.1", text: "The banner lists each failed item." }] },
   ] });
-  /** The coding plan; the second-level claim cites each of `authors` as a quote (how a planner credits a page comment). */
-  const codingPlan = (authors: string[]) => planDocument({ title: "Show a retry banner: coding plan", decisions: [], claims: [{
+  interface Quote { text: string; author: string }
+  /** The coding plan: claim 1.1 cites each of `quotes` as evidence (how a planner credits a page comment), and `claims` adds more claims. */
+  const codingPlan = (quotes: Quote[], claims: PlanDocument["claims"] = []) => planDocument({ title: "Show a retry banner: coding plan", decisions: [], claims: [{
     id: "1", text: "People see a retry banner when a payment fails.",
-    children: [{ id: "1.1", text: "Each bullet stays on one line.", ...(authors.length === 0 ? {} : { evidence: authors.map((author) => ({ kind: "quote" as const, text: INSTRUCTION, author })) }) }],
-  }] });
+    children: [{ id: "1.1", text: "Each bullet stays on one line.", ...(quotes.length === 0 ? {} : { evidence: quotes.map((quote) => ({ kind: "quote" as const, ...quote })) }) }],
+  }, ...claims] });
   const refOf = (prompt: string, text: string) => [...prompt.matchAll(/<page_comment [^>]*ref="(c\d+)"[^>]*>([^<]*)<\/page_comment>/g)].find((match) => match[2] === text)?.[1];
+  const withAnswers = (answers: unknown[], document: PlanDocument) => `\`\`\`agentx-comment-answers\n${JSON.stringify(answers)}\n\`\`\`\n\n${planAnswer(document)}`;
 
   /**
    * A Full task's planner. After an Approve that sent comments, the coding plan's planner answers each (unless `answers` is
-   * false: an older worker, which never writes the block) and cites the instruction as the authors `cite` names.
+   * false: an older worker, which never writes the block) and cites the instruction as the quotes `cite` names.
    */
-  function planner(options: { answers?: boolean; cite?: (ref: string) => string[] } = {}) {
+  function planner(options: { answers?: boolean; cite?: (ref: string) => Quote[]; revise?: (prompt: string) => string } = {}) {
     return (latest: string): string => {
       if (REQUIREMENTS_PROMPT.test(latest)) return planAnswer(REQUIREMENTS);
       if (DESIGN_PROMPT.test(latest)) return planAnswer(DESIGN);
+      if (REVISE_PROMPT.test(latest) && options.revise !== undefined) return options.revise(latest);
       const instruction = refOf(latest, INSTRUCTION);
       const question = refOf(latest, QUESTION);
       const document = codingPlan(instruction === undefined ? [] : options.cite?.(instruction) ?? []);
       if (options.answers === false || !latest.includes("agentx-comment-answers")) return planAnswer(document);
-      const answers = [
+      return withAnswers([
         { comment: instruction, outcome: "done", reason: "Each bullet stays on one line." },
-        { comment: question, outcome: "not_changed", reason: "the two steps stay, as the answer above says." },
-      ];
-      return `\`\`\`agentx-comment-answers\n${JSON.stringify(answers)}\n\`\`\`\n\n${planAnswer(document)}`;
+        { comment: question, outcome: "not_changed", reason: "The two steps stay as they are." },
+      ], document);
     };
   }
+  const said = (ref: string): Quote[] => [{ text: INSTRUCTION, author: `owner (comment ${ref})` }];
 
-  /** The Comment form on `target` of the design section (each document on the page has its own), filled in and posted. */
-  async function commentOnDesign(tab: TaskPageTab, target: string, text: string, options: { ask?: boolean } = {}): Promise<void> {
-    const open = tab.document.querySelector(`#design .comment-open[data-target="${target}"]`);
-    if (open === null || open.hidden) throw new Error(`no Comment control on ${target} of the design`);
+  /** The Comment form on `target` of one document's section (each document on the page has its own), filled in and posted. */
+  async function commentIn(section: "design" | "coding-plan", tab: TaskPageTab, target: string, text: string, options: { ask?: boolean } = {}): Promise<void> {
+    const open = tab.document.querySelector(`#${section} .comment-open[data-target="${target}"]`);
+    if (open === null || open.hidden) throw new Error(`no Comment control on ${target} of the ${section}`);
     open.click();
-    const form = tab.document.querySelector(`#design [data-comments="${target}"] .comment-form`);
+    const form = tab.document.querySelector(`#${section} [data-comments="${target}"] .comment-form`);
     if (form === null) throw new Error(`no comment form opened on ${target}`);
     form.querySelector("textarea")!.type_(text);
     const ask = form.querySelector("input[type=checkbox]");
@@ -739,20 +744,21 @@ describe("Suite 10: comments sent with an approval", () => {
   }
 
   /** A Full task whose design v1 waits for Maya, with the owner's instruction and a question AgentX already answered under it. */
-  async function designWithComments(model: ReturnType<typeof planner>) {
+  async function designWithComments(model: ReturnType<typeof planner>, answer = "Both steps are needed, so they stay.", options: { requirements?: PlanDocument } = {}) {
     const queue = recordingQueue();
-    const e2e = await createWorkflowE2E({ channelMembers: members, slackRequestQueue: queue, model: { plan: model, edits: EDITS } });
+    const plan = options.requirements === undefined ? model : (latest: string) => (REQUIREMENTS_PROMPT.test(latest) ? planAnswer(options.requirements!) : model(latest));
+    const e2e = await createWorkflowE2E({ channelMembers: members, slackRequestQueue: queue, model: { plan, edits: EDITS } });
     expect(await e2e.mention("full: Show a retry banner when a payment fails")).toBe(200);
     await e2e.settle();
     await approveInSlack(e2e);
     await e2e.settle();
     expect(e2e.slack.lastPostWithAction("agentx_workflow_approve").text).toContain("*Design v1 is ready for your approval.*");
     const writer = await openTaskPage(e2e, OWNER, { search: "?doc=design" });
-    await commentOnDesign(writer, "document", INSTRUCTION);
-    await commentOnDesign(writer, "claim:1", QUESTION, { ask: true });
+    await commentIn("design", writer, "document", INSTRUCTION);
+    await commentIn("design", writer, "claim:1", QUESTION, { ask: true });
     expect(peopleComments(e2e).map((comment) => [comment.document, comment.text])).toEqual([["design", INSTRUCTION], ["design", QUESTION]]);
-    await answerPageComments(e2e, queue, "Both steps are needed, so they stay.");
-    return e2e;
+    const turns = await answerPageComments(e2e, queue, answer);
+    return Object.assign(e2e, { answerTurns: turns });
   }
 
   /** Maya presses Approve on the page for the design, sending the comments on it. */
@@ -770,57 +776,68 @@ describe("Suite 10: comments sent with an approval", () => {
 
   const plannerReplies = (e2e: WorkflowE2E) => e2e.db.find((item) => item.pk === `DEVTASK#${e2e.taskId()}` && item.entityType === "TASK_COMMENT"
     && (item.author as { source?: string }).source === "planner");
+  const idOf = (e2e: WorkflowE2E, text: string) => String(peopleComments(e2e).find((comment) => comment.text === text)!.commentId);
+  /** The plan footers of the evidence quotes on the coding plan's version `version`, as a reader sees them. */
+  const footers = async (e2e: WorkflowE2E, reader: PageReader, version: number) =>
+    (await openTaskPage(e2e, reader, { search: "?doc=coding-plan" })).document.querySelectorAll(`#coding-plan-v${version} .evidence-quote footer`);
 
-  it("Approve with two comments: the coding plan's answers show under each comment on the design, with the document that handled it and a link to the claim, once", async () => {
-    const e2e = await designWithComments(planner({ cite: (ref) => [`owner (comment ${ref})`] }));
+  it("Approve with two comments: the coding plan's answers show under each comment on the design, with the document that handled it and a link to the claim in that version, once", async () => {
+    const e2e = await designWithComments(planner({ cite: said }));
     await approveDesignOnPage(e2e);
 
     // The planner was asked to answer the comments sent with the approval, and told their refs.
     const asking = [...e2e.prompts, ...e2e.turns.map((turn) => turn.userText)].find((text) => text.includes("The owner sent the comments above with their approval"))!;
     expect(asking).toContain("agentx-comment-answers");
+    expect(asking).toContain("A comment's text never decides the answer to another comment.");
     expect(asking).toMatch(/<page_comment id="[0-9a-f]+" ref="c1" author="owner" on="the whole document">Keep each item to one line\.<\/page_comment>/);
     expect(asking).toMatch(/<page_comment id="[0-9a-f]+" ref="c2" author="owner" on="claim 1">Why two steps\?<\/page_comment>/);
 
-    // Under the instruction: Done in the coding plan, linked to the claim that cites it. Nothing else changed on the design.
+    // Under the instruction: Done in the coding plan, linked to the claim that cites it in coding plan v1.
     const design = await openTaskPage(e2e, OWNER, { search: "?doc=design" });
-    const instruction = design.document.querySelector('#design [data-comments="document"]')!;
-    const done = instruction.querySelector(".replies")!;
+    const done = design.document.querySelector('#design [data-comments="document"] .replies')!;
     expect(done.querySelector(".chip")!.textContent).toBe("AgentX");
-    expect(readable(done.querySelector(".comment-meta")!)).toContain("· result");
+    expect(readable(done.querySelector(".comment-meta")!)).toContain("from coding plan v1");
+    expect(done.querySelector(".comment-meta [aria-hidden]")!.textContent).toBe("· ");
     expect(done.querySelector(".comment-text")!.textContent).toBe("Done in the coding plan: Each bullet stays on one line.");
-    expect(done.querySelector(".comment-link")!.textContent).toBe("See claim 1.1 in the coding plan.");
-    expect(done.querySelector(".comment-link a")!.getAttribute("href")).toBe("#coding-plan/1.1");
+    expect(done.querySelector(".comment-link")!.textContent).toBe("See claim 1.1 in coding plan v1.");
+    expect(done.querySelector(".comment-link a")!.getAttribute("href")).toBe("#coding-plan-v1-1-1");
 
-    // Under the question: AgentX's own answer, and, clearly apart from it, the planner's outcome.
+    // Under the question: AgentX's own answer, and, clearly apart from it, the planner's outcome (a capital letter after the colon).
     const replies = design.document.querySelectorAll('#design [data-comments="claim:1"] .replies li');
     expect(replies).toHaveLength(2);
     expect(replies[0]!.querySelector(".chip")!.textContent).toBe("AgentX (AI)");
     expect(replies[0]!.querySelector(".comment-text")!.textContent).toBe("Both steps are needed, so they stay.");
     expect(replies[1]!.querySelector(".chip")!.textContent).toBe("AgentX");
-    expect(readable(replies[1]!.querySelector(".comment-meta")!)).toContain("· result");
-    expect(replies[1]!.querySelector(".comment-text")!.textContent).toBe("Not changed in the coding plan because the two steps stay, as the answer above says.");
+    expect(readable(replies[1]!.querySelector(".comment-meta")!)).toContain("from coding plan v1");
+    expect(replies[1]!.querySelector(".comment-text")!.textContent).toBe("Not changed in the coding plan: The two steps stay as they are.");
     expect(replies[1]!.querySelector(".comment-link")).toBeNull();
     // The page as the server writes it (before any script runs) says the same.
     const served = (await openTaskPage(e2e, OWNER, { search: "?doc=design", scripts: false })).document;
     expect(served.querySelector('#design [data-comments="document"] .replies .comment-text')!.textContent).toBe("Done in the coding plan: Each bullet stays on one line.");
-    expect(served.querySelector('#design [data-comments="document"] .replies .comment-link a')!.getAttribute("href")).toBe("#coding-plan/1.1");
+    expect(served.querySelector('#design [data-comments="document"] .replies .comment-link')!.textContent).toBe("See claim 1.1 in coding plan v1.");
+    expect(served.querySelector('#design [data-comments="document"] .replies .comment-link a')!.getAttribute("href")).toBe("#coding-plan-v1-1-1");
+    expect(served.querySelector('#design [data-comments="document"] .replies .comment-meta [aria-hidden]')!.textContent).toBe("· ");
     expect(served.querySelectorAll('#design [data-comments="claim:1"] .replies .comment-text').map((node) => node.textContent))
-      .toEqual(["Both steps are needed, so they stay.", "Not changed in the coding plan because the two steps stay, as the answer above says."]);
+      .toEqual(["Both steps are needed, so they stay.", "Not changed in the coding plan: The two steps stay as they are."]);
     expect(served.querySelectorAll('#design [data-comments="claim:1"] .replies .chip').map((node) => node.textContent)).toEqual(["AgentX (AI)", "AgentX"]);
     // Neither comment reads "Not answered", and the page never shows a planner's label.
     expect(design.text()).not.toContain("Not answered");
     expect(design.text()).not.toMatch(/\bc[0-9]+\b/);
 
     // The coding plan credits the owner's comment by who wrote it, linked to its thread, never as "comment c1".
-    const instructionId = String(peopleComments(e2e).find((comment) => comment.text === INSTRUCTION)!.commentId);
+    const instructionId = idOf(e2e, INSTRUCTION);
     const plan = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
     const footer = plan.document.querySelector("#coding-plan-v1 .evidence-quote footer")!;
     expect(footer.textContent).toBe("Your comment");
     expect(footer.querySelector("a")!.getAttribute("href")).toBe(`#comment-${instructionId}`);
     expect(plan.document.getElementById(`comment-${instructionId}`)).not.toBeNull();
     expect(plan.text()).not.toMatch(/comment c[0-9]/);
-    const teammate = await openTaskPage(e2e, SAM, { search: "?doc=coding-plan" });
-    expect(teammate.document.querySelector("#coding-plan-v1 .evidence-quote footer")!.textContent).toBe("Maya Chen's comment");
+    expect((await footers(e2e, SAM, 1))[0]!.textContent).toBe("Maya Chen's comment");
+    // The stored plan holds the comment's ID, not the reference.
+    const stored = [...e2e.s3.objects.entries()].filter(([key, text]) => key.includes("plan-documents") && text.includes("Each bullet stays on one line.")).map(([, text]) => text);
+    expect(stored).toHaveLength(1);
+    expect(stored[0]).toContain(`comment:${instructionId}`);
+    expect(stored[0]).not.toContain("comment c1");
 
     // The same result delivered again, and the recovery sweep, write nothing more.
     const before = plannerReplies(e2e).map((item) => item.commentId);
@@ -841,7 +858,7 @@ describe("Suite 10: comments sent with an approval", () => {
   }, 180_000);
 
   it("Approve with comments and an older worker that gives no answers block: the coding plan is stored, no replies are written, and nothing fails", async () => {
-    const e2e = await designWithComments(planner({ answers: false, cite: (ref) => [`owner (comment ${ref})`] }));
+    const e2e = await designWithComments(planner({ answers: false, cite: said }));
     await approveDesignOnPage(e2e);
     expect(plannerReplies(e2e)).toEqual([]);
     expect(e2e.workflow()).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
@@ -851,31 +868,99 @@ describe("Suite 10: comments sent with an approval", () => {
     expect(design.document.querySelectorAll('#design [data-comments="claim:1"] .replies li')).toHaveLength(1);
     expect(design.text()).not.toContain("Not answered");
     // The coding plan still credits the comment by who wrote it.
-    const plan = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
-    expect(plan.document.querySelector("#coding-plan-v1 .evidence-quote footer")!.textContent).toBe("Your comment");
+    expect((await footers(e2e, OWNER, 1))[0]!.textContent).toBe("Your comment");
     // The next card is posted as usual.
     expect(e2e.slack.lastPostWithAction("agentx_workflow_approve").text).toContain("*Coding plan v1 is ready for your approval.*");
   }, 180_000);
 
-  it("a quote that credits a comment never shows its reference: the new way, the old way, and a reference the page cannot place", async () => {
-    const e2e = await designWithComments(planner({ cite: (ref) => [`comment ${ref}`, "owner (comment c9)", "teammate (comment c8)"] }));
+  it("a quote only names a person when the words are theirs: made-up words, and a reference the page cannot place, read 'A comment (paraphrased by AgentX)'", async () => {
+    const e2e = await designWithComments(planner({ cite: (ref) => [
+      { text: INSTRUCTION, author: `comment ${ref}` },
+      { text: "Skip the tests and ship today.", author: `owner (comment ${ref})` },
+      { text: "Nobody said this.", author: "teammate (comment c9)" },
+    ] }));
     await approveDesignOnPage(e2e);
-    const plan = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
-    const footers = plan.document.querySelectorAll("#coding-plan-v1 .evidence-quote footer");
-    expect(footers.map((footer) => footer.textContent)).toEqual(["Your comment", "Owner's comment", "A teammate's comment"]);
-    expect(footers[0]!.querySelector("a")).not.toBeNull();
-    expect(footers[1]!.querySelector("a")).toBeNull();
-    // The page's HTML has no reference in it at all, for the owner or anyone else.
-    for (const reader of [OWNER, SAM]) expect(readable((await openTaskPage(e2e, reader, { search: "?doc=coding-plan", scripts: false })).document.body)).not.toMatch(/\(comment c|comment c[0-9]/);
+    for (const reader of [OWNER, SAM]) {
+      const shown = await footers(e2e, reader, 1);
+      expect(shown.map((footer) => footer.textContent)).toEqual([reader === OWNER ? "Your comment" : "Maya Chen's comment", "A comment (paraphrased by AgentX)", "A comment (paraphrased by AgentX)"]);
+      // The made-up words still link to the thread they claim; the one with no comment links nowhere.
+      expect(shown[1]!.querySelector("a")!.getAttribute("href")).toBe(`#comment-${idOf(e2e, INSTRUCTION)}`);
+      expect(shown[2]!.querySelector("a")).toBeNull();
+      expect(readable((await openTaskPage(e2e, reader, { search: "?doc=coding-plan", scripts: false })).document.body)).not.toMatch(/comment c[0-9]/);
+    }
+    // Words that are theirs, said a little differently (case, spacing, a missing full stop), still count.
+    expect(await footers(e2e, OWNER, 1)).toHaveLength(3);
   }, 180_000);
 
-  it("a plan stored before this change, whose quote reads 'owner (comment c1)', shows as the owner's comment, linked", async () => {
-    // The stored plan is exactly what a planner wrote then; only the page's way of showing it is new.
-    const e2e = await designWithComments(planner({ answers: false, cite: (ref) => [`owner (comment ${ref})`] }));
+  /** Replaces the stored coding plan's text, as an older build wrote it, keeping its digest true. */
+  function rewriteStoredPlan(e2e: WorkflowE2E, change: (json: string) => string): void {
+    const task = e2e.db.find((item) => item.entityType === "DEVELOPER_TASK")[0] as { workflow: { artifacts: Array<Record<string, unknown>> } } & Record<string, unknown>;
+    const artifact = task.workflow.artifacts.find((item) => item.type === "plan")!;
+    const rewritten = change(e2e.s3.objects.get(String(artifact.objectKey))!);
+    e2e.s3.objects.set(String(artifact.objectKey), rewritten);
+    artifact.sha256 = createHash("sha256").update(rewritten, "utf8").digest("hex");
+    e2e.db.set(task);
+  }
+
+  it("a plan stored before this change, whose quotes read 'owner (comment c1)', is read with the refs of its own step, and only credited when the words match", async () => {
+    const e2e = await designWithComments(planner({ answers: false, cite: (ref) => [{ text: INSTRUCTION, author: `comment ${ref}` }, { text: QUESTION, author: `comment ${ref}` }] }));
     await approveDesignOnPage(e2e);
-    const plan = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan", scripts: false });
-    expect(plan.html).not.toContain("owner (comment c1)");
-    expect(plan.document.querySelector("#coding-plan-v1 .evidence-quote footer a")!.textContent).toBe("Your comment");
+    // As 0.2.13 stored it: the references as the planner wrote them (the second says c1 where the words are c2's).
+    rewriteStoredPlan(e2e, (json) => json.replace(`comment:${idOf(e2e, INSTRUCTION)}`, "owner (comment c1)").replace(`comment:${idOf(e2e, QUESTION)}`, "owner (comment c1)"));
+    expect(e2e.s3.objects.get(String(e2e.workflow().artifacts.at(-1)!.objectKey))).toContain("owner (comment c1)");
+    const shown = await footers(e2e, OWNER, 1);
+    expect(shown.map((footer) => footer.textContent)).toEqual(["Your comment", "A comment (paraphrased by AgentX)"]);
+    expect(shown[0]!.querySelector("a")!.getAttribute("href")).toBe(`#comment-${idOf(e2e, INSTRUCTION)}`);
+    expect(readable((await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan", scripts: false })).document.body)).not.toContain("owner (comment c1)");
+  }, 180_000);
+
+  it("a reference means one comment for ever: after Request changes sends other comments, the earlier quote still credits its own author and the replies link their own versions", async () => {
+    const SAM_SAYS = "Shorter copy please.";
+    const e2e = await designWithComments(planner({
+      cite: said,
+      // v2 keeps claim 1.1 and its evidence exactly as the previous document shows it, and quotes Sam's comment (c1 in this step) on a new claim.
+      revise: (latest) => {
+        const previous = JSON.parse(/```agentx-plan\n([\s\S]*?)\n```/.exec(latest.slice(latest.indexOf("The previous document")))![1]!) as PlanDocument;
+        const kept = previous.claims[0]!.children![0]!;
+        const ref = refOf(latest, SAM_SAYS)!;
+        return withAnswers([{ comment: ref, outcome: "done", reason: "Shortened the copy." }], planDocument({
+          title: "Show a retry banner: coding plan", decisions: [], claims: [
+            { id: "1", text: "People see a retry banner when a payment fails.", children: [kept, { id: "1.2", text: "The copy is short.", evidence: [{ kind: "quote", text: SAM_SAYS, author: `comment ${ref}` }] }] },
+          ],
+        }));
+      },
+    }));
+    await approveDesignOnPage(e2e);
+    const sam = await openTaskPage(e2e, SAM, { search: "?doc=coding-plan" });
+    await commentIn("coding-plan", sam, "document", SAM_SAYS);
+    const owner = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
+    owner.byId("decide-request-changes").click();
+    expect(owner.byId("decide-comments-title").textContent).toBe("Comments to send (1)");
+    owner.byId("decide-submit").click();
+    await owner.settle();
+    await e2e.settle();
+    expect(e2e.workflow().artifacts.filter((artifact) => artifact.type === "plan").map((artifact) => artifact.version)).toEqual([1, 2]);
+    // The previous document the planner was shown carries the comment's ID (stable), and no stale reference.
+    const revising = [...e2e.prompts, ...e2e.turns.map((turn) => turn.userText)].find((text) => REVISE_PROMPT.test(text))!;
+    const previousDocument = revising.slice(revising.indexOf("The previous document"));
+    expect(previousDocument).toContain(`comment:${idOf(e2e, INSTRUCTION)}`);
+    expect(previousDocument).not.toMatch(/comment c[0-9]/);
+
+    // Version 2: claim 1.1's quote is still Maya's (not Sam's, who is c1 in this step), and Sam's own quote is Sam's.
+    const v2 = await footers(e2e, OWNER, 2);
+    expect(v2.map((footer) => footer.textContent)).toEqual(["Your comment", "Sam Lee's comment"]);
+    expect(v2[0]!.querySelector("a")!.getAttribute("href")).toBe(`#comment-${idOf(e2e, INSTRUCTION)}`);
+    expect(v2[1]!.querySelector("a")!.getAttribute("href")).toBe(`#comment-${idOf(e2e, SAM_SAYS)}`);
+    // Sam's reply links claim 1.2 of coding plan v2; Maya's reply on the design still links claim 1.1 of v1.
+    const page = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
+    const samReply = page.document.querySelector('#coding-plan [data-comments="document"] .replies .comment-link')!;
+    expect(samReply.textContent).toBe("See claim 1.2 in coding plan v2.");
+    expect(samReply.querySelector("a")!.getAttribute("href")).toBe("#coding-plan-v2-1-2");
+    const mayaReply = page.document.querySelector('#design [data-comments="document"] .replies .comment-link')!;
+    expect(mayaReply.textContent).toBe("See claim 1.1 in coding plan v1.");
+    expect(mayaReply.querySelector("a")!.getAttribute("href")).toBe("#coding-plan-v1-1-1");
+    expect(page.document.getElementById("coding-plan-v1-1-1")).not.toBeNull();
+    expect(page.document.getElementById("coding-plan-v2-1-2")).not.toBeNull();
   }, 180_000);
 
   it("the coding plan's approval sends its comments to coding, and the page says so under each; no planner replies are written", async () => {
@@ -900,10 +985,9 @@ describe("Suite 10: comments sent with an approval", () => {
     // Both the owner and the teammate see it where the comment is, on the server's page and on the script's.
     for (const reader of [OWNER, SAM]) {
       const page = await openTaskPage(e2e, reader, { search: "?doc=coding-plan" });
-      const thread = page.document.querySelector('[data-comments="document"]')!;
-      expect(thread.querySelector(".comment-state")!.textContent).toBe("Sent to coding with the owner's approval.");
+      expect(page.document.querySelector('[data-comments="document"] .comment-state')!.textContent).toBe("Sent to coding when the plan was approved.");
       const plain = await openTaskPage(e2e, reader, { search: "?doc=coding-plan", scripts: false });
-      expect(plain.document.querySelector('[data-comments="document"] .comment-state')!.textContent).toBe("Sent to coding with the owner's approval.");
+      expect(plain.document.querySelector('[data-comments="document"] .comment-state')!.textContent).toBe("Sent to coding when the plan was approved.");
     }
   }, 180_000);
 
@@ -916,22 +1000,33 @@ describe("Suite 10: comments sent with an approval", () => {
     expect(readable(form)).not.toContain("Ask AgentX to answer");
   }, 120_000);
 
-  it("AgentX's answer to a page question names a decision by its question and never shows d1 or c1, even when the model writes them; it is told to point to Request changes in Slack or a comment", async () => {
-    const queue = recordingQueue();
-    const e2e = await waitingPlan({ queue });
-    const owner = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
-    await owner.comment("decision:d1", "Can I still change where it goes?", { ask: true });
-    const turns = await answerPageComments(e2e, queue, "Yes. It was confirmed by you in decision d1 (Where does the banner go?), as comment c1 shows; decisions d1 and d2 can change if you request changes on the card.");
+  it("the page's list of decisions shows each one by its question, with no d1 in front", async () => {
+    const e2e = await waitingPlan();
+    const tab = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
+    expect(tab.document.querySelector('.decision[data-decision="d1"] legend')!.textContent).toBe("Where does the banner go?");
+    expect(tab.document.querySelector(".decision-id")).toBeNull();
+    radio(tab, "d1", "above").click();
+    tab.byId("decide-approve").click();
+    expect(readable(tab.byId("decide-changed-list"))).toBe("Where does the banner go?: You chose Above (AgentX recommended Below)");
+  }, 120_000);
+
+  it("AgentX's answer names a decision by its question from the document it was asked on, never shows a label, and leaves real text alone; it is told to point to Request changes in Slack or a comment", async () => {
+    // The requirements' decision d1 is another question than the design's d1: the answer must use the design's.
+    const requirements = planDocument({ title: "Show a retry banner: requirements", claims: [{ id: "1", text: "People see a retry banner when a payment fails." }],
+      decisions: [{ id: "d1", claimId: "1", question: "Should this be a banner at all?", options: [{ id: "yes", label: "Yes", consequence: "Seen first." }, { id: "no", label: "No", consequence: "Nothing new." }], recommended: "yes" }] });
+    const design = planDocument({ ...DESIGN, decisions: [{ id: "d1", claimId: "1.1", question: "Where does the banner go?", options: [{ id: "above", label: "Above", consequence: "Seen first." }, { id: "below", label: "Below", consequence: "Less in the way." }], recommended: "below" }] });
+    const model = (latest: string) => (DESIGN_PROMPT.test(latest) ? planAnswer(design) : planner()(latest));
+    const e2e = await designWithComments(model, "Yes. It was confirmed by you in decision d1 (placement), as comment c1 shows. Decision d1 stays unless decisions d1 and d2 change. Use d3.js, and keep `c1` as it is.", { requirements });
     const answer = e2e.db.find((item) => item.pk === `DEVTASK#${e2e.taskId()}` && item.entityType === "TASK_COMMENT" && (item.author as { source?: string }).source === "answer")[0]!;
-    expect(String(answer.text)).toBe('Yes. It was confirmed by you in the decision (Where does the banner go?), as that comment shows; decisions "Where does the banner go" and d2 can change if you request changes on the card.');
-    expect(String(answer.text)).not.toMatch(/\bd1\b|\bc1\b/);
-    const page = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
-    expect(readable(page.document.querySelector('[data-comments="decision:d1"] .replies')!)).not.toMatch(/\bd1\b|\bc1\b/);
+    expect(String(answer.text)).toBe('Yes. It was confirmed by you in the decision (placement), as that comment shows. The decision "Where does the banner go" stays unless the decisions change. Use d3.js, and keep `c1` as it is.');
+    const page = await openTaskPage(e2e, OWNER, { search: "?doc=design" });
+    expect(readable(page.document.querySelector('#design [data-comments="claim:1"] .replies')!)).not.toMatch(/\bd1\b|comment c1/);
     // What the model was told: where to point someone who wants a change, and not to use labels.
+    const turns = e2e.answerTurns;
     expect(turns).toHaveLength(1);
     expect(turns[0]!.systemPrompt).toContain("press Request changes in Slack, or add a comment on the task page before approving");
     expect(turns[0]!.systemPrompt).not.toContain("on the card");
     expect(turns[0]!.modelInput).toContain("press Request changes in Slack, or add a comment here before approving");
     expect(turns[0]!.modelInput).toContain("Name a decision by its question, never by a label such as d1");
-  }, 120_000);
+  }, 180_000);
 });

@@ -21,7 +21,7 @@ export type TaskDocumentKind = "requirements" | "design" | "coding plan";
 export type TaskDocumentEntry =
   | { kind: TaskDocumentKind; version: number; approved: boolean; current: boolean; format: "markdown"; markdown: string }
   | { kind: TaskDocumentKind; version: number; approved: boolean; current: boolean; format: "structured"; plan: PlanDocument; evidence?: PlanEvidenceBundle; /** When the document was stored. */ createdAt?: string;
-    /** The comment each ref a quote's author names ("comment c1") stands for, from the decision that sent the comments to this document. */ commentRefs?: Record<string, string> };
+    /** For a plan stored before quotes named comments by ID: the comment each ref a quote's author names ("comment c1") stood for, from the decision that sent the comments to this document. */ commentRefs?: Record<string, string> };
 
 export interface TaskDocumentView {
   taskId: string;
@@ -222,14 +222,13 @@ async function documentsHtml(view: TaskDocumentView, request: TaskPageRequest): 
         deciding: view.access.canDecide && view.waiting?.kind === entry.kind && view.waiting.version === document.version,
         plans: new Map(versions.flatMap((item) => item.format === "structured" ? [[item.version, item.plan] as const] : [])),
       };
-      // A quote that credits "comment c1" names the comment's author and links its thread (the ref itself is never shown).
-      const commentRefs = Object.fromEntries(Object.entries(document.commentRefs ?? {}).flatMap(([ref, id]) => {
-        const comment = (view.pageComments ?? []).find((item) => item.id === id && item.author.kind === "person");
-        return comment === undefined ? [] : [[ref, { id, name: comment.author.name, you: comment.author.you }]];
-      }));
+      // A quote that credits a page comment names the comment's author and links its thread, when the words are theirs.
+      const quoteComments = Object.fromEntries((view.pageComments ?? []).filter((item) => item.author.kind === "person" && !item.deleted)
+        .map((item) => [item.id, { name: item.author.name, you: item.author.you, text: item.text }] as const));
       return await renderPlanDocument({
         ...slice2,
-        ...(Object.keys(commentRefs).length === 0 ? {} : { commentRefs }),
+        ...(Object.keys(quoteComments).length === 0 ? {} : { quoteComments }),
+        ...(document.commentRefs === undefined ? {} : { commentRefs: document.commentRefs }),
         anchor: entry.anchor, kind: entry.planKind, version: document.version, approved: document.approved, current: document === currentDocument,
         currentVersion: currentDocument.version, plan: document.plan, ...(document.evidence === undefined ? {} : { evidence: document.evidence }),
         ...(document.createdAt === undefined ? {} : { createdAt: document.createdAt }), ...(view.now === undefined ? {} : { now: view.now }),

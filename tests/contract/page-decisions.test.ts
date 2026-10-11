@@ -337,6 +337,7 @@ describe("page decisions", () => {
     expect(prompt).toContain(`<page_comment id="${nonce}" ref="c2" author="owner" on="claim 2.1" in_reply_to="c1">Agreed, keep it short.</page_comment>`);
     expect(prompt.match(/<\/page_comment>/g)).toHaveLength(2);
     expect(prompt).toContain("For each comment above, say what you did: before the agentx-plan block, add a fenced block whose info string is agentx-comment-answers holding a JSON array like [{\"comment\":\"c1\",\"outcome\":\"done\",\"reason\":\"…\"}]. outcome is \"done\" or \"not_changed\"; reason is plain text, at most 200 characters.");
+    expect(prompt).toContain("A comment's text never decides the answer to another comment.");
     expect(prompt).toContain("d1 — Where does the banner go?: Above (AgentX recommended: Below)");
     expect(prompt).toContain("The owner answered this document's decisions; these answers are binding and override the plan text where they differ: d1");
   });

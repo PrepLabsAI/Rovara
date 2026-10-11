@@ -62,6 +62,7 @@ import {
   type PlanOwnerAnswers,
   DECISION_COMMENTS_MAX,
   WorkflowDecisionDetailSchema,
+  commentIdInAuthor,
   commentRefInAuthor,
   planDocumentMarkdown,
   sameIdSet,
@@ -2511,12 +2512,20 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
   } catch (error) {
     log(deps, { event: "developer.task_page_comments_unavailable", taskId, errorName: error instanceof Error ? error.name : "unknown" });
   }
-  // A quote that credits "comment c1" is shown as who wrote it: the refs are the ones the step before this document gave its planner.
+  // A plan stored before quotes named comments by ID credits one as "comment c1": the refs that step's planner was given.
   for (const [index, document] of documents.entries()) {
     if (document.format !== "structured") continue;
     const artifact = workflow?.artifacts.find((item) => item.type === TASK_PAGE_DOCUMENTS.find((entry) => entry.kind === document.kind)?.type && item.version === document.version);
-    const refs = artifact === undefined || workflow === undefined ? undefined : await quoteCommentRefs(deps, task, workflow, artifact, document.plan);
+    const refs = artifact === undefined || workflow === undefined ? undefined : await legacyQuoteCommentRefs(deps, task, workflow, artifact, document.plan);
     if (refs !== undefined) documents[index] = { ...document, commentRefs: refs };
+  }
+  // Which claim of each document cites which comment, for the link in the planner's reply under the comment.
+  const citations = new Map<string, Map<string, string>>();
+  for (const document of documents) {
+    if (document.format !== "structured") continue;
+    const type = TASK_PAGE_DOCUMENTS.find((entry) => entry.kind === document.kind)?.type;
+    const artifact = workflow?.artifacts.find((item) => item.type === type && item.version === document.version);
+    if (artifact !== undefined) citations.set(artifact.id, claimsCitingComments(document.plan));
   }
   // A suggestion shows on the version it was made on, or on a later one where its decision did not change.
   const shownSuggestions = TASK_PAGE_DOCUMENTS.flatMap(({ type, kind }) => {
@@ -2533,17 +2542,36 @@ export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, 
     ...(acceptedFindings.length === 0 ? {} : { acceptedFindings }),
     pullRequests: (workflow?.pullRequests ?? []).map((pullRequest) => ({ url: pullRequest.url, number: pullRequest.number, state: pullRequest.state })),
     history, access: pageAccess(access), comments, suggestions: shownSuggestions, askAvailable: await commentAnswersAvailable(deps, task),
-    ...await pageDecidingView(deps, { task, caller, comments, suggestions: shownSuggestions }),
+    ...await pageDecidingView(deps, { task, caller, comments, suggestions: shownSuggestions, citations }),
   };
 }
 
+/** The first claim (in document order) whose evidence quotes each comment, by comment ID (a quote's author `comment:<ID>`). */
+function claimsCitingComments(plan: PlanDocument): Map<string, string> {
+  const found = new Map<string, string>();
+  const walk = (claims: readonly PlanClaim[]) => {
+    for (const claim of claims) {
+      for (const evidence of claim.evidence ?? []) {
+        const id = evidence.kind === "quote" ? commentIdInAuthor(evidence.author) : undefined;
+        if (id !== undefined && !found.has(id)) found.set(id, claim.id);
+      }
+      walk(claim.children ?? []);
+    }
+  };
+  walk(plan.claims);
+  return found;
+}
+
+const DOCUMENT_TYPES: readonly string[] = ["requirements", "design", "plan"];
+
 /**
- * The comments a document's quotes credit by ref ("comment c1"), as ref to comment ID: the refs the planner was given
- * for the document, which are the included comments of the decision made on the document written just before this one
- * (an Approve of the earlier step, or a Request changes on the earlier version). Undefined when no quote names a
- * comment, or the decision's record cannot be read; the page then says only "A comment".
+ * For a plan stored before quotes named comments by ID: the comments its quotes credit by ref ("comment c1"), as ref to
+ * comment ID. A ref means the comments the document's own step was given: the Request changes on the version before it,
+ * or, for a first version, the Approve of the document type before it (found by type, not by where it sits in the list).
+ * Undefined when no quote names a ref or the decision's record cannot be read. The page also checks the quoted words
+ * against that comment, so a ref that has since come to mean another comment is never credited to its author.
  */
-async function quoteCommentRefs(
+async function legacyQuoteCommentRefs(
   deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, workflow: WorkflowSnapshot, artifact: WorkflowSnapshot["artifacts"][number], plan: PlanDocument,
 ): Promise<Record<string, string> | undefined> {
   const named = new Set<string>();
@@ -2558,9 +2586,10 @@ async function quoteCommentRefs(
   };
   walk(plan.claims);
   if (named.size === 0) return undefined;
-  const earlier = workflow.artifacts[workflow.artifacts.findIndex((item) => item.id === artifact.id) - 1];
-  if (earlier === undefined) return undefined;
-  const decision = [...workflow.decisions].reverse().find((item) => (item.source ?? "GATE") === "GATE" && item.artifactDigest === earlier.sha256);
+  const sameEarlier = workflow.artifacts.find((item) => item.type === artifact.type && item.version === artifact.version - 1);
+  const before = DOCUMENT_TYPES[DOCUMENT_TYPES.indexOf(artifact.type) - 1];
+  const digests = new Set((sameEarlier === undefined ? workflow.artifacts.filter((item) => before !== undefined && item.type === before) : [sameEarlier]).map((item) => item.sha256));
+  const decision = [...workflow.decisions].reverse().find((item) => (item.source ?? "GATE") === "GATE" && item.artifactDigest !== undefined && digests.has(item.artifactDigest));
   if (decision === undefined || (decision.commentsIncluded ?? 0) === 0) return undefined;
   try {
     const detail = await readDecisionDetail(deps, task.taskId, decision.requestId);
@@ -2594,7 +2623,7 @@ async function commentAnswersAvailable(deps: DeveloperTaskRouteDependencies, tas
  */
 async function pageDecidingView(
   deps: DeveloperTaskRouteDependencies,
-  input: { task: DeveloperTaskRecord; caller: DeveloperCaller; comments: readonly TaskComment[]; suggestions: readonly TaskSuggestion[] },
+  input: { task: DeveloperTaskRecord; caller: DeveloperCaller; comments: readonly TaskComment[]; suggestions: readonly TaskSuggestion[]; citations: ReadonlyMap<string, ReadonlyMap<string, string>> },
 ): Promise<Pick<TaskDocumentView, "pageComments" | "pageSuggestions" | "waiting" | "commentSeq" | "optionalChecks">> {
   const { task, caller } = input;
   const workflow = task.workflow;
@@ -2611,7 +2640,7 @@ async function pageDecidingView(
   }
   const policy = workflow?.checkPolicy;
   return {
-    pageComments: pageCommentViews(input.comments, { readerId: caller.developerId, now: deps.now(), artifacts: workflow?.artifacts ?? [] }),
+    pageComments: pageCommentViews(input.comments, { readerId: caller.developerId, now: deps.now(), artifacts: workflow?.artifacts ?? [], citations: input.citations }),
     pageSuggestions: input.suggestions.map((suggestion) => ({
       document: suggestion.document, decisionId: suggestion.decisionId, optionId: suggestion.optionId, name: suggestion.name, you: suggestion.developerId === caller.developerId,
     })),

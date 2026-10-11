@@ -151,7 +151,7 @@ describe("deciding and commenting on the task page, end to end", () => {
     tab.byId("decide-approve").click();
     expect(tab.byId("decide-title").textContent).toBe("Approve Coding plan v1");
     expect(tab.byId("decide-submit").textContent).toBe("Approve and start coding");
-    expect(readable(tab.byId("decide-changed-list"))).toBe("d1 Where does the banner go?: You chose Above (AgentX recommended Below)");
+    expect(readable(tab.byId("decide-changed-list"))).toBe("Where does the banner go?: You chose Above (AgentX recommended Below)");
     expect(tab.byId("decide-comments-title").textContent).toBe("Comments to send (2)");
     expect(codingRuns(e2e)).toEqual([]);
     tab.byId("decide-submit").click();

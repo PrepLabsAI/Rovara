@@ -581,10 +581,10 @@ describe("the task page's documents, versions and history", () => {
   describe("the script", () => {
     interface Fake {
       id: string; tagName: string; parentElement?: Fake; firstElementChild?: Fake; open: boolean; attributes: Record<string, string>;
-      classes: Set<string>; scrolled: unknown[];
+      classes: Set<string>; scrolled: unknown[]; focused: unknown[];
     }
     const element = (id: string, tagName: string, parent?: Fake, attributes: Record<string, string> = {}): Fake => {
-      const fake: Fake = { id, tagName, attributes, classes: new Set(), scrolled: [], open: false };
+      const fake: Fake = { id, tagName, attributes, classes: new Set(), scrolled: [], focused: [], open: false };
       if (parent !== undefined) fake.parentElement = parent;
       return fake;
     };
@@ -596,6 +596,9 @@ describe("the task page's documents, versions and history", () => {
       for (const item of elements) {
         Object.assign(item, {
           getAttribute: (name: string) => item.attributes[name] ?? null,
+          hasAttribute: (name: string) => name in item.attributes,
+          setAttribute: (name: string, value: string) => { item.attributes[name] = value; },
+          focus: (options: unknown) => { item.focused.push(options); },
           scrollIntoView: (options: unknown) => { item.scrolled.push(options); },
           classList: { add: (name: string) => item.classes.add(name), remove: (name: string) => item.classes.delete(name) },
         });
@@ -625,6 +628,9 @@ describe("the task page's documents, versions and history", () => {
       const { timers } = run(page.all, { hash: "#coding-plan/2.1", search: "" });
       expect(page.claim.id).toBe("coding-plan-v2-2-1");
       expect(page.claim.scrolled).toEqual([{ block: "start" }]);
+      // Focus moves to the target (without scrolling again), so a keyboard or screen-reader user lands there.
+      expect(page.claim.focused).toEqual([{ preventScroll: true }]);
+      expect(page.claim.attributes["tabindex"]).toBe("-1");
       for (const item of [page.kind, page.folded, page.parent, page.claim]) expect(item.open).toBe(true);
       expect(page.old.open).toBe(false);
       expect(page.claim.classes.has("flash")).toBe(true);
@@ -1240,7 +1246,7 @@ describe("deciding and commenting on the task page (slice 2)", () => {
       { id: "00000000-0000-4000-8000-000000000001", document: "plan" as const, version: 1, target: { kind: "claim" as const, id: "1" }, author: { kind: "person" as const, name: "Sam", owner: false, you: false }, text: "Looks fine.", createdAt: "2026-10-11T10:00:00.000Z", edited: true, deleted: false, sent: true, rev: 2, agentx: "not_answered" as const },
       { id: "00000000-0000-4000-8000-000000000002", document: "plan" as const, version: 2, target: { kind: "document" as const }, author: { kind: "person" as const, name: "Priya", owner: true, you: true }, text: "", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: true, sent: false, rev: 2 },
       { id: "00000000-0000-4000-8000-000000000003", document: "plan" as const, version: 2, target: { kind: "claim" as const, id: "2" }, author: { kind: "person" as const, name: "Priya", owner: true, you: true }, text: "Why?", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: false, sent: false, rev: 1, agentx: "couldnt" as const },
-      { id: "00000000-0000-4000-8000-000000000004", parentId: "00000000-0000-4000-8000-000000000001", document: "plan" as const, version: 1, target: { kind: "claim" as const, id: "1" }, author: { kind: "agentx" as const, name: "AgentX", owner: false, you: false }, text: "Kept.", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: false, sent: false, rev: 1, planner: { outcome: "not_changed" as const, version: 2 } },
+      { id: "00000000-0000-4000-8000-000000000004", parentId: "00000000-0000-4000-8000-000000000001", document: "plan" as const, version: 1, target: { kind: "claim" as const, id: "1" }, author: { kind: "agentx" as const, name: "AgentX", owner: false, you: false }, text: "Kept.", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: false, sent: false, rev: 1, planner: { outcome: "not_changed" as const, version: 2, document: "plan" as const } },
     ];
     for (const access of [owner, commenter]) {
       const { body } = await deciding({ access, pageComments: comments, pageSuggestions: [{ document: "plan", decisionId: "d1", optionId: "five", name: "Sam", you: false }] });

@@ -273,7 +273,7 @@ describe("the plan page renderer", () => {
     const after = html.slice(html.indexOf("</header>"), html.indexOf('<div class="claims">'));
     expect(after).toContain("Decisions:");
     const links = [...after.matchAll(/<a class="decision-link" href="#([^"]+)">([^<]*)<\/a>/g)].map((match) => ({ href: match[1], text: match[2] }));
-    expect(links).toEqual([3, 1, 7, 2, 6, 4, 5].map((index) => ({ href: `design-v1-decision-d${index}`, text: `d${index} \u2014 Question ${index}? (on claim ${index})` })));
+    expect(links).toEqual([3, 1, 7, 2, 6, 4, 5].map((index) => ({ href: `design-v1-decision-d${index}`, text: `Question ${index}? (on claim ${index})` })));
     // Every link has a target, whether the decision shows in its claim or in the folded list.
     for (const link of links) expect(html).toContain(`<div class="decision" id="${link.href}" data-decision=`);
     expect(count(html, /id="design-v1-decision-d\d"/g)).toBe(7);
@@ -285,7 +285,7 @@ describe("the plan page renderer", () => {
     const html = await renderPlanDocument(input({ plan: planDocument({ claims: claims(2), decisions: [{ ...decision(1, "1"), question: long }, { ...decision(2, "2"), question: `Use ${secret}?` }] }) }));
     const text = [...html.matchAll(/<a class="decision-link" href="#[^"]+">([^<]*)<\/a>/g)].map((match) => match[1]!);
     expect(text).toHaveLength(2);
-    const question = /^d1 \u2014 (.*) \(on claim 1\)$/.exec(text[0]!)![1]!;
+    const question = /^(.*) \(on claim 1\)$/.exec(text[0]!)![1]!;
     expect(Array.from(question.replace(/&lt;/g, "<").replace(/&gt;/g, ">"))).toHaveLength(80);
     expect(question.endsWith("\u2026")).toBe(true);
     expect(html).not.toContain("<b>Why?");
@@ -454,7 +454,7 @@ describe("comments, suggestions and answers on the plan page", () => {
     const edited = comment({ agentx: "skipped", edited: true, target: { kind: "claim", id: "1" } });
     const html = await renderPlanDocument(input({ comments: [asked, answer, edited], access: commenting }));
     const reply = slice(html, `id="comment-${answer.id}"`, "</article>");
-    expect(reply).toContain('<span class="chip chip-agentx">AgentX (AI)</span> <span class="answering">· answering Sam &lt;Lee&gt;</span>');
+    expect(reply).toContain('<span class="chip chip-agentx">AgentX (AI)</span> <span class="answering"><span aria-hidden="true">· </span>answering Sam &lt;Lee&gt;</span>');
     expect(html).toContain("Edited after it was asked, so AgentX didn't answer.");
   });
 
@@ -510,7 +510,7 @@ describe("comments, suggestions and answers on the plan page", () => {
     const owner = await renderPlanDocument(input({ access: { canComment: true, canSuggest: false, canDecide: true }, deciding: true }));
     const box = slice(owner, 'data-decision="d1"', "</fieldset>");
     expect(box).toContain("<fieldset");
-    expect(box).toContain('<legend><span class="decision-id">d1</span> How many times should a payment be retried?</legend>');
+    expect(box).toContain('<legend>How many times should a payment be retried?</legend>');
     expect(box).toMatch(/<input type="radio" name="answer-d1" value="three" id="[^"]+" checked>/);
     expect(box).toMatch(/<input type="radio" name="answer-d1" value="five" id="[^"]+">/);
     expect(box).toContain("AgentX recommends");
@@ -542,8 +542,8 @@ describe("comments, suggestions and answers on the plan page", () => {
     const asked = comment({ agentx: "couldnt" });
     const waiting = comment({ agentx: "answering" });
     const none = comment({ agentx: "unavailable" });
-    const done = comment({ parentId: sent.id, author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Moved it <up>.", planner: { outcome: "done", version: 2 } });
-    const kept = comment({ parentId: asked.id, author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Too risky.", planner: { outcome: "not_changed", version: 2 } });
+    const done = comment({ parentId: sent.id, author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Moved it <up>.", planner: { outcome: "done", version: 2, document: "plan" } });
+    const kept = comment({ parentId: asked.id, author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Too risky.", planner: { outcome: "not_changed", version: 2, document: "plan" } });
     const html = readable(await renderPlanDocument(input({ comments: [sent, asked, waiting, none, done, kept], access: commenting })));
     expect(html).toContain("Not answered");
     expect(html).toContain("AgentX couldn't answer this one.");
@@ -551,6 +551,23 @@ describe("comments, suggestions and answers on the plan page", () => {
     expect(html).toContain("AgentX can answer comments only on tasks started in Slack.");
     expect(html).toContain("Done: Moved it &lt;up&gt;.");
     expect(html).toContain("Not changed because: Too risky.");
+  });
+
+  it("an Approve reply says which document handled it, with a link to that version's own claim; a quote that credits a comment is never shown as its reference", async () => {
+    const agentx = { kind: "agentx", name: "AgentX", owner: false, you: false } as const;
+    const parent = comment();
+    const handled = comment({ parentId: parent.id, author: agentx, text: "Each bullet stays on one line.", planner: { outcome: "done", version: 1, document: "plan", in: "plan", claim: "1.1" } });
+    const kept = comment({ parentId: parent.id, author: agentx, text: "The steps stay.", planner: { outcome: "not_changed", version: 3, document: "design", in: "design" } });
+    const html = await renderPlanDocument(input({ comments: [parent, handled, kept], access: commenting }));
+    expect(html).toContain("Done in the coding plan: Each bullet stays on one line.");
+    expect(html).toContain('<p class="comment-link">See <a class="claim-link" href="#coding-plan-v1-1-1">claim 1.1</a> in coding plan v1.</p>');
+    expect(html).toContain("Not changed in the design: The steps stay.");
+    expect(html).toContain('<span aria-hidden="true">· </span>from design v3');
+    // A why entry that credits a comment says "A comment".
+    const why = await renderPlanDocument(input({ plan: planDocument({ why: [{ text: "Keep it short.", author: "owner (comment c1)" }, { text: "Fine.", author: "Priya" }] }) }));
+    expect(why).toContain("<footer>A comment</footer>");
+    expect(why).toContain("<footer>Priya</footer>");
+    expect(why).not.toContain("comment c1");
   });
 
   it("deleted, edited and sent comments say so, and only the author gets Edit and Delete", async () => {

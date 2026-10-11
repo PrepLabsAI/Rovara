@@ -499,13 +499,7 @@ export function suggestionsFor(
  */
 export async function writePlannerReplies(
   deps: TableDependencies & Pick<DeveloperTaskRouteDependencies, "now" | "log">,
-  input: {
-    taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: readonly CommentAnswer[];
-    /** After an Approve: the document that handled the comments (they were made on the one before it). */
-    handledIn?: CommentDocument;
-    /** The claim of the new document that cites each comment, by ref. */
-    claims?: ReadonlyMap<string, string>;
-  },
+  input: { taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: readonly CommentAnswer[] },
 ): Promise<{ written: number }> {
   const { taskId } = input;
   let written = 0;
@@ -517,11 +511,8 @@ export async function writePlannerReplies(
     const reply = TaskCommentSchema.parse({
       schemaVersion: 1, taskId, commentId: plannerReplyCommentId(commentId, input.artifactId), parentId: comment.parentId ?? comment.commentId,
       document: comment.document, version: comment.version, target: comment.target,
-      author: {
-        kind: "agentx", source: "planner", outcome: answer.outcome, forVersion: input.version,
-        ...(input.handledIn === undefined ? {} : { handledIn: input.handledIn }),
-        ...(input.claims?.get(answer.ref) === undefined ? {} : { claim: input.claims.get(answer.ref)! }),
-      },
+      // Which document handled the comment, and the claim it cites, are worked out when the page is read (nothing more is stored).
+      author: { kind: "agentx", source: "planner", outcome: answer.outcome, forVersion: input.version },
       text: answer.reason, createdAt: iso(deps), rev: 1,
     });
     const send = () => deps.documentClient.send(new TransactWriteCommand({

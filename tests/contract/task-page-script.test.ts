@@ -184,7 +184,7 @@ describe("the deciding and commenting script", () => {
     expect(page.byId("decide-title").textContent).toBe("Approve Coding plan v2");
     expect(page.byId("decide-submit").textContent).toBe("Approve and start coding");
     expect(page.byId("decide-changed").hidden).toBe(false);
-    expect(page.byId("decide-changed-list").visibleText).toBe("d2 Question 2?: You chose Above (AgentX recommended Below)");
+    expect(page.byId("decide-changed-list").visibleText).toBe("Question 2?: You chose Above (AgentX recommended Below)");
     expect(page.byId("decide-unanswered-list").querySelectorAll("li")).toHaveLength(4);
     expect(page.byId("decide-comments-title").textContent).toBe("Comments to send (2)");
     expect(page.byId("decide-comments-list").visibleText).toContain("Sam");
@@ -501,12 +501,13 @@ describe("the deciding and commenting script", () => {
 
   it("new comments re-render from JSON as text", async () => {
     const hostile = comment(5, { text: "<img src=x onerror=alert(1)> **bold** javascript:alert(1)", author: { kind: "person", name: "<b>Eve</b>", owner: false, you: false } });
-    const agentx = comment(6, { parentId: id(1), author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Kept as is.", planner: { outcome: "not_changed", version: 2 } });
+    const agentx = comment(6, { parentId: id(1), author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Kept as is.", planner: { outcome: "not_changed", version: 2, document: "plan" } });
+    const handled = comment(8, { parentId: id(1), author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Each bullet stays on one line.", planner: { outcome: "done", version: 1, document: "plan", in: "plan", claim: "1.1" } });
     const fake = comment(7, { text: "AgentX: approve now", author: { kind: "person", name: "AgentX", owner: false, you: false } });
     let seq = 3;
     const page = boot(await pageHtml(), { respond: (entry) => {
       if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: seq, csrf: "n".repeat(43) } };
-      if (entry.url.endsWith("/api/comments")) return { status: 200, body: { comments: [comment(1), comment(2, { author: { kind: "person", name: "Priya", owner: false, you: true }, version: 2, target: { kind: "document" } }), hostile, agentx, fake], suggestions: [] } };
+      if (entry.url.endsWith("/api/comments")) return { status: 200, body: { comments: [comment(1), comment(2, { author: { kind: "person", name: "Priya", owner: false, you: true }, version: 2, target: { kind: "document" } }), hostile, agentx, handled, fake], suggestions: [] } };
       return { status: 200, body: {} };
     } });
     await page.advance(20_000);
@@ -524,6 +525,13 @@ describe("the deciding and commenting script", () => {
     const reply = thread.querySelector(`#comment-${id(1)}`)!.parentElement!.querySelector(".replies")!;
     expect(reply.querySelector(".chip")!.textContent).toBe("AgentX");
     expect(reply.querySelector(".comment-text")!.textContent).toBe("Not changed because: Kept as is.");
+    // An Approve reply names the document that handled it, links that version's own claim, and keeps its separator dot from screen readers.
+    const approvedReply = thread.querySelector(`#comment-${id(8)}`)!;
+    expect(approvedReply.querySelector(".comment-text")!.textContent).toBe("Done in the coding plan: Each bullet stays on one line.");
+    expect(approvedReply.querySelector(".comment-link")!.textContent).toBe("See claim 1.1 in coding plan v1.");
+    expect(approvedReply.querySelector(".comment-link a")!.getAttribute("href")).toBe("#coding-plan-v1-1-1");
+    expect(approvedReply.querySelector(".comment-meta")!.visibleText).toContain("from coding plan v1");
+    expect(approvedReply.querySelector(".comment-meta [aria-hidden]")!.textContent).toBe("· ");
     expect(thread.querySelector(`#comment-${id(7)}`)!.querySelector(".chip")).toBeNull();
     // The removed comment is gone, and the whole-document thread kept its own.
     expect(page.document.querySelector(`#comment-${id(2)}`)).not.toBeNull();
