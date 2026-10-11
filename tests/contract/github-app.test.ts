@@ -588,6 +588,27 @@ describe("GitHub App repository credentials", () => {
     expect(requests[1]?.url).toBe("https://api.github.com/repos/ps06756/personal-website-test/pulls/42");
   });
 
+  it("refuses a pull request whose head branch lives in another repository (a fork)", async () => {
+    const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
+    const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
+    const answer = (head: Record<string, unknown>) => appProvider({
+      credentialRef: "github-agentx-sdlc",
+      appId: "5002502",
+      getPrivateKey: async () => pem,
+      fetchImplementation: async (url) => {
+        const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
+        if (requestUrl.endsWith("/access_tokens")) return new Response(JSON.stringify({ token: "lookup-token" }), { status: 201 });
+        const fixture = pullRequestFixture();
+        return new Response(JSON.stringify({ ...fixture, head: { ...(fixture.head as Record<string, unknown>), ...head } }), { status: 200 });
+      },
+    }).getPullRequest("https://github.com/ps06756/personal-website-test.git", 42);
+    await expect(answer({ repo: { full_name: "someone-else/personal-website-test" } })).rejects.toThrow(/another repository/);
+    // A fork that was deleted leaves no head repository at all.
+    await expect(answer({ repo: null })).rejects.toThrow(/another repository/);
+    // The same repository in other letter case is the same repository.
+    await expect(answer({ repo: { full_name: "PS06756/Personal-Website-Test" } })).resolves.toMatchObject({ number: 42 });
+  });
+
   it("updates metadata and state with pull-request write permission", async () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048 });
     const pem = privateKey.export({ type: "pkcs8", format: "pem" }).toString();
@@ -856,8 +877,8 @@ function pullRequestFixture(): Record<string, unknown> {
     state: "open",
     merged: false,
     merge_commit_sha: null,
-    head: { ref: "agentx/00000000-0000-4000-8000-000000000001", sha: "a".repeat(40) },
-    base: { ref: "main" },
+    head: { ref: "agentx/00000000-0000-4000-8000-000000000001", sha: "a".repeat(40), repo: { full_name: "ps06756/personal-website-test" } },
+    base: { ref: "main", repo: { full_name: "ps06756/personal-website-test" } },
     title: "Current title",
     body: "Current body",
   };
@@ -879,7 +900,7 @@ describe("current PR feedback API reads", () => {
       fetchImplementation: async (url, init) => {
         const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url; requests.push(requestUrl);
         if (requestUrl.endsWith("access_tokens")) return new Response(JSON.stringify({ token: "fixture" }));
-        if (requestUrl === `${api}/pulls/42`) return Response.json({ ...pullRequestFixture(), head: { ref: "branch", sha: options.changedHead && reads++ ? "b".repeat(40) : "a".repeat(40) } });
+        if (requestUrl === `${api}/pulls/42`) return Response.json({ ...pullRequestFixture(), head: { ref: "branch", sha: options.changedHead && reads++ ? "b".repeat(40) : "a".repeat(40), repo: { full_name: "ps06756/personal-website-test" } } });
         if (requestUrl.includes("/git/commits/")) return Response.json({ tree: { sha: "b".repeat(40) } });
         if (requestUrl === "https://api.github.com/graphql") {
           const requestBody = typeof init?.body === "string" ? init.body : "";
