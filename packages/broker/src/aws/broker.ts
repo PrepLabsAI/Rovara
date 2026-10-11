@@ -195,7 +195,7 @@ import { isPageRefusal, writeCommentAnswer, writePlannerReplies, type SlackReque
 import { loadWorkflowDocument, readObjectText as readStoredText, shortenMarkdown } from "../developer/plan-artifacts.js";
 import { PLAN_EVIDENCE_PK, attachEvidence, planCitesCode, planEvidenceDueKey, planEvidenceEvent, planEvidenceJobItem, planEvidenceSources, type PlanEvidenceEvent, type PlanEvidenceJob } from "../developer/plan-evidence-jobs.js";
 import { resolvePlanEvidence } from "../developer/plan-evidence.js";
-import { WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
+import { WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
 import { approvedFeedbackFixes, withFeedbackFixes } from "../developer/pull-request-feedback-section.js";
 import { projectKey, requireProject } from "./project-records.js";
 import {
@@ -1006,7 +1006,7 @@ function thrownAt(error: unknown): string | undefined {
 }
 
 /** Task 19: what a press on an approval (Approve, Request changes) hears when it is out of date. */
-const SLACK_APPROVAL_OUT_OF_DATE = "That approval is out of date. Use the latest message in the thread.";
+const SLACK_APPROVAL_OUT_OF_DATE = WORKFLOW_APPROVAL_OUT_OF_DATE;
 /** Task 19: what a press on any other button hears when it is out of date (the same words Slack's own handler uses). */
 const SLACK_BUTTON_OUT_OF_DATE = WORKFLOW_BUTTON_OUT_OF_DATE;
 /**

@@ -62,7 +62,7 @@ import {
   type WorkflowPath,
 } from "./slack-workflow-choice.js";
 import { detailsActionHandler, dynamoTurnDetailsReader } from "./slack-details.js";
-import { WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
+import { WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
 import { FEEDBACK_REVIEW_RETRY_ACTION, WORKFLOW_ACTION_IDS, answeredWorkflowCard, cleanLine, slackText, workflowModalCopy } from "../developer/workflow-messages.js";
 
 const EVENT_RETENTION_SECONDS = 14 * 24 * 60 * 60;
@@ -1075,16 +1075,16 @@ export function workflowSlackHandlers(deps: {
     const share = asRecord(task.share);
     if (share.teamId !== thread.teamId || share.channelId !== thread.channelId || share.threadTs !== thread.threadTs) throw new WorkflowInteractionRefusal("This approval belongs to another Slack thread.");
     const parsed = WorkflowSnapshotSchema.safeParse(task.workflow);
-    if (!parsed.success) throw new WorkflowInteractionRefusal("This approval has changed. Use the latest AgentX message.");
+    if (!parsed.success) throw new WorkflowInteractionRefusal(WORKFLOW_APPROVAL_OUT_OF_DATE);
     return { task, workflow: parsed.data };
   };
   /** The step `value` approves is still the one waiting: same revision, same document. */
   const reviewStillWaiting = (value: WorkflowActionValue, workflow: WorkflowSnapshot): void => {
-    if (workflow.revision !== value.revision || workflow.stage !== "PLAN_REVIEW" || workflow.state !== "WAITING") throw new WorkflowInteractionRefusal("This approval has changed. Use the latest AgentX message.");
+    if (workflow.revision !== value.revision || workflow.stage !== "PLAN_REVIEW" || workflow.state !== "WAITING") throw new WorkflowInteractionRefusal(WORKFLOW_APPROVAL_OUT_OF_DATE);
     const artifactType = workflow.path === "FULL" && workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
       : workflow.path === "FULL" && workflow.reviewPhase === "DESIGN" ? "design" : "plan";
     const plan = workflow.artifacts.filter((artifact) => artifact.type === artifactType).at(-1);
-    if (!plan || plan.sha256 !== value.digest) throw new WorkflowInteractionRefusal("This approval has changed. Use the latest AgentX message.");
+    if (!plan || plan.sha256 !== value.digest) throw new WorkflowInteractionRefusal(WORKFLOW_APPROVAL_OUT_OF_DATE);
   };
   /**
    * Hands the owner's decision on the step `value` names to the broker, from the form or from a one-click Approve. Its
@@ -1154,7 +1154,7 @@ export function workflowSlackHandlers(deps: {
     // Task 16: also Run checks again on a change ready to publish whose code changed after its checks.
     if (!parsed.success || parsed.data.revision !== revision || !((parsed.data.stage === "VERIFY" && parsed.data.state === "BLOCKED")
       || (workflowPublicationRetryable(parsed.data) && (parsed.data.pullRequests?.length ?? 0) === 0))) {
-      throw new WorkflowInteractionRefusal("This verification retry is no longer current. Use the latest AgentX task update.");
+      throw new WorkflowInteractionRefusal(WORKFLOW_BUTTON_OUT_OF_DATE);
     }
     return { task, workflow: parsed.data };
   };
@@ -1169,7 +1169,7 @@ export function workflowSlackHandlers(deps: {
     if (!parsed.success || parsed.data.revision !== revision || parsed.data.stage !== "REVIEW" || parsed.data.state !== "BLOCKED"
       || parsed.data.candidate?.digest !== candidateDigest || parsed.data.verification?.candidateDigest !== candidateDigest
       || !parsed.data.verification.results.every((result) => result.status === "PASS")) {
-      throw new WorkflowInteractionRefusal("This review retry is no longer current. Use the latest AgentX task update.");
+      throw new WorkflowInteractionRefusal(WORKFLOW_BUTTON_OUT_OF_DATE);
     }
     return parsed.data;
   };
@@ -1247,7 +1247,7 @@ export function workflowSlackHandlers(deps: {
       }
       if (action.actionId === "agentx_workflow_resolve_findings") {
         const target = resolveFindingsTarget(action.value);
-        if (target === undefined || action.triggerId === "") throw new WorkflowInteractionRefusal("This button is no longer available. Use the latest AgentX task update.");
+        if (target === undefined || action.triggerId === "") throw new WorkflowInteractionRefusal(WORKFLOW_BUTTON_OUT_OF_DATE);
         const workflow = await currentOwnedWorkflow({ ...action, taskId: target.taskId, revision: target.revision }, "resolve these findings",
           (current) => current.candidate?.digest === target.candidateDigest && workflowResolveFindingsOffered(current));
         const open = openReviewFindings(workflow);
@@ -1308,7 +1308,7 @@ export function workflowSlackHandlers(deps: {
         }
         const parsed = WorkflowSnapshotSchema.safeParse(task.workflow);
         if (!parsed.success || parsed.data.revision !== Number(retry.revision) || !workflowPublicationRetryable(parsed.data)) {
-          throw new WorkflowInteractionRefusal("This retry is no longer current. Use the latest AgentX task update.");
+          throw new WorkflowInteractionRefusal(WORKFLOW_BUTTON_OUT_OF_DATE);
         }
         if (deps.retryPublication === undefined) throw new Error("pull request retry is not configured");
         await deps.retryPublication({ taskId, userId: action.userId, thread: action.thread, requestId: slackActionRequestId(action), expectedRevision: parsed.data.revision });

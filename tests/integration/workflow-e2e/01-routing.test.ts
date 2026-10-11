@@ -79,7 +79,7 @@ describe("Suite 1: routing and start", () => {
     await e2e.settle();
     // Slack's interactivity sees the card's plan is not the current one and answers the press privately at once (the
     // broker's own "That approval is out of date..." is for a press that gets past this check).
-    expect(e2e.slack.responses.map((response) => response.text).at(-1)).toBe("This approval has changed. Use the latest AgentX message.");
+    expect(e2e.slack.responses.map((response) => response.text).at(-1)).toBe("That approval is out of date. Use the latest message in the thread.");
     expect(e2e.workflow()).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING", revision });
     expect(e2e.workflow().decisions.filter((decision) => decision.decision === "APPROVE")).toEqual([]);
     expect(runs(e2e)).not.toContain("IMPLEMENT");
