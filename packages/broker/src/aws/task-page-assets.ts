@@ -5,7 +5,8 @@
  * it and scrolls there. `#<document>/<claim>` (for example `#coding-plan/2.1`) means that claim of the document's
  * current version, built the way `claimAnchor` builds claim element IDs (`coding-plan-v2-2-1`). Then, every 20 s while
  * the page is visible and for 30 minutes at most, it asks `/task/status` (same origin) where the task stands and, when that
- * differs from the page, shows the hidden "moved on" banner; it never reloads by itself, so nothing half-typed is lost.
+ * differs from the page, shows the hidden "moved on" banner (showing the page again asks at once, unless it asked under 5 s
+ * ago); it never reloads by itself, so nothing half-typed is lost.
  * The page reads fully without it.
  */
 export const TASK_PAGE_SCRIPT = String.raw`(function(){
@@ -43,12 +44,13 @@ var box=document.getElementById("moved-on");
 if(!box||typeof fetch!=="function"||typeof setInterval!=="function")return;
 var url=box.getAttribute("data-check"),version=box.getAttribute("data-version"),stage=box.getAttribute("data-stage");
 if(!url||!/^\/review\/[0-9a-fA-F-]{36}\/task\/status$/.test(url))return;
-var EVERY=20000,LIMIT=30*60*1000,started=Date.now(),timer=null,asking=false;
+var EVERY=20000,LIMIT=30*60*1000,SOON=5000,started=Date.now(),asked=0,timer=null,asking=false;
 function stop(){if(timer!==null){clearInterval(timer);timer=null;}}
 function check(){
   if(timer===null||asking||document.hidden)return;
   if(Date.now()-started>=LIMIT){stop();return;}
   asking=true;
+  asked=Date.now();
   fetch(url,{credentials:"same-origin",cache:"no-store",headers:{accept:"application/json"}}).then(function(reply){
     if(reply.status===401||reply.status===403||reply.status===404){stop();return null;}
     return reply.ok?reply.json():null;
@@ -59,7 +61,7 @@ function check(){
 var refresh=document.getElementById("moved-on-refresh");
 if(refresh)refresh.addEventListener("click",function(){location.reload();});
 timer=setInterval(check,EVERY);
-document.addEventListener("visibilitychange",function(){if(!document.hidden)check();});
+document.addEventListener("visibilitychange",function(){if(!document.hidden&&Date.now()-asked>=SOON)check();});
 })();`;
 
 /** Colours are custom properties with a dark set; nothing scrolls the page sideways at 360 px (code blocks and tables scroll inside themselves). */

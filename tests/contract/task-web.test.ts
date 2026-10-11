@@ -793,6 +793,20 @@ describe("the task page says when the task has moved on", () => {
       expect(page.intervals[0]!.cleared).toBe(true);
     });
 
+    it("does not ask again on showing the page when it asked under 5 seconds ago", async () => {
+      const page = run();
+      await page.tick();
+      expect(page.fetches).toHaveLength(1);
+      page.clock.now += 4_000;
+      page.documentListeners.get("visibilitychange")!();
+      await page.settle();
+      expect(page.fetches).toHaveLength(1);
+      page.clock.now += 1_000;
+      page.documentListeners.get("visibilitychange")!();
+      await page.settle();
+      expect(page.fetches).toHaveLength(2);
+    });
+
     it("stops quietly when the sign-in ended or the task is hidden, and ignores a failed answer", async () => {
       const signedOut = run({ answer: async () => ({ status: 401 }) });
       await signedOut.tick();
