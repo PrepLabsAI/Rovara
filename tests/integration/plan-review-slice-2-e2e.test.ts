@@ -295,6 +295,7 @@ describe("deciding and commenting on the task page, end to end", () => {
     const second = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
     radio(first, "d1", "above").click();
     radio(second, "d1", "below").click();
+    expect(codingRuns(e2e)).toEqual([]);
     first.byId("decide-approve").click();
     second.byId("decide-approve").click();
     second.byId("decide-note").type_("Ship it.");
@@ -316,6 +317,7 @@ describe("deciding and commenting on the task page, end to end", () => {
     const tab = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
     const before = e2e.workflow().revision;
     expect(tab.byId("moved-on").hidden).toBe(true);
+    expect(codingRuns(e2e)).toEqual([]);
     await approveInSlack(e2e);
     await e2e.settle();
     // The page's next poll sees the newer state.
@@ -340,6 +342,7 @@ describe("deciding and commenting on the task page, end to end", () => {
     const tab = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
     // The CSRF cookie expired (it lasts 15 minutes); the page still holds the old token.
     tab.jar.csrf = undefined;
+    expect(codingRuns(e2e)).toEqual([]);
     await tab.comment("claim:1", "Still here after lunch.");
     expect(tab.requests.map((request) => `${request.method} ${request.path.replace(/^.*\/api\//, "")} ${request.status}`)).toEqual([
       "POST comments 403", "GET state 200", "POST comments 201",
@@ -348,6 +351,9 @@ describe("deciding and commenting on the task page, end to end", () => {
     expect((retried!.body as { requestId: string }).requestId).toBe((refused!.body as { requestId: string }).requestId);
     expect(readable(tab.document.querySelector('[data-comments="claim:1"]')!)).toContain("Still here after lunch.");
     expect(commentsStored(e2e)).toHaveLength(1);
+    // Nothing here approves, so the coder never starts.
+    await e2e.settle();
+    expect(codingRuns(e2e)).toEqual([]);
   }, 120_000);
 
   it("too many comments in ten minutes, and a full task, are refused in plain words and the typed text is kept", async () => {
@@ -460,10 +466,12 @@ describe("deciding and commenting on the task page, end to end", () => {
 
   it("an approval from an AI tool (MCP) with no answers and no comments gives the coder exactly the prompt a Slack approval gives", async () => {
     const viaSlack = await waitingPlan();
+    expect(codingRuns(viaSlack)).toEqual([]);
     await approveInSlack(viaSlack);
     await viaSlack.settle();
     const viaTool = await waitingPlan();
     const workflow = viaTool.workflow();
+    expect(codingRuns(viaTool)).toEqual([]);
     signInToReview(viaTool, OWNER);
     const developer = { developerId: OWNER.developerId, name: OWNER.name, provider: "slack" as const, sessionId: "s-owner-tool", slackUserId: OWNER.slackUserId! };
     viaTool.db.set({ pk: `SESSION#${developer.sessionId}`, sk: "META", sessionId: developer.sessionId, developerId: developer.developerId, amr: "slack",
