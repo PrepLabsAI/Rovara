@@ -681,20 +681,40 @@ async function newThreadReplies(deps: NotifierDependencies, task: DeveloperTaskR
   return count;
 }
 
+/** The saved document types in the order the steps write them. */
+const DOCUMENT_ORDER = ["requirements", "design", "plan"] as const;
+const DOCUMENT_NAMES: Record<(typeof DOCUMENT_ORDER)[number], "requirements" | "design" | "coding plan"> = { requirements: "requirements", design: "design", plan: "coding plan" };
+
 /**
  * After Request changes that sent comments on the version before `approval`: how many of those comments the planner
- * answered in `approval` (each answer is a reply with an ID made from the comment and this version).
+ * answered in `approval` (each answer is a reply with an ID made from the comment and this version). For the first version of
+ * a document, the same for the comments sent with the Approve of the document before it.
  */
 async function commentAnswersFor(deps: NotifierDependencies, task: DeveloperTaskRecord, workflow: WorkflowSnapshot, approval: WorkflowArtifact): Promise<WorkflowMessageContext["commentAnswers"]> {
   const previous = workflow.artifacts.find((artifact) => artifact.type === approval.type && artifact.version === approval.version - 1);
-  if (previous === undefined) return undefined;
-  const decision = [...workflow.decisions].reverse().find((entry) => entry.artifactDigest === previous.sha256 && (entry.source ?? "GATE") === "GATE");
-  if (decision?.decision !== "REQUEST_CHANGES" || (decision.commentsIncluded ?? 0) === 0) return undefined;
+  const before = DOCUMENT_ORDER[DOCUMENT_ORDER.indexOf(approval.type as (typeof DOCUMENT_ORDER)[number]) - 1];
+  let decision: WorkflowSnapshot["decisions"][number] | undefined;
+  if (previous !== undefined) {
+    decision = [...workflow.decisions].reverse().find((entry) => entry.artifactDigest === previous.sha256 && (entry.source ?? "GATE") === "GATE");
+    if (decision?.decision !== "REQUEST_CHANGES") return undefined;
+  } else if (before !== undefined) {
+    const digests = new Set(workflow.artifacts.filter((artifact) => artifact.type === before).map((artifact) => artifact.sha256));
+    decision = [...workflow.decisions].reverse().find((entry) => (entry.source ?? "GATE") === "GATE" && entry.decision === "APPROVE" && entry.artifactDigest !== undefined && digests.has(entry.artifactDigest));
+  }
+  if (decision === undefined || (decision.commentsIncluded ?? 0) === 0) return undefined;
   const detail = await getItem<{ includedCommentIds?: unknown }>(deps, { pk: `DEVTASK#${task.taskId}`, sk: `DECISION#${decision.requestId}` });
   const ids = Array.isArray(detail?.includedCommentIds) ? detail.includedCommentIds.filter((id): id is string => typeof id === "string") : [];
   if (ids.length === 0) return undefined;
   const found = await Promise.all(ids.map((id) => getItem(deps, { pk: `DEVTASK#${task.taskId}`, sk: `COMMENT#${plannerReplyCommentId(id, approval.id)}` })));
-  return { answered: found.filter((item) => item !== undefined).length, total: ids.length, fromVersion: previous.version };
+  const answered = found.filter((item) => item !== undefined).length;
+  if (previous !== undefined) return { answered, total: ids.length, fromVersion: previous.version };
+  // Sent with an Approve: the page's comments of that document, with a link to the first one the planner answered.
+  const first = ids.find((_, index) => found[index] !== undefined);
+  const sent = await Promise.all(ids.map((id) => getItem<{ author?: { owner?: unknown } }>(deps, { pk: `DEVTASK#${task.taskId}`, sk: `COMMENT#${id}` })));
+  return {
+    answered, total: ids.length, fromVersion: 0,
+    approvedOn: { document: DOCUMENT_NAMES[before!], ...(first === undefined ? {} : { commentId: first }), allOwners: sent.every((item) => item?.author?.owner === true) },
+  };
 }
 
 /** The reopened pull requests a notice names (repository and number); a malformed entry is left out. */

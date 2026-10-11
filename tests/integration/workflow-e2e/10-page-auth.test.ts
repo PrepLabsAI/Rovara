@@ -804,6 +804,9 @@ describe("Suite 10: comments sent with an approval", () => {
     expect(asking).toMatch(/<page_comment id="[0-9a-f]+" ref="c[12]" author="owner" on="the whole document">Keep each item to one line\.<\/page_comment>/);
     expect(asking).toMatch(/<page_comment id="[0-9a-f]+" ref="c[12]" author="owner" on="claim 1">Why two steps\?<\/page_comment>/);
 
+    // Both comments were Maya's own, so the coding plan's card says "your".
+    expect(e2e.slack.lastPostWithAction("agentx_workflow_approve").text).toMatch(/\|AgentX replied to your 2 comments on the design\.>/);
+
     // Under the instruction: Done in the coding plan, linked to the claim that cites it in coding plan v1.
     const design = await openTaskPage(e2e, OWNER, { search: "?doc=design" });
     const done = design.document.querySelector('#design [data-comments="document"] .replies')!;
@@ -873,6 +876,8 @@ describe("Suite 10: comments sent with an approval", () => {
     const e2e = await designWithComments(planner({ answers: false, cite: said }));
     await approveDesignOnPage(e2e);
     expect(plannerReplies(e2e)).toEqual([]);
+    // No reply was written, so the card does not say there was one.
+    expect(e2e.slack.lastPostWithAction("agentx_workflow_approve").text).not.toContain("AgentX replied");
     expect(e2e.workflow()).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
     const design = await openTaskPage(e2e, OWNER, { search: "?doc=design" });
     // The instruction has no reply, the question keeps only AgentX's own answer, and neither reads "Not answered".
@@ -1145,11 +1150,20 @@ describe("Suite 10: comments sent with an approval", () => {
     }
   }, 240_000);
 
-  it("Approve with comments: the planner is told to write to the person who commented", async () => {
-    const { e2e } = await approvedDesignWithReplies();
+  it("Approve with comments: the planner is told to write to the person who commented, and the coding plan's card says AgentX replied, linked to the design's comments", async () => {
+    const { e2e, instructionId, questionId, samId } = await approvedDesignWithReplies();
     const asking = [...e2e.prompts, ...e2e.turns.map((turn) => turn.userText)].find((text) => text.includes("The owner sent the comments above with their approval"))!;
     expect(asking).toContain('written to the person who commented ("you"), never "the owner"');
     expect(asking).toContain("press Request changes on the current card, or comment before approving");
+    const card = e2e.slack.lastPostWithAction("agentx_workflow_approve").text;
+    expect(card).toContain("*Coding plan v1 is ready for your approval.*");
+    const line = /<([^|<>]+)\|(AgentX replied to [^>]*)>/.exec(card)!;
+    // Three comments (Maya's two and Sam's) were answered: not all Maya's, so the line does not say "your".
+    expect(line[2]).toBe("AgentX replied to 3 comments on the design.");
+    // The link opens the design at the first comment that was answered.
+    const linked = new RegExp(`/review/${e2e.taskId()}/task\\?doc=design#comment-([0-9a-f-]{36})$`).exec(line[1]!)?.[1];
+    expect([instructionId, questionId, samId]).toContain(linked);
+    expect(card).not.toContain("AgentX answered");
   }, 240_000);
 
   it("AgentX's answer on the page is plain text and names the places apart: stray emphasis markers go, real asterisks stay, and the model is told so", async () => {

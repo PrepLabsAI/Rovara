@@ -24,8 +24,12 @@ export interface WorkflowMessageContext {
   taskPageUrl?: string | undefined;
   /** Thread replies saved and not yet given to a step. */
   newReplies?: number | undefined;
-  /** After Request changes that sent comments: how many of them the planner answered, and the version they were sent on. */
-  commentAnswers?: { answered: number; total: number; fromVersion: number } | undefined;
+  /**
+   * After Request changes that sent comments: how many of them the planner answered, and the version they were sent on. After
+   * an Approve that sent comments, `approvedOn` names the approved document, the first comment answered (for the link) and
+   * whether every comment was the owner's.
+   */
+  commentAnswers?: { answered: number; total: number; fromVersion: number; approvedOn?: { document: DocumentName; commentId?: string; allOwners: boolean } } | undefined;
   /** AgentX's own draft pull request did not open; `codeChanged` when the workspace no longer held the checked code. */
   publishFailure?: { category: string; codeChanged?: boolean | undefined } | undefined;
   /** The step a closed required pull request's reopening started (the numbers reopened; empty when not known). */
@@ -335,7 +339,15 @@ function planReview(context: WorkflowMessageContext, exits: ReturnType<typeof ex
   if (checks !== undefined) tail.push(checks);
   if ((context.newReplies ?? 0) > 0) tail.push(`${plural(context.newReplies!, "thread reply", "thread replies")} since the last step will be included.`);
   const answered = context.commentAnswers;
-  if (answered !== undefined && answered.total > 0) tail.push(`AgentX answered ${answered.answered} of ${plural(answered.total, "comment")} from v${answered.fromVersion}.`);
+  if (answered?.approvedOn !== undefined) {
+    // Comments sent with the Approve of the document before: said only when the planner replied to some, linked to the first reply.
+    if (answered.answered > 0) {
+      const { document: approved, commentId, allOwners } = answered.approvedOn;
+      const comments = `${allOwners ? "your " : ""}${plural(answered.total, "comment")}`;
+      const line = `AgentX replied to ${answered.answered === answered.total ? "" : `${answered.answered} of `}${comments} on the ${approved}.`;
+      tail.push(context.taskPageUrl === undefined || commentId === undefined ? line : link(`${context.taskPageUrl}?doc=${approved.replace(" ", "-")}#comment-${commentId}`, line));
+    }
+  } else if (answered !== undefined && answered.total > 0) tail.push(`AgentX answered ${answered.answered} of ${plural(answered.total, "comment")} from v${answered.fromVersion}.`);
   const unlinked = `I couldn't link the full ${name}; ask an AgentX admin to check the task page.`;
   if (structured === undefined) {
     // A Markdown document: its first lines, and where the whole text reads.

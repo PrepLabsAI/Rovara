@@ -354,7 +354,8 @@ continue** for requirements and design) moves the task on. **Request changes** n
 comment or a note. AgentX writes the next version, and answers each comment you sent under it, starting
 "Done:" or "Not changed because:". A comment it did not answer says "Not answered". Comments you send with
 an Approve are answered by the next document, under the comment on the document it was made on ("Done in
-the coding plan: ..."), and any claim numbers in that reply link to the claims. Under a comment you
+the coding plan: ..."), and any claim numbers in that reply link to the claims. The Slack card for the next
+document says "AgentX replied to your 2 comments on the design." with a link to them. Under a comment you
 sent, the page says "Sent with your approval, so it can't be edited." (or "Sent with Request changes, so it
 can't be edited."). Comments sent with the coding plan's approval go to coding, and the page says so.
 Your answers and

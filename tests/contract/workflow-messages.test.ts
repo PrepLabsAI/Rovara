@@ -466,6 +466,23 @@ describe("workflow Slack messages", () => {
       expect(cardOf({}).text).not.toContain("AgentX answered");
     });
 
+    it("after an Approve with comments, one line says AgentX replied, linked to the first reply on the earlier document's page", () => {
+      const approvedOn = (extra: Record<string, unknown> = {}) => ({ document: "design", commentId: "c0ffee00-0000-4000-8000-000000000001", allOwners: true, ...extra });
+      const card = (answers: Record<string, unknown>) => cardOf({}, { commentAnswers: { answered: 2, total: 2, fromVersion: 0, approvedOn: approvedOn(), ...answers } }).text;
+      const link = `${page}?doc=design#comment-c0ffee00-0000-4000-8000-000000000001`;
+      expect(card({})).toContain(`\n<${link}|AgentX replied to your 2 comments on the design.>\n`);
+      expect(card({ answered: 1, total: 1 })).toContain("|AgentX replied to your 1 comment on the design.>");
+      // Some comments left unanswered, comments by teammates, and another document.
+      expect(card({ answered: 1 })).toContain("|AgentX replied to 1 of your 2 comments on the design.>");
+      expect(card({ approvedOn: approvedOn({ allOwners: false }) })).toContain("|AgentX replied to 2 comments on the design.>");
+      expect(card({ approvedOn: approvedOn({ document: "requirements" }) })).toContain(`<${page}?doc=requirements#comment-c0ffee00-0000-4000-8000-000000000001|AgentX replied to your 2 comments on the requirements.>`);
+      // No reply was written (an older worker), so nothing is said; and it never says "answered N of M from v".
+      expect(card({ answered: 0 })).not.toContain("AgentX replied");
+      expect(card({})).not.toContain("AgentX answered");
+      // Without the page's address the line is plain text.
+      expect(cardOf({}, { taskPageUrl: undefined, commentAnswers: { answered: 2, total: 2, fromVersion: 0, approvedOn: approvedOn() } }).text).toContain("\nAgentX replied to your 2 comments on the design.\n");
+    });
+
     it("lists every claim of a tiny plan, children indented, and does not say 'full'", () => {
       const message = cardOf({ claims: ["Payments are retried.", "  The retry waits longer each time.", "Nothing is charged twice."], claimCount: 3, decisionCount: 0, tiny: true });
       expect(message.text).toBe([
