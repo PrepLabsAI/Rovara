@@ -262,8 +262,18 @@ describe("deploy parameters", () => {
 
   it("uses a slack image override as-is, and only by digest", () => {
     const withOverrides = { ...answers(), images: { slack: `123456789012.dkr.ecr.us-east-1.amazonaws.com/agentx-slack-production@sha256:${d("f")}` } };
-    expect(stackParameters("slack", withOverrides, outputs, { packages: true }).OrchestratorImageUri).toBe(withOverrides.images.slack);
+    expect(stackParameters("slack", withOverrides, outputs, { packages: true })).toMatchObject({
+      OrchestratorImageUri: withOverrides.images.slack,
+      OrchestratorImageRepositoryName: "agentx-slack-production",
+    });
     expect(() => stackParameters("slack", { ...answers(), images: { slack: "x/y:latest" } }, outputs, { packages: true })).toThrow("image override for slack must be referenced by digest");
+    expect(() => stackParameters("slack", { ...answers(), images: { slack: `another-account.dkr.ecr.us-east-1.amazonaws.com/repo@sha256:${d("f")}` } }, outputs, { packages: true }))
+      .toThrow("the Slack image must be in a private ECR repository in this AWS account and region");
+  });
+
+  it("pins the selected public Slack image to its exact ECR cache repository", () => {
+    expect(stackParameters("slack", answers(), outputs, { packages: true }).OrchestratorImageRepositoryName)
+      .toBe("agentx-staging/agentx/agentx-slack");
   });
 
   it("a worker image override does not require the access stack's PullThroughPrefix output", () => {

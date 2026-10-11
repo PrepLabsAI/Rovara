@@ -23,6 +23,7 @@ export class AccessStack extends Stack {
     const { naming } = props;
     const env = naming.env;
     if (env === undefined) throw new Error("the access stack exists only for named environments");
+    const ecsFailureRuleArn = Fn.sub(`arn:${"${AWS::Partition}"}:events:${"${AWS::Region}"}:${"${AWS::AccountId}"}:rule/agentx-${env}-*-service-failures`);
 
     // The default boundary applies whenever the company gives none, so every AgentX role always has
     // one. It exists only under UseDefaultBoundary; the roles and the Deny statements Ref it inside
@@ -40,7 +41,8 @@ export class AccessStack extends Stack {
           description: `Default permission boundary for every agentx-${env} role`,
           policyDocument: {
             Version: "2012-10-17",
-            Statement: defaultBoundaryStatements({ env, partition: Aws.PARTITION, account: this.account, cloudFormationRoleName: naming.cloudFormationRoleName }),
+            Statement: defaultBoundaryStatements({ env, partition: Aws.PARTITION, region: Aws.REGION, account: this.account, cloudFormationRoleName: naming.cloudFormationRoleName })
+              .map((statement) => statement.Sid === "EcsFailureEventsRule" ? { ...statement, Resource: ecsFailureRuleArn } : statement),
           },
         });
         policy.cfnOptions.condition = useDefaultBoundary;
@@ -51,7 +53,7 @@ export class AccessStack extends Stack {
       type: "String",
       default: "",
       allowedPattern: "^$|^arn:aws[a-z-]*:iam::[0-9]{12}:(root|role/.+|user/.+)$",
-      description: "Optional principal allowed to assume the operator role; empty trusts the account root",
+      description: "Optional operator-role principal; empty trusts account root",
     });
     const hasOperatorPrincipal = new CfnCondition(this, "HasOperatorPrincipal", {
       expression: Fn.conditionNot(Fn.conditionEquals(operatorPrincipalArn.valueAsString, "")),
@@ -84,11 +86,12 @@ export class AccessStack extends Stack {
       cloudFormationRoleName: naming.cloudFormationRoleName,
     };
     // The boundary Deny statements always apply and name the effective boundary.
-    const serviceStatements = serviceRoleStatements({ ...policyScope, permissionsBoundaryArn: effectiveBoundaryArn });
+    const serviceStatements = serviceRoleStatements({ ...policyScope, permissionsBoundaryArn: effectiveBoundaryArn })
+      .map((statement) => statement.Sid === "EcsFailureEventsRule" ? { ...statement, Resource: ecsFailureRuleArn } : statement);
 
     const serviceRole = new iam.CfnRole(this, "CloudFormationServiceRole", {
       roleName: naming.cloudFormationRoleName,
-      description: `Role CloudFormation assumes to deploy the agentx-${env} stacks`,
+      description: `CloudFormation deployment role for ${env}`,
       assumeRolePolicyDocument: {
         Version: "2012-10-17",
         Statement: [
@@ -105,7 +108,7 @@ export class AccessStack extends Stack {
 
     const operatorRole = new iam.CfnRole(this, "OperatorRole", {
       roleName: naming.operatorRoleName,
-      description: `Role an operator assumes to run agentx against the ${env} environment`,
+      description: `AgentX operator role for ${env}`,
       assumeRolePolicyDocument: {
         Version: "2012-10-17",
         Statement: [
