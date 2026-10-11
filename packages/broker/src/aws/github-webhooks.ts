@@ -209,6 +209,17 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
         || (input.commitParents !== undefined && (await input.commitParents(pushed.url, input.expectedHeadSha).catch(() => [] as string[])).includes(shown));
       if (behind) throw new GithubWebhookRetryableError("GitHub has not caught up with the pull request's head yet");
     }
+    // The same lag, with no push event to hint at it: any event (a comment, a review, an edit) read just after AgentX
+    // recorded its own push may still see the head before it. When GitHub's head is exactly the only parent of the head
+    // AgentX recorded, the event is read again later instead of being taken for someone else's change. This only defers.
+    if (input.commitParents !== undefined) {
+      for (const read of reads) {
+        const shown = read.feedback.pullRequest.headCommit;
+        if (read.feedback.pullRequest.state !== "open" || read.pr.headSha === undefined || shown === read.pr.headSha) continue;
+        const parents = await input.commitParents(read.url, read.pr.headSha).catch(() => [] as string[]);
+        if (parents.length === 1 && parents[0] === shown) throw new GithubWebhookRetryableError("GitHub has not caught up with the pull request's head yet");
+      }
+    }
     // The head AgentX recorded, holding the tree recorded with it (the checked tree, for a record that has none).
     const headMatchesCandidate = ({ pr, feedback }: Pick<typeof reads[number], "pr" | "feedback">): boolean => pr.headSha !== undefined
       && pr.headSha === feedback.pullRequest.headCommit
@@ -335,7 +346,14 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
       // under another digest only for its delivery ID and time, and an owner's decision bound to the old one would be stale.
       // No feedback yet and none now (an approval with no summary, a pull request marked ready): nothing to review or say.
       // Feedback only in resolved review threads is no feedback either: a resolved thread starts excluded.
-      const nothingToReview = prior === undefined && observations.every(o => o.eligibleCommentIds.length === 0) && bundles.every(b => b.comments.length === 0);
+      // The feedback a finished round already reviewed is not new either: once its approved fix is pushed, GitHub's event for
+      // that push (or any later event before someone says something new) finds the same comments on the pull request.
+      const lastReviewed = current.feedbackReviewHistory?.at(-1);
+      const alreadyReviewed = prior === undefined && lastReviewed?.status === "COMPLETE" && lastReviewed.candidateBindings.length === bundles.length
+        && bundles.every(b => lastReviewed.candidateBindings.some(binding => binding.repositoryId === b.repositoryId && binding.number === b.number
+          && binding.commentSetDigest === b.commentSetDigest));
+      const nothingToReview = prior === undefined && (alreadyReviewed
+        || (observations.every(o => o.eligibleCommentIds.length === 0) && bundles.every(b => b.comments.length === 0)));
       if (same && sameThreadObservations(prior.threadObservations ?? [], observations) && next === current) {
         if (headTrees.length === 0) return false;
       } else if (nothingToReview) {

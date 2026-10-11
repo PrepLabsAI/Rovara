@@ -57,6 +57,16 @@ async function merged(e2e: WorkflowE2E, number: number): Promise<void> {
 /** The fix pushes AgentX made to the pull request's branch (after its publication). */
 const fixPushes = (e2e: WorkflowE2E) => e2e.github.pushLog.filter((push) => push.during === "maintain" && e2e.github.tokens.has(push.token));
 
+/** Runs the webhook recovery sweep each time the delivery is due again, until it is no longer kept for retry (at most six sweeps). */
+async function sweepUntilDone(e2e: WorkflowE2E, deliveryId: string): Promise<void> {
+  for (let sweep = 0; sweep < 6; sweep += 1) {
+    const delivery = e2e.db.get(`GITHUB_DELIVERY#${deliveryId}`, "META");
+    if (delivery?.status !== "RETRYABLE") return;
+    e2e.clock.set(new Date(Date.parse(String(delivery.nextAttemptAt)) + 1_000).toISOString());
+    await e2e.runWebhookRecovery();
+  }
+}
+
 describe("Suite 7: PR feedback loop", () => {
   journeySuite();
 
@@ -420,18 +430,45 @@ describe("Suite 7: PR feedback loop", () => {
     await e2e.click("agentx_feedback_review_recommended");
     await e2e.settle();
     expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
-    const pushEvent = await e2e.webhook({ kind: "pull_request", action: "synchronize", number: pullRequest.number });
+    const deliveryId = "71611111-2222-4333-8444-555555555555";
+    const pushEvent = await e2e.webhook({ kind: "pull_request", action: "synchronize", number: pullRequest.number }, { deliveryId });
     expect(pushEvent.status).toBe(503);
     await e2e.settle();
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
-    e2e.clock.advance(61_000);
-    for (let sweep = 0; sweep < 4 && e2e.db.find((item) => item.entityType === "GITHUB_WEBHOOK_DELIVERY" && item.status === "RETRYABLE").length > 0; sweep += 1) {
-      await e2e.runWebhookRecovery();
-      e2e.clock.advance(5 * 60_000);
-    }
+    await sweepUntilDone(e2e, deliveryId);
     await e2e.settle();
+    expect(e2e.db.get(`GITHUB_DELIVERY#${deliveryId}`, "META")).toMatchObject({ status: "COMPLETED" });
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
     expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
+    await merged(e2e, pullRequest.number);
+    expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
+  }, 120_000);
+
+  it("7.16 [LIVE-BUG B4] a comment webhook read while GitHub still shows the head before AgentX's fix is read again later: the comment is reviewed and AgentX keeps following", async () => {
+    // Found in review: only a push event was read again during GitHub's lag. A comment, review or edit read in that moment
+    // took AgentX's own fix for someone else's push, and AgentX stopped following the pull request for good.
+    const { e2e, counts, pullRequest } = await feedbackJourney();
+    await commented(e2e, pullRequest.number, "Please trim the name.");
+    e2e.github.lag({ prHeadReads: 6 });
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
+    const fix = fixPushes(e2e)[0]!.commit;
+    const comment = e2e.github.comment(pullRequest.number, "octocat", "Also greet in lowercase.");
+    const deliveryId = "71631111-2222-4333-8444-555555555555";
+    const during = await e2e.webhook({ kind: "issue_comment", number: pullRequest.number, comment }, { deliveryId });
+    expect(during.status).toBe(503);
+    expect(during.body).toMatchObject({ error: { message: "GitHub webhook processing will be retried" } });
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    await sweepUntilDone(e2e, deliveryId);
+    await e2e.settle();
+    expect(e2e.db.get(`GITHUB_DELIVERY#${deliveryId}`, "META")).toMatchObject({ status: "COMPLETED" });
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(e2e.workflow().pullRequests).toEqual([expect.objectContaining({ headSha: fix, state: "OPEN" })]);
+    expect(said(e2e)).not.toContain("I stopped following the pull request. The pull request on GitHub no longer holds the checked code, so I won't finish this task from it. Close the task.");
+    expect(counts.feedback).toBe(2);
+    expect(visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text)).toMatch(/^PR feedback is ready: 2 comments;/);
     await merged(e2e, pullRequest.number);
     expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
   }, 120_000);
