@@ -5457,6 +5457,7 @@ export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependen
   await reconcileTaskPullRequestFeedback({
     documentClient: dependencies.documentClient, tableName: dependencies.tableName,
     repositoryFullName: event.fullName, number: event.number, deliveryId,
+    ...(event.headSha === undefined ? {} : { expectedHeadSha: event.headSha }),
     loadTask: (taskId) => getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId)),
     repositoryUrl: async (projectName, revision, repositoryId) => {
       const project = await requireProject(dependencies, projectName, revision);

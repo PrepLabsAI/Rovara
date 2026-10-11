@@ -13,7 +13,8 @@ const GitHubWebhookPayloadSchema = z.object({
   installation: z.object({ id: z.number().int().positive() }).passthrough(),
   repository: z.object({ id: z.number().int().positive(), full_name: z.string().regex(/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/).max(300) }).passthrough(),
   issue: z.object({ number: z.number().int().positive(), state: z.enum(["open", "closed"]).optional(), pull_request: z.object({ url: z.string().url() }).passthrough().optional() }).passthrough().optional(),
-  pull_request: z.object({ number: z.number().int().positive(), state: z.enum(["open", "closed"]).optional(), merged: z.boolean().optional() }).passthrough().optional(),
+  pull_request: z.object({ number: z.number().int().positive(), state: z.enum(["open", "closed"]).optional(), merged: z.boolean().optional(),
+    head: z.object({ sha: z.string() }).passthrough().optional() }).passthrough().optional(),
   review: z.object({ id: z.number().int().positive(), body: z.string().max(65_536).nullable().optional(), html_url: z.string().url(), updated_at: z.string().datetime().optional(), user: z.object({ login: z.string().min(1).max(100) }).passthrough() }).passthrough().optional(),
   comment: z.object({ id: z.number().int().positive(), body: z.string().max(65_536).nullable().optional(), html_url: z.string().url(), updated_at: z.string().datetime().optional(), path: z.string().max(500).optional(), line: z.number().int().positive().optional(), diff_hunk: z.string().max(8_000).optional(), user: z.object({ login: z.string().min(1).max(100) }).passthrough() }).passthrough().optional(),
 }).passthrough();
@@ -61,6 +62,8 @@ export interface ReceivedGithubWebhook {
     repositoryId: number;
     fullName: string;
     number: number;
+    /** A push to the pull request (synchronize): the head GitHub says it now has. A hint, checked against GitHub's own read. */
+    headSha?: string;
     comment?: { id: number; body: string; truncated: boolean; url: string; author: string; updatedAt?: string; path?: string; line?: number; diffHunk?: string; source: "review" | "review_comment" | "pr_discussion" };
   };
 }
@@ -141,6 +144,8 @@ export interface LandedFixPush {
 export interface ReconcileTaskPullRequestFeedbackInput {
   documentClient: { send(command: unknown): Promise<unknown> }; tableName: string;
   repositoryFullName: string; number: number; deliveryId: string;
+  /** The head a push event says the pull request now has (a hint): until GitHub's own read shows it, nothing is decided. */
+  expectedHeadSha?: string;
   loadTask(taskId: string): Promise<{ project: string; startingRevision: number; workflow?: WorkflowSnapshot } | undefined>;
   repositoryUrl(project: string, revision: number, repositoryId: string): Promise<string | undefined>;
   getCurrentFeedback(repositoryUrl: string, number: number): Promise<GitHubPullRequestFeedback>;
@@ -187,6 +192,14 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
       if (feedback.pullRequest.number !== pr.number || feedback.pullRequest.url !== pr.url
         || feedback.comments.some(comment => !comment.url.startsWith(`${pr.url}#`))) throw new GithubWebhookRefusal("current GitHub feedback scope mismatch");
       reads.push({ pr, feedback, url, fullName });
+    }
+    // GitHub moves a pull request's head a moment after a push. A push event whose head GitHub's read still shows as the
+    // head AgentX recorded is read again later (the recovery sweep), so someone else's push is never missed.
+    const pushed = input.expectedHeadSha === undefined ? undefined
+      : reads.find(read => read.pr.number === input.number && read.fullName.toLowerCase() === input.repositoryFullName.toLowerCase());
+    if (pushed !== undefined && pushed.feedback.pullRequest.state === "open" && pushed.feedback.pullRequest.headCommit !== input.expectedHeadSha
+      && pushed.feedback.pullRequest.headCommit === pushed.pr.headSha) {
+      throw new GithubWebhookRetryableError("GitHub has not caught up with the pull request's head yet");
     }
     // The head AgentX recorded, holding the tree recorded with it (the checked tree, for a record that has none).
     const headMatchesCandidate = ({ pr, feedback }: Pick<typeof reads[number], "pr" | "feedback">): boolean => pr.headSha !== undefined
@@ -770,6 +783,7 @@ export async function receiveGithubWebhook(input: ReceiveGithubWebhookInput): Pr
     repositoryId: scope.repositoryId,
     fullName: scope.fullName,
     number,
+    ...(eventName === "pull_request" && object.action === "synchronize" && /^[a-f0-9]{40}$/.test(object.pull_request?.head?.sha ?? "") ? { headSha: object.pull_request!.head!.sha } : {}),
     ...(comment === undefined ? {} : { comment }),
   };
   const reserved = await input.reserveDelivery({
