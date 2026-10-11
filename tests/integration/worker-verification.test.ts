@@ -652,6 +652,99 @@ describe("PR feedback the reviewer leaves to the owner (0.2.8 live test)", () =>
   });
 });
 
+/**
+ * 0.2.12 live test: the owner asked for a shorter sentence, and the task's own approved check grepped the old sentence, so
+ * the approved fix failed it. The reviewer is shown the task's checks and lists the ones its fix makes wrong, with corrected
+ * checks under the coding plan's rules.
+ */
+describe("checks a PR feedback fix makes wrong (0.2.12 live test)", () => {
+  const OLD = "Everyone is expected to treat each other with respect and kindness.";
+  const NEW = "Be respectful and kind.";
+  const taskChecks = {
+    proposed: [{ id: "proposed-1", label: "Code of Conduct sentence present in README.md",
+      command: { cwd: "app", executable: "grep", args: ["-q", OLD, "README.md"], timeoutSeconds: 30 } }],
+    required: [{ id: "readiness-1", label: "Unit tests" }],
+    repositoryPaths: ["app"],
+  };
+  const replacement = { label: "Shorter Code of Conduct sentence present in README.md", cwd: "app", executable: "grep", args: ["-q", NEW, "README.md"] };
+  async function readmeFixture() {
+    return feedbackReviewFixture({ "README.md": `# App\n\n${OLD}\n` }, [{ id: "review-comment-1", body: "Make the sentence shorter.", path: "README.md", line: 3 }]);
+  }
+  const shorten = (bundleDigest: string, checks: Record<string, unknown>) => JSON.stringify({ findings: [implementFinding(bundleDigest, {
+    summary: `Replace the sentence with "${NEW}"`, fileChanges: [{ repositoryId: "app", path: "README.md", operation: "MODIFY", change: `Replace the sentence with "${NEW}"` }],
+    tests: [], ...checks })] });
+  async function review(fixture: Awaited<ReturnType<typeof readmeFixture>>, responses: string[], prompts: string[], checks: typeof taskChecks | null = taskChecks) {
+    return runWorkflowFeedbackReview({
+      operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7,
+      taskRequirements: "Add the Code of Conduct sentence to README.md.", candidateDigest: fixture.bundle.candidateDigest, rootPath: fixture.rootPath, model: FAUX_MODEL,
+      candidate: fixture.candidate, repositories: fixture.repositories, bundles: [{ ref: fixture.bundleRef, bytes: fixture.bytes }],
+      piAdapter: feedbackReviewerSequence(responses, prompts), artifactSink: async () => undefined,
+      ...(checks === null ? {} : { taskChecks: checks }),
+    });
+  }
+
+  it("shows the reviewer the task's checks and asks it to list the ones its fix would break, with corrected checks", async () => {
+    const fixture = await readmeFixture();
+    const prompts: string[] = [];
+    await review(fixture, [shorten(fixture.bundleRef.sha256, {})], prompts);
+    const prompt = prompts[0]!;
+    expect(prompt).toContain("Code of Conduct sentence present in README.md");
+    expect(prompt).toContain("proposed-1");
+    expect(prompt).toMatch(/fix would make one of the task's proposed checks wrong.*obsoleteChecks.*replacementChecks/s);
+    expect(prompt).toMatch(/required project checks always run/i);
+    expect(prompt).toContain("\"obsoleteChecks\":string[]");
+  });
+
+  it("keeps an IMPLEMENT proposal's obsolete and replacement checks in the report", async () => {
+    const fixture = await readmeFixture();
+    const prompts: string[] = [];
+    const result = await review(fixture, [shorten(fixture.bundleRef.sha256, { obsoleteChecks: ["proposed-1"], replacementChecks: [replacement] })], prompts);
+    expect(prompts).toHaveLength(1);
+    expect(result.report.status).toBe("COMPLETE");
+    expect(result.report.findings[0]?.fixProposal).toMatchObject({ obsoleteChecks: ["proposed-1"], replacementChecks: [replacement] });
+  });
+
+  it("accepts an obsolete check named by its label", async () => {
+    const fixture = await readmeFixture();
+    const result = await review(fixture, [shorten(fixture.bundleRef.sha256, { obsoleteChecks: ["Code of Conduct sentence present in README.md"], replacementChecks: [replacement] })], []);
+    expect(result.report.status).toBe("COMPLETE");
+  });
+
+  it.each([
+    ["a shell path as its program", { ...replacement, executable: "/bin/sh" }, "its program must be a plain program name or a ./ path inside the repository"],
+    ["a line break in an argument", { ...replacement, args: ["-q", "Be respectful\nand kind.", "README.md"] }, "its arguments may not contain line breaks or control characters"],
+    ["a folder outside the task's repositories", { ...replacement, cwd: "other" }, "it must run in one of the task's repositories"],
+    ["a timeout over the limit", { ...replacement, timeoutSeconds: 99_999 }, "its timeout must be a whole number of seconds from 1 to 1800"],
+    ["a field checks do not have", { ...replacement, env: { A: "1" } }, "it must have only label, cwd, executable, args and timeoutSeconds"],
+  ])("refuses a replacement check with %s, naming the problem, after the one follow-up", async (_name, unsafe, problem) => {
+    const fixture = await readmeFixture();
+    const prompts: string[] = [];
+    const result = await review(fixture, [shorten(fixture.bundleRef.sha256, { obsoleteChecks: ["proposed-1"], replacementChecks: [unsafe] })], prompts);
+    expect(prompts).toHaveLength(2);
+    expect(prompts[1]).toContain(problem);
+    expect(result.report.status).toBe("FAILED");
+    expect(result.report.blockReason).toBe(`reviewer output: fixProposal.replacementChecks[1] of finding 1: ${problem}`);
+  });
+
+  it("refuses dropping a required project check, or a check the task does not have", async () => {
+    const fixture = await readmeFixture();
+    const required = await review(fixture, [shorten(fixture.bundleRef.sha256, { obsoleteChecks: ["readiness-1"] })], []);
+    expect(required.report.blockReason).toBe("reviewer output: fixProposal.obsoleteChecks of finding 1 names a required project check");
+    const unknown = await review(fixture, [shorten(fixture.bundleRef.sha256, { obsoleteChecks: ["proposed-9"] })], []);
+    expect(unknown.report.blockReason).toBe("reviewer output: fixProposal.obsoleteChecks of finding 1 names a check the task does not have");
+  });
+
+  it("asks nothing about checks when the broker sent none (an older broker), and keeps no check changes in the report", async () => {
+    const fixture = await readmeFixture();
+    const prompts: string[] = [];
+    const result = await review(fixture, [shorten(fixture.bundleRef.sha256, { obsoleteChecks: ["proposed-1"], replacementChecks: [replacement] })], prompts, null);
+    expect(prompts[0]).not.toContain("obsoleteChecks");
+    expect(result.report.status).toBe("COMPLETE");
+    expect(result.report.findings[0]?.fixProposal).not.toHaveProperty("obsoleteChecks");
+    expect(result.report.findings[0]?.fixProposal).not.toHaveProperty("replacementChecks");
+  });
+});
+
 describe("AgentX checks the agent's work when it finishes (spec 051 Task 4)", () => {
   it("1. pass: the agent's pytest failed before its edit and the rerun passes; verified, no extra try, one request after the edit", async () => {
     const shell = scriptedShell({ pytest: { exitCode: 1, output: "1 failed\nCommand exited with code 1" } });

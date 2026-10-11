@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { createCandidateManifest, workflowRequestId } from "../../packages/contracts/src/task-workflow.js";
 import { canonicalPlanJson, parsePlanDocument, planDocumentMarkdown, readCanonicalPlan, type PlanDocument } from "@agentx/contracts";
 import { SlackThreadWorkspaceResultSchema } from "@agentx/contracts";
-import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, collectWorkflowFeedbackBundles, createWorkflowSnapshot, sharedTaskKey, SharedTaskRecordSchema, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema, WorkflowThreadNoteSchema, type WorkflowSnapshot } from "@agentx/contracts";
+import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, collectWorkflowFeedbackBundles, createWorkflowSnapshot, sharedTaskKey, SharedTaskRecordSchema, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema, WorkflowThreadNoteSchema, type WorkflowCheckPolicyInput, type WorkflowSnapshot } from "@agentx/contracts";
 import * as workflowContracts from "../../packages/contracts/src/task-workflow.js";
 import { workflowMessage } from "../../packages/broker/src/developer/workflow-messages.js";
 import { developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
@@ -88,7 +88,8 @@ async function workflowAtVerification(harness: Harness, structured?: PlanDocumen
  * A task waiting for merge whose feedback critic has just been started: its approved plan is `plan.content` (stored as a
  * structured document when `plan.structured`), and the critic's first read of the feedback bundles is ready to make.
  */
-async function collectingFeedbackTask(plan: { content: string; structured?: boolean; earlier?: Array<{ type: "requirements" | "design"; content: string }> } = { content: "Approved plan: address the linked PR feedback after owner approval." }) {
+async function collectingFeedbackTask(plan: { content: string; structured?: boolean; earlier?: Array<{ type: "requirements" | "design"; content: string }> } = { content: "Approved plan: address the linked PR feedback after owner approval." },
+  options: { checkPolicy?: WorkflowCheckPolicyInput } = {}) {
     const currentFeedback = { pullRequest: { number: 7, url: "https://github.com/example/demo/pull/7", state: "open" as const,
       headBranch: "feature", baseBranch: "main", headCommit: "a".repeat(40), headTreeSha: "b".repeat(40), title: "Fix retry", body: "" }, comments: [], threads: [] };
     const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getPullRequestFeedback: async () => currentFeedback } } });
@@ -116,7 +117,7 @@ async function collectingFeedbackTask(plan: { content: string; structured?: bool
       return { id: `${document.type}-v1`, type: document.type, version: 1, sha256, producer: "agentx-owner-approved", objectKey, createdAt: now, format: "structured" };
     });
     let workflow = WorkflowSnapshotSchema.parse({
-      ...createWorkflowSnapshot({ taskId, ownerId: task.ownerKey, now }),
+      ...createWorkflowSnapshot({ taskId, ownerId: task.ownerKey, now, ...(options.checkPolicy === undefined ? {} : { checkPolicy: options.checkPolicy }) }),
       stage: "WAIT_FOR_MERGE", state: "WAITING", candidate,
       artifacts: [...earlier, { id: "plan-v1", type: "plan", version: 1, sha256: planSha, producer: "agentx-owner-approved", objectKey: planKey, createdAt: now, ...(plan.structured === true ? { format: "structured" } : {}) }],
       decisions: [...earlier.map((document) => document.sha256), planSha].map((artifactDigest) => ({ requestId: randomUUID(), workflowRevision: 1, decision: "APPROVE", actorId: task.ownerKey, actorRole: "TASK_OWNER", reason: "Approved plan", artifactDigest, at: now })),
@@ -3144,6 +3145,27 @@ describe("a structured plan reaches coders, reviewers and the pull request as Ma
     expect(structured.split("\n").slice(0, 4)).toEqual(["Ping @‍here and read the docs https://‍evil.example/y before retrying.", "A payment is never charged twice.", "Refunds keep working as they do.", ""]);
     const legacy = workflowPullRequestBody({ title: "Fix" } as never, workflow, "# Plan\n\nFirst line.\nSecond line.\n", undefined);
     expect(legacy.split("\n").slice(0, 3)).toEqual(["First line.", "Second line.", ""]);
+  });
+
+  it("gives the feedback critic the task's checks: the proposed ones it runs now, the required ones, and the repository folders (0.2.12)", async () => {
+    const command = (args: string[]) => ({ cwd: "repo/demo", executable: "grep", args, timeoutSeconds: 30 });
+    const checkPolicy = {
+      required: [{ id: "required-1", label: "Unit tests", command: { cwd: "repo/demo", executable: "npm", args: ["test"], timeoutSeconds: 600 } }],
+      optional: [], selectedOptionalIds: [],
+      proposed: [{ id: "proposed-1", label: "Sentence present", command: command(["-q", "Old sentence.", "README.md"]) },
+        { id: "proposed-2", label: "Unticked check", command: command(["-q", "Other.", "README.md"]) }],
+      selectedProposedIds: ["proposed-1"],
+    };
+    const { readBundles, binding } = await collectingFeedbackTask(undefined, { checkPolicy });
+    const material = await readBundles(binding) as { taskChecks?: unknown };
+    expect(material.taskChecks).toEqual({
+      proposed: [checkPolicy.proposed[0]],
+      required: [{ id: "required-1", label: "Unit tests" }],
+      repositoryPaths: ["repo/demo"],
+    });
+    // A task stored without a check policy runs the project's checks; the critic is told nothing about checks.
+    const plain = await collectingFeedbackTask();
+    expect(await plain.readBundles(plain.binding)).not.toHaveProperty("taskChecks");
   });
 
   it("gives the feedback critic the approved structured plan as Markdown", async () => {

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { ProjectCommandSchema } from "./project.js";
+import { WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckInputSchema } from "./workflow-check-input.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const ActorIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -313,6 +314,8 @@ export const WorkflowFeedbackBundleSchema = WorkflowFeedbackBundleMetadataSchema
   });
 });
 export type WorkflowFeedbackBundle = z.infer<typeof WorkflowFeedbackBundleSchema>;
+/** The most checks one feedback finding may mark wrong, and the most corrected checks it may propose. */
+export const WORKFLOW_FEEDBACK_REPLACEMENT_CHECKS_MAX = 8;
 export const WorkflowFeedbackPrioritySchema = z.enum(["MUST_FIX", "SHOULD_FIX", "OPTIONAL"]);
 export const WorkflowFeedbackAssessmentSchema = z.enum(["ACTIONABLE", "ALREADY_ADDRESSED", "STALE", "TECHNICALLY_INCORRECT", "OUT_OF_SCOPE", "CONFLICTING", "NEEDS_OWNER_DECISION"]);
 export const WorkflowFeedbackFindingRefSchema = z.object({
@@ -335,6 +338,13 @@ export const WorkflowFeedbackFindingSchema = WorkflowFeedbackFindingRefSchema.ex
     // May be empty: the worker, which can see the candidate tree, requires tests only for a code change in a repository that has tests.
     tests: z.array(z.object({ repositoryId: z.string().trim().min(1).max(200), path: z.string().trim().min(1).max(1000),
       operation: z.enum(["MODIFY", "ADD"]), behavior: z.string().trim().min(1).max(2000) }).strict()).max(32),
+    /**
+     * The task's proposed checks (by ID or label) the fix makes wrong, such as a check that looks for the exact text the
+     * fix changes. Required project checks are never listed. Only from a broker that sent the task's checks.
+     */
+    obsoleteChecks: z.array(z.string().trim().min(1).max(80)).max(WORKFLOW_FEEDBACK_REPLACEMENT_CHECKS_MAX).optional(),
+    /** Corrected checks for the fix, under the coding plan's rules for proposed checks. */
+    replacementChecks: z.array(WorkflowProposedCheckInputSchema).max(WORKFLOW_FEEDBACK_REPLACEMENT_CHECKS_MAX).optional(),
   }).strict().optional(),
 }).strict();
 export type WorkflowFeedbackFinding = z.infer<typeof WorkflowFeedbackFindingSchema>;
@@ -632,6 +642,83 @@ export function workflowSelectedChecks(policy: WorkflowCheckPolicy | undefined):
  */
 export function workflowIsReviewOnly(policy: WorkflowCheckPolicy | undefined): boolean {
   return policy !== undefined && workflowSelectedChecks(policy).length === 0;
+}
+
+/**
+ * What a PR feedback reviewer is told about the task's checks, so it can list the ones its fix makes wrong: the
+ * proposed checks the task runs now (the approved plan's, as earlier approved fixes changed them), the project's
+ * required checks (which always run), and the repository folders a corrected check may run in.
+ */
+export const WorkflowFeedbackTaskChecksSchema = z.object({
+  proposed: z.array(WorkflowCheckSchema).max(WORKFLOW_PROPOSED_CHECKS_MAX),
+  required: z.array(z.object({ id: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/), label: z.string().trim().min(1).max(80) }).strict()).max(64),
+  repositoryPaths: z.array(z.string().min(1).max(512)).min(1).max(32),
+}).strict();
+export type WorkflowFeedbackTaskChecks = z.infer<typeof WorkflowFeedbackTaskChecksSchema>;
+
+/** The checks an approved PR feedback fix changes: the task's proposed checks it makes wrong, and the corrected ones it adds. */
+export interface WorkflowFeedbackCheckChanges {
+  obsolete: WorkflowCheck[];
+  added: Array<{ label: string; command: WorkflowCheck["command"] }>;
+}
+
+function sameCheckCommand(a: WorkflowCheck["command"], b: WorkflowCheck["command"]): boolean {
+  return a.cwd === b.cwd && a.executable === b.executable && a.args.length === b.args.length && a.args.every((arg, index) => arg === b.args[index]);
+}
+
+/**
+ * The check changes of the given feedback findings' proposals, against the task's check policy: each obsolete name
+ * resolves to a proposed check the task runs now (by ID, or by label ignoring case); required and optional project
+ * checks are never dropped. A corrected check that follows the proposed-check rules is added once, unless it is the same
+ * command as a required check or a proposed check that stays.
+ */
+export function workflowFeedbackCheckChanges(
+  policy: WorkflowCheckPolicy | undefined,
+  findings: ReadonlyArray<{ fixProposal?: { obsoleteChecks?: readonly string[] | undefined; replacementChecks?: readonly unknown[] | undefined } | undefined }>,
+): WorkflowFeedbackCheckChanges {
+  if (policy === undefined) return { obsolete: [], added: [] };
+  const kept = policy.selectedProposedIds;
+  const running = (policy.proposed ?? []).filter((check) => kept === undefined || kept.includes(check.id));
+  const obsolete: WorkflowCheck[] = [];
+  for (const name of findings.flatMap((finding) => finding.fixProposal?.obsoleteChecks ?? [])) {
+    const wanted = name.trim().toLowerCase();
+    const check = running.find((entry) => entry.id === name.trim() || entry.label.trim().toLowerCase() === wanted);
+    if (check !== undefined && !obsolete.includes(check)) obsolete.push(check);
+  }
+  const staying = [...policy.required, ...running.filter((check) => !obsolete.includes(check))];
+  const added: WorkflowFeedbackCheckChanges["added"] = [];
+  for (const raw of findings.flatMap((finding) => finding.fixProposal?.replacementChecks ?? [])) {
+    const parsed = WorkflowProposedCheckInputSchema.safeParse(raw);
+    if (!parsed.success) continue;
+    const command = { cwd: parsed.data.cwd, executable: parsed.data.executable, args: parsed.data.args,
+      timeoutSeconds: parsed.data.timeoutSeconds ?? WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS };
+    if (staying.some((check) => sameCheckCommand(check.command, command)) || added.some((check) => sameCheckCommand(check.command, command))) continue;
+    added.push({ label: parsed.data.label, command });
+  }
+  return { obsolete, added };
+}
+
+/**
+ * The workflow with an approved fix's check changes in its check policy, so its checks and every later step (and later
+ * feedback rounds) run the updated set: the obsolete proposed checks are removed and the corrected ones added as
+ * proposed checks `feedback-<round>-<n>`. The revision is not changed; the caller stores it with the approval.
+ */
+export function applyWorkflowFeedbackCheckChanges(currentInput: unknown, changes: WorkflowFeedbackCheckChanges): WorkflowSnapshot {
+  const current = validSnapshot(currentInput);
+  const policy = current.checkPolicy;
+  if (policy === undefined || (changes.obsolete.length === 0 && changes.added.length === 0)) return current;
+  const round = (current.feedbackDecisions ?? []).length;
+  const obsoleteIds = new Set(changes.obsolete.map((check) => check.id));
+  const added = changes.added.map((check, index) => ({ id: `feedback-${round}-${index + 1}`, label: check.label, command: check.command }));
+  const proposed = [...policy.proposed.filter((check) => !obsoleteIds.has(check.id)), ...added];
+  if (proposed.length > WORKFLOW_PROPOSED_CHECKS_MAX || policy.required.length + policy.optional.length + proposed.length > 64) {
+    throw new WorkflowTransitionError("the approved fix would give the task more checks than it can run");
+  }
+  const selectedProposedIds = policy.selectedProposedIds === undefined ? undefined
+    : [...policy.selectedProposedIds.filter((id) => !obsoleteIds.has(id)), ...added.map((check) => check.id)];
+  const { selectedProposedIds: _priorSelection, ...rest } = policy;
+  void _priorSelection;
+  return WorkflowSnapshotSchema.parse({ ...current, checkPolicy: { ...rest, proposed, ...(selectedProposedIds === undefined ? {} : { selectedProposedIds }) } });
 }
 
 export const WorkflowPathSchema = z.enum(["QUICK", "FULL"]);

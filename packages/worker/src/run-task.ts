@@ -116,6 +116,7 @@ export async function runTaskInvocation(
         taskRequirements: collected.taskRequirements, candidateDigest: binding.candidateDigest,
         rootPath: dependencies.rootPath, model: dependencies.model, candidate: candidateRepositories,
         repositories: repositoryInputs, bundles: collected.bundles, artifactSink: dependencies.artifactSink,
+        ...(collected.taskChecks === undefined ? {} : { taskChecks: collected.taskChecks }),
         ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,
         onProgress: message => { void events.append("progress", { message }).catch(() => undefined); },
       });

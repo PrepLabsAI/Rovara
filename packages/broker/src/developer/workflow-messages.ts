@@ -502,6 +502,7 @@ export function feedbackReviewFailurePlainReason(blockReason: string | undefined
   if (/^candidate changed (?:before|during) review$/.test(reason)) return "the code changed during the review";
   if (reason === "review could not verify the exact candidate") return "the review couldn't check the code";
   if (/not accounted for|answered more than once|names a comment or bundle that was not supplied/.test(reason)) return "the reviewer didn't answer every comment";
+  if (/^reviewer output: fixProposal\.(?:replacementChecks|obsoleteChecks)/.test(reason)) return "the reviewer proposed a check change AgentX can't use";
   if (/^reviewer output: .*fixProposal/.test(reason)) return "the reviewer's proposal was incomplete";
   // An answer that was read but broke a rule is named by the rule; only an answer that could not be read says so.
   if (/^reviewer output: finding \d+ is uncertain but not left for the owner$/.test(reason)) return "the reviewer was unsure but didn't leave the choice to you";

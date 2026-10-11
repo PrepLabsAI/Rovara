@@ -133,6 +133,8 @@ import {
   type CandidateRepository,
   WORKFLOW_PLAN_MAX_BYTES,
   WorkflowFeedbackBundleRefSchema,
+  WorkflowFeedbackTaskChecksSchema,
+  type WorkflowFeedbackTaskChecks,
   WorkflowFeedbackBundleSchema,
   WorkflowFeedbackApprovalBindingSchema,
   workflowFeedbackApprovalMatchesReview,
@@ -4373,7 +4375,7 @@ async function readFeedbackBundlesForCritic(
   dependencies: AwsBrokerDependencies,
   operation: OperationRecord,
   value: unknown,
-): Promise<{ taskRequirements: string; bundles: Array<{ ref: ReturnType<typeof WorkflowFeedbackBundleRefSchema.parse>; bytesBase64: string }> }> {
+): Promise<{ taskRequirements: string; bundles: Array<{ ref: ReturnType<typeof WorkflowFeedbackBundleRefSchema.parse>; bytesBase64: string }>; taskChecks?: WorkflowFeedbackTaskChecks }> {
   const input = object(value, "feedback bundle request");
   const taskId = input.taskId;
   const workflowRevision = input.workflowRevision;
@@ -4459,7 +4461,26 @@ async function readFeedbackBundlesForCritic(
     bundles.push({ ref, bytesBase64: bytes.toString("base64") });
   }
   if (bundles.length !== workflow.feedbackReview.bundleRefs.length) throw agentXError("RUNTIME_UNAVAILABLE", "feedback bundle set is incomplete");
-  return { taskRequirements, bundles };
+  const taskChecks = await feedbackTaskChecks(dependencies, task, workflow);
+  return { taskRequirements, bundles, ...(taskChecks === undefined ? {} : { taskChecks }) };
+}
+
+/**
+ * What the feedback critic is told about the task's checks, so it can list the proposed ones its fix makes wrong: the
+ * proposed checks the task runs now, the project's required checks and the task's repository folders. Nothing for a task
+ * stored without a check policy (it runs the project's checks, and a check change would be ignored). An older worker
+ * ignores the field.
+ */
+async function feedbackTaskChecks(dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord, workflow: WorkflowSnapshot): Promise<WorkflowFeedbackTaskChecks | undefined> {
+  const policy = workflow.checkPolicy;
+  if (policy === undefined) return undefined;
+  const project = await requireProject(dependencies, task.project, task.startingRevision);
+  const kept = policy.selectedProposedIds;
+  return WorkflowFeedbackTaskChecksSchema.parse({
+    proposed: policy.proposed.filter((check) => kept === undefined || kept.includes(check.id)),
+    required: policy.required.map((check) => ({ id: check.id, label: check.label })),
+    repositoryPaths: project.definition.repositories.map((repository) => repository.path),
+  });
 }
 
 async function handleCodeBuild(

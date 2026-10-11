@@ -705,6 +705,9 @@ describe("workflow Slack messages", () => {
       ["reviewer output: finding 1 field confidence is missing or invalid", "the reviewer's answer was missing details"],
       ["reviewer output: finding 3 does not have the required fields", "the reviewer's answer was missing details"],
       ["reviewer output: finding IDs are not unique", "the reviewer's answer was missing details"],
+      // 0.2.12: a check change the reviewer proposed broke the rules for checks.
+      ["reviewer output: fixProposal.replacementChecks[1] of finding 1: its program must be a plain program name or a ./ path inside the repository", "the reviewer proposed a check change AgentX can't use"],
+      ["reviewer output: fixProposal.obsoleteChecks of finding 2 names a required project check", "the reviewer proposed a check change AgentX can't use"],
     ];
     const slack = new StrictSlackWeb({ briefLimit: 1_200 });
     for (const [blockReason, plain] of reasons) {
