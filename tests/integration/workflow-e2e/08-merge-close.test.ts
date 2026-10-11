@@ -476,6 +476,23 @@ describe("Suite 8: merge and close", () => {
       expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(2);
     }, 120_000);
 
+    it("a release that keeps finding the compute busy is finished by the recovery sweep", async () => {
+      const { e2e, pullRequest } = await waiting();
+      const taskId = e2e.taskId();
+      e2e.deleteEc2Session.mockImplementationOnce(async () => { throw agentXError("WORKSPACE_BUSY", "the workspace compute is stopping"); });
+      await mergeWebhook(e2e, pullRequest.number);
+      await e2e.settle();
+      expect(counter(e2e, MEMBER).count).toBe(1);
+      expect(e2e.db.get("FINISHED_RELEASE", `TASK#${taskId}`)).toBeDefined();
+      // No more events come for a merged task: the scheduled sweep tries again.
+      const swept = await e2e.runRecovery();
+      expect(swept.dispatch.body.releases).toEqual({ attempted: 1, released: 1 });
+      expect(counter(e2e, MEMBER)).toEqual({ count: 0, tasks: [] });
+      expect(workspaceOf(e2e, taskId).status).toBe("CLOSED");
+      expect(e2e.db.get("FINISHED_RELEASE", `TASK#${taskId}`)).toBeUndefined();
+      expect((await e2e.runRecovery()).dispatch.body.releases).toEqual({ attempted: 0, released: 0 });
+    }, 120_000);
+
     it("the compute is deleted but the release's transaction fails: nothing is given back, and a later event gives it back once", async () => {
       const { e2e, pullRequest } = await waiting();
       const taskId = e2e.taskId();

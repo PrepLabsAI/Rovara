@@ -3904,18 +3904,48 @@ export async function releaseFinishedTasksOf(deps: ReleaseDeps, member: { pk: st
   return released;
 }
 
-/** releaseFinishedTask, logged and never thrown: for callers whose own work is done (a decision, a webhook, a sweep). */
+/** Where a finished task waits for its release until one goes through: the recovery sweep reads this partition. */
+export const FINISHED_RELEASE_PK = "FINISHED_RELEASE";
+const finishedReleaseKey = (taskId: string) => ({ pk: FINISHED_RELEASE_PK, sk: `TASK#${taskId}` });
+/** The most finished tasks one recovery sweep tries to release. */
+const RELEASE_SWEEP_MAX = 10;
+
+/**
+ * releaseFinishedTask, logged and never thrown: for callers whose own work is done (a decision, a webhook, an operation's
+ * result, the sweep). A finished task is marked as waiting for its release first and unmarked once it is released, so a
+ * release that found the workspace busy, failed, or never ran (the process stopped) is tried again by the recovery sweep.
+ */
 export async function releaseFinishedTaskQuietly(deps: ReleaseDeps, taskId: string): Promise<FinishedTaskRelease | undefined> {
   try {
     const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
-    if (task === undefined || task.closedAt !== undefined || task.releasedAt !== undefined) return undefined;
+    if (task !== undefined && task.closedAt === undefined && task.releasedAt === undefined && !workflowTaskFinished(task)) return "not_finished";
+    if (task === undefined || task.closedAt !== undefined || task.releasedAt !== undefined) {
+      // Nothing to release (any more): a mark the sweep left is removed.
+      await deps.documentClient.send(new DeleteCommand({ TableName: deps.tableName, Key: finishedReleaseKey(taskId) }));
+      return undefined;
+    }
+    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName,
+      Item: { ...finishedReleaseKey(taskId), entityType: "FINISHED_RELEASE", taskId, markedAt: new Date().toISOString() } }));
     const outcome = await releaseFinishedTask(deps, task);
+    if (outcome !== "busy") await deps.documentClient.send(new DeleteCommand({ TableName: deps.tableName, Key: finishedReleaseKey(taskId) }));
     if (outcome === "released" || outcome === "busy") console.log(JSON.stringify({ component: "broker", event: `developer.finished_task_${outcome}`, taskId }));
     return outcome;
   } catch (error) {
     console.log(JSON.stringify({ component: "broker", event: "developer.finished_task_release_failed", taskId, error: error instanceof Error ? error.name : "unknown" }));
     return undefined;
   }
+}
+
+/** The recovery sweep's part: the finished tasks still waiting for their release, at most RELEASE_SWEEP_MAX per run. */
+export async function releasePendingFinishedTasks(deps: ReleaseDeps): Promise<{ attempted: number; released: number }> {
+  const response = await deps.documentClient.send(new QueryCommand({
+    TableName: deps.tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": FINISHED_RELEASE_PK },
+    Limit: RELEASE_SWEEP_MAX, ConsistentRead: true,
+  })) as { Items?: Array<{ taskId?: unknown }> };
+  let released = 0;
+  const items = (response.Items ?? []).filter((item): item is { taskId: string } => typeof item.taskId === "string");
+  for (const item of items) if (await releaseFinishedTaskQuietly(deps, item.taskId) === "released") released += 1;
+  return { attempted: items.length, released };
 }
 
 /**

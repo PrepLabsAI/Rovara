@@ -208,7 +208,7 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, releaseFinishedTaskQuietly, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -671,7 +671,13 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           console.log(JSON.stringify({ component: "broker", event: "plan_evidence.sweep_failed", error: error instanceof Error ? error.name : "unknown" }));
           return { attempted: 0, started: 0 };
         });
-        return json({ ...dispatches, planEvidence }, "workflow-dispatch-recovery");
+        // Finished tasks whose release found the workspace busy, failed or never ran: their slot and workspace are given back.
+        const releases = await releasePendingFinishedTasks({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies), documentClient: dependencies.documentClient })
+          .catch((error: unknown) => {
+            console.log(JSON.stringify({ component: "broker", event: "developer.finished_task_sweep_failed", error: error instanceof Error ? error.name : "unknown" }));
+            return { attempted: 0, released: 0 };
+          });
+        return json({ ...dispatches, planEvidence, releases }, "workflow-dispatch-recovery");
       }
       catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "workflow.dispatch_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
@@ -2154,6 +2160,7 @@ async function ensureThreadWorkspace(
     return createUnpreparedThreadWorkspace(dependencies, identity, requestId, project, include, includeSettingsRevision);
   }
   const effective = await effectiveSlackLimits(dependencies, limits);
+  await healSlackMemberSlots(dependencies, slack.requester, effective);
   const preparation = await newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId);
   const { teamId, userId } = slack.requester;
   try {
@@ -2350,6 +2357,7 @@ async function startThreadPreparation(
     return { outcome: "WORKSPACE", workspaceId: workspace.id, status: workspace.status, operationId: workspace.activeOperationId, created: false };
   }
   const effective = await effectiveSlackLimits(dependencies, limits);
+  await healSlackMemberSlots(dependencies, slack.requester, effective);
   // One read of the latest revision feeds every field below, so a revision registered meanwhile
   // cannot mix in. The fence condition refuses the write if the workspace changed since it was read.
   const latest = await requireLatestProject(dependencies, workspace.projectName);
@@ -2763,6 +2771,21 @@ function openTaskCount(tasks: unknown): number {
 }
 
 /** The Slack limits with the admin's setting applied (R7); read only when a workspace is created. */
+/**
+ * Before a Slack thread workspace is charged: a member at the limit first gives back the slots their finished developer
+ * tasks still hold (the counter is shared, so they count here too). Best effort; never fails the request.
+ */
+async function healSlackMemberSlots(dependencies: AwsBrokerDependencies, requester: { teamId: string; userId: string }, effective: SlackServiceConfiguration): Promise<void> {
+  try {
+    const key = slackMemberLimitKey(requester.teamId, requester.userId);
+    const member = await getItem<{ count?: number }>(dependencies, key);
+    if ((member?.count ?? 0) < effective.memberWorkspaceLimit) return;
+    await releaseFinishedTasksOf({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies), documentClient: dependencies.documentClient }, key);
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "developer.finished_task_heal_failed", error: error instanceof Error ? error.name : "unknown" }));
+  }
+}
+
 async function effectiveSlackLimits(dependencies: AwsBrokerDependencies, configured: SlackServiceConfiguration): Promise<SlackServiceConfiguration> {
   const limits = await readWorkspaceLimits(dependencies.documentClient, dependencies.tableName, {
     member: configured.memberWorkspaceLimit,
@@ -2887,6 +2910,7 @@ async function retryThreadPreparation(
     const thread = await getItem<{ starterUserId?: unknown }>(dependencies, slackThreadKey(identity.ownerKey));
     const starter = typeof thread?.starterUserId === "string" ? thread.starterUserId : undefined;
     const effective = starter === undefined ? await effectiveSlackLimits(dependencies, limits) : undefined;
+    if (effective !== undefined) await healSlackMemberSlots(dependencies, slack.requester, effective);
     const charge: TransactItems = effective === undefined
       ? [{ ConditionCheck: {
         TableName: dependencies.tableName,

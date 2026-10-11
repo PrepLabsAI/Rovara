@@ -60,6 +60,25 @@ describe("the Slack limit refusal (C16)", () => {
   });
 });
 
+describe("a Slack thread at the limit first gives back slots finished tasks still hold (0.2.12 live test)", () => {
+  it("a merged task still counted is released, and the thread's workspace starts", async () => {
+    const { handler, db, subject, deleteEc2Session } = await fullOfTasks();
+    const task = db.find((item) => item.entityType === "DEVELOPER_TASK")[0]!;
+    // As the live table was: merged before releases ran on merge, its workspace READY, its slot still counted.
+    db.set({ ...task, workflow: { stage: "MERGED", state: "COMPLETE", outcome: "MERGED" } });
+    const { activeOperationId: _active, ...workspace } = db.get(`WORKSPACE#${String(task.workspaceId)}`, "META")!;
+    void _active;
+    db.set({ ...workspace, status: "READY" });
+    const opened = await serviceCall(handler, subject, MAYA.slackUserId!, "POST", "/v1/service/threads/workspace", { requestId: randomUUID() });
+    expect(opened.body).toMatchObject({ outcome: "WORKSPACE", created: true });
+    const member = db.get(`SLACK_LIMIT#${SLACK_TEAM}`, `MEMBER#${MAYA.slackUserId!}`)!;
+    expect(member.count).toBe(3);
+    expect((member.tasks as Set<string>).has(String(task.taskId))).toBe(false);
+    expect(db.get(`WORKSPACE#${String(task.workspaceId)}`, "META")?.status).toBe("CLOSED");
+    expect(deleteEc2Session).toHaveBeenCalledWith(task.workspaceId);
+  });
+});
+
 describe("the Slack limit refusal counts only the member's own tasks (C16)", () => {
   const PRIYA: Developer = { developerId: "f".repeat(64), name: "Priya Rao", provider: "slack", sessionId: "s-priya", slackUserId: "U0PRIYA001" };
 
