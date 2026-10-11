@@ -1,7 +1,19 @@
 import { describe, expect, it, vi } from "vitest";
 import { validateToolArguments } from "@earendil-works/pi-ai";
-import { createOrchestrationTools } from "../../packages/orchestrator/src/orchestration-tools.js";
-import { CONVERSATION_ID, LIFECYCLE_CASES, OPERATION_ID, REQUEST_ID, WORKSPACE_ID, managePullRequestApi } from "../support/pull-request-cases.js";
+import { createOrchestrationTools, type OrchestrationApi } from "../../packages/orchestrator/src/orchestration-tools.js";
+import { CONVERSATION_ID, LIFECYCLE_CASES, OPERATION_ID, REQUEST_ID, WORKSPACE_ID } from "../support/pull-request-cases.js";
+
+function managePullRequestApi() {
+  return {
+    submitTask: vi.fn<OrchestrationApi["submitTask"]>(),
+    taskStatus: vi.fn<OrchestrationApi["taskStatus"]>(),
+    taskResult: vi.fn<OrchestrationApi["taskResult"]>(),
+    followUp: vi.fn<OrchestrationApi["followUp"]>(),
+    createPullRequest: vi.fn<OrchestrationApi["createPullRequest"]>(),
+    managePullRequest: vi.fn<OrchestrationApi["managePullRequest"]>(async () => ({ operation: { id: OPERATION_ID } })),
+    pullRequestResult: vi.fn<OrchestrationApi["pullRequestResult"]>(async () => ({ status: "SUCCEEDED", url: "https://github.com/example/web/pull/12" })),
+  };
+}
 
 describe("agentx_manage_pull_request replaces the seven lifecycle tools call for call", () => {
   it.each(LIFECYCLE_CASES)("action $action sends exactly what $tool sent", async ({ action, params }) => {
@@ -44,10 +56,10 @@ describe("agentx_manage_pull_request replaces the seven lifecycle tools call for
 
   it.each(LIFECYCLE_CASES.filter(({ action }) => action === "append" || action === "edit"))("action $action forwards progress from the result stream to onUpdate, as $tool did", async ({ action, params }) => {
     const api = managePullRequestApi();
-    api.pullRequestResult.mockImplementationOnce((async (_input: unknown, options?: { onProgress?: (progress: typeof PROGRESS) => void }) => {
+    api.pullRequestResult.mockImplementationOnce(async (_input, options) => {
       options?.onProgress?.(PROGRESS);
       return { status: "SUCCEEDED", url: "https://github.com/example/web/pull/12" };
-    }) as never);
+    });
     const tools = createOrchestrationTools(api, { workspaceId: WORKSPACE_ID, conversationId: CONVERSATION_ID }, { requestId: () => REQUEST_ID });
     const onUpdate = vi.fn();
     await tools.find((entry) => entry.name === "agentx_manage_pull_request")!.execute("call-1", { action, ...params }, undefined, onUpdate, {} as never);

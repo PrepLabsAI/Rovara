@@ -2,11 +2,16 @@
 // Spec 025 FR-030: the admin read tools, their inputs, outputs and text, against a fake admin client.
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { describe, expect, it, vi } from "vitest";
 import { ADMIN_READ_TOOLS, DEVELOPER_TOOLS, ToolError, createAgentXMcpServer, type AdminControlPlaneClient, type ToolContext } from "../../packages/mcp/src/index.js";
-import { toolError } from "../support/mcp-tool-error.js";
+import { toolError as parseToolError } from "../support/mcp-tool-error.js";
 
 const PLANTED = `xoxb-${"1".repeat(10)}-planted-bot-token`;
+
+function toolError(result: Awaited<ReturnType<Client["callTool"]>>) {
+  return parseToolError(CallToolResultSchema.parse(result));
+}
 
 async function connect(admin: Partial<AdminControlPlaneClient> | undefined) {
   const context = (): ToolContext => ({
