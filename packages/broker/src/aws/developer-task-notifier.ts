@@ -15,7 +15,7 @@ import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
 import { answeredWorkflowCard, cleanLine, documentSummaryLines, feedbackReviewFailedMessage, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
-import { deriveTaskStatus, failureCategory, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
+import { deriveTaskStatus, failureCategory, plannerRepliesDoneKey, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
 import { isConditional } from "./broker-shared.js";
 import { requiredEnvironment } from "./lambda.js";
 import { parseSlackSecrets } from "./slack-ingress.js";
@@ -59,6 +59,13 @@ class StartPending extends Error {
     this.name = "StartPending";
   }
 }
+
+/** The planner's replies to the comments sent with a decision are not all written yet: the card for the new document waits. */
+class RepliesPending extends Error {
+  constructor() { super("the planner's replies are still being written"); this.name = "RepliesPending"; }
+}
+/** How long after a document was stored its card waits for the replies; after that it counts what is there. */
+const REPLIES_WAIT_MS = 3 * 60_000;
 
 class CanvasCloseoutPending extends Error {
   constructor(readonly reason: string) { super("task Canvas closeout remains pending"); this.name = "CanvasCloseoutPending"; }
@@ -705,6 +712,9 @@ async function commentAnswersFor(deps: NotifierDependencies, task: DeveloperTask
   const detail = await getItem<{ includedCommentIds?: unknown }>(deps, { pk: `DEVTASK#${task.taskId}`, sk: `DECISION#${decision.requestId}` });
   const ids = Array.isArray(detail?.includedCommentIds) ? detail.includedCommentIds.filter((id): id is string => typeof id === "string") : [];
   if (ids.length === 0) return undefined;
+  // The replies are written after the step commits, so a card built straight away could count too few: it waits for the
+  // "done" record (a retry is a few seconds to minutes later), and, past a short while, says what is there.
+  if (await getItem(deps, plannerRepliesDoneKey(task.taskId, approval.id)) === undefined && deps.now() - Date.parse(approval.createdAt) < REPLIES_WAIT_MS) throw new RepliesPending();
   const found = await Promise.all(ids.map((id) => getItem(deps, { pk: `DEVTASK#${task.taskId}`, sk: `COMMENT#${plannerReplyCommentId(id, approval.id)}` })));
   const answered = found.filter((item) => item !== undefined).length;
   if (previous !== undefined) return { answered, total: ids.length, fromVersion: previous.version };
@@ -745,6 +755,7 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
     approval = workflow.artifacts.filter((artifact) => artifact.type === workflowDocumentType(workflow)).at(-1);
     if (approval !== undefined) {
       const answered = await commentAnswersFor(deps, task, workflow, approval).catch((error: unknown) => {
+        if (error instanceof RepliesPending) throw error;
         deps.log({ event: "developer_notifier.comment_answers_unavailable", taskId: task.taskId, error: errorName(error) });
         return undefined;
       });

@@ -1219,40 +1219,58 @@ describe("deciding and commenting on the task page (slice 2)", () => {
     expect(bar).toMatch(/id="decide-approve"[^>]*hidden>Approve coding plan v1<\/button>/);
     expect(bar).toMatch(/id="decide-request-changes"[^>]*hidden>Request changes to coding plan v1<\/button>/);
     // No decisions to answer: nothing to count (the script shows no control and no note).
-    expect(bar).toContain('<button type="button" id="decide-next" hidden></button><span id="decide-count"></span>');
+    expect(bar).toContain('<button type="button" id="decide-next" hidden></button><span id="decide-count" role="status"></span>');
     // A waiting design is named the same way.
     const waitingDesign = await render({ documents: [requirements, { ...design, approved: false }], waiting: { kind: "design", version: 1, artifactDigest: digest }, access: owner });
     expect(waitingDesign.body).toMatch(/id="decide-approve"[^>]*hidden>Approve design v1<\/button>/);
     expect(waitingDesign.body).toMatch(/id="decide-request-changes"[^>]*hidden>Request changes to design v1<\/button>/);
   });
 
-  describe("Changed after approval belongs to one document", () => {
-    const badges = (body: string, anchor: string, version: number, id: string): string =>
-      new RegExp(`<details id="${anchor}-v${version}-${id}"[^>]*><summary>(.*?)</summary>`).exec(body)![1]!;
-    const requirementsPlan = (first: string) => planDocument({ claims: [{ id: "1", text: "Retries happen.", children: [{ id: "1.1", text: first }, { id: "1.2", text: "A retry is logged." }] }], decisions: [] });
+  describe("Changed after approval compares the levels the earlier document wrote", () => {
+    const badged = (body: string, anchor: string, version: number, id: string): boolean =>
+      new RegExp(`<details id="${anchor}-v${version}-${id}"[^>]*><summary>(.*?)</summary>`).exec(body)![1]!.includes("Changed after approval");
+    const tree = (claims: Array<[string, string]>) => planDocument({ claims: [{ id: "1", text: claims[0]![1], children: claims.slice(1).map(([id, text]) => ({ id, text })) }], decisions: [] });
+    const approvedRequirements = structuredDoc("requirements", 1, planDocument({ claims: [{ id: "1", text: "Retries happen." }, { id: "2", text: "Keep it to one small function." }], decisions: [] }), { approved: true });
 
-    it("a design whose claim numbers overlap the approved requirements is not badged", async () => {
-      const requirements = structuredDoc("requirements", 1, requirementsPlan("The wait is a second."), { approved: true });
-      const design = structuredDoc("design", 1, planDocument({ claims: [{ id: "1", text: "Retries happen.", children: [{ id: "1.1", text: "A timer waits between tries." }, { id: "1.2", text: "The log line names the try." }] }], decisions: [] }));
-      const { body } = await render({ documents: [requirements, design], access: owner });
-      expect(body).toContain("A timer waits between tries.");
-      expect(body).not.toContain("Changed after approval");
+    it("a design that rewords an approved requirements claim is badged on that claim only", async () => {
+      const design = structuredDoc("design", 1, planDocument({ claims: [{ id: "1", text: "Retries happen." }, { id: "2", text: "Keep it to one tiny function.", children: [{ id: "2.1", text: "It lives in retry.ts." }] }], decisions: [] }));
+      const { body } = await render({ documents: [approvedRequirements, design], access: owner });
+      expect(count(body, /Changed after approval/g)).toBe(1);
+      expect(badged(body, "design", 1, "2")).toBe(true);
+      expect(badged(body, "design", 1, "1")).toBe(false);
+      expect(badged(body, "design", 1, "2-1")).toBe(false);
     });
 
-    it("a claim reworded after its own document was approved is badged, on the later version only", async () => {
-      const approved = structuredDoc("requirements", 1, requirementsPlan("The wait is a second."), { approved: true, current: false });
-      const later = structuredDoc("requirements", 2, requirementsPlan("The wait is two seconds."));
+    it("claim numbers deeper than the earlier document wrote are another document's and are never compared", async () => {
+      // Requirements that slipped in level 2 claims do not make the design's own level 2 claims "changed".
+      const slipped = structuredDoc("requirements", 1, tree([["1", "Retries happen."], ["1.1", "The wait is a second."], ["1.2", "A retry is logged."]]), { approved: true });
+      const design = structuredDoc("design", 1, tree([["1", "Retries happen."], ["1.1", "A timer waits between tries."], ["1.2", "The log line names the try."]]));
+      const first = (await render({ documents: [slipped, design], access: owner })).body;
+      expect(first).toContain("A timer waits between tries.");
+      expect(first).not.toContain("Changed after approval");
+      // The design owns levels 1 and 2 for the coding plan; its level 3 claims, whatever the numbers, are not compared.
+      const approvedDesign = structuredDoc("design", 1, planDocument({ claims: [{ id: "1", text: "Retries happen.", children: [{ id: "1.1", text: "A timer waits.", children: [{ id: "1.1.1", text: "Slipped in by the design." }] }] }], decisions: [] }), { approved: true });
+      const plan = structuredDoc("coding plan", 1, planDocument({ claims: [{ id: "1", text: "Retries happen.", children: [{ id: "1.1", text: "A timer waits.", children: [{ id: "1.1.1", text: "Edit retry.ts." }] }] }], decisions: [] }));
+      expect((await render({ documents: [slipped, approvedDesign, plan], access: owner })).body).not.toContain("Changed after approval");
+      // The same coding plan rewording the design's level 2 claim is badged.
+      const reworded = structuredDoc("coding plan", 1, planDocument({ claims: [{ id: "1", text: "Retries happen.", children: [{ id: "1.1", text: "A timer pauses.", children: [{ id: "1.1.1", text: "Edit retry.ts." }] }] }], decisions: [] }));
+      const body = (await render({ documents: [slipped, approvedDesign, reworded], access: owner })).body;
+      expect(badged(body, "coding-plan", 1, "1-1")).toBe(true);
+      expect(badged(body, "coding-plan", 1, "1-1-1")).toBe(false);
+    });
+
+    it("a claim reworded after its own document was approved is badged too, on the later version only", async () => {
+      const approved = structuredDoc("requirements", 1, tree([["1", "Retries happen."]]), { approved: true, current: false });
+      const later = structuredDoc("requirements", 2, tree([["1", "Retries happen twice."]]));
       const { body } = await render({ documents: [approved, later], access: owner });
       expect(count(body, /Changed after approval/g)).toBe(1);
-      expect(badges(body, "requirements", 2, "1-1")).toContain("Changed after approval");
-      expect(badges(body, "requirements", 2, "1-2")).not.toContain("Changed after approval");
-      // The approved version itself is not compared with anything.
-      expect(badges(body, "requirements", 1, "1-1")).not.toContain("Changed after approval");
+      expect(badged(body, "requirements", 2, "1")).toBe(true);
+      expect(badged(body, "requirements", 1, "1")).toBe(false);
     });
 
     it("an unapproved earlier version is nothing to change after", async () => {
-      const first = structuredDoc("requirements", 1, requirementsPlan("The wait is a second."), { current: false });
-      const second = structuredDoc("requirements", 2, requirementsPlan("The wait is two seconds."));
+      const first = structuredDoc("requirements", 1, tree([["1", "Retries happen."]]), { current: false });
+      const second = structuredDoc("requirements", 2, tree([["1", "Retries happen twice."]]));
       expect((await render({ documents: [first, second], access: owner })).body).not.toContain("Changed after approval");
     });
   });

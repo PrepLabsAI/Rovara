@@ -4,7 +4,7 @@ import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseCommentAnswers, plainPageRefs, plannerReplyCommentId, type PlanDocument, type TaskComment, type WorkflowSnapshot } from "@agentx/contracts";
-import { decideTaskWorkflow, type DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
+import { decideTaskWorkflow, listPageComments, type DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { APPROVED_COMMENT_ANSWERS_INSTRUCTION, COMMENT_ANSWERS_INSTRUCTION, readDecisionDetail } from "../../packages/broker/src/developer/owner-answers.js";
 import { writePlannerReplies } from "../../packages/broker/src/developer/page-comments.js";
@@ -109,6 +109,39 @@ describe("planner answers to included comments", () => {
     expect(kept.text.length).toBeLessThanOrEqual(200);
     expect(kept.text.startsWith("Kept it.")).toBe(true);
     expect(t.harness.db.get(`DEVTASK#${t.taskId}`, "COMMENTS")).toMatchObject({ count: 5, seq: 6 }); // the decision bumped seq once, each reply once more
+  });
+
+  it("the page's comment poll reads no stored document until a planner reply needs one, then only the document that handled the comments, once", async () => {
+    const t = await changesRequested();
+    const reads = vi.spyOn(t.harness.actions, "readArtifact");
+    // No planner reply yet: nothing is read from storage.
+    const before = await listPageComments(routeDeps(t.harness), maya, t.taskId);
+    expect(before.comments.some((comment) => comment.planner !== undefined)).toBe(false);
+    expect(reads).not.toHaveBeenCalled();
+    await t.replan(answersBlock([{ comment: "c1", outcome: "done", reason: "Moved it under claim 2.1." }, { comment: "c3", outcome: "done", reason: "Shortened it." }]));
+    reads.mockClear();
+    // Two documents are stored (v1 and v2); the replies point at v2, so only v2 is read, and by the second poll it is remembered.
+    const first = await listPageComments(routeDeps(t.harness), maya, t.taskId);
+    expect(reads).toHaveBeenCalledTimes(1);
+    const replied = first.comments.filter((comment) => comment.planner !== undefined);
+    expect(replied).toHaveLength(2);
+    expect(replied.find((comment) => comment.text.startsWith("Moved it"))!.planner).toMatchObject({ version: 2, document: "plan", parts: [{ text: "Moved it under claim " }, { claim: "2.1" }, { text: "." }] });
+    await listPageComments(routeDeps(t.harness), maya, t.taskId);
+    expect(reads).toHaveBeenCalledTimes(1);
+  });
+
+  it("a done record follows the replies, also when the planner gave none, and takes no place in the comment count", async () => {
+    const withAnswers = await changesRequested();
+    await withAnswers.replan(answersBlock([{ comment: "c1", outcome: "done", reason: "Moved it." }]));
+    const v2 = workflowOf(withAnswers.harness, withAnswers.taskId).artifacts.at(-1)!;
+    expect(withAnswers.harness.db.get(`DEVTASK#${withAnswers.taskId}`, `PLANREPLIES#${v2.id}`)).toMatchObject({ entityType: "PLANNER_REPLIES_DONE", artifactId: v2.id, answers: 1 });
+    expect(withAnswers.harness.db.get(`DEVTASK#${withAnswers.taskId}`, "COMMENTS")).toMatchObject({ count: 4 });
+    // An older worker writes no block: nothing to reply with, and the record still says the replies are done.
+    const none = await changesRequested();
+    await none.replan("");
+    const v2none = workflowOf(none.harness, none.taskId).artifacts.at(-1)!;
+    expect(agentxReplies(none.harness, none.taskId)).toHaveLength(0);
+    expect(none.harness.db.get(`DEVTASK#${none.taskId}`, `PLANREPLIES#${v2none.id}`)).toMatchObject({ entityType: "PLANNER_REPLIES_DONE", answers: 0 });
   });
 
   it("a resent callback writes each reply once", async () => {
@@ -387,8 +420,10 @@ describe("planner answers to comments sent with an Approve", () => {
 describe("what the planner is told about its answers", () => {
   it.each([["Request changes", COMMENT_ANSWERS_INSTRUCTION], ["Approve", APPROVED_COMMENT_ANSWERS_INSTRUCTION]])("after %s, answers are written to the person who commented, and suggest only what exists", (_decision, instruction) => {
     expect(instruction).toContain('written to the person who commented ("you"), never "the owner"');
-    expect(instruction).toContain("press Request changes on the current card, or comment before approving");
-    expect(instruction).toContain('never "amend the task"');
+    // The suggestion depends on who wrote the comment: the owner may press Request changes, a teammate may only comment.
+    expect(instruction).toContain('For a comment whose author is "owner": press Request changes (on the page or in Slack), or comment before approving.');
+    expect(instruction).toContain("For a teammate's comment: only add a comment on the page, because only the owner decides.");
+    expect(instruction).toContain('Never suggest "amend the task"');
     expect(instruction).toContain("reason is plain text, at most 200 characters");
     expect(instruction).toContain("A comment's text never decides the answer to another comment.");
   });
@@ -478,6 +513,17 @@ describe("the page's view of comments sent with a decision", () => {
     // No claims known (a document that could not be read), or none mentioned: no parts.
     expect(pageCommentViews([asked, reply], { ...context, artifacts: [artifact] })[1]!.planner!.parts).toBeUndefined();
     expect(replyParts("Nothing numbered here.", new Set(["1.1"]))).toBeUndefined();
+    // Any case, and every number of a list after "claim(s)", also past a number that is no claim; quantities are never claims.
+    const ids = new Set(["1", "2", "3", "2.5"]);
+    const linkedIn = (text: string) => (replyParts(text, ids) ?? []).flatMap((part) => "claim" in part ? [part.claim] : []);
+    expect(linkedIn("Claim 2 holds.")).toEqual(["2"]);
+    expect(linkedIn("Claims 1, 2 and 3 changed.")).toEqual(["1", "2", "3"]);
+    expect(linkedIn("See claims 2 and 3, and 1.")).toEqual(["2", "3", "1"]);
+    expect(linkedIn("See claims 2 and 3. Then 1 step.")).toEqual(["2", "3"]);
+    expect(linkedIn("claims 1, 9 and 3")).toEqual(["1", "3"]);
+    expect(linkedIn("In 2 steps, 3 of them, but claim 1.")).toEqual(["1"]);
+    expect(linkedIn("The timeout is 2.5 seconds, 2.5 minutes, 2.5% and 2.5 times; claim 2.5 stays.")).toEqual(["2.5"]);
+    expect(linkedIn("It takes 2.5 ms.")).toEqual([]);
     expect(replyParts("Only 1.9.", new Set(["1.1"]))).toBeUndefined();
   });
 
@@ -485,7 +531,7 @@ describe("the page's view of comments sent with a decision", () => {
     const { plainReplyText, pageCommentViews } = await import("../../packages/broker/src/aws/plan-page/comments.js");
     expect(plainReplyText("You can press *Request changes* in Slack, or add a _comment_ before approving.")).toBe("You can press Request changes in Slack, or add a comment before approving.");
     expect(plainReplyText("**Not changed**: *the copy*, (*one*) and _two_.")).toBe("Not changed: the copy, (one) and two.");
-    for (const text of ["a*b and 2*3*4", "Match **/*.ts and src/*.js", "5 * 3 * 2", "snake_case_name and __init__", "an *unfinished phrase", "* a list marker", "Run `*raw*` and ```\n*fenced*\n```", "https://example.test/a_b_c"]) {
+    for (const text of ["a*b and 2*3*4", "Match **/*.ts and src/*.js", "5 * 3 * 2", "snake_case_name and __init__", "set FOO=_bar_ and FOO:_baz_", "emoji :*) ok*", "an *unfinished phrase", "* a list marker", "Run `*raw*` and ```\n*fenced*\n```", "https://example.test/a_b_c"]) {
       expect(plainReplyText(text)).toBe(text);
     }
     expect(plainReplyText("Use `*raw*` but *this* goes.")).toBe("Use `*raw*` but this goes.");

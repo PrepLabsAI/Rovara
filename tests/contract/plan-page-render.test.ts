@@ -594,6 +594,8 @@ describe("comments, suggestions and answers on the plan page", () => {
     expect(await note({ author: teammate, sentWith: "APPROVE" })).toBe("Sent with the owner's approval, so it can't be edited.");
     expect(await note({ author: owner, sentWith: "REQUEST_CHANGES" })).toBe("Sent with Request changes, so it can't be edited.");
     expect(await note({ author: teammate, sentWith: "REQUEST_CHANGES" })).toBe("Sent with Request changes, so it can't be edited.");
+    // A comment whose decision is not known says only that it was sent with one.
+    expect(await note({ author: owner })).toBe("Sent with a decision, so it can't be edited.");
     // Someone else's comment carries no note, and the old wording is gone.
     expect(await note({ sentWith: "APPROVE" })).toBeUndefined();
     expect(await renderPlanDocument(input({ comments: [comment({ author: owner, sent: true, sentWith: "APPROVE" })], access: commenting }))).not.toContain("so it can't be changed");
@@ -625,7 +627,7 @@ describe("comments, suggestions and answers on the plan page", () => {
   it("deleted, edited and sent comments say so, and only the author gets Edit and Delete", async () => {
     const deleted = comment({ deleted: true, text: "" });
     const mine = comment({ author: { kind: "person", name: "Priya", owner: true, you: true }, edited: true });
-    const sent = comment({ author: { kind: "person", name: "Priya", owner: true, you: true }, sent: true });
+    const sent = comment({ author: { kind: "person", name: "Priya", owner: true, you: true }, sent: true, sentWith: "APPROVE" });
     const html = await renderPlanDocument(input({ comments: [deleted, mine, sent], access: commenting }));
     expect(readable(html)).toContain("Comment deleted");
     expect(readable(html)).toContain("(edited)");

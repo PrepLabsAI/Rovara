@@ -235,6 +235,7 @@ export const TASK_PAGE_DECIDING_COPY = {
   sentApproval: "Sent with your approval, so it can't be edited.",
   sentOwnerApproval: "Sent with the owner's approval, so it can't be edited.",
   sentChanges: "Sent with Request changes, so it can't be edited.",
+  sentDecision: "Sent with a decision, so it can't be edited.",
   fromVersion: "from v",
   edited: "(edited)",
   owner: "Owner",
@@ -504,7 +505,7 @@ function commentNode(c,shownVersion,isReply){
   else article.appendChild(make("p",{"class":"comment-text"},str(c.text)));
   if(typeof c.agentx==="string"&&has(STATES,c.agentx))article.appendChild(make("p",{"class":"comment-state"},STATES[c.agentx]));
   var yours=!agentx&&c.author.you===true&&c.deleted!==true;
-  if(yours&&c.sent===true)article.appendChild(make("p",{"class":"comment-sent"},c.sentWith==="REQUEST_CHANGES"?COPY.sentChanges:c.author.owner===true?COPY.sentApproval:COPY.sentOwnerApproval));
+  if(yours&&c.sent===true)article.appendChild(make("p",{"class":"comment-sent"},c.sentWith==="REQUEST_CHANGES"?COPY.sentChanges:c.sentWith!=="APPROVE"?COPY.sentDecision:c.author.owner===true?COPY.sentApproval:COPY.sentOwnerApproval));
   var actions=[];
   if(yours&&c.sent!==true&&canComment){
     actions.push(make("button",{type:"button","class":"comment-edit","data-comment":c.id,"aria-describedby":"comment-"+c.id},COPY.edit));

@@ -139,9 +139,9 @@ task pauses and the thread offers Take ownership.
   partially valid plan is never shown.
 - **FR-009** Full path: the tree grows. Requirements hold level-1 claims, Not changing, Risks and decisions.
   Design adds level-2 claims under approved ones. The coding plan adds level-3 claims and checks. A later step
-  may edit an approved claim; the page marks it "Changed after approval" only when a claim of the same document
-  changes after that document's own approval (each document has its own claim numbers). Quick writes the whole
-  tree in one document.
+  may edit an approved claim; the page marks it "Changed after approval", comparing only the claim levels the earlier
+  document wrote (requirements level 1, design levels 1 and 2). Quick writes the whole tree
+  in one document.
 - **FR-010** The planner is told to scale the plan to the task: tiny tasks get tiny plans.
 - **FR-011** AgentX derives a Markdown copy from the structured plan and the recorded decision. The coding
   worker, the code and security reviewers, the MCP tools, and the Slack summary use this copy; none reads the
@@ -180,7 +180,7 @@ task pauses and the thread offers Take ownership.
 - **FR-020** A document shows Why (one-line summary that opens), the claim tree folded to level 1, decisions
   on their claims with the recommended answer labelled, Not changing, Risks, and for coding plans the Checks
   section. Each level shows its top 5 children and then "Show N more"; decisions likewise.
-- **FR-021** Claim badges: New, Changed since v<N>, Changed after approval (claim text only, against the same document's approved version), and a comment count.
+- **FR-021** Claim badges: New, Changed since v<N>, Changed after approval (claim text only), and a comment count.
 - **FR-022** From v2 on, a "What changed since v<N>" switch shows only added, removed and changed claims and
   decisions. Removed claims keep their comments under "Removed claims".
 - **FR-023** Earlier versions: a folded list under each document; opening one shows it read-only with "This

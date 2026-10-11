@@ -18,8 +18,14 @@ export interface RenderPlanInput {
   /** When the document was stored and the time now (epoch milliseconds): the current version's code is still being loaded for a short while after it was stored. */
   createdAt?: string; now?: number;
   previous?: { version: number; plan: PlanDocument };
-  /** The latest approved earlier version of this same document (each document has its own claim numbers): a claim reworded since is badged. */
+  /**
+   * The approved document of the nearest earlier step, with how deep its own claims go (requirements write level 1, the
+   * design levels 1 and 2): a claim reworded since is badged. Deeper IDs are another document's numbering and never compare.
+   */
   approvedEarlier?: PlanDocument;
+  approvedEarlierDepth?: number;
+  /** The latest approved earlier version of this same document: a claim reworded since is badged too. */
+  approvedSame?: PlanDocument;
   checks?: Array<{ id?: string; label: string; proposed: boolean; proves: string[]; status: string }>;
   /** Checks the task knows that the table does not list (an optional check not chosen): their threads stay with the checks. */
   knownChecks?: Array<{ id: string; label: string }>;
@@ -388,8 +394,13 @@ export async function renderPlanDocument(input: RenderPlanInput): Promise<string
   const { plan, anchor, version } = input;
   const diff = input.previous === undefined ? undefined : diffPlanDocuments(input.previous.plan, plan);
   // After approval only the claim's words count: evidence or children added by a later step are expected.
-  const approvedText = new Map(flatten(input.approvedEarlier?.claims ?? []).map((claim) => [claim.id, claim.text]));
-  const changedAfterApprovalIds = new Set(flatten(plan.claims).filter((claim) => approvedText.has(claim.id) && approvedText.get(claim.id) !== claim.text).map((claim) => claim.id));
+  const depthOf = (id: string): number => id.split(".").length;
+  const approvedWords = (document: PlanDocument | undefined, maxDepth = Number.POSITIVE_INFINITY) =>
+    new Map(flatten(document?.claims ?? []).filter((claim) => depthOf(claim.id) <= maxDepth).map((claim) => [claim.id, claim.text]));
+  const earlierWords = approvedWords(input.approvedEarlier, input.approvedEarlierDepth);
+  const sameWords = approvedWords(input.approvedSame);
+  const reworded = (words: Map<string, string>, claim: PlanClaim): boolean => words.has(claim.id) && words.get(claim.id) !== claim.text;
+  const changedAfterApprovalIds = new Set(flatten(plan.claims).filter((claim) => reworded(earlierWords, claim) || reworded(sameWords, claim)).map((claim) => claim.id));
   const decisionsInClaims = new Map<string, PlanDecision[]>();
   for (const decision of plan.decisions.slice(0, SHOWN)) decisionsInClaims.set(decision.claimId, [...(decisionsInClaims.get(decision.claimId) ?? []), decision]);
   // The current version shows its document's comments up to this version: on their place when it still exists, else under Removed claims.

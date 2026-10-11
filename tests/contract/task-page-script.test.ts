@@ -554,10 +554,11 @@ describe("the deciding and commenting script", () => {
     const mineTeammate = comment(4, { author: { kind: "person", name: "Sam", owner: false, you: true }, sent: true, sentWith: "APPROVE" });
     const mineChanges = comment(5, { author: { kind: "person", name: "Sam", owner: false, you: true }, sent: true, sentWith: "REQUEST_CHANGES" });
     const theirs = comment(6, { sent: true, sentWith: "APPROVE" });
+    const unknown = comment(10, { author: { kind: "person", name: "Sam", owner: true, you: true }, sent: true });
     let seq = 3;
     const page = boot(await pageHtml(), { respond: (entry) => {
       if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: seq, csrf: "n".repeat(43) } };
-      if (entry.url.endsWith("/api/comments")) return { status: 200, body: { comments: [comment(1), mineOwner, mineTeammate, mineChanges, theirs, handled, unlinked], suggestions: [] } };
+      if (entry.url.endsWith("/api/comments")) return { status: 200, body: { comments: [comment(1), mineOwner, mineTeammate, mineChanges, theirs, unknown, handled, unlinked], suggestions: [] } };
       return { status: 200, body: {} };
     } });
     seq = 4;
@@ -574,6 +575,8 @@ describe("the deciding and commenting script", () => {
     expect(note(4)).toBe("Sent with the owner's approval, so it can't be edited.");
     expect(note(5)).toBe("Sent with Request changes, so it can't be edited.");
     expect(note(6)).toBeUndefined();
+    // Without a recorded decision (an older broker) it says only that a decision sent it.
+    expect(note(10)).toBe("Sent with a decision, so it can't be edited.");
   });
 
   it("AgentX's answer re-rendered from JSON is labelled as AI with who asked; an edited question says why it has no answer", async () => {

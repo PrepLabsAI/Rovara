@@ -198,7 +198,7 @@ import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type C
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { decisionComments, ownerAnswersFor, pageCommentsPrompt, promptComments, readDecisionDetail } from "../developer/owner-answers.js";
-import { isPageRefusal, writeCommentAnswer, writePlannerReplies, type SlackRequestQueue } from "../developer/page-comments.js";
+import { isPageRefusal, markPlannerRepliesDone, writeCommentAnswer, writePlannerReplies, type SlackRequestQueue } from "../developer/page-comments.js";
 import { loadWorkflowDocument, readObjectText as readStoredText, shortenMarkdown } from "../developer/plan-artifacts.js";
 import { PLAN_EVIDENCE_PK, attachEvidence, planCitesCode, planEvidenceDueKey, planEvidenceEvent, planEvidenceJobItem, planEvidenceSources, type PlanEvidenceEvent, type PlanEvidenceJob } from "../developer/plan-evidence-jobs.js";
 import { resolvePlanEvidence } from "../developer/plan-evidence.js";
@@ -6741,15 +6741,22 @@ function plannerRepliesFor(content: string, plan: PlanDocument, step: PlanStepCo
   return { taskId: task.taskId, ...stored, detail: step.detail, answers };
 }
 
-/** Writes the planner's answers as replies from AgentX, after the plan committed. Best effort: a failure is logged with counts only. */
+/**
+ * Writes the planner's answers as replies from AgentX, after the plan committed. Best effort: a failure is logged with counts
+ * only. Each document's replies end with a "done" record (also when there was nothing to write), which the Slack card for
+ * the document waits for before it counts them.
+ */
 async function writeAllPlannerReplies(dependencies: AwsBrokerDependencies, entries: readonly PlannerReplies[]): Promise<void> {
+  const deps = { documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, log: (line: Record<string, unknown>) => console.log(JSON.stringify({ component: "broker", ...line })) };
   for (const entry of entries) {
-    if (entry.answers.length === 0) continue;
-    try {
-      await writePlannerReplies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, log: (line) => console.log(JSON.stringify({ component: "broker", ...line })) }, entry);
-    } catch (error) {
-      console.log(JSON.stringify({ component: "broker", event: "developer.planner_replies_failed", taskId: entry.taskId, answers: entry.answers.length, errorName: error instanceof Error ? error.name : "unknown" }));
+    if (entry.answers.length > 0) {
+      try {
+        await writePlannerReplies(deps, entry);
+      } catch (error) {
+        console.log(JSON.stringify({ component: "broker", event: "developer.planner_replies_failed", taskId: entry.taskId, answers: entry.answers.length, errorName: error instanceof Error ? error.name : "unknown" }));
+      }
     }
+    await markPlannerRepliesDone(deps, { taskId: entry.taskId, artifactId: entry.artifactId, answers: entry.answers.length });
   }
 }
 

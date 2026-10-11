@@ -682,8 +682,10 @@ describe("Suite 10: page and auth", () => {
       // The planner was told to write to the person who commented, and to suggest only what exists.
       expect(asked).toHaveLength(1);
       expect(asked[0]).toContain('written to the person who commented ("you"), never "the owner"');
-      expect(asked[0]).toContain("press Request changes on the current card, or comment before approving");
-      expect(asked[0]).toContain('never "amend the task"');
+      // The planner sees who wrote each comment (here Sam, a teammate): owners may press Request changes, teammates only comment.
+      expect(asked[0]).toContain('For a comment whose author is "owner": press Request changes (on the page or in Slack), or comment before approving.');
+      expect(asked[0]).toContain("For a teammate's comment: only add a comment on the page, because only the owner decides.");
+      expect(asked[0]).toMatch(/<page_comment [^>]*author="teammate"/);
       const v2 = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
       expect(v2.document.querySelector('[data-comments="claim:2.1"] .replies .comment-text')!.textContent).toBe("Done: Moved the banner above the pay button.");
       expect(v2.document.querySelector('[data-comments="document"] .replies .comment-text')!.textContent).toBe("Not changed because: The copy is already one short line.");
@@ -1045,7 +1047,7 @@ describe("Suite 10: comments sent with an approval", () => {
     expect(turns).toHaveLength(1);
     expect(turns[0]!.systemPrompt).toContain("press Request changes in Slack, or add a comment on the task page before approving");
     expect(turns[0]!.systemPrompt).not.toContain("on the card");
-    expect(turns[0]!.modelInput).toContain("press Request changes in Slack, or add a comment here before approving");
+    expect(turns[0]!.modelInput).toContain("say you can press Request changes (here or in Slack), or add a comment here before approving.");
     expect(turns[0]!.modelInput).toContain("Name a decision by its question, never by a label such as d1");
   }, 180_000);
 
@@ -1066,11 +1068,12 @@ describe("Suite 10: comments sent with an approval", () => {
     const SAM_TEXT = "Please keep the sketches short.";
     const requirements = planDocument({ title: "Show a retry banner: requirements", decisions: [], claims: [{ id: "1", text: "People see a retry banner when a payment fails.", children: [
       { id: "1.1", text: "The banner names the failed payment." }, { id: "1.2", text: "The banner offers a retry." }] }] });
+    // The requirements slipped in level 2 claims and the design level 3 ones: numbers another document owns, which collide and are never compared.
     const design = planDocument({ title: "Show a retry banner: design", decisions: [], claims: [{ id: "1", text: "People see a retry banner when a payment fails.", children: [
-      { id: "1.1", text: "A banner component reads the payment state." }, { id: "1.2", text: "The retry button calls the payments API." }] }] });
+      { id: "1.1", text: "A banner component reads the payment state.", children: [{ id: "1.1.1", text: "A note the design wrote at level 3." }] }, { id: "1.2", text: "The retry button calls the payments API." }] }] });
     const coding = planDocument({ title: "Show a retry banner: coding plan", decisions: [], claims: [{ id: "1", text: "People see a retry banner when a payment fails.", children: [
-      { id: "1.1", text: "Edit the banner component.", children: [{ id: "1.1.1", text: "Sketch of the banner component." }] },
-      { id: "1.2", text: "Wire the retry button.", children: [{ id: "1.2.1", text: "Call the payments API." }, { id: "1.2.2", text: "Show the result." }, { id: "1.2.3", text: "Log the try." }] }] }] });
+      { id: "1.1", text: "A banner component reads the payment state.", children: [{ id: "1.1.1", text: "Sketch of the banner component." }] },
+      { id: "1.2", text: "The retry button calls the payments API.", children: [{ id: "1.2.1", text: "Call the payments API." }, { id: "1.2.2", text: "Show the result." }, { id: "1.2.3", text: "Log the try." }] }] }] });
     const model = (latest: string): string => {
       if (REQUIREMENTS_PROMPT.test(latest)) return planAnswer(requirements);
       if (DESIGN_PROMPT.test(latest)) return planAnswer(design);
@@ -1154,7 +1157,10 @@ describe("Suite 10: comments sent with an approval", () => {
     const { e2e, instructionId, questionId, samId } = await approvedDesignWithReplies();
     const asking = [...e2e.prompts, ...e2e.turns.map((turn) => turn.userText)].find((text) => text.includes("The owner sent the comments above with their approval"))!;
     expect(asking).toContain('written to the person who commented ("you"), never "the owner"');
-    expect(asking).toContain("press Request changes on the current card, or comment before approving");
+    expect(asking).toContain('For a comment whose author is "owner": press Request changes (on the page or in Slack), or comment before approving.');
+    expect(asking).toContain("For a teammate's comment: only add a comment on the page, because only the owner decides.");
+    expect(asking).toMatch(/<page_comment [^>]*author="owner"/);
+    expect(asking).toMatch(/<page_comment [^>]*author="teammate"/);
     const card = e2e.slack.lastPostWithAction("agentx_workflow_approve").text;
     expect(card).toContain("*Coding plan v1 is ready for your approval.*");
     const line = /<([^|<>]+)\|(AgentX replied to [^>]*)>/.exec(card)!;

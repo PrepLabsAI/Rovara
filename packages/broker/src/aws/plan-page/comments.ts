@@ -62,8 +62,8 @@ export interface CommentViewContext {
 const CODE_SPAN = /```[\s\S]*?(?:```|$)|`[^`\n]+`/gu;
 // Emphasis the answer model may still write: *Request changes*, **this**, _that_. A marker counts only at the edge of a short
 // phrase and not inside a word, so a*b, 2*3*4, snake_case_name and **/*.ts stay as written.
-const STAR_EMPHASIS = /(?<![\p{L}\p{N}_*\\/])(\*{1,2})(?=[^\s*])([^*\n]{1,80}?)(?<=[^\s*])\1(?![\p{L}\p{N}*])/gu;
-const UNDERSCORE_EMPHASIS = /(?<![\p{L}\p{N}_*\\/])_(?=[^\s_])([^_\n]{1,80}?)(?<=[^\s_])_(?![\p{L}\p{N}_])/gu;
+const STAR_EMPHASIS = /(?<![\p{L}\p{N}_*\\/=:])(\*{1,2})(?=[^\s*])([^*\n]{1,80}?)(?<=[^\s*])\1(?![\p{L}\p{N}*])/gu;
+const UNDERSCORE_EMPHASIS = /(?<![\p{L}\p{N}_*\\/=:])_(?=[^\s_])([^_\n]{1,80}?)(?<=[^\s_])_(?![\p{L}\p{N}_])/gu;
 
 /** AgentX's replies are plain text on the page: emphasis markers around a short phrase are dropped; code spans are left alone. */
 export function plainReplyText(text: string): string {
@@ -77,21 +77,30 @@ export function plainReplyText(text: string): string {
   return result + plain(text.slice(last));
 }
 
-// A claim number in a reply: a dotted one ("1.2.1"), or a single number after the word "claim" or "claims".
-const CLAIM_MENTION = /(?<![\p{L}\p{N}_./-])(claims?\s+)?([1-9][0-9]{0,2}(?:\.[1-9][0-9]{0,2}){0,2})(?![\p{L}\p{N}_/-]|\.[0-9])/gu;
+// A claim number in a reply: a dotted one ("1.2.1"), a single number after the word "claim" or "claims", or one in such a list
+// ("claims 1, 2 and 3"). A number followed by a unit ("2.5 seconds", "3 times", "40%") is a quantity, not a claim.
+const UNIT = String.raw`%|(?:seconds?|secs?|minutes?|mins?|hours?|days?|weeks?|ms|milliseconds?|[KMG]B|bytes?|times|percent)(?![\p{L}\p{N}])`;
+const CLAIM_MENTION = new RegExp(String.raw`(?<![\p{L}\p{N}_./-])(claims?\s+)?([1-9][0-9]{0,2}(?:\.[1-9][0-9]{0,2}){0,2})(?![\p{L}\p{N}_/-]|\.[0-9])(?!\s*(?:${UNIT}))`, "giu");
+const LIST_JOIN = /^(?:\s*,\s*(?:and\s+)?|\s+and\s+|\s*&\s*)$/iu;
 
 /** The reply's words split at each claim number that is a claim of the version that handled the comment; undefined when none is. */
 export function replyParts(text: string, claimIds: ReadonlySet<string> | undefined): ReplyPart[] | undefined {
   if (claimIds === undefined || claimIds.size === 0) return undefined;
   const parts: ReplyPart[] = [];
   let last = 0;
+  // After "claim(s) N", the numbers that follow in a list ("1, 2 and 3") are claims too.
+  let listEnd = -1;
   for (const match of text.matchAll(CLAIM_MENTION)) {
     const [whole, lead, id] = match as unknown as [string, string | undefined, string];
-    if ((lead === undefined && !id.includes(".")) || !claimIds.has(id)) continue;
+    const inList = listEnd >= 0 && LIST_JOIN.test(text.slice(listEnd, match.index));
+    if (lead === undefined && !id.includes(".") && !inList) { listEnd = -1; continue; }
+    // A number that is no claim of that version stays plain, and does not break the list it is in.
+    if (!claimIds.has(id)) { listEnd = match.index + whole.length; continue; }
     const start = match.index + (lead?.length ?? 0);
     if (start > last) parts.push({ text: text.slice(last, start) });
     parts.push({ claim: id });
     last = match.index + whole.length;
+    listEnd = last;
   }
   if (parts.length === 0) return undefined;
   if (last < text.length) parts.push({ text: text.slice(last) });
@@ -220,6 +229,7 @@ const claimElementId = (anchor: PlanAnchor, version: number, claimId: string): s
  */
 function sentNote(comment: Pick<PageCommentView, "author" | "sentWith">): string {
   if (comment.sentWith === "REQUEST_CHANGES") return "Sent with Request changes, so it can't be edited.";
+  if (comment.sentWith === undefined) return "Sent with a decision, so it can't be edited.";
   return comment.author.owner ? "Sent with your approval, so it can't be edited." : "Sent with the owner's approval, so it can't be edited.";
 }
 
