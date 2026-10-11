@@ -99,3 +99,28 @@ export async function atPlanReview(e2e: WorkflowE2E, request = "quick: Add a gre
   await e2e.settle();
   expect(e2e.workflow()).toMatchObject({ stage: "PLAN_REVIEW", state: "WAITING" });
 }
+
+/** The owner-approved PR feedback fix reaches the coder with this line. */
+export const FEEDBACK_FIX = "Implement only the owner-approved PR feedback";
+/** The coder's PR feedback fix: greet trims the name. */
+export const FIXED = [{ path: "repo/demo/greeting.ts", content: "export function greet(name: string): string {\n  return `Hello, ${name.trim()}`;\n}\n" }];
+/** The coder: EDITS for the task, FIXED for an approved PR feedback fix. */
+export const editsOrFix = (latest: string) => (latest.includes(FEEDBACK_FIX) ? FIXED : EDITS);
+
+/** What the thread says once a pull request (or a fix pushed to it) waits for its merge. */
+export const OPENED_PR = (number: number) => `Draft pull request opened: PR #${number}. Review it and merge it on GitHub; I'll finish this task when it's merged.`;
+export const PUSHED_FIX = (number: number) => `Pushed the fix to PR #${number}. Review it and merge it on GitHub; I'll finish this task when it's merged.`;
+export const MERGED = "The pull request is merged. This task is complete.";
+
+/**
+ * A Quick task taken to its open draft pull request (WAIT_FOR_MERGE/WAITING): the mention, the coding plan's approval,
+ * coding, checks, reviews and the publication. Answers GitHub's pull request.
+ */
+export async function openDraftPr(e2e: WorkflowE2E): Promise<WorkflowE2E["github"]["pullRequests"][number]> {
+  await atPlanReview(e2e);
+  await e2e.click("agentx_workflow_approve");
+  await e2e.settle();
+  expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+  expect(e2e.github.pullRequests).toHaveLength(1);
+  return e2e.github.pullRequests[0]!;
+}
