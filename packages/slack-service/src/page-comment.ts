@@ -27,7 +27,7 @@ export async function handlePageComment(message: SlackPageCommentMessage, deps: 
   try {
     const answer = (await deps.answer(message.text)).trim();
     if (answer === "") throw Object.assign(new Error("the model gave no answer"), { name: "EmptyAnswerError" });
-    result = { taskId, commentId, thread: message.thread, outcome: "ANSWERED", text: Array.from(answer).slice(0, PAGE_COMMENT_ANSWER_MAX_CHARS).join("") };
+    result = { taskId, commentId, thread: message.thread, outcome: "ANSWERED", text: cutAnswer(answer) };
   } catch (error) {
     deps.log("page_comment.answer_failed", { taskId, commentId, errorName: error instanceof Error ? error.name : "unknown" });
     result = { taskId, commentId, thread: message.thread, outcome: "FAILED" };
@@ -35,7 +35,24 @@ export async function handlePageComment(message: SlackPageCommentMessage, deps: 
   try {
     await deps.markAnswered(result);
     deps.log("page_comment.answered", { taskId, commentId, outcome: result.outcome, latencyMs: Math.max(0, now() - startedAt) });
+    return;
   } catch (error) {
     deps.log("page_comment.write_back_failed", { taskId, commentId, outcome: result.outcome, errorName: error instanceof Error ? error.name : "unknown" });
   }
+  // The broker did not take the answer: say once that there is none, so the comment does not read "answering" for ever.
+  if (result.outcome === "FAILED") return;
+  try {
+    await deps.markAnswered({ taskId, commentId, thread: message.thread, outcome: "FAILED" });
+    deps.log("page_comment.answered", { taskId, commentId, outcome: "FAILED", latencyMs: Math.max(0, now() - startedAt) });
+  } catch (error) {
+    deps.log("page_comment.write_back_failed", { taskId, commentId, outcome: "FAILED", errorName: error instanceof Error ? error.name : "unknown" });
+  }
+}
+
+/** The answer cut to what the broker takes, counted as the broker counts (UTF-16 units), never through a character pair. */
+function cutAnswer(answer: string): string {
+  if (answer.length <= PAGE_COMMENT_ANSWER_MAX_CHARS) return answer;
+  const cut = answer.slice(0, PAGE_COMMENT_ANSWER_MAX_CHARS);
+  const last = cut.charCodeAt(cut.length - 1);
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
 }

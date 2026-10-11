@@ -79,6 +79,27 @@ describe("a page comment the Slack service answers", () => {
     expect(t.logs.some((entry) => entry.event === "page_comment.write_back_failed")).toBe(true);
   });
 
+  it("an answer is cut by the broker's own length, never through a character pair; a failed write-back is retried once as failed", async () => {
+    // 2,999 plain characters then emoji (two UTF-16 units each): the cut keeps 2,999 and never half an emoji.
+    const t = setup(async () => `${"x".repeat(2_999)}${"\u{1F600}".repeat(10)}`);
+    await handlePageComment(message, t.deps);
+    const text = (t.marked[0] as { text: string }).text;
+    expect(text.length).toBeLessThanOrEqual(PAGE_COMMENT_ANSWER_MAX_CHARS);
+    expect(text).toBe("x".repeat(2_999));
+    const pairs = setup(async () => "\u{1F600}".repeat(2_000));
+    await handlePageComment(message, pairs.deps);
+    expect((pairs.marked[0] as { text: string }).text).toBe("\u{1F600}".repeat(1_500));
+    // The broker refused the answer: the service says it failed, once, so the comment does not wait for ever.
+    const sent: SlackCommentAnsweredRequest[] = [];
+    const retried = setup(async () => "An answer.");
+    await handlePageComment(message, { ...retried.deps, markAnswered: async (input) => { sent.push(input); if (sent.length === 1) throw new Error("broker refused"); } });
+    expect(sent.map((input) => input.outcome)).toEqual(["ANSWERED", "FAILED"]);
+    // A failed FAILED is not retried again.
+    const twice: SlackCommentAnsweredRequest[] = [];
+    await handlePageComment(message, { ...retried.deps, markAnswered: async (input) => { twice.push(input); throw new Error("broker down"); } });
+    expect(twice.map((input) => input.outcome)).toEqual(["ANSWERED", "FAILED"]);
+  });
+
   it("an older service's schema refuses a page-comment message", async () => {
     expect(SlackPageCommentMessageSchema.safeParse(message).success).toBe(true);
     expect(SlackRequestMessageSchema.safeParse(message).success).toBe(false);
