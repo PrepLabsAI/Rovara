@@ -213,9 +213,10 @@ export async function createWorkflowE2E(options: {
   optionalChecks?: WorkflowOptionalCheck[];
   /**
    * What a project command's run returns, by command. Absent (or undefined for a command): it passes with "ok". Lets a test
-   * make a check fail, or be broken (exit 126 or 127, a python SyntaxError), as the worker's own check runner would report it.
+   * make a check fail, be broken (exit 126 or 127, a python SyntaxError) or time out, as the worker's own check runner would report
+   * it; throwing is the check runner itself failing.
    */
-  checkResult?: (command: ProjectCommand) => { exitCode: number | null; stdout: string; stderr: string } | undefined;
+  checkResult?: (command: ProjectCommand) => { exitCode: number | null; stdout: string; stderr: string; timedOut?: boolean } | undefined;
   /** Runs in the worker just before it publishes, with the repository's directory (to change the workspace, say). */
   beforePublish?: (repositoryDirectory: string) => Promise<void>;
   /**
