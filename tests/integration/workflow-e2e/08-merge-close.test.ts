@@ -4,7 +4,7 @@
 // blocked task's discard), a teammate's Close, and the Canvas closeout.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_BLOCK_REASONS } from "@agentx/contracts";
+import { WORKFLOW_BLOCK_REASONS, agentXError } from "@agentx/contracts";
 import { CLOSED_REPLY } from "../../../packages/broker/src/developer/share-messages.js";
 import { SLACK_TEAM } from "../../support/slack-broker.js";
 import { createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
@@ -457,6 +457,58 @@ describe("Suite 8: merge and close", () => {
       await e2e.settle();
       const records = e2e.db.find((item) => item.taskId === e2e.taskId() && item.action === "close" && item.phase === "completed");
       expect(records.map((record) => record.responseText)).toEqual(["The task is complete (its pull request merged), and its workspace is released."]);
+    }, 120_000);
+
+    it("compute that refuses while it stops: the release keeps its claim, and the next event finishes it, once", async () => {
+      const { e2e, pullRequest } = await waiting();
+      const taskId = e2e.taskId();
+      e2e.deleteEc2Session.mockImplementationOnce(async () => { throw agentXError("WORKSPACE_BUSY", "the workspace compute is stopping"); });
+      await mergeWebhook(e2e, pullRequest.number);
+      // The workspace is claimed (nothing can start there), but nothing is given back yet.
+      expect(workspaceOf(e2e, taskId).status).toBe("CLOSING");
+      expect(counter(e2e, MEMBER)).toEqual({ count: 1, tasks: [taskId] });
+      // GitHub's next delivery (a redelivery, say) takes the claim up.
+      expect(await e2e.githubWebhook(pullRequest.number, { merged: true })).toBe(200);
+      await e2e.settle();
+      expect(workspaceOf(e2e, taskId).status).toBe("CLOSED");
+      expect(counter(e2e, MEMBER)).toEqual({ count: 0, tasks: [] });
+      expect(counter(e2e, ORGANIZATION).count).toBe(0);
+      expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(2);
+    }, 120_000);
+
+    it("the compute is deleted but the release's transaction fails: nothing is given back, and a later event gives it back once", async () => {
+      const { e2e, pullRequest } = await waiting();
+      const taskId = e2e.taskId();
+      const workspaceKey = { pk: `WORKSPACE#${String(taskById(e2e, taskId).workspaceId)}`, sk: "META" };
+      // While the compute is deleted, the workspace's claim is lost (its record moved back), so the commit's condition fails.
+      e2e.deleteEc2Session.mockImplementationOnce(async () => { e2e.db.set({ ...e2e.db.get(workspaceKey.pk, workspaceKey.sk)!, status: "READY" }); });
+      await mergeWebhook(e2e, pullRequest.number);
+      expect(workspaceOf(e2e, taskId).status).toBe("READY");
+      expect(counter(e2e, MEMBER)).toEqual({ count: 1, tasks: [taskId] });
+      expect(taskById(e2e, taskId).releasedAt).toBeUndefined();
+      expect(await e2e.githubWebhook(pullRequest.number, { merged: true })).toBe(200);
+      await e2e.settle();
+      expect(workspaceOf(e2e, taskId).status).toBe("CLOSED");
+      expect(counter(e2e, MEMBER)).toEqual({ count: 0, tasks: [] });
+      expect(counter(e2e, ORGANIZATION).count).toBe(0);
+    }, 120_000);
+
+    it("two releases at once (a webhook and an operation's result racing) give the slot back exactly once", async () => {
+      const { e2e, pullRequest } = await waiting();
+      const taskId = e2e.taskId();
+      e2e.github.merge(pullRequest.number);
+      const statuses = await e2e.concurrently(
+        () => e2e.webhook({ kind: "pull_request", number: pullRequest.number, action: "closed", merged: true }),
+        () => e2e.webhook({ kind: "pull_request", number: pullRequest.number, action: "closed", merged: true }),
+        () => e2e.webhook({ kind: "pull_request", number: pullRequest.number, action: "closed", merged: true }),
+      ) as Array<{ status: number }>;
+      expect(statuses.map((answer) => answer.status)).toEqual([200, 200, 200]);
+      await e2e.settle();
+      expect(taskById(e2e, taskId).workflow).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
+      expect(counter(e2e, MEMBER)).toEqual({ count: 0, tasks: [] });
+      expect(counter(e2e, ORGANIZATION).count).toBe(0);
+      expect(workspaceOf(e2e, taskId).status).toBe("CLOSED");
+      expect(e2e.db.find((item) => item.taskId === taskId && item.action === "close" && item.phase === "completed")).toHaveLength(1);
     }, 120_000);
 
     it("a merge while the feedback review runs releases the slot once that review ends", async () => {
