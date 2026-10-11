@@ -463,6 +463,22 @@ describe("native developer task workflow", () => {
     });
   });
 
+  it("allows the owner of a rejected task (CLOSED, outcome REJECTED) to retry its Canvas closeout", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
+      requestId: randomUUID(), project: "payments", instructions: "Retry a rejected task's closeout", client: "test-client", workflow: true, workflowPath: "QUICK",
+    });
+    const taskId = String((started.body.task as { taskId: string }).taskId);
+    const row = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workflow: Record<string, unknown> };
+    const workflowRevision = Number(row.workflow.revision);
+    const attempt = { status: "ARCHIVE_PENDING", workflowRevision, terminalState: "CLOSED", reason: "artifact_unavailable",
+      attempts: 1, updatedAt: new Date().toISOString() };
+    harness.db.set({ ...row, workflow: { ...row.workflow, stage: "CLOSED", state: "COMPLETE", outcome: "REJECTED", canvasCloseoutAttempt: attempt } });
+    const response = await harness.dev(MAYA, "POST", `/v1/dev/tasks/${taskId}/canvas-closeout/retry`, { requestId: randomUUID(), workflowRevision });
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ status: "retry_requested", workflowRevision });
+  });
+
   it("rejects an owner retry when the workflow advanced after the persisted preparation failure", async () => {
     const harness = await createDeveloperTaskBroker();
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {

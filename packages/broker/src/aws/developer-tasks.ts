@@ -1911,7 +1911,8 @@ async function retryTaskCanvasCloseout(deps: DeveloperTaskRouteDependencies, cal
     throw agentXError("IDEMPOTENCY_CONFLICT", "the requested closeout workflow revision is no longer current");
   }
   const terminal = (task.workflow.stage === "MERGED" && task.workflow.state === "COMPLETE" && task.workflow.outcome === "MERGED")
-    || (task.workflow.stage === "CLOSED" && task.workflow.state === "COMPLETE" && task.workflow.outcome === "CLOSED")
+    // The CLOSED stage ends complete whatever its outcome (in practice REJECTED: the owner rejected the plan).
+    || (task.workflow.stage === "CLOSED" && task.workflow.state === "COMPLETE")
     || (task.closedAt !== undefined && task.workflow.stage !== "MERGED");
   if (!terminal) throw agentXError("CONFIG_INVALID", "Canvas closeout can only be retried for a terminal task");
   if (closeout !== undefined) {

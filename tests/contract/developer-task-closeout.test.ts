@@ -56,6 +56,15 @@ function storeFor(input: TaskCanvasCloseoutTask = task, options: { artifactBytes
 }
 
 describe("verified Slack Canvas closeout", () => {
+  it("closes out a rejected task's Canvases (CLOSED, outcome REJECTED, not closed by hand)", async () => {
+    const { closedAt: _closed, ...open } = task;
+    void _closed;
+    const h = storeFor({ ...open, workflow: { ...task.workflow!, outcome: "REJECTED" } });
+    const result = await runTaskCanvasCloseout(h.store, { taskId });
+    expect(result).toMatchObject({ status: "COMPLETE", terminalState: "CLOSED" });
+    expect(h.calls.filter((call) => call.startsWith("delete:"))).toEqual(["delete:F12345678", "delete:F22345678"]);
+  });
+
   it("stores and verifies one immutable manifest before deleting every versioned Canvas", async () => {
     const h = storeFor();
     await expect(runTaskCanvasCloseout(h.store, { taskId })).resolves.toMatchObject({ status: "COMPLETE" });

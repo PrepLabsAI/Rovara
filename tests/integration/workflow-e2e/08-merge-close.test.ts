@@ -447,6 +447,8 @@ describe("Suite 8: merge and close", () => {
       expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(1);
       const records = e2e.db.find((item) => item.taskId === taskId && item.action === "close" && item.phase === "completed");
       expect(records.map((record) => record.responseText)).toEqual(["The task is complete (its plan was rejected), and its workspace is released."]);
+      // Its Canvas closeout runs as a closed task's does.
+      expect(e2e.workflow().canvasCloseout).toMatchObject({ status: "COMPLETE", terminalState: "CLOSED" });
     }, 120_000);
 
     it("a merge writes the close's audit record once, saying the pull request merged", async () => {
