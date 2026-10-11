@@ -3941,13 +3941,15 @@ async function sendSlackWorkflowBack(dependencies: AwsBrokerDependencies, tasks:
 }
 
 /**
- * Task 16: Close task, after the owner confirmed in Slack that code not in a pull request is discarded. With no pull
- * request open that confirmation is the owner's authorization to discard; with one, the close keeps its usual check.
+ * Task 16: Close task, after the owner confirmed in Slack that code not in a pull request is discarded (its open pull
+ * request stays on GitHub). That confirmation is the owner's authorization to discard, with or without a pull request:
+ * otherwise an approved fix that was never pushed refused the close, and the thread, told "I'll post here when it's
+ * closed", heard nothing more.
  */
 async function closeSlackWorkflowTask(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowCloseEvent) {
-  const { task, taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "close this task");
+  const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "close this task");
   const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller);
-  const body = JSON.stringify({ requestId, discard_unpublished: (task.workflow?.pullRequests?.length ?? 0) === 0 });
+  const body = JSON.stringify({ requestId, discard_unpublished: true });
   const path = `/v1/dev/tasks/${taskId}/close`;
   return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
 }

@@ -1672,7 +1672,10 @@ describe("exits for blocked work (Task 16)", () => {
     expect(operations(harness, workspaceId).find((item) => item.kind === "close")).toMatchObject({ discardUnpublished: true });
   });
 
-  it("closes from Slack without discarding when a pull request is recorded, so the close keeps its check for unpublished work", async () => {
+  // Changed by e2e 8.8: the close modal says code that isn't in a pull request is discarded and the open pull request stays
+  // on GitHub, so the owner's confirmation discards with a pull request too (keeping the check left an unpushed fix
+  // refusing the close, and the thread was never told).
+  it("closes from Slack discarding unpublished work also when a pull request is recorded, as the confirmed modal says", async () => {
     const harness = await createDeveloperTaskBroker();
     const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000086" };
     const started = await harness.handler({ source: "agentx.slack-ingress", action: "start-workflow", thread,
@@ -1688,7 +1691,7 @@ describe("exits for blocked work (Task 16)", () => {
     expect(closed.statusCode).toBe(200);
     const close = operations(harness, workspaceId).find((item) => item.kind === "close");
     expect(close).toBeDefined();
-    expect(close?.discardUnpublished).not.toBe(true);
+    expect(close?.discardUnpublished).toBe(true);
   });
 
   it("sends blocked work back to coding from its Slack thread for the owner only", async () => {
