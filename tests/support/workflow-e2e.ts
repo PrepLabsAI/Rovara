@@ -82,6 +82,8 @@ const REPOSITORY_URL = "https://github.com/example/demo.git";
 const RESPONSE_URL = "https://hooks.slack.com/actions/T0BSHLLUGBD/1/e2e";
 const MANIFEST_PATH = ".agentx/preparation-manifest.json";
 const MAX_SETTLE_STEPS = 40;
+/** The review pages' base, as the notifier links them. */
+const REVIEW_URL_BASE = "https://agentx.example.test";
 /** The GitHub App's webhook secret, as the broker reads it; the test signs its deliveries with it. */
 const WEBHOOK_SECRET = "e2e-github-webhook-secret-0123456789abcdef";
 
@@ -353,6 +355,7 @@ export async function createWorkflowE2E(options: {
     const commit = await git(["commit-tree", tree, "-p", payload.workflowBaseCommit, "-m", `AgentX: ${payload.title}`]);
     // The worker leaves the workspace on the published commit (same tree, new commit), so later reads see HEAD moved.
     await git(["checkout", "--force", "-B", payload.headBranch, commit]);
+    recordPush(invocation.workspaceId, commit);
     github.push(credential.token, payload.headBranch, commit, tree, [payload.workflowBaseCommit]);
     const pullRequest = await callbacks.pullRequestSink({
       repository: "demo", repositoryUrl: REPOSITORY_URL, headBranch: payload.headBranch, baseBranch: "main", commit, title: payload.title,
@@ -381,6 +384,7 @@ export async function createWorkflowE2E(options: {
     await git(["merge-base", "--is-ancestor", baseCommit, "HEAD"]);
     const commit = await git(["commit-tree", tree, "-p", remoteHead, "-m", "AgentX: address PR feedback"]);
     await git(["checkout", "--force", "-B", payload.headBranch, commit]);
+    recordPush(invocation.workspaceId, commit);
     github.push(credential.token, payload.headBranch, commit, tree, [remoteHead]);
     const updated = await callbacks.pullRequestUpdateSink({ repository: payload.repository, pullRequestNumber: payload.pullRequestNumber, action: "append",
       headBranch: payload.headBranch, baseBranch: payload.baseBranch, previousCommit: remoteHead, commit });
@@ -456,6 +460,18 @@ export async function createWorkflowE2E(options: {
     return { ...record, dynamodb: { ...rest, ...(newImage === undefined ? {} : { NewImage: newImage }), ...(oldImage === undefined ? {} : { OldImage: oldImage }) } };
   };
 
+  /** The task that owns a workspace, through the workspace's task pointer (as the broker finds it). */
+  const taskOf = (workspaceId: string): Record<string, unknown> | undefined => {
+    const pointer = db.get(`WORKSPACE#${workspaceId}`, "DEVELOPER_TASK");
+    return typeof pointer?.taskId === "string" ? db.get(`DEVTASK#${pointer.taskId}`, "META") : undefined;
+  };
+  /** Every push AgentX made, with the task's workflow at that moment (INV-CODE). */
+  const pushedWorkflows: Array<{ commit: string; workflow: WorkflowSnapshot | undefined }> = [];
+  const recordPush = (workspaceId: string, commit: string): void => {
+    const parsed = WorkflowSnapshotSchema.safeParse(taskOf(workspaceId)?.workflow);
+    pushedWorkflows.push({ commit, workflow: parsed.success ? structuredClone(parsed.data) : undefined });
+  };
+
   /** Faults and version skew the test asked the worker for (`e2e.worker`). */
   const crashes: Array<{ kind: E2EInvocationKind; afterPush: boolean }> = [];
   const failures: Array<{ kind: E2EInvocationKind; message: string }> = [];
@@ -482,14 +498,14 @@ export async function createWorkflowE2E(options: {
       : { ...queued, payload: Object.fromEntries(Object.entries(queued.payload).filter(([key]) => !strippedFields.includes(key))) } as WorkerInvocation;
     invocations.push(invocation);
     // What the owner had decided when this run started, for the invariant that only an owner's click changes code.
-    const owning = db.find((item) => item.entityType === "DEVELOPER_TASK" && item.workspaceId === invocation.workspaceId)[0]?.workflow as Partial<WorkflowSnapshot> | undefined;
+    const owningTask = taskOf(invocation.workspaceId);
+    const owning = owningTask?.workflow as Partial<WorkflowSnapshot> | undefined;
     // A Retry coding press: the broker records the owner's own request for this run as an accepted "continue" turn.
-    const owner = db.find((item) => item.entityType === "DEVELOPER_TASK" && item.workspaceId === invocation.workspaceId)[0]?.slackUserId;
+    const owner = owningTask?.slackUserId;
     const ownerRetry = owner !== undefined && db.find((item) => item.operationId === invocation.operationId && item.action === "continue" && item.outcome === "accepted"
       && (item.developer as { slackUserId?: unknown } | undefined)?.slackUserId === owner).length > 0;
     ledger.push({ operationId: invocation.operationId, kind: invocation.kind, ...(invocation.kind === "task" && invocation.payload.workflowMode !== undefined ? { mode: invocation.payload.workflowMode } : {}),
-      ownerDecisions: (owning?.decisions ?? []).filter((decision) => decision.actorRole === "TASK_OWNER").length,
-      feedbackApprovals: (owning?.feedbackDecisions ?? []).filter((decision) => decision.decision === "APPROVE").length,
+      decided: structuredClone({ decisions: owning?.decisions ?? [], feedbackDecisions: owning?.feedbackDecisions ?? [], artifacts: owning?.artifacts ?? [] }),
       ...(ownerRetry ? { ownerRetry: true } : {}) });
     // The code each review run is given: the workspace as it is when the run starts.
     if (invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW") reviewedTrees.push(await workspaceTree(`review-${invocation.operationId}`));
@@ -605,7 +621,7 @@ export async function createWorkflowE2E(options: {
       await onCreated?.(id);
       return { canvasId: id, permalink: `https://acme.slack.com/docs/${SLACK_TEAM}/${id}` };
     },
-    reviewUrlBase: "https://agentx.example.test",
+    reviewUrlBase: REVIEW_URL_BASE,
     now: () => Date.now(), log: () => undefined, deliveryFailed: () => undefined,
   });
   /** Stream to queue, then every queued notice once; failed ones stay queued. */
@@ -826,7 +842,7 @@ export async function createWorkflowE2E(options: {
       }
     },
     db, s3, handler, slack, github, repoDirectory, baseCommit, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs,
-    ledger, reviewedTrees, briefLimit,
+    ledger, reviewedTrees, briefLimit, pushedWorkflows, reviewUrlBase: REVIEW_URL_BASE,
 
     /** Delivers every notice the table's writes have queued (the stream, then the queue), without running any worker. */
     deliverNotices: pumpNotices,
