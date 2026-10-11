@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { RelativeWorkspacePathSchema } from "./project.js";
+import { redactText } from "./redaction.js";
 
 /**
  * A check as a model proposes it: a coding plan's `agentx-checks` entry, or a corrected check a PR feedback reviewer
@@ -65,9 +66,23 @@ export function proposedCheckProblem(value: unknown, repositoryPaths?: readonly 
   return WorkflowProposedCheckInputSchema.safeParse(value).success ? undefined : "it must have only label, cwd, executable, args and timeoutSeconds";
 }
 
+/**
+ * A check's command as the owner reads it before approving it: the program, then each argument (quoted when it holds
+ * anything but plain characters). Past `max` characters only the arguments are cut, ending in "…": the program always shows.
+ */
+export function workflowCheckCommandText(command: { executable: string; args: readonly string[] }, max = 160): string {
+  const args = command.args.map((arg) => /^[A-Za-z0-9._/=:@+,-]+$/.test(arg) ? arg : JSON.stringify(arg)).join(" ");
+  const full = args.length === 0 ? command.executable : `${command.executable} ${args}`;
+  if (full.length <= max) return full;
+  const room = Math.max(0, max - command.executable.length - 2);
+  return `${command.executable} ${args.slice(0, room).trimEnd()}…`;
+}
+
 /** The longest command (program and arguments joined by spaces) a corrected check from PR feedback may have. */
 export const WORKFLOW_FEEDBACK_CHECK_COMMAND_MAX = 300;
 const PLAIN_TEXT = /^[\x20-\x7e]*$/;
+/** The longest folder a corrected check from PR feedback may run in. */
+export const WORKFLOW_FEEDBACK_CHECK_FOLDER_MAX = 120;
 
 /**
  * What is wrong with a corrected check a PR feedback reviewer proposes, or undefined. Besides the coding plan's rules,
@@ -83,9 +98,14 @@ export function feedbackReplacementCheckProblem(value: unknown, repositoryPaths?
   const command = [executable, ...args].join(" ");
   // The label as given: the schema trims it, and a hidden character at either end must be refused too.
   const rawLabel = (value as { label: string }).label;
-  if ([rawLabel, label, cwd, executable, ...args].some((text) => !PLAIN_TEXT.test(text)) || command.length > WORKFLOW_FEEDBACK_CHECK_COMMAND_MAX
-    || args.some((arg) => arg.includes("`") || arg.includes("$("))) {
-    return "keep the command under 300 plain characters without ` or $(";
+  const plainCode = (text: string) => PLAIN_TEXT.test(text) && !text.includes("`") && !text.includes("$(");
+  if (!plainCode(cwd) || cwd.length > WORKFLOW_FEEDBACK_CHECK_FOLDER_MAX) return "keep its folder to at most 120 plain characters without ` or $(";
+  if ([rawLabel, label, executable].some((text) => !PLAIN_TEXT.test(text)) || !args.every(plainCode) || command.length > WORKFLOW_FEEDBACK_CHECK_COMMAND_MAX) {
+    return "keep the command to at most 300 plain characters without ` or $(";
+  }
+  // A card shows model text redacted; a check whose text redaction would change could not be shown as it runs.
+  if ([label, cwd, workflowCheckCommandText({ executable, args }, Number.POSITIVE_INFINITY)].some((text) => redactText(text) !== text)) {
+    return "the command looks like it contains a secret; checks must not include secrets";
   }
   return undefined;
 }

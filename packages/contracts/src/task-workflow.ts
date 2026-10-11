@@ -744,17 +744,7 @@ export function workflowFeedbackCheckChanges(
   return { obsolete, added, byFinding, problems };
 }
 
-/**
- * A check's command as the owner reads it before approving it: the program, then each argument (quoted when it holds
- * anything but plain characters). Past `max` characters only the arguments are cut, ending in "…": the program always shows.
- */
-export function workflowCheckCommandText(command: { executable: string; args: readonly string[] }, max = 160): string {
-  const args = command.args.map((arg) => /^[A-Za-z0-9._/=:@+,-]+$/.test(arg) ? arg : JSON.stringify(arg)).join(" ");
-  const full = args.length === 0 ? command.executable : `${command.executable} ${args}`;
-  if (full.length <= max) return full;
-  const room = Math.max(0, max - command.executable.length - 2);
-  return `${command.executable} ${args.slice(0, room).trimEnd()}…`;
-}
+export { workflowCheckCommandText } from "./workflow-check-input.js";
 
 /**
  * How a proposal card and the review page say approved fixes' check changes, one finding at a time (each finding's
