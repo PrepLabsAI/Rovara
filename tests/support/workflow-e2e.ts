@@ -253,7 +253,8 @@ export async function createWorkflowE2E(options: {
   let configuredSecret: string | null = options.webhookSecret === undefined ? WEBHOOK_SECRET : options.webhookSecret;
   let cachedSecret = configuredSecret;
   const githubWebhookSecret = async (read?: { refresh?: boolean }): Promise<string> => {
-    if (read?.refresh === true) cachedSecret = configuredSecret;
+    // As the production reader does (github-credentials.ts): `refresh`, or a cached copy with no usable key, reads the secret again.
+    if (read?.refresh === true || cachedSecret === null) cachedSecret = configuredSecret;
     // The production reader's own refusal for an App secret with no usable webhook secret.
     return cachedSecret === null ? webhookSecretFromSecret("{}") : cachedSecret;
   };
