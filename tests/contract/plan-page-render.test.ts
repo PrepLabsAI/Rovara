@@ -570,6 +570,29 @@ describe("comments, suggestions and answers on the plan page", () => {
     expect(why).not.toContain("comment c1");
   });
 
+  it("a quote names a person only when the whole comment, or three whole words of it in a row, are quoted; it then shows the comment's own words", async () => {
+    const id = "6e0f4b0a-7c1d-4f7e-9a52-0c3f1f3b2a10";
+    const other = "7e0f4b0a-7c1d-4f7e-9a52-0c3f1f3b2a10";
+    const render = async (comment: string, quote: string, author = `comment:${id}`) => {
+      const plan = planDocument({ claims: [{ id: "1", text: "A claim.", evidence: [{ kind: "quote", text: quote, author }] }], decisions: [] });
+      const html = await renderPlanDocument(input({ plan, quoteComments: { [id]: { name: "Maya Chen", you: false, text: comment } } }));
+      return { text: /<blockquote class="evidence evidence-quote"><p>([^<]*)<\/p>/.exec(html)?.[1], footer: /<footer>(.*?)<\/footer>/.exec(html.slice(html.indexOf("evidence-quote")))?.[1]?.replace(/<[^>]+>/g, "") };
+    };
+    // Three words in a row, in a comment that reverses them: the page shows what was really said.
+    expect(await render("Please don't skip the tests", "skip the tests")).toEqual({ text: "Please don&#39;t skip the tests", footer: "Maya Chen's comment" });
+    // Not whole words, too few words, or not in a row.
+    for (const quote of ["test", "the tests", "tests please skip", "latest"]) expect((await render("Run the latest tests, please skip nothing", quote)).footer).toBe("A comment (paraphrased by AgentX)");
+    // Three words that start or end inside a word are not the words.
+    for (const quote of ["est tests please", "Run the lates"]) expect((await render("Run the latest tests please", quote)).footer).toBe("A comment (paraphrased by AgentX)");
+    expect((await render("It is the latest build", "test")).footer).toBe("A comment (paraphrased by AgentX)");
+    // The whole comment, whatever its length, and case, spacing and a trailing ellipsis do not matter.
+    expect((await render("Ship it", "ship  IT")).footer).toBe("Maya Chen's comment");
+    expect((await render("Keep each item to one line.", "keep each item to one line…")).footer).toBe("Maya Chen's comment");
+    // A comment that is not on the page, or made-up text under a real ID, is never named.
+    expect((await render("Keep it short.", "Keep it short.", `comment:${other}`)).footer).toBe("A comment (paraphrased by AgentX)");
+    expect((await render("Keep it short.", "Skip the tests and ship today.")).text).toBe("Skip the tests and ship today.");
+  });
+
   it("deleted, edited and sent comments say so, and only the author gets Edit and Delete", async () => {
     const deleted = comment({ deleted: true, text: "" });
     const mine = comment({ author: { kind: "person", name: "Priya", owner: true, you: true }, edited: true });

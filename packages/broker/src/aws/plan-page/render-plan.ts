@@ -125,14 +125,41 @@ function codeEvidence(context: Context, claim: PlanClaim, index: number, item: E
   return `<figure class="evidence evidence-code evidence-missing"><figcaption>${range}</figcaption>${note}<p class="evidence-status">${sentence}</p></figure>`;
 }
 
-/** Words as they are compared: lower case, one space between them, a trailing ellipsis and surrounding quote marks dropped. */
-const normalised = (value: string): string => value.toLowerCase().replace(/[“”"]/gu, " ").replace(/(\.{3}|…)\s*$/u, "").replace(/\s+/gu, " ").trim();
+/** The most of a comment's own words a quote shows. */
+const QUOTE_SHOWN_MAX_CHARS = 300;
 
-/** Whether `quote` is in the words of `comment` (so the page may say the comment's author said it). */
+/**
+ * Whether `quote` is in the words of `comment`: the whole comment, or at least three whole words of it in a row (case and
+ * spacing aside, a trailing ellipsis and quote marks dropped). "test" is not in "latest", and a fragment of two words is
+ * not enough to put a name on.
+ */
 function quotedFrom(comment: string, quote: string): boolean {
-  const said = normalised(quote);
-  const words = normalised(comment);
-  return said.length >= 4 ? words.includes(said) : said.length > 0 && words === said;
+  const words = (value: string): string[] => value.replace(/[“”"]/gu, " ").replace(/(\.{3}|…)\s*$/u, "").split(/\s+/u).filter((word) => word !== "");
+  const said = words(quote);
+  if (said.length === 0) return false;
+  if (said.join(" ").toLowerCase() === words(comment).join(" ").toLowerCase()) return true;
+  if (said.length < 3) return false;
+  const escaped = said.map((word) => word.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("\\s+");
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "iu").test(comment);
+}
+
+/** The comment a quote credits (by ID, or by ref for a plan stored before comments were credited by ID), and whether the quoted words are in it. */
+function creditedComment(context: Context, item: Extract<PlanEvidenceInput, { kind: "quote" }>): { id: string; name: string; you: boolean; text: string; matches: boolean } | undefined {
+  const ref = commentRefInAuthor(item.author);
+  const id = commentIdInAuthor(item.author) ?? (ref === undefined ? undefined : context.input.commentRefs?.[ref]);
+  const comment = id === undefined ? undefined : context.input.quoteComments?.[id];
+  return id === undefined || comment === undefined ? undefined : { id, ...comment, matches: quotedFrom(comment.text, item.text) };
+}
+
+/**
+ * The words a quote shows. A quote that credits a comment whose words it matches shows the comment's own words (cut), never
+ * the planner's copy of them, so no model-chosen fragment carries a person's name.
+ */
+function quoteText(context: Context, item: Extract<PlanEvidenceInput, { kind: "quote" }>): string {
+  const credited = creditsPageComment(item.author) ? creditedComment(context, item) : undefined;
+  if (credited?.matches !== true) return t(item.text);
+  const characters = Array.from(credited.text.replace(/\s+/gu, " ").trim());
+  return t(characters.length > QUOTE_SHOWN_MAX_CHARS ? `${characters.slice(0, QUOTE_SHOWN_MAX_CHARS - 1).join("").trimEnd()}…` : characters.join(""));
 }
 
 /**
@@ -143,13 +170,11 @@ function quotedFrom(comment: string, quote: string): boolean {
  */
 function quoteAuthor(context: Context, item: Extract<PlanEvidenceInput, { kind: "quote" }>): string {
   if (!creditsPageComment(item.author)) return t(item.author);
-  const ref = commentRefInAuthor(item.author);
-  const id = commentIdInAuthor(item.author) ?? (ref === undefined ? undefined : context.input.commentRefs?.[ref]);
-  const comment = id === undefined ? undefined : context.input.quoteComments?.[id];
-  if (id === undefined || comment === undefined) return "A comment (paraphrased by AgentX)";
-  const link = `href="#comment-${escapeHtml(id)}"`;
-  if (!quotedFrom(comment.text, item.text)) return `<a ${link}>A comment (paraphrased by AgentX)</a>`;
-  return `<a ${link}>${comment.you ? "Your comment" : `${t(comment.name)}'s comment`}</a>`;
+  const credited = creditedComment(context, item);
+  if (credited === undefined) return "A comment (paraphrased by AgentX)";
+  const link = `href="#comment-${escapeHtml(credited.id)}"`;
+  if (!credited.matches) return `<a ${link}>A comment (paraphrased by AgentX)</a>`;
+  return `<a ${link}>${credited.you ? "Your comment" : `${t(credited.name)}'s comment`}</a>`;
 }
 
 async function evidenceHtml(context: Context, claim: PlanClaim, index: number, item: PlanEvidenceInput): Promise<string> {
@@ -159,7 +184,7 @@ async function evidenceHtml(context: Context, claim: PlanClaim, index: number, i
     case "sketch":
       return `<figure class="evidence evidence-sketch"><figcaption>Sketch: not in the repository yet <span class="lang">${t(item.language)}</span></figcaption>${item.note === undefined ? "" : `<p class="evidence-note">${t(item.note)}</p>`}<pre><code>${t(item.code)}</code></pre></figure>`;
     case "quote":
-      return `<blockquote class="evidence evidence-quote"><p>${t(item.text)}</p><footer>${quoteAuthor(context, item)}</footer></blockquote>`;
+      return `<blockquote class="evidence evidence-quote"><p>${quoteText(context, item)}</p><footer>${quoteAuthor(context, item)}</footer></blockquote>`;
     case "flow":
     case "schema":
     case "stateMachine": {

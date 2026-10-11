@@ -232,7 +232,9 @@ async function designApproved(options: { comments?: number; long?: boolean } = {
     return commentId;
   };
   const ids = Array.from({ length: options.comments ?? 2 }, (_, index) => seed(index === 0 ? "Keep each item to one line." : options.long === true ? `Comment ${index + 1}: ${"Long thought. ".repeat(100)}` : "Why two steps?"));
-  harness.db.set({ pk: `DEVTASK#${taskId}`, sk: "COMMENTS", entityType: "TASK_COMMENT_COUNTER", taskId, count: ids.length, seq: ids.length });
+  // A comment on the design that the approval leaves out.
+  const outside = seed("Left out for now.");
+  harness.db.set({ pk: `DEVTASK#${taskId}`, sk: "COMMENTS", entityType: "TASK_COMMENT_COUNTER", taskId, count: ids.length + 1, seq: ids.length + 1 });
   const requestId = await approve(ids);
   const plan = async (prefix: string, document: PlanDocument = planDocument({ title: "Retry banner coding plan", decisions: [] })) => {
     const running = operations(harness, workspaceId).find((item) => item.workflowMode === "PLAN" && item.status === "ACCEPTED")!;
@@ -245,7 +247,7 @@ async function designApproved(options: { comments?: number; long?: boolean } = {
     const running = operations(harness, workspaceId).find((item) => item.workflowMode === "PLAN" && item.status === "ACCEPTED")!;
     return String((harness.db.find((item) => item.entityType === "OUTBOX" && item.operationId === running.id)[0]?.invocation as { payload: { prompt: string } } | undefined)?.payload.prompt);
   };
-  return { harness, taskId, workspaceId, requestId, ids, plan, prompt };
+  return { harness, taskId, workspaceId, requestId, ids, outside, plan, prompt };
 }
 
 describe("planner answers to comments sent with an Approve", () => {
@@ -288,6 +290,24 @@ describe("planner answers to comments sent with an Approve", () => {
     expect(stored.claims[0]!.evidence!.map((item) => (item.kind === "quote" ? item.author : ""))).toEqual([`comment:${t.ids[0]}`, `comment:${t.ids[1]}`, "a comment"]);
   });
 
+  it("a comment:<ID> the planner writes itself is kept only for a comment this step showed it; any other form naming a comment is 'a comment'", async () => {
+    const t = await designApproved();
+    await t.plan("", planDocument({ title: "Retry banner coding plan", decisions: [], claims: [
+      { id: "1", text: "One.", evidence: [
+        { kind: "quote", text: "Keep each item to one line.", author: `comment:${t.ids[0]}` },
+        { kind: "quote", text: "Left out for now.", author: `comment:${t.outside}` },
+        { kind: "quote", text: "Made up.", author: `comment:${randomUUID()}` },
+      ] },
+      { id: "2", text: "Two.", evidence: [
+        { kind: "quote", text: "Keep each item to one line.", author: `owner (comment:${t.ids[0]})` },
+        { kind: "quote", text: "Why two steps?", author: `COMMENT:${t.ids[1]!.toUpperCase()}` },
+      ] },
+    ] }));
+    const stored = JSON.parse(t.harness.s3.objects.get(workflowOf(t.harness, t.taskId).artifacts.at(-1)!.objectKey)!) as PlanDocument;
+    const authors = stored.claims.map((claim) => claim.evidence!.map((item) => (item.kind === "quote" ? item.author : "")));
+    expect(authors).toEqual([[`comment:${t.ids[0]}`, "a comment", "a comment"], ["a comment", `comment:${t.ids[1]}`]]);
+  });
+
   it("only the comments the prompt showed can be answered", async () => {
     const t = await designApproved({ comments: 25, long: true });
     const prompt = t.prompt();
@@ -305,13 +325,18 @@ describe("planner answers to comments sent with an Approve", () => {
     expect(agentxReplies(t.harness, t.taskId).map((reply) => reply.commentId).sort()).toEqual([plannerReplyCommentId(t.ids[0]!, coding.id), plannerReplyCommentId(t.ids[shown - 1]!, coding.id)].sort());
   });
 
-  it("an answer that names another comment's ref is not taken", () => {
-    const refs = new Set(["c1", "c2"]);
+  it("an answer that says 'comment cN' of another shown comment is not taken, but a word like C4 is just a word", () => {
+    const refs = new Set(["c1", "c2", "c3", "c4"]);
     const parsed = parseCommentAnswers(answersBlock([
-      { comment: "c1", outcome: "done", reason: "Done, as c2 says it should be." },
+      { comment: "c1", outcome: "done", reason: "Done, as comment c2 says it should be." },
       { comment: "c2", outcome: "done", reason: "Left as it is." },
+      { comment: "c3", outcome: "done", reason: "Kept the C4 diagram." },
+      { comment: "c4", outcome: "done", reason: "Added the c2 flag." },
+      { comment: "c1", outcome: "done", reason: "See comment c9 (not one of these)." },
     ]), refs);
-    expect(parsed.map((answer) => answer.ref)).toEqual(["c2"]);
+    expect(parsed.map((answer) => answer.ref)).toEqual(["c2", "c3", "c4", "c1"]);
+    // Its own ref, and refs that were not shown, do not steer anything.
+    expect(parseCommentAnswers(answersBlock([{ comment: "c1", outcome: "done", reason: "As comment c1 asked." }]), refs)).toHaveLength(1);
   });
 
   it("the planner is asked for the answers after an Approve with comments, and not when the approval has none", async () => {
@@ -416,6 +441,10 @@ describe("the page's view of comments sent with a decision", () => {
     const same = person({ document: "plan", version: 1, lockedBy: { ...approved, decision: "REQUEST_CHANGES" } });
     const [, again] = pageCommentViews([same, { ...reply(artifact.id, 2), commentId: plannerReplyCommentId(same.commentId, artifact.id), parentId: same.commentId, document: "plan" }], withArtifacts);
     expect(again!.planner).toEqual({ outcome: "done", version: 2, document: "plan" });
+    // Only a comment sent with a decision can have been answered, so a reply to one that was not sent is read as it was written.
+    const unsent = person({ document: "design", version: 1 });
+    const [, unlocked] = pageCommentViews([unsent, { ...reply(artifact.id, 2), commentId: plannerReplyCommentId(unsent.commentId, artifact.id), parentId: unsent.commentId }], withArtifacts);
+    expect(unlocked!.planner).toEqual({ outcome: "done", version: 2, document: "design" });
     // A reply whose document cannot be found (an artifact no longer listed) still reads as before.
     const [, lost] = pageCommentViews([asked, reply(randomUUID(), 2)], context);
     expect(lost!.planner).toEqual({ outcome: "done", version: 2, document: "design" });

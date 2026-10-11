@@ -34,6 +34,7 @@ import {
   parsePlanDocument,
   parseCommentAnswers,
   commentRefInAuthor,
+  commentIdInAuthor,
   COMMENT_AUTHOR_PREFIX,
   UNPLACED_COMMENT_AUTHOR,
   plainPageRefs,
@@ -6580,10 +6581,14 @@ async function storePlanAnswer(
   // Claim numbers an earlier structured document of this task had and its latest dropped may not come back. A document
   // that cannot be read back or fails its digest is skipped.
   const earlier: PlanDocument[] = [];
+  let previousVersion: PlanDocument | undefined;
   for (const entry of workflow.artifacts) {
     if (entry.format !== "structured") continue;
     const loaded = await loadWorkflowDocument((key) => readObjectText(dependencies, key, EARLIER_PLAN_MAX_BYTES), entry, {}).catch(() => undefined);
-    if (loaded?.format === "structured") earlier.push(loaded.plan);
+    if (loaded?.format === "structured") {
+      earlier.push(loaded.plan);
+      if (entry.type === artifactType) previousVersion = loaded.plan;
+    }
   }
   // A coding plan's `checks` member proposes its checks; they run only once the owner approves this plan.
   const parsed = parsePlanDocument(content, {
@@ -6598,7 +6603,7 @@ async function storePlanAnswer(
   if (!parsed.ok) return unreadable(parsed.errors);
   // The owner's real request (and the replies this step was given) is what the plan says it is for, not the planner's words.
   const step = await planStepComments(dependencies, task, artifactType);
-  const plan: PlanDocument = planWithCommentIds({ ...parsed.plan, why: await planWhyEntries(dependencies, task, parsed.plan.why) }, step);
+  const plan: PlanDocument = planWithCommentIds({ ...parsed.plan, why: await planWhyEntries(dependencies, task, parsed.plan.why) }, step, previousVersion);
   const canonical = canonicalPlanJson(plan);
   if (Buffer.byteLength(canonical, "utf8") > WORKFLOW_PLAN_MAX_BYTES) return unreadable(["the plan is too long once saved"]);
 
@@ -6678,18 +6683,41 @@ async function planStepComments(
   }
 }
 
+/** The comment IDs a plan's quotes credit (`comment:<ID>`), anywhere in its claim tree. */
+function creditedCommentIds(plan: PlanDocument): Set<string> {
+  const found = new Set<string>();
+  const walk = (claims: readonly PlanClaim[]) => {
+    for (const claim of claims) {
+      for (const item of claim.evidence ?? []) {
+        const id = item.kind === "quote" ? commentIdInAuthor(item.author) : undefined;
+        if (id !== undefined) found.add(id);
+      }
+      walk(claim.children ?? []);
+    }
+  };
+  walk(plan.claims);
+  return found;
+}
+
 /**
  * A plan whose quotes credit a page comment as "comment c1" (a ref that only means something in this step) with each
  * swapped for `comment:<comment ID>`, which stays true in every later version. A ref this step did not give the planner
- * becomes plain "a comment".
+ * becomes plain "a comment". A `comment:<ID>` the planner writes itself is kept only for a comment this step showed it, or
+ * one the previous version of this document already credited (the planner copies those); anything else that names a
+ * comment, in any other form, becomes "a comment" too.
  */
-function planWithCommentIds(plan: PlanDocument, step: PlanStepComments | undefined): PlanDocument {
+function planWithCommentIds(plan: PlanDocument, step: PlanStepComments | undefined, previous?: PlanDocument): PlanDocument {
+  const allowed = new Set([...(step?.detail.includedCommentIds.slice(0, step.shown) ?? []), ...(previous === undefined ? [] : creditedCommentIds(previous))].map((id) => id.toLowerCase()));
   const credit = (author: string): string => {
     const ref = commentRefInAuthor(author);
-    if (ref === undefined) return author;
-    const position = Number(ref.slice(1));
-    const id = step === undefined || position > step.shown ? undefined : step.detail.includedCommentIds[position - 1];
-    return id === undefined ? UNPLACED_COMMENT_AUTHOR : `${COMMENT_AUTHOR_PREFIX}${id}`;
+    if (ref !== undefined) {
+      const position = Number(ref.slice(1));
+      const id = step === undefined || position > step.shown ? undefined : step.detail.includedCommentIds[position - 1];
+      return id === undefined ? UNPLACED_COMMENT_AUTHOR : `${COMMENT_AUTHOR_PREFIX}${id}`;
+    }
+    if (!/comment:/iu.test(author)) return author;
+    const id = commentIdInAuthor(author);
+    return id !== undefined && allowed.has(id) ? `${COMMENT_AUTHOR_PREFIX}${id}` : UNPLACED_COMMENT_AUTHOR;
   };
   const walk = (claims: readonly PlanClaim[]): PlanClaim[] => claims.map((claim) => ({
     ...claim,

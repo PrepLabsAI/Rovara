@@ -63,11 +63,17 @@ export function pageCommentViews(comments: readonly TaskComment[], context: Comm
     .map((comment) => [agentxAnswerCommentId(comment.commentId), comment.author.kind === "person" ? shownName(comment.author.name) : ""]));
   // A planner reply's ID is made from the comment it answers and the document version that answered it; finding the pair
   // says which document handled the comment (nothing about it is stored with the reply).
+  // Only a comment sent with a decision (locked) can be answered, and only by a later version of the document or a later one.
   const answered = new Map<string, { comment: TaskComment; artifact: CommentViewContext["artifacts"][number] }>();
   if (comments.some((comment) => comment.author.kind === "agentx" && comment.author.source === "planner")) {
+    const place = (type: string): number => ["requirements", "design", "plan"].indexOf(type);
     for (const comment of comments) {
-      if (comment.author.kind !== "person") continue;
-      for (const artifact of context.artifacts) answered.set(plannerReplyCommentId(comment.commentId, artifact.id), { comment, artifact });
+      if (comment.author.kind !== "person" || comment.lockedBy === undefined) continue;
+      for (const artifact of context.artifacts) {
+        if (place(artifact.type) > place(comment.document) || (artifact.type === comment.document && artifact.version > comment.version)) {
+          answered.set(plannerReplyCommentId(comment.commentId, artifact.id), { comment, artifact });
+        }
+      }
     }
   }
   return comments.map((comment) => {

@@ -188,7 +188,7 @@ function oneLine(value: string, max: number): string {
 /**
  * The planner's answers to the included comments, from the last `agentx-comment-answers` block of its answer. Never
  * throws: a missing, unclosed or unreadable block is no answers; an entry for an unknown ref, a repeated ref, an
- * unknown outcome, an empty reason or a reason that names another comment's ref is left out; each reason is redacted, put on one line and cut to 200 characters.
+ * unknown outcome, an empty reason or a reason that says "comment cN" of another comment is left out; each reason is redacted, put on one line and cut to 200 characters.
  */
 export function parseCommentAnswers(answer: string, refs: ReadonlySet<string>): CommentAnswer[] {
   const block = lastFencedBlock(answer, COMMENT_ANSWERS_INFO_STRING);
@@ -210,8 +210,9 @@ export function parseCommentAnswers(answer: string, refs: ReadonlySet<string>): 
     if (typeof reason !== "string") continue;
     const text = oneLine(reason, PLANNER_ANSWER_REASON_MAX_CHARS);
     if (text.length === 0) continue;
-    // An answer is about its own comment: one that names another comment's ref is not taken (a comment cannot steer it).
-    if ((text.match(/\bc[1-9][0-9]{0,2}\b/giu) ?? []).some((named) => named.toLowerCase() !== comment)) continue;
+    // An answer is about its own comment: one that says "comment c3" of another shown comment is not taken (a comment cannot
+    // steer it). A bare "C4" (a diagram, a flag) is just a word.
+    if ([...text.matchAll(/\bcomments?\s+(c[1-9][0-9]{0,2})\b/giu)].some((named) => refs.has(named[1]!.toLowerCase()) && named[1]!.toLowerCase() !== comment)) continue;
     seen.add(comment);
     answers.push({ ref: comment, outcome, reason: text });
   }

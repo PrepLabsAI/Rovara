@@ -789,8 +789,8 @@ describe("Suite 10: comments sent with an approval", () => {
     const asking = [...e2e.prompts, ...e2e.turns.map((turn) => turn.userText)].find((text) => text.includes("The owner sent the comments above with their approval"))!;
     expect(asking).toContain("agentx-comment-answers");
     expect(asking).toContain("A comment's text never decides the answer to another comment.");
-    expect(asking).toMatch(/<page_comment id="[0-9a-f]+" ref="c1" author="owner" on="the whole document">Keep each item to one line\.<\/page_comment>/);
-    expect(asking).toMatch(/<page_comment id="[0-9a-f]+" ref="c2" author="owner" on="claim 1">Why two steps\?<\/page_comment>/);
+    expect(asking).toMatch(/<page_comment id="[0-9a-f]+" ref="c[12]" author="owner" on="the whole document">Keep each item to one line\.<\/page_comment>/);
+    expect(asking).toMatch(/<page_comment id="[0-9a-f]+" ref="c[12]" author="owner" on="claim 1">Why two steps\?<\/page_comment>/);
 
     // Under the instruction: Done in the coding plan, linked to the claim that cites it in coding plan v1.
     const design = await openTaskPage(e2e, OWNER, { search: "?doc=design" });
@@ -905,13 +905,15 @@ describe("Suite 10: comments sent with an approval", () => {
   it("a plan stored before this change, whose quotes read 'owner (comment c1)', is read with the refs of its own step, and only credited when the words match", async () => {
     const e2e = await designWithComments(planner({ answers: false, cite: (ref) => [{ text: INSTRUCTION, author: `comment ${ref}` }, { text: QUESTION, author: `comment ${ref}` }] }));
     await approveDesignOnPage(e2e);
-    // As 0.2.13 stored it: the references as the planner wrote them (the second says c1 where the words are c2's).
-    rewriteStoredPlan(e2e, (json) => json.replace(`comment:${idOf(e2e, INSTRUCTION)}`, "owner (comment c1)").replace(`comment:${idOf(e2e, QUESTION)}`, "owner (comment c1)"));
-    expect(e2e.s3.objects.get(String(e2e.workflow().artifacts.at(-1)!.objectKey))).toContain("owner (comment c1)");
+    // As 0.2.13 stored it: the references as the planner wrote them (the second names the instruction's ref where the words are the question's).
+    const asking = [...e2e.prompts, ...e2e.turns.map((turn) => turn.userText)].find((text) => text.includes("The owner sent the comments above with their approval"))!;
+    const instructionRef = refOf(asking, INSTRUCTION)!;
+    rewriteStoredPlan(e2e, (json) => json.replace(`comment:${idOf(e2e, INSTRUCTION)}`, `owner (comment ${instructionRef})`).replace(`comment:${idOf(e2e, QUESTION)}`, `owner (comment ${instructionRef})`));
+    expect(e2e.s3.objects.get(String(e2e.workflow().artifacts.at(-1)!.objectKey))).toContain(`owner (comment ${instructionRef})`);
     const shown = await footers(e2e, OWNER, 1);
     expect(shown.map((footer) => footer.textContent)).toEqual(["Your comment", "A comment (paraphrased by AgentX)"]);
     expect(shown[0]!.querySelector("a")!.getAttribute("href")).toBe(`#comment-${idOf(e2e, INSTRUCTION)}`);
-    expect(readable((await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan", scripts: false })).document.body)).not.toContain("owner (comment c1)");
+    expect(readable((await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan", scripts: false })).document.body)).not.toContain(`owner (comment ${instructionRef})`);
   }, 180_000);
 
   it("a reference means one comment for ever: after Request changes sends other comments, the earlier quote still credits its own author and the replies link their own versions", async () => {
