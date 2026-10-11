@@ -334,8 +334,8 @@ function planReview(context: WorkflowMessageContext, exits: ReturnType<typeof ex
   }
   // FR-036: what Approve in Slack takes. A tiny plan (FR-037) is approved in Slack as it is, so its card is unchanged.
   if (structured.decisionCount > 0) {
-    tail.unshift(`Approve here uses AgentX's answers for ${plural(structured.decisionCount, "decision")} and includes every open comment from the task page.`);
-  } else if (!structured.tiny) tail.unshift("Approve here includes every open comment from the task page.");
+    tail.unshift(`Approve here uses AgentX's answers for ${plural(structured.decisionCount, "decision")} and includes the open comments (up to 25) from the task page.`);
+  } else if (!structured.tiny) tail.unshift("Approve here includes the open comments (up to 25) from the task page.");
   tail.push(context.documentLink === undefined ? unlinked : link(context.documentLink.url, structured.tiny ? `Open the ${name}` : `Open the full ${name}`));
   const buttons: Button[] = context.documentLink === undefined ? decisions
     : [{ type: "button", action_id: "agentx_open_review", text: { type: "plain_text", text: "Open review" }, url: context.documentLink.url }, ...decisions];

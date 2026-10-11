@@ -828,7 +828,7 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
       expect(text).toContain("|Open the coding plan>");
       expect(text).not.toMatch(/more claim|decision/);
     }], [big, (text: string) => {
-      expect(text).toContain("\nAnd 47 more claims.\nApprove here uses AgentX's answers for 20 decisions and includes every open comment from the task page.\n");
+      expect(text).toContain("\nAnd 47 more claims.\nApprove here uses AgentX's answers for 20 decisions and includes the open comments (up to 25) from the task page.\n");
       expect(text.split("\n").filter((line) => line.startsWith("> "))).toHaveLength(3);
     }]] as const) {
       const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {

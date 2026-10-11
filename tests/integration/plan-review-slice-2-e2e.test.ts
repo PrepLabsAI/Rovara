@@ -130,7 +130,7 @@ describe("deciding and commenting on the task page, end to end", () => {
   it("the owner answers a decision on the page and approves with two comments; the Slack card says who decided and what went with it", async () => {
     const e2e = await waitingPlan();
     const card = e2e.slack.lastPostWithAction("agentx_workflow_approve");
-    expect(card.text).toContain("Approve here uses AgentX's answers for 1 decision and includes every open comment from the task page.");
+    expect(card.text).toContain("Approve here uses AgentX's answers for 1 decision and includes the open comments (up to 25) from the task page.");
 
     // Sam comments from his own tab; Maya comments from hers.
     const sam = await openTaskPage(e2e, SAM, { search: "?doc=coding-plan" });
