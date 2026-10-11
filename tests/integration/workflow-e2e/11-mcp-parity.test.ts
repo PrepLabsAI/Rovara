@@ -238,6 +238,40 @@ describe("Suite 11: MCP parity", () => {
     expect(again.value).toMatchObject({ started: false });
   }, 120_000);
 
+  it("11.5 a fix that changed nothing: agentx_keep_pull_request keeps the PR as it is, as the Slack button does", async () => {
+    let fixRuns = 0;
+    const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: (latest) => {
+      if (!latest.includes("Implement only the owner-approved PR feedback")) return editsOrFix(latest);
+      fixRuns += 1;
+      return [];
+    }, feedback: (prompt) => feedbackCriticReply(prompt, { repositoryId: "demo", path: "greeting.ts", testPath: "greeting.test.ts" }) } });
+    const pullRequest = await openDraftPr(e2e);
+    const comment = e2e.github.comment(pullRequest.number, "octocat", "Please trim the name.");
+    expect(await e2e.githubWebhook(pullRequest.number, { comment })).toBe(200);
+    await e2e.settle();
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(fixRuns).toBe(1);
+    const card = e2e.slack.posts.at(-1)!;
+    expect(actionIds(card)).toContain("agentx_workflow_keep_pull_requests");
+    const task = await tool(e2e, "agentx_get_task", { task_id: e2e.taskId() });
+    const { revision } = workflowOf(task);
+    expect(task.text).toContain(`The approved fix didn't change any code, so nothing was pushed to the pull request. To run the fix again, use agentx_retry_workflow with expected_revision ${revision}. To keep the pull request as it is and wait for its merge, use agentx_keep_pull_request with expected_revision ${revision}.`);
+    const other = await e2e.mcp("agentx_keep_pull_request", { task_id: e2e.taskId(), expected_revision: revision }, OMAR);
+    expect(other.isError).toBe(true);
+    const stale = await e2e.mcp("agentx_keep_pull_request", { task_id: e2e.taskId(), expected_revision: revision - 1 });
+    expect(stale.isError).toBe(true);
+    expect(e2e.workflow().revision).toBe(revision);
+    await tool(e2e, "agentx_keep_pull_request", { task_id: e2e.taskId(), expected_revision: revision });
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(said(e2e).at(-1)).toBe("Got it. The pull request stays as it is; I'll finish this task when it's merged.");
+    expect(retired(e2e, card.ts)).toBe(true);
+    const after = await tool(e2e, "agentx_get_task", { task_id: e2e.taskId() });
+    expect(after.text).toContain(WAITING_FOR_MERGE);
+    expect(e2e.github.pushLog.filter((push) => push.during === "maintain")).toEqual([]);
+  }, 120_000);
+
   it("11.6 agentx_get_task's stage and next step match the thread at every stage, through the merge", async () => {
     const { e2e, pullRequest } = await feedbackProposed();
     const at = async () => tool(e2e, "agentx_get_task", { task_id: e2e.taskId() });

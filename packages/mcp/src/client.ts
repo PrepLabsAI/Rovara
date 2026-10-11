@@ -57,6 +57,8 @@ export interface ControlPlaneClient {
   resolveWorkflowFindings(taskId: string, request: WorkflowResolveFindingsInput): Promise<DeveloperTaskView>;
   /** Task 12/16: asks AgentX to open the workflow's draft pull request again. */
   retryWorkflowPublish(taskId: string, request: WorkflowPublishRetryRequest): Promise<DeveloperTaskView>;
+  /** After an approved PR feedback fix changed nothing: keep the pull request as it is and wait for its merge again. */
+  keepWorkflowPullRequests(taskId: string, request: WorkflowPublishRetryRequest): Promise<DeveloperTaskView>;
   /** The pending PR feedback proposal, as the feedback page shows it (GitHub and reviewer text: untrusted data). */
   getWorkflowFeedback(taskId: string): Promise<Record<string, unknown>>;
   /** The owner's decision on the pending PR feedback proposal, the same transition the Slack buttons make. */
@@ -241,6 +243,7 @@ export function httpControlPlaneClient(options: {
     sendWorkflowBack: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/send-back"), request)),
     resolveWorkflowFindings: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/review-findings"), request)),
     retryWorkflowPublish: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/publish-retry"), request)),
+    keepWorkflowPullRequests: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/keep-pull-requests"), request)),
     getWorkflowFeedback: async (taskId) => (await call(FeedbackReviewResponseSchema, "GET", path(taskId, "/workflow/feedback"))).review,
     decideWorkflowFeedback: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/feedback-decision"), request)),
     retryWorkflowFeedbackReview: async (taskId, request) => {

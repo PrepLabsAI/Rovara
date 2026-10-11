@@ -3,8 +3,8 @@
 // for the AI tool that reads them: when to use the tool, and what to do next.
 import {
   DEFAULT_DEVELOPER_TASK_POLICY, DEVELOPER_EVENTS_DEFAULT, DEVELOPER_EVENTS_MAX, DEVELOPER_TASK_LIST_DEFAULT, DEVELOPER_TASK_LIST_MAX,
-  DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, WORKFLOW_REVIEW_FAILURE_REASONS,
-  inertName, openReviewFindings, workflowIsReviewOnly, type DeveloperTaskView,
+  DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY, WORKFLOW_BLOCK_REASONS, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, WORKFLOW_REVIEW_FAILURE_REASONS,
+  inertName, openReviewFindings, workflowIsReviewOnly, workflowKeepPullRequestsOffered, type DeveloperTaskView,
 } from "@agentx/contracts";
 import { z } from "zod";
 import type { AdminControlPlaneClient } from "./admin-client.js";
@@ -208,6 +208,13 @@ function nextFor(task: DeveloperTaskView): string {
     if (!failed) {
       return `The checks are blocked: ${workflow.blockReason ?? "their results are unknown"}. Run them again with agentx_retry_workflow and expected_revision ${workflow.revision}; no code editing will run. To stop instead, use agentx_close_task.`;
     }
+  }
+  // An approved PR feedback fix that changed nothing: retry it, keep the pull request as it is (when it can simply wait for
+  // its merge again), or close the task.
+  if (task.workflow?.state === "BLOCKED" && task.workflow.stage === "IMPLEMENT" && task.workflow.blockReason === WORKFLOW_BLOCK_REASONS.fixChangedNothing) {
+    const keep = workflowKeepPullRequestsOffered(task.workflow)
+      ? ` To keep the pull request as it is and wait for its merge, use agentx_keep_pull_request with expected_revision ${task.workflow.revision}.` : "";
+    return `The approved fix didn't change any code, so nothing was pushed to the pull request. To run the fix again, use agentx_retry_workflow with expected_revision ${task.workflow.revision}.${keep} To stop instead, use agentx_close_task.`;
   }
   // Task 16: every blocked step after the plan can go back to coding with the problems found.
   if (task.workflow?.state === "BLOCKED" && ["IMPLEMENT", "VERIFY", "REVIEW"].includes(task.workflow.stage)) {
@@ -654,6 +661,21 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
       const id = requestIdFor(context, call, input, ["agentx_retry_workflow_publish", input.task_id, input.expected_revision]);
       const task = await context.client.retryWorkflowPublish(input.task_id as string, { requestId: id, expectedRevision: input.expected_revision as number });
       return afterAction(context, call, "agentx_retry_workflow_publish", task, 0, id);
+    },
+  },
+  {
+    name: "agentx_keep_pull_request",
+    title: "Keep an AgentX pull request as it is",
+    description: "After an approved fix from pull request feedback changed no code, keeps the pull request as it is: the task waits for its merge again, and the next comments on it are reviewed as usual. The same as Keep the pull request as it is in the task's Slack thread. Copy expected_revision from agentx_get_task; the call is refused if the task moved on. Only the task's owner can use it.",
+    inputSchema: {
+      task_id: taskIdInput, request_id: requestIdInput,
+      expected_revision: z.number().int().positive().describe("the current workflow revision from agentx_get_task"),
+    },
+    outputSchema: ActionShape,
+    async handler(context, input, call) {
+      const id = requestIdFor(context, call, input, ["agentx_keep_pull_request", input.task_id, input.expected_revision]);
+      const task = await context.client.keepWorkflowPullRequests(input.task_id as string, { requestId: id, expectedRevision: input.expected_revision as number });
+      return afterAction(context, call, "agentx_keep_pull_request", task, 0, id);
     },
   },
   {
