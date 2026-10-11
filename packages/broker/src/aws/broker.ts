@@ -6140,10 +6140,12 @@ async function completedWorkflowItems(
           const status = entry === undefined || entry.after === "not_run" || entry.after === "unknown" ? "UNKNOWN" as const : entry.after === "passed" ? "PASS" as const : "FAILED" as const;
           // The worker's report of a program it could not start, which is all the check's output then holds.
           const programNotFound = status === "FAILED" && entry?.output.trim() === `spawn ${check.command.executable} ENOENT`;
-          // Any other spawn error the worker reports as the check's whole output (EAGAIN, EACCES, ...): the process never started.
-          const neverStarted = status === "FAILED" && /^spawn \S+ E[A-Z]+$/u.test(entry?.output.trim() ?? "");
+          // Any other spawn error the worker reports as the check's whole output (EAGAIN, EACCES, ...), with no exit code:
+          // the process never started. (A check that ran and printed those words has its exit code.)
+          const neverStarted = status === "FAILED" && !programNotFound && entry?.exitCode == null && /^spawn \S+ E[A-Z]+$/u.test(entry?.output.trim() ?? "");
           const broken = status === "FAILED" && entry !== undefined && (programNotFound || neverStarted || checkCommandCouldNotRun(check.command, entry.exitCode, entry.output));
-          return { checkId: check.id, status, ...(programNotFound ? { programNotFound: true as const } : {}), ...(broken ? { broken: true as const } : {}) };
+          return { checkId: check.id, status, ...(programNotFound ? { programNotFound: true as const } : {}), ...(broken ? { broken: true as const } : {}),
+            ...(neverStarted ? { neverStarted: true as const } : {}) };
         });
         if (results.length === 0 && !reviewOnly) {
           verificationFailure = WORKFLOW_BLOCK_REASONS.noCheckResults;

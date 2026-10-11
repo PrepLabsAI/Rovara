@@ -129,9 +129,10 @@ describe("Suite 4: checks", () => {
     await e2e.click("agentx_workflow_approve");
     await e2e.settle();
     expect(e2e.workflow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
-    expect(e2e.workflow().verification?.results).toEqual([{ checkId: "required-1", status: "FAILED", broken: true }]);
+    expect(e2e.workflow().verification?.results).toEqual([{ checkId: "required-1", status: "FAILED", broken: true, neverStarted: true }]);
     const card = e2e.slack.posts.at(-1)!;
-    expect(card.text).toBe(`${projectLabel(e2e)} is a project check and couldn't run; ask a project admin to fix it, or close the task.`);
+    // Nothing is wrong with the check itself: it may start on a retry, so no project admin is needed.
+    expect(card.text).toBe(`${projectLabel(e2e)} couldn't start on the AgentX worker this time. Choose checks and retry to run it again, or close the task.`);
     expect(card.text).not.toContain("EAGAIN");
     expect(actionIds(card)).toEqual(["agentx_workflow_retry_checks", "agentx_workflow_close"]);
     expect(runs(e2e)).not.toContain("REVIEW");

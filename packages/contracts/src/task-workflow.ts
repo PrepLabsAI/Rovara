@@ -135,6 +135,8 @@ const VerificationResultsSchema = z.object({
     programNotFound: z.literal(true).optional(),
     /** The check's command could not run (not found, not runnable, or a script that does not parse): the code is not at fault. */
     broken: z.literal(true).optional(),
+    /** The check's process never started (the worker failed to start it, EAGAIN say): nothing is wrong with it, and a retry may run it. */
+    neverStarted: z.literal(true).optional(),
   }).strict()).max(100),
   /** No check was selected for this task: the candidate was validated and goes to review with no check results. */
   reviewOnly: z.boolean().optional(),

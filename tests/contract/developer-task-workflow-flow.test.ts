@@ -2307,6 +2307,11 @@ describe("checks AgentX proposes in the coding plan", () => {
       expect(workflowMessage({ taskId: blocked.taskId, workflow: blocked })!.text).toContain("npx is not installed on the AgentX worker.");
     });
 
+    it("marks a check whose process never started (no exit code) as one that may start on a retry, and a check that only printed the same words as failing", async () => {
+      const blocked = await verified([unitTests, typecheck], [entry(0, "failed", "spawn npm EAGAIN"), entry(1, "failed", "spawn npx EAGAIN", 1)]);
+      expect(blocked.verification?.results).toEqual([{ checkId: "proposed-1", status: "FAILED", broken: true, neverStarted: true }, { checkId: "proposed-2", status: "FAILED" }]);
+    });
+
     const inline = { label: "Inline check", cwd: "repo/demo", executable: "python3", args: ["-c", "import app"], proves: ["1"] };
     const nested = { label: "Nested script", cwd: "repo/demo", executable: "python3.11", args: ["tools/check.py"], proves: ["1"] };
     const brokenResult = [{ checkId: "proposed-1", status: "FAILED", broken: true }];
