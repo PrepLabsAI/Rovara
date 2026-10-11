@@ -208,7 +208,7 @@ export function currentOperation(operations: readonly OperationFacts[]): Operati
 }
 
 const DISPATCH_OR_COMPUTE = /^RUNTIME_UNAVAILABLE:/;
-const WORKER_CALLBACK_REFUSED = /^RUNTIME_UNAVAILABLE: worker callback [a-z-]+ failed with HTTP \d{3}$/;
+const WORKER_CALLBACK_REFUSED = /^RUNTIME_UNAVAILABLE: worker callback pull-request(?:-update)? failed with HTTP \d{3}$/;
 /** F18: also matches the worker devcontainer's "timeout:<ms>" error text (packages/worker/src/devcontainer.ts). */
 const TIMED_OUT = /\btimed? ?out\b|\btimeout:/i;
 
