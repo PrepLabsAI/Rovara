@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
-import type { WorkerInvocation } from "@agentx/contracts";
+import type { ProjectDefinition, WorkerInvocation } from "@agentx/contracts";
 import { describe, expect, it, vi } from "vitest";
 import { createRepositoryCredentialProvider } from "../../packages/worker/src/repository-credentials.js";
+
+type PublishInvocationOutput = Extract<WorkerInvocation, { kind: "publish" }>;
+type PublishInvocationFixture = Omit<PublishInvocationOutput, "payload"> & {
+  payload: Omit<PublishInvocationOutput["payload"], "mode"> & { mode?: PublishInvocationOutput["payload"]["mode"] };
+};
 
 describe("worker repository credential exchange", () => {
   it("exchanges the operation grant for the exact repository without logging it into the URL", async () => {
@@ -18,7 +23,7 @@ describe("worker repository credential exchange", () => {
         repositoryGrant: "signed.repository-grant",
       },
     };
-    const requests: Array<{ url: string; init?: RequestInit }> = [];
+    const requests: Array<{ url: string; init: RequestInit | undefined }> = [];
     const fetchImplementation = vi.fn(async (url: string | URL | Request, init?: RequestInit) => {
       const requestUrl = typeof url === "string" ? url : url instanceof URL ? url.href : url.url;
       requests.push({ url: requestUrl, init });
@@ -60,22 +65,24 @@ describe("worker repository credential exchange", () => {
       projectRevision: 1,
       callbackCapability: "c".repeat(64),
       payload: { project: project(), repositoryGrant: "grant" },
-    } as const satisfies Extract<WorkerInvocation, { kind: "prepare" }>;
+    } satisfies Extract<WorkerInvocation, { kind: "prepare" }>;
     const provider = createRepositoryCredentialProvider({
       controlPlaneUrl: "https://agentx.example.test",
       invocation,
       fetchImplementation: async () => new Response("secret-response-body", { status: 403 }),
     });
+    const repository = invocation.payload.project.repositories[0];
+    if (repository === undefined) throw new Error("expected the project repository");
 
-    await expect(provider(invocation.payload.project.repositories[0])).rejects.toThrow(/HTTP 403/);
-    await expect(provider(invocation.payload.project.repositories[0])).rejects.not.toThrow(
+    await expect(provider(repository)).rejects.toThrow(/HTTP 403/);
+    await expect(provider(repository)).rejects.not.toThrow(
       /secret-response-body/,
     );
   });
 
   it("requests exact push access for a publish invocation", async () => {
     const operationId = randomUUID();
-    const invocation = {
+    const invocation: PublishInvocationFixture = {
       protocolVersion: 1,
       kind: "publish",
       operationId,
@@ -90,11 +97,12 @@ describe("worker repository credential exchange", () => {
         headBranch: `agentx/${operationId}`,
         repositoryGrant: "push-grant",
       },
-    } as const satisfies Extract<WorkerInvocation, { kind: "publish" }>;
+    };
     const bodies: string[] = [];
     const provider = createRepositoryCredentialProvider({
       controlPlaneUrl: "https://agentx.example.test",
-      invocation,
+      // This wire-input fixture intentionally omits the schema-defaulted mode; provider only reads the exact repository grant envelope.
+      invocation: invocation as PublishInvocationOutput,
       fetchImplementation: async (_url, init) => {
         if (typeof init?.body !== "string") throw new Error("expected JSON request body");
         bodies.push(init.body);
@@ -102,12 +110,14 @@ describe("worker repository credential exchange", () => {
       },
     });
 
-    await provider(invocation.payload.project.repositories[0]);
+    const repository = invocation.payload.project.repositories[0];
+    if (repository === undefined) throw new Error("expected the project repository");
+    await provider(repository);
     expect(JSON.parse(bodies[0]!)).toMatchObject({ access: "push" });
   });
 });
 
-function project() {
+function project(): ProjectDefinition {
   return {
     name: "personal-website",
     revision: 1,
@@ -121,5 +131,5 @@ function project() {
     setup: [],
     readiness: [],
     orchestratorInstructions: "Delegate work to the remote agent.",
-  } as const;
+  };
 }

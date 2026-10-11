@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   CredentialUnavailable, REFRESH_LEASE_TTL_MS, REFRESH_TOKEN_CACHE_KEY, oauthRefreshTokenProvider, parseConnectorSecret,
 } from "../../packages/gateway/src/index.js";
+import type { CachedToken } from "../../packages/gateway/src/credentials.js";
 import { fakeClock, fakeTokenEndpoint, memoryLease, memorySecretStore, memoryTokenCache } from "../support/refresh-token-fakes.js";
 
 const SECRET = "agentx/connectors/asana-bot";
@@ -293,7 +294,8 @@ describe("oauth-refresh-token provider", () => {
     const { endpoint, tokens, clock, container } = setup();
     const injectedAt = clock.now();
     // A corrupt (or hostile) cache entry: refreshAt claims the token is usable long after it really expires.
-    tokens.items.set(REFRESH_TOKEN_CACHE_KEY, { token: "stale-token", expiresAt: injectedAt + 10_000, refreshAt: injectedAt + 1_000_000 });
+    const corruptEntry: CachedToken & { refreshAt?: number } = { token: "stale-token", expiresAt: injectedAt + 10_000, refreshAt: injectedAt + 1_000_000 };
+    tokens.items.set(REFRESH_TOKEN_CACHE_KEY, corruptEntry);
     clock.advance(20_000); // past the token's real expiry, though well before the corrupt refreshAt
     const issued = await container().issue(undefined, "read");
     expect(issued.token).toBe(endpoint.accessTokens[0]);

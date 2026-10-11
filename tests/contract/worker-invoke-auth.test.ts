@@ -29,7 +29,7 @@ function tokenFor(claims: WorkerInvokeTokenClaims, privateKey: KeyObject = signe
   return workerInvokeToken(payload, sign("sha256", Buffer.from(payload, "ascii"), privateKey));
 }
 
-function invocationFor(operationId = randomUUID(), fence = 2): WorkerInvocation {
+function invocationFor(operationId: WorkerInvocation["operationId"] = randomUUID(), fence = 2): WorkerInvocation {
   return {
     protocolVersion: 1,
     kind: "resume",

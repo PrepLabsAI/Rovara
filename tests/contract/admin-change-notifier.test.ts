@@ -482,10 +482,12 @@ describe("Slack's two calls", () => {
     const refused = vi.fn(async () => Response.json({ ok: false, error: "message_not_found" }));
     const error = await chatUpdate(BOT_TOKEN, { channel: "D0ADMINDM1", ts: "1", text: "done", blocks: [] }, refused as unknown as typeof fetch).catch((caught: unknown) => caught as SlackPostError);
     expect(error).toMatchObject({ slackError: "message_not_found" });
+    if (error === undefined) throw new Error("expected chat.update to fail");
     expect(error.message).toContain("chat.update");
     expect(error.message).not.toContain(BOT_TOKEN);
     const broken = vi.fn(async () => new Response(`oops ${BOT_TOKEN}`, { status: 502 }));
     const unreadable = await chatUpdate(BOT_TOKEN, { channel: "D0ADMINDM1", ts: "1", text: "done", blocks: [] }, broken as unknown as typeof fetch).catch((caught: unknown) => caught as SlackPostError);
+    if (unreadable === undefined) throw new Error("expected unreadable chat.update to fail");
     expect(unreadable.slackError).toBe("http_502");
     expect(unreadable.message).not.toContain(BOT_TOKEN);
   });
