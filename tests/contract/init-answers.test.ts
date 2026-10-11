@@ -24,6 +24,11 @@ const everyFlag: InitFlags = {
   slackAppName: "AgentX acme (staging)", slackAppPostedMessages: "accept",
 };
 
+/** These fixtures intentionally keep an own property whose value is undefined. */
+function withExplicitUndefined<K extends keyof InitFlags>(flags: InitFlags, key: K): InitFlags {
+  return { ...flags, [key]: undefined };
+}
+
 // Spec 048 FR-020: the settings form's questions in the terminal, in its own order: the four, the
 // Advanced question, then (on yes) every Advanced setting.
 const FORM_QUESTIONS = [
@@ -114,7 +119,7 @@ describe("init questions", () => {
   });
 
   it("accepts another Bedrock model id for the orchestrator", async () => {
-    const flags = { ...everyFlag, orchestratorModel: undefined } as InitFlags;
+    const flags = withExplicitUndefined(everyFlag, "orchestratorModel");
     const prompter = scriptedPrompter([...settingsScript({ flags, advanced: { orchestratorModel: "other" } }), "us.anthropic.claude-opus-4-1-20250805-v1:0"]);
     const { answers } = await collectInitAnswers({ ...base, flags, prompter });
     expect(prompter.asked.at(-1)).toBe("Orchestrator model id");
@@ -128,7 +133,7 @@ describe("init questions", () => {
   });
 
   it("keeps a webhook address out of the answers and stores it only as a secret (Review Focus 4)", async () => {
-    const flags: InitFlags = { ...everyFlag, alertEmail: undefined } as InitFlags;
+    const flags = withExplicitUndefined(everyFlag, "alertEmail");
     const prompter = scriptedPrompter([...settingsScript({ flags, advanced: { alertKind: "webhook" } }), `  ${WEBHOOK}\r\n`]);
     const collected = await collectInitAnswers({ ...base, flags, prompter });
     expect(collected.answers.alert).toEqual({ kind: "webhook", display: "https://api.opsgenie.com/...", secretName: "agentx/staging/alert-endpoint" });
@@ -144,7 +149,7 @@ describe("init questions", () => {
   });
 
   it("reads a webhook from --alert-webhook-env, refuses one that is not https, and replaces a secret left by an aborted run", async () => {
-    const flags: InitFlags = { ...everyFlag, alertEmail: undefined, alertWebhook: { envName: "AGENTX_ALERT_WEBHOOK" } } as InitFlags;
+    const flags = withExplicitUndefined({ ...everyFlag, alertWebhook: { envName: "AGENTX_ALERT_WEBHOOK" } }, "alertEmail");
     const collected = await collectWithFlags({ ...base, processEnv: { AGENTX_ALERT_WEBHOOK: WEBHOOK }, flags });
     const secrets = memoryAlertSecrets();
     secrets.values.set("agentx/staging/alert-endpoint", "https://stale.example.com/x");
@@ -160,7 +165,7 @@ describe("init questions", () => {
   });
 
   it("with --yes and no alert flag, refuses for want of your email, and sends alerts to --admin-email when given", async () => {
-    const flags = { ...everyFlag, alertEmail: undefined } as InitFlags;
+    const flags = withExplicitUndefined(everyFlag, "alertEmail");
     // Spec 048 FR-025 (Ruling 9): alerts go to your email, so with neither flag your email is what is missing.
     await expect(collectInitAnswers({ ...base, flags, prompter: unattendedPrompter() }))
       .rejects.toThrow("Your email, for your AgentX admin user and alerts needs an answer; with --yes, pass --admin-email");
@@ -169,7 +174,7 @@ describe("init questions", () => {
   });
 
   it("records no alerts for --no-alerts, with a note saying nobody will hear about failures", async () => {
-    const { answers, notes } = await collectWithFlags({ ...base, flags: { ...everyFlag, alertEmail: undefined, alerts: false } as InitFlags });
+    const { answers, notes } = await collectWithFlags({ ...base, flags: withExplicitUndefined({ ...everyFlag, alerts: false }, "alertEmail") });
     expect(answers.alert).toEqual({ kind: "none" });
     expect(notes.join("\n")).toContain("nobody is told when AgentX fails");
   });
@@ -185,7 +190,7 @@ describe("init questions", () => {
   });
 
   it("with --yes and no GitHub account, names the flag", async () => {
-    await expect(collectInitAnswers({ ...base, flags: { ...everyFlag, githubAccount: undefined } as InitFlags, prompter: unattendedPrompter() }))
+    await expect(collectInitAnswers({ ...base, flags: withExplicitUndefined(everyFlag, "githubAccount"), prompter: unattendedPrompter() }))
       .rejects.toThrow("with --yes, pass --github-account");
   });
 
@@ -199,7 +204,7 @@ describe("init questions", () => {
 describe("the budget question (FR-047)", () => {
   it("defaults to the estimate plus 20% for the whole account, and only the tag choice needs it activated", async () => {
     const suggested = suggestedBudgetUsd(estimateMonthlyCost({ orchestrator: everyFlag.orchestratorModel!, classifier: everyFlag.classifierModel!, worker: everyFlag.workerModel! }));
-    const result = await collectWithFlags({ ...base, flags: { ...everyFlag, budget: undefined } as InitFlags });
+    const result = await collectWithFlags({ ...base, flags: withExplicitUndefined(everyFlag, "budget") });
     expect(result.answers.budget).toEqual({ monthlyUsd: suggested, scope: "account" });
     expect(result.notes).not.toContain(BUDGET_TAG_NOTE);
   });
@@ -406,14 +411,14 @@ describe("resuming with flags", () => {
     );
     expect(() => assertResumeFlagsMatch(emailAnswers, { alertWebhook: { file: "/tmp/webhook.txt" } })).toThrow("--alert-webhook-file /tmp/webhook.txt differs");
 
-    const noneFlags: InitFlags = { ...everyFlag, alertEmail: undefined, alerts: false } as InitFlags;
+    const noneFlags = withExplicitUndefined({ ...everyFlag, alerts: false }, "alertEmail");
     const { answers: noneAnswers } = await collectWithFlags({ ...base, flags: noneFlags });
     expect(() => assertResumeFlagsMatch(noneAnswers, { alerts: false })).not.toThrow();
     expect(() => assertResumeFlagsMatch(noneAnswers, { alertEmail: "ops@example.com" })).toThrow(
       "--alert-email ops@example.com differs from what this install started with (not set); an install's answers cannot change halfway. Run agentx init without that flag to continue",
     );
 
-    const webhookFlags: InitFlags = { ...everyFlag, alertEmail: undefined, alertWebhook: { envName: "AGENTX_ALERT_WEBHOOK" } } as InitFlags;
+    const webhookFlags = withExplicitUndefined({ ...everyFlag, alertWebhook: { envName: "AGENTX_ALERT_WEBHOOK" } }, "alertEmail");
     const { answers: webhookAnswers } = await collectWithFlags({ ...base, processEnv: { AGENTX_ALERT_WEBHOOK: WEBHOOK }, flags: webhookFlags });
     expect(() => assertResumeFlagsMatch(webhookAnswers, { alertWebhook: { envName: "AGENTX_ALERT_WEBHOOK" } })).not.toThrow();
     expect(() => assertResumeFlagsMatch(webhookAnswers, { alerts: false })).toThrow("--no-alerts differs from what this install started with (webhook)");
