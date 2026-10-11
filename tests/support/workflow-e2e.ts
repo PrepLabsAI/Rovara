@@ -238,6 +238,8 @@ export async function createWorkflowE2E(options: {
   webhookSecret?: string | null;
   /** The worker's review timeouts (the run-task seam); absent, the reviews' own 5 minutes. */
   workerTimeouts?: { reviewMs?: number; feedbackReviewMs?: number };
+  /** "eventual": a read without ConsistentRead may see an item's previous version once after each write (DynamoDB's default read). */
+  consistency?: "strong" | "eventual";
 } = {}) {
   const github = new FakeGitHub(options.github?.realism === undefined ? {} : { realism: options.github.realism });
   // The webhook secret GitHub signs with, and the copy the broker's container has cached (it re-reads on { refresh: true }).
@@ -255,6 +257,7 @@ export async function createWorkflowE2E(options: {
   const planEvidenceJobs: PlanEvidenceEvent[] = [];
   const harness = await createDeveloperTaskBroker({
     register: false,
+    ...(options.consistency === undefined ? {} : { consistency: options.consistency }),
     brokerExtra: {
       githubPullRequests,
       startPlanEvidenceJob: async (event: PlanEvidenceEvent) => { planEvidenceJobs.push(event); },
@@ -624,6 +627,8 @@ export async function createWorkflowE2E(options: {
   const stream = recordStream(db);
   const queue: Array<{ notice: Notice; attempt: number }> = [];
   let canvas = 0;
+  /** How many times the notifier gave up on a notice Slack refused for good (its deliveryFailed). */
+  let noticeDeliveryFailures = 0;
   /** Every plan Canvas Slack was asked to delete (the closeout of a merged or closed task), in order. */
   const canvasesDeleted: string[] = [];
   const closeoutStore = createCanvasCloseoutStore({ documentClient: db as never, s3: s3 as never, tableName: () => "state", bucketName: () => "artifacts",
@@ -644,7 +649,7 @@ export async function createWorkflowE2E(options: {
       return { canvasId: id, permalink: `https://acme.slack.com/docs/${SLACK_TEAM}/${id}` };
     },
     reviewUrlBase: REVIEW_URL_BASE,
-    now: () => Date.now(), log: () => undefined, deliveryFailed: () => undefined,
+    now: () => Date.now(), log: () => undefined, deliveryFailed: () => { noticeDeliveryFailures += 1; },
   });
   /** Stream to queue, then every queued notice once; failed ones stay queued. */
   const pumpNotices = async () => {
@@ -871,6 +876,8 @@ export async function createWorkflowE2E(options: {
     ledger, reviewedTrees, briefLimit, pushedWorkflows, reviewUrlBase: REVIEW_URL_BASE, canvasesDeleted,
     /** The table's stream as the notifier reads it (`duplicateNext()` delivers the next record twice). */
     stream,
+    /** How many times the notifier gave up on a notice Slack refused for good. */
+    noticeDeliveryFailures: (): number => noticeDeliveryFailures,
 
     /** Delivers every notice the table's writes have queued (the stream, then the queue), without running any worker. */
     deliverNotices: pumpNotices,
@@ -1036,13 +1043,13 @@ export async function createWorkflowE2E(options: {
      * The task page, fetched through the broker's real route with a browser sign-in as `reader` (the owner by
      * default), exactly as a browser sends it. Not counted in `brokerCalls`: it is a person's page view, not part of the Slack journey.
      */
-    async taskPage(search = "", reader: Developer = MAYA): Promise<{ status: number; body: string }> {
+    async taskPage(search = "", reader: Developer = MAYA): Promise<{ status: number; body: string; headers: Record<string, string> }> {
       const response = await harness.handler({
         version: "2.0", routeKey: "ANY /review/{proxy+}", rawPath: `/review/${this.taskId()}/task`, rawQueryString: search.replace(/^\?/, ""),
         headers: { cookie: `__Host-agentx_review_session=${browserSession(reader)}` },
         requestContext: { requestId: randomUUID(), http: { method: "GET" } },
       });
-      return { status: response.statusCode, body: response.body };
+      return { status: response.statusCode, body: response.body, headers: (response as { headers?: Record<string, string> }).headers ?? {} };
     },
 
     /**

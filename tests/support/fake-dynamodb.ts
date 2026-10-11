@@ -98,8 +98,22 @@ export class FakeDynamoDb {
 
   /** A read's copy of an item. */
   private readClone<T>(value: T): T {
-    return this.reorder(structuredClone(value));
+    const read = this.reorder(structuredClone(value));
+    const item = value as { pk?: unknown; sk?: unknown } | undefined;
+    if (item !== null && typeof item === "object" && typeof item.pk === "string" && typeof item.sk === "string") {
+      const kind = `${item.pk.split("#")[0]}#${item.sk.split("#")[0]}`;
+      const counted = this.readOrders.get(kind) ?? { reads: 0, reordered: 0 };
+      counted.reads += 1;
+      if (JSON.stringify(read) !== JSON.stringify(value)) counted.reordered += 1;
+      this.readOrders.set(kind, counted);
+    }
+    return read;
   }
+  /**
+   * Item reads by kind (`DEVTASK#META`: the pk's and sk's first segments): how many, and how many came back with some
+   * map in an order other than the one it was written in.
+   */
+  readonly readOrders = new Map<string, { reads: number; reordered: number }>();
   private readonly listeners = new Set<(change: { before?: Item; after?: Item }) => void>();
   /** Every request the table refused as DynamoDB would (ValidationException), in order: a correct product causes none. */
   readonly refusals: Array<{ command: string; message: string }> = [];
