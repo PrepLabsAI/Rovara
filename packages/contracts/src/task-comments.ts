@@ -13,7 +13,8 @@ export const TASK_COMMENT_ITEMS_MAX = 300;
 export const COMMENT_THREAD_REPLIES_MAX = 20;
 /** The most comments one decision can include: keeps the planner's answers and the transaction small. */
 export const DECISION_COMMENTS_MAX = 25;
-export const COMMENT_RATE = { comments: 30, suggestions: 60, windowMs: 600_000 } as const;
+/** Per person and task, in each window: new comments, suggestion changes, and edits or deletes of their own comments. */
+export const COMMENT_RATE = { comments: 30, suggestions: 60, changes: 60, windowMs: 600_000 } as const;
 export const AGENTX_ASK_RATE = { perPersonPerHour: 6, perTaskPerHour: 20, perThread: 5, perPersonAllTasksPerHour: 30 } as const;
 export const NUDGE_WINDOW_MS = 600_000;
 /** A question waiting longer than this shows as not answered. */

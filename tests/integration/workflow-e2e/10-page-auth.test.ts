@@ -609,6 +609,21 @@ describe("Suite 10: page and auth", () => {
       expect(e2e.workflow().decisions).toEqual([]);
     }, 120_000);
 
+    it("edits and deletes of one's own comments are limited like new comments: sixty in ten minutes, then refused until the window passes", async () => {
+      // Found in review: edits and deletes had no limit, though each is a write every open page sees.
+      const e2e = await waitingPlan();
+      const sam = await openTaskPage(e2e, SAM, { search: "?doc=coding-plan" });
+      expect((await pageApi(sam, e2e, "comments", commentBody({ kind: "document" }, "First thought."))).status).toBe(201);
+      const commentId = String(peopleComments(e2e).find((comment) => comment.text === "First thought.")!.commentId);
+      for (let rev = 1; rev <= 60; rev += 1) {
+        expect((await pageApi(sam, e2e, `comments/${commentId}/edit`, { rev, text: `Thought, take ${rev}.` })).status).toBe(200);
+      }
+      expect(await pageApi(sam, e2e, `comments/${commentId}/delete`, { rev: 61 })).toEqual({ status: 429, body: { error: "slow_down", message: SLOW_DOWN } });
+      expect(peopleComments(e2e).find((comment) => comment.commentId === commentId)).toMatchObject({ text: "Thought, take 60.", rev: 61 });
+      e2e.clock.advance(10 * 60_000);
+      expect((await pageApi(sam, e2e, `comments/${commentId}/delete`, { rev: 61 })).status).toBe(200);
+    }, 120_000);
+
     it("AgentX's answers have limits: a long answer is cut, and past a person's hourly questions the comment posts with a plain note instead of an answer", async () => {
       const queue = recordingQueue();
       const e2e = await waitingPlan({ queue });

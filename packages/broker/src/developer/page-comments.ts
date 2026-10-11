@@ -181,7 +181,7 @@ const cancellationCodes = (error: unknown): string[] =>
  */
 export async function takeRate(
   deps: TableDependencies & Pick<DeveloperTaskRouteDependencies, "now">,
-  key: { taskId: string; kind: "comment" | "suggestion" | "ask"; actor: string },
+  key: { taskId: string; kind: "comment" | "suggestion" | "change" | "ask"; actor: string },
   limit: number,
   windowMs: number,
 ): Promise<boolean> {
@@ -365,6 +365,10 @@ async function changeableComment(deps: CommentDependencies, actor: PageActor, co
   if (comment.lockedBy !== undefined) throw pageRefusal("locked");
   if (comment.deletedAt !== undefined) throw pageRefusal("gone");
   if (comment.rev !== rev) throw pageRefusal("changed");
+  // Edits and deletes are limited as new comments are: each one is a write every open page sees.
+  if (!await takeRate(deps, { taskId: actor.task.taskId, kind: "change", actor: actor.caller.developerId }, COMMENT_RATE.changes, COMMENT_RATE.windowMs)) {
+    throw pageRefusal("slow_down");
+  }
   return comment;
 }
 
