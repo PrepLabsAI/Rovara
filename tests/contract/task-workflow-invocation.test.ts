@@ -60,6 +60,20 @@ describe("workflow-mode worker invocation", () => {
     expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowReviewPlan");
   });
 
+  it("carries the owner's approved PR feedback for the reviewers only on a review operation, bounded (0.2.12)", () => {
+    const feedback = (workflowReviewFeedback: unknown, workflowMode = "REVIEW") => WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode, workflowReviewFeedback } }).success;
+    const entry = { summary: "Use the shorter sentence.", fileChanges: [{ repositoryId: "demo", path: "README.md", change: "Shorten it." }], ownerNote: "Keep it short." };
+    expect(feedback([entry])).toBe(true);
+    expect(feedback([{ summary: "Use the shorter sentence.", fileChanges: [] }])).toBe(true);
+    expect(feedback([])).toBe(false);
+    expect(feedback([{ ...entry, extra: 1 }])).toBe(false);
+    expect(feedback([{ ...entry, summary: "" }])).toBe(false);
+    expect(feedback(Array.from({ length: 21 }, () => entry))).toBe(false);
+    expect(feedback(Array.from({ length: 20 }, () => ({ ...entry, summary: "x".repeat(2_000) })))).toBe(false);
+    expect(feedback([entry], "IMPLEMENT")).toBe(false);
+    expect(WORKER_INVOCATION_FEATURES).toContain("task.workflowReviewFeedback");
+  });
+
   it("carries the reviewed tree for a pull request update, only as 40 hex on a maintain append", () => {
     const maintain = {
       ...base,

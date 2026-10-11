@@ -61,6 +61,10 @@ import {
   type WorkflowReviewBase,
   type WorkflowReviewChecks,
   type WorkflowReviewPlan,
+  type WorkflowReviewFeedback,
+  type WorkflowFeedbackReviewReport,
+  WorkflowReviewFeedbackSchema,
+  WORKFLOW_REVIEW_FEEDBACK_MAX,
   type WorkflowReviewFinding,
   type WorkflowCheckPolicy,
   WorkflowDecisionRequestSchema,
@@ -514,7 +518,7 @@ export async function submitWorkflowFeedbackDecision(
     // The owner's approval covers the approved fixes' check changes: from now on the task runs the updated checks
     // (required project checks always stay), for this fix and for every later step and feedback round.
     try {
-      next = applyWorkflowFeedbackCheckChanges(next, workflowFeedbackCheckChanges(next.checkPolicy, selected as Parameters<typeof workflowFeedbackCheckChanges>[1]));
+      next = applyWorkflowFeedbackCheckChanges(next, workflowFeedbackCheckChanges(next.checkPolicy, selected));
     } catch (error) {
       if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", error.message);
       throw error;
@@ -1821,6 +1825,46 @@ async function workflowReviewPlanOption(deps: DeveloperTaskRouteDependencies, wo
 }
 
 /**
+ * What the reviewers are shown of the fixes the owner approved from pull request feedback since the plan: for each
+ * approved decision, oldest first, each selected finding's proposed fix (summary and file changes) and the owner's note.
+ * Each report is read through its recorded key and its digest checked; one that cannot be read is left out (the
+ * reviewers then judge against the plan, as before) rather than holding the reviews back. Older entries give way first
+ * when the whole would not fit the reviewers' limit.
+ */
+async function workflowReviewFeedbackOption(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, workflow: WorkflowSnapshot): Promise<{ workflowReviewFeedback?: WorkflowReviewFeedback }> {
+  const approvals = (workflow.feedbackDecisions ?? []).filter(decision => decision.decision === "APPROVE");
+  if (approvals.length === 0) return {};
+  const refs = [...(workflow.feedbackReviewHistory ?? []), ...(workflow.feedbackReview?.reviewRef === undefined ? [] : [workflow.feedbackReview.reviewRef])];
+  const prefix = `private/${task.ownerKey}/${task.workspaceId}/feedback-reviews/`;
+  const cut = (text: string, max: number) => text.length <= max ? text : `${text.slice(0, max - 1)}\u2026`;
+  const entries: WorkflowReviewFeedback = [];
+  for (const decision of approvals) {
+    const ref = refs.find(candidate => candidate.sha256 === decision.reviewDigest);
+    if (ref === undefined || ref.objectKey !== `${prefix}${ref.sha256}.json`) continue;
+    let report: WorkflowFeedbackReviewReport;
+    try {
+      const bytes = await deps.actions.readArtifact(ref.objectKey, FEEDBACK_REPORT_MAX_BYTES);
+      if (createHash("sha256").update(bytes, "utf8").digest("hex") !== ref.sha256) continue;
+      const parsed = WorkflowFeedbackReviewReportSchema.safeParse(JSON.parse(bytes));
+      if (!parsed.success || parsed.data.taskId !== task.taskId) continue;
+      report = parsed.data;
+    } catch {
+      continue;
+    }
+    for (const finding of report.findings.filter(item => decision.selectedFindingIds.includes(item.id))) {
+      entries.push({
+        summary: cut(finding.fixProposal?.summary ?? finding.rationale, 1_000),
+        fileChanges: (finding.fixProposal?.fileChanges ?? []).map(change => ({ repositoryId: change.repositoryId, path: change.path, change: cut(change.change, 500) })),
+        ...(decision.ownerNote === undefined ? {} : { ownerNote: cut(decision.ownerNote, 500) }),
+      });
+    }
+  }
+  let shown = entries.slice(-WORKFLOW_REVIEW_FEEDBACK_MAX);
+  while (shown.length > 0 && !WorkflowReviewFeedbackSchema.safeParse(shown).success) shown = shown.slice(1);
+  return shown.length === 0 ? {} : { workflowReviewFeedback: shown };
+}
+
+/**
  * Queue the read-only code and security reviews of the task's current candidate, moving the workflow from its
  * current REVIEW state (WAITING, or BLOCKED for a retry) to RUNNING in the same transaction. The prompt depends
  * only on the candidate and the note, so a repeated request ID is a duplicate, never a conflict.
@@ -1839,6 +1883,7 @@ async function queueWorkflowReview(
   const next: WorkflowSnapshot = { ...retryBase, revision: workflow.revision + 1, state: "RUNNING", updatedAt: receivedAt };
   const prompt = `Perform the required read-only critic and security reviews for the task. The current verified candidate digest is ${candidateDigest}. Do not edit files. Reviewer findings must be concise and refer to code evidence. Owner note: ${note}`;
   const reviewPlan = await workflowReviewPlanOption(deps, workflow);
+  const reviewFeedback = await workflowReviewFeedbackOption(deps, task, workflow);
   return deps.actions.acceptTask(developerTaskIdentity(task), task.workspaceId, { requestId, conversationId: task.conversationId, prompt }, (operation) => [
     { Update: {
       TableName: deps.tableName, Key: taskKey(task.taskId),
@@ -1851,7 +1896,7 @@ async function queueWorkflowReview(
       party: partyOfTask(task), turnId: randomUUID(), action: "continue", phase: "accepted", outcome: "accepted", receivedAt, finishedAt: iso(deps),
       request: "Run independent candidate reviews", response: `Independent code and security reviews started as operation ${operation.id}.`, operationId: operation.id,
     })),
-  ], { sharedTask: task.shared === true, workflowMode: "REVIEW", ...taskBaseOption(task, next), ...workflowReviewChecksOption(workflow), ...reviewPlan });
+  ], { sharedTask: task.shared === true, workflowMode: "REVIEW", ...taskBaseOption(task, next), ...workflowReviewChecksOption(workflow), ...reviewPlan, ...reviewFeedback });
 }
 
 /**

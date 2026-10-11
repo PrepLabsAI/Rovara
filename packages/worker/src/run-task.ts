@@ -521,6 +521,7 @@ export async function runTaskInvocation(
           repositories,
           ...(invocation.payload.workflowReviewChecks === undefined ? {} : { reviewChecks: invocation.payload.workflowReviewChecks }),
           ...(invocation.payload.workflowReviewPlan === undefined ? {} : { reviewPlan: invocation.payload.workflowReviewPlan }),
+          ...(invocation.payload.workflowReviewFeedback === undefined ? {} : { reviewFeedback: invocation.payload.workflowReviewFeedback }),
           signal: verificationStop.signal,
           ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }),
           onProgress: (message) => { void events.append("progress", { message }).catch(() => undefined); },
