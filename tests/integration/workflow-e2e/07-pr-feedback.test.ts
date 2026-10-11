@@ -316,6 +316,11 @@ describe("Suite 7: PR feedback loop", () => {
     });
     const pullRequest = await openDraftPr(e2e);
     const opened = pullRequest.commit;
+    // The description's checks line, as a list of what passed; and a person's own note added to the description on GitHub.
+    const checksLine = () => (pullRequest.body ?? "").split("\n").find((line) => line.startsWith("Checks: "))!.slice("Checks: ".length).split(", ").sort();
+    const required = `${e2e.workflow().checkPolicy!.required[0]!.label} passed`;
+    expect(checksLine()).toEqual([required, `${OLD_CHECK.label} passed`].sort());
+    pullRequest.body = `${pullRequest.body ?? ""}\n\nTesting notes: tried it by hand.`;
     await commented(e2e, pullRequest.number, "Make the sentence shorter.", "maya");
     // The replacement check is shown in full on the card the owner approves.
     const proposal = visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text);
@@ -325,6 +330,11 @@ describe("Suite 7: PR feedback loop", () => {
     await e2e.settle();
     expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
     const fix1 = pullRequest.commit;
+    // The description names the checks that ran on the pushed fix: the replacement passed, never the old check (0.2.12
+    // live test), and the person's note is kept.
+    expect(checksLine()).toEqual([required, `${NEW_CHECK.label} passed`].sort());
+    expect(pullRequest.body).toContain("Reviews: code review passed; security review passed");
+    expect(pullRequest.body).toContain("Testing notes: tried it by hand.");
     const afterFix1 = e2e.checkRuns.length;
 
     await commented(e2e, pullRequest.number, "Please trim the name too.");
@@ -332,6 +342,8 @@ describe("Suite 7: PR feedback loop", () => {
     await e2e.settle();
     expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
     const fix2 = pullRequest.commit;
+    expect(checksLine()).toEqual([required, `${NEW_CHECK.label} passed`].sort());
+    expect(pullRequest.body.split("Checks: ")).toHaveLength(2);
     expect(fixPushes(e2e).map((push) => push.commit)).toEqual([fix1, fix2]);
     expect(e2e.github.parents.get(fix1)).toEqual([opened]);
     expect(e2e.github.parents.get(fix2)).toEqual([fix1]);

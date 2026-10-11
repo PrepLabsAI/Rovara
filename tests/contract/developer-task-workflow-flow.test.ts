@@ -2584,8 +2584,9 @@ describe("review-only verification when no check applies", () => {
       verification: { candidateDigest: candidate.digest, producer: "t", environmentId: "w", recordedAt: now, results: [{ checkId: "required-1", status: "PASS" }, { checkId: "proposed-1", status: "PASS" }] },
       reviews: ["CRITIC", "SECURITY"].map((role) => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "t", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now })) });
     const body = workflowPullRequestBody({ title: "Fix" } as never, workflow, undefined, undefined);
-    expect(body.split("\n")).toEqual(["Fix", "", "Checks: npm test passed, Typecheck passed", "Reviews: code review passed; security review passed", "",
-      "Opened as a draft by AgentX after the owner-approved plan, checks and reviews passed. Merge it on GitHub."]);
+    // The checks and reviews lines are between markers, so a pushed PR feedback fix can bring them up to date.
+    expect(body.split("\n")).toEqual(["Fix", "", "<!-- agentx:checks-and-reviews -->", "Checks: npm test passed, Typecheck passed", "Reviews: code review passed; security review passed",
+      "<!-- /agentx:checks-and-reviews -->", "", "Opened as a draft by AgentX after the owner-approved plan, checks and reviews passed. Merge it on GitHub."]);
   });
 
   it("makes a proposed check's label inert in the description: no mention, link or image reaches GitHub", () => {
@@ -2596,7 +2597,7 @@ describe("review-only verification when no check applies", () => {
       verification: { candidateDigest: candidate.digest, producer: "t", environmentId: "w", recordedAt: now, results: [{ checkId: "proposed-1", status: "PASS" }] },
       reviews: ["CRITIC", "SECURITY"].map((role) => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "t", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now })) });
     const body = workflowPullRequestBody({ title: "Fix" } as never, workflow, undefined, undefined);
-    expect(body.split("\n")[2]).toBe("Checks: Ping @‍team  docs #‍1 passed");
+    expect(body.split("\n")[3]).toBe("Checks: Ping @‍team  docs #‍1 passed");
     expect(body).not.toContain("https://e.example");
   });
 });

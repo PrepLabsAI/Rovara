@@ -5,6 +5,9 @@
 import { PULL_REQUEST_BODY_MAX_CHARS, WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WorkflowFeedbackReviewReportSchema, redactText, type WorkflowFeedbackReviewReport, type WorkflowSnapshot } from "@agentx/contracts";
 import { createHash } from "node:crypto";
 
+/** Around the description's lines about the checks and reviews of the code on the pull request (since this release). */
+export const PULL_REQUEST_STATUS_START = "<!-- agentx:checks-and-reviews -->";
+export const PULL_REQUEST_STATUS_END = "<!-- /agentx:checks-and-reviews -->";
 const START = "<!-- agentx:pr-feedback-fixes -->";
 const END = "<!-- /agentx:pr-feedback-fixes -->";
 const HEADING = "### Fixes from PR feedback";
@@ -180,4 +183,43 @@ export function withFeedbackFixes(body: string, fixes: readonly FeedbackFix[], e
   const section = feedbackFixesSection(fixes, PULL_REQUEST_BODY_MAX_CHARS - before.length - separator.length - trailer.length, earlier);
   const next = section === "" ? `${before}${after === "" ? "" : `${before === "" ? "" : "\n\n"}${after}`}` : `${before}${separator}${section}${trailer}`;
   return { ...(next === body ? {} : { body: next }), dropped: section === "" && fixes.length > 0 };
+}
+
+const CHECKS_LINE = /^Checks: /u;
+const REVIEWS_LINE = /^Reviews: code review /u;
+
+/**
+ * The description with its lines about the checks and reviews brought up to date with `lines` (workflowPullRequestStatusLines
+ * for the code now on the pull request). Only AgentX's own lines change; everything else stays as the person left it.
+ * A description AgentX opened since this release has them between its markers, which are replaced in place (one pair,
+ * START before END; otherwise nothing changes). An older one has no markers: its single "Checks: " line and the "Reviews:
+ * code review " line right after it (or that Reviews line alone, for a review-only task) are replaced, only when exactly
+ * one of each is found outside the PR feedback section and they match the new lines' shape; otherwise nothing changes.
+ * Undefined when nothing changes.
+ */
+export function withStatusLines(body: string, lines: readonly string[]): string | undefined {
+  const start = body.indexOf(PULL_REQUEST_STATUS_START);
+  const end = body.indexOf(PULL_REQUEST_STATUS_END);
+  if (start !== -1 || end !== -1) {
+    // Exactly one pair, in order; anything else is not AgentX's block as it wrote it.
+    if (start === -1 || end === -1 || end < start || body.indexOf(PULL_REQUEST_STATUS_START, start + 1) !== -1
+      || body.indexOf(PULL_REQUEST_STATUS_END, end + 1) !== -1) return undefined;
+    const next = `${body.slice(0, start)}${[PULL_REQUEST_STATUS_START, ...lines, PULL_REQUEST_STATUS_END].join("\n")}${body.slice(end + PULL_REQUEST_STATUS_END.length)}`;
+    return next === body ? undefined : next;
+  }
+  // An older description: its lines outside the PR feedback section, which is AgentX's too but never holds these.
+  const sectionStart = body.indexOf(START);
+  const sectionEnd = body.indexOf(END);
+  const outside = sectionStart !== -1 && sectionEnd > sectionStart ? body.slice(0, sectionStart) : body;
+  const own = outside.split("\n");
+  const checksAt = own.flatMap((line, index) => (CHECKS_LINE.test(line) ? [index] : []));
+  const reviewsAt = own.flatMap((line, index) => (REVIEWS_LINE.test(line) ? [index] : []));
+  const newChecks = lines.filter((line) => CHECKS_LINE.test(line));
+  const newReviews = lines.filter((line) => REVIEWS_LINE.test(line));
+  if (reviewsAt.length !== 1 || newReviews.length !== 1 || checksAt.length !== newChecks.length || checksAt.length > 1) return undefined;
+  if (checksAt.length === 1 && checksAt[0]! + 1 !== reviewsAt[0]) return undefined;
+  const from = checksAt[0] ?? reviewsAt[0]!;
+  const replaced = [...own.slice(0, from), ...newChecks, ...newReviews, ...own.slice(reviewsAt[0]! + 1)].join("\n");
+  const next = `${replaced}${body.slice(outside.length)}`;
+  return next === body ? undefined : next;
 }

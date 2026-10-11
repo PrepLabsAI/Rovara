@@ -197,7 +197,7 @@ import { loadWorkflowDocument, readObjectText as readStoredText, shortenMarkdown
 import { PLAN_EVIDENCE_PK, attachEvidence, planCitesCode, planEvidenceDueKey, planEvidenceEvent, planEvidenceJobItem, planEvidenceSources, type PlanEvidenceEvent, type PlanEvidenceJob } from "../developer/plan-evidence-jobs.js";
 import { resolvePlanEvidence } from "../developer/plan-evidence.js";
 import { WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
-import { approvedFeedbackFixes, withFeedbackFixes } from "../developer/pull-request-feedback-section.js";
+import { approvedFeedbackFixes, withFeedbackFixes, withStatusLines } from "../developer/pull-request-feedback-section.js";
 import { projectKey, requireProject } from "./project-records.js";
 import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
@@ -208,7 +208,7 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, releaseFinishedTask, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, releaseFinishedTask, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -4814,7 +4814,7 @@ async function reconcilePullRequestUpdate(
   );
   if (record.expectedHeadCommit === input.commit) {
     // A retried callback after the push was recorded: its description is brought up to date too.
-    if (expected.workflowCandidate !== undefined) await describeFeedbackFixes(dependencies, operation, record);
+    if (expected.workflowCandidate !== undefined) await describeFeedbackFixes(dependencies, operation, record, expected.workflowCandidate.candidateDigest);
     return { url: record.url, state: record.state, reconciled: true };
   }
   if (record.expectedHeadCommit !== expected.expectedHeadCommit) {
@@ -4852,7 +4852,7 @@ async function reconcilePullRequestUpdate(
       ":now": new Date().toISOString(),
     },
   }));
-  if (expected.workflowCandidate !== undefined) await describeFeedbackFixes(dependencies, operation, record);
+  if (expected.workflowCandidate !== undefined) await describeFeedbackFixes(dependencies, operation, record, expected.workflowCandidate.candidateDigest);
   return { url: remote.url, state: remote.state, reconciled: false };
 }
 
@@ -4864,8 +4864,12 @@ const DESCRIPTION_UPDATE_MAX_MS = 5_000;
  * of that pull request's comments ("Fixes from PR feedback"), kept up to date across rounds. Best effort and bounded in
  * time (at most the newest approvals' reports are read): the push is recorded whatever happens here, and a description
  * that could not be updated, or whose section no longer fits, is logged. GitHub's description is read just before the write.
+ *
+ * The same update brings the description's checks and reviews lines up to date (withStatusLines) when the task's current
+ * code is `candidateDigest`, the fix just pushed, and its checks ran on exactly that code: the description then names the
+ * checks and reviews of the code on the pull request, never an earlier round's.
  */
-async function describeFeedbackFixes(dependencies: AwsBrokerDependencies, operation: Pick<OperationRecord, "id" | "workspaceId">, record: PullRequestRecord): Promise<void> {
+async function describeFeedbackFixes(dependencies: AwsBrokerDependencies, operation: Pick<OperationRecord, "id" | "workspaceId">, record: PullRequestRecord, candidateDigest: string): Promise<void> {
   const log = (event: string, error?: unknown) => console.log(JSON.stringify({ component: "broker", event, operationId: operation.id,
     ...(error === undefined ? {} : { error: error instanceof Error ? error.name : "unknown" }) }));
   // Past the time limit the update is abandoned: it must never write later (Lambda may resume a frozen promise in a
@@ -4882,7 +4886,12 @@ async function describeFeedbackFixes(dependencies: AwsBrokerDependencies, operat
     if (late()) return;
     // The description as GitHub has it now, read just before the write, so a person's edit since is kept.
     const current = (await dependencies.githubPullRequests.getPullRequest(record.repositoryUrl, record.number)).body;
-    const next = withFeedbackFixes(current, fixes, earlier);
+    const workflow = task.workflow;
+    const pushedChecked = workflow.candidate?.digest === candidateDigest && workflow.verification?.candidateDigest === candidateDigest;
+    const status = pushedChecked ? withStatusLines(current, workflowPullRequestStatusLines(workflow)) : undefined;
+    const withStatus = status !== undefined && status.length <= PULL_REQUEST_BODY_MAX_CHARS ? status : current;
+    const fixed = withFeedbackFixes(withStatus, fixes, earlier);
+    const next = { ...fixed, ...(fixed.body === undefined && withStatus !== current ? { body: withStatus } : {}) };
     if (next.dropped) log("workflow.pull_request_description_section_dropped");
     if (next.body === undefined) return;
     if (late()) {
@@ -5675,7 +5684,7 @@ export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependen
       // The fix is on the pull request as if its result had come: its description lists it too.
       for (const push of pushes) {
         const record = await getItem<PullRequestRecord>(dependencies, pullRequestKey(push.workspaceId, push.repositoryId, push.number));
-        if (record !== undefined) await describeFeedbackFixes(dependencies, { id: `landed-${deliveryId}`, workspaceId: push.workspaceId }, record);
+        if (record !== undefined) await describeFeedbackFixes(dependencies, { id: `landed-${deliveryId}`, workspaceId: push.workspaceId }, record, push.candidateDigest);
       }
     },
     reviewedComments: async (taskId, bundleDigests) => {

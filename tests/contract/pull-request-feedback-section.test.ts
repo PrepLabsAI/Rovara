@@ -4,7 +4,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { PULL_REQUEST_BODY_MAX_CHARS, WorkflowFeedbackReviewReportSchema, type WorkflowSnapshot } from "@agentx/contracts";
-import { approvedFeedbackFixes, inertGitHubText, shortFixSummary, withFeedbackFixes } from "../../packages/broker/src/developer/pull-request-feedback-section.js";
+import { PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START, approvedFeedbackFixes, inertGitHubText, shortFixSummary, withFeedbackFixes, withStatusLines } from "../../packages/broker/src/developer/pull-request-feedback-section.js";
 
 const ZWJ = "‍";
 const taskId = randomUUID();
@@ -132,3 +132,37 @@ describe("the PR description's Fixes from PR feedback section", () => {
     expect(removed).toEqual({ body: full, dropped: true });
   });
 });
+
+describe("the PR description's checks and reviews lines after a pushed fix (0.2.12 live test)", () => {
+  const NEW = ["Checks: npm test passed, Discussions link present passed", "Reviews: code review passed; security review passed"];
+  const OLD = ["Checks: npm test passed, Issues link present passed", "Reviews: code review passed after the owner accepted its findings; security review passed"];
+  const block = (lines: readonly string[]) => [PULL_REQUEST_STATUS_START, ...lines, PULL_REQUEST_STATUS_END].join("\n");
+
+  it("replaces AgentX's marked block in place and keeps the person's edits around it", () => {
+    const body = `Add a link.\n\n${block([...OLD, "Owner accepted 1 review finding:", "- [code] x \u2014 accepted: y"])}\nAgentX task: https://x.example\n\nTesting notes: by hand.`;
+    expect(withStatusLines(body, NEW)).toBe(`Add a link.\n\n${block(NEW)}\nAgentX task: https://x.example\n\nTesting notes: by hand.`);
+    expect(withStatusLines(block(NEW), NEW)).toBeUndefined();
+  });
+
+  it("leaves a marked block alone when its markers are not one pair in order", () => {
+    expect(withStatusLines(`${PULL_REQUEST_STATUS_END}\n${OLD.join("\n")}\n${PULL_REQUEST_STATUS_START}`, NEW)).toBeUndefined();
+    expect(withStatusLines(`${block(OLD)}\n${PULL_REQUEST_STATUS_START}`, NEW)).toBeUndefined();
+    expect(withStatusLines(`${PULL_REQUEST_STATUS_START}\n${OLD.join("\n")}`, NEW)).toBeUndefined();
+  });
+
+  it("in an older description with no markers, replaces only its one Checks line and the Reviews line right after it", () => {
+    const body = `Add a link.\n\n${OLD.join("\n")}\nAgentX task: https://x.example\n\nNotes.\n\n<!-- agentx:pr-feedback-fixes -->\n### Fixes from PR feedback\n- Fix.\n<!-- /agentx:pr-feedback-fixes -->`;
+    expect(withStatusLines(body, NEW)).toBe(body.replace(OLD.join("\n"), NEW.join("\n")));
+    // Review only: the Reviews line alone.
+    expect(withStatusLines(`Intro.\n\n${OLD[1]}`, [NEW[1]!])).toBe(`Intro.\n\n${NEW[1]}`);
+  });
+
+  it("in an older description, changes nothing when its lines can't be found reliably", () => {
+    // Two Checks lines (the person quoted one), Checks and Reviews apart, or a Checks line where the new lines have none.
+    expect(withStatusLines(`${OLD.join("\n")}\n\nChecks: something else`, NEW)).toBeUndefined();
+    expect(withStatusLines(`${OLD[0]}\nA person's line.\n${OLD[1]}`, NEW)).toBeUndefined();
+    expect(withStatusLines(OLD.join("\n"), [NEW[1]!])).toBeUndefined();
+    expect(withStatusLines("No lines of AgentX's here.", NEW)).toBeUndefined();
+  });
+});
+
