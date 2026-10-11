@@ -128,15 +128,16 @@ async function tell(message: SlackRequestMessage, deps: TaskQuestionDependencies
  */
 export async function runTaskAnswer(
   message: SlackRequestMessage,
-  taskAnswer: { taskId: string; /** A task page comment being answered (spec 061 slice 2). */ commentId?: string },
+  /** A thread question's route, or a task page comment being answered (spec 061 slice 2). */
+  taskAnswer: TaskQuestionRoute | { taskId: string; commentId: string },
   question: string,
   deps: { api: ThreadServiceApi; runTurn: (input: TurnInput) => Promise<string>; handoff?: AbortSignal },
 ): Promise<string> {
   if (deps.api.taskAnswerWorkspace === undefined) throw new Error("task answers are unavailable in this deployment");
   const requestId = deterministicUuid(`${message.eventId}:task-answer`);
-  const workspace = taskAnswer.commentId === undefined
-    ? await deps.api.taskAnswerWorkspace(requestId, taskAnswer.taskId)
-    : await deps.api.taskAnswerWorkspace(requestId, taskAnswer.taskId, taskAnswer.commentId);
+  const workspace = "commentId" in taskAnswer
+    ? await deps.api.taskAnswerWorkspace(requestId, taskAnswer.taskId, taskAnswer.commentId)
+    : await deps.api.taskAnswerWorkspace(requestId, taskAnswer.taskId);
   if (workspace.outcome !== "WORKSPACE" || workspace.mode !== "task-answer" || workspace.taskContext === undefined) {
     throw new Error("the task's thread cannot be answered in task mode");
   }

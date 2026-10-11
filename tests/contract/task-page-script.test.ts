@@ -477,7 +477,7 @@ describe("the deciding and commenting script", () => {
     const mine = comment(2, { author: { kind: "person", name: "Priya", owner: false, you: true }, version: 2, target: { kind: "document" } });
     const page = boot(await pageHtml(), { respond: (entry) => {
       if (entry.url.endsWith("/api/comments") && entry.method === "POST") {
-        return { status: 201, body: { comment: comment(10, { parentId: entry.body.parentId, version: 2, text: entry.body.text, author: { kind: "person", name: "Maya", owner: true, you: true } }) } };
+        return { status: 201, body: { comment: comment(10, { ...(entry.body.parentId === undefined ? {} : { parentId: entry.body.parentId }), version: 2, text: entry.body.text ?? "", author: { kind: "person", name: "Maya", owner: true, you: true } }) } };
       }
       if (entry.url.endsWith("/edit")) return { status: 200, body: { comment: { ...mine, text: entry.body.text, edited: true, rev: 2 } } };
       if (entry.url.endsWith("/delete")) return { status: 200, body: { comment: { ...mine, text: "", deleted: true, rev: 3 } } };

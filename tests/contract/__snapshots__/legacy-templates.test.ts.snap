@@ -486,6 +486,9 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
             "SLACK_ORGANIZATION_WORKSPACE_LIMIT": {
               "Ref": "SlackOrganizationWorkspaceLimit",
             },
+            "SLACK_REQUEST_QUEUE_URL": {
+              "Ref": "SlackRequestQueueCC82C864",
+            },
             "STATE_TABLE_NAME": {
               "Ref": "State1C20CC9A",
             },
@@ -1036,6 +1039,20 @@ exports[`legacy production templates > AgentXControlPlane is unchanged 1`] = `
                     },
                     ":stateMachine:agentx-production-swebench-eval",
                   ],
+                ],
+              },
+            },
+            {
+              "Action": [
+                "sqs:SendMessage",
+                "sqs:GetQueueAttributes",
+                "sqs:GetQueueUrl",
+              ],
+              "Effect": "Allow",
+              "Resource": {
+                "Fn::GetAtt": [
+                  "SlackRequestQueueCC82C864",
+                  "Arn",
                 ],
               },
             },
