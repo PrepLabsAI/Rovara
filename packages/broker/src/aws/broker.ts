@@ -5847,8 +5847,9 @@ async function completedPullRequestUpdateItems(
       // GitHub could not say: the pull request's own head stands.
     }
   }
+  // The pull request must still come from the branch AgentX pushed to: the same tree on another branch is not this push.
   const onReviewedTree = current.pullRequest.number === pullRequest.number && current.pullRequest.url === pullRequest.url
-    && headTree === binding.treeSha && head !== maintenance.expectedHeadCommit && /^[a-f0-9]{40}$/.test(head);
+    && current.pullRequest.headBranch === maintenance.headBranch && headTree === binding.treeSha && head !== maintenance.expectedHeadCommit && /^[a-f0-9]{40}$/.test(head);
   const ownFastForward = async (): Promise<boolean> => {
     if (record?.expectedHeadCommit === head) return true;
     try {

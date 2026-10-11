@@ -3981,6 +3981,20 @@ describe("pushing an approved PR feedback fix to the same pull request (item 7)"
     expect(taskWorkflow(t.harness, t.taskId)).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED", pullRequestUpdateFailure: { cause: "PUSH_REFUSED" } });
   });
 
+  it("does not take a push as landed when the pull request's head branch is no longer the one AgentX pushed to", async () => {
+    for (const status of ["SUCCEEDED", "FAILED"] as const) {
+      const t = await fixPassed();
+      await t.pass();
+      const maintain = await pushLands(t, { callback: false });
+      // The pull request now shows the reviewed tree, but from another branch.
+      t.gh.branch.name = "someone-else/branch";
+      await t.harness.finish(t.workspaceId, maintain.id, status, status === "SUCCEEDED" ? appendResult(maintain) : { error: "CODEBUILD_FAILED: a validation gate did not pass" });
+      const workflow = taskWorkflow(t.harness, t.taskId);
+      expect(workflow, status).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED" });
+      expect(workflow.pullRequests, status).toEqual([expect.objectContaining({ headSha: "d".repeat(40), candidateDigest: t.first.digest })]);
+    }
+  });
+
   // 0.2.11 live blocker: GitHub moves a pull request's head a moment after a push to its branch. The worker's update
   // callback, and the push's result, came within that moment.
   const updateCallback = (maintain: { maintenance: { headBranch: string } }) => ({ repository: "demo", pullRequestNumber: 42, action: "append", headBranch: maintain.maintenance.headBranch,
