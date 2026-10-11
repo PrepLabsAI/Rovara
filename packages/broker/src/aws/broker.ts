@@ -2500,7 +2500,9 @@ async function taskAnswerWorkspace(
   commentId?: string,
 ): Promise<SlackThreadWorkspaceResult | undefined> {
   const workspace = await requireWorkspace(dependencies, shared.workspaceId);
-  if (workspace.status === "CLOSED") return undefined;
+  // A merged (or rejected) task gave back its workspace but is not closed: its thread is still answered, which needs no
+  // compute. A closed task's thread stays closed (the context below is undefined for it).
+  if (workspace.status === "CLOSED" && (await getItem<DeveloperTaskRecord>(dependencies, taskKey(shared.taskId)))?.releasedAt === undefined) return undefined;
   const taskContext = await workflowTaskAnswerContext(
     { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: developerTaskActions(dependencies) },
     { taskId: shared.taskId, workspaceId: shared.workspaceId, thread, ...(commentId === undefined ? {} : { commentId }) },

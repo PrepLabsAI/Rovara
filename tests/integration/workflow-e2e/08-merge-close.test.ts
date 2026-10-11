@@ -409,6 +409,21 @@ describe("Suite 8: merge and close", () => {
       expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(1);
     }, 120_000);
 
+    it("a question in a merged task's thread is still answered after its workspace is released", async () => {
+      const { e2e, pullRequest } = await waiting();
+      await mergeWebhook(e2e, pullRequest.number);
+      await e2e.settle();
+      expect(workspaceOf(e2e, e2e.taskId()).status).toBe("CLOSED");
+      const QUESTION = "what did this change?";
+      expect(await e2e.mention(QUESTION)).toBe(200);
+      await e2e.settle();
+      const before = e2e.slack.posts.length;
+      await e2e.answerTaskQuestions({ route: () => ({ kind: "question", outcome: "ok" }), answer: (question) => `Answer to: ${question}` });
+      const texts = [...e2e.slack.posts.slice(before).map((post) => post.text), ...e2e.slack.ephemerals.map((message) => message.text)];
+      expect(texts).toContain(`<@${OWNER}> Answer to: ${QUESTION}`);
+      expect(texts).not.toContain(CLOSED_REPLY);
+    }, 120_000);
+
     it("a merge while the feedback review runs releases the slot once that review ends", async () => {
       const { e2e, pullRequest } = await waiting();
       await comment(e2e, pullRequest.number);
