@@ -259,6 +259,14 @@ export class FakeGitHub {
     return { commit, tree };
   }
 
+  /** Someone force-pushes the pull request's branch back to an earlier commit (with no token AgentX minted). */
+  resetBranch(number: number, commit: string): void {
+    const pullRequest = this.find(number);
+    const tree = this.commits.get(commit);
+    if (tree === undefined) throw new Error(`GitHub has no commit ${commit}`);
+    this.moveBranch(pullRequest.headBranch, commit, tree, this.parents.get(commit) ?? [], "ghp_someone_else");
+  }
+
   /** Someone closes the pull request on GitHub without merging it. */
   close(number: number): void {
     this.find(number).state = "closed";

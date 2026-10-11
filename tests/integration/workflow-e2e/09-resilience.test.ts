@@ -466,6 +466,32 @@ describe("Suite 9: resilience", () => {
     expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
   }, 120_000);
 
+  it("9.19 someone resets the branch to the commit before AgentX's fix: an event is held back only for a few minutes, then AgentX stops following the PR", async () => {
+    // Found in review: the lag rule held such events back until they were given up, so the feedback was lost without a word.
+    const { e2e, counts, pullRequest } = await waiting();
+    const opened = pullRequest.commit;
+    const first = e2e.github.comment(pullRequest.number, "octocat", "Please trim the name.");
+    expect(await e2e.githubWebhook(pullRequest.number, { comment: first })).toBe(200);
+    await e2e.settle();
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(said(e2e).at(-1)).toBe(PUSHED_FIX(pullRequest.number));
+    e2e.github.resetBranch(pullRequest.number, opened);
+    // A moment later GitHub's own reads show the reset.
+    await e2e.github.gateway.getPullRequest(pullRequest.url, pullRequest.number);
+    const id = "91911111-2222-4333-8444-555555555555";
+    const comment = e2e.github.comment(pullRequest.number, "octocat", "Why was this undone?");
+    expect((await e2e.webhook({ kind: "issue_comment", number: pullRequest.number, comment }, { deliveryId: id })).status).toBe(503);
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    e2e.clock.advance(11 * 60_000);
+    await e2e.runWebhookRecovery();
+    await e2e.settle();
+    expect(delivery(e2e, id)).toMatchObject({ status: "COMPLETED" });
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED" });
+    expect(said(e2e).at(-1)).toBe("I stopped following the pull request. The pull request on GitHub no longer holds the checked code, so I won't finish this task from it. Close the task.");
+    expect(counts.feedback).toBe(1);
+  }, 120_000);
+
   it("9.18 a plan near the size limit with many thread replies stays within DynamoDB's item limit", async () => {
     const claims = Array.from({ length: PLAN_CLAIMS_MAX }, (_, index) => ({ id: String(index + 1), text: `Step ${index + 1}: ${"change the greeting so it reads well; ".repeat(12)}`.slice(0, 300).trim() }));
     const long = (length: number, index: number) => `${index + 1}. ${"Keep every greeting short and friendly for each user. ".repeat(12)}`.slice(0, length).trim();

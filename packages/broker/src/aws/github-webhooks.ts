@@ -171,6 +171,9 @@ export interface ReconcileTaskPullRequestFeedbackInput {
   now: string;
 }
 
+/** How long after AgentX records a push GitHub's read may still show the head before it (it takes seconds; this is generous). */
+export const GITHUB_HEAD_LAG_WINDOW_MS = 10 * 60_000;
+
 /** Event payloads are hints only. Recollect all linked PRs on every CAS retry. */
 export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullRequestFeedbackInput): Promise<boolean> {
   const linked = await findLinkedGithubWorkflowPullRequest(input);
@@ -217,7 +220,11 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
     // The same lag, with no push event to hint at it: any event (a comment, a review, an edit) read just after AgentX
     // recorded its own push may still see the head before it. When GitHub's head is exactly the only parent of the head
     // AgentX recorded, the event is read again later instead of being taken for someone else's change. This only defers.
-    if (input.commitParents !== undefined) {
+    // Only for a while after AgentX recorded its push: past that, GitHub has long caught up, and a head at the commit before
+    // AgentX's push is someone resetting the branch, which the usual rules then judge (never as AgentX's own push).
+    const recordedAt = current.pullRequestUpdatedAt === undefined ? Number.NaN : Date.parse(current.pullRequestUpdatedAt);
+    const lagWindow = Number.isFinite(recordedAt) && Date.parse(input.now) - recordedAt <= GITHUB_HEAD_LAG_WINDOW_MS;
+    if (input.commitParents !== undefined && lagWindow) {
       for (const read of reads) {
         const shown = read.feedback.pullRequest.headCommit;
         if (read.feedback.pullRequest.state !== "open" || read.pr.headSha === undefined || shown === read.pr.headSha) continue;
