@@ -166,6 +166,9 @@ describe("workflow Slack messages", () => {
   it("acknowledges each owner decision by what it was, not by the stage alone", () => {
     const full = (phase: string, decision: string) => snapshot("PLAN", "RUNNING", { path: "FULL", reviewPhase: phase, decisions: [{ requestId: "33333333-3333-4333-8333-333333333333", workflowRevision: 6, decision, actorId: "a".repeat(64), actorRole: "TASK_OWNER", reason: "r", artifactDigest: "c".repeat(64), at: now }] });
     expect(workflowMessage({ taskId, workflow: full("DESIGN", "APPROVE") })?.text).toBe("Requirements approved. Writing the design next.");
+    // The approver is named the same way at every approval gate (0.2.12 live test).
+    expect(workflowMessage({ taskId, ownerSlackUserId: "U0123456789", workflow: full("DESIGN", "APPROVE") })?.text).toBe("Requirements approved by <@U0123456789>. Writing the design next.");
+    expect(workflowMessage({ taskId, ownerSlackUserId: "U0123456789", workflow: full("IMPLEMENTATION_PLAN", "APPROVE") })?.text).toBe("Design approved by <@U0123456789>. Writing the coding plan next.");
     expect(workflowMessage({ taskId, workflow: full("DESIGN", "REQUEST_CHANGES") })?.text).toBe("Got it. Revising the design with your changes.");
     expect(workflowMessage({ taskId, workflow: snapshot("PLAN", "RUNNING") })?.text).toContain("Working on the coding plan");
     const approved = snapshot("IMPLEMENT", "RUNNING", { checkPolicy, decisions: [{ requestId: "33333333-3333-4333-8333-333333333333", workflowRevision: 5, decision: "APPROVE", actorId: "a".repeat(64), actorRole: "TASK_OWNER", reason: "r", artifactDigest: "c".repeat(64), at: now }] });

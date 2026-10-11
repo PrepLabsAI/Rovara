@@ -598,9 +598,8 @@ function implementRunning(context: WorkflowMessageContext): string {
     return `Sent back to coding with ${what === "" ? "your note" : what}. Checks and reviews will run again after.`;
   }
   if (decision?.decision === "APPROVE") {
-    const by = context.ownerSlackUserId === undefined ? "" : ` by <@${context.ownerSlackUserId}>`;
     const count = checkCount(workflow);
-    return `Coding plan approved${by}. Writing the code now${count > 0 ? `; then I'll run ${plural(count, "check")}` : ""}.`;
+    return `Coding plan approved${approvedBy(context, decision)}. Writing the code now${count > 0 ? `; then I'll run ${plural(count, "check")}` : ""}.`;
   }
   return "Trying the coding step again.";
 }
@@ -624,13 +623,19 @@ function fixChangedNothing(context: WorkflowMessageContext, exits: ReturnType<ty
   };
 }
 
-function planRunning(workflow: WorkflowSnapshot): string {
+/** " by @owner" when the task's owner made this approval and their Slack user is known; otherwise nothing. */
+function approvedBy(context: WorkflowMessageContext, decision: { actorRole: string }): string {
+  return context.ownerSlackUserId === undefined || decision.actorRole !== "TASK_OWNER" ? "" : ` by <@${context.ownerSlackUserId}>`;
+}
+
+function planRunning(context: WorkflowMessageContext): string {
+  const { workflow } = context;
   const name = workflowDocumentName(workflow);
   const decision = leadingDecision(workflow);
   if (decision?.decision === "REQUEST_CHANGES") return `Got it. Revising the ${name} with your changes.`;
   if (decision?.decision === "APPROVE" && workflow.path === "FULL") {
     const previous = workflow.reviewPhase === "DESIGN" ? "requirements" : "design";
-    return `${capitalized(previous)} approved. Writing the ${name} next.`;
+    return `${capitalized(previous)} approved${approvedBy(context, decision)}. Writing the ${name} next.`;
   }
   return `Working on the ${name}. I'll post it here for your approval; nothing changes in the code until you approve.`;
 }
@@ -646,7 +651,7 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
   const checksAndReviewsPassed = reviewOnly ? "Reviews passed (no automated check applied)." : "Checks and reviews passed.";
   if (context.publishFailure !== undefined && workflow.stage === "PULL_REQUEST") return publishFailed(context, exits, context.publishFailure);
   switch (`${workflow.stage}/${workflow.state}`) {
-    case "PLAN/RUNNING": return plain(planRunning(workflow));
+    case "PLAN/RUNNING": return plain(planRunning(context));
     case "PLAN/BLOCKED": return { text: workflow.blockReason === WORKFLOW_BLOCK_REASONS.planUnreadable
       ? `AgentX couldn't read the ${workflowDocumentName(workflow)} it wrote.`
       : `I couldn't finish the ${workflowDocumentName(workflow)}. ${plainBlockReason(workflow.blockReason)}`,
