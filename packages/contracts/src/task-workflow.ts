@@ -6,9 +6,9 @@ import { WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckI
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const ActorIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
 export const WORKFLOW_PLAN_MAX_BYTES = 32_768;
-/** Shown to the owner when the code no longer descends from the commit the task started from. */
 /** The worker's refusal when a coding run leaves every repository as it was when the task started: nothing to check or publish. */
 export const WORKFLOW_NO_CODE_CHANGE_MESSAGE = "the coding run left the code as it was when the task started";
+/** Shown to the owner when the code no longer descends from the commit the task started from. */
 export const WORKFLOW_HISTORY_REWRITTEN_MESSAGE = "The change history was rewritten past where this task started, so AgentX can't compare it. Ask for the change again in a new task.";
 
 /** Shown to the owner when AgentX gave up starting the reviews on its own; Retry reviews starts them. */
