@@ -3,6 +3,7 @@ import { realpathSync } from "node:fs";
 import { open, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, extname, join, resolve } from "node:path";
+import { createInterface } from "node:readline";
 import { Writable as NodeWritable, type Readable, type Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 import {
@@ -38,6 +39,7 @@ import { loginWithPkce, openSystemBrowser, tokenStoreKey } from "./auth.js";
 import { loadProjectConfig } from "./config.js";
 import { developerLogout, fetchDeveloperProjects, logoutText, whoamiText } from "./developer/commands.js";
 import { resolveDeveloperEnvironment } from "./developer/config.js";
+import { chatGptConnect, chatGptConnectionText, chatGptDisconnect, chatGptDisconnectText, chatGptStatus } from "./developer/chatgpt.js";
 import { developerLogin } from "./developer/login.js";
 import { fetchDeveloperWorkspaces, type DeveloperWorkspacesResult } from "./developer/workspaces.js";
 import { runWorkspacesCommand } from "./workspaces-ui/index.js";
@@ -142,6 +144,8 @@ export interface CliDependencies {
     isInteractive?: () => boolean;
     port?: number;
   };
+  /** `chatgpt connect` overrides, for tests: another port, no browser, and no terminal check. */
+  chatgpt?: { port?: number; openBrowser?: (url: string) => Promise<void>; isInteractive?: () => boolean };
   /** `agentx mcp` reads MCP messages from here; process.stdin by default. */
   stdin?: Readable;
   /** `agentx mcp`'s clock for waits, for tests. */
@@ -378,6 +382,53 @@ export function createCliProgram(dependencies: CliDependencies = {}): Command {
         ...(overrides.waitForExit === undefined ? {} : { waitForExit: overrides.waitForExit }),
         ...(overrides.port === undefined ? {} : { port: overrides.port }),
       });
+    });
+
+  // Sign in with ChatGPT (#339): the signed-in developer's own ChatGPT plan, for their tasks.
+  const chatgpt = program.command("chatgpt").description("connect your own ChatGPT plan, so your tasks can run on it");
+  chatgpt
+    .command("connect")
+    .description("connect your ChatGPT Plus or Pro plan: signs in with ChatGPT in your browser")
+    .option("--no-browser", "print the link instead of opening a browser")
+    .action(async (options: { browser: boolean }, command: Command) => {
+      const globals = globalOptions(command);
+      const overrides = dependencies.chatgpt ?? {};
+      const input = dependencies.stdin ?? process.stdin;
+      // Opened only when a paste is offered, so a run without a terminal never holds stdin.
+      let lines: AsyncIterator<string> | undefined;
+      try {
+        const result = await chatGptConnect(developerSession(), developerEnv(command), {
+          browser: options.browser,
+          openBrowser: overrides.openBrowser ?? openSystemBrowser,
+          write: (line) => { services.stderr.write(`${line}\n`); },
+          readLine: async () => {
+            lines ??= createInterface({ input, terminal: false })[Symbol.asyncIterator]();
+            const next = await lines.next();
+            return next.done === true ? undefined : next.value;
+          },
+          interactive: (overrides.isInteractive ?? (() => process.stdin.isTTY === true))(),
+          ...(overrides.port === undefined ? {} : { port: overrides.port }),
+        });
+        services.stdout.write(globals.json ? formatSuccess({ env: result.env, url: result.url, ...result.connection }, true) : chatGptConnectionText(result, "connected"));
+      } finally {
+        await lines?.return?.();
+      }
+    });
+  chatgpt
+    .command("status")
+    .description("show whether your ChatGPT plan is connected, and the models it offers")
+    .action(async (_options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const result = await chatGptStatus(developerSession(), developerEnv(command));
+      services.stdout.write(globals.json ? formatSuccess({ env: result.env, url: result.url, ...result.connection }, true) : chatGptConnectionText(result, "status"));
+    });
+  chatgpt
+    .command("disconnect")
+    .description("disconnect your ChatGPT plan; your tasks go back to this environment's default model")
+    .action(async (_options: unknown, command: Command) => {
+      const globals = globalOptions(command);
+      const result = await chatGptDisconnect(developerSession(), developerEnv(command));
+      services.stdout.write(globals.json ? formatSuccess({ env: result.env, url: result.url, ...result.connection }, true) : chatGptDisconnectText(result));
     });
 
   registerSigninCommands(program, {

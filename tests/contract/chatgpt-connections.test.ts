@@ -3,7 +3,7 @@
 // found the real service does. Nothing here reaches AWS or OpenAI.
 import { createHash } from "node:crypto";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { CHATGPT_CALLBACK_URL } from "@agentx/contracts";
+import { AgentXError, CHATGPT_CALLBACK_URL } from "@agentx/contracts";
 import { ACCESS_TOKEN_MARGIN_MS, chatGptConnections, type ChatGptSealer } from "../../packages/broker/src/chatgpt/connections.js";
 import { chatGptAuthorization, chatGptHostId, chatGptModels, parseChatGptCallback, CHATGPT_TOKEN_URL } from "../../packages/broker/src/chatgpt/oauth.js";
 import { developerTokenVerifier } from "../../packages/broker/src/developer/verify-token.js";
@@ -42,7 +42,10 @@ function fakeOpenAi(options: { models?: number; scope?: string } = {}) {
     if (target === CHATGPT_TOKEN_URL) {
       const fields = Object.fromEntries(new URLSearchParams(typeof init?.body === "string" ? init.body : ""));
       calls.push(fields);
-      if (fields.grant_type === "authorization_code") return new Response(JSON.stringify(tokens()), { status: 200 });
+      if (fields.grant_type === "authorization_code") {
+        if (fields.code === "refused-code") return new Response(JSON.stringify({ error: "invalid_grant", error_description: "code secret abc" }), { status: 400 });
+        return new Response(JSON.stringify(tokens()), { status: 200 });
+      }
       if (!valid.has(fields.refresh_token ?? "")) return new Response(JSON.stringify({ error: "invalid_grant", error_description: "refresh token secret abc" }), { status: 400 });
       valid.delete(fields.refresh_token ?? "");
       return new Response(JSON.stringify(tokens()), { status: 200 });
@@ -262,5 +265,17 @@ describe("the developer routes for a ChatGPT connection", () => {
     const response = await call("GET", developerId);
     expect(response.status).toBe(404);
     expect(JSON.stringify(response.body)).toContain("Sign in with ChatGPT is not set up in this deployment");
+  });
+});
+
+describe("a code OpenAI refuses", () => {
+  it("is a 400 to start again, not a 401 that would read as the Rovara sign-in ending, and keeps nothing", async () => {
+    const { db, connections, callbackFor } = harness();
+    const { authorizeUrl } = await connections.start("dev-1");
+    const refused = await connections.finish("dev-1", { callbackUrl: callbackFor(authorizeUrl, "refused-code") }).catch((error: unknown) => error as AgentXError);
+    expect(refused).toBeInstanceOf(AgentXError);
+    expect(refused.statusCode).toBe(400);
+    expect(refused.message).toBe("CONFIG_INVALID: ChatGPT sign-in failed (invalid_grant); start connecting ChatGPT again");
+    expect(db.get("CHATGPT#dev-1", "CONNECTION")).toBeUndefined();
   });
 });

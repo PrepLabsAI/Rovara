@@ -127,7 +127,14 @@ export function chatGptConnections(deps: ChatGptConnectionsDependencies): ChatGp
       }
       if (pending.expiresAt <= deps.now()) throw agentXError("CONFIG_INVALID", "this sign-in has expired; start connecting ChatGPT again");
       const verifier = await deps.sealer.open(pending.sealedVerifier, contextOf(developerId, "verifier"));
-      const tokens = await exchangeChatGptCode({ fetch: deps.fetch, now: deps.now(), code: callback.code, verifier, clientId: callback.clientId });
+      const tokens = await exchangeChatGptCode({ fetch: deps.fetch, now: deps.now(), code: callback.code, verifier, clientId: callback.clientId }).catch((error: unknown) => {
+        // OpenAI refusing the code is not the caller's Rovara sign-in ending: answering 401 would
+        // tell the CLI to sign in to Rovara again.
+        if (error instanceof AgentXError && error.code === "AUTH_REQUIRED") {
+          throw agentXError("CONFIG_INVALID", `${error.message.slice(error.code.length + 2)}; start connecting ChatGPT again`);
+        }
+        throw error;
+      });
       // The eligibility check: a plan Rovara may not use refuses this, and nothing is kept.
       const models = await chatGptModels({ fetch: deps.fetch, access: tokens.access });
       const record: ConnectionRecord = {
