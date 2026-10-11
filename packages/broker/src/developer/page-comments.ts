@@ -185,8 +185,17 @@ export async function takeRate(
   limit: number,
   windowMs: number,
 ): Promise<boolean> {
+  return takeRateAt(deps, rateKey(key.taskId, key.kind, key.actor), limit, windowMs);
+}
+
+/** `takeRate` for any rate item. */
+async function takeRateAt(
+  deps: TableDependencies & Pick<DeveloperTaskRouteDependencies, "now">,
+  Key: { pk: string; sk: string },
+  limit: number,
+  windowMs: number,
+): Promise<boolean> {
   const window = Math.floor(deps.now() / windowMs) * windowMs;
-  const Key = rateKey(key.taskId, key.kind, key.actor);
   const increment = async (): Promise<boolean> => {
     try {
       await deps.documentClient.send(new UpdateCommand({
@@ -576,39 +585,68 @@ export async function queueCommentAnswer(
   input: { task: DeveloperTaskRecord; comment: TaskComment; caller: DeveloperCaller },
 ): Promise<{ outcome: "queued" | "limited" | "unavailable" | "failed"; comment: TaskComment }> {
   const { task, comment, caller } = input;
-  const share = task.share;
-  const userId = caller.slackUserId ?? task.slackUserId;
-  const threadTs = share?.threadTs;
-  const shared = share === undefined || threadTs === undefined ? undefined
-    : await getItem(deps, sharedTaskKey({ teamId: share.teamId, channelId: share.channelId, threadTs }));
-  const startedInSlack = shared?.taskId === task.taskId && shared.workflowThread === true && shared.closedAt === undefined;
-  if (deps.slackRequestQueue === undefined || share === undefined || threadTs === undefined || !startedInSlack || userId === undefined || comment.author.kind !== "person") {
-    return { outcome: "unavailable", comment: await setAsk(deps, comment, "unavailable") };
-  }
-  // The thread's AgentX answers first (no limit is spent on a refused ask), then the person's and the task's hourly limits.
-  const threadId = comment.parentId ?? comment.commentId;
-  const answers = (await listTaskComments(deps, task.taskId)).filter((item) => item.author.kind === "agentx" && item.author.source === "answer" && item.parentId === threadId);
-  if (answers.length >= AGENTX_ASK_RATE.perThread) return { outcome: "limited", comment };
-  if (!await takeRate(deps, { taskId: task.taskId, kind: "ask", actor: caller.developerId }, AGENTX_ASK_RATE.perPersonPerHour, HOUR_MS)) return { outcome: "limited", comment };
-  if (!await takeRate(deps, { taskId: task.taskId, kind: "ask", actor: "task" }, AGENTX_ASK_RATE.perTaskPerHour, HOUR_MS)) return { outcome: "limited", comment };
-  const answering = await setAsk(deps, comment, "answering");
-  const message = SlackPageCommentMessageSchema.parse({
-    version: 1, eventId: pageCommentEventId(comment.commentId), thread: { teamId: share.teamId, channelId: share.channelId, threadTs }, userId,
-    text: comment.text, receivedAt: iso(deps), pageComment: { taskId: task.taskId, commentId: comment.commentId },
-  });
+  let answering: TaskComment | undefined;
   try {
-    await deps.slackRequestQueue.send({
+    const share = task.share;
+    const userId = caller.slackUserId ?? task.slackUserId;
+    const threadTs = share?.threadTs;
+    const shared = share === undefined || threadTs === undefined ? undefined
+      : await getItem(deps, sharedTaskKey({ teamId: share.teamId, channelId: share.channelId, threadTs }));
+    const startedInSlack = shared?.taskId === task.taskId && shared.workflowThread === true && shared.closedAt === undefined;
+    const queue = deps.slackRequestQueue;
+    if (queue === undefined || share === undefined || threadTs === undefined || !startedInSlack || userId === undefined || comment.author.kind !== "person") {
+      return { outcome: "unavailable", comment: await setAsk(deps, comment, "unavailable") };
+    }
+    // The message is built (and checked) before anything is spent or marked.
+    const message = SlackPageCommentMessageSchema.parse({
+      version: 1, eventId: pageCommentEventId(comment.commentId), thread: { teamId: share.teamId, channelId: share.channelId, threadTs }, userId,
+      text: comment.text, receivedAt: iso(deps), pageComment: { taskId: task.taskId, commentId: comment.commentId },
+    });
+    // The thread's limit first: AgentX's answers there and the questions still being answered (no limit is spent on a
+    // refused ask). Then every hourly limit is checked before any of them is spent.
+    const threadId = comment.parentId ?? comment.commentId;
+    const inThread = (await listTaskComments(deps, task.taskId)).filter((item) => item.commentId !== comment.commentId && (item.parentId === threadId || item.commentId === threadId));
+    const answers = inThread.filter((item) => (item.author.kind === "agentx" && item.author.source === "answer") || item.ask?.state === "answering");
+    if (answers.length >= AGENTX_ASK_RATE.perThread) return { outcome: "limited", comment };
+    const limits = [
+      { key: rateKey(task.taskId, "ask", caller.developerId), limit: AGENTX_ASK_RATE.perPersonPerHour },
+      { key: rateKey(task.taskId, "ask", "task"), limit: AGENTX_ASK_RATE.perTaskPerHour },
+      { key: askRateAcrossTasksKey(caller.developerId), limit: AGENTX_ASK_RATE.perPersonAllTasksPerHour },
+    ];
+    for (const entry of limits) if (!await rateRoom(deps, entry.key, entry.limit, HOUR_MS)) return { outcome: "limited", comment };
+    for (const entry of limits) if (!await takeRateAt(deps, entry.key, entry.limit, HOUR_MS)) return { outcome: "limited", comment };
+    answering = await setAsk(deps, comment, "answering");
+    await queue.send({
       body: JSON.stringify(message),
       groupId: createHash("sha256").update(`page-comment\0${task.taskId}`, "utf8").digest("hex"),
       deduplicationId: message.eventId,
       attributes: pageCommentAttributes(),
     });
+    log(deps, { event: "developer.comment_answer_queued", taskId: task.taskId });
+    return { outcome: "queued", comment: answering };
   } catch (error) {
+    // The comment is posted whatever happens here: the question reads as not answered rather than waiting for ever.
     log(deps, { event: "developer.comment_answer_queue_failed", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" });
-    return { outcome: "failed", comment: await setAsk(deps, answering, "failed", "answering").catch(() => answering) };
+    const failed = answering === undefined
+      ? await setAsk(deps, comment, "failed").catch(() => undefined)
+      : await setAsk(deps, answering, "failed", "answering").catch(() => undefined);
+    return { outcome: "failed", comment: failed ?? { ...comment, ask: { state: "failed", at: iso(deps) } } };
   }
-  log(deps, { event: "developer.comment_answer_queued", taskId: task.taskId });
-  return { outcome: "queued", comment: answering };
+}
+
+/** The per-person limit on questions to AgentX over all of a person's tasks: its own item, outside any task. */
+const askRateAcrossTasksKey = (developerId: string) => ({ pk: `ASKRATE#${developerId}`, sk: "RATE#ask" });
+
+/** Counts one question to AgentX against `developerId`'s limit over all their tasks (30 an hour). */
+export function takeAskRateAcrossTasks(deps: TableDependencies & Pick<DeveloperTaskRouteDependencies, "now">, developerId: string): Promise<boolean> {
+  return takeRateAt(deps, askRateAcrossTasksKey(developerId), AGENTX_ASK_RATE.perPersonAllTasksPerHour, HOUR_MS);
+}
+
+/** Whether a fixed-window limit has room for one more, without counting it. */
+async function rateRoom(deps: TableDependencies & Pick<DeveloperTaskRouteDependencies, "now">, Key: { pk: string; sk: string }, limit: number, windowMs: number): Promise<boolean> {
+  const window = Math.floor(deps.now() / windowMs) * windowMs;
+  const stored = await getItem(deps, Key);
+  return stored === undefined || typeof stored.windowStart !== "number" || stored.windowStart < window || typeof stored.count !== "number" || stored.count < limit;
 }
 
 const HOUR_MS = 3_600_000;
@@ -627,7 +665,13 @@ export async function writeCommentAnswer(
   if (comment === undefined || comment.author.kind !== "person" || comment.ask === undefined) throw pageRefusal("changed");
   const state = comment.ask.state;
   if (state === "answered" || state === "failed") return state;
+  if (state === "skipped") return "failed";
   if (state !== "answering") throw pageRefusal("changed");
+  // Deleted, or edited after it was asked: the answer would be to words no longer there, so it is not shown.
+  if (comment.deletedAt !== undefined || (comment.editedAt !== undefined && comment.editedAt > comment.ask.at)) {
+    await setAsk(deps, comment, "skipped", "answering");
+    return "failed";
+  }
   if (input.outcome === "FAILED") {
     await setAsk(deps, comment, "failed", "answering");
     return "failed";
@@ -654,8 +698,10 @@ export async function writeCommentAnswer(
         {
           Update: {
             TableName: deps.tableName, Key: commentKey(input.taskId, comment.commentId), UpdateExpression: "SET #ask = :ask",
-            ConditionExpression: "#ask.#state = :answering", ExpressionAttributeNames: { "#ask": "ask", "#state": "state" },
-            ExpressionAttributeValues: { ":ask": ask, ":answering": "answering" },
+            // The comment as it was read: not deleted or edited since.
+            ConditionExpression: "#ask.#state = :answering AND #rev = :rev AND attribute_not_exists(deletedAt)",
+            ExpressionAttributeNames: { "#ask": "ask", "#state": "state", "#rev": "rev" },
+            ExpressionAttributeValues: { ":ask": ask, ":answering": "answering", ":rev": comment.rev },
           },
         },
       ] as never,
@@ -665,6 +711,11 @@ export async function writeCommentAnswer(
     if (error instanceof Error && error.name === "TransactionCanceledException") {
       const now = await getComment(deps, input.taskId, input.commentId);
       if (now?.ask?.state === "answered" || now?.ask?.state === "failed") return now.ask.state;
+      if (now?.ask?.state === "skipped") return "failed";
+      if (now !== undefined && now.ask?.state === "answering" && codes[2] === "ConditionalCheckFailed" && (now.deletedAt !== undefined || now.rev !== comment.rev)) {
+        await setAsk(deps, now, "skipped", "answering");
+        return "failed";
+      }
       // The task holds 300 items: the answer cannot be kept, so the question reads as not answered.
       if (codes[1] === "ConditionalCheckFailed") {
         log(deps, { event: "developer.comment_answer_full", taskId: input.taskId });

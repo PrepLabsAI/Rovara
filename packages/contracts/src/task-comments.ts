@@ -14,7 +14,7 @@ export const COMMENT_THREAD_REPLIES_MAX = 20;
 /** The most comments one decision can include: keeps the planner's answers and the transaction small. */
 export const DECISION_COMMENTS_MAX = 25;
 export const COMMENT_RATE = { comments: 30, suggestions: 60, windowMs: 600_000 } as const;
-export const AGENTX_ASK_RATE = { perPersonPerHour: 6, perTaskPerHour: 20, perThread: 5 } as const;
+export const AGENTX_ASK_RATE = { perPersonPerHour: 6, perTaskPerHour: 20, perThread: 5, perPersonAllTasksPerHour: 30 } as const;
 export const NUDGE_WINDOW_MS = 600_000;
 /** A question waiting longer than this shows as not answered. */
 export const ANSWER_STALE_MS = 600_000;
@@ -83,7 +83,7 @@ export const TaskCommentSchema = z.object({
   rev: z.number().int().positive(),
   /** Set when a decision included the comment: it can no longer be edited or deleted. */
   lockedBy: z.object({ requestId: UuidSchema, decision: z.enum(["APPROVE", "REQUEST_CHANGES"]), at: DateTimeSchema }).strict().optional(),
-  ask: z.object({ state: z.enum(["answering", "answered", "failed", "unavailable"]), at: DateTimeSchema }).strict().optional(),
+  ask: z.object({ state: z.enum(["answering", "answered", "failed", "unavailable", "skipped"]), at: DateTimeSchema }).strict().optional(),
   /** Top-level comments: how many people's replies the thread holds (at most 20). */
   replyCount: z.number().int().min(0).max(COMMENT_THREAD_REPLIES_MAX).optional(),
 }).strict().superRefine((comment, context) => {

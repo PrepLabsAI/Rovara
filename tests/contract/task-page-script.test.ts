@@ -441,6 +441,23 @@ describe("the deciding and commenting script", () => {
     expect(replyButton.getAttribute("aria-describedby")).toBe(`comment-${id(5)}`);
   });
 
+  it("AgentX's answer re-rendered from JSON is labelled as AI with who asked; an edited question says why it has no answer", async () => {
+    const answer = comment(6, { parentId: id(1), author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Only the owner decides.", answering: "<b>Sam</b>" });
+    const edited = comment(7, { agentx: "skipped", edited: true });
+    let seq = 3;
+    const page = boot(await pageHtml(), { respond: (entry) => {
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: seq, csrf: "n".repeat(43) } };
+      if (entry.url.endsWith("/api/comments")) return { status: 200, body: { comments: [comment(1, { agentx: "answered" }), answer, edited], suggestions: [] } };
+      return { status: 200, body: {} };
+    } });
+    seq = 4;
+    await page.advance(20_000);
+    const shown = page.document.querySelector(`#comment-${id(6)}`)!;
+    expect(shown.querySelector(".comment-meta")!.visibleText).toMatch(/^AgentX \(AI\) · answering <b>Sam<\/b>/);
+    expect(shown.querySelectorAll("b")).toHaveLength(0);
+    expect(page.document.querySelector(`#comment-${id(7)}`)!.visibleText).toContain("Edited after it was asked, so AgentX didn't answer.");
+  });
+
   it("a 429 shows the slow-down sentence under the form", async () => {
     const slow = "You've posted a lot in the last 10 minutes. Try again in a few minutes.";
     const page = boot(await pageHtml(), { respond: (entry) => entry.method === "POST" ? { status: 429, body: { error: "slow_down", message: slow } } : { status: 200, body: {} } });

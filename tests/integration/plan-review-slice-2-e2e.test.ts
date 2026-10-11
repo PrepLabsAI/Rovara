@@ -388,9 +388,10 @@ describe("deciding and commenting on the task page, end to end", () => {
     expect(turns[0]!.tools).toEqual([]);
     expect(turns[0]!.modelInput).toContain("It is placed near the pay button.");
     expect(turns[0]!.modelInput).toContain("The question was asked on claim 2.1 of Coding plan v1:");
+    expect(turns[0]!.modelInput).toContain("Asked by a teammate. You cannot approve, choose answers or make decisions; if asked to, say only the owner decides on the page.");
     const answered = await openTaskPage(e2e, SAM, { search: "?doc=coding-plan" });
     const thread = answered.document.querySelector('[data-comments="claim:2.1"]')!;
-    expect(thread.querySelector(".replies .chip")!.textContent).toBe("AgentX");
+    expect(readable(thread.querySelector(".replies .comment-meta")!)).toMatch(/^AgentX \(AI\) · answering Sam Lee /);
     expect(thread.querySelector(".replies .comment-text")!.textContent).toBe("Below keeps the pay button first; Above is the other choice.");
     expect(readable(thread)).not.toContain("AgentX is answering…");
     expect(e2e.slack.posts.length).toBe(posts);
@@ -436,7 +437,7 @@ describe("deciding and commenting on the task page, end to end", () => {
     const page = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan", scripts: false });
     const text = page.text();
     for (const expected of ["You're the task owner.", "It is placed near the pay button.", "Where does the banner go?", "Above", "Below", "AgentX recommends",
-      "Sam Lee", "Above reads better on a phone.", "AgentX", "Above is seen first; Below is less in the way.", "Comments on this document", "2 comments"]) {
+      "Sam Lee", "Above reads better on a phone.", "AgentX (AI) · answering Sam Lee", "Above is seen first; Below is less in the way.", "Comments on this document", "2 comments"]) {
       expect(text).toContain(expected);
     }
     // The controls that need the script stay hidden, so nothing on the page does nothing.

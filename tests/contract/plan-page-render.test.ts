@@ -448,6 +448,16 @@ describe("comments, suggestions and answers on the plan page", () => {
     expect(await renderPlanDocument(input({ comments: [secret], access: commenting }))).not.toContain("a".repeat(36));
   });
 
+  it("AgentX's answer to a question is labelled as AI and names who asked; an edited question says why it has no answer", async () => {
+    const asked = comment({ agentx: "answered" });
+    const answer = comment({ parentId: asked.id, author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Only the owner decides.", answering: "Sam <Lee>" });
+    const edited = comment({ agentx: "skipped", edited: true, target: { kind: "claim", id: "1" } });
+    const html = await renderPlanDocument(input({ comments: [asked, answer, edited], access: commenting }));
+    const reply = slice(html, `id="comment-${answer.id}"`, "</article>");
+    expect(reply).toContain('<span class="chip chip-agentx">AgentX (AI)</span> <span class="answering">· answering Sam &lt;Lee&gt;</span>');
+    expect(html).toContain("Edited after it was asked, so AgentX didn't answer.");
+  });
+
   it("a claim shows its comment count and its threads; replies are one level", async () => {
     const first = comment();
     const answer = comment({ parentId: first.id, author: { kind: "person", name: "Priya Shah", owner: true, you: true } });

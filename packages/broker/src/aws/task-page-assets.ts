@@ -230,6 +230,9 @@ export const TASK_PAGE_DECIDING_COPY = {
   edited: "(edited)",
   owner: "Owner",
   agentx: "AgentX",
+  agentxAi: "AgentX (AI)",
+  answeringWho: "· answering ",
+  skipped: "Edited after it was asked, so AgentX didn't answer.",
   reply: "Reply",
   done: "Done: ",
   notChanged: "Not changed because: ",
@@ -394,14 +397,20 @@ function containerFor(section,key){
 }
 
 /* ---------- showing a comment ---------- */
-var STATES={answering:COPY.answering,couldnt:COPY.couldnt,not_answered:COPY.notAnswered,unavailable:COPY.askUnavailable};
+var STATES={answering:COPY.answering,couldnt:COPY.couldnt,not_answered:COPY.notAnswered,unavailable:COPY.askUnavailable,skipped:COPY.skipped};
 function shortTime(at){var d=new Date(at);if(isNaN(d.getTime()))return "";var iso=d.toISOString();return iso.slice(0,10)+" "+iso.slice(11,16)+" UTC";}
 function validComment(c){return c&&typeof c==="object"&&UUID.test(str(c.id))&&(c.parentId===undefined||UUID.test(str(c.parentId)))&&c.author&&typeof c.author==="object"&&typeof c.version==="number";}
 function commentNode(c,shownVersion,isReply){
   var agentx=c.author.kind==="agentx";
   var article=make("article",{"class":"comment"+(agentx?" comment-agentx":""),id:"comment-"+c.id,"data-comment":c.id,"data-rev":String(Number(c.rev)||1)});
   var meta=make("p",{"class":"comment-meta"});
-  if(agentx){meta.appendChild(make("span",{"class":"chip chip-agentx"},COPY.agentx));}
+  if(agentx&&typeof c.answering==="string"&&c.answering!==""){
+    // An answer to someone's question: labelled as AI, with the asker's name from the page's own record.
+    meta.appendChild(make("span",{"class":"chip chip-agentx"},COPY.agentxAi));
+    meta.appendChild(document.createTextNode(" "));
+    meta.appendChild(make("span",{"class":"answering"},COPY.answeringWho+c.answering));
+  }
+  else if(agentx){meta.appendChild(make("span",{"class":"chip chip-agentx"},COPY.agentx));}
   else{
     meta.appendChild(make("span",{"class":"comment-author"},str(c.author.name)||COPY.someone));
     if(c.author.owner===true){meta.appendChild(document.createTextNode(" "));meta.appendChild(make("span",{"class":"tag tag-owner"},COPY.owner));}

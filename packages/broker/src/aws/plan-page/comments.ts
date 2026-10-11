@@ -2,7 +2,7 @@
 // view with no IDs of people: the author's name, whether they are an owner, whether they are the reader, and the AgentX
 // chip only for an item AgentX wrote. Text is redacted again here; the page escapes it (HTML) or sets it as text (script).
 import {
-  ANSWER_STALE_MS, plannerReplyCommentId, redactText,
+  ANSWER_STALE_MS, agentxAnswerCommentId, plannerReplyCommentId, redactText,
   type CommentDocument, type CommentTarget, type TaskComment, type WorkflowArtifact,
 } from "@agentx/contracts";
 import { escapeHtml } from "../web-session.js";
@@ -22,7 +22,9 @@ export interface PageCommentView {
   sent: boolean;
   rev: number;
   /** A person's comment that asked AgentX, or was sent with Request changes: what became of the answer. */
-  agentx?: "answering" | "answered" | "couldnt" | "not_answered" | "unavailable";
+  agentx?: "answering" | "answered" | "couldnt" | "not_answered" | "unavailable" | "skipped";
+  /** AgentX's answer to an asked comment: the asker's name, from that stored comment (never from the answer). */
+  answering?: string;
   /** A planner reply: what the planner did, and in which version. */
   planner?: { outcome: "done" | "not_changed"; version: number };
 }
@@ -49,6 +51,9 @@ export interface CommentViewContext {
  */
 export function pageCommentViews(comments: readonly TaskComment[], context: CommentViewContext): PageCommentView[] {
   const ids = new Set(comments.map((comment) => comment.commentId));
+  // Who asked each question AgentX answered: the answer's ID is derived from the asked comment's.
+  const askers = new Map(comments.filter((comment) => comment.author.kind === "person" && comment.ask !== undefined)
+    .map((comment) => [agentxAnswerCommentId(comment.commentId), comment.author.kind === "person" ? shownName(comment.author.name) : ""]));
   return comments.map((comment) => {
     const person = comment.author.kind === "person" ? comment.author : undefined;
     const agentxAuthor = comment.author.kind === "agentx" ? comment.author : undefined;
@@ -56,7 +61,7 @@ export function pageCommentViews(comments: readonly TaskComment[], context: Comm
     if (comment.ask !== undefined) {
       const state = comment.ask.state;
       const stale = state === "answering" && context.now - Date.parse(comment.ask.at) > ANSWER_STALE_MS;
-      agentx = state === "answered" ? "answered" : state === "failed" || stale ? "couldnt" : state === "unavailable" ? "unavailable" : "answering";
+      agentx = state === "answered" ? "answered" : state === "skipped" ? "skipped" : state === "failed" || stale ? "couldnt" : state === "unavailable" ? "unavailable" : "answering";
     }
     if (person !== undefined && comment.lockedBy?.decision === "REQUEST_CHANGES") {
       const later = context.artifacts.filter((artifact) => artifact.type === comment.document && artifact.version > comment.version);
@@ -76,6 +81,7 @@ export function pageCommentViews(comments: readonly TaskComment[], context: Comm
       sent: comment.lockedBy !== undefined,
       rev: comment.rev,
       ...(agentx === undefined ? {} : { agentx }),
+      ...(agentxAuthor?.source === "answer" && askers.has(comment.commentId) ? { answering: askers.get(comment.commentId)! } : {}),
       ...(agentxAuthor?.source === "planner" && agentxAuthor.outcome !== undefined
         ? { planner: { outcome: agentxAuthor.outcome, version: agentxAuthor.forVersion ?? comment.version } } : {}),
     };
@@ -104,6 +110,7 @@ const AGENTX_STATES: Record<NonNullable<PageCommentView["agentx"]>, string> = {
   couldnt: "AgentX couldn't answer this one.",
   not_answered: "Not answered",
   unavailable: "AgentX can answer comments only on tasks started in Slack.",
+  skipped: "Edited after it was asked, so AgentX didn't answer.",
 };
 
 const shortTime = (at: string): string => {
@@ -117,7 +124,9 @@ const shortTime = (at: string): string => {
  * hidden until the page's script turns them on.
  */
 function commentHtml(comment: PageCommentView, context: { shownVersion: number; canComment: boolean }, reply: boolean): string {
-  const author = comment.author.kind === "agentx"
+  const author = comment.author.kind === "agentx" && comment.answering !== undefined
+    ? `<span class="chip chip-agentx">AgentX (AI)</span> <span class="answering">· answering ${t(comment.answering)}</span>`
+    : comment.author.kind === "agentx"
     ? '<span class="chip chip-agentx">AgentX</span>'
     : `<span class="comment-author">${t(comment.author.name)}</span>${comment.author.owner ? ' <span class="tag tag-owner">Owner</span>' : ""}`;
   const from = comment.version < context.shownVersion ? ` <span class="from-version">from v${comment.version}</span>` : "";

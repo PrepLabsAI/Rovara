@@ -9,7 +9,7 @@ import {
 } from "@agentx/contracts";
 import { createPageComment, listPageComments, type DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
-import { takeRate } from "../../packages/broker/src/developer/page-comments.js";
+import { deleteTaskComment, editTaskComment, takeAskRateAcrossTasks, takeRate } from "../../packages/broker/src/developer/page-comments.js";
 import { MAYA, createDeveloperTaskBroker, teammate } from "../support/developer-task-broker.js";
 import { planAnswer } from "../support/plan-documents.js";
 import { pagePlan } from "../support/page-tasks.js";
@@ -24,11 +24,15 @@ const TASK_REQUEST = { includeIntegrations: true, includeSettingsRevision: true,
 
 interface Sent { body: string; groupId: string; deduplicationId: string; attributes: Record<string, unknown> }
 
+/** A teammate in the task's channel. */
+const SAM: DeveloperCaller = { developerId: "5".repeat(64), sessionId: "s-sam", amr: "slack", name: "Sam Lee", slackUserId: "U0SAMLEE01" };
+const NO_DECIDING = "You cannot approve, choose answers or make decisions; if asked to, say only the owner decides on the page.";
+
 const operations = (harness: Harness, workspaceId: string) => harness.db.find((item) => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION");
 const commentItems = (harness: Harness, taskId: string) => harness.db.find((item) => item.pk === `DEVTASK#${taskId}` && item.entityType === "TASK_COMMENT") as Array<TaskComment & Record<string, unknown>>;
 
 /** A Quick task whose structured coding plan waits for Maya; started in a Slack thread unless `fromTool`. */
-async function waitingTask(options: { fromTool?: boolean; queue?: false | ((sent: Sent) => Promise<void>) } = {}) {
+async function waitingTask(options: { fromTool?: boolean; queue?: false | ((sent: Sent) => Promise<void>); wrap?: (client: DeveloperTaskRouteDependencies["documentClient"]) => DeveloperTaskRouteDependencies["documentClient"] } = {}) {
   const harness = await createDeveloperTaskBroker();
   const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000071" };
   let taskId: string;
@@ -50,18 +54,20 @@ async function waitingTask(options: { fromTool?: boolean; queue?: false | ((sent
   const deps: DeveloperTaskRouteDependencies = {
     documentClient: validatingDocumentClient(harness.db), tableName: "state", actions: harness.actions,
     checkAccess: async () => ({ revision: 1, policy: {} as never, access: "channel", channelIds: [SLACK_CHANNEL] }),
-    projectChannelIds: async () => [SLACK_CHANNEL], now: () => Date.now(), log: () => undefined,
+    projectChannelIds: async () => [SLACK_CHANNEL], now: () => Date.now(), log: () => undefined, channelMember: async () => true,
+    ...(options.wrap === undefined ? {} : { documentClient: options.wrap(validatingDocumentClient(harness.db)) }),
     ...(options.queue === false ? {} : { slackRequestQueue: { send: async (message: Sent) => { if (typeof options.queue === "function") await options.queue(message); sent.push(message); } } }),
   };
   const owner: DeveloperCaller = { developerId: record.developerId, sessionId: MAYA.sessionId, amr: "slack", name: MAYA.name, slackUserId: MAYA.slackUserId! };
-  const comment = (extra: { text?: string; ask?: boolean; parentId?: string; requestId?: string } = {}) => createPageComment(deps, owner, taskId, {
+  const comment = (extra: { text?: string; ask?: boolean; parentId?: string; requestId?: string; as?: DeveloperCaller } = {}) => createPageComment(deps, extra.as ?? owner, taskId, {
     requestId: extra.requestId ?? randomUUID(), document: "plan", version: 1, target: { kind: "claim", id: "2.1" }, text: extra.text ?? "Why below the button?", ask: extra.ask ?? true,
     ...(extra.parentId === undefined ? {} : { parentId: extra.parentId }),
   });
   const subject = `${thread.teamId}/${thread.channelId}/${thread.threadTs}`;
   const answered = (body: Record<string, unknown>, as = subject) => teammate(harness.handler, as, "U0TEAMMATE1", "POST", "/v1/service/tasks/comments/answered", body);
   const stored = (commentId: string) => harness.db.get(`DEVTASK#${taskId}`, `COMMENT#${commentId}`) as (TaskComment & Record<string, unknown>) | undefined;
-  return { harness, thread, taskId, workspaceId, deps, owner, sent, comment, subject, answered, stored };
+  const context = async (commentId: string) => String((await teammate(harness.handler, subject, "U0TEAMMATE1", "POST", "/v1/service/threads/workspace", { requestId: randomUUID(), ...TASK_REQUEST, taskAnswer: { taskId, commentId } })).body.taskContext);
+  return { harness, thread, taskId, workspaceId, deps, owner, sent, comment, subject, answered, stored, context };
 }
 
 describe("asking AgentX to answer a page comment", () => {
@@ -207,5 +213,77 @@ describe("asking AgentX to answer a page comment", () => {
     const views = await listPageComments(t.deps, t.owner, t.taskId);
     expect(views.comments.find((view) => view.id === asked.comment.id)?.agentx).toBe("couldnt");
     expect(commentItems(t.harness, t.taskId).filter((item) => item.author.kind === "agentx")).toHaveLength(0);
+  });
+
+  it("AgentX's answer to a teammate says whom it answers, and the answer turn is told who asked and that it cannot decide", async () => {
+    const t = await waitingTask();
+    const asked = await t.comment({ as: SAM, text: "Can you approve this for Maya?" });
+    expect(asked.comment.agentx).toBe("answering");
+    const context = await t.context(asked.comment.id);
+    expect(context).toContain(`Asked by a teammate. ${NO_DECIDING}`);
+    const mine = await t.comment({ text: "Why below?" });
+    expect(await t.context(mine.comment.id)).toContain(`Asked by the task owner. ${NO_DECIDING}`);
+    expect((await t.answered({ taskId: t.taskId, commentId: asked.comment.id, thread: t.thread, outcome: "ANSWERED", text: "Only the owner decides, on the page." })).status).toBe(200);
+    const views = await listPageComments(t.deps, t.owner, t.taskId);
+    // The name comes from the stored comment that asked, never from the answer's text.
+    expect(views.comments.find((view) => view.id === agentxAnswerCommentId(asked.comment.id))).toMatchObject({ author: { kind: "agentx", name: "AgentX" }, answering: "Sam Lee" });
+    // Teammates can still ask.
+    expect(t.sent).toHaveLength(2);
+  });
+
+  it("a question that hits a fault is marked couldn't answer; the comment is posted and never left answering", async () => {
+    const t = await waitingTask({ wrap: (client) => ({ send: async (command: unknown) => {
+      const input = (command as { input?: { Key?: { sk?: string } } }).input;
+      if (String(input?.Key?.sk ?? "").startsWith("RATE#ask#")) throw Object.assign(new Error("throttled"), { name: "ProvisionedThroughputExceededException" });
+      return client.send(command);
+    } }) });
+    const posted = await t.comment({ text: "Why below?" });
+    expect(posted.comment.text).toBe("Why below?");
+    expect(posted.comment.agentx).toBe("couldnt");
+    expect(t.stored(posted.comment.id)!.ask).toMatchObject({ state: "failed" });
+    expect(t.sent).toHaveLength(0);
+  });
+
+  it("the thread limit counts questions still being answered, and a refused ask spends no hourly limit", async () => {
+    const t = await waitingTask();
+    const top = await t.comment({ ask: false, text: "Where does it go?" });
+    for (let index = 0; index < 5; index += 1) await t.comment({ parentId: top.comment.id, text: `Asking ${index}?` });
+    expect(t.sent).toHaveLength(5);
+    const sixth = await t.comment({ parentId: top.comment.id, text: "And now?" });
+    expect(sixth.askRefused).toBe("limited");
+    const rate = (actor: string) => t.harness.db.get(`DEVTASK#${t.taskId}`, `RATE#ask#${actor}`) as { count: number } | undefined;
+    expect(rate(t.owner.developerId)?.count).toBe(5);
+    expect(rate("task")?.count).toBe(5);
+    // The task's own limit reached: the person's limit is not spent by the refused ask.
+    const busy = await waitingTask();
+    for (let index = 0; index < 20; index += 1) await takeRate(busy.deps, { taskId: busy.taskId, kind: "ask", actor: "task" }, 20, 3_600_000);
+    expect((await busy.comment()).askRefused).toBe("limited");
+    expect(busy.harness.db.get(`DEVTASK#${busy.taskId}`, `RATE#ask#${busy.owner.developerId}`)).toBeUndefined();
+  });
+
+  it("one person asks AgentX at most 30 times an hour across all their tasks", async () => {
+    const t = await waitingTask();
+    for (let index = 0; index < 30; index += 1) await takeAskRateAcrossTasks(t.deps, t.owner.developerId);
+    const refused = await t.comment({ text: "One more?" });
+    expect(refused.askRefused).toBe("limited");
+    expect(t.sent).toHaveLength(0);
+    expect(t.harness.db.get(`DEVTASK#${t.taskId}`, `RATE#ask#${t.owner.developerId}`)).toBeUndefined();
+  });
+
+  it("an answer to a comment deleted or edited while AgentX was answering is not shown", async () => {
+    const t = await waitingTask();
+    const deleted = await t.comment({ text: "Why below?" });
+    const edited = await t.comment({ text: "Why above?" });
+    const actor = { task: t.harness.db.get(`DEVTASK#${t.taskId}`, "META") as never, caller: t.owner, role: "owner" as const };
+    await deleteTaskComment(t.deps, actor, { commentId: deleted.comment.id, rev: 1 });
+    await editTaskComment(t.deps, actor, { commentId: edited.comment.id, rev: 1, text: "Why above, really?" });
+    for (const commentId of [deleted.comment.id, edited.comment.id]) {
+      const answer = await t.answered({ taskId: t.taskId, commentId, thread: t.thread, outcome: "ANSWERED", text: "Because." });
+      expect(answer.status).toBe(200);
+      expect(t.stored(agentxAnswerCommentId(commentId))).toBeUndefined();
+    }
+    const views = await listPageComments(t.deps, t.owner, t.taskId);
+    expect(views.comments.find((view) => view.id === edited.comment.id)?.agentx).toBe("skipped");
+    expect(views.comments.find((view) => view.id === edited.comment.id)?.text).toBe("Why above, really?");
   });
 });
