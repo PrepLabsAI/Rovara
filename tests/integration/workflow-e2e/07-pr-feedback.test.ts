@@ -407,6 +407,31 @@ describe("Suite 7: PR feedback loop", () => {
     expect(e2e.workflow().pullRequests).toEqual([expect.objectContaining({ number: pullRequest.number, headSha: pushed[0]!.commit, headTreeSha: pushed[0]!.tree })]);
   }, 120_000);
 
+  it("7.16 [LIVE-BUG B4] GitHub's push event for AgentX's own fix, read while GitHub still shows the old head, is read again later: AgentX keeps following", async () => {
+    // Found by this scenario: the push event's read saw the head before the fix, took it for someone else's change, and
+    // stopped following the pull request ("no longer holds the checked code").
+    const { e2e, pullRequest } = await feedbackJourney();
+    await commented(e2e, pullRequest.number, "Please trim the name.");
+    e2e.github.lag({ prHeadReads: 6 });
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
+    const pushEvent = await e2e.webhook({ kind: "pull_request", action: "synchronize", number: pullRequest.number });
+    expect(pushEvent.status).toBe(503);
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    e2e.clock.advance(61_000);
+    for (let sweep = 0; sweep < 4 && e2e.db.find((item) => item.entityType === "GITHUB_WEBHOOK_DELIVERY" && item.status === "RETRYABLE").length > 0; sweep += 1) {
+      await e2e.runWebhookRecovery();
+      e2e.clock.advance(5 * 60_000);
+    }
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
+    await merged(e2e, pullRequest.number);
+    expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
+  }, 120_000);
+
   it("7.17 GitHub refuses the fix's push: said in plain words, the merge is still followed and completes the task", async () => {
     const { e2e, pullRequest } = await feedbackJourney();
     await commented(e2e, pullRequest.number, "Please trim the name.");

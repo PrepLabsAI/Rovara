@@ -197,13 +197,17 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
         || feedback.comments.some(comment => !comment.url.startsWith(`${pr.url}#`))) throw new GithubWebhookRefusal("current GitHub feedback scope mismatch");
       reads.push({ pr, feedback, url, fullName });
     }
-    // GitHub moves a pull request's head a moment after a push. A push event whose head GitHub's read still shows as the
-    // head AgentX recorded is read again later (the recovery sweep), so someone else's push is never missed.
+    // GitHub moves a pull request's head a moment after a push. A push event whose head GitHub's read does not show yet,
+    // while the read shows the head AgentX recorded or the pushed commit's parent, is read again later (the recovery
+    // sweep): someone else's push is never missed, and AgentX's own push is never taken for someone else's.
     const pushed = input.expectedHeadSha === undefined ? undefined
       : reads.find(read => read.pr.number === input.number && read.fullName.toLowerCase() === input.repositoryFullName.toLowerCase());
-    if (pushed !== undefined && pushed.feedback.pullRequest.state === "open" && pushed.feedback.pullRequest.headCommit !== input.expectedHeadSha
-      && pushed.feedback.pullRequest.headCommit === pushed.pr.headSha) {
-      throw new GithubWebhookRetryableError("GitHub has not caught up with the pull request's head yet");
+    if (pushed !== undefined && input.expectedHeadSha !== undefined && pushed.feedback.pullRequest.state === "open"
+      && pushed.feedback.pullRequest.headCommit !== input.expectedHeadSha) {
+      const shown = pushed.feedback.pullRequest.headCommit;
+      const behind = shown === pushed.pr.headSha
+        || (input.commitParents !== undefined && (await input.commitParents(pushed.url, input.expectedHeadSha).catch(() => [] as string[])).includes(shown));
+      if (behind) throw new GithubWebhookRetryableError("GitHub has not caught up with the pull request's head yet");
     }
     // The head AgentX recorded, holding the tree recorded with it (the checked tree, for a record that has none).
     const headMatchesCandidate = ({ pr, feedback }: Pick<typeof reads[number], "pr" | "feedback">): boolean => pr.headSha !== undefined
