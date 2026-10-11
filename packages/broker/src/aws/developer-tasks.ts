@@ -2045,13 +2045,6 @@ const cutReason = (reason: string): string => {
 };
 
 /**
- * Task 18: what the read-only task page shows. The task's owner may read it, and so may a member of the Slack channel
- * the task is shared into (they see its thread already) who can also use the task's project (FR-048). Anyone else is
- * refused: a reader on this Slack workspace who can use the project (FR-047) is told whose approval to ask for, and
- * everyone else, including a reader whose checks failed, gets the answer a missing task gets. Each document is read
- * through its recorded key and shown only when its digest matches; review findings are the current code's.
- */
-/**
  * The task a task-page reader may see, and whether they own it. Not theirs, and no such task, both read as TASK_NOT_FOUND;
  * only an eligible teammate who is not in the task's channel gets TASK_ACCESS_DENIED with the owner's name.
  */
@@ -2093,6 +2086,13 @@ export async function getTaskFreshness(deps: DeveloperTaskRouteDependencies, cal
   return { revision: task.workflow?.revision ?? 0, stage: taskPageStep(task.workflow, task.closedAt !== undefined) };
 }
 
+/**
+ * Task 18: what the read-only task page shows. The task's owner may read it, and so may a member of the Slack channel
+ * the task is shared into (they see its thread already) who can also use the task's project (FR-048). Anyone else is
+ * refused: a reader on this Slack workspace who can use the project (FR-047) is told whose approval to ask for, and
+ * everyone else, including a reader whose checks failed, gets the answer a missing task gets. Each document is read
+ * through its recorded key and shown only when its digest matches; review findings are the current code's.
+ */
 export async function getTaskDocumentView(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskDocumentView> {
   const { task, owner } = await visibleTaskForPage(deps, caller, taskId);
   const workflow = task.workflow;
