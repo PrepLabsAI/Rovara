@@ -60,6 +60,12 @@ async function fetchPage(host: PageHost, jar: Jar, search: string): Promise<{ st
   return { status: response.statusCode, body: response.body, headers: response.headers ?? {} };
 }
 
+/** The nonce in the response's content-security-policy script-src, if it names one. */
+function cspNonce(headers: Record<string, string | undefined>): string | undefined {
+  const policy = Object.entries(headers).find(([name]) => name.toLowerCase() === "content-security-policy")?.[1];
+  return policy === undefined ? undefined : /script-src[^;]*'nonce-([^']+)'/.exec(policy)?.[1];
+}
+
 /**
  * Opens the task page in a new tab as `reader`. With `scripts: false` the tab is the page with JavaScript off: the HTML
  * only. `storage` is the tab's sessionStorage.
@@ -71,6 +77,8 @@ export async function openTaskPage(host: PageHost, reader: PageReader | Develope
   const jar = new Jar(signInToReview(host, who));
   const page = await fetchPage(host, jar, options.search ?? "");
   const document: FakeDocument = parseHtml(page.body);
+  // As a browser does: only what carries the nonce the response's content-security-policy names runs or applies.
+  const nonce = cspNonce(page.headers);
   const storage = options.storage ?? fakeStorage();
   const requests: BrowserRequest[] = [];
   const timers: Array<{ fn: () => void; at: number; id: number }> = [];
@@ -108,7 +116,8 @@ export async function openTaskPage(host: PageHost, reader: PageReader | Develope
       },
       clearTimeout: (handle: number) => { const index = timers.findIndex((timer) => timer.id === handle); if (index >= 0) timers.splice(index, 1); },
       setInterval: () => 0, clearInterval: () => undefined,
-      Date: Object.assign(function PageDate(...args: [string]) { return new Date(...args); }, { now: () => clock.now }),
+      // `new Date()` is the tab's own clock; given arguments it is an ordinary Date.
+      Date: Object.assign(function PageDate(...args: unknown[]) { return args.length === 0 ? new Date(clock.now) : new Date(...(args as [string])); }, { now: () => clock.now }),
       crypto: { randomUUID },
       fetch: (url: string, init: { method?: string; headers?: Record<string, string>; body?: string } = {}) => {
         const answer = send(url, init);
@@ -121,9 +130,12 @@ export async function openTaskPage(host: PageHost, reader: PageReader | Develope
     sandbox.window = { addEventListener: () => undefined, sessionStorage: storage };
     sandbox.sessionStorage = storage;
     for (const script of document.querySelectorAll("script")) {
-      if (script.getAttribute("nonce") !== null) vm.runInNewContext(script.textContent, sandbox);
+      if (nonce !== undefined && script.getAttribute("nonce") === nonce) vm.runInNewContext(script.textContent, sandbox);
     }
   }
+
+  /** The page's style elements that carry the response's nonce (the only ones a browser applies). */
+  const styles = () => document.querySelectorAll("style").filter((style) => nonce !== undefined && style.getAttribute("nonce") === nonce);
 
   /** Lets every request the scripts started reach the broker and its answer reach the page. */
   const settle = async () => {
@@ -174,7 +186,7 @@ export async function openTaskPage(host: PageHost, reader: PageReader | Develope
   return {
     /** A request made from this tab outside the page's scripts (the browser's cookies and Origin, nothing else). */
     fetch: send,
-    status: page.status, html: page.body, document, storage, requests, clock, reloads, jar, settle, advance, byId, button, comment,
+    status: page.status, html: page.body, nonce, styles, document, storage, requests, clock, reloads, jar, settle, advance, byId, button, comment,
     /** The page as it is now, as a person reads it. */
     text: () => readable(document.body),
   };

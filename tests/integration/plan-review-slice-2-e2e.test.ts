@@ -457,7 +457,7 @@ describe("deciding and commenting on the task page, end to end", () => {
     const e2e = await waitingPlan();
     const page = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan", scripts: false });
     expect(page.html).toContain('<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">');
-    const css = page.document.querySelectorAll("style").map((style) => style.textContent).join("\n").replace(/\s+/g, "");
+    const css = page.styles().map((style) => style.textContent).join("\n").replace(/\s+/g, "");
     expect(css).toContain("env(safe-area-inset-bottom)");
     expect(css).toContain("min-height:2.75rem");
     expect(css).toMatch(/@media\(max-width:35rem\)\{[^}]*#decide-dialog|@media\(max-width:35rem\)\{[^}]*dialog/);
