@@ -157,9 +157,25 @@ describe("the PR description's checks and reviews lines after a pushed fix (0.2.
     expect(withStatusLines(`Intro.\n\n${OLD[1]}`, [NEW[1]!])).toBe(`Intro.\n\n${NEW[1]}`);
   });
 
+  it("in an older description, replaces AgentX's accepted-findings list and partial-review line about the earlier code too", () => {
+    const partial = "The change was too large to show the reviewers in full, so the reviews covered only part of it. Review the rest by hand.";
+    const earlier = [...OLD, "Owner accepted 2 review findings:", "- [code] a \u2014 accepted: b", "- [security] c \u2014 accepted: d", partial];
+    const body = `Add a link.\n\n${earlier.join("\n")}\nAgentX task: https://x.example`;
+    expect(withStatusLines(body, NEW)).toBe(`Add a link.\n\n${NEW.join("\n")}\nAgentX task: https://x.example`);
+    // The new code's own accepted findings come from the new lines.
+    const accepted = [...NEW, "Owner accepted 1 review finding:", "- [code] e \u2014 accepted: f"];
+    expect(withStatusLines(body, accepted)).toBe(`Add a link.\n\n${accepted.join("\n")}\nAgentX task: https://x.example`);
+  });
+
+  it("in an older description, never touches a line a person reworded", () => {
+    // The person added to AgentX's Checks line: it is no longer AgentX's shape, so nothing is replaced.
+    expect(withStatusLines(`Intro.\n\nChecks: npm test passed, manual QA by Dana\n${OLD[1]}`, NEW)).toBeUndefined();
+    expect(withStatusLines(`Intro.\n\n${OLD[0]}\nReviews: code review passed; security review passed by Sam`, NEW)).toBeUndefined();
+  });
+
   it("in an older description, changes nothing when its lines can't be found reliably", () => {
     // Two Checks lines (the person quoted one), Checks and Reviews apart, or a Checks line where the new lines have none.
-    expect(withStatusLines(`${OLD.join("\n")}\n\nChecks: something else`, NEW)).toBeUndefined();
+    expect(withStatusLines(`${OLD.join("\n")}\n\nChecks: lint passed`, NEW)).toBeUndefined();
     expect(withStatusLines(`${OLD[0]}\nA person's line.\n${OLD[1]}`, NEW)).toBeUndefined();
     expect(withStatusLines(OLD.join("\n"), [NEW[1]!])).toBeUndefined();
     expect(withStatusLines("No lines of AgentX's here.", NEW)).toBeUndefined();

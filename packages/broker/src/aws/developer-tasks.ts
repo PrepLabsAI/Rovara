@@ -122,7 +122,7 @@ import {
 } from "@agentx/contracts";
 import type { z } from "zod";
 import { channelLabel, decideMode, decideShare, type BoundChannel, type ShareDecision } from "../developer/share.js";
-import { PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START } from "../developer/pull-request-feedback-section.js";
+import { PULL_REQUEST_PARTIAL_REVIEW_LINE, PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START } from "../developer/pull-request-feedback-section.js";
 import { chargeConflict, chargeItems, developerCharge, limitReached, readWorkspaceLimits, releaseConflict, releaseItems, type ChargeConflict, type WorkspaceLimits } from "../developer/limits.js";
 import {
   aiToolTurn,
@@ -2669,7 +2669,7 @@ export function workflowPullRequestStatusLines(workflow: WorkflowSnapshot): stri
       ...accepted.slice(0, WORKFLOW_PULL_REQUEST_ACCEPTED_LISTED).map((finding) => `- [${finding.role === "SECURITY" ? "security" : "code"}] ${inertPlanLine(redactText(finding.text).replace(/\s+/gu, " "))} \u2014 accepted: ${inertPlanLine(redactText(finding.reason).replace(/\s+/gu, " "))}`),
       ...(accepted.length > WORKFLOW_PULL_REQUEST_ACCEPTED_LISTED ? [`- and ${accepted.length - WORKFLOW_PULL_REQUEST_ACCEPTED_LISTED} more; see the task page`] : []),
     ]),
-    ...(partial ? ["The change was too large to show the reviewers in full, so the reviews covered only part of it. Review the rest by hand."] : []),
+    ...(partial ? [PULL_REQUEST_PARTIAL_REVIEW_LINE] : []),
   ];
 }
 

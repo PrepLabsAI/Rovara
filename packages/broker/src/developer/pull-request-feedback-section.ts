@@ -185,17 +185,26 @@ export function withFeedbackFixes(body: string, fixes: readonly FeedbackFix[], e
   return { ...(next === body ? {} : { body: next }), dropped: section === "" && fixes.length > 0 };
 }
 
-const CHECKS_LINE = /^Checks: /u;
-const REVIEWS_LINE = /^Reviews: code review /u;
+/** The description's line when the reviewers saw only part of the change (workflowPullRequestStatusLines writes it). */
+export const PULL_REQUEST_PARTIAL_REVIEW_LINE = "The change was too large to show the reviewers in full, so the reviews covered only part of it. Review the rest by hand.";
+
+// AgentX's own lines, exactly in the shape it writes them; a line a person reworded no longer matches and is never touched.
+const REVIEW_WORD = "(?:passed|passed after the owner accepted its findings)";
+const CHECKS_LINE = /^Checks: (?:none recorded|.+ passed(?:, .+ passed)*)$/u;
+const REVIEWS_LINE = new RegExp(`^Reviews: code review ${REVIEW_WORD}; security review ${REVIEW_WORD}(?:; \\d+ earlier issues? noted)?$`, "u");
+const ACCEPTED_HEADER = /^Owner accepted \d+ review findings?:$/u;
+const ACCEPTED_ITEM = /^- (?:\[(?:code|security)\] .* \u2014 accepted: .*|and \d+ more; see the task page)$/u;
 
 /**
  * The description with its lines about the checks and reviews brought up to date with `lines` (workflowPullRequestStatusLines
  * for the code now on the pull request). Only AgentX's own lines change; everything else stays as the person left it.
- * A description AgentX opened since this release has them between its markers, which are replaced in place (one pair,
- * START before END; otherwise nothing changes). An older one has no markers: its single "Checks: " line and the "Reviews:
- * code review " line right after it (or that Reviews line alone, for a review-only task) are replaced, only when exactly
- * one of each is found outside the PR feedback section and they match the new lines' shape; otherwise nothing changes.
- * Undefined when nothing changes.
+ *
+ * A description AgentX opened since this release has them between its markers: that block is AgentX's, and is replaced
+ * whole, in place (one pair, START before END; otherwise nothing changes). An older one has no markers: its lines are
+ * found by AgentX's exact shapes, outside the PR feedback section: a single Checks line and the Reviews line right after
+ * it (or that Reviews line alone, for a review-only task), then any accepted-findings list and partial-review line that
+ * follow, which describe the earlier code. They are replaced by `lines` only when exactly one of each is found and the
+ * new lines have the same Checks line or none; otherwise nothing changes. Undefined when nothing changes.
  */
 export function withStatusLines(body: string, lines: readonly string[]): string | undefined {
   const start = body.indexOf(PULL_REQUEST_STATUS_START);
@@ -215,11 +224,17 @@ export function withStatusLines(body: string, lines: readonly string[]): string 
   const checksAt = own.flatMap((line, index) => (CHECKS_LINE.test(line) ? [index] : []));
   const reviewsAt = own.flatMap((line, index) => (REVIEWS_LINE.test(line) ? [index] : []));
   const newChecks = lines.filter((line) => CHECKS_LINE.test(line));
-  const newReviews = lines.filter((line) => REVIEWS_LINE.test(line));
-  if (reviewsAt.length !== 1 || newReviews.length !== 1 || checksAt.length !== newChecks.length || checksAt.length > 1) return undefined;
+  if (reviewsAt.length !== 1 || lines.filter((line) => REVIEWS_LINE.test(line)).length !== 1 || checksAt.length !== newChecks.length || checksAt.length > 1) return undefined;
   if (checksAt.length === 1 && checksAt[0]! + 1 !== reviewsAt[0]) return undefined;
   const from = checksAt[0] ?? reviewsAt[0]!;
-  const replaced = [...own.slice(0, from), ...newChecks, ...newReviews, ...own.slice(reviewsAt[0]! + 1)].join("\n");
+  // AgentX's accepted-findings list and partial-review line under the Reviews line, about the earlier code.
+  let to = reviewsAt[0]! + 1;
+  if (ACCEPTED_HEADER.test(own[to] ?? "")) {
+    to += 1;
+    while (ACCEPTED_ITEM.test(own[to] ?? "")) to += 1;
+  }
+  if (own[to] === PULL_REQUEST_PARTIAL_REVIEW_LINE) to += 1;
+  const replaced = [...own.slice(0, from), ...lines, ...own.slice(to)].join("\n");
   const next = `${replaced}${body.slice(outside.length)}`;
   return next === body ? undefined : next;
 }
