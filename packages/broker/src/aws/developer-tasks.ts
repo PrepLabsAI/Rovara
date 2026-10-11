@@ -3783,6 +3783,9 @@ export async function releaseFinishedTask(deps: ReleaseDeps, task: DeveloperTask
       const claimed = task.releaseClaimedAt !== undefined && workspace.status === "CLOSING" && workspace.closeOperationId === undefined;
       if (!claimed) {
         if (!RELEASABLE_WORKSPACE.has(workspace.status) || workspace.activeOperationId != null) return "busy";
+        // A workspace whose compute can't be deleted (a retired storage mode) is never claimed, so it is not left CLOSING;
+        // its mark is put off and tried again later.
+        if (deps.actions.canDeleteCompute?.(workspace) === false) return "busy";
         const now = new Date().toISOString();
         try {
           await deps.actions.transact([
@@ -3896,8 +3899,11 @@ export async function releaseFinishedTasksOf(deps: ReleaseDeps, member: { pk: st
     if (released >= SELF_HEAL_MAX) break;
     const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
     if (task === undefined) continue;
+    // A finished task goes through the marked release, so a claim it leaves (the compute refused, say) is the sweep's to
+    // finish; a closed task only gives back its slot.
     try {
-      if (await releaseFinishedTask(deps, task) === "released") released += 1;
+      const outcome = task.closedAt === undefined ? await releaseFinishedTaskQuietly(deps, taskId) : await releaseFinishedTask(deps, task);
+      if (outcome === "released") released += 1;
     } catch (error) {
       console.log(JSON.stringify({ component: "broker", event: "developer.finished_task_release_failed", taskId, error: error instanceof Error ? error.name : "unknown" }));
     }
@@ -3908,45 +3914,79 @@ export async function releaseFinishedTasksOf(deps: ReleaseDeps, member: { pk: st
 /** Where a finished task waits for its release until one goes through: the recovery sweep reads this partition. */
 export const FINISHED_RELEASE_PK = "FINISHED_RELEASE";
 const finishedReleaseKey = (taskId: string) => ({ pk: FINISHED_RELEASE_PK, sk: `TASK#${taskId}` });
-/** The most finished tasks one recovery sweep tries to release. */
+/** The most finished tasks one recovery sweep tries to release, and the most marks it reads to choose them. */
 const RELEASE_SWEEP_MAX = 10;
+const RELEASE_SWEEP_SCAN = 200;
+/** After a release that did not go through, the next try waits this long, doubling each time up to the cap. */
+const RELEASE_RETRY_FIRST_MS = 5 * 60_000;
+const RELEASE_RETRY_MAX_MS = 6 * 3_600_000;
+
+interface FinishedReleaseMark { taskId: string; markedAt?: string; attempts?: number; nextAttemptAt?: string }
 
 /**
  * releaseFinishedTask, logged and never thrown: for callers whose own work is done (a decision, a webhook, an operation's
- * result, the sweep). A finished task is marked as waiting for its release first and unmarked once it is released, so a
- * release that found the workspace busy, failed, or never ran (the process stopped) is tried again by the recovery sweep.
+ * result, a self-heal, the sweep). A finished task is marked as waiting for its release first and unmarked once it is
+ * released, so a release that found the workspace busy, failed, or never ran (the process stopped) is tried again by the
+ * recovery sweep. A try that did not go through puts the mark's next try off, with backoff, so marks that keep failing
+ * never hold back the others.
  */
 export async function releaseFinishedTaskQuietly(deps: ReleaseDeps, taskId: string): Promise<FinishedTaskRelease | undefined> {
+  const key = finishedReleaseKey(taskId);
+  const putOff = async () => {
+    const mark = await get<FinishedReleaseMark>(deps, key);
+    const attempts = (mark?.attempts ?? 0) + 1;
+    const wait = Math.min(RELEASE_RETRY_FIRST_MS * 2 ** (attempts - 1), RELEASE_RETRY_MAX_MS);
+    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key,
+      UpdateExpression: "SET attempts = :attempts, nextAttemptAt = :next",
+      ExpressionAttributeValues: { ":attempts": attempts, ":next": new Date(Date.now() + wait).toISOString() } }));
+  };
+  let marked = false;
   try {
     const task = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
     if (task !== undefined && task.closedAt === undefined && task.releasedAt === undefined && !workflowTaskFinished(task)) return "not_finished";
     if (task === undefined || task.closedAt !== undefined || task.releasedAt !== undefined) {
       // Nothing to release (any more): a mark the sweep left is removed.
-      await deps.documentClient.send(new DeleteCommand({ TableName: deps.tableName, Key: finishedReleaseKey(taskId) }));
+      await deps.documentClient.send(new DeleteCommand({ TableName: deps.tableName, Key: key }));
       return undefined;
     }
-    await deps.documentClient.send(new PutCommand({ TableName: deps.tableName,
-      Item: { ...finishedReleaseKey(taskId), entityType: "FINISHED_RELEASE", taskId, markedAt: new Date().toISOString() } }));
+    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key,
+      UpdateExpression: "SET entityType = :entity, taskId = :task, markedAt = if_not_exists(markedAt, :now)",
+      ExpressionAttributeValues: { ":entity": "FINISHED_RELEASE", ":task": taskId, ":now": new Date().toISOString() } }));
+    marked = true;
     const outcome = await releaseFinishedTask(deps, task);
-    if (outcome !== "busy") await deps.documentClient.send(new DeleteCommand({ TableName: deps.tableName, Key: finishedReleaseKey(taskId) }));
+    if (outcome === "busy") await putOff();
+    else await deps.documentClient.send(new DeleteCommand({ TableName: deps.tableName, Key: key }));
     if (outcome === "released" || outcome === "busy") console.log(JSON.stringify({ component: "broker", event: `developer.finished_task_${outcome}`, taskId }));
     return outcome;
   } catch (error) {
     console.log(JSON.stringify({ component: "broker", event: "developer.finished_task_release_failed", taskId, error: error instanceof Error ? error.name : "unknown" }));
+    if (marked) await putOff().catch(() => undefined);
     return undefined;
   }
 }
 
-/** The recovery sweep's part: the finished tasks still waiting for their release, at most RELEASE_SWEEP_MAX per run. */
+/**
+ * The recovery sweep's part: the finished tasks still waiting for their release whose next try is due, those waiting
+ * longest first, at most RELEASE_SWEEP_MAX per run (of the first RELEASE_SWEEP_SCAN marks read).
+ */
 export async function releasePendingFinishedTasks(deps: ReleaseDeps): Promise<{ attempted: number; released: number }> {
-  const response = await deps.documentClient.send(new QueryCommand({
-    TableName: deps.tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": FINISHED_RELEASE_PK },
-    Limit: RELEASE_SWEEP_MAX, ConsistentRead: true,
-  })) as { Items?: Array<{ taskId?: unknown }> };
+  const marks: FinishedReleaseMark[] = [];
+  let start: Record<string, unknown> | undefined;
+  do {
+    const response = await deps.documentClient.send(new QueryCommand({
+      TableName: deps.tableName, KeyConditionExpression: "pk = :pk", ExpressionAttributeValues: { ":pk": FINISHED_RELEASE_PK },
+      Limit: 100, ConsistentRead: true, ...(start === undefined ? {} : { ExclusiveStartKey: start }),
+    })) as { Items?: FinishedReleaseMark[]; LastEvaluatedKey?: Record<string, unknown> };
+    marks.push(...(response.Items ?? []).filter((item) => typeof item.taskId === "string"));
+    start = response.LastEvaluatedKey;
+  } while (start !== undefined && marks.length < RELEASE_SWEEP_SCAN);
+  const now = new Date().toISOString();
+  const dueAt = (mark: FinishedReleaseMark) => mark.nextAttemptAt ?? mark.markedAt ?? "";
+  const due = marks.filter((mark) => mark.nextAttemptAt === undefined || mark.nextAttemptAt <= now)
+    .sort((left, right) => dueAt(left).localeCompare(dueAt(right))).slice(0, RELEASE_SWEEP_MAX);
   let released = 0;
-  const items = (response.Items ?? []).filter((item): item is { taskId: string } => typeof item.taskId === "string");
-  for (const item of items) if (await releaseFinishedTaskQuietly(deps, item.taskId) === "released") released += 1;
-  return { attempted: items.length, released };
+  for (const mark of due) if (await releaseFinishedTaskQuietly(deps, mark.taskId) === "released") released += 1;
+  return { attempted: due.length, released };
 }
 
 /**

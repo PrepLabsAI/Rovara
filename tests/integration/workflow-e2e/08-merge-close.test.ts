@@ -486,7 +486,9 @@ describe("Suite 8: merge and close", () => {
       await e2e.settle();
       expect(counter(e2e, MEMBER).count).toBe(1);
       expect(e2e.db.get("FINISHED_RELEASE", `TASK#${taskId}`)).toBeDefined();
-      // No more events come for a merged task: the scheduled sweep tries again.
+      // No more events come for a merged task: the scheduled sweep tries again once the next try is due.
+      expect((await e2e.runRecovery()).dispatch.body.releases).toEqual({ attempted: 0, released: 0 });
+      e2e.clock.set(new Date(Date.now() + 6 * 60_000).toISOString());
       const swept = await e2e.runRecovery();
       expect(swept.dispatch.body.releases).toEqual({ attempted: 1, released: 1 });
       expect(counter(e2e, MEMBER)).toEqual({ count: 0, tasks: [] });
@@ -494,6 +496,87 @@ describe("Suite 8: merge and close", () => {
       expect(e2e.db.get("FINISHED_RELEASE", `TASK#${taskId}`)).toBeUndefined();
       expect((await e2e.runRecovery()).dispatch.body.releases).toEqual({ attempted: 0, released: 0 });
     }, 120_000);
+
+    /** Copies of a merged task, each finished, in its own thread and workspace (READY), not counted anywhere. */
+    function finishedCopies(e2e: WorkflowE2E, taskId: string, ids: readonly string[]): void {
+      const original = taskById(e2e, taskId);
+      for (const [index, id] of ids.entries()) {
+        const workspaceId = randomUUID();
+        const { closedAt: _closed, ...workspace } = workspaceOf(e2e, taskId);
+        void _closed;
+        e2e.db.set({ ...workspace, pk: `WORKSPACE#${workspaceId}`, id: workspaceId, status: "READY" });
+        const { releasedAt: _released, ...task } = original;
+        void _released;
+        e2e.db.set({ ...task, pk: `DEVTASK#${id}`, taskId: id, workspaceId,
+          share: { ...(original.share as Record<string, unknown>), threadTs: `1695800000.${String(index).padStart(6, "0")}` } });
+      }
+    }
+
+    it("marks that keep failing never hold back the others: each is put off with backoff, and a good one behind them is released", async () => {
+      const { e2e, pullRequest } = await waiting();
+      const taskId = e2e.taskId();
+      await mergeWebhook(e2e, pullRequest.number);
+      await e2e.settle();
+      // Eleven finished tasks whose compute can't be deleted, marked long ago, ahead of the good one in key order too.
+      const failing = Array.from({ length: 11 }, (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`);
+      finishedCopies(e2e, taskId, failing);
+      const failingWorkspaces = new Set(failing.map((id) => String(taskById(e2e, id).workspaceId)));
+      for (const id of failing) e2e.db.set({ pk: "FINISHED_RELEASE", sk: `TASK#${id}`, entityType: "FINISHED_RELEASE", taskId: id, markedAt: "2026-01-01T00:00:00.000Z" });
+      // The good one: a merged task whose release found the compute busy once.
+      const { releasedAt: _released, ...good } = taskById(e2e, taskId);
+      void _released;
+      e2e.db.set(good);
+      e2e.db.set({ ...workspaceOf(e2e, taskId), status: "READY" });
+      e2e.db.set({ pk: "FINISHED_RELEASE", sk: `TASK#${taskId}`, entityType: "FINISHED_RELEASE", taskId, markedAt: new Date().toISOString() });
+      e2e.deleteEc2Session.mockImplementation(async (workspaceId: string) => {
+        if (failingWorkspaces.has(workspaceId)) throw agentXError("RUNTIME_UNAVAILABLE", "workspace resource cleanup failed");
+      });
+      expect((await e2e.runRecovery()).dispatch.body.releases).toEqual({ attempted: 10, released: 0 });
+      // The ten that failed wait now; the eleventh and the good one are due.
+      // (Its slot went back at the merge, so only its workspace was left to release.)
+      expect((await e2e.runRecovery()).dispatch.body.releases).toMatchObject({ attempted: 2 });
+      expect(workspaceOf(e2e, taskId).status).toBe("CLOSED");
+      expect(taskById(e2e, taskId).releasedAt).toBeDefined();
+      expect(e2e.db.get("FINISHED_RELEASE", `TASK#${taskId}`)).toBeUndefined();
+      expect(e2e.db.get("FINISHED_RELEASE", `TASK#${failing[0]!}`)).toMatchObject({ attempts: 1 });
+      // Once the compute can be deleted again, later sweeps finish the rest.
+      e2e.deleteEc2Session.mockImplementation(async () => undefined);
+      e2e.clock.set(new Date(Date.now() + 7 * 3_600_000).toISOString());
+      await e2e.runRecovery();
+      await e2e.runRecovery();
+      expect(failing.map((id) => workspaceOf(e2e, id).status)).toEqual(failing.map(() => "CLOSED"));
+      expect(e2e.db.find((item) => item.pk === "FINISHED_RELEASE")).toEqual([]);
+    }, 120_000);
+
+    it("a self-heal whose compute delete refuses leaves a mark, and the sweep finishes it", async () => {
+      const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: editsOrFix } });
+      const merged = await mergedTask(e2e, "Add a greet(name) function");
+      const copies = [randomUUID(), randomUUID()];
+      finishedCopies(e2e, merged, copies);
+      const stuck = [merged, ...copies];
+      const { releasedAt: _released, ...task } = taskById(e2e, merged);
+      void _released;
+      e2e.db.set(task);
+      e2e.db.set({ ...workspaceOf(e2e, merged), status: "READY" });
+      e2e.db.set({ ...e2e.db.get(MEMBER.pk, MEMBER.sk), count: 3, tasks: new Set(stuck) });
+      e2e.db.set({ ...e2e.db.get(ORGANIZATION.pk, ORGANIZATION.sk), count: 3 });
+      e2e.deleteEc2Session.mockImplementationOnce(async () => { throw agentXError("WORKSPACE_BUSY", "the workspace compute is stopping"); });
+      expect(await newThread(e2e, "quick: Add a farewell(name) function")).toBe(200);
+      await e2e.settle();
+      const started = newestTaskId(e2e);
+      expect(stuck).not.toContain(started);
+      // One of the three kept its claim (CLOSING) and its slot, with a mark for the sweep.
+      const marks = e2e.db.find((item) => item.pk === "FINISHED_RELEASE");
+      expect(marks).toHaveLength(1);
+      const kept = String(marks[0]!.taskId);
+      expect(workspaceOf(e2e, kept).status).toBe("CLOSING");
+      expect(counter(e2e, MEMBER)).toEqual({ count: 2, tasks: [kept, started].sort() });
+      e2e.clock.set(new Date(Date.now() + 6 * 60_000).toISOString());
+      expect((await e2e.runRecovery()).dispatch.body.releases).toEqual({ attempted: 1, released: 1 });
+      expect(counter(e2e, MEMBER)).toEqual({ count: 1, tasks: [started] });
+      expect(counter(e2e, ORGANIZATION).count).toBe(1);
+      expect(stuck.map((id) => workspaceOf(e2e, id).status)).toEqual(["CLOSED", "CLOSED", "CLOSED"]);
+    }, 240_000);
 
     it("the compute is deleted but the release's transaction fails: nothing is given back, and a later event gives it back once", async () => {
       const { e2e, pullRequest } = await waiting();

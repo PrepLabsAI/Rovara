@@ -65,6 +65,8 @@ export interface DeveloperTaskActions {
   startClose(identity: AuthenticatedIdentity, workspace: WorkspaceInstance, requestId: string, extra: ExtraItems, discardUnpublished?: boolean): Promise<{ operationId: string; duplicate: boolean }>;
   /** Deletes the workspace's compute; the existing per-mode switch lives behind it (FR-024). Unchecked: callers must load the owned task and check project access first. */
   deleteCompute(workspace: WorkspaceInstance): Promise<void>;
+  /** Whether deleteCompute can delete this workspace's compute (a retired storage mode cannot be); the per-mode check lives behind it (FR-024). */
+  canDeleteCompute?(workspace: WorkspaceInstance): boolean;
   /** Writes items in one transaction. Unchecked: callers must load the owned task and check project access first. */
   transact(items: TransactItems): Promise<void>;
   /** C15: the shared thread's Slack turn records that name this task, newest first, at most `limit`. Unchecked: callers must load the owned task first. */

@@ -571,6 +571,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
     },
     startClose: (identity, workspace, requestId, extra, discardUnpublished) => startTaskClose(dependencies, identity, workspace, requestId, extra, discardUnpublished),
     deleteCompute: (workspace) => deleteWorkspaceCompute(dependencies, workspace),
+    canDeleteCompute: (workspace) => workspace.deploymentMode === "ec2-ebs" && dependencies.deleteEc2Session !== undefined,
     transact: async (items) => {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
     },
