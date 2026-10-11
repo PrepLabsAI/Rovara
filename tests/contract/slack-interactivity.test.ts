@@ -609,7 +609,10 @@ describe("Slack native workflow review controls", () => {
       }
       for (const block of noteBlocks(modal)) {
         expect(block.optional).toBe(true);
-        expect((block.label as { text: string }).text).toBe("Instructions (optional) / Reason (required if you accept)");
+        // Slack itself adds "(optional)" to an optional input, so the label never says it: it says what the text is for.
+        const label = (block.label as { text: string }).text;
+        expect(label).toBe("Instructions if you choose Fix, or your reason if you choose Accept (required to accept)");
+        expect(label).not.toMatch(/optional/i);
         expect(block.element).toMatchObject({ type: "plain_text_input", multiline: true, max_length: 1_000 });
       }
       // The form names the exact revision and code, and a request ID that stays the same for this form.
