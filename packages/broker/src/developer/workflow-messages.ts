@@ -3,7 +3,7 @@
 // value from a record, the model or a reviewer is redacted where it is free text, cut short and escaped here.
 import {
   WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE,
-  WORKFLOW_RESOLVE_FINDINGS_MAX, openReviewFindings, redactText, sendBackProblems, workflowIsReviewOnly, workflowReviewsSawPartialDiff, workflowCheckResultBroken, workflowSelectedChecks, workflowSendBackOffered, type WorkflowSnapshot,
+  WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WORKFLOW_RESOLVE_FINDINGS_MAX, openReviewFindings, redactText, workflowKeepPullRequestsOffered, sendBackProblems, workflowIsReviewOnly, workflowReviewsSawPartialDiff, workflowCheckResultBroken, workflowSelectedChecks, workflowSendBackOffered, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { WORKFLOW_ACTION_IDS } from "./workflow-actions.js";
 
@@ -451,6 +451,7 @@ function freshFeedbackAnswer(workflow: WorkflowSnapshot) {
 function waitingForMerge(workflow: WorkflowSnapshot): string | undefined {
   const answer = freshFeedbackAnswer(workflow);
   if (answer?.decision === "REQUEST_CHANGES") return "Got it. I saved your note for the next round of PR feedback; the pull request stays as it is.";
+  if (answer?.decision === "DISMISS" && answer.ownerNote === WORKFLOW_KEEP_PULL_REQUESTS_NOTE) return "Got it. The pull request stays as it is; I'll finish this task when it's merged.";
   if (answer?.decision === "DISMISS") return "PR feedback dismissed. The pull request stays as it is.";
   const required = (workflow.pullRequests ?? []).filter((pullRequest) => pullRequest.required);
   if (required.length === 0) return undefined;
@@ -592,6 +593,25 @@ function implementRunning(context: WorkflowMessageContext): string {
   return "Trying the coding step again.";
 }
 
+/**
+ * An approved PR feedback fix left the pull request's code as it was: nothing was pushed. The owner retries the fix, keeps
+ * the pull request as it is (when its checked code is still the task's, the task simply waits for the merge again), or
+ * closes the task. Either way the merge is still followed.
+ */
+function fixChangedNothing(context: WorkflowMessageContext, exits: ReturnType<typeof exitButtons>): { text: string; buttons: Button[] } {
+  const { workflow } = context;
+  const open = (workflow.pullRequests ?? []).filter((pullRequest) => pullRequest.state === "OPEN" || pullRequest.state === "UNKNOWN");
+  const names = open.length === 0 ? "the pull request" : pullRequestNames(open, (pullRequest) => link(pullRequest.url, `PR #${pullRequest.number}`));
+  const keep = workflowKeepPullRequestsOffered(workflow);
+  return {
+    text: `The approved fix didn't change any code, so nothing was pushed to ${names}. ${keep
+      ? "Retry coding, keep the pull request as it is, or close the task."
+      : `Retry coding, or close the task. ${STILL_WATCHING}`}`,
+    buttons: [exits.button("agentx_workflow_retry_implementation", "Retry coding"),
+      ...(keep ? [exits.button("agentx_workflow_keep_pull_requests", "Keep the pull request as it is")] : []), exits.close],
+  };
+}
+
 function planRunning(workflow: WorkflowSnapshot): string {
   const name = workflowDocumentName(workflow);
   const decision = leadingDecision(workflow);
@@ -625,7 +645,8 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
       ? `The saved ${workflowDocumentName(workflow)} couldn't be checked, so I stopped. Close this task and start again.`
       : `I stopped before your approval of the ${workflowDocumentName(workflow)}. ${plainBlockReason(workflow.blockReason)}`, buttons: [exits.close] };
     case "IMPLEMENT/RUNNING": return plain(implementRunning(context));
-    case "IMPLEMENT/BLOCKED": return { text: workflow.blockReason === WORKFLOW_BLOCK_REASONS.noCodeChanged ? WORKFLOW_BLOCK_REASONS.noCodeChanged
+    case "IMPLEMENT/BLOCKED": if (workflow.blockReason === WORKFLOW_BLOCK_REASONS.fixChangedNothing) return fixChangedNothing(context, exits);
+      return { text: workflow.blockReason === WORKFLOW_BLOCK_REASONS.noCodeChanged ? WORKFLOW_BLOCK_REASONS.noCodeChanged
       : `Coding stopped before it finished. ${plainBlockReason(workflow.blockReason)}`,
       // Rewritten history can't be coded on again: a new task is the way on.
       buttons: workflow.blockReason === WORKFLOW_HISTORY_REWRITTEN_MESSAGE ? [exits.close] : [exits.button("agentx_workflow_retry_implementation", "Retry coding"), exits.close] };

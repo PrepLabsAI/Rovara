@@ -104,6 +104,8 @@ import {
   unblockWorkflowPublication,
   workflowRequestId,
   workflowPublicationRetryable,
+  workflowKeepPullRequestsOffered,
+  keepWorkflowPullRequests,
   returnWorkflowToImplementation,
   sendBackProblems,
   WORKFLOW_REGRESSION_INSTRUCTION,
@@ -2139,8 +2141,11 @@ function taskPageStage(workflow: WorkflowSnapshot | undefined, closed: boolean, 
       : { status: "Waiting for the owner's approval", nextStep: `The task owner approves or requests changes ${inSlack}.` };
     case "PLAN_REVIEW/BLOCKED": return { status: `Stopped before approval of the ${name}`, nextStep: `Close the task ${inSlack} and start again.` };
     case "IMPLEMENT/READY": case "IMPLEMENT/RUNNING": return { status: "Writing the code", nextStep: "The checks and reviews run when coding finishes." };
-    case "IMPLEMENT/BLOCKED": return { status: workflow.blockReason === WORKFLOW_BLOCK_REASONS.noCodeChanged ? "Coding finished, but no code changed" : "Coding stopped before it finished",
-      nextStep: `Retry coding or close the task ${inSlack}.` };
+    case "IMPLEMENT/BLOCKED": return workflow.blockReason === WORKFLOW_BLOCK_REASONS.fixChangedNothing
+      ? { status: "The approved fix didn't change any code", nextStep: workflowKeepPullRequestsOffered(workflow)
+        ? `Retry coding, keep the pull request as it is, or close the task ${inSlack}.` : `Retry coding or close the task ${inSlack}.` }
+      : { status: workflow.blockReason === WORKFLOW_BLOCK_REASONS.noCodeChanged ? "Coding finished, but no code changed" : "Coding stopped before it finished",
+        nextStep: `Retry coding or close the task ${inSlack}.` };
     case "VERIFY/READY": case "VERIFY/RUNNING": return { status: "Running the checks", nextStep: "The code and security reviews start when the checks pass." };
     case "VERIFY/BLOCKED": return { status: "The checks didn't pass or couldn't run", nextStep: `Send it back to coding, retry the checks, or close the task ${inSlack}.` };
     case "REVIEW/READY": case "REVIEW/WAITING": case "REVIEW/RUNNING": return { status: "Code and security reviews are running", nextStep: "A draft pull request opens when both pass." };
@@ -2844,6 +2849,42 @@ async function retryTaskWorkflowPublication(deps: DeveloperTaskRouteDependencies
     return busyOrClosing(deps, task, error);
   }
   if (outcome === "STALE") throw agentXError("IDEMPOTENCY_CONFLICT", "this retry is out of date; refresh the task and try again");
+  const fresh = await loadOwnedTask(deps, caller, taskId);
+  const view = await taskView(deps, fresh, { events: 0, details: false });
+  await syncIndex(deps, fresh, view.status, view.updatedAt);
+  return { task: view };
+}
+
+/**
+ * The owner keeps the pull requests as they are after an approved fix changed nothing: the task waits for the merge again,
+ * and the feedback the fix was for is recorded as dismissed. Owner only, at the exact revision; nothing runs.
+ */
+async function keepTaskWorkflowPullRequests(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, value: unknown): Promise<{ task: DeveloperTaskView }> {
+  const request = parse(WorkflowPublishRetryRequestSchema, value, deps, "workflow-keep-pull-requests");
+  const task = await loadOwnedTask(deps, caller, taskId);
+  const workflow = task.workflow;
+  if (workflow === undefined) throw agentXError("NOT_FOUND", "this task does not have a workflow record");
+  if (workflow.feedbackDecisions?.some((decision) => decision.requestId === request.requestId && decision.decision === "DISMISS")) {
+    return { task: await taskView(deps, task, { events: 0, details: false }) };
+  }
+  if (request.expectedRevision !== workflow.revision) throw agentXError("IDEMPOTENCY_CONFLICT", "this request is out of date; refresh the task and try again");
+  const now = iso(deps);
+  let next: WorkflowSnapshot;
+  try {
+    next = keepWorkflowPullRequests(workflow, { requestId: request.requestId, actorId: task.ownerKey, now });
+  } catch (error) {
+    if (error instanceof WorkflowTransitionError) throw agentXError("CONFIG_INVALID", error.message);
+    throw error;
+  }
+  try {
+    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: taskKey(taskId),
+      UpdateExpression: "SET workflow = :workflow, updatedAt = :now",
+      ConditionExpression: "workflow.revision = :revision AND attribute_not_exists(closedAt)",
+      ExpressionAttributeValues: { ":workflow": next, ":now": now, ":revision": workflow.revision } }));
+  } catch (error) {
+    if (isConditional(error)) throw agentXError("IDEMPOTENCY_CONFLICT", "this request is out of date; refresh the task and try again");
+    throw error;
+  }
   const fresh = await loadOwnedTask(deps, caller, taskId);
   const view = await taskView(deps, fresh, { events: 0, details: false });
   await syncIndex(deps, fresh, view.status, view.updatedAt);
@@ -3984,7 +4025,7 @@ export async function adminShareMode(deps: ShareModeDependencies, admin: ShareAd
 export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, request: AdaptedHttpRequest, url: URL): Promise<unknown> {
   if (request.method === "POST" && url.pathname === "/v1/dev/tasks") return startTask(deps, caller, body(request));
   if (request.method === "GET" && url.pathname === "/v1/dev/tasks") return listTasks(deps, caller, url);
-  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/send-back|workflow\/review-findings|canvas-closeout\/retry))?$/.exec(url.pathname);
+  const route = /^\/v1\/dev\/tasks\/([^/]+)(?:\/(events|continue|cancel|close|pull-requests|share|workflow\/decision|workflow\/retry|workflow\/review|workflow\/publish-retry|workflow\/keep-pull-requests|workflow\/send-back|workflow\/review-findings|canvas-closeout\/retry))?$/.exec(url.pathname);
   const taskId = route?.[1] === undefined ? undefined : safeDecode(route[1]);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === undefined) return readTask(deps, caller, taskId, url);
   if (taskId !== undefined && request.method === "GET" && route?.[2] === "events") return taskEvents(deps, caller, taskId, url);
@@ -3994,6 +4035,7 @@ export async function routeDeveloperTaskRequest(deps: DeveloperTaskRouteDependen
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "canvas-closeout/retry") return retryTaskCanvasCloseout(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/review") return startTaskWorkflowReview(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/publish-retry") return retryTaskWorkflowPublication(deps, caller, taskId, body(request));
+  if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/keep-pull-requests") return keepTaskWorkflowPullRequests(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/send-back") return sendTaskWorkflowBackToCoding(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "workflow/review-findings") return resolveTaskWorkflowFindings(deps, caller, taskId, body(request));
   if (taskId !== undefined && request.method === "POST" && route?.[2] === "cancel") return cancelTask(deps, caller, taskId, body(request));

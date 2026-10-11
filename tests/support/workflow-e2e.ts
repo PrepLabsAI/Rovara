@@ -773,6 +773,7 @@ export async function createWorkflowE2E(options: {
       retryPlan: (input) => brokerEvent(handler, "workflow-retry", input),
       retryImplementation: (input) => brokerEvent(handler, "workflow-retry", input),
       close: (input) => brokerEvent(handler, "workflow-close", input),
+      keepPullRequests: (input) => brokerEvent(handler, "workflow-keep-pull-requests", input),
       submitFeedback: (input) => brokerEvent(handler, "workflow-feedback-findings-decision", input),
       retryFeedbackReview: (input) => brokerEvent(handler, "workflow-feedback-review-retry", input),
       chooseWorkflowPath,
@@ -1013,8 +1014,8 @@ export async function createWorkflowE2E(options: {
       return Promise.all(steps.map((step) => step()));
     },
 
-    /** Submits the latest opened modal with these input values; throws when Slack would show form errors. */
-    async submitView(values: Record<string, Record<string, unknown>> = {}, submitOptions: { user?: string } = {}): Promise<void> {
+    /** Submits the latest opened modal with these input values; throws when Slack would show form errors. Answers Slack's reply (an updated view, say). */
+    async submitView(values: Record<string, Record<string, unknown>> = {}, submitOptions: { user?: string } = {}): Promise<Record<string, unknown>> {
       const opened = slack.views.at(-1);
       if (opened === undefined) throw new Error("no modal is open");
       const answer = await interact({
@@ -1022,6 +1023,7 @@ export async function createWorkflowE2E(options: {
         view: { callback_id: opened.view.callback_id, private_metadata: opened.view.private_metadata, blocks: opened.view.blocks, state: { values } },
       });
       if (answer.response_action === "errors") throw new Error(`the modal refused the submission: ${JSON.stringify(answer.errors)}`);
+      return answer;
     },
 
     /** Delivers notices and runs every accepted worker invocation until nothing is pending. */

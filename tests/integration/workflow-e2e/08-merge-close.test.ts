@@ -33,6 +33,10 @@ async function mergeWebhook(e2e: WorkflowE2E, number: number): Promise<void> {
 const MARKDOWN_PLAN = "# Plan\n\n1. Add greet to greeting.ts.\n2. Run node --version.\n";
 const canvasIds = (e2e: WorkflowE2E) => (e2e.workflow().canvasLineage ?? []).map((entry) => entry.canvasId).filter((id): id is string => id !== undefined);
 
+/** What the latest close form says. */
+const closeFormText = (e2e: WorkflowE2E) => ((e2e.slack.views.at(-1)?.view.blocks as Array<{ text?: { text?: string } }> | undefined) ?? []).map((block) => block.text?.text ?? "").join("\n");
+const CLOSE_AFTER_FIX_STARTED = "An approved fix started after you opened this, and closing now would discard it. Close this form and press Close task again if you still want to close.";
+
 const fixPushes = (e2e: WorkflowE2E) => e2e.github.pushLog.filter((push) => push.during === "maintain" && e2e.github.tokens.has(push.token));
 /** What the thread said after the task's completion. */
 const afterCompletion = (e2e: WorkflowE2E) => said(e2e).slice(said(e2e).indexOf(MERGED) + 1);
@@ -153,6 +157,7 @@ describe("Suite 8: merge and close", () => {
     const { e2e, pullRequest } = await waiting();
     await e2e.click("agentx_workflow_close");
     expect(e2e.slack.views.at(-1)?.view).toMatchObject({ type: "modal" });
+    expect(closeFormText(e2e)).toBe("Closing stops this task and releases its workspace. Code that isn't in a pull request is discarded. PR #1 stays open on GitHub.");
     await e2e.submitView({});
     expect(e2e.slack.responses.at(-1)?.text).toBe(CLOSING);
     await e2e.settle();
@@ -182,7 +187,8 @@ describe("Suite 8: merge and close", () => {
     await e2e.settle();
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED" });
     await e2e.click("agentx_workflow_close");
-    expect(JSON.stringify(e2e.slack.views.at(-1)?.view)).toContain("Code that isn't in a pull request is discarded. Its open pull request stays on GitHub.");
+    // Found in review: the form said only that code not in a pull request is discarded, never that the approved fix is.
+    expect(closeFormText(e2e)).toBe("Closing stops this task and releases its workspace. The approved fix that isn't on PR #1 yet is discarded. PR #1 stays open on GitHub.");
     await e2e.submitView({});
     expect(e2e.slack.responses.at(-1)?.text).toBe(CLOSING);
     await e2e.settle();
@@ -190,6 +196,45 @@ describe("Suite 8: merge and close", () => {
     expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.closedAt).toBeDefined();
     expect(fixPushes(e2e)).toEqual([]);
     expect(pullRequest.state).toBe("open");
+  }, 120_000);
+
+  it("8.8 the close form of a pull request closed on GitHub says it stays closed, not open", async () => {
+    // Found in review: the form said "Its open pull request stays on GitHub" whatever the pull request's state.
+    const { e2e, pullRequest } = await waiting();
+    e2e.github.close(pullRequest.number);
+    expect((await e2e.webhook({ kind: "pull_request", action: "closed", number: pullRequest.number, merged: false })).status).toBe(200);
+    await e2e.settle();
+    await e2e.click("agentx_workflow_close");
+    expect(closeFormText(e2e)).toBe("Closing stops this task and releases its workspace. Code that isn't in a pull request is discarded. PR #1 stays closed on GitHub.");
+    await e2e.submitView({});
+    await e2e.settle();
+    expect(said(e2e).at(-1)).toBe(CLOSED_REPLY);
+  }, 120_000);
+
+  it("8.8 an approved fix that started after the close form opened is not discarded silently: the close is refused with why", async () => {
+    // Found in review: the form, opened while the task only waited for the merge, said nothing about a fix; confirmed after
+    // the owner approved one, it discarded that fix without a word.
+    const { e2e, pullRequest } = await waiting();
+    await comment(e2e, pullRequest.number);
+    await e2e.settle();
+    await e2e.click("agentx_workflow_close");
+    expect(closeFormText(e2e)).toBe("Closing stops this task and releases its workspace. Code that isn't in a pull request is discarded. PR #1 stays open on GitHub.");
+    // The fix is made, checked and reviewed; GitHub refuses its push, so it is still not on the pull request.
+    e2e.github.failNext("push", 403);
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "BLOCKED" });
+    const answer = await e2e.submitView({});
+    expect(answer).toMatchObject({ response_action: "update" });
+    expect(JSON.stringify(answer.view)).toContain(CLOSE_AFTER_FIX_STARTED);
+    expect(e2e.db.get(`DEVTASK#${e2e.taskId()}`, "META")?.closedAt).toBeUndefined();
+    // Pressed again, the form says the fix is discarded, and the confirmed close goes ahead.
+    await e2e.click("agentx_workflow_close");
+    expect(closeFormText(e2e)).toBe("Closing stops this task and releases its workspace. The approved fix that isn't on PR #1 yet is discarded. PR #1 stays open on GitHub.");
+    await e2e.submitView({});
+    await e2e.settle();
+    expect(said(e2e).at(-1)).toBe(CLOSED_REPLY);
+    expect(fixPushes(e2e)).toEqual([]);
   }, 120_000);
 
   it("8.9 closing a blocked task before any pull request discards its work: no push token, no branch", async () => {

@@ -195,6 +195,7 @@ import { isPageRefusal, writeCommentAnswer, writePlannerReplies, type SlackReque
 import { loadWorkflowDocument, readObjectText as readStoredText, shortenMarkdown } from "../developer/plan-artifacts.js";
 import { PLAN_EVIDENCE_PK, attachEvidence, planCitesCode, planEvidenceDueKey, planEvidenceEvent, planEvidenceJobItem, planEvidenceSources, type PlanEvidenceEvent, type PlanEvidenceJob } from "../developer/plan-evidence-jobs.js";
 import { resolvePlanEvidence } from "../developer/plan-evidence.js";
+import { WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
 import { projectKey, requireProject } from "./project-records.js";
 import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
@@ -699,6 +700,7 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
     if (isSlackWorkflowRetryEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "verification_retry", () => retrySlackWorkflowChecks(dependencies, tasks, event), button);
     if (isSlackWorkflowReviewRetryEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "review_retry", () => retrySlackWorkflowReviews(dependencies, tasks, event), button);
     if (isSlackWorkflowPublishRetryEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "publish_retry", () => retrySlackWorkflowPublication(dependencies, tasks, event), button);
+    if (isSlackWorkflowKeepPullRequestsEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "keep_pull_requests", () => keepSlackWorkflowPullRequests(dependencies, tasks, event), button);
     if (isSlackWorkflowSendBackEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "send_back", () => sendSlackWorkflowBack(dependencies, tasks, event), button);
     if (isSlackWorkflowResolveFindingsEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "resolve_findings", () => resolveSlackWorkflowFindings(dependencies, tasks, event), button);
     if (isSlackWorkflowCloseEvent(event)) return answerSlackWorkflowEvent(dependencies, event, "close", () => closeSlackWorkflowTask(dependencies, tasks, event), button);
@@ -1004,8 +1006,8 @@ function thrownAt(error: unknown): string | undefined {
 
 /** Task 19: what a press on an approval (Approve, Request changes) hears when it is out of date. */
 const SLACK_APPROVAL_OUT_OF_DATE = "That approval is out of date. Use the latest message in the thread.";
-/** Task 19: what a press on any other button hears when it is out of date. */
-const SLACK_BUTTON_OUT_OF_DATE = "That button is out of date. Use the latest message in this thread.";
+/** Task 19: what a press on any other button hears when it is out of date (the same words Slack's own handler uses). */
+const SLACK_BUTTON_OUT_OF_DATE = WORKFLOW_BUTTON_OUT_OF_DATE;
 /**
  * Refusals that are not about a press being out of date, by their exact text (never a prefix), in the words the presser
  * hears: the press was current, and the presser can fix what it asked for.
@@ -4072,6 +4074,34 @@ async function retrySlackWorkflowPublication(dependencies: AwsBrokerDependencies
   return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
 }
 
+/** The owner's "Keep the pull request as it is" after an approved fix changed nothing, from the task's own thread. */
+export interface SlackWorkflowKeepPullRequestsEvent {
+  source: "agentx.slack-ingress";
+  action: "workflow-keep-pull-requests";
+  taskId: string;
+  userId: string;
+  thread: SlackThread;
+  requestId: string;
+  expectedRevision: number;
+}
+
+export function isSlackWorkflowKeepPullRequestsEvent(event: unknown): event is SlackWorkflowKeepPullRequestsEvent {
+  if (!event || typeof event !== "object") return false;
+  const value = event as Record<string, unknown>;
+  return value.source === "agentx.slack-ingress" && value.action === "workflow-keep-pull-requests" && value.requestContext === undefined
+    && typeof value.taskId === "string" && typeof value.userId === "string" && typeof value.requestId === "string"
+    && Number.isInteger(value.expectedRevision) && typeof value.thread === "object" && value.thread !== null;
+}
+
+/** Keep the pull request as it is, through the same route an AI tool uses. */
+async function keepSlackWorkflowPullRequests(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowKeepPullRequestsEvent) {
+  const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "keep the pull request as it is");
+  const routeDeps = developerTaskRouteDependencies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, developer, now: Date.now, tasks }, caller);
+  const body = JSON.stringify({ requestId, expectedRevision: event.expectedRevision });
+  const path = `/v1/dev/tasks/${taskId}/workflow/keep-pull-requests`;
+  return routeDeveloperTaskRequest(routeDeps, caller, { method: "POST", path, headers: {}, requestId, body }, new URL(path, "https://agentx.invalid"));
+}
+
 async function decideSlackWorkflow(dependencies: AwsBrokerDependencies, tasks: DeveloperTaskActions, event: SlackWorkflowDecisionEvent) {
   // The same checks as every other Slack press: this Slack workspace, the task's owner, and the task's own thread.
   const { taskId, requestId, caller, developer } = await ownedSlackWorkflowTask(dependencies, event, "decide this plan");
@@ -6149,12 +6179,13 @@ async function completedWorkflowItems(
           throw new Error("candidate repositories are incomplete");
         }
         // An approved fix to an open pull request that leaves every repository's code as the pull request holds it changed
-        // nothing: there is nothing to check again or push, so the thread must not say a fix was pushed.
-        const prior = task.workflow.candidate;
-        if (operation.workflowMode === "IMPLEMENT" && prior !== undefined
-          && (task.workflow.pullRequests ?? []).some((pullRequest) => pullRequest.state === "OPEN" || pullRequest.state === "UNKNOWN")
-          && candidate.repositories.every((repository) => prior.repositories.some((entry) => entry.repositoryId === repository.repositoryId && entry.treeSha === repository.treeSha))) {
-          verificationFailure = WORKFLOW_BLOCK_REASONS.noCodeChanged;
+        // nothing: there is nothing to check again or push, so the thread must not say a fix was pushed. The comparison is
+        // with what each pull request holds, never with the latest candidate: after a fix that failed its checks and a
+        // Send back, the latest candidate is that failed fix.
+        const pullRequestTrees = workflowPullRequestTrees(task.workflow);
+        if (operation.workflowMode === "IMPLEMENT" && pullRequestTrees !== undefined
+          && candidate.repositories.every((repository) => pullRequestTrees.get(repository.repositoryId) === repository.treeSha)) {
+          verificationFailure = WORKFLOW_BLOCK_REASONS.fixChangedNothing;
           throw new Error("the fix left the pull request's code as it was");
         }
         if (checkedCandidate.digest !== candidate.digest) {
@@ -6228,7 +6259,7 @@ async function completedWorkflowItems(
         });
       } catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "workflow.verification_blocked", taskId: task.taskId, operationId: operation.id, errorName: error instanceof Error ? error.name : "unknown", reason: verificationFailure, ...(verificationDetail === undefined ? {} : { detail: verificationDetail }) }));
-        next = verificationFailure === WORKFLOW_BLOCK_REASONS.noCodeChanged ? blockWorkflow(task.workflow, verificationFailure, now)
+        next = verificationFailure === WORKFLOW_BLOCK_REASONS.fixChangedNothing ? blockWorkflow(task.workflow, verificationFailure, now)
           : blockWorkflow(verifying, verificationFailure, now, regressedChecks === undefined ? {} : { regressedChecks });
       }
     }
@@ -6534,6 +6565,27 @@ function pythonFileIsScript(file: string, script: string, cwd: string): boolean 
  * The tests a rerun found passed before this change and fail now: each label (a command, untrusted worker output) on one
  * line, redacted and cut short, without repeats, at most WORKFLOW_REGRESSED_CHECKS_MAX.
  */
+/**
+ * The code each repository's open pull request holds, by repository: GitHub's tree for its head as recorded, or else the
+ * tree of the reviewed code it was opened or last updated with when that is the current candidate (or a collected
+ * feedback bundle's). A repository with no open pull request keeps the current candidate's tree. Undefined when the task
+ * has no open pull request, or one's code is not known.
+ */
+function workflowPullRequestTrees(workflow: WorkflowSnapshot): Map<string, string> | undefined {
+  const open = (workflow.pullRequests ?? []).filter((pullRequest) => pullRequest.state === "OPEN" || pullRequest.state === "UNKNOWN");
+  if (open.length === 0) return undefined;
+  const trees = new Map((workflow.candidate?.repositories ?? []).map((repository) => [repository.repositoryId, repository.treeSha] as const));
+  for (const pullRequest of open) {
+    const tree = pullRequest.headTreeSha
+      ?? (workflow.candidate?.digest === pullRequest.candidateDigest ? workflow.candidate.repositories.find((repository) => repository.repositoryId === pullRequest.repositoryId)?.treeSha : undefined)
+      ?? workflow.feedbackReview?.bundleRefs.find((bundle) => bundle.repositoryId === pullRequest.repositoryId && bundle.number === pullRequest.number
+        && bundle.candidateDigest === pullRequest.candidateDigest)?.headTreeSha;
+    if (tree === undefined) return undefined;
+    trees.set(pullRequest.repositoryId, tree);
+  }
+  return trees;
+}
+
 function regressedCheckLabels(entries: readonly CheckEntry[]): string[] {
   const labels = entries.filter((entry) => entry.class === "regression").map((entry) => {
     const line = redactText(entry.label).replace(/\s+/gu, " ").trim();

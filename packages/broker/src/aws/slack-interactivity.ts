@@ -18,6 +18,8 @@ import {
   WORKFLOW_RESOLVE_FINDINGS_MAX,
   WorkflowSnapshotSchema,
   openReviewFindings,
+  WORKFLOW_BLOCK_REASONS,
+  workflowKeepPullRequestsOffered,
   workflowPublicationRetryable,
   workflowResolveFindingsOffered,
   workflowSelectedChecks,
@@ -60,6 +62,7 @@ import {
   type WorkflowPath,
 } from "./slack-workflow-choice.js";
 import { detailsActionHandler, dynamoTurnDetailsReader } from "./slack-details.js";
+import { WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
 import { FEEDBACK_REVIEW_RETRY_ACTION, WORKFLOW_ACTION_IDS, answeredWorkflowCard, cleanLine, slackText, workflowModalCopy } from "../developer/workflow-messages.js";
 
 const EVENT_RETENTION_SECONDS = 14 * 24 * 60 * 60;
@@ -763,6 +766,9 @@ export function createAwsSlackInteractivityHandler() {
     async close(input) {
       await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-close", ...input });
     },
+    async keepPullRequests(input) {
+      await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-keep-pull-requests", ...input });
+    },
     async submitFeedback(input) {
       await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-feedback-findings-decision", ...input });
     },
@@ -879,7 +885,47 @@ function closeRefusedView(message: string): Record<string, unknown> {
     blocks: [{ type: "section", text: { type: "mrkdwn", text: message } }] };
 }
 
-const STALE_WORKFLOW_BUTTON = "This button is no longer current. Use the latest AgentX task update.";
+const STALE_WORKFLOW_BUTTON = WORKFLOW_BUTTON_OUT_OF_DATE;
+
+/** Said in place of the close when an approved fix started after the owner opened the close form. */
+const CLOSE_AFTER_FIX_STARTED = "An approved fix started after you opened this, and closing now would discard it. Close this form and press Close task again if you still want to close.";
+
+const OPEN_PULL_REQUEST = new Set(["OPEN", "UNKNOWN"]);
+
+/** "PR #3", or "PRs #3 and #4" (and "PRs #3, #4 and #5"). */
+function pullRequestNumbers(pullRequests: ReadonlyArray<{ number: number }>): string {
+  const numbers = [...pullRequests].map((pullRequest) => pullRequest.number).sort((left, right) => left - right);
+  if (numbers.length === 1) return `PR #${numbers[0]}`;
+  return `PRs ${numbers.slice(0, -1).map((number) => `#${number}`).join(", ")} and #${numbers.at(-1)}`;
+}
+
+/**
+ * Whether closing would discard an approved PR feedback fix that isn't on the open pull requests yet: it is being made,
+ * checked, reviewed or pushed, its push failed, or the reviewed code differs from what a pull request holds. A fix that
+ * changed nothing has nothing to discard.
+ */
+function approvedFixNotOnPullRequests(workflow: WorkflowSnapshot): boolean {
+  const open = (workflow.pullRequests ?? []).filter((pullRequest) => OPEN_PULL_REQUEST.has(pullRequest.state));
+  if (open.length === 0 || workflow.blockReason === WORKFLOW_BLOCK_REASONS.fixChangedNothing) return false;
+  return ["IMPLEMENT", "VERIFY", "REVIEW", "PULL_REQUEST"].includes(workflow.stage)
+    || workflow.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed
+    || (workflow.candidate !== undefined && open.some((pullRequest) => pullRequest.candidateDigest !== workflow.candidate?.digest));
+}
+
+/** What the close form says closing does: what is discarded, and what becomes of each pull request on GitHub. */
+function closeConfirmationText(workflow: WorkflowSnapshot): string {
+  const pullRequests = (workflow.pullRequests ?? []).filter((pullRequest) => pullRequest.required);
+  const lines = ["Closing stops this task and releases its workspace."];
+  if (pullRequests.length === 0) return [...lines, "Code that isn't in a pull request is discarded."].join(" ");
+  const open = pullRequests.filter((pullRequest) => OPEN_PULL_REQUEST.has(pullRequest.state));
+  const closed = pullRequests.filter((pullRequest) => pullRequest.state === "CLOSED");
+  const merged = pullRequests.filter((pullRequest) => pullRequest.state === "MERGED");
+  lines.push(approvedFixNotOnPullRequests(workflow) ? `The approved fix that isn't on ${pullRequestNumbers(open)} yet is discarded.` : "Code that isn't in a pull request is discarded.");
+  if (open.length > 0) lines.push(`${pullRequestNumbers(open)} ${open.length === 1 ? "stays" : "stay"} open on GitHub.`);
+  if (closed.length > 0) lines.push(`${pullRequestNumbers(closed)} ${closed.length === 1 ? "stays" : "stay"} closed on GitHub.`);
+  if (merged.length > 0) lines.push(`${pullRequestNumbers(merged)} ${merged.length === 1 ? "is" : "are"} already merged.`);
+  return lines.join(" ");
+}
 
 const CHOICE_NOT_WAITING = workflowChoiceRefusal("none");
 
@@ -957,6 +1003,8 @@ export function workflowSlackHandlers(deps: {
   retryImplementation?(input: Record<string, unknown>): Promise<void>;
   /** Task 16: close the task after the owner confirmed it in the modal. */
   close?(input: Record<string, unknown>): Promise<void>;
+  /** Keep the pull request as it is after an approved fix changed nothing: the task waits for the merge again. */
+  keepPullRequests?(input: Record<string, unknown>): Promise<void>;
   /** Gap 3: starts the request waiting in the thread on the path its requester clicked. A refused start throws SlackWorkflowStartError. */
   /**
    * Starts the request waiting in the thread on the path its requester clicked, or hands that start over (the AWS
@@ -1004,7 +1052,7 @@ export function workflowSlackHandlers(deps: {
     const bundleSetDigest = createHash("sha256").update(JSON.stringify(bundleDigests), "utf8").digest("hex");
     // The task moved past PR feedback (its pull request merged, or it closed): the card is just old.
     if (task.closedAt !== undefined || (parsed.success && (parsed.data.stage === "MERGED" || parsed.data.stage === "CLOSED"))) {
-      throw new WorkflowInteractionRefusal("That button is out of date. Use the latest message in this thread.");
+      throw new WorkflowInteractionRefusal(WORKFLOW_BUTTON_OUT_OF_DATE);
     }
     if (!parsed.success || parsed.data.revision !== value.expectedRevision || parsed.data.stage !== "WAIT_FOR_MERGE"
       || parsed.data.state !== "WAITING" || review?.status !== "PENDING" || review.reviewRef.status !== "COMPLETE"
@@ -1227,16 +1275,23 @@ export function workflowSlackHandlers(deps: {
         const { taskId } = exitButton(action);
         if (action.triggerId === "") throw new WorkflowInteractionRefusal(STALE_WORKFLOW_BUTTON);
         const workflow = await currentOwnedWorkflow({ ...action, taskId }, "close this task", (current) => current.state !== "COMPLETE");
-        const published = (workflow.pullRequests?.length ?? 0) > 0;
         await deps.openView(action.triggerId, {
           type: "modal", callback_id: WORKFLOW_CLOSE_SUBMISSION,
-          // The press's response_url rides along, so the confirmed close can be acknowledged at once.
-          private_metadata: JSON.stringify({ taskId, requestId: slackActionRequestId(action), thread: action.thread, responseUrl: action.responseUrl }),
+          // The press's response_url rides along, so the confirmed close can be acknowledged at once. The step the owner
+          // read, and whether an approved fix was under way then, are checked again when the close is confirmed.
+          private_metadata: JSON.stringify({ taskId, requestId: slackActionRequestId(action), thread: action.thread, responseUrl: action.responseUrl,
+            revision: workflow.revision, fixPending: approvedFixNotOnPullRequests(workflow) }),
           title: { type: "plain_text", text: "Close this task" }, submit: { type: "plain_text", text: "Close task" }, close: { type: "plain_text", text: "Cancel" },
-          blocks: [{ type: "section", text: { type: "mrkdwn", text: published
-            ? "Closing stops this task and releases its workspace. Code that isn't in a pull request is discarded. Its open pull request stays on GitHub."
-            : "Closing stops this task and releases its workspace. Code that isn't in a pull request is discarded." } }],
+          blocks: [{ type: "section", text: { type: "mrkdwn", text: closeConfirmationText(workflow) } }],
         });
+        return;
+      }
+      if (action.actionId === "agentx_workflow_keep_pull_requests") {
+        const { taskId, revision } = exitButton(action);
+        const workflow = await currentOwnedWorkflow({ ...action, taskId, revision }, "keep the pull request as it is", workflowKeepPullRequestsOffered);
+        if (deps.keepPullRequests === undefined) throw new Error("keeping the pull request is not configured");
+        // The thread's next post says the task waits for the merge again, so nothing is said privately as well.
+        await deps.keepPullRequests({ taskId, userId: action.userId, thread: action.thread, expectedRevision: workflow.revision, requestId: slackActionRequestId(action) });
         return;
       }
       if (action.actionId === "agentx_workflow_retry_publish") {
@@ -1382,8 +1437,13 @@ export function workflowSlackHandlers(deps: {
         if (taskId === undefined || requestId === undefined || !thread.success || !userId.success || !userTeamId.success || !workspaceTeamId.success) {
           throw new WorkflowInteractionRefusal(STALE_WORKFLOW_BUTTON);
         }
-        await currentOwnedWorkflow({ taskId, userId: userId.data, thread: thread.data, userTeamId: userTeamId.data, workspaceTeamId: workspaceTeamId.data },
-          "close this task", (current) => current.state !== "COMPLETE");
+        const current = await currentOwnedWorkflow({ taskId, userId: userId.data, thread: thread.data, userTeamId: userTeamId.data, workspaceTeamId: workspaceTeamId.data },
+          "close this task", (workflow) => workflow.state !== "COMPLETE");
+        // The owner confirmed what the form said. An approved fix that started after it opened was never mentioned, so it is
+        // not discarded silently. (A form opened before this check existed carries no revision and closes as it did.)
+        if (Number.isInteger(metadata.revision) && metadata.revision !== current.revision && metadata.fixPending !== true && approvedFixNotOnPullRequests(current)) {
+          throw new WorkflowInteractionRefusal(CLOSE_AFTER_FIX_STARTED);
+        }
         if (deps.close === undefined) throw new Error("closing tasks is not configured");
         await deps.close({ taskId, userId: userId.data, thread: thread.data, requestId });
         // The thread hears "closed" only once the workspace is released, which takes a minute or two; until then the

@@ -36,6 +36,7 @@ async function feedbackJourney(options: Parameters<typeof createWorkflowE2E>[0] 
 const lastSaid = (e2e: WorkflowE2E) => said(e2e).at(-1);
 const OWNER = "U0MAYA001";
 const STILL_WATCHING = "I'm still watching the pull request and will finish this task when it's merged.";
+const FIX_CHANGED_NOTHING_KEEP = (number: number) => `The approved fix didn't change any code, so nothing was pushed to PR #${number}. Retry coding, keep the pull request as it is, or close the task.`;
 const SAVED_NOTE = "Got it. I saved your note for the next round of PR feedback; the pull request stays as it is.";
 const failedReview = (number: number, why: string) => `I couldn't review the feedback on PR #${number}: ${why}. You can retry the review, or merge or close the pull request on GitHub.`;
 
@@ -527,10 +528,10 @@ describe("Suite 7: PR feedback loop", () => {
     const head = pullRequest.commit;
     await e2e.click("agentx_feedback_review_recommended");
     await e2e.settle();
-    expect(e2e.workflow()).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED" });
+    expect(e2e.workflow()).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.fixChangedNothing });
     const card = e2e.slack.posts.at(-1)!;
-    expect(card.text).toBe(WORKFLOW_BLOCK_REASONS.noCodeChanged);
-    expect(actionIds(card)).toEqual(["agentx_workflow_retry_implementation", "agentx_workflow_close"]);
+    expect(visibleSlackText(card.text)).toBe(FIX_CHANGED_NOTHING_KEEP(pullRequest.number));
+    expect(actionIds(card)).toEqual(["agentx_workflow_retry_implementation", "agentx_workflow_keep_pull_requests", "agentx_workflow_close"]);
     expect(said(e2e)).not.toContain(PUSHED_FIX(pullRequest.number));
     expect(fixPushes(e2e)).toEqual([]);
     expect(pullRequest.commit).toBe(head);
@@ -538,6 +539,96 @@ describe("Suite 7: PR feedback loop", () => {
     await merged(e2e, pullRequest.number);
     expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
     expect(lastSaid(e2e)).toBe(MERGED);
+  }, 120_000);
+
+  it("7.19 a fix that changes nothing: Keep the pull request as it is waits for the merge again, and the next comment is reviewed", async () => {
+    // Found in review: the only ways on were Retry coding and Close; the owner could not simply keep the pull request.
+    let fixRuns = 0;
+    const { e2e, counts, pullRequest } = await feedbackJourney({ model: { plan: PLAN, edits: (latest) => {
+      if (!latest.includes(FEEDBACK_FIX)) return editsOrFix(latest);
+      fixRuns += 1;
+      return fixRuns === 1 ? [] : FIXED;
+    } } });
+    await commented(e2e, pullRequest.number, "Please trim the name.");
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.fixChangedNothing });
+    const revision = e2e.workflow().revision;
+    await e2e.click("agentx_workflow_keep_pull_requests", { user: TEAMMATE });
+    expect(e2e.slack.responses.at(-1)?.text).toBe(`Only <@${OWNER}> can keep the pull request as it is.`);
+    expect(e2e.workflow().revision).toBe(revision);
+    await e2e.click("agentx_workflow_keep_pull_requests");
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(e2e.workflow().feedbackReview?.status).toBe("DISMISSED");
+    expect(lastSaid(e2e)).toBe("Got it. The pull request stays as it is; I'll finish this task when it's merged.");
+    expect(fixPushes(e2e)).toEqual([]);
+    // The old card's press is out of date.
+    await e2e.click("agentx_workflow_keep_pull_requests");
+    await e2e.settle();
+    expect(e2e.slack.responses.at(-1)?.text).toBe("That button is out of date. Use the latest message in this thread.");
+    // Someone says something new: a review of the pull request's feedback, the next fix pushed.
+    await commented(e2e, pullRequest.number, "Please also greet in lowercase.");
+    expect(counts.feedback).toBe(2);
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
+    expect(fixPushes(e2e)).toHaveLength(1);
+  }, 120_000);
+
+  it("7.19 a fix that fails its check, then Send back, then the coder puts the pull request's code back: nothing is pushed, and the merge is still followed", async () => {
+    // Found in review: "changed nothing" was judged against the failed fix, not against what the pull request holds, so
+    // code identical to the pull request's was checked, reviewed and pushed as an empty commit.
+    const held: { e2e?: WorkflowE2E } = {};
+    let sentBack = false;
+    const { e2e, pullRequest } = await feedbackJourney({
+      model: { plan: PLAN, edits: (latest) => (latest.includes(FEEDBACK_FIX) || (!sentBack && latest.includes("found a regression")) ? FIXED : sentBack ? EDITS : editsOrFix(latest)) },
+      checkResult: () => (held.e2e !== undefined && readFileSync(join(held.e2e.repoDirectory, "greeting.ts"), "utf8") === FIXED[0]!.content
+        ? { exitCode: 1, stdout: "", stderr: "greeting.test.ts failed" } : undefined),
+    });
+    held.e2e = e2e;
+    await commented(e2e, pullRequest.number, "Please trim the name.");
+    const head = pullRequest.commit;
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    sentBack = true;
+    await e2e.click("agentx_workflow_send_back");
+    await e2e.settle();
+    expect(await e2e.repoFile("greeting.ts")).toBe(EDITS[0]!.content);
+    expect(e2e.workflow()).toMatchObject({ stage: "IMPLEMENT", state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.fixChangedNothing });
+    const card = e2e.slack.posts.at(-1)!;
+    expect(visibleSlackText(card.text)).toBe(`The approved fix didn't change any code, so nothing was pushed to PR #${pullRequest.number}. Retry coding, or close the task. ${STILL_WATCHING}`);
+    expect(actionIds(card)).toEqual(["agentx_workflow_retry_implementation", "agentx_workflow_close"]);
+    expect(fixPushes(e2e)).toEqual([]);
+    expect(pullRequest.commit).toBe(head);
+    await merged(e2e, pullRequest.number);
+    expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
+    expect(lastSaid(e2e)).toBe(MERGED);
+  }, 120_000);
+
+  it("7.19 a fix that fails its check, then Send back, then the coder leaves the failed fix as it was: its checks run again and fail, never \"no code changed\"", async () => {
+    const held: { e2e?: WorkflowE2E } = {};
+    const { e2e, pullRequest } = await feedbackJourney({
+      model: { plan: PLAN, edits: (latest) => (latest.includes(FEEDBACK_FIX) || latest.includes("found a regression") ? FIXED
+        : latest.includes("Fix the problems listed above") ? [] : editsOrFix(latest)) },
+      checkResult: () => (held.e2e !== undefined && readFileSync(join(held.e2e.repoDirectory, "greeting.ts"), "utf8") === FIXED[0]!.content
+        ? { exitCode: 1, stdout: "", stderr: "greeting.test.ts failed" } : undefined),
+    });
+    held.e2e = e2e;
+    await commented(e2e, pullRequest.number, "Please trim the name.");
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(e2e.workflow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    const checksBefore = e2e.checkRuns.length;
+    await e2e.click("agentx_workflow_send_back");
+    await e2e.settle();
+    expect(await e2e.repoFile("greeting.ts")).toBe(FIXED[0]!.content);
+    expect(e2e.workflow()).toMatchObject({ stage: "VERIFY", state: "BLOCKED" });
+    expect(e2e.checkRuns.length).toBeGreaterThan(checksBefore);
+    expect(e2e.slack.posts.at(-1)!.text).toBe(`1 of 1 check didn't pass: ${e2e.workflow().checkPolicy!.required[0]!.label}. Nothing was sent to GitHub.`);
+    expect(said(e2e).some((text) => text.startsWith("The approved fix didn't change any code"))).toBe(false);
+    expect(fixPushes(e2e)).toEqual([]);
   }, 120_000);
 
   it("7.20 deciding on the feedback page: 1 of 2 findings is fixed, the Slack card is retired, and the thread says the fix is under way", async () => {
