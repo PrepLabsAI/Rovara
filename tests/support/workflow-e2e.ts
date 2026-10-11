@@ -409,7 +409,9 @@ export async function createWorkflowE2E(options: {
     const commit = await git(["commit-tree", tree, "-p", remoteHead, "-m", "AgentX: address PR feedback"]);
     await git(["checkout", "--force", "-B", payload.headBranch, commit]);
     recordPush(invocation.workspaceId, commit);
-    github.push(credential.token, payload.headBranch, commit, tree, [remoteHead]);
+    // What the fix changed, as GitHub works out which inline comments it outdates.
+    const changedPaths = (await git(["diff", "--name-only", remoteHead, commit])).split("\n").filter((line) => line !== "");
+    github.push(credential.token, payload.headBranch, commit, tree, [remoteHead], changedPaths);
     await git(["update-ref", `refs/remotes/origin/${payload.headBranch}`, commit]);
     const updated = await callbacks.pullRequestUpdateSink({ repository: payload.repository, pullRequestNumber: payload.pullRequestNumber, action: "append",
       headBranch: payload.headBranch, baseBranch: payload.baseBranch, previousCommit: remoteHead, commit });

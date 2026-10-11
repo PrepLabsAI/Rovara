@@ -9,7 +9,9 @@ import type { GitHubFeedbackComment, GitHubFeedbackThread, GitHubPullRequestDeta
 export type GitHubReviewState = "APPROVED" | "CHANGES_REQUESTED" | "COMMENTED" | "PENDING" | "DISMISSED";
 
 /** A feedback item as GitHub holds it: the provider's view, plus a review's state and body as GitHub stores them. */
-type StoredComment = GitHubFeedbackComment & { reviewState?: GitHubReviewState; rawBody?: string | null };
+type StoredComment = GitHubFeedbackComment & { reviewState?: GitHubReviewState; rawBody?: string | null;
+  /** An inline comment's line when it was made (GitHub's `original_line`); `line` is gone once a push changes that file. */
+  originalLine?: number };
 
 export type FakePullRequest = {
   number: number; url: string; headBranch: string; baseBranch: string; title: string; body?: string; draft?: boolean;
@@ -119,13 +121,23 @@ export class FakeGitHub {
     return { token };
   }
 
-  push(token: string | undefined, headBranch: string, commit: string, tree: string, parents: readonly string[] = []): void {
+  /**
+   * A push with a push-scoped token. `changedPaths` (repository paths the pushed commit changes from its parent) outdates the
+   * inline comments on those files, as GitHub does: their `line` is gone and only `original_line` stays.
+   */
+  push(token: string | undefined, headBranch: string, commit: string, tree: string, parents: readonly string[] = [], changedPaths: readonly string[] = []): void {
     this.fault("push");
     if (token === undefined || this.tokens.get(token) !== "push") throw new Error(`GitHub refused the push to ${headBranch}: the token cannot push`);
-    this.moveBranch(headBranch, commit, tree, parents, token);
+    this.moveBranch(headBranch, commit, tree, parents, token, changedPaths);
   }
 
-  private moveBranch(headBranch: string, commit: string, tree: string, parents: readonly string[], token: string): void {
+  private moveBranch(headBranch: string, commit: string, tree: string, parents: readonly string[], token: string, changedPaths: readonly string[] = []): void {
+    for (const pullRequest of this.pullRequests) {
+      if (pullRequest.headBranch !== headBranch) continue;
+      for (const comment of pullRequest.comments) {
+        if (comment.kind === "REVIEW_COMMENT" && comment.path !== undefined && changedPaths.includes(comment.path)) delete comment.line;
+      }
+    }
     this.pushLog.push({ branch: headBranch, commit, tree, parents: [...parents], token, during: this.during });
     this.pushes.set(headBranch, { commit, tree, token });
     this.commits.set(commit, tree);
@@ -173,7 +185,7 @@ export class FakeGitHub {
     const databaseId = this.nextId.reviewComment++;
     const threadId = `PRRT_kwDOe2e${databaseId}`;
     const comment: StoredComment = { id: `review_comment:${databaseId}`, threadId, kind: "REVIEW_COMMENT", url: `${pullRequest.url}#discussion_r${databaseId}`,
-      author, updatedAt: new Date().toISOString(), body, path, line };
+      author, updatedAt: new Date().toISOString(), body, path, line, originalLine: line };
     pullRequest.comments.push(comment);
     (pullRequest.threads ??= []).push({ id: threadId, resolved: false, commentIds: [comment.id] });
     return publicComment(comment);
@@ -187,7 +199,8 @@ export class FakeGitHub {
     const first = pullRequest.comments.find((comment) => comment.id === thread.commentIds[0])!;
     const databaseId = this.nextId.reviewComment++;
     const comment: StoredComment = { id: `review_comment:${databaseId}`, threadId, kind: "REVIEW_COMMENT", url: `${pullRequest.url}#discussion_r${databaseId}`,
-      author, updatedAt: new Date().toISOString(), body, ...(first.path === undefined ? {} : { path: first.path }), ...(first.line === undefined ? {} : { line: first.line }) };
+      author, updatedAt: new Date().toISOString(), body, ...(first.path === undefined ? {} : { path: first.path }), ...(first.line === undefined ? {} : { line: first.line }),
+      ...(first.originalLine === undefined ? {} : { originalLine: first.originalLine }) };
     pullRequest.comments.push(comment);
     thread.commentIds.push(comment.id);
     return publicComment(comment);
@@ -430,7 +443,7 @@ export class FakeGitHub {
       return { ...common, body: comment.rawBody ?? "", state: comment.reviewState, submitted_at: comment.updatedAt };
     }
     if (comment.kind === "REVIEW_COMMENT") {
-      return { ...common, body: comment.body, updated_at: comment.updatedAt, path: comment.path, line: comment.line, pull_request_url: `${API}/pulls/${pullRequest.number}` };
+      return { ...common, body: comment.body, updated_at: comment.updatedAt, path: comment.path, line: comment.line ?? null, original_line: comment.originalLine ?? comment.line ?? null, pull_request_url: `${API}/pulls/${pullRequest.number}` };
     }
     return { ...common, body: comment.body, updated_at: comment.updatedAt, issue_url: `${API}/issues/${pullRequest.number}` };
   }
@@ -464,9 +477,10 @@ export class FakeGitHub {
 }
 
 function publicComment(comment: StoredComment): GitHubFeedbackComment {
-  const { reviewState: _state, rawBody: _raw, ...rest } = comment;
+  const { reviewState: _state, rawBody: _raw, originalLine: _original, ...rest } = comment;
   void _state;
   void _raw;
+  void _original;
   return { ...rest };
 }
 

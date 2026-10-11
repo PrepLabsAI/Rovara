@@ -498,6 +498,49 @@ describe("Suite 7: PR feedback loop", () => {
     expect(e2e.workflow()).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
   }, 120_000);
 
+  it("7.16 GitHub's push event for AgentX's own fix to an inline comment, which the fix outdated, reviews nothing again", async () => {
+    // Found in review: GitHub drops an inline comment's line once the fix changes its file, so the same comment looked like
+    // new feedback and was reviewed again right after "Pushed the fix".
+    const { e2e, counts, pullRequest } = await feedbackJourney();
+    const inline = e2e.github.reviewComment(pullRequest.number, "octocat", "Please trim the name here.", "greeting.ts", 2);
+    expect((await e2e.webhook({ kind: "pull_request_review_comment", number: pullRequest.number, comment: inline })).status).toBe(200);
+    await e2e.settle();
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
+    expect(e2e.github.pullRequests[0]!.comments.find((comment) => comment.id === inline.id)?.line).toBeUndefined();
+    const deliveryId = "71621111-2222-4333-8444-555555555555";
+    const pushEvent = await e2e.webhook({ kind: "pull_request", action: "synchronize", number: pullRequest.number }, { deliveryId });
+    if (pushEvent.status === 503) await sweepUntilDone(e2e, deliveryId);
+    await e2e.settle();
+    expect(e2e.db.get(`GITHUB_DELIVERY#${deliveryId}`, "META")).toMatchObject({ status: "COMPLETED" });
+    expect(counts.feedback).toBe(1);
+    expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
+    expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+  }, 120_000);
+
+  it("7.16 after the fix, resolving one fixed thread and GitHub's push event review nothing again; a new comment is still reviewed", async () => {
+    // Found in review: a thread resolved after the fix made the remaining, already fixed, comments look like new feedback.
+    const { e2e, counts, pullRequest } = await feedbackJourney();
+    e2e.github.comment(pullRequest.number, "octocat", "Please trim the name.");
+    const inline = e2e.github.reviewComment(pullRequest.number, "octocat", "Farewell could be shorter.", "farewell.ts", 1);
+    expect((await e2e.webhook({ kind: "pull_request_review_comment", number: pullRequest.number, comment: inline })).status).toBe(200);
+    await e2e.settle();
+    await e2e.click("agentx_feedback_review_recommended");
+    await e2e.settle();
+    expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
+    e2e.github.resolveThread(inline.threadId!);
+    const deliveryId = "71641111-2222-4333-8444-555555555555";
+    const pushEvent = await e2e.webhook({ kind: "pull_request", action: "synchronize", number: pullRequest.number }, { deliveryId });
+    if (pushEvent.status === 503) await sweepUntilDone(e2e, deliveryId);
+    await e2e.settle();
+    expect(e2e.db.get(`GITHUB_DELIVERY#${deliveryId}`, "META")).toMatchObject({ status: "COMPLETED" });
+    expect(counts.feedback).toBe(1);
+    expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
+    await commented(e2e, pullRequest.number, "And greet in lowercase.");
+    expect(counts.feedback).toBe(2);
+  }, 120_000);
+
   it("7.16 [LIVE-BUG B4] a comment webhook read while GitHub still shows the head before AgentX's fix is read again later: the comment is reviewed and AgentX keeps following", async () => {
     // Found in review: only a push event was read again during GitHub's lag. A comment, review or edit read in that moment
     // took AgentX's own fix for someone else's push, and AgentX stopped following the pull request for good.

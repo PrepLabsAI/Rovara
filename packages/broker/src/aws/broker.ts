@@ -5622,6 +5622,19 @@ export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependen
       ] }));
       console.log(JSON.stringify({ component: "broker", event: "workflow.landed_fix_push_recorded", taskId, pullRequests: pushes.map((push) => push.number) }));
     },
+    reviewedComments: async (taskId, bundleDigests) => {
+      const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+      if (task === undefined) return undefined;
+      const comments: Array<{ id: string; updatedAt: string; bodyDigest: string }> = [];
+      for (const digest of bundleDigests) {
+        const text = await readObjectText(dependencies, `private/${task.ownerKey}/${task.workspaceId}/feedback/${digest}.json`, FEEDBACK_BUNDLE_MAX_BYTES);
+        if (text === undefined || createHash("sha256").update(text, "utf8").digest("hex") !== digest) return undefined;
+        const bundle = WorkflowFeedbackBundleSchema.safeParse(JSON.parse(text));
+        if (!bundle.success || bundle.data.taskId !== taskId) return undefined;
+        comments.push(...bundle.data.comments.map(({ id, updatedAt, bodyDigest }) => ({ id, updatedAt, bodyDigest })));
+      }
+      return comments;
+    },
     persistBundle: async (bundle, bytes, sha256) => {
       const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(bundle.taskId));
       if (!task) throw new GithubWebhookRefusal("linked feedback task no longer exists");

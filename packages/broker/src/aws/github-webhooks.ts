@@ -157,6 +157,11 @@ export interface ReconcileTaskPullRequestFeedbackInput {
   /** A commit's parents, as GitHub says. */
   commitParents?(repositoryUrl: string, commit: string): Promise<string[]>;
   /**
+   * The comments a completed review was given (each one's ID, edit time and body digest), read from its immutable
+   * bundles; undefined when they cannot be read.
+   */
+  reviewedComments?(taskId: string, bundleDigests: readonly string[]): Promise<Array<{ id: string; updatedAt: string; bodyDigest: string }> | undefined>;
+  /**
    * Saves the workflow with the fix pushes it records that were taken for failed but landed, together with each pull
    * request's link to the task (now naming the fix) and its pull request record (now at the landed head).
    */
@@ -348,10 +353,17 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
       // Feedback only in resolved review threads is no feedback either: a resolved thread starts excluded.
       // The feedback a finished round already reviewed is not new either: once its approved fix is pushed, GitHub's event for
       // that push (or any later event before someone says something new) finds the same comments on the pull request.
+      // "The same" is each comment's identity, words and edit time: an inline comment the fix outdated loses its line, and
+      // a thread resolved after the fix leaves the set, without anything new having been said.
       const lastReviewed = current.feedbackReviewHistory?.at(-1);
-      const alreadyReviewed = prior === undefined && lastReviewed?.status === "COMPLETE" && lastReviewed.candidateBindings.length === bundles.length
-        && bundles.every(b => lastReviewed.candidateBindings.some(binding => binding.repositoryId === b.repositoryId && binding.number === b.number
-          && binding.commentSetDigest === b.commentSetDigest));
+      let alreadyReviewed = false;
+      if (prior === undefined && lastReviewed?.status === "COMPLETE") {
+        const reviewed = await input.reviewedComments?.(linked.taskId, lastReviewed.bundleDigests).catch(() => undefined);
+        alreadyReviewed = reviewed !== undefined
+          ? bundles.every(b => b.comments.every(c => reviewed.some(r => r.id === c.id && r.updatedAt === c.updatedAt && r.bodyDigest === c.bodyDigest)))
+          : lastReviewed.candidateBindings.length === bundles.length && bundles.every(b => lastReviewed.candidateBindings.some(binding =>
+            binding.repositoryId === b.repositoryId && binding.number === b.number && binding.commentSetDigest === b.commentSetDigest));
+      }
       const nothingToReview = prior === undefined && (alreadyReviewed
         || (observations.every(o => o.eligibleCommentIds.length === 0) && bundles.every(b => b.comments.length === 0)));
       if (same && sameThreadObservations(prior.threadObservations ?? [], observations) && next === current) {
