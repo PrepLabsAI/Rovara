@@ -241,7 +241,8 @@ export const TASK_PAGE_DECIDING_COPY = {
   couldnt: "AgentX couldn't answer this one.",
   notAnswered: "Not answered",
   askUnavailable: "AgentX can answer comments only on tasks started in Slack.",
-  askLimited: "AgentX has answered a lot of questions on this task in the last hour. Your comment is posted; ask again later.",
+  // One line for every cap (an hour, the task, the thread, all tasks): it never names the limit that refused the question.
+  askLimited: "AgentX has answered a lot of questions recently. Try again later, or ask in the task's Slack thread.",
   tooLong: "Keep comments under 2,000 characters.",
   suggest: "Suggest this",
   youSuggest: "You suggest this · Undo",

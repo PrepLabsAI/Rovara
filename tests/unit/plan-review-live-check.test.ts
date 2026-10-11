@@ -1,7 +1,7 @@
 // The live check for deciding and commenting on the task page (spec 061 slice 2): what the script checks by itself on a
 // deployed task page, and the hands-on list it prints for a person to record.
 import { describe, expect, it } from "vitest";
-import { LIVE_CHECKLIST, pageChecks, stateChecks } from "../../scripts/plan-review-live-check.js";
+import { LIVE_CHECKLIST, pageChecks, stateChecks, taskPageLink } from "../../scripts/plan-review-live-check.js";
 import { createTaskWeb, type TaskDocumentView } from "../../packages/broker/src/aws/task-web.js";
 import { planDocument } from "../support/plan-documents.js";
 
@@ -48,5 +48,18 @@ describe("the task page live check", () => {
       expect(text).toContain(item);
     }
     expect(text).not.toMatch(/\b(candidate|revision|digest|operation|artifact|workflow)\b/i);
+  });
+});
+
+describe("the --page link", () => {
+  it("accepts an https task page link", () => {
+    expect(taskPageLink(`https://api.example.test/review/${taskId}/task`).pathname).toBe(`/review/${taskId}/task`);
+  });
+  it("refuses a link that is not https, so the review cookie never goes out in the clear", () => {
+    expect(() => taskPageLink(`http://api.example.test/review/${taskId}/task`)).toThrow(/https/);
+    expect(() => taskPageLink(`ftp://api.example.test/review/${taskId}/task`)).toThrow(/https/);
+  });
+  it("still refuses a link that is not a task page", () => {
+    expect(() => taskPageLink("https://api.example.test/other")).toThrow(/task page link/);
   });
 });

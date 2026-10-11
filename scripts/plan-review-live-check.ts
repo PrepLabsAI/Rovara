@@ -55,14 +55,21 @@ export const LIVE_CHECKLIST: readonly string[] = [
   "The Full path with one Request changes: requirements, design and coding plan, with one Request changes sending two comments; the next version shows AgentX's answer under each, and the card says how many it answered.",
 ];
 
+/** The --page link, checked: https only (the review cookie is sent with every request) and a task page path. */
+export function taskPageLink(value: string): URL {
+  const page = new URL(value);
+  if (page.protocol !== "https:") throw new Error("--page must be an https link: the review cookie is sent with every request");
+  if (!/^\/review\/[0-9a-f-]{36}\/task$/i.test(page.pathname)) throw new Error("--page must be a task page link: https://<api>/review/<task ID>/task");
+  return page;
+}
+
 async function main(): Promise<void> {
   const { values } = parseArgs({ options: { page: { type: "string" } } });
   const session = process.env.AGENTX_REVIEW_SESSION;
   if (values.page === undefined || session === undefined || session === "") {
     throw new Error("usage: AGENTX_REVIEW_SESSION=<review cookie> npx tsx scripts/plan-review-live-check.ts --page https://<api>/review/<task ID>/task");
   }
-  const page = new URL(values.page);
-  if (!/^\/review\/[0-9a-f-]{36}\/task$/i.test(page.pathname)) throw new Error("--page must be a task page link: https://<api>/review/<task ID>/task");
+  const page = taskPageLink(values.page);
   const cookie = `__Host-agentx_review_session=${session}`;
   const served = await fetch(page, { headers: { cookie }, redirect: "manual" });
   if (served.status !== 200) throw new Error(`the task page answered ${served.status}; open it from the task's Slack card first, then copy the review cookie again`);

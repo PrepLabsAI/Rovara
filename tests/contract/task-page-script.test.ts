@@ -134,6 +134,11 @@ describe("the deciding and commenting script", () => {
     for (const [name, text] of Object.entries(TASK_PAGE_DECIDING_COPY)) expect(String(text), name).not.toMatch(BANNED);
   });
 
+  it("the ask-refused line fits every cap that can refuse a question", () => {
+    expect(TASK_PAGE_DECIDING_COPY.askLimited).toBe("AgentX has answered a lot of questions recently. Try again later, or ask in the task's Slack thread.");
+    expect(TASK_PAGE_DECIDING_COPY.askLimited).not.toMatch(/this task|last hour|per thread/i);
+  });
+
   it("is included only for someone who can act, by the page's nonce", async () => {
     const html = await pageHtml();
     const nonce = /<script nonce="([^"]+)">/.exec(html)![1]!;
