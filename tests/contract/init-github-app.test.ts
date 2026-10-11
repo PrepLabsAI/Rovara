@@ -12,6 +12,7 @@ import { problemText } from "../../packages/cli/src/init/retry.js";
 import { githubCard } from "../../packages/cli/src/init/ui/cards.js";
 import { startInstallWizard } from "../../packages/cli/src/init/ui/index.js";
 import type { WizardCard } from "../../packages/cli/src/init/ui/protocol.js";
+import type { PreMadeGitHubApp } from "../../packages/cli/src/init/context.js";
 import type { ProgressHandle } from "../../packages/cli/src/init/steps.js";
 import {
   allStackOutputs, browserThatCreatesGitHubApp, fakeGitHubApi, initContext, memoryInitSecrets, progressHandle, sampleAnswers, scriptedDeployer, scriptedPrompter, T0, TEST_PRIVATE_KEY, TEST_PUBLIC_KEY,
@@ -130,7 +131,7 @@ describe("GitHub App step", () => {
       openBrowser: async () => true,
       manifestHost: async (host) => {
         pages.push(host.page("http://127.0.0.1:50123/github/created"));
-        return { startUrl: "http://127.0.0.1:50123/github/start", port: 50123, code: Promise.resolve("0123456789abcdef0123"), close: () => undefined };
+        return { startUrl: "http://127.0.0.1:50123/github/start", redirectUrl: "http://127.0.0.1:50123/github/created", port: 50123, code: Promise.resolve("0123456789abcdef0123"), close: () => undefined };
       },
     });
     homes.push(context.home);
@@ -148,7 +149,7 @@ describe("GitHub App step", () => {
       openBrowser: async () => true,
       manifestHost: async (host) => {
         pages.push(host.page("http://127.0.0.1:50123/github/created"));
-        return { startUrl: "http://127.0.0.1:50123/github/start", port: 50123, code: Promise.resolve("0123456789abcdef0123"), close: () => undefined };
+        return { startUrl: "http://127.0.0.1:50123/github/start", redirectUrl: "http://127.0.0.1:50123/github/created", port: 50123, code: Promise.resolve("0123456789abcdef0123"), close: () => undefined };
       },
     });
     context.deployment = async () => ({ deployer: scriptedDeployer(outputs, Object.keys(outputs)), store: context.store, secrets: context.secrets, holder: context.holder, partition: "aws", cleanup: async () => undefined });
@@ -355,7 +356,7 @@ describe("GitHub App step", () => {
 
     it("a failure before any GitHub card shows none", async () => {
       const cards: WizardCard[] = [];
-      const context = initContext({ surface: { card: (card) => { cards.push(card); } }, preMadeGitHubApp: { appId: "999" } });
+      const context = initContext({ surface: { card: (card) => { cards.push(card); } }, preMadeGitHubApp: { appId: "999" } as PreMadeGitHubApp });
       homes.push(context.home);
       const { progress } = recorded();
       await expect(githubAppStep(fakeGitHubApi()).run(context, progress)).rejects.toThrow("this install already uses GitHub App 424242, not 999 from --github-app-id");
