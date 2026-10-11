@@ -64,6 +64,15 @@ describe("the Slack service's thread client", () => {
     expect(sent).toEqual([{ requestId, includeSharedTask: true }]);
   });
 
+  it("sends explicit discard authorization only when requested", async () => {
+    const { handler } = createBroker();
+    await registerSlackProject(handler);
+    const sent: unknown[] = [];
+    const requestId = randomUUID();
+    await threadApi(handler, sent).startClose(requestId, true);
+    expect(sent).toEqual([{ requestId, includeSharedTask: true, discard_unpublished: true }]);
+  });
+
   it("reports a refused request with the broker's code, as before the move", async () => {
     const { handler } = createBroker();
     await registerSlackProject(handler, { bind: false });

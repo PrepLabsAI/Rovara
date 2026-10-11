@@ -29,8 +29,9 @@ import {
 } from "./devcontainer.js";
 import { runCollected, type CollectedProcess } from "./collected-process.js";
 import { describeCommandFailure } from "./command-failure.js";
+import { DOCKER_DATA_DIRECTORY } from "./devcontainer-policy.js";
 import { evaluateReadiness, type CommandResult } from "./readiness.js";
-import { gitSafeEnvironment } from "./git.js";
+import { gitHardenedEnvironment, projectCommandEnvironment } from "./git.js";
 import { CHECK_HISTORY_PATH, projectCheckKey, recordPreparedOutcomes } from "./verification/check-history.js";
 import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
 import type {
@@ -44,8 +45,9 @@ const MAX_COMMAND_OUTPUT_BYTES = 1_048_576;
 /**
  * Docker's data root on an EC2 worker's workspace volume (#121), so images, containers and named
  * volumes survive an idle stop. The boot script puts it there; it is root's, not the workspace's.
+ * A dev container gets it hidden (devcontainer-policy.ts).
  */
-export const DOCKER_DATA_DIRECTORY = ".docker";
+export { DOCKER_DATA_DIRECTORY };
 
 export interface PreparationManifest {
   schemaVersion: 2;
@@ -346,7 +348,7 @@ async function cloneRepository(
   const remote = await execFileAsync("git", ["-C", destination, "remote", "get-url", "origin"], {
     timeout: 30_000,
     maxBuffer: 4_096,
-    env: gitSafeEnvironment(destination),
+    env: await gitHardenedEnvironment(destination),
   });
   assertCredentialFreeRemote(remote.stdout.trim());
 }
@@ -359,7 +361,7 @@ async function resolveDefaultBranch(directory: string, branch: string): Promise<
       {
         timeout: 30_000,
         maxBuffer: 4_096,
-        env: gitSafeEnvironment(directory),
+        env: await gitHardenedEnvironment(directory),
       },
     );
     return result.stdout.trim();
@@ -374,7 +376,7 @@ async function checkoutResolvedCommit(directory: string, commit: string): Promis
   await execFileAsync("git", ["-C", directory, "checkout", "--detach", "--force", commit], {
     timeout: 120_000,
     maxBuffer: MAX_COMMAND_OUTPUT_BYTES,
-    env: gitSafeEnvironment(directory),
+    env: await gitHardenedEnvironment(directory),
   });
   const resolved = await gitHead(directory);
   if (resolved !== commit) throw new Error("repository did not check out the resolved branch commit");
@@ -384,7 +386,7 @@ async function gitHead(directory: string): Promise<string> {
   const result = await execFileAsync("git", ["-C", directory, "rev-parse", "HEAD"], {
     timeout: 30_000,
     maxBuffer: 4_096,
-    env: gitSafeEnvironment(directory),
+    env: await gitHardenedEnvironment(directory),
   });
   return result.stdout.trim();
 }
@@ -406,7 +408,8 @@ export async function runProjectCommand(
     result = await runCollected(command.executable, command.args, {
       cwd,
       timeoutMs: command.timeoutSeconds * 1_000,
-      env: gitSafeEnvironment(cwd, command.env),
+      // A project command is the project's own code: it keeps the worker's Git settings.
+      env: projectCommandEnvironment(cwd, command.env),
       ...(signal !== undefined ? { signal } : {}),
     });
   } catch (error) {
@@ -483,4 +486,13 @@ function withoutFailure(manifest: PreparationManifest): PreparationManifest {
   const next = { ...manifest };
   delete next.failure;
   return next;
+}
+
+/**
+ * The prepare result's record of where each repository was checked out, before any agent runs: the broker keeps it
+ * as the task's base. Omitted unless every repository has a 40-hex commit.
+ */
+export function preparedBaseResult(manifest: PreparationManifest): { preparedBase?: Array<{ repositoryId: string; baseCommitSha: string }> } {
+  if (manifest.repositories.length === 0 || !manifest.repositories.every((repository) => /^[a-f0-9]{40}$/.test(repository.resolvedCommit))) return {};
+  return { preparedBase: manifest.repositories.map((repository) => ({ repositoryId: repository.name, baseCommitSha: repository.resolvedCommit })) };
 }

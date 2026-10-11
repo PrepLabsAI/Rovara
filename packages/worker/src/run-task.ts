@@ -1,6 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { WorkerInvocationSchema, agentXError, parseAgentClaim, redactText, type CheckReport, type WorkerInvocation } from "@agentx/contracts";
+import { AGENTX_PREAMBLE_VERSION, WorkerInvocationSchema, WORKFLOW_PLAN_MAX_BYTES, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, redactText, reportStatus, type CheckReport, type CandidateRepository, type WorkflowReviewReport, type WorkerInvocation } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, recorderFingerprint, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
@@ -26,7 +26,9 @@ import {
 import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
 import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
-import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
+import { readCandidateRepositories, type CandidateRepositoryInput } from "./verification/candidate.js";
+import { runWorkflowReviews } from "./verification/review.js";
+import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, verificationExtension } from "./verification/extension.js";
 import { gitOriginalCode, recoverAgentFiles, type OriginalCode } from "./verification/original-code.js";
 import { CommandRecorder } from "./verification/recorder.js";
@@ -42,7 +44,13 @@ export interface TaskInvocationResult {
   /** False on the turn that created the saved session, true on every turn that reopened it. */
   reopened: boolean;
   /** Spec 051 FR-007: AgentX's check of the agent's work, with outputs cut to fit (compactCheckReport). */
-  checks: CheckReport;
+  checks?: CheckReport;
+  workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS";
+  /** Worker-reported Git object identities; the broker recomputes and stores the canonical digest. */
+  workflowCandidateRepositories?: Array<{ repositoryId: string; commitSha: string; treeSha: string }>;
+  /** Repository identities captured when the final successful check round ended. */
+  workflowCheckCandidateRepositories?: Array<{ repositoryId: string; commitSha: string; treeSha: string }>;
+  workflowReviews?: WorkflowReviewReport[];
 }
 
 export async function runTaskInvocation(
@@ -89,6 +97,68 @@ export async function runTaskInvocation(
   // round plans from this snapshot, and the final round's outcomes are merged over it.
   const checkHistory = await readCheckHistory(canonicalRoot, manifest);
 
+  // A verification retry has no model and no coding tools. It snapshots the candidate, runs only
+  // the owner-selected project checks, then snapshots again so the broker can reject a changed tree.
+  if (invocation.payload.workflowMode === "CHECKS") {
+    const readiness = invocation.payload.readiness ?? [];
+    if (readiness.length === 0) throw agentXError("CONFIG_INVALID", "verification retry requires at least one selected project check");
+    const events = new EventBatcher(dependencies.eventSink);
+    const repositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase);
+    const candidateBefore = await readCandidateRepositories(repositories);
+    const recorder = new CommandRecorder({ fingerprint: (signal) => recorderFingerprint(repositories.map((repository) => ({ name: repository.repositoryId, directory: repository.directory })), signal) });
+    const plan = planChecks(readiness, recorder, checkHistory);
+    const stop = new AbortController();
+    const unregister = dependencies.cancellationController?.register(invocation.operationId, { abort: async () => stop.abort() });
+    try {
+      await events.append("lifecycle", { status: "RUNNING", conversationId: invocation.payload.conversationId, conversation: { started: true, reopened: true } });
+      await events.append("progress", { message: "AgentX is running the selected project checks against the current code. This retry has no code-editing tools." });
+      const runners = dependencies.checkRunners ?? createCheckRunners({
+        rootPath: canonicalRoot,
+        ...(devcontainer === undefined || devcontainerCli === undefined ? {} : { devcontainer: { cli: devcontainerCli, target: devcontainer } }),
+        ...(bashOperations === undefined ? {} : { bashOperations }),
+      });
+      const round = await runChecks(plan, runners, { budgetMs: dependencies.checkBudgetMs?.() ?? CHECK_ROUND_BUDGET_MS, signal: stop.signal });
+      const status = round.stopped ? "not_verified" : reportStatus(round.entries);
+      const checks: CheckReport = {
+        status,
+        ...(status === "not_verified" ? { notVerifiedReason: round.stopped || round.entries.length > 0 ? "stopped" : "no_checks" } : {}),
+        source: plan.source,
+        preambleVersion: AGENTX_PREAMBLE_VERSION,
+        preambleSha256: agentxPreambleSha256(),
+        checks: round.entries,
+        extraTry: "not_needed",
+        agentClaim: "none",
+      };
+      try {
+        const restored = await restoreCheckHistory(canonicalRoot, checkHistory, plan.source === "project" && plan.readiness !== undefined
+          ? { plan: { source: plan.source, readiness: plan.readiness }, entries: round.entries } : undefined);
+        if (restored.outcome === "removed") await events.append("progress", { message: "AgentX could not save these check results for the next task and removed the untrusted check-history file." });
+      } catch {
+        await events.append("progress", { message: "AgentX could not safely update the workspace check history." });
+      }
+      const candidateAfter = await readCandidateRepositories(repositories);
+      await dependencies.artifactSink({ name: "checks.json", mediaType: "application/json", content: checksArtifactContent(checks) });
+      const compact = compactCheckReport(checks);
+      await events.append("result", {
+        status: "SUCCEEDED", conversationId: invocation.payload.conversationId, workflowMode: "CHECKS", checks: compact,
+        workflowCandidateRepositories: candidateBefore,
+        workflowCheckCandidateRepositories: candidateAfter,
+      });
+      await events.flush();
+      return {
+        conversationId: invocation.payload.conversationId, reopened: true, workflowMode: "CHECKS", checks: compact,
+        workflowCandidateRepositories: candidateBefore,
+        workflowCheckCandidateRepositories: candidateAfter,
+      };
+    } catch (error) {
+      await events.append("error", { message: redactText(error instanceof Error ? error.message : "verification retry failed") }).catch(() => undefined);
+      await events.flush().catch(() => undefined);
+      throw error;
+    } finally {
+      unregister?.();
+    }
+  }
+
   const conversationId = invocation.payload.conversationId;
   const conversations = new WorkspaceConversationStore(dependencies.rootPath);
   const registered = await conversations.tryResolve(conversationId);
@@ -134,6 +204,8 @@ export async function runTaskInvocation(
   // loop guard's stop, so a running check ends with the task rather than at its own timeout (Review Focus 1).
   const verificationStop = new AbortController();
   const readiness = invocation.payload.readiness;
+  const planning = invocation.payload.workflowMode === "PLAN";
+  const reviewing = invocation.payload.workflowMode === "REVIEW";
   const recorder = new CommandRecorder({
     fingerprint: (signal) => recorderFingerprint(
       manifest.repositories.map((repository) => ({ name: repository.name, directory: resolve(canonicalRoot, repository.path) })),
@@ -145,6 +217,7 @@ export async function runTaskInvocation(
   });
   let checkPlan: CheckPlan | undefined;
   let reportedChecks: CheckReport | undefined;
+  let reportedChecksCandidate: CandidateRepository[] | undefined;
   // The first round's report when the extra try was given (Ruling N).
   let firstRoundChecks: CheckReport | undefined;
   const verification = verificationExtension({
@@ -157,7 +230,15 @@ export async function runTaskInvocation(
     budgetMs: dependencies.checkBudgetMs ?? (() => CHECK_ROUND_BUDGET_MS),
     signal: verificationStop.signal,
     recorder,
-    onReport: (report) => { reportedChecks = report; },
+    onReport: async (report) => {
+      reportedChecks = report;
+      reportedChecksCandidate = undefined;
+      if (invocation.payload.workflowMode === "IMPLEMENT" && (report.status === "verified" || report.status === "regression")) {
+        try {
+          reportedChecksCandidate = await readCandidateRepositories(candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase));
+        } catch { /* missing identity leaves the check result unbound and the workflow blocked */ }
+      }
+    },
     // I-3: an earlier settle's report is stale once the agent has a regression to fix.
     onExtraTry: (firstRound) => { firstRoundChecks = firstRound; reportedChecks = undefined; },
     onDiagnostic,
@@ -170,10 +251,11 @@ export async function runTaskInvocation(
       {
         rootPath: dependencies.rootPath,
         model: dependencies.model,
+        workflowMode: invocation.payload.workflowMode ?? "IMPLEMENT",
         conversationId,
         sessionFile: registered.sessionFile,
         onDiagnostic,
-        extensionFactories: [verification],
+        extensionFactories: planning || reviewing ? [] : [verification],
         ...(bashOperations === undefined ? {} : { bashOperations }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
       },
@@ -182,8 +264,8 @@ export async function runTaskInvocation(
   } else {
     session = await createWorkspacePiSession(
       {
-        rootPath: dependencies.rootPath, model: dependencies.model, conversationId, onDiagnostic,
-        extensionFactories: [verification],
+        rootPath: dependencies.rootPath, model: dependencies.model, workflowMode: invocation.payload.workflowMode ?? "IMPLEMENT", conversationId, onDiagnostic,
+        extensionFactories: planning || reviewing ? [] : [verification],
         ...(bashOperations === undefined ? {} : { bashOperations }),
         ...(containerPaths === undefined ? {} : { devcontainerPaths: containerPaths }),
       },
@@ -319,6 +401,49 @@ export async function runTaskInvocation(
       }
       const modelFailure = failedTurn(lastAssistant);
       if (modelFailure !== undefined) throw modelFailure;
+      if (planning) {
+        const plan = finalText?.trim();
+        if (!plan) throw agentXError("OPERATION_INTERRUPTED", "the planning run produced no plan artifact");
+        if (Buffer.byteLength(plan, "utf8") > WORKFLOW_PLAN_MAX_BYTES) throw agentXError("OPERATION_INTERRUPTED", "the planning run exceeded the maximum plan size");
+        await dependencies.artifactSink({ name: "plan.md", mediaType: "text/markdown; charset=utf-8", content: plan });
+        await publishEvidence();
+        outcome = "SUCCEEDED";
+        await events.append("result", { status: "SUCCEEDED", conversationId, workflowMode: "PLAN" });
+        taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "PLAN" };
+      } else if (reviewing) {
+        const repositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase);
+        const beforeReview = createCandidateManifest(await readCandidateRepositories(repositories));
+        let reports = await runWorkflowReviews({
+          operationId: invocation.operationId,
+          rootPath: canonicalRoot,
+          model: session.getModel(),
+          candidate: beforeReview.repositories,
+          repositories,
+          signal: verificationStop.signal,
+          ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }),
+          onProgress: (message) => { void events.append("progress", { message }).catch(() => undefined); },
+          onUsage: async ({ role, stats, model, outcome }) => {
+            const usage = createTaskUsageTelemetry(stats, { ...model, ...(dependencies.model.cacheRetention === undefined ? {} : { cacheRetention: dependencies.model.cacheRetention }) }, outcome);
+            const redactedUsage = redactCredentials(usage);
+            await events.append("usage", usageForControlPlane(redactedUsage, dependencies.model));
+            await dependencies.artifactSink({ name: `workflow-review-${role.toLowerCase()}-usage.json`, mediaType: "application/json", content: JSON.stringify(redactedUsage, null, 2) });
+          },
+        });
+        try {
+          const afterReview = createCandidateManifest(await readCandidateRepositories(repositories));
+          if (afterReview.digest !== beforeReview.digest) reports = reports.map((report) => ({ ...report, status: "UNKNOWN", findings: [] }));
+        } catch {
+          reports = reports.map((report) => ({ ...report, status: "UNKNOWN", findings: [] }));
+        }
+        await publishEvidence();
+        outcome = "SUCCEEDED";
+        await events.append("result", {
+          status: "SUCCEEDED", conversationId, workflowMode: "REVIEW",
+          workflowCandidateRepositories: beforeReview.repositories,
+          workflowReviews: reports,
+        });
+        taskResult = { conversationId, reopened: registered !== undefined, workflowMode: "REVIEW", workflowCandidateRepositories: beforeReview.repositories, workflowReviews: reports };
+      } else {
       diffAttempted = true;
       const { changed: dirty } = await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
       await publishEvidence();
@@ -341,13 +466,24 @@ export async function runTaskInvocation(
       if (warning !== undefined) await events.append("progress", { message: warning });
       outcome = "SUCCEEDED";
       const checks = compactCheckReport(finalChecks());
+      const workflowRepositories = candidateInputs(manifest, canonicalRoot, invocation.payload.workflowBase);
+      const workflowCandidateRepositories = invocation.payload.workflowMode === "IMPLEMENT"
+        ? await readCandidateRepositories(workflowRepositories)
+        : undefined;
       await events.append("result", {
         status: "SUCCEEDED",
         conversationId,
         sessionFile: "agent-sessions/[server-generated]",
         checks,
+        ...(workflowCandidateRepositories === undefined ? {} : { workflowCandidateRepositories }),
+        ...(workflowCandidateRepositories === undefined || reportedChecksCandidate === undefined ? {} : { workflowCheckCandidateRepositories: reportedChecksCandidate }),
       });
-      taskResult = { conversationId, reopened: registered !== undefined, checks };
+      taskResult = {
+        conversationId, reopened: registered !== undefined, checks,
+        ...(workflowCandidateRepositories === undefined ? {} : { workflowCandidateRepositories }),
+        ...(workflowCandidateRepositories === undefined || reportedChecksCandidate === undefined ? {} : { workflowCheckCandidateRepositories: reportedChecksCandidate }),
+      };
+      }
     } catch (error) {
       if (loopStop === undefined && dependencies.cancellationController?.isCancelled(invocation.operationId)) {
         outcome = "CANCELLED";
@@ -376,7 +512,7 @@ export async function runTaskInvocation(
           await reportUnsaved("test-and-tool-evidence.json");
         }
       }
-      if (!checksAttempted) {
+      if (!planning && !checksAttempted) {
         try {
           await publishChecks();
         } catch (artifactError) {
@@ -384,7 +520,7 @@ export async function runTaskInvocation(
           await reportUnsaved("checks.json");
         }
       }
-      if (!diffAttempted && outcome !== "CANCELLED") {
+      if (!planning && !diffAttempted && outcome !== "CANCELLED") {
         try {
           await publishWorkspaceDiff(dependencies.rootPath, dependencies.artifactSink);
         } catch (artifactError) {
@@ -394,7 +530,7 @@ export async function runTaskInvocation(
       }
     }
 
-    await restoreHistory();
+    if (!planning) await restoreHistory();
     await flushDiagnostics().catch(() => undefined);
 
     let telemetryFailure = evidenceFailure;
@@ -589,6 +725,23 @@ function eventType(event: unknown): "progress" | "tool_start" | "tool_end" {
     if (type === "tool_execution_end" || type === "tool_result") return "tool_end";
   }
   return "progress";
+}
+
+/**
+ * The candidate inputs for every prepared repository, each with the task's base commit: the base the broker pinned
+ * when it sent one, otherwise the commit preparation resolved (absent for an old manifest without a usable commit).
+ * Every workflow stage reads its candidate through this, so IMPLEMENT, CHECKS and REVIEW digests all include the base.
+ */
+function candidateInputs(
+  manifest: PreparationManifest,
+  root: string,
+  base?: ReadonlyArray<{ repositoryId: string; baseCommitSha: string }>,
+): CandidateRepositoryInput[] {
+  return manifest.repositories.map((repository) => {
+    const baseCommitSha = base?.find((entry) => entry.repositoryId === repository.name)?.baseCommitSha
+      ?? (/^[a-f0-9]{40}$/.test(repository.resolvedCommit ?? "") ? repository.resolvedCommit : undefined);
+    return { repositoryId: repository.name, directory: resolve(root, repository.path), ...(baseCommitSha === undefined ? {} : { baseCommitSha }) };
+  });
 }
 
 /**

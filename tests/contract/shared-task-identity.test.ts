@@ -249,6 +249,16 @@ describe("a thread that is not open to the channel (C11, Review Focus 2)", () =>
     expect(result((await h.ensure()).body)).toEqual({ outcome: "VIEW_ONLY", taskId: h.taskId, closed: true });
   });
 
+  it("treats a Slack-started task's own thread as closed to the channel's chat agent, even in continue mode", async () => {
+    const h = await continueThread();
+    h.db.set({ ...h.db.get(`SHARED_TASK#${h.subject}`, "META")!, mode: "continue", workflowThread: true });
+    const before = h.workspaces();
+    expect(result((await h.ensure()).body)).toEqual({ outcome: "VIEW_ONLY", taskId: h.taskId, closed: true });
+    expect((await h.ensure(OLDER_REQUEST)).body.error).toMatchObject({ code: "FORBIDDEN" });
+    expect(h.workspaces()).toBe(before);
+    expect((await teammate(h.handler, h.subject, PRIYA, "POST", `/v1/service/workspaces/${h.workspaceId}/conversations`, {})).status).toBe(404);
+  });
+
   it("treats a thread whose channel now serves another project as view only", async () => {
     const h = await continueThread();
     h.db.set({ ...h.db.get(`SHARED_TASK#${h.subject}`, "META")!, project: "ledger" });

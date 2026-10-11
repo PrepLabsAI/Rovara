@@ -168,8 +168,13 @@ Then configure the Slack app:
   request URL. The app-level `xapp-` token is no longer used and can be revoked.
 - Under **Event Subscriptions**, enable events and set the request URL to the `SlackEventsUrl`
   output. Slack verifies the URL immediately, which succeeds only after the secret is stored.
-- Subscribe to the bot event `app_mention`.
-- Bot token scopes: `app_mentions:read`, `chat:write` and `users:read`. Rovara uses `users:read`
+- Subscribe to the bot events `app_mention`, `message.channels` and `message.groups`. The two
+  message events deliver replies in the thread of a task started in Slack, which are saved as input
+  for the task's next step; Rovara ignores, and does not store, any other channel message.
+- Bot token scopes: `app_mentions:read`, `channels:history`, `groups:history`, `chat:write` and
+  `users:read` (`channels:history` and `groups:history` go with the message events). The manifest
+  `agentx init` generates (`packages/cli/src/init/slack-app.ts`) lists every scope and event AgentX
+  uses; prefer it to setting them by hand. Rovara uses `users:read`
   to confirm that a mention posted through another app came from a person, and to show the
   requester's name in connector write footers. Without it, Rovara does not run mentions posted
   through other apps (it says it could not confirm the sender), and footers show the Slack member
@@ -201,12 +206,17 @@ command whose directory the workspace does not have fails that check rather than
 
 ## Working in a thread
 
-Mention the app in the bound channel for every request, including follow-ups in a thread:
+Mention the app in the bound channel for every request, including follow-ups in a thread. A plain
+top-level `@AgentX <request>` starts a task with the Quick or Full question (see
+[Starting a task from Slack](project-configuration.md#starting-a-task-from-slack)); to reach the chat
+agent described in this section, start a new request with `chat:`:
 
 ```text
-@AgentX inspect the project and implement the navigation fix. Run the relevant tests, but do not
+@AgentX chat: inspect the project and implement the navigation fix. Run the relevant tests, but do not
 create a pull request.
 ```
+
+Follow-ups in a thread the chat agent is already answering need no `chat:`.
 
 Rovara replies within a few seconds. If earlier requests in the thread are still running, it says
 how many are ahead, and says "Working on it now" when it starts on the request. A request with
@@ -273,6 +283,13 @@ To stop the thread's running coding task, mention Rovara in the thread with just
 so `@AgentX stop using tabs` is an ordinary request. A bare `@AgentX cancel` still declines a pending
 confirmation. Any member of the channel can stop the task. Rovara replies that it is stopping, and the
 task ends as cancelled. When nothing is running, the message goes to Rovara like any other request.
+
+In the thread of a task started in Slack, only the person who started the task can stop it, and the
+stop must mention AgentX (`@AgentX stop`). A plain `stop` reply without the mention is saved as a reply
+for the task's next step, like any other reply in that thread. A teammate's `@AgentX stop` gets a
+private "Only the person who started this task can stop it."; when nothing is running, the sender is
+told so privately. See
+[Replies in a Slack task's thread](project-configuration.md#replies-in-a-slack-tasks-thread).
 
 To release a thread workspace, mention Rovara in that thread with an explicit close request:
 

@@ -21,6 +21,8 @@ import {
   type DeveloperTaskView,
   type ShareDeveloperTaskRequest,
   type StartDeveloperTaskRequest,
+  type WorkflowDecisionRequest,
+  type WorkflowPublishRetryRequest,
 } from "@agentx/contracts";
 import { z } from "zod";
 import { CLOSE_BUSY_STEP, NEXT_STEPS, SHARE_BUSY_STEP, START_BUSY_STEP, ToolError, isMeaningfulCode, plainText, signInStep, toolErrorFromResponse } from "./errors.js";
@@ -43,8 +45,15 @@ export interface ControlPlaneClient {
   getTask(taskId: string, events: number, options?: CallOptions): Promise<DeveloperTaskView>;
   listTasks(query: { project?: string; status?: DeveloperTaskStatus; limit: number }): Promise<DeveloperTaskListItem[]>;
   continueTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
+  decideWorkflowTask(taskId: string, request: WorkflowDecisionRequest): Promise<DeveloperTaskView>;
+  startWorkflowReviewTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
+  retryWorkflowTask(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
+  /** Task 16: sends blocked work back to coding with the problems found; expectedRevision is required. */
+  sendWorkflowBack(taskId: string, request: ContinueDeveloperTaskRequest): Promise<DeveloperTaskView>;
+  /** Task 12/16: asks AgentX to open the workflow's draft pull request again. */
+  retryWorkflowPublish(taskId: string, request: WorkflowPublishRetryRequest): Promise<DeveloperTaskView>;
   cancelTask(taskId: string, requestId: string): Promise<DeveloperTaskView>;
-  closeTask(taskId: string, requestId: string): Promise<DeveloperCloseResponse>;
+  closeTask(taskId: string, requestId: string, discardUnpublished?: boolean): Promise<DeveloperCloseResponse>;
   openPullRequest(taskId: string, request: DeveloperPullRequestRequest): Promise<DeveloperPullRequestResponse>;
   /** Spec 025 FR-030: shares the task, or changes a shared task's mode (API 1.2). */
   shareTask(taskId: string, request: ShareDeveloperTaskRequest): Promise<DeveloperTaskView>;
@@ -213,8 +222,13 @@ export function httpControlPlaneClient(options: {
       return (await call(DeveloperTaskListResponseSchema, "GET", `/v1/dev/tasks?${search.toString()}`)).tasks;
     },
     continueTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/continue"), request)),
+    decideWorkflowTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/decision"), request)),
+    startWorkflowReviewTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/review"), request)),
+    retryWorkflowTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/retry"), request)),
+    sendWorkflowBack: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/send-back"), request)),
+    retryWorkflowPublish: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/workflow/publish-retry"), request)),
     cancelTask: async (taskId, requestId) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/cancel"), { requestId })),
-    closeTask: (taskId, requestId) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId }, true, { busyStep: CLOSE_BUSY_STEP }),
+    closeTask: (taskId, requestId, discardUnpublished = false) => call(DeveloperCloseResponseSchema, "POST", path(taskId, "/close"), { requestId, ...(discardUnpublished ? { discard_unpublished: true } : {}) }, true, { busyStep: CLOSE_BUSY_STEP }),
     openPullRequest: (taskId, request) => call(DeveloperPullRequestResponseSchema, "POST", path(taskId, "/pull-requests"), request),
     shareTask: async (taskId, request) => task(await call(DeveloperTaskResponseSchema, "POST", path(taskId, "/share"), request, true, { busyStep: SHARE_BUSY_STEP })),
   };

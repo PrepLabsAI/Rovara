@@ -20,6 +20,7 @@ import {
   aws_iam as iam,
   aws_kms as kms,
   aws_lambda as lambda,
+  aws_lambda_destinations as lambdaDestinations,
   aws_lambda_nodejs as lambdaNodejs,
   aws_logs as logs,
   aws_s3 as s3,
@@ -30,7 +31,7 @@ import {
   aws_sqs as sqs,
 } from "aws-cdk-lib";
 import type { Construct } from "constructs";
-import { HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, WORKER_SETTING_PARAMETERS, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
+import { HEALTH_ALARM_SUFFIXES, INDEX_EXPIRY_ATTRIBUTE, WORKER_SETTING_PARAMETERS, WORKFLOW_DISPATCH_DUE_INDEX, WORKSPACE_PROJECT_INDEX, WORKSPACE_SESSION_STATE_INDEX } from "@agentx/contracts";
 import { type AgentXNaming, legacyNaming } from "./naming.js";
 import { DeveloperSignIn, developerSignInParameters } from "./developer-signin.js";
 import { DeveloperTaskNotifier } from "./developer-task-notifier.js";
@@ -246,6 +247,13 @@ export class ControlPlaneStack extends Stack {
       indexName: WORKSPACE_PROJECT_INDEX.name,
       partitionKey: { name: WORKSPACE_PROJECT_INDEX.partitionKey, type: dynamodb.AttributeType.STRING },
       sortKey: { name: WORKSPACE_PROJECT_INDEX.sortKey, type: dynamodb.AttributeType.STRING },
+      projectionType: dynamodb.ProjectionType.ALL,
+    });
+    // Gap 6: sparse due-time index over workflow dispatch rows, so the recovery sweep reads due rows first.
+    state.addGlobalSecondaryIndex({
+      indexName: WORKFLOW_DISPATCH_DUE_INDEX.name,
+      partitionKey: { name: WORKFLOW_DISPATCH_DUE_INDEX.partitionKey, type: dynamodb.AttributeType.STRING },
+      sortKey: { name: WORKFLOW_DISPATCH_DUE_INDEX.sortKey, type: dynamodb.AttributeType.STRING },
       projectionType: dynamodb.ProjectionType.ALL,
     });
     // The dispatcher signs each invocation to an EC2 worker; workers verify with the public key
@@ -632,6 +640,27 @@ export class ControlPlaneStack extends Stack {
       target: `integrations/${integration.ref}`,
       authorizationType: "NONE",
     });
+    // Confused-deputy guard: only this account's own EventBridge schedules may assume the recovery role.
+    const schedulerPrincipal = new iam.ServicePrincipal("scheduler.amazonaws.com", { conditions: {
+      StringEquals: { "aws:SourceAccount": this.account },
+      ArnLike: { "aws:SourceArn": `arn:${this.partition}:scheduler:${this.region}:${this.account}:schedule/*` },
+    } });
+    // Gap 6: re-run any workflow dispatch (an automatic review start) left behind after its result committed.
+    const workflowDispatchRecoveryRole = new iam.Role(this, "WorkflowDispatchRecoveryRole", {
+      assumedBy: schedulerPrincipal,
+    });
+    broker.grantInvoke(workflowDispatchRecoveryRole);
+    new scheduler.CfnSchedule(this, "WorkflowDispatchRecoverySchedule", {
+      flexibleTimeWindow: { mode: "OFF" },
+      scheduleExpression: "rate(1 minute)",
+      state: "ENABLED",
+      target: {
+        arn: broker.functionArn,
+        roleArn: workflowDispatchRecoveryRole.roleArn,
+        input: JSON.stringify({ source: "agentx.workflow-dispatch-recovery" }),
+        retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 300 },
+      },
+    });
     const defaultStage = new apigwv2.CfnStage(this, "DefaultStage", {
       apiId: api.ref,
       stageName: "$default",
@@ -686,7 +715,7 @@ export class ControlPlaneStack extends Stack {
         naming, env: naming.env, api, stage: defaultStage, brokerIntegration: integration, broker, slackSecret, parameters: signInParameters, turnRecords,
       });
       // Spec 025 phase 25c: sharing, named environments only (D14).
-      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, state, slackSecret, notifyOperator });
+      const notifier = new DeveloperTaskNotifier(this, "DeveloperTaskNotifier", { naming, controlPlaneUrl: api.attrApiEndpoint, state, artifactBucket: artifacts, slackSecret, notifyOperator });
       // Spec 025 A13: the admin health route reads the environment's alarms, by name, and
       // the depths of its dead-letter queues. Read-only, and on exactly these resources.
       const alarmPrefix = naming.alarmName("");
@@ -715,6 +744,44 @@ export class ControlPlaneStack extends Stack {
         resources: [state.tableArn],
         conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["SHARED_TASK#*"] } },
       }));
+      // Slack plan buttons read only the task owner, share binding, and saved workflow policy by key.
+      slackIngress.addToRolePolicy(new iam.PolicyStatement({
+        actions: ["dynamodb:GetItem"],
+        resources: [state.tableArn],
+        conditions: {
+          "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVTASK#*"] },
+          "ForAllValues:StringEquals": { "dynamodb:Attributes": ["pk", "sk", "slackUserId", "share", "workflow"] },
+          StringEqualsIfExists: { "dynamodb:Select": "SPECIFIC_ATTRIBUTES" },
+          Null: { "dynamodb:Attributes": "false" },
+        },
+      }));
+      // Task 19 (gap 10h): a Quick or Full button takes the choice while Slack waits, then starts the task in an
+      // asynchronous invoke of this same Lambda. A policy of its own, so the function does not wait on it (no cycle).
+      new iam.Policy(this, "SlackIngressSelfInvoke", {
+        roles: [slackIngress.role!],
+        statements: [new iam.PolicyStatement({ actions: ["lambda:InvokeFunction"], resources: [slackIngress.functionArn] })],
+      });
+      // Task 19: an asynchronous invoke Lambda could not run (throttled past its retries, too old, or a crash) lands here,
+      // and the operator is told: a Slack press handed to the broker or this Lambda's own Quick or Full start, and also
+      // any other asynchronous broker invoke (a scheduled retry sweep). The handlers answer every expected refusal
+      // themselves, so anything here is a lost request.
+      const handOffFailures = new sqs.Queue(this, "SlackHandOffFailureQueue", {
+        encryption: sqs.QueueEncryption.SQS_MANAGED,
+        retentionPeriod: Duration.days(14),
+      });
+      broker.configureAsyncInvoke({ onFailure: new lambdaDestinations.SqsDestination(handOffFailures) });
+      slackIngress.configureAsyncInvoke({ onFailure: new lambdaDestinations.SqsDestination(handOffFailures) });
+      new cloudwatch.Alarm(this, "SlackHandOffFailuresAlarm", {
+        alarmName: naming.alarmName("SlackHandOffFailures"),
+        alarmDescription: "An AgentX background request (a Slack button press or a scheduled retry) was lost: Lambda could not run it, and it is in the Slack hand-off failure queue. Check the queue, and the broker and Slack ingress logs for its task or request ID.",
+        // Each lost request alarms on its own: the count sent in five minutes, not the queue's depth (which stays up until
+        // the queue is purged and would hide a later loss).
+        metric: handOffFailures.metricNumberOfMessagesSent({ statistic: "Sum", period: Duration.minutes(5) }),
+        threshold: 1,
+        evaluationPeriods: 1,
+        comparisonOperator: cloudwatch.ComparisonOperator.GREATER_THAN_OR_EQUAL_TO_THRESHOLD,
+        treatMissingData: cloudwatch.TreatMissingData.NOT_BREACHING,
+      }).addAlarmAction(notifyOperator);
       // Spec 025 E14 (C14): the interactivity route hands Slack Confirm and Cancel presses to the broker.
       slackIngress.addEnvironment("ADMIN_CHANGES", "enabled");
       // Spec 025 E14, FR-052: the interactivity route logs a press with its change's trace ID; it may

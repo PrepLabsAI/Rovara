@@ -73,12 +73,12 @@ async function registerRevision(handler: Handler, revision: number, integrations
   expect(registered.status).toBe(201);
 }
 
-function startClose(handler: Handler, thread: string, slackUser: string, requestId = randomUUID()) {
+function startClose(handler: Handler, thread: string, slackUser: string, requestId = randomUUID(), discardUnpublished = false) {
   return call(handler, {
     method: "POST",
     path: "/v1/service/threads/workspace/close",
     service: { principal: orchestratorPrincipal, thread, slackUser },
-    body: { requestId },
+    body: { requestId, ...(discardUnpublished ? { discard_unpublished: true } : {}) },
   });
 }
 
@@ -1172,6 +1172,36 @@ describe("Slack thread workspace closure", () => {
     expect((await completeClose(handler, threadOne, pratik, operationId)).status).toBe(409);
     expect(deleteEc2Session).not.toHaveBeenCalled();
     expect(db.get(`SLACK_LIMIT#${team}`, "ORGANIZATION")).toMatchObject({ count: 1 });
+  });
+
+  it("lets only the Slack thread starter explicitly discard unpublished work and close", async () => {
+    const { db, handler, deleteEc2Session } = createBroker();
+    await registerProjectAndBind(handler);
+    const created = await ensureWorkspace(handler, threadOne, pratik);
+    const workspaceId = created.body.workspaceId as string;
+    markReady(db, workspaceId);
+
+    const refused = await startClose(handler, threadOne, bob, randomUUID(), true);
+    expect(refused.body).toMatchObject({ outcome: "REFUSED", reason: "not_owner" });
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "READY" });
+
+    const started = await startClose(handler, threadOne, pratik, randomUUID(), true);
+    const operationId = started.body.operationId as string;
+    expect(db.get(`WORKSPACE#${workspaceId}`, `OPERATION#${operationId}`)).toMatchObject({ discardUnpublished: true, requestedBy: { userId: pratik } });
+    await finishClosePreflight(handler, db, workspaceId, operationId, {
+      safeToClose: false,
+      repositories: [{ name: "demo", reasons: ["worktree_changes", "untracked_files"] }],
+    });
+
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "CLOSING" });
+    expect((await completeClose(handler, threadOne, bob, operationId)).status).toBe(403);
+    const completed = await completeClose(handler, threadOne, pratik, operationId);
+    expect(completed.body).toMatchObject({ outcome: "CLOSED", discardedUnpublished: true });
+    expect(deleteEc2Session).toHaveBeenCalledExactlyOnceWith(workspaceId);
+    expect(db.get(`WORKSPACE#${workspaceId}`, "META")).toMatchObject({ status: "CLOSED" });
+    expect(db.get(`SLACK_LIMIT#${team}`, "ORGANIZATION")).toMatchObject({ count: 0 });
+    expect((await completeClose(handler, threadOne, pratik, operationId)).body).toMatchObject({ outcome: "CLOSED", discardedUnpublished: true });
+    expect((await startClose(handler, threadOne, pratik, randomUUID(), true)).body).toMatchObject({ outcome: "CLOSED", discardedUnpublished: true });
   });
 
   it("keeps a safe workspace closing when resource cleanup fails and succeeds on retry", async () => {

@@ -2,7 +2,7 @@
 // broker builds it (createDeveloperTaskActions) over the existing handlers, so the routes never
 // reach into broker.ts internals.
 import type { TransactWriteCommandInput } from "@aws-sdk/lib-dynamodb";
-import type { ChannelTurn, Operation, OperationRequest, PullRequestRequest, WorkspaceInstance } from "@agentx/contracts";
+import type { ChannelTurn, Operation, OperationRequest, ProjectCommand, PullRequestRequest, WorkflowReviewBase, WorkspaceInstance } from "@agentx/contracts";
 import type { AuthenticatedIdentity } from "../auth.js";
 import type { StoredEvent } from "../developer/task-records.js";
 import type { RegisteredProjectRecord } from "./broker.js";
@@ -43,10 +43,20 @@ export interface DeveloperTaskActions {
   /** The workspace's pull requests, across all pages. Unchecked: callers must load the owned task and check project access first. */
   pullRequests(workspaceId: string): Promise<StoredPullRequest[]>;
   /** `sharedTask`: the task is shared, so the worker's prompt gets the re-read line (25c note 1). */
-  acceptTask(identity: AuthenticatedIdentity, workspaceId: string, request: OperationRequest, extra: ExtraItems, options?: { sharedTask?: boolean }): Promise<{ operation: Operation; duplicate: boolean }>;
-  acceptPullRequest(identity: AuthenticatedIdentity, workspaceId: string, request: PullRequestRequest, extra: ExtraItems): Promise<{ operation: Operation; duplicate: boolean }>;
+  acceptTask(identity: AuthenticatedIdentity, workspaceId: string, request: OperationRequest, extra: ExtraItems, options?: { sharedTask?: boolean; workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS"; workflowPhase?: "REQUIREMENTS" | "DESIGN" | "IMPLEMENTATION_PLAN"; readiness?: ProjectCommand[]; workflowBase?: WorkflowReviewBase }): Promise<{ operation: Operation; duplicate: boolean }>;
+  /**
+   * `workflowCandidate`: the workflow's own draft publication of the tree its checks and reviews passed on, the only
+   * pull request a workflow task's workspace accepts. The worker refuses a workspace that no longer has that tree, and
+   * the broker checks the pushed commit's tree before opening the pull request.
+   */
+  acceptPullRequest(identity: AuthenticatedIdentity, workspaceId: string, request: PullRequestRequest, extra: ExtraItems, options?: { workflowCandidate?: { repositoryId: string; treeSha: string; candidateDigest: string; baseCommitSha?: string } }): Promise<{ operation: Operation; duplicate: boolean }>;
+  /**
+   * How many workflow publications of this repository's checked tree, for this candidate, ended without succeeding in
+   * the workspace. Unchecked: callers must load the owned task first.
+   */
+  failedPublications(workspaceId: string, candidate: { repositoryId: string; candidateDigest: string; treeSha: string }): Promise<number>;
   cancelRunning(identity: AuthenticatedIdentity, workspace: WorkspaceInstance, extra: ExtraItems): Promise<TaskCancellationResult>;
-  startClose(identity: AuthenticatedIdentity, workspace: WorkspaceInstance, requestId: string, extra: ExtraItems): Promise<{ operationId: string; duplicate: boolean }>;
+  startClose(identity: AuthenticatedIdentity, workspace: WorkspaceInstance, requestId: string, extra: ExtraItems, discardUnpublished?: boolean): Promise<{ operationId: string; duplicate: boolean }>;
   /** Deletes the workspace's compute; the existing per-mode switch lives behind it (FR-024). Unchecked: callers must load the owned task and check project access first. */
   deleteCompute(workspace: WorkspaceInstance): Promise<void>;
   /** Writes items in one transaction. Unchecked: callers must load the owned task and check project access first. */

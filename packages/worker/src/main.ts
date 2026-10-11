@@ -1,6 +1,6 @@
 import type { WorkerInvocation } from "@agentx/contracts";
 import { OperationJournal } from "./journal.js";
-import { prepareWorkspace } from "./prepare.js";
+import { prepareWorkspace, preparedBaseResult } from "./prepare.js";
 import { createWorkerCallbackSinks } from "./callback-client.js";
 import { createRepositoryCredentialProvider } from "./repository-credentials.js";
 import { runTaskInvocation } from "./run-task.js";
@@ -38,6 +38,7 @@ const state = createWorkerServerState(
           manifestPath: ".agentx/preparation-manifest.json",
           projectName: manifest.projectName,
           projectRevision: manifest.projectRevision,
+          ...preparedBaseResult(manifest),
         };
       }
       if (invocation.kind === "task") {

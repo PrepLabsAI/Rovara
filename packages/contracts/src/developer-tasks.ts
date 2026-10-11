@@ -6,6 +6,8 @@ import { cleanDisplayName } from "./display-name.js";
 import { OperationStatusSchema } from "./operation.js";
 import { DeveloperShareModeSchema } from "./project.js";
 import { sharedNoticeKey, slackThreadSubject, type SlackThread } from "./slack.js";
+import { WORKFLOW_PLAN_MAX_BYTES, WorkflowSnapshotViewSchema } from "./task-workflow.js";
+import { WorkflowPathSchema } from "./task-workflow.js";
 
 export const DEVELOPER_TASK_OWNER_ISSUER = "agentx-developer-task";
 export const DEVELOPER_INSTRUCTIONS_MAX_BYTES = 65_536;
@@ -126,6 +128,8 @@ export const SharedTaskRecordSchema = z.object({
   mode: DeveloperShareModeSchema,
   sharedAt: z.string().datetime(),
   closedAt: z.string().datetime().optional(),
+  /** Set only for a task started in Slack: its thread is where its owner drives it, not a view-only share. */
+  workflowThread: z.literal(true).optional(),
 });
 export type SharedTaskRecord = z.infer<typeof SharedTaskRecordSchema>;
 
@@ -169,15 +173,41 @@ export const StartDeveloperTaskRequestSchema = z
     shareToChannel: z.boolean().optional(),
     shareMode: DeveloperShareModeSchema.optional(),
     channel: z.string().min(1).max(80).optional(),
+    /** Opts this task into the native human-gated task-to-PR workflow. */
+    workflow: z.literal(true).optional(),
+    /** Selects the required approval sequence for a native workflow. */
+    workflowPath: WorkflowPathSchema.optional(),
   })
-  .strict();
+  .strict().superRefine((request, context) => {
+    if (request.workflowPath !== undefined && request.workflow !== true) context.addIssue({ code: "custom", path: ["workflowPath"], message: "workflowPath requires workflow: true" });
+    if (request.workflow === true && request.workflowPath === undefined) context.addIssue({ code: "custom", path: ["workflowPath"], message: "workflow requests require an explicit Quick or Full path" });
+  });
 export type StartDeveloperTaskRequest = z.infer<typeof StartDeveloperTaskRequestSchema>;
 
-export const ContinueDeveloperTaskRequestSchema = z.object({ requestId: RequestIdSchema, instructions: DeveloperInstructionsSchema }).strict();
+export const ContinueDeveloperTaskRequestSchema = z.object({
+  requestId: RequestIdSchema,
+  instructions: DeveloperInstructionsSchema,
+  /** Optional revision fence for a retry initiated from a staleable UI action. */
+  expectedRevision: z.number().int().positive().optional(),
+  /** Candidate fence for an independent-review retry. */
+  candidateDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+  /** Owner-selected, project-approved optional checks for a blocked verification retry. */
+  selectedOptionalCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(20).optional(),
+}).strict().superRefine((request, context) => {
+  if (request.selectedOptionalCheckIds !== undefined && new Set(request.selectedOptionalCheckIds).size !== request.selectedOptionalCheckIds.length) {
+    context.addIssue({ code: "custom", path: ["selectedOptionalCheckIds"], message: "selected optional checks must be unique" });
+  }
+});
 export type ContinueDeveloperTaskRequest = z.infer<typeof ContinueDeveloperTaskRequestSchema>;
 
 export const DeveloperTaskActionRequestSchema = z.object({ requestId: RequestIdSchema }).strict();
 export type DeveloperTaskActionRequest = z.infer<typeof DeveloperTaskActionRequestSchema>;
+export const DeveloperTaskCloseRequestSchema = z.object({ requestId: RequestIdSchema, discard_unpublished: z.boolean().optional() }).strict();
+export type DeveloperTaskCloseRequest = z.infer<typeof DeveloperTaskCloseRequestSchema>;
+
+/** The owner asks AgentX to open the task's draft pull request again, at the workflow revision they saw. */
+export const WorkflowPublishRetryRequestSchema = z.object({ requestId: RequestIdSchema, expectedRevision: z.number().int().positive() }).strict();
+export type WorkflowPublishRetryRequest = z.infer<typeof WorkflowPublishRetryRequestSchema>;
 
 export const DeveloperPullRequestRequestSchema = z
   .object({
@@ -213,6 +243,7 @@ export const DeveloperTaskViewSchema = z.object({
   title: z.string(),
   project: z.string(),
   status: DeveloperTaskStatusSchema,
+  workflow: WorkflowSnapshotViewSchema.extend({ planContent: z.string().max(WORKFLOW_PLAN_MAX_BYTES).optional() }).optional(),
   failure: DeveloperTaskFailureSchema.optional(),
   startingRevision: z.number().int().positive(),
   client: z.string(),
@@ -242,6 +273,7 @@ export const DeveloperTaskResponseSchema = z.object({ task: DeveloperTaskViewSch
 export const DeveloperCloseResponseSchema = z.object({
   task: DeveloperTaskViewSchema,
   closed: z.boolean(),
+  discardedUnpublished: z.boolean().optional(),
   unpublished: z.array(z.object({ repository: z.string(), reasons: z.array(z.string()) })).optional(),
   /** Present whenever `closed` is false: why the task is not closed yet, and what to do next. */
   message: z.string().optional(),

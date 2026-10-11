@@ -120,11 +120,13 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(authorizers.map((properties) => properties.Name)).toEqual(["agentx-jwt"]);
   });
 
-  it("routes /v1/dev/* with no authorizer to the broker, which verifies the token itself (D17), /v1/auth/* with no authorizer to DeveloperIdentity, and leaves ANY /{proxy+} alone", () => {
+  it("routes /v1/dev/* and /review/* to the broker without JWT, keeps /v1/auth/* on DeveloperIdentity, and leaves ANY /{proxy+} protected", () => {
     const routes = Object.fromEntries(ofType(named, "AWS::ApiGatewayV2::Route").map(([, resource]) => [resource.Properties.RouteKey as string, resource.Properties]));
     const authorizerId = (name: string) => ({ Ref: ofType(named, "AWS::ApiGatewayV2::Authorizer").find(([, r]) => r.Properties.Name === name)![0] });
     expect(routes["ANY /v1/dev/{proxy+}"]).toMatchObject({ AuthorizationType: "NONE", Target: routes["ANY /{proxy+}"]!.Target });
     expect(routes["ANY /v1/dev/{proxy+}"]!.AuthorizerId).toBeUndefined();
+    expect(routes["ANY /review/{proxy+}"]).toMatchObject({ AuthorizationType: "NONE", Target: routes["ANY /{proxy+}"]!.Target });
+    expect(routes["ANY /review/{proxy+}"]!.AuthorizerId).toBeUndefined();
     expect(routes["ANY /{proxy+}"]).toMatchObject({ AuthorizationType: "JWT", AuthorizerId: authorizerId("agentx-jwt") });
     const auth = routes["ANY /v1/auth/{proxy+}"]!;
     expect(auth.AuthorizationType).toBe("NONE");
@@ -195,19 +197,21 @@ describe("developer sign-in infrastructure (named environments)", () => {
     expect(tableStatements[0]!.Resource).toEqual({ "Fn::GetAtt": [tableId, "Arn"] });
   });
 
-  it("throttles the public /v1/auth/* and /v1/dev/* routes on the default stage (burst 50, 20 requests a second)", () => {
+  it("throttles the public /v1/auth/*, /v1/dev/*, and /review/* routes on the default stage (burst 50, 20 requests a second)", () => {
     const stages = ofType(named, "AWS::ApiGatewayV2::Stage");
     expect(stages).toHaveLength(1);
     const [, stage] = stages[0]!;
     expect(stage.Properties.RouteSettings).toEqual({
       "ANY /v1/auth/{proxy+}": { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 },
       "ANY /v1/dev/{proxy+}": { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 },
+      "ANY /review/{proxy+}": { ThrottlingBurstLimit: 50, ThrottlingRateLimit: 20 },
     });
     // A stage's route settings name routes that must already exist.
     const routeId = (key: string) => ofType(named, "AWS::ApiGatewayV2::Route").find(([, r]) => r.Properties.RouteKey === key)![0];
     const dependsOn = [(stage as Resource & { DependsOn?: string | string[] }).DependsOn].flat();
     expect(dependsOn).toContain(routeId("ANY /v1/auth/{proxy+}"));
     expect(dependsOn).toContain(routeId("ANY /v1/dev/{proxy+}"));
+    expect(dependsOn).toContain(routeId("ANY /review/{proxy+}"));
   });
 
   it("keeps sign-in records in a retained, point-in-time recoverable table with a TTL", () => {
@@ -325,6 +329,8 @@ describe("the developer task notifier (spec 025 phase 25c, named environments)",
       { dynamodb: { NewImage: { entityType: { S: ["OPERATION"] }, requestedBy: { M: { kind: { S: ["developer"] } } }, status: { S: ["SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"] } } } },
       // Spec 025 E13: a fourth filter on this same mapping, never a third reader.
       { dynamodb: { NewImage: { entityType: { S: ["ADMIN_CHANGE"] } } } },
+      // Task 19: a fifth, for refused Slack presses, on this same mapping.
+      { dynamodb: { NewImage: { entityType: { S: ["WORKFLOW_ACTION_REFUSAL"] } } } },
     ]);
     expect(notifierMapping.Properties).toMatchObject({ StartingPosition: "LATEST", MaximumRecordAgeInSeconds: 3600, MaximumRetryAttempts: 10, BisectBatchOnFunctionError: true });
     // A batch that still fails (the notice queue refusing sends, say) leaves a record of its shard and

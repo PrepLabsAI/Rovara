@@ -72,6 +72,11 @@ describe("the developer requester on operations (FR-022)", () => {
     expect(OperationSchema.parse({ ...operation, requestedBy }).requestedBy).toEqual(requestedBy);
   });
 
+  it("accepts discard authorization only on a close operation", () => {
+    expect(OperationSchema.parse({ ...operation, kind: "close", discardUnpublished: true }).discardUnpublished).toBe(true);
+    expect(OperationSchema.safeParse({ ...operation, discardUnpublished: true }).success).toBe(false);
+  });
+
   it("refuses a developer requester with a malformed ID or an extra field", () => {
     expect(OperationSchema.safeParse({ ...operation, requestedBy: { kind: "developer", developerId: "maya", provider: "slack" } }).success).toBe(false);
     expect(OperationSchema.safeParse({ ...operation, requestedBy: { kind: "developer", developerId: "d".repeat(64), provider: "slack", name: "Maya" } }).success).toBe(false);

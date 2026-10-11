@@ -139,6 +139,7 @@ export const SlackWorkspaceCloseStartResultSchema = z.discriminatedUnion("outcom
     outcome: z.literal("CLOSED"),
     workspaceId: z.string().uuid(),
     closedAt: z.string().datetime(),
+    discardedUnpublished: z.boolean().optional(),
   }).strict(),
   z.object({
     outcome: z.literal("PREFLIGHT"),
@@ -146,7 +147,7 @@ export const SlackWorkspaceCloseStartResultSchema = z.discriminatedUnion("outcom
     operationId: z.string().uuid(),
     status: z.enum(["ACCEPTED", "DISPATCHING", "RUNNING", "CANCEL_REQUESTED", "SUCCEEDED", "FAILED", "CANCELLED", "INTERRUPTED"]),
   }).strict(),
-  z.object({ outcome: z.literal("REFUSED"), reason: z.literal("shared_task") }).strict(),
+  z.object({ outcome: z.literal("REFUSED"), reason: z.enum(["shared_task", "not_owner"]) }).strict(),
 ]);
 
 export const SlackWorkspaceCloseCompleteResultSchema = z.object({
@@ -155,6 +156,7 @@ export const SlackWorkspaceCloseCompleteResultSchema = z.object({
   operationId: z.string().uuid(),
   closedAt: z.string().datetime(),
   storageReleased: z.boolean(),
+  discardedUnpublished: z.boolean().optional(),
 }).strict();
 
 export const SLACK_MESSAGE_CHUNK_LENGTH = 3_500;

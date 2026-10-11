@@ -89,8 +89,12 @@ async function forWorker(
 ): Promise<WorkerInvocation> {
   const requestedThinkingLevel = carriedThinkingLevel(invocation);
   const carriesReadiness = invocation.kind === "task" && invocation.payload.readiness !== undefined;
+  const carriesWorkflowMode = invocation.kind === "task" && invocation.payload.workflowMode !== undefined;
+  const carriesWorkflowBase = invocation.kind === "task" && invocation.payload.workflowBase !== undefined;
   const carriesReportChecks = invocation.kind === "publish" && invocation.payload.reportChecks !== undefined;
-  if (requestedThinkingLevel === undefined && !carriesReadiness && !carriesReportChecks) return invocation;
+  const carriesCandidateTree = invocation.kind === "publish" && invocation.payload.candidateTreeSha !== undefined;
+  const carriesPublishBase = invocation.kind === "publish" && invocation.payload.workflowBaseCommit !== undefined;
+  if (requestedThinkingLevel === undefined && !carriesReadiness && !carriesWorkflowMode && !carriesWorkflowBase && !carriesReportChecks && !carriesCandidateTree && !carriesPublishBase) return invocation;
   let features: readonly string[] = [];
   if (workerFeatures !== undefined) {
     try {
@@ -98,6 +102,27 @@ async function forWorker(
     } catch (error) {
       throw agentXError("RUNTIME_UNAVAILABLE", `could not ask the EC2 worker which invocation fields it parses: ${error instanceof Error ? error.message : String(error)}`.slice(0, 512));
     }
+  }
+  if (carriesWorkflowMode && !features.includes("task.workflowMode")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "AgentX workflow mode requires a compatible worker that advertises the read-only tool boundary");
+  }
+  if (invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW" && !features.includes("task.workflowReview")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "independent workflow review requires a compatible worker");
+  }
+  if (invocation.kind === "task" && invocation.payload.workflowMode === "CHECKS" && !features.includes("task.workflowChecks")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "verification retry requires a compatible worker that runs checks without code-editing tools");
+  }
+  // The pinned base decides what reviewers judge and whether a finding blocks, so it is never dropped.
+  if (carriesWorkflowBase && !features.includes("task.workflowBase")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "workflow reviews need a worker that receives the task's pinned base commit");
+  }
+  // The checked tree binds the publication to what passed checks and reviews, so it is never dropped either.
+  if (carriesCandidateTree && !features.includes("publish.candidateTree")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "publishing the checked code needs a worker that publishes exactly the checked tree");
+  }
+  // The pinned base is the published commit's parent, which the broker checks on GitHub, so it is never dropped either.
+  if (carriesPublishBase && !features.includes("publish.workflowBase")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "publishing the checked code needs a worker that builds it on the task's pinned base commit");
   }
   const reason = workerFeatures === undefined ? "no-probe" : "worker-lacks-feature";
   const leveled = withoutUnparsedFields(invocation, features);

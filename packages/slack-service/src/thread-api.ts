@@ -60,8 +60,8 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
     async prepareWorkspace(requestId) {
       return SlackThreadPrepareResultSchema.parse(await servicePost("/v1/threads/workspace/prepare", { requestId, includeOpenTaskCount: true, includeSharedTask: true }, "thread workspace preparation failed"));
     },
-    async startClose(requestId) {
-      return SlackWorkspaceCloseStartResultSchema.parse(await servicePost("/v1/threads/workspace/close", { requestId, includeSharedTask: true }, "workspace close request failed"));
+    async startClose(requestId, discardUnpublished = false) {
+      return SlackWorkspaceCloseStartResultSchema.parse(await servicePost("/v1/threads/workspace/close", { requestId, includeSharedTask: true, ...(discardUnpublished ? { discard_unpublished: true } : {}) }, "workspace close request failed"));
     },
     async completeClose(requestId, operationId) {
       return SlackWorkspaceCloseCompleteResultSchema.parse(

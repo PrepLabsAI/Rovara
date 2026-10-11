@@ -3,11 +3,14 @@ import { createHmac } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DynamoDBDocumentClient } from "@aws-sdk/lib-dynamodb";
+import { LambdaClient } from "@aws-sdk/client-lambda";
 import { SecretsManagerClient } from "@aws-sdk/client-secrets-manager";
 import { SQSClient } from "@aws-sdk/client-sqs";
 import {
   CONFIRMATION_TTL_MS,
   DETAILS_ACTION,
+  createWorkflowSnapshot,
+  submitWorkflowArtifact,
   TURN_DETAILS_ATTRIBUTES,
   TurnRecordSchema,
   queuedBehindAttributes,
@@ -482,6 +485,53 @@ describe("the Details handler on the ingress Lambda's AWS wiring", () => {
     expect(JSON.stringify(opened[0]!.body)).toContain(DETAILS_UNAVAILABLE);
     expect(lines).toContainEqual({ component: "slack-interactivity", event: "interaction.details_read_failed", errorName: "DetailsNotConfigured" });
     expect(lines.filter((line) => line.event === "interaction.details_not_configured")).toHaveLength(1);
+  });
+
+  it("hands a workflow approval to the broker asynchronously, and keeps the form open only when Lambda does not take it (Task 19)", async () => {
+    process.env.SLACK_THREADS_TABLE_NAME = "threads";
+    process.env.SLACK_REQUEST_QUEUE_URL = "https://sqs.us-east-1.amazonaws.com/123456789012/requests.fifo";
+    process.env.SLACK_SECRET_ARN = "arn:aws:secretsmanager:us-east-1:123456789012:secret:slack";
+    process.env.STATE_TABLE_NAME = "state";
+    process.env.BROKER_FUNCTION_NAME = "broker";
+    process.env.AWS_REGION = "us-east-1";
+    delete process.env.TURN_RECORDS_TABLE_NAME;
+
+    const now = new Date().toISOString();
+    const taskId = "44444444-4444-5444-8444-444444444444";
+    const digest = "a".repeat(64);
+    const workflow = submitWorkflowArtifact(createWorkflowSnapshot({
+      taskId, ownerId: "b".repeat(64), now,
+      checkPolicy: { required: [], optional: [{ id: "diff-check", label: "Patch whitespace", command: { cwd: "repo", executable: "git", args: ["diff", "--check"], timeoutSeconds: 30 } }], selectedOptionalIds: [] },
+    }), { expectedRevision: 1, now, artifact: {
+      id: "plan-1", type: "plan", version: 1, sha256: digest, producer: "agentx-plan", objectKey: "private/plan", createdAt: now,
+    } });
+    const logs: Array<Record<string, unknown>> = [];
+    vi.spyOn(console, "log").mockImplementation((line: unknown) => { logs.push(JSON.parse(String(line)) as Record<string, unknown>); });
+    vi.spyOn(SecretsManagerClient.prototype, "send").mockImplementation((async () => ({ SecretString: JSON.stringify({ signingSecret, botToken: "xoxb-test" }) })) as never);
+    vi.spyOn(DynamoDBDocumentClient.prototype, "send").mockImplementation((async () => ({ Item: { taskId, slackUserId: requester, share: thread, workflow } })) as never);
+    const invocations: Array<Record<string, unknown>> = [];
+    // Lambda queues the event (202) without waiting for the broker; the second time it refuses the invoke.
+    let accepted = true;
+    vi.spyOn(LambdaClient.prototype, "send").mockImplementation((async (command: { input: Record<string, unknown> }) => {
+      invocations.push(command.input);
+      return { StatusCode: accepted ? 202 : 429 };
+    }) as never);
+
+    const handler = createAwsSlackInteractivityHandler();
+    const view = {
+      callback_id: "agentx_workflow_review_submission",
+      private_metadata: JSON.stringify({ taskId, revision: workflow.revision, digest, decision: "APPROVE", thread }),
+      state: { values: { workflow_checks: { selected_options: { selected_options: [{ value: "diff-check" }] } } } },
+    };
+    const submit = () => handler(signed({ type: "view_submission", team: { id: thread.teamId }, user: { id: requester, team_id: thread.teamId }, view }, Date.now()));
+
+    expect(JSON.parse((await submit()).body)).toEqual({ response_action: "clear" });
+    expect(invocations).toHaveLength(1);
+    expect(invocations[0]).toMatchObject({ InvocationType: "Event", FunctionName: "broker" });
+    expect(JSON.parse(Buffer.from(invocations[0]!.Payload as Uint8Array).toString("utf8"))).toMatchObject({ action: "workflow-decision", selectedOptionalCheckIds: ["diff-check"] });
+    accepted = false;
+    expect(JSON.parse((await submit()).body)).toMatchObject({ response_action: "errors" });
+    expect(logs).toContainEqual(expect.objectContaining({ event: "workflow.submission_failed" }));
   });
 
   it("queues Approve and Cancel with the queuedBehind attribute the message ingress sends, so a click with nothing ahead gets no extra notice", async () => {

@@ -38,6 +38,7 @@ export interface OperationRecord extends Operation {
   targetOperationId?: string;
   /** The project revision whose non-disk settings applied, which may be newer than the workspace's. */
   settingsRevision?: number;
+  workflowMode?: "PLAN" | "IMPLEMENT" | "REVIEW" | "CHECKS" | undefined;
   publication?: {
     repository: string;
     repositoryUrl: string;
@@ -47,6 +48,15 @@ export interface OperationRecord extends Operation {
     body?: string;
     /** Spec 025 FR-023: a developer's pull request opens as a draft unless they ask otherwise. */
     draft?: boolean;
+    /**
+     * A workflow publication: the tree the task's checks and reviews passed on. The broker opens the pull request only
+     * when GitHub says the pushed commit has this tree, and always as a draft.
+     */
+    expectedTreeSha?: string;
+    /** The checked candidate the tree belongs to (a workflow publication only). */
+    candidateDigest?: string;
+    /** The base commit the broker pinned for the task: the pushed commit's only parent (a workflow publication only). */
+    expectedBaseCommit?: string;
     mode?: "create" | "replace" | "revert";
     targetPullRequestNumber?: number;
     revertCommit?: string;
@@ -114,6 +124,8 @@ export function publicOperation(record: OperationRecord): Operation {
     id: record.id,
     workspaceId: record.workspaceId,
     kind: record.kind,
+    ...(record.discardUnpublished === true ? { discardUnpublished: true } : {}),
+    ...(record.workflowMode === undefined ? {} : { workflowMode: record.workflowMode }),
     requestId: record.requestId,
     payloadHash: record.payloadHash,
     status: record.status,

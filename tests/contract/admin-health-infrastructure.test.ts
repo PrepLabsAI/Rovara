@@ -110,25 +110,40 @@ describe("the health route's grants (A13)", () => {
     expect(found.filter((file) => !allowed.has(file))).toEqual([]);
   });
 
-  it("sets the TTL attribute in broker.ts on the channel-operation marker alone, and in the notifier on NOTICE items alone (25c note 2)", () => {
+  it("sets the TTL attribute in broker.ts on the channel-operation marker, workflow dispatch rows and Slack refusal notes alone, and in the notifier on NOTICE items alone (25c note 2, gap 6, Task 19)", () => {
     const broker = readFileSync("packages/broker/src/aws/broker.ts", "utf8");
     const brokerUses = broker.split("\n").filter((line) => /indexExpiresAt\(|INDEX_EXPIRY_ATTRIBUTE\]/.test(line));
-    expect(brokerUses).toEqual(["      [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(operation.createdAt),"]);
+    expect(brokerUses).toEqual([
+      "        slackUserId: user.data, channelId: thread.data.channelId, threadTs: thread.data.threadTs, message, at, [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(at) },",
+      "      [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(operation.createdAt),",
+      "    [INDEX_EXPIRY_ATTRIBUTE]: Math.floor(Date.parse(now) / 1000) + WORKFLOW_DISPATCH_RETENTION_SECONDS,",
+    ]);
+    // Task 19: a refused Slack press's private note, delivered within the hour and then dead weight.
+    const refusal = broker.slice(broker.indexOf("async function recordSlackWorkflowRefusal("), broker.indexOf("async function answerSlackWorkflowEvent("));
+    expect(refusal).toContain('entityType: "WORKFLOW_ACTION_REFUSAL"');
+    expect(refusal).toContain(brokerUses.shift());
     const channelOperation = broker.slice(broker.indexOf("function channelOperation("), broker.indexOf("function requesterOf("));
     expect(channelOperation).toContain('entityType: "CHANNEL_OPERATION"');
     expect(channelOperation).toContain(brokerUses[0]);
+    // Gap 6: a backstop for a workflow dispatch row that is somehow never resolved (the sweep gives up long before).
+    const dispatchItem = broker.slice(broker.indexOf("function workflowDispatchItem("), broker.indexOf("async function recordWorkflowDispatchFailure("));
+    expect(dispatchItem).toContain('entityType: "WORKFLOW_DISPATCH"');
+    expect(dispatchItem).toContain(brokerUses[1]);
     const notifier = readFileSync("packages/broker/src/aws/developer-task-notifier.ts", "utf8");
     const writes = notifier.split("\n").filter((line) => line.includes("noticeExpiry(deps)"));
     expect(writes.length).toBeGreaterThanOrEqual(4);
     for (const line of writes) expect(line).toMatch(/entityType: "NOTICE"|":expires": noticeExpiry/);
     // Nothing else in the notifier names the attribute: no other item there can carry it.
     const named = notifier.split("\n").filter((line) => /indexExpiresAt|INDEX_EXPIRY_ATTRIBUTE/.test(line)).map((line) => line.trim());
-    expect(named).toHaveLength(4);
+    expect(named).toHaveLength(6);
     expect(named[0]).toMatch(/^import \{ INDEX_EXPIRY_ATTRIBUTE, .*indexExpiresAt, .*\} from "@agentx\/contracts";$/);
     expect(named.slice(1)).toEqual([
       "const noticeExpiry = (deps: NotifierDependencies) => ({ [INDEX_EXPIRY_ATTRIBUTE]: indexExpiresAt(new Date(deps.now()).toISOString()) });",
       'ExpressionAttributeNames: { "#expires": INDEX_EXPIRY_ATTRIBUTE },',
       'ExpressionAttributeValues: { ":notice": "NOTICE", ":until": until, ":now": deps.now(), ":expires": noticeExpiry(deps)[INDEX_EXPIRY_ATTRIBUTE] },',
+      // Task 17: the claim on a message's words (a NOTICE item too) expires the same way.
+      'ExpressionAttributeNames: { "#expires": INDEX_EXPIRY_ATTRIBUTE },',
+      '":expires": noticeExpiry(deps)[INDEX_EXPIRY_ATTRIBUTE] },',
     ]);
   });
 

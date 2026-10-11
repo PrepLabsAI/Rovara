@@ -1,10 +1,13 @@
 import { execFile } from "node:child_process";
-import { readFile, realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { mkdtemp, readFile, realpath, rm, stat } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { promisify } from "node:util";
 import {
   PullRequestResultSchema,
   PullRequestLifecycleResultSchema,
+  AgentXError,
+  WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE,
   agentXError,
   type CheckEntry,
   type PublicationCheckResult,
@@ -12,8 +15,10 @@ import {
   type PullRequestLifecycleResult,
   type WorkerInvocation,
 } from "@agentx/contracts";
-import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME, gitSafeEnvironment } from "./git.js";
-import { assertCredentialFreeRemote, runGitWithCredential } from "./git-auth.js";
+import { AGENTX_GIT_EMAIL, AGENTX_GIT_NAME, assertNoEmbeddedRepositories, assertNoLfsFiles, gitHardenedEnvironment } from "./git.js";
+import { assertCredentialFreeRemote, pushCommitFromIsolatedRepository, runGitWithCredential } from "./git-auth.js";
+import { stopWorkspaceProcesses } from "./workspace-processes.js";
+import { sweepWorkspaceContainers } from "./workspace-containers.js";
 import type { PullRequestSink } from "./callback-client.js";
 import { runCodeBuildGates, type CodeBuildSink } from "./codebuild.js";
 import type { RepositoryCredentialProvider } from "./repository-credentials.js";
@@ -42,6 +47,35 @@ export interface PublishWorkspaceOptions {
   codeBuildSink?: CodeBuildSink;
   /** The `devcontainer` CLI, as a seam for tests. */
   devcontainerCli?: DevcontainerCli;
+  /**
+   * Stops every process left running from the workspace before the push credential is fetched, failing when it cannot
+   * (see workspace-processes.ts for what it covers). A seam for tests; the default stops them for real.
+   */
+  stopWorkspaceProcesses?: (rootPath: string) => Promise<{ stopped: number } | void>;
+  /**
+   * Removes every container but the worker's own before the push credential is fetched, failing when it cannot (see
+   * workspace-containers.ts). A seam for tests; the default removes them for real in the worker container.
+   */
+  sweepWorkspaceContainers?: (rootPath: string) => Promise<{ removed: number }>;
+}
+
+const CONTAINMENT_ROUNDS = 4;
+
+/**
+ * Removes the containers, then stops the processes, until one round finds neither and a last check finds no container
+ * either, since either can start the other. Fails closed when they keep coming back. Runs before every credential
+ * request of a publication.
+ */
+async function containWorkspace(
+  rootPath: string,
+  steps: { sweep: (rootPath: string) => Promise<{ removed: number }>; stop: (rootPath: string) => Promise<{ stopped: number } | void> },
+): Promise<void> {
+  for (let round = 0; round < CONTAINMENT_ROUNDS; round += 1) {
+    const { removed } = await steps.sweep(rootPath);
+    const stopped = (await steps.stop(rootPath))?.stopped ?? 0;
+    if (removed === 0 && stopped === 0 && (await steps.sweep(rootPath)).removed === 0) return;
+  }
+  throw agentXError("RUNTIME_UNAVAILABLE", "AgentX kept finding programs or containers started from the workspace, so it did not push");
 }
 
 export async function publishWorkspace(
@@ -64,81 +98,127 @@ export async function publishWorkspace(
   if (!metadata?.isDirectory()) throw agentXError("WORKSPACE_NOT_READY", "prepared repository checkout is missing");
   const canonicalRepositoryPath = await realpath(repositoryPath);
   assertContained(rootPath, canonicalRepositoryPath);
+  // Every Git call below, up to the readiness checks, shares one hardened environment. The checks run
+  // project code, so the push after them computes its own.
+  const git = await repositoryGit(repositoryPath);
 
-  const remoteUrl = (await git(repositoryPath, ["remote", "get-url", "origin"])).trim();
+  const remoteUrl = (await git(["remote", "get-url", "origin"])).trim();
   assertCredentialFreeRemote(remoteUrl);
   if (remoteUrl !== repository.url) {
     throw agentXError("CONFIG_INVALID", "repository remote does not match the registered project");
   }
-  const conflicts = await git(repositoryPath, ["diff", "--name-only", "--diff-filter=U"]);
+  const conflicts = await git(["diff", "--name-only", "--diff-filter=U", "--ignore-submodules=dirty"]);
   if (conflicts.trim()) throw agentXError("CONFIG_INVALID", "repository has unresolved merge conflicts");
 
-  const currentBranch = await git(repositoryPath, ["branch", "--show-current"]);
-  const currentCommit = (await git(repositoryPath, ["rev-parse", "HEAD"])).trim();
-  const status = await git(repositoryPath, ["status", "--porcelain=v1", "--untracked-files=all"]);
+  const currentBranch = await git(["branch", "--show-current"]);
+  const currentCommit = (await git(["rev-parse", "HEAD"])).trim();
+  const status = await git(["status", "--porcelain=v1", "--untracked-files=all", "--ignore-submodules=dirty"]);
   const retryingCommittedPublication =
     currentBranch.trim() === invocation.payload.headBranch && status.trim().length === 0;
   const hasCommittedChanges = currentCommit !== manifestRepository.resolvedCommit;
-  if (mode !== "revert" && !retryingCommittedPublication && status.trim().length === 0 && !hasCommittedChanges) {
+  const candidateTreeSha = invocation.payload.candidateTreeSha;
+  if (candidateTreeSha === undefined && mode !== "revert" && !retryingCommittedPublication && status.trim().length === 0 && !hasCommittedChanges) {
     throw agentXError("CONFIG_INVALID", "repository has no changes to publish");
   }
 
-  const credential = await options.credentialProvider(repository);
+  // Every credential this publication asks for (it can push) is fetched only once no process or container the task
+  // started is left: each such process runs as this worker's user, so it could read the token or rewrite what Git
+  // reads; a container is out of the worker's process view (workspace-containers.ts). Nothing is fetched or pushed when
+  // they cannot all be stopped. A fetch of the latest base, for an ordinary publication or a revert, takes its own
+  // credential before the readiness checks run, so it is preceded by its own stop too.
+  const fetchCredential = async () => {
+    await containWorkspace(rootPath, {
+      sweep: options.sweepWorkspaceContainers ?? ((root: string) => sweepWorkspaceContainers({ rootPath: root })),
+      stop: options.stopWorkspaceProcesses ?? ((root: string) => stopWorkspaceProcesses({ rootPath: root })),
+    });
+    return options.credentialProvider(repository);
+  };
   let commit: string;
-  if (retryingCommittedPublication) {
-    commit = (await git(repositoryPath, ["rev-parse", "HEAD"])).trim();
+  if (candidateTreeSha !== undefined) {
+    // A workflow publication: exactly the tree that passed its checks and reviews, on the task's own base: the base the
+    // broker pinned for the task when it sends one (never the agent-writable manifest's), else the commit preparation
+    // checked out. It is not replayed onto the latest base; GitHub shows any conflict on the pull request.
+    const pinnedBase = invocation.payload.workflowBaseCommit;
+    if (pinnedBase !== undefined) {
+      await git(["cat-file", "-e", `${pinnedBase}^{commit}`]).catch(() => {
+        throw agentXError("WORKSPACE_NOT_READY", "the task's base commit is missing from the workspace");
+      });
+    }
+    commit = await prepareCandidatePublicationCommit({
+      git,
+      preparationCommit: pinnedBase ?? manifestRepository.resolvedCommit,
+      headBranch: invocation.payload.headBranch,
+      title: invocation.payload.title,
+      candidateTreeSha,
+      retrying: retryingCommittedPublication,
+    });
+  } else if (retryingCommittedPublication) {
+    commit = (await git(["rev-parse", "HEAD"])).trim();
   } else if (mode === "revert") {
     if (!invocation.payload.revertCommit) {
       throw agentXError("CONFIG_INVALID", "revert publication is missing the merged commit");
     }
     commit = await prepareRevertCommit({
-      repositoryPath,
+      git,
+      remoteUrl: repository.url,
       baseBranch: repository.defaultBranch,
       headBranch: invocation.payload.headBranch,
       revertCommit: invocation.payload.revertCommit,
-      credential,
+      credential: await fetchCredential(),
     });
   } else {
     commit = await prepareCleanPublicationCommit({
-      repositoryPath,
+      git,
+      remoteUrl: repository.url,
       baseBranch: repository.defaultBranch,
       preparationCommit: manifestRepository.resolvedCommit,
       headBranch: invocation.payload.headBranch,
       title: invocation.payload.title,
-      credential,
+      credential: await fetchCredential(),
     });
   }
 
-  const checks: PublicationCheckResult[] = await runReadinessChecks(rootPath, invocation, manifest, {
-    ...(options.devcontainerCli !== undefined ? { devcontainerCli: options.devcontainerCli } : {}),
-  });
-  // Spec 051 P-2 (D-7, Ruling S): a broker that asks for the checks opens a draft pull request when one fails, so a failing
-  // check no longer refuses the publication. A broker built before it would open a normal one, so it still refuses.
-  const reportChecks = invocation.payload.reportChecks === true;
-  if (!reportChecks && checks.some((check) => check.outcome !== "passed")) {
-    throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
+  // A workflow publication runs no project command here: its checks already ran, on this same tree, before its reviews,
+  // and the tree is checked again above. Only an ordinary publication runs the project's readiness checks.
+  let checks: PublicationCheckResult[] = [];
+  let checkEntries: CheckEntry[] | undefined;
+  if (candidateTreeSha === undefined) {
+    checks = await runReadinessChecks(rootPath, invocation, manifest, {
+      ...(options.devcontainerCli !== undefined ? { devcontainerCli: options.devcontainerCli } : {}),
+    });
+    // Spec 051 P-2 (D-7, Ruling S): a broker that asks for the checks opens a draft pull request when one fails, so a
+    // failing check no longer refuses the publication. A broker built before it would open a normal one, so it still refuses.
+    const reportChecks = invocation.payload.reportChecks === true;
+    if (!reportChecks && checks.some((check) => check.outcome !== "passed")) {
+      throw agentXError("CONFIG_INVALID", "one or more registered readiness checks failed");
+    }
+    checkEntries = reportChecks ? judgedChecks(invocation, manifest, checks) : undefined;
   }
-  const checkEntries = reportChecks ? judgedChecks(invocation, manifest, checks) : undefined;
+  // The object store the push borrows, read before anything is stopped; the push reads nothing else from the workspace.
+  const objectsDirectory = (await git(["rev-parse", "--path-format=absolute", "--git-path", "objects"])).trim();
 
+  // Again after the readiness checks, which ran project code.
+  const credential = await fetchCredential();
   try {
-    await runGitWithCredential({
-      directory: repositoryPath,
-      args: [
-        "-C",
-        repositoryPath,
-        "push",
-        "--porcelain",
-        "origin",
-        `HEAD:refs/heads/${invocation.payload.headBranch}`,
-      ],
+    // The commit built above, by its ID (project code may have moved HEAD since), to the registered URL (never the
+    // remote's name), from a repository AgentX made for the push: the command that holds the token never reads the
+    // workspace's config, hooks or attributes.
+    await pushCommitFromIsolatedRepository({
+      objectsDirectory,
+      url: repository.url,
+      commit,
+      branch: invocation.payload.headBranch,
       credential,
       timeout: 300_000,
       maxBuffer: MAX_GIT_OUTPUT,
     });
   } catch (error) {
+    if (error instanceof AgentXError) throw error;
     const message = error instanceof Error ? error.message : "Git push failed";
     throw agentXError("RUNTIME_UNAVAILABLE", sanitizeGitError(message));
   }
+  // A push to a URL updates no remote-tracking branch; record it as a push to origin would have.
+  await (await repositoryGit(repositoryPath))(["update-ref", `refs/remotes/origin/${invocation.payload.headBranch}`, commit]);
 
   const codeBuildChecks = await runCodeBuildGates({
     repository: repository.name,
@@ -195,18 +275,18 @@ function judgedChecks(
   return publicationCheckEntries(plan, results);
 }
 
-async function prepareRevertCommit(input: {
-  repositoryPath: string;
+/** Fetches the base branch from the registered URL (never the remote's name) into origin's tracking branch. */
+async function fetchBase(input: {
+  git: RepositoryGit;
+  remoteUrl: string;
   baseBranch: string;
-  headBranch: string;
-  revertCommit: string;
   credential: Awaited<ReturnType<RepositoryCredentialProvider>>;
-}): Promise<string> {
+}): Promise<void> {
   try {
     await runGitWithCredential({
-      directory: input.repositoryPath,
+      directory: input.git.directory,
       args: [
-        "-C", input.repositoryPath, "fetch", "--no-tags", "origin",
+        "-C", input.git.directory, "fetch", "--no-tags", input.remoteUrl,
         `refs/heads/${input.baseBranch}:refs/remotes/origin/${input.baseBranch}`,
       ],
       credential: input.credential,
@@ -214,42 +294,122 @@ async function prepareRevertCommit(input: {
       maxBuffer: MAX_GIT_OUTPUT,
     });
   } catch (error) {
+    // A refusal of the repository's own config is the project's to fix, not a runtime failure.
+    if (error instanceof AgentXError) throw error;
     throw agentXError("RUNTIME_UNAVAILABLE", sanitizeGitError(error instanceof Error ? error.message : "Git fetch failed"));
   }
-  const baseCommit = (await git(input.repositoryPath, ["rev-parse", `refs/remotes/origin/${input.baseBranch}^{commit}`])).trim();
-  if (!(await isAncestor(input.repositoryPath, input.revertCommit, baseCommit))) {
+}
+
+async function prepareRevertCommit(input: {
+  git: RepositoryGit;
+  remoteUrl: string;
+  baseBranch: string;
+  headBranch: string;
+  revertCommit: string;
+  credential: Awaited<ReturnType<RepositoryCredentialProvider>>;
+}): Promise<string> {
+  await fetchBase(input);
+  const baseCommit = (await input.git(["rev-parse", `refs/remotes/origin/${input.baseBranch}^{commit}`])).trim();
+  if (!(await isAncestor(input.git, input.revertCommit, baseCommit))) {
     throw agentXError("STALE_FENCE", "merged pull request commit is not reachable from the latest base");
   }
-  await git(input.repositoryPath, ["checkout", "--force", "-B", input.headBranch, baseCommit]);
-  const parents = (await git(input.repositoryPath, ["rev-list", "--parents", "-n", "1", input.revertCommit]))
+  await input.git(["checkout", "--force", "-B", input.headBranch, baseCommit]);
+  const parents = (await input.git(["rev-list", "--parents", "-n", "1", input.revertCommit]))
     .trim().split(/\s+/u);
   if (parents.length < 2) throw agentXError("CONFIG_INVALID", "cannot revert a root commit");
   try {
-    await git(input.repositoryPath, [
+    await input.git([
       "-c", `user.name=${AGENTX_GIT_NAME}`, "-c", `user.email=${AGENTX_GIT_EMAIL}`,
       "revert", "--no-edit", ...(parents.length > 2 ? ["-m", "1"] : []), input.revertCommit,
     ]);
   } catch {
-    await git(input.repositoryPath, ["revert", "--abort"]).catch(() => undefined);
-    await git(input.repositoryPath, ["reset", "--hard", baseCommit]);
+    await input.git(["revert", "--abort"]).catch(() => undefined);
+    await input.git(["reset", "--hard", baseCommit]);
     throw agentXError("CONFIG_INVALID", "merged pull request cannot be reverted cleanly");
   }
-  const commit = (await git(input.repositoryPath, ["rev-parse", "HEAD"])).trim();
+  const commit = (await input.git(["rev-parse", "HEAD"])).trim();
   if (commit === baseCommit) throw agentXError("CONFIG_INVALID", "revert produced no change");
   return commit;
 }
 
+/**
+ * The commit for a workflow publication: the workspace's tree, which must be the tree its checks and reviews passed on,
+ * with the commit preparation checked out as its only parent. The tree is computed in a temporary index, as the
+ * candidate's was, so the real index is untouched. A retry of the same publication reuses the commit it already made.
+ */
+async function prepareCandidatePublicationCommit(input: {
+  git: RepositoryGit;
+  preparationCommit: string;
+  headBranch: string;
+  title: string;
+  candidateTreeSha: string;
+  retrying: boolean;
+}): Promise<string> {
+  try {
+    await assertNoEmbeddedRepositories(input.git.directory, input.git.env);
+    await assertNoLfsFiles(input.git.directory, input.git.env);
+  } catch (error) {
+    if (error instanceof AgentXError) throw error;
+    throw agentXError("CONFIG_INVALID", "Git could not read the repository's files");
+  }
+  const workspaceTree = await temporaryIndexTree(input.git);
+  if (workspaceTree !== input.candidateTreeSha) throw agentXError("CONFIG_INVALID", WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE);
+  if (input.retrying) {
+    const head = (await input.git(["rev-parse", "HEAD"])).trim();
+    const headTree = (await input.git(["rev-parse", "HEAD^{tree}"])).trim();
+    const parent = (await input.git(["rev-parse", "HEAD^"]).catch(() => "")).trim();
+    if (headTree === input.candidateTreeSha && parent === input.preparationCommit) return head;
+  }
+  const preparedTree = (await input.git(["rev-parse", `${input.preparationCommit}^{tree}`])).trim();
+  if (workspaceTree === preparedTree) throw agentXError("CONFIG_INVALID", "repository has no changes to publish");
+  const commit = (await input.git([
+    "-c", `user.name=${AGENTX_GIT_NAME}`, "-c", `user.email=${AGENTX_GIT_EMAIL}`,
+    "commit-tree", workspaceTree, "-p", input.preparationCommit, "-m", `AgentX: ${input.title}`,
+  ])).trim();
+  await input.git(["checkout", "--force", "-B", input.headBranch, commit]);
+  return commit;
+}
+
+/** The tree of HEAD plus every tracked and untracked change, staged in a throwaway index under the same hardened Git. */
+async function temporaryIndexTree(git: RepositoryGit): Promise<string> {
+  const temporary = await mkdtemp(join(tmpdir(), "agentx-publish-index-"));
+  const env = { ...git.env, GIT_INDEX_FILE: join(temporary, "index") };
+  const run = async (args: readonly string[]): Promise<string> => {
+    try {
+      return (await execFileAsync("git", ["-C", git.directory, ...args], { timeout: 120_000, maxBuffer: MAX_GIT_OUTPUT, encoding: "utf8", env })).stdout;
+    } catch (error) {
+      const processError = error as Error & { stderr?: string };
+      throw agentXError("CONFIG_INVALID", sanitizeGitError(processError.stderr ?? processError.message));
+    }
+  };
+  try {
+    await run(["read-tree", "HEAD"]);
+    await run(["add", "--all", "--", "."]);
+    return (await run(["write-tree"])).trim();
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
 async function prepareCleanPublicationCommit(input: {
-  repositoryPath: string;
+  git: RepositoryGit;
+  remoteUrl: string;
   baseBranch: string;
   preparationCommit: string;
   headBranch: string;
   title: string;
   credential: Awaited<ReturnType<RepositoryCredentialProvider>>;
 }): Promise<string> {
-  await git(input.repositoryPath, ["add", "--all"]);
-  const workspaceTree = (await git(input.repositoryPath, ["write-tree"])).trim();
-  const workspaceCommit = (await git(input.repositoryPath, [
+  try {
+    await assertNoEmbeddedRepositories(input.git.directory, input.git.env);
+    await assertNoLfsFiles(input.git.directory, input.git.env);
+  } catch (error) {
+    if (error instanceof AgentXError) throw error;
+    throw agentXError("CONFIG_INVALID", "Git could not read the repository's files");
+  }
+  await input.git(["add", "--all"]);
+  const workspaceTree = (await input.git(["write-tree"])).trim();
+  const workspaceCommit = (await input.git([
     "-c",
     `user.name=${AGENTX_GIT_NAME}`,
     "-c",
@@ -262,37 +422,19 @@ async function prepareCleanPublicationCommit(input: {
     "AgentX workspace snapshot",
   ])).trim();
 
-  try {
-    await runGitWithCredential({
-      directory: input.repositoryPath,
-      args: [
-        "-C",
-        input.repositoryPath,
-        "fetch",
-        "--no-tags",
-        "origin",
-        `refs/heads/${input.baseBranch}:refs/remotes/origin/${input.baseBranch}`,
-      ],
-      credential: input.credential,
-      timeout: 300_000,
-      maxBuffer: MAX_GIT_OUTPUT,
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "Git fetch failed";
-    throw agentXError("RUNTIME_UNAVAILABLE", sanitizeGitError(message));
-  }
+  await fetchBase(input);
 
-  const baseCommit = (await git(input.repositoryPath, [
+  const baseCommit = (await input.git([
     "rev-parse",
     `refs/remotes/origin/${input.baseBranch}^{commit}`,
   ])).trim();
-  const mergedTree = await mergeWorkspaceTree(input.repositoryPath, baseCommit, workspaceCommit);
-  const baseTree = (await git(input.repositoryPath, ["rev-parse", `${baseCommit}^{tree}`])).trim();
+  const mergedTree = await mergeWorkspaceTree(input.git, baseCommit, workspaceCommit);
+  const baseTree = (await input.git(["rev-parse", `${baseCommit}^{tree}`])).trim();
   if (mergedTree === baseTree) {
     throw agentXError("CONFIG_INVALID", "repository has no changes to publish against the latest base");
   }
 
-  const commit = (await git(input.repositoryPath, [
+  const commit = (await input.git([
     "-c",
     `user.name=${AGENTX_GIT_NAME}`,
     "-c",
@@ -304,24 +446,24 @@ async function prepareCleanPublicationCommit(input: {
     "-m",
     `AgentX: ${input.title}`,
   ])).trim();
-  await git(input.repositoryPath, ["checkout", "--force", "-B", input.headBranch, commit]);
+  await input.git(["checkout", "--force", "-B", input.headBranch, commit]);
   return commit;
 }
 
 async function mergeWorkspaceTree(
-  repositoryPath: string,
+  git: RepositoryGit,
   baseCommit: string,
   workspaceCommit: string,
 ): Promise<string> {
   try {
     const result = await execFileAsync(
       "git",
-      ["-C", repositoryPath, "merge-tree", "--write-tree", baseCommit, workspaceCommit],
+      ["-C", git.directory, "merge-tree", "--write-tree", baseCommit, workspaceCommit],
       {
         timeout: 120_000,
         maxBuffer: MAX_GIT_OUTPUT,
         encoding: "utf8",
-        env: gitSafeEnvironment(repositoryPath),
+        env: git.env,
       },
     );
     const tree = result.stdout.trim().split(/\s/u)[0];
@@ -335,12 +477,12 @@ async function mergeWorkspaceTree(
   }
 }
 
-async function isAncestor(repositoryPath: string, ancestor: string, descendant: string): Promise<boolean> {
+async function isAncestor(git: RepositoryGit, ancestor: string, descendant: string): Promise<boolean> {
   try {
-    await execFileAsync("git", ["-C", repositoryPath, "merge-base", "--is-ancestor", ancestor, descendant], {
+    await execFileAsync("git", ["-C", git.directory, "merge-base", "--is-ancestor", ancestor, descendant], {
       timeout: 120_000,
       maxBuffer: MAX_GIT_OUTPUT,
-      env: gitSafeEnvironment(repositoryPath),
+      env: git.env,
     });
     return true;
   } catch (error) {
@@ -453,19 +595,36 @@ async function missingCommandDirectory(rootPath: string, cwd: string): Promise<b
   }
 }
 
-async function git(directory: string, args: readonly string[]): Promise<string> {
+/** Git in one repository under one hardened environment, computed once when it is created. */
+interface RepositoryGit {
+  (args: readonly string[]): Promise<string>;
+  readonly directory: string;
+  readonly env: NodeJS.ProcessEnv;
+}
+
+async function repositoryGit(directory: string): Promise<RepositoryGit> {
+  let env: NodeJS.ProcessEnv;
   try {
-    const result = await execFileAsync("git", ["-C", directory, ...args], {
-      timeout: 120_000,
-      maxBuffer: MAX_GIT_OUTPUT,
-      encoding: "utf8",
-      env: gitSafeEnvironment(directory),
-    });
-    return result.stdout;
+    env = await gitHardenedEnvironment(directory);
   } catch (error) {
     const processError = error as Error & { stderr?: string };
     throw agentXError("CONFIG_INVALID", sanitizeGitError(processError.stderr ?? processError.message));
   }
+  const run = async (args: readonly string[]): Promise<string> => {
+    try {
+      const result = await execFileAsync("git", ["-C", directory, ...args], {
+        timeout: 120_000,
+        maxBuffer: MAX_GIT_OUTPUT,
+        encoding: "utf8",
+        env,
+      });
+      return result.stdout;
+    } catch (error) {
+      const processError = error as Error & { stderr?: string };
+      throw agentXError("CONFIG_INVALID", sanitizeGitError(processError.stderr ?? processError.message));
+    }
+  };
+  return Object.assign(run, { directory, env });
 }
 
 function containedPath(rootPath: string, configuredPath: string): string {

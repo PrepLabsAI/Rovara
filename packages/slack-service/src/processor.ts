@@ -48,7 +48,7 @@ export interface ThreadServiceApi {
   ensureWorkspace(requestId: string): Promise<SlackThreadWorkspaceResult>;
   /** Spec 014: prepares compute for a thread whose workspace is UNPREPARED. */
   prepareWorkspace?(requestId: string): Promise<SlackThreadPrepareResult>;
-  startClose(requestId: string): Promise<SlackWorkspaceCloseStartResult>;
+  startClose(requestId: string, discardUnpublished?: boolean): Promise<SlackWorkspaceCloseStartResult>;
   completeClose(requestId: string, operationId: string): Promise<SlackWorkspaceCloseCompleteResult>;
   waitForOperation(workspaceId: string, operationId: string, signal?: AbortSignal): Promise<{ status: string; error?: string | undefined; result?: unknown }>;
   /** Issue 157: waits for a worker task and returns its final response; without it, a resumed turn posts the status alone. */
@@ -465,23 +465,28 @@ export async function processSlackRequest(
       finished = true;
       return;
     }
-    if (isCloseWorkspaceRequest(message.text)) {
+    const discardUnpublished = isDiscardCloseWorkspaceRequest(message.text);
+    if (discardUnpublished || isCloseWorkspaceRequest(message.text)) {
       draft.disposition = "workspace_close";
-      const started = await api.startClose(deterministicUuid(`${message.eventId}:close`));
+      const started = await api.startClose(deterministicUuid(`${message.eventId}:close`), discardUnpublished);
       if (started.outcome === "NOT_FOUND") {
         await post("This thread does not have a workspace to close.");
         finished = true;
         return;
       }
       if (started.outcome === "REFUSED") {
-        await post(SHARED_CLOSE_REFUSED_MESSAGE);
+        await post(started.reason === "not_owner"
+          ? "Only the person who started this Slack thread can authorize discarding its unpublished workspace changes. Nothing was deleted."
+          : SHARED_CLOSE_REFUSED_MESSAGE);
         finished = true;
         return;
       }
       draft.workspaceId = started.workspaceId;
       if (started.outcome === "CLOSED") {
         await dependencies.threads.close(subject, { workspaceId: started.workspaceId, closedAt: started.closedAt });
-        await post("This thread's workspace is already closed and its workspace resources have been released.");
+        await post(started.discardedUnpublished
+          ? "This thread's workspace is already closed. Its unpublished changes were discarded, and its isolated storage was released."
+          : "This thread's workspace is already closed and its workspace resources have been released.");
         finished = true;
         return;
       }
@@ -493,16 +498,18 @@ export async function processSlackRequest(
         return;
       }
       const result = WorkspaceClosePreflightResultSchema.parse(preflight.result);
-      if (!result.safeToClose) {
+      if (!result.safeToClose && !discardUnpublished) {
         await post(closeBlockedMessage(result));
         finished = true;
         return;
       }
       const closed = await api.completeClose(deterministicUuid(`${message.eventId}:close-complete`), started.operationId);
       await dependencies.threads.close(subject, { workspaceId: closed.workspaceId, closedAt: closed.closedAt });
-      await post(closed.storageReleased
-        ? "Workspace closed. Its runtime session and persistent workspace storage have been released."
-        : "Workspace closed. This deployment mode has no persistent EBS session to release.");
+      await post(closed.discardedUnpublished
+        ? "Workspace closed. Its unpublished changes were discarded, and its isolated storage was released."
+        : closed.storageReleased
+          ? "Workspace closed. Its runtime session and persistent workspace storage have been released."
+          : "Workspace closed. This deployment mode has no persistent EBS session to release.");
       finished = true;
       return;
     }
@@ -1041,20 +1048,36 @@ const CLOSE_REQUEST_MAX_LENGTH = 200;
 const CLOSE_POLITE_PREFIX = /^(?:(?:please|pls|kindly|ok|okay),? |(?:can|could|would) you (?:please )?)/u;
 const CLOSE_POLITE_SUFFIX = /,? (?:please|thanks|thank you)$/u;
 const CLOSE_COMMAND = /^close (?:(?:the|this|my|our) )?workspace$/u;
+const DISCARD_CLOSE_COMMAND = /^discard unpublished work and close (?:(?:the|this|my|our) )?workspace$/u;
 
-export function isCloseWorkspaceRequest(text: string): boolean {
+function normalizeCloseRequest(text: string): string | undefined {
   // No real close request is this long; rejecting early also bounds regex work on hostile input.
-  if (text.length > CLOSE_REQUEST_MAX_LENGTH) return false;
+  if (text.length > CLOSE_REQUEST_MAX_LENGTH) return undefined;
   const stripTrailingPunctuation = (value: string) => value.replace(/[.!?]+$/u, "").trim();
-  const normalized = stripTrailingPunctuation(
+  return stripTrailingPunctuation(
     text
       .replace(/^\s*<@[A-Z0-9]+>\s*/iu, "")
       .replace(/\s+/gu, " ")
       .trim()
       .toLowerCase(),
   );
-  const withoutSuffix = stripTrailingPunctuation(normalized.replace(CLOSE_POLITE_SUFFIX, ""));
-  return CLOSE_COMMAND.test(withoutSuffix.replace(CLOSE_POLITE_PREFIX, ""));
+}
+
+function normalizedCloseCommand(text: string): string | undefined {
+  const normalized = normalizeCloseRequest(text);
+  if (normalized === undefined) return undefined;
+  const withoutSuffix = normalized.replace(CLOSE_POLITE_SUFFIX, "").replace(/[.!?]+$/u, "").trim();
+  return withoutSuffix.replace(CLOSE_POLITE_PREFIX, "");
+}
+
+export function isCloseWorkspaceRequest(text: string): boolean {
+  const command = normalizedCloseCommand(text);
+  return command !== undefined && CLOSE_COMMAND.test(command);
+}
+
+export function isDiscardCloseWorkspaceRequest(text: string): boolean {
+  const command = normalizedCloseCommand(text);
+  return command !== undefined && DISCARD_CLOSE_COMMAND.test(command);
 }
 
 function closeBlockedMessage(result: ReturnType<typeof WorkspaceClosePreflightResultSchema.parse>): string {

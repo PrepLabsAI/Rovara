@@ -19,11 +19,28 @@ interface WriteAction {
   values?: Values | undefined;
 }
 
+/** DynamoDB's item size limit: 400 KB, where a KB is 1,024 bytes. */
+export const DYNAMODB_ITEM_MAX_BYTES = 409_600;
+
+interface InjectedFault {
+  command?: string | undefined;
+  match?: ((input: Record<string, unknown>) => boolean) | undefined;
+  error: { name: string; message?: string | undefined; cancellationReasons?: Array<{ Code: string }> | undefined };
+  remaining: number;
+}
+
 export class FakeDynamoDb {
   readonly items = new Map<string, Item>();
   private readonly listeners = new Set<(change: { before?: Item; after?: Item }) => void>();
   /** Constructor names of every command sent, in order (spec 025 A3: no route scans). */
   private readonly sent: string[] = [];
+
+  private readonly faults: InjectedFault[] = [];
+
+  /** Fails the next `times` (default 1) matching commands with the named AWS error, before they touch any item. */
+  injectFault(fault: { command?: string; match?: (input: Record<string, unknown>) => boolean; error: { name: string; message?: string; cancellationReasons?: Array<{ Code: string }> }; times?: number }): void {
+    this.faults.push({ command: fault.command, match: fault.match, error: fault.error, remaining: fault.times ?? 1 });
+  }
 
   commandNames(): string[] {
     return [...this.sent];
@@ -54,6 +71,13 @@ export class FakeDynamoDb {
 
   send = async (command: Command): Promise<unknown> => {
     this.sent.push(command.constructor.name);
+    const fault = this.faults.find((candidate) => candidate.remaining > 0
+      && (candidate.command === undefined || candidate.command === command.constructor.name)
+      && (candidate.match === undefined || candidate.match(command.input)));
+    if (fault !== undefined) {
+      fault.remaining -= 1;
+      throw Object.assign(new Error(fault.error.message ?? fault.error.name), { name: fault.error.name, $metadata: {}, ...(fault.error.cancellationReasons === undefined ? {} : { CancellationReasons: fault.error.cancellationReasons }) });
+    }
     await Promise.resolve();
     const input = command.input;
     switch (command.constructor.name) {
@@ -71,6 +95,15 @@ export class FakeDynamoDb {
         return {};
       case "TransactWriteCommand": {
         const entries = input.TransactItems as Array<Record<string, Record<string, unknown>>>;
+        // DynamoDB refuses a transaction that names one item twice, before any condition is evaluated.
+        const named = entries.map((entry) => {
+          const action = Object.values(entry)[0] as Record<string, unknown>;
+          const key = (action.Key ?? action.Item) as { pk?: unknown; sk?: unknown };
+          return JSON.stringify([action.TableName, key.pk, key.sk]);
+        });
+        if (new Set(named).size !== named.length) {
+          throw Object.assign(new Error("Transaction request cannot include multiple operations on one item"), { name: "ValidationException", $metadata: {} });
+        }
         this.commit(entries.map((entry) => {
           const [kind, action] = Object.entries(entry)[0] as [WriteAction["kind"], Record<string, unknown>];
           return toAction(kind, action);
@@ -177,6 +210,16 @@ export class FakeDynamoDb {
       const after = start === undefined ? found : found.filter((item) => compareKeys(item.sk as string, String(start.sk)) > 0);
       return after.map((item) => structuredClone(item));
     }
+    // A whole partition, as the workflow dispatch sweep reads it (sort key order).
+    if (String(input.KeyConditionExpression) === "pk = :pk") {
+      const whole = this.find((item) => item.pk === values[":pk"]).sort((left, right) => compareKeys(left.sk as string, right.sk as string));
+      if (input.ScanIndexForward === false) whole.reverse();
+      const start = input.ExclusiveStartKey as { sk?: unknown } | undefined;
+      const after = start === undefined
+        ? whole
+        : whole.filter((item) => compareKeys(item.sk as string, String(start.sk)) * (input.ScanIndexForward === false ? -1 : 1) > 0);
+      return after.map((item) => structuredClone(item));
+    }
     const match = /^pk = :pk AND begins_with\(sk, (:[a-zA-Z]+)\)$/.exec(String(input.KeyConditionExpression));
     if (!match) throw new Error(`FakeDynamoDb does not support the key condition ${String(input.KeyConditionExpression)}`);
     const prefix = values[match[1]!] as string;
@@ -213,10 +256,15 @@ export class FakeDynamoDb {
       }
       throw error;
     }
-    for (const action of actions) {
+    // Compute every result first so one oversize item refuses the whole transaction (`apply` is pure).
+    const nexts = actions.map((action) => action.kind === "ConditionCheck" ? undefined : action.apply(this.items.get(action.key)));
+    if (nexts.some((next) => next !== undefined && Buffer.byteLength(JSON.stringify(next), "utf8") > DYNAMODB_ITEM_MAX_BYTES)) {
+      throw Object.assign(new Error("Item size has exceeded the maximum allowed size"), { name: "ValidationException" });
+    }
+    for (const [index, action] of actions.entries()) {
       if (action.kind === "ConditionCheck") continue;
       const before = this.items.get(action.key);
-      const next = action.apply(before);
+      const next = nexts[index];
       if (next === undefined) this.items.delete(action.key);
       else this.items.set(action.key, next);
       // Deleting an item that does not exist leaves no stream record, as in DynamoDB.
@@ -269,7 +317,9 @@ const EXPRESSION_KEYWORDS: ReadonlySet<string> = new Set(["AND", "OR", "NOT", "S
 /** Throws as DynamoDB does when an expression names a reserved word without an #alias. */
 export function assertNoReservedWords(expression: string | undefined): void {
   if (expression === undefined) return;
-  const words = expression.match(/(?<![#:\w.])[A-Za-z_]\w*\b(?!\s*\()/g) ?? [];
+  // A document-path separator does not make the following attribute name safe:
+  // `workflow.state` still names the reserved DynamoDB word `state`.
+  const words = expression.match(/(?<![#:\w])[A-Za-z_]\w*\b(?!\s*\()/g) ?? [];
   const reserved = words.find((word) => !EXPRESSION_KEYWORDS.has(word) && RESERVED_WORDS.has(word.toUpperCase()));
   if (reserved !== undefined) {
     throw Object.assign(new Error(`Invalid expression: Attribute name is a reserved keyword; reserved keyword: ${reserved}`), { name: "ValidationException" });

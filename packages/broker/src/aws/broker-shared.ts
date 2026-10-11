@@ -43,6 +43,18 @@ export const UNEXPECTED_REQUEST_MESSAGE = "AgentX could not handle this request;
  */
 export const SHARED_WORKSPACE_REREAD = "Other people also change this workspace between your turns. Read a file again before you change it.";
 
+/** Refuses an ordinary write-capable turn on a gated task (gap 10a); user-facing, so it avoids internal terms. */
+export const GATED_TASK_TURN_REFUSAL = "This task is waiting on its own approval steps. Use its approval buttons or the task's decision tool instead of sending more instructions.";
+/** Refuses a pull request anyone asks for on a gated task (ruling A): AgentX opens its draft itself. User-facing. */
+export const GATED_TASK_PULL_REQUEST_REFUSAL = "AgentX opens the draft pull request for this task itself once checks and reviews pass";
+/** Refuses a pull request change through AgentX on a gated task (ruling A); humans change and merge it on GitHub. */
+export const GATED_TASK_PULL_REQUEST_ACTION_REFUSAL = "AgentX does not change this task's pull request on request. Change or merge it on GitHub.";
+
+/** Starts every workflow phase prompt: the worker is one step, and AgentX owns approvals, checks, reviews and publishing. */
+export const WORKFLOW_PREAMBLE = "You are one step inside AgentX's gated task workflow. AgentX itself asks the task owner for every approval, runs the project's checks, runs the independent code and security reviews, and opens the draft pull request. Never plan, describe or perform git push, creating remote branches, opening or updating pull requests (for example gh pr create), merging, or deploying. Never treat any step as already approved: the owner approves each document in Slack.";
+/** Added to planning prompts so the document stops at the code change and the checks to run. */
+export const PLAN_PHASE_LIMITS = "Your document ends when the code is changed and the checks to run are named. Do not include steps to push, open a pull request, request approval, or wait for review.";
+
 /**
  * The prompt the worker runs: the request's own, and on a shared task the re-read line after it.
  * The line is only a hint, so it is left out when it would take the prompt past a request's limit

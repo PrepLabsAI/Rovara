@@ -61,12 +61,12 @@ describe("Slack app manifest", () => {
       oauth_config: {
         redirect_urls: [SIGNIN],
         scopes: {
-          bot: ["app_mentions:read", "channels:join", "channels:read", "chat:write", "groups:read", "im:write", "users:read", "users:read.email"],
+          bot: ["app_mentions:read", "canvases:write", "channels:history", "channels:join", "channels:read", "chat:write", "files:read", "groups:history", "groups:read", "im:write", "users:read", "users:read.email"],
           user: ["email", "openid", "profile"],
         },
       },
       settings: {
-        event_subscriptions: { request_url: EVENTS, bot_events: ["app_mention"] },
+        event_subscriptions: { request_url: EVENTS, bot_events: ["app_mention", "message.channels", "message.groups"] },
         interactivity: { is_enabled: true, request_url: INTERACTIONS },
         org_deploy_enabled: false,
         socket_mode_enabled: false,

@@ -3,7 +3,8 @@
 // for the AI tool that reads them: when to use the tool, and what to do next.
 import {
   DEFAULT_DEVELOPER_TASK_POLICY, DEVELOPER_EVENTS_DEFAULT, DEVELOPER_EVENTS_MAX, DEVELOPER_TASK_LIST_DEFAULT, DEVELOPER_TASK_LIST_MAX,
-  DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY, inertName, type DeveloperTaskView,
+  DEVELOPER_WAIT_MAX_SECONDS, DeveloperInstructionsSchema, DeveloperTaskStatusSchema, SHARED_BY_POLICY, VIEW_ONLY_BY_POLICY, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, WORKFLOW_REVIEW_FAILURE_REASONS,
+  inertName, type DeveloperTaskView,
 } from "@agentx/contracts";
 import { z } from "zod";
 import type { AdminControlPlaneClient } from "./admin-client.js";
@@ -83,6 +84,14 @@ const TaskShape = {
   artifacts: z.array(z.object({ name: z.string(), size: z.number().optional() })).optional(),
   pull_requests: z.array(z.object({ repository: z.string(), number: z.number(), url: z.string(), state: z.string() })).optional(),
   unpublished: z.array(z.object({ repository: z.string(), reasons: z.array(z.string()) })).optional(),
+  workflow: z.object({
+    stage: z.string(), state: z.string(), revision: z.number(), path: z.enum(["QUICK", "FULL"]).optional(), review_phase: z.string().optional(), block_reason: z.string().optional(),
+    candidate_digest: z.string().optional(),
+    verification: z.object({ candidate_digest: z.string(), results: z.array(z.object({ check_id: z.string(), status: z.enum(["PASS", "FAILED", "UNKNOWN"]) })) }).optional(),
+    reviews: z.array(z.object({ role: z.enum(["CRITIC", "SECURITY"]), status: z.enum(["PASS", "FINDINGS", "FAILED", "INTERRUPTED", "UNKNOWN"]), candidate_digest: z.string(), failure_reason: z.enum(WORKFLOW_REVIEW_FAILURE_REASONS).optional(), recorded_at: z.string() })).optional(),
+    approval_document: z.object({ type: z.string(), sha256: z.string(), version: z.number(), content: z.string().optional() }).optional(),
+    plan: z.object({ sha256: z.string(), version: z.number(), content: z.string().optional() }).optional(),
+  }).optional(),
   /** Only on start, continue and wait, which may wait (R21). */
   timed_out: z.boolean().optional(),
   /** A wait that stopped early because checking on the task failed; not a timeout. */
@@ -94,6 +103,10 @@ const RETRY = "If the call fails or times out, send your own request_id, or repe
 
 /** The one place a wire view (camelCase) becomes a tool output (snake_case). */
 function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string, unknown> {
+  const activeArtifactType = task.workflow?.path === "FULL" && task.workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
+    : task.workflow?.path === "FULL" && task.workflow.reviewPhase === "DESIGN" ? "design" : "plan";
+  const activeArtifact = task.workflow?.artifacts.filter((artifact) => artifact.type === activeArtifactType).at(-1);
+  const planArtifact = task.workflow?.artifacts.filter((artifact) => artifact.type === "plan").at(-1);
   return {
     task_id: task.taskId, title: task.title, project: task.project, status: task.status,
     ...(task.failure === undefined ? {} : { failure: task.failure }),
@@ -118,12 +131,71 @@ function taskOutput(task: DeveloperTaskView, timedOut?: boolean): Record<string,
     ...(task.artifacts === undefined ? {} : { artifacts: task.artifacts }),
     ...(task.pullRequests === undefined ? {} : { pull_requests: task.pullRequests }),
     ...(task.unpublished === undefined ? {} : { unpublished: task.unpublished }),
+    ...(task.workflow === undefined ? {} : {
+      workflow: {
+        stage: task.workflow.stage, state: task.workflow.state, revision: task.workflow.revision,
+        path: task.workflow.path,
+        ...(task.workflow.reviewPhase === undefined ? {} : { review_phase: task.workflow.reviewPhase }),
+        ...(task.workflow.blockReason === undefined ? {} : { block_reason: task.workflow.blockReason }),
+        ...(task.workflow.candidate === undefined ? {} : { candidate_digest: task.workflow.candidate.digest }),
+        ...(task.workflow.verification === undefined ? {} : { verification: {
+          candidate_digest: task.workflow.verification.candidateDigest,
+          results: task.workflow.verification.results.map((result) => ({ check_id: result.checkId, status: result.status })),
+        } }),
+        ...(task.workflow.reviews === undefined ? {} : { reviews: task.workflow.reviews.map((review) => ({
+          role: review.role, status: review.status, candidate_digest: review.candidateDigest,
+          ...(review.failureReason === undefined ? {} : { failure_reason: review.failureReason }), recorded_at: review.recordedAt,
+        })) }),
+        ...(activeArtifact === undefined ? {} : {
+          approval_document: { type: activeArtifact.type, sha256: activeArtifact.sha256, version: activeArtifact.version, ...(task.workflow.planContent === undefined ? {} : { content: task.workflow.planContent }) },
+        }),
+        ...(planArtifact === undefined ? {} : {
+          plan: { sha256: planArtifact.sha256, version: planArtifact.version, ...(planArtifact.type === activeArtifactType && task.workflow.planContent !== undefined ? { content: task.workflow.planContent } : {}) },
+        }),
+      },
+    }),
     ...(timedOut === undefined ? {} : { timed_out: timedOut }),
   };
 }
 
 /** What the AI tool can do next with a task in this state. */
 function nextFor(task: DeveloperTaskView): string {
+  if (task.workflow?.state === "WAITING" && task.workflow.stage === "PLAN_REVIEW") {
+    return "Review the current approval_document, then use agentx_decide_workflow with its exact sha256 and expected revision. Quick has one approval; Full has requirements, design, and coding-plan approvals before implementation.";
+  }
+  if (task.workflow?.state === "BLOCKED" && task.workflow.stage === "REVIEW") {
+    const workflow = task.workflow;
+    const retryable = workflow.reviews?.some((review) => ["UNKNOWN", "FAILED", "INTERRUPTED"].includes(review.status)) === true;
+    const checksPassed = workflow.verification !== undefined && workflow.candidate !== undefined
+      && workflow.verification.candidateDigest === workflow.candidate.digest
+      && workflow.verification.results.every((result) => result.status === "PASS");
+    if (retryable && checksPassed && workflow.candidate !== undefined) {
+      return `The review is blocked: ${workflow.blockReason ?? "a review has no verifiable result"}. Retry only the read-only reviews with agentx_review_workflow_candidate, expected_revision ${workflow.revision}, and candidate_digest ${workflow.candidate.digest}. No code editing will run.`;
+    }
+  }
+  if (task.workflow?.state === "BLOCKED" && task.workflow.stage === "PLAN") return `The plan run was interrupted or could not save its plan. To recover, use agentx_retry_workflow to start another read-only planning run.`;
+  // Task 16: checks that did not finish (no check failed) run again; nothing is known to fix yet.
+  if (task.workflow?.state === "BLOCKED" && task.workflow.stage === "VERIFY") {
+    const workflow = task.workflow;
+    const failed = workflow.candidate !== undefined && workflow.verification?.candidateDigest === workflow.candidate.digest
+      && workflow.verification.results.some((result) => result.status === "FAILED");
+    if (!failed) {
+      return `The checks are blocked: ${workflow.blockReason ?? "their results are unknown"}. Run them again with agentx_retry_workflow and expected_revision ${workflow.revision}; no code editing will run. To stop instead, use agentx_close_task.`;
+    }
+  }
+  // Task 16: every blocked step after the plan can go back to coding with the problems found.
+  if (task.workflow?.state === "BLOCKED" && ["IMPLEMENT", "VERIFY", "REVIEW"].includes(task.workflow.stage)) {
+    const retry = task.workflow.stage === "IMPLEMENT" ? " To run the same coding step again, use agentx_retry_workflow." : "";
+    return `The workflow is blocked: ${task.workflow.blockReason ?? "required evidence is missing"}. To have AgentX fix it, use agentx_send_workflow_back with expected_revision ${task.workflow.revision} and your instructions; the checks and reviews then run again.${retry} To stop instead, use agentx_close_task.`;
+  }
+  if (task.workflow?.state === "BLOCKED" && task.workflow.stage === "PULL_REQUEST") {
+    return `The workflow is blocked: ${task.workflow.blockReason ?? "the draft pull request did not open"}. Retry it with agentx_retry_workflow_publish and expected_revision ${task.workflow.revision}, or use agentx_send_workflow_back to change the code first.`;
+  }
+  // Task 16: the draft pull request did not open because the code changed after its checks and reviews.
+  if (task.workflow?.stage === "PULL_REQUEST" && task.workflow.state === "READY" && task.failure?.message.includes(WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE) === true) {
+    return `The draft pull request did not open because the code changed after its checks and reviews. Use agentx_send_workflow_back with expected_revision ${task.workflow.revision} to have AgentX fix it, or run the checks again on the current code with agentx_retry_workflow and expected_revision ${task.workflow.revision}.`;
+  }
+  if (task.workflow?.state === "BLOCKED") return `The workflow is blocked: ${task.workflow.blockReason ?? "required evidence is missing"}. Review it before continuing.`;
   if (task.closing === true) return "It is closing: check with agentx_get_task, which shows CLOSED when done.";
   switch (task.status) {
     case "STARTING":
@@ -322,10 +394,41 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     },
   },
   {
+    name: "agentx_start_workflow",
+    title: "Start a human-gated AgentX delivery workflow",
+    description: "Starts a native AgentX task-to-PR workflow. AgentX first inspects the request with read-only tools and saves a plan. The task owner reviews the complete plan and approves its exact digest and workflow revision with agentx_decide_workflow before implementation. Interrupted planning can be retried with agentx_retry_workflow. After implementation, AgentX blocks before PR publication until candidate-bound verification and review are qualified. Use agentx_start_task for the existing task flow.",
+    inputSchema: {
+      project: z.string().min(1).max(200).describe("the project's exact name, from agentx_list_projects"),
+      instructions: instructionsInput,
+      title: z.string().max(120).optional(),
+      share_to_channel: z.boolean().optional(),
+      share_mode: z.enum(["view", "continue"]).optional(),
+      channel: z.string().min(1).max(80).optional(),
+      workflow_path: z.enum(["quick", "full"]).describe("required approval sequence: quick asks once for the coding plan; full asks separately for requirements, design, and coding steps"),
+      wait_seconds: waitInput(0).optional(),
+      request_id: requestIdInput,
+    },
+    outputSchema: ActionShape,
+    async handler(context, input, call) {
+      const text = instructions(input.instructions);
+      const workflowPath = input.workflow_path === "full" ? "FULL" : "QUICK";
+      const id = requestIdFor(context, call, input, ["agentx_start_workflow", input.project, text, workflowPath, optional(input.title), optional(input.share_to_channel), optional(input.share_mode), optional(input.channel)]);
+      const task = await context.client.startTask({
+        requestId: id, project: input.project as string, instructions: text, workflow: true, workflowPath,
+        ...(input.title === undefined ? {} : { title: input.title as string }),
+        ...(context.clientName === undefined ? {} : { client: context.clientName.slice(0, 200) }),
+        ...(input.share_to_channel === undefined ? {} : { shareToChannel: input.share_to_channel as boolean }),
+        ...(input.share_mode === undefined ? {} : { shareMode: input.share_mode as "view" | "continue" }),
+        ...(input.channel === undefined ? {} : { channel: input.channel as string }),
+      });
+      return afterAction(context, call, "agentx_start_workflow", task, (input.wait_seconds as number | undefined) ?? 0, id);
+    },
+  },
+  {
     name: "agentx_get_task",
     title: "Check an AgentX task",
     description:
-      "Shows one of your tasks: its status (STARTING, RUNNING, SUCCEEDED, FAILED, CANCELLED, INTERRUPTED or CLOSED), any failure, and its latest progress. Once the task ends it also shows the worker's summary, the changed files with line counts, artifacts, and pull requests with their URLs. Use it to check on a task, to find a pull request's URL after agentx_open_pull_request, and to see how agentx_close_task went: status CLOSED when done, or unpublished listing each repository and why it was not closed. For a shared task it shows the channel, the mode, the thread link once posted, and in continue mode the channel's turns.",
+      "Shows one of your tasks, its latest progress, and any native workflow stage. For an agentx_start_workflow task, it includes the current approval document and digest while a review gate is open. After work ends it shows the worker's summary, changed files, artifacts and any pull requests. For a shared task it shows the channel, sharing mode, thread link and channel turns.",
     inputSchema: { task_id: taskIdInput, events: eventsInput },
     outputSchema: TaskShape,
     async handler(context, input) {
@@ -389,6 +492,100 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     },
   },
   {
+    name: "agentx_decide_workflow",
+    title: "Approve or respond to an AgentX plan",
+    description: "Records your decision on the current approval document. APPROVE advances Quick or Full to its next stage only when the exact document sha256 and workflow revision match. REQUEST_CHANGES asks AgentX to replace the document without editing files. REJECT closes this workflow. SKIP is refused unless the project explicitly allows it. Use the approval_document digest and revision shown by agentx_get_task.",
+    inputSchema: {
+      task_id: taskIdInput,
+      request_id: z.string().uuid().describe("UUID for safe retry; repeat the same request unchanged if the call times out"),
+      expected_revision: z.number().int().positive(),
+      decision: z.enum(["APPROVE", "REQUEST_CHANGES", "REJECT", "SKIP"]),
+      reason: z.string().trim().min(1).max(500),
+      artifact_digest: z.string().regex(/^[a-f0-9]{64}$/),
+    },
+    outputSchema: ActionShape,
+    async handler(context, input) {
+      const task = await context.client.decideWorkflowTask(input.task_id as string, {
+        requestId: input.request_id as string,
+        expectedRevision: input.expected_revision as number,
+        decision: input.decision as "APPROVE" | "REQUEST_CHANGES" | "REJECT" | "SKIP",
+        reason: input.reason as string,
+        ...(input.artifact_digest === undefined ? {} : { artifactDigest: input.artifact_digest as string }),
+      });
+      return { structured: { ...taskOutput(task), request_id: input.request_id }, text: `${taskText(task)} ${nextFor(task)}` };
+    },
+  },
+  {
+    name: "agentx_review_workflow_candidate",
+    title: "Run independent code and security reviews",
+    description: "Starts separate read-only code and security reviews after checks pass. It cannot edit the candidate. Use when agentx_get_task shows stage REVIEW and state WAITING. To retry a blocked review, use its exact expected_revision and candidate_digest from agentx_get_task; the retry is rejected if the candidate or checks changed.",
+    inputSchema: {
+      task_id: taskIdInput, request_id: requestIdInput, instructions: instructionsInput,
+      expected_revision: z.number().int().positive().optional().describe("required when retrying a blocked review; copy the current workflow revision from agentx_get_task"),
+      candidate_digest: z.string().regex(/^[a-f0-9]{64}$/).optional().describe("required when retrying a blocked review; copy the current candidate digest from agentx_get_task"),
+    },
+    outputSchema: ActionShape,
+    async handler(context, input, call) {
+      const instructions = input.instructions as string;
+      const id = requestIdFor(context, call, input, ["agentx_review_workflow_candidate", input.task_id, instructions, optional(input.expected_revision), optional(input.candidate_digest)]);
+      const task = await context.client.startWorkflowReviewTask(input.task_id as string, {
+        requestId: id, instructions,
+        ...(input.expected_revision === undefined ? {} : { expectedRevision: input.expected_revision as number }),
+        ...(input.candidate_digest === undefined ? {} : { candidateDigest: input.candidate_digest as string }),
+      });
+      return afterAction(context, call, "agentx_review_workflow_candidate", task, 0, id);
+    },
+  },
+  {
+    name: "agentx_retry_workflow",
+    title: "Retry a blocked AgentX plan or coding step",
+    description: "Restarts a blocked planning stage using the instructions you provide, and AgentX keeps that run read-only. It also restarts a blocked coding stage (IMPLEMENT) on the approved plan, with your instructions as a note, and runs the project's checks again, without editing code, for a blocked VERIFY stage or a change whose draft pull request did not open because its code changed. Use it after agentx_get_task shows one of those; the operation starts again only if the workspace is ready. Running checks again needs expected_revision. To have AgentX fix failed checks or review findings, use agentx_send_workflow_back instead.",
+    inputSchema: {
+      task_id: taskIdInput, request_id: requestIdInput, instructions: instructionsInput,
+      expected_revision: z.number().int().positive().optional().describe("the current workflow revision from agentx_get_task; required to run the checks again, and checked whenever given"),
+    },
+    outputSchema: ActionShape,
+    async handler(context, input, call) {
+      const instructions = input.instructions as string;
+      const id = requestIdFor(context, call, input, ["agentx_retry_workflow", input.task_id, instructions, optional(input.expected_revision)]);
+      const task = await context.client.retryWorkflowTask(input.task_id as string, { requestId: id, instructions,
+        ...(input.expected_revision === undefined ? {} : { expectedRevision: input.expected_revision as number }) });
+      return afterAction(context, call, "agentx_retry_workflow", task, 0, id);
+    },
+  },
+  {
+    name: "agentx_send_workflow_back",
+    title: "Send a blocked AgentX change back to coding",
+    description: "Sends a blocked workflow task back to coding. AgentX gives the coding run the problems the change introduced (failed checks and review findings, never pre-existing ones), your instructions and the approved plan. The checks and reviews then run again on the new code, and AgentX opens the draft pull request once they pass. Use it when agentx_get_task shows a blocked IMPLEMENT, VERIFY or REVIEW stage, or a PULL_REQUEST stage whose pull request did not open. Copy expected_revision from agentx_get_task; the call is refused if the task moved on. Only the task's owner can use it.",
+    inputSchema: {
+      task_id: taskIdInput, request_id: requestIdInput,
+      expected_revision: z.number().int().positive().describe("the current workflow revision from agentx_get_task"),
+      instructions: instructionsInput,
+    },
+    outputSchema: ActionShape,
+    async handler(context, input, call) {
+      const instructions = input.instructions as string;
+      const id = requestIdFor(context, call, input, ["agentx_send_workflow_back", input.task_id, input.expected_revision, instructions]);
+      const task = await context.client.sendWorkflowBack(input.task_id as string, { requestId: id, expectedRevision: input.expected_revision as number, instructions });
+      return afterAction(context, call, "agentx_send_workflow_back", task, 0, id);
+    },
+  },
+  {
+    name: "agentx_retry_workflow_publish",
+    title: "Retry opening an AgentX draft pull request",
+    description: "Asks AgentX to open a workflow task's draft pull request again, after it did not open or AgentX gave up opening it. It publishes only the code whose checks and reviews passed; if that code changed since, use agentx_send_workflow_back instead. Copy expected_revision from agentx_get_task; the call is refused if the task moved on. Only the task's owner can use it.",
+    inputSchema: {
+      task_id: taskIdInput, request_id: requestIdInput,
+      expected_revision: z.number().int().positive().describe("the current workflow revision from agentx_get_task"),
+    },
+    outputSchema: ActionShape,
+    async handler(context, input, call) {
+      const id = requestIdFor(context, call, input, ["agentx_retry_workflow_publish", input.task_id, input.expected_revision]);
+      const task = await context.client.retryWorkflowPublish(input.task_id as string, { requestId: id, expectedRevision: input.expected_revision as number });
+      return afterAction(context, call, "agentx_retry_workflow_publish", task, 0, id);
+    },
+  },
+  {
     name: "agentx_cancel_task",
     title: "Cancel an AgentX task",
     description:
@@ -410,20 +607,27 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     name: "agentx_close_task",
     title: "Close an AgentX task",
     description:
-      "Closes one of your tasks and releases its workspace, so it stops counting against your limit of open tasks. AgentX first checks the workspace for work that is not in a pull request, and does not close a task that has some. Answers at once while the close runs: check the outcome with agentx_get_task, which shows status CLOSED when done, or unpublished listing each repository and why. To keep unpublished work, open a pull request with agentx_open_pull_request first; to drop it, continue the task with instructions to discard the changes, then close it again.",
-    inputSchema: { task_id: taskIdInput, request_id: requestIdInput },
+      "Closes one of your tasks and releases its workspace, so it stops counting against your limit of open tasks. AgentX checks for work not in a pull request and refuses by default. Set discard_unpublished=true only when you explicitly want to permanently discard all unpublished changes in this task's isolated workspace. This does not run coding tools or publish changes; it records your authorization, checks the workspace, and deletes only that workspace. Answers at once while closing: check agentx_get_task for CLOSED.",
+    inputSchema: {
+      task_id: taskIdInput,
+      request_id: requestIdInput,
+      discard_unpublished: z.boolean().optional().describe("Set true only when you, the task owner, explicitly authorize discarding unpublished changes in this task's isolated workspace."),
+    },
     outputSchema: { ...TaskShape, closed: z.boolean() },
     async handler(context, input) {
       const taskId = input.task_id as string;
       // R22: no wait. A repeated request_id returns the same close and its outcome.
       // A fresh ID when left out: closing again after publishing is a new request, and a repeat
       // on a closing task returns that close (Task 12).
-      const answer = await context.client.closeTask(taskId, (input.request_id as string | undefined) ?? context.newRequestId());
+      const discardUnpublished = input.discard_unpublished === true;
+      const answer = await context.client.closeTask(taskId, (input.request_id as string | undefined) ?? context.newRequestId(), discardUnpublished);
       const unpublished = answer.unpublished ?? answer.task.unpublished;
       const task = unpublished === undefined ? answer.task : { ...answer.task, unpublished };
       // AgentX's own words, when it gives them, say why the task is not closed yet and what next.
       const text = answer.closed
-        ? `Task ${taskId} is closed; its workspace is released.`
+        ? answer.discardedUnpublished
+          ? `Task ${taskId} is closed. Its unpublished workspace changes were discarded, and its workspace is released.`
+          : `Task ${taskId} is closed; its workspace is released.`
         : answer.message !== undefined
           ? `Task ${taskId}: ${plainText(answer.message, "AgentX has not closed it yet; check with agentx_get_task")}`
           : unpublished !== undefined
@@ -465,7 +669,7 @@ export const DEVELOPER_TOOLS: readonly ToolDefinition[] = [
     name: "agentx_open_pull_request",
     title: "Open a pull request from an AgentX task",
     description:
-      `Opens a pull request with one of your task's changes, through AgentX's GitHub App, as a draft unless draft is false. Use it once the task has ended and you have read its summary and changed files. Answers at once with the publish operation's ID and status (ACCEPTED when just started): check with agentx_get_task, whose pull_requests lists the URL once it is published. ${RETRY}, so it gives the same operation, never a second pull request. repository is needed only when the project has several repositories.`,
+      `Opens a pull request with one of your task's changes, through AgentX's GitHub App, as a draft unless draft is false. Use it once the task has ended and you have read its summary and changed files. Answers at once with the publish operation's ID and status (ACCEPTED when just started): check with agentx_get_task, whose pull_requests lists the URL once it is published. ${RETRY}, so it gives the same operation, never a second pull request. repository is needed only when the project has several repositories. For workflow tasks AgentX opens the draft pull request itself once the checks and reviews pass, so this tool refuses them; agentx_get_task shows the pull request then, and a person merges it on GitHub.`,
     inputSchema: {
       task_id: taskIdInput,
       title: z.string().min(1).max(256).describe("the pull request's title"),

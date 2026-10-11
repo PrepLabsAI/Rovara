@@ -1,14 +1,18 @@
 // Spec 025 FR-034, C7: the DeveloperTaskNotifier. Named environments only (D14). It is the only new
 // reader of the Slack secret; the broker still cannot read it (D11).
-import { Duration, aws_cloudwatch as cloudwatch, type aws_dynamodb as dynamodb, aws_iam as iam, aws_lambda as lambda, aws_lambda_event_sources as eventSources, type aws_lambda_nodejs as lambdaNodejs, type aws_secretsmanager as secretsmanager, aws_sqs as sqs } from "aws-cdk-lib";
+import { Duration, aws_cloudwatch as cloudwatch, type aws_dynamodb as dynamodb, aws_iam as iam, aws_lambda as lambda, aws_lambda_event_sources as eventSources, type aws_lambda_nodejs as lambdaNodejs, type aws_s3 as s3, type aws_secretsmanager as secretsmanager, aws_sqs as sqs } from "aws-cdk-lib";
 import { Construct } from "constructs";
 import { packagedFunction } from "./control-plane.js";
 import type { AgentXNaming } from "./naming.js";
 
 export interface DeveloperTaskNotifierProps {
   naming: AgentXNaming;
+  /** Same-origin AgentX control plane, used only to construct authenticated review links. */
+  controlPlaneUrl: string;
   /** The concrete Table: its stream ARN is read here. */
   state: dynamodb.Table;
+  /** Task plan artifacts are read only to create a Slack detail page after digest verification. */
+  artifactBucket: s3.Bucket;
   slackSecret: secretsmanager.Secret;
   /** The operator alerts topic's action: a dead-lettered notice or stream batch is never silent. */
   notifyOperator: cloudwatch.IAlarmAction;
@@ -59,11 +63,18 @@ export class DeveloperTaskNotifier extends Construct {
       "A batch of state table changes could not be turned into shared task notices, so a thread may have missed updates. Check the developer task notifier logs, and the failure queue for the shard and sequence numbers.");
     this.function = packagedFunction(this, "Function", "packages/broker/src/aws/developer-task-notifier.ts", {
       STATE_TABLE_NAME: props.state.tableName,
+      CONTROL_PLANE_URL: props.controlPlaneUrl,
+      ARTIFACT_BUCKET_NAME: props.artifactBucket.bucketName,
       NOTICE_QUEUE_URL: this.queue.queueUrl,
       SLACK_SECRET_ARN: props.slackSecret.secretArn,
       AGENTX_METRICS_NAMESPACE: props.naming.metricsNamespace,
     }, Duration.seconds(30));
     props.slackSecret.grantRead(this.function);
+    this.function.addToRolePolicy(new iam.PolicyStatement({
+      actions: ["s3:GetObject"],
+      resources: [props.artifactBucket.arnForObjects("private/*/*/*/*")],
+    }));
+    props.artifactBucket.encryptionKey?.grantEncryptDecrypt(this.function);
     props.state.grantStreamRead(this.function);
     this.queue.grantSendMessages(this.function);
     this.queue.grantConsumeMessages(this.function);
@@ -112,6 +123,8 @@ export class DeveloperTaskNotifier extends Construct {
         } } }),
         // Spec 025 E13: admin changes whose Slack step started, and changes with a message that ended.
         lambda.FilterCriteria.filter({ dynamodb: { NewImage: { entityType: { S: equals("ADMIN_CHANGE") } } } }),
+        // Task 19: a Slack press the broker refused, told privately to whoever pressed.
+        lambda.FilterCriteria.filter({ dynamodb: { NewImage: { entityType: { S: equals("WORKFLOW_ACTION_REFUSAL") } } } }),
       ],
     });
     new lambda.EventSourceMapping(this, "NoticeQueueMapping", {

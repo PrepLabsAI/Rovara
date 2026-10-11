@@ -14,7 +14,8 @@ export const account = "111122223333";
 export const orchestratorRoleArn = `arn:aws:iam::${account}:role/AgentXSlackOrchestrator-TaskRole`;
 export const orchestratorPrincipal = `arn:aws:sts::${account}:assumed-role/AgentXSlackOrchestrator-TaskRole/ecs-task-1`;
 
-export type Handler = (event: unknown) => Promise<{ statusCode: number; body: string }>;
+/** The broker handler; `context` is what Lambda passes (its request ID), absent for a direct call. */
+export type Handler = (event: unknown, context?: { awsRequestId?: string }) => Promise<{ statusCode: number; body: string }>;
 
 export interface SlackBrokerModule {
   createAwsBrokerHandler: (dependencies: never) => Handler;
@@ -153,7 +154,7 @@ const projectAdministrator = { subject: "admin-subject", admin: true };
 /** Registers project "payments" at a revision and, unless told not to, binds the test channel to it. */
 export async function registerSlackProject(
   handler: Handler,
-  options: { revision?: number; connectors?: unknown[]; models?: unknown; bind?: boolean; extraRepositories?: unknown[]; readiness?: unknown[] } = {},
+  options: { revision?: number; connectors?: unknown[]; models?: unknown; bind?: boolean; extraRepositories?: unknown[]; readiness?: unknown[]; developerTasks?: unknown } = {},
 ): Promise<void> {
   const revision = options.revision ?? 1;
   const registered = await call(handler, {
@@ -172,6 +173,7 @@ export async function registerSlackProject(
         readiness: options.readiness ?? [],
         orchestratorInstructions: `Delegate work (revision ${revision}).`,
         ...(options.models ? { models: options.models } : {}),
+        ...(options.developerTasks === undefined ? {} : { developerTasks: options.developerTasks }),
         ...(options.connectors ? { integrations: { connectors: options.connectors } } : {}),
       },
       runtimeBinding: {
