@@ -1,6 +1,6 @@
 import { readFile, realpath } from "node:fs/promises";
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import { AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, WorkerInvocationSchema, WORKFLOW_PLAN_MAX_BYTES, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, parsePlanDocument, redactText, reportStatus, type CheckReport, type PlanDocumentKind, type CandidateRepository, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation } from "@agentx/contracts";
+import { AGENTX_PREAMBLE_VERSION, PLAN_DOCUMENT_INFO_STRING, WorkerInvocationSchema, WORKFLOW_NO_CODE_CHANGE_MESSAGE, WORKFLOW_PLAN_MAX_BYTES, agentXError, agentxPreambleSha256, createCandidateManifest, parseAgentClaim, parsePlanDocument, redactText, reportStatus, type CheckReport, type PlanDocumentKind, type CandidateRepository, type WorkflowFeedbackReviewReport, type WorkflowReviewReport, type WorkerInvocation } from "@agentx/contracts";
 import type { BashOperations } from "@earendil-works/pi-coding-agent";
 import { publishWorkspaceDiff, recorderFingerprint, workspaceFingerprint, type ArtifactSink } from "./artifacts.js";
 import { WorkspaceConversationStore, type ConversationRecord } from "./conversations.js";
@@ -28,7 +28,7 @@ import type { PreparationManifest } from "./prepare.js";
 import { WorkerOperationCancelledError, type WorkerCancellationController } from "./cancel.js";
 import type { FeedbackApprovalAuthorizer, FeedbackBundleReader } from "./callback-client.js";
 import { readCheckHistory, restoreCheckHistory } from "./verification/check-history.js";
-import { readCandidateRepositories, type CandidateRepositoryInput } from "./verification/candidate.js";
+import { candidateUnchangedSinceBase, readCandidateRepositories, type CandidateRepositoryInput } from "./verification/candidate.js";
 import { runWorkflowFeedbackReview, runWorkflowReviews } from "./verification/review.js";
 import { CHECK_ROUND_BUDGET_MS, createCheckRunners, planChecks, runChecks, type CheckPlan, type CheckRunners } from "./verification/checks.js";
 import { assistantText, checksArtifactContent, compactCheckReport, finalCheckReport, verificationExtension } from "./verification/extension.js";
@@ -577,6 +577,10 @@ export async function runTaskInvocation(
       const workflowCandidateRepositories = invocation.payload.workflowMode === "IMPLEMENT"
         ? await readCandidateRepositories(workflowRepositories)
         : undefined;
+      // A coding run that left the code as the task started has nothing to check or publish: the owner is told so.
+      if (workflowCandidateRepositories !== undefined && await candidateUnchangedSinceBase(workflowRepositories, workflowCandidateRepositories)) {
+        throw agentXError("CONFIG_INVALID", WORKFLOW_NO_CODE_CHANGE_MESSAGE);
+      }
       await events.append("result", {
         status: "SUCCEEDED",
         conversationId,

@@ -7,6 +7,8 @@ const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const ActorIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
 export const WORKFLOW_PLAN_MAX_BYTES = 32_768;
 /** Shown to the owner when the code no longer descends from the commit the task started from. */
+/** The worker's refusal when a coding run leaves every repository as it was when the task started: nothing to check or publish. */
+export const WORKFLOW_NO_CODE_CHANGE_MESSAGE = "the coding run left the code as it was when the task started";
 export const WORKFLOW_HISTORY_REWRITTEN_MESSAGE = "The change history was rewritten past where this task started, so AgentX can't compare it. Ask for the change again in a new task.";
 
 /** Shown to the owner when AgentX gave up starting the reviews on its own; Retry reviews starts them. */
@@ -32,6 +34,8 @@ export const WORKFLOW_BLOCK_REASONS = {
   /** Review only: AgentX's rerun of the agent's own tests found one that passed before and fails now. */
   regressionFound: "A test that passed before this change fails now. Send it back to coding, or close the task.",
   repositoriesIncomplete: "AgentX couldn't find every repository in the final code. Retry coding, or close the task.",
+  /** The coding run finished, but the code is still what the task started from (WORKFLOW_NO_CODE_CHANGE_MESSAGE). */
+  noCodeChanged: "Coding finished, but no code changed, so there is nothing to check or open as a pull request. Retry coding, or close the task.",
   codeChangedAfterChecks: "The code changed after its checks ran. Run the checks again on the latest code.",
   startUnrecorded: "AgentX could not record where this change started. Close the task and start a new one.",
   startUnconfirmed: "AgentX could not confirm the task's starting commit on GitHub.",

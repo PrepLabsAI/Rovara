@@ -44,6 +44,7 @@ import {
   completeWorkflowFeedbackReview,
   createCandidateManifest,
   WORKFLOW_HISTORY_REWRITTEN_MESSAGE,
+  WORKFLOW_NO_CODE_CHANGE_MESSAGE,
   WORKFLOW_BLOCK_REASONS,
   WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE,
   WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE,
@@ -6001,6 +6002,7 @@ async function completedWorkflowItems(
   if (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS") {
     if (terminalStatus !== "SUCCEEDED") {
       next = blockWorkflow(task.workflow, terminalError?.includes(WORKFLOW_HISTORY_REWRITTEN_MESSAGE) === true ? WORKFLOW_HISTORY_REWRITTEN_MESSAGE
+        : terminalError?.includes(WORKFLOW_NO_CODE_CHANGE_MESSAGE) === true ? WORKFLOW_BLOCK_REASONS.noCodeChanged
         : workflowRunEndedReason(operation.workflowMode, terminalStatus), now);
     } else {
       const reported = result !== null && typeof result === "object" ? result as Record<string, unknown> : {};

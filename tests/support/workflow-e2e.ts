@@ -348,6 +348,8 @@ export async function createWorkflowE2E(options: {
     const credential = await createRepositoryCredentialProvider({ controlPlaneUrl: CONTROL_PLANE_URL, invocation, fetchImplementation: workerFetch(handler) })(repository);
     // The commit goes on the base the broker pinned for the task, as the worker builds it.
     if (payload.workflowBaseCommit !== baseCommit) throw new Error(`the publish request names base ${String(payload.workflowBaseCommit)}, not the task's base ${baseCommit}`);
+    // The worker's own refusal (publish.ts): a workspace still at the base's tree has nothing to publish.
+    if (tree === github.commits.get(baseCommit)) throw new Error("repository has no changes to publish");
     const commit = await git(["commit-tree", tree, "-p", payload.workflowBaseCommit, "-m", `AgentX: ${payload.title}`]);
     // The worker leaves the workspace on the published commit (same tree, new commit), so later reads see HEAD moved.
     await git(["checkout", "--force", "-B", payload.headBranch, commit]);
@@ -481,9 +483,14 @@ export async function createWorkflowE2E(options: {
     invocations.push(invocation);
     // What the owner had decided when this run started, for the invariant that only an owner's click changes code.
     const owning = db.find((item) => item.entityType === "DEVELOPER_TASK" && item.workspaceId === invocation.workspaceId)[0]?.workflow as Partial<WorkflowSnapshot> | undefined;
+    // A Retry coding press: the broker records the owner's own request for this run as an accepted "continue" turn.
+    const owner = db.find((item) => item.entityType === "DEVELOPER_TASK" && item.workspaceId === invocation.workspaceId)[0]?.slackUserId;
+    const ownerRetry = owner !== undefined && db.find((item) => item.operationId === invocation.operationId && item.action === "continue" && item.outcome === "accepted"
+      && (item.developer as { slackUserId?: unknown } | undefined)?.slackUserId === owner).length > 0;
     ledger.push({ operationId: invocation.operationId, kind: invocation.kind, ...(invocation.kind === "task" && invocation.payload.workflowMode !== undefined ? { mode: invocation.payload.workflowMode } : {}),
       ownerDecisions: (owning?.decisions ?? []).filter((decision) => decision.actorRole === "TASK_OWNER").length,
-      feedbackApprovals: (owning?.feedbackDecisions ?? []).filter((decision) => decision.decision === "APPROVE").length });
+      feedbackApprovals: (owning?.feedbackDecisions ?? []).filter((decision) => decision.decision === "APPROVE").length,
+      ...(ownerRetry ? { ownerRetry: true } : {}) });
     // The code each review run is given: the workspace as it is when the run starts.
     if (invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW") reviewedTrees.push(await workspaceTree(`review-${invocation.operationId}`));
     const callbacks = createWorkerCallbackSinks({ controlPlaneUrl: CONTROL_PLANE_URL, invocation, fetchImplementation: workerFetch(handler) });

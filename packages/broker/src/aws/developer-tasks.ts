@@ -1979,7 +1979,8 @@ function taskPageStage(workflow: WorkflowSnapshot | undefined, closed: boolean, 
       : { status: "Waiting for the owner's approval", nextStep: `The task owner approves or requests changes ${inSlack}.` };
     case "PLAN_REVIEW/BLOCKED": return { status: `Stopped before approval of the ${name}`, nextStep: `Close the task ${inSlack} and start again.` };
     case "IMPLEMENT/READY": case "IMPLEMENT/RUNNING": return { status: "Writing the code", nextStep: "The checks and reviews run when coding finishes." };
-    case "IMPLEMENT/BLOCKED": return { status: "Coding stopped before it finished", nextStep: `Retry coding or close the task ${inSlack}.` };
+    case "IMPLEMENT/BLOCKED": return { status: workflow.blockReason === WORKFLOW_BLOCK_REASONS.noCodeChanged ? "Coding finished, but no code changed" : "Coding stopped before it finished",
+      nextStep: `Retry coding or close the task ${inSlack}.` };
     case "VERIFY/READY": case "VERIFY/RUNNING": return { status: "Running the checks", nextStep: "The code and security reviews start when the checks pass." };
     case "VERIFY/BLOCKED": return { status: "The checks didn't pass or couldn't run", nextStep: `Send it back to coding, retry the checks, or close the task ${inSlack}.` };
     case "REVIEW/READY": case "REVIEW/WAITING": case "REVIEW/RUNNING": return { status: "Code and security reviews are running", nextStep: "A draft pull request opens when both pass." };
