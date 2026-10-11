@@ -67,6 +67,7 @@ import { SLACK_CHANNEL, SLACK_TEAM, call, orchestratorPrincipal, registerSlackPr
 import { SlackPostError } from "../../packages/broker/src/aws/slack-web.js";
 import { StrictSlackWeb } from "./strict-slack.js";
 import { FakeGitHub, type FakeGitHubOptions } from "./workflow-e2e-github.js";
+import { trackJourney, type JourneyLedgerEntry } from "./workflow-e2e-invariants.js";
 
 const execFile = promisify(execFileCallback);
 
@@ -469,11 +470,22 @@ export async function createWorkflowE2E(options: {
 
   /** Every invocation the worker was given, as the broker queued it (after any delivery downgrade). */
   const invocations: WorkerInvocation[] = [];
+  /** Per run, in order: its kind and mode, and how many owner decisions and feedback approvals the task held when it started. */
+  const ledger: JourneyLedgerEntry[] = [];
+  /** The workspace tree each review run was given. */
+  const reviewedTrees: string[] = [];
   const runInvocation = async (queued: WorkerInvocation): Promise<void> => {
     // An old broker: the fields it did not know are not in the payload at all.
     const invocation = strippedFields.length === 0 ? queued
       : { ...queued, payload: Object.fromEntries(Object.entries(queued.payload).filter(([key]) => !strippedFields.includes(key))) } as WorkerInvocation;
     invocations.push(invocation);
+    // What the owner had decided when this run started, for the invariant that only an owner's click changes code.
+    const owning = db.find((item) => item.entityType === "DEVELOPER_TASK" && item.workspaceId === invocation.workspaceId)[0]?.workflow as Partial<WorkflowSnapshot> | undefined;
+    ledger.push({ operationId: invocation.operationId, kind: invocation.kind, ...(invocation.kind === "task" && invocation.payload.workflowMode !== undefined ? { mode: invocation.payload.workflowMode } : {}),
+      ownerDecisions: (owning?.decisions ?? []).filter((decision) => decision.actorRole === "TASK_OWNER").length,
+      feedbackApprovals: (owning?.feedbackDecisions ?? []).filter((decision) => decision.decision === "APPROVE").length });
+    // The code each review run is given: the workspace as it is when the run starts.
+    if (invocation.kind === "task" && invocation.payload.workflowMode === "REVIEW") reviewedTrees.push(await workspaceTree(`review-${invocation.operationId}`));
     const callbacks = createWorkerCallbackSinks({ controlPlaneUrl: CONTROL_PLANE_URL, invocation, fetchImplementation: workerFetch(handler) });
     const { operationId } = invocation;
     const failure = takeFault(failures, invocation);
@@ -757,7 +769,7 @@ export async function createWorkflowE2E(options: {
   const mcpClients = new Map<string, Awaited<ReturnType<typeof signedInClient>>>();
 
   let sequence = 0;
-  return {
+  const journey = {
     /** Runs, as the PlanEvidence Lambda would, every job the broker started since the last call; answers what each did. */
     async runPlanEvidenceJobs(): Promise<PlanEvidenceRunOutcome[]> {
       const outcomes: PlanEvidenceRunOutcome[] = [];
@@ -807,6 +819,10 @@ export async function createWorkflowE2E(options: {
       }
     },
     db, s3, handler, slack, github, repoDirectory, baseCommit, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs,
+    ledger, reviewedTrees, briefLimit,
+
+    /** Delivers every notice the table's writes have queued (the stream, then the queue), without running any worker. */
+    deliverNotices: pumpNotices,
 
     /**
      * A signed Events API callback for a message in the test thread; answers the HTTP status. `subtype` and `botId` make it
@@ -1070,6 +1086,8 @@ export async function createWorkflowE2E(options: {
       return { statusCode: response.statusCode, body: JSON.parse(response.body) as Record<string, unknown> };
     },
   };
+  trackJourney(journey);
+  return journey;
 }
 
 export type WorkflowE2E = Awaited<ReturnType<typeof createWorkflowE2E>>;

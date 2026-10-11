@@ -86,6 +86,8 @@ export class FakeDynamoDb {
     return this.reorder(structuredClone(value));
   }
   private readonly listeners = new Set<(change: { before?: Item; after?: Item }) => void>();
+  /** Every request the table refused as DynamoDB would (ValidationException), in order: a correct product causes none. */
+  readonly refusals: Array<{ command: string; message: string }> = [];
   /** Constructor names of every command sent, in order (spec 025 A3: no route scans). */
   private readonly sent: string[] = [];
 
@@ -126,21 +128,30 @@ export class FakeDynamoDb {
   send = async (command: Command): Promise<unknown> => {
     this.sent.push(command.constructor.name);
     // DynamoDB checks a request's expression attributes before it does anything else, each transaction entry on its own.
-    if (this.validateExpressions) {
-      if (command.constructor.name === "TransactWriteCommand") {
-        for (const entry of (command.input.TransactItems ?? []) as Array<Record<string, Record<string, unknown>>>) {
-          assertDynamoExpressionAttributes(Object.values(entry)[0] ?? {});
+    try {
+      if (this.validateExpressions) {
+        if (command.constructor.name === "TransactWriteCommand") {
+          for (const entry of (command.input.TransactItems ?? []) as Array<Record<string, Record<string, unknown>>>) {
+            assertDynamoExpressionAttributes(Object.values(entry)[0] ?? {});
+          }
+        } else {
+          assertDynamoExpressionAttributes(command.input ?? {});
         }
-      } else {
-        assertDynamoExpressionAttributes(command.input ?? {});
       }
+      return await this.execute(command);
+    } catch (error) {
+      if (error instanceof Error && error.name === "ValidationException" && (error as { injected?: boolean }).injected !== true) this.refusals.push({ command: command.constructor.name, message: error.message });
+      throw error;
     }
+  };
+
+  private execute = async (command: Command): Promise<unknown> => {
     const fault = this.faults.find((candidate) => candidate.remaining > 0
       && (candidate.command === undefined || candidate.command === command.constructor.name)
       && (candidate.match === undefined || candidate.match(command.input)));
     if (fault !== undefined) {
       fault.remaining -= 1;
-      throw Object.assign(new Error(fault.error.message ?? fault.error.name), { name: fault.error.name, $metadata: {}, ...(fault.error.cancellationReasons === undefined ? {} : { CancellationReasons: fault.error.cancellationReasons }) });
+      throw Object.assign(new Error(fault.error.message ?? fault.error.name), { name: fault.error.name, $metadata: {}, injected: true, ...(fault.error.cancellationReasons === undefined ? {} : { CancellationReasons: fault.error.cancellationReasons }) });
     }
     await Promise.resolve();
     const input = command.input;

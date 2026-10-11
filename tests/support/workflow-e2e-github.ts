@@ -53,6 +53,8 @@ export class FakeGitHub {
   readonly appTokens: Array<{ token: string; permissions: Record<string, string> }> = [];
   /** The kind of worker invocation now running, or undefined between invocations. */
   during: string | undefined;
+  /** Every push that moved a branch, in order, with the kind of worker invocation running when it was (AgentX's, or someone else's). */
+  readonly pushLog: Array<{ branch: string; commit: string; tree: string; parents: string[]; token: string; during: string | undefined }> = [];
 
   private prHeadReads: number;
   private nextId = { discussion: 1_210_000_001, reviewComment: 1_780_000_001, review: 2_340_000_001, foreign: 1 };
@@ -97,6 +99,7 @@ export class FakeGitHub {
   }
 
   private moveBranch(headBranch: string, commit: string, tree: string, parents: readonly string[], token: string): void {
+    this.pushLog.push({ branch: headBranch, commit, tree, parents: [...parents], token, during: this.during });
     this.pushes.set(headBranch, { commit, tree, token });
     this.commits.set(commit, tree);
     this.parents.set(commit, [...parents]);
