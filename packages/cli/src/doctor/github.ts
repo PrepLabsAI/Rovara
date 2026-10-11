@@ -6,15 +6,20 @@ import { plainMessage } from "../output.js";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
 import { jsonObject } from "./secrets.js";
 
-const DELIVERY_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+/** GitHub keeps only about 3 days of an App's webhook deliveries, so nothing older is ever listed. */
+const DELIVERY_WINDOW_MS = 3 * 24 * 60 * 60 * 1000;
 
 /**
- * Whether GitHub's webhook deliveries reach AgentX: ok when the latest delivery in the last 7 days went through; a warning
+ * Whether GitHub's webhook deliveries reach AgentX: ok when the latest delivery in the last 3 days went through; a warning
  * when there was none (the hook may be switched off, or nothing happened) or the latest one failed. Only the time, status
- * and HTTP code of each delivery are read.
+ * and HTTP code of each delivery are read. GitHub's delivery list does not say where each delivery went, so while the
+ * App's webhook URL is not AgentX's, deliveries are never reported ok.
  */
-async function deliveriesCheck(context: DoctorContext, jwt: string, settingsPage: string): Promise<DoctorCheck> {
+async function deliveriesCheck(context: DoctorContext, jwt: string, settingsPage: string, hook: { url: string | undefined; expected: string; fix: string }): Promise<DoctorCheck> {
   const name = "GitHub webhook deliveries";
+  if (hook.url !== hook.expected) {
+    return check("github", name, "warn", hook.url === undefined ? `GitHub has nowhere to deliver events; they should go to ${hook.expected}` : `GitHub's deliveries go to ${hook.url}, not ${hook.expected}`, hook.fix);
+  }
   const fix = `check that Active is on at ${settingsPage}; GitHub lists each delivery at ${settingsPage}/advanced`;
   let deliveries;
   try {
@@ -28,9 +33,9 @@ async function deliveriesCheck(context: DoctorContext, jwt: string, settingsPage
     .filter((delivery) => Number.isFinite(delivery.at) && delivery.at >= since)
     .sort((left, right) => right.at - left.at);
   const latest = recent[0];
-  if (latest === undefined) return check("github", name, "warn", "GitHub has delivered no event to AgentX in the last 7 days", fix);
+  if (latest === undefined) return check("github", name, "warn", "no successful deliveries to AgentX in the last 3 days", fix);
   if (latest.statusCode >= 200 && latest.statusCode < 400 && latest.status === "OK") {
-    return check("github", name, "ok", "GitHub delivered an event to AgentX in the last 7 days");
+    return check("github", name, "ok", "GitHub delivered an event to AgentX in the last 3 days");
   }
   const answer = latest.statusCode > 0 ? `HTTP ${latest.statusCode}` : "it got no answer";
   return check("github", name, "warn", `GitHub's latest delivery to AgentX failed (${answer})`, fix);
@@ -96,10 +101,12 @@ export async function githubWebhookChecks(context: DoctorContext): Promise<Docto
   const upgradeFix = `run agentx --env ${env} upgrade: it`;
   const checks: DoctorCheck[] = [];
   let settingsPage: string | undefined;
+  let hookUrl: string | undefined;
   const expectedUrl = githubWebhookUrl(settings.controlPlaneUrl);
   const jwt = githubAppJwt({ appId: app.appId, privateKey: app.privateKey, nowSeconds: Math.floor(services.now() / 1000) });
   try {
     const hook = await services.github.getHookConfig(jwt);
+    hookUrl = hook.url;
     checks.push(hook.url === expectedUrl
       ? check("github", "GitHub webhook", "ok", `the App sends events to ${expectedUrl}`)
       : check("github", "GitHub webhook", "warn", hook.url === undefined ? `the App has no webhook URL; it should send events to ${expectedUrl}` : `the App sends events to ${hook.url}, not ${expectedUrl}`, `${upgradeFix} points the App's webhook at the control plane`));
@@ -118,6 +125,8 @@ export async function githubWebhookChecks(context: DoctorContext): Promise<Docto
     ? check("github", "GitHub webhook secret", "warn", `${secretName} holds no webhook secret, so GitHub's deliveries cannot be verified`, `${upgradeFix} stores a webhook secret and gives it to GitHub`)
     : check("github", "GitHub webhook secret", "ok", "stored"));
   // Without the App's settings page (GitHub could not be asked above) the warning already says to try again.
-  if (settingsPage !== undefined) checks.push(await deliveriesCheck(context, jwt, settingsPage));
+  if (settingsPage !== undefined) {
+    checks.push(await deliveriesCheck(context, jwt, settingsPage, { url: hookUrl, expected: expectedUrl, fix: `${upgradeFix} points the App's webhook at the control plane` }));
+  }
   return checks;
 }

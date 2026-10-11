@@ -290,7 +290,7 @@ describe("doctor: GitHub webhook", () => {
       ["GitHub webhook", "ok", `the App sends events to ${EXPECTED_URL}`],
       ["GitHub webhook", "ok", "subscribed to pull request and comment events; check that Active is on at https://github.com/organizations/acme/settings/apps/agentx-acme-staging"],
       ["GitHub webhook secret", "ok", "stored"],
-      ["GitHub webhook deliveries", "ok", "GitHub delivered an event to AgentX in the last 7 days"],
+      ["GitHub webhook deliveries", "ok", "GitHub delivered an event to AgentX in the last 3 days"],
     ]);
     expect(text(checks)).not.toContain(WEBHOOK_SECRET);
   });
@@ -301,10 +301,11 @@ describe("doctor: GitHub webhook", () => {
     const deliveriesCheck = async (deliveries: Array<{ deliveredAt: string; status: string; statusCode: number }>) =>
       (await githubWebhookChecks(contextWith({ hookUrl: EXPECTED_URL, deliveries }))).find((entry) => entry.name === "GitHub webhook deliveries")!;
 
-    it("warns, naming where Active is switched on, when GitHub delivered nothing in the last 7 days", async () => {
-      for (const deliveries of [[], [{ deliveredAt: hoursAgo(8 * 24), status: "OK", statusCode: 200 }]]) {
+    // GitHub keeps only about 3 days of deliveries, so an older one is never listed and the window is 3 days.
+    it("warns, naming where Active is switched on, when GitHub made no successful delivery in the last 3 days", async () => {
+      for (const deliveries of [[], [{ deliveredAt: hoursAgo(4 * 24), status: "OK", statusCode: 200 }]]) {
         const found = await deliveriesCheck(deliveries);
-        expect(found).toMatchObject({ status: "warn", detail: "GitHub has delivered no event to AgentX in the last 7 days" });
+        expect(found).toMatchObject({ status: "warn", detail: "no successful deliveries to AgentX in the last 3 days" });
         expect(found.fix).toBe(`check that Active is on at ${SETTINGS_PAGE}; GitHub lists each delivery at ${SETTINGS_PAGE}/advanced`);
       }
     });
@@ -320,6 +321,14 @@ describe("doctor: GitHub webhook", () => {
     it("is ok when the latest recent delivery went through, whatever order GitHub lists them in", async () => {
       const found = await deliveriesCheck([{ deliveredAt: hoursAgo(30), status: "Bad Gateway", statusCode: 502 }, { deliveredAt: hoursAgo(2), status: "OK", statusCode: 200 }]);
       expect(found).toMatchObject({ status: "ok" });
+    });
+
+    it("does not report deliveries ok while the App's webhook points somewhere else, and names the expected URL", async () => {
+      const checks = await githubWebhookChecks(contextWith({ hookUrl: "https://old.example.test/hook", deliveries: [{ deliveredAt: hoursAgo(1), status: "OK", statusCode: 200 }] }));
+      const found = checks.find((entry) => entry.name === "GitHub webhook deliveries")!;
+      expect(found.status).toBe("warn");
+      expect(found.detail).toBe(`GitHub's deliveries go to https://old.example.test/hook, not ${EXPECTED_URL}`);
+      expect(found.fix).toBe("run agentx --env staging upgrade: it points the App's webhook at the control plane");
     });
 
     it("warns, and does not fail, when the deliveries cannot be read", async () => {
