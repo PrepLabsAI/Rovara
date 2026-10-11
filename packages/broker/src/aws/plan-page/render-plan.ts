@@ -18,6 +18,7 @@ export interface RenderPlanInput {
   /** When the document was stored and the time now (epoch milliseconds): the current version's code is still being loaded for a short while after it was stored. */
   createdAt?: string; now?: number;
   previous?: { version: number; plan: PlanDocument };
+  /** The latest approved earlier version of this same document (each document has its own claim numbers): a claim reworded since is badged. */
   approvedEarlier?: PlanDocument;
   checks?: Array<{ id?: string; label: string; proposed: boolean; proves: string[]; status: string }>;
   /** Checks the task knows that the table does not list (an optional check not chosen): their threads stay with the checks. */

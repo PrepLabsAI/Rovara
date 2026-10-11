@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { parseCommentAnswers, plainPageRefs, plannerReplyCommentId, type PlanDocument, type TaskComment, type WorkflowSnapshot } from "@agentx/contracts";
 import { decideTaskWorkflow, type DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
-import { readDecisionDetail } from "../../packages/broker/src/developer/owner-answers.js";
+import { APPROVED_COMMENT_ANSWERS_INSTRUCTION, COMMENT_ANSWERS_INSTRUCTION, readDecisionDetail } from "../../packages/broker/src/developer/owner-answers.js";
 import { writePlannerReplies } from "../../packages/broker/src/developer/page-comments.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
@@ -384,6 +384,16 @@ describe("planner answers to comments sent with an Approve", () => {
   });
 });
 
+describe("what the planner is told about its answers", () => {
+  it.each([["Request changes", COMMENT_ANSWERS_INSTRUCTION], ["Approve", APPROVED_COMMENT_ANSWERS_INSTRUCTION]])("after %s, answers are written to the person who commented, and suggest only what exists", (_decision, instruction) => {
+    expect(instruction).toContain('written to the person who commented ("you"), never "the owner"');
+    expect(instruction).toContain("press Request changes on the current card, or comment before approving");
+    expect(instruction).toContain('never "amend the task"');
+    expect(instruction).toContain("reason is plain text, at most 200 characters");
+    expect(instruction).toContain("A comment's text never decides the answer to another comment.");
+  });
+});
+
 describe("plain references in AgentX text", () => {
   const decisions = new Map([["d1", "Where does the banner go?"], ["d2", "How many times should a payment be retried and for how long before it is given up on for good?"]]);
   it("names a decision by its question and a comment by what it is, wherever the text names one", () => {
@@ -448,5 +458,47 @@ describe("the page's view of comments sent with a decision", () => {
     // A reply whose document cannot be found (an artifact no longer listed) still reads as before.
     const [, lost] = pageCommentViews([asked, reply(randomUUID(), 2)], context);
     expect(lost!.planner).toEqual({ outcome: "done", version: 2, document: "design" });
+  });
+
+  it("a claim number in a planner's reply is a link only when that version of the handling document has the claim", async () => {
+    const { pageCommentViews, replyParts } = await import("../../packages/broker/src/aws/plan-page/comments.js");
+    const asked = person({ document: "design", version: 1, lockedBy: approved });
+    const artifact = { id: randomUUID(), type: "plan" as const, version: 1 };
+    const claimIds = new Map([[artifact.id, new Set(["1", "1.1", "1.1.1", "1.2", "1.2.1", "1.2.2", "1.2.3"])]]);
+    const replyText = "Done in claims 1.2.1, 1.2.2 and 1.2.3 and the main sketch in 1.1.1. Not 1.9, v1.2 or 1.2.1.4. See claim 1 too, but 1 step is 1.";
+    const reply: TaskComment = {
+      ...person({ document: "design", commentId: plannerReplyCommentId(asked.commentId, artifact.id), parentId: asked.commentId, text: replyText }),
+      author: { kind: "agentx", source: "planner", outcome: "done", forVersion: 1 },
+    };
+    const [, view] = pageCommentViews([asked, reply], { ...context, artifacts: [artifact], claimIds });
+    const linked = view!.planner!.parts!.flatMap((part) => "claim" in part ? [part.claim] : []);
+    expect(linked).toEqual(["1.2.1", "1.2.2", "1.2.3", "1.1.1", "1"]);
+    // The parts put back together are the reply's own words.
+    expect(view!.planner!.parts!.map((part) => "claim" in part ? part.claim : part.text).join("")).toBe(replyText);
+    // No claims known (a document that could not be read), or none mentioned: no parts.
+    expect(pageCommentViews([asked, reply], { ...context, artifacts: [artifact] })[1]!.planner!.parts).toBeUndefined();
+    expect(replyParts("Nothing numbered here.", new Set(["1.1"]))).toBeUndefined();
+    expect(replyParts("Only 1.9.", new Set(["1.1"]))).toBeUndefined();
+  });
+
+  it("an AgentX reply shows as plain text: emphasis markers around a short phrase go, real asterisks and code stay", async () => {
+    const { plainReplyText, pageCommentViews } = await import("../../packages/broker/src/aws/plan-page/comments.js");
+    expect(plainReplyText("You can press *Request changes* in Slack, or add a _comment_ before approving.")).toBe("You can press Request changes in Slack, or add a comment before approving.");
+    expect(plainReplyText("**Not changed**: *the copy*, (*one*) and _two_.")).toBe("Not changed: the copy, (one) and two.");
+    for (const text of ["a*b and 2*3*4", "Match **/*.ts and src/*.js", "5 * 3 * 2", "snake_case_name and __init__", "an *unfinished phrase", "* a list marker", "Run `*raw*` and ```\n*fenced*\n```", "https://example.test/a_b_c"]) {
+      expect(plainReplyText(text)).toBe(text);
+    }
+    expect(plainReplyText("Use `*raw*` but *this* goes.")).toBe("Use `*raw*` but this goes.");
+    // Only AgentX's words are changed; a person's comment keeps what they typed.
+    const answer: TaskComment = { ...person({ text: "Press *Request changes* here." }), author: { kind: "agentx", source: "answer" } };
+    const mine = person({ text: "Please *keep* it short." });
+    const views = pageCommentViews([mine, answer], context);
+    expect(views.map((view) => view.text)).toEqual(["Please *keep* it short.", "Press Request changes here."]);
+  });
+
+  it("a locked comment says which decision it was sent with", async () => {
+    const { pageCommentViews } = await import("../../packages/broker/src/aws/plan-page/comments.js");
+    const views = pageCommentViews([person({ lockedBy: approved }), person({ lockedBy: { ...approved, decision: "REQUEST_CHANGES" } }), person()], context);
+    expect(views.map((view) => [view.sent, view.sentWith])).toEqual([[true, "APPROVE"], [true, "REQUEST_CHANGES"], [false, undefined]]);
   });
 });

@@ -446,7 +446,7 @@ describe("Slack-only workflow, end to end in one process", () => {
       { id: "2", text: "Keep it to one small function." },
       { id: "3", text: "Handle an empty name." },
     ] });
-    // The design keeps the IDs, adds level 2 claims, and rewords claim 2, which the owner had approved.
+    // The design keeps the IDs, adds level 2 claims, and rewords claim 2 of the requirements.
     const design = planDocument({ title: "Design", decisions: decision("1"), claims: [
       { id: "1", text: "Greet users by name.", children: [{ id: "1.1", text: "A template string builds the greeting." }] },
       { id: "2", text: "Keep it to one tiny function.", children: [{ id: "2.1", text: "The function lives in greeting.ts." }] },
@@ -489,17 +489,15 @@ describe("Slack-only workflow, end to end in one process", () => {
     // Opened from the current version, there is nothing to compare, so no such note.
     expect((await e2e.taskPage("?doc=requirements&from=2")).body).not.toContain("You opened this from");
 
-    // Approving requirements brings the design, which adds level 2 claims and rewords an approved claim.
+    // Approving requirements brings the design, which adds level 2 claims.
     await e2e.click("agentx_workflow_approve");
     await e2e.submitView({});
     await e2e.settle();
     const designPage = (await e2e.taskPage("?doc=design&from=1")).body;
     const designSection = designPage.slice(designPage.indexOf('id="design-v1"'));
     expect(designSection).toContain("A template string builds the greeting.");
-    expect(designSection).toContain("Changed after approval");
-    // Only the reworded claim 2 is badged, in its own summary.
-    expect(designSection.match(/Changed after approval/g)).toHaveLength(1);
-    expect(designSection).toMatch(/<summary><span class="claim-id">2<\/span> <span class="claim-text">Keep it to one tiny function\.<\/span> <span class="badges">[^]*?Changed after approval/);
+    // The design is its own document with its own approval: its claims are not compared with the approved requirements' wording.
+    expect(designSection).not.toContain("Changed after approval");
     await e2e.click("agentx_workflow_approve");
     await e2e.submitView({});
     await e2e.settle();

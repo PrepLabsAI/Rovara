@@ -570,6 +570,35 @@ describe("comments, suggestions and answers on the plan page", () => {
     expect(why).not.toContain("comment c1");
   });
 
+  it("a reply's claim numbers are links to that version's claims, escaped, with the words around them intact", async () => {
+    const agentx = { kind: "agentx", name: "AgentX", owner: false, you: false } as const;
+    const parent = comment();
+    const parts = [{ text: "Changed <b>in</b> claims " }, { claim: "1.2.1" }, { text: ", " }, { claim: "1.2.2" }, { text: " and the sketch in " }, { claim: "1.1.1" }, { text: "." }];
+    const handled = comment({ parentId: parent.id, author: agentx, text: "ignored when parts are given", planner: { outcome: "done", version: 1, document: "plan", in: "plan", parts } });
+    const html = await renderPlanDocument(input({ comments: [parent, handled], access: commenting }));
+    expect(html).toContain('<p class="comment-text">Done in the coding plan: Changed &lt;b&gt;in&lt;/b&gt; claims <a class="claim-link" href="#coding-plan-v1-1-2-1">1.2.1</a>, '
+      + '<a class="claim-link" href="#coding-plan-v1-1-2-2">1.2.2</a> and the sketch in <a class="claim-link" href="#coding-plan-v1-1-1-1">1.1.1</a>.</p>');
+    // A reply with no parts is plain escaped text.
+    const plain = comment({ parentId: parent.id, author: agentx, text: "See 1.2.1.", planner: { outcome: "done", version: 1, document: "plan", in: "plan" } });
+    expect(await renderPlanDocument(input({ comments: [parent, plain], access: commenting }))).toContain("Done in the coding plan: See 1.2.1.</p>");
+  });
+
+  it("the note under a locked comment names the decision it was sent with, and is the author's alone", async () => {
+    const owner = { kind: "person", name: "Priya", owner: true, you: true } as const;
+    const teammate = { kind: "person", name: "Sam Lee", owner: false, you: true } as const;
+    const note = async (overrides: Partial<PageCommentView>) => {
+      const html = await renderPlanDocument(input({ comments: [comment({ sent: true, ...overrides })], access: commenting }));
+      return /<p class="comment-sent">(.*?)<\/p>/.exec(html)?.[1];
+    };
+    expect(await note({ author: owner, sentWith: "APPROVE" })).toBe("Sent with your approval, so it can't be edited.");
+    expect(await note({ author: teammate, sentWith: "APPROVE" })).toBe("Sent with the owner's approval, so it can't be edited.");
+    expect(await note({ author: owner, sentWith: "REQUEST_CHANGES" })).toBe("Sent with Request changes, so it can't be edited.");
+    expect(await note({ author: teammate, sentWith: "REQUEST_CHANGES" })).toBe("Sent with Request changes, so it can't be edited.");
+    // Someone else's comment carries no note, and the old wording is gone.
+    expect(await note({ sentWith: "APPROVE" })).toBeUndefined();
+    expect(await renderPlanDocument(input({ comments: [comment({ author: owner, sent: true, sentWith: "APPROVE" })], access: commenting }))).not.toContain("so it can't be changed");
+  });
+
   it("a quote names a person only when the whole comment, or three whole words of it in a row, are quoted; it then shows the comment's own words", async () => {
     const id = "6e0f4b0a-7c1d-4f7e-9a52-0c3f1f3b2a10";
     const other = "7e0f4b0a-7c1d-4f7e-9a52-0c3f1f3b2a10";
@@ -600,7 +629,7 @@ describe("comments, suggestions and answers on the plan page", () => {
     const html = await renderPlanDocument(input({ comments: [deleted, mine, sent], access: commenting }));
     expect(readable(html)).toContain("Comment deleted");
     expect(readable(html)).toContain("(edited)");
-    expect(readable(html)).toContain("Sent with a decision, so it can't be changed.");
+    expect(readable(html)).toContain("Sent with your approval, so it can't be edited.");
     expect(count(html, /class="comment-edit"/g)).toBe(1);
     expect(count(html, /class="comment-delete"/g)).toBe(1);
   });

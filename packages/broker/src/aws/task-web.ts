@@ -195,12 +195,11 @@ async function documentsHtml(view: TaskDocumentView, request: TaskPageRequest): 
     const currentDocument = versions.find((document) => document.current) ?? versions.at(-1)!;
     const earlier = versions.filter((document) => document !== currentDocument).reverse();
     const fromEarlier = requested === entry && request.from !== undefined && request.from < currentDocument.version;
-    // The latest approved structured document of the nearest earlier step: a claim reworded since is badged.
-    let approvedEarlier: PlanDocument | undefined;
-    for (const prior of ANCHORS.slice(0, ANCHORS.indexOf(entry)).reverse()) {
-      const approved = (byKind.get(prior.kind) ?? []).filter((candidate) => candidate.approved).at(-1);
-      if (approved?.format === "structured") { approvedEarlier = approved.plan; break; }
-    }
+    // Each document has its own numbering: a claim is badged only against the latest approved version of the same document before this one.
+    const approvedBefore = (document: TaskDocumentEntry): PlanDocument | undefined => {
+      const approved = versions.filter((candidate) => candidate.approved && candidate.version < document.version).at(-1);
+      return approved?.format === "structured" ? approved.plan : undefined;
+    };
     const render = async (document: TaskDocumentEntry): Promise<string> => {
       if (document.format === "markdown") {
         // A Markdown document takes whole-document comments only, shown on its current version.
@@ -214,6 +213,7 @@ async function documentsHtml(view: TaskDocumentView, request: TaskPageRequest): 
       const checks = entry.kind === "coding plan" && document === currentDocument
         ? view.checks.map((check) => ({ ...(check.id === undefined ? {} : { id: check.id }), label: check.label, proposed: check.proposed === true, proves: check.proves ?? [], status: checkWords(check) })) : undefined;
       const isCurrent = document === currentDocument;
+      const approvedPlan = approvedBefore(document);
       const slice2 = !isCurrent || view.access === undefined ? {} : {
         comments: view.pageComments ?? [],
         suggestions: (view.pageSuggestions ?? []).filter((suggestion) => suggestion.document === entry.planKind)
@@ -233,7 +233,7 @@ async function documentsHtml(view: TaskDocumentView, request: TaskPageRequest): 
         currentVersion: currentDocument.version, plan: document.plan, ...(document.evidence === undefined ? {} : { evidence: document.evidence }),
         ...(document.createdAt === undefined ? {} : { createdAt: document.createdAt }), ...(view.now === undefined ? {} : { now: view.now }),
         ...(before?.format === "structured" ? { previous: { version: before.version, plan: before.plan } } : {}),
-        ...(approvedEarlier === undefined ? {} : { approvedEarlier }),
+        ...(approvedPlan === undefined ? {} : { approvedEarlier: approvedPlan }),
         ...(checks === undefined ? {} : { checks }),
         ...(entry.kind === "coding plan" && isCurrent && view.optionalChecks !== undefined ? { knownChecks: view.optionalChecks.map(({ id, label }) => ({ id, label })) } : {}),
         openWhatChanged: document === currentDocument && fromEarlier,
@@ -332,10 +332,12 @@ function decideBar(view: TaskDocumentView): string {
   if (view.waiting === undefined || view.access === undefined) return "";
   if (!view.access.canDecide) return '<div class="decide-bar" role="region" aria-label="Decide"><p>Only owners decide.</p></div>';
   const count = waitingDocument(view)?.plan.decisions.length ?? 0;
-  const label = count === 0 ? "All answered" : `${count} to answer`;
+  // The buttons act on the waiting document, whichever one the reader has open, so each names it.
+  const name = `${KIND_LABEL[view.waiting.kind].toLowerCase()} v${view.waiting.version}`;
+  // Without the script the count is only a note; the script turns it into the "Next decision" control, or says all are answered.
   return '<div class="decide-bar" role="region" aria-label="Decide">'
-    + `<p><button type="button" id="decide-next" hidden>${label}</button><span id="decide-count">${label}</span></p>`
-    + '<button type="button" id="decide-approve" hidden>Approve</button> <button type="button" id="decide-request-changes" hidden>Request changes</button></div>';
+    + `<p><button type="button" id="decide-next" hidden></button><span id="decide-count">${count === 0 ? "" : `${count} to answer`}</span></p>`
+    + `<button type="button" id="decide-approve" hidden>Approve ${escapeHtml(name)}</button> <button type="button" id="decide-request-changes" hidden>Request changes to ${escapeHtml(name)}</button></div>`;
 }
 
 /** The one confirmation dialog; the page's script fills it with text only. */

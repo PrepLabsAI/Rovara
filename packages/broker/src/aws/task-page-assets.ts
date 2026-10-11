@@ -199,7 +199,9 @@ dialog::backdrop{background:rgba(0,0,0,.4)}
  */
 export const TASK_PAGE_DECIDING_COPY = {
   toAnswer: " to answer",
-  allAnswered: "All answered",
+  allAnswered: "All decisions answered",
+  nextDecision: "Next decision (",
+  closeCount: ")",
   approveTitle: "Approve ",
   changesTitle: "Request changes to ",
   youChose: ": You chose ",
@@ -230,7 +232,9 @@ export const TASK_PAGE_DECIDING_COPY = {
   confirmRemove: "Delete this comment?",
   aComment: "A comment",
   removed: "Comment deleted",
-  sentLocked: "Sent with a decision, so it can't be changed.",
+  sentApproval: "Sent with your approval, so it can't be edited.",
+  sentOwnerApproval: "Sent with the owner's approval, so it can't be edited.",
+  sentChanges: "Sent with Request changes, so it can't be edited.",
   fromVersion: "from v",
   edited: "(edited)",
   owner: "Owner",
@@ -477,10 +481,18 @@ function commentNode(c,shownVersion,isReply){
     var handledIn=has(DOC_ANCHORS,c.planner.in)?c.planner.in:"";
     var handled=handledIn===""?"":COPY.doneIn+DOC_WORDS[handledIn].the;
     var lead=handled===""?(c.planner.outcome==="done"?COPY.done+COPY.becauseColon:COPY.notChanged+" because: "):(c.planner.outcome==="done"?COPY.done:COPY.notChanged)+handled+COPY.becauseColon;
-    article.appendChild(make("p",{"class":"comment-text"},lead+str(c.text)));
     var claim=typeof c.planner.claim==="string"&&CLAIM_ID.test(c.planner.claim)?c.planner.claim:"";
     var where=has(DOC_ANCHORS,c.planner.document)?c.planner.document:"";
     var shown=Number(c.planner.version);
+    var sentence=make("p",{"class":"comment-text"},lead);
+    var parts=arr(c.planner.parts);
+    if(parts.length===0||where===""||!(shown>0))sentence.appendChild(document.createTextNode(str(c.text)));
+    else for(var q=0;q<parts.length;q++){
+      /* A claim number of the version that handled the comment links to that version's own claim. */
+      if(parts[q]&&typeof parts[q].claim==="string"&&CLAIM_ID.test(parts[q].claim))sentence.appendChild(make("a",{"class":"claim-link",href:"#"+claimAnchor(DOC_ANCHORS[where],shown,parts[q].claim)},parts[q].claim));
+      else sentence.appendChild(document.createTextNode(str(parts[q]&&(typeof parts[q].text==="string"?parts[q].text:parts[q].claim))));
+    }
+    article.appendChild(sentence);
     if(claim!==""&&where!==""&&shown>0){
       // The link is to that version's own claim, which a later version may have renumbered.
       var seen=make("p",{"class":"comment-link"},COPY.seeClaim);
@@ -492,7 +504,7 @@ function commentNode(c,shownVersion,isReply){
   else article.appendChild(make("p",{"class":"comment-text"},str(c.text)));
   if(typeof c.agentx==="string"&&has(STATES,c.agentx))article.appendChild(make("p",{"class":"comment-state"},STATES[c.agentx]));
   var yours=!agentx&&c.author.you===true&&c.deleted!==true;
-  if(yours&&c.sent===true)article.appendChild(make("p",{"class":"comment-sent"},COPY.sentLocked));
+  if(yours&&c.sent===true)article.appendChild(make("p",{"class":"comment-sent"},c.sentWith==="REQUEST_CHANGES"?COPY.sentChanges:c.author.owner===true?COPY.sentApproval:COPY.sentOwnerApproval));
   var actions=[];
   if(yours&&c.sent!==true&&canComment){
     actions.push(make("button",{type:"button","class":"comment-edit","data-comment":c.id,"aria-describedby":"comment-"+c.id},COPY.edit));
@@ -914,7 +926,10 @@ if(canDecide&&current&&DOCS[current.anchor]&&docSection&&dialog&&bar.next&&bar.a
 }
 function updateBar(){
   var left=decisions.filter(function(d){return !opened[d.id];}).length;
-  bar.next.textContent=left===0?COPY.allAnswered:left+COPY.toAnswer;
+  /* Decisions left: a control that goes to the next one. None left: a plain note, not a button. */
+  bar.next.hidden=left===0;
+  if(left>0)bar.next.textContent=COPY.nextDecision+left+COPY.toAnswer+COPY.closeCount;
+  if(bar.count){bar.count.textContent=COPY.allAnswered;bar.count.hidden=!(left===0&&decisions.length>0);}
 }
 
 function el(id){return document.getElementById(id);}

@@ -662,8 +662,11 @@ describe("Suite 10: page and auth", () => {
           { comment: refs.get("Keep the banner copy short."), outcome: "not_changed", reason: "The copy is already one short line." },
         ]);
       };
-      const e2e = await waitingPlan({ plan: (latest) => latest.includes("agentx-comment-answers")
-        ? `\`\`\`agentx-comment-answers\n${answers(latest)}\n\`\`\`\n\n${planAnswer(V2)}` : planAnswer(PLAN) });
+      const asked: string[] = [];
+      const e2e = await waitingPlan({ plan: (latest) => {
+        if (latest.includes("agentx-comment-answers")) asked.push(latest);
+        return latest.includes("agentx-comment-answers") ? `\`\`\`agentx-comment-answers\n${answers(latest)}\n\`\`\`\n\n${planAnswer(V2)}` : planAnswer(PLAN);
+      } });
       const sam = await openTaskPage(e2e, SAM, { search: "?doc=coding-plan" });
       await sam.comment("claim:2.1", "Above reads better on a phone.");
       await sam.comment("document", "Keep the banner copy short.");
@@ -676,10 +679,19 @@ describe("Suite 10: page and auth", () => {
       expect(tab.byId("decide-status").textContent).toBe("Sent. AgentX is on the next step.");
       await e2e.settle();
       expect(e2e.slack.lastPostWithAction("agentx_workflow_approve").text).toContain("AgentX answered 2 of 3 comments from v1.");
+      // The planner was told to write to the person who commented, and to suggest only what exists.
+      expect(asked).toHaveLength(1);
+      expect(asked[0]).toContain('written to the person who commented ("you"), never "the owner"');
+      expect(asked[0]).toContain("press Request changes on the current card, or comment before approving");
+      expect(asked[0]).toContain('never "amend the task"');
       const v2 = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
       expect(v2.document.querySelector('[data-comments="claim:2.1"] .replies .comment-text')!.textContent).toBe("Done: Moved the banner above the pay button.");
       expect(v2.document.querySelector('[data-comments="document"] .replies .comment-text')!.textContent).toBe("Not changed because: The copy is already one short line.");
       expect(readable(v2.document.querySelector('[data-comments="claim:1"]')!)).toContain("Not answered");
+      // Sam's comments were sent with Request changes: his page says so, and an owner's own approval is not mentioned.
+      const sentNotes = async (scripts: boolean) => (await openTaskPage(e2e, SAM, { search: "?doc=coding-plan", scripts })).document.querySelectorAll(".comment-sent").map((node) => node.textContent);
+      expect(await sentNotes(false)).toEqual(Array(3).fill("Sent with Request changes, so it can't be edited."));
+      expect(await sentNotes(true)).toEqual(Array(3).fill("Sent with Request changes, so it can't be edited."));
       expect(codingRuns(e2e)).toEqual([]);
     }, 120_000);
   });
@@ -1030,5 +1042,133 @@ describe("Suite 10: comments sent with an approval", () => {
     expect(turns[0]!.systemPrompt).not.toContain("on the card");
     expect(turns[0]!.modelInput).toContain("press Request changes in Slack, or add a comment here before approving");
     expect(turns[0]!.modelInput).toContain("Name a decision by its question, never by a label such as d1");
+  }, 180_000);
+
+  /** Polls the open tab so its script re-renders every thread from the page's JSON (another reader's comment moves the counter). */
+  async function refreshed(e2e: WorkflowE2E, tab: TaskPageTab, section: "design" | "coding-plan"): Promise<void> {
+    const other = await openTaskPage(e2e, SAM, { search: `?doc=${section}` });
+    await commentIn(section, other, "document", `A later thought ${randomUUID().slice(0, 4)}`);
+    await tab.advance(20_000);
+    await tab.settle();
+    expect(tab.requests.some((entry) => entry.method === "GET" && entry.path.endsWith("/task/api/comments"))).toBe(true);
+  }
+
+  /**
+   * A Full task whose requirements, design and coding plan number their claims alike. Maya and Sam comment on the design, Maya
+   * approves it with all three comments, and the coding plan's planner replies to each.
+   */
+  async function approvedDesignWithReplies() {
+    const SAM_TEXT = "Please keep the sketches short.";
+    const requirements = planDocument({ title: "Show a retry banner: requirements", decisions: [], claims: [{ id: "1", text: "People see a retry banner when a payment fails.", children: [
+      { id: "1.1", text: "The banner names the failed payment." }, { id: "1.2", text: "The banner offers a retry." }] }] });
+    const design = planDocument({ title: "Show a retry banner: design", decisions: [], claims: [{ id: "1", text: "People see a retry banner when a payment fails.", children: [
+      { id: "1.1", text: "A banner component reads the payment state." }, { id: "1.2", text: "The retry button calls the payments API." }] }] });
+    const coding = planDocument({ title: "Show a retry banner: coding plan", decisions: [], claims: [{ id: "1", text: "People see a retry banner when a payment fails.", children: [
+      { id: "1.1", text: "Edit the banner component.", children: [{ id: "1.1.1", text: "Sketch of the banner component." }] },
+      { id: "1.2", text: "Wire the retry button.", children: [{ id: "1.2.1", text: "Call the payments API." }, { id: "1.2.2", text: "Show the result." }, { id: "1.2.3", text: "Log the try." }] }] }] });
+    const model = (latest: string): string => {
+      if (REQUIREMENTS_PROMPT.test(latest)) return planAnswer(requirements);
+      if (DESIGN_PROMPT.test(latest)) return planAnswer(design);
+      return withAnswers([
+        { comment: refOf(latest, INSTRUCTION), outcome: "done", reason: "Done in claims 1.2.1, 1.2.2 and 1.2.3 and the main sketch in 1.1.1. Nothing in 1.9, and no change to *this* wording." },
+        { comment: refOf(latest, QUESTION), outcome: "not_changed", reason: "The two steps stay, as claim 1 says." },
+        { comment: refOf(latest, SAM_TEXT), outcome: "done", reason: "Each sketch is one line in 1.1.1." },
+      ], coding);
+    };
+    const e2e = await designWithComments(model);
+    await commentIn("design", await openTaskPage(e2e, SAM, { search: "?doc=design" }), "document", SAM_TEXT);
+    const approving = await openTaskPage(e2e, OWNER, { search: "?doc=design" });
+    approving.byId("decide-approve").click();
+    expect(approving.byId("decide-comments-title").textContent).toBe("Comments to send (3)");
+    approving.byId("decide-submit").click();
+    await approving.settle();
+    await e2e.settle();
+    expect(e2e.workflow().artifacts.at(-1)).toMatchObject({ type: "plan", version: 1 });
+    return { e2e, instructionId: idOf(e2e, INSTRUCTION), questionId: idOf(e2e, QUESTION), samId: idOf(e2e, SAM_TEXT) };
+  }
+
+  it("Approve with comments: the planner's reply links each claim number it names, in the served page and after the script redraws the thread", async () => {
+    const { e2e, instructionId, questionId } = await approvedDesignWithReplies();
+    const linksIn = (tab: TaskPageTab, id: string) => {
+      const reply = tab.document.getElementById(`comment-${id}`)!.parentElement!.querySelectorAll(".replies .comment-text").at(-1)!;
+      return { text: reply.textContent, links: reply.querySelectorAll("a").map((anchor) => [anchor.textContent, anchor.getAttribute("href")]) };
+    };
+    const expectedLinks = [["1.2.1", "#coding-plan-v1-1-2-1"], ["1.2.2", "#coding-plan-v1-1-2-2"], ["1.2.3", "#coding-plan-v1-1-2-3"], ["1.1.1", "#coding-plan-v1-1-1-1"]];
+    const expectedText = "Done in the coding plan: Done in claims 1.2.1, 1.2.2 and 1.2.3 and the main sketch in 1.1.1. Nothing in 1.9, and no change to this wording.";
+    const served = await openTaskPage(e2e, OWNER, { search: "?doc=design", scripts: false });
+    expect(linksIn(served, instructionId)).toEqual({ text: expectedText, links: expectedLinks });
+    // "claim 1" after the word claim links too; 1.9 is no claim of that version and stays plain.
+    expect(linksIn(served, questionId)).toEqual({ text: "Not changed in the coding plan: The two steps stay, as claim 1 says.", links: [["1", "#coding-plan-v1-1"]] });
+    // Every link goes to an element of the coding plan's own version.
+    const plan = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
+    for (const [, href] of [...expectedLinks, ["1", "#coding-plan-v1-1"]]) expect(plan.document.getElementById(href!.slice(1))).not.toBeNull();
+    const drawn = await openTaskPage(e2e, OWNER, { search: "?doc=design" });
+    await refreshed(e2e, drawn, "coding-plan");
+    expect(linksIn(drawn, instructionId)).toEqual({ text: expectedText, links: expectedLinks });
+    expect(linksIn(drawn, questionId).links).toEqual([["1", "#coding-plan-v1-1"]]);
+  }, 240_000);
+
+  it("Approve with comments: under each locked comment its author reads which decision it was sent with, on the served page and as the script draws it", async () => {
+    const { e2e, instructionId, samId } = await approvedDesignWithReplies();
+    const note = (tab: TaskPageTab, id: string) => tab.document.querySelector(`#comment-${id} .comment-sent`)?.textContent;
+    const mine = await openTaskPage(e2e, OWNER, { search: "?doc=design" });
+    const mineServed = await openTaskPage(e2e, OWNER, { search: "?doc=design", scripts: false });
+    await refreshed(e2e, mine, "coding-plan");
+    for (const tab of [mineServed, mine]) {
+      // Maya's own approval for her comment; Sam's comment is his to be told about, not hers.
+      expect(note(tab, instructionId)).toBe("Sent with your approval, so it can't be edited.");
+      expect(note(tab, samId)).toBeUndefined();
+    }
+    for (const scripts of [false, true]) {
+      const samPage = await openTaskPage(e2e, SAM, { search: "?doc=design", scripts });
+      if (scripts) await refreshed(e2e, samPage, "coding-plan");
+      expect(note(samPage, samId)).toBe("Sent with the owner's approval, so it can't be edited.");
+      expect(note(samPage, instructionId)).toBeUndefined();
+      expect(samPage.text()).not.toContain("so it can't be changed");
+    }
+  }, 240_000);
+
+  it("Approve with comments: the bar names the coding plan it acts on, even on the approved design, and nothing is badged as changed after approval though the documents number their claims alike", async () => {
+    const { e2e } = await approvedDesignWithReplies();
+    for (const search of ["?doc=design", "?doc=requirements", "?doc=coding-plan"]) {
+      for (const scripts of [false, true]) {
+        const tab = await openTaskPage(e2e, OWNER, { search, scripts });
+        expect(tab.document.getElementById("decide-approve")!.textContent).toBe("Approve coding plan v1");
+        expect(tab.document.getElementById("decide-request-changes")!.textContent).toBe("Request changes to coding plan v1");
+        expect(tab.html).not.toContain("Changed after approval");
+        // The coding plan has no decisions to answer: no "next decision" control and no "all answered" note.
+        if (scripts) {
+          expect(tab.byId("decide-next").hidden).toBe(true);
+          expect(tab.byId("decide-count").hidden).toBe(true);
+        }
+      }
+    }
+  }, 240_000);
+
+  it("Approve with comments: the planner is told to write to the person who commented", async () => {
+    const { e2e } = await approvedDesignWithReplies();
+    const asking = [...e2e.prompts, ...e2e.turns.map((turn) => turn.userText)].find((text) => text.includes("The owner sent the comments above with their approval"))!;
+    expect(asking).toContain('written to the person who commented ("you"), never "the owner"');
+    expect(asking).toContain("press Request changes on the current card, or comment before approving");
+  }, 240_000);
+
+  it("AgentX's answer on the page is plain text and names the places apart: stray emphasis markers go, real asterisks stay, and the model is told so", async () => {
+    const answer = "You can press *Request changes* in Slack, or add a _comment_ here. Keep **/*.ts and a*b as they are, and `*raw*` too.";
+    const e2e = await designWithComments(planner({ cite: said }), answer);
+    const shown = "You can press Request changes in Slack, or add a comment here. Keep **/*.ts and a*b as they are, and `*raw*` too.";
+    expect(String(e2e.db.find((item) => item.pk === `DEVTASK#${e2e.taskId()}` && item.entityType === "TASK_COMMENT" && (item.author as { source?: string }).source === "answer")[0]!.text)).toBe(answer);
+    const text = (tab: TaskPageTab) => tab.document.querySelector('#design [data-comments="claim:1"] .replies .comment-text')!.textContent;
+    expect(text(await openTaskPage(e2e, OWNER, { search: "?doc=design", scripts: false }))).toBe(shown);
+    const tab = await openTaskPage(e2e, OWNER, { search: "?doc=design" });
+    expect(text(tab)).toBe(shown);
+    await refreshed(e2e, tab, "design");
+    expect(text(tab)).toBe(shown);
+    // The answer model was told it writes on the task page, in plain text, and where "here" and "Slack" are.
+    const [turn] = e2e.answerTurns;
+    expect(turn!.modelInput).toContain("This is an AgentX task (untrusted data follows).");
+    expect(turn!.modelInput).not.toContain("This Slack thread is an AgentX task");
+    expect(turn!.modelInput).toContain("Write plain text only: no Slack or Markdown formatting");
+    expect(turn!.modelInput).toContain('Say \\"in Slack\\" or \\"in the Slack thread\\" for Slack and \\"here\\" for this page; never call this page a Slack thread.');
+    expect(turn!.modelInput).toContain('write to them as \\"you\\"');
   }, 180_000);
 });

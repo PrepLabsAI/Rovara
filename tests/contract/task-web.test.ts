@@ -885,7 +885,7 @@ describe("the task page through the broker", () => {
     const member = await open(TEAMMATE);
     expect(member.statusCode).toBe(200);
     expect(member.body).toContain("Waiting for the owner&#39;s approval");
-    expect(member.body).not.toContain("your approval");
+    expect(member.body).not.toContain("Waiting for your approval");
     slack.down = true;
     const unconfirmed = await open(TEAMMATE);
     expect(unconfirmed.statusCode).toBe(404);
@@ -1195,8 +1195,8 @@ describe("deciding and commenting on the task page (slice 2)", () => {
     const bar = body.slice(body.indexOf('<div class="decide-bar"'));
     expect(bar).toMatch(/^<div class="decide-bar" role="region" aria-label="Decide">/);
     expect(bar).toContain("1 to answer");
-    expect(bar).toMatch(/<button type="button" id="decide-approve"[^>]*hidden>Approve<\/button>/);
-    expect(bar).toMatch(/<button type="button" id="decide-request-changes"[^>]*hidden>Request changes<\/button>/);
+    expect(bar).toMatch(/<button type="button" id="decide-approve"[^>]*hidden>Approve coding plan v2<\/button>/);
+    expect(bar).toMatch(/<button type="button" id="decide-request-changes"[^>]*hidden>Request changes to coding plan v2<\/button>/);
     // The bar sits with the current coding plan, not the earlier version.
     expect(body.indexOf('class="decide-bar"')).toBeGreaterThan(body.indexOf('id="coding-plan-v2"'));
     expect(body).toContain('<dialog id="decide-dialog" aria-labelledby="decide-title">');
@@ -1208,6 +1208,53 @@ describe("deciding and commenting on the task page (slice 2)", () => {
     expect(idle).not.toContain('class="decide-bar"');
     expect(idle).not.toContain('id="decide-dialog"');
     expect(idle).not.toContain('type="radio"');
+  });
+
+  it("the bar's buttons name the document they act on, whichever document is open", async () => {
+    const requirements = structuredDoc("requirements", 1, planDocument({ claims: [{ id: "1", text: "Retries happen." }], decisions: [] }), { approved: true });
+    const design = structuredDoc("design", 1, planDocument({ claims: [{ id: "1", text: "Retries wait." }], decisions: [] }), { approved: true });
+    const codingPlan = structuredDoc("coding plan", 1, planDocument({ claims: [{ id: "1", text: "Edit retry.ts." }], decisions: [] }));
+    const opened = await renderAt("?doc=design", { documents: [requirements, design, codingPlan], waiting: { kind: "coding plan", version: 1, artifactDigest: digest }, revision: 7, commentSeq: 3, access: owner });
+    const bar = opened.body.slice(opened.body.indexOf('<div class="decide-bar"'));
+    expect(bar).toMatch(/id="decide-approve"[^>]*hidden>Approve coding plan v1<\/button>/);
+    expect(bar).toMatch(/id="decide-request-changes"[^>]*hidden>Request changes to coding plan v1<\/button>/);
+    // No decisions to answer: nothing to count (the script shows no control and no note).
+    expect(bar).toContain('<button type="button" id="decide-next" hidden></button><span id="decide-count"></span>');
+    // A waiting design is named the same way.
+    const waitingDesign = await render({ documents: [requirements, { ...design, approved: false }], waiting: { kind: "design", version: 1, artifactDigest: digest }, access: owner });
+    expect(waitingDesign.body).toMatch(/id="decide-approve"[^>]*hidden>Approve design v1<\/button>/);
+    expect(waitingDesign.body).toMatch(/id="decide-request-changes"[^>]*hidden>Request changes to design v1<\/button>/);
+  });
+
+  describe("Changed after approval belongs to one document", () => {
+    const badges = (body: string, anchor: string, version: number, id: string): string =>
+      new RegExp(`<details id="${anchor}-v${version}-${id}"[^>]*><summary>(.*?)</summary>`).exec(body)![1]!;
+    const requirementsPlan = (first: string) => planDocument({ claims: [{ id: "1", text: "Retries happen.", children: [{ id: "1.1", text: first }, { id: "1.2", text: "A retry is logged." }] }], decisions: [] });
+
+    it("a design whose claim numbers overlap the approved requirements is not badged", async () => {
+      const requirements = structuredDoc("requirements", 1, requirementsPlan("The wait is a second."), { approved: true });
+      const design = structuredDoc("design", 1, planDocument({ claims: [{ id: "1", text: "Retries happen.", children: [{ id: "1.1", text: "A timer waits between tries." }, { id: "1.2", text: "The log line names the try." }] }], decisions: [] }));
+      const { body } = await render({ documents: [requirements, design], access: owner });
+      expect(body).toContain("A timer waits between tries.");
+      expect(body).not.toContain("Changed after approval");
+    });
+
+    it("a claim reworded after its own document was approved is badged, on the later version only", async () => {
+      const approved = structuredDoc("requirements", 1, requirementsPlan("The wait is a second."), { approved: true, current: false });
+      const later = structuredDoc("requirements", 2, requirementsPlan("The wait is two seconds."));
+      const { body } = await render({ documents: [approved, later], access: owner });
+      expect(count(body, /Changed after approval/g)).toBe(1);
+      expect(badges(body, "requirements", 2, "1-1")).toContain("Changed after approval");
+      expect(badges(body, "requirements", 2, "1-2")).not.toContain("Changed after approval");
+      // The approved version itself is not compared with anything.
+      expect(badges(body, "requirements", 1, "1-1")).not.toContain("Changed after approval");
+    });
+
+    it("an unapproved earlier version is nothing to change after", async () => {
+      const first = structuredDoc("requirements", 1, requirementsPlan("The wait is a second."), { current: false });
+      const second = structuredDoc("requirements", 2, requirementsPlan("The wait is two seconds."));
+      expect((await render({ documents: [first, second], access: owner })).body).not.toContain("Changed after approval");
+    });
   });
 
   it("others see Only owners decide", async () => {
