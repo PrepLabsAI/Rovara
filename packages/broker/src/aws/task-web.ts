@@ -9,7 +9,10 @@ import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { checksAnchor, renderPlanDocument, type PlanAnchor } from "./plan-page/render-plan.js";
 import { TASK_PAGE_SCRIPT, TASK_PAGE_STYLE } from "./task-page-assets.js";
-import { SESSION_COOKIE, canonicalGithubUrl, escapeHtml, parseCookie, safeResponse, signInLocation, type WebResponse } from "./web-session.js";
+import { TASK_PAGE_API_PREFIX } from "./task-web-api.js";
+import {
+  CSRF_COOKIE, SESSION_COOKIE, canonicalGithubUrl, csrfCookie, escapeHtml, isCsrfToken, parseCookie, safeResponse, signInLocation, type WebResponse,
+} from "./web-session.js";
 
 export type TaskDocumentKind = "requirements" | "design" | "coding plan";
 
@@ -69,6 +72,8 @@ export interface TaskWebDependencies {
    * not see the task exactly as `getTaskDocumentView` does. Without it, `/task/status` is not found.
    */
   getTaskFreshness?(caller: DeveloperCaller, taskId: string): Promise<TaskFreshness>;
+  /** The page's JSON API (`/review/<task ID>/task/api/*`, see task-web-api.ts). Without it, those paths are not found. */
+  api?(request: AdaptedHttpRequest, url: URL): Promise<WebResponse>;
 }
 
 /** What `/review/<task ID>/task/status` answers. */
@@ -245,7 +250,8 @@ function progressStrip(view: TaskDocumentView, targets: ChipTargets): string {
   return `<nav aria-label="Progress"><ol class="progress">${items.join("")}</ol></nav>`;
 }
 
-async function page(view: TaskDocumentView, nonce: string, request: TaskPageRequest): Promise<string> {
+async function page(view: TaskDocumentView, nonce: string, request: TaskPageRequest, csrf?: string): Promise<string> {
+  void csrf;
   const unverified = (view.unverified ?? []).map((kind) => `<p><strong>The saved ${escapeHtml(kind)} couldn't be verified, so it isn't shown.</strong></p>`).join("");
   const noDocuments = view.documents.length === 0 && unverified === "" ? "<p class=\"muted\">No document has been written yet.</p>" : "";
   const documents = await documentsHtml(view, request);
@@ -355,6 +361,7 @@ async function taskStatus(deps: TaskWebDependencies, request: AdaptedHttpRequest
 /** The read-only task page. The session and the reader's right to see the task are checked on every request. */
 export function createTaskWeb(deps: TaskWebDependencies): (request: AdaptedHttpRequest, url: URL) => Promise<WebResponse> {
   return async (request, url) => {
+    if (TASK_PAGE_API_PREFIX.test(url.pathname)) return deps.api === undefined ? safeResponse(404, { error: "not_found" }) : deps.api(request, url);
     const statusOf = TASK_STATUS.exec(url.pathname)?.[1];
     if (statusOf !== undefined) return taskStatus(deps, request, statusOf);
     const taskId = TASK_PAGE.exec(url.pathname)?.[1];
@@ -373,7 +380,13 @@ export function createTaskWeb(deps: TaskWebDependencies): (request: AdaptedHttpR
     try {
       const view = await deps.getTaskDocumentView(caller, taskId);
       const nonce = randomBytes(18).toString("base64url");
-      return htmlResponse(200, await page(view, nonce, pageRequest(url)), nonce);
+      // Someone who can comment or decide gets the CSRF cookie the page's API checks; a valid one is kept as it is.
+      const acts = view.access?.canComment === true || view.access?.canDecide === true;
+      const current = parseCookie(request.headers, CSRF_COOKIE);
+      const csrf = !acts ? undefined : isCsrfToken(current) ? current : randomBytes(32).toString("base64url");
+      const response = htmlResponse(200, await page(view, nonce, pageRequest(url), csrf), nonce);
+      if (csrf !== undefined) response.headers["set-cookie"] = csrfCookie(csrf);
+      return response;
     } catch (error) {
       const code = String((error as { code?: unknown })?.code);
       // Only a reader the broker found eligible is told whom to ask; with no name to give, the answer is the generic one.

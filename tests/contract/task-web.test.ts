@@ -1119,3 +1119,49 @@ describe("the task page through the broker", () => {
     });
   });
 });
+
+describe("the task page and its API (slice 2)", () => {
+  const access = { role: "owner" as const, canComment: true, canSuggest: false, canDecide: true, canAsk: true };
+
+  it("the policy allows fetch to this origin only and still no form posts", async () => {
+    const answer = await render({ access });
+    const csp = answer.headers["content-security-policy"]!;
+    expect(csp).toContain("connect-src 'self'");
+    expect(csp).not.toMatch(/connect-src[^;]*(https?:|\*)/);
+    expect(csp).toContain("form-action 'none'");
+    expect(csp).toContain("img-src 'none'");
+    expect(csp).toContain("frame-ancestors 'none'");
+    // Any POST to the page itself (not its API) is still refused.
+    const web = createTaskWeb({ authenticateSession: async () => caller, getTaskDocumentView: async () => view });
+    const posted = await web({ ...request(`/review/${taskId}/task`, SESSION), method: "POST" }, pageUrl);
+    expect(posted.statusCode).toBe(405);
+  });
+
+  it("the page sets the CSRF cookie only for someone who can act", async () => {
+    const owner = await render({ access });
+    expect(owner.headers["set-cookie"]).toMatch(/^__Host-agentx_review_csrf=[A-Za-z0-9_-]{32,64}; Secure; HttpOnly; SameSite=Lax; Path=\/; Max-Age=900$/);
+    const commenter = await render({ access: { role: "commenter", canComment: true, canSuggest: true, canDecide: false, canAsk: true } });
+    expect(commenter.headers["set-cookie"]).toContain("__Host-agentx_review_csrf=");
+    const closed = await render({ access: { role: "owner", canComment: false, canSuggest: false, canDecide: false, canAsk: false } });
+    expect(closed.headers["set-cookie"]).toBeUndefined();
+    expect((await render({})).headers["set-cookie"]).toBeUndefined();
+    // A valid cookie already there is kept, not replaced.
+    const csrf = "k".repeat(43);
+    const web = createTaskWeb({ authenticateSession: async () => caller, getTaskDocumentView: async () => ({ ...view, access }) });
+    const again = await web(request(`/review/${taskId}/task`, `${SESSION}; __Host-agentx_review_csrf=${csrf}`), pageUrl);
+    expect(again.headers["set-cookie"]).toBe(`__Host-agentx_review_csrf=${csrf}; Secure; HttpOnly; SameSite=Lax; Path=/; Max-Age=900`);
+  });
+
+  it("sends its API paths to the API, signed in or not", async () => {
+    const seen: string[] = [];
+    const web = createTaskWeb({
+      authenticateSession: async () => caller, getTaskDocumentView: async () => view,
+      api: async (_request, url) => { seen.push(url.pathname); return { statusCode: 200, headers: {}, body: "{}" }; },
+    });
+    const path = `/review/${taskId}/task/api/state`;
+    expect((await web(request(path), new URL(`https://agentx.example.test${path}`))).statusCode).toBe(200);
+    expect(seen).toEqual([path]);
+    const without = createTaskWeb({ authenticateSession: async () => caller, getTaskDocumentView: async () => view });
+    expect((await without(request(path, SESSION), new URL(`https://agentx.example.test${path}`))).statusCode).toBe(404);
+  });
+});

@@ -35,10 +35,13 @@ import {
 import { accessDeniedMessage, resolveDeveloperAccess } from "../developer/access.js";
 import { META, endedByAdmin, methodSince, startedBeforeMethodOn, type DeveloperRecord, type SessionRecord } from "../developer/store.js";
 import type { DeveloperTaskActions } from "./developer-task-actions.js";
-import { getTaskDocumentView, getTaskFreshness, getWorkflowFeedbackReview, routeDeveloperTaskRequest, submitWorkflowFeedbackDecision, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
+import {
+  createPageComment, decideOnPage, deletePageComment, editPageComment, getTaskDocumentView, getTaskFreshness, getTaskPageState, listPageComments, setPageSuggestion,
+  getWorkflowFeedbackReview, routeDeveloperTaskRequest, submitWorkflowFeedbackDecision, type DeveloperTaskRouteDependencies } from "./developer-tasks.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { createFeedbackReviewWeb } from "./feedback-review-web.js";
 import { TASK_PAGE, TASK_STATUS, createTaskWeb } from "./task-web.js";
+import { TASK_PAGE_API_PREFIX, createTaskWebApi } from "./task-web-api.js";
 
 export interface DeveloperApiConfiguration {
   issuer: string; env: string; methods: { slack: boolean; oidc: boolean }; slackTeamId?: string;
@@ -600,11 +603,24 @@ export async function routeDeveloperRequest(deps: DeveloperRouteDependencies, re
       catch { return undefined; }
     };
     // Task 18: the read-only task page and its "moved on" check; every other /review/ path is the PR-feedback review.
-    if (TASK_PAGE.test(url.pathname) || TASK_STATUS.test(url.pathname)) {
+    // Spec 061 slice 2: the page's JSON API is matched here too, so the PR-feedback page never sees its paths.
+    if (TASK_PAGE.test(url.pathname) || TASK_STATUS.test(url.pathname) || TASK_PAGE_API_PREFIX.test(url.pathname)) {
+      const routeDeps = (caller: DeveloperCaller) => developerTaskRouteDependencies(deps, caller);
       return createTaskWeb({
         authenticateSession,
-        getTaskDocumentView: (caller, taskId) => getTaskDocumentView(developerTaskRouteDependencies(deps, caller), caller, taskId),
-        getTaskFreshness: (caller, taskId) => getTaskFreshness(developerTaskRouteDependencies(deps, caller), caller, taskId),
+        getTaskDocumentView: (caller, taskId) => getTaskDocumentView(routeDeps(caller), caller, taskId),
+        getTaskFreshness: (caller, taskId) => getTaskFreshness(routeDeps(caller), caller, taskId),
+        api: createTaskWebApi({
+          origin: deps.developer.issuer,
+          authenticateSession,
+          taskState: (caller, taskId) => getTaskPageState(routeDeps(caller), caller, taskId),
+          listComments: (caller, taskId) => listPageComments(routeDeps(caller), caller, taskId),
+          createComment: (caller, taskId, input) => createPageComment(routeDeps(caller), caller, taskId, input),
+          editComment: (caller, taskId, input) => editPageComment(routeDeps(caller), caller, taskId, input),
+          deleteComment: (caller, taskId, input) => deletePageComment(routeDeps(caller), caller, taskId, input),
+          setSuggestion: (caller, taskId, input) => setPageSuggestion(routeDeps(caller), caller, taskId, input),
+          decide: (caller, taskId, input) => decideOnPage(routeDeps(caller), caller, taskId, input),
+        }),
       })(request, url);
     }
     const web = createFeedbackReviewWeb({

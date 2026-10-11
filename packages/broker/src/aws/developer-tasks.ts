@@ -154,9 +154,15 @@ import { feedbackReviewNoticeId } from "../developer/notifications.js";
 import { feedbackNoticeToDecisionMeasure, feedbackRecommendationMeasure } from "../developer/feedback-review-measures.js";
 import { documentSummaryLines, isFeedbackReviewFailure, workflowDocumentName } from "../developer/workflow-messages.js";
 import type { TaskDocumentKind, TaskDocumentView, TaskFreshness } from "./task-web.js";
-import { pageAccess, resolveTaskAccess } from "../developer/task-access.js";
+import type { PageCommentInput, PageDecisionInput, PageSuggestionInput, TaskPageState } from "./task-web-api.js";
+import { pageCommentViews, type PageCommentView } from "./plan-page/comments.js";
+import type { PlanAnchor } from "./plan-page/render-plan.js";
+import { can, pageAccess, resolveTaskAccess } from "../developer/task-access.js";
 import { inertReplyText } from "../developer/prompt-text.js";
-import { commentKey, counterTouch, listSuggestions, listTaskComments, openCommentsFor, suggestionsFor } from "../developer/page-comments.js";
+import {
+  commentCounterKey, commentKey, counterTouch, createTaskComment, deleteTaskComment, editTaskComment, listSuggestions, listTaskComments, openCommentsFor,
+  setSuggestion, suggestionsFor, type PageActor,
+} from "../developer/page-comments.js";
 import {
   COMMENT_ANSWERS_INSTRUCTION, COMMENT_CHANGED_MESSAGE, REQUEST_CHANGES_NEEDS_INPUT, decisionDetailKey, ownerAnswersFor, ownerAnswersSentence, pageCommentsPromptSection,
   planOwnerAnswers, promptComments, readDecisionDetail, refusalMessage,
@@ -2169,6 +2175,74 @@ const cutReason = (reason: string): string => {
   const characters = Array.from(redactText(reason).replace(/\s+/gu, " ").trim());
   return characters.length <= HISTORY_REASON_MAX_CHARS ? characters.join("") : `${characters.slice(0, HISTORY_REASON_MAX_CHARS - 1).join("")}…`;
 };
+
+/** The page's poll (spec 061 slice 2): where the task stands, with no names and no text; the full access check runs each time. */
+export async function getTaskPageState(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskPageState> {
+  const { task } = await resolveTaskAccess(deps, caller, taskId);
+  const workflow = task.workflow;
+  const documents = TASK_PAGE_DOCUMENTS.flatMap(({ type, anchor }) => {
+    const latest = (workflow?.artifacts ?? []).filter((artifact) => artifact.type === type).reduce((most, artifact) => Math.max(most, artifact.version), 0);
+    return latest === 0 ? [] : [{ anchor: anchor as PlanAnchor, version: latest }];
+  });
+  const counter = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: commentCounterKey(taskId), ConsistentRead: true })) as { Item?: { seq?: unknown } };
+  return {
+    revision: workflow?.revision ?? 0, waiting: workflow?.stage === "PLAN_REVIEW" && workflow.state === "WAITING" && task.closedAt === undefined,
+    stage: taskPageStep(workflow, task.closedAt !== undefined), documents, commentSeq: typeof counter.Item?.seq === "number" ? counter.Item.seq : 0,
+  };
+}
+
+/** A signed-in reader acting on the task page: their access, checked again for every request. */
+async function pageActor(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<PageActor> {
+  return { ...await resolveTaskAccess(deps, caller, taskId), caller };
+}
+
+const commentViewContext = (deps: DeveloperTaskRouteDependencies, actor: PageActor) =>
+  ({ readerId: actor.caller.developerId, now: deps.now(), artifacts: actor.task.workflow?.artifacts ?? [] });
+
+/** The task's comments as the page's script reads them. */
+export async function listPageComments(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<PageCommentView[]> {
+  const actor = await pageActor(deps, caller, taskId);
+  return pageCommentViews(await listTaskComments(deps, taskId), commentViewContext(deps, actor));
+}
+
+/** Posts a comment or a reply from the page. Asking AgentX is accepted and has no effect yet. */
+export async function createPageComment(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, input: PageCommentInput): Promise<{ comment: PageCommentView; duplicate: boolean }> {
+  const actor = await pageActor(deps, caller, taskId);
+  const { parentId, ...rest } = input;
+  const { comment, duplicate } = await createTaskComment(deps, actor, { ...rest, ...(parentId === undefined ? {} : { parentId }) });
+  return { comment: pageCommentViews([comment], commentViewContext(deps, actor))[0]!, duplicate };
+}
+
+export async function editPageComment(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, input: { commentId: string; rev: number; text: string }): Promise<{ comment: PageCommentView }> {
+  const actor = await pageActor(deps, caller, taskId);
+  return { comment: pageCommentViews([await editTaskComment(deps, actor, input)], commentViewContext(deps, actor))[0]! };
+}
+
+export async function deletePageComment(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, input: { commentId: string; rev: number }): Promise<{ comment: PageCommentView }> {
+  const actor = await pageActor(deps, caller, taskId);
+  return { comment: pageCommentViews([await deleteTaskComment(deps, actor, input)], commentViewContext(deps, actor))[0]! };
+}
+
+export async function setPageSuggestion(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, input: PageSuggestionInput): Promise<void> {
+  await setSuggestion(deps, await pageActor(deps, caller, taskId), input);
+}
+
+/**
+ * A decision from the page: only someone whose role may decide reaches the one transition, which Slack and MCP use too.
+ * The note becomes the decision's reason; without one, the reason says where the decision was made.
+ */
+export async function decideOnPage(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, input: PageDecisionInput): Promise<{ revision: number }> {
+  const access = await resolveTaskAccess(deps, caller, taskId);
+  if (!can(access.role, "decide")) throw Object.assign(agentXError("FORBIDDEN", "Only owners decide."), { pageReason: "owners_only" });
+  await decideTaskWorkflow(deps, caller, taskId, {
+    requestId: input.requestId, expectedRevision: input.expectedRevision, decision: input.decision, artifactDigest: input.artifactDigest,
+    reason: input.note ?? (input.decision === "APPROVE" ? "Approved on the task page." : "See the included comments."),
+    answers: input.answers, includedCommentIds: input.includedCommentIds,
+    ...(input.selectedOptionalCheckIds === undefined ? {} : { selectedOptionalCheckIds: input.selectedOptionalCheckIds }),
+  }, { via: "PAGE", ...(input.note === undefined ? {} : { note: input.note }) });
+  const stored = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: taskKey(taskId), ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
+  return { revision: stored.Item?.workflow?.revision ?? input.expectedRevision };
+}
 
 /** Where the task stands now, for the open task page's "moved on" check: the same access rule as the page, two values only. */
 export async function getTaskFreshness(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskFreshness> {
