@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { WORKFLOW_BLOCK_REASONS, WorkflowTransitionError, WorkflowFeedbackBundleSchema, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleRefSchema, WorkflowSnapshotSchema, collectWorkflowFeedbackBundles, type WorkflowFeedbackBundle, type WorkflowFeedbackBundleRef, type WorkflowFeedbackThreadObservation, observeWorkflowPullRequest, observeWorkflowPullRequestMergedWithFix, recordWorkflowPullRequestHeadTrees, recordWorkflowPullRequestUpdate, workflowFollowsOnlyMerge, type WorkflowSnapshot } from "@agentx/contracts";
+import { WORKFLOW_BLOCK_REASONS, WorkflowFeedbackBundleSchema, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleRefSchema, WorkflowSnapshotSchema, collectWorkflowFeedbackBundles, type WorkflowFeedbackBundle, type WorkflowFeedbackBundleRef, type WorkflowFeedbackThreadObservation, observeWorkflowPullRequest, observeWorkflowPullRequestMergedWithFix, recordWorkflowPullRequestHeadTrees, recordWorkflowPullRequestUpdate, workflowFollowsOnlyMerge, type WorkflowSnapshot } from "@agentx/contracts";
 import { githubWorkflowPullRequestKey, type GithubWorkflowPullRequestRecord } from "../developer/task-records.js";
 import { parseGitHubRepository, type GitHubPullRequestFeedback } from "../github-app.js";
 import { isConditional } from "./broker-shared.js";
@@ -313,12 +313,16 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
       // Unchanged content (comment set, heads, trees and threads) is never collected again: a new bundle would be recorded
       // under another digest only for its delivery ID and time, and an owner's decision bound to the old one would be stale.
       // No feedback yet and none now (an approval with no summary, a pull request marked ready): nothing to review or say.
-      const nothingToReview = prior === undefined && observations.length === 0 && bundles.every(b => b.comments.length === 0);
+      // Feedback only in resolved review threads is no feedback either: a resolved thread starts excluded.
+      const nothingToReview = prior === undefined && observations.every(o => o.eligibleCommentIds.length === 0) && bundles.every(b => b.comments.length === 0);
       if (same && sameThreadObservations(prior.threadObservations ?? [], observations) && next === current) {
         if (headTrees.length === 0) return false;
       } else if (nothingToReview) {
         if (next === current && headTrees.length === 0) return false;
       } else {
+        // A step is running (the review of earlier feedback): nothing can be collected now, so nothing is stored. The
+        // delivery is kept, and the recovery sweep collects again once the step is done.
+        if (current.state === "RUNNING") throw new GithubWebhookRetryableError("the task is running a step");
         const refs: WorkflowFeedbackBundleRef[] = [];
         for (const bundle of bundles) {
           const bytes = JSON.stringify(bundle); const sha256 = digest(bytes);
@@ -327,13 +331,7 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
           void deliveryIds;
           refs.push(WorkflowFeedbackBundleRefSchema.parse({ ...metadata, sha256, objectKey, comments: comments.map(({ body, ...ref }) => { void body; return ref; }) }));
         }
-        try {
-          next = collectWorkflowFeedbackBundles(next, { bundleRefs: refs, threadObservations: observations }, input.now);
-        } catch (error) {
-          // A step is running (the review of earlier feedback): the delivery is kept, and the recovery sweep collects again.
-          if (error instanceof WorkflowTransitionError && current.state === "RUNNING") throw new GithubWebhookRetryableError("the task is running a step");
-          throw error;
-        }
+        next = collectWorkflowFeedbackBundles(next, { bundleRefs: refs, threadObservations: observations }, input.now);
       }
     }
     if (headTrees.length > 0) next = recordWorkflowPullRequestHeadTrees(next, headTrees, input.now);

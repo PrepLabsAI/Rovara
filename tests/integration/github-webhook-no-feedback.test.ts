@@ -3,6 +3,7 @@
 // approval with `body: null`, and AgentX ran the feedback reviewer on zero comments and posted "PR feedback is ready:
 // 0 comments" in the task's thread.
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { registerJourneyInvariants } from "../support/workflow-e2e-invariants.js";
 import { createWorkflowE2E } from "../support/workflow-e2e.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
@@ -14,6 +15,7 @@ describe("a GitHub event with no feedback on a task's pull request", () => {
   let log: MockInstance<typeof console.log>;
   beforeEach(() => { log = vi.spyOn(console, "log").mockImplementation(() => undefined); });
   afterEach(() => { log.mockRestore(); });
+  registerJourneyInvariants({ logs: () => log.mock.calls.map(([line]) => String(line)) });
 
   it("starts no feedback review and posts nothing, and a later comment is reviewed as usual", async () => {
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
@@ -30,6 +32,15 @@ describe("a GitHub event with no feedback on a task's pull request", () => {
     expect((await e2e.webhook({ kind: "pull_request", action: "ready_for_review", number })).status).toBe(200);
     await e2e.settle();
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
+    expect(e2e.workflow().feedbackReview).toBeUndefined();
+    expect(e2e.invocations.length).toBe(runs);
+    expect(e2e.slack.posts.length).toBe(posts);
+
+    // An inline comment whose thread is already resolved when AgentX first sees it is no feedback either.
+    const inline = e2e.github.reviewComment(number, "octocat", "Nit: a blank line here.", "greeting.ts", 1);
+    e2e.github.resolveThread(inline.threadId!);
+    expect((await e2e.webhook({ kind: "pull_request_review_comment", number, comment: inline })).status).toBe(200);
+    await e2e.settle();
     expect(e2e.workflow().feedbackReview).toBeUndefined();
     expect(e2e.invocations.length).toBe(runs);
     expect(e2e.slack.posts.length).toBe(posts);

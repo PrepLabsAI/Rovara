@@ -3,6 +3,7 @@
 // answered such a delivery 400 "check it and try again" and logged an unexpected error, although it keeps the delivery
 // for a retry; GitHub's delivery log then showed a client error for a delivery AgentX goes on to process.
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from "vitest";
+import { registerJourneyInvariants } from "../support/workflow-e2e-invariants.js";
 import { createWorkflowE2E } from "../support/workflow-e2e.js";
 import { planAnswer, planDocument } from "../support/plan-documents.js";
 
@@ -14,6 +15,7 @@ describe("a GitHub webhook for a task that is busy reviewing feedback", () => {
   let log: MockInstance<typeof console.log>;
   beforeEach(() => { log = vi.spyOn(console, "log").mockImplementation(() => undefined); });
   afterEach(() => { log.mockRestore(); });
+  registerJourneyInvariants({ logs: () => log.mock.calls.map(([line]) => String(line)) });
 
   it("is answered as retryable (503), and the recovery sweep collects the comment once the review is done", async () => {
     const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: EDITS } });
@@ -28,7 +30,10 @@ describe("a GitHub webhook for a task that is busy reviewing feedback", () => {
     // The feedback review of the first comment is running when the second comment arrives.
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "RUNNING" });
     const second = e2e.github.comment(number, "octocat", "Also add a test for an empty name.");
+    const stored = e2e.s3.objects.size;
     const answer = await e2e.webhook({ kind: "issue_comment", number, comment: second });
+    // Nothing is stored for a delivery that collects nothing (no orphan bundle in S3).
+    expect(e2e.s3.objects.size).toBe(stored);
     expect(answer).toMatchObject({ status: 503, body: { error: { code: "RUNTIME_UNAVAILABLE", message: "GitHub webhook processing will be retried" } } });
     expect(log.mock.calls.map(([line]) => String(line)).filter((line) => line.includes("request.unexpected_error"))).toEqual([]);
 
@@ -38,5 +43,8 @@ describe("a GitHub webhook for a task that is busy reviewing feedback", () => {
     await e2e.settle();
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", feedbackReview: { status: "PENDING" } });
     expect(e2e.workflow().feedbackReview?.bundleRefs.flatMap((bundle) => bundle.comments.map((comment) => comment.id)).sort()).toEqual([first.id, second.id].sort());
+    // Two reviews in all: the first comment's, then one of both comments; the 503 delivery started none of its own.
+    const feedbackReviews = e2e.invocations.filter((invocation) => invocation.kind === "task" && invocation.payload.workflowMode === "FEEDBACK_REVIEW");
+    expect(feedbackReviews).toHaveLength(2);
   }, 120_000);
 });
