@@ -74,6 +74,8 @@ export async function runTaskInvocation(
     checkBudgetMs?: () => number;
     /** D-16: the original code for before results; tests supply a fake. Default: each repository's preparation commit. */
     originalCode?: OriginalCode;
+    /** How long a review (each role) and a PR feedback review may take; tests supply short ones. Default: the reviews' own (5 minutes). */
+    timeouts?: { reviewMs?: number; feedbackReviewMs?: number };
   },
 ): Promise<TaskInvocationResult> {
   const invocation = WorkerInvocationSchema.parse(untrustedInvocation);
@@ -117,6 +119,7 @@ export async function runTaskInvocation(
         rootPath: dependencies.rootPath, model: dependencies.model, candidate: candidateRepositories,
         repositories: repositoryInputs, bundles: collected.bundles, artifactSink: dependencies.artifactSink,
         ...(collected.taskChecks === undefined ? {} : { taskChecks: collected.taskChecks }),
+        ...(dependencies.timeouts?.feedbackReviewMs === undefined ? {} : { timeoutMs: dependencies.timeouts.feedbackReviewMs }),
         ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }), signal: stop.signal,
         onProgress: message => { void events.append("progress", { message }).catch(() => undefined); },
       });
@@ -522,6 +525,7 @@ export async function runTaskInvocation(
           ...(invocation.payload.workflowReviewChecks === undefined ? {} : { reviewChecks: invocation.payload.workflowReviewChecks }),
           ...(invocation.payload.workflowReviewPlan === undefined ? {} : { reviewPlan: invocation.payload.workflowReviewPlan }),
           ...(invocation.payload.workflowReviewFeedback === undefined ? {} : { reviewFeedback: invocation.payload.workflowReviewFeedback }),
+          ...(dependencies.timeouts?.reviewMs === undefined ? {} : { timeoutMs: dependencies.timeouts.reviewMs }),
           signal: verificationStop.signal,
           ...(dependencies.piAdapter === undefined ? {} : { piAdapter: dependencies.piAdapter }),
           onProgress: (message) => { void events.append("progress", { message }).catch(() => undefined); },
