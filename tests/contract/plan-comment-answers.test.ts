@@ -130,18 +130,48 @@ describe("planner answers to included comments", () => {
     expect(reads).toHaveBeenCalledTimes(1);
   });
 
-  it("a done record follows the replies, also when the planner gave none, and takes no place in the comment count", async () => {
+  it("the plan commits with a record of the comments the planner answered, also when it answered none, and the record takes no place in the comment count", async () => {
     const withAnswers = await changesRequested();
-    await withAnswers.replan(answersBlock([{ comment: "c1", outcome: "done", reason: "Moved it." }]));
+    await withAnswers.replan(answersBlock([{ comment: "c1", outcome: "done", reason: "Moved it." }, { comment: "c3", outcome: "not_changed", reason: "Kept it." }, { comment: "c1", outcome: "not_changed", reason: "Twice." }, { comment: "c9", outcome: "done", reason: "No such comment." }]));
     const v2 = workflowOf(withAnswers.harness, withAnswers.taskId).artifacts.at(-1)!;
-    expect(withAnswers.harness.db.get(`DEVTASK#${withAnswers.taskId}`, `PLANREPLIES#${v2.id}`)).toMatchObject({ entityType: "PLANNER_REPLIES_DONE", artifactId: v2.id, answers: 1 });
-    expect(withAnswers.harness.db.get(`DEVTASK#${withAnswers.taskId}`, "COMMENTS")).toMatchObject({ count: 4 });
-    // An older worker writes no block: nothing to reply with, and the record still says the replies are done.
+    expect(withAnswers.harness.db.get(`DEVTASK#${withAnswers.taskId}`, `PLANREPLIES#${v2.id}`)).toMatchObject({
+      entityType: "PLANNER_REPLIES", artifactId: v2.id, version: 2, answered: [{ commentId: withAnswers.c1, outcome: "done" }, { commentId: withAnswers.c3, outcome: "not_changed" }],
+    });
+    expect(withAnswers.harness.db.get(`DEVTASK#${withAnswers.taskId}`, "COMMENTS")).toMatchObject({ count: 5 });
+    // An older worker writes no block: nothing was answered, and the record says so.
     const none = await changesRequested();
     await none.replan("");
     const v2none = workflowOf(none.harness, none.taskId).artifacts.at(-1)!;
     expect(agentxReplies(none.harness, none.taskId)).toHaveLength(0);
-    expect(none.harness.db.get(`DEVTASK#${none.taskId}`, `PLANREPLIES#${v2none.id}`)).toMatchObject({ entityType: "PLANNER_REPLIES_DONE", answers: 0 });
+    expect(none.harness.db.get(`DEVTASK#${none.taskId}`, `PLANREPLIES#${v2none.id}`)).toMatchObject({ entityType: "PLANNER_REPLIES", answered: [] });
+  });
+
+  it("the record is written with the plan itself: when a reply write fails afterwards, the plan and the record are still there", async () => {
+    const t = await changesRequested();
+    // Reply writes (transactions that put a comment) fail; the plan's own commit does not put a comment.
+    const inner = t.harness.db;
+    const original = inner.send.bind(inner) as (command: unknown) => Promise<unknown>;
+    vi.spyOn(inner, "send").mockImplementation((async (command: unknown) => {
+      const items = (command as { input?: { TransactItems?: Array<{ Put?: { Item?: { entityType?: string; author?: { source?: string } } } }> } }).input?.TransactItems;
+      if (items?.some((item) => item.Put?.Item?.entityType === "TASK_COMMENT" && item.Put.Item.author?.source === "planner")) throw Object.assign(new Error("down"), { name: "InternalServerError" });
+      return original(command);
+    }));
+    await t.replan(answersBlock([{ comment: "c1", outcome: "done", reason: "Moved it." }]));
+    const v2 = workflowOf(t.harness, t.taskId).artifacts.at(-1)!;
+    expect(v2.version).toBe(2);
+    expect(agentxReplies(t.harness, t.taskId)).toHaveLength(0);
+    expect(t.harness.db.get(`DEVTASK#${t.taskId}`, `PLANREPLIES#${v2.id}`)).toMatchObject({ answered: [{ commentId: t.c1, outcome: "done" }] });
+  });
+
+  it("a record never holds more than 25 answers, an answer twice, or one for a comment that was not sent", async () => {
+    const { plannerRepliesItem } = await import("../../packages/broker/src/developer/page-comments.js");
+    const ids = Array.from({ length: 30 }, () => randomUUID());
+    const detail = { schemaVersion: 1, taskId: "t", requestId: randomUUID(), decision: "REQUEST_CHANGES", artifactSha256: "a".repeat(64), answers: [], includedCommentIds: ids.slice(0, 25), at: "2026-10-11T09:00:00.000Z" } as never;
+    const answers = [...ids.map((_, index) => ({ ref: `c${index + 1}`, outcome: "done" as const, reason: "x" })), { ref: "c1", outcome: "not_changed" as const, reason: "again" }, { ref: "c0", outcome: "done" as const, reason: "x" }];
+    const item = plannerRepliesItem("state", { taskId: "t", artifactId: "a", version: 2, detail, answers }, "2026-10-11T09:30:00.000Z").Item;
+    expect(item.answered).toHaveLength(25);
+    expect(item.answered.map((entry) => entry.commentId)).toEqual(ids.slice(0, 25));
+    expect(item.answered[0]).toEqual({ commentId: ids[0], outcome: "done" });
   });
 
   it("a resent callback writes each reply once", async () => {

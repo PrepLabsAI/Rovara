@@ -198,7 +198,7 @@ import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type C
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
 import { decisionComments, ownerAnswersFor, pageCommentsPrompt, promptComments, readDecisionDetail } from "../developer/owner-answers.js";
-import { isPageRefusal, markPlannerRepliesDone, writeCommentAnswer, writePlannerReplies, type SlackRequestQueue } from "../developer/page-comments.js";
+import { isPageRefusal, plannerRepliesItem, writeCommentAnswer, writePlannerReplies, type SlackRequestQueue } from "../developer/page-comments.js";
 import { loadWorkflowDocument, readObjectText as readStoredText, shortenMarkdown } from "../developer/plan-artifacts.js";
 import { PLAN_EVIDENCE_PK, attachEvidence, planCitesCode, planEvidenceDueKey, planEvidenceEvent, planEvidenceJobItem, planEvidenceSources, type PlanEvidenceEvent, type PlanEvidenceJob } from "../developer/plan-evidence-jobs.js";
 import { resolvePlanEvidence } from "../developer/plan-evidence.js";
@@ -6287,6 +6287,8 @@ async function completedWorkflowItems(
   let planUnreadable: DeveloperTaskRecord["planUnreadable"] | null | undefined;
   // A stored plan that cites code: the job that reads that code later, committed with the plan.
   let evidenceJob: { artifactId: string; artifactSha256: string } | undefined;
+  /** The record of the comments the planner answered, committed with the plan it answered them in. */
+  let recordedReplies: ReturnType<typeof plannerRepliesItem> | undefined;
   if (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS") {
     if (terminalStatus !== "SUCCEEDED") {
       next = blockWorkflow(task.workflow, terminalError?.includes(WORKFLOW_HISTORY_REWRITTEN_MESSAGE) === true ? WORKFLOW_HISTORY_REWRITTEN_MESSAGE
@@ -6515,7 +6517,10 @@ async function completedWorkflowItems(
       planUnreadable = stored.planUnreadable;
       evidenceJob = stored.evidenceJob;
       if (stored.inlineEvidence !== undefined) inlineEvidence?.push({ ...stored.inlineEvidence, taskId: task.taskId });
-      if (stored.plannerReplies !== undefined) plannerReplies?.push(stored.plannerReplies);
+      if (stored.plannerReplies !== undefined) {
+        plannerReplies?.push(stored.plannerReplies);
+        recordedReplies = plannerRepliesItem(dependencies.tableName, stored.plannerReplies, now);
+      }
     }
   } else {
     next = blockWorkflow(task.workflow, workflowRunEndedReason("PLAN", terminalStatus), now);
@@ -6544,7 +6549,8 @@ async function completedWorkflowItems(
       ...(planUnreadable === undefined || planUnreadable === null ? {} : { ":unreadable": planUnreadable }),
       ...(planUnreadable === null && task.threadNotesFedThrough !== undefined ? { ":fedFrom": task.threadNotesFedThrough } : {}) },
   } }, ...dispatch,
-  ...(evidenceJob === undefined ? [] : [{ Put: { TableName: dependencies.tableName, Item: planEvidenceJobItem({ taskId: task.taskId, ...evidenceJob, now: Date.parse(now) }), ConditionExpression: "attribute_not_exists(pk)" } }])];
+  ...(evidenceJob === undefined ? [] : [{ Put: { TableName: dependencies.tableName, Item: planEvidenceJobItem({ taskId: task.taskId, ...evidenceJob, now: Date.parse(now) }), ConditionExpression: "attribute_not_exists(pk)" } }]),
+  ...(recordedReplies === undefined ? [] : [{ Put: recordedReplies }])];
 }
 
 /** What the broker keeps of a planning answer it could not read: the problems found, at most this many. */
@@ -6741,22 +6747,15 @@ function plannerRepliesFor(content: string, plan: PlanDocument, step: PlanStepCo
   return { taskId: task.taskId, ...stored, detail: step.detail, answers };
 }
 
-/**
- * Writes the planner's answers as replies from AgentX, after the plan committed. Best effort: a failure is logged with counts
- * only. Each document's replies end with a "done" record (also when there was nothing to write), which the Slack card for
- * the document waits for before it counts them.
- */
+/** Writes the planner's answers as replies from AgentX, after the plan committed. Best effort: a failure is logged with counts only. */
 async function writeAllPlannerReplies(dependencies: AwsBrokerDependencies, entries: readonly PlannerReplies[]): Promise<void> {
-  const deps = { documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, log: (line: Record<string, unknown>) => console.log(JSON.stringify({ component: "broker", ...line })) };
   for (const entry of entries) {
-    if (entry.answers.length > 0) {
-      try {
-        await writePlannerReplies(deps, entry);
-      } catch (error) {
-        console.log(JSON.stringify({ component: "broker", event: "developer.planner_replies_failed", taskId: entry.taskId, answers: entry.answers.length, errorName: error instanceof Error ? error.name : "unknown" }));
-      }
+    if (entry.answers.length === 0) continue;
+    try {
+      await writePlannerReplies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, log: (line) => console.log(JSON.stringify({ component: "broker", ...line })) }, entry);
+    } catch (error) {
+      console.log(JSON.stringify({ component: "broker", event: "developer.planner_replies_failed", taskId: entry.taskId, answers: entry.answers.length, errorName: error instanceof Error ? error.name : "unknown" }));
     }
-    await markPlannerRepliesDone(deps, { taskId: entry.taskId, artifactId: entry.artifactId, answers: entry.answers.length });
   }
 }
 

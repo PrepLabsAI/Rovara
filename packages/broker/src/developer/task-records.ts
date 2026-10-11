@@ -181,8 +181,8 @@ export interface GithubWorkflowPullRequestRecord {
 }
 
 export const taskKey = (taskId: string) => ({ pk: `DEVTASK#${taskId}`, sk: "META" as const });
-/** The item that says every planner reply of a stored document is written (or given up on): the Slack card waits for it. */
-export const plannerRepliesDoneKey = (taskId: string, artifactId: string) => ({ pk: `DEVTASK#${taskId}`, sk: `PLANREPLIES#${artifactId}` });
+/** The item stored with a plan: which comments the planner answered in it (the Slack card for the plan reads it). */
+export const plannerRepliesKey = (taskId: string, artifactId: string) => ({ pk: `DEVTASK#${taskId}`, sk: `PLANREPLIES#${artifactId}` });
 export const taskIndexKey = (developerId: string, createdAt: string, taskId: string) => ({ pk: `DEVELOPER#${developerId}`, sk: `TASK#${createdAt}#${taskId}` });
 export const taskPointerKey = (workspaceId: string) => ({ pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK" as const });
 export function githubWorkflowPullRequestKey(repositoryFullName: string, number: number) {

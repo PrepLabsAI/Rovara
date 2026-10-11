@@ -2,7 +2,7 @@
 // (`DEVTASK#<taskId>`), never inside the task item, and every write is conditional: comments on `rev`, the comment counter
 // on its cap, rate items on their window. The writer's name and owner flag come from the session and its role.
 import { createHash } from "node:crypto";
-import { GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
+import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
   AGENTX_ANSWER_MAX_CHARS, AGENTX_ASK_RATE, ANSWER_STALE_MS, COMMENT_RATE, COMMENT_THREAD_REPLIES_MAX, NUDGE_WINDOW_MS, SlackPageCommentMessageSchema, TASK_COMMENT_ITEMS_MAX, TaskCommentSchema,
   TaskSuggestionSchema, agentXError, agentxAnswerCommentId, cleanCommentText, diffPlanDocuments, pageCommentAttributes, pageCommentEventId, pageCommentId,
@@ -16,7 +16,7 @@ import { isConditional } from "../aws/broker-shared.js";
 import { plainName } from "../aws/task-web.js";
 import { loadWorkflowDocument, type LoadedDocument } from "./plan-artifacts.js";
 import { can, taskOpen, type TaskAccess } from "./task-access.js";
-import { plannerRepliesDoneKey, type DeveloperTaskRecord } from "./task-records.js";
+import { plannerRepliesKey, type DeveloperTaskRecord } from "./task-records.js";
 
 type CommentDependencies = Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName" | "actions" | "now" | "log">;
 type TableDependencies = Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName">;
@@ -541,20 +541,26 @@ export async function writePlannerReplies(
   return { written };
 }
 
+/** The most answers one plan's record holds: the comments one decision sends are capped at 25. */
+const PLANNER_REPLIES_RECORDED_MAX = 25;
+
 /**
- * Records that the planner's replies for `artifactId` are done: written, or not possible. The card for the new document
- * counts the replies only once this is there, so it never counts a half-written set. It is not a comment and takes no
- * place in the task's comment count. Best effort: a failure is logged, and the card then waits only a short while.
+ * The record kept with a plan that answered the comments sent with a decision, written in the same transaction as the plan
+ * so it is there whenever the plan is: the comments the planner answered (each by ID, with its outcome; the same ones
+ * `writePlannerReplies` then writes as replies) and the version. The Slack card for the plan counts from it, so the card
+ * never waits for the replies. It is not a comment and takes no place in the task's comment count.
  */
-export async function markPlannerRepliesDone(deps: TableDependencies & Pick<DeveloperTaskRouteDependencies, "now" | "log">, input: { taskId: string; artifactId: string; answers: number }): Promise<void> {
-  try {
-    await deps.documentClient.send(new PutCommand({
-      TableName: deps.tableName,
-      Item: { ...plannerRepliesDoneKey(input.taskId, input.artifactId), entityType: "PLANNER_REPLIES_DONE", taskId: input.taskId, artifactId: input.artifactId, answers: input.answers, at: iso(deps) },
-    }));
-  } catch (error) {
-    log(deps, { event: "developer.planner_replies_mark_failed", taskId: input.taskId, errorName: error instanceof Error ? error.name : "unknown" });
+export function plannerRepliesItem(tableName: string, input: { taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: readonly CommentAnswer[] }, at: string) {
+  const answered = new Map<string, "done" | "not_changed">();
+  for (const answer of input.answers) {
+    const commentId = /^c[1-9][0-9]*$/u.test(answer.ref) ? input.detail.includedCommentIds[Number(answer.ref.slice(1)) - 1] : undefined;
+    if (commentId !== undefined && !answered.has(commentId) && answered.size < PLANNER_REPLIES_RECORDED_MAX) answered.set(commentId, answer.outcome);
   }
+  return {
+    TableName: tableName,
+    Item: { ...plannerRepliesKey(input.taskId, input.artifactId), entityType: "PLANNER_REPLIES", taskId: input.taskId, artifactId: input.artifactId, version: input.version,
+      answered: [...answered].map(([commentId, outcome]) => ({ commentId, outcome })), at },
+  };
 }
 
 /** What a failed planner reply write means: already written (a repeat), the task is full, or anything else (thrown). */

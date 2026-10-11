@@ -230,7 +230,7 @@ describe("asking AgentX to answer a page comment", () => {
     const context = await t.context(asked.comment.id);
     expect(context).toContain(`Asked by a teammate. ${NO_DECIDING}`);
     // A teammate is told they can comment, and that only the owner presses Request changes.
-    expect(context).toContain("say they can add a comment here, and only the owner can press Request changes (here or in Slack).");
+    expect(context).toContain("say you can add a comment here, and only the owner can press Request changes (here or in Slack).");
     expect(context).not.toContain("say you can press Request changes");
     const mine = await t.comment({ text: "Why below?" });
     const ownerContext = await t.context(mine.comment.id);

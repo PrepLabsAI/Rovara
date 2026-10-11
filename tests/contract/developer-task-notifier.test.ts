@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { PutCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, indexExpiresAt, plannerReplyCommentId } from "@agentx/contracts";
-import { developerTaskIdentity, plannerRepliesDoneKey } from "../../packages/broker/src/developer/task-records.js";
+import { developerTaskIdentity, plannerRepliesKey } from "../../packages/broker/src/developer/task-records.js";
 import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
 import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import type { Notice } from "../../packages/broker/src/developer/notifications.js";
@@ -1887,57 +1887,49 @@ describe("page decisions and comments in Slack (spec 061 slice 2)", () => {
     await finishPlanningWithMarkdown(h, h.workspaceId, h.active(), "# Plan\nAdd a retry regression test, and one for empty input.");
     const v2 = (h.db.get(`DEVTASK#${h.taskId}`, "META") as { workflow: { artifacts: Array<{ id: string; version: number }> } }).workflow.artifacts.at(-1)!;
     expect(v2.version).toBe(2);
-    /** What the broker writes after the step commits: AgentX's reply to c1, then the record that the replies are done. */
-    const writeReplies = () => {
-      h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `COMMENT#${plannerReplyCommentId(c1, v2.id)}`, entityType: "TASK_COMMENT", schemaVersion: 1, taskId: h.taskId,
-        commentId: plannerReplyCommentId(c1, v2.id), parentId: c1, document: "plan", version: 1, target: { kind: "document" },
-        author: { kind: "agentx", source: "planner", outcome: "done", forVersion: 2 }, text: "Added it.", createdAt: new Date().toISOString(), rev: 1 });
-      h.db.set({ ...plannerRepliesDoneKey(h.taskId, v2.id), entityType: "PLANNER_REPLIES_DONE", taskId: h.taskId, artifactId: v2.id, answers: 1, at: new Date().toISOString() });
-    };
-    return { h, v2, writeReplies };
+    /** The record the broker commits with the plan (here: c1 answered), and, after the commit, AgentX's reply to c1. */
+    const recordAnswers = () => h.db.set({ ...plannerRepliesKey(h.taskId, v2.id), entityType: "PLANNER_REPLIES", taskId: h.taskId, artifactId: v2.id, version: 2, answered: [{ commentId: c1, outcome: "done" }], at: new Date().toISOString() });
+    const writeReply = () => h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `COMMENT#${plannerReplyCommentId(c1, v2.id)}`, entityType: "TASK_COMMENT", schemaVersion: 1, taskId: h.taskId,
+      commentId: plannerReplyCommentId(c1, v2.id), parentId: c1, document: "plan", version: 1, target: { kind: "document" },
+      author: { kind: "agentx", source: "planner", outcome: "done", forVersion: 2 }, text: "Added it.", createdAt: new Date().toISOString(), rev: 1 });
+    return { h, v2, recordAnswers, writeReply };
   }
 
   it("the next version's card says how many sent comments AgentX answered", async () => {
-    const { h, writeReplies } = await secondVersionAfterComments();
-    writeReplies();
+    const { h, recordAnswers, writeReply } = await secondVersionAfterComments();
+    recordAnswers();
+    writeReply();
     await h.pump();
     const card = h.posts.at(-1)!;
     expect(card.text).toContain("Coding plan v2 is ready for your approval.");
     expect(card.text).toContain("AgentX answered 1 of 2 comments from v1.");
   });
 
-  it("a card built before the planner's replies are written waits for them, so its count is never short", async () => {
-    const { h, v2, writeReplies } = await secondVersionAfterComments();
-    // The step committed and the notice came first: the broker's "done" record is not there yet (the real broker writes it
-    // with the replies, after the commit).
-    h.db.delete(`DEVTASK#${h.taskId}`, `PLANREPLIES#${v2.id}`);
+  it("the card is posted at once, from the record committed with the plan, before any reply is written, with no retry", async () => {
+    const { h, recordAnswers } = await secondVersionAfterComments();
+    recordAnswers();
+    // The replies themselves are written after the commit: none is there yet when the notice arrives.
+    expect(h.db.find((item) => item.pk === `DEVTASK#${h.taskId}` && item.entityType === "TASK_COMMENT")).toHaveLength(0);
     const posted = h.posts.length;
-    await h.pump();
-    expect(h.posts).toHaveLength(posted);
-    expect(h.retryLater).toHaveBeenCalledWith(expect.any(String), 30);
-    expect(h.logs).toContainEqual(expect.objectContaining({ event: "developer_notifier.retry", kind: "workflow", reason: "RepliesPending" }));
-    expect(h.queue).toHaveLength(1);
-    // The replies land; the retried notice counts them all.
-    writeReplies();
     await h.pump();
     expect(h.posts).toHaveLength(posted + 1);
     expect(h.posts.at(-1)!.text).toContain("AgentX answered 1 of 2 comments from v1.");
+    expect(h.retryLater).not.toHaveBeenCalled();
+    expect(h.queue).toHaveLength(0);
     // Delivered again (a redelivery), it is not posted twice.
     await h.pump();
     expect(h.posts).toHaveLength(posted + 1);
   });
 
-  it("a card whose replies never get a done record is posted after a few minutes with what is there", async () => {
-    const { h, v2, writeReplies } = await secondVersionAfterComments();
-    writeReplies();
+  it("a plan stored before the record existed posts its card at once, without a line about replies", async () => {
+    const { h, v2 } = await secondVersionAfterComments();
     h.db.delete(`DEVTASK#${h.taskId}`, `PLANREPLIES#${v2.id}`);
     const posted = h.posts.length;
     await h.pump();
-    expect(h.posts).toHaveLength(posted);
-    h.advance(4 * 60_000);
-    await h.pump();
     expect(h.posts).toHaveLength(posted + 1);
-    expect(h.posts.at(-1)!.text).toContain("AgentX answered 1 of 2 comments from v1.");
+    expect(h.posts.at(-1)!.text).toContain("Coding plan v2 is ready for your approval.");
+    expect(h.posts.at(-1)!.text).not.toMatch(/AgentX (answered|replied)/);
+    expect(h.retryLater).not.toHaveBeenCalled();
   });
 
   const LEE = "f".repeat(64);

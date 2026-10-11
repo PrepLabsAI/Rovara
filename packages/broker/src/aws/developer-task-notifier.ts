@@ -9,13 +9,13 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { INDEX_EXPIRY_ATTRIBUTE, NUDGE_WINDOW_MS, plannerReplyCommentId, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, NUDGE_WINDOW_MS, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
 import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
 import { answeredWorkflowCard, cleanLine, documentSummaryLines, feedbackReviewFailedMessage, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
-import { deriveTaskStatus, failureCategory, plannerRepliesDoneKey, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
+import { deriveTaskStatus, failureCategory, plannerRepliesKey, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
 import { isConditional } from "./broker-shared.js";
 import { requiredEnvironment } from "./lambda.js";
 import { parseSlackSecrets } from "./slack-ingress.js";
@@ -59,13 +59,6 @@ class StartPending extends Error {
     this.name = "StartPending";
   }
 }
-
-/** The planner's replies to the comments sent with a decision are not all written yet: the card for the new document waits. */
-class RepliesPending extends Error {
-  constructor() { super("the planner's replies are still being written"); this.name = "RepliesPending"; }
-}
-/** How long after a document was stored its card waits for the replies; after that it counts what is there. */
-const REPLIES_WAIT_MS = 3 * 60_000;
 
 class CanvasCloseoutPending extends Error {
   constructor(readonly reason: string) { super("task Canvas closeout remains pending"); this.name = "CanvasCloseoutPending"; }
@@ -712,14 +705,15 @@ async function commentAnswersFor(deps: NotifierDependencies, task: DeveloperTask
   const detail = await getItem<{ includedCommentIds?: unknown }>(deps, { pk: `DEVTASK#${task.taskId}`, sk: `DECISION#${decision.requestId}` });
   const ids = Array.isArray(detail?.includedCommentIds) ? detail.includedCommentIds.filter((id): id is string => typeof id === "string") : [];
   if (ids.length === 0) return undefined;
-  // The replies are written after the step commits, so a card built straight away could count too few: it waits for the
-  // "done" record (a retry is a few seconds to minutes later), and, past a short while, says what is there.
-  if (await getItem(deps, plannerRepliesDoneKey(task.taskId, approval.id)) === undefined && deps.now() - Date.parse(approval.createdAt) < REPLIES_WAIT_MS) throw new RepliesPending();
-  const found = await Promise.all(ids.map((id) => getItem(deps, { pk: `DEVTASK#${task.taskId}`, sk: `COMMENT#${plannerReplyCommentId(id, approval.id)}` })));
-  const answered = found.filter((item) => item !== undefined).length;
+  // What the planner answered is recorded with the plan itself, so it is there whenever the card is built. A plan stored
+  // before that has no record, and its card says nothing about replies.
+  const recorded = await getItem<{ answered?: unknown }>(deps, plannerRepliesKey(task.taskId, approval.id));
+  if (recorded === undefined || !Array.isArray(recorded.answered)) return undefined;
+  const answers = recorded.answered.flatMap((entry) => (typeof (entry as { commentId?: unknown } | null)?.commentId === "string" ? [(entry as { commentId: string }).commentId] : []));
+  const answered = answers.length;
   if (previous !== undefined) return { answered, total: ids.length, fromVersion: previous.version };
   // Sent with an Approve: the page's comments of that document, with a link to the first one the planner answered.
-  const first = ids.find((_, index) => found[index] !== undefined);
+  const first = answers[0];
   const sent = await Promise.all(ids.map((id) => getItem<{ author?: { owner?: unknown } }>(deps, { pk: `DEVTASK#${task.taskId}`, sk: `COMMENT#${id}` })));
   return {
     answered, total: ids.length, fromVersion: 0,
@@ -755,7 +749,6 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
     approval = workflow.artifacts.filter((artifact) => artifact.type === workflowDocumentType(workflow)).at(-1);
     if (approval !== undefined) {
       const answered = await commentAnswersFor(deps, task, workflow, approval).catch((error: unknown) => {
-        if (error instanceof RepliesPending) throw error;
         deps.log({ event: "developer_notifier.comment_answers_unavailable", taskId: task.taskId, error: errorName(error) });
         return undefined;
       });
