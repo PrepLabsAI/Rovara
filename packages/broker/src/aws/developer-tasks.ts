@@ -2638,13 +2638,14 @@ export async function retryTaskWorkflowFeedbackReview(
 }
 
 /**
- * Why a retry that found the workspace idle still could not start: the task changed under it (another press won and
- * started the review, so its new card is coming), or else the workspace really became busy.
+ * Why a retry that found the workspace idle still could not start: the task is gone or closed (the press is out of date,
+ * and no card is coming), the task changed under it (another press won and started the review, so its new card is
+ * coming), or else the workspace really became busy.
  */
 async function feedbackRetryRefusal(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord, read: WorkflowSnapshot): Promise<AgentXError> {
   const latest = await get<DeveloperTaskRecord>(deps, taskKey(task.taskId));
-  const changed = latest === undefined || latest.closedAt !== undefined || latest.workflow?.revision !== read.revision;
-  return agentXError("CONFIG_INVALID", changed ? FEEDBACK_REVIEW_RETRY_CHANGED : FEEDBACK_REVIEW_RETRY_BUSY);
+  if (latest === undefined || latest.closedAt !== undefined) return agentXError("CONFIG_INVALID", FEEDBACK_REVIEW_RETRY_STALE);
+  return agentXError("CONFIG_INVALID", latest.workflow?.revision !== read.revision ? FEEDBACK_REVIEW_RETRY_CHANGED : FEEDBACK_REVIEW_RETRY_BUSY);
 }
 
 function slackEventRequestId(eventId: string): string {
