@@ -1282,6 +1282,23 @@ async function continueTask(deps: DeveloperTaskRouteDependencies, caller: Develo
 }
 
 /**
+ * The task a caller may decide, through the one access rule (resolveTaskAccess and the role table). Anyone whose role may
+ * not decide, and anyone who may not see the task at all, gets the answer a missing task gets, as before.
+ */
+async function decidableTask(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string): Promise<DeveloperTaskRecord> {
+  const notYours = () => agentXError("TASK_NOT_FOUND", TASK_ID.test(taskId) ? `no task ${taskId} of yours` : "that is not a task ID of yours");
+  let access: Awaited<ReturnType<typeof resolveTaskAccess>>;
+  try {
+    access = await resolveTaskAccess(deps, caller, taskId);
+  } catch (error) {
+    if (error instanceof AgentXError && (error.code === "TASK_NOT_FOUND" || error.code === "TASK_ACCESS_DENIED")) throw notYours();
+    throw error;
+  }
+  if (!can(access.role, "decide")) throw notYours();
+  return access.task;
+}
+
+/**
  * The one transition for a plan decision, from Slack, MCP and the task page alike. A page decision (`via: "PAGE"`) carries
  * the owner's answer to every decision and the comments they chose to send; Slack and MCP send neither, so an approval
  * takes AgentX's answers and up to 25 open comments, oldest first, and a change request takes none (FR-036). The detail
@@ -1294,7 +1311,7 @@ export async function decideTaskWorkflow(
   options: { via?: "PAGE"; note?: string } = {},
 ): Promise<{ task: DeveloperTaskView }> {
   const request = parse(WorkflowDecisionRequestSchema, value, deps, "workflow-decision");
-  const task = await loadOwnedTask(deps, caller, taskId);
+  const task = await decidableTask(deps, caller, taskId);
   if (task.workflow === undefined) throw agentXError("NOT_FOUND", "this task does not have a workflow record");
   const workflow = task.workflow;
   const prior = workflow.decisions.find((decision) => decision.requestId === request.requestId);

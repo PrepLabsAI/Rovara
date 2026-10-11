@@ -283,6 +283,22 @@ describe("task page API through the broker", () => {
     expect(teammate.body).toContain("You can read and comment on this task.");
   });
 
+  it("through the AI tool API a teammate cannot decide either, and hears the answer a missing task gets", async () => {
+    const t = await sharedTask();
+    for (const who of [LEE, NIA]) {
+      t.harness.db.set({ pk: `SESSION#${who.sessionId}`, sk: "META", sessionId: who.sessionId, developerId: who.developerId, amr: who.provider, startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800 });
+    }
+    const body = { requestId: randomUUID(), expectedRevision: t.revision, decision: "APPROVE", reason: "Looks right.", artifactDigest: t.sha256 };
+    const teammate = await t.harness.dev(LEE, "POST", `/v1/dev/tasks/${t.id}/workflow/decision`, body);
+    expect(teammate.status).toBe(404);
+    expect((teammate.body.error as { code: string }).code).toBe("TASK_NOT_FOUND");
+    const outsider = await t.harness.dev(NIA, "POST", `/v1/dev/tasks/${t.id}/workflow/decision`, body);
+    expect(outsider.body.error).toEqual(teammate.body.error);
+    expect((t.harness.db.get(`DEVTASK#${t.id}`, "META") as { workflow: { revision: number } }).workflow.revision).toBe(t.revision);
+    const owner = await t.harness.dev(MAYA, "POST", `/v1/dev/tasks/${t.id}/workflow/decision`, body);
+    expect(owner.status, JSON.stringify(owner.body)).toBe(200);
+  });
+
   it("the feedback review routes are unchanged", async () => {
     const t = await sharedTask();
     // The PR feedback page and its API still answer their own paths: this task has no review, so both say not found in their own words.
