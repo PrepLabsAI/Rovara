@@ -213,14 +213,37 @@ describe("the index row follows the task (R4)", () => {
       return String((response.body.error as { message: string }).message);
     };
     expect(await limited()).toContain(ids[0]);
-    const record = harness.db.get(`DEVTASK#${ids[0]}`, "META") as { createdAt: string };
+    const record = harness.db.get(`DEVTASK#${ids[0]}`, "META") as { createdAt: string; charge: { member: { pk: string; sk: string } } };
     harness.db.set({ ...record, closedAt: new Date().toISOString() });
+    // The close gave its slot back; a Slack thread workspace took it, so the limit is still reached (a closed task still
+    // counted would be given back by the start itself).
+    const member = harness.db.get(record.charge.member.pk, record.charge.member.sk)!;
+    harness.db.set({ ...member, tasks: new Set([ids[1], ids[2]]), threads: ["T0BSHLLUGBD/C0123456789/1695500000.000001"] });
     expect(((await harness.dev(MAYA, "GET", `/v1/dev/tasks/${ids[0]}`)).body.task as { status: string }).status).toBe("CLOSED");
     expect(harness.db.get(`DEVELOPER#${MAYA.developerId}`, `TASK#${record.createdAt}#${ids[0]}`)).toMatchObject({ status: "CLOSED" });
     const message = await limited();
     expect(message).not.toContain(ids[0]);
     expect(message).toContain(ids[1]);
     expect(message).toContain(ids[2]);
+  });
+
+  it("a closed task its counter still holds (an older record) is given back by a start that meets the limit, once", async () => {
+    const harness = await createDeveloperTaskBroker();
+    const ids: string[] = [];
+    for (const title of ["one", "two", "three"]) {
+      ids.push(((await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: title })).body.task as { taskId: string }).taskId);
+    }
+    const record = harness.db.get(`DEVTASK#${ids[0]}`, "META") as { charge: { member: { pk: string; sk: string }; organization: { pk: string; sk: string } } };
+    harness.db.set({ ...record, closedAt: new Date().toISOString() });
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "four" });
+    const fourth = (started.body.task as { taskId: string }).taskId;
+    const member = harness.db.get(record.charge.member.pk, record.charge.member.sk)!;
+    expect({ count: member.count, tasks: [...(member.tasks as Set<string>)].sort() }).toEqual({ count: 3, tasks: [ids[1], ids[2], fourth].sort() });
+    expect(harness.db.get(record.charge.organization.pk, record.charge.organization.sk)?.count).toBe(3);
+    // The limit is reached again by open tasks: nothing more is given back.
+    const refused = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "five" });
+    expect(refused.body.error).toMatchObject({ code: "WORKSPACE_LIMIT" });
+    expect(harness.db.get(record.charge.member.pk, record.charge.member.sk)?.count).toBe(3);
   });
 
   it("writes a failed prepare's status to the index on a read of the task", async () => {
