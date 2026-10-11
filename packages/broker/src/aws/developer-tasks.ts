@@ -88,7 +88,7 @@ import {
   workflowFeedbackCheckChanges,
   retryWorkflowFeedbackReview,
   WorkflowPublishRetryRequestSchema,
-  WorkflowFeedbackDecisionRequestSchema,
+  WorkflowFeedbackFindingsDecisionRequestSchema,
   WorkflowFeedbackReviewRetryRequestSchema,
   WORKFLOW_PLAN_MAX_BYTES,
   WORKFLOW_BLOCK_REASONS,
@@ -3987,7 +3987,7 @@ export async function adminShareMode(deps: ShareModeDependencies, admin: ShareAd
  * the Slack buttons and the feedback page, then the task as it now stands.
  */
 async function decideTaskWorkflowFeedback(deps: DeveloperTaskRouteDependencies, caller: DeveloperCaller, taskId: string, input: unknown): Promise<{ task: DeveloperTaskView }> {
-  const parsed = WorkflowFeedbackDecisionRequestSchema.safeParse(input);
+  const parsed = WorkflowFeedbackFindingsDecisionRequestSchema.safeParse(input);
   if (!parsed.success) throw agentXError("CONFIG_INVALID", parsed.error.issues[0]?.message ?? "the PR feedback decision is invalid");
   await submitWorkflowFeedbackDecision(deps, caller, taskId, parsed.data);
   return readTask(deps, caller, taskId, new URL(`/v1/dev/tasks/${encodeURIComponent(taskId)}`, "https://agentx.invalid"));

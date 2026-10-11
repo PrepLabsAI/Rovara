@@ -220,7 +220,7 @@ export type WorkflowPublishRetryRequest = z.infer<typeof WorkflowPublishRetryReq
  * The owner's decision on a pending PR feedback proposal from an AI tool: the same fields the feedback page sends. APPROVE
  * names the findings to fix; REQUEST_CHANGES and DISMISS carry the owner's note and select nothing.
  */
-export const WorkflowFeedbackDecisionRequestSchema = z.object({
+export const WorkflowFeedbackFindingsDecisionRequestSchema = z.object({
   requestId: RequestIdSchema,
   expectedRevision: z.number().int().positive(),
   reviewDigest: z.string().regex(/^[a-f0-9]{64}$/),
@@ -237,7 +237,7 @@ export const WorkflowFeedbackDecisionRequestSchema = z.object({
   if (value.decision !== "APPROVE" && value.ownerNote === undefined) context.addIssue({ code: "custom", path: ["ownerNote"], message: "add a short note saying what to change or why" });
   if (value.decision !== "APPROVE" && value.selectedFindingIds.length > 0) context.addIssue({ code: "custom", path: ["selectedFindingIds"], message: "only an approval names findings" });
 });
-export type WorkflowFeedbackDecisionRequest = z.infer<typeof WorkflowFeedbackDecisionRequestSchema>;
+export type WorkflowFeedbackFindingsDecisionRequest = z.infer<typeof WorkflowFeedbackFindingsDecisionRequestSchema>;
 /** The owner's retry of a PR feedback review that could not finish, naming the failed review. */
 export const WorkflowFeedbackReviewRetryRequestSchema = z.object({ reviewDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict();
 export type WorkflowFeedbackReviewRetryRequest = z.infer<typeof WorkflowFeedbackReviewRetryRequestSchema>;

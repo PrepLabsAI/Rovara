@@ -22,7 +22,7 @@ import {
   type ShareDeveloperTaskRequest,
   type StartDeveloperTaskRequest,
   type WorkflowDecisionRequest,
-  type WorkflowFeedbackDecisionRequest,
+  type WorkflowFeedbackFindingsDecisionRequest,
   type WorkflowFeedbackReviewRetryRequest,
   type WorkflowPublishRetryRequest,
   type WorkflowResolveFindingsInput,
@@ -60,7 +60,7 @@ export interface ControlPlaneClient {
   /** The pending PR feedback proposal, as the feedback page shows it (GitHub and reviewer text: untrusted data). */
   getWorkflowFeedback(taskId: string): Promise<Record<string, unknown>>;
   /** The owner's decision on the pending PR feedback proposal, the same transition the Slack buttons make. */
-  decideWorkflowFeedback(taskId: string, request: WorkflowFeedbackDecisionRequest): Promise<DeveloperTaskView>;
+  decideWorkflowFeedback(taskId: string, request: WorkflowFeedbackFindingsDecisionRequest): Promise<DeveloperTaskView>;
   /** The owner's Retry review of a PR feedback review that could not finish. */
   retryWorkflowFeedbackReview(taskId: string, request: WorkflowFeedbackReviewRetryRequest): Promise<{ task: DeveloperTaskView; started: boolean }>;
   cancelTask(taskId: string, requestId: string): Promise<DeveloperTaskView>;
