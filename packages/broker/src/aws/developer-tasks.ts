@@ -520,7 +520,10 @@ export async function submitWorkflowFeedbackDecision(
     // (required project checks always stay), for this fix and for every later step and feedback round.
     // Corrected checks are checked again here, against the project's repository folders: any problem refuses the whole
     // approval, so an obsolete check is never dropped without its replacement.
-    const checkChanges = workflowFeedbackCheckChanges(next.checkPolicy, selected, await taskRepositoryPaths(deps, task));
+    // The folders are the task's starting project revision's, looked up only when a fix adds a check.
+    const addsChecks = selected.some(finding => finding.proposedDisposition === "IMPLEMENT"
+      && ((finding.fixProposal as { replacementChecks?: unknown[] } | undefined)?.replacementChecks?.length ?? 0) > 0);
+    const checkChanges = workflowFeedbackCheckChanges(next.checkPolicy, selected, addsChecks ? await taskRepositoryPaths(deps, task) : undefined);
     if (checkChanges.problems.length > 0) {
       throw agentXError("CONFIG_INVALID", `The approved fix proposes a check change AgentX won't make: ${checkChanges.problems[0]!}. Dismiss the proposal or request changes.`);
     }
@@ -613,10 +616,10 @@ function approvedFix(proposal: { summary: string; fileChanges: Array<{ repositor
   return { summary: proposal.summary, fileChanges: proposal.fileChanges.map(({ repositoryId, operation, path, change }) => ({ repositoryId, operation, path, change })) };
 }
 
-/** The task's repository folders, from its project's latest registration: where a corrected check may run. */
+/** The task's repository folders, from the project revision it started from: where a corrected check may run. */
 async function taskRepositoryPaths(deps: DeveloperTaskRouteDependencies, task: DeveloperTaskRecord): Promise<string[]> {
-  const project = await deps.actions.latestProject(task.project);
-  if (project === undefined) throw agentXError("CONFIG_INVALID", "this task's project is no longer registered; ask an admin");
+  const project = await deps.actions.projectRevision(task.project, task.startingRevision);
+  if (project === undefined) throw agentXError("CONFIG_INVALID", "this task's project revision is no longer registered; ask an admin");
   return project.definition.repositories.map(repository => repository.path);
 }
 

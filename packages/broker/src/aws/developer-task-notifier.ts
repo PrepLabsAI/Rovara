@@ -9,7 +9,7 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { INDEX_EXPIRY_ATTRIBUTE, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
 import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
@@ -84,10 +84,6 @@ const FEEDBACK_QUESTIONS_SHOWN = 3;
 const FEEDBACK_QUESTION_MAX = 280;
 /** Each check label's visible length in a card's "Updates checks" line (a label is at most 80 characters). */
 const FEEDBACK_CHECK_LABEL_MAX = 100;
-/** A check command's visible length on the card before it is cut (never inside its program). */
-const FEEDBACK_CHECK_COMMAND_MAX = 160;
-/** Room for a cut command (or a folder) once escaped, so escaping never cuts it again. */
-const FEEDBACK_CHECK_CODE_MAX = 2_000;
 
 /**
  * One line of the reviewer's words (made inert by cleanLine) at most `limit` characters long once escaped: an escaped
@@ -140,13 +136,14 @@ export function feedbackReviewSlackMessage(input: {
   const shownQuestions = questions.slice(0, FEEDBACK_QUESTIONS_SHOWN);
   const recommended = input.recommendedFindingIds.length;
   const details = `<${slackText(url.href)}|Open details>.`;
-  // Labels and commands are the plan's and the reviewer's words: each is made inert; a command is shortened only past its
-  // program (workflowCheckCommandText), and a backtick in it cannot close its code style.
-  const code = (text: string) => `\`${escapedLine(text.replaceAll("`", "'"), FEEDBACK_CHECK_CODE_MAX)}\``;
+  // Labels and commands are the plan's and the reviewer's words: each is made inert. A corrected check's command is at
+  // most 300 plain characters with no backtick, so it is shown in full, its spacing kept, in exact code style (a backtick
+  // is still replaced, so none can close it).
+  const code = (text: string) => `\`${slackText(redactText(text)).replaceAll("`", "'")}\``;
   const checkLines = recommended === 0 || input.checkChanges === undefined ? [] : describeWorkflowCheckChanges(input.checkChanges.map((finding) => ({
     obsolete: finding.obsolete.map((label) => escapedLine(label, FEEDBACK_CHECK_LABEL_MAX)),
     added: finding.added.map((check) => ({ label: escapedLine(check.label, FEEDBACK_CHECK_LABEL_MAX),
-      command: code(workflowCheckCommandText(check.command, FEEDBACK_CHECK_COMMAND_MAX)), cwd: code(check.command.cwd) })),
+      command: code(workflowCheckCommandText(check.command, Number.POSITIVE_INFINITY)), cwd: code(check.command.cwd) })),
   })));
   const checksLine = checkLines.length === 0 ? undefined : checkLines.join("\n");
   let text: string;
@@ -778,14 +775,22 @@ async function feedbackReviewNotification(deps: NotifierDependencies, task: Deve
     // The reviewer is told to put its question and options in the proposal's summary; its rationale stands in when it gave none.
     ownerQuestions: findings.filter(finding => finding.proposedDisposition === "OWNER_DECISION")
       .map(finding => ({ findingId: finding.id, question: finding.fixProposal?.summary ?? finding.rationale })),
-    checkChanges: findings.filter(finding => finding.recommended).map(finding => checkChangeLabels(workflowFeedbackCheckChanges(workflow!.checkPolicy, [finding]))),
+    checkChanges: feedbackCardCheckChanges(workflow!.checkPolicy, findings.filter(finding => finding.recommended)),
     detailUrl: new URL(`/review/${encodeURIComponent(task.taskId)}`, base).href,
   });
 }
 
-/** The labels of a fix's check changes, as a card says them. */
-function checkChangeLabels(changes: ReturnType<typeof workflowFeedbackCheckChanges>): { obsolete: string[]; added: Array<{ label: string; command: { cwd: string; executable: string; args: string[] } }> } {
-  return { obsolete: changes.obsolete.map(check => check.label), added: changes.added.map(check => ({ label: check.label, command: check.command })) };
+/**
+ * The check changes a card says for its recommended fixes: exactly what Approve applies for them together
+ * (workflowFeedbackCheckChanges, which the approval uses too), split by the finding each change comes from.
+ */
+export function feedbackCardCheckChanges(
+  policy: Parameters<typeof workflowFeedbackCheckChanges>[0],
+  findings: Parameters<typeof workflowFeedbackCheckChanges>[1],
+): Array<{ obsolete: string[]; added: Array<{ label: string; command: WorkflowCheck["command"] }> }> {
+  return workflowFeedbackCheckChanges(policy, findings).byFinding.map(entry => ({
+    obsolete: entry.obsolete.map(check => check.label), added: entry.added.map(check => ({ label: check.label, command: check.command })),
+  }));
 }
 
 type Outcome = "posted" | "recorded" | "not_shared" | "before_share" | "after_close" | "delivered" | "no_thread" | "stale";

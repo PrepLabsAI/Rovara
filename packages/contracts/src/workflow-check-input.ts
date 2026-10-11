@@ -77,17 +77,15 @@ const PLAIN_TEXT = /^[\x20-\x7e]*$/;
 export function feedbackReplacementCheckProblem(value: unknown, repositoryPaths?: readonly string[]): string | undefined {
   const planProblem = proposedCheckProblem(value, repositoryPaths);
   if (planProblem !== undefined) return planProblem;
-  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
-    const { label, cwd, executable, args } = value as Record<string, unknown>;
-    const texts = [label, cwd, executable, ...(Array.isArray(args) ? args : [])];
-    if (typeof executable === "string" && Array.isArray(args) && texts.every((text) => typeof text === "string")) {
-      const strings = texts as string[];
-      const command = [executable, ...(args as string[])].join(" ");
-      if (strings.some((text) => !PLAIN_TEXT.test(text)) || command.length > WORKFLOW_FEEDBACK_CHECK_COMMAND_MAX
-        || (args as string[]).some((arg) => arg.includes("`") || arg.includes("$("))) {
-        return "keep the command under 300 plain characters without ` or $(";
-      }
-    }
+  const parsed = WorkflowProposedCheckInputSchema.safeParse(value);
+  if (!parsed.success) return "it must have only label, cwd, executable, args and timeoutSeconds";
+  const { label, cwd, executable, args } = parsed.data;
+  const command = [executable, ...args].join(" ");
+  // The label as given: the schema trims it, and a hidden character at either end must be refused too.
+  const rawLabel = (value as { label: string }).label;
+  if ([rawLabel, label, cwd, executable, ...args].some((text) => !PLAIN_TEXT.test(text)) || command.length > WORKFLOW_FEEDBACK_CHECK_COMMAND_MAX
+    || args.some((arg) => arg.includes("`") || arg.includes("$("))) {
+    return "keep the command under 300 plain characters without ` or $(";
   }
   return undefined;
 }
