@@ -45,6 +45,8 @@ export const WORKFLOW_BLOCK_REASONS = {
   /** The saved plan is a structured document that could not be read back. */
   planUnreadable: "the plan couldn't be read",
   pullRequestChanged: "The pull request on GitHub no longer holds the checked code, so I won't finish this task from it. Close the task.",
+  /** A required pull request was closed on GitHub without merging; reopened, it is followed again. */
+  pullRequestClosed: "The pull request was closed on GitHub without merging. Reopen it there, or close this task.",
   /** The pull request's feedback review failed; AgentX still watches the pull request for its merge. */
   feedbackReviewFailed: "I couldn't review the feedback on the pull request, so I have nothing to propose from it.",
   /** The approved fix could not be pushed to the pull request; AgentX still watches the pull request for its merge. */
@@ -1224,18 +1226,25 @@ export function workflowFollowsOnlyMerge(workflow: Pick<WorkflowSnapshot, "stage
 
 /**
  * The task once its pull requests are as observed: complete when every required one merged; otherwise a task that follows
- * them only for their merge stays where it is, and one waiting for the merge waits on.
+ * them only for their merge stays where it is, one whose required pull request was closed without merging stops (until it
+ * is reopened), and one waiting for the merge waits on.
  */
 function withPullRequestsObserved(current: WorkflowSnapshot, pullRequests: WorkflowPullRequest[], now: string): WorkflowSnapshot {
   const complete = pullRequests.filter((pullRequest) => pullRequest.required).every((pullRequest) => pullRequest.state === "MERGED");
   const keep = !complete && workflowFollowsOnlyMerge(current);
+  const closed = !complete && !keep && pullRequests.some((pullRequest) => pullRequest.required && pullRequest.state === "CLOSED");
   const { outcome: _priorOutcome, ...withoutPriorOutcome } = current;
   void _priorOutcome;
+  // Waiting again (a closed pull request reopened) carries no reason to stop.
+  const { blockReason: _priorReason, ...unblocked } = withoutPriorOutcome;
+  void _priorReason;
+  const reopened = !keep && !closed && current.state === "BLOCKED" && current.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestClosed;
   return WorkflowSnapshotSchema.parse({
-    ...(keep ? current : withoutPriorOutcome),
+    ...(keep ? current : reopened ? unblocked : withoutPriorOutcome),
     revision: current.revision + 1,
     stage: complete ? "MERGED" : keep ? current.stage : "WAIT_FOR_MERGE",
-    state: complete ? "COMPLETE" : keep ? current.state : "WAITING",
+    state: complete ? "COMPLETE" : keep ? current.state : closed ? "BLOCKED" : "WAITING",
+    ...(closed ? { blockReason: WORKFLOW_BLOCK_REASONS.pullRequestClosed } : {}),
     ...(complete ? { outcome: "MERGED" as const } : {}),
     pullRequests,
     updatedAt: now,

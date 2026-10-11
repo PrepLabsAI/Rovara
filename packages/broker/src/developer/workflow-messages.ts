@@ -647,6 +647,7 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
     // pull request ends the following; a failed feedback review or push leaves the merge still tracked.
     case "WAIT_FOR_MERGE/BLOCKED": return { text: workflow.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestChanged
       ? `I stopped following the pull request. ${plainBlockReason(workflow.blockReason)}`
+      : workflow.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestClosed ? plainBlockReason(workflow.blockReason)
       : workflow.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed ? pullRequestUpdateFailed(workflow)
         : `${plainBlockReason(workflow.blockReason)} ${STILL_WATCHING}`, buttons: [exits.close] };
     case "MERGED/COMPLETE": {
