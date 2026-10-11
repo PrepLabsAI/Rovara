@@ -450,6 +450,11 @@ describe("broker-backed feedback review data", () => {
     const page = await createFeedbackReviewWeb(dependencies({ getWorkflowFeedbackReview: vi.fn(async () => review) }))(
       request("GET", `/review/${fixture.taskId}`, { cookie: "__Host-agentx_review_session=session-owner" }), new URL(`/review/${fixture.taskId}`, origin));
     expect(page.body).toContain("Updates checks: Sentence present → Shorter sentence present");
+    // The per-finding view says it is for that finding alone; the combined block says what Approve recommended applies,
+    // from the same computation the approval uses.
+    expect(page.body).toContain("<h5>Checks, if approved on its own</h5>");
+    expect(review.recommendedCheckChanges).toEqual([{ obsolete: ["Sentence present"], added: [{ label: "Shorter sentence present", command: added }] }]);
+    expect(page.body).toMatch(/<section aria-label="Approve recommended applies"><h2>Approve recommended applies:<\/h2><p>Updates checks: Sentence present → Shorter sentence present<\/p><p>Adds check Shorter sentence present: <code class="command">grep -q New\. README\.md<\/code>/);
     expect(page.body).toContain('Adds check Shorter sentence present: <code class="command">grep -q New. README.md</code> in <code class="command">repo/demo</code>');
     expect(page.body).toContain("These commands run on the next step.");
 

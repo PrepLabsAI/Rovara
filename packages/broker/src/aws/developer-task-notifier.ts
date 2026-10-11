@@ -140,31 +140,34 @@ export function feedbackReviewSlackMessage(input: {
   // most 300 plain characters with no backtick, so it is shown in full, its spacing kept, in exact code style (a backtick
   // is still replaced, so none can close it).
   const code = (text: string) => `\`${slackText(redactText(text)).replaceAll("`", "'")}\``;
+  const label = (text: string) => `\`${escapedLine(text.replaceAll("`", "'"), FEEDBACK_CHECK_LABEL_MAX)}\``;
   const checkLines = recommended === 0 || input.checkChanges === undefined ? [] : describeWorkflowCheckChanges(input.checkChanges.map((finding) => ({
-    obsolete: finding.obsolete.map((label) => escapedLine(label, FEEDBACK_CHECK_LABEL_MAX)),
-    added: finding.added.map((check) => ({ label: escapedLine(check.label, FEEDBACK_CHECK_LABEL_MAX),
+    obsolete: finding.obsolete.map(label),
+    added: finding.added.map((check) => ({ label: label(check.label),
       command: code(workflowCheckCommandText(check.command, Number.POSITIVE_INFINITY)), cwd: code(check.command.cwd) })),
   })));
-  const checksLine = checkLines.length === 0 ? undefined : checkLines.join("\n");
-  let text: string;
+  // The text before the check lines and after them: each check line is its own section, so no split lands inside one.
+  let before: string;
+  let after = "";
   if (questions.length === 0) {
-    text = checksLine === undefined
+    before = checkLines.length === 0
       ? `PR feedback is ready: ${input.totalComments} comments; ${recommendationSummary} Highest priority: ${priority}. ${details}`
-      : `PR feedback is ready: ${input.totalComments} comments; ${recommendationSummary} Highest priority: ${priority}.\n${checksLine}\n${details}`;
+      : `PR feedback is ready: ${input.totalComments} comments; ${recommendationSummary} Highest priority: ${priority}.`;
+    if (checkLines.length > 0) after = details;
   } else {
     const hidden = questions.length - shownQuestions.length;
     const more = hidden === 0 ? [] : [`(${hidden} more ${hidden === 1 ? "question is" : "questions are"} on the details page; your answer here covers only the ones shown.)`];
     const several = shownQuestions.length > 1;
     const scope = recommended === 0 ? ""
       : ` Your answer covers only the ${several ? "questions" : "question"}. Approve ${recommended} recommended makes only the recommended ${recommended === 1 ? "fix" : "fixes"} and leaves the ${several ? "questions" : "question"} open.`;
-    text = [
-      `PR feedback is ready: ${input.totalComments} comments${recommended === 0 ? "" : `; ${recommendationSummary} Highest priority: ${priority}`}.`,
-      ...(checksLine === undefined ? [] : [checksLine]),
+    before = `PR feedback is ready: ${input.totalComments} comments${recommended === 0 ? "" : `; ${recommendationSummary} Highest priority: ${priority}`}.`;
+    after = [
       "The reviewer needs your answer before changing any code:",
       ...shownQuestions.map(({ question }) => `> ${escapedLine(question, FEEDBACK_QUESTION_MAX)}`), ...more,
       `Answer with instructions and I'll make that change.${scope} ${details}`,
     ].join("\n");
   }
+  const text = [before, ...checkLines, after].filter((part) => part.length > 0).join("\n");
   const bundleSetDigest = createHash("sha256").update(JSON.stringify(input.bundleDigests), "utf8").digest("hex");
   const card = { taskId: input.taskId, expectedRevision: input.revision, reviewDigest: input.reviewDigest, proposalDigest: input.proposalDigest, bundleSetDigest };
   const binding = JSON.stringify({ ...card, selection: "RECOMMENDED" });
@@ -178,11 +181,14 @@ export function feedbackReviewSlackMessage(input: {
         value: JSON.stringify({ ...card, selection: "ANSWER", findingIds: shownQuestions.map(({ findingId }) => findingId) }) },
     { type: "button", action_id: "agentx_feedback_review_dismiss", text: { type: "plain_text", text: "Dismiss" }, value: binding },
   ];
-  // Escaping can make the reviewer's words several times longer than they look, so long text is split across sections.
+  // Escaping can make the reviewer's words several times longer than they look, so long text is split across sections;
+  // each check line is a section of its own (a line is at most a few hundred characters), never split.
+  const sections = checkLines.length === 0 ? slackSectionTexts(text)
+    : [...slackSectionTexts(before), ...checkLines, ...(after.length === 0 ? [] : slackSectionTexts(after))];
   return {
     text,
     blocks: [
-      ...slackSectionTexts(text).map((section) => ({ type: "section", text: { type: "mrkdwn", text: section } })),
+      ...sections.map((section) => ({ type: "section", text: { type: "mrkdwn", text: section } })),
       { type: "actions", elements },
     ],
   };

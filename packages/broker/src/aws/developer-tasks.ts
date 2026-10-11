@@ -454,6 +454,10 @@ export async function getWorkflowFeedbackReview(deps: DeveloperTaskRouteDependen
     qualification: report.qualification, reviewDigest: reportRef.sha256, proposalDigest: report.proposalDigest,
     bundleDigests: report.bundleDigests, candidates, findings,
     recommendedFindingIds: findings.filter(finding => finding.recommended).map(finding => finding.id), checks,
+    // What Approve recommended applies to the checks, split by finding: the computation the approval itself uses.
+    recommendedCheckChanges: workflowFeedbackCheckChanges(workflow.checkPolicy, report.findings.filter(finding => finding.recommended)).byFinding
+      .filter(entry => entry.obsolete.length > 0 || entry.added.length > 0)
+      .map(entry => ({ obsolete: entry.obsolete.map(check => check.label), added: entry.added.map(check => ({ label: check.label, command: check.command })) })),
   };
 }
 

@@ -1151,9 +1151,9 @@ describe("Slack-only workflow, end to end in one process", () => {
     await e2e.settle();
     // The proposal says which check the fix changes; Approve covers it.
     const proposal = e2e.slack.lastPostWithAction("agentx_feedback_review_recommended");
-    expect(visibleSlackText(proposal.text)).toContain(`Updates checks: ${OLD_CHECK.label} → ${NEW_CHECK.label}`);
+    expect(visibleSlackText(proposal.text)).toContain(`Updates checks: \`${OLD_CHECK.label}\` → \`${NEW_CHECK.label}\``);
     // ...and the exact command it adds, which the owner approves with it.
-    expect(visibleSlackText(proposal.text)).toContain(`Adds check ${NEW_CHECK.label}: \`grep -q "${NEW}" README.md\` in \`repo/demo\``);
+    expect(visibleSlackText(proposal.text)).toContain(`Adds check \`${NEW_CHECK.label}\`: \`grep -q "${NEW}" README.md\` in \`repo/demo\``);
     expect(visibleSlackText(proposal.text)).toContain("These commands run on the next step.");
     expect(visibleSlackText(proposal.text)).not.toMatch(JARGON);
     const runsBefore = e2e.checkRuns.length;

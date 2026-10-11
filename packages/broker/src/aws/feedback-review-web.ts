@@ -51,6 +51,25 @@ const scriptJson = (value: unknown) => JSON.stringify(value).replace(/[<>&\u2028
 const isCsrf = (value: string | undefined): value is string => value !== undefined && /^[A-Za-z0-9_-]{32,64}$/.test(value);
 const signInLocation = (taskId: string) => signInTo(`/review/${taskId}`);
 
+/**
+ * The lines that say check changes on the page, from the review's data: the obsolete checks by label and every added
+ * check by its exact command and folder in full (at most 300 plain characters), escaped, as code that keeps its spacing.
+ */
+function checkChangeLines(entries: readonly unknown[]): string[] {
+  const labels = (value: unknown) => (Array.isArray(value) ? value : []).filter((label): label is string => typeof label === "string").map(label => escape(label));
+  return describeWorkflowCheckChanges(entries.flatMap(entry => {
+    const changes = entry !== null && typeof entry === "object" ? entry as Record<string, unknown> : undefined;
+    if (changes === undefined) return [];
+    const added = (Array.isArray(changes.added) ? changes.added as Array<Record<string, unknown>> : []).flatMap(check => {
+      const command = check.command !== null && typeof check.command === "object" ? check.command as Record<string, unknown> : undefined;
+      if (typeof check.label !== "string" || command === undefined || typeof command.executable !== "string" || typeof command.cwd !== "string" || !Array.isArray(command.args)) return [];
+      const args = command.args.filter((arg): arg is string => typeof arg === "string");
+      return [{ label: escape(check.label), command: `<code class="command">${escape(workflowCheckCommandText({ executable: command.executable, args }, Number.POSITIVE_INFINITY))}</code>`, cwd: `<code class="command">${escape(command.cwd)}</code>` }];
+    });
+    return [{ obsolete: labels(changes.obsolete), added }];
+  }));
+}
+
 function page(review: Record<string, unknown>, csrf: string, nonce: string): string {
   // A review that failed, timed out or was interrupted has nothing to decide on.
   const pending = review.status === "PENDING" && (review.reportStatus === undefined || review.reportStatus === "COMPLETE") && (review.workflowStatus === undefined
@@ -76,18 +95,8 @@ function page(review: Record<string, unknown>, csrf: string, nonce: string): str
     const tests = Array.isArray(proposal?.tests) ? proposal.tests as Array<Record<string, unknown>> : [];
     // A finding the reviewer left to the owner holds a question (and its options), not a fix: no Files or Tests to list.
     const isQuestion = finding.proposedDisposition === "OWNER_DECISION";
-    // Every check the fix adds is shown by its exact command and folder in full (at most 300 plain characters), escaped,
-    // as code that keeps its spacing.
-    const changes = finding.checkChanges !== null && typeof finding.checkChanges === "object" ? finding.checkChanges as Record<string, unknown> : undefined;
-    const labels = (value: unknown) => (Array.isArray(value) ? value : []).filter((label): label is string => typeof label === "string").map(label => escape(label));
-    const addedChecks = (Array.isArray(changes?.added) ? changes.added as Array<Record<string, unknown>> : []).flatMap(check => {
-      const command = check.command !== null && typeof check.command === "object" ? check.command as Record<string, unknown> : undefined;
-      if (typeof check.label !== "string" || command === undefined || typeof command.executable !== "string" || typeof command.cwd !== "string" || !Array.isArray(command.args)) return [];
-      const args = command.args.filter((arg): arg is string => typeof arg === "string");
-      return [{ label: escape(check.label), command: `<code class="command">${escape(workflowCheckCommandText({ executable: command.executable, args }, Number.POSITIVE_INFINITY))}</code>`, cwd: `<code class="command">${escape(command.cwd)}</code>` }];
-    });
-    const checkLines = changes === undefined ? [] : describeWorkflowCheckChanges([{ obsolete: labels(changes.obsolete), added: addedChecks }]);
-    const checksContent = checkLines.length === 0 ? "" : `<h5>Checks</h5>${checkLines.map(line => `<p>${line}</p>`).join("")}`;
+    const checkLines = checkChangeLines([finding.checkChanges]);
+    const checksContent = checkLines.length === 0 ? "" : `<h5>Checks, if approved on its own</h5>${checkLines.map(line => `<p>${line}</p>`).join("")}`;
     const proposalContent = proposal === undefined ? "" : isQuestion
       ? `<section aria-label="Question for you"><h4>Question for you</h4><p>${escape(proposal.summary)}</p></section>`
       : `<section aria-label="Proposed fix"><h4>Proposed fix</h4><p>${escape(proposal.summary)}</p><h5>Files</h5><ul>${fileChanges.map(change => `<li>${escape(change.operation)} <code>${escape(change.repositoryId)}/${escape(change.path)}</code>: ${escape(change.change)}</li>`).join("")}</ul><h5>Tests</h5>${tests.length === 0 ? "<p>No new tests: the change is documentation only, or the repository has no tests.</p>" : `<ul>${tests.map(test => `<li>${escape(test.operation)} <code>${escape(test.repositoryId)}/${escape(test.path)}</code>: ${escape(test.behavior)}</li>`).join("")}</ul>`}${checksContent}</section>`;
@@ -116,12 +125,16 @@ function page(review: Record<string, unknown>, csrf: string, nonce: string): str
   const outcome = !pending && recordedDecision !== undefined
     ? `<section aria-label="Recorded decision"><h2>Decision recorded: ${recordedDecision}</h2>${decision?.ownerNote ? `<p>Your note: ${escape(decision.ownerNote)}</p>` : ""}<p class="muted">Recorded ${escape(decision?.at)}</p></section>`
     : "";
+  // What Approve recommended applies to the checks: the recommended fixes together, as the approval computes it.
+  const appliedLines = recommendedIds.length === 0 || !Array.isArray(review.recommendedCheckChanges) ? [] : checkChangeLines(review.recommendedCheckChanges);
+  const appliedChecks = appliedLines.length === 0 ? ""
+    : `<section aria-label="Approve recommended applies"><h2>Approve recommended applies:</h2>${appliedLines.map(line => `<p>${line}</p>`).join("")}</section>`;
   const recommendedButton = recommendedIds.length > 0 ? `<button type="button" id="approve-recommended">Approve recommended fixes</button>` : "";
   const recommendedHandler = recommendedIds.length > 0
     ? `document.querySelector('#approve-recommended').addEventListener('click',()=>{document.querySelectorAll('.finding-choice').forEach(x=>x.checked=${scriptJson(recommendedIds)}.includes(x.value));send('APPROVE',${scriptJson(recommendedIds)})});`
     : "";
   const reviewControls = pending
-    ? `${currentStatus}${cleanupStatus}<p>This is AI guidance, not independent evidence. Reviewers’ comments stay visible. Only your explicit approval starts the selected code changes.</p><p><strong>${originalCommentCount} ${originalCommentCount === 1 ? "comment" : "comments"} grouped into ${findings.length} findings.</strong> AgentX recommends addressing ${actionable}.</p><section aria-labelledby="recommendation"><h2 id="recommendation">AgentX recommends</h2><p>${highestText}</p><p>Approving starts the selected code changes and checks. It does not reply to GitHub, merge, or deploy.</p></section><form id="decision"><input type="hidden" name="csrf" value="${csrf}"><section><h2>Choose findings</h2>${findingCards}<p>${recommendedButton}<button type="submit" id="approve-selected">Approve selected findings</button></p></section><section><h2>Another decision</h2><label for="owner-note">Note for AgentX</label><textarea id="owner-note" name="ownerNote" maxlength="2000"></textarea><p><button type="button" id="request-changes">Request changes</button><button type="button" id="dismiss">Dismiss proposal</button></p></section><p id="status" role="status" aria-live="polite"></p></form>`
+    ? `${currentStatus}${cleanupStatus}<p>This is AI guidance, not independent evidence. Reviewers’ comments stay visible. Only your explicit approval starts the selected code changes.</p><p><strong>${originalCommentCount} ${originalCommentCount === 1 ? "comment" : "comments"} grouped into ${findings.length} findings.</strong> AgentX recommends addressing ${actionable}.</p><section aria-labelledby="recommendation"><h2 id="recommendation">AgentX recommends</h2><p>${highestText}</p><p>Approving starts the selected code changes and checks. It does not reply to GitHub, merge, or deploy.</p></section>${appliedChecks}<form id="decision"><input type="hidden" name="csrf" value="${csrf}"><section><h2>Choose findings</h2>${findingCards}<p>${recommendedButton}<button type="submit" id="approve-selected">Approve selected findings</button></p></section><section><h2>Another decision</h2><label for="owner-note">Note for AgentX</label><textarea id="owner-note" name="ownerNote" maxlength="2000"></textarea><p><button type="button" id="request-changes">Request changes</button><button type="button" id="dismiss">Dismiss proposal</button></p></section><p id="status" role="status" aria-live="polite"></p></form>`
     : `${currentStatus}${cleanupStatus}${outcome}<p>This AI-generated advisory and the owner’s decision are retained in the private AgentX task record.</p><p><strong>${originalCommentCount} ${originalCommentCount === 1 ? "comment" : "comments"} grouped into ${findings.length} findings.</strong></p><section><h2>Review details</h2>${findingCards}</section>`;
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PR feedback · ${escape(review.title)}</title><style nonce="${nonce}">:root{color-scheme:light dark;font-family:system-ui,sans-serif}body{max-width:52rem;margin:0 auto;padding:clamp(1rem,4vw,2.5rem);line-height:1.55}h1,h2,h3{line-height:1.2}.muted{opacity:.8}.badge{display:inline-block;border:1px solid currentColor;border-radius:999px;padding:.12rem .6rem;font-size:.85rem}.finding{border-top:1px solid #888;padding:1rem 0}button{font:inherit;padding:.65rem 1rem;margin:.35rem;border-radius:.35rem;cursor:pointer}textarea{display:block;width:min(100%,40rem);min-height:5rem;font:inherit}a:focus,button:focus,input:focus,textarea:focus,summary:focus{outline:3px solid #478cff;outline-offset:2px}code.command{white-space:pre-wrap}@media(max-width:35rem){body{padding:1rem}code{overflow-wrap:anywhere}}</style></head><body><main><p class="badge">AI-generated advisory</p><h1>${escape(review.title ?? "PR feedback review")}</h1>${reviewControls}<section><h2>Pull requests</h2><ul>${prList}</ul><h2>Checks to run</h2><ul>${checks}</ul></section></main>${pending ? `<script nonce="${nonce}">(()=>{const form=document.querySelector('#decision');const status=document.querySelector('#status');const choices=()=>Array.from(document.querySelectorAll('.finding-choice:checked')).map(x=>x.value);async function send(decision,selected){const data={requestId:crypto.randomUUID(),expectedRevision:${Number(review.revision) || 0},reviewDigest:${scriptJson(safeText(review.reviewDigest))},proposalDigest:${scriptJson(safeText(review.proposalDigest))},bundleDigests:${scriptJson(Array.isArray(review.bundleDigests) ? review.bundleDigests : [])},decision,selectedFindingIds:selected,...(document.querySelector('#owner-note').value.trim()?{ownerNote:document.querySelector('#owner-note').value.trim()}: {})};status.textContent='Sending your decision…';const response=await fetch('/review/${encodeURIComponent(id)}/api/decision',{method:'POST',credentials:'same-origin',headers:{'content-type':'application/json','x-agentx-csrf':${scriptJson(csrf)}},body:JSON.stringify(data)});const result=await response.json();status.textContent=response.ok?'Decision recorded. AgentX will show the next step here.':(result.message||'The review changed. Refresh the page before deciding.');if(response.ok)location.reload()}${recommendedHandler}form.addEventListener('submit',event=>{event.preventDefault();send('APPROVE',choices())});document.querySelector('#request-changes').addEventListener('click',()=>send('REQUEST_CHANGES',[]));document.querySelector('#dismiss').addEventListener('click',()=>send('DISMISS',[]))})();</script>` : ""}</body></html>`;
 }

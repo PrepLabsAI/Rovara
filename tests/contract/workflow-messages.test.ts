@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_PULL_REQUEST_UPDATE_CAUSES, WORKFLOW_REVIEW_FAILURE_REASONS, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, WorkflowStageSchema, WorkflowStateSchema, createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, WorkflowSnapshotViewSchema, workflowFindingFingerprint, type WorkflowSnapshot } from "@agentx/contracts";
-import { WORKFLOW_ACTION_IDS, documentSummaryLines, feedbackReviewFailedMessage, plainBlockReason, planReviewLink, workflowMessage, workflowMessageKey, workflowModalCopy } from "../../packages/broker/src/developer/workflow-messages.js";
+import { WORKFLOW_ACTION_IDS, documentSummaryLines, slackSectionTexts, feedbackReviewFailedMessage, plainBlockReason, planReviewLink, workflowMessage, workflowMessageKey, workflowModalCopy } from "../../packages/broker/src/developer/workflow-messages.js";
 import { WORKFLOW_ACTION_IDS as INTERACTIVITY_ACTION_IDS } from "../../packages/broker/src/aws/slack-interactivity.js";
 import { StrictSlackWeb, visibleSlackText } from "../support/strict-slack.js";
 
@@ -747,5 +747,21 @@ describe("workflow Slack messages", () => {
   it("summarises a document in at most three plain lines", () => {
     expect(documentSummaryLines("# Plan\n\n**Goal:** add `greet`.\n\n1. Edit greeting.ts\n2. Add a test\n3. Run checks\n4. Extra")).toEqual(["Goal: add greet.", "1. Edit greeting.ts", "2. Add a test"]);
     expect(documentSummaryLines("```ts\nconst x = 1;\n```\n- [Read](https://example.test) the *spec*\n" + "y".repeat(400), 2)).toEqual(["Read the spec", `${"y".repeat(157)}...`]);
+  });
+});
+
+describe("splitting a long Slack text into sections (0.2.12 review)", () => {
+  it("splits at a line break whenever the text has one, so a later line stays whole", () => {
+    const command = "`" + "&lt;".repeat(650) + "`";
+    expect(slackSectionTexts(`${"a".repeat(500)}\n${command}`)).toEqual(["a".repeat(500), command]);
+  });
+
+  it("never ends a section inside an escaped character or a code span when it must split one long line", () => {
+    const entities = slackSectionTexts("&lt;".repeat(1_000));
+    expect(entities.join("")).toBe("&lt;".repeat(1_000));
+    for (const section of entities) expect(section).toMatch(/^(?:&lt;)+$/);
+    const code = slackSectionTexts(`${"x".repeat(2_700)} \`${"y".repeat(200)}\``);
+    expect(code.join("")).toBe(`${"x".repeat(2_700)} \`${"y".repeat(200)}\``);
+    for (const section of code) expect((section.match(/`/g) ?? []).length % 2).toBe(0);
   });
 });
