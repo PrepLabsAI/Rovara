@@ -30,7 +30,46 @@ export function routeAttributes(): Record<string, { DataType: "String"; StringVa
   return { [SLACK_ROUTE_ATTRIBUTE]: { DataType: "String", StringValue: SLACK_ROUTE_SUGGEST } };
 }
 
-/** "suggest" when a received message carries the routing mark, else undefined. */
+/**
+ * A task-thread @mention, already saved as a thread note, sent to the Slack service to decide whether it is a question.
+ * Same queue, same strict body: the task, the note's Slack timestamp and a `chat:` prefix travel as attributes. A service
+ * that does not know this route value ignores it (see `routeOf`).
+ */
+export const SLACK_ROUTE_TASK_QUESTION = "task-question";
+export const SLACK_TASK_ID_ATTRIBUTE = "agentxTaskId";
+export const SLACK_NOTE_TS_ATTRIBUTE = "agentxNoteTs";
+export const SLACK_CHAT_ATTRIBUTE = "agentxChat";
+
+/** Said privately to the sender when a thread reply is saved for the next step (an instruction, or one that could not be checked). */
+export const TASK_NOTE_SAVED_TEXT = "Saved for the next step.";
+
+export interface TaskQuestionRoute {
+  taskId: string;
+  /** The saved note's Slack message timestamp (what the "answered" route names). */
+  noteTs: string;
+  /** The mention's text starts with `chat:`: a question without asking the classifier. */
+  chat: boolean;
+}
+
+export function taskQuestionAttributes(route: TaskQuestionRoute): Record<string, { DataType: "String"; StringValue: string }> {
+  return {
+    [SLACK_ROUTE_ATTRIBUTE]: { DataType: "String", StringValue: SLACK_ROUTE_TASK_QUESTION },
+    [SLACK_TASK_ID_ATTRIBUTE]: { DataType: "String", StringValue: route.taskId },
+    [SLACK_NOTE_TS_ATTRIBUTE]: { DataType: "String", StringValue: route.noteTs },
+    ...(route.chat ? { [SLACK_CHAT_ATTRIBUTE]: { DataType: "String" as const, StringValue: "1" } } : {}),
+  };
+}
+
+/** The task question a received message carries, or undefined when it is not one or an attribute is missing. */
+export function taskQuestionOf(attributes: Readonly<Record<string, { StringValue?: string | undefined }>> | undefined): TaskQuestionRoute | undefined {
+  if (attributes?.[SLACK_ROUTE_ATTRIBUTE]?.StringValue !== SLACK_ROUTE_TASK_QUESTION) return undefined;
+  const taskId = attributes[SLACK_TASK_ID_ATTRIBUTE]?.StringValue;
+  const noteTs = attributes[SLACK_NOTE_TS_ATTRIBUTE]?.StringValue;
+  if (!taskId || !noteTs) return undefined;
+  return { taskId, noteTs, chat: attributes[SLACK_CHAT_ATTRIBUTE]?.StringValue === "1" };
+}
+
+/** "suggest" when a received message carries the routing mark, else undefined. Any other value (task-question too) is undefined. */
 export function routeOf(attributes: Readonly<Record<string, { StringValue?: string | undefined }>> | undefined): typeof SLACK_ROUTE_SUGGEST | undefined {
   return attributes?.[SLACK_ROUTE_ATTRIBUTE]?.StringValue === SLACK_ROUTE_SUGGEST ? SLACK_ROUTE_SUGGEST : undefined;
 }

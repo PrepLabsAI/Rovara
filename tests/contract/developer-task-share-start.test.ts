@@ -2,7 +2,9 @@
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { AgentXError, DEFAULT_DEVELOPER_TASK_POLICY, type ChannelInfoRequest, type ChannelInfoResponse } from "@agentx/contracts";
+import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { routeDeveloperTaskRequest } from "../../packages/broker/src/aws/developer-tasks.js";
+import { slackWorkflowCaller } from "../../packages/broker/src/aws/slack-workflow-caller.js";
 import { MAYA, OMAR, bindChannel, createDeveloperTaskBroker, grantProject, registerRevision, unbindChannel } from "../support/developer-task-broker.js";
 import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
@@ -19,6 +21,24 @@ type Db = Awaited<ReturnType<typeof createDeveloperTaskBroker>>["db"];
 const workspaces = (db: Db) => db.find((item) => item.entityType === "WORKSPACE");
 const refusals = (db: Db) => db.find((item) => typeof item.pk === "string" && item.pk.startsWith("TASK#") && item.phase === "refused");
 const taskOf = (body: Record<string, unknown>) => body.task as { taskId: string; shared: boolean; share?: Record<string, unknown> };
+
+describe("the client a task keeps (FR-033)", () => {
+  it("keeps Slack for a task the Slack workflow starts, and an AI tool for any other client that says slack", async () => {
+    const { db, actions } = await createDeveloperTaskBroker({ channelInfo: names });
+    const route = async (caller: DeveloperCaller) => {
+      const request = { method: "POST", path: "/v1/dev/tasks", headers: {}, requestId: randomUUID(), body: JSON.stringify(start({ client: "slack" })) };
+      return await routeDeveloperTaskRequest({
+        documentClient: db, tableName: "state", actions, now: () => Date.now(),
+        checkAccess: async () => ({ revision: 1, policy: DEFAULT_DEVELOPER_TASK_POLICY, access: "granted", channelIds: [] }),
+        projectChannelIds: async () => [],
+      }, caller, request, new URL("https://agentx.test/v1/dev/tasks")) as { task: { taskId: string } };
+    };
+    const fromSlack = await route(slackWorkflowCaller("U0BSPTAFNG2"));
+    expect(db.get(`DEVTASK#${fromSlack.task.taskId}`, "META")).toMatchObject({ client: "Slack" });
+    const fromTool = await route({ developerId: MAYA.developerId, sessionId: MAYA.sessionId, amr: MAYA.provider, name: MAYA.name, slackUserId: MAYA.slackUserId! });
+    expect(db.get(`DEVTASK#${fromTool.task.taskId}`, "META")).toMatchObject({ client: "an AI tool" });
+  });
+});
 
 describe("sharing at the start (FR-031)", () => {
   it("shares a start that asks to, in the project's default mode, with the channel's name (D6)", async () => {

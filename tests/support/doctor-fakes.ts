@@ -2,6 +2,7 @@
 // every secret well formed. Tests break one thing at a time.
 import { environmentStackName, type ReleaseManifest } from "@agentx/contracts";
 import type { DoctorContext, DoctorServices, DoctorStack } from "../../packages/cli/src/doctor/checks.js";
+import { githubWebhookUrl } from "../../packages/cli/src/init/github-app.js";
 import type { InstallProgress } from "../../packages/cli/src/init/install-state.js";
 import { fakeGitHubApi, fakeSlackApi, memoryInitSecrets, passingChecks, sampleAnswers, TEST_BOT_TOKEN, TEST_PRIVATE_KEY, TEST_SIGNING_SECRET, T0 } from "./init-fakes.js";
 import { fakeAlerts, fakeSlackChannels, fakeVendors, STAGING_SETTINGS } from "./setup-fakes.js";
@@ -18,10 +19,13 @@ export const MANIFEST: ReleaseManifest = {
   images: { worker: `public.ecr.aws/agentx/agentx-worker@${WORKER_DIGEST}`, slack: `public.ecr.aws/agentx/agentx-slack@${SLACK_DIGEST}` },
 };
 
+/** The webhook secret a healthy environment stores in its GitHub App secret. */
+export const WEBHOOK_SECRET = "stored-webhook-secret-".padEnd(48, "w");
+
 export const SECRETS: Record<string, string> = {
   "agentx/staging/callback-signing-key": SIGNING_KEY,
   "agentx/staging/slack": JSON.stringify({ botToken: TEST_BOT_TOKEN, signingSecret: TEST_SIGNING_SECRET }),
-  "agentx/staging/github-app": JSON.stringify({ appId: "123", slug: "agentx-acme", account: "acme", privateKey: TEST_PRIVATE_KEY }),
+  "agentx/staging/github-app": JSON.stringify({ appId: "123", slug: "agentx-acme", account: "acme", privateKey: TEST_PRIVATE_KEY, webhookSecret: WEBHOOK_SECRET }),
 };
 
 /** Every part's stack, healthy, deployed by the templates engine from MANIFEST. */
@@ -62,7 +66,7 @@ export function doctorServices(overrides: Partial<DoctorServices> & { stackMap?:
     checks: passingChecks(),
     slackApi: fakeSlackApi(),
     slackChannels: fakeSlackChannels([{ id: "C0123456789", name: "payments", isPrivate: false, isMember: true }]),
-    github: fakeGitHubApi({ installationId: 456 }),
+    github: fakeGitHubApi({ installationId: 456, hookUrl: githubWebhookUrl(SETTINGS.controlPlaneUrl) }),
     vendors: fakeVendors(),
     alerts: fakeAlerts({ existing: [{ arn: "arn:aws:sns:us-east-1:123456789012:agentx-staging-alerts:1", protocol: "email", endpoint: "ops@example.com" }], budgetUsd: 100 }),
     // The Slack ingress: echoes the url_verification challenge, and answers the interactivity probe 200.

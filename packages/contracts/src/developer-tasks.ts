@@ -193,9 +193,14 @@ export const ContinueDeveloperTaskRequestSchema = z.object({
   candidateDigest: z.string().regex(/^[a-f0-9]{64}$/).optional(),
   /** Owner-selected, project-approved optional checks for a blocked verification retry. */
   selectedOptionalCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(20).optional(),
+  /** The approved plan's proposed checks the owner keeps for a blocked verification retry; the rest are removed. */
+  selectedProposedCheckIds: z.array(z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/)).max(8).optional(),
 }).strict().superRefine((request, context) => {
   if (request.selectedOptionalCheckIds !== undefined && new Set(request.selectedOptionalCheckIds).size !== request.selectedOptionalCheckIds.length) {
     context.addIssue({ code: "custom", path: ["selectedOptionalCheckIds"], message: "selected optional checks must be unique" });
+  }
+  if (request.selectedProposedCheckIds !== undefined && new Set(request.selectedProposedCheckIds).size !== request.selectedProposedCheckIds.length) {
+    context.addIssue({ code: "custom", path: ["selectedProposedCheckIds"], message: "kept proposed checks must be unique" });
   }
 });
 export type ContinueDeveloperTaskRequest = z.infer<typeof ContinueDeveloperTaskRequestSchema>;

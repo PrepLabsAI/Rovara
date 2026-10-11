@@ -72,6 +72,8 @@ export interface OperationRecord extends Operation {
     baseBranch: string;
     expectedHeadCommit: string;
     codeBuildGates: CodeBuildGateDefinition[];
+    /** A workflow task's push of its reviewed fix: the candidate, its reviewed tree and the task's pinned base. */
+    workflowCandidate?: { candidateDigest: string; treeSha: string; baseCommitSha: string };
   };
   candidateCommit?: string;
   closePreviousStatus?: "READY" | "STOPPED";

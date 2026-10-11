@@ -18,6 +18,7 @@ export const AgentXErrorCodeSchema = z.enum([
   "PROJECT_ACCESS_DENIED",
   "PROJECT_TASKS_DISABLED",
   "TASK_NOT_FOUND",
+  "TASK_ACCESS_DENIED",
   "TASK_BUSY",
   "CHANNEL_REQUIRED",
   "WORKSPACE_LIMIT",
@@ -44,7 +45,7 @@ export class AgentXError extends Error {
 
 export function errorStatus(code: AgentXErrorCode): number {
   if (code === "AUTH_REQUIRED") return 401;
-  if (code === "FORBIDDEN" || code === "PROJECT_ACCESS_DENIED" || code === "PROJECT_TASKS_DISABLED") return 403;
+  if (code === "FORBIDDEN" || code === "PROJECT_ACCESS_DENIED" || code === "PROJECT_TASKS_DISABLED" || code === "TASK_ACCESS_DENIED") return 403;
   if (code === "NOT_FOUND" || code === "PROJECT_NOT_FOUND" || code === "TASK_NOT_FOUND") return 404;
   if (code === "CONFIG_INVALID") return 400;
   if (code === "RUNTIME_UNAVAILABLE" || code === "SLACK_UNAVAILABLE") return 503;

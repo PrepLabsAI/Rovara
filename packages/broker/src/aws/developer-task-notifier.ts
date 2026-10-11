@@ -9,11 +9,12 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { INDEX_EXPIRY_ATTRIBUTE, AdminChangePendingRecordSchema, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, type PendingChange, type WorkflowArtifact, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
 import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
+import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
-import { answeredWorkflowCard, documentSummaryLines, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
+import { answeredWorkflowCard, cleanLine, documentSummaryLines, feedbackReviewFailedMessage, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
 import { deriveTaskStatus, failureCategory, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
 import { isConditional } from "./broker-shared.js";
 import { requiredEnvironment } from "./lambda.js";
@@ -77,6 +78,30 @@ export const ADMIN_CHANGE_EXPIRY_GRACE_MS = 5_000;
 /** SQS's longest per-message delay. */
 const MAX_DELAY_SECONDS = 900;
 
+/** The most reviewer questions a PR feedback card shows; the rest are on the details page. */
+const FEEDBACK_QUESTIONS_SHOWN = 3;
+/** Each question's visible length on the card, so three fit in a brief message. */
+const FEEDBACK_QUESTION_MAX = 280;
+
+/**
+ * One line of the reviewer's words (made inert by cleanLine) at most `limit` characters long once escaped: an escaped
+ * character (`&amp;`, `&lt;`) takes several, so the line is cut shorter until its escaped form fits.
+ */
+function escapedLine(text: string, limit: number): string {
+  let cut = limit;
+  let line = cleanLine(text, cut);
+  while (line.length > limit && cut > 10) {
+    cut = Math.max(10, cut - Math.ceil((line.length - limit) / 5));
+    line = cleanLine(text, cut);
+  }
+  return line;
+}
+
+/**
+ * The card for a complete PR feedback review. When the reviewer left findings to the owner, the card asks their
+ * questions (the reviewer's own words, made inert) and its Request changes button becomes the owner's answer, which
+ * approves the fix it describes. Approve shows only when something is recommended; Dismiss always shows.
+ */
 export function feedbackReviewSlackMessage(input: {
   taskId: string;
   revision: number;
@@ -86,6 +111,8 @@ export function feedbackReviewSlackMessage(input: {
   totalComments: number;
   recommendedFindingIds: string[];
   highestPriority: "MUST_FIX" | "SHOULD_FIX" | "OPTIONAL" | undefined;
+  /** Each finding left to the owner and its question (its proposal's summary, or its rationale), as the reviewer wrote it. */
+  ownerQuestions?: ReadonlyArray<{ findingId: string; question: string }>;
   detailUrl: string;
 }): { text: string; blocks: unknown[] } {
   const url = new URL(input.detailUrl);
@@ -97,19 +124,45 @@ export function feedbackReviewSlackMessage(input: {
   const recommendationSummary = input.recommendedFindingIds.length === 0
     ? "No fixes are recommended."
     : `${input.recommendedFindingIds.length} recommendations.`;
-  const text = `PR feedback is ready: ${input.totalComments} comments; ${recommendationSummary} Highest priority: ${priority}. <${slackText(url.href)}|Open details>.`;
+  const questions = (input.ownerQuestions ?? []).filter(({ question }) => question.trim().length > 0);
+  // The answer is bound to exactly the questions the card shows; the others are answered from the details page.
+  const shownQuestions = questions.slice(0, FEEDBACK_QUESTIONS_SHOWN);
+  const recommended = input.recommendedFindingIds.length;
+  const details = `<${slackText(url.href)}|Open details>.`;
+  let text: string;
+  if (questions.length === 0) {
+    text = `PR feedback is ready: ${input.totalComments} comments; ${recommendationSummary} Highest priority: ${priority}. ${details}`;
+  } else {
+    const hidden = questions.length - shownQuestions.length;
+    const more = hidden === 0 ? [] : [`(${hidden} more ${hidden === 1 ? "question is" : "questions are"} on the details page; your answer here covers only the ones shown.)`];
+    const several = shownQuestions.length > 1;
+    const scope = recommended === 0 ? ""
+      : ` Your answer covers only the ${several ? "questions" : "question"}. Approve ${recommended} recommended makes only the recommended ${recommended === 1 ? "fix" : "fixes"} and leaves the ${several ? "questions" : "question"} open.`;
+    text = [
+      `PR feedback is ready: ${input.totalComments} comments${recommended === 0 ? "" : `; ${recommendationSummary} Highest priority: ${priority}`}.`,
+      "The reviewer needs your answer before changing any code:",
+      ...shownQuestions.map(({ question }) => `> ${escapedLine(question, FEEDBACK_QUESTION_MAX)}`), ...more,
+      `Answer with instructions and I'll make that change.${scope} ${details}`,
+    ].join("\n");
+  }
   const bundleSetDigest = createHash("sha256").update(JSON.stringify(input.bundleDigests), "utf8").digest("hex");
-  const binding = JSON.stringify({ taskId: input.taskId, expectedRevision: input.revision, reviewDigest: input.reviewDigest,
-    proposalDigest: input.proposalDigest, bundleSetDigest, selection: "RECOMMENDED" });
+  const card = { taskId: input.taskId, expectedRevision: input.revision, reviewDigest: input.reviewDigest, proposalDigest: input.proposalDigest, bundleSetDigest };
+  const binding = JSON.stringify({ ...card, selection: "RECOMMENDED" });
   const elements: Array<Record<string, unknown>> = [
-    ...(input.recommendedFindingIds.length > 0 ? [{ type: "button", action_id: "agentx_feedback_review_recommended", style: "primary",
-      text: { type: "plain_text", text: `Approve ${input.recommendedFindingIds.length} recommended` }, value: binding }] : []),
-    { type: "button", action_id: "agentx_feedback_review_changes", text: { type: "plain_text", text: "Request changes" }, value: binding },
+    ...(recommended > 0 ? [{ type: "button", action_id: "agentx_feedback_review_recommended", style: "primary",
+      text: { type: "plain_text", text: `Approve ${recommended} recommended` }, value: binding }] : []),
+    questions.length === 0
+      ? { type: "button", action_id: "agentx_feedback_review_changes", text: { type: "plain_text", text: "Request changes" }, value: binding }
+      : { type: "button", action_id: "agentx_feedback_review_changes", ...(recommended === 0 ? { style: "primary" } : {}),
+        text: { type: "plain_text", text: "Answer with instructions" },
+        value: JSON.stringify({ ...card, selection: "ANSWER", findingIds: shownQuestions.map(({ findingId }) => findingId) }) },
+    { type: "button", action_id: "agentx_feedback_review_dismiss", text: { type: "plain_text", text: "Dismiss" }, value: binding },
   ];
+  // Escaping can make the reviewer's words several times longer than they look, so long text is split across sections.
   return {
     text,
     blocks: [
-      { type: "section", text: { type: "mrkdwn", text } },
+      ...slackSectionTexts(text).map((section) => ({ type: "section", text: { type: "mrkdwn", text: section } })),
       { type: "actions", elements },
     ],
   };
@@ -242,9 +295,9 @@ async function updateWorkflowApprovalCard(deps: NotifierDependencies, task: Deve
 const hasButtons = (blocks: unknown[] | undefined): boolean => (blocks ?? []).some((block) => (block as { type?: unknown } | null)?.type === "actions");
 
 /** Task 19: the line a card whose step is over shows in place of its buttons, by where the task is now. */
-function movedOnStatusLine(workflow: WorkflowSnapshot): string {
-  if (workflow.stage === "CLOSED") return "This task is closed.";
+function movedOnStatusLine(workflow: WorkflowSnapshot, closed: boolean): string {
   if (workflow.stage === "MERGED") return "Done. The pull request is merged.";
+  if (closed || workflow.stage === "CLOSED") return "This task is closed.";
   return "Done. This step moved on.";
 }
 
@@ -254,11 +307,13 @@ function movedOnStatusLine(workflow: WorkflowSnapshot): string {
  * The text is kept byte for byte, so the card never grows. An approval card whose decision was recorded is the
  * decision edit's (updateWorkflowApprovalCard). Best effort, as that edit is: a Slack error that would fail again is
  * logged and the card given up on; only a passing one retries the notice. A press that was refused (busy, out of
- * date) moves nothing, so its card keeps its buttons.
+ * date) moves nothing, so its card keeps its buttons. Close task records closedAt without moving the workflow's
+ * revision, so a closed task's cards all go, its current step's card included.
  */
 async function retireButtonCards(deps: NotifierDependencies, task: DeveloperTaskRecord): Promise<void> {
   const workflow = task.workflow;
   if (workflow === undefined || deps.update === undefined) return;
+  const closed = task.closedAt !== undefined;
   const markers: Array<NoticeMarker & { pk: string; sk: string }> = [];
   let startKey: Record<string, unknown> | undefined;
   do {
@@ -275,13 +330,17 @@ async function retireButtonCards(deps: NotifierDependencies, task: DeveloperTask
   for (const marker of markers) {
     if (marker.buttonCard !== true || marker.retiredAt !== undefined || typeof marker.deliveredAt !== "string" || typeof marker.postedTs !== "string"
       || typeof marker.postedChannelId !== "string" || typeof marker.postedText !== "string" || typeof marker.postedWorkflowRevision !== "number"
-      || marker.postedWorkflowRevision >= workflow.revision) continue;
+      || (!closed && marker.postedWorkflowRevision >= workflow.revision)) continue;
     // The decision's own edit says what was decided.
+    // A failed PR feedback review's Retry review stays while that report is still pending, whatever else moved the step on.
+    const pendingReview = workflow.feedbackReview;
+    if (!closed && marker.postedFeedbackReviewDigest !== undefined && pendingReview?.status === "PENDING"
+      && pendingReview.reviewRef.sha256 === marker.postedFeedbackReviewDigest) continue;
     if (marker.workflowDecisionRevision !== undefined || (marker.postedArtifactDigest !== undefined
       && (workflow.decisions ?? []).some((decision) => decision.workflowRevision === marker.postedWorkflowRevision && decision.artifactDigest === marker.postedArtifactDigest))) continue;
     try {
       await deps.update({ channel: marker.postedChannelId, ts: marker.postedTs, text: marker.postedText,
-        blocks: answeredWorkflowCard(marker.postedText, movedOnStatusLine(workflow)) });
+        blocks: answeredWorkflowCard(marker.postedText, movedOnStatusLine(workflow, closed)) });
     } catch (error) {
       if (passingSlackError(error)) throw error;
       deps.log({ event: "developer_notifier.button_card_update_failed", taskId: task.taskId, workflowRevision: marker.postedWorkflowRevision,
@@ -466,26 +525,48 @@ const CANVAS_UNAVAILABLE = new Set([
   "free_teams_cannot_create_standalone_canvases", "team_tier_cannot_create_channel_canvases",
 ]);
 
+/** The most claims a plan may have to be a tiny one, whose card lists every claim. */
+const TINY_PLAN_CLAIMS = 3;
+
+/** What a structured document's card shows: the top claims (all of them, children indented, for a tiny plan) and the counts. */
+function structuredCardClaims(plan: PlanDocument): NonNullable<WorkflowMessageContext["structured"]> {
+  const claimCount = planClaimCount(plan);
+  const tiny = claimCount <= TINY_PLAN_CLAIMS && plan.decisions.length === 0;
+  const everyClaim = (claims: PlanClaim[], depth: number): string[] => {
+    const lines = planSummaryLines({ ...plan, claims }, claims.length);
+    return claims.flatMap((claim, index) => [`${"  ".repeat(depth)}${lines[index]!}`, ...everyClaim(claim.children ?? [], depth + 1)]);
+  };
+  return { claims: tiny ? everyClaim(plan.claims, 0) : planSummaryLines(plan), claimCount, decisionCount: plan.decisions.length, tiny };
+}
+
 /**
  * The approval card's link and summary: the document is read through its recorded key and its digest checked; then a
  * Canvas holds the full text (recorded before and after it is created, so a retry never makes a second one). When no
  * Canvas can be linked, the task page is; when nothing can be, the card says so. A document whose digest does not
  * match is neither summarised nor linked.
  */
-async function prepareDocumentLink(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot): Promise<{ url?: string; summary?: string[] }> {
+async function prepareDocumentLink(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, workflow: WorkflowSnapshot): Promise<{ url?: string; summary?: string[]; structured?: NonNullable<WorkflowMessageContext["structured"]> }> {
   const unavailable = (reason: string) => deps.log({ event: "developer_notifier.document_link_unavailable", taskId: task.taskId, workflowRevision: workflow.revision, reason });
   const plan = workflow.artifacts.filter((artifact) => artifact.type === workflowDocumentType(workflow)).at(-1);
   if (plan === undefined || deps.readArtifact === undefined) {
     unavailable(plan === undefined ? "document_missing" : "reader_unconfigured");
     return {};
   }
-  const markdown = await deps.readArtifact(plan.objectKey);
-  if (createHash("sha256").update(markdown, "utf8").digest("hex") !== plan.sha256) {
+  const read = deps.readArtifact.bind(deps);
+  const loaded = await loadWorkflowDocument((key) => read(key), plan, {});
+  if (loaded === undefined) {
     unavailable("integrity_check_failed");
     return {};
   }
-  const summary = documentSummaryLines(markdown);
   const fallback = taskPageUrl(deps, task.taskId);
+  // A structured plan is read on the task page, never in a Canvas: the card carries its top claims and a link that opens
+  // the page at this document and version.
+  if (loaded.format === "structured") {
+    if (fallback === undefined) unavailable("task_page_unconfigured");
+    return { structured: structuredCardClaims(loaded.plan), ...(fallback === undefined ? {} : { url: planReviewLink(fallback, workflow, plan.version) }) };
+  }
+  const markdown = loaded.markdown;
+  const summary = documentSummaryLines(markdown);
   const linkOr = (reason: string, url: string | undefined = fallback) => {
     if (url === fallback) unavailable(reason);
     return { summary, ...(url === undefined ? {} : { url }) };
@@ -552,10 +633,10 @@ async function newThreadReplies(deps: NotifierDependencies, task: DeveloperTaskR
   do {
     const page = await deps.documentClient.send(new QueryCommand({
       TableName: deps.tableName, KeyConditionExpression: "pk = :pk AND begins_with(sk, :note)",
-      ExpressionAttributeValues: { ":pk": `DEVTASK#${task.taskId}`, ":note": "NOTE#" }, ProjectionExpression: "receivedAt", ConsistentRead: true,
+      ExpressionAttributeValues: { ":pk": `DEVTASK#${task.taskId}`, ":note": "NOTE#" }, ProjectionExpression: "receivedAt, answeredAt", ConsistentRead: true,
       ...(start === undefined ? {} : { ExclusiveStartKey: start }),
-    })) as { Items?: Array<{ receivedAt?: unknown }>; LastEvaluatedKey?: Record<string, unknown> };
-    count += (page.Items ?? []).filter((item) => typeof item.receivedAt === "string" && item.receivedAt > since).length;
+    })) as { Items?: Array<{ receivedAt?: unknown; answeredAt?: unknown }>; LastEvaluatedKey?: Record<string, unknown> };
+    count += (page.Items ?? []).filter((item) => typeof item.receivedAt === "string" && item.receivedAt > since && item.answeredAt === undefined).length;
     start = page.LastEvaluatedKey;
   } while (start !== undefined);
   return count;
@@ -571,6 +652,7 @@ async function workflowReply(deps: NotifierDependencies, task: DeveloperTaskReco
   if (workflow.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {
     const document = await prepareDocumentLink(deps, task, workflow);
     context.documentSummary = document.summary;
+    context.structured = document.structured;
     if (document.url !== undefined) context.documentLink = { url: document.url };
     context.newReplies = await newThreadReplies(deps, task);
     approval = workflow.artifacts.filter((artifact) => artifact.type === workflowDocumentType(workflow)).at(-1);
@@ -642,8 +724,15 @@ async function feedbackReviewNotification(deps: NotifierDependencies, task: Deve
   const workflow = task.workflow;
   const review = workflow?.feedbackReview;
   const reviewRef = review?.reviewRef;
-  if (notice.kind !== "github_feedback" || review?.status !== "PENDING" || reviewRef?.status !== "COMPLETE"
-    || reviewRef.sha256 !== notice.feedbackReviewDigest) return undefined;
+  if (notice.kind !== "github_feedback" || review?.status !== "PENDING" || reviewRef === undefined || reviewRef.sha256 !== notice.feedbackReviewDigest) return undefined;
+  if (reviewRef.status !== "COMPLETE") {
+    // Said from the report's own reference: its stored reason is AgentX's words only, and is shown in plain words.
+    const opened = workflow!.pullRequests ?? [];
+    return feedbackReviewFailedMessage({ taskId: task.taskId, revision: workflow!.revision, reviewDigest: reviewRef.sha256, status: reviewRef.status, blockReason: reviewRef.blockReason,
+      pullRequests: review.bundleRefs.map((bundle) => ({ number: bundle.number,
+        url: opened.find((pullRequest) => pullRequest.repositoryId === bundle.repositoryId && pullRequest.number === bundle.number)?.url ?? "" })) });
+  }
+  if (reviewRef.status !== "COMPLETE") return undefined;
   if (deps.readArtifact === undefined || deps.reviewUrlBase === undefined) throw new Error("feedback review notice is not configured");
   const bytes = await deps.readArtifact(reviewRef.objectKey);
   if (createHash("sha256").update(bytes, "utf8").digest("hex") !== reviewRef.sha256) throw new Error("feedback review artifact integrity check failed");
@@ -663,6 +752,9 @@ async function feedbackReviewNotification(deps: NotifierDependencies, task: Deve
     bundleDigests: review.bundleRefs.map(bundle => bundle.sha256),
     totalComments: review.bundleRefs.reduce((total, bundle) => total + bundle.comments.length, 0),
     recommendedFindingIds: findings.filter(finding => finding.recommended).map(finding => finding.id), highestPriority,
+    // The reviewer is told to put its question and options in the proposal's summary; its rationale stands in when it gave none.
+    ownerQuestions: findings.filter(finding => finding.proposedDisposition === "OWNER_DECISION")
+      .map(finding => ({ findingId: finding.id, question: finding.fixProposal?.summary ?? finding.rationale })),
     detailUrl: new URL(`/review/${encodeURIComponent(task.taskId)}`, base).href,
   });
 }
@@ -883,6 +975,8 @@ interface NoticeMarker {
   buttonCard?: boolean;
   /** Task 19: when the card's buttons were taken away (or given up on). */
   retiredAt?: string;
+  /** A failed PR feedback review's card: its Retry review stays while this report is still the pending one. */
+  postedFeedbackReviewDigest?: string;
 }
 
 /**
@@ -1041,6 +1135,8 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
     }),
     ...(reply.approval === undefined || task.workflow === undefined ? {} : { postedArtifactDigest: reply.approval.sha256 }),
     ...(buttons && task.workflow !== undefined ? { buttonCard: true } : {}),
+    ...(feedbackReview !== undefined && notice.feedbackReviewDigest !== undefined && task.workflow?.feedbackReview?.status === "PENDING"
+      && task.workflow.feedbackReview.reviewRef.status !== "COMPLETE" ? { postedFeedbackReviewDigest: notice.feedbackReviewDigest } : {}),
   });
   if (sameAs !== undefined) await putMarker(deps, sameAs);
   await editCard();

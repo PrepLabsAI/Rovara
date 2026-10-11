@@ -31,6 +31,21 @@ interface InjectedFault {
 
 export class FakeDynamoDb {
   readonly items = new Map<string, Item>();
+  /**
+   * With `mapOrder: "dynamodb"`, reads hand back each map's attributes in another order than they were written, as
+   * DynamoDB does (it does not keep a map's attribute order). Off by default.
+   */
+  private readonly dynamoMapOrder: boolean;
+
+  constructor(options: { mapOrder?: "insertion" | "dynamodb" } = {}) {
+    this.dynamoMapOrder = options.mapOrder === "dynamodb";
+  }
+
+  /** A read's copy of an item. */
+  private readClone<T>(value: T): T {
+    const copy = structuredClone(value);
+    return this.dynamoMapOrder ? reorderMaps(copy) as T : copy;
+  }
   private readonly listeners = new Set<(change: { before?: Item; after?: Item }) => void>();
   /** Constructor names of every command sent, in order (spec 025 A3: no route scans). */
   private readonly sent: string[] = [];
@@ -84,7 +99,7 @@ export class FakeDynamoDb {
       case "GetCommand": {
         const key = input.Key as { pk: string; sk: string };
         const item = this.get(key.pk, key.sk);
-        return { Item: item === undefined ? undefined : structuredClone(item) };
+        return { Item: item === undefined ? undefined : this.readClone(item) };
       }
       case "QueryCommand":
         return this.queryPage(input);
@@ -168,7 +183,7 @@ export class FakeDynamoDb {
         const after = start === undefined
           ? found
           : found.filter((item) => compareTuples(indexOrder(item, sort), indexOrder(start, sort)) * (input.ScanIndexForward === false ? -1 : 1) > 0);
-        return after.map((item) => structuredClone(item));
+        return after.map((item) => this.readClone(item));
       }
       // A secondary index keyed by one attribute: `<attribute> = :value`, sparse like DynamoDB's.
       const indexed = INDEX_EQUALS.exec(String(input.KeyConditionExpression));
@@ -177,12 +192,12 @@ export class FakeDynamoDb {
       // The table's own (insertion) order, as before; ExclusiveStartKey resumes after that item in it.
       const found = this.find((item) => item[attribute] !== undefined && item[attribute] === values[indexed[2]!]);
       const start = input.ExclusiveStartKey as { pk?: unknown; sk?: unknown } | undefined;
-      if (start === undefined) return found.map((item) => structuredClone(item));
+      if (start === undefined) return found.map((item) => this.readClone(item));
       const position = found.findIndex((item) => item.pk === start.pk && item.sk === start.sk);
       if (position === -1) {
         throw Object.assign(new Error("FakeDynamoDb resumes a single-attribute index only after an item still in it"), { name: "ValidationException" });
       }
-      return found.slice(position + 1).map((item) => structuredClone(item));
+      return found.slice(position + 1).map((item) => this.readClone(item));
     }
     // A sort key range, as the operation events page reads it: `pk = :pk AND sk BETWEEN :a AND :b`.
     const range = /^pk = :pk AND sk BETWEEN (:[a-zA-Z]+) AND (:[a-zA-Z]+)$/.exec(String(input.KeyConditionExpression));
@@ -197,7 +212,7 @@ export class FakeDynamoDb {
       const after = start === undefined
         ? inRange
         : inRange.filter((item) => compareKeys(item.sk as string, String(start.sk)) * (input.ScanIndexForward === false ? -1 : 1) > 0);
-      return after.map((item) => structuredClone(item));
+      return after.map((item) => this.readClone(item));
     }
     // The stuck-setup sweep's "older than" range (spec 025 C17).
     const before = /^pk = :pk AND sk < (:[a-zA-Z]+)$/.exec(String(input.KeyConditionExpression));
@@ -208,7 +223,7 @@ export class FakeDynamoDb {
       // ExclusiveStartKey resumes after that key (this range is read oldest first only).
       const start = input.ExclusiveStartKey as { sk?: unknown } | undefined;
       const after = start === undefined ? found : found.filter((item) => compareKeys(item.sk as string, String(start.sk)) > 0);
-      return after.map((item) => structuredClone(item));
+      return after.map((item) => this.readClone(item));
     }
     // A whole partition, as the workflow dispatch sweep reads it (sort key order).
     if (String(input.KeyConditionExpression) === "pk = :pk") {
@@ -218,7 +233,7 @@ export class FakeDynamoDb {
       const after = start === undefined
         ? whole
         : whole.filter((item) => compareKeys(item.sk as string, String(start.sk)) * (input.ScanIndexForward === false ? -1 : 1) > 0);
-      return after.map((item) => structuredClone(item));
+      return after.map((item) => this.readClone(item));
     }
     const match = /^pk = :pk AND begins_with\(sk, (:[a-zA-Z]+)\)$/.exec(String(input.KeyConditionExpression));
     if (!match) throw new Error(`FakeDynamoDb does not support the key condition ${String(input.KeyConditionExpression)}`);
@@ -236,7 +251,7 @@ export class FakeDynamoDb {
     const after = start === undefined
       ? items
       : items.filter((item) => compareKeys(item.sk as string, String(start.sk)) * (input.ScanIndexForward === false ? -1 : 1) > 0);
-    return after.map((item) => structuredClone(item));
+    return after.map((item) => this.readClone(item));
   }
 
   private commit(actions: WriteAction[], errorName: string): void {
@@ -290,6 +305,17 @@ function compareTuples(left: string[], right: string[]): number {
     if (order !== 0) return order;
   }
   return 0;
+}
+
+/**
+ * DynamoDB does not keep the order of a map's attributes (an item's top level, or a map inside it): it hands them back
+ * in its own order. Reversed here, so code that compares what it read with what it built by their JSON text, rather
+ * than by their content, fails in a test as it does live.
+ */
+export function reorderMaps(value: unknown): unknown {
+  if (Array.isArray(value)) return value.map(reorderMaps);
+  if (value === null || typeof value !== "object" || Object.getPrototypeOf(value) !== Object.prototype) return value;
+  return Object.fromEntries(Object.entries(value as Record<string, unknown>).reverse().map(([key, entry]) => [key, reorderMaps(entry)]));
 }
 
 function itemKey(pk: string, sk: string): string {

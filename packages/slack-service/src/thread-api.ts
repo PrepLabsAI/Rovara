@@ -8,6 +8,8 @@ import {
   EvalBatchWatchUpdateRequestSchema,
   EvalBatchWatchUpdateResultSchema,
   type SlackThread,
+  SlackThreadNoteAnsweredRequestSchema,
+  SlackThreadNoteAnsweredResultSchema,
   SlackThreadPrepareResultSchema,
   SlackThreadWorkspaceResultSchema,
   SlackWorkspaceCloseCompleteResultSchema,
@@ -56,6 +58,13 @@ export function createThreadApi(options: { controlPlaneUrl: string; signedFetch:
   return {
     async ensureWorkspace(requestId) {
       return SlackThreadWorkspaceResultSchema.parse(await servicePost("/v1/threads/workspace", threadWorkspaceRequest(requestId), "thread workspace request failed"));
+    },
+    async taskAnswerWorkspace(requestId, taskId) {
+      return SlackThreadWorkspaceResultSchema.parse(await servicePost("/v1/threads/workspace", { ...threadWorkspaceRequest(requestId), taskAnswer: { taskId } }, "task answer workspace request failed"));
+    },
+    async markThreadNoteAnswered(input) {
+      const body = SlackThreadNoteAnsweredRequestSchema.parse(input);
+      SlackThreadNoteAnsweredResultSchema.parse(await servicePost("/v1/tasks/thread-notes/answered", body, "marking the thread note answered failed"));
     },
     async prepareWorkspace(requestId) {
       return SlackThreadPrepareResultSchema.parse(await servicePost("/v1/threads/workspace/prepare", { requestId, includeOpenTaskCount: true, includeSharedTask: true }, "thread workspace preparation failed"));

@@ -66,7 +66,7 @@ const CONTAINMENT_ROUNDS = 4;
  * either, since either can start the other. Fails closed when they keep coming back. Runs before every credential
  * request of a publication.
  */
-async function containWorkspace(
+export async function containWorkspace(
   rootPath: string,
   steps: { sweep: (rootPath: string) => Promise<{ removed: number }>; stop: (rootPath: string) => Promise<{ stopped: number } | void> },
 ): Promise<void> {
@@ -371,7 +371,7 @@ async function prepareCandidatePublicationCommit(input: {
 }
 
 /** The tree of HEAD plus every tracked and untracked change, staged in a throwaway index under the same hardened Git. */
-async function temporaryIndexTree(git: RepositoryGit): Promise<string> {
+export async function temporaryIndexTree(git: { readonly directory: string; readonly env: NodeJS.ProcessEnv }): Promise<string> {
   const temporary = await mkdtemp(join(tmpdir(), "agentx-publish-index-"));
   const env = { ...git.env, GIT_INDEX_FILE: join(temporary, "index") };
   const run = async (args: readonly string[]): Promise<string> => {

@@ -9,6 +9,7 @@ import {
   SlackThreadSchema,
   SlackUserIdSchema,
   routeChoiceLabel,
+  suggestionCardMessage,
   suggestionCardText,
   workflowChoiceKey,
   workflowChoicePut,
@@ -82,6 +83,25 @@ export function workflowChoiceMessage(input: { choiceId: string; requesterId: st
       ] },
     ],
   };
+}
+
+/** The question's card as it was first posted, for the request's `suggestion` (a routed card) or the plain Quick or Full question. */
+export function workflowChoiceCard(input: { choiceId: string; requesterId: string; suggestion?: RequestSuggestion | undefined }): { text: string; blocks: Array<Record<string, unknown>> } {
+  return input.suggestion === undefined
+    ? workflowChoiceMessage({ choiceId: input.choiceId, requesterId: input.requesterId })
+    : suggestionCardMessage({ choiceId: input.choiceId, requesterId: input.requesterId, suggestion: input.suggestion });
+}
+
+/** What the question's card says the moment its requester pressed Quick or Full: no buttons, until the start is known. */
+export function workflowChoiceStartingMessage(path: WorkflowPath): { text: string; blocks: Array<Record<string, unknown>> } {
+  const text = `Starting this on ${path === "FULL" ? "Full" : "Quick"}…`;
+  return { text, blocks: [{ type: "section", text: { type: "mrkdwn", text } }] };
+}
+
+/** The question's card once its start was refused for good: its question kept, no buttons, and what to do instead. */
+function workflowChoiceEndedMessage(suggestion: RequestSuggestion | undefined): { text: string; blocks: Array<Record<string, unknown>> } {
+  const text = "I couldn't start this. Start a new request in the channel.";
+  return { text, blocks: answeredWorkflowCard(suggestion === undefined ? QUESTION_TEXT : suggestionCardText(suggestion), text) };
 }
 
 /** What happens first on `path`, in one sentence. */
@@ -482,6 +502,8 @@ export interface HandedOffWorkflowStart {
   responseUrl: string;
   /** The question's message, which loses its buttons once the task started. */
   messageTs?: string;
+  /** What the routed card suggested, so a failed start can put the same card back; absent on the plain Quick or Full question. */
+  suggestion?: RequestSuggestion;
 }
 
 export function isHandedOffWorkflowStart(event: unknown): event is HandedOffWorkflowStart {
@@ -492,25 +514,38 @@ export function isHandedOffWorkflowStart(event: unknown): event is HandedOffWork
     && SlackThreadSchema.safeParse(value.thread).success && SlackUserIdSchema.safeParse(value.userId).success
     && (value.workflowPath === "QUICK" || value.workflowPath === "FULL") && typeof value.choiceId === "string" && UUID_PATTERN.test(value.choiceId)
     && typeof value.responseUrl === "string" && value.responseUrl.startsWith("https://hooks.slack.com/")
-    && (value.messageTs === undefined || SlackMessageTimestampSchema.safeParse(value.messageTs).success);
+    && (value.messageTs === undefined || SlackMessageTimestampSchema.safeParse(value.messageTs).success)
+    && (value.suggestion === undefined || (typeof value.suggestion === "string" && SUGGESTIONS.has(value.suggestion)));
 }
 
 /**
  * Gap 10h for Quick or Full buttons: takes the requester's choice (the store's short hold) while Slack waits, and hands
  * the start itself to `handOff`, which runs it after Slack has its answer. "started" means the start is on its way.
+ * `replaceCard` (the press's response URL) changes the question's card to "Starting this on ..." with no buttons before
+ * the hand-off, so the start can never put the original card back first; a hand-off that fails puts it back.
  */
 export async function handOffChosenWorkflow(
-  deps: { store: WorkflowChoiceStore; handOff(event: HandedOffWorkflowStart): Promise<void> },
+  deps: { store: WorkflowChoiceStore; handOff(event: HandedOffWorkflowStart): Promise<void>; replaceCard?(message: { text: string; blocks: Array<Record<string, unknown>> }): Promise<void> },
   input: { thread: SlackThread; userId: string; workflowPath: WorkflowPath; choiceId: string; responseUrl: string; messageTs?: string },
 ): Promise<WorkflowChoiceOutcome> {
   const chosen = await deps.store.choose(input);
   if (typeof chosen === "string") return chosen;
+  const replace = async (message: { text: string; blocks: Array<Record<string, unknown>> }, failure: string) => {
+    try {
+      await deps.replaceCard?.(message);
+    } catch (error) {
+      logChoice(failure, error);
+    }
+  };
+  await replace(workflowChoiceStartingMessage(input.workflowPath), "workflow.choice_starting_card_failed");
   try {
     await deps.handOff({ source: "agentx.slack-interactivity", action: "start-chosen-workflow", thread: input.thread, userId: input.userId,
-      workflowPath: input.workflowPath, choiceId: chosen.choiceId, responseUrl: input.responseUrl, ...(input.messageTs === undefined ? {} : { messageTs: input.messageTs }) });
+      workflowPath: input.workflowPath, choiceId: chosen.choiceId, responseUrl: input.responseUrl, ...(input.messageTs === undefined ? {} : { messageTs: input.messageTs }),
+      ...(chosen.suggestion === undefined ? {} : { suggestion: chosen.suggestion }) });
   } catch (error) {
-    // Nothing will start it: free the hold so the same answer can be given again at once.
+    // Nothing will start it: free the hold so the same answer can be given again at once, with its buttons back.
     await deps.store.release(input.thread, chosen.choiceId).catch((releaseError: unknown) => logChoice("workflow.choice_release_failed", releaseError));
+    await replace(workflowChoiceCard({ choiceId: chosen.choiceId, requesterId: input.userId, suggestion: chosen.suggestion }), "workflow.choice_card_restore_failed");
     throw error;
   }
   return "started";
@@ -521,7 +556,9 @@ export async function handOffChosenWorkflow(
  * tells the member privately, through the press's response URL, when the start failed or was refused.
  */
 export async function runHandedOffWorkflowStart(
-  deps: ChosenWorkflowDependencies & { respondEphemeral(responseUrl: string, text: string): Promise<void> },
+  deps: ChosenWorkflowDependencies & { respondEphemeral(responseUrl: string, text: string): Promise<void>;
+    /** Replaces the question's card through the press's response URL (best effort). */
+    replaceCard?(responseUrl: string, message: { text: string; blocks: Array<Record<string, unknown>> }): Promise<void> },
   event: HandedOffWorkflowStart,
 ): Promise<"started" | "none" | "failed"> {
   const input = { thread: event.thread, userId: event.userId, workflowPath: event.workflowPath };
@@ -532,11 +569,23 @@ export async function runHandedOffWorkflowStart(
       logChoice("workflow.choice_failure_notice_failed", error);
     }
   };
+  // The press changed the card to "Starting this on ..."; a start that did not go through puts the question back (its
+  // buttons too, unless the choice was dropped for good) before the member is told why.
+  const restoreCard = async (terminal: boolean) => {
+    const message = terminal ? workflowChoiceEndedMessage(event.suggestion)
+      : workflowChoiceCard({ choiceId: event.choiceId, requesterId: event.userId, suggestion: event.suggestion });
+    try {
+      await deps.replaceCard?.(event.responseUrl, message);
+    } catch (error) {
+      logChoice("workflow.choice_card_restore_failed", error);
+    }
+  };
   let chosen: ChosenRequest | undefined;
   try {
     chosen = await deps.store.held({ ...input, choiceId: event.choiceId });
   } catch (error) {
     logChoice("workflow.choice_read_failed", error);
+    await restoreCard(false);
     await tell(workflowStartFailureNotice("UNKNOWN", event.choiceId));
     return "failed";
   }
@@ -545,6 +594,7 @@ export async function runHandedOffWorkflowStart(
     await finishChosenWorkflow(deps, input, { ...chosen, ...(chosen.messageTs === undefined && event.messageTs !== undefined ? { messageTs: event.messageTs } : {}) });
   } catch (error) {
     logChoice("workflow.choice_start_failed", error);
+    await restoreCard(error instanceof SlackWorkflowStartError && TERMINAL_START_REFUSALS.has(error.code));
     await tell(workflowStartFailureNotice(error instanceof SlackWorkflowStartError ? error.code : "UNKNOWN", event.choiceId));
     return "failed";
   }

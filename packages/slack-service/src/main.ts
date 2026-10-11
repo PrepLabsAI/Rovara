@@ -13,7 +13,8 @@ import {
 } from "@aws-sdk/client-sqs";
 import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import {
-  SLACK_QUEUED_BEHIND_ATTRIBUTE, SLACK_ROUTE_ATTRIBUTE, confirmationBlocks, queuedBehindOf, routeOf, sharedNoticeClaim, type SlackRequestMessage,
+  SLACK_CHAT_ATTRIBUTE, SLACK_NOTE_TS_ATTRIBUTE, SLACK_QUEUED_BEHIND_ATTRIBUTE, SLACK_ROUTE_ATTRIBUTE, SLACK_TASK_ID_ATTRIBUTE, confirmationBlocks,
+  queuedBehindOf, routeOf, sharedNoticeClaim, taskQuestionOf, type SlackRequestMessage,
 } from "@agentx/contracts";
 import { ControlPlaneApi } from "@agentx/orchestrator/control-plane-api";
 import { runOrchestratorTurn } from "@agentx/orchestrator/orchestrator";
@@ -29,6 +30,7 @@ import { HANDOFF_MILLISECONDS, activeTurnFromItem, turnNoteFromItem } from "./in
 import { classifierTimeoutMs, createHostedClassifier, createHostedRequestRouter, createHostedSlackRuntime, gateDecisionLogFields, runHostedTurn } from "./runtime.js";
 import { createChoiceOffer, routeSlackRequest } from "./request-routing.js";
 import { DynamoTurnRecordWriter } from "./turn-records.js";
+import { handleTaskQuestion, runTaskAnswer } from "./task-question.js";
 
 const MAX_RECEIVE_COUNT = 5;
 const VISIBILITY_SECONDS = 15 * 60;
@@ -112,6 +114,18 @@ async function postToSlack(channel: string, threadTs: string | undefined, text: 
   const result = await response.json() as { ok?: boolean; error?: string; ts?: string };
   if (!response.ok || result.ok !== true) throw new SlackApiError("chat.postMessage", result.error ?? `HTTP ${response.status}`);
   return result.ts;
+}
+
+/** A message only `user` sees, in the thread (chat.postEphemeral). */
+async function postEphemeralToSlack(channel: string, threadTs: string, user: string, text: string): Promise<void> {
+  const response = await fetch("https://slack.com/api/chat.postEphemeral", {
+    method: "POST",
+    signal: AbortSignal.timeout(10_000),
+    headers: { authorization: `Bearer ${await slackBotToken()}`, "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ channel, thread_ts: threadTs, user, text }),
+  });
+  const result = await response.json() as { ok?: boolean; error?: string };
+  if (!response.ok || result.ok !== true) throw new SlackApiError("chat.postEphemeral", result.error ?? `HTTP ${response.status}`);
 }
 
 /** Issue 219: edits the bot's own message (a long task's progress note). */
@@ -252,7 +266,8 @@ async function runTurn(input: TurnInput): Promise<string> {
   try {
     const sessions = join(directory, "sessions");
     await mkdir(sessions, { recursive: true, mode: 0o700 });
-    const saved = await loadSession(input.subject);
+    // A question about a task keeps no session: each answer reads the task's context afresh.
+    const saved = input.answerOnly === true ? undefined : await loadSession(input.subject);
     const sessionFile = saved === undefined ? undefined : join(sessions, "thread.jsonl");
     if (sessionFile !== undefined && saved !== undefined) await writeFile(sessionFile, saved, { mode: 0o600 });
     const userName = await slackUserName(input.message.userId);
@@ -281,7 +296,7 @@ async function runTurn(input: TurnInput): Promise<string> {
         log("turn.abort_failed", { eventId: input.message.eventId, errorName: error instanceof Error ? error.name : "unknown" });
       });
       const written = runtime.session.sessionManager.getSessionFile();
-      if (input.signal?.aborted !== true && written !== undefined && await exists(written)) {
+      if (input.answerOnly !== true && input.signal?.aborted !== true && written !== undefined && await exists(written)) {
         await s3.send(new PutObjectCommand({
           Bucket: sessionBucketName,
           Key: sessionKey(input.subject),
@@ -315,11 +330,12 @@ const queue: QueueClient = {
       WaitTimeSeconds: 20,
       VisibilityTimeout: VISIBILITY_SECONDS,
       MessageSystemAttributeNames: ["MessageGroupId", "ApproximateReceiveCount"],
-      MessageAttributeNames: [SLACK_QUEUED_BEHIND_ATTRIBUTE, SLACK_ROUTE_ATTRIBUTE],
+      MessageAttributeNames: [SLACK_QUEUED_BEHIND_ATTRIBUTE, SLACK_ROUTE_ATTRIBUTE, SLACK_TASK_ID_ATTRIBUTE, SLACK_NOTE_TS_ATTRIBUTE, SLACK_CHAT_ATTRIBUTE],
     }));
     return (response.Messages ?? []).map((message) => {
       const queuedBehind = queuedBehindOf(message.MessageAttributes);
       const route = routeOf(message.MessageAttributes);
+      const taskQuestion = taskQuestionOf(message.MessageAttributes);
       return {
         body: message.Body ?? "",
         receiptHandle: message.ReceiptHandle ?? "",
@@ -327,6 +343,7 @@ const queue: QueueClient = {
         receiveCount: Number.parseInt(message.Attributes?.ApproximateReceiveCount ?? "1", 10),
         ...(queuedBehind === undefined ? {} : { queuedBehind }),
         ...(route === undefined ? {} : { route }),
+        ...(taskQuestion === undefined ? {} : { taskQuestion }),
       };
     });
   },
@@ -371,7 +388,20 @@ log("service.started", {
   classifierProvider: classifierModel.provider, classifierModel: classifierModel.modelId, classifierAvailable, requestRouting: requestRouter !== undefined,
 });
 const offerChoice = createChoiceOffer({ documentClient, tableName: threadsTableName, post: (thread, text, blocks) => postToSlack(thread.channelId, thread.threadTs, text, blocks), log });
-await runConsumer(queue, (message, { route, ...context }) => route === "suggest"
+await runConsumer(queue, (message, { route, taskQuestion, ...context }) => taskQuestion !== undefined
+  ? handleTaskQuestion(message, taskQuestion, {
+    ...(requestRouter === undefined ? {} : { route: requestRouter }),
+    answer: (question) => runTaskAnswer(message, taskQuestion, question, { api: threadApi(message), runTurn, ...(context.handoff === undefined ? {} : { handoff: context.handoff }) }),
+    post: async (thread, text) => { await postToSlack(thread.channelId, thread.threadTs, text); },
+    postPrivate: (thread, userId, text) => postEphemeralToSlack(thread.channelId, thread.threadTs, userId, text),
+    markAnswered: async (input) => {
+      const api = threadApi(message);
+      if (api.markThreadNoteAnswered === undefined) throw new Error("marking a note answered is unavailable in this deployment");
+      await api.markThreadNoteAnswered(input);
+    },
+    finish: (subject) => threads.finish(subject),
+    log })
+  : route === "suggest"
   ? routeSlackRequest(message, { ...(requestRouter === undefined ? {} : { route: requestRouter }), offer: offerChoice,
     notify: async (thread, text) => { await postToSlack(thread.channelId, thread.threadTs, text); },
     answer: (question) => processRequest(question, context), finish: (subject) => threads.finish(subject), log })

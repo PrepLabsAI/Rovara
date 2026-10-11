@@ -9,6 +9,7 @@ import {
   WorkspaceClosePreflightResultSchema,
   type SlackRequestMessage,
   type SlackThread,
+  type SlackThreadNoteAnsweredRequest,
   type SlackThreadPrepareResult,
   type SlackThreadWorkspaceResult,
   type SlackWorkspaceCloseCompleteResult,
@@ -59,6 +60,10 @@ export interface ThreadServiceApi {
    */
   cancelOperation?(workspaceId: string, operationId: string): Promise<CancelOutcome>;
   createConversation(workspaceId: string): Promise<string>;
+  /** A task thread's read-only view for answering a question (workspace mode `task-answer`); nothing is prepared or run on it. */
+  taskAnswerWorkspace?(requestId: string, taskId: string): Promise<SlackThreadWorkspaceResult>;
+  /** Marks a saved task-thread note answered, so the planner's next step skips it. */
+  markThreadNoteAnswered?(input: SlackThreadNoteAnsweredRequest): Promise<void>;
   listProjectModels?(): Promise<ProjectModelOptions>;
   selectProjectModel?(model: ModelIdentifier): Promise<ProjectModelOptions>;
   /** Spec 043: absent where the control plane has no SWE-bench routes. */
@@ -141,6 +146,8 @@ export interface TurnInput {
   signal?: AbortSignal;
   /** Issue 157: what a resumed earlier turn in this thread did, for the model to read this turn only. */
   turnNote?: string;
+  /** A question about a task: the turn has no tools and keeps no session (see OrchestratorOptions.answerOnly). */
+  answerOnly?: boolean;
 }
 
 export type ServiceLog = (event: string, fields: Readonly<Record<string, string | number | boolean>>) => void;

@@ -1,8 +1,10 @@
 // FR-050: the GitHub App installation and repository access. The private key signs one JWT in
 // memory and is never written anywhere.
-import { githubAppJwt, githubAppSecretName, parseAppSecret } from "../init/github-app.js";
+import { appSettingsUrl, GITHUB_WEBHOOK_EVENTS, githubAppJwt, githubAppSecretName, githubWebhookUrl, parseAppSecret } from "../init/github-app.js";
+import { storedWebhookSecret } from "../github/webhook-setup.js";
 import { plainMessage } from "../output.js";
 import { check, type DoctorCheck, type DoctorContext } from "./checks.js";
+import { jsonObject } from "./secrets.js";
 
 export async function githubChecks(context: DoctorContext): Promise<DoctorCheck[]> {
   const { env, progress, services } = context;
@@ -46,4 +48,43 @@ export async function githubChecks(context: DoctorContext): Promise<DoctorCheck[
   }
   if (count === 0) return [check("github", "GitHub App", "fail", `installed on ${installation.account.login}, but it sees no repository`, "choose the repositories AgentX may use in the app's installation settings on GitHub")];
   return [check("github", "GitHub App", "ok", `installed on ${installation.account.login}, sees ${count} ${count === 1 ? "repository" : "repositories"}`)];
+}
+
+/** The App's webhook: where it sends events, which events, and whether the secret that verifies them is stored. Warnings, not
+ * failures: nothing here stops AgentX working, and agentx upgrade fixes the first and the last. */
+export async function githubWebhookChecks(context: DoctorContext): Promise<DoctorCheck[]> {
+  const { env, settings, services } = context;
+  const secretName = githubAppSecretName(env);
+  const raw = await services.secrets.get(secretName);
+  let app;
+  try {
+    if (raw === undefined) throw new Error("missing");
+    app = parseAppSecret(raw, secretName);
+  } catch {
+    return [];
+  }
+  const upgradeFix = `run agentx --env ${env} upgrade: it`;
+  const checks: DoctorCheck[] = [];
+  const expectedUrl = githubWebhookUrl(settings.controlPlaneUrl);
+  const jwt = githubAppJwt({ appId: app.appId, privateKey: app.privateKey, nowSeconds: Math.floor(services.now() / 1000) });
+  try {
+    const hook = await services.github.getHookConfig(jwt);
+    checks.push(hook.url === expectedUrl
+      ? check("github", "GitHub webhook", "ok", `the App sends events to ${expectedUrl}`)
+      : check("github", "GitHub webhook", "warn", hook.url === undefined ? `the App has no webhook URL; it should send events to ${expectedUrl}` : `the App sends events to ${hook.url}, not ${expectedUrl}`, `${upgradeFix} points the App's webhook at the control plane`));
+    const githubApp = await services.github.getApp(jwt);
+    const subscribed = githubApp.events ?? [];
+    const missing = GITHUB_WEBHOOK_EVENTS.filter((event) => !subscribed.includes(event));
+    const settingsPage = appSettingsUrl(githubApp.owner, githubApp.slug);
+    checks.push(missing.length === 0
+      // GitHub's API does not say whether the hook is Active, so the page where it is switched on is always named.
+      ? check("github", "GitHub webhook", "ok", `subscribed to pull request and comment events; check that Active is on at ${settingsPage}`)
+      : check("github", "GitHub webhook", "warn", `the App is not subscribed to ${missing.join(", ")}`, `GitHub's API cannot add events: tick ${missing.join(", ")} at ${settingsPage}/permissions, and check that Active is on at ${settingsPage}`));
+  } catch (error) {
+    checks.push(check("github", "GitHub webhook", "warn", `could not read the App's webhook settings from GitHub: ${plainMessage(error)}`, "run agentx doctor again in a minute"));
+  }
+  checks.push(storedWebhookSecret(jsonObject(raw) ?? {}) === undefined
+    ? check("github", "GitHub webhook secret", "warn", `${secretName} holds no webhook secret, so GitHub's deliveries cannot be verified`, `${upgradeFix} stores a webhook secret and gives it to GitHub`)
+    : check("github", "GitHub webhook secret", "ok", "stored"));
+  return checks;
 }

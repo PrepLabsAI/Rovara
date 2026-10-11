@@ -1,5 +1,6 @@
 import {
   WORKER_INVOKE_AUTHORIZATION_SCHEME,
+  WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED,
   agentXError,
   modelSelectionFor,
   workerInvokeToken,
@@ -7,6 +8,7 @@ import {
   type Ec2RuntimeBinding,
   type WorkerInvocation,
 } from "@agentx/contracts";
+import { asksForCodeAnchors, withoutCodeAnchorText } from "./broker-shared.js";
 import type { Ec2OutboxRecord } from "./lambda.js";
 import type { SessionManager } from "./sessions.js";
 
@@ -77,7 +79,11 @@ export function createEc2Delivery(dependencies: Ec2DeliveryDependencies) {
  * readiness goes only to a worker whose /ping lists "task.readiness"; one built before spec 051 has no
  * verification at all, so it neither checks nor reports (it is a new worker under an old broker, which sends no
  * readiness, that checks the agent's own test commands), and a publication's reportChecks goes only to one whose /ping lists
- * "publish.reportChecks". The invoke token signs the operation, not the payload, so
+ * "publish.reportChecks". A review's workflowReviewChecks goes only to one whose /ping lists "task.workflowReviewChecks";
+ * an older one reviews without being told which checks ran, and its workflowReviewPlan goes only to one whose /ping lists
+ * "task.workflowReviewPlan"; an older one reviews without seeing the approved plan. A planning run's workflowPhase and planFormat go only to one whose /ping lists
+ * "task.structuredPlans"; an older one plans without checking the answer's format. A planning prompt asks for anchor lines on
+ * code citations only on one whose /ping lists "task.codeAnchors"; for an older one that text is left out of the prompt. The invoke token signs the operation, not the payload, so
  * dropping a field leaves it valid. A ping that fails fails the attempt: the worker journals a hash of
  * the whole invocation, so a retry must send what the first attempt would have, and a blip must not
  * run a capable worker at the default level.
@@ -89,14 +95,18 @@ async function forWorker(
 ): Promise<WorkerInvocation> {
   const requestedThinkingLevel = carriedThinkingLevel(invocation);
   const carriesReadiness = invocation.kind === "task" && invocation.payload.readiness !== undefined;
+  const carriesReviewChecks = invocation.kind === "task" && (invocation.payload.workflowReviewChecks !== undefined || invocation.payload.workflowReviewPlan !== undefined);
   const carriesWorkflowMode = invocation.kind === "task" && invocation.payload.workflowMode !== undefined;
   const carriesFeedbackReview = invocation.kind === "task" && invocation.payload.workflowMode === "FEEDBACK_REVIEW";
   const carriesFeedbackApproval = invocation.kind === "task" && invocation.payload.workflowFeedbackApproval !== undefined;
   const carriesWorkflowBase = invocation.kind === "task" && invocation.payload.workflowBase !== undefined;
+  const carriesStructuredPlans = invocation.kind === "task" && (invocation.payload.workflowPhase !== undefined || invocation.payload.planFormat !== undefined);
+  const carriesCodeAnchors = invocation.kind === "task" && asksForCodeAnchors(invocation.payload.prompt);
   const carriesReportChecks = invocation.kind === "publish" && invocation.payload.reportChecks !== undefined;
   const carriesCandidateTree = invocation.kind === "publish" && invocation.payload.candidateTreeSha !== undefined;
   const carriesPublishBase = invocation.kind === "publish" && invocation.payload.workflowBaseCommit !== undefined;
-  if (requestedThinkingLevel === undefined && !carriesReadiness && !carriesWorkflowMode && !carriesWorkflowBase && !carriesReportChecks && !carriesCandidateTree && !carriesPublishBase) return invocation;
+  const carriesPullRequestUpdate = invocation.kind === "maintain" && invocation.payload.workflowCandidateTreeSha !== undefined;
+  if (requestedThinkingLevel === undefined && !carriesReadiness && !carriesReviewChecks && !carriesWorkflowMode && !carriesWorkflowBase && !carriesStructuredPlans && !carriesCodeAnchors && !carriesReportChecks && !carriesCandidateTree && !carriesPublishBase && !carriesPullRequestUpdate) return invocation;
   let features: readonly string[] = [];
   if (workerFeatures !== undefined) {
     try {
@@ -132,6 +142,10 @@ async function forWorker(
   if (carriesPublishBase && !features.includes("publish.workflowBase")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "publishing the checked code needs a worker that builds it on the task's pinned base commit");
   }
+  // A reviewed fix is pushed only as exactly its reviewed tree; an older worker would push the workspace as it is, so it gets nothing.
+  if (carriesPullRequestUpdate && !features.includes("task.workflowPullRequestUpdate")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", WORKFLOW_PULL_REQUEST_UPDATE_WORKER_OUTDATED);
+  }
   const reason = workerFeatures === undefined ? "no-probe" : "worker-lacks-feature";
   const leveled = withoutUnparsedFields(invocation, features);
   if (leveled !== invocation) {
@@ -154,8 +168,8 @@ async function forWorker(
       workspaceId: invocation.workspaceId,
     }));
   }
-  const sent = withoutReportChecks(checked, features);
-  if (sent !== checked) {
+  const reported = withoutReportChecks(checked, features);
+  if (reported !== checked) {
     console.log(JSON.stringify({
       component: "dispatcher",
       event: "dispatch.report_checks_omitted",
@@ -164,7 +178,84 @@ async function forWorker(
       workspaceId: invocation.workspaceId,
     }));
   }
+  const phased = withoutStructuredPlans(reported, features);
+  if (phased !== reported) {
+    console.log(JSON.stringify({
+      component: "dispatcher",
+      event: "dispatch.structured_plans_omitted",
+      reason,
+      operationId: invocation.operationId,
+      workspaceId: invocation.workspaceId,
+    }));
+  }
+  const withChecks = withoutReviewChecks(phased, features);
+  if (withChecks !== phased) {
+    console.log(JSON.stringify({
+      component: "dispatcher",
+      event: "dispatch.review_checks_omitted",
+      reason,
+      operationId: invocation.operationId,
+      workspaceId: invocation.workspaceId,
+    }));
+  }
+  const withPlan = withoutReviewPlan(withChecks, features);
+  if (withPlan !== withChecks) {
+    console.log(JSON.stringify({
+      component: "dispatcher",
+      event: "dispatch.review_plan_omitted",
+      reason,
+      operationId: invocation.operationId,
+      workspaceId: invocation.workspaceId,
+    }));
+  }
+  const sent = withoutCodeAnchors(withPlan, features);
+  if (sent !== withPlan) {
+    console.log(JSON.stringify({
+      component: "dispatcher",
+      event: "dispatch.code_anchors_omitted",
+      reason,
+      operationId: invocation.operationId,
+      workspaceId: invocation.workspaceId,
+    }));
+  }
   return sent;
+}
+
+/** A planning prompt that does not ask for anchor lines, for a worker that does not parse them: it would reject a plan that carried one. */
+function withoutCodeAnchors(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind !== "task" || !asksForCodeAnchors(invocation.payload.prompt) || features.includes("task.codeAnchors")) return invocation;
+  return { ...invocation, payload: { ...invocation.payload, prompt: withoutCodeAnchorText(invocation.payload.prompt) } };
+}
+
+/** A planning run without the kind and format of plan it writes, for a worker that does not parse them; it plans without checking the answer's format. */
+function withoutStructuredPlans(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind !== "task" || (invocation.payload.workflowPhase === undefined && invocation.payload.planFormat === undefined) || features.includes("task.structuredPlans")) return invocation;
+  const payload = { ...invocation.payload };
+  delete payload.workflowPhase;
+  delete payload.planFormat;
+  return { ...invocation, payload };
+}
+
+/**
+ * A review without the note of which checks ran, for a worker that does not parse it. The note only informs the
+ * reviewers' prompt; such a worker reviews the same change as before, without being told which checks ran.
+ */
+function withoutReviewChecks(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind !== "task" || invocation.payload.workflowReviewChecks === undefined || features.includes("task.workflowReviewChecks")) return invocation;
+  const payload = { ...invocation.payload };
+  delete payload.workflowReviewChecks;
+  return { ...invocation, payload };
+}
+
+/**
+ * A review without the approved plan, for a worker that does not parse it. The plan only informs the reviewers'
+ * prompt; such a worker reviews the same change as before, without seeing the plan.
+ */
+function withoutReviewPlan(invocation: WorkerInvocation, features: readonly string[]): WorkerInvocation {
+  if (invocation.kind !== "task" || invocation.payload.workflowReviewPlan === undefined || features.includes("task.workflowReviewPlan")) return invocation;
+  const payload = { ...invocation.payload };
+  delete payload.workflowReviewPlan;
+  return { ...invocation, payload };
 }
 
 /**

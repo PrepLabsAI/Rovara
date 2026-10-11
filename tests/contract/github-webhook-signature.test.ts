@@ -1,10 +1,13 @@
 import { createHmac } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { createCandidateManifest, createWorkflowSnapshot, WorkflowSnapshotSchema, type WorkflowSnapshot, type WorkflowFeedbackBundle } from "../../packages/contracts/src/task-workflow.js";
 import { claimGithubWebhookDelivery, completeGithubWebhookDelivery, findLinkedGithubWorkflowPullRequest, listDueGithubWebhookDeliveries, processGithubWebhookDelivery, receiveGithubWebhook, reconcileTaskPullRequestFeedback, reserveGithubWebhookDelivery, verifyGithubWebhookSignature, verifyTaskPullRequestFeedbackCurrent } from "../../packages/broker/src/aws/github-webhooks.js";
 import type { ReconcileTaskPullRequestFeedbackInput } from "../../packages/broker/src/aws/github-webhooks.js";
 import type { GitHubPullRequestFeedback } from "../../packages/broker/src/github-app.js";
 import type { FeedbackReviewMeasure } from "../../packages/broker/src/developer/feedback-review-measures.js";
+import { call, createBroker, loadSlackBroker } from "../support/slack-broker.js";
+import { validatingDocumentClient } from "../support/validating-document-client.js";
+import { reorderMaps } from "../support/fake-dynamodb.js";
 
 function commandInput(command: unknown): { constructor: { name: string }; input: Record<string, unknown> } {
   return command as { constructor: { name: string }; input: Record<string, unknown> };
@@ -223,7 +226,7 @@ describe("GitHub webhook signature verification", () => {
 
   it("marks a delivery complete after processing and leaves failed work retryable", async () => {
     const records = new Map<string, Record<string, unknown>>();
-    const documentClient = {
+    const recordStore = {
       async send(command: unknown) {
         const value = command as { constructor: { name: string }; input: Record<string, unknown> };
         if (value.constructor.name === "QueryCommand") {
@@ -262,6 +265,8 @@ describe("GitHub webhook signature verification", () => {
         return { Attributes: record };
       },
     };
+    // DynamoDB refuses unused expression values; the validating wrapper makes this fake do the same.
+    const documentClient = validatingDocumentClient(recordStore);
     const deliveryId = "550e8400-e29b-41d4-a716-446655440010";
     const event = { delivery: "ACCEPTED" as const, deliveryId, event: { kind: "PULL_REQUEST" as const, action: "closed", installationId: 777, repositoryId: 1234, fullName: "acme/payments", number: 9 } };
     await reserveGithubWebhookDelivery({ documentClient, tableName: "state", deliveryId, installationId: 777, repositoryId: 1234, eventHash: "d".repeat(64), event: event.event, now: "2026-10-05T12:00:00.000Z" });
@@ -415,6 +420,28 @@ describe("task-wide current PR feedback reconciliation", () => {
     expect(f.workflow().feedbackReview?.status).toBe("COLLECTING");
     expect(f.artifacts[0]?.bundle).toMatchObject({ headSha: "d".repeat(40), headTreeSha: "b".repeat(40), candidateDigest: f.workflow().candidate?.digest });
   });
+  it("learns the head tree of a pull request recorded without one, keeping the revision an owner's decision is bound to", async () => {
+    const f = await fixture();
+    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
+    expect(f.workflow().pullRequests?.map(pr => pr.headTreeSha)).toEqual(["b".repeat(40), "b".repeat(40)]);
+    // Collected already, and an earlier release dropped the trees: only the trees are written, at the same revision.
+    const collected = f.workflow();
+    f.setWorkflow(WorkflowSnapshotSchema.parse({ ...collected, pullRequests: collected.pullRequests?.map(({ headTreeSha: _tree, ...pr }) => { void _tree; return pr; }) }));
+    expect(await f.module.reconcileTaskPullRequestFeedback({ ...f.input, deliveryId: "delivery-2" })).toBe(true);
+    expect(f.workflow()).toEqual({ ...collected, updatedAt: f.input.now });
+    expect(await f.module.reconcileTaskPullRequestFeedback({ ...f.input, deliveryId: "delivery-3" })).toBe(false);
+  });
+  it("skips, without failing the delivery, a merge at the fix's tree while the fix is still being made", async () => {
+    const f = await fixture();
+    const fix = createCandidateManifest(["api", "ui"].map(repositoryId => ({ repositoryId, commitSha: "e".repeat(40), treeSha: "c".repeat(40) })));
+    for (const stage of ["IMPLEMENT", "VERIFY", "REVIEW"] as const) {
+      const before = WorkflowSnapshotSchema.parse({ ...f.workflow(), stage, state: "RUNNING", candidate: fix, verification: undefined, reviews: [] });
+      f.setWorkflow(before);
+      f.setRemotePr("merged", "d".repeat(40), "c".repeat(40));
+      await expect(f.module.reconcileTaskPullRequestFeedback({ ...f.input, recordedHead: async () => "d".repeat(40) }), stage).resolves.toBe(false);
+      expect(f.workflow()).toEqual(before);
+    }
+  });
   it("does not complete when a linked PR changes candidate before it is merged", async () => {
     const f = await fixture();
     f.setRemotePr("merged", "d".repeat(40), "c".repeat(40));
@@ -526,9 +553,113 @@ describe("task-wide current PR feedback reconciliation", () => {
     expect(stored.size).toBe(2);
     expect([...stored.values()].every(bytes => !bytes.includes("stale webhook body"))).toBe(true);
   });
+  // 0.2.9 live test: the task is read back from DynamoDB, which keeps no map's attribute order. An owner's decision
+  // refreshes GitHub under a new delivery ID each time; unchanged feedback must not be collected (and reviewed) again.
+  it("does not collect unchanged feedback again when the stored collection is read back in DynamoDB's attribute order", async () => {
+    const f = await fixture();
+    f.reopen();
+    expect(await f.module.reconcileTaskPullRequestFeedback(f.input)).toBe(true);
+    const collected = f.workflow();
+    expect(collected.feedbackReview?.threadObservations).toHaveLength(1);
+    f.setWorkflow(reorderMaps(collected) as WorkflowSnapshot);
+    const artifacts = f.artifacts.length;
+    for (const deliveryId of [`owner-decision-${crypto.randomUUID()}`, `owner-decision-${crypto.randomUUID()}`]) {
+      expect(await f.module.reconcileTaskPullRequestFeedback({ ...f.input, deliveryId })).toBe(false);
+    }
+    expect(f.artifacts).toHaveLength(artifacts);
+    expect(f.workflow().revision).toBe(collected.revision);
+    // A real change still collects again.
+    f.addInline();
+    expect(await f.module.reconcileTaskPullRequestFeedback({ ...f.input, deliveryId: `owner-decision-${crypto.randomUUID()}` })).toBe(true);
+    expect(f.workflow().revision).toBe(collected.revision + 1);
+  });
+  it("proves an approval current at worker start when the task is read back in DynamoDB's attribute order", async () => {
+    const f = await fixture();
+    f.reopen();
+    await f.module.reconcileTaskPullRequestFeedback(f.input);
+    const current = f.workflow();
+    const review = current.feedbackReview;
+    if (!review || review.status !== "COLLECTING") throw new Error("feedback review was not collected");
+    const candidateDigest = current.candidate!.digest;
+    const bundleDigests = review.bundleRefs.map((ref) => ref.sha256);
+    const approval = { taskId: current.taskId, requestId: "550e8400-e29b-41d4-a716-446655440098", ownerId: current.ownerId,
+      decisionWorkflowRevision: current.revision, activeWorkflowRevision: current.revision + 1, reviewDigest: "c".repeat(64),
+      proposalDigest: "d".repeat(64), bundleDigests, candidateDigest, selectedFindingIds: ["finding-1"], selectedCommentIds: ["review:1"] };
+    f.setWorkflow(reorderMaps({ ...current, revision: approval.activeWorkflowRevision, stage: "IMPLEMENT", state: "RUNNING",
+      feedbackReview: { ...review, status: "APPROVED", reviewRef: { schemaVersion: 1, taskId: current.taskId, workflowRevision: current.revision,
+        operationMode: "FEEDBACK_REVIEW", qualification: "AI_GENERATED_ADVISORY", proposalDigest: approval.proposalDigest, taskRequirementsDigest: "e".repeat(64),
+        candidateBindings: review.bundleRefs.map((bundle) => ({ repositoryId: bundle.repositoryId, number: bundle.number, headSha: bundle.headSha,
+          candidateDigest, commentSetDigest: bundle.commentSetDigest, bundleDigest: bundle.sha256 })),
+        operationId: "11111111-1111-4111-8111-111111111111", provider: "test", version: "1", status: "COMPLETE",
+        bundleDigests, findingRefs: [], recordedAt: current.updatedAt, sha256: approval.reviewDigest, objectKey: `tasks/${current.taskId}/reviews/${approval.reviewDigest}.json` } },
+      feedbackDispatchApproval: approval }) as WorkflowSnapshot);
+    expect(await f.module.verifyTaskPullRequestFeedbackCurrent(f.input)).toBe(true);
+  });
   it("refuses current API results outside the pinned task PR scope without publishing bundles", async () => {
     const f = await fixture(); expect(f.module.reconcileTaskPullRequestFeedback).toBeTypeOf("function"); f.wrongScope();
     await expect(f.module.reconcileTaskPullRequestFeedback(f.input)).rejects.toThrow(/scope/);
     expect(f.artifacts).toHaveLength(0);
+  });
+});
+
+describe("the GitHub webhook route and a changed webhook secret", () => {
+  beforeAll(async () => { await loadSlackBroker(); });
+  const pullRequestBody = {
+    action: "opened", installation: { id: 777 }, repository: { id: 1234, full_name: "acme/payments" },
+    pull_request: { number: 9, state: "open", merged: false },
+  };
+  const signedHeaders = (body: unknown, secret: string) => ({
+    "x-hub-signature-256": `sha256=${createHmac("sha256", secret).update(JSON.stringify(body)).digest("hex")}`,
+    "x-github-delivery": "550e8400-e29b-41d4-a716-446655440000",
+    "x-github-event": "pull_request",
+  });
+  const post = (webhookSecret: (options?: { refresh?: boolean }) => Promise<string>, headers: Record<string, string>) => {
+    const broker = createBroker({ extra: { githubWebhookSecret: webhookSecret } });
+    return call(broker.handler, { method: "POST", path: "/v1/github/webhooks", body: pullRequestBody, headers });
+  };
+
+  it("accepts a delivery signed with a secret added after the container started", async () => {
+    // The container cached a secret with no webhook secret; the refreshed read finds the one GitHub signs with.
+    const webhookSecret = vi.fn(async (options?: { refresh?: boolean }) => {
+      if (options?.refresh === true) return "added-after-start-".padEnd(40, "x");
+      return "old-secret-before-the-change".padEnd(40, "o");
+    });
+    const response = await post(webhookSecret, signedHeaders(pullRequestBody, "added-after-start-".padEnd(40, "x")));
+    // It gets past the signature check and stops at the registered-repository check (nothing is linked in this fixture).
+    expect(response.status).toBe(403);
+    expect(JSON.stringify(response.body)).toMatch(/registered installation and repository/);
+    expect(webhookSecret.mock.calls).toEqual([[undefined], [{ refresh: true }]]);
+  });
+
+  it("does not ask for a refreshed secret when the first one verifies", async () => {
+    const secret = "current-secret".padEnd(40, "c");
+    const webhookSecret = vi.fn(async () => secret);
+    const response = await post(webhookSecret, signedHeaders(pullRequestBody, secret));
+    expect(JSON.stringify(response.body)).toMatch(/registered installation and repository/);
+    expect(webhookSecret).toHaveBeenCalledTimes(1);
+  });
+
+  it("still refuses a bad signature after one refresh", async () => {
+    const webhookSecret = vi.fn(async (options?: { refresh?: boolean }) => options?.refresh === true ? "refreshed".padEnd(40, "r") : "cached".padEnd(40, "c"));
+    const response = await post(webhookSecret, signedHeaders(pullRequestBody, "someone-else".padEnd(40, "s")));
+    expect(response.status).toBe(403);
+    expect(JSON.stringify(response.body)).toMatch(/signature is invalid/);
+    expect(webhookSecret).toHaveBeenCalledTimes(2);
+  });
+
+  it("skips the second verification when the refresh returns the same secret", async () => {
+    const webhookSecret = vi.fn(async () => "same".padEnd(40, "s"));
+    const response = await post(webhookSecret, signedHeaders(pullRequestBody, "other".padEnd(40, "o")));
+    expect(response.status).toBe(403);
+    expect(JSON.stringify(response.body)).toMatch(/signature is invalid/);
+    expect(webhookSecret).toHaveBeenCalledTimes(2);
+  });
+
+  it("answers 503 not configured when the secret holds no webhook secret even after a refresh", async () => {
+    const { agentXError } = await import("../../packages/contracts/src/index.js");
+    const webhookSecret = vi.fn(async () => { throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App secret does not contain a valid webhook secret"); });
+    const response = await post(webhookSecret, signedHeaders(pullRequestBody, "any".padEnd(40, "a")));
+    expect(response.status).toBe(503);
+    expect(JSON.stringify(response.body)).toContain("GitHub webhook handling is not configured");
   });
 });

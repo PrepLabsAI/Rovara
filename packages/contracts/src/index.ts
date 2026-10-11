@@ -11,6 +11,8 @@ export * from "./credentials.js";
 export * from "./developer.js";
 export * from "./developer-tasks.js";
 export * from "./task-workflow.js";
+export * from "./workflow-proposed-checks.js";
+export * from "./workflow-plan-document.js";
 export * from "./display-name.js";
 export * from "./environments.js";
 export * from "./github-mcp.js";

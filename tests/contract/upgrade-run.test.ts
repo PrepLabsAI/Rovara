@@ -15,7 +15,7 @@ import { prepareDeployment } from "../../packages/cli/src/deploy/commands.js";
 import { agentXError } from "@agentx/contracts";
 import { accessChanged, runUpgrade, type UpgradeDependencies } from "../../packages/cli/src/upgrade/run.js";
 import { SETTINGS } from "../support/doctor-fakes.js";
-import { allStackOutputs, fakeRelease, memoryInitSecrets, scriptedDeployer, T0 } from "../support/init-fakes.js";
+import { allStackOutputs, fakeGitHubApi, fakeRelease, memoryInitSecrets, scriptedDeployer, T0, TEST_PRIVATE_KEY } from "../support/init-fakes.js";
 import { MemoryParameterStore } from "../support/memory-parameter-store.js";
 
 const dirs: string[] = [];
@@ -59,13 +59,19 @@ function confirmingDeployer(changes: Record<string, ChangeSetChange[]> = {}): St
 
 const healthy: DoctorReport = { env: "staging", region: "us-east-1", version: "1.3.0", engine: "templates", checks: [], failed: 0, warned: 0, passed: 25 };
 
-async function harness(overrides: Partial<UpgradeDependencies> & { caller?: string; deployer?: StackDeployer; changes?: Record<string, ChangeSetChange[]>; controlPlane?: Record<string, string> } = {}) {
+const GITHUB_APP_SECRET = "agentx/staging/github-app";
+const HAND_SET_WEBHOOK_SECRET = "hand-set-webhook-secret-".padEnd(40, "h");
+const GITHUB_WEBHOOK_URL = "https://abc123.execute-api.us-east-1.amazonaws.com/v1/github/webhooks";
+
+async function harness(overrides: Partial<UpgradeDependencies> & { caller?: string; deployer?: StackDeployer; changes?: Record<string, ChangeSetChange[]>; controlPlane?: Record<string, string>; github?: Parameters<typeof fakeGitHubApi>[0]; githubSecret?: string | null } = {}) {
   const store = new MemoryParameterStore();
   await writeEnvironmentSettings(store, INSTALLED);
   const deployer = overrides.deployer ?? confirmingDeployer(overrides.changes);
   const lines: string[] = [];
   const doctorRuns: string[] = [];
   const prepared: string[] = [];
+  const github = fakeGitHubApi(overrides.github);
+  const githubSecrets = memoryInitSecrets(overrides.githubSecret === null ? {} : { [GITHUB_APP_SECRET]: overrides.githubSecret ?? JSON.stringify({ appId: "123", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY, webhookSecret: HAND_SET_WEBHOOK_SECRET }) });
   const controlPlane = overrides.controlPlane ?? { GitHubAppId: "123", GitHubAppPrivateKeySecretArn: "arn:aws:secretsmanager:us-east-1:123456789012:secret:agentx/staging/github-app-AbCdEf", BudgetMonthlyUsd: "250", CallbackSigningKey: "****" };
   const deps: UpgradeDependencies = {
     store,
@@ -82,13 +88,14 @@ async function harness(overrides: Partial<UpgradeDependencies> & { caller?: stri
     cdkDiff: async (request) => `Stack ${request.stackName}\nThere were no differences`,
     ask: async () => "y",
     isInteractive: () => true,
+    githubWebhook: () => ({ secrets: githubSecrets, github }),
     doctor: async (env) => { doctorRuns.push(env); return healthy; },
     write: (line) => lines.push(line),
     now: () => T0,
     cliVersion: "1.3.0",
     ...overrides,
   };
-  return { deps, store, lines, doctorRuns, prepared, deployer: deployer as ReturnType<typeof confirmingDeployer> };
+  return { deps, store, lines, doctorRuns, prepared, github, githubSecrets, deployer: deployer as ReturnType<typeof confirmingDeployer> };
 }
 
 const options = { env: "staging", yes: true, allowReplace: [] as string[] };
@@ -105,6 +112,79 @@ describe("agentx upgrade (FR-042 to FR-044)", () => {
     expect((await readEnvironmentSettings(h.store, "staging"))?.version).toBe("1.3.0");
     expect(h.doctorRuns).toEqual(["staging"]);
     expect(result).toMatchObject({ from: "1.2.3", to: "1.3.0", doctor: { failed: 0 } });
+  });
+
+  describe("the GitHub webhook", () => {
+    it("sets the hook URL, keeps the stored secret, and says so before doctor runs", async () => {
+      const h = await harness();
+      await runUpgrade(options, h.deps);
+      expect(h.lines).toContain("GitHub webhook: configured");
+      expect(h.lines.indexOf("GitHub webhook: configured")).toBeLessThan(h.lines.indexOf("Checking the environment with agentx doctor"));
+      expect(h.github.hookWrites).toEqual([{ url: GITHUB_WEBHOOK_URL, secret: HAND_SET_WEBHOOK_SECRET }]);
+      expect((JSON.parse(h.githubSecrets.values.get(GITHUB_APP_SECRET)!) as { webhookSecret: string }).webhookSecret).toBe(HAND_SET_WEBHOOK_SECRET);
+    });
+
+    it("asks for Active to be turned on when the App's hook had no URL or another one", async () => {
+      const h = await harness();
+      await runUpgrade(options, h.deps);
+      expect(h.lines).toContain("GitHub webhook: turn on Active at https://github.com/organizations/acme/settings/apps/agentx-acme-staging if it is off");
+      const same = await harness({ github: { hookUrl: GITHUB_WEBHOOK_URL } });
+      await runUpgrade(options, same.deps);
+      expect(same.lines.some((line) => line.includes("turn on Active"))).toBe(false);
+    });
+
+    it("says unchanged when the hook already points at the control plane", async () => {
+      const h = await harness({ github: { hookUrl: GITHUB_WEBHOOK_URL } });
+      await runUpgrade(options, h.deps);
+      expect(h.lines).toContain("GitHub webhook: unchanged");
+      // The stored secret is sent again: GitHub masks its own copy, so a mismatch could not be seen.
+      expect(h.github.hookWrites).toEqual([{ url: GITHUB_WEBHOOK_URL, secret: HAND_SET_WEBHOOK_SECRET }]);
+    });
+
+    it("tells the owner which events to tick and where", async () => {
+      const h = await harness({ github: { hookUrl: GITHUB_WEBHOOK_URL, events: ["pull_request"] } });
+      await runUpgrade(options, h.deps);
+      expect(h.lines).toContain("GitHub webhook: tick these events on https://github.com/organizations/acme/settings/apps/agentx-acme-staging/permissions: pull_request_review, pull_request_review_comment, issue_comment");
+    });
+
+    it("never prints the webhook secret, stored or generated", async () => {
+      const kept = await harness();
+      await runUpgrade(options, kept.deps);
+      expect(kept.lines.join("\n")).not.toContain(HAND_SET_WEBHOOK_SECRET);
+
+      const generated = await harness({ githubSecret: JSON.stringify({ appId: "123", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY }) });
+      const result = await runUpgrade(options, generated.deps);
+      const stored = JSON.parse(generated.githubSecrets.values.get(GITHUB_APP_SECRET)!) as { webhookSecret: string };
+      expect(stored.webhookSecret).toMatch(/^[0-9a-f]{64}$/);
+      expect(generated.lines.join("\n")).not.toContain(stored.webhookSecret);
+      expect(JSON.stringify(result)).not.toContain(stored.webhookSecret);
+    });
+
+    it("carries on to doctor, and says what failed, when GitHub cannot be set up", async () => {
+      const h = await harness();
+      h.github.setHookConfig = async () => { throw agentXError("RUNTIME_UNAVAILABLE", "GitHub webhook update failed with HTTP 503"); };
+      await runUpgrade(options, h.deps);
+      expect(h.lines.some((line) => line.startsWith("GitHub webhook: could not be set up") && line.includes("HTTP 503"))).toBe(true);
+      expect(h.doctorRuns).toEqual(["staging"]);
+    });
+
+    it("does not print the secret when storing it fails", async () => {
+      const h = await harness({ githubSecret: JSON.stringify({ appId: "123", slug: "agentx-acme-staging", account: "acme", privateKey: TEST_PRIVATE_KEY }) });
+      let written = "";
+      h.githubSecrets.put = async (_name, value) => { written = value; throw Object.assign(new Error(`access denied for ${value}`), { name: "AccessDeniedException" }); };
+      await runUpgrade(options, h.deps);
+      const generated = (JSON.parse(written) as { webhookSecret: string }).webhookSecret;
+      expect(h.lines.some((line) => line.startsWith("GitHub webhook: could not be set up") && line.includes("AccessDeniedException"))).toBe(true);
+      expect(h.lines.join("\n")).not.toContain(generated);
+      expect(h.lines.join("\n")).not.toContain("PRIVATE KEY");
+    });
+
+    it("skips an environment that has no GitHub App yet", async () => {
+      const h = await harness({ githubSecret: null });
+      await runUpgrade(options, h.deps);
+      expect(h.lines.some((line) => line.startsWith("GitHub webhook: skipped"))).toBe(true);
+      expect(h.github.hookWrites).toEqual([]);
+    });
   });
 
   it("never prints the callback signing key", async () => {

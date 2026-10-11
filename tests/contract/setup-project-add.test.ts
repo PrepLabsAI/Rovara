@@ -111,7 +111,8 @@ describe("agentx project add (FR-040)", () => {
     // repository, project name (default), setup (default: none), test
     const prompter = scriptedPrompter(["acme/docs", "", "", "make check"]);
     await addProject({ env: "staging", session, githubToken: "ghs_x", prompter, write: (line) => lines.push(line), services: services(plane), flags: {} });
-    expect(lines.join("\n")).toContain("No build file AgentX knows in acme/docs, so no command is proposed.");
+    expect(lines.join("\n")).toContain("No build file AgentX knows in acme/docs. AgentX will propose checks for each task; you can add project checks later.");
+    expect(prompter.asked).toContain("Test command (empty to let AgentX propose checks per task)");
     expect((plane.registered[0] as { definition: { setup: unknown[]; readiness: Array<{ args: string[] }> } }).definition).toMatchObject({ setup: [], readiness: [{ executable: "make", args: ["check"] }] });
   });
 

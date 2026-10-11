@@ -241,12 +241,12 @@ export async function addProject(input: {
     if (flags.testCommand !== undefined) readiness = typed(flags.testCommand, TEST_TIMEOUT);
   } else {
     input.write(proposed.basis.length === 0
-      ? `No build file AgentX knows in ${repository.fullName}, so no command is proposed.`
+      ? `No build file AgentX knows in ${repository.fullName}. AgentX will propose checks for each task; you can add project checks later.`
       : proposed.basis.map((line) => `Proposed from ${line}`).join("\n"));
     const summary = `setup: ${setup.map(commandLine).join("; ") || "none"}; test: ${readiness.map(commandLine).join("; ") || "none"}`;
     if (proposed.basis.length === 0 || !(await prompter.confirm(`Use these commands? (${summary})`, { defaultValue: true }))) {
       setup = typed(await prompter.ask("Setup command (empty for none)", { flag: "--setup-command", defaultValue: setup.map(commandLine)[0] ?? "" }), SETUP_TIMEOUT);
-      readiness = typed(await prompter.ask("Test command (empty for none)", { flag: "--test-command", defaultValue: readiness.map(commandLine)[0] ?? "" }), TEST_TIMEOUT);
+      readiness = typed(await prompter.ask("Test command (empty to let AgentX propose checks per task)", { flag: "--test-command", defaultValue: readiness.map(commandLine)[0] ?? "" }), TEST_TIMEOUT);
     }
   }
   const definition = ProjectDefinitionSchema.parse({

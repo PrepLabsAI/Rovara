@@ -4,7 +4,7 @@ import { SlackPostError } from "../../packages/broker/src/aws/slack-web.js";
 
 export const SLACK_LIMITS = {
   privateMetadata: 3000, sectionText: 3000, messageBlocks: 50, modalBlocks: 100, checkboxOptions: 10, selectOptions: 100,
-  optionText: 75, optionValue: 150, buttonText: 75, buttonValue: 2000, messageText: 40000, modalTitle: 24, inputLabel: 2000,
+  radioOptions: 10, optionText: 75, optionValue: 150, buttonText: 75, buttonValue: 2000, messageText: 40000, modalTitle: 24, inputLabel: 2000,
   contextElements: 10, actionsElements: 25, plainTextInputMax: 3000,
 } as const;
 
@@ -58,6 +58,13 @@ function validateElement(method: string, element: unknown): void {
       return;
     }
     case "checkboxes": return validateOptions(method, record, SLACK_LIMITS.checkboxOptions);
+    case "radio_buttons": {
+      validateOptions(method, record, SLACK_LIMITS.radioOptions);
+      // An initial option must be one of the options.
+      const initial = asRecord(record.initial_option);
+      if (initial !== undefined && !(record.options as unknown[]).some((option) => asRecord(option)?.value === initial.value)) refuse(method, "invalid_blocks");
+      return;
+    }
     case "static_select":
     case "multi_static_select": return validateOptions(method, record, SLACK_LIMITS.selectOptions);
     case "plain_text_input": {
@@ -172,6 +179,8 @@ export class StrictSlackWeb {
   readonly ephemerals: Array<{ channel: string; threadTs?: string; user: string; text: string; blocks?: unknown[] }> = [];
   readonly views: Array<{ triggerId: string; view: Record<string, unknown> }> = [];
   readonly responses: Array<{ url: string; text: string }> = [];
+  /** Edits of a button's own message through its response_url (replace_original). */
+  readonly replacements: Array<{ url: string; text: string; blocks: unknown[] }> = [];
   private readonly failures = new Map<string, string[]>();
   private clock = 1_695_500_000_000_100;
 
@@ -249,6 +258,14 @@ export class StrictSlackWeb {
     // A button's private answer is read in the thread where the button was pressed.
     this.enforceBrief("response_url", { text });
     this.responses.push({ url, text });
+  }
+
+  /** A response_url answer that replaces the message the button is on; held to the limits of a thread message. */
+  async replaceOriginal(url: string, message: { text: string; blocks: unknown[] }): Promise<void> {
+    if (!url.startsWith("https://hooks.slack.com/")) refuse("response_url", "invalid_arguments");
+    validateMessage("response_url", message);
+    this.enforceBrief("response_url", message);
+    this.replacements.push({ url, text: message.text, blocks: message.blocks });
   }
 
   lastPostWithAction(actionId: string): Post {

@@ -111,7 +111,9 @@ export async function runTaskCanvasCloseout(
   if (input.expectedWorkflowRevision !== undefined && input.expectedWorkflowRevision !== workflow.revision) {
     return { status: "ARCHIVE_PENDING", reason: "manifest_binding_changed" };
   }
-  const lineage = workflow.canvasLineage ?? [];
+  // Slack refused these outright (a free workspace, say), so no Canvas exists to delete. An outcome Slack did not
+  // answer (CREATE_OUTCOME_UNKNOWN) may have a Canvas and stays unresolved below.
+  const lineage = (workflow.canvasLineage ?? []).filter((entry) => entry.state !== "CREATE_FAILED");
   if (lineage.some((entry) => !workflow.artifacts.some((artifact) => artifact.id === entry.artifactId
     && artifact.objectKey === entry.artifactRef && artifact.sha256 === entry.artifactDigest))) {
     return persistPreparationFailure({ store, taskId: task.taskId, workflowRevision: workflow.revision, terminalState: terminal,

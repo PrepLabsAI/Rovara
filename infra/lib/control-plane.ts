@@ -197,6 +197,50 @@ export class ControlPlaneStack extends Stack {
     broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["ssm:GetParameters"], resources: swebenchParameterArns }));
     broker.addToRolePolicy(new iam.PolicyStatement({ actions: ["states:StartExecution"], resources: [swebenchStateMachineArn] }));
 
+    // Spec 061: a stored plan's cited code is read from GitHub in the background, with retries, so a slow or failing
+    // GitHub never holds up the plan. The broker starts the job right after the plan commits (an async invoke), and
+    // its recovery sweep starts any row that is due; the job needs nothing from the broker. 150 seconds: the code is
+    // read inside 120, and the rest is for attaching the bundle and cleaning up. 1,024 MB: files are read in memory.
+    // Developer tasks, and so their plans, exist only in named environments; the legacy templates gain nothing.
+    if (naming.env !== undefined) {
+      const planEvidence = packagedFunction(this, "PlanEvidence", "packages/broker/src/aws/plan-evidence-handler.ts", {
+        STATE_TABLE_NAME: state.tableName,
+        ARTIFACT_BUCKET_NAME: artifacts.bucketName,
+        GITHUB_APP_CREDENTIAL_REF: githubAppCredentialRef.valueAsString,
+        GITHUB_APP_ID: githubAppId.valueAsString,
+        GITHUB_APP_PRIVATE_KEY_SECRET_ARN: githubAppPrivateKeySecretArn.valueAsString,
+      }, Duration.seconds(150), [], 1024);
+      // The State table, one action at a time, each on the partitions it needs (the sort key cannot be narrowed here):
+      // reads of the task record, its evidence pointer, the job rows and the project revision the task started from; the
+      // pointer is written with PutItem (DEVTASK#, put once, never the task record's workflow); the job row is claimed and
+      // rescheduled with UpdateItem and removed with DeleteItem. No Query: the sweep runs in the broker.
+      planEvidence.addToRolePolicy(new iam.PolicyStatement({
+        sid: "ReadTaskJobAndProject",
+        actions: ["dynamodb:GetItem"],
+        resources: [state.tableArn],
+        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVTASK#*", "PLAN_EVIDENCE", "PROJECT#*"] } },
+      }));
+      planEvidence.addToRolePolicy(new iam.PolicyStatement({
+        sid: "PutEvidencePointer",
+        actions: ["dynamodb:PutItem"],
+        resources: [state.tableArn],
+        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["DEVTASK#*"] } },
+      }));
+      planEvidence.addToRolePolicy(new iam.PolicyStatement({
+        sid: "ClaimAndCloseJobRow",
+        actions: ["dynamodb:UpdateItem", "dynamodb:DeleteItem"],
+        resources: [state.tableArn],
+        conditions: { "ForAllValues:StringLike": { "dynamodb:LeadingKeys": ["PLAN_EVIDENCE"] } },
+      }));
+      // The plan is read back from its own folder, and the bundle is written only beside it.
+      planEvidence.addToRolePolicy(new iam.PolicyStatement({ sid: "ReadPlanDocuments", actions: ["s3:GetObject"], resources: [artifacts.arnForObjects("private/*")] }));
+      planEvidence.addToRolePolicy(new iam.PolicyStatement({ sid: "WriteEvidenceBundles", actions: ["s3:PutObject"], resources: [artifacts.arnForObjects("private/*/plan-documents/*.evidence.*.json")] }));
+      // The GitHub App's key, to read files as the broker does.
+      planEvidence.addToRolePolicy(new iam.PolicyStatement({ sid: "GitHubAppKey", actions: ["secretsmanager:GetSecretValue"], resources: [githubAppPrivateKeySecretArn.valueAsString] }));
+      planEvidence.grantInvoke(broker);
+      broker.addEnvironment("PLAN_EVIDENCE_FUNCTION_NAME", planEvidence.functionName);
+    }
+
     const outboxPublisher = packagedFunction(
       this,
       "OutboxPublisher",
@@ -655,9 +699,12 @@ export class ControlPlaneStack extends Stack {
       authorizationType: "NONE",
     });
     // Confused-deputy guard: only this account's own EventBridge schedules may assume the recovery roles.
+    // Scheduler sets aws:SourceArn to the schedule group's ARN, not the schedule's; these schedules use the default group.
     const schedulerPrincipal = new iam.ServicePrincipal("scheduler.amazonaws.com", { conditions: {
-      StringEquals: { "aws:SourceAccount": this.account },
-      ArnLike: { "aws:SourceArn": `arn:${this.partition}:scheduler:${this.region}:${this.account}:schedule/*` },
+      StringEquals: {
+        "aws:SourceAccount": this.account,
+        "aws:SourceArn": `arn:${this.partition}:scheduler:${this.region}:${this.account}:schedule-group/default`,
+      },
     } });
     const githubRecoveryRole = new iam.Role(this, "GithubWebhookRecoveryRole", {
       assumedBy: schedulerPrincipal,
@@ -966,13 +1013,14 @@ export function packagedFunction(
   timeout = Duration.seconds(30),
   /** Files copied beside the bundled handler, as [absolute source, name in the bundle]. */
   extraFiles: ReadonlyArray<readonly [string, string]> = [],
+  memorySize = 512,
 ): lambdaNodejs.NodejsFunction {
   return new lambdaNodejs.NodejsFunction(scope, id, {
     runtime: lambda.Runtime.NODEJS_22_X,
     entry: resolve(process.cwd(), entry),
     handler: "handler",
     timeout,
-    memorySize: 512,
+    memorySize,
     tracing: lambda.Tracing.ACTIVE,
     environment,
     logGroup: new logs.LogGroup(scope, `${id}Logs`, {

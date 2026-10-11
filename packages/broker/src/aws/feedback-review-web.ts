@@ -3,7 +3,7 @@ import { z } from "zod";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import {
-  CSRF_COOKIE, SESSION_COOKIE, SESSION_MAX_AGE_SECONDS, canonicalGithubUrl, escapeHtml as escape, parseCookie, safeResponse, safeText,
+  CSRF_COOKIE, CSRF_MAX_AGE_SECONDS, SESSION_COOKIE, canonicalGithubUrl, escapeHtml as escape, parseCookie, safeResponse, safeText,
   signInLocation as signInTo,
 } from "./web-session.js";
 
@@ -51,7 +51,8 @@ const isCsrf = (value: string | undefined): value is string => value !== undefin
 const signInLocation = (taskId: string) => signInTo(`/review/${taskId}`);
 
 function page(review: Record<string, unknown>, csrf: string, nonce: string): string {
-  const pending = review.status === "PENDING" && (review.workflowStatus === undefined
+  // A review that failed, timed out or was interrupted has nothing to decide on.
+  const pending = review.status === "PENDING" && (review.reportStatus === undefined || review.reportStatus === "COMPLETE") && (review.workflowStatus === undefined
     || (review.workflowStatus === "WAITING" && review.workflowStage === "WAIT_FOR_MERGE"));
   const findings = Array.isArray(review.findings) ? review.findings as Array<Record<string, unknown>> : [];
   const recommendedIds = Array.isArray(review.recommendedFindingIds) ? review.recommendedFindingIds.filter((id): id is string => typeof id === "string") : [];
@@ -72,8 +73,12 @@ function page(review: Record<string, unknown>, csrf: string, nonce: string): str
     const proposal = finding.fixProposal !== null && typeof finding.fixProposal === "object" ? finding.fixProposal as Record<string, unknown> : undefined;
     const fileChanges = Array.isArray(proposal?.fileChanges) ? proposal.fileChanges as Array<Record<string, unknown>> : [];
     const tests = Array.isArray(proposal?.tests) ? proposal.tests as Array<Record<string, unknown>> : [];
-    const proposalContent = proposal === undefined ? "" : `<section aria-label="Proposed fix"><h4>Proposed fix</h4><p>${escape(proposal.summary)}</p><h5>Files</h5><ul>${fileChanges.map(change => `<li>${escape(change.operation)} <code>${escape(change.repositoryId)}/${escape(change.path)}</code>: ${escape(change.change)}</li>`).join("")}</ul><h5>Tests</h5><ul>${tests.map(test => `<li>${escape(test.operation)} <code>${escape(test.repositoryId)}/${escape(test.path)}</code>: ${escape(test.behavior)}</li>`).join("")}</ul></section>`;
-    return `<article class="finding"><h3>${escape(finding.priority)} · ${escape(finding.assessment)}</h3><p>${escape(finding.rationale)}</p><p class="muted">${recommended ? "AgentX recommends addressing this." : "AgentX does not recommend a code change for this item."}</p>${selection}<details><summary>See proposed fix, comments and evidence</summary>${proposalContent}<p>${escape(finding.confidence && typeof finding.confidence === "object" ? (finding.confidence as Record<string, unknown>).reason : "")}</p><ul>${commentContent}</ul><ul>${(Array.isArray(finding.evidence) ? finding.evidence as Array<Record<string, unknown>> : []).map(evidence => `<li>${escape(evidence.source)}: ${escape(evidence.reference)}</li>`).join("")}</ul></details></article>`;
+    // A finding the reviewer left to the owner holds a question (and its options), not a fix: no Files or Tests to list.
+    const isQuestion = finding.proposedDisposition === "OWNER_DECISION";
+    const proposalContent = proposal === undefined ? "" : isQuestion
+      ? `<section aria-label="Question for you"><h4>Question for you</h4><p>${escape(proposal.summary)}</p></section>`
+      : `<section aria-label="Proposed fix"><h4>Proposed fix</h4><p>${escape(proposal.summary)}</p><h5>Files</h5><ul>${fileChanges.map(change => `<li>${escape(change.operation)} <code>${escape(change.repositoryId)}/${escape(change.path)}</code>: ${escape(change.change)}</li>`).join("")}</ul><h5>Tests</h5>${tests.length === 0 ? "<p>No new tests: the change is documentation only, or the repository has no tests.</p>" : `<ul>${tests.map(test => `<li>${escape(test.operation)} <code>${escape(test.repositoryId)}/${escape(test.path)}</code>: ${escape(test.behavior)}</li>`).join("")}</ul>`}</section>`;
+    return `<article class="finding"><h3>${escape(finding.priority)} · ${escape(finding.assessment)}</h3><p>${escape(finding.rationale)}</p><p class="muted">${recommended ? "AgentX recommends addressing this." : "AgentX does not recommend a code change for this item."}</p>${selection}<details><summary>${isQuestion ? "See the question, comments and evidence" : "See proposed fix, comments and evidence"}</summary>${proposalContent}<p>${escape(finding.confidence && typeof finding.confidence === "object" ? (finding.confidence as Record<string, unknown>).reason : "")}</p><ul>${commentContent}</ul><ul>${(Array.isArray(finding.evidence) ? finding.evidence as Array<Record<string, unknown>> : []).map(evidence => `<li>${escape(evidence.source)}: ${escape(evidence.reference)}</li>`).join("")}</ul></details></article>`;
   }).join("");
   const prList = candidates.map(pr => `<li>${escape(pr.repositoryId)} #${escape(pr.number)} · head <code>${escape(pr.headSha)}</code></li>`).join("");
   const checks = (Array.isArray(review.checks) ? review.checks : []).map(check => `<li>${escape(check)}</li>`).join("");
@@ -148,7 +153,7 @@ export function createFeedbackReviewWeb(deps: FeedbackReviewWebDependencies) {
       const csrf = pending ? (isCsrf(currentCsrf) ? currentCsrf : randomBytes(32).toString("base64url")) : "";
       const nonce = randomBytes(18).toString("base64url");
       const response: FeedbackReviewWebResponse = safeResponse(200, page(review, csrf, nonce), nonce);
-      if (pending && !isCsrf(currentCsrf)) response.headers["set-cookie"] = `${CSRF_COOKIE}=${csrf}; Secure; SameSite=Lax; Path=/; Max-Age=${SESSION_MAX_AGE_SECONDS}`;
+      if (pending && !isCsrf(currentCsrf)) response.headers["set-cookie"] = `${CSRF_COOKIE}=${csrf}; Secure; SameSite=Lax; Path=/; Max-Age=${CSRF_MAX_AGE_SECONDS}`;
       return response;
     } catch (error) {
       const code = (error as { code?: string })?.code;

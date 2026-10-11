@@ -15,8 +15,12 @@ import {
   SlackTeamIdSchema,
   SlackThreadSchema,
   SlackUserIdSchema,
+  WORKFLOW_RESOLVE_FINDINGS_MAX,
   WorkflowSnapshotSchema,
+  openReviewFindings,
   workflowPublicationRetryable,
+  workflowResolveFindingsOffered,
+  workflowSelectedChecks,
   workflowSendBackOffered,
   answeredConfirmationBlocks,
   confirmationClickEventId,
@@ -28,7 +32,9 @@ import {
   type PendingConfirmation,
   type SlackRequestMessage,
   type SlackThread,
+  type WorkflowCheck,
   type WorkflowCheckPolicy,
+  type WorkflowOpenFinding,
   type WorkflowSnapshot,
 } from "@agentx/contracts";
 import { requiredEnvironment, type HttpApiV2Event } from "./lambda.js";
@@ -54,7 +60,7 @@ import {
   type WorkflowPath,
 } from "./slack-workflow-choice.js";
 import { detailsActionHandler, dynamoTurnDetailsReader } from "./slack-details.js";
-import { WORKFLOW_ACTION_IDS, answeredWorkflowCard, slackText, workflowModalCopy } from "../developer/workflow-messages.js";
+import { FEEDBACK_REVIEW_RETRY_ACTION, WORKFLOW_ACTION_IDS, answeredWorkflowCard, cleanLine, slackText, workflowModalCopy } from "../developer/workflow-messages.js";
 
 const EVENT_RETENTION_SECONDS = 14 * 24 * 60 * 60;
 /** Every Slack call made while Slack waits (3 seconds) for this request's answer gives up after this. */
@@ -146,15 +152,26 @@ function respond(statusCode: number, body: unknown): HttpResponse {
 export { WORKFLOW_ACTION_IDS };
 export { answeredWorkflowCard };
 
+/** Said when a Retry review press no longer matches the task's failed review. */
+const FEEDBACK_REVIEW_CHANGED = "This review changed. Use the latest AgentX message.";
 /** The modal that confirms Close task. */
 const WORKFLOW_CLOSE_SUBMISSION = "agentx_workflow_close_submission";
+/** The modal that answers each blocking review finding of a blocked review. */
+const WORKFLOW_FINDINGS_SUBMISSION = "agentx_workflow_resolve_findings_submission";
+/** Said privately when the owner confirms Close task; the thread's "closed" follows once the workspace is released. */
+const CLOSING_ACK = "Closing this task. Its workspace is being released; I'll post here when it's closed, usually within two minutes.";
 
 class WorkflowDecisionSubmissionError extends Error {
   constructor() { super("the broker did not take the workflow event"); this.name = "WorkflowDecisionSubmissionError"; }
 }
 
 class WorkflowCheckSelectionRequired extends Error {
-  constructor(message = "Select at least one check before approving the coding plan.") { super(message); this.name = "WorkflowCheckSelectionRequired"; }
+  constructor(message: string) { super(message); this.name = "WorkflowCheckSelectionRequired"; }
+}
+
+/** Problems with the owner's answers, each shown in the form on its own input (by block ID). */
+class WorkflowFormErrors extends Error {
+  constructor(readonly errors: Record<string, string>) { super("the form has problems"); this.name = "WorkflowFormErrors"; }
 }
 
 /**
@@ -191,42 +208,126 @@ const SECTION_TEXT_MAX = 3_000;
 const optionText = (label: string): string => label.length > OPTION_TEXT_MAX ? `${label.slice(0, OPTION_TEXT_MAX - 1)}…` : label;
 
 /**
- * Gap 10e: the check controls of the approval and Retry verification modals, within Slack's limits at the policy's
- * maximums (64 required, 20 optional, 80-character labels). The required list names at most 20 checks, then says how
- * many more, and stays inside one section's 3,000 characters; up to ten optional checks are checkboxes, more are a
- * multi-select (Slack allows ten checkboxes and 100 select options); each option reads at most 75 characters.
- * Before the coding plan (`codingPlan` false) no checks are chosen, so only the required list is shown.
+ * A heading and its checks' labels (escaped), naming at most 20 and then how many more, inside one section's 3,000
+ * characters.
  */
-export function workflowCheckControls(policy: WorkflowCheckPolicy | undefined, options: { codingPlan: boolean }): Array<Record<string, unknown>> {
+function checkListSection(heading: string, checks: readonly WorkflowCheck[], kind: string): Record<string, unknown> {
+  let text = heading;
+  let listed = 0;
+  for (const check of checks.slice(0, REQUIRED_CHECKS_LISTED)) {
+    const line = `\n• ${slackText(optionText(check.label))}`;
+    // Room is kept for the "and N more" line.
+    if (text.length + line.length > SECTION_TEXT_MAX - 60) break;
+    text += line;
+    listed += 1;
+  }
+  if (listed < checks.length) text += `\nand ${checks.length - listed} more ${kind} checks`;
+  return { type: "section", text: { type: "mrkdwn", text } };
+}
+
+/** What the coding plan form says when neither the project nor AgentX has a check for this change. */
+function reviewOnlySentence(noneReason: string | undefined): string {
+  const reason = noneReason?.trim().replace(/[.!?]+$/, "") ?? "";
+  return `No automated checks apply${reason === "" ? "" : `: ${slackText(reason)}`}. If you approve without choosing a check, this change is checked by review only and the draft PR will say so.`;
+}
+
+/**
+ * Gap 10e: the check controls of the approval and Retry verification modals, within Slack's limits at the policy's
+ * maximums (64 required, 8 proposed, 20 optional, 80-character labels). Each list names at most 20 checks, then says
+ * how many more, and stays inside one section's 3,000 characters; up to ten optional checks are checkboxes, more are a
+ * multi-select (Slack allows ten checkboxes and 100 select options); each option reads at most 75 characters.
+ * Before the coding plan (`codingPlan` false) no checks are chosen, so only the project's checks are shown.
+ * Approving the coding plan: the project's checks and AgentX's proposed ones always run, optional ones may be added,
+ * and choosing none of anything is review only, which the form says. A verification retry (`retry`) starts with the
+ * optional checks chosen before, and must run at least one check.
+ */
+export function workflowCheckControls(policy: WorkflowCheckPolicy | undefined, options: { codingPlan: boolean; retry?: boolean }): Array<Record<string, unknown>> {
   const required = policy?.required ?? [];
   const optional = policy?.optional ?? [];
-  let requiredText: string;
-  if (required.length > 0) {
-    requiredText = "Always run these project checks:";
-    let listed = 0;
-    for (const check of required.slice(0, REQUIRED_CHECKS_LISTED)) {
-      const line = `\n• ${slackText(optionText(check.label))}`;
-      // Room is kept for the "and N more" line.
-      if (requiredText.length + line.length > SECTION_TEXT_MAX - 60) break;
-      requiredText += line;
-      listed += 1;
-    }
-    if (listed < required.length) requiredText += `\nand ${required.length - listed} more required checks`;
-  } else {
-    requiredText = options.codingPlan ? "No project checks are required. Choose at least one check below." : "Checks are chosen when you approve the coding plan.";
+  // A task stored before proposals has no `proposed`.
+  const proposed = policy?.proposed ?? [];
+  const requiredSection = required.length > 0 ? checkListSection("Project checks, always run:", required, "required") : undefined;
+  if (!options.codingPlan) {
+    return [requiredSection ?? { type: "section", text: { type: "mrkdwn", text: "Checks are chosen when you approve the coding plan." } }];
   }
-  const blocks: Array<Record<string, unknown>> = [{ type: "section", text: { type: "mrkdwn", text: requiredText } }];
-  if (!options.codingPlan || optional.length === 0) return blocks;
+  const blocks: Array<Record<string, unknown>> = [];
+  if (requiredSection !== undefined) blocks.push(requiredSection);
+  if (proposed.length > 0 && options.retry === true) {
+    // A retry may drop a proposed check (one the worker can't run, say), never add one: those still kept start ticked.
+    const choices = proposed.map((check) => ({ text: { type: "plain_text", text: optionText(check.label) }, value: check.id }));
+    const kept = choices.filter((choice) => policy?.selectedProposedIds === undefined || policy.selectedProposedIds.includes(choice.value));
+    blocks.push({ type: "input", block_id: "workflow_proposed_checks", optional: true, label: { type: "plain_text", text: "Proposed by AgentX" },
+      element: { type: "checkboxes", action_id: "selected_options", options: choices, ...(kept.length > 0 ? { initial_options: kept } : {}) } });
+  } else if (proposed.length > 0) {
+    blocks.push(checkListSection("Proposed by AgentX for this change:", proposed, "proposed"));
+  }
+  const locked = required.length + proposed.length;
+  if (locked === 0 && options.retry !== true) blocks.push({ type: "section", text: { type: "mrkdwn", text: reviewOnlySentence(policy?.noneReason) } });
+  if (optional.length === 0) return blocks;
   if (optional.some((check) => check.command.executable === "git" && check.command.args.join(" ") === "diff --check")) {
     blocks.push({ type: "context", elements: [{ type: "mrkdwn", text: "*Check patch whitespace* finds whitespace errors such as trailing spaces. It does not test program behavior." }] });
   }
   const choices = optional.map((check) => ({ text: { type: "plain_text", text: optionText(check.label) }, value: check.id }));
-  blocks.push({ type: "input", block_id: "workflow_checks", optional: required.length > 0,
-    label: { type: "plain_text", text: required.length > 0 ? "Optional checks" : "Choose a check" },
+  // A retry must still run a check: with nothing else to run, one must be chosen.
+  const mustChoose = options.retry === true && locked === 0;
+  const chosenBefore = options.retry === true ? choices.filter((choice) => policy?.selectedOptionalIds.includes(choice.value)) : [];
+  const initial = chosenBefore.length > 0 ? { initial_options: chosenBefore } : {};
+  blocks.push({ type: "input", block_id: "workflow_checks", optional: !mustChoose,
+    label: { type: "plain_text", text: mustChoose ? "Choose a check" : "Optional checks" },
     element: optional.length <= CHECKBOX_OPTIONS_MAX
-      ? { type: "checkboxes", action_id: "selected_options", options: choices }
-      : { type: "multi_static_select", action_id: "selected_options", placeholder: { type: "plain_text", text: "Choose checks" }, options: choices } });
+      ? { type: "checkboxes", action_id: "selected_options", options: choices, ...initial }
+      : { type: "multi_static_select", action_id: "selected_options", placeholder: { type: "plain_text", text: "Choose checks" }, options: choices, ...initial } });
   return blocks;
+}
+
+/** The checks input a form error attaches to: the optional checks, or the proposed ones when only they can be chosen. */
+function checksErrorBlock(view: Record<string, unknown>): string {
+  const ids = Array.isArray(view.blocks) ? view.blocks.map((block) => asRecord(block).block_id) : [];
+  return !ids.includes("workflow_checks") && ids.includes("workflow_proposed_checks") ? "workflow_proposed_checks" : "workflow_checks";
+}
+
+/** The block ID of a modal's first input: where an error that is about the whole form is shown. */
+function firstInputBlock(view: Record<string, unknown>): string {
+  const blocks = Array.isArray(view.blocks) ? view.blocks.map(asRecord) : [];
+  const first = blocks.find((block) => block.type === "input" && typeof block.block_id === "string");
+  return typeof first?.block_id === "string" ? first.block_id : "workflow_feedback";
+}
+
+/** How much of a finding's text and path the form shows: Slack limits a section to 3,000 characters, and the form holds up to 20. */
+const FINDING_FORM_TEXT_MAX = 400;
+const FINDING_FORM_FILE_MAX = 100;
+const FINDING_REASON_MAX = 500;
+const FINDING_INSTRUCTION_MAX = 1_000;
+
+const findingBlockIds = (findingId: string) => ({ action: `finding_action_${findingId}`, note: `finding_note_${findingId}` });
+
+/**
+ * The form that answers each blocking review finding: the finding (escaped, cut), a Fix or Accept choice that starts on
+ * Fix, and one text box ("Instructions" for Fix, "Reason" for Accept). Three blocks a finding and one introduction: at
+ * most 61 of Slack's 100.
+ */
+export function workflowFindingsModal(findings: readonly WorkflowOpenFinding[], metadata: Record<string, unknown>): Record<string, unknown> {
+  const fix = { text: { type: "plain_text", text: "Fix" }, value: "FIX" };
+  const accept = { text: { type: "plain_text", text: "Accept" }, value: "ACCEPT" };
+  const blocks: Array<Record<string, unknown>> = [{ type: "section", text: { type: "mrkdwn", text: findings.length === 1
+    ? "Fix sends this finding back to coding with your instructions. Accept lets the change go on to its pull request; your reason is saved and listed there."
+    : "Fix sends a finding back to coding with your instructions. Accept lets the change go on to its pull request; your reason is saved and listed there." } }];
+  findings.forEach((finding, index) => {
+    const ids = findingBlockIds(finding.findingId);
+    // Reviewer text and paths are untrusted: redacted, on one line, cut, escaped and never a link (as on the card).
+    const where = finding.file === undefined ? "" : ` (${cleanLine(finding.file, FINDING_FORM_FILE_MAX)}${finding.line === undefined ? "" : `:${finding.line}`})`;
+    blocks.push(
+      { type: "section", text: { type: "mrkdwn", text: `*${index + 1}. ${finding.role === "SECURITY" ? "Security review" : "Code review"}*${where}\n${cleanLine(finding.text, FINDING_FORM_TEXT_MAX)}` } },
+      { type: "input", block_id: ids.action, label: { type: "plain_text", text: `What should happen to finding ${index + 1}?` },
+        element: { type: "radio_buttons", action_id: "action", options: [fix, accept], initial_option: fix } },
+      { type: "input", block_id: ids.note, optional: true, label: { type: "plain_text", text: "Instructions (optional) / Reason (required if you accept)" },
+        element: { type: "plain_text_input", action_id: "note", multiline: true, max_length: FINDING_INSTRUCTION_MAX } },
+    );
+  });
+  return {
+    type: "modal", callback_id: WORKFLOW_FINDINGS_SUBMISSION, private_metadata: JSON.stringify(metadata),
+    title: { type: "plain_text", text: "Resolve findings" }, submit: { type: "plain_text", text: "Save" }, close: { type: "plain_text", text: "Cancel" }, blocks,
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> {
@@ -261,7 +362,7 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
     if (payload.type === "view_submission") {
       const callbackId = asRecord(payload.view).callback_id;
       if (callbackId !== "agentx_workflow_review_submission" && callbackId !== "agentx_workflow_checks_retry_submission" && callbackId !== "agentx_feedback_review_changes_submission"
-        && callbackId !== WORKFLOW_CLOSE_SUBMISSION) return respond(200, { response_action: "clear" });
+        && callbackId !== WORKFLOW_CLOSE_SUBMISSION && callbackId !== WORKFLOW_FINDINGS_SUBMISSION) return respond(200, { response_action: "clear" });
       // The close confirmation has no input to attach an error to, so a refusal replaces the modal with its reason.
       if (callbackId === WORKFLOW_CLOSE_SUBMISSION) {
         try {
@@ -275,15 +376,19 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
       }
       if (dependencies.workflow === undefined) {
         log("workflow.submission_failed", { errorName: "WorkflowNotConfigured" });
-        return respond(200, { response_action: "errors", errors: { [callbackId === "agentx_feedback_review_changes_submission" ? "feedback_note" : callbackId === "agentx_workflow_checks_retry_submission" ? "workflow_checks" : "workflow_feedback"]: "Workflow approvals are temporarily unavailable. Try again shortly." } });
+        return respond(200, { response_action: "errors", errors: { [callbackId === "agentx_feedback_review_changes_submission" ? "feedback_note" : callbackId === "agentx_workflow_checks_retry_submission" ? "workflow_checks"
+          : callbackId === WORKFLOW_FINDINGS_SUBMISSION ? firstInputBlock(asRecord(payload.view)) : "workflow_feedback"]: "Workflow approvals are temporarily unavailable. Try again shortly." } });
       }
       try {
         await dependencies.workflow.handleSubmission(payload);
         return respond(200, { response_action: "clear" });
       } catch (error) {
         log("workflow.submission_failed", { errorName: errorName(error) });
+        // Each problem with the owner's answers is shown on the input it is about.
+        if (error instanceof WorkflowFormErrors) return respond(200, { response_action: "errors", errors: error.errors });
         const field = callbackId === "agentx_feedback_review_changes_submission" ? "feedback_note"
-          : callbackId === "agentx_workflow_checks_retry_submission" || error instanceof WorkflowCheckSelectionRequired ? "workflow_checks" : "workflow_feedback";
+          : callbackId === WORKFLOW_FINDINGS_SUBMISSION ? firstInputBlock(asRecord(payload.view))
+          : callbackId === "agentx_workflow_checks_retry_submission" || error instanceof WorkflowCheckSelectionRequired ? checksErrorBlock(asRecord(payload.view)) : "workflow_feedback";
         // A refusal the form can tell (not the owner, another workspace, a step that moved on) reads as itself.
         return respond(200, { response_action: "errors", errors: { [field]: error instanceof WorkflowCheckSelectionRequired || error instanceof WorkflowInteractionRefusal
           ? error.message : "I couldn't save this decision. Close this form and try again." } });
@@ -352,6 +457,7 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
             : action.actionId === "agentx_workflow_retry_reviews" ? "I couldn't start the review retry. Use the latest AgentX task update and try again."
             : action.actionId === "agentx_workflow_retry_publish" ? "I couldn't retry opening the pull request. Use the latest AgentX task update and try again."
             : action.actionId === "agentx_workflow_send_back" ? "I couldn't send the task back to coding. Use the latest AgentX task update and try again."
+            : action.actionId === "agentx_workflow_resolve_findings" ? "I couldn't open the findings form. Use the latest AgentX task update and try again."
             : action.actionId === "agentx_workflow_retry_plan" || action.actionId === "agentx_workflow_retry_implementation" ? "I couldn't start the retry. Use the latest AgentX task update and try again."
             : action.actionId === "agentx_workflow_close" ? "I couldn't open the close confirmation. Use the latest AgentX task update and try again."
             : workflowButton ? "I couldn't open those plan controls. Use the latest plan message and try again."
@@ -571,6 +677,18 @@ export async function respondEphemeral(responseUrl: string, text: string, fetchI
   if (!response.ok) throw new Error(`Slack response_url failed: HTTP ${response.status}`);
 }
 
+/** Slack's response_url edit: replaces the message the button is on, for everyone who reads it. */
+export async function respondReplace(responseUrl: string, message: { text: string; blocks: Array<Record<string, unknown>> }, fetchImplementation: typeof fetch = fetch): Promise<void> {
+  const response = await fetchImplementation(responseUrl, {
+    method: "POST",
+    signal: AbortSignal.timeout(SLACK_FETCH_TIMEOUT_MILLISECONDS),
+    redirect: "error",
+    headers: { "content-type": "application/json; charset=utf-8" },
+    body: JSON.stringify({ replace_original: true, text: message.text, blocks: message.blocks }),
+  });
+  if (!response.ok) throw new Error(`Slack response_url failed: HTTP ${response.status}`);
+}
+
 /** The interactivity handler for the ingress Lambda, from the same environment the ingress reads. */
 export function createAwsSlackInteractivityHandler() {
   const clientConfiguration = process.env.AWS_REGION === undefined ? {} : { region: process.env.AWS_REGION };
@@ -632,6 +750,9 @@ export function createAwsSlackInteractivityHandler() {
     async sendBack(input) {
       await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-send-back", ...input });
     },
+    async resolveFindings(input) {
+      await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-resolve-findings", ...input });
+    },
     async retryPlan(input) {
       await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-retry", ...input });
     },
@@ -644,12 +765,16 @@ export function createAwsSlackInteractivityHandler() {
     async submitFeedback(input) {
       await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-feedback-findings-decision", ...input });
     },
+    async retryFeedbackReview(input) {
+      await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-feedback-review-retry", ...input });
+    },
     // Gap 3: a task started in Slack is driven from its thread, so none starts where task threads are off.
     // Gap 10h: the choice is taken while Slack waits; the start (a broker call that can outlast Slack's three seconds)
     // runs in an asynchronous invoke of this same Lambda.
     async chooseWorkflowPath(input) {
       if (process.env.SHARED_TASKS !== "enabled") throw new WorkflowInteractionRefusal(SLACK_TASK_THREADS_OFF_NOTICE);
-      return handOffChosenWorkflow({ store: choices, handOff: (event) => handOffToSelf(lambda, event) }, input);
+      // The card says "Starting this on ..." at once, before the start is handed over; a start that fails puts it back.
+      return handOffChosenWorkflow({ store: choices, handOff: (event) => handOffToSelf(lambda, event), replaceCard: (message) => respondReplace(input.responseUrl, message) }, input);
     },
     // Task 21: queuing for the chat agent is quick (DynamoDB and SQS), so it runs while Slack waits.
     async answerWorkflowChoice(input) {
@@ -665,6 +790,7 @@ export function createAwsSlackInteractivityHandler() {
     store: choices, startWorkflow: (start) => startWorkflowThroughBroker((brokerEvent) => invokeBroker(brokerEvent, HANDED_OFF_START_TIMEOUT_MS), start),
     updateQuestion: async (input) => slackApi((await secrets()).botToken, "chat.update", input),
     respondEphemeral: (responseUrl, text) => respondEphemeral(responseUrl, text),
+    replaceCard: (responseUrl, message) => respondReplace(responseUrl, message),
   }, event);
   const interactivity = createSlackInteractivityHandler({
     secrets,
@@ -766,8 +892,14 @@ function workflowActionValue(value: string): WorkflowActionValue | undefined {
   } catch { return undefined; }
 }
 
+/**
+ * The card a PR feedback button sits on. `ANSWER` is the Request changes button of a card whose reviewer left a question
+ * to the owner: the owner's words approve the fix (with any recommended ones), so they are coded rather than kept.
+ */
 interface FeedbackReviewActionValue {
-  taskId: string; expectedRevision: number; reviewDigest: string; proposalDigest: string; bundleSetDigest: string; selection: "RECOMMENDED";
+  taskId: string; expectedRevision: number; reviewDigest: string; proposalDigest: string; bundleSetDigest: string; selection: "RECOMMENDED" | "ANSWER";
+  /** ANSWER only: the findings whose questions the card showed (one to three), and so the only ones the answer decides. */
+  findingIds?: string[];
 }
 
 function feedbackReviewActionValue(value: string): FeedbackReviewActionValue | undefined {
@@ -777,8 +909,25 @@ function feedbackReviewActionValue(value: string): FeedbackReviewActionValue | u
       || typeof parsed.reviewDigest !== "string" || !/^[a-f0-9]{64}$/.test(parsed.reviewDigest)
       || typeof parsed.proposalDigest !== "string" || !/^[a-f0-9]{64}$/.test(parsed.proposalDigest)
       || typeof parsed.bundleSetDigest !== "string" || !/^[a-f0-9]{64}$/.test(parsed.bundleSetDigest)
-      || parsed.selection !== "RECOMMENDED") return undefined;
-    return { taskId: parsed.taskId, expectedRevision: parsed.expectedRevision, reviewDigest: parsed.reviewDigest, proposalDigest: parsed.proposalDigest, bundleSetDigest: parsed.bundleSetDigest, selection: "RECOMMENDED" };
+      || (parsed.selection !== "RECOMMENDED" && parsed.selection !== "ANSWER")) return undefined;
+    const findingIds = parsed.findingIds;
+    if (parsed.selection === "RECOMMENDED") {
+      if (findingIds !== undefined) return undefined;
+      return { taskId: parsed.taskId, expectedRevision: parsed.expectedRevision, reviewDigest: parsed.reviewDigest, proposalDigest: parsed.proposalDigest, bundleSetDigest: parsed.bundleSetDigest, selection: "RECOMMENDED" };
+    }
+    if (!Array.isArray(findingIds) || findingIds.length < 1 || findingIds.length > 3 || new Set(findingIds).size !== findingIds.length
+      || !findingIds.every((id): id is string => typeof id === "string" && id.trim().length > 0 && id.length <= 128)) return undefined;
+    return { taskId: parsed.taskId, expectedRevision: parsed.expectedRevision, reviewDigest: parsed.reviewDigest, proposalDigest: parsed.proposalDigest, bundleSetDigest: parsed.bundleSetDigest, selection: "ANSWER", findingIds };
+  } catch { return undefined; }
+}
+
+/** The task, revision and code a Resolve findings button or its form names, or undefined when any is missing or malformed. */
+function resolveFindingsTarget(value: string): { taskId: string; revision: number; candidateDigest: string } | undefined {
+  try {
+    const parsed = asRecord(JSON.parse(value));
+    if (typeof parsed.taskId !== "string" || !CHANGE_ID.test(parsed.taskId) || typeof parsed.revision !== "number" || !Number.isInteger(parsed.revision)
+      || typeof parsed.candidateDigest !== "string" || !/^[a-f0-9]{64}$/.test(parsed.candidateDigest)) return undefined;
+    return { taskId: parsed.taskId, revision: parsed.revision, candidateDigest: parsed.candidateDigest };
   } catch { return undefined; }
 }
 
@@ -795,8 +944,12 @@ export function workflowSlackHandlers(deps: {
   retryReviews?(input: Record<string, unknown>): Promise<void>;
   retryPublication?(input: Record<string, unknown>): Promise<void>;
   submitFeedback?(input: Record<string, unknown>): Promise<void>;
+  /** Retry review on a failed PR feedback review: the same comments are reviewed again. */
+  retryFeedbackReview?(input: Record<string, unknown>): Promise<void>;
   /** Task 16: Send back to coding, with the problems found as the coder's instructions. */
   sendBack?(input: Record<string, unknown>): Promise<void>;
+  /** The owner's answer to each blocking review finding (Fix or Accept, with a note), handed to the broker. */
+  resolveFindings?(input: Record<string, unknown>): Promise<void>;
   /** Task 16: retry blocked planning. */
   retryPlan?(input: Record<string, unknown>): Promise<void>;
   /** Task 16: retry blocked coding on the approved plan. */
@@ -807,7 +960,8 @@ export function workflowSlackHandlers(deps: {
   /**
    * Starts the request waiting in the thread on the path its requester clicked, or hands that start over (the AWS
    * wiring); "started" means it started or is on its way. A refused start throws SlackWorkflowStartError. `messageTs` is
-   * the question's own message, which loses its buttons only once the task actually started.
+   * the question's own message; its card reads "Starting this on ..." from the press on (through `responseUrl`) and gets
+   * its buttons back if the start fails.
    */
   chooseWorkflowPath?(input: { thread: SlackThread; userId: string; workflowPath: WorkflowPath; choiceId: string; responseUrl: string; messageTs: string }): Promise<WorkflowChoiceOutcome>;
   /**
@@ -879,10 +1033,29 @@ export function workflowSlackHandlers(deps: {
     const plan = workflow.artifacts.filter((artifact) => artifact.type === artifactType).at(-1);
     if (!plan || plan.sha256 !== value.digest) throw new WorkflowInteractionRefusal("This approval has changed. Use the latest AgentX message.");
   };
-  const currentReview = async (value: WorkflowActionValue, who: { userId: string; userTeamId: string; workspaceTeamId: string }, thread: SlackThread) => {
-    const owned = await loadOwnedThreadTask(value, who, thread);
-    reviewStillWaiting(value, owned.workflow);
-    return owned;
+  /**
+   * Hands the owner's decision on the step `value` names to the broker, from the form or from a one-click Approve. Its
+   * request ID is derived from the decision itself, so the same decision pressed or submitted again is the same request.
+   * Answers false when this exact decision is already saved (a resubmission after a slow save): nothing is sent, before
+   * any check that the step is still waiting, which it no longer is.
+   */
+  const submitDecision = async (value: WorkflowActionValue, userId: string, thread: SlackThread, workflow: WorkflowSnapshot,
+    reason: string, chosenOptionalCheckIds: string[]): Promise<boolean> => {
+    // One canonical order for both the request ID and the submitted decision, so the same selection made in another
+    // order is the same decision rather than a replay mismatch.
+    const selectedOptionalCheckIds = [...chosenOptionalCheckIds].sort();
+    const requestId = workflowDecisionRequestId({ taskId: value.taskId, revision: value.revision, digest: value.digest, decision: value.decision, reason, selectedOptionalCheckIds });
+    if (workflow.decisions.some((decision) => decision.requestId === requestId)) {
+      console.log(JSON.stringify({ component: "slack-interactivity", event: "workflow.decision_replayed", taskId: value.taskId, requestId }));
+      return false;
+    }
+    reviewStillWaiting(value, workflow);
+    await deps.submit({
+      taskId: value.taskId, userId, thread,
+      expectedRevision: value.revision, artifactDigest: value.digest, decision: value.decision,
+      reason, selectedOptionalCheckIds, requestId,
+    });
+    return true;
   };
   /**
    * Task 16: the owner's own task, pressed in its own thread from its own workspace, still in a state `accepts`
@@ -974,8 +1147,8 @@ export function workflowSlackHandlers(deps: {
           throw error;
         }
         if (outcome !== "started") throw new WorkflowInteractionRefusal(workflowChoiceRefusal(outcome));
-        // The question keeps its buttons and its "reply quick or full" hint until the task has started: the start marks
-        // it answered then. A start that fails leaves it as it was, and the member hears why.
+        // The card already reads "Starting this on ..." with no buttons (the choice took it before handing the start
+        // over); the start marks it answered, and a start that fails puts the question back with its buttons.
         await acknowledged(action, workflowPath === "FULL" ? "Starting this on Full." : "Starting this on Quick.");
         return;
       }
@@ -988,7 +1161,7 @@ export function workflowSlackHandlers(deps: {
           throw new WorkflowInteractionRefusal("This verification retry must be opened from the task's AgentX workspace.");
         }
         const { workflow } = await currentVerificationRetry(taskId, Number(retry.revision), action.userId, action.thread);
-        const modalBlocks = workflowCheckControls(workflow.checkPolicy, { codingPlan: true });
+        const modalBlocks = workflowCheckControls(workflow.checkPolicy, { codingPlan: true, retry: true });
         await deps.openView(action.triggerId, {
           type: "modal", callback_id: "agentx_workflow_checks_retry_submission",
           private_metadata: JSON.stringify({ taskId, revision: workflow.revision, requestId: randomUUID(), thread: action.thread }),
@@ -1019,6 +1192,20 @@ export function workflowSlackHandlers(deps: {
         await acknowledged(action, "Sending this back to coding.");
         return;
       }
+      if (action.actionId === "agentx_workflow_resolve_findings") {
+        const target = resolveFindingsTarget(action.value);
+        if (target === undefined || action.triggerId === "") throw new WorkflowInteractionRefusal("This button is no longer available. Use the latest AgentX task update.");
+        const workflow = await currentOwnedWorkflow({ ...action, taskId: target.taskId, revision: target.revision }, "resolve these findings",
+          (current) => current.candidate?.digest === target.candidateDigest && workflowResolveFindingsOffered(current));
+        const open = openReviewFindings(workflow);
+        if (open.length > WORKFLOW_RESOLVE_FINDINGS_MAX) {
+          throw new WorkflowInteractionRefusal(`This change has more than ${WORKFLOW_RESOLVE_FINDINGS_MAX} open findings, which is too many to resolve here. Send it back to coding instead.`);
+        }
+        // The form carries what its submission is checked against, and a request ID that stays the same for this one press.
+        await deps.openView(action.triggerId, workflowFindingsModal(open, { taskId: target.taskId, revision: workflow.revision, candidateDigest: target.candidateDigest,
+          requestId: slackActionRequestId(action), thread: action.thread, responseUrl: action.responseUrl }));
+        return;
+      }
       if (action.actionId === "agentx_workflow_retry_plan" || action.actionId === "agentx_workflow_retry_implementation") {
         const { taskId, revision } = exitButton(action);
         const plan = action.actionId === "agentx_workflow_retry_plan";
@@ -1038,7 +1225,8 @@ export function workflowSlackHandlers(deps: {
         const published = (workflow.pullRequests?.length ?? 0) > 0;
         await deps.openView(action.triggerId, {
           type: "modal", callback_id: WORKFLOW_CLOSE_SUBMISSION,
-          private_metadata: JSON.stringify({ taskId, requestId: slackActionRequestId(action), thread: action.thread }),
+          // The press's response_url rides along, so the confirmed close can be acknowledged at once.
+          private_metadata: JSON.stringify({ taskId, requestId: slackActionRequestId(action), thread: action.thread, responseUrl: action.responseUrl }),
           title: { type: "plain_text", text: "Close this task" }, submit: { type: "plain_text", text: "Close task" }, close: { type: "plain_text", text: "Cancel" },
           blocks: [{ type: "section", text: { type: "mrkdwn", text: published
             ? "Closing stops this task and releases its workspace. Code that isn't in a pull request is discarded. Its open pull request stays on GitHub."
@@ -1067,50 +1255,99 @@ export function workflowSlackHandlers(deps: {
         await acknowledged(action, "Opening the draft pull request again.");
         return;
       }
-      if (action.actionId === "agentx_feedback_review_recommended" || action.actionId === "agentx_feedback_review_changes") {
+      if (action.actionId === FEEDBACK_REVIEW_RETRY_ACTION) {
+        let retry: Record<string, unknown>;
+        try { retry = asRecord(JSON.parse(action.value)); } catch { throw new WorkflowInteractionRefusal(FEEDBACK_REVIEW_CHANGED); }
+        const taskId = typeof retry.taskId === "string" && CHANGE_ID.test(retry.taskId) ? retry.taskId : undefined;
+        const reviewDigest = typeof retry.reviewDigest === "string" && /^[a-f0-9]{64}$/.test(retry.reviewDigest) ? retry.reviewDigest : undefined;
+        if (taskId === undefined || reviewDigest === undefined) throw new WorkflowInteractionRefusal(FEEDBACK_REVIEW_CHANGED);
+        sameWorkspace(action.userTeamId, action.workspaceTeamId, action.thread, "This review belongs to another Slack workspace or thread.");
+        const task = await deps.loadTask(taskId);
+        if (!task || task.slackUserId !== action.userId) {
+          const owner = SlackUserIdSchema.safeParse(task?.slackUserId);
+          throw new WorkflowInteractionRefusal(owner.success ? `Only <@${owner.data}> can retry this review.` : "Only the task owner can retry this review.");
+        }
+        const share = asRecord(task.share);
+        if (share.teamId !== action.thread.teamId || share.channelId !== action.thread.channelId || share.threadTs !== action.thread.threadTs) {
+          throw new WorkflowInteractionRefusal("This review belongs to another Slack workspace or thread.");
+        }
+        const parsed = WorkflowSnapshotSchema.safeParse(task.workflow);
+        const workflow = parsed.success ? parsed.data : undefined;
+        const review = workflow?.feedbackReview;
+        const retried = review?.status === "COLLECTING" && workflow?.feedbackReviewHistory?.some((ref) => ref.sha256 === reviewDigest && ref.status !== "COMPLETE");
+        // An earlier press already started the retried review: nothing more to do.
+        if (retried && workflow?.state === "RUNNING") {
+          await acknowledged(action, "Already reviewing the feedback again.");
+          return;
+        }
+        // Bound by the report itself (failed, timed out or interrupted), which no later change reuses; the card's step is
+        // carried for the record. A retry still waiting to start goes to the broker too, which starts it.
+        if (!retried && (workflow?.stage !== "WAIT_FOR_MERGE" || workflow.state !== "WAITING" || review?.status !== "PENDING"
+          || review.reviewRef.status === "COMPLETE" || review.reviewRef.sha256 !== reviewDigest)) throw new WorkflowInteractionRefusal(FEEDBACK_REVIEW_CHANGED);
+        if (deps.retryFeedbackReview === undefined) throw new Error("retrying the PR feedback review is not configured");
+        // Only the broker knows whether the review started: it tells the owner privately then, or why not.
+        await deps.retryFeedbackReview({ taskId, userId: action.userId, thread: action.thread, requestId: slackActionRequestId(action), reviewDigest });
+        return;
+      }
+      if (action.actionId === "agentx_feedback_review_recommended" || action.actionId === "agentx_feedback_review_changes" || action.actionId === "agentx_feedback_review_dismiss") {
         const value = feedbackReviewActionValue(action.value);
-        if (!value || action.triggerId === "") throw new WorkflowInteractionRefusal("This review action is no longer available. Reopen the AgentX review details.");
+        if (!value || action.triggerId === "" || (action.actionId !== "agentx_feedback_review_changes" && value.selection !== "RECOMMENDED")) {
+          throw new WorkflowInteractionRefusal("This review action is no longer available. Reopen the AgentX review details.");
+        }
         const { bundleDigests } = await currentFeedbackReview(value, action.userId, action.userTeamId, action.workspaceTeamId, action.thread);
         const requestId = slackActionRequestId(action);
         if (deps.submitFeedback === undefined) throw new Error("PR feedback decisions are not configured");
+        const decided = { taskId: value.taskId, userId: action.userId, thread: action.thread, requestId,
+          expectedRevision: value.expectedRevision, reviewDigest: value.reviewDigest, proposalDigest: value.proposalDigest,
+          // The broker checks the review it decides on by the same bundle set digest the card carries.
+          bundleDigests, bundleSetDigest: value.bundleSetDigest, selection: "RECOMMENDED" };
         if (action.actionId === "agentx_feedback_review_recommended") {
-          await deps.submitFeedback({ taskId: value.taskId, userId: action.userId, thread: action.thread, requestId,
-            expectedRevision: value.expectedRevision, reviewDigest: value.reviewDigest, proposalDigest: value.proposalDigest,
-            bundleDigests, selection: "RECOMMENDED", decision: "APPROVE" });
+          await deps.submitFeedback({ ...decided, decision: "APPROVE" });
           await acknowledged(action, "Working on the recommended fixes.");
           return;
         }
+        if (action.actionId === "agentx_feedback_review_dismiss") {
+          // Nothing to ask: a dismissal changes no code, and the pull request stays as it is. The thread's next post says
+          // so, so nothing is said privately as well.
+          await deps.submitFeedback({ ...decided, decision: "DISMISS", ownerNote: "Dismissed in Slack." });
+          return;
+        }
+        const answering = value.selection === "ANSWER";
         await deps.openView(action.triggerId, {
           type: "modal", callback_id: "agentx_feedback_review_changes_submission",
           private_metadata: JSON.stringify({ ...value, bundleDigests, requestId, thread: action.thread }),
-          title: { type: "plain_text", text: "Request changes" },
-          submit: { type: "plain_text", text: "Send note" }, close: { type: "plain_text", text: "Cancel" },
-          blocks: [{ type: "input", block_id: "feedback_note", label: { type: "plain_text", text: "What should AgentX reconsider?" },
-            element: { type: "plain_text_input", action_id: "reason", multiline: true, max_length: 500, placeholder: { type: "plain_text", text: "Add a short note" } } }],
+          title: { type: "plain_text", text: answering ? "Answer the reviewer" : "Request changes" },
+          submit: { type: "plain_text", text: answering ? "Make the change" : "Send note" }, close: { type: "plain_text", text: "Cancel" },
+          blocks: [
+            ...(answering ? [{ type: "context", elements: [{ type: "mrkdwn",
+              text: "AgentX makes the change you describe for the question on the card. Recommended fixes are not included; approve them from the card." }] }] : []),
+            { type: "input", block_id: "feedback_note", label: { type: "plain_text", text: answering ? "What should AgentX do?" : "What should AgentX reconsider?" },
+              element: { type: "plain_text_input", action_id: "reason", multiline: true, max_length: 500,
+                placeholder: { type: "plain_text", text: answering ? "Your answer to the reviewer's question" : "Add a short note" } } },
+          ],
         });
         return;
       }
       const value = workflowActionValue(action.value);
       if (!value || action.triggerId === "") throw new Error("invalid workflow action");
-      const { workflow } = await currentReview(value, action, action.thread);
+      const { workflow } = await loadOwnedThreadTask(value, action, action.thread);
       const requiredChecks = workflow.checkPolicy?.required ?? [];
       const codingPlan = workflow.path === "QUICK" || workflow.reviewPhase === "IMPLEMENTATION_PLAN";
       const optionalChecks = workflow.checkPolicy?.optional ?? [];
-      if (value.decision === "APPROVE" && codingPlan && requiredChecks.length === 0 && optionalChecks.length === 0) {
-        throw new WorkflowInteractionRefusal("This project has no checks to run. Ask a project admin to configure at least one check before approving the coding plan.");
-      }
       const choosing = value.decision === "APPROVE" && codingPlan;
+      if (choosing && optionalChecks.length === 0) {
+        // Nothing to choose: Approve is the decision, the same one the form would submit with nothing chosen.
+        if (await submitDecision(value, action.userId, action.thread, workflow, "Approved in Slack.", [])) await acknowledged(action, "Approving the coding plan.");
+        return;
+      }
+      reviewStillWaiting(value, workflow);
       const controls = workflowCheckControls(workflow.checkPolicy, { codingPlan: choosing });
       // Asking for changes to the coding plan itself: its checks are chosen when it is approved, not "later".
-      const blocks: Array<Record<string, unknown>> = [!choosing && codingPlan && requiredChecks.length === 0
-        ? { type: "section", text: { type: "mrkdwn", text: "No project checks are required. You choose checks when you approve the coding plan." } }
-        : controls[0]!];
-      if (choosing) {
-        blocks.push({ type: "section", text: { type: "mrkdwn", text: optionalChecks.length
-          ? requiredChecks.length ? "Optional checks: select any extras to run." : "Choose at least one check. AgentX will run these before review or opening a pull request."
-          : "No optional checks are available." } });
-        blocks.push(...controls.slice(1));
-      } else if (value.decision === "REQUEST_CHANGES") {
+      const blocks: Array<Record<string, unknown>> = !choosing && codingPlan && requiredChecks.length === 0
+        ? [{ type: "section", text: { type: "mrkdwn", text: optionalChecks.length > 0
+          ? "No project checks are required. You choose checks when you approve the coding plan." : "No project checks are required." } }]
+        : [...controls];
+      if (value.decision === "REQUEST_CHANGES") {
         blocks.push({ type: "input", block_id: "workflow_feedback", label: { type: "plain_text", text: "What should change?" }, element: { type: "plain_text_input", action_id: "reason", multiline: true, max_length: 500 } });
       }
       // Keep this below Slack's 3,000-character private_metadata limit. The original
@@ -1144,6 +1381,62 @@ export function workflowSlackHandlers(deps: {
           "close this task", (current) => current.state !== "COMPLETE");
         if (deps.close === undefined) throw new Error("closing tasks is not configured");
         await deps.close({ taskId, userId: userId.data, thread: thread.data, requestId });
+        // The thread hears "closed" only once the workspace is released, which takes a minute or two; until then the
+        // owner is told privately that the close is under way. Best effort: the close is already handed off.
+        if (isSlackResponseUrl(metadata.responseUrl)) {
+          try {
+            await deps.respondEphemeral?.(metadata.responseUrl, CLOSING_ACK);
+          } catch (error) {
+            console.log(JSON.stringify({ component: "slack-interactivity", event: "workflow.ack_failed", actionId: "agentx_workflow_close", errorName: errorName(error) }));
+          }
+        }
+        return;
+      }
+      if (view.callback_id === WORKFLOW_FINDINGS_SUBMISSION) {
+        let metadata: Record<string, unknown>;
+        try { metadata = asRecord(JSON.parse(typeof view.private_metadata === "string" ? view.private_metadata : "")); }
+        catch { throw new WorkflowInteractionRefusal(STALE_WORKFLOW_BUTTON); }
+        const target = resolveFindingsTarget(JSON.stringify(metadata));
+        const requestId = typeof metadata.requestId === "string" && CHANGE_ID.test(metadata.requestId) ? metadata.requestId : undefined;
+        const thread = SlackThreadSchema.safeParse(metadata.thread);
+        const userId = SlackUserIdSchema.safeParse(asRecord(payload.user).id);
+        const userTeamId = SlackTeamIdSchema.safeParse(asRecord(payload.user).team_id);
+        const workspaceTeamId = SlackTeamIdSchema.safeParse(asRecord(payload.team).id);
+        if (target === undefined || requestId === undefined || !thread.success || !userId.success || !userTeamId.success || !workspaceTeamId.success) {
+          throw new WorkflowInteractionRefusal(STALE_WORKFLOW_BUTTON);
+        }
+        // The same owner, thread and step the form was opened for; the open findings are read again from the task.
+        const workflow = await currentOwnedWorkflow({ taskId: target.taskId, userId: userId.data, thread: thread.data, userTeamId: userTeamId.data, workspaceTeamId: workspaceTeamId.data, revision: target.revision },
+          "resolve these findings", (current) => current.candidate?.digest === target.candidateDigest && workflowResolveFindingsOffered(current));
+        const open = openReviewFindings(workflow);
+        if (open.length > WORKFLOW_RESOLVE_FINDINGS_MAX) throw new WorkflowInteractionRefusal(STALE_WORKFLOW_BUTTON);
+        const values = asRecord(asRecord(view.state).values);
+        const errors: Record<string, string> = {};
+        const resolutions = open.map((finding) => {
+          const ids = findingBlockIds(finding.findingId);
+          const chosen = asRecord(asRecord(asRecord(values[ids.action]).action).selected_option).value;
+          const action: "ACCEPT" | "FIX" = chosen === "ACCEPT" ? "ACCEPT" : "FIX";
+          const raw = asRecord(asRecord(values[ids.note]).note).value;
+          const note = typeof raw === "string" ? raw.trim() : "";
+          if (action === "ACCEPT" && note === "") errors[ids.note] = "Give a reason to accept this finding.";
+          else if (action === "ACCEPT" && note.length > FINDING_REASON_MAX) errors[ids.note] = `A reason is at most ${FINDING_REASON_MAX} characters.`;
+          else if (action === "FIX" && note.length > FINDING_INSTRUCTION_MAX) errors[ids.note] = "Instructions are at most 1,000 characters.";
+          return { findingId: finding.findingId, action, note };
+        });
+        if (Object.keys(errors).length > 0) throw new WorkflowFormErrors(errors);
+        if (deps.resolveFindings === undefined) throw new Error("resolving review findings is not configured");
+        await deps.resolveFindings({ taskId: target.taskId, userId: userId.data, thread: thread.data, requestId, expectedRevision: workflow.revision, candidateDigest: target.candidateDigest, resolutions });
+        // The form closes at once and the next card comes later: say privately what was saved. Best effort; the save stands.
+        if (isSlackResponseUrl(metadata.responseUrl)) {
+          const toFix = resolutions.filter((resolution) => resolution.action === "FIX").length;
+          const findings = (count: number) => `${count} ${count === 1 ? "finding" : "findings"}`;
+          try {
+            await deps.respondEphemeral?.(metadata.responseUrl, toFix > 0 ? `Sending ${findings(toFix)} back to coding.`
+              : `Accepted ${findings(resolutions.length)}; the change goes on to its draft pull request.`);
+          } catch (error) {
+            console.log(JSON.stringify({ component: "slack-interactivity", event: "workflow.ack_failed", actionId: "agentx_workflow_resolve_findings", errorName: errorName(error) }));
+          }
+        }
         return;
       }
       if (view.callback_id === "agentx_workflow_checks_retry_submission") {
@@ -1171,13 +1464,23 @@ export function workflowSlackHandlers(deps: {
         }) : [];
         // Canonical order: the same selection in another order replays the modal's request ID.
         selectedOptionalCheckIds.sort();
-        const required = workflow.checkPolicy?.required ?? [];
-        if (required.length === 0 && selectedOptionalCheckIds.length === 0) {
-          throw new WorkflowCheckSelectionRequired("Choose at least one check before retrying verification.");
+        // The proposed checks the owner kept ticked, only from the approved plan. A form without that choice (none
+        // proposed) keeps what the task runs now.
+        const proposed = workflow.checkPolicy?.proposed ?? [];
+        const keptSelections = asRecord(asRecord(asRecord(asRecord(view.state).values).workflow_proposed_checks).selected_options).selected_options;
+        const selectedProposedCheckIds = proposed.length === 0 || !Array.isArray(keptSelections) ? undefined : keptSelections.flatMap((entry) => {
+          const id = asRecord(entry).value;
+          return typeof id === "string" && proposed.some((check) => check.id === id) ? [id] : [];
+        }).sort();
+        // A retry runs the project's checks, the proposed ones kept here and the optional ones chosen here.
+        const remaining = workflow.checkPolicy === undefined ? 0 : workflowSelectedChecks({ ...workflow.checkPolicy, selectedOptionalIds: selectedOptionalCheckIds,
+          ...(selectedProposedCheckIds === undefined ? {} : { selectedProposedIds: selectedProposedCheckIds }) }).length;
+        if (remaining === 0) {
+          throw new WorkflowCheckSelectionRequired(proposed.length > 0 ? "Keep at least one check, or close the task." : "Choose at least one check before retrying verification.");
         }
         if (deps.retryChecks === undefined) throw new Error("verification retry is not configured");
         await deps.retryChecks({ taskId, userId: userId.data, thread: thread.data, requestId, expectedRevision: revision,
-          selectedOptionalCheckIds, instructions: "Retry the selected checks without changing code." });
+          selectedOptionalCheckIds, ...(selectedProposedCheckIds === undefined ? {} : { selectedProposedCheckIds }), instructions: "Retry the selected checks without changing code." });
         return;
       }
       if (view.callback_id === "agentx_feedback_review_changes_submission") {
@@ -1201,7 +1504,9 @@ export function workflowSlackHandlers(deps: {
         if (deps.submitFeedback === undefined) throw new Error("PR feedback decisions are not configured");
         await deps.submitFeedback({ taskId: value.taskId, userId: user.data, thread: thread.data, requestId: metadata.requestId,
           expectedRevision: value.expectedRevision, reviewDigest: value.reviewDigest, proposalDigest: value.proposalDigest,
-          bundleDigests, selection: "RECOMMENDED", decision: "REQUEST_CHANGES", ownerNote: ownerNote.trim() });
+          bundleDigests, bundleSetDigest: value.bundleSetDigest, ownerNote: ownerNote.trim(),
+          // An answer to the reviewer's question approves the fix it describes; any other note is kept for the next round.
+          ...(value.selection === "ANSWER" ? { selection: "ANSWER", questionFindingIds: value.findingIds, decision: "APPROVE" } : { selection: "RECOMMENDED", decision: "REQUEST_CHANGES" }) });
         return;
       }
       let metadata: Record<string, unknown>;
@@ -1230,27 +1535,9 @@ export function workflowSlackHandlers(deps: {
           const id = asRecord(entry).value;
           return typeof id === "string" && workflow.checkPolicy?.optional.some((check) => check.id === id) ? [id] : [];
         });
-        // One canonical order for both the request ID and the submitted decision, so the same
-        // selection made in another order is the same decision rather than a replay mismatch.
-        selectedOptionalCheckIds.sort();
       }
-      const requestId = workflowDecisionRequestId({ taskId: value.taskId, revision: value.revision, digest: value.digest, decision: value.decision, reason, selectedOptionalCheckIds });
-      // Gap 10h: this exact decision is already saved (a resubmission after a slow save): the form just closes,
-      // before any check that the step is still waiting, which it no longer is.
-      if (workflow.decisions.some((decision) => decision.requestId === requestId)) {
-        console.log(JSON.stringify({ component: "slack-interactivity", event: "workflow.decision_replayed", taskId: value.taskId, requestId }));
-        return;
-      }
-      reviewStillWaiting(value, workflow);
-      const codingPlan = workflow.path === "QUICK" || workflow.reviewPhase === "IMPLEMENTATION_PLAN";
-      if (value.decision === "APPROVE" && codingPlan && (workflow.checkPolicy?.required.length ?? 0) === 0 && selectedOptionalCheckIds.length === 0) {
-        throw new WorkflowCheckSelectionRequired();
-      }
-      await deps.submit({
-        taskId: value.taskId, userId: userId.data, thread: thread.data,
-        expectedRevision: value.revision, artifactDigest: value.digest, decision: value.decision,
-        reason, selectedOptionalCheckIds, requestId,
-      });
+      // Gap 10h: a decision already saved just closes the form. Approving with no check at all is review only.
+      await submitDecision(value, userId.data, thread.data, workflow, reason, selectedOptionalCheckIds);
     },
   };
 }

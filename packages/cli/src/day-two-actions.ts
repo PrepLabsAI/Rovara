@@ -38,6 +38,7 @@ export const UPGRADE_AWS_ACTIONS: readonly string[] = [
   "s3:GetObject", "s3:PutObject",
   // InitSecrets.arn reads a secret's ARN with DescribeSecret; an S3 HeadObject answers 404 only with ListBucket (ruling F13).
   "secretsmanager:DescribeSecret", "s3:ListBucket",
-  "secretsmanager:GetSecretValue", "secretsmanager:CreateSecret", "secretsmanager:TagResource",
+  // The GitHub App secret gains its webhook secret (ensureGithubWebhook).
+  "secretsmanager:GetSecretValue", "secretsmanager:CreateSecret", "secretsmanager:PutSecretValue", "secretsmanager:TagResource",
   ...DOCTOR_AWS_ACTIONS,
 ];

@@ -62,7 +62,7 @@ describe("install plan", () => {
       "the permission boundary agentx-staging-boundary, which every AgentX role carries; the stacks' own roles live under the IAM path /agentx/staging/",
       "Secrets agentx/staging/callback-signing-key, agentx/staging/github-app, agentx/staging/slack",
       "Settings under /agentx/staging/",
-      "In GitHub: an app named \"AgentX acme (staging)\" owned by acme, with read and write access to contents, pull requests and issues, and read access to metadata. No webhook.",
+      "In GitHub: an app named \"AgentX acme (staging)\" owned by acme, with read and write access to contents, pull requests and issues, and read access to metadata, and a webhook that sends pull request and comment events to the control plane.",
       "In Slack: an app named \"AgentX acme (staging)\".",
       "- Alerts: email to ops@example.com, subscribed and tested at the end of the install",
       "- Models: main model Claude Sonnet 4.6 (Amazon Bedrock), safety check model Claude Haiku 4.5 (Amazon Bedrock), coding model Claude Sonnet 4.6 (Amazon Bedrock)",

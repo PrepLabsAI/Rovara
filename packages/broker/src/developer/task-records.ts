@@ -7,8 +7,10 @@ import {
   DEVELOPER_EVENT_TEXT_MAX,
   DEVELOPER_FAILURE_MESSAGE_MAX,
   DEVELOPER_TASK_OWNER_ISSUER,
+  PullRequestLifecycleResultSchema,
   PullRequestResultSchema,
   TURN_TEXT_LIMIT,
+  UNKNOWN_CLIENT_NAME,
   aiToolTurnRecordKeys,
   capText,
   lastAssistantResponse,
@@ -66,10 +68,20 @@ export interface DeveloperTaskRecord {
   workflow?: WorkflowSnapshot;
   /** The commit each repository's preparation checked out, from the prepare result; the task's base until one is pinned. */
   preparedBase?: WorkflowReviewBase;
+  /** Spec 061: why the planner's last answer could not be read, kept for Retry planning; `workflowRevision` is the blocked step's revision. */
+  planUnreadable?: { workflowRevision: number; errors: string[] };
   /** Gap 2: how many thread replies are saved for the task (NOTE# items). */
   threadNoteCount?: number;
   /** Gap 2: the newest saved reply's receivedAt already given to a planning or coding step; each reply is given once. */
   threadNotesFedThrough?: string;
+  /**
+   * The thread replies received after this and through `threadNotesFedThrough` were given to steps since the last plan
+   * that was stored; they are what that plan's "why" quotes. Set to `threadNotesFedThrough` when a plan is stored; absent
+   * until the first one is.
+   */
+  threadNotesFedFrom?: string;
+  /** The owner's original request, redacted and cut to 4,000 characters; the first entry of each plan's "why". Tasks created earlier have none. */
+  requestText?: string;
 }
 
 /** C1: a shared task's thread, as the task record keeps it. */
@@ -390,7 +402,8 @@ export function aiToolTurn(input: {
 export const OUTCOME: Record<string, AiToolTurnRecord["outcome"]> = { SUCCEEDED: "succeeded", FAILED: "failed", CANCELLED: "cancelled", INTERRUPTED: "interrupted" };
 
 /**
- * R12: the result of a developer's task or publish operation. Its turnId and receivedAt are the
+ * R12: the result of a developer's task or publish operation, or of the push of a workflow task's approved fix (a
+ * maintain operation). Its turnId and receivedAt are the
  * operation's ID and creation time, so its key is fixed and a repeated result cannot write it
  * twice. The response text is the result summary (FR-037), redacted and capped by aiToolTurn.
  */
@@ -405,13 +418,16 @@ export function completedTurn(input: {
   const { operation } = input;
   const ended = `ended ${input.status}${operation.error ? `: ${operation.error}` : ""}`;
   const published = operation.kind === "publish" ? PullRequestResultSchema.safeParse(operation.result) : undefined;
+  const pushed = operation.kind === "maintain" ? PullRequestLifecycleResultSchema.safeParse(operation.result) : undefined;
   const response = operation.kind === "publish"
     ? (published?.success ? `Pull request ${published.data.url}` : `The pull request ${ended}`)
-    : lastAssistantResponse(input.events) ?? `The task ${ended}`;
+    : operation.kind === "maintain"
+      ? (pushed?.success ? `Pushed the fix to pull request ${pushed.data.url}` : `The fix push ${ended}`)
+      : lastAssistantResponse(input.events) ?? `The task ${ended}`;
   return aiToolTurn({
     party: partyOfTask(input.task),
     turnId: operation.id,
-    action: operation.kind === "publish" ? "pull_request" : operation.requestId === input.pointer.firstRequestId ? "start" : "continue",
+    action: operation.kind === "publish" || operation.kind === "maintain" ? "pull_request" : operation.requestId === input.pointer.firstRequestId ? "start" : "continue",
     phase: "completed",
     outcome: OUTCOME[input.status] ?? "failed",
     receivedAt: operation.createdAt,
@@ -425,9 +441,31 @@ export function completedTurn(input: {
 /** Moved to the contracts package so the MCP server marks names the same way (final review M7). */
 export { inertName };
 
-/** FR-023. The client is one of the four names cleanClientName gives, so it needs no escaping. */
+/** The client name a task keeps when the Slack workflow started it, so its footer can tell Slack from an AI tool. */
+export const SLACK_CLIENT_NAME = "Slack";
+
+/** The session ID of the caller the Slack workflow starts tasks as (slack-workflow-caller.ts). */
+export const SLACK_WORKFLOW_SESSION_ID = "slack-workflow";
+
+/** What a person reads for the owner when no name anyone knows is on record. */
+export const TASK_OWNER_LABEL = "the task owner";
+const SLACK_FALLBACK_NAME = /^Slack user U[A-Z0-9]+$/;
+
+/** The owner's name for people to read: "the task owner" when it is empty or only the Slack-ID fallback of a Slack-started task. */
+export function taskOwnerLabel(name: string): string {
+  const trimmed = name.trim();
+  return trimmed === "" || SLACK_FALLBACK_NAME.test(trimmed) ? TASK_OWNER_LABEL : name;
+}
+
+/**
+ * FR-023. The client is one of the fixed names cleanClientName gives, or "Slack" for a task the Slack workflow
+ * started, so it needs no escaping. A task stored before Slack was kept as a client is told by its Slack-ID name.
+ */
 export function developerFooter(name: string, client: string): string {
-  return `Requested by ${inertName(name)} via AgentX, started from ${client}`;
+  const label = taskOwnerLabel(name);
+  const owner = label === TASK_OWNER_LABEL ? label : inertName(label);
+  const slack = client === SLACK_CLIENT_NAME || (client === UNKNOWN_CLIENT_NAME && SLACK_FALLBACK_NAME.test(name.trim()));
+  return `Requested by ${owner} via AgentX, started from ${slack ? SLACK_CLIENT_NAME : client}`;
 }
 
 /** The identity every workspace handler sees for a developer task: its own owner key (FR-021). */

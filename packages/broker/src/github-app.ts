@@ -3,6 +3,9 @@ import { agentXError, type AgentXError } from "@agentx/contracts";
 import type { RepositoryAccess, RepositoryCredential } from "./repository-access.js";
 
 const GITHUB_APP_ID = /^[1-9][0-9]*$/;
+const FILE_AT_COMMIT_MAX_BYTES = 20_971_520;
+const FILE_AT_COMMIT_TIMEOUT_MS = 8_000;
+const READ_TOKEN_REUSE_MS = 5 * 60_000;
 
 export interface GitHubAppCredentialProviderOptions {
   credentialRef: string;
@@ -79,6 +82,7 @@ export class GitHubAppCredentialProvider {
   private readonly fetchImplementation: typeof fetch;
   private readonly now: () => number;
   private readonly installations = new Map<string, Promise<{ id: number; login: string }>>();
+  private readonly readTokens = new Map<string, { token: Promise<string>; expiresAt: number }>();
 
   constructor(private readonly options: GitHubAppCredentialProviderOptions) {
     if (typeof options.appId === "string" && !GITHUB_APP_ID.test(options.appId)) throw new Error("GitHub App ID must be numeric");
@@ -241,10 +245,12 @@ export class GitHubAppCredentialProvider {
       const connection = feedbackConnection(pr.reviews);
       for (const value of connection.nodes) {
         const review = feedbackRecord(value);
-        if (typeof review.fullDatabaseId !== "number" || !Number.isSafeInteger(review.fullDatabaseId) || review.fullDatabaseId < 1) throw feedbackReadError("invalid review ID");
-        const id = `review:${review.fullDatabaseId}`;
-        const comment = comments.find(c => c.id === id && c.kind === "REVIEW");
-        if (!comment) continue; // Blank bodies and unpublished draft reviews were excluded by REST.
+        const databaseId = feedbackDatabaseId(review.fullDatabaseId);
+        // GraphQL sends fullDatabaseId as a string. A review with no usable ID cannot match a REST review, and the
+        // "review set changed" check below refuses if a collected review is never matched.
+        const id = databaseId === null ? null : `review:${databaseId}`;
+        const comment = id === null ? undefined : comments.find(c => c.id === id && c.kind === "REVIEW");
+        if (!id || !comment) continue; // Blank bodies and unpublished draft reviews were excluded by REST.
         if (currentReviewIds.has(id) || comment.url !== review.url || comment.body !== review.body
           || typeof review.updatedAt !== "string" || !Number.isFinite(Date.parse(review.updatedAt))) throw feedbackReadError("review changed during collection");
         currentReviewIds.add(id); comment.updatedAt = new Date(review.updatedAt).toISOString();
@@ -273,9 +279,8 @@ export class GitHubAppCredentialProvider {
         const commentCursors = new Set<string>();
         for (;;) {
           for (const comment of threadComments.nodes) {
-            const id = feedbackRecord(comment).fullDatabaseId;
-            if ((typeof id !== "string" && typeof id !== "number") || !/^[1-9][0-9]*$/.test(String(id))
-              || (typeof id === "number" && !Number.isSafeInteger(id))) throw feedbackReadError("invalid thread comment ID");
+            const id = feedbackDatabaseId(feedbackRecord(comment).fullDatabaseId);
+            if (id === null) throw feedbackReadError("invalid thread comment ID");
             ids.push(`review_comment:${id}`);
           }
           const next = nextFeedbackCursor(threadComments, commentCursors);
@@ -328,6 +333,79 @@ export class GitHubAppCredentialProvider {
     const repository = await this.installed(parseGitHubRepository(repositoryUrl));
     const token = await this.createInstallationToken(repository, { contents: "read" });
     return this.getCommitTreeSha(repository, commitSha, token);
+  }
+
+  /**
+   * A file's text as GitHub holds it at a commit; undefined when the file is not there.
+   * With `untilLine` the body is read as a stream and the read stops after that many newline-ended lines (the text through that line is returned);
+   * a file that ends sooner comes back whole. Throws when GitHub cannot answer or 20 MB arrive before the wanted line (or without one).
+   * `timeoutMs` (default 8,000) is how long the request may take, for a caller that has more time to give.
+   */
+  async getFileAtCommit(repositoryUrl: string, path: string, commitSha: string, options?: { untilLine?: number; timeoutMs?: number }): Promise<string | undefined> {
+    if (!/^[a-f0-9]{40}$/u.test(commitSha)) throw agentXError("CONFIG_INVALID", "commit identity is invalid");
+    const segments = path.split("/");
+    if (path.length === 0 || path.length > 512 || path.includes("\\") || segments.some((segment) => segment === "" || segment === "." || segment === "..")) {
+      throw agentXError("CONFIG_INVALID", "file path is invalid");
+    }
+    const untilLine = options?.untilLine;
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl));
+    const token = await this.readTokenFor(repository);
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/contents/${segments.map(encodeURIComponent).join("/")}?ref=${commitSha}`,
+      { headers: { ...githubHeaders(token), accept: "application/vnd.github.raw+json" }, signal: AbortSignal.timeout(options?.timeoutMs ?? FILE_AT_COMMIT_TIMEOUT_MS), redirect: "error" },
+    );
+    if (response.status === 404) { await response.body?.cancel(); return undefined; }
+    if (!response.ok) {
+      await response.body?.cancel();
+      throw agentXError("RUNTIME_UNAVAILABLE", `GitHub file lookup failed with HTTP ${response.status}`);
+    }
+    // A directory answers with a JSON listing even for the raw media type; it is not a file, so it is not there.
+    if (response.headers.get("content-type")?.toLowerCase().startsWith("application/json") === true) { await response.body?.cancel(); return undefined; }
+    const tooLarge = () => agentXError("RUNTIME_UNAVAILABLE", untilLine === undefined ? "file too large" : "file too large to read up to the cited line");
+    // Without a last line the whole file is wanted, so a declared size over the cap is refused before any byte is read.
+    if (untilLine === undefined && Number(response.headers.get("content-length")) > FILE_AT_COMMIT_MAX_BYTES) {
+      await response.body?.cancel();
+      throw tooLarge();
+    }
+    if (response.body === null) return "";
+    const reader = response.body.getReader();
+    const chunks: Uint8Array[] = [];
+    let total = 0;
+    let lines = 0;
+    for (;;) {
+      const result = await reader.read();
+      if (result.done) break;
+      let value = result.value as Uint8Array;
+      let reached = false;
+      if (untilLine !== undefined) {
+        // Find the newline that ends the wanted line; the rest of this chunk is not needed.
+        let from = 0;
+        for (let end = value.indexOf(10, from); end !== -1; end = value.indexOf(10, from)) {
+          lines += 1;
+          from = end + 1;
+          if (lines >= untilLine) { value = value.subarray(0, from); reached = true; break; }
+        }
+      }
+      total += value.byteLength;
+      if (total > FILE_AT_COMMIT_MAX_BYTES) {
+        await reader.cancel();
+        throw tooLarge();
+      }
+      chunks.push(value);
+      if (reached) { await reader.cancel().catch(() => undefined); break; }
+    }
+    return new TextDecoder().decode(Buffer.concat(chunks));
+  }
+
+  /** A contents-read token for reading files: reused for 5 minutes per repository, so a run of file reads mints one. */
+  private readTokenFor(repository: InstalledRepository): Promise<string> {
+    const key = `${repository.owner.toLowerCase()}/${repository.name.toLowerCase()}:contents=read`;
+    const cached = this.readTokens.get(key);
+    if (cached !== undefined && cached.expiresAt > this.now()) return cached.token;
+    const token = this.createInstallationToken(repository, { contents: "read" });
+    this.readTokens.set(key, { token, expiresAt: this.now() + READ_TOKEN_REUSE_MS });
+    token.catch(() => { if (this.readTokens.get(key)?.token === token) this.readTokens.delete(key); });
+    return token;
   }
 
   /** The parents of a commit GitHub holds in the installed repository; throws when GitHub does not have that commit. */
@@ -610,6 +688,13 @@ export interface GitHubPullRequestFeedback {
 }
 const FEEDBACK_THREAD_FIELDS = `id isResolved repository { nameWithOwner } pullRequest { number }
   comments(first:100) { nodes { fullDatabaseId } pageInfo { hasNextPage endCursor } }`;
+/** A GitHub database ID: a positive-integer string (GraphQL BigInt) or a safe-integer number. Null when neither. */
+function feedbackDatabaseId(value: unknown): string | null {
+  if (typeof value !== "string" && typeof value !== "number") return null;
+  if (typeof value === "number" && !Number.isSafeInteger(value)) return null;
+  const text = String(value);
+  return /^[1-9][0-9]*$/.test(text) ? text : null;
+}
 function feedbackReadError(reason: string): AgentXError { return agentXError("RUNTIME_UNAVAILABLE", `GitHub feedback read refused: ${reason}`); }
 function feedbackRecord(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw feedbackReadError("invalid record");
@@ -775,6 +860,13 @@ export function appIdFromSecret(secret: string): string {
   throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App secret holds no appId; set the control plane's GitHubAppId parameter");
 }
 
+const GITHUB_WEBHOOK_SECRET_MISSING = "GitHub App secret does not contain a valid webhook secret";
+
+/** True for the refusal webhookSecretFromSecret raises when the App secret has no usable webhook secret. */
+export function isWebhookSecretMissing(error: unknown): boolean {
+  return isAgentXError(error) && error.code === "RUNTIME_UNAVAILABLE" && error.message.endsWith(GITHUB_WEBHOOK_SECRET_MISSING);
+}
+
 /** Reads the optional webhook HMAC secret from the same protected App secret JSON object. */
 export function webhookSecretFromSecret(secret: string): string {
   try {
@@ -786,7 +878,7 @@ export function webhookSecretFromSecret(secret: string): string {
   } catch {
     // Do not include secret material in errors.
   }
-  throw agentXError("RUNTIME_UNAVAILABLE", "GitHub App secret does not contain a valid webhook secret");
+  throw agentXError("RUNTIME_UNAVAILABLE", GITHUB_WEBHOOK_SECRET_MISSING);
 }
 
 export function parseGitHubRepository(repositoryUrl: string): { owner: string; name: string } {

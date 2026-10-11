@@ -1,7 +1,7 @@
 import { createHash, createHmac } from "node:crypto";
 import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
-import { CLOSED_SHARED_NOTICE, SlackRequestMessageSchema, VIEW_ONLY_NOTICE, sharedNoticeClaim, sharedNoticeKey, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
+import { CLOSED_SHARED_NOTICE, SlackRequestMessageSchema, VIEW_ONLY_NOTICE, sharedNoticeClaim, sharedNoticeKey, taskQuestionAttributes, taskQuestionOf, type SlackRequestMessage, type TaskQuestionRoute } from "../../packages/contracts/src/index.js";
 import {
   captureFeedbackNoteThroughBroker,
   createSlackIngressHandler,
@@ -57,7 +57,7 @@ function harness(options: {
   const workflowSelections: Array<{ thread: unknown; userId: string; workflowPath: "QUICK" | "FULL" }> = [];
   const pendingLookups: string[] = [];
   const feedbackNotes: Array<Record<string, unknown>> = [];
-  const routed: Array<{ message: SlackRequestMessage; groupId: string }> = [];
+  const routed: Array<{ message: SlackRequestMessage; groupId: string; taskQuestion?: TaskQuestionRoute }> = [];
   const answers: Array<{ thread: unknown; userId: string }> = [];
   let routeFailures = options.routing?.fail ?? 0;
   const threadNotes: Array<{ taskId: string; thread: unknown; userId: string; messageTs: string; eventId: string; text: string }> = [];
@@ -177,12 +177,12 @@ function harness(options: {
       },
     }),
     ...(options.routing === undefined ? {} : {
-      routeRequest: async (message: SlackRequestMessage, groupId: string) => {
+      routeRequest: async (message: SlackRequestMessage, groupId: string, taskQuestion?: TaskQuestionRoute) => {
         if (routeFailures > 0) {
           routeFailures -= 1;
           throw new Error("SQS unavailable");
         }
-        routed.push({ message, groupId });
+        routed.push({ message, groupId, ...(taskQuestion === undefined ? {} : { taskQuestion }) });
       },
     }),
     ...(options.answerChoice === undefined ? {} : {
@@ -372,7 +372,7 @@ describe("Slack mention ingress", () => {
     const h = harness({ shared: { threads }, threadNote: { outcome: "captured" } });
     await send(h.handler, signedEvent(mention({ eventId: "EvAck01", event: { thread_ts: "1695500000.000001", ts: "1695500006.000001", text: `<@${bot}> Keep the copy short.` } })));
     await send(h.handler, signedEvent(mention({ eventId: "EvAck02", event: { type: "message", thread_ts: "1695500000.000001", ts: "1695500006.000002", text: "Agreed" } })));
-    expect(h.ephemerals).toEqual([{ channel, threadTs: "1695500000.000001", user: pratik, text: "Saved. I'll include this at the next step." }]);
+    expect(h.ephemerals).toEqual([{ channel, threadTs: "1695500000.000001", user: pratik, text: "Saved for the next step." }]);
     expect(h.posts).toEqual([]);
     // A plain reply in a workflow thread is claimed, so Slack's retry of it is not saved twice.
     expect(h.claimedEvents()).toEqual(["EvAck01", "EvAck02"]);
@@ -388,6 +388,95 @@ describe("Slack mention ingress", () => {
     await send(quiet.handler, signedEvent(mention({ eventId: "EvAck05", event: { type: "message", thread_ts: "1695500000.000001", ts: "1695500006.000005", text: "   " } })));
     expect(quiet.threadNotes).toEqual([]);
     expect(quiet.posts).toEqual([]);
+  });
+
+  describe("task-thread mentions sent for a question check after saving", () => {
+    const taskId = "11111111-1111-4111-8111-111111111111";
+    const threads = { "1695500000.000001": { mode: "view" as const, taskId, workflowThread: true as const } };
+    const saved = "Saved for the next step.";
+    const reply = (eventId: string, ts: string, text: string, event: Record<string, unknown> = {}) =>
+      signedEvent(mention({ eventId, event: { thread_ts: "1695500000.000001", ts, text, ...event } }));
+
+    it("saves the note, then sends one message with the task question route and no immediate ephemeral", async () => {
+      const h = harness({ shared: { threads }, threadNote: { outcome: "captured" }, routing: {} });
+      expect((await send(h.handler, reply("EvTq0001", "1695500002.000007", `<@${bot}> Why is step two slow?`))).status).toBe(200);
+      expect(h.threadNotes.map((note) => [note.messageTs, note.text])).toEqual([["1695500002.000007", "Why is step two slow?"]]);
+      expect(h.routed).toHaveLength(1);
+      expect(h.routed[0]).toMatchObject({ message: { eventId: "EvTq0001", userId: pratik, text: "Why is step two slow?" }, taskQuestion: { taskId, noteTs: "1695500002.000007", chat: false } });
+      expect(SlackRequestMessageSchema.parse(h.routed[0]!.message)).toEqual(h.routed[0]!.message);
+      expect(h.routed[0]!.groupId).toBe(createHash("sha256").update(`${team}/${channel}/1695500000.000001`).digest("hex"));
+      expect(h.ephemerals).toEqual([]);
+      expect(h.queue).toEqual([]);
+      expect(h.posts).toEqual([]);
+      // Counted like any queued request, which the Slack service lowers when it is done.
+      expect([...h.pending.values()]).toEqual([1]);
+    });
+
+    it("sets the chat attribute only when the text starts with chat: in any case", async () => {
+      const h = harness({ shared: { threads }, threadNote: {}, routing: {} });
+      await send(h.handler, reply("EvTq0002", "1695500002.000008", `<@${bot}> CHAT: what changed?`));
+      await send(h.handler, reply("EvTq0003", "1695500002.000009", `<@${bot}> please chat: no`));
+      expect(h.routed.map((entry) => [entry.message.eventId, entry.taskQuestion?.chat])).toEqual([["EvTq0002", true], ["EvTq0003", false]]);
+    });
+
+    it("carries the route and its attributes outside the body, and an old reader sees no route", () => {
+      const attributes = taskQuestionAttributes({ taskId, noteTs: "1695500002.000007", chat: true });
+      expect(attributes).toEqual({
+        agentxRoute: { DataType: "String", StringValue: "task-question" },
+        agentxTaskId: { DataType: "String", StringValue: taskId },
+        agentxNoteTs: { DataType: "String", StringValue: "1695500002.000007" },
+        agentxChat: { DataType: "String", StringValue: "1" },
+      });
+      expect(taskQuestionOf(attributes)).toEqual({ taskId, noteTs: "1695500002.000007", chat: true });
+      expect(Object.keys(taskQuestionAttributes({ taskId, noteTs: "1.2", chat: false }))).not.toContain("agentxChat");
+      expect(taskQuestionOf({ agentxRoute: { StringValue: "task-question" } })).toBeUndefined();
+      expect(taskQuestionOf({ agentxRoute: { StringValue: "suggest" } })).toBeUndefined();
+    });
+
+    it("still saves the note and says so when the send fails, never answering 500 or releasing the claim", async () => {
+      const h = harness({ shared: { threads }, threadNote: { outcome: "captured" }, routing: { fail: 1 } });
+      expect((await send(h.handler, reply("EvTq0004", "1695500002.000010", `<@${bot}> Is this safe?`))).status).toBe(200);
+      expect(h.threadNotes).toHaveLength(1);
+      expect(h.routed).toEqual([]);
+      expect(h.ephemerals).toEqual([{ channel, threadTs: "1695500000.000001", user: pratik, text: saved }]);
+      expect([...h.pending.values()]).toEqual([0]);
+      expect(h.claimedEvents()).toEqual(["EvTq0004"]);
+      expect(JSON.stringify(h.logs)).not.toContain("Is this safe");
+    });
+
+    it("routes a mention whose note was already saved as a duplicate, but never a refused one", async () => {
+      const duplicate = harness({ shared: { threads }, threadNote: { outcome: "duplicate" }, routing: {} });
+      await send(duplicate.handler, reply("EvTq0005", "1695500002.000011", `<@${bot}> Why?`));
+      expect(duplicate.routed).toHaveLength(1);
+      expect(duplicate.ephemerals).toEqual([]);
+      const refused = harness({ shared: { threads }, threadNote: { outcome: "refused" }, routing: {} });
+      await send(refused.handler, reply("EvTq0006", "1695500002.000012", `<@${bot}> Why?`));
+      expect(refused.routed).toEqual([]);
+      expect(refused.ephemerals.map((entry) => entry.text)).toEqual(["I couldn't save this reply for the task. It may be closed, or it already has as many replies as I keep."]);
+    });
+
+    it("saves a plain message only, and never routes the plain copy of a mention", async () => {
+      const h = harness({ shared: { threads }, threadNote: {}, routing: {} });
+      await send(h.handler, reply("EvTq0007", "1695500002.000013", "Agreed, thanks", { type: "message", channel_type: "channel" }));
+      await send(h.handler, reply("EvTq0008", "1695500002.000014", `<@${bot}> Why?`, { type: "message", channel_type: "channel" }));
+      expect(h.threadNotes).toHaveLength(2);
+      expect(h.routed).toEqual([]);
+      expect(h.ephemerals).toEqual([]);
+    });
+
+    it("leaves a stop mention as it is: stopped, never saved or routed", async () => {
+      const h = harness({ shared: { threads }, threadNote: {}, stop: { outcome: "CANCEL_REQUESTED" }, routing: {} });
+      await send(h.handler, reply("EvTq0009", "1695500002.000015", `<@${bot}> stop`));
+      expect(h.stopCalls).toHaveLength(1);
+      expect(h.threadNotes).toEqual([]);
+      expect(h.routed).toEqual([]);
+    });
+
+    it("saves and acknowledges as before when the deployment cannot route", async () => {
+      const h = harness({ shared: { threads }, threadNote: {} });
+      await send(h.handler, reply("EvTq0010", "1695500002.000016", `<@${bot}> Why?`));
+      expect(h.ephemerals.map((entry) => entry.text)).toEqual([saved]);
+    });
   });
 
   it("does not save the plain-message copy of an @AgentX stop as a note", async () => {

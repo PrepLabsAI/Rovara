@@ -1,7 +1,7 @@
 import { createHash, createHmac, randomUUID, timingSafeEqual } from "node:crypto";
 import { GetCommand, PutCommand, QueryCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { z } from "zod";
-import { WORKFLOW_BLOCK_REASONS, WorkflowFeedbackBundleSchema, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleRefSchema, WorkflowSnapshotSchema, collectWorkflowFeedbackBundles, type WorkflowFeedbackBundle, type WorkflowFeedbackBundleRef, type WorkflowFeedbackThreadObservation, observeWorkflowPullRequest, type WorkflowSnapshot } from "@agentx/contracts";
+import { WORKFLOW_BLOCK_REASONS, WorkflowFeedbackBundleSchema, WorkflowFeedbackBundleCommentsSchema, WorkflowFeedbackBundleRefSchema, WorkflowSnapshotSchema, collectWorkflowFeedbackBundles, type WorkflowFeedbackBundle, type WorkflowFeedbackBundleRef, type WorkflowFeedbackThreadObservation, observeWorkflowPullRequest, observeWorkflowPullRequestMergedWithFix, recordWorkflowPullRequestHeadTrees, recordWorkflowPullRequestUpdate, workflowFollowsOnlyMerge, type WorkflowSnapshot } from "@agentx/contracts";
 import { githubWorkflowPullRequestKey, type GithubWorkflowPullRequestRecord } from "../developer/task-records.js";
 import { parseGitHubRepository, type GitHubPullRequestFeedback } from "../github-app.js";
 import { isConditional } from "./broker-shared.js";
@@ -25,6 +25,8 @@ const MAX_REVIEW_COMMENT_CHARS = 8_000;
 export const GITHUB_WEBHOOK_RECOVERY_INDEX = "github-webhook-recovery";
 const GITHUB_WEBHOOK_RECOVERY_PK = "GITHUB_WEBHOOK_RECOVERY";
 const MAX_WEBHOOK_ATTEMPTS = 8;
+
+export const GITHUB_WEBHOOK_SIGNATURE_INVALID = "GitHub webhook signature is invalid";
 
 export class GithubWebhookRefusal extends Error {
   constructor(message: string) {
@@ -91,6 +93,8 @@ export async function authorizeLinkedGithubWebhook(input: {
   scope: { installationId: number; repositoryId: number; fullName: string; pullRequestNumber: number };
   loadTask(taskId: string): Promise<{ project: string; startingRevision: number; workflow?: {
     stage: string;
+    state?: string | undefined;
+    blockReason?: string | undefined;
     candidate?: { digest: string } | undefined;
     pullRequests?: Array<{ repositoryId: string; number: number; url: string; candidateDigest: string }> | undefined;
   } | undefined } | undefined>;
@@ -106,8 +110,7 @@ export async function authorizeLinkedGithubWebhook(input: {
   if (linked === undefined) return false;
   const task = await input.loadTask(linked.taskId);
   const workflow = task?.workflow;
-  if (task === undefined || workflow === undefined || workflow.candidate?.digest !== linked.candidateDigest
-    || (workflow.stage !== "WAIT_FOR_MERGE" && workflow.stage !== "MERGED")
+  if (task === undefined || workflow === undefined || !tracksLinkedPullRequests(workflow)
     || !workflow.pullRequests?.some((pullRequest) => pullRequest.repositoryId === linked.repositoryId
       && pullRequest.number === linked.number && pullRequest.url === linked.url
       && pullRequest.candidateDigest === linked.candidateDigest)) return false;
@@ -120,6 +123,21 @@ export async function authorizeLinkedGithubWebhook(input: {
   });
 }
 
+/**
+ * Whether the task follows its linked pull requests: from the first one opened until the task closes, in every stage (an
+ * approved fix being coded, checked, reviewed or pushed included). Each linked pull request is matched by the reviewed code
+ * it was recorded with, so a merge of the head GitHub has is observed in every one of these.
+ */
+function tracksLinkedPullRequests(workflow: { stage: string; pullRequests?: readonly unknown[] | undefined }): boolean {
+  return workflow.stage !== "CLOSED" && (workflow.pullRequests ?? []).length > 0;
+}
+
+/** An approved fix's push that was taken for failed but that GitHub shows landed on a linked pull request. */
+export interface LandedFixPush {
+  workspaceId: string; repositoryId: string; repositoryFullName: string; number: number; url: string;
+  headSha: string; previousHeadSha: string; candidateDigest: string; previousCandidateDigest: string; state: "open";
+}
+
 export interface ReconcileTaskPullRequestFeedbackInput {
   documentClient: { send(command: unknown): Promise<unknown> }; tableName: string;
   repositoryFullName: string; number: number; deliveryId: string;
@@ -129,6 +147,15 @@ export interface ReconcileTaskPullRequestFeedbackInput {
   /** Writes exact payload bytes to immutable content-addressed storage; never overwrites an artifact. */
   persistBundle(bundle: WorkflowFeedbackBundle, bytes: string, sha256: string): Promise<string>;
   saveWorkflow(taskId: string, expectedRevision: number, workflow: WorkflowSnapshot): Promise<void>;
+  /** The head AgentX last pushed to a pull request (its pull request record), when it has one. */
+  recordedHead?(workspaceId: string, repositoryId: string, number: number): Promise<string | undefined>;
+  /** A commit's parents, as GitHub says. */
+  commitParents?(repositoryUrl: string, commit: string): Promise<string[]>;
+  /**
+   * Saves the workflow with the fix pushes it records that were taken for failed but landed, together with each pull
+   * request's link to the task (now naming the fix) and its pull request record (now at the landed head).
+   */
+  saveLandedPushes?(taskId: string, expectedRevision: number, workflow: WorkflowSnapshot, pushes: readonly LandedFixPush[]): Promise<void>;
   /** Aggregate-only telemetry callback; must not add task/comment/user context. */
   measure?(entry: FeedbackReviewMeasure): void;
   now: string;
@@ -141,13 +168,12 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const task = await input.loadTask(linked.taskId);
     const current = task?.workflow;
-    if (!task || !current || current.candidate?.digest !== linked.candidateDigest
+    if (!task || !current || !tracksLinkedPullRequests(current)
       || !current.pullRequests?.some(pr => pr.repositoryId === linked.repositoryId && pr.number === linked.number
-        && pr.url === linked.url && pr.candidateDigest === linked.candidateDigest)
-      || (current.stage !== "WAIT_FOR_MERGE" && current.stage !== "MERGED")) {
+        && pr.url === linked.url && pr.candidateDigest === linked.candidateDigest)) {
       throw new GithubWebhookRefusal("linked workflow no longer matches the PR candidate");
     }
-    const reads: Array<{ pr: NonNullable<WorkflowSnapshot["pullRequests"]>[number]; feedback: GitHubPullRequestFeedback }> = [];
+    const reads: Array<{ pr: NonNullable<WorkflowSnapshot["pullRequests"]>[number]; feedback: GitHubPullRequestFeedback; url: string; fullName: string }> = [];
     for (const pr of [...(current.pullRequests ?? [])].sort((a, b) => a.repositoryId.localeCompare(b.repositoryId) || a.number - b.number)) {
       const url = await input.repositoryUrl(task.project, task.startingRevision, pr.repositoryId);
       if (!url) throw new GithubWebhookRefusal("linked PR repository is missing from the pinned project");
@@ -155,38 +181,95 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
       const fullName = `${parsed.owner}/${parsed.name}`;
       const index = await findLinkedGithubWorkflowPullRequest({ ...input, repositoryFullName: fullName, number: pr.number });
       if (!index || index.taskId !== linked.taskId || index.repositoryId !== pr.repositoryId
-        || index.url !== pr.url || index.candidateDigest !== current.candidate.digest
+        || index.url !== pr.url || index.candidateDigest !== pr.candidateDigest
         || pr.url !== `https://github.com/${fullName}/pull/${pr.number}`) throw new GithubWebhookRefusal("linked task PR scope mismatch");
       const feedback = await input.getCurrentFeedback(url, pr.number);
       if (feedback.pullRequest.number !== pr.number || feedback.pullRequest.url !== pr.url
         || feedback.comments.some(comment => !comment.url.startsWith(`${pr.url}#`))) throw new GithubWebhookRefusal("current GitHub feedback scope mismatch");
-      reads.push({ pr, feedback });
+      reads.push({ pr, feedback, url, fullName });
     }
-    const headMatchesCandidate = ({ pr, feedback }: typeof reads[number]): boolean => pr.headSha !== undefined
+    // The head AgentX recorded, holding the tree recorded with it (the checked tree, for a record that has none).
+    const headMatchesCandidate = ({ pr, feedback }: Pick<typeof reads[number], "pr" | "feedback">): boolean => pr.headSha !== undefined
       && pr.headSha === feedback.pullRequest.headCommit
-      && current.candidate!.repositories.find(repo => repo.repositoryId === pr.repositoryId)?.treeSha === feedback.pullRequest.headTreeSha;
+      && (pr.headTreeSha ?? current.candidate?.repositories.find(repo => repo.repositoryId === pr.repositoryId)?.treeSha) === feedback.pullRequest.headTreeSha;
     const changedHead = reads.some(read => (read.feedback.pullRequest.state === "open" || read.feedback.pullRequest.state === "merged")
       && !headMatchesCandidate(read));
+    // While an approved fix is made or pushed (its push moves the head), or after its push failed, only a merge is followed.
+    const onlyMerge = workflowFollowsOnlyMerge(current);
+    // Only a fix whose checks and reviews passed is pushed: while it is pushed, or after its push failed.
+    const fixPushed = current.stage === "PULL_REQUEST" || (current.state === "BLOCKED" && current.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed);
+    // A pull request an earlier release recorded without its head's tree learns it while the candidate is still the code it
+    // was opened with: once an approved fix is coded, the candidate is the fix's.
+    const headTrees = onlyMerge ? [] : reads.filter(read => read.pr.headTreeSha === undefined && read.pr.headSha !== undefined
+      && read.pr.candidateDigest === current.candidate?.digest && headMatchesCandidate(read))
+      .map(({ pr, feedback }) => ({ repositoryId: pr.repositoryId, number: pr.number, headSha: pr.headSha!, headTreeSha: feedback.pullRequest.headTreeSha }));
+    /**
+     * Whether GitHub's head is the approved fix AgentX pushed, not yet recorded on the task (its result was late, lost, or
+     * taken for failed): the head's tree is exactly the fix's reviewed tree, and the pull request's record names that head
+     * or the head's only parent is the head the task recorded.
+     */
+    const landedFix = async ({ pr, feedback, url }: typeof reads[number]): Promise<boolean> => {
+      const head = feedback.pullRequest.headCommit;
+      const fixTree = current.candidate?.repositories.find(repo => repo.repositoryId === pr.repositoryId)?.treeSha;
+      if (!fixPushed || pr.headSha === undefined || pr.state === "MERGED" || pr.candidateDigest === current.candidate?.digest
+        || fixTree === undefined || fixTree !== feedback.pullRequest.headTreeSha || head === pr.headSha || !/^[a-f0-9]{40}$/.test(head)) return false;
+      if (await input.recordedHead?.(linked.workspaceId, pr.repositoryId, pr.number) === head) return true;
+      try {
+        return input.commitParents !== undefined && JSON.stringify(await input.commitParents(url, head)) === JSON.stringify([pr.headSha]);
+      } catch {
+        return false;
+      }
+    };
+    // A task blocked because its fix's push was taken for failed records that push once GitHub shows it landed.
+    const pushTakenForFailed = current.state === "BLOCKED" && current.blockReason === WORKFLOW_BLOCK_REASONS.pullRequestUpdateFailed;
+    const landed: LandedFixPush[] = [];
     let next = current;
-    for (const { pr, feedback } of reads) {
+    for (const read of reads) {
+      const { pr, feedback } = read;
       const state = feedback.pullRequest.state === "merged" ? "MERGED" : feedback.pullRequest.state === "closed" ? "CLOSED" : "OPEN";
+      if (onlyMerge && state !== "MERGED") {
+        if (state === "OPEN" && pushTakenForFailed && input.saveLandedPushes !== undefined && current.candidate !== undefined && await landedFix(read)) {
+          landed.push({ workspaceId: linked.workspaceId, repositoryId: pr.repositoryId, repositoryFullName: read.fullName, number: pr.number, url: pr.url,
+            headSha: feedback.pullRequest.headCommit, previousHeadSha: pr.headSha!, candidateDigest: current.candidate.digest,
+            previousCandidateDigest: pr.candidateDigest, state: "open" });
+        }
+        continue;
+      }
       // A merge only completes this candidate-bound task when the merged PR still points at its checked publication.
       // Keep mismatched merged PRs in their prior workflow state so the task cannot become terminally complete.
-      if (state === "MERGED" && !headMatchesCandidate({ pr, feedback })) continue;
+      if (state === "MERGED" && !headMatchesCandidate({ pr, feedback })) {
+        // The one exception: GitHub merged the approved fix AgentX pushed before its push was recorded.
+        if (onlyMerge && await landedFix(read)) {
+          next = observeWorkflowPullRequestMergedWithFix(next, { repositoryId: pr.repositoryId, number: pr.number,
+            headSha: feedback.pullRequest.headCommit, headTreeSha: feedback.pullRequest.headTreeSha, observedAt: input.now }, input.now);
+        }
+        continue;
+      }
       if (pr.state !== state) next = observeWorkflowPullRequest(next, { repositoryId: pr.repositoryId, number: pr.number,
         candidateDigest: pr.candidateDigest, state, source: "GITHUB_API", observedAt: input.now }, input.now);
     }
+    // Recorded as a push would have been: the task waits for the merge again once every pull request holds the fix.
+    const recordedPushes = landed.length > 0 && next.stage === "WAIT_FOR_MERGE" && next.state === "BLOCKED" ? landed : [];
+    if (recordedPushes.length > 0) {
+      next = recordWorkflowPullRequestUpdate(next, { updates: recordedPushes.map(push => ({ repositoryId: push.repositoryId, number: push.number,
+        headSha: push.headSha, headTreeSha: current.candidate!.repositories.find(repo => repo.repositoryId === push.repositoryId)!.treeSha })), now: input.now });
+    }
     const open = reads.filter(r => r.feedback.pullRequest.state === "open");
     let reopenedFeedback = false;
-    if (changedHead || open.length === 0) {
+    if (onlyMerge) {
+      if (next === current) return false;
+    } else if (changedHead || open.length === 0) {
       if (!current.feedbackReview && next === current
-        && (!changedHead || current.state === "BLOCKED")) return false;
-      const previousReport = current.feedbackReview?.reviewRef;
-      const history = [...(current.feedbackReviewHistory ?? [])];
-      if (previousReport && !history.some(r => r.sha256 === previousReport.sha256)) history.push(previousReport);
-      next = WorkflowSnapshotSchema.parse({ ...next, revision: next.revision + 1,
-        ...(changedHead ? { state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.pullRequestChanged } : {}),
-        feedbackReview: undefined, feedbackReviewHistory: history, updatedAt: input.now });
+        && (!changedHead || current.state === "BLOCKED")) {
+        if (headTrees.length === 0) return false;
+      } else {
+        const previousReport = current.feedbackReview?.reviewRef;
+        const history = [...(current.feedbackReviewHistory ?? [])];
+        if (previousReport && !history.some(r => r.sha256 === previousReport.sha256)) history.push(previousReport);
+        next = WorkflowSnapshotSchema.parse({ ...next, revision: next.revision + 1,
+          ...(changedHead ? { state: "BLOCKED", blockReason: WORKFLOW_BLOCK_REASONS.pullRequestChanged } : {}),
+          feedbackReview: undefined, feedbackReviewHistory: history, updatedAt: input.now });
+      }
     } else {
       const observations: WorkflowFeedbackThreadObservation[] = [];
       const bundles = open.map(({ pr, feedback }): WorkflowFeedbackBundle => {
@@ -225,20 +308,28 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
       observations.sort((a, b) => a.repositoryId.localeCompare(b.repositoryId) || a.number - b.number || a.threadId.localeCompare(b.threadId));
       const prior = current.feedbackReview;
       const same = prior && prior.bundleRefs.length === bundles.length && bundles.every(b => prior.bundleRefs.some(p =>
-        p.repositoryId === b.repositoryId && p.number === b.number && p.headSha === b.headSha && p.candidateDigest === b.candidateDigest && p.commentSetDigest === b.commentSetDigest));
-      if (same && JSON.stringify(prior.threadObservations ?? []) === JSON.stringify(observations) && next === current) return false;
-      const refs: WorkflowFeedbackBundleRef[] = [];
-      for (const bundle of bundles) {
-        const bytes = JSON.stringify(bundle); const sha256 = digest(bytes);
-        const objectKey = await input.persistBundle(bundle, bytes, sha256);
-        const { sourceDeliveryIds: deliveryIds, comments, ...metadata } = bundle;
-        void deliveryIds;
-        refs.push(WorkflowFeedbackBundleRefSchema.parse({ ...metadata, sha256, objectKey, comments: comments.map(({ body, ...ref }) => { void body; return ref; }) }));
+        p.repositoryId === b.repositoryId && p.number === b.number && p.headSha === b.headSha && p.headTreeSha === b.headTreeSha
+        && p.candidateDigest === b.candidateDigest && p.commentSetDigest === b.commentSetDigest));
+      // Unchanged content (comment set, heads, trees and threads) is never collected again: a new bundle would be recorded
+      // under another digest only for its delivery ID and time, and an owner's decision bound to the old one would be stale.
+      if (same && sameThreadObservations(prior.threadObservations ?? [], observations) && next === current) {
+        if (headTrees.length === 0) return false;
+      } else {
+        const refs: WorkflowFeedbackBundleRef[] = [];
+        for (const bundle of bundles) {
+          const bytes = JSON.stringify(bundle); const sha256 = digest(bytes);
+          const objectKey = await input.persistBundle(bundle, bytes, sha256);
+          const { sourceDeliveryIds: deliveryIds, comments, ...metadata } = bundle;
+          void deliveryIds;
+          refs.push(WorkflowFeedbackBundleRefSchema.parse({ ...metadata, sha256, objectKey, comments: comments.map(({ body, ...ref }) => { void body; return ref; }) }));
+        }
+        next = collectWorkflowFeedbackBundles(next, { bundleRefs: refs, threadObservations: observations }, input.now);
       }
-      next = collectWorkflowFeedbackBundles(next, { bundleRefs: refs, threadObservations: observations }, input.now);
     }
+    if (headTrees.length > 0) next = recordWorkflowPullRequestHeadTrees(next, headTrees, input.now);
     try {
-      await input.saveWorkflow(linked.taskId, current.revision, next);
+      if (recordedPushes.length > 0) await input.saveLandedPushes!(linked.taskId, current.revision, next, recordedPushes);
+      else await input.saveWorkflow(linked.taskId, current.revision, next);
       if (reopenedFeedback) {
         const measure = feedbackReopenedMeasure(input.now);
         if (measure !== undefined) input.measure?.(measure);
@@ -302,7 +393,20 @@ export async function verifyTaskPullRequestFeedbackCurrent(input: Pick<Reconcile
       || ref.commentSetDigest !== digest(JSON.stringify(normalizedComments))) return false;
   }
   observations.sort((a, b) => a.repositoryId.localeCompare(b.repositoryId) || a.number - b.number || a.threadId.localeCompare(b.threadId));
-  return JSON.stringify(review.threadObservations ?? []) === JSON.stringify(observations);
+  return sameThreadObservations(review.threadObservations ?? [], observations);
+}
+
+/**
+ * Whether two thread observation lists hold the same content, compared field by field. A stored list is read back from
+ * DynamoDB, which keeps no map's attribute order, so its JSON text differs from a freshly built list's even when every
+ * value is the same.
+ */
+function sameThreadObservations(left: readonly WorkflowFeedbackThreadObservation[], right: readonly WorkflowFeedbackThreadObservation[]): boolean {
+  const content = (observations: readonly WorkflowFeedbackThreadObservation[]) => JSON.stringify(observations.map(observation => [
+    observation.repositoryId, observation.number, observation.threadId, observation.resolved,
+    observation.comments.map(comment => [comment.id, comment.updatedAt, comment.bodyDigest]), observation.eligibleCommentIds,
+  ]));
+  return content(left) === content(right);
 }
 function digest(value: string): string { return createHash("sha256").update(value, "utf8").digest("hex"); }
 
@@ -451,8 +555,11 @@ export async function retryGithubWebhookDelivery(input: {
       ConditionExpression: "#status = :processing AND leaseToken = :leaseToken",
       ExpressionAttributeNames: { "#status": "status" },
       ExpressionAttributeValues: {
-        ":processing": "PROCESSING", ":retryable": "RETRYABLE", ":dead": "DEAD", ":leaseToken": input.leaseToken, ":now": input.now,
-        ...(terminal ? {} : { ":nextAttemptAt": nextAttemptAt, ":recoveryPk": GITHUB_WEBHOOK_RECOVERY_PK, ":recoverySk": `${nextAttemptAt}#${input.deliveryId}` }),
+        // DynamoDB refuses a request that carries a value no expression uses, so each branch sends only its own.
+        ":processing": "PROCESSING", ":leaseToken": input.leaseToken, ":now": input.now,
+        ...(terminal
+          ? { ":dead": "DEAD" }
+          : { ":retryable": "RETRYABLE", ":nextAttemptAt": nextAttemptAt, ":recoveryPk": GITHUB_WEBHOOK_RECOVERY_PK, ":recoverySk": `${nextAttemptAt}#${input.deliveryId}` }),
       },
     }));
   } catch (error) {
@@ -511,6 +618,7 @@ export async function processGithubWebhookDelivery(input: {
   received: ReceivedGithubWebhook;
   process(event: ReceivedGithubWebhook["event"], deliveryId: string): Promise<void>;
   now(): string;
+  log?: (entry: Record<string, unknown>) => void;
 }): Promise<"PROCESSED" | "DUPLICATE" | "IN_PROGRESS"> {
   if (input.received.delivery === "DUPLICATE") return "DUPLICATE";
   const leaseToken = randomUUID();
@@ -534,6 +642,17 @@ export async function processGithubWebhookDelivery(input: {
     });
     return "PROCESSED";
   } catch (error) {
+    // Record the cause first so a failure while saving the delivery's state cannot hide it. Name and code only:
+    // messages can carry request or response text.
+    const log = input.log ?? ((entry: Record<string, unknown>) => console.log(JSON.stringify({ component: "broker", ...entry })));
+    const code = (error as { code?: unknown } | null)?.code;
+    log({
+      event: "github_webhook.delivery_failed",
+      deliveryId: input.received.deliveryId,
+      error: error instanceof Error ? error.name : "unknown",
+      ...(typeof code === "string" ? { code } : {}),
+      outcome: error instanceof GithubWebhookRefusal ? "rejected" : "retry",
+    });
     if (error instanceof GithubWebhookRefusal) {
       await rejectGithubWebhookDelivery({ documentClient: input.documentClient, tableName: input.tableName, deliveryId: input.received.deliveryId, leaseToken, now: input.now() });
     } else {
@@ -596,7 +715,7 @@ export async function receiveGithubWebhook(input: ReceiveGithubWebhookInput): Pr
   if (Buffer.byteLength(input.rawBody, "utf8") > 1_048_576) throw new GithubWebhookRefusal("GitHub webhook payload exceeds the size limit");
   const headers = Object.fromEntries(Object.entries(input.headers).map(([key, value]) => [key.toLowerCase(), value]));
   if (!verifyGithubWebhookSignature(input.rawBody, headers["x-hub-signature-256"], input.secret)) {
-    throw new GithubWebhookRefusal("GitHub webhook signature is invalid");
+    throw new GithubWebhookRefusal(GITHUB_WEBHOOK_SIGNATURE_INVALID);
   }
   const deliveryId = headers["x-github-delivery"];
   if (deliveryId === undefined || !DELIVERY_ID.test(deliveryId)) throw new GithubWebhookRefusal("GitHub webhook delivery ID is invalid");

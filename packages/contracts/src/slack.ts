@@ -39,6 +39,24 @@ export const SlackChannelBindingSchema = z
 
 export const SlackWorkspaceLimitSchema = z.enum(["MEMBER", "ORGANIZATION"]);
 
+/** The longest task context the broker sends a chat agent in task mode (characters; the broker keeps it far smaller). */
+export const SLACK_TASK_CONTEXT_MAX_CHARS = 40_000;
+
+/** What a Slack service adds to POST /v1/threads/workspace to ask for task mode in a task's own thread. */
+export const SlackTaskAnswerRequestSchema = z.object({ taskId: z.string().uuid() }).strict();
+export type SlackTaskAnswerRequest = z.infer<typeof SlackTaskAnswerRequestSchema>;
+
+/** The body of POST /v1/service/tasks/thread-notes/answered: which saved thread note a question answer covers. */
+export const SlackThreadNoteAnsweredRequestSchema = z.object({
+  taskId: z.string().uuid(),
+  messageTs: SlackMessageTimestampSchema,
+  thread: SlackThreadSchema,
+}).strict();
+export type SlackThreadNoteAnsweredRequest = z.infer<typeof SlackThreadNoteAnsweredRequestSchema>;
+
+/** The answer: the note is marked answered (a repeat is the same answer). */
+export const SlackThreadNoteAnsweredResultSchema = z.object({ outcome: z.literal("ANSWERED") }).strict();
+
 export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", [
   z
     .object({
@@ -64,6 +82,11 @@ export const SlackThreadWorkspaceResultSchema = z.discriminatedUnion("outcome", 
       // D22, C12: sent with sharedTask while the developer's own operation runs. Its ID stays private
       // (operationId is then null), but the Slack service still waits for the task to be free.
       activeOperation: z.literal("developer").optional(),
+      // Sent only to a service that asked for task mode (`taskAnswer` in the request): the thread is an AgentX task,
+      // the chat agent may only answer questions about it (no tools, no repositories), and `taskContext` is what it may
+      // read: the broker's untrusted-data text about the task. A service that never asks never sees either field.
+      mode: z.literal("task-answer").optional(),
+      taskContext: z.string().min(1).max(SLACK_TASK_CONTEXT_MAX_CHARS).optional(),
     })
     .strict(),
   z

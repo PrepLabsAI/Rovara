@@ -15,6 +15,8 @@ export interface HttpApiV2Event {
   rawPath?: string;
   rawQueryString?: string;
   headers?: Record<string, string | undefined>;
+  /** Payload 2.0 moves the request's Cookie header here, one entry per cookie. */
+  cookies?: string[];
   body?: string;
   isBase64Encoded?: boolean;
   requestContext?: {
@@ -83,6 +85,7 @@ export function adaptHttpApiEvent(event: HttpApiV2Event): AdaptedHttpRequest {
   const headers = Object.fromEntries(
     Object.entries(event.headers ?? {}).map(([key, value]) => [key.toLowerCase(), value]),
   );
+  if (event.cookies !== undefined && event.cookies.length > 0) headers.cookie = event.cookies.join("; ");
   const decodedBody =
     event.body === undefined
       ? undefined
