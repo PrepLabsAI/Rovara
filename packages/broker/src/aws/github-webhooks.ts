@@ -294,7 +294,7 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
           threadIds.add(thread.id);
           const members = thread.commentIds.map(id => comments.find(c => c.id === id && c.threadId === thread.id));
           if (members.some(c => c === undefined) || new Set(thread.commentIds).size !== thread.commentIds.length) throw new GithubWebhookRetryableError("thread comment state is incomplete");
-          const prior = current.feedbackReview?.threadObservations?.find(t => t.repositoryId === pr.repositoryId && t.number === pr.number && t.threadId === thread.id);
+          const prior = (current.feedbackReview?.threadObservations ?? (current.feedbackReview === undefined ? current.feedbackThreadObservations : undefined))?.find(t => t.repositoryId === pr.repositoryId && t.number === pr.number && t.threadId === thread.id);
           const ids = members.flatMap(comment => {
             if (!comment) return [];
             if (!thread.resolved) return [comment.id];
@@ -331,6 +331,11 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
       if (same && sameThreadObservations(prior.threadObservations ?? [], observations) && next === current) {
         if (headTrees.length === 0) return false;
       } else if (nothingToReview) {
+        // Feedback only in resolved threads: nothing to review, but the threads are remembered as seen, so a later reply
+        // in one of them is compared with what was there.
+        if (observations.length > 0 && !sameThreadObservations(current.feedbackThreadObservations ?? [], observations)) {
+          next = WorkflowSnapshotSchema.parse({ ...next, revision: next.revision + 1, feedbackThreadObservations: observations, updatedAt: input.now });
+        }
         if (next === current && headTrees.length === 0) return false;
       } else {
         // A step is running (the review of earlier feedback): nothing can be collected now, so nothing is stored. The
@@ -345,6 +350,7 @@ export async function reconcileTaskPullRequestFeedback(input: ReconcileTaskPullR
           refs.push(WorkflowFeedbackBundleRefSchema.parse({ ...metadata, sha256, objectKey, comments: comments.map(({ body, ...ref }) => { void body; return ref; }) }));
         }
         next = collectWorkflowFeedbackBundles(next, { bundleRefs: refs, threadObservations: observations }, input.now);
+        if (next.feedbackThreadObservations !== undefined) next = WorkflowSnapshotSchema.parse({ ...next, feedbackThreadObservations: undefined });
       }
     }
     if (headTrees.length > 0) next = recordWorkflowPullRequestHeadTrees(next, headTrees, input.now);

@@ -179,6 +179,20 @@ export class FakeGitHub {
     return publicComment(comment);
   }
 
+  /** Someone replies in an existing review thread (resolved or not) on GitHub. */
+  replyInThread(threadId: string, author: string, body: string): GitHubFeedbackComment {
+    const pullRequest = this.pullRequests.find((entry) => (entry.threads ?? []).some((thread) => thread.id === threadId));
+    if (pullRequest === undefined) throw new Error(`GitHub has no review thread ${threadId}`);
+    const thread = pullRequest.threads!.find((entry) => entry.id === threadId)!;
+    const first = pullRequest.comments.find((comment) => comment.id === thread.commentIds[0])!;
+    const databaseId = this.nextId.reviewComment++;
+    const comment: StoredComment = { id: `review_comment:${databaseId}`, threadId, kind: "REVIEW_COMMENT", url: `${pullRequest.url}#discussion_r${databaseId}`,
+      author, updatedAt: new Date().toISOString(), body, ...(first.path === undefined ? {} : { path: first.path }), ...(first.line === undefined ? {} : { line: first.line }) };
+    pullRequest.comments.push(comment);
+    thread.commentIds.push(comment.id);
+    return publicComment(comment);
+  }
+
   /**
    * Someone submits a review: its body (null for none, as GitHub sends a review with no summary) and state, and its inline
    * comments, each opening a thread of its own. A review with a blank body or still PENDING is not feedback.

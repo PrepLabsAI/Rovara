@@ -129,6 +129,24 @@ describe("Suite 7: PR feedback loop", () => {
     expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
   }, 120_000);
 
+  it("7.5 feedback only in a resolved thread starts nothing, and a later reply in that thread is reviewed", async () => {
+    const { e2e, counts, pullRequest } = await feedbackJourney();
+    const old = e2e.github.reviewComment(pullRequest.number, "octocat", "Old note, already handled.", "greeting.ts", 1);
+    e2e.github.resolveThread(old.threadId!);
+    const posts = e2e.slack.posts.length;
+    expect((await e2e.webhook({ kind: "pull_request_review_comment", number: pullRequest.number, comment: old })).status).toBe(200);
+    await e2e.settle();
+    expect(counts.feedback).toBe(0);
+    expect(e2e.slack.posts).toHaveLength(posts);
+    // Someone answers in the resolved thread: that reply is new feedback.
+    const reply = e2e.github.replyInThread(old.threadId!, "octocat", "Actually, please trim the name too.");
+    expect((await e2e.webhook({ kind: "pull_request_review_comment", number: pullRequest.number, comment: reply })).status).toBe(200);
+    await e2e.settle();
+    expect(counts.feedback).toBe(1);
+    expect(feedbackBundles(counts.prompts[0]!).flatMap((bundle) => bundle.comments.map((entry) => entry.id))).toEqual([reply.id]);
+    expect(visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text)).toMatch(READY_ONE);
+  }, 120_000);
+
   it("7.6 a redelivered webhook is a duplicate, and a review's two deliveries start one review with one post", async () => {
     const { e2e, counts, pullRequest } = await feedbackJourney();
     const { review, comments } = e2e.github.review(pullRequest.number, "octocat", { body: "Two small things.", state: "COMMENTED",

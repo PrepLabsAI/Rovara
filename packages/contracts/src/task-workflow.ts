@@ -915,6 +915,11 @@ const WorkflowSnapshotShapeSchema = z.object({
   /** Why the latest push of a fix failed, for the owner's message: the pull requests it was for, and a plain cause when known. */
   pullRequestUpdateFailure: WorkflowPullRequestUpdateFailureSchema.optional(),
   feedbackReview: WorkflowFeedbackReviewSchema.optional(),
+  /**
+   * The review threads as last seen when there was nothing to review (feedback only in resolved threads), so a later reply
+   * in a thread seen resolved counts as new feedback. A collected review keeps its own observations instead.
+   */
+  feedbackThreadObservations: FeedbackThreadObservationsSchema.optional(),
   feedbackReviewHistory: z.array(WorkflowFeedbackReviewRefSchema).max(100).optional(),
   feedbackDecisions: z.array(WorkflowFeedbackDecisionSchema).max(100).optional(),
   feedbackDispatchApproval: WorkflowFeedbackApprovalBindingSchema.optional(),
