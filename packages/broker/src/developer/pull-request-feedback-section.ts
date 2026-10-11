@@ -5,12 +5,20 @@
 import { PULL_REQUEST_BODY_MAX_CHARS, WORKFLOW_KEEP_PULL_REQUESTS_NOTE, WorkflowFeedbackReviewReportSchema, redactText, type WorkflowFeedbackReviewReport, type WorkflowSnapshot } from "@agentx/contracts";
 import { createHash } from "node:crypto";
 
+/** Around the description's lines about the checks and reviews of the code on the pull request (since this release). */
+export const PULL_REQUEST_STATUS_START = "<!-- agentx:checks-and-reviews -->";
+export const PULL_REQUEST_STATUS_END = "<!-- /agentx:checks-and-reviews -->";
 const START = "<!-- agentx:pr-feedback-fixes -->";
 const END = "<!-- /agentx:pr-feedback-fixes -->";
 const HEADING = "### Fixes from PR feedback";
 /** The newest fixes listed; older ones are counted in one line. */
 const FIXES_LISTED = 20;
-const SUMMARY_MAX = 300;
+/** The most characters of a fix's line before its comment link: one short sentence. */
+const SUMMARY_MAX = 120;
+/** The fewest characters a cut summary keeps; a shorter one gives way to the fallback line. */
+const SUMMARY_MIN = 30;
+/** A fix's line when its summary has no short opening that can be cut cleanly. */
+const summaryFallback = (comments: number) => `Made the change the ${comments > 1 ? "comments" : "comment"} asked for.`;
 const LINKS_LISTED = 3;
 const REPORT_MAX_BYTES = 1_000_000;
 /** The newest approvals whose reports are read for the section (each report is read from storage). */
@@ -89,15 +97,60 @@ export async function approvedFeedbackFixes(
   return { fixes, earlier: approvals.length > APPROVALS_READ };
 }
 
-function fixLine(fix: FeedbackFix): string {
-  const text = inertGitHubText(redactText(fix.summary));
-  // Cut on a whole character, never inside an escape.
-  let summary = text;
-  if (text.length > SUMMARY_MAX) {
-    summary = text.slice(0, SUMMARY_MAX - 1);
-    if (/(^|[^\\])(\\\\)*\\$/u.test(summary)) summary = summary.slice(0, -1);
-    summary = `${summary}\u2026`;
+/** A Markdown link or image, its target allowed one level of parentheses (a URL such as `.../Foo_(bar)`). */
+const MARKDOWN_LINK = /!?\[([^\]]*)\]\((?:[^()\s]|\([^()\s]*\))*\)/gu;
+/**
+ * Spans a line is never cut inside: a code span, and an address (a URL, `//host` or `www.`) without the punctuation
+ * right after it, so the period ending a sentence after an address still ends it.
+ */
+const UNCUT = /`[^`]*`|\S*(?:\/\/|\bwww\.)\S*?(?=[.,;:!?)'"\u2019\u201D]*(?:\s|$))/giu;
+/** Words whose trailing period does not end a sentence. */
+const ABBREVIATION = /(?:^|[\s(])(?:e\.g|i\.e|etc|vs|cf|approx|incl|Mr|Mrs|Ms|Dr|St|Jr|Sr|No)$/iu;
+const OPENING_QUOTE = /(?:^|[\s(])(['"\u2018\u201C])/gu;
+const CLOSING_QUOTE = /['"\u2019\u201D](?=[\s.,;:!?)]|$)/gu;
+const CLOSER: Record<string, string> = { "'": "'", "\"": "\"", "\u2018": "\u2019", "\u201C": "\u201D" };
+
+/**
+ * A reviewer's summary as one short sentence for the description: its first sentence, or, when that is longer than
+ * SUMMARY_MAX, cut at the last space that fits with an ellipsis, never inside a code span or an address. A Markdown link
+ * is reduced to its text first. A sentence ends at . ! or ?, with a closing quote after it if there is one, outside
+ * quotes and not after a common abbreviation. A cut inside a quote closes it after the ellipsis.
+ * Undefined when nothing short can be cut cleanly (the summary opens with a long address, say).
+ */
+export function shortFixSummary(summary: string): string | undefined {
+  // A Markdown link or image reads as its text: the description shows no link from a reviewer anyway.
+  const text = summary.replace(MARKDOWN_LINK, "$1").replace(/\s+/gu, " ").trim();
+  // The quote opened before `at` and still open there, if any (an apostrophe inside a word is no quote).
+  const openQuote = (at: number): string | undefined => {
+    const before = text.slice(0, at);
+    const opened = [...before.matchAll(OPENING_QUOTE)];
+    return opened.length > (before.match(CLOSING_QUOTE)?.length ?? 0) ? opened.at(-1)![1] : undefined;
+  };
+  const spans = [...text.matchAll(UNCUT)].map((match) => [match.index, match.index + match[0].length] as const);
+  const inside = (at: number) => spans.some(([start, end]) => at > start && at < end);
+  let sentence = text;
+  for (const match of text.matchAll(/[.!?](['"\u2019\u201D]?)(?=\s|$)/gu)) {
+    const after = match.index + match[0].length;
+    if (inside(match.index) || openQuote(after) !== undefined || ABBREVIATION.test(text.slice(0, match.index))) continue;
+    sentence = text.slice(0, after);
+    break;
   }
+  if (sentence.length <= SUMMARY_MAX) return sentence === "" ? undefined : sentence;
+  // Room for the ellipsis and a closing quote.
+  for (let at = sentence.lastIndexOf(" ", SUMMARY_MAX - 2); at > 0; at = sentence.lastIndexOf(" ", at - 1)) {
+    if (inside(at)) continue;
+    const cut = sentence.slice(0, at).replace(/[\s,;:(\-\u2013\u2014'"\u2018\u201C]+$/u, "");
+    // Too little left to say what changed.
+    if (cut.length < SUMMARY_MIN) return undefined;
+    const quote = openQuote(cut.length);
+    return `${cut}\u2026${quote === undefined ? "" : CLOSER[quote]}`;
+  }
+  return undefined;
+}
+
+function fixLine(fix: FeedbackFix): string {
+  // Cut before it is escaped, so no cut lands inside an escape.
+  const summary = inertGitHubText(shortFixSummary(redactText(fix.summary)) ?? summaryFallback(fix.comments.length));
   if (fix.comments.length === 0) return `- ${summary}`;
   const links = fix.comments.slice(0, LINKS_LISTED).map((url, index) => `[comment ${index + 1}](${url})`);
   const more = fix.comments.length > LINKS_LISTED ? ` and ${fix.comments.length - LINKS_LISTED} more` : "";
@@ -144,4 +197,63 @@ export function withFeedbackFixes(body: string, fixes: readonly FeedbackFix[], e
   const section = feedbackFixesSection(fixes, PULL_REQUEST_BODY_MAX_CHARS - before.length - separator.length - trailer.length, earlier);
   const next = section === "" ? `${before}${after === "" ? "" : `${before === "" ? "" : "\n\n"}${after}`}` : `${before}${separator}${section}${trailer}`;
   return { ...(next === body ? {} : { body: next }), dropped: section === "" && fixes.length > 0 };
+}
+
+/** The description's line when the reviewers saw only part of the change (workflowPullRequestStatusLines writes it). */
+export const PULL_REQUEST_PARTIAL_REVIEW_LINE = "The change was too large to show the reviewers in full, so the reviews covered only part of it. Review the rest by hand.";
+
+// AgentX's own lines, exactly in the shape it writes them; a line a person reworded no longer matches and is never touched.
+const REVIEW_WORD = "(?:passed|passed after the owner accepted its findings)";
+const CHECKS_LINE = /^Checks: (?:none recorded|.+ passed(?:, .+ passed)*)$/u;
+const REVIEWS_LINE = new RegExp(`^Reviews: code review ${REVIEW_WORD}; security review ${REVIEW_WORD}(?:; \\d+ earlier issues? noted)?$`, "u");
+const ACCEPTED_HEADER = /^Owner accepted \d+ review findings?:$/u;
+const ACCEPTED_ITEM = /^- (?:\[(?:code|security)\] .* \u2014 accepted: .*|and \d+ more; see the task page)$/u;
+
+/**
+ * The description with its lines about the checks and reviews brought up to date with `lines` (workflowPullRequestStatusLines
+ * for the code now on the pull request). Only AgentX's own lines change; everything else stays as the person left it.
+ *
+ * A description AgentX opened since this release has them between its markers: that block is AgentX's, and is replaced
+ * whole, in place (one pair, START before END; otherwise nothing changes). An older one has no markers: its lines are
+ * found by AgentX's exact shapes, outside the PR feedback section: a single Checks line and the Reviews line right after
+ * it (or that Reviews line alone, for a review-only task), then any accepted-findings list and partial-review line that
+ * follow, which describe the earlier code. They are replaced by `lines` only when exactly one of each is found and the
+ * new lines have the same Checks line or none; otherwise nothing changes. Undefined when nothing changes.
+ */
+export function withStatusLines(body: string, lines: readonly string[]): string | undefined {
+  const start = body.indexOf(PULL_REQUEST_STATUS_START);
+  const end = body.indexOf(PULL_REQUEST_STATUS_END);
+  if (start !== -1 || end !== -1) {
+    // Exactly one pair, in order; anything else is not AgentX's block as it wrote it.
+    if (start === -1 || end === -1 || end < start || body.indexOf(PULL_REQUEST_STATUS_START, start + 1) !== -1
+      || body.indexOf(PULL_REQUEST_STATUS_END, end + 1) !== -1) return undefined;
+    // A description saved from GitHub's website has CRLF line endings: the block keeps them.
+    const eol = body.includes("\r\n") ? "\r\n" : "\n";
+    const next = `${body.slice(0, start)}${[PULL_REQUEST_STATUS_START, ...lines, PULL_REQUEST_STATUS_END].join(eol)}${body.slice(end + PULL_REQUEST_STATUS_END.length)}`;
+    return next === body ? undefined : next;
+  }
+  // An older description: its lines outside the PR feedback section, which is AgentX's too but never holds these.
+  const sectionStart = body.indexOf(START);
+  const sectionEnd = body.indexOf(END);
+  const outside = sectionStart !== -1 && sectionEnd > sectionStart ? body.slice(0, sectionStart) : body;
+  // Lines are matched without a trailing CR (GitHub's website saves CRLF), and written back with the same ending.
+  const raw = outside.split("\n");
+  const own = raw.map((line) => line.replace(/\r$/u, ""));
+  const cr = raw.some((line) => line.endsWith("\r")) ? "\r" : "";
+  const checksAt = own.flatMap((line, index) => (CHECKS_LINE.test(line) ? [index] : []));
+  const reviewsAt = own.flatMap((line, index) => (REVIEWS_LINE.test(line) ? [index] : []));
+  const newChecks = lines.filter((line) => CHECKS_LINE.test(line));
+  if (reviewsAt.length !== 1 || lines.filter((line) => REVIEWS_LINE.test(line)).length !== 1 || checksAt.length !== newChecks.length || checksAt.length > 1) return undefined;
+  if (checksAt.length === 1 && checksAt[0]! + 1 !== reviewsAt[0]) return undefined;
+  const from = checksAt[0] ?? reviewsAt[0]!;
+  // AgentX's accepted-findings list and partial-review line under the Reviews line, about the earlier code.
+  let to = reviewsAt[0]! + 1;
+  if (ACCEPTED_HEADER.test(own[to] ?? "")) {
+    to += 1;
+    while (ACCEPTED_ITEM.test(own[to] ?? "")) to += 1;
+  }
+  if (own[to] === PULL_REQUEST_PARTIAL_REVIEW_LINE) to += 1;
+  const replaced = [...raw.slice(0, from), ...lines.map((line) => `${line}${cr}`), ...raw.slice(to)].join("\n");
+  const next = `${replaced}${body.slice(outside.length)}`;
+  return next === body ? undefined : next;
 }

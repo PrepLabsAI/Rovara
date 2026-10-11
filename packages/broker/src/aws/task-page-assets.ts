@@ -33,6 +33,9 @@ function go(){
   var first=el.firstElementChild;
   if(first&&first.tagName==="DETAILS")first.open=true;
   el.scrollIntoView({block:"start"});
+  // Keyboard and screen-reader users land on the target too, not on the link they used.
+  if(!el.hasAttribute("tabindex"))el.setAttribute("tabindex","-1");
+  if(typeof el.focus==="function")el.focus({preventScroll:true});
   el.classList.add("flash");
   setTimeout(function(){el.classList.remove("flash");},2000);
 }
@@ -170,7 +173,8 @@ dialog::backdrop{background:rgba(0,0,0,.4)}
 .comment-author{color:var(--fg);font-weight:600}
 .comment-text{margin:.2rem 0;white-space:pre-wrap;overflow-wrap:anywhere}
 .comment-state,.comment-sent,.comment-deleted,.from-version,.comment-edited{color:var(--muted);font-size:.9rem}
-.comment-state,.comment-sent,.comment-deleted{margin:.2rem 0}
+.comment-state,.comment-sent,.comment-deleted,.comment-link{margin:.2rem 0}
+.comment-link{font-size:.9rem}
 .chip{display:inline-block;border-radius:999px;padding:0 .5rem;font-size:.8rem;font-weight:600;background:var(--focus);color:var(--bg)}
 .tag-owner{font-size:.75rem}
 .badge-comments{color:var(--muted)}
@@ -195,7 +199,9 @@ dialog::backdrop{background:rgba(0,0,0,.4)}
  */
 export const TASK_PAGE_DECIDING_COPY = {
   toAnswer: " to answer",
-  allAnswered: "All answered",
+  allAnswered: "All decisions answered",
+  nextDecision: "Next decision (",
+  closeCount: ")",
   approveTitle: "Approve ",
   changesTitle: "Request changes to ",
   youChose: ": You chose ",
@@ -217,7 +223,7 @@ export const TASK_PAGE_DECIDING_COPY = {
   movedOn: "This task moved on.",
   isReady: " is ready.",
   yourComment: "Your comment",
-  ask: "Ask AgentX to answer",
+  ask: "Ask AgentX to reply to this comment",
   post: "Post",
   cancel: "Cancel",
   save: "Save",
@@ -226,17 +232,35 @@ export const TASK_PAGE_DECIDING_COPY = {
   confirmRemove: "Delete this comment?",
   aComment: "A comment",
   removed: "Comment deleted",
-  sentLocked: "Sent with a decision, so it can't be changed.",
+  sentApproval: "Sent with your approval, so it can't be edited.",
+  sentOwnerApproval: "Sent with the owner's approval, so it can't be edited.",
+  sentChanges: "Sent with Request changes, so it can't be edited.",
+  sentDecision: "Sent with a decision, so it can't be edited.",
   fromVersion: "from v",
   edited: "(edited)",
   owner: "Owner",
   agentx: "AgentX",
   agentxAi: "AgentX (AI)",
-  answeringWho: "· answering ",
+  answeringWho: "answering ",
   skipped: "Edited after it was asked, so AgentX didn't answer.",
   reply: "Reply",
-  done: "Done: ",
-  notChanged: "Not changed because: ",
+  done: "Done",
+  notChanged: "Not changed",
+  becauseColon: ": ",
+  doneIn: " in ",
+  seeClaim: "See ",
+  claimWord: "claim ",
+  inWord: " in ",
+  fromWord: "from ",
+  versionWord: " v",
+  inRequirements: "the requirements",
+  inDesign: "the design",
+  inPlan: "the coding plan",
+  nameRequirements: "requirements",
+  nameDesign: "design",
+  namePlan: "coding plan",
+  dot: "· ",
+  sentToCoding: "Sent to coding when the plan was approved.",
   answering: "AgentX is answering…",
   couldnt: "AgentX couldn't answer this one.",
   notAnswered: "Not answered",
@@ -411,7 +435,18 @@ function containerFor(section,key){
 }
 
 /* ---------- showing a comment ---------- */
-var STATES={answering:COPY.answering,couldnt:COPY.couldnt,not_answered:COPY.notAnswered,unavailable:COPY.askUnavailable,skipped:COPY.skipped};
+var STATES={answering:COPY.answering,couldnt:COPY.couldnt,not_answered:COPY.notAnswered,unavailable:COPY.askUnavailable,skipped:COPY.skipped,sent_to_coding:COPY.sentToCoding};
+var DOC_ANCHORS={requirements:"requirements",design:"design",plan:"coding-plan"};
+function claimAnchor(anchor,version,claimId){return anchor+"-v"+version+"-"+claimId.replace(/\./g,"-");}
+var DOC_WORDS={requirements:{the:COPY.inRequirements,bare:COPY.nameRequirements},design:{the:COPY.inDesign,bare:COPY.nameDesign},plan:{the:COPY.inPlan,bare:COPY.namePlan}};
+function dotted(text){
+  // The separator dot is for the eye; a screen reader skips it.
+  var span=make("span",{"class":"answering"});
+  span.appendChild(make("span",{"aria-hidden":"true"},COPY.dot));
+  span.appendChild(document.createTextNode(text));
+  return span;
+}
+var CLAIM_ID=/^[1-9][0-9]{0,2}(?:\.[1-9][0-9]{0,2}){0,2}$/;
 function shortTime(at){var d=new Date(at);if(isNaN(d.getTime()))return "";var iso=d.toISOString();return iso.slice(0,10)+" "+iso.slice(11,16)+" UTC";}
 function validComment(c){return c&&typeof c==="object"&&UUID.test(str(c.id))&&(c.parentId===undefined||UUID.test(str(c.parentId)))&&c.author&&typeof c.author==="object"&&typeof c.version==="number";}
 function commentNode(c,shownVersion,isReply){
@@ -422,7 +457,14 @@ function commentNode(c,shownVersion,isReply){
     // An answer to someone's question: labelled as AI, with the asker's name from the page's own record.
     meta.appendChild(make("span",{"class":"chip chip-agentx"},COPY.agentxAi));
     meta.appendChild(document.createTextNode(" "));
-    meta.appendChild(make("span",{"class":"answering"},COPY.answeringWho+c.answering));
+    meta.appendChild(dotted(COPY.answeringWho+c.answering));
+  }
+  else if(agentx&&c.planner&&typeof c.planner==="object"){
+    // The planner's outcome, apart from AgentX's own answer to a question.
+    meta.appendChild(make("span",{"class":"chip chip-agentx"},COPY.agentx));
+    meta.appendChild(document.createTextNode(" "));
+    var words=has(DOC_WORDS,c.planner.document)?DOC_WORDS[c.planner.document].bare:"";
+    meta.appendChild(dotted(COPY.fromWord+words+COPY.versionWord+Number(c.planner.version)));
   }
   else if(agentx){meta.appendChild(make("span",{"class":"chip chip-agentx"},COPY.agentx));}
   else{
@@ -435,11 +477,35 @@ function commentNode(c,shownVersion,isReply){
   if(c.edited===true&&c.deleted!==true){meta.appendChild(document.createTextNode(" "));meta.appendChild(make("span",{"class":"comment-edited"},COPY.edited));}
   article.appendChild(meta);
   if(c.deleted===true)article.appendChild(make("p",{"class":"comment-deleted"},COPY.removed));
-  else if(agentx&&c.planner&&typeof c.planner==="object")article.appendChild(make("p",{"class":"comment-text"},(c.planner.outcome==="done"?COPY.done:COPY.notChanged)+str(c.text)));
+  else if(agentx&&c.planner&&typeof c.planner==="object"){
+    // After an Approve the comment was handled in the next document; after Request changes, in the same one again.
+    var handledIn=has(DOC_ANCHORS,c.planner.in)?c.planner.in:"";
+    var handled=handledIn===""?"":COPY.doneIn+DOC_WORDS[handledIn].the;
+    var lead=handled===""?(c.planner.outcome==="done"?COPY.done+COPY.becauseColon:COPY.notChanged+" because: "):(c.planner.outcome==="done"?COPY.done:COPY.notChanged)+handled+COPY.becauseColon;
+    var claim=typeof c.planner.claim==="string"&&CLAIM_ID.test(c.planner.claim)?c.planner.claim:"";
+    var where=has(DOC_ANCHORS,c.planner.document)?c.planner.document:"";
+    var shown=Number(c.planner.version);
+    var sentence=make("p",{"class":"comment-text"},lead);
+    var parts=arr(c.planner.parts);
+    if(parts.length===0||where===""||!(shown>0))sentence.appendChild(document.createTextNode(str(c.text)));
+    else for(var q=0;q<parts.length;q++){
+      /* A claim number of the version that handled the comment links to that version's own claim. */
+      if(parts[q]&&typeof parts[q].claim==="string"&&CLAIM_ID.test(parts[q].claim))sentence.appendChild(make("a",{"class":"claim-link",href:"#"+claimAnchor(DOC_ANCHORS[where],shown,parts[q].claim)},parts[q].claim));
+      else sentence.appendChild(document.createTextNode(str(parts[q]&&(typeof parts[q].text==="string"?parts[q].text:parts[q].claim))));
+    }
+    article.appendChild(sentence);
+    if(claim!==""&&where!==""&&shown>0){
+      // The link is to that version's own claim, which a later version may have renumbered.
+      var seen=make("p",{"class":"comment-link"},COPY.seeClaim);
+      seen.appendChild(make("a",{"class":"claim-link",href:"#"+claimAnchor(DOC_ANCHORS[where],shown,claim)},COPY.claimWord+claim));
+      seen.appendChild(document.createTextNode(COPY.inWord+DOC_WORDS[where].bare+COPY.versionWord+shown+"."));
+      article.appendChild(seen);
+    }
+  }
   else article.appendChild(make("p",{"class":"comment-text"},str(c.text)));
   if(typeof c.agentx==="string"&&has(STATES,c.agentx))article.appendChild(make("p",{"class":"comment-state"},STATES[c.agentx]));
   var yours=!agentx&&c.author.you===true&&c.deleted!==true;
-  if(yours&&c.sent===true)article.appendChild(make("p",{"class":"comment-sent"},COPY.sentLocked));
+  if(yours&&c.sent===true)article.appendChild(make("p",{"class":"comment-sent"},c.sentWith==="REQUEST_CHANGES"?COPY.sentChanges:c.sentWith!=="APPROVE"?COPY.sentDecision:c.author.owner===true?COPY.sentApproval:COPY.sentOwnerApproval));
   var actions=[];
   if(yours&&c.sent!==true&&canComment){
     actions.push(make("button",{type:"button","class":"comment-edit","data-comment":c.id,"aria-describedby":"comment-"+c.id},COPY.edit));
@@ -861,7 +927,10 @@ if(canDecide&&current&&DOCS[current.anchor]&&docSection&&dialog&&bar.next&&bar.a
 }
 function updateBar(){
   var left=decisions.filter(function(d){return !opened[d.id];}).length;
-  bar.next.textContent=left===0?COPY.allAnswered:left+COPY.toAnswer;
+  /* Decisions left: a control that goes to the next one. None left: a plain note, not a button. */
+  bar.next.hidden=left===0;
+  if(left>0)bar.next.textContent=COPY.nextDecision+left+COPY.toAnswer+COPY.closeCount;
+  if(bar.count){bar.count.textContent=COPY.allAnswered;bar.count.hidden=!(left===0&&decisions.length>0);}
 }
 
 function el(id){return document.getElementById(id);}
@@ -891,8 +960,8 @@ function openDialog(kind,button){
   clear(changed);clear(unanswered);
   for(var i=0;i<decisions.length;i++){
     var d=decisions[i],chosen=answers[d.id],question=str(d.question),rec=str(d.labels[d.recommended]);
-    if(chosen!==d.recommended)changed.appendChild(make("li",null,d.id+" "+question+COPY.youChose+str(d.labels[chosen])+COPY.recommendedOpen+rec+COPY.recommendedClose));
-    else if(!opened[d.id])unanswered.appendChild(make("li",null,d.id+" "+question+": "+rec));
+    if(chosen!==d.recommended)changed.appendChild(make("li",null,question+COPY.youChose+str(d.labels[chosen])+COPY.recommendedOpen+rec+COPY.recommendedClose));
+    else if(!opened[d.id])unanswered.appendChild(make("li",null,question+": "+rec));
   }
   section("decide-changed",changed.children.length>0);
   section("decide-unanswered",unanswered.children.length>0);

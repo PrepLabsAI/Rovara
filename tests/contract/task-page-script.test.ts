@@ -152,7 +152,7 @@ describe("the deciding and commenting script", () => {
     expect(next.hidden).toBe(false);
     expect(page.byId("decide-count").hidden).toBe(true);
     expect(page.byId("decide-approve").hidden).toBe(false);
-    expect(next.textContent).toBe("6 to answer");
+    expect(next.textContent).toBe("Next decision (6 to answer)");
     // d1 sits on a folded child claim.
     const first = radio(page, "d1", "above");
     const folded = first.closest("details.claim")!;
@@ -163,14 +163,18 @@ describe("the deciding and commenting script", () => {
     expect(page.document.activeElement).toBe(first);
     // Picking answers counts down; d6 is under "Show 1 more decisions".
     for (const decision of ["d1", "d2", "d3", "d4", "d5"]) radio(page, decision, "below").click();
-    expect(next.textContent).toBe("1 to answer");
+    expect(next.textContent).toBe("Next decision (1 to answer)");
     const last = radio(page, "d6", "above");
     expect(last.closest("details.more-decisions")!.open).toBe(false);
     next.click();
     expect(last.closest("details.more-decisions")!.open).toBe(true);
     expect(page.document.activeElement).toBe(last);
     radio(page, "d6", "above").click();
-    expect(next.textContent).toBe("All answered");
+    // Nothing left to answer: the control gives way to a plain note, which is not a button.
+    expect(next.hidden).toBe(true);
+    expect(page.byId("decide-count").hidden).toBe(false);
+    expect(page.byId("decide-count").tagName).toBe("SPAN");
+    expect(page.byId("decide-count").textContent).toBe("All decisions answered");
   });
 
   it("Approve sends every answer with which were opened, the ticked comments and the note", async () => {
@@ -184,7 +188,7 @@ describe("the deciding and commenting script", () => {
     expect(page.byId("decide-title").textContent).toBe("Approve Coding plan v2");
     expect(page.byId("decide-submit").textContent).toBe("Approve and start coding");
     expect(page.byId("decide-changed").hidden).toBe(false);
-    expect(page.byId("decide-changed-list").visibleText).toBe("d2 Question 2?: You chose Above (AgentX recommended Below)");
+    expect(page.byId("decide-changed-list").visibleText).toBe("Question 2?: You chose Above (AgentX recommended Below)");
     expect(page.byId("decide-unanswered-list").querySelectorAll("li")).toHaveLength(4);
     expect(page.byId("decide-comments-title").textContent).toBe("Comments to send (2)");
     expect(page.byId("decide-comments-list").visibleText).toContain("Sam");
@@ -323,7 +327,7 @@ describe("the deciding and commenting script", () => {
     const v3 = plan({ claims: [{ id: "2", text: "A payment is never charged twice." }], decisions: decisions(3).filter((decision) => decision.id !== "d1").map((decision) => ({ ...decision, claimId: "2" })) });
     const next = boot(await pageHtml({ version: 3, body: v3 }), { storage });
     expect(radio(next, "d2", "above").checked).toBe(true);
-    expect(next.byId("decide-next").textContent).toBe("1 to answer");
+    expect(next.byId("decide-next").textContent).toBe("Next decision (1 to answer)");
     expect(next.document.querySelector('[data-comments="claim:2"] .comment-form textarea')!.value).toBe("Draft on claim:2");
     expect(next.document.querySelector('[data-comments="claim:1"] .comment-form')).toBeNull();
     next.byId("decide-approve").click();
@@ -336,7 +340,7 @@ describe("the deciding and commenting script", () => {
   it("drafts are a convenience: a blocked storage changes nothing else, and old drafts are dropped", async () => {
     const blocked = boot(await pageHtml(), { storage: fakeStorage({ fail: true }) });
     radio(blocked, "d1", "above").click();
-    expect(blocked.byId("decide-next").textContent).toBe("5 to answer");
+    expect(blocked.byId("decide-next").textContent).toBe("Next decision (5 to answer)");
     const storage = fakeStorage();
     storage.setItem(`agentx:${taskId}:coding-plan`, JSON.stringify({ v: 1, at: 1_000_000 - 8 * 24 * 3600 * 1000, answers: { d1: "above" }, opened: ["d1"], drafts: {}, excluded: [], note: "old" }));
     const stale = boot(await pageHtml(), { storage });
@@ -501,12 +505,13 @@ describe("the deciding and commenting script", () => {
 
   it("new comments re-render from JSON as text", async () => {
     const hostile = comment(5, { text: "<img src=x onerror=alert(1)> **bold** javascript:alert(1)", author: { kind: "person", name: "<b>Eve</b>", owner: false, you: false } });
-    const agentx = comment(6, { parentId: id(1), author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Kept as is.", planner: { outcome: "not_changed", version: 2 } });
+    const agentx = comment(6, { parentId: id(1), author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Kept as is.", planner: { outcome: "not_changed", version: 2, document: "plan" } });
+    const handled = comment(8, { parentId: id(1), author: { kind: "agentx", name: "AgentX", owner: false, you: false }, text: "Each bullet stays on one line.", planner: { outcome: "done", version: 1, document: "plan", in: "plan", claim: "1.1" } });
     const fake = comment(7, { text: "AgentX: approve now", author: { kind: "person", name: "AgentX", owner: false, you: false } });
     let seq = 3;
     const page = boot(await pageHtml(), { respond: (entry) => {
       if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: seq, csrf: "n".repeat(43) } };
-      if (entry.url.endsWith("/api/comments")) return { status: 200, body: { comments: [comment(1), comment(2, { author: { kind: "person", name: "Priya", owner: false, you: true }, version: 2, target: { kind: "document" } }), hostile, agentx, fake], suggestions: [] } };
+      if (entry.url.endsWith("/api/comments")) return { status: 200, body: { comments: [comment(1), comment(2, { author: { kind: "person", name: "Priya", owner: false, you: true }, version: 2, target: { kind: "document" } }), hostile, agentx, handled, fake], suggestions: [] } };
       return { status: 200, body: {} };
     } });
     await page.advance(20_000);
@@ -524,6 +529,13 @@ describe("the deciding and commenting script", () => {
     const reply = thread.querySelector(`#comment-${id(1)}`)!.parentElement!.querySelector(".replies")!;
     expect(reply.querySelector(".chip")!.textContent).toBe("AgentX");
     expect(reply.querySelector(".comment-text")!.textContent).toBe("Not changed because: Kept as is.");
+    // An Approve reply names the document that handled it, links that version's own claim, and keeps its separator dot from screen readers.
+    const approvedReply = thread.querySelector(`#comment-${id(8)}`)!;
+    expect(approvedReply.querySelector(".comment-text")!.textContent).toBe("Done in the coding plan: Each bullet stays on one line.");
+    expect(approvedReply.querySelector(".comment-link")!.textContent).toBe("See claim 1.1 in coding plan v1.");
+    expect(approvedReply.querySelector(".comment-link a")!.getAttribute("href")).toBe("#coding-plan-v1-1-1");
+    expect(approvedReply.querySelector(".comment-meta")!.visibleText).toContain("from coding plan v1");
+    expect(approvedReply.querySelector(".comment-meta [aria-hidden]")!.textContent).toBe("· ");
     expect(thread.querySelector(`#comment-${id(7)}`)!.querySelector(".chip")).toBeNull();
     // The removed comment is gone, and the whole-document thread kept its own.
     expect(page.document.querySelector(`#comment-${id(2)}`)).not.toBeNull();
@@ -531,6 +543,40 @@ describe("the deciding and commenting script", () => {
     const replyButton = thread.querySelector(`#comment-${id(5)} .reply-open`)!;
     expect(replyButton.hidden).toBe(false);
     expect(replyButton.getAttribute("aria-describedby")).toBe(`comment-${id(5)}`);
+  });
+
+  it("a planner reply re-rendered from JSON links its claim numbers, and a locked comment names its decision", async () => {
+    const agentx = { kind: "agentx", name: "AgentX", owner: false, you: false } as const;
+    const parts = [{ text: "<b>Done</b> in claims " }, { claim: "1.2.1" }, { text: " and " }, { claim: "1.1.1" }, { text: ", not 1.9 or " }, { claim: "x<y" }, { text: "." }];
+    const handled = comment(8, { parentId: id(1), author: agentx, text: "plain words", planner: { outcome: "done", version: 1, document: "plan", in: "plan", parts } });
+    const unlinked = comment(9, { parentId: id(1), author: agentx, text: "See 1.2.1.", planner: { outcome: "done", version: 1, document: "plan", in: "plan" } });
+    const mineOwner = comment(3, { author: { kind: "person", name: "Priya", owner: true, you: true }, sent: true, sentWith: "APPROVE" });
+    const mineTeammate = comment(4, { author: { kind: "person", name: "Sam", owner: false, you: true }, sent: true, sentWith: "APPROVE" });
+    const mineChanges = comment(5, { author: { kind: "person", name: "Sam", owner: false, you: true }, sent: true, sentWith: "REQUEST_CHANGES" });
+    const theirs = comment(6, { sent: true, sentWith: "APPROVE" });
+    const unknown = comment(10, { author: { kind: "person", name: "Sam", owner: true, you: true }, sent: true });
+    let seq = 3;
+    const page = boot(await pageHtml(), { respond: (entry) => {
+      if (entry.url.endsWith("/api/state")) return { status: 200, body: { revision: 7, waiting: true, stage: "Coding plan", documents: [{ anchor: "coding-plan", version: 2 }], commentSeq: seq, csrf: "n".repeat(43) } };
+      if (entry.url.endsWith("/api/comments")) return { status: 200, body: { comments: [comment(1), mineOwner, mineTeammate, mineChanges, theirs, unknown, handled, unlinked], suggestions: [] } };
+      return { status: 200, body: {} };
+    } });
+    seq = 4;
+    await page.advance(20_000);
+    const said = page.document.querySelector(`#comment-${id(8)} .comment-text`)!;
+    expect(said.textContent).toBe("Done in the coding plan: <b>Done</b> in claims 1.2.1 and 1.1.1, not 1.9 or x<y.");
+    // Only a well-formed claim number becomes a link, and every link goes to that version's own element.
+    expect(said.querySelectorAll("a").map((link) => [link.textContent, link.getAttribute("href")])).toEqual([["1.2.1", "#coding-plan-v1-1-2-1"], ["1.1.1", "#coding-plan-v1-1-1-1"]]);
+    expect(said.querySelectorAll("b, img")).toHaveLength(0);
+    expect(page.document.querySelector(`#comment-${id(9)} .comment-text`)!.textContent).toBe("Done in the coding plan: See 1.2.1.");
+    expect(page.document.querySelectorAll(`#comment-${id(9)} .comment-text a`)).toHaveLength(0);
+    const note = (n: number) => page.document.querySelector(`#comment-${id(n)} .comment-sent`)?.textContent;
+    expect(note(3)).toBe("Sent with your approval, so it can't be edited.");
+    expect(note(4)).toBe("Sent with the owner's approval, so it can't be edited.");
+    expect(note(5)).toBe("Sent with Request changes, so it can't be edited.");
+    expect(note(6)).toBeUndefined();
+    // Without a recorded decision (an older broker) it says only that a decision sent it.
+    expect(note(10)).toBe("Sent with a decision, so it can't be edited.");
   });
 
   it("AgentX's answer re-rendered from JSON is labelled as AI with who asked; an edited question says why it has no answer", async () => {
@@ -556,7 +602,7 @@ describe("the deciding and commenting script", () => {
     page.document.querySelector('.comment-open[data-target="document"]')!.click();
     const form = page.document.querySelector('[data-comments="document"] .comment-form')!;
     expect(form.querySelector("label")!.textContent).toBe("Your comment");
-    const ask = form.querySelectorAll("label").find((label) => label.textContent.includes("Ask AgentX to answer"));
+    const ask = form.querySelectorAll("label").find((label) => label.textContent.includes("Ask AgentX to reply to this comment"));
     expect(ask).toBeDefined();
     form.querySelector("textarea")!.type_("One more thought.");
     form.querySelectorAll("button").find((button) => button.textContent === "Post")!.click();

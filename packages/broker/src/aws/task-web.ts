@@ -20,7 +20,8 @@ export type TaskDocumentKind = "requirements" | "design" | "coding plan";
 /** One saved version of a document: older Markdown copies and structured plans read through the same list. */
 export type TaskDocumentEntry =
   | { kind: TaskDocumentKind; version: number; approved: boolean; current: boolean; format: "markdown"; markdown: string }
-  | { kind: TaskDocumentKind; version: number; approved: boolean; current: boolean; format: "structured"; plan: PlanDocument; evidence?: PlanEvidenceBundle; /** When the document was stored. */ createdAt?: string };
+  | { kind: TaskDocumentKind; version: number; approved: boolean; current: boolean; format: "structured"; plan: PlanDocument; evidence?: PlanEvidenceBundle; /** When the document was stored. */ createdAt?: string;
+    /** For a plan stored before quotes named comments by ID: the comment each ref a quote's author names ("comment c1") stood for, from the decision that sent the comments to this document. */ commentRefs?: Record<string, string> };
 
 export interface TaskDocumentView {
   taskId: string;
@@ -151,6 +152,8 @@ const ANCHORS: Array<{ kind: TaskDocumentKind; anchor: PlanAnchor; label: string
   { kind: "design", anchor: "design", label: "Design", planKind: "design" },
   { kind: "coding plan", anchor: "coding-plan", label: "Coding plan", planKind: "plan" },
 ];
+/** How many claim levels each earlier document writes: requirements level 1, the design levels 1 and 2. */
+const WRITTEN_LEVELS: Partial<Record<TaskDocumentKind, number>> = { requirements: 1, design: 2 };
 const FULL_STEPS = ["Requirements", "Design", "Coding plan", "Coding", "Checks", "Reviews", "Pull request"];
 const QUICK_STEPS = FULL_STEPS.slice(2);
 const STEP_DOCUMENT: Record<string, TaskDocumentKind> = { Requirements: "requirements", Design: "design", "Coding plan": "coding plan" };
@@ -194,12 +197,17 @@ async function documentsHtml(view: TaskDocumentView, request: TaskPageRequest): 
     const currentDocument = versions.find((document) => document.current) ?? versions.at(-1)!;
     const earlier = versions.filter((document) => document !== currentDocument).reverse();
     const fromEarlier = requested === entry && request.from !== undefined && request.from < currentDocument.version;
-    // The latest approved structured document of the nearest earlier step: a claim reworded since is badged.
-    let approvedEarlier: PlanDocument | undefined;
+    // A claim reworded after its approval is badged, against the nearest earlier step's approved document (only the claim
+    // levels that document wrote: each document numbers its own deeper claims) and against this document's own approved version.
+    let approvedEarlier: { plan: PlanDocument; depth: number } | undefined;
     for (const prior of ANCHORS.slice(0, ANCHORS.indexOf(entry)).reverse()) {
       const approved = (byKind.get(prior.kind) ?? []).filter((candidate) => candidate.approved).at(-1);
-      if (approved?.format === "structured") { approvedEarlier = approved.plan; break; }
+      if (approved?.format === "structured") { approvedEarlier = { plan: approved.plan, depth: WRITTEN_LEVELS[prior.kind] ?? 0 }; break; }
     }
+    const approvedBefore = (document: TaskDocumentEntry): PlanDocument | undefined => {
+      const approved = versions.filter((candidate) => candidate.approved && candidate.version < document.version).at(-1);
+      return approved?.format === "structured" ? approved.plan : undefined;
+    };
     const render = async (document: TaskDocumentEntry): Promise<string> => {
       if (document.format === "markdown") {
         // A Markdown document takes whole-document comments only, shown on its current version.
@@ -213,6 +221,7 @@ async function documentsHtml(view: TaskDocumentView, request: TaskPageRequest): 
       const checks = entry.kind === "coding plan" && document === currentDocument
         ? view.checks.map((check) => ({ ...(check.id === undefined ? {} : { id: check.id }), label: check.label, proposed: check.proposed === true, proves: check.proves ?? [], status: checkWords(check) })) : undefined;
       const isCurrent = document === currentDocument;
+      const approvedPlan = approvedBefore(document);
       const slice2 = !isCurrent || view.access === undefined ? {} : {
         comments: view.pageComments ?? [],
         suggestions: (view.pageSuggestions ?? []).filter((suggestion) => suggestion.document === entry.planKind)
@@ -221,13 +230,19 @@ async function documentsHtml(view: TaskDocumentView, request: TaskPageRequest): 
         deciding: view.access.canDecide && view.waiting?.kind === entry.kind && view.waiting.version === document.version,
         plans: new Map(versions.flatMap((item) => item.format === "structured" ? [[item.version, item.plan] as const] : [])),
       };
+      // A quote that credits a page comment names the comment's author and links its thread, when the words are theirs.
+      const quoteComments = Object.fromEntries((view.pageComments ?? []).filter((item) => item.author.kind === "person" && !item.deleted)
+        .map((item) => [item.id, { name: item.author.name, you: item.author.you, text: item.text }] as const));
       return await renderPlanDocument({
         ...slice2,
+        ...(Object.keys(quoteComments).length === 0 ? {} : { quoteComments }),
+        ...(document.commentRefs === undefined ? {} : { commentRefs: document.commentRefs }),
         anchor: entry.anchor, kind: entry.planKind, version: document.version, approved: document.approved, current: document === currentDocument,
         currentVersion: currentDocument.version, plan: document.plan, ...(document.evidence === undefined ? {} : { evidence: document.evidence }),
         ...(document.createdAt === undefined ? {} : { createdAt: document.createdAt }), ...(view.now === undefined ? {} : { now: view.now }),
         ...(before?.format === "structured" ? { previous: { version: before.version, plan: before.plan } } : {}),
-        ...(approvedEarlier === undefined ? {} : { approvedEarlier }),
+        ...(approvedEarlier === undefined ? {} : { approvedEarlier: approvedEarlier.plan, approvedEarlierDepth: approvedEarlier.depth }),
+        ...(approvedPlan === undefined ? {} : { approvedSame: approvedPlan }),
         ...(checks === undefined ? {} : { checks }),
         ...(entry.kind === "coding plan" && isCurrent && view.optionalChecks !== undefined ? { knownChecks: view.optionalChecks.map(({ id, label }) => ({ id, label })) } : {}),
         openWhatChanged: document === currentDocument && fromEarlier,
@@ -326,10 +341,12 @@ function decideBar(view: TaskDocumentView): string {
   if (view.waiting === undefined || view.access === undefined) return "";
   if (!view.access.canDecide) return '<div class="decide-bar" role="region" aria-label="Decide"><p>Only owners decide.</p></div>';
   const count = waitingDocument(view)?.plan.decisions.length ?? 0;
-  const label = count === 0 ? "All answered" : `${count} to answer`;
+  // The buttons act on the waiting document, whichever one the reader has open, so each names it.
+  const name = `${KIND_LABEL[view.waiting.kind].toLowerCase()} v${view.waiting.version}`;
+  // Without the script the count is only a note; the script turns it into the "Next decision" control, or says all are answered.
   return '<div class="decide-bar" role="region" aria-label="Decide">'
-    + `<p><button type="button" id="decide-next" hidden>${label}</button><span id="decide-count">${label}</span></p>`
-    + '<button type="button" id="decide-approve" hidden>Approve</button> <button type="button" id="decide-request-changes" hidden>Request changes</button></div>';
+    + `<p><button type="button" id="decide-next" hidden></button><span id="decide-count" role="status">${count === 0 ? "" : `${count} to answer`}</span></p>`
+    + `<button type="button" id="decide-approve" hidden>Approve ${escapeHtml(name)}</button> <button type="button" id="decide-request-changes" hidden>Request changes to ${escapeHtml(name)}</button></div>`;
 }
 
 /** The one confirmation dialog; the page's script fills it with text only. */

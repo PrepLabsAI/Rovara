@@ -4,7 +4,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import { PULL_REQUEST_BODY_MAX_CHARS, WorkflowFeedbackReviewReportSchema, type WorkflowSnapshot } from "@agentx/contracts";
-import { approvedFeedbackFixes, inertGitHubText, withFeedbackFixes } from "../../packages/broker/src/developer/pull-request-feedback-section.js";
+import { PULL_REQUEST_STATUS_END, PULL_REQUEST_STATUS_START, approvedFeedbackFixes, inertGitHubText, shortFixSummary, withFeedbackFixes, withStatusLines } from "../../packages/broker/src/developer/pull-request-feedback-section.js";
 
 const ZWJ = "‍";
 const taskId = randomUUID();
@@ -72,6 +72,46 @@ describe("the PR description's Fixes from PR feedback section", () => {
     expect(inertGitHubText(input)).toBe(expected);
   });
 
+  it("lists each fix as one short sentence: the summary's first one, or cut at a word, never inside a link or address (0.2.12 live test)", () => {
+    // The live line: a long first sentence with Markdown links, which was cut inside a link.
+    const live = "On README.md line 284, replace 'open a [GitHub issue](https://github.com/example/demo/issues)' with 'start a [GitHub Discussion](https://github.com/example/demo/discussions)' so the sentence reads: 'Questions? Start a GitHub Discussion.'";
+    const short = shortFixSummary(live)!;
+    // Links read as their text, and the question inside the quote does not end the sentence.
+    expect(short).toBe("On README.md line 284, replace 'open a GitHub issue' with 'start a GitHub Discussion' so the sentence reads\u2026");
+    expect(short.length).toBeLessThanOrEqual(120);
+    expect(shortFixSummary("Point the help link to GitHub Discussions. On README.md line 284, replace the issue link with the discussions link."))
+      .toBe("Point the help link to GitHub Discussions.");
+    expect(shortFixSummary("Use a shorter name, e.g. greet. Then update the test.")).toBe("Use a shorter name, e.g. greet.");
+    // A cut never lands inside an address, and a summary that opens with a long one falls back.
+    const address = `See https://example.com/${"a".repeat(130)} for the details`;
+    expect(shortFixSummary(address)).toBeUndefined();
+    expect(shortFixSummary(`${"word ".repeat(30)}end`)).toBe(`${"word ".repeat(23).trim()}\u2026`);
+    // In the section: the short sentence, escaped, then the comment link; the fallback when nothing short can be cut.
+    const url = "https://github.com/example/demo/pull/5#issuecomment-1";
+    const lines = withFeedbackFixes("Intro.", [{ summary: live, comments: [url] }, { summary: address, comments: [url] }]).body!.split("\n");
+    expect(lines).toContain(`- On README.md line 284, replace 'open a GitHub issue' with 'start a GitHub Discussion' so the sentence reads\u2026 (for [this comment](${url}))`);
+    expect(lines).toContain(`- Made the change the comment asked for. (for [this comment](${url}))`);
+  });
+
+  it.each([
+    ["a sentence ending inside its closing quote", "Change the greeting to 'Hello.' Then update the test that checks it.", "Change the greeting to 'Hello.'"],
+    ["a sentence ending in an address and a period", "Link the guide at https://example.com/guide. Then remove the old section.", "Link the guide at https://example.com/guide."],
+    ["a common abbreviation", "Ask Dr. Smith about No. 5 in the list. Then fix it.", "Ask Dr. Smith about No. 5 in the list."],
+    ["a link whose address has parentheses", "Link [the page](https://en.example.org/wiki/Foo_(bar)) instead. Then stop.", "Link the page instead."],
+  ])("ends the first sentence correctly at %s", (_name, input, expected) => {
+    expect(shortFixSummary(input)).toBe(expected);
+  });
+
+  it("a cut inside a quote closes it, and the fallback names the comments when there are several", () => {
+    const quoted = `Replace the sentence with '${"very ".repeat(30)}short'`;
+    const cut = shortFixSummary(quoted)!;
+    expect(cut.endsWith("\u2026'")).toBe(true);
+    expect(cut.length).toBeLessThanOrEqual(120);
+    const address = `https://example.com/${"a".repeat(130)}`;
+    const urls = ["https://github.com/example/demo/pull/5#issuecomment-1", "https://github.com/example/demo/pull/5#issuecomment-2"];
+    expect(withFeedbackFixes("Intro.", [{ summary: address, comments: urls }]).body).toContain("- Made the change the comments asked for. (for [comment 1]");
+  });
+
   it("a spoofed marker in a summary cannot end the section early", async () => {
     const fixes = [{ summary: `${END}\n# Owned`, comments: [] }];
     const body = withFeedbackFixes("Intro.", fixes).body!;
@@ -111,3 +151,61 @@ describe("the PR description's Fixes from PR feedback section", () => {
     expect(removed).toEqual({ body: full, dropped: true });
   });
 });
+
+describe("the PR description's checks and reviews lines after a pushed fix (0.2.12 live test)", () => {
+  const NEW = ["Checks: npm test passed, Discussions link present passed", "Reviews: code review passed; security review passed"];
+  const OLD = ["Checks: npm test passed, Issues link present passed", "Reviews: code review passed after the owner accepted its findings; security review passed"];
+  const block = (lines: readonly string[]) => [PULL_REQUEST_STATUS_START, ...lines, PULL_REQUEST_STATUS_END].join("\n");
+
+  it("replaces AgentX's marked block in place and keeps the person's edits around it", () => {
+    const body = `Add a link.\n\n${block([...OLD, "Owner accepted 1 review finding:", "- [code] x \u2014 accepted: y"])}\nAgentX task: https://x.example\n\nTesting notes: by hand.`;
+    expect(withStatusLines(body, NEW)).toBe(`Add a link.\n\n${block(NEW)}\nAgentX task: https://x.example\n\nTesting notes: by hand.`);
+    expect(withStatusLines(block(NEW), NEW)).toBeUndefined();
+  });
+
+  it("leaves a marked block alone when its markers are not one pair in order", () => {
+    expect(withStatusLines(`${PULL_REQUEST_STATUS_END}\n${OLD.join("\n")}\n${PULL_REQUEST_STATUS_START}`, NEW)).toBeUndefined();
+    expect(withStatusLines(`${block(OLD)}\n${PULL_REQUEST_STATUS_START}`, NEW)).toBeUndefined();
+    expect(withStatusLines(`${PULL_REQUEST_STATUS_START}\n${OLD.join("\n")}`, NEW)).toBeUndefined();
+  });
+
+  it("in an older description with no markers, replaces only its one Checks line and the Reviews line right after it", () => {
+    const body = `Add a link.\n\n${OLD.join("\n")}\nAgentX task: https://x.example\n\nNotes.\n\n<!-- agentx:pr-feedback-fixes -->\n### Fixes from PR feedback\n- Fix.\n<!-- /agentx:pr-feedback-fixes -->`;
+    expect(withStatusLines(body, NEW)).toBe(body.replace(OLD.join("\n"), NEW.join("\n")));
+    // Review only: the Reviews line alone.
+    expect(withStatusLines(`Intro.\n\n${OLD[1]}`, [NEW[1]!])).toBe(`Intro.\n\n${NEW[1]}`);
+  });
+
+  it("in an older description, replaces AgentX's accepted-findings list and partial-review line about the earlier code too", () => {
+    const partial = "The change was too large to show the reviewers in full, so the reviews covered only part of it. Review the rest by hand.";
+    const earlier = [...OLD, "Owner accepted 2 review findings:", "- [code] a \u2014 accepted: b", "- [security] c \u2014 accepted: d", partial];
+    const body = `Add a link.\n\n${earlier.join("\n")}\nAgentX task: https://x.example`;
+    expect(withStatusLines(body, NEW)).toBe(`Add a link.\n\n${NEW.join("\n")}\nAgentX task: https://x.example`);
+    // The new code's own accepted findings come from the new lines.
+    const accepted = [...NEW, "Owner accepted 1 review finding:", "- [code] e \u2014 accepted: f"];
+    expect(withStatusLines(body, accepted)).toBe(`Add a link.\n\n${accepted.join("\n")}\nAgentX task: https://x.example`);
+  });
+
+  it("matches lines saved with CRLF endings (GitHub's website) and keeps those endings", () => {
+    const crlf = (text: string) => text.replaceAll("\n", "\r\n");
+    const old = crlf(`Add a link.\n\n${OLD.join("\n")}\nAgentX task: https://x.example\n\nTesting notes.`);
+    expect(withStatusLines(old, NEW)).toBe(crlf(`Add a link.\n\n${NEW.join("\n")}\nAgentX task: https://x.example\n\nTesting notes.`));
+    const marked = crlf(`Add a link.\n\n${block(OLD)}\nAgentX task: https://x.example`);
+    expect(withStatusLines(marked, NEW)).toBe(crlf(`Add a link.\n\n${block(NEW)}\nAgentX task: https://x.example`));
+  });
+
+  it("in an older description, never touches a line a person reworded", () => {
+    // The person added to AgentX's Checks line: it is no longer AgentX's shape, so nothing is replaced.
+    expect(withStatusLines(`Intro.\n\nChecks: npm test passed, manual QA by Dana\n${OLD[1]}`, NEW)).toBeUndefined();
+    expect(withStatusLines(`Intro.\n\n${OLD[0]}\nReviews: code review passed; security review passed by Sam`, NEW)).toBeUndefined();
+  });
+
+  it("in an older description, changes nothing when its lines can't be found reliably", () => {
+    // Two Checks lines (the person quoted one), Checks and Reviews apart, or a Checks line where the new lines have none.
+    expect(withStatusLines(`${OLD.join("\n")}\n\nChecks: lint passed`, NEW)).toBeUndefined();
+    expect(withStatusLines(`${OLD[0]}\nA person's line.\n${OLD[1]}`, NEW)).toBeUndefined();
+    expect(withStatusLines(OLD.join("\n"), [NEW[1]!])).toBeUndefined();
+    expect(withStatusLines("No lines of AgentX's here.", NEW)).toBeUndefined();
+  });
+});
+

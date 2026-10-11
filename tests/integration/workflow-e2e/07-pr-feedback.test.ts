@@ -18,7 +18,7 @@ import { visibleSlackText } from "../../support/strict-slack.js";
 import { E2E_CHECK, SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import { EDITS, FEEDBACK_FIX, FIXED, MERGED, PLAN, PLAN_DOCUMENT, PUSHED_FIX, TEAMMATE, actionIds, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";
 
-const READY_ONE = /^PR feedback is ready: 1 comments; 1 recommendations\. Highest priority: should fix\. Open details\.$/;
+const READY_ONE = /^PR feedback is ready: 1 comment; 1 recommendation\. Highest priority: should fix\. Open details\.$/;
 
 /** A Quick task with the usual plan, whose coder writes the fix when a PR feedback fix is approved; counts the feedback reviews. */
 async function feedbackJourney(options: Parameters<typeof createWorkflowE2E>[0] = {}, feedback?: (prompt: string) => string | FauxResponseStep) {
@@ -94,7 +94,7 @@ describe("Suite 7: PR feedback loop", () => {
     expect((await e2e.webhook({ kind: "pull_request_review", action: "submitted", number: pullRequest.number, review, body: null, state: "COMMENTED" })).status).toBe(200);
     await e2e.settle();
     expect(visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text))
-      .toMatch(/^PR feedback is ready: 2 comments; 1 recommendations\./);
+      .toMatch(/^PR feedback is ready: 2 comments; 1 recommendation\./);
     expect(counts.feedback).toBe(1);
     const sent = feedbackBundles(counts.prompts[0]!).flatMap((bundle) => bundle.comments.map((entry) => entry.id));
     expect(sent.sort()).toEqual(comments.map((entry) => entry.id).sort());
@@ -131,7 +131,7 @@ describe("Suite 7: PR feedback loop", () => {
     const sent = feedbackBundles(counts.prompts[0]!).flatMap((bundle) => bundle.comments.map((entry) => entry.id));
     expect(sent).not.toContain(resolved.id);
     expect(sent).toContain(open.id);
-    expect(visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text)).toMatch(/^PR feedback is ready: 4 comments; 1 recommendations\./);
+    expect(visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text)).toMatch(/^PR feedback is ready: 4 comments; 1 recommendation\./);
     await e2e.click("agentx_feedback_review_recommended");
     await e2e.settle();
     expect(e2e.slack.ephemerals).toEqual([]);
@@ -203,7 +203,7 @@ describe("Suite 7: PR feedback loop", () => {
     await commented(e2e, pullRequest.number, "Tidy up the name.");
     expect(e2e.workflow().feedbackReview).toMatchObject({ status: "PENDING", reviewRef: { status: "COMPLETE" } });
     const card = e2e.slack.lastPostWithAction("agentx_feedback_review_changes");
-    expect(visibleSlackText(card.text)).toBe(["PR feedback is ready: 1 comments.", "The reviewer needs your answer before changing any code:", `> ${QUESTION}`,
+    expect(visibleSlackText(card.text)).toBe(["PR feedback is ready: 1 comment.", "The reviewer needs your answer before changing any code:", `> ${QUESTION}`,
       "Answer with instructions and I'll make that change. Open details."].join("\n"));
     expect(actionIds(card)).toEqual(["agentx_feedback_review_changes", "agentx_feedback_review_dismiss"]);
     const labels = (card.blocks as Array<{ elements?: Array<{ text: { text: string } }> }>).flatMap((block) => block.elements ?? []).map((element) => element.text.text);
@@ -316,6 +316,11 @@ describe("Suite 7: PR feedback loop", () => {
     });
     const pullRequest = await openDraftPr(e2e);
     const opened = pullRequest.commit;
+    // The description's checks line, as a list of what passed; and a person's own note added to the description on GitHub.
+    const checksLine = () => (pullRequest.body ?? "").split("\n").find((line) => line.startsWith("Checks: "))!.slice("Checks: ".length).split(", ").sort();
+    const required = `${e2e.workflow().checkPolicy!.required[0]!.label} passed`;
+    expect(checksLine()).toEqual([required, `${OLD_CHECK.label} passed`].sort());
+    pullRequest.body = `${pullRequest.body ?? ""}\n\nTesting notes: tried it by hand.`;
     await commented(e2e, pullRequest.number, "Make the sentence shorter.", "maya");
     // The replacement check is shown in full on the card the owner approves.
     const proposal = visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text);
@@ -325,6 +330,11 @@ describe("Suite 7: PR feedback loop", () => {
     await e2e.settle();
     expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
     const fix1 = pullRequest.commit;
+    // The description names the checks that ran on the pushed fix: the replacement passed, never the old check (0.2.12
+    // live test), and the person's note is kept.
+    expect(checksLine()).toEqual([required, `${NEW_CHECK.label} passed`].sort());
+    expect(pullRequest.body).toContain("Reviews: code review passed; security review passed");
+    expect(pullRequest.body).toContain("Testing notes: tried it by hand.");
     const afterFix1 = e2e.checkRuns.length;
 
     await commented(e2e, pullRequest.number, "Please trim the name too.");
@@ -332,6 +342,8 @@ describe("Suite 7: PR feedback loop", () => {
     await e2e.settle();
     expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
     const fix2 = pullRequest.commit;
+    expect(checksLine()).toEqual([required, `${NEW_CHECK.label} passed`].sort());
+    expect(pullRequest.body.split("Checks: ")).toHaveLength(2);
     expect(fixPushes(e2e).map((push) => push.commit)).toEqual([fix1, fix2]);
     expect(e2e.github.parents.get(fix1)).toEqual([opened]);
     expect(e2e.github.parents.get(fix2)).toEqual([fix1]);
@@ -355,6 +367,8 @@ describe("Suite 7: PR feedback loop", () => {
 
   it("7.13 D2: after each pushed fix the PR description lists what was changed for which comments, kept up to date and inert", async () => {
     const HOSTILE = "Trim the name in greet; thanks @octocat, see https://example.com/x and #12 <img src=x>";
+    // Round 2's summary is long: only its first sentence is listed (0.2.12 live test).
+    const LONG = "Greet in lowercase. In greeting.ts, change the template literal so it reads `hello, ${name.trim()}` as the [second comment](https://github.com/example/demo/pull/1) asks, and keep the trim from the first fix.";
     let round = 0;
     let fixes = 0;
     const LOWER = [{ path: "repo/demo/greeting.ts", content: "export function greet(name: string): string {\n  return `hello, ${name.trim()}`;\n}\n" }];
@@ -365,7 +379,7 @@ describe("Suite 7: PR feedback loop", () => {
     } } }, (prompt) => {
       round += 1;
       const reply = JSON.parse(feedbackCriticReply(prompt, { repositoryId: "demo", path: "greeting.ts", testPath: "greeting.test.ts" })) as { findings: Array<{ fixProposal: { summary: string } }> };
-      for (const finding of reply.findings) finding.fixProposal.summary = round === 1 ? HOSTILE : "Greet in lowercase.";
+      for (const finding of reply.findings) finding.fixProposal.summary = round === 1 ? HOSTILE : LONG;
       return JSON.stringify(reply);
     });
     const opened = pullRequest.body ?? "";

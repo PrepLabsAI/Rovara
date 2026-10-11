@@ -65,6 +65,13 @@ export interface DeveloperTaskRecord {
   createdAt: string;
   updatedAt: string;
   closedAt?: string;
+  /**
+   * When a finished workflow task (all its pull requests merged, or its workflow closed) gave back its workspace slot and
+   * its workspace. A closed task gives them back with its close instead, and has none.
+   */
+  releasedAt?: string;
+  /** When that release claimed the workspace (CLOSING) before deleting its compute; removed once it is released. */
+  releaseClaimedAt?: string;
   workflow?: WorkflowSnapshot;
   /** The commit each repository's preparation checked out, from the prepare result; the task's base until one is pinned. */
   preparedBase?: WorkflowReviewBase;
@@ -174,6 +181,8 @@ export interface GithubWorkflowPullRequestRecord {
 }
 
 export const taskKey = (taskId: string) => ({ pk: `DEVTASK#${taskId}`, sk: "META" as const });
+/** The item stored with a plan: which comments the planner answered in it (the Slack card for the plan reads it). */
+export const plannerRepliesKey = (taskId: string, artifactId: string) => ({ pk: `DEVTASK#${taskId}`, sk: `PLANREPLIES#${artifactId}` });
 export const taskIndexKey = (developerId: string, createdAt: string, taskId: string) => ({ pk: `DEVELOPER#${developerId}`, sk: `TASK#${createdAt}#${taskId}` });
 export const taskPointerKey = (workspaceId: string) => ({ pk: `WORKSPACE#${workspaceId}`, sk: "DEVELOPER_TASK" as const });
 export function githubWorkflowPullRequestKey(repositoryFullName: string, number: number) {

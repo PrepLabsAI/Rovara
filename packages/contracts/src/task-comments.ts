@@ -59,7 +59,7 @@ const PersonAuthorSchema = z.object({
 
 const AgentXAuthorSchema = z.object({
   kind: z.literal("agentx"),
-  /** "answer": AgentX answered a question asked on the page; "planner": the planner's answer after Request changes. */
+  /** "answer": AgentX answered a question asked on the page; "planner": the planner's answer to a comment sent with a decision. */
   source: z.enum(["answer", "planner"]),
   outcome: z.enum(["done", "not_changed"]).optional(),
   /** Planner replies: the version written in answer. */
@@ -188,7 +188,7 @@ function oneLine(value: string, max: number): string {
 /**
  * The planner's answers to the included comments, from the last `agentx-comment-answers` block of its answer. Never
  * throws: a missing, unclosed or unreadable block is no answers; an entry for an unknown ref, a repeated ref, an
- * unknown outcome or an empty reason is left out; each reason is redacted, put on one line and cut to 200 characters.
+ * unknown outcome, an empty reason or a reason that says "comment cN" of another comment is left out; each reason is redacted, put on one line and cut to 200 characters.
  */
 export function parseCommentAnswers(answer: string, refs: ReadonlySet<string>): CommentAnswer[] {
   const block = lastFencedBlock(answer, COMMENT_ANSWERS_INFO_STRING);
@@ -210,6 +210,9 @@ export function parseCommentAnswers(answer: string, refs: ReadonlySet<string>): 
     if (typeof reason !== "string") continue;
     const text = oneLine(reason, PLANNER_ANSWER_REASON_MAX_CHARS);
     if (text.length === 0) continue;
+    // An answer is about its own comment: one that says "comment c3" of another shown comment is not taken (a comment cannot
+    // steer it). A bare "C4" (a diagram, a flag) is just a word.
+    if ([...text.matchAll(/\bcomments?\s+(c[1-9][0-9]{0,2})\b/giu)].some((named) => refs.has(named[1]!.toLowerCase()) && named[1]!.toLowerCase() !== comment)) continue;
     seen.add(comment);
     answers.push({ ref: comment, outcome, reason: text });
   }
@@ -224,4 +227,40 @@ export function sameIdSet(a: readonly string[], b: readonly string[]): boolean {
   const left = [...a].sort();
   const right = [...b].sort();
   return left.every((id, index) => id === right[index]);
+}
+
+const SHOWN_DECISION_MAX_CHARS = 60;
+const DECISION_LIST = "d[1-9][0-9]?(?:(?:\\s*,\\s*|\\s+and\\s+|\\s*&\\s*|\\s+or\\s+)d[1-9][0-9]?)*";
+const COMMENT_LIST = "c[1-9][0-9]{0,2}(?:(?:\\s*,\\s*|\\s+and\\s+|\\s*&\\s*|\\s+or\\s+)c[1-9][0-9]{0,2})*";
+/** Not followed by more of a name or a file extension ("d3.js", "d1-x", "d1/y"). */
+const ENDS_THERE = "(?![\\w/-]|\\.\\w)";
+
+/**
+ * AgentX-written page text with the plan's own labels made plain, wherever the text names them: "decision d1" (or
+ * "decisions d1 and d2") reads as the decision's question, taken from the document the text is about, and "comment c1"
+ * as "that comment". A label for a decision that document does not have is dropped ("the decision"). A bare "d3" or
+ * "c1" with no such word before it is real text (a file, a flag) and is left alone.
+ */
+export function plainPageRefs(text: string, input: { decisions: ReadonlyMap<string, string> }): string {
+  const named = (id: string): string | undefined => {
+    const question = input.decisions.get(id.toLowerCase());
+    if (question === undefined) return undefined;
+    const flat = question.replace(/\s+/gu, " ").trim().replace(/[?.!]+$/u, "");
+    const characters = Array.from(flat);
+    return `"${characters.length > SHOWN_DECISION_MAX_CHARS ? `${characters.slice(0, SHOWN_DECISION_MAX_CHARS - 1).join("").trimEnd()}…` : flat}"`;
+  };
+  const lead = (first: string, plain: string) => (first === first.toUpperCase() && first !== first.toLowerCase() ? `${plain.charAt(0).toUpperCase()}${plain.slice(1)}` : plain);
+  const joined = (names: string[]) => (names.length <= 1 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)!}`);
+  return text
+    .replace(new RegExp(`\\b(the\\s+)?(decisions?)\\s+(${DECISION_LIST})${ENDS_THERE}(\\s*\\()?`, "giu"), (match: string, _the: string | undefined, _word: string, list: string, open: string | undefined) => {
+      const ids = list.match(/d[1-9][0-9]?/giu) ?? [];
+      const names = ids.map(named);
+      const first = match.charAt(0);
+      const plural = ids.length > 1;
+      if (open !== undefined) return `${lead(first, plural ? "the decisions" : "the decision")} (`;
+      const all = names.every((name): name is string => name !== undefined);
+      return `${lead(first, plural ? "the decisions" : "the decision")}${all ? ` ${joined(names)}` : ""}`;
+    })
+    .replace(new RegExp(`\\b(the\\s+)?(comments?)\\s+(${COMMENT_LIST})${ENDS_THERE}`, "giu"), (match: string, _the: string | undefined, _word: string, list: string) =>
+      lead(match.charAt(0), (list.match(/c[1-9][0-9]{0,2}/giu) ?? []).length > 1 ? "those comments" : "that comment"));
 }

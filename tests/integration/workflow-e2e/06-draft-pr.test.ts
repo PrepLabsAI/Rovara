@@ -26,9 +26,11 @@ describe("Suite 6: draft PR", () => {
     await published(e2e);
     const label = e2e.workflow().checkPolicy!.required[0]!.label;
     const body = (e2e.github.pullRequests[0]!.body ?? "").split("\n");
-    expect(body.slice(-8)).toEqual([
+    expect(body.slice(-10)).toEqual([
+      "<!-- agentx:checks-and-reviews -->",
       `Checks: ${label} passed`,
       "Reviews: code review passed; security review passed",
+      "<!-- /agentx:checks-and-reviews -->",
       `AgentX task: ${pageUrl(e2e)}`,
       "",
       "Opened as a draft by AgentX after the owner-approved plan, checks and reviews passed. Merge it on GitHub.",

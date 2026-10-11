@@ -1214,7 +1214,7 @@ describe("Slack-only workflow, end to end in one process", () => {
         threadObservations: [{ threadId: first.threadId, resolved: false }, { threadId: second.threadId, resolved: false }] } });
       expect(counts.feedback).toBe(1);
       const proposal = e2e.slack.lastPostWithAction("agentx_feedback_review_recommended");
-      expect(visibleSlackText(proposal.text)).toMatch(/^PR feedback is ready: 2 comments; 1 recommendations\./);
+      expect(visibleSlackText(proposal.text)).toMatch(/^PR feedback is ready: 2 comments; 1 recommendation\./);
       return { e2e, counts, pullRequest, reviewed, comments: [first, second] };
     }
 
@@ -1243,7 +1243,7 @@ describe("Slack-only workflow, end to end in one process", () => {
       const again = e2e.workflow();
       expect(again).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", feedbackReview: { status: "PENDING", reviewRef: { status: "COMPLETE" } } });
       expect(again.revision).toBeGreaterThan(reviewed.revision);
-      expect(visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text)).toMatch(/^PR feedback is ready: 3 comments; 1 recommendations\./);
+      expect(visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text)).toMatch(/^PR feedback is ready: 3 comments; 1 recommendation\./);
       expect(await e2e.repoFile("greeting.ts")).not.toContain("name.trim()");
     }, 120_000);
   });
@@ -1273,7 +1273,7 @@ describe("Slack-only workflow, end to end in one process", () => {
     await e2e.settle();
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING", feedbackReview: { status: "PENDING", reviewRef: { status: "COMPLETE" } } });
     const proposal = e2e.slack.lastPostWithAction("agentx_feedback_review_recommended");
-    expect(visibleSlackText(proposal.text)).toMatch(/^PR feedback is ready: 1 comments; 1 recommendations\./);
+    expect(visibleSlackText(proposal.text)).toMatch(/^PR feedback is ready: 1 comment; 1 recommendation\./);
     // The failed review's card lost its button once the retry moved the task on.
     const edits = e2e.slack.updates.filter((update) => update.ts === failedCard.ts);
     expect(edits.at(-1)?.blocks.some((block) => (block as { type: string }).type === "actions")).toBe(false);

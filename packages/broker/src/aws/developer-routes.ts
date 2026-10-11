@@ -64,7 +64,7 @@ export interface DeveloperApiConfiguration {
   channelByName?: (request: ChannelByNameRequest) => Promise<ChannelByNameResponse>;
   /** Verifies the Authorization header's developer access token (D17; verify-token.ts) and returns its claims. */
   verifyAccessToken(authorization: string | undefined): Promise<Record<string, unknown>>;
-  /** Spec 061 slice 2: the Slack service's request queue, set only with SLACK_REQUEST_QUEUE_URL; "Ask AgentX to answer" needs it. */
+  /** Spec 061 slice 2: the Slack service's request queue, set only with SLACK_REQUEST_QUEUE_URL; "Ask AgentX to reply to this comment" needs it. */
   slackRequestQueue?: SlackRequestQueue;
 }
 export interface DeveloperRouteDependencies {

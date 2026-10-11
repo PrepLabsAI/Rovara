@@ -33,7 +33,13 @@ import {
   submitWorkflowArtifact,
   parsePlanDocument,
   parseCommentAnswers,
+  commentRefInAuthor,
+  commentIdInAuthor,
+  COMMENT_AUTHOR_PREFIX,
+  UNPLACED_COMMENT_AUTHOR,
+  plainPageRefs,
   type CommentAnswer,
+  type PlanClaim,
   type WorkflowDecisionDetail,
   retiredClaimIds,
   canonicalPlanJson,
@@ -191,13 +197,13 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
-import { ownerAnswersFor, readDecisionDetail } from "../developer/owner-answers.js";
-import { isPageRefusal, writeCommentAnswer, writePlannerReplies, type SlackRequestQueue } from "../developer/page-comments.js";
+import { decisionComments, ownerAnswersFor, pageCommentsPrompt, promptComments, readDecisionDetail } from "../developer/owner-answers.js";
+import { isPageRefusal, plannerRepliesItem, writeCommentAnswer, writePlannerReplies, type SlackRequestQueue } from "../developer/page-comments.js";
 import { loadWorkflowDocument, readObjectText as readStoredText, shortenMarkdown } from "../developer/plan-artifacts.js";
 import { PLAN_EVIDENCE_PK, attachEvidence, planCitesCode, planEvidenceDueKey, planEvidenceEvent, planEvidenceJobItem, planEvidenceSources, type PlanEvidenceEvent, type PlanEvidenceJob } from "../developer/plan-evidence-jobs.js";
 import { resolvePlanEvidence } from "../developer/plan-evidence.js";
 import { WORKFLOW_APPROVAL_OUT_OF_DATE, WORKFLOW_BUTTON_OUT_OF_DATE } from "../developer/workflow-actions.js";
-import { approvedFeedbackFixes, withFeedbackFixes } from "../developer/pull-request-feedback-section.js";
+import { approvedFeedbackFixes, withFeedbackFixes, withStatusLines } from "../developer/pull-request-feedback-section.js";
 import { projectKey, requireProject } from "./project-records.js";
 import {
   TERMINAL, getItem, issueCapability, operationKey, operationRecord, outboxRecord, publicOperation, requestCancellation, requireOperation,
@@ -208,7 +214,7 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, releaseFinishedTaskQuietly, releaseFinishedTasksOf, releasePendingFinishedTasks, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, promptTagId, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowPullRequestStatusLines, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -571,6 +577,7 @@ function developerTaskActions(dependencies: AwsBrokerDependencies): DeveloperTas
     },
     startClose: (identity, workspace, requestId, extra, discardUnpublished) => startTaskClose(dependencies, identity, workspace, requestId, extra, discardUnpublished),
     deleteCompute: (workspace) => deleteWorkspaceCompute(dependencies, workspace),
+    canDeleteCompute: (workspace) => workspace.deploymentMode === "ec2-ebs" && dependencies.deleteEc2Session !== undefined,
     transact: async (items) => {
       await dependencies.documentClient.send(new TransactWriteCommand({ TransactItems: items }));
     },
@@ -671,7 +678,13 @@ export function createAwsBrokerHandler(input: AwsBrokerInput) {
           console.log(JSON.stringify({ component: "broker", event: "plan_evidence.sweep_failed", error: error instanceof Error ? error.name : "unknown" }));
           return { attempted: 0, started: 0 };
         });
-        return json({ ...dispatches, planEvidence }, "workflow-dispatch-recovery");
+        // Finished tasks whose release found the workspace busy, failed or never ran: their slot and workspace are given back.
+        const releases = await releasePendingFinishedTasks({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies), documentClient: dependencies.documentClient })
+          .catch((error: unknown) => {
+            console.log(JSON.stringify({ component: "broker", event: "developer.finished_task_sweep_failed", error: error instanceof Error ? error.name : "unknown" }));
+            return { attempted: 0, released: 0 };
+          });
+        return json({ ...dispatches, planEvidence, releases }, "workflow-dispatch-recovery");
       }
       catch (error) {
         console.log(JSON.stringify({ component: "broker", event: "workflow.dispatch_recovery_failed", error: error instanceof Error ? error.name : "unknown" }));
@@ -2154,6 +2167,7 @@ async function ensureThreadWorkspace(
     return createUnpreparedThreadWorkspace(dependencies, identity, requestId, project, include, includeSettingsRevision);
   }
   const effective = await effectiveSlackLimits(dependencies, limits);
+  await healSlackMemberSlots(dependencies, slack.requester, effective);
   const preparation = await newWorkspacePreparation(dependencies, identity, project, identity.ownerKey, requestId);
   const { teamId, userId } = slack.requester;
   try {
@@ -2350,6 +2364,7 @@ async function startThreadPreparation(
     return { outcome: "WORKSPACE", workspaceId: workspace.id, status: workspace.status, operationId: workspace.activeOperationId, created: false };
   }
   const effective = await effectiveSlackLimits(dependencies, limits);
+  await healSlackMemberSlots(dependencies, slack.requester, effective);
   // One read of the latest revision feeds every field below, so a revision registered meanwhile
   // cannot mix in. The fence condition refuses the write if the workspace changed since it was read.
   const latest = await requireLatestProject(dependencies, workspace.projectName);
@@ -2500,7 +2515,9 @@ async function taskAnswerWorkspace(
   commentId?: string,
 ): Promise<SlackThreadWorkspaceResult | undefined> {
   const workspace = await requireWorkspace(dependencies, shared.workspaceId);
-  if (workspace.status === "CLOSED") return undefined;
+  // A merged (or rejected) task gave back its workspace but is not closed: its thread is still answered, which needs no
+  // compute. A closed task's thread stays closed (the context below is undefined for it).
+  if (workspace.status === "CLOSED" && (await getItem<DeveloperTaskRecord>(dependencies, taskKey(shared.taskId)))?.releasedAt === undefined) return undefined;
   const taskContext = await workflowTaskAnswerContext(
     { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: developerTaskActions(dependencies) },
     { taskId: shared.taskId, workspaceId: shared.workspaceId, thread, ...(commentId === undefined ? {} : { commentId }) },
@@ -2555,7 +2572,7 @@ async function markCommentAnswered(dependencies: AwsBrokerDependencies, identity
   try {
     state = await writeCommentAnswer(
       { documentClient: dependencies.documentClient, tableName: dependencies.tableName, actions: developerTaskActions(dependencies), now: Date.now },
-      { taskId: body.taskId, commentId: body.commentId, outcome: body.outcome, ...(body.outcome === "ANSWERED" ? { text: body.text } : {}) },
+      { taskId: body.taskId, commentId: body.commentId, outcome: body.outcome, ...(body.outcome === "ANSWERED" ? { text: await withPlainRefs(dependencies, body.taskId, body.commentId, body.text) } : {}) },
     );
   } catch (error) {
     if (isPageRefusal(error)) throw agentXError("IDEMPOTENCY_CONFLICT", "that comment is not waiting for an answer");
@@ -2563,6 +2580,28 @@ async function markCommentAnswered(dependencies: AwsBrokerDependencies, identity
   }
   console.log(JSON.stringify({ component: "broker", event: "developer.comment_answer_written", taskId: body.taskId, outcome: state }));
   return { outcome: state === "answered" ? "ANSWERED" : "FAILED" };
+}
+
+/**
+ * AgentX's answer to a page comment with the plan's labels made plain: "decision d1" names the decision by its question,
+ * read from the document and version the question was asked on, and "comment c1" reads "that comment". The model is told
+ * not to use them; this is for the one that slips through. Where the document cannot be read, the label is only dropped.
+ */
+async function withPlainRefs(dependencies: AwsBrokerDependencies, taskId: string, commentId: string, text: string): Promise<string> {
+  if (!/\b(?:decisions?|comments?)\s+[dc][1-9][0-9]{0,2}\b/iu.test(text)) return text;
+  const decisions = new Map<string, string>();
+  try {
+    const asked = await getItem<{ document?: string; version?: number }>(dependencies, { pk: `DEVTASK#${taskId}`, sk: `COMMENT#${commentId}` });
+    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+    const entry = task?.workflow?.artifacts.find((artifact) => artifact.type === asked?.document && artifact.version === asked.version);
+    if (entry?.format === "structured") {
+      const loaded = await loadWorkflowDocument((key) => readObjectText(dependencies, key, EARLIER_PLAN_MAX_BYTES), entry, {}).catch(() => undefined);
+      if (loaded?.format === "structured") for (const decision of loaded.plan.decisions) decisions.set(decision.id, decision.question);
+    }
+  } catch {
+    // The labels are still removed below, only without the decision's words.
+  }
+  return plainPageRefs(text, { decisions });
 }
 
 const SHARED_VIEW_ONLY = "this thread follows a task started from an AI tool and is view only";
@@ -2761,6 +2800,21 @@ function openTaskCount(tasks: unknown): number {
 }
 
 /** The Slack limits with the admin's setting applied (R7); read only when a workspace is created. */
+/**
+ * Before a Slack thread workspace is charged: a member at the limit first gives back the slots their finished developer
+ * tasks still hold (the counter is shared, so they count here too). Best effort; never fails the request.
+ */
+async function healSlackMemberSlots(dependencies: AwsBrokerDependencies, requester: { teamId: string; userId: string }, effective: SlackServiceConfiguration): Promise<void> {
+  try {
+    const key = slackMemberLimitKey(requester.teamId, requester.userId);
+    const member = await getItem<{ count?: number }>(dependencies, key);
+    if ((member?.count ?? 0) < effective.memberWorkspaceLimit) return;
+    await releaseFinishedTasksOf({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies), documentClient: dependencies.documentClient }, key);
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "developer.finished_task_heal_failed", error: error instanceof Error ? error.name : "unknown" }));
+  }
+}
+
 async function effectiveSlackLimits(dependencies: AwsBrokerDependencies, configured: SlackServiceConfiguration): Promise<SlackServiceConfiguration> {
   const limits = await readWorkspaceLimits(dependencies.documentClient, dependencies.tableName, {
     member: configured.memberWorkspaceLimit,
@@ -2885,6 +2939,7 @@ async function retryThreadPreparation(
     const thread = await getItem<{ starterUserId?: unknown }>(dependencies, slackThreadKey(identity.ownerKey));
     const starter = typeof thread?.starterUserId === "string" ? thread.starterUserId : undefined;
     const effective = starter === undefined ? await effectiveSlackLimits(dependencies, limits) : undefined;
+    if (effective !== undefined) await healSlackMemberSlots(dependencies, slack.requester, effective);
     const charge: TransactItems = effective === undefined
       ? [{ ConditionCheck: {
         TableName: dependencies.tableName,
@@ -4814,7 +4869,7 @@ async function reconcilePullRequestUpdate(
   );
   if (record.expectedHeadCommit === input.commit) {
     // A retried callback after the push was recorded: its description is brought up to date too.
-    if (expected.workflowCandidate !== undefined) await describeFeedbackFixes(dependencies, operation, record);
+    if (expected.workflowCandidate !== undefined) await describeFeedbackFixes(dependencies, operation, record, expected.workflowCandidate.candidateDigest);
     return { url: record.url, state: record.state, reconciled: true };
   }
   if (record.expectedHeadCommit !== expected.expectedHeadCommit) {
@@ -4852,7 +4907,7 @@ async function reconcilePullRequestUpdate(
       ":now": new Date().toISOString(),
     },
   }));
-  if (expected.workflowCandidate !== undefined) await describeFeedbackFixes(dependencies, operation, record);
+  if (expected.workflowCandidate !== undefined) await describeFeedbackFixes(dependencies, operation, record, expected.workflowCandidate.candidateDigest);
   return { url: remote.url, state: remote.state, reconciled: false };
 }
 
@@ -4864,8 +4919,12 @@ const DESCRIPTION_UPDATE_MAX_MS = 5_000;
  * of that pull request's comments ("Fixes from PR feedback"), kept up to date across rounds. Best effort and bounded in
  * time (at most the newest approvals' reports are read): the push is recorded whatever happens here, and a description
  * that could not be updated, or whose section no longer fits, is logged. GitHub's description is read just before the write.
+ *
+ * The same update brings the description's checks and reviews lines up to date (withStatusLines) when the task's current
+ * code is `candidateDigest`, the fix just pushed, and its checks ran on exactly that code: the description then names the
+ * checks and reviews of the code on the pull request, never an earlier round's.
  */
-async function describeFeedbackFixes(dependencies: AwsBrokerDependencies, operation: Pick<OperationRecord, "id" | "workspaceId">, record: PullRequestRecord): Promise<void> {
+async function describeFeedbackFixes(dependencies: AwsBrokerDependencies, operation: Pick<OperationRecord, "id" | "workspaceId">, record: PullRequestRecord, candidateDigest: string): Promise<void> {
   const log = (event: string, error?: unknown) => console.log(JSON.stringify({ component: "broker", event, operationId: operation.id,
     ...(error === undefined ? {} : { error: error instanceof Error ? error.name : "unknown" }) }));
   // Past the time limit the update is abandoned: it must never write later (Lambda may resume a frozen promise in a
@@ -4882,7 +4941,12 @@ async function describeFeedbackFixes(dependencies: AwsBrokerDependencies, operat
     if (late()) return;
     // The description as GitHub has it now, read just before the write, so a person's edit since is kept.
     const current = (await dependencies.githubPullRequests.getPullRequest(record.repositoryUrl, record.number)).body;
-    const next = withFeedbackFixes(current, fixes, earlier);
+    const workflow = task.workflow;
+    const pushedChecked = workflow.candidate?.digest === candidateDigest && workflow.verification?.candidateDigest === candidateDigest;
+    const status = pushedChecked ? withStatusLines(current, workflowPullRequestStatusLines(workflow)) : undefined;
+    const withStatus = status !== undefined && status.length <= PULL_REQUEST_BODY_MAX_CHARS ? status : current;
+    const fixed = withFeedbackFixes(withStatus, fixes, earlier);
+    const next = { ...fixed, ...(fixed.body === undefined && withStatus !== current ? { body: withStatus } : {}) };
     if (next.dropped) log("workflow.pull_request_description_section_dropped");
     if (next.body === undefined) return;
     if (late()) {
@@ -5596,6 +5660,11 @@ async function completedTurnItems(
   return [{ Put: { TableName: table, Item: item, ConditionExpression: "attribute_not_exists(pk)" } }];
 }
 
+/** A finished workflow task gives back its workspace slot and its workspace (releaseFinishedTask); never throws. */
+async function releaseIfFinished(dependencies: AwsBrokerDependencies, taskId: string): Promise<void> {
+  await releaseFinishedTaskQuietly({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies), documentClient: dependencies.documentClient }, taskId);
+}
+
 /** Refresh all linked PRs from the GitHub API before an owner decision (webhook payloads are hints only). */
 async function refreshTaskFeedbackForOwnerDecision(dependencies: AwsBrokerDependencies, taskId: string): Promise<void> {
   if (dependencies.githubPullRequests.getPullRequestFeedback === undefined) {
@@ -5660,7 +5729,7 @@ export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependen
       // The fix is on the pull request as if its result had come: its description lists it too.
       for (const push of pushes) {
         const record = await getItem<PullRequestRecord>(dependencies, pullRequestKey(push.workspaceId, push.repositoryId, push.number));
-        if (record !== undefined) await describeFeedbackFixes(dependencies, { id: `landed-${deliveryId}`, workspaceId: push.workspaceId }, record);
+        if (record !== undefined) await describeFeedbackFixes(dependencies, { id: `landed-${deliveryId}`, workspaceId: push.workspaceId }, record, push.candidateDigest);
       }
     },
     reviewedComments: async (taskId, bundleDigests) => {
@@ -5705,6 +5774,8 @@ export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependen
     now: new Date().toISOString(),
   });
   const linked = await getItem<GithubWorkflowPullRequestRecord>(dependencies, githubWorkflowPullRequestKey(event.fullName, event.number));
+  // A merge that finished the task gives back its slot and workspace (again for a redelivery, which changes nothing).
+  if (linked !== undefined) await releaseIfFinished(dependencies, linked.taskId);
   if (linked !== undefined) {
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(linked.taskId));
     if (task !== undefined && dependencies.developer !== undefined) {
@@ -6216,6 +6287,8 @@ async function completedWorkflowItems(
   let planUnreadable: DeveloperTaskRecord["planUnreadable"] | null | undefined;
   // A stored plan that cites code: the job that reads that code later, committed with the plan.
   let evidenceJob: { artifactId: string; artifactSha256: string } | undefined;
+  /** The record of the comments the planner answered, committed with the plan it answered them in. */
+  let recordedReplies: ReturnType<typeof plannerRepliesItem> | undefined;
   if (operation.workflowMode === "IMPLEMENT" || operation.workflowMode === "CHECKS") {
     if (terminalStatus !== "SUCCEEDED") {
       next = blockWorkflow(task.workflow, terminalError?.includes(WORKFLOW_HISTORY_REWRITTEN_MESSAGE) === true ? WORKFLOW_HISTORY_REWRITTEN_MESSAGE
@@ -6444,7 +6517,10 @@ async function completedWorkflowItems(
       planUnreadable = stored.planUnreadable;
       evidenceJob = stored.evidenceJob;
       if (stored.inlineEvidence !== undefined) inlineEvidence?.push({ ...stored.inlineEvidence, taskId: task.taskId });
-      if (stored.plannerReplies !== undefined) plannerReplies?.push(stored.plannerReplies);
+      if (stored.plannerReplies !== undefined) {
+        plannerReplies?.push(stored.plannerReplies);
+        recordedReplies = plannerRepliesItem(dependencies.tableName, stored.plannerReplies, now);
+      }
     }
   } else {
     next = blockWorkflow(task.workflow, workflowRunEndedReason("PLAN", terminalStatus), now);
@@ -6473,7 +6549,8 @@ async function completedWorkflowItems(
       ...(planUnreadable === undefined || planUnreadable === null ? {} : { ":unreadable": planUnreadable }),
       ...(planUnreadable === null && task.threadNotesFedThrough !== undefined ? { ":fedFrom": task.threadNotesFedThrough } : {}) },
   } }, ...dispatch,
-  ...(evidenceJob === undefined ? [] : [{ Put: { TableName: dependencies.tableName, Item: planEvidenceJobItem({ taskId: task.taskId, ...evidenceJob, now: Date.parse(now) }), ConditionExpression: "attribute_not_exists(pk)" } }])];
+  ...(evidenceJob === undefined ? [] : [{ Put: { TableName: dependencies.tableName, Item: planEvidenceJobItem({ taskId: task.taskId, ...evidenceJob, now: Date.parse(now) }), ConditionExpression: "attribute_not_exists(pk)" } }]),
+  ...(recordedReplies === undefined ? [] : [{ Put: recordedReplies }])];
 }
 
 /** What the broker keeps of a planning answer it could not read: the problems found, at most this many. */
@@ -6510,10 +6587,14 @@ async function storePlanAnswer(
   // Claim numbers an earlier structured document of this task had and its latest dropped may not come back. A document
   // that cannot be read back or fails its digest is skipped.
   const earlier: PlanDocument[] = [];
+  let previousVersion: PlanDocument | undefined;
   for (const entry of workflow.artifacts) {
     if (entry.format !== "structured") continue;
     const loaded = await loadWorkflowDocument((key) => readObjectText(dependencies, key, EARLIER_PLAN_MAX_BYTES), entry, {}).catch(() => undefined);
-    if (loaded?.format === "structured") earlier.push(loaded.plan);
+    if (loaded?.format === "structured") {
+      earlier.push(loaded.plan);
+      if (entry.type === artifactType) previousVersion = loaded.plan;
+    }
   }
   // A coding plan's `checks` member proposes its checks; they run only once the owner approves this plan.
   const parsed = parsePlanDocument(content, {
@@ -6527,7 +6608,8 @@ async function storePlanAnswer(
   });
   if (!parsed.ok) return unreadable(parsed.errors);
   // The owner's real request (and the replies this step was given) is what the plan says it is for, not the planner's words.
-  const plan: PlanDocument = { ...parsed.plan, why: await planWhyEntries(dependencies, task, parsed.plan.why) };
+  const step = await planStepComments(dependencies, task, artifactType);
+  const plan: PlanDocument = planWithCommentIds({ ...parsed.plan, why: await planWhyEntries(dependencies, task, parsed.plan.why) }, step, previousVersion);
   const canonical = canonicalPlanJson(plan);
   if (Buffer.byteLength(canonical, "utf8") > WORKFLOW_PLAN_MAX_BYTES) return unreadable(["the plan is too long once saved"]);
 
@@ -6547,7 +6629,7 @@ async function storePlanAnswer(
       format: "structured",
     },
   });
-  const replies = await plannerRepliesFor(dependencies, task, artifactType, content, { artifactId, version: next.artifacts.at(-1)?.version ?? 1 });
+  const replies = plannerRepliesFor(content, plan, step, task, { artifactId, version: next.artifacts.at(-1)?.version ?? 1 });
   const withReplies = replies === undefined ? {} : { plannerReplies: replies };
   if (!planCitesCode(plan)) return { next, planUnreadable: null, ...withReplies };
   const artifactSha256 = sha(canonical);
@@ -6570,31 +6652,99 @@ async function storePlanAnswer(
   return { next, planUnreadable: null, inlineEvidence: { artifactId, artifactSha256, bundle, prefix }, ...withReplies };
 }
 
-/** The planner's answers to the comments the owner sent back with Request changes, for the version just stored. */
+/** The planner's answers to the comments the owner sent with a decision, for the version just stored. */
 interface PlannerReplies { taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: CommentAnswer[] }
 
+const DOCUMENT_ORDER: readonly string[] = ["requirements", "design", "plan"];
+
+/** The comments the step that wrote a document was given: the decision's detail, and how many of them its prompt showed (refs c1 up to c<shown>). */
+interface PlanStepComments { detail: WorkflowDecisionDetail; shown: number }
+
 /**
- * Spec 061 slice 2: when this planning step follows a Request changes that sent comments, the planner's
- * `agentx-comment-answers` block read against that decision's comments (refs c1, c2 and so on). Undefined when the step
- * did not follow such a decision, or its record cannot be read; a missing or unreadable block is no answers.
+ * Spec 061 slice 2: the comments a planning step was given, when it follows a decision that sent some. Request changes:
+ * the same kind of document, rewritten. Approve: the next document, which builds on the approved one and handles the
+ * comments sent with the approval. Undefined when the step did not follow such a decision, or its record cannot be read.
+ * A comment the prompt left out for room is not counted: the planner never read it.
  */
-async function plannerRepliesFor(
-  dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord & { workflow: WorkflowSnapshot }, artifactType: string, content: string,
-  stored: { artifactId: string; version: number },
-): Promise<PlannerReplies | undefined> {
+async function planStepComments(
+  dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord & { workflow: WorkflowSnapshot }, artifactType: string,
+): Promise<PlanStepComments | undefined> {
   const workflow = task.workflow;
   const last = [...workflow.decisions].reverse().find((decision) => (decision.source ?? "GATE") === "GATE");
-  if (last?.decision !== "REQUEST_CHANGES" || (last.commentsIncluded ?? 0) === 0) return undefined;
-  if (!workflow.artifacts.some((artifact) => artifact.sha256 === last.artifactDigest && artifact.type === artifactType)) return undefined;
+  if ((last?.decision !== "REQUEST_CHANGES" && last?.decision !== "APPROVE") || (last.commentsIncluded ?? 0) === 0) return undefined;
+  const decided = workflow.artifacts.find((artifact) => artifact.sha256 === last.artifactDigest);
+  if (decided === undefined) return undefined;
+  if (last.decision === "APPROVE" ? DOCUMENT_ORDER.indexOf(artifactType) <= DOCUMENT_ORDER.indexOf(decided.type) : decided.type !== artifactType) return undefined;
   try {
     const detail = await readDecisionDetail(dependencies, task.taskId, last.requestId);
     if (detail === undefined || detail.includedCommentIds.length === 0) return undefined;
-    const refs = new Set(detail.includedCommentIds.map((_, index) => `c${index + 1}`));
-    return { taskId: task.taskId, ...stored, detail, answers: parseCommentAnswers(content, refs) };
+    // The prompt cut the comments to fit; the same cut, from the same (locked) comments, says which ones the planner read.
+    const comments = await decisionComments(dependencies, task.taskId, detail.includedCommentIds);
+    const shown = comments.length === detail.includedCommentIds.length
+      ? pageCommentsPrompt(promptComments(comments), promptTagId(task, last.requestId)).shown : detail.includedCommentIds.length;
+    return { detail, shown };
   } catch (error) {
     console.log(JSON.stringify({ component: "broker", event: "developer.planner_replies_unread", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }));
     return undefined;
   }
+}
+
+/** The comment IDs a plan's quotes credit (`comment:<ID>`), anywhere in its claim tree. */
+function creditedCommentIds(plan: PlanDocument): Set<string> {
+  const found = new Set<string>();
+  const walk = (claims: readonly PlanClaim[]) => {
+    for (const claim of claims) {
+      for (const item of claim.evidence ?? []) {
+        const id = item.kind === "quote" ? commentIdInAuthor(item.author) : undefined;
+        if (id !== undefined) found.add(id);
+      }
+      walk(claim.children ?? []);
+    }
+  };
+  walk(plan.claims);
+  return found;
+}
+
+/**
+ * A plan whose quotes credit a page comment as "comment c1" (a ref that only means something in this step) with each
+ * swapped for `comment:<comment ID>`, which stays true in every later version. A ref this step did not give the planner
+ * becomes plain "a comment". A `comment:<ID>` the planner writes itself is kept only for a comment this step showed it, or
+ * one the previous version of this document already credited (the planner copies those); anything else that names a
+ * comment, in any other form, becomes "a comment" too.
+ */
+function planWithCommentIds(plan: PlanDocument, step: PlanStepComments | undefined, previous?: PlanDocument): PlanDocument {
+  const allowed = new Set([...(step?.detail.includedCommentIds.slice(0, step.shown) ?? []), ...(previous === undefined ? [] : creditedCommentIds(previous))].map((id) => id.toLowerCase()));
+  const credit = (author: string): string => {
+    const ref = commentRefInAuthor(author);
+    if (ref !== undefined) {
+      const position = Number(ref.slice(1));
+      const id = step === undefined || position > step.shown ? undefined : step.detail.includedCommentIds[position - 1];
+      return id === undefined ? UNPLACED_COMMENT_AUTHOR : `${COMMENT_AUTHOR_PREFIX}${id}`;
+    }
+    if (!/comment:/iu.test(author)) return author;
+    const id = commentIdInAuthor(author);
+    return id !== undefined && allowed.has(id) ? `${COMMENT_AUTHOR_PREFIX}${id}` : UNPLACED_COMMENT_AUTHOR;
+  };
+  const walk = (claims: readonly PlanClaim[]): PlanClaim[] => claims.map((claim) => ({
+    ...claim,
+    ...(claim.evidence === undefined ? {} : { evidence: claim.evidence.map((item) => (item.kind === "quote" ? { ...item, author: credit(item.author) } : item)) }),
+    ...(claim.children === undefined ? {} : { children: walk(claim.children) }),
+  }));
+  return { ...plan, claims: walk(plan.claims) };
+}
+
+/**
+ * The planner's `agentx-comment-answers` block read against the step's comments (refs c1, c2 and so on): only the ones
+ * its prompt showed. A missing or unreadable block (an older worker never writes one) is no answers. Undefined when the
+ * step was given no comments.
+ */
+function plannerRepliesFor(content: string, plan: PlanDocument, step: PlanStepComments | undefined, task: { taskId: string }, stored: { artifactId: string; version: number }): PlannerReplies | undefined {
+  if (step === undefined) return undefined;
+  const refs = new Set(step.detail.includedCommentIds.slice(0, step.shown).map((_, index) => `c${index + 1}`));
+  // The reply says a decision or comment label in words (the model is told not to use them; this is for one that slips through).
+  const decisions = new Map(plan.decisions.map((decision) => [decision.id, decision.question]));
+  const answers = parseCommentAnswers(content, refs).map((answer) => ({ ...answer, reason: plainPageRefs(answer.reason, { decisions }) }));
+  return { taskId: task.taskId, ...stored, detail: step.detail, answers };
 }
 
 /** Writes the planner's answers as replies from AgentX, after the plan committed. Best effort: a failure is logged with counts only. */
@@ -6849,6 +6999,8 @@ async function recordTerminalResult(
   if (closeCanFinish && taskPointer !== undefined) await finishDeveloperClose(dependencies, taskPointer, operation.id, operation.createdAt, operation.discardUnpublished === true && closePreflight?.safeToClose !== true);
   // Gap 6: start any step this result made due (its dispatch row committed above); a lost start is the sweep's.
   if (taskPointer !== undefined) await dispatchWorkflowContinuation(dependencies, taskPointer.taskId);
+  // A task that finished while this ran (merged during a feedback review, say) gives back its slot and workspace now.
+  if (taskPointer !== undefined && !closeCanFinish) await releaseIfFinished(dependencies, taskPointer.taskId);
   // Spec 061: read the code a new plan cites, in the background; a lost start is the sweep's.
   if (recordedStatus === terminalStatus) {
     await startPlanEvidenceJobs(dependencies, evidenceJobs);
@@ -7711,7 +7863,7 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
   const functionName = requiredEnvironment("DEVELOPER_IDENTITY_FUNCTION_ARN");
   const teamId = process.env.SLACK_TEAM_ID ?? "";
   return {
-    // Spec 061 slice 2: "Ask AgentX to answer" queues on the Slack service's request queue; set only where that service runs.
+    // Spec 061 slice 2: "Ask AgentX to reply to this comment" queues on the Slack service's request queue; set only where that service runs.
     ...(process.env.SLACK_REQUEST_QUEUE_URL ? { slackRequestQueue: slackRequestQueue(process.env.SLACK_REQUEST_QUEUE_URL) } : {}),
     issuer,
     env: requiredEnvironment("AGENTX_ENV"),
@@ -7733,7 +7885,7 @@ function developerConfiguration(): DeveloperApiConfiguration | undefined {
     }),
   };
 }
-/** The Slack request queue (FIFO) as "Ask AgentX to answer" sends to it. */
+/** The Slack request queue (FIFO) as "Ask AgentX to reply to this comment" sends to it. */
 function slackRequestQueue(queueUrl: string): SlackRequestQueue {
   const client = new SQSClient(awsClientConfiguration);
   return {

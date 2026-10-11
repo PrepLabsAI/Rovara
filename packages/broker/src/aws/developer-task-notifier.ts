@@ -9,13 +9,13 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { INDEX_EXPIRY_ATTRIBUTE, NUDGE_WINDOW_MS, plannerReplyCommentId, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, NUDGE_WINDOW_MS, sameJsonContent, AdminChangePendingRecordSchema, planClaimCount, planSummaryLines, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, describeWorkflowCheckChanges, redactText, workflowCheckCommandText, workflowFeedbackCheckChanges, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, type PendingChange, type PlanClaim, type PlanDocument, type WorkflowArtifact, type WorkflowCheck, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
 import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { loadWorkflowDocument } from "../developer/plan-artifacts.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
 import { answeredWorkflowCard, cleanLine, documentSummaryLines, feedbackReviewFailedMessage, planReviewLink, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
-import { deriveTaskStatus, failureCategory, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
+import { deriveTaskStatus, failureCategory, plannerRepliesKey, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
 import { isConditional } from "./broker-shared.js";
 import { requiredEnvironment } from "./lambda.js";
 import { parseSlackSecrets } from "./slack-ingress.js";
@@ -130,12 +130,13 @@ export function feedbackReviewSlackMessage(input: {
     : input.highestPriority === "OPTIONAL" ? "optional" : "none recommended";
   const recommendationSummary = input.recommendedFindingIds.length === 0
     ? "No fixes are recommended."
-    : `${input.recommendedFindingIds.length} recommendations.`;
+    : `${input.recommendedFindingIds.length} ${input.recommendedFindingIds.length === 1 ? "recommendation" : "recommendations"}.`;
   const questions = (input.ownerQuestions ?? []).filter(({ question }) => question.trim().length > 0);
   // The answer is bound to exactly the questions the card shows; the others are answered from the details page.
   const shownQuestions = questions.slice(0, FEEDBACK_QUESTIONS_SHOWN);
   const recommended = input.recommendedFindingIds.length;
   const details = `<${slackText(url.href)}|Open details>.`;
+  const comments = `${input.totalComments} ${input.totalComments === 1 ? "comment" : "comments"}`;
   // Labels and commands are the plan's and the reviewer's words: each is made inert. A corrected check's command is at
   // most 300 plain characters with no backtick, so it is shown in full, its spacing kept, in exact code style (a backtick
   // is still replaced, so none can close it).
@@ -151,8 +152,8 @@ export function feedbackReviewSlackMessage(input: {
   let after = "";
   if (questions.length === 0) {
     before = checkLines.length === 0
-      ? `PR feedback is ready: ${input.totalComments} comments; ${recommendationSummary} Highest priority: ${priority}. ${details}`
-      : `PR feedback is ready: ${input.totalComments} comments; ${recommendationSummary} Highest priority: ${priority}.`;
+      ? `PR feedback is ready: ${comments}; ${recommendationSummary} Highest priority: ${priority}. ${details}`
+      : `PR feedback is ready: ${comments}; ${recommendationSummary} Highest priority: ${priority}.`;
     if (checkLines.length > 0) after = details;
   } else {
     const hidden = questions.length - shownQuestions.length;
@@ -160,7 +161,7 @@ export function feedbackReviewSlackMessage(input: {
     const several = shownQuestions.length > 1;
     const scope = recommended === 0 ? ""
       : ` Your answer covers only the ${several ? "questions" : "question"}. Approve ${recommended} recommended makes only the recommended ${recommended === 1 ? "fix" : "fixes"} and leaves the ${several ? "questions" : "question"} open.`;
-    before = `PR feedback is ready: ${input.totalComments} comments${recommended === 0 ? "" : `; ${recommendationSummary} Highest priority: ${priority}`}.`;
+    before = `PR feedback is ready: ${comments}${recommended === 0 ? "" : `; ${recommendationSummary} Highest priority: ${priority}`}.`;
     after = [
       "The reviewer needs your answer before changing any code:",
       ...shownQuestions.map(({ question }) => `> ${escapedLine(question, FEEDBACK_QUESTION_MAX)}`), ...more,
@@ -680,20 +681,44 @@ async function newThreadReplies(deps: NotifierDependencies, task: DeveloperTaskR
   return count;
 }
 
+/** The saved document types in the order the steps write them. */
+const DOCUMENT_ORDER = ["requirements", "design", "plan"] as const;
+const DOCUMENT_NAMES: Record<(typeof DOCUMENT_ORDER)[number], "requirements" | "design" | "coding plan"> = { requirements: "requirements", design: "design", plan: "coding plan" };
+
 /**
  * After Request changes that sent comments on the version before `approval`: how many of those comments the planner
- * answered in `approval` (each answer is a reply with an ID made from the comment and this version).
+ * answered in `approval` (each answer is a reply with an ID made from the comment and this version). For the first version of
+ * a document, the same for the comments sent with the Approve of the document before it.
  */
 async function commentAnswersFor(deps: NotifierDependencies, task: DeveloperTaskRecord, workflow: WorkflowSnapshot, approval: WorkflowArtifact): Promise<WorkflowMessageContext["commentAnswers"]> {
   const previous = workflow.artifacts.find((artifact) => artifact.type === approval.type && artifact.version === approval.version - 1);
-  if (previous === undefined) return undefined;
-  const decision = [...workflow.decisions].reverse().find((entry) => entry.artifactDigest === previous.sha256 && (entry.source ?? "GATE") === "GATE");
-  if (decision?.decision !== "REQUEST_CHANGES" || (decision.commentsIncluded ?? 0) === 0) return undefined;
+  const before = DOCUMENT_ORDER[DOCUMENT_ORDER.indexOf(approval.type as (typeof DOCUMENT_ORDER)[number]) - 1];
+  let decision: WorkflowSnapshot["decisions"][number] | undefined;
+  if (previous !== undefined) {
+    decision = [...workflow.decisions].reverse().find((entry) => entry.artifactDigest === previous.sha256 && (entry.source ?? "GATE") === "GATE");
+    if (decision?.decision !== "REQUEST_CHANGES") return undefined;
+  } else if (before !== undefined) {
+    const digests = new Set(workflow.artifacts.filter((artifact) => artifact.type === before).map((artifact) => artifact.sha256));
+    decision = [...workflow.decisions].reverse().find((entry) => (entry.source ?? "GATE") === "GATE" && entry.decision === "APPROVE" && entry.artifactDigest !== undefined && digests.has(entry.artifactDigest));
+  }
+  if (decision === undefined || (decision.commentsIncluded ?? 0) === 0) return undefined;
   const detail = await getItem<{ includedCommentIds?: unknown }>(deps, { pk: `DEVTASK#${task.taskId}`, sk: `DECISION#${decision.requestId}` });
   const ids = Array.isArray(detail?.includedCommentIds) ? detail.includedCommentIds.filter((id): id is string => typeof id === "string") : [];
   if (ids.length === 0) return undefined;
-  const found = await Promise.all(ids.map((id) => getItem(deps, { pk: `DEVTASK#${task.taskId}`, sk: `COMMENT#${plannerReplyCommentId(id, approval.id)}` })));
-  return { answered: found.filter((item) => item !== undefined).length, total: ids.length, fromVersion: previous.version };
+  // What the planner answered is recorded with the plan itself, so it is there whenever the card is built. A plan stored
+  // before that has no record, and its card says nothing about replies.
+  const recorded = await getItem<{ answered?: unknown }>(deps, plannerRepliesKey(task.taskId, approval.id));
+  if (recorded === undefined || !Array.isArray(recorded.answered)) return undefined;
+  const answers = recorded.answered.flatMap((entry) => (typeof (entry as { commentId?: unknown } | null)?.commentId === "string" ? [(entry as { commentId: string }).commentId] : []));
+  const answered = answers.length;
+  if (previous !== undefined) return { answered, total: ids.length, fromVersion: previous.version };
+  // Sent with an Approve: the page's comments of that document, with a link to the first one the planner answered.
+  const first = answers[0];
+  const sent = await Promise.all(ids.map((id) => getItem<{ author?: { owner?: unknown } }>(deps, { pk: `DEVTASK#${task.taskId}`, sk: `COMMENT#${id}` })));
+  return {
+    answered, total: ids.length, fromVersion: 0,
+    approvedOn: { document: DOCUMENT_NAMES[before!], ...(first === undefined ? {} : { commentId: first }), allOwners: sent.every((item) => item?.author?.owner === true) },
+  };
 }
 
 /** The reopened pull requests a notice names (repository and number); a malformed entry is left out. */

@@ -224,7 +224,7 @@ function checkListSection(heading: string, checks: readonly WorkflowCheck[], kin
     text += line;
     listed += 1;
   }
-  if (listed < checks.length) text += `\nand ${checks.length - listed} more ${kind} checks`;
+  if (listed < checks.length) text += `\nand ${checks.length - listed} more ${kind} ${checks.length - listed === 1 ? "check" : "checks"}`;
   return { type: "section", text: { type: "mrkdwn", text } };
 }
 

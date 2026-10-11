@@ -581,10 +581,10 @@ describe("the task page's documents, versions and history", () => {
   describe("the script", () => {
     interface Fake {
       id: string; tagName: string; parentElement?: Fake; firstElementChild?: Fake; open: boolean; attributes: Record<string, string>;
-      classes: Set<string>; scrolled: unknown[];
+      classes: Set<string>; scrolled: unknown[]; focused: unknown[];
     }
     const element = (id: string, tagName: string, parent?: Fake, attributes: Record<string, string> = {}): Fake => {
-      const fake: Fake = { id, tagName, attributes, classes: new Set(), scrolled: [], open: false };
+      const fake: Fake = { id, tagName, attributes, classes: new Set(), scrolled: [], focused: [], open: false };
       if (parent !== undefined) fake.parentElement = parent;
       return fake;
     };
@@ -596,6 +596,9 @@ describe("the task page's documents, versions and history", () => {
       for (const item of elements) {
         Object.assign(item, {
           getAttribute: (name: string) => item.attributes[name] ?? null,
+          hasAttribute: (name: string) => name in item.attributes,
+          setAttribute: (name: string, value: string) => { item.attributes[name] = value; },
+          focus: (options: unknown) => { item.focused.push(options); },
           scrollIntoView: (options: unknown) => { item.scrolled.push(options); },
           classList: { add: (name: string) => item.classes.add(name), remove: (name: string) => item.classes.delete(name) },
         });
@@ -625,6 +628,9 @@ describe("the task page's documents, versions and history", () => {
       const { timers } = run(page.all, { hash: "#coding-plan/2.1", search: "" });
       expect(page.claim.id).toBe("coding-plan-v2-2-1");
       expect(page.claim.scrolled).toEqual([{ block: "start" }]);
+      // Focus moves to the target (without scrolling again), so a keyboard or screen-reader user lands there.
+      expect(page.claim.focused).toEqual([{ preventScroll: true }]);
+      expect(page.claim.attributes["tabindex"]).toBe("-1");
       for (const item of [page.kind, page.folded, page.parent, page.claim]) expect(item.open).toBe(true);
       expect(page.old.open).toBe(false);
       expect(page.claim.classes.has("flash")).toBe(true);
@@ -879,7 +885,7 @@ describe("the task page through the broker", () => {
     const member = await open(TEAMMATE);
     expect(member.statusCode).toBe(200);
     expect(member.body).toContain("Waiting for the owner&#39;s approval");
-    expect(member.body).not.toContain("your approval");
+    expect(member.body).not.toContain("Waiting for your approval");
     slack.down = true;
     const unconfirmed = await open(TEAMMATE);
     expect(unconfirmed.statusCode).toBe(404);
@@ -1189,8 +1195,8 @@ describe("deciding and commenting on the task page (slice 2)", () => {
     const bar = body.slice(body.indexOf('<div class="decide-bar"'));
     expect(bar).toMatch(/^<div class="decide-bar" role="region" aria-label="Decide">/);
     expect(bar).toContain("1 to answer");
-    expect(bar).toMatch(/<button type="button" id="decide-approve"[^>]*hidden>Approve<\/button>/);
-    expect(bar).toMatch(/<button type="button" id="decide-request-changes"[^>]*hidden>Request changes<\/button>/);
+    expect(bar).toMatch(/<button type="button" id="decide-approve"[^>]*hidden>Approve coding plan v2<\/button>/);
+    expect(bar).toMatch(/<button type="button" id="decide-request-changes"[^>]*hidden>Request changes to coding plan v2<\/button>/);
     // The bar sits with the current coding plan, not the earlier version.
     expect(body.indexOf('class="decide-bar"')).toBeGreaterThan(body.indexOf('id="coding-plan-v2"'));
     expect(body).toContain('<dialog id="decide-dialog" aria-labelledby="decide-title">');
@@ -1202,6 +1208,71 @@ describe("deciding and commenting on the task page (slice 2)", () => {
     expect(idle).not.toContain('class="decide-bar"');
     expect(idle).not.toContain('id="decide-dialog"');
     expect(idle).not.toContain('type="radio"');
+  });
+
+  it("the bar's buttons name the document they act on, whichever document is open", async () => {
+    const requirements = structuredDoc("requirements", 1, planDocument({ claims: [{ id: "1", text: "Retries happen." }], decisions: [] }), { approved: true });
+    const design = structuredDoc("design", 1, planDocument({ claims: [{ id: "1", text: "Retries wait." }], decisions: [] }), { approved: true });
+    const codingPlan = structuredDoc("coding plan", 1, planDocument({ claims: [{ id: "1", text: "Edit retry.ts." }], decisions: [] }));
+    const opened = await renderAt("?doc=design", { documents: [requirements, design, codingPlan], waiting: { kind: "coding plan", version: 1, artifactDigest: digest }, revision: 7, commentSeq: 3, access: owner });
+    const bar = opened.body.slice(opened.body.indexOf('<div class="decide-bar"'));
+    expect(bar).toMatch(/id="decide-approve"[^>]*hidden>Approve coding plan v1<\/button>/);
+    expect(bar).toMatch(/id="decide-request-changes"[^>]*hidden>Request changes to coding plan v1<\/button>/);
+    // No decisions to answer: nothing to count (the script shows no control and no note).
+    expect(bar).toContain('<button type="button" id="decide-next" hidden></button><span id="decide-count" role="status"></span>');
+    // A waiting design is named the same way.
+    const waitingDesign = await render({ documents: [requirements, { ...design, approved: false }], waiting: { kind: "design", version: 1, artifactDigest: digest }, access: owner });
+    expect(waitingDesign.body).toMatch(/id="decide-approve"[^>]*hidden>Approve design v1<\/button>/);
+    expect(waitingDesign.body).toMatch(/id="decide-request-changes"[^>]*hidden>Request changes to design v1<\/button>/);
+  });
+
+  describe("Changed after approval compares the levels the earlier document wrote", () => {
+    const badged = (body: string, anchor: string, version: number, id: string): boolean =>
+      new RegExp(`<details id="${anchor}-v${version}-${id}"[^>]*><summary>(.*?)</summary>`).exec(body)![1]!.includes("Changed after approval");
+    const tree = (claims: Array<[string, string]>) => planDocument({ claims: [{ id: "1", text: claims[0]![1], children: claims.slice(1).map(([id, text]) => ({ id, text })) }], decisions: [] });
+    const approvedRequirements = structuredDoc("requirements", 1, planDocument({ claims: [{ id: "1", text: "Retries happen." }, { id: "2", text: "Keep it to one small function." }], decisions: [] }), { approved: true });
+
+    it("a design that rewords an approved requirements claim is badged on that claim only", async () => {
+      const design = structuredDoc("design", 1, planDocument({ claims: [{ id: "1", text: "Retries happen." }, { id: "2", text: "Keep it to one tiny function.", children: [{ id: "2.1", text: "It lives in retry.ts." }] }], decisions: [] }));
+      const { body } = await render({ documents: [approvedRequirements, design], access: owner });
+      expect(count(body, /Changed after approval/g)).toBe(1);
+      expect(badged(body, "design", 1, "2")).toBe(true);
+      expect(badged(body, "design", 1, "1")).toBe(false);
+      expect(badged(body, "design", 1, "2-1")).toBe(false);
+    });
+
+    it("claim numbers deeper than the earlier document wrote are another document's and are never compared", async () => {
+      // Requirements that slipped in level 2 claims do not make the design's own level 2 claims "changed".
+      const slipped = structuredDoc("requirements", 1, tree([["1", "Retries happen."], ["1.1", "The wait is a second."], ["1.2", "A retry is logged."]]), { approved: true });
+      const design = structuredDoc("design", 1, tree([["1", "Retries happen."], ["1.1", "A timer waits between tries."], ["1.2", "The log line names the try."]]));
+      const first = (await render({ documents: [slipped, design], access: owner })).body;
+      expect(first).toContain("A timer waits between tries.");
+      expect(first).not.toContain("Changed after approval");
+      // The design owns levels 1 and 2 for the coding plan; its level 3 claims, whatever the numbers, are not compared.
+      const approvedDesign = structuredDoc("design", 1, planDocument({ claims: [{ id: "1", text: "Retries happen.", children: [{ id: "1.1", text: "A timer waits.", children: [{ id: "1.1.1", text: "Slipped in by the design." }] }] }], decisions: [] }), { approved: true });
+      const plan = structuredDoc("coding plan", 1, planDocument({ claims: [{ id: "1", text: "Retries happen.", children: [{ id: "1.1", text: "A timer waits.", children: [{ id: "1.1.1", text: "Edit retry.ts." }] }] }], decisions: [] }));
+      expect((await render({ documents: [slipped, approvedDesign, plan], access: owner })).body).not.toContain("Changed after approval");
+      // The same coding plan rewording the design's level 2 claim is badged.
+      const reworded = structuredDoc("coding plan", 1, planDocument({ claims: [{ id: "1", text: "Retries happen.", children: [{ id: "1.1", text: "A timer pauses.", children: [{ id: "1.1.1", text: "Edit retry.ts." }] }] }], decisions: [] }));
+      const body = (await render({ documents: [slipped, approvedDesign, reworded], access: owner })).body;
+      expect(badged(body, "coding-plan", 1, "1-1")).toBe(true);
+      expect(badged(body, "coding-plan", 1, "1-1-1")).toBe(false);
+    });
+
+    it("a claim reworded after its own document was approved is badged too, on the later version only", async () => {
+      const approved = structuredDoc("requirements", 1, tree([["1", "Retries happen."]]), { approved: true, current: false });
+      const later = structuredDoc("requirements", 2, tree([["1", "Retries happen twice."]]));
+      const { body } = await render({ documents: [approved, later], access: owner });
+      expect(count(body, /Changed after approval/g)).toBe(1);
+      expect(badged(body, "requirements", 2, "1")).toBe(true);
+      expect(badged(body, "requirements", 1, "1")).toBe(false);
+    });
+
+    it("an unapproved earlier version is nothing to change after", async () => {
+      const first = structuredDoc("requirements", 1, tree([["1", "Retries happen."]]), { current: false });
+      const second = structuredDoc("requirements", 2, tree([["1", "Retries happen twice."]]));
+      expect((await render({ documents: [first, second], access: owner })).body).not.toContain("Changed after approval");
+    });
   });
 
   it("others see Only owners decide", async () => {
@@ -1240,7 +1311,7 @@ describe("deciding and commenting on the task page (slice 2)", () => {
       { id: "00000000-0000-4000-8000-000000000001", document: "plan" as const, version: 1, target: { kind: "claim" as const, id: "1" }, author: { kind: "person" as const, name: "Sam", owner: false, you: false }, text: "Looks fine.", createdAt: "2026-10-11T10:00:00.000Z", edited: true, deleted: false, sent: true, rev: 2, agentx: "not_answered" as const },
       { id: "00000000-0000-4000-8000-000000000002", document: "plan" as const, version: 2, target: { kind: "document" as const }, author: { kind: "person" as const, name: "Priya", owner: true, you: true }, text: "", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: true, sent: false, rev: 2 },
       { id: "00000000-0000-4000-8000-000000000003", document: "plan" as const, version: 2, target: { kind: "claim" as const, id: "2" }, author: { kind: "person" as const, name: "Priya", owner: true, you: true }, text: "Why?", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: false, sent: false, rev: 1, agentx: "couldnt" as const },
-      { id: "00000000-0000-4000-8000-000000000004", parentId: "00000000-0000-4000-8000-000000000001", document: "plan" as const, version: 1, target: { kind: "claim" as const, id: "1" }, author: { kind: "agentx" as const, name: "AgentX", owner: false, you: false }, text: "Kept.", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: false, sent: false, rev: 1, planner: { outcome: "not_changed" as const, version: 2 } },
+      { id: "00000000-0000-4000-8000-000000000004", parentId: "00000000-0000-4000-8000-000000000001", document: "plan" as const, version: 1, target: { kind: "claim" as const, id: "1" }, author: { kind: "agentx" as const, name: "AgentX", owner: false, you: false }, text: "Kept.", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: false, sent: false, rev: 1, planner: { outcome: "not_changed" as const, version: 2, document: "plan" as const } },
     ];
     for (const access of [owner, commenter]) {
       const { body } = await deciding({ access, pageComments: comments, pageSuggestions: [{ document: "plan", decisionId: "d1", optionId: "five", name: "Sam", you: false }] });

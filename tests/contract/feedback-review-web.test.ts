@@ -80,7 +80,7 @@ describe("authenticated PR feedback review web journey", () => {
     expect(response.body).toContain("AI-generated advisory");
     expect(response.body).toContain("Approving starts the selected code changes and checks");
     expect(response.body).toContain("Handle retries");
-    expect(response.body).toContain("1 comment grouped into 1 findings");
+    expect(response.body).toContain("1 comment grouped into 1 finding.<");
     expect(response.body).toContain("Approve recommended fixes");
     expect(response.body).toContain("Choose findings");
     expect(response.body).toContain("See proposed fix, comments and evidence");

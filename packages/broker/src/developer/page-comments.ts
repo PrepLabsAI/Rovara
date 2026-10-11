@@ -16,7 +16,7 @@ import { isConditional } from "../aws/broker-shared.js";
 import { plainName } from "../aws/task-web.js";
 import { loadWorkflowDocument, type LoadedDocument } from "./plan-artifacts.js";
 import { can, taskOpen, type TaskAccess } from "./task-access.js";
-import type { DeveloperTaskRecord } from "./task-records.js";
+import { plannerRepliesKey, type DeveloperTaskRecord } from "./task-records.js";
 
 type CommentDependencies = Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName" | "actions" | "now" | "log">;
 type TableDependencies = Pick<DeveloperTaskRouteDependencies, "documentClient" | "tableName">;
@@ -491,8 +491,8 @@ export function suggestionsFor(
 }
 
 /**
- * The planner's answers to the comments a Request changes sent (refs c1, c2 and so on, in the decision's order), written
- * as replies from AgentX under each comment's thread. Each reply has an ID derived from the comment and the new version,
+ * The planner's answers to the comments a Request changes or an Approve sent (refs c1, c2 and so on, in the decision's
+ * order), written as replies from AgentX under each comment's thread, on the document the comment was made on. Each reply has an ID derived from the comment and the new version,
  * so a repeat finds it already there. Each one counts toward the task's 300 items; once the cap is reached the rest are
  * left out and logged (counts only, never text). A write that meets another in flight is tried once more; any other
  * failure skips that one reply (logged) and the rest are still written.
@@ -511,6 +511,7 @@ export async function writePlannerReplies(
     const reply = TaskCommentSchema.parse({
       schemaVersion: 1, taskId, commentId: plannerReplyCommentId(commentId, input.artifactId), parentId: comment.parentId ?? comment.commentId,
       document: comment.document, version: comment.version, target: comment.target,
+      // Which document handled the comment, and the claim it cites, are worked out when the page is read (nothing more is stored).
       author: { kind: "agentx", source: "planner", outcome: answer.outcome, forVersion: input.version },
       text: answer.reason, createdAt: iso(deps), rev: 1,
     });
@@ -538,6 +539,28 @@ export async function writePlannerReplies(
     }
   }
   return { written };
+}
+
+/** The most answers one plan's record holds: the comments one decision sends are capped at 25. */
+const PLANNER_REPLIES_RECORDED_MAX = 25;
+
+/**
+ * The record kept with a plan that answered the comments sent with a decision, written in the same transaction as the plan
+ * so it is there whenever the plan is: the comments the planner answered (each by ID, with its outcome; the same ones
+ * `writePlannerReplies` then writes as replies) and the version. The Slack card for the plan counts from it, so the card
+ * never waits for the replies. It is not a comment and takes no place in the task's comment count.
+ */
+export function plannerRepliesItem(tableName: string, input: { taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: readonly CommentAnswer[] }, at: string) {
+  const answered = new Map<string, "done" | "not_changed">();
+  for (const answer of input.answers) {
+    const commentId = /^c[1-9][0-9]*$/u.test(answer.ref) ? input.detail.includedCommentIds[Number(answer.ref.slice(1)) - 1] : undefined;
+    if (commentId !== undefined && !answered.has(commentId) && answered.size < PLANNER_REPLIES_RECORDED_MAX) answered.set(commentId, answer.outcome);
+  }
+  return {
+    TableName: tableName,
+    Item: { ...plannerRepliesKey(input.taskId, input.artifactId), entityType: "PLANNER_REPLIES", taskId: input.taskId, artifactId: input.artifactId, version: input.version,
+      answered: [...answered].map(([commentId, outcome]) => ({ commentId, outcome })), at },
+  };
 }
 
 /** What a failed planner reply write means: already written (a repeat), the task is full, or anything else (thrown). */
@@ -578,7 +601,7 @@ async function setAsk(deps: CommentDependencies, comment: TaskComment, state: No
 }
 
 /**
- * "Ask AgentX to answer" (spec 061 slice 2): queues the comment's question for the Slack service, which answers it in
+ * "Ask AgentX to reply to this comment" (spec 061 slice 2): queues the comment's question for the Slack service, which answers it in
  * task mode with no tools and writes the answer back. Only for a task started in Slack (its own thread) when the queue is
  * set up; otherwise the comment says AgentX can answer only there. Limited per person (6 an hour), per task (20 an hour)
  * and per thread (5 AgentX answers); a limited ask leaves the comment as it is. A queue that refuses the message marks the

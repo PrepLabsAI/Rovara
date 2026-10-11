@@ -401,7 +401,7 @@ export class ControlPlaneStack extends Stack {
       description: "Hosted AgentX Slack orchestrator; the only principal allowed on /v1/service routes",
     });
     slackRequestQueue.grantConsumeMessages(slackOrchestratorRole);
-    // Spec 061 slice 2: "Ask AgentX to answer" on the task page queues the comment for the Slack service (send only).
+    // Spec 061 slice 2: "Ask AgentX to reply to this comment" on the task page queues the comment for the Slack service (send only).
     slackRequestQueue.grantSendMessages(broker);
     broker.addEnvironment("SLACK_REQUEST_QUEUE_URL", slackRequestQueue.queueUrl);
     slackThreads.grantReadWriteData(slackOrchestratorRole);

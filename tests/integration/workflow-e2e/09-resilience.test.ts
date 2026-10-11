@@ -11,7 +11,7 @@ import { planAnswer, planDocument } from "../../support/plan-documents.js";
 import { visibleSlackText } from "../../support/strict-slack.js";
 import { EDITS, MERGED, OPENED_PR, PLAN, PUSHED_FIX, actionIds, atPlanReview, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";
 
-const READY_ONE = /^PR feedback is ready: 1 comments; 1 recommendations\./;
+const READY_ONE = /^PR feedback is ready: 1 comment; 1 recommendation\./;
 const STILL_WATCHING = "I'm still watching the pull request and will finish this task when it's merged.";
 
 async function waiting(options: Parameters<typeof createWorkflowE2E>[0] = {}) {

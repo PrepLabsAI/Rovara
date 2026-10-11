@@ -1,5 +1,5 @@
 // What the planner is asked for: one agentx-plan block, and the document it is changing shown as data.
-import { PLAN_DOCUMENT_INFO_STRING, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, canonicalPlanJson, parsePlanDocument } from "@agentx/contracts";
+import { PLAN_DOCUMENT_INFO_STRING, commentRefInAuthor, WORKER_INVOCATION_FEATURES, WorkerInvocationSchema, canonicalPlanJson, parsePlanDocument } from "@agentx/contracts";
 import { describe, expect, it } from "vitest";
 import { asksForCodeAnchors, planChecksInstructions, planDocumentInstructions, withoutCodeAnchorText } from "../../packages/broker/src/aws/broker-shared.js";
 import { planDocument } from "../support/plan-documents.js";
@@ -14,6 +14,33 @@ describe("planDocumentInstructions", () => {
     expect(text).toContain("32,768 bytes");
     expect(text).toContain("at most 50 claims and 20 decisions");
     expect(text).not.toContain("previous document");
+  });
+
+  it("asks that a quoted page comment be credited by its ref alone, which the page turns into who wrote it", () => {
+    const text = planDocumentInstructions({ kind: "plan", path: "FULL" });
+    expect(text).toContain('To quote a comment from the task page, write its author as "comment c1" (the comment\'s ref, nothing else); AgentX shows who wrote it.');
+  });
+
+  it("shows a quote of an earlier step's comment as 'an earlier comment' (its ref means another comment now), and keeps one credited by comment ID", () => {
+    const id = "6e0f4b0a-7c1d-4f7e-9a52-0c3f1f3b2a10";
+    const plan = planDocument({ claims: [{ id: "1", text: "Kept.", evidence: [
+      { kind: "quote", text: "Keep it short.", author: "owner (comment c1)" },
+      { kind: "quote", text: "Keep it tidy.", author: `comment:${id}` },
+      { kind: "quote", text: "From a person.", author: "Priya" },
+    ], children: [{ id: "1.1", text: "Child.", evidence: [{ kind: "quote", text: "Deeper.", author: "comment c2" }] }] }] });
+    const text = planDocumentInstructions({ kind: "plan", path: "FULL", previous: { kind: "design", version: 1, json: canonicalPlanJson(plan) } });
+    const block = text.slice(text.indexOf("The previous document"));
+    expect(block).toContain('"author":"an earlier comment"');
+    expect(block).toContain(`"author":"comment:${id}"`);
+    expect(block).toContain('"author":"Priya"');
+    expect(block).not.toMatch(/comment c[0-9]/);
+    expect((block.match(/an earlier comment/g) ?? [])).toHaveLength(2);
+  });
+
+  it("reads 'comment c1' only where the word comment comes first, so a standard's name is never a comment", () => {
+    expect(commentRefInAuthor("owner (comment c1)")).toBe("c1");
+    expect(commentRefInAuthor("Comment C12")).toBe("c12");
+    for (const author of ["ISO C11 standard", "Section C2 of RFC 9110", "owner (c1)", "c3"]) expect(commentRefInAuthor(author)).toBeUndefined();
   });
 
   it("gives each kind its own job, and the checks member to the coding plan and the Quick plan only", () => {

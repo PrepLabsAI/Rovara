@@ -371,6 +371,8 @@ describe("AI-generated PR feedback advisory", () => {
     expect(sessionMode).toBe("REVIEW");
     expect(reviewPrompt).toContain("Do not invent paths; inspect the read-only candidate first.");
     expect(reviewPrompt).toContain("fileChanges");
+    // The summary opens with one short sentence: only that sentence is shown in the pull request's description.
+    expect(reviewPrompt).toContain("opens with one short sentence (under 100 characters)");
     expect(review.report.blockReason).toBeUndefined();
     expect(review.report.status).toBe("COMPLETE");
     expect(review.report).toMatchObject({ workflowRevision: 7, operationMode: "FEEDBACK_REVIEW", qualification: "AI_GENERATED_ADVISORY" });

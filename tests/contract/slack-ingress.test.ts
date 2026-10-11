@@ -1186,7 +1186,7 @@ describe("starting a task from a Slack mention (gap 3)", () => {
     expect(failing.posts.at(-1)?.text).toContain("EvStartFail1");
     const limited = harness({ ...starting, ...waitingForPratik, workflowSelection: { throws: true, errorCode: "WORKSPACE_LIMIT" } });
     await send(limited.handler, threadReply("EvStartFail2", `<@${bot}> quick`));
-    expect(limited.posts.at(-1)?.text).toContain("open-task limit");
+    expect(limited.posts.at(-1)?.text).toContain("limit of open AgentX tasks");
   });
 
   it("refuses to start or choose a Slack task with an admin message when the ingress cannot read task threads", async () => {

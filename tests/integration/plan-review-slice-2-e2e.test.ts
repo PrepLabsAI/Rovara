@@ -145,13 +145,14 @@ describe("deciding and commenting on the task page, end to end", () => {
     // Maya reloads (the new comments are on the page), picks Above and approves with both comments.
     const tab = await openTaskPage(e2e, OWNER, { search: "?doc=coding-plan" });
     expect(tab.text()).toContain("Above reads better on a phone.");
-    expect(tab.byId("decide-next").textContent).toBe("1 to answer");
+    expect(tab.byId("decide-next").textContent).toBe("Next decision (1 to answer)");
     radio(tab, "d1", "above").click();
-    expect(tab.byId("decide-next").textContent).toBe("All answered");
+    expect(tab.byId("decide-next").hidden).toBe(true);
+    expect(tab.byId("decide-count").textContent).toBe("All decisions answered");
     tab.byId("decide-approve").click();
     expect(tab.byId("decide-title").textContent).toBe("Approve Coding plan v1");
     expect(tab.byId("decide-submit").textContent).toBe("Approve and start coding");
-    expect(readable(tab.byId("decide-changed-list"))).toBe("d1 Where does the banner go?: You chose Above (AgentX recommended Below)");
+    expect(readable(tab.byId("decide-changed-list"))).toBe("Where does the banner go?: You chose Above (AgentX recommended Below)");
     expect(tab.byId("decide-comments-title").textContent).toBe("Comments to send (2)");
     expect(codingRuns(e2e)).toEqual([]);
     tab.byId("decide-submit").click();
@@ -233,7 +234,7 @@ describe("deciding and commenting on the task page, end to end", () => {
     expect(whole.querySelector(".replies .comment-text")!.textContent).toBe("Not changed because: The copy is already one short line.");
     // Sam sees his sent comment can no longer be changed; the comment left out is still his to edit, and still open.
     const samV2 = await openTaskPage(e2e, SAM, { search: "?doc=coding-plan" });
-    expect(samV2.text()).toContain("Sent with a decision, so it can't be changed.");
+    expect(samV2.text()).toContain("Sent with Request changes, so it can't be edited.");
     const open = samV2.document.querySelector('[data-comments="claim:1"]')!;
     expect(readable(open)).toContain("Could it say how many tries are left?");
     expect(open.querySelector(".comment-sent")).toBeNull();
@@ -383,7 +384,7 @@ describe("deciding and commenting on the task page, end to end", () => {
     const posts = e2e.slack.posts.length;
     const sam = await openTaskPage(e2e, SAM, { search: "?doc=coding-plan" });
     const form = await sam.comment("claim:2.1", "Why is Below the recommended place?", { ask: true });
-    expect(readable(form)).toContain("Ask AgentX to answer");
+    expect(readable(form)).toContain("Ask AgentX to reply to this comment");
     expect(queue.sent).toHaveLength(1);
     const waiting = await openTaskPage(e2e, SAM, { search: "?doc=coding-plan" });
     expect(readable(waiting.document.querySelector('[data-comments="claim:2.1"]')!)).toContain("AgentX is answering…");

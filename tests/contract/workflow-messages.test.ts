@@ -166,6 +166,9 @@ describe("workflow Slack messages", () => {
   it("acknowledges each owner decision by what it was, not by the stage alone", () => {
     const full = (phase: string, decision: string) => snapshot("PLAN", "RUNNING", { path: "FULL", reviewPhase: phase, decisions: [{ requestId: "33333333-3333-4333-8333-333333333333", workflowRevision: 6, decision, actorId: "a".repeat(64), actorRole: "TASK_OWNER", reason: "r", artifactDigest: "c".repeat(64), at: now }] });
     expect(workflowMessage({ taskId, workflow: full("DESIGN", "APPROVE") })?.text).toBe("Requirements approved. Writing the design next.");
+    // The approver is named the same way at every approval gate (0.2.12 live test).
+    expect(workflowMessage({ taskId, ownerSlackUserId: "U0123456789", workflow: full("DESIGN", "APPROVE") })?.text).toBe("Requirements approved by <@U0123456789>. Writing the design next.");
+    expect(workflowMessage({ taskId, ownerSlackUserId: "U0123456789", workflow: full("IMPLEMENTATION_PLAN", "APPROVE") })?.text).toBe("Design approved by <@U0123456789>. Writing the coding plan next.");
     expect(workflowMessage({ taskId, workflow: full("DESIGN", "REQUEST_CHANGES") })?.text).toBe("Got it. Revising the design with your changes.");
     expect(workflowMessage({ taskId, workflow: snapshot("PLAN", "RUNNING") })?.text).toContain("Working on the coding plan");
     const approved = snapshot("IMPLEMENT", "RUNNING", { checkPolicy, decisions: [{ requestId: "33333333-3333-4333-8333-333333333333", workflowRevision: 5, decision: "APPROVE", actorId: "a".repeat(64), actorRole: "TASK_OWNER", reason: "r", artifactDigest: "c".repeat(64), at: now }] });
@@ -459,8 +462,25 @@ describe("workflow Slack messages", () => {
     it("the answered-comments line", () => {
       const text = cardOf({}, { commentAnswers: { answered: 2, total: 3, fromVersion: 1 } }).text;
       expect(text).toContain("\nAgentX answered 2 of 3 comments from v1.\n");
-      expect(cardOf({}, { commentAnswers: { answered: 1, total: 1, fromVersion: 2 } }).text).toContain("AgentX answered 1 of 1 comments from v2.");
+      expect(cardOf({}, { commentAnswers: { answered: 1, total: 1, fromVersion: 2 } }).text).toContain("AgentX answered 1 of 1 comment from v2.");
       expect(cardOf({}).text).not.toContain("AgentX answered");
+    });
+
+    it("after an Approve with comments, one line says AgentX replied, linked to the first reply on the earlier document's page", () => {
+      const approvedOn = (extra: Record<string, unknown> = {}) => ({ document: "design", commentId: "c0ffee00-0000-4000-8000-000000000001", allOwners: true, ...extra });
+      const card = (answers: Record<string, unknown>) => cardOf({}, { commentAnswers: { answered: 2, total: 2, fromVersion: 0, approvedOn: approvedOn(), ...answers } }).text;
+      const link = `${page}?doc=design#comment-c0ffee00-0000-4000-8000-000000000001`;
+      expect(card({})).toContain(`\n<${link}|AgentX replied to your 2 comments on the design.>\n`);
+      expect(card({ answered: 1, total: 1 })).toContain("|AgentX replied to your 1 comment on the design.>");
+      // Some comments left unanswered, comments by teammates, and another document.
+      expect(card({ answered: 1 })).toContain("|AgentX replied to 1 of your 2 comments on the design.>");
+      expect(card({ approvedOn: approvedOn({ allOwners: false }) })).toContain("|AgentX replied to 2 comments on the design.>");
+      expect(card({ approvedOn: approvedOn({ document: "requirements" }) })).toContain(`<${page}?doc=requirements#comment-c0ffee00-0000-4000-8000-000000000001|AgentX replied to your 2 comments on the requirements.>`);
+      // No reply was written (an older worker), so nothing is said; and it never says "answered N of M from v".
+      expect(card({ answered: 0 })).not.toContain("AgentX replied");
+      expect(card({})).not.toContain("AgentX answered");
+      // Without the page's address the line is plain text.
+      expect(cardOf({}, { taskPageUrl: undefined, commentAnswers: { answered: 2, total: 2, fromVersion: 0, approvedOn: approvedOn() } }).text).toContain("\nAgentX replied to your 2 comments on the design.\n");
     });
 
     it("lists every claim of a tiny plan, children indented, and does not say 'full'", () => {

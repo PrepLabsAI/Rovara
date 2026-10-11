@@ -2,7 +2,7 @@
 // first level, with evidence, decisions, badges and what changed. A pure function of its input apart from the
 // drawing of diagrams. All model text is redacted and escaped here; the markup carries class names only (the page
 // owns the styles) and no inline style or event handler.
-import { diffPlanDocuments, redactText, type PlanClaim, type PlanDecision, type PlanDocument, type PlanDocumentKind, type PlanEvidenceBundle, type PlanEvidenceInput } from "@agentx/contracts";
+import { commentIdInAuthor, commentRefInAuthor, creditsPageComment, diffPlanDocuments, redactText, type PlanClaim, type PlanDecision, type PlanDocument, type PlanDocumentKind, type PlanEvidenceBundle, type PlanEvidenceInput } from "@agentx/contracts";
 import { escapeHtml } from "../web-session.js";
 import { renderDiagram } from "./diagrams.js";
 import { commentCountBadge, renderThreads, suggestionLines, targetKey, type PageCommentView, type PageSuggestionView } from "./comments.js";
@@ -18,7 +18,14 @@ export interface RenderPlanInput {
   /** When the document was stored and the time now (epoch milliseconds): the current version's code is still being loaded for a short while after it was stored. */
   createdAt?: string; now?: number;
   previous?: { version: number; plan: PlanDocument };
+  /**
+   * The approved document of the nearest earlier step, with how deep its own claims go (requirements write level 1, the
+   * design levels 1 and 2): a claim reworded since is badged. Deeper IDs are another document's numbering and never compare.
+   */
   approvedEarlier?: PlanDocument;
+  approvedEarlierDepth?: number;
+  /** The latest approved earlier version of this same document: a claim reworded since is badged too. */
+  approvedSame?: PlanDocument;
   checks?: Array<{ id?: string; label: string; proposed: boolean; proves: string[]; status: string }>;
   /** Checks the task knows that the table does not list (an optional check not chosen): their threads stay with the checks. */
   knownChecks?: Array<{ id: string; label: string }>;
@@ -33,6 +40,12 @@ export interface RenderPlanInput {
   deciding?: boolean;
   /** Every structured version of this document by number, to quote a removed claim's words. */
   plans?: ReadonlyMap<number, PlanDocument>;
+  /**
+   * For a quote that credits a page comment: the comments of the task by ID (who wrote each, whether it is the reader's,
+   * and its words), and, for a plan stored before comments were credited by ID, the comment each ref ("c1") meant.
+   */
+  quoteComments?: Record<string, { name: string; you: boolean; text: string }>;
+  commentRefs?: Record<string, string>;
 }
 
 /** How many claims, per level, and how many decisions in all, show before the rest fold away. */
@@ -119,6 +132,58 @@ function codeEvidence(context: Context, claim: PlanClaim, index: number, item: E
   return `<figure class="evidence evidence-code evidence-missing"><figcaption>${range}</figcaption>${note}<p class="evidence-status">${sentence}</p></figure>`;
 }
 
+/** The most of a comment's own words a quote shows. */
+const QUOTE_SHOWN_MAX_CHARS = 300;
+
+/**
+ * Whether `quote` is in the words of `comment`: the whole comment, or at least three whole words of it in a row (case and
+ * spacing aside, a trailing ellipsis and quote marks dropped). "test" is not in "latest", and a fragment of two words is
+ * not enough to put a name on.
+ */
+function quotedFrom(comment: string, quote: string): boolean {
+  const words = (value: string): string[] => value.replace(/[“”"]/gu, " ").replace(/(\.{3}|…)\s*$/u, "").split(/\s+/u).filter((word) => word !== "");
+  const said = words(quote);
+  if (said.length === 0) return false;
+  if (said.join(" ").toLowerCase() === words(comment).join(" ").toLowerCase()) return true;
+  if (said.length < 3) return false;
+  const escaped = said.map((word) => word.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&")).join("\\s+");
+  return new RegExp(`(?<![\\p{L}\\p{N}])${escaped}(?![\\p{L}\\p{N}])`, "iu").test(comment);
+}
+
+/** The comment a quote credits (by ID, or by ref for a plan stored before comments were credited by ID), and whether the quoted words are in it. */
+function creditedComment(context: Context, item: Extract<PlanEvidenceInput, { kind: "quote" }>): { id: string; name: string; you: boolean; text: string; matches: boolean } | undefined {
+  const ref = commentRefInAuthor(item.author);
+  const id = commentIdInAuthor(item.author) ?? (ref === undefined ? undefined : context.input.commentRefs?.[ref]);
+  const comment = id === undefined ? undefined : context.input.quoteComments?.[id];
+  return id === undefined || comment === undefined ? undefined : { id, ...comment, matches: quotedFrom(comment.text, item.text) };
+}
+
+/**
+ * The words a quote shows. A quote that credits a comment whose words it matches shows the comment's own words (cut), never
+ * the planner's copy of them, so no model-chosen fragment carries a person's name.
+ */
+function quoteText(context: Context, item: Extract<PlanEvidenceInput, { kind: "quote" }>): string {
+  const credited = creditsPageComment(item.author) ? creditedComment(context, item) : undefined;
+  if (credited?.matches !== true) return t(item.text);
+  const characters = Array.from(credited.text.replace(/\s+/gu, " ").trim());
+  return t(characters.length > QUOTE_SHOWN_MAX_CHARS ? `${characters.slice(0, QUOTE_SHOWN_MAX_CHARS - 1).join("").trimEnd()}…` : characters.join(""));
+}
+
+/**
+ * Who a quote credits. A planner credits a page comment by reference ("comment c1", stored as the comment's ID). The page
+ * says "Your comment" or "Sam's comment", linked to the comment's thread, only when the quoted words are in that comment.
+ * Anything else, including a reference it cannot place, reads "A comment (paraphrased by AgentX)": the planner wrote those
+ * words, and a name must never sit on them. The reference itself is never shown.
+ */
+function quoteAuthor(context: Context, item: Extract<PlanEvidenceInput, { kind: "quote" }>): string {
+  if (!creditsPageComment(item.author)) return t(item.author);
+  const credited = creditedComment(context, item);
+  if (credited === undefined) return "A comment (paraphrased by AgentX)";
+  const link = `href="#comment-${escapeHtml(credited.id)}"`;
+  if (!credited.matches) return `<a ${link}>A comment (paraphrased by AgentX)</a>`;
+  return `<a ${link}>${credited.you ? "Your comment" : `${t(credited.name)}'s comment`}</a>`;
+}
+
 async function evidenceHtml(context: Context, claim: PlanClaim, index: number, item: PlanEvidenceInput): Promise<string> {
   switch (item.kind) {
     case "code":
@@ -126,7 +191,7 @@ async function evidenceHtml(context: Context, claim: PlanClaim, index: number, i
     case "sketch":
       return `<figure class="evidence evidence-sketch"><figcaption>Sketch: not in the repository yet <span class="lang">${t(item.language)}</span></figcaption>${item.note === undefined ? "" : `<p class="evidence-note">${t(item.note)}</p>`}<pre><code>${t(item.code)}</code></pre></figure>`;
     case "quote":
-      return `<blockquote class="evidence evidence-quote"><p>${t(item.text)}</p><footer>${t(item.author)}</footer></blockquote>`;
+      return `<blockquote class="evidence evidence-quote"><p>${quoteText(context, item)}</p><footer>${quoteAuthor(context, item)}</footer></blockquote>`;
     case "flow":
     case "schema":
     case "stateMachine": {
@@ -153,7 +218,7 @@ function decisionHtml(context: Context, decision: PlanDecision, withLink: boolea
       return `<li class="option${recommended ? " recommended" : ""}" data-option="${t(option.id)}"><input type="radio" name="answer-${t(decision.id)}" value="${t(option.id)}" id="${inputId}"${recommended ? " checked" : ""}>`
         + `<label for="${inputId}"><span class="option-label">${t(option.label)}</span>${recommended ? ' <span class="badge badge-recommended">AgentX recommends</span>' : ""} <span class="consequence">${t(option.consequence)}</span></label></li>`;
     }).join("");
-    return `<div class="decision" id="${id}" data-decision="${t(decision.id)}"><fieldset class="answer"><legend><span class="decision-id">${t(decision.id)}</span> ${t(decision.question)}</legend>${where}<ul class="options">${options}</ul></fieldset>${after}</div>`;
+    return `<div class="decision" id="${id}" data-decision="${t(decision.id)}"><fieldset class="answer"><legend>${t(decision.question)}</legend>${where}<ul class="options">${options}</ul></fieldset>${after}</div>`;
   }
   const suggesting = context.input.current && context.input.access?.canSuggest === true;
   const mine = suggestions.find((suggestion) => suggestion.you)?.optionId;
@@ -162,7 +227,7 @@ function decisionHtml(context: Context, decision: PlanDecision, withLink: boolea
     const suggest = !suggesting ? "" : ` <button type="button" class="suggest" data-decision="${t(decision.id)}" data-option="${t(option.id)}"${mine === option.id ? ' data-mine="true"' : ""} hidden>${mine === option.id ? "You suggest this · Undo" : "Suggest this"}</button>`;
     return `<li class="option${recommended ? " recommended" : ""}" data-option="${t(option.id)}"><span class="option-label">${t(option.label)}</span>${recommended ? ' <span class="badge badge-recommended">AgentX recommends</span>' : ""} <span class="consequence">${t(option.consequence)}</span>${suggest}</li>`;
   }).join("");
-  return `<div class="decision" id="${id}" data-decision="${t(decision.id)}"><p class="decision-question"><span class="decision-id">${t(decision.id)}</span> ${t(decision.question)}</p>${where}<ul class="options">${options}</ul>${after}</div>`;
+  return `<div class="decision" id="${id}" data-decision="${t(decision.id)}"><p class="decision-question">${t(decision.question)}</p>${where}<ul class="options">${options}</ul>${after}</div>`;
 }
 
 function badges(context: Context, claim: PlanClaim): string {
@@ -203,7 +268,7 @@ function decisionListHtml(context: Context, plan: PlanDocument): string {
   if (plan.decisions.length === 0) return '<p class="no-decisions">No decisions needed</p>';
   const items = plan.decisions.map((decision) => {
     const question = escapeHtml(cut(redactText(decision.question), DECISION_QUESTION_MAX_CHARS));
-    return `<li><a class="decision-link" href="#${escapeHtml(decisionAnchor(context, decision.id))}">${t(decision.id)} \u2014 ${question} (on claim ${t(decision.claimId)})</a></li>`;
+    return `<li><a class="decision-link" href="#${escapeHtml(decisionAnchor(context, decision.id))}">${question} (on claim ${t(decision.claimId)})</a></li>`;
   }).join("");
   return `<nav class="decision-list" aria-label="Decisions"><p class="decision-list-title">Decisions:</p><ul>${items}</ul></nav>`;
 }
@@ -221,7 +286,7 @@ function whatChangedHtml(context: Context): string {
     const claim = from.get(id);
     return `<li>${linked ? claimLink(context, id) : `<span class="claim-id">${t(id)}</span>`} ${claim === undefined ? "" : t(claim.text)}</li>`;
   }).join("");
-  const decisionItems = (ids: string[], from: Map<string, PlanDecision>): string => ids.map((id) => `<li><span class="decision-id">${t(id)}</span> ${from.get(id) === undefined ? "" : t(from.get(id)!.question)}</li>`).join("");
+  const decisionItems = (ids: string[], from: Map<string, PlanDecision>): string => ids.map((id) => `<li>${from.get(id) === undefined ? "A decision" : t(from.get(id)!.question)}</li>`).join("");
   const group = (label: string, items: string): string => (items === "" ? "" : `<h4>${label}</h4><ul>${items}</ul>`);
   const body = [
     group("Added", claimItems(diff.added, now, true)),
@@ -237,7 +302,7 @@ function whatChangedHtml(context: Context): string {
 function whyHtml(plan: PlanDocument): string {
   const first = plan.why[0];
   if (first === undefined) return "";
-  const quotes = plan.why.map((quote) => `<blockquote class="why-quote"><p>${t(quote.text)}</p><footer>${t(quote.author)}</footer></blockquote>`).join("");
+  const quotes = plan.why.map((quote) => `<blockquote class="why-quote"><p>${t(quote.text)}</p><footer>${creditsPageComment(quote.author) ? "A comment" : t(quote.author)}</footer></blockquote>`).join("");
   return `<details class="why"><summary>${t(cut(redactText(first.text), WHY_SUMMARY_MAX_CHARS))}</summary>${quotes}</details>`;
 }
 
@@ -329,8 +394,13 @@ export async function renderPlanDocument(input: RenderPlanInput): Promise<string
   const { plan, anchor, version } = input;
   const diff = input.previous === undefined ? undefined : diffPlanDocuments(input.previous.plan, plan);
   // After approval only the claim's words count: evidence or children added by a later step are expected.
-  const approvedText = new Map(flatten(input.approvedEarlier?.claims ?? []).map((claim) => [claim.id, claim.text]));
-  const changedAfterApprovalIds = new Set(flatten(plan.claims).filter((claim) => approvedText.has(claim.id) && approvedText.get(claim.id) !== claim.text).map((claim) => claim.id));
+  const depthOf = (id: string): number => id.split(".").length;
+  const approvedWords = (document: PlanDocument | undefined, maxDepth = Number.POSITIVE_INFINITY) =>
+    new Map(flatten(document?.claims ?? []).filter((claim) => depthOf(claim.id) <= maxDepth).map((claim) => [claim.id, claim.text]));
+  const earlierWords = approvedWords(input.approvedEarlier, input.approvedEarlierDepth);
+  const sameWords = approvedWords(input.approvedSame);
+  const reworded = (words: Map<string, string>, claim: PlanClaim): boolean => words.has(claim.id) && words.get(claim.id) !== claim.text;
+  const changedAfterApprovalIds = new Set(flatten(plan.claims).filter((claim) => reworded(earlierWords, claim) || reworded(sameWords, claim)).map((claim) => claim.id));
   const decisionsInClaims = new Map<string, PlanDecision[]>();
   for (const decision of plan.decisions.slice(0, SHOWN)) decisionsInClaims.set(decision.claimId, [...(decisionsInClaims.get(decision.claimId) ?? []), decision]);
   // The current version shows its document's comments up to this version: on their place when it still exists, else under Removed claims.

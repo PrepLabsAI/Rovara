@@ -24,8 +24,12 @@ export interface WorkflowMessageContext {
   taskPageUrl?: string | undefined;
   /** Thread replies saved and not yet given to a step. */
   newReplies?: number | undefined;
-  /** After Request changes that sent comments: how many of them the planner answered, and the version they were sent on. */
-  commentAnswers?: { answered: number; total: number; fromVersion: number } | undefined;
+  /**
+   * After Request changes that sent comments: how many of them the planner answered, and the version they were sent on. After
+   * an Approve that sent comments, `approvedOn` names the approved document, the first comment answered (for the link) and
+   * whether every comment was the owner's.
+   */
+  commentAnswers?: { answered: number; total: number; fromVersion: number; approvedOn?: { document: DocumentName; commentId?: string; allOwners: boolean } } | undefined;
   /** AgentX's own draft pull request did not open; `codeChanged` when the workspace no longer held the checked code. */
   publishFailure?: { category: string; codeChanged?: boolean | undefined } | undefined;
   /** The step a closed required pull request's reopening started (the numbers reopened; empty when not known). */
@@ -335,7 +339,15 @@ function planReview(context: WorkflowMessageContext, exits: ReturnType<typeof ex
   if (checks !== undefined) tail.push(checks);
   if ((context.newReplies ?? 0) > 0) tail.push(`${plural(context.newReplies!, "thread reply", "thread replies")} since the last step will be included.`);
   const answered = context.commentAnswers;
-  if (answered !== undefined && answered.total > 0) tail.push(`AgentX answered ${answered.answered} of ${answered.total} comments from v${answered.fromVersion}.`);
+  if (answered?.approvedOn !== undefined) {
+    // Comments sent with the Approve of the document before: said only when the planner replied to some, linked to the first reply.
+    if (answered.answered > 0) {
+      const { document: approved, commentId, allOwners } = answered.approvedOn;
+      const comments = `${allOwners ? "your " : ""}${plural(answered.total, "comment")}`;
+      const line = `AgentX replied to ${answered.answered === answered.total ? "" : `${answered.answered} of `}${comments} on the ${approved}.`;
+      tail.push(context.taskPageUrl === undefined || commentId === undefined ? line : link(`${context.taskPageUrl}?doc=${approved.replace(" ", "-")}#comment-${commentId}`, line));
+    }
+  } else if (answered !== undefined && answered.total > 0) tail.push(`AgentX answered ${answered.answered} of ${plural(answered.total, "comment")} from v${answered.fromVersion}.`);
   const unlinked = `I couldn't link the full ${name}; ask an AgentX admin to check the task page.`;
   if (structured === undefined) {
     // A Markdown document: its first lines, and where the whole text reads.
@@ -482,7 +494,7 @@ function waitingForMerge(workflow: WorkflowSnapshot): string | undefined {
   }
   const remaining = required.filter((pullRequest) => pullRequest.state !== "MERGED")
     .map((pullRequest) => `${name(pullRequest)} is still ${pullRequest.state === "CLOSED" ? "closed" : "open"}.`).join(" ");
-  return `GitHub update: ${merged} of ${required.length} pull requests merged. ${remaining}`.trim();
+  return `GitHub update: ${merged} of ${plural(required.length, "pull request")} merged. ${remaining}`.trim();
 }
 
 /** "PR #3", or "PRs #3 and #4" (and "PRs #3, #4 and #5"), each named by `name`. */
@@ -598,9 +610,8 @@ function implementRunning(context: WorkflowMessageContext): string {
     return `Sent back to coding with ${what === "" ? "your note" : what}. Checks and reviews will run again after.`;
   }
   if (decision?.decision === "APPROVE") {
-    const by = context.ownerSlackUserId === undefined ? "" : ` by <@${context.ownerSlackUserId}>`;
     const count = checkCount(workflow);
-    return `Coding plan approved${by}. Writing the code now${count > 0 ? `; then I'll run ${plural(count, "check")}` : ""}.`;
+    return `Coding plan approved${approvedBy(context, decision)}. Writing the code now${count > 0 ? `; then I'll run ${plural(count, "check")}` : ""}.`;
   }
   return "Trying the coding step again.";
 }
@@ -624,13 +635,19 @@ function fixChangedNothing(context: WorkflowMessageContext, exits: ReturnType<ty
   };
 }
 
-function planRunning(workflow: WorkflowSnapshot): string {
+/** " by @owner" when the task's owner made this approval and their Slack user is known; otherwise nothing. */
+function approvedBy(context: WorkflowMessageContext, decision: { actorRole: string }): string {
+  return context.ownerSlackUserId === undefined || decision.actorRole !== "TASK_OWNER" ? "" : ` by <@${context.ownerSlackUserId}>`;
+}
+
+function planRunning(context: WorkflowMessageContext): string {
+  const { workflow } = context;
   const name = workflowDocumentName(workflow);
   const decision = leadingDecision(workflow);
   if (decision?.decision === "REQUEST_CHANGES") return `Got it. Revising the ${name} with your changes.`;
   if (decision?.decision === "APPROVE" && workflow.path === "FULL") {
     const previous = workflow.reviewPhase === "DESIGN" ? "requirements" : "design";
-    return `${capitalized(previous)} approved. Writing the ${name} next.`;
+    return `${capitalized(previous)} approved${approvedBy(context, decision)}. Writing the ${name} next.`;
   }
   return `Working on the ${name}. I'll post it here for your approval; nothing changes in the code until you approve.`;
 }
@@ -646,7 +663,7 @@ function copyOf(context: WorkflowMessageContext): { text: string; buttons: Butto
   const checksAndReviewsPassed = reviewOnly ? "Reviews passed (no automated check applied)." : "Checks and reviews passed.";
   if (context.publishFailure !== undefined && workflow.stage === "PULL_REQUEST") return publishFailed(context, exits, context.publishFailure);
   switch (`${workflow.stage}/${workflow.state}`) {
-    case "PLAN/RUNNING": return plain(planRunning(workflow));
+    case "PLAN/RUNNING": return plain(planRunning(context));
     case "PLAN/BLOCKED": return { text: workflow.blockReason === WORKFLOW_BLOCK_REASONS.planUnreadable
       ? `AgentX couldn't read the ${workflowDocumentName(workflow)} it wrote.`
       : `I couldn't finish the ${workflowDocumentName(workflow)}. ${plainBlockReason(workflow.blockReason)}`,

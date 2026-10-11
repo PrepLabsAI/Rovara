@@ -333,7 +333,9 @@ owner can decide on the page, and teammates in the task's channel can comment an
 
 **Answering decisions.** Each decision shows its options with AgentX's recommendation already picked.
 Pick another option to change the answer. The bar at the bottom counts the decisions you have not
-looked at yet ("2 to answer", then "All answered"); press it to jump to the next one. You don't have to
+looked at yet ("Next decision (2 to answer)"); press it to jump to the next one. When none are left it
+says "All decisions answered", as a note you can't press. The **Approve** and **Request changes** buttons
+name the document they act on, for example "Approve coding plan v1", whichever document you have open. You don't have to
 answer every decision: any you leave keep AgentX's answer. Teammates' suggestions show under each
 decision, for example "Priya and Sam suggest: Above".
 
@@ -350,7 +352,13 @@ differ from AgentX's, the decisions left to AgentX, and the open comments to sen
 any to keep them for later). You can add a note. **Approve and start coding** (or **Approve and
 continue** for requirements and design) moves the task on. **Request changes** needs at least one
 comment or a note. AgentX writes the next version, and answers each comment you sent under it, starting
-"Done:" or "Not changed because:". A comment it did not answer says "Not answered". Your answers and
+"Done:" or "Not changed because:". A comment it did not answer says "Not answered". Comments you send with
+an Approve are answered by the next document, under the comment on the document it was made on ("Done in
+the coding plan: ..."), and any claim numbers in that reply link to the claims. The Slack card for the next
+document says "AgentX replied to your 2 comments on the design." with a link to them. Under a comment you
+sent, the page says "Sent with your approval, so it can't be edited." (or "Sent with Request changes, so it
+can't be edited."). Comments sent with the coding plan's approval go to coding, and the page says so.
+Your answers and
 the comments you send go to the next step as part of the plan; comments are passed on as teammates'
 words, never as instructions that override your answers.
 
@@ -366,7 +374,7 @@ Chen a moment ago." and keeps what you typed. A teammate who comments gets one S
 task's thread at most every 10 minutes ("Sam Lee left 2 comments on Coding plan v1."), with no comment
 text in it. The next version's card says how many sent comments AgentX answered.
 
-**Ask AgentX to answer.** Tick **Ask AgentX to answer** when you post a comment, and AgentX replies under
+**Ask AgentX to reply to this comment.** Tick **Ask AgentX to reply to this comment** when you post a comment, and AgentX replies under
 it on the page, from what it knows about the task. Its reply is marked "AgentX (AI) · answering Sam Lee",
 naming who asked. It cannot change code, choose answers or decide, and says so if asked. If the comment
 is edited or deleted before the answer comes, the answer is not shown ("Edited after it was asked, so

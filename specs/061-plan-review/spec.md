@@ -93,7 +93,10 @@ included".
 
 Channel members comment on claims and suggest answers. The owner sees suggestions on each decision and the
 comments that will be sent, and can leave any out. After Request changes, the next version answers each
-comment as a reply ("Done: ..." or "Not changed because ...").
+comment as a reply ("Done: ..." or "Not changed because ..."). Comments sent with an Approve are answered
+the same way by the next document ("Done in the coding plan: ..." or "Not changed in the coding plan
+because ..."), under the comment on the document it was made on; comments sent with the coding plan's
+approval go to coding, and the page says so under each.
 
 **Independent test:** A commenter suggests an option and comments; the owner requests changes; v2 shows a
 reply from AgentX under the comment, and the comment carries forward on the same claim marked "from v1".
@@ -136,7 +139,8 @@ task pauses and the thread offers Take ownership.
   partially valid plan is never shown.
 - **FR-009** Full path: the tree grows. Requirements hold level-1 claims, Not changing, Risks and decisions.
   Design adds level-2 claims under approved ones. The coding plan adds level-3 claims and checks. A later step
-  may edit an approved claim; the page marks it "Changed after approval". Quick writes the whole tree
+  may edit an approved claim; the page marks it "Changed after approval", comparing only the claim levels the earlier
+  document wrote (requirements level 1, design levels 1 and 2). Quick writes the whole tree
   in one document.
 - **FR-010** The planner is told to scale the plan to the task: tiny tasks get tiny plans.
 - **FR-011** AgentX derives a Markdown copy from the structured plan and the recorded decision. The coding

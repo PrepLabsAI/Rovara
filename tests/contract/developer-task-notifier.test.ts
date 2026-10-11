@@ -5,7 +5,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { PutCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it, vi } from "vitest";
 import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, indexExpiresAt, plannerReplyCommentId } from "@agentx/contracts";
-import { developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
+import { developerTaskIdentity, plannerRepliesKey } from "../../packages/broker/src/developer/task-records.js";
 import { SlackPostError, chatPostMessage } from "../../packages/broker/src/aws/slack-web.js";
 import { cachedSlackPoster, createNotifierHandler, retryDelaySeconds } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import type { Notice } from "../../packages/broker/src/developer/notifications.js";
@@ -1667,7 +1667,7 @@ describe("the PR feedback advisory summary", () => {
     });
     const grep: Added = { label: "Shorter sentence present in README.md", command: { cwd: "repo/demo", executable: "grep", args: ["-q", "Be respectful and kind.", "README.md"] } };
     const replaced = card([{ obsolete: ["Code of Conduct sentence present in README.md"], added: [grep] }]);
-    expect(visibleSlackText(replaced.text)).toBe("PR feedback is ready: 1 comments; 1 recommendations. Highest priority: should fix.\n"
+    expect(visibleSlackText(replaced.text)).toBe("PR feedback is ready: 1 comment; 1 recommendation. Highest priority: should fix.\n"
       + "Updates checks: `Code of Conduct sentence present in README.md` → `Shorter sentence present in README.md`\n"
       + "Adds check `Shorter sentence present in README.md`: `grep -q \"Be respectful and kind.\" README.md` in `repo/demo`\n"
       + "These commands run on the next step.\nOpen details.");
@@ -1860,7 +1860,8 @@ describe("page decisions and comments in Slack (spec 061 slice 2)", () => {
     expect(zero.updates[0]!.blocks.at(-1)).toEqual({ type: "context", elements: [{ type: "mrkdwn", text: `Approved by <@${MAYA.slackUserId}>.` }] });
   });
 
-  it("the next version's card says how many sent comments AgentX answered", async () => {
+  /** A Quick task whose v1 was sent back with two comments (c1, c2); v2 is stored and its card not yet delivered. */
+  async function secondVersionAfterComments() {
     const plan = "# Plan\nAdd a retry regression test.";
     const h = await notifierHarness({ shareToChannel: true, workflow: true, workflowPath: "QUICK" }, {
       readArtifact: async () => plan, createPlanCanvas: async () => ({ canvasId: "F12345678", permalink: "https://acme.slack.com/docs/T123/F12345678" }),
@@ -1886,13 +1887,49 @@ describe("page decisions and comments in Slack (spec 061 slice 2)", () => {
     await finishPlanningWithMarkdown(h, h.workspaceId, h.active(), "# Plan\nAdd a retry regression test, and one for empty input.");
     const v2 = (h.db.get(`DEVTASK#${h.taskId}`, "META") as { workflow: { artifacts: Array<{ id: string; version: number }> } }).workflow.artifacts.at(-1)!;
     expect(v2.version).toBe(2);
-    h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `COMMENT#${plannerReplyCommentId(c1, v2.id)}`, entityType: "TASK_COMMENT", schemaVersion: 1, taskId: h.taskId,
+    /** The record the broker commits with the plan (here: c1 answered), and, after the commit, AgentX's reply to c1. */
+    const recordAnswers = () => h.db.set({ ...plannerRepliesKey(h.taskId, v2.id), entityType: "PLANNER_REPLIES", taskId: h.taskId, artifactId: v2.id, version: 2, answered: [{ commentId: c1, outcome: "done" }], at: new Date().toISOString() });
+    const writeReply = () => h.db.set({ pk: `DEVTASK#${h.taskId}`, sk: `COMMENT#${plannerReplyCommentId(c1, v2.id)}`, entityType: "TASK_COMMENT", schemaVersion: 1, taskId: h.taskId,
       commentId: plannerReplyCommentId(c1, v2.id), parentId: c1, document: "plan", version: 1, target: { kind: "document" },
       author: { kind: "agentx", source: "planner", outcome: "done", forVersion: 2 }, text: "Added it.", createdAt: new Date().toISOString(), rev: 1 });
+    return { h, v2, recordAnswers, writeReply };
+  }
+
+  it("the next version's card says how many sent comments AgentX answered", async () => {
+    const { h, recordAnswers, writeReply } = await secondVersionAfterComments();
+    recordAnswers();
+    writeReply();
     await h.pump();
     const card = h.posts.at(-1)!;
     expect(card.text).toContain("Coding plan v2 is ready for your approval.");
     expect(card.text).toContain("AgentX answered 1 of 2 comments from v1.");
+  });
+
+  it("the card is posted at once, from the record committed with the plan, before any reply is written, with no retry", async () => {
+    const { h, recordAnswers } = await secondVersionAfterComments();
+    recordAnswers();
+    // The replies themselves are written after the commit: none is there yet when the notice arrives.
+    expect(h.db.find((item) => item.pk === `DEVTASK#${h.taskId}` && item.entityType === "TASK_COMMENT")).toHaveLength(0);
+    const posted = h.posts.length;
+    await h.pump();
+    expect(h.posts).toHaveLength(posted + 1);
+    expect(h.posts.at(-1)!.text).toContain("AgentX answered 1 of 2 comments from v1.");
+    expect(h.retryLater).not.toHaveBeenCalled();
+    expect(h.queue).toHaveLength(0);
+    // Delivered again (a redelivery), it is not posted twice.
+    await h.pump();
+    expect(h.posts).toHaveLength(posted + 1);
+  });
+
+  it("a plan stored before the record existed posts its card at once, without a line about replies", async () => {
+    const { h, v2 } = await secondVersionAfterComments();
+    h.db.delete(`DEVTASK#${h.taskId}`, `PLANREPLIES#${v2.id}`);
+    const posted = h.posts.length;
+    await h.pump();
+    expect(h.posts).toHaveLength(posted + 1);
+    expect(h.posts.at(-1)!.text).toContain("Coding plan v2 is ready for your approval.");
+    expect(h.posts.at(-1)!.text).not.toMatch(/AgentX (answered|replied)/);
+    expect(h.retryLater).not.toHaveBeenCalled();
   });
 
   const LEE = "f".repeat(64);

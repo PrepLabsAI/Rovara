@@ -2,9 +2,11 @@
 // suite 7. Here: a merge in every stage (while the feedback review runs, while a proposal waits, while the fix is made,
 // while it is pushed [LIVE-BUG B4], at someone else's head), closing from Slack (while waiting for the merge, and a
 // blocked task's discard), a teammate's Close, and the Canvas closeout.
+import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { WORKFLOW_BLOCK_REASONS } from "@agentx/contracts";
+import { WORKFLOW_BLOCK_REASONS, agentXError } from "@agentx/contracts";
 import { CLOSED_REPLY } from "../../../packages/broker/src/developer/share-messages.js";
+import { SLACK_TEAM } from "../../support/slack-broker.js";
 import { createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import { EDITS, FIXED, MERGED, PLAN, TEAMMATE, actionIds, atPlanReview, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";
 
@@ -349,4 +351,329 @@ describe("Suite 8: merge and close", () => {
     expect(e2e.canvasesDeleted).toEqual([]);
     expect(e2e.workflow().canvasCloseout?.canvases ?? []).toEqual([]);
   }, 120_000);
+
+  describe("8.12 a finished task gives back its open-task slot and its workspace (0.2.12 live test)", () => {
+    const MEMBER = { pk: `SLACK_LIMIT#${SLACK_TEAM}`, sk: `MEMBER#${OWNER}` };
+    const ORGANIZATION = { pk: `SLACK_LIMIT#${SLACK_TEAM}`, sk: "ORGANIZATION" };
+    const counter = (e2e: WorkflowE2E, key: { pk: string; sk: string }) => {
+      const item = e2e.db.get(key.pk, key.sk);
+      return { count: item?.count, tasks: [...((item?.tasks as Set<string> | undefined) ?? [])].sort() };
+    };
+    const tasks = (e2e: WorkflowE2E) => e2e.db.find((item) => String(item.pk).startsWith("DEVTASK#") && item.sk === "META");
+    const taskById = (e2e: WorkflowE2E, taskId: string) => e2e.db.get(`DEVTASK#${taskId}`, "META")!;
+    const workspaceOf = (e2e: WorkflowE2E, taskId: string) => e2e.db.get(`WORKSPACE#${String(taskById(e2e, taskId).workspaceId)}`, "META")!;
+    const newestTaskId = (e2e: WorkflowE2E) => String(tasks(e2e).sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))).at(-1)!.taskId);
+
+    let threads = 0;
+    /** A new request at the top of the channel: its own thread. */
+    const newThread = (e2e: WorkflowE2E, request: string) => {
+      const ts = `1695600000.${String(++threads).padStart(6, "0")}`;
+      return e2e.mention(request, { ts, threadTs: ts });
+    };
+    /** A new Quick request in its own thread, taken to its draft pull request and merged. Answers its task. */
+    async function mergedTask(e2e: WorkflowE2E, request: string): Promise<string> {
+      const before = tasks(e2e).length;
+      expect(await newThread(e2e, `quick: ${request}`)).toBe(200);
+      await e2e.settle();
+      expect(tasks(e2e)).toHaveLength(before + 1);
+      const taskId = newestTaskId(e2e);
+      await e2e.click("agentx_workflow_approve");
+      await e2e.settle();
+      const pullRequest = e2e.github.pullRequests.at(-1)!;
+      await mergeWebhook(e2e, pullRequest.number);
+      await e2e.settle();
+      expect(taskById(e2e, taskId).workflow).toMatchObject({ stage: "MERGED", state: "COMPLETE", outcome: "MERGED" });
+      return taskId;
+    }
+
+    it("a merge releases the task's slot and its workspace, once, and a redelivered merge changes nothing", async () => {
+      const { e2e, pullRequest } = await waiting();
+      const taskId = e2e.taskId();
+      expect(counter(e2e, MEMBER)).toEqual({ count: 1, tasks: [taskId] });
+      await mergeWebhook(e2e, pullRequest.number);
+      await e2e.settle();
+      expect(counter(e2e, MEMBER)).toEqual({ count: 0, tasks: [] });
+      expect(counter(e2e, ORGANIZATION).count).toBe(0);
+      expect(workspaceOf(e2e, taskId).status).toBe("CLOSED");
+      expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(1);
+      expect(e2e.deleteEc2Session).toHaveBeenCalledWith(taskById(e2e, taskId).workspaceId);
+      // The task is complete, not closed: no close notice, and its last word is the merge.
+      expect(taskById(e2e, taskId).closedAt).toBeUndefined();
+      expect(said(e2e).at(-1)).toBe(MERGED);
+      // GitHub sends the merge again, and once more with a new delivery ID.
+      expect(await e2e.githubWebhook(pullRequest.number, { merged: true })).toBe(200);
+      expect((await e2e.webhook({ kind: "pull_request", number: pullRequest.number, action: "closed", merged: true })).status).toBe(200);
+      await e2e.settle();
+      expect(counter(e2e, MEMBER)).toEqual({ count: 0, tasks: [] });
+      expect(counter(e2e, ORGANIZATION).count).toBe(0);
+      expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(1);
+    }, 120_000);
+
+    it("a question in a merged task's thread is still answered after its workspace is released", async () => {
+      const { e2e, pullRequest } = await waiting();
+      await mergeWebhook(e2e, pullRequest.number);
+      await e2e.settle();
+      expect(workspaceOf(e2e, e2e.taskId()).status).toBe("CLOSED");
+      const QUESTION = "what did this change?";
+      expect(await e2e.mention(QUESTION)).toBe(200);
+      await e2e.settle();
+      const before = e2e.slack.posts.length;
+      await e2e.answerTaskQuestions({ route: () => ({ kind: "question", outcome: "ok" }), answer: (question) => `Answer to: ${question}` });
+      const texts = [...e2e.slack.posts.slice(before).map((post) => post.text), ...e2e.slack.ephemerals.map((message) => message.text)];
+      expect(texts).toContain(`<@${OWNER}> Answer to: ${QUESTION}`);
+      expect(texts).not.toContain(CLOSED_REPLY);
+    }, 120_000);
+
+    /** The owner rejects the coding plan through their AI tool (the one way to reject one). */
+    async function rejectPlan(e2e: WorkflowE2E): Promise<void> {
+      const workflow = e2e.workflow();
+      const plan = workflow.artifacts.filter((artifact) => artifact.type === "plan").at(-1)!;
+      const answer = await e2e.mcp("agentx_decide_workflow", { task_id: e2e.taskId(), request_id: randomUUID(), expected_revision: workflow.revision,
+        decision: "REJECT", reason: "Not needed after all.", artifact_digest: plan.sha256 });
+      expect(answer.isError).toBe(false);
+      await e2e.settle();
+      expect(e2e.workflow()).toMatchObject({ stage: "CLOSED", state: "COMPLETE", outcome: "REJECTED" });
+    }
+
+    it("a rejected plan gives back its slot and its workspace at once, with the close's audit record and its reason", async () => {
+      const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: editsOrFix } });
+      await atPlanReview(e2e);
+      const taskId = e2e.taskId();
+      expect(counter(e2e, MEMBER)).toEqual({ count: 1, tasks: [taskId] });
+      await rejectPlan(e2e);
+      expect(counter(e2e, MEMBER)).toEqual({ count: 0, tasks: [] });
+      expect(counter(e2e, ORGANIZATION).count).toBe(0);
+      expect(workspaceOf(e2e, taskId).status).toBe("CLOSED");
+      expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(1);
+      const records = e2e.db.find((item) => item.taskId === taskId && item.action === "close" && item.phase === "completed");
+      expect(records.map((record) => record.responseText)).toEqual(["The task is complete (its plan was rejected), and its workspace is released."]);
+      // Its Canvas closeout runs as a closed task's does.
+      expect(e2e.workflow().canvasCloseout).toMatchObject({ status: "COMPLETE", terminalState: "CLOSED" });
+    }, 120_000);
+
+    it("a merge writes the close's audit record once, saying the pull request merged", async () => {
+      const { e2e, pullRequest } = await waiting();
+      await mergeWebhook(e2e, pullRequest.number);
+      await e2e.settle();
+      expect(await e2e.githubWebhook(pullRequest.number, { merged: true })).toBe(200);
+      await e2e.settle();
+      const records = e2e.db.find((item) => item.taskId === e2e.taskId() && item.action === "close" && item.phase === "completed");
+      expect(records.map((record) => record.responseText)).toEqual(["The task is complete (its pull request merged), and its workspace is released."]);
+    }, 120_000);
+
+    it("compute that refuses while it stops: the release keeps its claim, and the next event finishes it, once", async () => {
+      const { e2e, pullRequest } = await waiting();
+      const taskId = e2e.taskId();
+      e2e.deleteEc2Session.mockImplementationOnce(async () => { throw agentXError("WORKSPACE_BUSY", "the workspace compute is stopping"); });
+      await mergeWebhook(e2e, pullRequest.number);
+      // The workspace is claimed (nothing can start there), but nothing is given back yet.
+      expect(workspaceOf(e2e, taskId).status).toBe("CLOSING");
+      expect(counter(e2e, MEMBER)).toEqual({ count: 1, tasks: [taskId] });
+      // GitHub's next delivery (a redelivery, say) takes the claim up.
+      expect(await e2e.githubWebhook(pullRequest.number, { merged: true })).toBe(200);
+      await e2e.settle();
+      expect(workspaceOf(e2e, taskId).status).toBe("CLOSED");
+      expect(counter(e2e, MEMBER)).toEqual({ count: 0, tasks: [] });
+      expect(counter(e2e, ORGANIZATION).count).toBe(0);
+      expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(2);
+    }, 120_000);
+
+    it("a release that keeps finding the compute busy is finished by the recovery sweep", async () => {
+      const { e2e, pullRequest } = await waiting();
+      const taskId = e2e.taskId();
+      e2e.deleteEc2Session.mockImplementationOnce(async () => { throw agentXError("WORKSPACE_BUSY", "the workspace compute is stopping"); });
+      await mergeWebhook(e2e, pullRequest.number);
+      await e2e.settle();
+      expect(counter(e2e, MEMBER).count).toBe(1);
+      expect(e2e.db.get("FINISHED_RELEASE", `TASK#${taskId}`)).toBeDefined();
+      // No more events come for a merged task: the scheduled sweep tries again once the next try is due.
+      expect((await e2e.runRecovery()).dispatch.body.releases).toEqual({ attempted: 0, released: 0 });
+      e2e.clock.set(new Date(Date.now() + 6 * 60_000).toISOString());
+      const swept = await e2e.runRecovery();
+      expect(swept.dispatch.body.releases).toEqual({ attempted: 1, released: 1 });
+      expect(counter(e2e, MEMBER)).toEqual({ count: 0, tasks: [] });
+      expect(workspaceOf(e2e, taskId).status).toBe("CLOSED");
+      expect(e2e.db.get("FINISHED_RELEASE", `TASK#${taskId}`)).toBeUndefined();
+      expect((await e2e.runRecovery()).dispatch.body.releases).toEqual({ attempted: 0, released: 0 });
+    }, 120_000);
+
+    /** Copies of a merged task, each finished, in its own thread and workspace (READY), not counted anywhere. */
+    function finishedCopies(e2e: WorkflowE2E, taskId: string, ids: readonly string[]): void {
+      const original = taskById(e2e, taskId);
+      for (const [index, id] of ids.entries()) {
+        const workspaceId = randomUUID();
+        const { closedAt: _closed, ...workspace } = workspaceOf(e2e, taskId);
+        void _closed;
+        e2e.db.set({ ...workspace, pk: `WORKSPACE#${workspaceId}`, id: workspaceId, status: "READY" });
+        const { releasedAt: _released, ...task } = original;
+        void _released;
+        e2e.db.set({ ...task, pk: `DEVTASK#${id}`, taskId: id, workspaceId,
+          share: { ...(original.share as Record<string, unknown>), threadTs: `1695800000.${String(index).padStart(6, "0")}` } });
+      }
+    }
+
+    it("marks that keep failing never hold back the others: each is put off with backoff, and a good one behind them is released", async () => {
+      const { e2e, pullRequest } = await waiting();
+      const taskId = e2e.taskId();
+      await mergeWebhook(e2e, pullRequest.number);
+      await e2e.settle();
+      // Eleven finished tasks whose compute can't be deleted, marked long ago, ahead of the good one in key order too.
+      const failing = Array.from({ length: 11 }, (_, index) => `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`);
+      finishedCopies(e2e, taskId, failing);
+      const failingWorkspaces = new Set(failing.map((id) => String(taskById(e2e, id).workspaceId)));
+      for (const id of failing) e2e.db.set({ pk: "FINISHED_RELEASE", sk: `TASK#${id}`, entityType: "FINISHED_RELEASE", taskId: id, markedAt: "2026-01-01T00:00:00.000Z" });
+      // The good one: a merged task whose release found the compute busy once.
+      const { releasedAt: _released, ...good } = taskById(e2e, taskId);
+      void _released;
+      e2e.db.set(good);
+      e2e.db.set({ ...workspaceOf(e2e, taskId), status: "READY" });
+      e2e.db.set({ pk: "FINISHED_RELEASE", sk: `TASK#${taskId}`, entityType: "FINISHED_RELEASE", taskId, markedAt: new Date().toISOString() });
+      e2e.deleteEc2Session.mockImplementation(async (workspaceId: string) => {
+        if (failingWorkspaces.has(workspaceId)) throw agentXError("RUNTIME_UNAVAILABLE", "workspace resource cleanup failed");
+      });
+      expect((await e2e.runRecovery()).dispatch.body.releases).toEqual({ attempted: 10, released: 0 });
+      // The ten that failed wait now; the eleventh and the good one are due.
+      // (Its slot went back at the merge, so only its workspace was left to release.)
+      expect((await e2e.runRecovery()).dispatch.body.releases).toMatchObject({ attempted: 2 });
+      expect(workspaceOf(e2e, taskId).status).toBe("CLOSED");
+      expect(taskById(e2e, taskId).releasedAt).toBeDefined();
+      expect(e2e.db.get("FINISHED_RELEASE", `TASK#${taskId}`)).toBeUndefined();
+      expect(e2e.db.get("FINISHED_RELEASE", `TASK#${failing[0]!}`)).toMatchObject({ attempts: 1 });
+      // Once the compute can be deleted again, later sweeps finish the rest.
+      e2e.deleteEc2Session.mockImplementation(async () => undefined);
+      e2e.clock.set(new Date(Date.now() + 7 * 3_600_000).toISOString());
+      await e2e.runRecovery();
+      await e2e.runRecovery();
+      expect(failing.map((id) => workspaceOf(e2e, id).status)).toEqual(failing.map(() => "CLOSED"));
+      expect(e2e.db.find((item) => item.pk === "FINISHED_RELEASE")).toEqual([]);
+    }, 120_000);
+
+    it("a self-heal whose compute delete refuses leaves a mark, and the sweep finishes it", async () => {
+      const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: editsOrFix } });
+      const merged = await mergedTask(e2e, "Add a greet(name) function");
+      const copies = [randomUUID(), randomUUID()];
+      finishedCopies(e2e, merged, copies);
+      const stuck = [merged, ...copies];
+      const { releasedAt: _released, ...task } = taskById(e2e, merged);
+      void _released;
+      e2e.db.set(task);
+      e2e.db.set({ ...workspaceOf(e2e, merged), status: "READY" });
+      e2e.db.set({ ...e2e.db.get(MEMBER.pk, MEMBER.sk), count: 3, tasks: new Set(stuck) });
+      e2e.db.set({ ...e2e.db.get(ORGANIZATION.pk, ORGANIZATION.sk), count: 3 });
+      e2e.deleteEc2Session.mockImplementationOnce(async () => { throw agentXError("WORKSPACE_BUSY", "the workspace compute is stopping"); });
+      expect(await newThread(e2e, "quick: Add a farewell(name) function")).toBe(200);
+      await e2e.settle();
+      const started = newestTaskId(e2e);
+      expect(stuck).not.toContain(started);
+      // One of the three kept its claim (CLOSING) and its slot, with a mark for the sweep.
+      const marks = e2e.db.find((item) => item.pk === "FINISHED_RELEASE");
+      expect(marks).toHaveLength(1);
+      const kept = String(marks[0]!.taskId);
+      expect(workspaceOf(e2e, kept).status).toBe("CLOSING");
+      expect(counter(e2e, MEMBER)).toEqual({ count: 2, tasks: [kept, started].sort() });
+      e2e.clock.set(new Date(Date.now() + 6 * 60_000).toISOString());
+      expect((await e2e.runRecovery()).dispatch.body.releases).toEqual({ attempted: 1, released: 1 });
+      expect(counter(e2e, MEMBER)).toEqual({ count: 1, tasks: [started] });
+      expect(counter(e2e, ORGANIZATION).count).toBe(1);
+      expect(stuck.map((id) => workspaceOf(e2e, id).status)).toEqual(["CLOSED", "CLOSED", "CLOSED"]);
+    }, 240_000);
+
+    it("the compute is deleted but the release's transaction fails: nothing is given back, and a later event gives it back once", async () => {
+      const { e2e, pullRequest } = await waiting();
+      const taskId = e2e.taskId();
+      const workspaceKey = { pk: `WORKSPACE#${String(taskById(e2e, taskId).workspaceId)}`, sk: "META" };
+      // While the compute is deleted, the workspace's claim is lost (its record moved back), so the commit's condition fails.
+      e2e.deleteEc2Session.mockImplementationOnce(async () => { e2e.db.set({ ...e2e.db.get(workspaceKey.pk, workspaceKey.sk)!, status: "READY" }); });
+      await mergeWebhook(e2e, pullRequest.number);
+      expect(workspaceOf(e2e, taskId).status).toBe("READY");
+      expect(counter(e2e, MEMBER)).toEqual({ count: 1, tasks: [taskId] });
+      expect(taskById(e2e, taskId).releasedAt).toBeUndefined();
+      expect(await e2e.githubWebhook(pullRequest.number, { merged: true })).toBe(200);
+      await e2e.settle();
+      expect(workspaceOf(e2e, taskId).status).toBe("CLOSED");
+      expect(counter(e2e, MEMBER)).toEqual({ count: 0, tasks: [] });
+      expect(counter(e2e, ORGANIZATION).count).toBe(0);
+    }, 120_000);
+
+    it("two releases at once (a webhook and an operation's result racing) give the slot back exactly once", async () => {
+      const { e2e, pullRequest } = await waiting();
+      const taskId = e2e.taskId();
+      e2e.github.merge(pullRequest.number);
+      const statuses = await e2e.concurrently(
+        () => e2e.webhook({ kind: "pull_request", number: pullRequest.number, action: "closed", merged: true }),
+        () => e2e.webhook({ kind: "pull_request", number: pullRequest.number, action: "closed", merged: true }),
+        () => e2e.webhook({ kind: "pull_request", number: pullRequest.number, action: "closed", merged: true }),
+      ) as Array<{ status: number }>;
+      expect(statuses.map((answer) => answer.status)).toEqual([200, 200, 200]);
+      await e2e.settle();
+      expect(taskById(e2e, taskId).workflow).toMatchObject({ stage: "MERGED", state: "COMPLETE" });
+      expect(counter(e2e, MEMBER)).toEqual({ count: 0, tasks: [] });
+      expect(counter(e2e, ORGANIZATION).count).toBe(0);
+      expect(workspaceOf(e2e, taskId).status).toBe("CLOSED");
+      expect(e2e.db.find((item) => item.taskId === taskId && item.action === "close" && item.phase === "completed")).toHaveLength(1);
+    }, 120_000);
+
+    it("a merge while the feedback review runs releases the slot once that review ends", async () => {
+      const { e2e, pullRequest } = await waiting();
+      await comment(e2e, pullRequest.number);
+      await e2e.deliverNotices();
+      await mergeWebhook(e2e, pullRequest.number);
+      // The review is still running on the workspace: nothing is released under it.
+      expect(counter(e2e, MEMBER).count).toBe(1);
+      expect(e2e.deleteEc2Session).not.toHaveBeenCalled();
+      await e2e.settle();
+      expect(counter(e2e, MEMBER)).toEqual({ count: 0, tasks: [] });
+      expect(workspaceOf(e2e, e2e.taskId()).status).toBe("CLOSED");
+    }, 120_000);
+
+    it("after three merged tasks, a fourth request starts (the per-person limit is 3)", async () => {
+      const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: editsOrFix } });
+      const merged = [await mergedTask(e2e, "Add a greet(name) function"), await mergedTask(e2e, "Add a farewell(name) function"), await mergedTask(e2e, "Add a wave(name) function")];
+      expect(counter(e2e, MEMBER)).toEqual({ count: 0, tasks: [] });
+      expect(merged.map((taskId) => workspaceOf(e2e, taskId).status)).toEqual(["CLOSED", "CLOSED", "CLOSED"]);
+      expect(await newThread(e2e, "quick: Add a nod(name) function")).toBe(200);
+      await e2e.settle();
+      expect(tasks(e2e)).toHaveLength(4);
+      expect(said(e2e).some((text) => text.includes("limit of open AgentX tasks"))).toBe(false);
+      expect(counter(e2e, MEMBER)).toEqual({ count: 1, tasks: [newestTaskId(e2e)] });
+    }, 240_000);
+
+    it("self-heal: slots merged tasks kept before this release are given back when a start meets the limit", async () => {
+      const e2e = await createWorkflowE2E({ model: { plan: PLAN, edits: editsOrFix } });
+      const merged = await mergedTask(e2e, "Add a greet(name) function");
+      // As the live table was: three finished tasks still counted (two merged, one rejected), their workspaces READY, no
+      // release recorded.
+      const original = taskById(e2e, merged);
+      const stuck = [merged, randomUUID(), randomUUID()];
+      for (const taskId of stuck.slice(1)) {
+        const workspaceId = randomUUID();
+        e2e.db.set({ ...workspaceOf(e2e, merged), pk: `WORKSPACE#${workspaceId}`, id: workspaceId });
+        // Each in its own thread, as each was started.
+        const share = { ...(original.share as Record<string, unknown>), threadTs: `1695700000.${String(stuck.indexOf(taskId)).padStart(6, "0")}` };
+        // The last one's plan was rejected instead (CLOSED/COMPLETE, outcome REJECTED).
+        const workflow = taskId === stuck[2] ? { ...(original.workflow as Record<string, unknown>), stage: "CLOSED", state: "COMPLETE", outcome: "REJECTED" } : original.workflow;
+        e2e.db.set({ ...original, pk: `DEVTASK#${taskId}`, taskId, workspaceId, share, workflow });
+      }
+      for (const taskId of stuck) {
+        const { releasedAt: _released, ...task } = taskById(e2e, taskId);
+        void _released;
+        e2e.db.set(task);
+        const { closedAt: _closed, ...workspace } = workspaceOf(e2e, taskId);
+        void _closed;
+        e2e.db.set({ ...workspace, status: "READY" });
+      }
+      e2e.db.set({ ...e2e.db.get(MEMBER.pk, MEMBER.sk), count: 3, tasks: new Set(stuck) });
+      e2e.db.set({ ...e2e.db.get(ORGANIZATION.pk, ORGANIZATION.sk), count: 3 });
+      e2e.deleteEc2Session.mockClear();
+      expect(await newThread(e2e, "quick: Add a farewell(name) function")).toBe(200);
+      await e2e.settle();
+      expect(said(e2e).some((text) => text.includes("limit of open AgentX tasks"))).toBe(false);
+      const started = newestTaskId(e2e);
+      expect(stuck).not.toContain(started);
+      expect(counter(e2e, MEMBER)).toEqual({ count: 1, tasks: [started] });
+      expect(counter(e2e, ORGANIZATION).count).toBe(1);
+      expect(stuck.map((taskId) => workspaceOf(e2e, taskId).status)).toEqual(["CLOSED", "CLOSED", "CLOSED"]);
+      expect(e2e.deleteEc2Session).toHaveBeenCalledTimes(3);
+    }, 240_000);
+  });
 });

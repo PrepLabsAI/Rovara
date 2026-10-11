@@ -90,7 +90,7 @@ export function noticesOf(previous: Record<string, unknown> | undefined, next: R
       // A stored NULL counts as unset.
       if (next.closedAt != null && previous?.closedAt == null) notices.push({ id: `${taskId}:closed`, kind: "closed", taskId, at });
       const terminalWorkflow = (value: Record<string, unknown> | undefined): boolean => value?.state === "COMPLETE"
-        && ((value.stage === "MERGED" && value.outcome === "MERGED") || (value.stage === "CLOSED" && value.outcome === "CLOSED"));
+        && ((value.stage === "MERGED" && value.outcome === "MERGED") || value.stage === "CLOSED");
       if ((terminalWorkflow(afterWorkflow) && !terminalWorkflow(beforeWorkflow)) || (next.closedAt != null && previous?.closedAt == null)) {
         const revision = afterWorkflow?.revision;
         const closeoutId = next.closedAt != null && previous?.closedAt == null ? "closed" : typeof revision === "number" ? String(revision) : "terminal";

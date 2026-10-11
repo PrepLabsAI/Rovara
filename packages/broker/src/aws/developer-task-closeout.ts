@@ -56,7 +56,8 @@ function terminalState(task: TaskCanvasCloseoutTask): "MERGED" | "CLOSED" | "CAN
   if (workflow?.stage === "MERGED" && workflow.state === "COMPLETE" && workflow.outcome === "MERGED"
     && (workflow.pullRequests ?? []).some((pr) => pr.required)
     && workflow.pullRequests!.filter((pr) => pr.required).every((pr) => pr.state === "MERGED")) return "MERGED";
-  if (workflow?.stage === "CLOSED" && workflow.state === "COMPLETE" && workflow.outcome === "CLOSED") return "CLOSED";
+  // The CLOSED stage ends complete whatever its outcome (in practice REJECTED: the owner rejected the plan).
+  if (workflow?.stage === "CLOSED" && workflow.state === "COMPLETE") return "CLOSED";
   if (task.closedAt !== undefined && workflow?.stage !== "MERGED") return "CLOSED";
   return undefined;
 }

@@ -53,7 +53,8 @@ A plan, design or requirements document waiting for its owner can also be decide
 page. The owner's answers to the plan's decisions and the comments they choose to send go through the
 same single decision as a Slack or AI-tool approval, so exactly one decision is recorded however many
 places it is pressed. The coding and review steps read the plan with the owner's answers, and the
-planner answers each comment sent with Request changes on the next version. Comments are passed to the
+planner answers each comment sent with Request changes on the next version, and each comment sent with an
+Approve in the next document. Comments are passed to the
 model as quoted, untrusted teammates' words. See
 [Deciding and commenting on the task page](slack.md#deciding-and-commenting-on-the-task-page).
 
