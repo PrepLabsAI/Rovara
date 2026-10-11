@@ -4482,6 +4482,7 @@ async function feedbackTaskChecks(dependencies: AwsBrokerDependencies, task: Dev
   return WorkflowFeedbackTaskChecksSchema.parse({
     proposed: policy.proposed.filter((check) => kept === undefined || kept.includes(check.id)),
     required: policy.required.map((check) => ({ id: check.id, label: check.label })),
+    optional: policy.optional.map((check) => ({ id: check.id, label: check.label })),
     repositoryPaths: project.definition.repositories.map((repository) => repository.path),
   });
 }

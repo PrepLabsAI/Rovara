@@ -64,3 +64,30 @@ export function proposedCheckProblem(value: unknown, repositoryPaths?: readonly 
   if (!insideRepository) return "it must run in one of the task's repositories";
   return WorkflowProposedCheckInputSchema.safeParse(value).success ? undefined : "it must have only label, cwd, executable, args and timeoutSeconds";
 }
+
+/** The longest command (program and arguments joined by spaces) a corrected check from PR feedback may have. */
+export const WORKFLOW_FEEDBACK_CHECK_COMMAND_MAX = 300;
+const PLAIN_TEXT = /^[\x20-\x7e]*$/;
+
+/**
+ * What is wrong with a corrected check a PR feedback reviewer proposes, or undefined. Besides the coding plan's rules,
+ * it must be short and plain so the owner reads exactly what runs before approving it: the label, folder, program and
+ * arguments only printable ASCII, the whole command at most 300 characters, and no argument with ` or $(.
+ */
+export function feedbackReplacementCheckProblem(value: unknown, repositoryPaths?: readonly string[]): string | undefined {
+  const planProblem = proposedCheckProblem(value, repositoryPaths);
+  if (planProblem !== undefined) return planProblem;
+  if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+    const { label, cwd, executable, args } = value as Record<string, unknown>;
+    const texts = [label, cwd, executable, ...(Array.isArray(args) ? args : [])];
+    if (typeof executable === "string" && Array.isArray(args) && texts.every((text) => typeof text === "string")) {
+      const strings = texts as string[];
+      const command = [executable, ...(args as string[])].join(" ");
+      if (strings.some((text) => !PLAIN_TEXT.test(text)) || command.length > WORKFLOW_FEEDBACK_CHECK_COMMAND_MAX
+        || (args as string[]).some((arg) => arg.includes("`") || arg.includes("$("))) {
+        return "keep the command under 300 plain characters without ` or $(";
+      }
+    }
+  }
+  return undefined;
+}

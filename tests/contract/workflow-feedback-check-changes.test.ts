@@ -3,7 +3,7 @@
 import { describe, expect, it } from "vitest";
 import {
   WorkflowSnapshotSchema, WorkflowTransitionError, applyWorkflowFeedbackCheckChanges, createWorkflowSnapshot, workflowFeedbackCheckChanges,
-  describeWorkflowCheckChanges, workflowCheckCommandText, workflowSelectedChecks, type WorkflowCheckPolicyInput,
+  describeWorkflowCheckChanges, feedbackReplacementCheckProblem, workflowCheckCommandText, workflowSelectedChecks, type WorkflowCheckPolicyInput,
 } from "../../packages/contracts/src/index.js";
 
 const taskId = "8b579b4b-eaa7-4bf2-87bc-6da86b97c9e6";
@@ -27,7 +27,7 @@ const workflow = (checkPolicy: WorkflowCheckPolicyInput, feedbackDecisions = 0) 
 describe("check changes of an approved PR feedback fix", () => {
   it("resolves obsolete checks by ID or label among the proposed checks the task runs, and normalizes corrected checks", () => {
     const parsed = WorkflowSnapshotSchema.parse(workflow(policy())).checkPolicy;
-    expect(workflowFeedbackCheckChanges(parsed, [finding({ obsoleteChecks: ["proposed-1"], replacementChecks: [replacement] })])).toEqual({
+    expect(workflowFeedbackCheckChanges(parsed, [finding({ obsoleteChecks: ["proposed-1"], replacementChecks: [replacement] })])).toMatchObject({
       obsolete: [SENTENCE], added: [{ label: replacement.label, command: { cwd: replacement.cwd, executable: replacement.executable, args: replacement.args, timeoutSeconds: 600 } }], problems: [],
     });
     expect(workflowFeedbackCheckChanges(parsed, [finding({ obsoleteChecks: ["code of conduct sentence present in readme.md"] })]).obsolete).toEqual([SENTENCE]);
@@ -61,8 +61,48 @@ describe("check changes of an approved PR feedback fix", () => {
     const parsed = WorkflowSnapshotSchema.parse(workflow(policy())).checkPolicy;
     for (const disposition of ["OWNER_DECISION", "SKIP"]) {
       expect(workflowFeedbackCheckChanges(parsed, [finding({ obsoleteChecks: ["proposed-1"], replacementChecks: [replacement] }, disposition)]))
-        .toEqual({ obsolete: [], added: [], problems: [] });
+        .toMatchObject({ obsolete: [], added: [], problems: [] });
     }
+  });
+
+  describe("a corrected check from PR feedback is short and plain, so the owner reads exactly what runs", () => {
+    const parsed = () => WorkflowSnapshotSchema.parse(workflow(policy())).checkPolicy;
+    const PLAIN = "keep the command under 300 plain characters without ` or $(";
+    it.each([
+      ["a backtick", { ...replacement, args: ["-q", "`id`", "README.md"] }],
+      ["$(", { ...replacement, args: ["-q", "$(id)", "README.md"] }],
+      ["a right-to-left override", { ...replacement, args: ["-q", "kind.\u202E", "README.md"] }],
+      ["a zero-width space", { ...replacement, args: ["-q", "kind.\u200B", "README.md"] }],
+      ["a character outside plain ASCII in its label", { ...replacement, label: "Shorter sentence \u00e9" }],
+      ["301 characters", { ...replacement, args: ["-q", "x".repeat(301 - "grep -q  README.md".length), "README.md"] }],
+    ])("refuses %s", (_name, check) => {
+      expect(feedbackReplacementCheckProblem(check, ["repo/demo"])).toBe(PLAIN);
+      expect(workflowFeedbackCheckChanges(parsed(), [finding({ replacementChecks: [check] })], ["repo/demo"]).problems).toEqual([PLAIN]);
+    });
+    it("accepts a plain command of exactly 300 characters, and still applies the plan's rules", () => {
+      const longest = { ...replacement, args: ["-q", "x".repeat(300 - "grep -q  README.md".length), "README.md"] };
+      expect([longest.executable, ...longest.args].join(" ")).toHaveLength(300);
+      expect(feedbackReplacementCheckProblem(longest, ["repo/demo"])).toBeUndefined();
+      expect(feedbackReplacementCheckProblem({ ...replacement, cwd: "other" }, ["repo/demo"])).toBe("it must run in one of the task's repositories");
+    });
+  });
+
+  it("caps one review's check changes at 5 corrected and 5 obsolete checks", () => {
+    const parsed = WorkflowSnapshotSchema.parse(workflow(policy())).checkPolicy;
+    const checks = (count: number) => Array.from({ length: count }, (_, index) => ({ ...replacement, args: ["-q", `Line ${String(index)}`, "README.md"] }));
+    expect(workflowFeedbackCheckChanges(parsed, [finding({ replacementChecks: checks(3) }), finding({ replacementChecks: checks(3).map((check) => ({ ...check, label: "Other" })) })]).problems)
+      .toContain("it proposes more than 5 corrected checks");
+    expect(workflowFeedbackCheckChanges(parsed, [finding({ obsoleteChecks: ["proposed-1", "proposed-1", "proposed-2", "proposed-2", "proposed-1", "proposed-2"] })]).problems)
+      .toContain("it names more than 5 checks to drop");
+  });
+
+  it("attributes each change to its finding exactly as the whole set applies: A drops X and B adds X's command", () => {
+    const parsed = WorkflowSnapshotSchema.parse(workflow(policy())).checkPolicy;
+    const sameAsSentence = { label: "Sentence again", cwd: "repo/demo", executable: "grep", args: SENTENCE.command.args, timeoutSeconds: 30 };
+    const changes = workflowFeedbackCheckChanges(parsed, [finding({ obsoleteChecks: ["proposed-1"] }), finding({ replacementChecks: [sameAsSentence] })]);
+    expect(changes.added.map((check) => check.label)).toEqual(["Sentence again"]);
+    expect(changes.byFinding.map((entry) => [entry.obsolete.map((check) => check.label), entry.added.map((check) => check.label)]))
+      .toEqual([[[SENTENCE.label], []], [[], ["Sentence again"]]]);
   });
 
   it("shows a command for the owner to approve in full up to its limit, cutting only its arguments", () => {

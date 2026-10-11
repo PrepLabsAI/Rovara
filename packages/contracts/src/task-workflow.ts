@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import { ProjectCommandSchema } from "./project.js";
-import { WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckInputSchema, proposedCheckProblem } from "./workflow-check-input.js";
+import { WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckInputSchema, feedbackReplacementCheckProblem } from "./workflow-check-input.js";
 
 const DigestSchema = z.string().regex(/^[a-f0-9]{64}$/);
 const ActorIdSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -652,19 +652,26 @@ export function workflowIsReviewOnly(policy: WorkflowCheckPolicy | undefined): b
 export const WorkflowFeedbackTaskChecksSchema = z.object({
   proposed: z.array(WorkflowCheckSchema).max(WORKFLOW_PROPOSED_CHECKS_MAX),
   required: z.array(z.object({ id: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/), label: z.string().trim().min(1).max(80) }).strict()).max(64),
+  /** The project's optional checks: like required ones, never dropped by a fix. */
+  optional: z.array(z.object({ id: z.string().regex(/^[a-z][a-z0-9_-]{0,63}$/), label: z.string().trim().min(1).max(80) }).strict()).max(20).optional(),
   repositoryPaths: z.array(z.string().min(1).max(512)).min(1).max(32),
 }).strict();
 export type WorkflowFeedbackTaskChecks = z.infer<typeof WorkflowFeedbackTaskChecksSchema>;
 
 /**
- * The checks an approved PR feedback fix changes: the task's proposed checks it makes wrong, the corrected ones it adds,
- * and, in plain words, what in the proposal AgentX will not apply (an approval with any problem is refused whole).
+ * The checks approved PR feedback fixes change: the task's proposed checks they make wrong, the corrected ones they add,
+ * the same split by finding (for saying which fix changes what), and, in plain words, what in the proposals AgentX will
+ * not apply (an approval with any problem is refused whole).
  */
 export interface WorkflowFeedbackCheckChanges {
   obsolete: WorkflowCheck[];
   added: Array<{ label: string; command: WorkflowCheck["command"] }>;
+  byFinding: Array<{ obsolete: WorkflowCheck[]; added: Array<{ label: string; command: WorkflowCheck["command"] }> }>;
   problems: string[];
 }
+
+/** The most corrected checks, and the most checks to drop, one review's fixes may propose in all. */
+export const WORKFLOW_FEEDBACK_CHECK_CHANGES_MAX = 5;
 
 function sameCheckCommand(a: WorkflowCheck["command"], b: WorkflowCheck["command"]): boolean {
   return a.cwd === b.cwd && a.executable === b.executable && a.args.length === b.args.length && a.args.every((arg, index) => arg === b.args[index]);
@@ -676,42 +683,52 @@ type FeedbackFindingCheckInput = {
 };
 
 /**
- * The check changes of the given feedback findings' proposals, against the task's check policy. Only a fix to make
- * (IMPLEMENT) changes checks. An obsolete name is a check ID, or a label naming exactly one check; it must be a proposed
- * check: naming a project check (which always runs), a check the task does not have, or a label several checks share is
- * a problem. A proposed check the owner already unticked is not run, so naming it changes nothing. A corrected check must
- * follow the proposed-check rules (and, given `repositoryPaths`, run in one of those folders); it is added once, unless it
- * is the same command as a required check or a proposed check that stays.
+ * The check changes of the given feedback findings' proposals, against the task's check policy: what Approve applies
+ * for exactly these findings, so a card and the approval use this one computation. Only a fix to make (IMPLEMENT)
+ * changes checks. An obsolete name is a check ID, or a label naming exactly one check; it must be a proposed check:
+ * naming a project check (which always runs), a check the task does not have, or a label several checks share is a
+ * problem. A proposed check the owner already unticked is not run, so naming it changes nothing. A corrected check must
+ * be short and plain and follow the proposed-check rules (and, given `repositoryPaths`, run in one of those folders); it
+ * is added once, unless it is the same command as a required check or a proposed check that stays. At most 5 corrected
+ * checks and 5 checks to drop in all.
  */
 export function workflowFeedbackCheckChanges(
   policy: WorkflowCheckPolicy | undefined,
   findings: ReadonlyArray<FeedbackFindingCheckInput>,
   repositoryPaths?: readonly string[],
 ): WorkflowFeedbackCheckChanges {
-  if (policy === undefined) return { obsolete: [], added: [], problems: [] };
-  const fixes = findings.filter((finding) => finding.proposedDisposition === "IMPLEMENT");
+  const byFinding: WorkflowFeedbackCheckChanges["byFinding"] = findings.map(() => ({ obsolete: [], added: [] }));
+  if (policy === undefined) return { obsolete: [], added: [], byFinding, problems: [] };
+  const isFix = (finding: FeedbackFindingCheckInput) => finding.proposedDisposition === "IMPLEMENT";
   const kept = policy.selectedProposedIds;
   const proposedAll = policy.proposed ?? [];
   const running = proposedAll.filter((check) => kept === undefined || kept.includes(check.id));
   const projectChecks = [...policy.required, ...policy.optional];
   const obsolete: WorkflowCheck[] = [];
   const problems: string[] = [];
+  const names = findings.flatMap((finding, index) => isFix(finding) ? (finding.fixProposal?.obsoleteChecks ?? []).map((name) => ({ name, index })) : []);
+  const raws = findings.flatMap((finding, index) => isFix(finding) ? (finding.fixProposal?.replacementChecks ?? []).map((raw) => ({ raw, index })) : []);
+  if (names.length > WORKFLOW_FEEDBACK_CHECK_CHANGES_MAX) problems.push(`it names more than ${WORKFLOW_FEEDBACK_CHECK_CHANGES_MAX} checks to drop`);
+  if (raws.length > WORKFLOW_FEEDBACK_CHECK_CHANGES_MAX) problems.push(`it proposes more than ${WORKFLOW_FEEDBACK_CHECK_CHANGES_MAX} corrected checks`);
   const named = (name: string, checks: readonly WorkflowCheck[]) => {
     const byId = checks.filter((check) => check.id === name.trim());
     return byId.length > 0 ? byId : checks.filter((check) => check.label.trim().toLowerCase() === name.trim().toLowerCase());
   };
-  for (const name of fixes.flatMap((finding) => finding.fixProposal?.obsoleteChecks ?? [])) {
+  for (const { name, index } of names) {
     if (named(name, projectChecks).length > 0) { problems.push("it names a project check, which always runs"); continue; }
     const matches = named(name, proposedAll);
     if (matches.length === 0) { problems.push("it names a check the task does not have"); continue; }
     if (matches.length > 1) { problems.push("it names more than one check by the same label"); continue; }
     const check = matches[0]!;
-    if (running.includes(check) && !obsolete.includes(check)) obsolete.push(check);
+    if (running.includes(check) && !obsolete.includes(check)) {
+      obsolete.push(check);
+      byFinding[index]!.obsolete.push(check);
+    }
   }
   const staying = [...policy.required, ...running.filter((check) => !obsolete.includes(check))];
   const added: WorkflowFeedbackCheckChanges["added"] = [];
-  for (const raw of fixes.flatMap((finding) => finding.fixProposal?.replacementChecks ?? [])) {
-    const problem = proposedCheckProblem(raw, repositoryPaths);
+  for (const { raw, index } of raws) {
+    const problem = feedbackReplacementCheckProblem(raw, repositoryPaths);
     const parsed = WorkflowProposedCheckInputSchema.safeParse(raw);
     if (problem !== undefined || !parsed.success) {
       problems.push(problem ?? "it must have only label, cwd, executable, args and timeoutSeconds");
@@ -720,9 +737,11 @@ export function workflowFeedbackCheckChanges(
     const command = { cwd: parsed.data.cwd, executable: parsed.data.executable, args: parsed.data.args,
       timeoutSeconds: parsed.data.timeoutSeconds ?? WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS };
     if (staying.some((check) => sameCheckCommand(check.command, command)) || added.some((check) => sameCheckCommand(check.command, command))) continue;
-    added.push({ label: parsed.data.label, command });
+    const entry = { label: parsed.data.label, command };
+    added.push(entry);
+    byFinding[index]!.added.push(entry);
   }
-  return { obsolete, added, problems };
+  return { obsolete, added, byFinding, problems };
 }
 
 /**

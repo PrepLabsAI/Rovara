@@ -2,7 +2,7 @@ import { z } from "zod";
 import { WORKFLOW_PROPOSED_CHECKS_MAX, WorkflowCheckProposalSchema, type WorkflowCheck, type WorkflowCheckProposal } from "./task-workflow.js";
 import { WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckInputSchema as ProposedCheckInputSchema, hasControlCharacter } from "./workflow-check-input.js";
 
-export { WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckInputSchema, hasControlCharacter, proposedCheckExecutableAllowed, proposedCheckProblem, type WorkflowProposedCheckInput } from "./workflow-check-input.js";
+export { WORKFLOW_FEEDBACK_CHECK_COMMAND_MAX, WORKFLOW_PROPOSED_CHECK_DEFAULT_TIMEOUT_SECONDS, WorkflowProposedCheckInputSchema, feedbackReplacementCheckProblem, hasControlCharacter, proposedCheckExecutableAllowed, proposedCheckProblem, type WorkflowProposedCheckInput } from "./workflow-check-input.js";
 
 /** The note shown when a plan's `agentx-checks` block is malformed or over a limit. */
 export const WORKFLOW_PROPOSED_CHECKS_UNREADABLE = "AgentX could not read the proposed checks";

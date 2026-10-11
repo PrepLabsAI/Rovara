@@ -673,7 +673,7 @@ describe("checks a PR feedback fix makes wrong (0.2.12 live test)", () => {
   const shorten = (bundleDigest: string, checks: Record<string, unknown>) => JSON.stringify({ findings: [implementFinding(bundleDigest, {
     summary: `Replace the sentence with "${NEW}"`, fileChanges: [{ repositoryId: "app", path: "README.md", operation: "MODIFY", change: `Replace the sentence with "${NEW}"` }],
     tests: [], ...checks })] });
-  async function review(fixture: Awaited<ReturnType<typeof readmeFixture>>, responses: string[], prompts: string[], checks: typeof taskChecks | null = taskChecks) {
+  async function review(fixture: Awaited<ReturnType<typeof readmeFixture>>, responses: string[], prompts: string[], checks: Parameters<typeof runWorkflowFeedbackReview>[0]["taskChecks"] | null = taskChecks) {
     return runWorkflowFeedbackReview({
       operationId: randomUUID(), taskId: fixture.taskId, workflowRevision: 7,
       taskRequirements: "Add the Code of Conduct sentence to README.md.", candidateDigest: fixture.bundle.candidateDigest, rootPath: fixture.rootPath, model: FAUX_MODEL,
@@ -716,6 +716,12 @@ describe("checks a PR feedback fix makes wrong (0.2.12 live test)", () => {
     ["a folder outside the task's repositories", { ...replacement, cwd: "other" }, "it must run in one of the task's repositories"],
     ["a timeout over the limit", { ...replacement, timeoutSeconds: 99_999 }, "its timeout must be a whole number of seconds from 1 to 1800"],
     ["a field checks do not have", { ...replacement, env: { A: "1" } }, "it must have only label, cwd, executable, args and timeoutSeconds"],
+    // 0.2.12 review: a corrected check is short and plain, so the owner reads exactly what runs.
+    ["a backtick", { ...replacement, args: ["-q", "`id`", "README.md"] }, "keep the command under 300 plain characters without ` or $("],
+    ["$(", { ...replacement, args: ["-q", "$(id)", "README.md"] }, "keep the command under 300 plain characters without ` or $("],
+    ["a right-to-left override", { ...replacement, args: ["-q", "kind.\u202E", "README.md"] }, "keep the command under 300 plain characters without ` or $("],
+    ["a zero-width space", { ...replacement, args: ["-q", "kind.\u200B", "README.md"] }, "keep the command under 300 plain characters without ` or $("],
+    ["a 301-character command", { ...replacement, args: ["-q", "x".repeat(301 - "grep -q  README.md".length), "README.md"] }, "keep the command under 300 plain characters without ` or $("],
   ])("refuses a replacement check with %s, naming the problem, after the one follow-up", async (_name, unsafe, problem) => {
     const fixture = await readmeFixture();
     const prompts: string[] = [];
@@ -729,7 +735,7 @@ describe("checks a PR feedback fix makes wrong (0.2.12 live test)", () => {
   it("refuses dropping a required project check, or a check the task does not have", async () => {
     const fixture = await readmeFixture();
     const required = await review(fixture, [shorten(fixture.bundleRef.sha256, { obsoleteChecks: ["readiness-1"] })], []);
-    expect(required.report.blockReason).toBe("reviewer output: fixProposal.obsoleteChecks of finding 1 names a required project check");
+    expect(required.report.blockReason).toBe("reviewer output: fixProposal.obsoleteChecks of finding 1 names a project check, which always runs");
     const unknown = await review(fixture, [shorten(fixture.bundleRef.sha256, { obsoleteChecks: ["proposed-9"] })], []);
     expect(unknown.report.blockReason).toBe("reviewer output: fixProposal.obsoleteChecks of finding 1 names a check the task does not have");
   });
@@ -741,6 +747,22 @@ describe("checks a PR feedback fix makes wrong (0.2.12 live test)", () => {
     expect(ambiguous.report.blockReason).toBe("reviewer output: fixProposal.obsoleteChecks of finding 1 names more than one check by the same label");
     const byId = await review(fixture, [shorten(fixture.bundleRef.sha256, { obsoleteChecks: ["proposed-2"], replacementChecks: [replacement] })], [], twins);
     expect(byId.report.status).toBe("COMPLETE");
+  });
+
+  it("refuses dropping an optional project check, as approval does", async () => {
+    const fixture = await readmeFixture();
+    const withOptional = { ...taskChecks, optional: [{ id: "lint", label: "Lint the change" }] };
+    const result = await review(fixture, [shorten(fixture.bundleRef.sha256, { obsoleteChecks: ["lint"] })], [], withOptional);
+    expect(result.report.blockReason).toBe("reviewer output: fixProposal.obsoleteChecks of finding 1 names a project check, which always runs");
+  });
+
+  it("refuses more than 5 corrected checks, or more than 5 checks to drop, in one review", async () => {
+    const fixture = await readmeFixture();
+    const six = Array.from({ length: 6 }, (_, index) => ({ ...replacement, args: ["-q", `Line ${String(index)}`, "README.md"] }));
+    const tooMany = await review(fixture, [shorten(fixture.bundleRef.sha256, { replacementChecks: six })], []);
+    expect(tooMany.report.blockReason).toBe("reviewer output: fixProposal.replacementChecks: more than 5 corrected checks in one review");
+    const drops = await review(fixture, [shorten(fixture.bundleRef.sha256, { obsoleteChecks: Array.from({ length: 6 }, () => "proposed-1") })], []);
+    expect(drops.report.blockReason).toBe("reviewer output: fixProposal.obsoleteChecks: more than 5 checks to drop in one review");
   });
 
   it("keeps no check changes on a finding that is not a fix to make", async () => {

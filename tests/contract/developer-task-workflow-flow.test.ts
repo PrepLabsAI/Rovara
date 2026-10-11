@@ -3161,6 +3161,7 @@ describe("a structured plan reaches coders, reviewers and the pull request as Ma
     expect(material.taskChecks).toEqual({
       proposed: [checkPolicy.proposed[0]],
       required: [{ id: "required-1", label: "Unit tests" }],
+      optional: [],
       repositoryPaths: ["repo/demo"],
     });
     // A task stored without a check policy runs the project's checks; the critic is told nothing about checks.
