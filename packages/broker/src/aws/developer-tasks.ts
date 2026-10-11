@@ -801,7 +801,10 @@ export async function taskView(
   const lastClose = operations.filter((operation) => operation.kind === "close").sort(byCreated).at(-1);
   const workedSince = lastClose !== undefined && derived.current !== undefined && byCreated(derived.current, lastClose) > 0;
   const unpublished = lastClose?.status === "SUCCEEDED" && !derived.closing && derived.status !== "CLOSED" && !workedSince ? unpublishedOf(lastClose.result) : undefined;
-  let workflow: DeveloperTaskView["workflow"] = task.workflow;
+  // Older MCP and CLI clients parse decisions strictly: the slice 2 fields stay out of the public view until the oldest
+  // supported client knows them (the task page and Slack read them from the stored task).
+  let workflow: DeveloperTaskView["workflow"] = task.workflow === undefined ? undefined
+    : { ...task.workflow, decisions: task.workflow.decisions.map(({ answerOverrides, commentsIncluded, via, ...decision }) => { void answerOverrides; void commentsIncluded; void via; return decision; }) };
   if (options.details && workflow?.stage === "PLAN_REVIEW" && workflow.state === "WAITING") {
     const activeArtifactType = workflow.path === "FULL" && workflow.reviewPhase === "REQUIREMENTS" ? "requirements"
       : workflow.path === "FULL" && workflow.reviewPhase === "DESIGN" ? "design" : "plan";
@@ -1443,16 +1446,17 @@ export async function decideTaskWorkflow(
     ], { sharedTask: task.shared === true, workflowMode: mode, ...(retired.length === 0 ? {} : { retiredClaimIds: retired }), ...(mode === "PLAN" && nextPhase !== undefined ? { workflowPhase: nextPhase } : {}), ...(selectedReadiness === undefined ? {} : { readiness: selectedReadiness }), ...(mode === "IMPLEMENT" ? taskBaseOption(task, next) : {}) });
     });
   } catch (error) {
-    const reasons = (error as { extraCancellation?: string[] }).extraCancellation;
-    if (reasons !== undefined && lockItems.some((_, index) => reasons[lockOffset + index] === "ConditionalCheckFailed")) {
-      throw Object.assign(agentXError("IDEMPOTENCY_CONFLICT", COMMENT_CHANGED_MESSAGE), { pageReason: "comment_changed" });
-    }
-    // Another decision got there first: the same request (a double press) is that decision; any other is refused with who decided.
+    // Another decision got there first: the same request (a double press) is that decision; any other is refused with
+    // who decided. That is checked before the comment locks: a decision that won with the same comment also fails its lock.
     const fresh = await get<DeveloperTaskRecord>(deps, taskKey(taskId));
     if (fresh?.workflow?.decisions.some((decision) => decision.requestId === request.requestId) === true) {
       return { task: await taskView(deps, fresh, { events: 0, details: false }) };
     }
     if (fresh?.workflow !== undefined && fresh.workflow.revision !== workflow.revision) throw refused(fresh.workflow);
+    const reasons = (error as { extraCancellation?: string[] }).extraCancellation;
+    if (reasons !== undefined && lockItems.some((_, index) => reasons[lockOffset + index] === "ConditionalCheckFailed")) {
+      throw Object.assign(agentXError("IDEMPOTENCY_CONFLICT", COMMENT_CHANGED_MESSAGE), { pageReason: "comment_changed" });
+    }
     return busyOrClosing(deps, task, error);
   }
   const fresh = await loadOwnedTask(deps, caller, taskId);

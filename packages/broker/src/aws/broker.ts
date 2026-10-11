@@ -1016,11 +1016,14 @@ const SLACK_PLAIN_REFUSALS: ReadonlyMap<string, string> = new Map([
  * task is not found for a Slack caller when it was started from an AI tool (its owner is that tool's sign-in) or is
  * gone, so the words fit both.
  */
+/** The decision's lost-race sentences (FR-035), which Slack says as they are. */
+const LOST_RACE = /^(Already approved by|Changes were already requested by) [^\n]{1,200}\.$/u;
 function slackRefusalMessage(code: string, outOfDate: string, reason = ""): string | undefined {
   switch (code) {
     // A refusal the presser can act on is said as it is; any other means the press no longer fits the task.
     case "CONFIG_INVALID": return SLACK_PLAIN_REFUSALS.get(reason) ?? outOfDate;
-    case "IDEMPOTENCY_CONFLICT": return outOfDate;
+    // A lost race says who decided and when (the owner's name is redacted; Slack's markup characters are escaped).
+    case "IDEMPOTENCY_CONFLICT": return LOST_RACE.test(reason) ? reason.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;") : outOfDate;
     case "WORKSPACE_BUSY":
     case "TASK_BUSY": return "AgentX is still working on the previous step. Try again when it posts.";
     case "FORBIDDEN": return "Only the task owner can do that.";

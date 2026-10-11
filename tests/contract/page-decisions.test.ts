@@ -1,14 +1,14 @@
 // A decision on a plan with the owner's answers and the comments they chose, through the one transition Slack and MCP use.
 import { randomUUID } from "node:crypto";
 import { describe, expect, it } from "vitest";
-import { createCandidateManifest, type PlanDocument, type TaskComment, type WorkflowSnapshot } from "@agentx/contracts";
+import { DeveloperTaskViewSchema, WorkflowDecisionSchema, createCandidateManifest, type PlanDocument, type TaskComment, type WorkflowSnapshot } from "@agentx/contracts";
 import { decideTaskWorkflow, promptTagId, type DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
 import { ownerAnswersFor, refusalMessage } from "../../packages/broker/src/developer/owner-answers.js";
 import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broker.js";
 import { finishPlanningWithMarkdown, planAnswer } from "../support/plan-documents.js";
 import { pagePlan } from "../support/page-tasks.js";
-import { SLACK_CHANNEL } from "../support/slack-broker.js";
+import { SLACK_CHANNEL, SLACK_TEAM } from "../support/slack-broker.js";
 
 type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
 const PREPARED = { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } };
@@ -41,10 +41,17 @@ function routeDeps(harness: Harness): DeveloperTaskRouteDependencies {
 }
 
 /** A Quick task whose structured coding plan (`plan`) waits for its owner, Maya. */
-async function waitingPlan(plan: PlanDocument = PLAN, options: { markdown?: string } = {}) {
+async function waitingPlan(plan: PlanDocument = PLAN, options: { markdown?: string; slackThread?: { teamId: string; channelId: string; threadTs: string } } = {}) {
   const harness = await createDeveloperTaskBroker();
-  const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Retry failed payments", client: "test-client", workflow: true, workflowPath: "QUICK" });
-  const taskId = String((started.body.task as { taskId: string }).taskId);
+  let taskId: string;
+  if (options.slackThread === undefined) {
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Retry failed payments", client: "test-client", workflow: true, workflowPath: "QUICK" });
+    taskId = String((started.body.task as { taskId: string }).taskId);
+  } else {
+    // Started from a Slack thread, so its card's buttons work.
+    const started = await harness.handler({ source: "agentx.slack-ingress", action: "start-workflow", thread: options.slackThread, userId: MAYA.slackUserId, instructions: "Retry failed payments", workflowPath: "QUICK", requestId: randomUUID() }) as { body: string };
+    taskId = String((JSON.parse(started.body) as { taskId: string }).taskId);
+  }
   const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workspaceId: string; workflow: WorkflowSnapshot };
   const workspaceId = record.workspaceId;
   harness.db.set({ ...record, workflow: { ...record.workflow, checkPolicy: { required: [REQUIRED_CHECK], optional: [], selectedOptionalIds: [] } } });
@@ -71,7 +78,9 @@ async function waitingPlan(plan: PlanDocument = PLAN, options: { markdown?: stri
     return commentId;
   };
   const digest = () => workflowOf(harness, taskId).artifacts.at(-1)!.sha256;
-  const page = (body: Record<string, unknown>, note?: string) => decideTaskWorkflow(routeDeps(harness), maya, taskId, {
+  // The page's signed-in owner: the task's own developer (a task started in Slack has its own developer ID).
+  const owner: DeveloperCaller = { ...maya, developerId: String((harness.db.get(`DEVTASK#${taskId}`, "META") as { developerId: string }).developerId) };
+  const page = (body: Record<string, unknown>, note?: string) => decideTaskWorkflow(routeDeps(harness), owner, taskId, {
     requestId: randomUUID(), expectedRevision: workflowOf(harness, taskId).revision, decision: "APPROVE", artifactDigest: digest(), reason: note ?? "Approved on the task page.",
     answers: [{ decisionId: "d1", optionId: "below", opened: false }, { decisionId: "d2", optionId: "three", opened: false }], includedCommentIds: [], ...body,
   }, { via: "PAGE", ...(note === undefined ? {} : { note }) });
@@ -190,13 +199,15 @@ describe("page decisions", () => {
     const revision = workflowOf(t.harness, t.taskId).revision;
     expect((await t.plain("APPROVE", requestId, revision)).status).toBe(200);
     const after = workflowOf(t.harness, t.taskId);
-    const later = t.seed();
+    const later = [t.seed(), t.seed()];
     const replay = await t.plain("APPROVE", requestId, revision);
     expect(replay.status, JSON.stringify(replay.body)).toBe(200);
     expect(workflowOf(t.harness, t.taskId).decisions).toEqual(after.decisions);
+    expect(workflowOf(t.harness, t.taskId).decisions.at(-1)?.commentsIncluded).toBe(1);
     expect(after.decisions.at(-1)?.commentsIncluded).toBe(1);
+    expect(t.harness.db.get(`DEVTASK#${t.taskId}`, `DECISION#${requestId}`)).toMatchObject({ includedCommentIds: [first] });
     expect(commentItem(t.harness, t.taskId, first)?.lockedBy?.requestId).toBe(requestId);
-    expect(commentItem(t.harness, t.taskId, later)?.lockedBy).toBeUndefined();
+    for (const id of later) expect(commentItem(t.harness, t.taskId, id)?.lockedBy).toBeUndefined();
     expect(operations(t.harness, t.workspaceId).filter((item) => item.workflowMode === "IMPLEMENT")).toHaveLength(1);
   });
 
@@ -321,6 +332,95 @@ describe("page decisions", () => {
     expect(prompt).toContain("1. Fix the retry.");
     expect(prompt).toContain(">Mind the old flag.</page_comment>");
     expect(workflowOf(t.harness, t.taskId).decisions.at(-1)).toMatchObject({ commentsIncluded: 1, via: "PAGE" });
+  });
+
+  it("two tabs that include the same comment: the loser hears who approved, not that a comment changed", async () => {
+    const t = await waitingPlan();
+    const shared = t.seed();
+    const expectedRevision = workflowOf(t.harness, t.taskId).revision;
+    const results = await Promise.allSettled([t.page({ expectedRevision, includedCommentIds: [shared] }), t.page({ expectedRevision, includedCommentIds: [shared] })]);
+    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    const lost = (results.find((result) => result.status === "rejected") as PromiseRejectedResult).reason as Error & { code: string };
+    expect(lost.code).toBe("IDEMPOTENCY_CONFLICT");
+    expect(lost.message).toContain("Already approved by Maya Chen a moment ago.");
+    expect(lost.message).not.toContain(COMMENT_CHANGED);
+    expect(workflowOf(t.harness, t.taskId).decisions.filter((decision) => decision.decision === "APPROVE")).toHaveLength(1);
+  });
+
+  /**
+   * The page's decision and another one (`other`, sent with `otherRequestId`) both pass their checks; the page's write
+   * lands first, then the other's: a real lost race, not a stale button.
+   */
+  async function raceAgainstPage<T>(t: Awaited<ReturnType<typeof waitingPlan>>, includedCommentIds: string[], other: (otherRequestId: string) => Promise<T>): Promise<T> {
+    const pageRequestId = randomUUID();
+    const otherRequestId = randomUUID();
+    const expectedRevision = workflowOf(t.harness, t.taskId).revision;
+    const send = t.harness.db.send;
+    let arrived!: () => void;
+    let release!: () => void;
+    const otherArrived = new Promise<void>((resolve) => { arrived = resolve; });
+    const released = new Promise<void>((resolve) => { release = resolve; });
+    let otherResult: Promise<T> | undefined;
+    t.harness.db.send = async (command) => {
+      const isTransaction = (command as { constructor: { name: string } }).constructor.name === "TransactWriteCommand";
+      const text = isTransaction ? JSON.stringify((command as { input: unknown }).input) : "";
+      if (isTransaction && text.includes(pageRequestId) && otherResult === undefined) {
+        otherResult = other(otherRequestId);
+        await otherArrived;
+        const result = await send(command);
+        release();
+        return result;
+      }
+      if (isTransaction && text.includes(otherRequestId)) {
+        arrived();
+        await released;
+      }
+      return send(command);
+    };
+    try {
+      await t.page({ requestId: pageRequestId, expectedRevision, includedCommentIds });
+      return await otherResult!;
+    } finally {
+      t.harness.db.send = send;
+    }
+  }
+
+  it("a Slack press that loses to the page hears who approved", async () => {
+    const thread = { teamId: SLACK_TEAM, channelId: SLACK_CHANNEL, threadTs: "1695500000.000099" };
+    const t = await waitingPlan(PLAN, { slackThread: thread });
+    const shared = t.seed();
+    const expectedRevision = workflowOf(t.harness, t.taskId).revision;
+    const pressed = await raceAgainstPage(t, [shared], (requestId) => t.harness.handler({ source: "agentx.slack-ingress", action: "workflow-decision", taskId: t.taskId, userId: MAYA.slackUserId, thread, requestId,
+      expectedRevision, artifactDigest: t.digest(), decision: "APPROVE", reason: "Approved in Slack.", selectedOptionalCheckIds: [] }) as Promise<{ statusCode: number; body: string }>);
+    const answer = JSON.parse(pressed.body) as { refused?: boolean; message?: string };
+    // A task started in Slack has no stored name for its owner, so the sentence names the role.
+    expect(answer).toMatchObject({ refused: true, message: "Already approved by the task owner a moment ago." });
+    expect(workflowOf(t.harness, t.taskId).decisions.filter((decision) => decision.decision === "APPROVE")).toHaveLength(1);
+  });
+
+  it("an MCP decision that loses to the page hears who approved", async () => {
+    const t = await waitingPlan();
+    const shared = t.seed();
+    const expectedRevision = workflowOf(t.harness, t.taskId).revision;
+    const answer = await raceAgainstPage(t, [shared], (requestId) => t.plain("APPROVE", requestId, expectedRevision));
+    expect(answer.status).toBe(409);
+    expect(JSON.stringify(answer.body)).toContain("Already approved by Maya Chen a moment ago.");
+    expect(workflowOf(t.harness, t.taskId).decisions.filter((decision) => decision.decision === "APPROVE")).toHaveLength(1);
+  });
+
+  it("the public task view leaves out the new decision fields, so older clients still read it", async () => {
+    const t = await waitingPlan();
+    const sams = t.seed();
+    await t.page({ answers: [{ decisionId: "d1", optionId: "above", opened: true }, { decisionId: "d2", optionId: "three", opened: false }], includedCommentIds: [sams] });
+    expect(workflowOf(t.harness, t.taskId).decisions.at(-1)).toMatchObject({ commentsIncluded: 1, via: "PAGE" });
+    const read = await t.harness.dev(MAYA, "GET", `/v1/dev/tasks/${t.taskId}`);
+    expect(read.status).toBe(200);
+    const decisions = (read.body.task as { workflow: { decisions: Array<Record<string, unknown>> } }).workflow.decisions;
+    for (const decision of decisions) for (const key of ["answerOverrides", "commentsIncluded", "via"]) expect(decision).not.toHaveProperty(key);
+    // A client built before these fields parses the view with the strict decision schema it knew.
+    const OldDecisionSchema = WorkflowDecisionSchema.omit({ answerOverrides: true, commentsIncluded: true, via: true }).strict();
+    for (const decision of decisions) expect(OldDecisionSchema.safeParse(decision).success).toBe(true);
+    expect(DeveloperTaskViewSchema.safeParse(read.body.task).success).toBe(true);
   });
 
   it("the refusal sentence says who and when in plain words", () => {
