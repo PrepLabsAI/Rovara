@@ -282,6 +282,8 @@ export async function createWorkflowE2E(options: {
     },
   });
   const { db, s3 } = harness;
+  const deleteEc2Session = harness.deleteEc2Session;
+  if (deleteEc2Session === undefined) throw new Error("the E2E broker deletes EC2 sessions");
   // Maya's Slack sign-in: her session and developer records, keyed by her Slack user's developer ID.
   db.set({ pk: `SESSION#${SLACK_MAYA.sessionId}`, sk: "META", sessionId: SLACK_MAYA.sessionId, developerId: SLACK_MAYA.developerId, amr: "slack",
     startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800 });
@@ -913,7 +915,7 @@ export async function createWorkflowE2E(options: {
     db, s3, handler, slack, github, repoDirectory, baseCommit, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs,
     ledger, reviewedTrees, briefLimit, pushedWorkflows, reviewUrlBase: REVIEW_URL_BASE, canvasesDeleted,
     /** The broker's EC2 session deleter: each call removes one workspace's compute. */
-    deleteEc2Session: harness.deleteEc2Session,
+    deleteEc2Session,
     /** The table's stream as the notifier reads it (`duplicateNext()` delivers the next record twice). */
     stream,
     /** How many times the notifier gave up on a notice Slack refused for good. */
