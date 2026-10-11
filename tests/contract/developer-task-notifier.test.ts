@@ -827,11 +827,22 @@ describe("the shared thread (FR-032, US3 scenario 1)", () => {
     await h.pump();
     expect(h.posts.at(-1)!.text).toBe("Draft pull requests opened: <https://github.com/example/api/pull/12|PR #12>, <https://github.com/example/web/pull/13|PR #13>. Review them and merge them on GitHub; I'll finish this task when they're all merged.");
     expect(JSON.stringify(h.posts.at(-1)!.blocks)).toContain("agentx_workflow_close");
-    // A later step that changes nothing about the pull requests says nothing again.
+    // A later step that changes nothing about the pull requests (such as collecting PR feedback) says nothing again.
     const before = h.posts.length;
     await saveWorkflow({ ...first, revision: 3 });
     await h.pump();
     expect(h.posts).toHaveLength(before);
+    // Approved PR feedback re-published the same pull requests with new heads: that is said.
+    const feedback = (decision: string, workflowRevision: number) => ({ schemaVersion: 1, requestId: randomUUID(), workflowRevision, decision, actorId: "a".repeat(64), actorRole: "TASK_OWNER",
+      reviewDigest: "f".repeat(64), proposalDigest: "f".repeat(64), bundleDigests: ["f".repeat(64)], selectedFindingIds: [], selectedCommentIds: [], candidates: [], at: new Date().toISOString() });
+    const republished = { ...first, pullRequests: first.pullRequests.map((pr) => ({ ...pr, headSha: "9".repeat(40) })), feedbackDecisions: [feedback("APPROVE", 3)] };
+    await saveWorkflow({ ...republished, revision: 4 });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toMatch(/^Pull requests updated with the approved PR feedback: /);
+    // The owner dismissed the next round of PR feedback: a short answer, and nothing else.
+    await saveWorkflow({ ...republished, revision: 5, feedbackDecisions: [...republished.feedbackDecisions, feedback("DISMISS", 4)] });
+    await h.pump();
+    expect(h.posts.at(-1)!.text).toBe("PR feedback dismissed. The pull request stays as it is.");
     await saveWorkflow({ ...first, revision: 6, pullRequests: first.pullRequests.map((pr, index) => ({ ...pr, state: index === 0 ? "MERGED" : "OPEN" })) });
     await h.pump();
     expect(h.posts.at(-1)!.text).toBe("GitHub update: 1 of 2 pull requests merged. <https://github.com/example/web/pull/13|PR #13> is still open.");
@@ -1329,5 +1340,55 @@ describe("an uncertain start post is logged (25c note 3)", () => {
     await h.pump();
     expect(h.posts).toHaveLength(1);
     expect(uncertain(h.logs)).toEqual([]);
+  });
+});
+
+describe("the PR feedback advisory summary", () => {
+  it("posts a brief, redacted summary with a secure detail link and named actions", async () => {
+    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const message = feedbackReviewSlackMessage({
+      taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
+      reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
+      totalComments: 7, recommendedFindingIds: ["finding-1", "finding-2"], highestPriority: "MUST_FIX",
+      detailUrl: "https://agentx.example/review/11111111-1111-4111-8111-111111111111",
+    });
+    expect(message.text).toContain("7 comments");
+    expect(message.text).toContain("2 recommendations");
+    expect(message.text).toContain("Highest priority: must fix");
+    expect(message.text).toContain("https://agentx.example/review/");
+    expect(message.text).not.toContain("hostile comment");
+    expect(message.text).not.toContain("full fix plan");
+    expect(message.text.length).toBeLessThan(500);
+    const blocks = message.blocks as Array<{ elements?: Array<{ action_id: string; value: string }> }>;
+    const actions = blocks.flatMap(block => block.elements ?? []);
+    expect(actions.map(action => action.action_id)).toEqual([
+      "agentx_feedback_review_recommended", "agentx_feedback_review_changes",
+    ]);
+    const feedbackActionValue = parseAction(actions[0]!.value);
+    expect(feedbackActionValue).toMatchObject({
+      selection: "RECOMMENDED", expectedRevision: 8, reviewDigest: "a".repeat(64),
+      proposalDigest: "b".repeat(64),
+    });
+    expect(typeof feedbackActionValue.bundleSetDigest === "string" && /^[a-f0-9]{64}$/.test(feedbackActionValue.bundleSetDigest)).toBe(true);
+    const maxPrMessage = feedbackReviewSlackMessage({ taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
+      reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: Array.from({ length: 32 }, (_, index) => String(index).padStart(2, "0").repeat(32)),
+      totalComments: 128, recommendedFindingIds: ["finding"], highestPriority: "MUST_FIX", detailUrl: "https://agentx.example/review/11111111-1111-4111-8111-111111111111" });
+    const maxPrActionValue = parseAction(((maxPrMessage.blocks[1] as { elements: Array<{ value: string }> }).elements[0]!).value);
+    expect(typeof maxPrActionValue.bundleSetDigest === "string" && /^[a-f0-9]{64}$/.test(maxPrActionValue.bundleSetDigest)).toBe(true);
+    expect(((maxPrMessage.blocks[1] as { elements: Array<{ value: string }> }).elements[0]!).value.length).toBeLessThan(2_000);
+  });
+
+  it("does not offer approval when there are no recommended fixes", async () => {
+    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const message = feedbackReviewSlackMessage({
+      taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
+      reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
+      totalComments: 0, recommendedFindingIds: [], highestPriority: undefined,
+      detailUrl: "https://agentx.example/review/11111111-1111-4111-8111-111111111111",
+    });
+    expect(message.text).toContain("No fixes are recommended");
+    const actions = (message.blocks as Array<{ elements?: Array<{ action_id: string; text: { text: string } }> }>).flatMap(block => block.elements ?? []);
+    expect(actions.map(action => action.action_id)).toEqual(["agentx_feedback_review_changes"]);
+    expect(actions[0]?.text.text).toBe("Request changes");
   });
 });

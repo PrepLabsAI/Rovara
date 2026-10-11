@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { diffStat, type WorkerInvocation } from "@agentx/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { MISSING_BASE_NOTE, publishWorkspaceDiff, workspaceFingerprint, type WorkerArtifact } from "../../packages/worker/src/artifacts.js";
 import type { WorkerEvent } from "../../packages/worker/src/events.js";
 import { WorkerCancellationController } from "../../packages/worker/src/cancel.js";
@@ -96,6 +96,24 @@ const usageOutcome = (events: WorkerEvent[]) =>
   (events.find((event) => event.type === "usage")?.payload as { outcome?: string } | undefined)?.outcome;
 const progressMessages = (events: WorkerEvent[]) =>
   events.filter((event) => event.type === "progress").map((event) => (event.payload as { message?: unknown }).message).filter((message) => typeof message === "string");
+
+describe("PR feedback approval worker-start fence", () => {
+  it("refuses stale approval before reading the workspace or invoking the coding agent", async () => {
+    const invocation = taskInvocation();
+    invocation.payload.workflowMode = "IMPLEMENT";
+    invocation.payload.workflowFeedbackApproval = {
+      taskId: randomUUID(), requestId: randomUUID(), ownerId: "a".repeat(64), decisionWorkflowRevision: 4,
+      activeWorkflowRevision: 6, reviewDigest: "b".repeat(64), proposalDigest: "c".repeat(64),
+      bundleDigests: ["d".repeat(64)], candidateDigest: "e".repeat(64), selectedFindingIds: ["finding-1"], selectedCommentIds: ["comment-1"],
+    };
+    const authorize = vi.fn(async () => { throw new Error("STALE_FENCE: approval was invalidated by a newer GitHub event"); });
+    await expect(runTaskInvocation(invocation, {
+      rootPath: "/path/that/must-not-be-read", model: { provider: "test", modelId: "test" },
+      eventSink: async () => undefined, artifactSink: async () => undefined, authorizeFeedbackApproval: authorize,
+    })).rejects.toThrow(/STALE_FENCE/);
+    expect(authorize).toHaveBeenCalledWith(invocation.payload.workflowFeedbackApproval);
+  });
+});
 
 describe("a task whose every edit failed and nothing changed (#158)", () => {
   it("fails with a reason that names the count and the last file, and keeps its evidence", async () => {

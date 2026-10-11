@@ -1,5 +1,5 @@
 // The pieces AgentX's signed-in browser pages share: the review session cookie, private no-store headers, HTML
-// escaping and the sign-in redirect. The read-only task page uses them.
+// escaping and the sign-in redirect. The PR-feedback review page and the read-only task page both use them.
 
 export const SESSION_COOKIE = "__Host-agentx_review_session";
 export const CSRF_COOKIE = "__Host-agentx_review_csrf";

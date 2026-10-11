@@ -260,7 +260,7 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
     }
     if (payload.type === "view_submission") {
       const callbackId = asRecord(payload.view).callback_id;
-      if (callbackId !== "agentx_workflow_review_submission" && callbackId !== "agentx_workflow_checks_retry_submission"
+      if (callbackId !== "agentx_workflow_review_submission" && callbackId !== "agentx_workflow_checks_retry_submission" && callbackId !== "agentx_feedback_review_changes_submission"
         && callbackId !== WORKFLOW_CLOSE_SUBMISSION) return respond(200, { response_action: "clear" });
       // The close confirmation has no input to attach an error to, so a refusal replaces the modal with its reason.
       if (callbackId === WORKFLOW_CLOSE_SUBMISSION) {
@@ -275,14 +275,15 @@ export function createSlackInteractivityHandler(dependencies: SlackInteractivity
       }
       if (dependencies.workflow === undefined) {
         log("workflow.submission_failed", { errorName: "WorkflowNotConfigured" });
-        return respond(200, { response_action: "errors", errors: { [callbackId === "agentx_workflow_checks_retry_submission" ? "workflow_checks" : "workflow_feedback"]: "Workflow approvals are temporarily unavailable. Try again shortly." } });
+        return respond(200, { response_action: "errors", errors: { [callbackId === "agentx_feedback_review_changes_submission" ? "feedback_note" : callbackId === "agentx_workflow_checks_retry_submission" ? "workflow_checks" : "workflow_feedback"]: "Workflow approvals are temporarily unavailable. Try again shortly." } });
       }
       try {
         await dependencies.workflow.handleSubmission(payload);
         return respond(200, { response_action: "clear" });
       } catch (error) {
         log("workflow.submission_failed", { errorName: errorName(error) });
-        const field = callbackId === "agentx_workflow_checks_retry_submission" || error instanceof WorkflowCheckSelectionRequired ? "workflow_checks" : "workflow_feedback";
+        const field = callbackId === "agentx_feedback_review_changes_submission" ? "feedback_note"
+          : callbackId === "agentx_workflow_checks_retry_submission" || error instanceof WorkflowCheckSelectionRequired ? "workflow_checks" : "workflow_feedback";
         // A refusal the form can tell (not the owner, another workspace, a step that moved on) reads as itself.
         return respond(200, { response_action: "errors", errors: { [field]: error instanceof WorkflowCheckSelectionRequired || error instanceof WorkflowInteractionRefusal
           ? error.message : "I couldn't save this decision. Close this form and try again." } });
@@ -640,6 +641,9 @@ export function createAwsSlackInteractivityHandler() {
     async close(input) {
       await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-close", ...input });
     },
+    async submitFeedback(input) {
+      await invokeWorkflowDecision(lambda, brokerFunctionName, { source: "agentx.slack-ingress", action: "workflow-feedback-findings-decision", ...input });
+    },
     // Gap 3: a task started in Slack is driven from its thread, so none starts where task threads are off.
     // Gap 10h: the choice is taken while Slack waits; the start (a broker call that can outlast Slack's three seconds)
     // runs in an asynchronous invoke of this same Lambda.
@@ -762,6 +766,22 @@ function workflowActionValue(value: string): WorkflowActionValue | undefined {
   } catch { return undefined; }
 }
 
+interface FeedbackReviewActionValue {
+  taskId: string; expectedRevision: number; reviewDigest: string; proposalDigest: string; bundleSetDigest: string; selection: "RECOMMENDED";
+}
+
+function feedbackReviewActionValue(value: string): FeedbackReviewActionValue | undefined {
+  try {
+    const parsed = asRecord(JSON.parse(value));
+    if (typeof parsed.taskId !== "string" || !CHANGE_ID.test(parsed.taskId) || typeof parsed.expectedRevision !== "number" || !Number.isInteger(parsed.expectedRevision)
+      || typeof parsed.reviewDigest !== "string" || !/^[a-f0-9]{64}$/.test(parsed.reviewDigest)
+      || typeof parsed.proposalDigest !== "string" || !/^[a-f0-9]{64}$/.test(parsed.proposalDigest)
+      || typeof parsed.bundleSetDigest !== "string" || !/^[a-f0-9]{64}$/.test(parsed.bundleSetDigest)
+      || parsed.selection !== "RECOMMENDED") return undefined;
+    return { taskId: parsed.taskId, expectedRevision: parsed.expectedRevision, reviewDigest: parsed.reviewDigest, proposalDigest: parsed.proposalDigest, bundleSetDigest: parsed.bundleSetDigest, selection: "RECOMMENDED" };
+  } catch { return undefined; }
+}
+
 function slackActionRequestId(action: SlackBlockAction): string {
   const digest = createHash("sha256").update(`${action.thread.teamId}/${action.thread.channelId}/${action.messageTs}/${action.actionTs ?? action.messageTs}/${action.actionId}`, "utf8").digest("hex");
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-5${digest.slice(13, 16)}-8${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
@@ -774,6 +794,7 @@ export function workflowSlackHandlers(deps: {
   retryChecks?(input: Record<string, unknown>): Promise<void>;
   retryReviews?(input: Record<string, unknown>): Promise<void>;
   retryPublication?(input: Record<string, unknown>): Promise<void>;
+  submitFeedback?(input: Record<string, unknown>): Promise<void>;
   /** Task 16: Send back to coding, with the problems found as the coder's instructions. */
   sendBack?(input: Record<string, unknown>): Promise<void>;
   /** Task 16: retry blocked planning. */
@@ -812,6 +833,25 @@ export function workflowSlackHandlers(deps: {
   /** The press must come from the task's own Slack workspace, from a member of that workspace (not Slack Connect). */
   const sameWorkspace = (userTeamId: string, workspaceTeamId: string, thread: SlackThread, refusal: string): void => {
     if (workspaceTeamId !== thread.teamId || userTeamId !== thread.teamId) throw new WorkflowInteractionRefusal(refusal);
+  };
+  const currentFeedbackReview = async (value: FeedbackReviewActionValue, userId: string, userTeamId: string, workspaceTeamId: string, thread: SlackThread) => {
+    const task = await deps.loadTask(value.taskId);
+    if (!task || task.slackUserId !== userId) {
+      const owner = SlackUserIdSchema.safeParse(task?.slackUserId);
+      throw new WorkflowInteractionRefusal(owner.success ? `Only <@${owner.data}> can decide this PR feedback.` : "Only the task owner can decide this PR feedback.");
+    }
+    const share = asRecord(task.share);
+    if (workspaceTeamId !== thread.teamId || userTeamId !== thread.teamId || share.teamId !== thread.teamId
+      || share.channelId !== thread.channelId || share.threadTs !== thread.threadTs) throw new WorkflowInteractionRefusal("This PR feedback belongs to another Slack workspace or thread.");
+    const parsed = WorkflowSnapshotSchema.safeParse(task.workflow);
+    const review = parsed.success ? parsed.data.feedbackReview : undefined;
+    const bundleDigests = review?.bundleRefs.map(bundle => bundle.sha256) ?? [];
+    const bundleSetDigest = createHash("sha256").update(JSON.stringify(bundleDigests), "utf8").digest("hex");
+    if (!parsed.success || parsed.data.revision !== value.expectedRevision || parsed.data.stage !== "WAIT_FOR_MERGE"
+      || parsed.data.state !== "WAITING" || review?.status !== "PENDING" || review.reviewRef.status !== "COMPLETE"
+      || review.reviewRef.sha256 !== value.reviewDigest || review.reviewRef.proposalDigest !== value.proposalDigest
+      || bundleSetDigest !== value.bundleSetDigest) throw new WorkflowInteractionRefusal("This review changed. Reopen the AgentX review details.");
+    return { task, workflow: parsed.data, bundleDigests };
   };
   /**
    * The owner's task, decided from its own thread, by a member of the task's own Slack workspace pressing there (a
@@ -1027,6 +1067,29 @@ export function workflowSlackHandlers(deps: {
         await acknowledged(action, "Opening the draft pull request again.");
         return;
       }
+      if (action.actionId === "agentx_feedback_review_recommended" || action.actionId === "agentx_feedback_review_changes") {
+        const value = feedbackReviewActionValue(action.value);
+        if (!value || action.triggerId === "") throw new WorkflowInteractionRefusal("This review action is no longer available. Reopen the AgentX review details.");
+        const { bundleDigests } = await currentFeedbackReview(value, action.userId, action.userTeamId, action.workspaceTeamId, action.thread);
+        const requestId = slackActionRequestId(action);
+        if (deps.submitFeedback === undefined) throw new Error("PR feedback decisions are not configured");
+        if (action.actionId === "agentx_feedback_review_recommended") {
+          await deps.submitFeedback({ taskId: value.taskId, userId: action.userId, thread: action.thread, requestId,
+            expectedRevision: value.expectedRevision, reviewDigest: value.reviewDigest, proposalDigest: value.proposalDigest,
+            bundleDigests, selection: "RECOMMENDED", decision: "APPROVE" });
+          await acknowledged(action, "Working on the recommended fixes.");
+          return;
+        }
+        await deps.openView(action.triggerId, {
+          type: "modal", callback_id: "agentx_feedback_review_changes_submission",
+          private_metadata: JSON.stringify({ ...value, bundleDigests, requestId, thread: action.thread }),
+          title: { type: "plain_text", text: "Request changes" },
+          submit: { type: "plain_text", text: "Send note" }, close: { type: "plain_text", text: "Cancel" },
+          blocks: [{ type: "input", block_id: "feedback_note", label: { type: "plain_text", text: "What should AgentX reconsider?" },
+            element: { type: "plain_text_input", action_id: "reason", multiline: true, max_length: 500, placeholder: { type: "plain_text", text: "Add a short note" } } }],
+        });
+        return;
+      }
       const value = workflowActionValue(action.value);
       if (!value || action.triggerId === "") throw new Error("invalid workflow action");
       const { workflow } = await currentReview(value, action, action.thread);
@@ -1115,6 +1178,30 @@ export function workflowSlackHandlers(deps: {
         if (deps.retryChecks === undefined) throw new Error("verification retry is not configured");
         await deps.retryChecks({ taskId, userId: userId.data, thread: thread.data, requestId, expectedRevision: revision,
           selectedOptionalCheckIds, instructions: "Retry the selected checks without changing code." });
+        return;
+      }
+      if (view.callback_id === "agentx_feedback_review_changes_submission") {
+        let metadata: Record<string, unknown>;
+        try { metadata = asRecord(JSON.parse(typeof view.private_metadata === "string" ? view.private_metadata : "")); }
+        catch { throw new Error("invalid feedback modal metadata"); }
+        const value = feedbackReviewActionValue(JSON.stringify(metadata));
+        const thread = SlackThreadSchema.safeParse(metadata.thread);
+        const slackUser = asRecord(payload.user);
+        const user = SlackUserIdSchema.safeParse(slackUser.id);
+        const userTeam = SlackTeamIdSchema.safeParse(slackUser.team_id);
+        const workspaceTeam = SlackTeamIdSchema.safeParse(asRecord(payload.team).id);
+        if (!value || !thread.success || !user.success || !userTeam.success || !workspaceTeam.success
+          || typeof metadata.requestId !== "string" || !CHANGE_ID.test(String(metadata.taskId))) {
+          throw new WorkflowInteractionRefusal("This PR feedback belongs to another Slack workspace or thread.");
+        }
+        const { bundleDigests } = await currentFeedbackReview(value, user.data, userTeam.data, workspaceTeam.data, thread.data);
+        const reason = asRecord(asRecord(asRecord(view.state).values).feedback_note).reason;
+        const ownerNote = asRecord(reason).value;
+        if (typeof ownerNote !== "string" || ownerNote.trim().length === 0 || ownerNote.trim().length > 500) throw new WorkflowInteractionRefusal("Add a short note before sending.");
+        if (deps.submitFeedback === undefined) throw new Error("PR feedback decisions are not configured");
+        await deps.submitFeedback({ taskId: value.taskId, userId: user.data, thread: thread.data, requestId: metadata.requestId,
+          expectedRevision: value.expectedRevision, reviewDigest: value.reviewDigest, proposalDigest: value.proposalDigest,
+          bundleDigests, selection: "RECOMMENDED", decision: "REQUEST_CHANGES", ownerNote: ownerNote.trim() });
         return;
       }
       let metadata: Record<string, unknown>;

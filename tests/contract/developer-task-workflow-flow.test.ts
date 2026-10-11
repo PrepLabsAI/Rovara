@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import { createCandidateManifest, workflowRequestId } from "../../packages/contracts/src/task-workflow.js";
-import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, createWorkflowSnapshot, sharedTaskKey, SharedTaskRecordSchema, WorkflowSnapshotSchema, WorkflowThreadNoteSchema, type WorkflowSnapshot } from "@agentx/contracts";
-import { getTaskDocumentView, inertTaskTitle, promptTagId, threadNotesPromptSection, workflowPullRequestBody } from "../../packages/broker/src/aws/developer-tasks.js";
+import { WORKFLOW_AUTO_PUBLISH_FAILED_MESSAGE, WORKFLOW_AUTO_REVIEW_FAILED_MESSAGE, WORKFLOW_BLOCK_REASONS, WORKFLOW_HISTORY_REWRITTEN_MESSAGE, WORKFLOW_REVIEW_RESULT_INCOMPLETE_MESSAGE, collectWorkflowFeedbackBundles, createWorkflowSnapshot, sharedTaskKey, SharedTaskRecordSchema, WorkflowFeedbackBundleSchema, WorkflowSnapshotSchema, WorkflowThreadNoteSchema, type WorkflowSnapshot } from "@agentx/contracts";
+import { developerTaskIdentity } from "../../packages/broker/src/developer/task-records.js";
+import { githubWorkflowPullRequestKey } from "../../packages/broker/src/developer/task-records.js";
+import { getTaskDocumentView, inertTaskTitle, promptTagId, startTaskWorkflowFeedbackReviewFromWebhook, threadNotesPromptSection, workflowPullRequestBody } from "../../packages/broker/src/aws/developer-tasks.js";
 import { GATED_TASK_TURN_REFUSAL, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE } from "../../packages/broker/src/aws/broker-shared.js";
 import { recordThreadNoteThroughBroker } from "../../packages/broker/src/aws/slack-ingress.js";
 import { DEV_ISSUER, MAYA, OMAR, createDeveloperTaskBroker, markThreadPosted } from "../support/developer-task-broker.js";
@@ -64,6 +66,140 @@ async function workflowAtVerification(harness: Harness) {
 }
 
 describe("native developer task workflow", () => {
+  it("launches one feedback critic from current collection, limits its reads, and stores only an advisory report", async () => {
+    const currentFeedback = { pullRequest: { number: 7, url: "https://github.com/example/demo/pull/7", state: "open" as const,
+      headBranch: "feature", baseBranch: "main", headCommit: "a".repeat(40), headTreeSha: "b".repeat(40), title: "Fix retry", body: "" }, comments: [], threads: [] };
+    const harness = await createDeveloperTaskBroker({ brokerExtra: { githubPullRequests: { getPullRequestFeedback: async () => currentFeedback } } });
+    const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {
+      requestId: randomUUID(), project: "payments", instructions: "Fix the retry bug", client: "test-client", workflow: true, workflowPath: "QUICK",
+    });
+    const taskId = String((started.body.task as { taskId: string }).taskId);
+    const workspaceId = String(harness.db.get(`DEVTASK#${taskId}`, "META")?.workspaceId);
+    const prepare = harness.db.find(item => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find(item => item.kind === "prepare");
+    await harness.finish(workspaceId, String(prepare?.id), "SUCCEEDED", PREPARED);
+    const planOperation = harness.db.find(item => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION").find(item => item.workflowMode === "PLAN");
+    await harness.finish(workspaceId, String(planOperation?.id), "FAILED", { error: "test setup advances the workspace to READY" });
+    const task = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { developerId: string; provider: "slack"; developerName: string; client: string; ownerKey: string; workspaceId: string; conversationId: string };
+    const candidate = createCandidateManifest([{ repositoryId: "demo", commitSha: "a".repeat(40), treeSha: "b".repeat(40), baseCommitSha: "e".repeat(40) }]);
+    const now = new Date().toISOString();
+    const planContent = "Approved plan: address the linked PR feedback after owner approval.";
+    const planSha = createHash("sha256").update(planContent).digest("hex");
+    const planKey = `private/${task.ownerKey}/${workspaceId}/approved-plan.md`;
+    harness.s3.objects.set(planKey, planContent);
+    let workflow = WorkflowSnapshotSchema.parse({
+      ...createWorkflowSnapshot({ taskId, ownerId: task.ownerKey, now }),
+      stage: "WAIT_FOR_MERGE", state: "WAITING", candidate,
+      artifacts: [{ id: "plan-v1", type: "plan", version: 1, sha256: planSha, producer: "agentx-owner-approved", objectKey: planKey, createdAt: now }],
+      decisions: [{ requestId: randomUUID(), workflowRevision: 1, decision: "APPROVE", actorId: task.ownerKey, actorRole: "TASK_OWNER", reason: "Approved plan", artifactDigest: planSha, at: now }],
+      verification: { candidateDigest: candidate.digest, producer: "broker", environmentId: workspaceId, recordedAt: now, results: [{ checkId: "unit", status: "PASS" }] },
+      reviews: ["CRITIC", "SECURITY"].map(role => ({ operationId: randomUUID(), candidateDigest: candidate.digest, role, provider: "test", version: "1", status: "PASS", findings: [], readOnly: true, recordedAt: now })),
+      pullRequests: [{ repositoryId: "demo", number: 7, url: "https://github.com/example/demo/pull/7", headSha: "a".repeat(40), candidateDigest: candidate.digest, required: true, state: "OPEN" }],
+    });
+    const commentSetDigest = createHash("sha256").update("[]").digest("hex");
+    const bundle = WorkflowFeedbackBundleSchema.parse({ schemaVersion: 1, taskId, repositoryId: "demo", number: 7,
+      headSha: "a".repeat(40), headTreeSha: "b".repeat(40), candidateDigest: candidate.digest, commentSetDigest, producer: "agentx-github-reconciler", version: "1", recordedAt: now,
+      comments: [], sourceDeliveryIds: ["delivery-test"] });
+    const bundleBytes = JSON.stringify(bundle);
+    const bundleDigest = createHash("sha256").update(bundleBytes).digest("hex");
+    const bundleKey = `private/${task.ownerKey}/${workspaceId}/feedback/${bundleDigest}.json`;
+    harness.s3.objects.set(bundleKey, bundleBytes);
+    const { sourceDeliveryIds: deliveryIds, comments, ...metadata } = bundle;
+    void deliveryIds;
+    const bundleRef = { ...metadata, sha256: bundleDigest, objectKey: bundleKey, comments };
+    workflow = collectWorkflowFeedbackBundles(workflow, { bundleRefs: [bundleRef], threadObservations: [] }, now);
+    harness.db.set({ ...task, workflow, updatedAt: now });
+    const routeDeps = { documentClient: harness.db, tableName: "state", actions: harness.actions,
+      checkAccess: async () => ({ revision: 1, policy: {} as never, access: "granted" as const, channelIds: [] }),
+      projectChannelIds: async () => [], now: () => Date.parse(now) };
+    expect(await startTaskWorkflowFeedbackReviewFromWebhook(routeDeps as never, taskId)).toBe(true);
+    // A duplicate delivery or stale callback sees RUNNING and cannot enqueue a second critic.
+    expect(await startTaskWorkflowFeedbackReviewFromWebhook(routeDeps as never, taskId)).toBe(false);
+    const accepted = { operation: harness.db.find(item => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION")
+      .find(item => item.workflowMode === "FEEDBACK_REVIEW")! };
+    expect(accepted.operation).toBeDefined();
+    const operationId = String(accepted.operation.id);
+    expect(harness.db.find(item => item.pk === `WORKSPACE#${workspaceId}` && item.entityType === "OPERATION")
+      .filter(item => item.workflowMode === "FEEDBACK_REVIEW")).toHaveLength(1);
+    const binding = accepted.operation.workflowFeedbackReview as { taskId: string; workflowRevision: number; candidateDigest: string };
+    const readBundles = (input: Record<string, unknown>) => harness.callback(workspaceId, operationId, "feedback-bundles", input);
+    await expect(readBundles({ ...binding, taskId: randomUUID() })).rejects.toThrow();
+    await expect(readBundles({ ...binding, workflowRevision: binding.workflowRevision + 1 })).rejects.toThrow();
+    await expect(readBundles({ ...binding, candidateDigest: "f".repeat(64) })).rejects.toThrow();
+    await expect(readBundles({ ...binding, objectKey: bundleKey })).rejects.toThrow();
+    await expect(readBundles({ ...binding, bundleDigest: "f".repeat(64) })).rejects.toThrow();
+    const material: unknown = await readBundles(binding);
+    if (material === null || typeof material !== "object" || !("taskRequirements" in material)
+      || typeof material.taskRequirements !== "string" || !("bundles" in material) || !Array.isArray(material.bundles)) {
+      throw new Error("feedback bundle callback returned invalid material");
+    }
+    expect(material.taskRequirements).toContain("Approved plan");
+    expect(JSON.stringify(material)).toContain(bundleDigest);
+    expect(JSON.stringify(material)).toContain(Buffer.from(bundleBytes).toString("base64"));
+    harness.s3.objects.set(bundleKey, bundleBytes + "tampered");
+    await expect(readBundles(binding)).rejects.toThrow();
+    harness.s3.objects.set(bundleKey, bundleBytes);
+
+    const requirementsDigest = createHash("sha256").update(material.taskRequirements).digest("hex");
+    const candidateBinding = { repositoryId: "demo", number: 7, headSha: "a".repeat(40), candidateDigest: candidate.digest, commentSetDigest, bundleDigest };
+    const findingRefs: never[] = [];
+    const output = JSON.stringify({ schemaVersion: 1, taskId, workflowRevision: binding.workflowRevision, operationMode: "FEEDBACK_REVIEW",
+      qualification: "AI_GENERATED_ADVISORY", proposalDigest: "c".repeat(64), taskRequirementsDigest: requirementsDigest,
+      candidateBindings: [candidateBinding], operationId: accepted.operation.id, provider: "test", version: "1",
+      status: "COMPLETE", bundleDigests: [bundleDigest], findingRefs, findings: [], recordedAt: now });
+    const outputDigest = createHash("sha256").update(output).digest("hex");
+    const artifactName = `workflow-feedback-review-${outputDigest}.json`;
+    await harness.artifact(workspaceId, operationId, artifactName, output);
+    await harness.finish(workspaceId, operationId, "SUCCEEDED", { result: { workflowFeedbackReviewResult: {
+      ...binding, outputDigest, artifactName, status: "COMPLETE",
+    } } });
+    const saved = harness.db.get(`DEVTASK#${taskId}`, "META")?.workflow as Record<string, unknown>;
+    expect(saved).toMatchObject({ state: "WAITING", feedbackReview: { status: "PENDING", reviewRef: { operationId: accepted.operation.id, sha256: outputDigest } } });
+    expect(saved).not.toMatchObject({ feedbackReview: { decision: "APPROVE" } });
+
+    const slackThread = { teamId: "T0BSHLLUGBD", channelId: "C0123456789", threadTs: "1695500000.000001" };
+    harness.db.set({ ...task, slackUserId: MAYA.slackUserId, share: slackThread, workflow: saved });
+    harness.db.set({ ...sharedTaskKey(slackThread), entityType: "SHARED_TASK", taskId, workspaceId,
+      ownerKey: task.ownerKey, developerId: task.developerId, mode: "FULL", createdAt: now });
+    harness.db.set({ ...githubWorkflowPullRequestKey("example/demo", 7), entityType: "GITHUB_WORKFLOW_PR",
+      repositoryFullName: "example/demo", number: 7, repositoryId: "demo", taskId, workspaceId,
+      candidateDigest: candidate.digest, url: "https://github.com/example/demo/pull/7" });
+    const reply = { thread: slackThread, userId: MAYA.slackUserId!, eventId: "Ev01ABC", messageTs: "1695500002.000001", text: "Please explain the edge case." };
+    const slackReplyEvent = { source: "agentx.slack-ingress", action: "feedback-note", taskId, ...reply };
+    const captured = await harness.handler(slackReplyEvent);
+    expect(JSON.parse(String(captured.body))).toMatchObject({ captured: true });
+    const duplicate = await harness.handler(slackReplyEvent);
+    expect(JSON.parse(String(duplicate.body))).toMatchObject({ captured: true, duplicate: true });
+    const afterReply = harness.db.get(`DEVTASK#${taskId}`, "META")?.workflow as Record<string, unknown>;
+    expect(afterReply.feedbackNotes).toMatchObject([{ source: "THREAD_REPLY", sourceId: "Ev01ABC", text: reply.text,
+      slack: { teamId: slackThread.teamId, channelId: slackThread.channelId, threadTs: slackThread.threadTs,
+        userId: MAYA.slackUserId, messageTs: reply.messageTs, eventId: "Ev01ABC" } }]);
+    expect(afterReply.feedbackDecisions).toBeUndefined();
+    expect((await harness.handler({ ...slackReplyEvent, userId: "U0OTHER001" })).statusCode).toBe(403);
+    expect((await harness.handler({ ...slackReplyEvent,
+      thread: { ...slackThread, threadTs: "1695500000.000009" }, eventId: "Ev01DEF" })).statusCode).toBe(403);
+
+    const currentReview = afterReply.feedbackReview as { reviewRef: { sha256: string; proposalDigest: string }; bundleRefs: Array<{ sha256: string }> };
+    const bundleDigests = currentReview.bundleRefs.map(bundle => bundle.sha256);
+    const decisionRequestId = randomUUID();
+    const decisionResponse = await harness.handler({ source: "agentx.slack-ingress", action: "workflow-feedback-findings-decision",
+      taskId, userId: MAYA.slackUserId, thread: slackThread, requestId: decisionRequestId,
+      expectedRevision: afterReply.revision, reviewDigest: currentReview.reviewRef.sha256,
+      proposalDigest: currentReview.reviewRef.proposalDigest,
+      bundleSetDigest: createHash("sha256").update(JSON.stringify(bundleDigests), "utf8").digest("hex"),
+      selection: "RECOMMENDED", decision: "REQUEST_CHANGES", ownerNote: "Please explain the recommendation." });
+    expect(decisionResponse.statusCode).toBe(200);
+    const decided = harness.db.get(`DEVTASK#${taskId}`, "META")?.workflow as Record<string, unknown>;
+    expect(decided).toMatchObject({ feedbackReview: { status: "CHANGES_REQUESTED" },
+      feedbackDecisions: [{ requestId: decisionRequestId, decision: "REQUEST_CHANGES", actorRole: "TASK_OWNER", ownerNote: "Please explain the recommendation." }] });
+    expect(decided.state).toBe("WAITING");
+
+    await expect(readBundles(binding)).rejects.toThrow();
+
+    // No ordinary operation (which could otherwise try to read the bundles) can even start on a gated task.
+    await expect(harness.actions.acceptTask(developerTaskIdentity(task as never), workspaceId,
+      { requestId: randomUUID(), conversationId: task.conversationId, prompt: "ordinary task operation" }, () => [])).rejects.toMatchObject({ code: "WORKSPACE_BUSY" });
+  });
+
   it("leaves the established task entry point unchanged unless workflow was requested", async () => {
     const harness = await createDeveloperTaskBroker();
     const response = await harness.dev(MAYA, "POST", "/v1/dev/tasks", {

@@ -9,11 +9,11 @@ import { GetSecretValueCommand, SecretsManagerClient } from "@aws-sdk/client-sec
 import { GetObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { ChangeMessageVisibilityCommand, SQSClient, SendMessageBatchCommand } from "@aws-sdk/client-sqs";
 import { DynamoDBDocumentClient, GetCommand, PutCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
-import { INDEX_EXPIRY_ATTRIBUTE, AdminChangePendingRecordSchema, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, adminChangeKey, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, type PendingChange, type WorkflowArtifact, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
+import { INDEX_EXPIRY_ATTRIBUTE, AdminChangePendingRecordSchema, PullRequestResultSchema, SHARE_DELIVERY_WINDOW_MS, WorkflowFeedbackReviewReportSchema, adminChangeKey, indexExpiresAt, lastAssistantResponse, sharedTaskKey, WORKFLOW_PUBLISH_CANDIDATE_CHANGED_MESSAGE, workflowPublicationRetryable, type PendingChange, type WorkflowArtifact, type WorkflowCanvasLineage, type WorkflowSnapshot } from "@agentx/contracts";
 import { adminChangeExpiredMessage, adminChangeMessage, adminChangeOutcomeMessage } from "../developer/change-messages.js";
 import { readStream, type Notice, type StreamRecord } from "../developer/notifications.js";
 import { CANCELLED_REPLY, CLOSED_REPLY, READY_REPLY, endedReply, modeReply, pullRequestReply, setupFailedReply, startMessage } from "../developer/share-messages.js";
-import { answeredWorkflowCard, documentSummaryLines, slackSectionTexts, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
+import { answeredWorkflowCard, documentSummaryLines, slackSectionTexts, slackText, workflowDocumentType, workflowMessage, workflowMessageKey, type WorkflowMessageContext } from "../developer/workflow-messages.js";
 import { deriveTaskStatus, failureCategory, taskKey, taskPointerKey, type DeveloperTaskPointerRecord, type DeveloperTaskRecord, type OperationFacts, type TaskShare } from "../developer/task-records.js";
 import { isConditional } from "./broker-shared.js";
 import { requiredEnvironment } from "./lambda.js";
@@ -60,7 +60,7 @@ class StartPending extends Error {
 /** 30, 60, 120, 240, 480, then 900 seconds, by the delivery attempt that failed. */
 export const retryDelaySeconds = (attempt: number): number => Math.min(900, 30 * 2 ** Math.max(0, Math.min(attempt - 1, 5)));
 
-const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "workflow", "admin_change_dm", "admin_change_outcome", "admin_change_expiry", "workflow_refusal"]);
+const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "setup_failed", "ended", "pull_request", "workflow", "github_feedback", "admin_change_dm", "admin_change_outcome", "admin_change_expiry", "workflow_refusal"]);
 
 /**
  * #217: how long after a change's expiry its message is edited. The broker refuses a claim at or
@@ -70,6 +70,44 @@ const NOTICE_KINDS = new Set(["start", "mode", "closed", "cancelled", "ready", "
 export const ADMIN_CHANGE_EXPIRY_GRACE_MS = 5_000;
 /** SQS's longest per-message delay. */
 const MAX_DELAY_SECONDS = 900;
+
+export function feedbackReviewSlackMessage(input: {
+  taskId: string;
+  revision: number;
+  reviewDigest: string;
+  proposalDigest: string;
+  bundleDigests: string[];
+  totalComments: number;
+  recommendedFindingIds: string[];
+  highestPriority: "MUST_FIX" | "SHOULD_FIX" | "OPTIONAL" | undefined;
+  detailUrl: string;
+}): { text: string; blocks: unknown[] } {
+  const url = new URL(input.detailUrl);
+  if (url.protocol !== "https:" || url.username || url.password || url.search || url.hash) {
+    throw new Error("feedback review link is not a secure AgentX URL");
+  }
+  const priority = input.highestPriority === "MUST_FIX" ? "must fix" : input.highestPriority === "SHOULD_FIX" ? "should fix"
+    : input.highestPriority === "OPTIONAL" ? "optional" : "none recommended";
+  const recommendationSummary = input.recommendedFindingIds.length === 0
+    ? "No fixes are recommended."
+    : `${input.recommendedFindingIds.length} recommendations.`;
+  const text = `PR feedback is ready: ${input.totalComments} comments; ${recommendationSummary} Highest priority: ${priority}. <${slackText(url.href)}|Open details>.`;
+  const bundleSetDigest = createHash("sha256").update(JSON.stringify(input.bundleDigests), "utf8").digest("hex");
+  const binding = JSON.stringify({ taskId: input.taskId, expectedRevision: input.revision, reviewDigest: input.reviewDigest,
+    proposalDigest: input.proposalDigest, bundleSetDigest, selection: "RECOMMENDED" });
+  const elements: Array<Record<string, unknown>> = [
+    ...(input.recommendedFindingIds.length > 0 ? [{ type: "button", action_id: "agentx_feedback_review_recommended", style: "primary",
+      text: { type: "plain_text", text: `Approve ${input.recommendedFindingIds.length} recommended` }, value: binding }] : []),
+    { type: "button", action_id: "agentx_feedback_review_changes", text: { type: "plain_text", text: "Request changes" }, value: binding },
+  ];
+  return {
+    text,
+    blocks: [
+      { type: "section", text: { type: "mrkdwn", text } },
+      { type: "actions", elements },
+    ],
+  };
+}
 
 /** #217: the queue delay for a notice the notifier scheduled: until its `notBefore`, within SQS's 15 minutes. */
 export function noticeDelaySeconds(notice: Notice, now: number): number {
@@ -592,6 +630,35 @@ async function replyText(deps: NotifierDependencies, task: DeveloperTaskRecord &
   }
 }
 
+async function feedbackReviewNotification(deps: NotifierDependencies, task: DeveloperTaskRecord & { share: TaskShare }, notice: Notice) {
+  const workflow = task.workflow;
+  const review = workflow?.feedbackReview;
+  const reviewRef = review?.reviewRef;
+  if (notice.kind !== "github_feedback" || review?.status !== "PENDING" || reviewRef?.status !== "COMPLETE"
+    || reviewRef.sha256 !== notice.feedbackReviewDigest) return undefined;
+  if (deps.readArtifact === undefined || deps.reviewUrlBase === undefined) throw new Error("feedback review notice is not configured");
+  const bytes = await deps.readArtifact(reviewRef.objectKey);
+  if (createHash("sha256").update(bytes, "utf8").digest("hex") !== reviewRef.sha256) throw new Error("feedback review artifact integrity check failed");
+  const report = WorkflowFeedbackReviewReportSchema.parse(JSON.parse(bytes));
+  if (report.taskId !== task.taskId || report.status !== "COMPLETE" || report.proposalDigest !== reviewRef.proposalDigest
+    || JSON.stringify(report.bundleDigests) !== JSON.stringify(review.bundleRefs.map(bundle => bundle.sha256))) {
+    throw new Error("feedback review artifact binding failed");
+  }
+  const base = new URL(deps.reviewUrlBase);
+  if (base.protocol !== "https:" || base.username || base.password || base.search || base.hash) throw new Error("feedback review base URL is invalid");
+  const findings = report.findings;
+  const highestPriority = findings.some(finding => finding.recommended && finding.priority === "MUST_FIX") ? "MUST_FIX"
+    : findings.some(finding => finding.recommended && finding.priority === "SHOULD_FIX") ? "SHOULD_FIX"
+      : findings.some(finding => finding.recommended && finding.priority === "OPTIONAL") ? "OPTIONAL" : undefined;
+  return feedbackReviewSlackMessage({
+    taskId: task.taskId, revision: workflow!.revision, reviewDigest: reviewRef.sha256, proposalDigest: reviewRef.proposalDigest,
+    bundleDigests: review.bundleRefs.map(bundle => bundle.sha256),
+    totalComments: review.bundleRefs.reduce((total, bundle) => total + bundle.comments.length, 0),
+    recommendedFindingIds: findings.filter(finding => finding.recommended).map(finding => finding.id), highestPriority,
+    detailUrl: new URL(`/review/${encodeURIComponent(task.taskId)}`, base).href,
+  });
+}
+
 type Outcome = "posted" | "recorded" | "not_shared" | "before_share" | "after_close" | "delivered" | "no_thread" | "stale";
 
 /** Another delivery of an admin change's message holds the claim: this one is retried (C9). */
@@ -921,7 +988,8 @@ async function deliver(deps: NotifierDependencies, notice: Notice): Promise<Outc
     await updateWorkflowApprovalCard(deps, { ...task, share }, notice);
     await retireButtonCards(deps, task);
   };
-  const reply: Reply | undefined = await replyText(deps, { ...task, share }, notice);
+  const feedbackReview = await feedbackReviewNotification(deps, { ...task, share }, notice);
+  const reply: Reply | undefined = feedbackReview ?? await replyText(deps, { ...task, share }, notice);
   if (reply === undefined) {
     await editCard();
     return "stale";

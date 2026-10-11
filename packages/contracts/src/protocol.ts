@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { WorkflowReviewBaseSchema } from "./task-workflow.js";
+import { WorkflowFeedbackApprovalBindingSchema, WorkflowReviewBaseSchema } from "./task-workflow.js";
 import { ProjectCommandSchema, StoredProjectDefinitionSchema } from "./project.js";
 import { ModelSelectionSchema, type ModelSelection } from "./models.js";
 
@@ -12,7 +12,7 @@ export const AGENTX_PROTOCOL_VERSION = 1 as const;
  * list on GET /ping, and the eval runner image release records it beside the image, so the control
  * plane sends such a field only to a build that lists it.
  */
-export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase"] as const;
+export const WORKER_INVOCATION_FEATURES = ["model.thinkingLevel", "task.readiness", "task.workflowMode", "task.workflowReview", "task.workflowChecks", "task.workflowFeedbackReview", "task.workflowFeedbackApproval", "publish.reportChecks", "task.workflowBase", "publish.candidateTree", "publish.workflowBase"] as const;
 export type WorkerInvocationFeature = (typeof WORKER_INVOCATION_FEATURES)[number];
 /** The field on /ping that carries WORKER_INVOCATION_FEATURES; absent on a worker built before it. */
 export const WORKER_PING_FEATURES_FIELD = "invocationFeatures";
@@ -46,7 +46,9 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
         /** The control plane's record that this conversation already owns a saved session. */
         conversationStarted: z.boolean().optional(),
         /** The broker-selected tool boundary for the current native workflow stage (spec 056). */
-        workflowMode: z.enum(["PLAN", "IMPLEMENT", "REVIEW", "CHECKS"]).optional(),
+        workflowMode: z.enum(["PLAN", "IMPLEMENT", "REVIEW", "CHECKS", "FEEDBACK_REVIEW"]).optional(),
+        workflowFeedbackReview: z.object({ taskId: z.string().uuid(), workflowRevision: z.number().int().positive(), candidateDigest: z.string().regex(/^[a-f0-9]{64}$/) }).strict().optional(),
+        workflowFeedbackApproval: WorkflowFeedbackApprovalBindingSchema.optional(),
         /**
          * The task's pinned base commit per repository (the workflow's reviewBase). The worker records it in the
          * candidate and reviewers see the diff from it. Sent only to a worker whose /ping lists "task.workflowBase".
@@ -61,7 +63,14 @@ export const WorkerInvocationSchema = z.discriminatedUnion("kind", [
          */
         readiness: z.array(ProjectCommandSchema).max(64).optional(),
       })
-      .strict(),
+      .strict().superRefine((payload, context) => {
+        if ((payload.workflowMode === "FEEDBACK_REVIEW") !== (payload.workflowFeedbackReview !== undefined)) {
+          context.addIssue({ code: "custom", path: ["workflowFeedbackReview"], message: "feedback review mode requires its exact task workflow binding" });
+        }
+        if (payload.workflowFeedbackApproval !== undefined && payload.workflowMode !== "IMPLEMENT") {
+          context.addIssue({ code: "custom", path: ["workflowFeedbackApproval"], message: "feedback approval binding requires implementation mode" });
+        }
+      }),
   }).strict(),
   InvocationBaseSchema.extend({
     kind: z.literal("publish"),

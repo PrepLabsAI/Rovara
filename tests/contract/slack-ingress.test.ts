@@ -3,6 +3,7 @@ import { UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import { describe, expect, it } from "vitest";
 import { CLOSED_SHARED_NOTICE, SlackRequestMessageSchema, VIEW_ONLY_NOTICE, sharedNoticeClaim, sharedNoticeKey, type SlackRequestMessage } from "../../packages/contracts/src/index.js";
 import {
+  captureFeedbackNoteThroughBroker,
   createSlackIngressHandler,
   parseSlackSecrets,
   recordThreadNoteThroughBroker,
@@ -41,6 +42,7 @@ function harness(options: {
   /** threadTs to the requester of the Quick or Full choice waiting there. */
   pendingChoice?: Record<string, string>;
   shared?: { threads: Record<string, { mode: "view" | "continue"; closed?: boolean; taskId?: string; workflowThread?: true }>; lookupThrows?: boolean; claimThrows?: boolean };
+  feedbackCapture?: { captured?: boolean; throws?: boolean };
   threadNote?: { outcome?: "captured" | "duplicate" | "refused"; throws?: boolean };
   /** Task 21: plain top-level requests are queued for the Slack service to route; `fail` routes throw first. */
   routing?: { fail?: number };
@@ -54,6 +56,7 @@ function harness(options: {
   const workflowChoices: Array<{ thread: unknown; userId: string; instructions: string; requestId: string }> = [];
   const workflowSelections: Array<{ thread: unknown; userId: string; workflowPath: "QUICK" | "FULL" }> = [];
   const pendingLookups: string[] = [];
+  const feedbackNotes: Array<Record<string, unknown>> = [];
   const routed: Array<{ message: SlackRequestMessage; groupId: string }> = [];
   const answers: Array<{ thread: unknown; userId: string }> = [];
   let routeFailures = options.routing?.fail ?? 0;
@@ -188,6 +191,13 @@ function harness(options: {
         return options.answerChoice?.outcome ?? "started";
       },
     }),
+    ...(options.feedbackCapture === undefined ? {} : {
+      captureFeedbackNote: async (input: Record<string, unknown>) => {
+        feedbackNotes.push(input);
+        if (options.feedbackCapture?.throws) throw new Error("private note body must not appear in this error");
+        return { captured: options.feedbackCapture?.captured ?? true };
+      },
+    }),
     ...(options.threadNote === undefined ? {} : {
       recordThreadNote: async (input: { taskId: string; thread: unknown; userId: string; messageTs: string; eventId: string; text: string }) => {
         threadNotes.push(input);
@@ -230,7 +240,7 @@ function harness(options: {
       },
     }),
   });
-  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls, workflowStarts, workflowChoices, workflowSelections, pendingLookups, threadNotes, ephemerals, noticedAt,
+  return { handler, queue, posts, pending, logs, memberChecks, clock, turnWindows, turnReleases, stopCalls, workflowStarts, workflowChoices, workflowSelections, pendingLookups, feedbackNotes, threadNotes, ephemerals, noticedAt,
     routed, answers, claimedEvents: () => [...claimed] };
 }
 
@@ -309,6 +319,24 @@ describe("Slack request signatures", () => {
 });
 
 describe("Slack mention ingress", () => {
+  it("captures only an owner's explicit AgentX thread reply for the known task and deduplicates delivery", async () => {
+    const taskId = "11111111-1111-4111-8111-111111111111";
+    const h = harness({
+      shared: { threads: { "1695500000.000001": { mode: "continue", taskId } }, },
+      feedbackCapture: { captured: true },
+    });
+    const payload = mention({ event: { thread_ts: "1695500000.000001", ts: "1695500002.000007", text: `<@${bot}> Please address the second recommendation.` } });
+    expect((await send(h.handler, signedEvent(payload))).status).toBe(200);
+    expect((await send(h.handler, signedEvent(payload))).status).toBe(200);
+    expect(h.feedbackNotes).toEqual([expect.objectContaining({
+      taskId, userId: pratik, eventId: "Ev0000000001", messageTs: "1695500002.000007",
+      thread: { teamId: team, channelId: channel, threadTs: "1695500000.000001" },
+      text: "Please address the second recommendation.",
+    })]);
+    expect(h.queue).toHaveLength(0);
+    expect(h.posts.at(-1)?.text).toContain("Note saved");
+    expect(JSON.stringify(h.logs)).not.toContain("second recommendation");
+  });
 
   it("records every reply in a workflow task thread, mention or not, and never asks Slack to retry a refusal", async () => {
     const workflowThread = { "1695500000.000001": { mode: "view" as const, taskId: "11111111-1111-4111-8111-111111111111", workflowThread: true as const } };
@@ -1268,6 +1296,12 @@ describe("the broker adapters for thread replies (no 500 for an expected refusal
     await expect(stopTaskThroughBroker(answering(403, { error: { code: "FORBIDDEN" } }), thread, pratik)).rejects.toThrow(/stop failed/);
   });
 
+  it("treats a refused PR feedback note (a teammate, or a reply over 500 characters) as not captured", async () => {
+    expect(await captureFeedbackNoteThroughBroker(answering(403, { error: { code: "FORBIDDEN" } }), input)).toEqual({ captured: false });
+    expect(await captureFeedbackNoteThroughBroker(answering(400, { error: { code: "CONFIG_INVALID" } }), input)).toEqual({ captured: false });
+    expect(await captureFeedbackNoteThroughBroker(answering(200, { captured: true }), input)).toEqual({ captured: true });
+    await expect(captureFeedbackNoteThroughBroker(answering(502, {}), input)).rejects.toThrow(/feedback note failed/);
+  });
 });
 
 describe("chat.postEphemeral", () => {

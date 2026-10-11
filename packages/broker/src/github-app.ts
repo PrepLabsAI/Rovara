@@ -48,6 +48,14 @@ export interface GitHubPullRequestUpdate {
   state?: "open" | "closed";
 }
 
+export interface GitHubPullRequestChangedFile {
+  filename: string;
+  status: string;
+  additions: number;
+  deletions: number;
+  patch?: string;
+}
+
 export interface GitHubWebhookRepositoryScope {
   installationId: number;
   repositoryId: number;
@@ -178,6 +186,27 @@ export class GitHubAppCredentialProvider {
       pull_requests: "read",
     });
     return this.getPullRequestWithToken(repository, number, token);
+  }
+
+  /** Reads a bounded PR diff summary for a code-aware, owner-approved feedback proposal. */
+  async getPullRequestChangedFiles(repositoryUrl: string, number: number): Promise<GitHubPullRequestChangedFile[]> {
+    const repository = await this.installed(parseGitHubRepository(repositoryUrl));
+    const token = await this.createInstallationToken(repository, { contents: "read", pull_requests: "read" });
+    const response = await this.fetchImplementation(
+      `https://api.github.com/repos/${encodeURIComponent(repository.owner)}/${encodeURIComponent(repository.name)}/pulls/${number}/files?per_page=100`,
+      { headers: { ...githubHeaders(token), accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(8_000), redirect: "error" },
+    );
+    if (!response.ok) throw agentXError("RUNTIME_UNAVAILABLE", `GitHub pull request diff lookup failed with HTTP ${response.status}`);
+    const body: unknown = await response.json();
+    if (!Array.isArray(body)) throw agentXError("RUNTIME_UNAVAILABLE", "GitHub returned an invalid pull request diff");
+    return body.slice(0, 100).flatMap((entry): GitHubPullRequestChangedFile[] => {
+      if (!entry || typeof entry !== "object") return [];
+      const file = entry as Record<string, unknown>;
+      if (typeof file.filename !== "string" || file.filename.length > 500 || typeof file.status !== "string"
+        || !Number.isSafeInteger(file.additions) || !Number.isSafeInteger(file.deletions)) return [];
+      return [{ filename: file.filename, status: file.status, additions: file.additions as number, deletions: file.deletions as number,
+        ...(typeof file.patch === "string" ? { patch: file.patch.slice(0, 3_000) } : {}) }];
+    });
   }
 
   /** Current authoritative feedback, including thread resolution, read with a repository-scoped token. */

@@ -76,6 +76,34 @@ describe("ec2-ebs delivery", () => {
     }
     const postedPayload = (post: ReturnType<typeof delivery>["post"]) => (JSON.parse(post.mock.calls[0]![1].body) as { payload: Record<string, unknown> }).payload;
 
+    it("refuses feedback-approved implementation before POST unless the worker advertises approval authorization", async () => {
+      const { deliver, post } = delivery({ workerFeatures: async () => ["task.workflowMode"] });
+      const approval = {
+        taskId: randomUUID(), requestId: randomUUID(), ownerId: "owner-1",
+        decisionWorkflowRevision: 4, activeWorkflowRevision: 5,
+        reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
+        candidateDigest: "d".repeat(64), selectedFindingIds: ["finding-1"], selectedCommentIds: ["comment-1"],
+      };
+      const record = taskRecord({ workflowMode: "IMPLEMENT", workflowFeedbackApproval: approval });
+
+      await expect(deliver(record, record.invocation)).rejects.toThrow(/feedback approval requires a compatible worker/);
+      expect(post).not.toHaveBeenCalled();
+    });
+
+    it("sends feedback-approved implementation only to a worker advertising approval authorization", async () => {
+      const { deliver, post } = delivery({ workerFeatures: async () => ["task.workflowMode", "task.workflowFeedbackApproval"] });
+      const approval = {
+        taskId: randomUUID(), requestId: randomUUID(), ownerId: "owner-1",
+        decisionWorkflowRevision: 4, activeWorkflowRevision: 5,
+        reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
+        candidateDigest: "d".repeat(64), selectedFindingIds: ["finding-1"], selectedCommentIds: ["comment-1"],
+      };
+      const record = taskRecord({ workflowMode: "IMPLEMENT", workflowFeedbackApproval: approval });
+
+      expect(await deliver(record, record.invocation)).toBe("DELIVERED");
+      expect(postedPayload(post).workflowFeedbackApproval).toEqual(approval);
+    });
+
     it("refuses a pinned task base before POST unless the worker advertises it", async () => {
       const workflowBase = [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }];
       const refused = delivery({ workerFeatures: async () => ["task.workflowMode", "task.workflowReview"] });

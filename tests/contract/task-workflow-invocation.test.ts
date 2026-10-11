@@ -26,4 +26,11 @@ describe("workflow-mode worker invocation", () => {
     expect(WorkerInvocationSchema.parse(base)).not.toHaveProperty("payload.workflowMode");
     expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode: "ADMIN" } }).success).toBe(false);
   });
+
+  it("requires a task, revision, and candidate binding for the separate feedback critic operation", () => {
+    const binding = { taskId: "44444444-4444-4444-8444-444444444444", workflowRevision: 8, candidateDigest: "a".repeat(64) };
+    expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode: "FEEDBACK_REVIEW", workflowFeedbackReview: binding } }).success).toBe(true);
+    expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode: "FEEDBACK_REVIEW" } }).success).toBe(false);
+    expect(WorkerInvocationSchema.safeParse({ ...base, payload: { ...base.payload, workflowMode: "REVIEW", workflowFeedbackReview: binding } }).success).toBe(false);
+  });
 });

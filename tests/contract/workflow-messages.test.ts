@@ -21,9 +21,11 @@ const BROKER_BLOCK_REASONS: Array<{ stages: string[]; reason: string; plain: boo
     { stages: ["IMPLEMENT"], reason: `implementation operation ended ${status}`, plain: false },
     { stages: ["VERIFY"], reason: `verification retry operation ended ${status}`, plain: false },
     { stages: ["REVIEW"], reason: `independent review operation ended ${status}`, plain: false },
+    { stages: ["WAIT_FOR_MERGE"], reason: `PR feedback review operation ended ${status}`, plain: false },
     { stages: ["PLAN"], reason: `planning operation ended ${status}`, plain: false },
   ]),
   { stages: ["REVIEW"], reason: "independent candidate review was invalid, incomplete, or stale", plain: false },
+  { stages: ["WAIT_FOR_MERGE"], reason: "PR feedback review report was invalid, incomplete, or stale", plain: false },
   { stages: ["VERIFY"], reason: "candidate checks are being recorded", plain: false },
 ];
 
@@ -203,7 +205,19 @@ describe("workflow Slack messages", () => {
     expect(buttonsOf(message.blocks).map((button) => button.action_id)).toEqual(["agentx_workflow_close"]);
   });
 
-  it("keys the merge step by its pull requests, so a pull request with a new head is said again", () => {
+  it("acknowledges PR feedback the owner sent back or dismissed, and says a re-published pull request was updated", () => {
+    const feedbackDecision = (decision: string, workflowRevision: number) => ({ schemaVersion: 1, requestId: "44444444-4444-4444-8444-444444444444", workflowRevision, decision,
+      actorId: "a".repeat(64), actorRole: "TASK_OWNER", reviewDigest: "f".repeat(64), proposalDigest: "f".repeat(64), bundleDigests: ["f".repeat(64)],
+      selectedFindingIds: decision === "APPROVE" ? ["finding-1"] : [], selectedCommentIds: decision === "APPROVE" ? ["comment-1"] : [],
+      candidates: decision === "APPROVE" ? [{ repositoryId: "demo", number: 42, headSha: "d".repeat(40), candidateDigest: candidate.digest, commentSetDigest: "f".repeat(64), bundleDigest: "f".repeat(64) }] : [],
+      ...(decision === "APPROVE" ? {} : { ownerNote: "Not now." }), at: now });
+    const waiting = (decision: string, workflowRevision: number) => snapshot("WAIT_FOR_MERGE", "WAITING", { feedbackDecisions: [feedbackDecision(decision, workflowRevision)] });
+    expect(workflowMessage({ taskId, workflow: waiting("REQUEST_CHANGES", 6) })!.text).toBe("Got it. I saved your note for the next round of PR feedback; the pull request stays as it is.");
+    expect(workflowMessage({ taskId, workflow: waiting("DISMISS", 6) })!.text).toBe("PR feedback dismissed. The pull request stays as it is.");
+    expect(workflowMessageKey(waiting("DISMISS", 6))).toBe("revision:7");
+    // An older answer is not repeated: the step says the pull request again.
+    expect(workflowMessage({ taskId, workflow: waiting("DISMISS", 3) })!.text).toMatch(/^Draft pull request opened: /);
+    expect(workflowMessage({ taskId, workflow: waiting("APPROVE", 3) })!.text).toMatch(/^Pull request updated with the approved PR feedback: <https:\/\/github\.com\/example\/demo\/pull\/42\|PR #42>\./);
     // The same pull request with a new head is a new thing to say.
     const opened = snapshot("WAIT_FOR_MERGE", "WAITING");
     const republished = { ...opened, pullRequests: opened.pullRequests!.map((pullRequest) => ({ ...pullRequest, headSha: "9".repeat(40) })) };

@@ -251,12 +251,28 @@ function publishFailed(context: WorkflowMessageContext, exits: ReturnType<typeof
     buttons: [exits.retryPublish, exits.close] };
 }
 
+/** The owner's PR-feedback decision that led to this revision, when it kept the pull request as it is. */
+function freshFeedbackAnswer(workflow: WorkflowSnapshot) {
+  const latest = (workflow.feedbackDecisions ?? []).at(-1);
+  return latest !== undefined && latest.decision !== "APPROVE" && latest.workflowRevision === workflow.revision - 1 ? latest : undefined;
+}
+
 function waitingForMerge(workflow: WorkflowSnapshot): string | undefined {
+  const answer = freshFeedbackAnswer(workflow);
+  if (answer?.decision === "REQUEST_CHANGES") return "Got it. I saved your note for the next round of PR feedback; the pull request stays as it is.";
+  if (answer?.decision === "DISMISS") return "PR feedback dismissed. The pull request stays as it is.";
   const required = (workflow.pullRequests ?? []).filter((pullRequest) => pullRequest.required);
   if (required.length === 0) return undefined;
+  // After approved PR feedback, the same pull request carries the fixed code.
+  const updated = (workflow.feedbackDecisions ?? []).some((decision) => decision.decision === "APPROVE");
   const name = (pullRequest: { url: string; number: number }) => link(pullRequest.url, `PR #${pullRequest.number}`);
   const merged = required.filter((pullRequest) => pullRequest.state === "MERGED").length;
   if (merged === 0) {
+    if (updated) {
+      return required.length === 1
+        ? `Pull request updated with the approved PR feedback: ${name(required[0]!)}. Review it and merge it on GitHub; I'll finish this task when it's merged.`
+        : `Pull requests updated with the approved PR feedback: ${required.map(name).join(", ")}. Review them and merge them on GitHub; I'll finish this task when they're all merged.`;
+    }
     return required.length === 1
       ? `Draft pull request opened: ${name(required[0]!)}. Review it and merge it on GitHub; I'll finish this task when it's merged.`
       : `Draft pull requests opened: ${required.map(name).join(", ")}. Review them and merge them on GitHub; I'll finish this task when they're all merged.`;
@@ -269,6 +285,10 @@ function waitingForMerge(workflow: WorkflowSnapshot): string | undefined {
 function implementRunning(context: WorkflowMessageContext): string {
   const { workflow } = context;
   const decision = leadingDecision(workflow);
+  const feedback = (workflow.feedbackDecisions ?? []).at(-1);
+  if (feedback?.decision === "APPROVE" && feedback.workflowRevision >= workflow.revision - 2 && (decision === undefined || feedback.at >= decision.at)) {
+    return "PR feedback approved. Updating the code now; the checks and reviews run again after.";
+  }
   if (decision?.source === "SEND_BACK") {
     const problems = sendBackProblems(workflow);
     const issues = problems.filter((problem) => problem.source !== "check").length;
@@ -370,7 +390,7 @@ export function answeredWorkflowCard(text: string, note: string): Array<Record<s
  * were says nothing; opening the pull requests is said once per checked code.
  */
 export function workflowMessageKey(workflow: WorkflowSnapshot): string {
-  if (workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING") {
+  if (workflow.stage === "WAIT_FOR_MERGE" && workflow.state === "WAITING" && freshFeedbackAnswer(workflow) === undefined) {
     return `merge:${(workflow.pullRequests ?? []).filter((pullRequest) => pullRequest.required)
       .map((pullRequest) => `${pullRequest.repositoryId}#${pullRequest.number}@${pullRequest.headSha ?? pullRequest.candidateDigest}=${pullRequest.state === "MERGED" ? "merged" : pullRequest.state === "CLOSED" ? "closed" : "open"}`)
       .join(",")}`;

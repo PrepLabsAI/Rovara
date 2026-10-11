@@ -24,7 +24,7 @@ import {
 import type { InvokeCommand } from "@aws-sdk/client-lambda";
 import type { HttpApiV2Event } from "../../packages/broker/src/aws/lambda.js";
 import { createNotifierHandler } from "../../packages/broker/src/aws/developer-task-notifier.js";
-import { createSlackIngressHandler, recordThreadNoteThroughBroker, startWorkflowThroughBroker } from "../../packages/broker/src/aws/slack-ingress.js";
+import { captureFeedbackNoteThroughBroker, createSlackIngressHandler, recordThreadNoteThroughBroker, startWorkflowThroughBroker } from "../../packages/broker/src/aws/slack-ingress.js";
 import { createSlackInteractivityHandler, invokeWorkflowDecision, workflowSlackHandlers } from "../../packages/broker/src/aws/slack-interactivity.js";
 import { answerChosenRequest, createDynamoWorkflowChoiceStore, offerWorkflowChoice, startChosenWorkflow, type SlackWorkflowStartInput } from "../../packages/broker/src/aws/slack-workflow-choice.js";
 import { createChoiceOffer, routeSlackRequest } from "../../packages/slack-service/src/request-routing.js";
@@ -385,7 +385,8 @@ export async function createWorkflowE2E(options: {
     github.during = invocation.kind;
     try {
       result = invocation.kind === "publish" ? await publish(invocation, callbacks) : await runTaskInvocation(invocation, {
-        rootPath: root, model: FAUX_MODEL, piAdapter, eventSink: callbacks.eventSink, artifactSink: callbacks.artifactSink, checkRunners,
+        rootPath: root, model: FAUX_MODEL, piAdapter, eventSink: callbacks.eventSink, artifactSink: callbacks.artifactSink,
+        feedbackBundleReader: callbacks.feedbackBundleReader, authorizeFeedbackApproval: callbacks.authorizeFeedbackApproval, checkRunners,
       });
     } catch (error) {
       await callbacks.terminalSink({ operationId, status: "FAILED", error: error instanceof Error ? error.message : String(error) });
@@ -495,6 +496,8 @@ export async function createWorkflowE2E(options: {
     // private acknowledgement through the strict Slack double.
     recordThreadNote: (input) => recordThreadNoteThroughBroker(invokeBroker(handler), input),
     postEphemeral: async (input) => { slack.postEphemeral(input); },
+    // A shared thread that is not a Slack-started task's own thread keeps the PR feedback note path.
+    captureFeedbackNote: (input) => captureFeedbackNoteThroughBroker(invokeBroker(handler), input),
     sharedTask: {
       lookup: async (thread: SlackThread) => {
         const item = db.get(sharedTaskKey(thread).pk, "META");
@@ -528,6 +531,7 @@ export async function createWorkflowE2E(options: {
       retryPlan: (input) => brokerEvent(handler, "workflow-retry", input),
       retryImplementation: (input) => brokerEvent(handler, "workflow-retry", input),
       close: (input) => brokerEvent(handler, "workflow-close", input),
+      submitFeedback: (input) => brokerEvent(handler, "workflow-feedback-findings-decision", input),
       chooseWorkflowPath,
       answerWorkflowChoice,
       respondEphemeral: (url, text) => slack.respondEphemeral(url, text),

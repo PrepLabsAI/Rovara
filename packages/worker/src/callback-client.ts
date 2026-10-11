@@ -1,8 +1,11 @@
 import {
   CodeBuildCheckResultSchema,
+  WorkflowFeedbackBundleRefSchema,
+  WorkflowFeedbackApprovalBindingSchema,
   agentXError,
   type CheckEntry,
   type WorkerInvocation,
+  type WorkflowFeedbackApprovalBinding,
 } from "@agentx/contracts";
 import type { ArtifactSink } from "./artifacts.js";
 import type { EventBatchSink } from "./events.js";
@@ -10,6 +13,14 @@ import type { WorkerTerminalResult } from "./server.js";
 import type { CodeBuildSink } from "./codebuild.js";
 
 export type TerminalResultSink = (result: WorkerTerminalResult) => Promise<void>;
+
+export interface FeedbackBundleReadResult {
+  taskRequirements: string;
+  bundles: Array<{ ref: ReturnType<typeof WorkflowFeedbackBundleRefSchema.parse>; bytes: string }>;
+}
+
+export type FeedbackBundleReader = (binding: { taskId: string; workflowRevision: number; candidateDigest: string }) => Promise<FeedbackBundleReadResult>;
+export type FeedbackApprovalAuthorizer = (binding: WorkflowFeedbackApprovalBinding) => Promise<void>;
 
 export interface PullRequestCallbackInput {
   repository: string;
@@ -67,6 +78,8 @@ export function createWorkerCallbackSinks(input: {
   pullRequestSink: PullRequestSink;
   pullRequestUpdateSink: PullRequestUpdateSink;
   codeBuildSink: CodeBuildSink;
+  feedbackBundleReader: FeedbackBundleReader;
+  authorizeFeedbackApproval: FeedbackApprovalAuthorizer;
 } {
   const fetchImplementation = input.fetchImplementation ?? fetch;
   const base = input.controlPlaneUrl.replace(/\/$/, "");
@@ -106,6 +119,28 @@ export function createWorkerCallbackSinks(input: {
       ...(result.result === undefined ? {} : { result: result.result }),
       ...(result.error === undefined ? {} : { error: result.error }),
     }),
+    feedbackBundleReader: async (binding) => {
+      const value = await postForResult("feedback-bundles", binding);
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw agentXError("RUNTIME_UNAVAILABLE", "feedback bundle callback response is invalid");
+      const record = value as Record<string, unknown>;
+      if (typeof record.taskRequirements !== "string" || !Array.isArray(record.bundles)) throw agentXError("RUNTIME_UNAVAILABLE", "feedback bundle callback response is invalid");
+      const bundles = record.bundles.map((entry) => {
+        if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw agentXError("RUNTIME_UNAVAILABLE", "feedback bundle callback response is invalid");
+        const item = entry as Record<string, unknown>;
+        if (typeof item.bytesBase64 !== "string" || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(item.bytesBase64)) throw agentXError("RUNTIME_UNAVAILABLE", "feedback bundle callback response is invalid");
+        const bytes = Buffer.from(item.bytesBase64, "base64");
+        if (bytes.toString("base64") !== item.bytesBase64) throw agentXError("RUNTIME_UNAVAILABLE", "feedback bundle callback response encoding is invalid");
+        return { ref: WorkflowFeedbackBundleRefSchema.parse(item.ref), bytes: bytes.toString("utf8") };
+      });
+      return { taskRequirements: record.taskRequirements, bundles };
+    },
+    authorizeFeedbackApproval: async (binding) => {
+      const approval = WorkflowFeedbackApprovalBindingSchema.parse(binding);
+      const value = await postForResult("feedback-approval", approval);
+      if (!value || typeof value !== "object" || Array.isArray(value) || (value as Record<string, unknown>).authorized !== true) {
+        throw agentXError("STALE_FENCE", "the owner-approved PR feedback is no longer authorized");
+      }
+    },
     pullRequestSink: async (request) => {
       const value = await postForResult("pull-request", request);
       if (!value || typeof value !== "object" || Array.isArray(value)) {

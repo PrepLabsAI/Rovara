@@ -90,6 +90,8 @@ async function forWorker(
   const requestedThinkingLevel = carriedThinkingLevel(invocation);
   const carriesReadiness = invocation.kind === "task" && invocation.payload.readiness !== undefined;
   const carriesWorkflowMode = invocation.kind === "task" && invocation.payload.workflowMode !== undefined;
+  const carriesFeedbackReview = invocation.kind === "task" && invocation.payload.workflowMode === "FEEDBACK_REVIEW";
+  const carriesFeedbackApproval = invocation.kind === "task" && invocation.payload.workflowFeedbackApproval !== undefined;
   const carriesWorkflowBase = invocation.kind === "task" && invocation.payload.workflowBase !== undefined;
   const carriesReportChecks = invocation.kind === "publish" && invocation.payload.reportChecks !== undefined;
   const carriesCandidateTree = invocation.kind === "publish" && invocation.payload.candidateTreeSha !== undefined;
@@ -111,6 +113,12 @@ async function forWorker(
   }
   if (invocation.kind === "task" && invocation.payload.workflowMode === "CHECKS" && !features.includes("task.workflowChecks")) {
     throw agentXError("RUNTIME_UNAVAILABLE", "verification retry requires a compatible worker that runs checks without code-editing tools");
+  }
+  if (carriesFeedbackReview && !features.includes("task.workflowFeedbackReview")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "PR feedback critic requires a compatible worker");
+  }
+  if (carriesFeedbackApproval && !features.includes("task.workflowFeedbackApproval")) {
+    throw agentXError("RUNTIME_UNAVAILABLE", "feedback approval requires a compatible worker");
   }
   // The pinned base decides what reviewers judge and whether a finding blocks, so it is never dropped.
   if (carriesWorkflowBase && !features.includes("task.workflowBase")) {
