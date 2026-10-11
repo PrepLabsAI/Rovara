@@ -4,9 +4,9 @@
 import { GetCommand, QueryCommand, TransactWriteCommand, UpdateCommand } from "@aws-sdk/lib-dynamodb";
 import {
   COMMENT_RATE, COMMENT_THREAD_REPLIES_MAX, NUDGE_WINDOW_MS, TASK_COMMENT_ITEMS_MAX, TaskCommentSchema, TaskSuggestionSchema, agentXError,
-  cleanCommentText, diffPlanDocuments, pageCommentId, planClaimIds,
-  type AgentXError, type AgentXErrorCode, type CommentDocument, type CommentTarget, type PlanDocument, type TaskComment, type TaskSuggestion,
-  type WorkflowSnapshot,
+  cleanCommentText, diffPlanDocuments, pageCommentId, planClaimIds, plannerReplyCommentId,
+  type AgentXError, type AgentXErrorCode, type CommentAnswer, type CommentDocument, type CommentTarget, type PlanDocument, type TaskComment,
+  type TaskSuggestion, type WorkflowDecisionDetail, type WorkflowSnapshot,
 } from "@agentx/contracts";
 import type { DeveloperCaller } from "../aws/developer-routes.js";
 import type { DeveloperTaskRouteDependencies } from "../aws/developer-tasks.js";
@@ -465,4 +465,59 @@ export function suggestionsFor(
     const diff = diffPlanDocuments(earlier, input.plan);
     return !diff.decisionsChanged.includes(decision.id) && !diff.decisionsAdded.includes(decision.id);
   });
+}
+
+/**
+ * The planner's answers to the comments a Request changes sent (refs c1, c2 and so on, in the decision's order), written
+ * as replies from AgentX under each comment's thread. Each reply has an ID derived from the comment and the new version,
+ * so a repeat finds it already there. Each one counts toward the task's 300 items; once the cap is reached the rest are
+ * left out and logged (counts only, never text). A write that meets another in flight is tried once more.
+ */
+export async function writePlannerReplies(
+  deps: TableDependencies & Pick<DeveloperTaskRouteDependencies, "now" | "log">,
+  input: { taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: readonly CommentAnswer[] },
+): Promise<{ written: number }> {
+  const { taskId } = input;
+  let written = 0;
+  for (const [index, answer] of input.answers.entries()) {
+    const commentId = input.detail.includedCommentIds[Number(answer.ref.slice(1)) - 1];
+    if (!/^c[1-9][0-9]*$/u.test(answer.ref) || commentId === undefined) continue;
+    const comment = await getComment(deps, taskId, commentId);
+    if (comment === undefined) continue;
+    const reply = TaskCommentSchema.parse({
+      schemaVersion: 1, taskId, commentId: plannerReplyCommentId(commentId, input.artifactId), parentId: comment.parentId ?? comment.commentId,
+      document: comment.document, version: comment.version, target: comment.target,
+      author: { kind: "agentx", source: "planner", outcome: answer.outcome, forVersion: input.version },
+      text: answer.reason, createdAt: iso(deps), rev: 1,
+    });
+    const send = () => deps.documentClient.send(new TransactWriteCommand({
+      TransactItems: [
+        { Put: { TableName: deps.tableName, Item: { ...commentKey(taskId, reply.commentId), entityType: "TASK_COMMENT", ...reply }, ConditionExpression: "attribute_not_exists(pk)" } },
+        counterAdd(deps, taskId),
+      ] as never,
+    }));
+    const outcome = await send().then(() => "written" as const, async (error: unknown) => {
+      const codes = cancellationCodes(error);
+      if (error instanceof Error && error.name === "TransactionCanceledException" && codes.includes("TransactionConflict")) {
+        return send().then(() => "written" as const, (again: unknown) => classify(again));
+      }
+      return classify(error);
+    });
+    if (outcome === "written") written += 1;
+    if (outcome === "full") {
+      log(deps, { event: "developer.planner_replies_full", taskId, written, skipped: input.answers.length - index });
+      break;
+    }
+  }
+  return { written };
+}
+
+/** What a failed planner reply write means: already written (a repeat), the task is full, or anything else (thrown). */
+function classify(error: unknown): "duplicate" | "full" {
+  if (error instanceof Error && error.name === "TransactionCanceledException") {
+    const codes = cancellationCodes(error);
+    if (codes[0] === "ConditionalCheckFailed") return "duplicate";
+    if (codes[1] === "ConditionalCheckFailed") return "full";
+  }
+  throw error;
 }

@@ -32,6 +32,9 @@ import {
   type StandingFailure,
   submitWorkflowArtifact,
   parsePlanDocument,
+  parseCommentAnswers,
+  type CommentAnswer,
+  type WorkflowDecisionDetail,
   retiredClaimIds,
   canonicalPlanJson,
   type PlanDocument,
@@ -185,7 +188,8 @@ import { attributionDroppedLog, callConnector, connectorCatalogKey, discoverConn
 import { resolveConnectors, BUILT_IN_CONNECTOR_TYPES, type ConnectorType, type ConnectorTypeContext, type ResolvedConnector } from "./connector-types.js";
 import { CredentialRegistry, secretsManagerSource, type ConnectorCredentialsConfiguration } from "./credentials.js";
 import { developerTokenVerifier } from "../developer/verify-token.js";
-import { ownerAnswersFor } from "../developer/owner-answers.js";
+import { ownerAnswersFor, readDecisionDetail } from "../developer/owner-answers.js";
+import { writePlannerReplies } from "../developer/page-comments.js";
 import { loadWorkflowDocument, readObjectText as readStoredText, shortenMarkdown } from "../developer/plan-artifacts.js";
 import { PLAN_EVIDENCE_PK, attachEvidence, planCitesCode, planEvidenceDueKey, planEvidenceEvent, planEvidenceJobItem, planEvidenceSources, type PlanEvidenceEvent, type PlanEvidenceJob } from "../developer/plan-evidence-jobs.js";
 import { resolvePlanEvidence } from "../developer/plan-evidence.js";
@@ -5904,6 +5908,8 @@ async function completedWorkflowItems(
   terminalError?: string,
   /** Collects the evidence a stored plan's own callback read (no evidence job configured), to attach once the plan has committed. */
   inlineEvidence?: InlineEvidence[],
+  /** Collects the planner's answers to the comments its Request changes sent, to write as replies once the plan has committed. */
+  plannerReplies?: PlannerReplies[],
 ): Promise<TransactItems> {
   if (pointer === undefined) return [];
   const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
@@ -6211,6 +6217,7 @@ async function completedWorkflowItems(
       planUnreadable = stored.planUnreadable;
       evidenceJob = stored.evidenceJob;
       if (stored.inlineEvidence !== undefined) inlineEvidence?.push({ ...stored.inlineEvidence, taskId: task.taskId });
+      if (stored.plannerReplies !== undefined) plannerReplies?.push(stored.plannerReplies);
     }
   } else {
     next = blockWorkflow(task.workflow, `planning operation ended ${terminalStatus.toLowerCase()}`, now);
@@ -6259,7 +6266,7 @@ async function storePlanAnswer(
   task: DeveloperTaskRecord & { workflow: WorkflowSnapshot },
   artifact: Record<string, unknown>,
   now: string,
-): Promise<{ next: WorkflowSnapshot; planUnreadable: NonNullable<DeveloperTaskRecord["planUnreadable"]> | null; evidenceJob?: { artifactId: string; artifactSha256: string }; inlineEvidence?: Omit<InlineEvidence, "taskId"> }> {
+): Promise<{ next: WorkflowSnapshot; planUnreadable: NonNullable<DeveloperTaskRecord["planUnreadable"]> | null; evidenceJob?: { artifactId: string; artifactSha256: string }; inlineEvidence?: Omit<InlineEvidence, "taskId">; plannerReplies?: PlannerReplies }> {
   const workflow = task.workflow;
   const unreadable = (errors: string[]) => {
     const next = blockWorkflow(workflow, WORKFLOW_BLOCK_REASONS.planUnreadable, now);
@@ -6313,11 +6320,13 @@ async function storePlanAnswer(
       format: "structured",
     },
   });
-  if (!planCitesCode(plan)) return { next, planUnreadable: null };
+  const replies = await plannerRepliesFor(dependencies, task, artifactType, content, { artifactId, version: next.artifacts.at(-1)?.version ?? 1 });
+  const withReplies = replies === undefined ? {} : { plannerReplies: replies };
+  if (!planCitesCode(plan)) return { next, planUnreadable: null, ...withReplies };
   const artifactSha256 = sha(canonical);
   // With the evidence job configured, the code is read afterwards. Without it (no PlanEvidence function in this deployment),
   // it is read here as before, inside the old 12 second budget, and attached after the plan commits, the same way the job does.
-  if (dependencies.startPlanEvidenceJob !== undefined) return { next, planUnreadable: null, evidenceJob: { artifactId, artifactSha256 } };
+  if (dependencies.startPlanEvidenceJob !== undefined) return { next, planUnreadable: null, evidenceJob: { artifactId, artifactSha256 }, ...withReplies };
   const github = dependencies.githubPullRequests;
   let bundle: PlanEvidenceBundle;
   try {
@@ -6331,7 +6340,46 @@ async function storePlanAnswer(
   } catch {
     bundle = { schemaVersion: 1, excerpts: [] };
   }
-  return { next, planUnreadable: null, inlineEvidence: { artifactId, artifactSha256, bundle, prefix } };
+  return { next, planUnreadable: null, inlineEvidence: { artifactId, artifactSha256, bundle, prefix }, ...withReplies };
+}
+
+/** The planner's answers to the comments the owner sent back with Request changes, for the version just stored. */
+interface PlannerReplies { taskId: string; artifactId: string; version: number; detail: WorkflowDecisionDetail; answers: CommentAnswer[] }
+
+/**
+ * Spec 061 slice 2: when this planning step follows a Request changes that sent comments, the planner's
+ * `agentx-comment-answers` block read against that decision's comments (refs c1, c2 and so on). Undefined when the step
+ * did not follow such a decision, or its record cannot be read; a missing or unreadable block is no answers.
+ */
+async function plannerRepliesFor(
+  dependencies: AwsBrokerDependencies, task: DeveloperTaskRecord & { workflow: WorkflowSnapshot }, artifactType: string, content: string,
+  stored: { artifactId: string; version: number },
+): Promise<PlannerReplies | undefined> {
+  const workflow = task.workflow;
+  const last = [...workflow.decisions].reverse().find((decision) => (decision.source ?? "GATE") === "GATE");
+  if (last?.decision !== "REQUEST_CHANGES" || (last.commentsIncluded ?? 0) === 0) return undefined;
+  if (!workflow.artifacts.some((artifact) => artifact.sha256 === last.artifactDigest && artifact.type === artifactType)) return undefined;
+  try {
+    const detail = await readDecisionDetail(dependencies, task.taskId, last.requestId);
+    if (detail === undefined || detail.includedCommentIds.length === 0) return undefined;
+    const refs = new Set(detail.includedCommentIds.map((_, index) => `c${index + 1}`));
+    return { taskId: task.taskId, ...stored, detail, answers: parseCommentAnswers(content, refs) };
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "developer.planner_replies_unread", taskId: task.taskId, errorName: error instanceof Error ? error.name : "unknown" }));
+    return undefined;
+  }
+}
+
+/** Writes the planner's answers as replies from AgentX, after the plan committed. Best effort: a failure is logged with counts only. */
+async function writeAllPlannerReplies(dependencies: AwsBrokerDependencies, entries: readonly PlannerReplies[]): Promise<void> {
+  for (const entry of entries) {
+    if (entry.answers.length === 0) continue;
+    try {
+      await writePlannerReplies({ documentClient: dependencies.documentClient, tableName: dependencies.tableName, now: Date.now, log: (line) => console.log(JSON.stringify({ component: "broker", ...line })) }, entry);
+    } catch (error) {
+      console.log(JSON.stringify({ component: "broker", event: "developer.planner_replies_failed", taskId: entry.taskId, answers: entry.answers.length, errorName: error instanceof Error ? error.name : "unknown" }));
+    }
+  }
 }
 
 /**
@@ -6512,6 +6560,7 @@ async function recordTerminalResult(
   // Spec 061: the evidence jobs this result queued (a stored plan that cites code), started after it commits.
   let evidenceJobs: PlanEvidenceEvent[] = [];
   const inlineEvidence: InlineEvidence[] = [];
+  const plannerReplies: PlannerReplies[] = [];
   try {
     // A queuing transaction that met another one in flight (TransactionConflict, not a failed
     // condition) is decided again once from fresh reads before it counts as a stale callback.
@@ -6523,7 +6572,8 @@ async function recordTerminalResult(
       taskPointer = pointer;
       const completed = await completedTurnItems(dependencies, operation, pointer, terminalStatus, { result, error }, now);
       inlineEvidence.length = 0;
-      const workflow = await completedWorkflowItems(dependencies, operation, pointer, terminalStatus, now, result, error, inlineEvidence);
+      plannerReplies.length = 0;
+      const workflow = await completedWorkflowItems(dependencies, operation, pointer, terminalStatus, now, result, error, inlineEvidence, plannerReplies);
       recordedStatus = await sendTerminalResult(dependencies, workspace, operation, pointer, terminalStatus, now, [...transactItems, ...completed, ...workflow], workspaceUpdate, send);
       evidenceJobs = workflow.flatMap((item) => {
         const row = item.Put?.Item as Partial<PlanEvidenceJob> | undefined;
@@ -6575,6 +6625,7 @@ async function recordTerminalResult(
   if (recordedStatus === terminalStatus) {
     await startPlanEvidenceJobs(dependencies, evidenceJobs);
     await attachInlineEvidence(dependencies, inlineEvidence);
+    await writeAllPlannerReplies(dependencies, plannerReplies);
   }
   // #213: a prepare that did not succeed leaves the workspace PREPARATION_FAILED, which stops
   // counting toward the workspace limits now; the release logs, and never fails the callback.
