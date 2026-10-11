@@ -156,7 +156,7 @@ function wireFeedbackReader(github: FakeGitHub): (repositoryUrl: string, number:
   const provider = new GitHubAppCredentialProvider({ credentialRef: "github-app", appId: "123", getPrivateKey: async () => key, fetchImplementation: github.fetch });
   return async (repositoryUrl, number) => {
     github.fault("getPullRequestFeedback");
-    return provider.getPullRequestFeedback(repositoryUrl, number);
+    return github.atOneMoment(() => provider.getPullRequestFeedback(repositoryUrl, number));
   };
 }
 

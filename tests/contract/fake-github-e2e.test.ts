@@ -109,6 +109,34 @@ describe("FakeGitHub v2", () => {
     expect(() => github.failNext("noSuchMethod" as never, 500)).toThrow(/no method/);
   });
 
+  it("failNext() reports a status as the real client does: a missing file or repository is an answer, a feedback read is refused", async () => {
+    const github = new FakeGitHub();
+    const { number } = await openPullRequest(github);
+    github.files.set("greeting.ts", "x");
+    github.failNext("getFileAtCommit", 404);
+    await expect(github.gateway.getFileAtCommit(REPO, "greeting.ts", sha("a"))).resolves.toBeUndefined();
+    github.failNext("verifyWebhookRepository", 404);
+    await expect(github.gateway.verifyWebhookRepository()).resolves.toBe(false);
+    github.failNext("getFileAtCommit", 500);
+    await expect(github.gateway.getFileAtCommit(REPO, "greeting.ts", sha("a"))).rejects.toThrow("GitHub getFileAtCommit failed with HTTP 500");
+    github.failNext("getPullRequestFeedback", 502);
+    await expect(github.gateway.getPullRequestFeedback(REPO, number)).rejects.toThrow("GitHub feedback read refused: head commit lookup HTTP 502");
+  });
+
+  it("atOneMoment() shows every read of a pull request inside it the same head, and the lag counts once", async () => {
+    const github = new FakeGitHub();
+    github.lag({ prHeadReads: 2 });
+    const { push, number } = await openPullRequest(github);
+    github.push(push, BRANCH, sha("c"), sha("2"), [sha("a")]);
+    const heads = await github.atOneMoment(async () => [
+      (await github.gateway.getPullRequest(REPO, number)).headCommit, (await github.gateway.getPullRequestFeedback(REPO, number)).pullRequest.headCommit,
+      (await github.gateway.getPullRequest(REPO, number)).headCommit,
+    ]);
+    expect(heads).toEqual([sha("a"), sha("a"), sha("a")]);
+    expect((await github.gateway.getPullRequest(REPO, number)).headCommit).toBe(sha("a"));
+    expect((await github.gateway.getPullRequest(REPO, number)).headCommit).toBe(sha("c"));
+  });
+
   describe("wire mode", () => {
     const { privateKey } = generateKeyPairSync("rsa", { modulusLength: 2048, privateKeyEncoding: { type: "pkcs8", format: "pem" }, publicKeyEncoding: { type: "spki", format: "pem" } });
     const provider = (github: FakeGitHub) => new GitHubAppCredentialProvider({ credentialRef: "github-app", appId: "123", getPrivateKey: async () => privateKey, fetchImplementation: github.fetch });

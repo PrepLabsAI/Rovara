@@ -57,6 +57,8 @@ export class FakeGitHub {
   readonly pushLog: Array<{ branch: string; commit: string; tree: string; parents: string[]; token: string; during: string | undefined }> = [];
 
   private prHeadReads: number;
+  /** While set (atOneMoment), the head each pull request read shows, by number. */
+  private moment: Map<number, { commit: string; tree: string }> | undefined;
   private nextId = { discussion: 1_210_000_001, reviewComment: 1_780_000_001, review: 2_340_000_001, foreign: 1 };
   private readonly faults: Array<{ method: FakeGitHubMethod; failure: number | Error; remaining: number }> = [];
   private readonly graphqlIdTypes = new Set<string>();
@@ -80,13 +82,34 @@ export class FakeGitHub {
     this.faults.push({ method, failure, remaining: times });
   }
 
-  /** Throws the next queued failure for `method`, if any (the harness calls it for a call it routes elsewhere, as in wire mode). */
-  fault(method: FakeGitHubMethod): void {
+  /**
+   * Throws the next queued failure for `method`, if any, as the real client reports that HTTP status (the harness calls it
+   * for a call it routes elsewhere, as in wire mode). Answers "not_found" for a 404 the real client answers rather than
+   * throws (a file that is not there, a repository the App cannot see).
+   */
+  fault(method: FakeGitHubMethod): "not_found" | undefined {
     const found = this.faults.find((entry) => entry.method === method && entry.remaining > 0);
-    if (found === undefined) return;
+    if (found === undefined) return undefined;
     found.remaining -= 1;
     if (found.failure instanceof Error) throw found.failure;
-    throw agentXError("RUNTIME_UNAVAILABLE", `GitHub ${method} failed with HTTP ${found.failure}`);
+    const status = found.failure;
+    if (status === 404 && (method === "getFileAtCommit" || method === "verifyWebhookRepository")) return "not_found";
+    if (method === "getPullRequestFeedback") throw agentXError("RUNTIME_UNAVAILABLE", `GitHub feedback read refused: head commit lookup HTTP ${status}`);
+    if (method === "push") throw new Error(`GitHub refused the push: HTTP ${status}`);
+    throw agentXError("RUNTIME_UNAVAILABLE", `GitHub ${method} failed with HTTP ${status}`);
+  }
+
+  /**
+   * Runs `read` as one moment on GitHub: every read of a pull request inside it sees the same head (a lag counts once),
+   * as GitHub's REST and GraphQL answers a few milliseconds apart do. The wire feedback read uses it.
+   */
+  async atOneMoment<T>(read: () => Promise<T>): Promise<T> {
+    this.moment = new Map();
+    try {
+      return await read();
+    } finally {
+      this.moment = undefined;
+    }
   }
 
   async resolveCredential(_reference: string, _url: string, access: "clone" | "push"): Promise<{ token: string }> {
@@ -118,6 +141,14 @@ export class FakeGitHub {
 
   /** The head a read of the pull request sees now; `read` counts it against the lag. */
   private visibleHead(pullRequest: FakePullRequest, read: boolean): { commit: string; tree: string } {
+    const seen = read ? this.moment?.get(pullRequest.number) : undefined;
+    if (seen !== undefined) return seen;
+    const head = this.headNow(pullRequest, read);
+    if (read) this.moment?.set(pullRequest.number, head);
+    return head;
+  }
+
+  private headNow(pullRequest: FakePullRequest, read: boolean): { commit: string; tree: string } {
     const lagged = pullRequest.lagged;
     if (lagged === undefined || lagged.reads <= 0) return { commit: pullRequest.commit, tree: pullRequest.tree };
     if (read) {
@@ -268,8 +299,7 @@ export class FakeGitHub {
       return this.details(pullRequest, this.visibleHead(pullRequest, true));
     },
     verifyWebhookRepository: async (): Promise<boolean> => {
-      this.fault("verifyWebhookRepository");
-      return true;
+      return this.fault("verifyWebhookRepository") !== "not_found";
     },
     getBranchHead: async (_repositoryUrl: string, branch: string): Promise<string> => {
       this.fault("getBranchHead");
@@ -284,7 +314,7 @@ export class FakeGitHub {
       return tree;
     },
     getFileAtCommit: async (_repositoryUrl: string, path: string): Promise<string | undefined> => {
-      this.fault("getFileAtCommit");
+      if (this.fault("getFileAtCommit") === "not_found") return undefined;
       return this.files.get(path);
     },
     getCommitParents: async (_repositoryUrl: string, commit: string): Promise<string[]> => {
