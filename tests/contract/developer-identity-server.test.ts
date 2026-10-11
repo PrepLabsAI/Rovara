@@ -7,6 +7,7 @@ import {
   remoteJwksCache,
   unconfiguredProvider,
 } from "../../packages/broker/src/aws/developer-identity.js";
+import { CHANNEL_MEMBERS_MAX_CHANNELS, TaskPersonProofRequestSchema, TaskPersonProofResponseSchema } from "@agentx/contracts";
 import { ownerKeyForSubject } from "../../packages/broker/src/aws/lambda.js";
 import { ProviderNotConfiguredError, slackSignInProvider } from "../../packages/broker/src/developer/providers.js";
 import type { HttpResult } from "../../packages/broker/src/developer/server.js";
@@ -756,5 +757,25 @@ describe("the Lambda's configuration", () => {
     expect(jwksFor("https://idp.example.test/jwks")).toBe(first);
     expect(jwksFor("https://slack.com/openid/connect/keys")).not.toBe(first);
     expect(created).toEqual(["https://idp.example.test/jwks", "https://slack.com/openid/connect/keys"]);
+  });
+});
+
+describe("task person proof invoke contract", () => {
+  it("accepts only the strict bounded request and validates either exact response shape", async () => {
+    const h = identityHarness({ slackUsers: [maya], channels: { C0PAY0001: [maya.userId] } });
+    const request = { kind: "task-person-proof" as const, slackUserId: maya.userId, channelIds: ["C0PAY0001"] };
+    expect(TaskPersonProofRequestSchema.parse(request)).toEqual(request);
+    expect(TaskPersonProofResponseSchema.parse(await h.handler(request))).toEqual({
+      ok: true,
+      user: { id: maya.userId, teamId: TEAM, name: maya.name },
+      memberOf: ["C0PAY0001"],
+    });
+    for (const invalid of [
+      { ...request, extra: true },
+      { ...request, slackUserId: "not-a-user" },
+      { ...request, channelIds: Array.from({ length: CHANNEL_MEMBERS_MAX_CHANNELS + 1 }, (_, index) => `C0CH${String(index).padStart(5, "0")}`) },
+    ]) expect(TaskPersonProofRequestSchema.safeParse(invalid).success).toBe(false);
+    expect(TaskPersonProofResponseSchema.safeParse({ ok: true, user: { id: maya.userId, teamId: TEAM, name: maya.name }, memberOf: ["C0OTHER01"] }).success).toBe(true);
+    expect(await h.handler({ ...request, extra: true } as never)).toEqual({ ok: false, error: "invalid_request" });
   });
 });
