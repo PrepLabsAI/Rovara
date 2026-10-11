@@ -183,12 +183,15 @@ export function feedbackReviewSlackMessage(input: {
   ];
   // Escaping can make the reviewer's words several times longer than they look, so long text is split across sections;
   // each check line is a section of its own (a line is at most a few hundred characters), never split.
-  const sections = checkLines.length === 0 ? slackSectionTexts(text)
-    : [...slackSectionTexts(before), ...checkLines, ...(after.length === 0 ? [] : slackSectionTexts(after))];
+  // A check line is verbatim, so Slack never links a URL or turns @channel or @here in it into a mention; the text around
+  // it is not, because it carries the details link.
+  const plain = (parts: string[]) => parts.map((section) => ({ text: section, verbatim: false }));
+  const sections = checkLines.length === 0 ? plain(slackSectionTexts(text))
+    : [...plain(slackSectionTexts(before)), ...checkLines.map((line) => ({ text: line, verbatim: true })), ...(after.length === 0 ? [] : plain(slackSectionTexts(after)))];
   return {
     text,
     blocks: [
-      ...sections.map((section) => ({ type: "section", text: { type: "mrkdwn", text: section } })),
+      ...sections.map((section) => ({ type: "section", text: { type: "mrkdwn", text: section.text, ...(section.verbatim ? { verbatim: true } : {}) } })),
       { type: "actions", elements },
     ],
   };

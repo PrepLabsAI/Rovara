@@ -1701,6 +1701,22 @@ describe("the PR feedback advisory summary", () => {
     expect(card().text).not.toContain("Updates checks");
   });
 
+  it("marks every check line verbatim, so Slack never links a URL or turns @channel or @here in a command into a mention", async () => {
+    const { feedbackReviewSlackMessage } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
+    const message = feedbackReviewSlackMessage({
+      taskId: "11111111-1111-4111-8111-111111111111", revision: 8,
+      reviewDigest: "a".repeat(64), proposalDigest: "b".repeat(64), bundleDigests: ["c".repeat(64)],
+      totalComments: 1, recommendedFindingIds: ["finding-1"], highestPriority: "SHOULD_FIX",
+      detailUrl: "https://agentx.example/review/11111111-1111-4111-8111-111111111111",
+      checkChanges: [{ obsolete: ["Old @channel check"], added: [{ label: "Fetch http://example.com/x", command: { cwd: "repo/demo", executable: "curl", args: ["http://example.com/x", "@here"] } }] }],
+    });
+    const sections = (message.blocks as Array<{ type: string; text?: { type: string; text: string; verbatim?: boolean } }>).filter((block) => block.type === "section");
+    const checkSections = sections.filter((block) => /^(Updates checks|Adds check)/.test(block.text!.text));
+    expect(checkSections.length).toBeGreaterThanOrEqual(2);
+    for (const block of checkSections) expect(block.text).toMatchObject({ type: "mrkdwn", verbatim: true });
+    expect(checkSections.map((block) => block.text!.text).join("\n")).toContain("http://example.com/x");
+  });
+
   it("says on the card exactly what Approve applies for the recommended fixes together: A drops X, and B adds X's command (0.2.12 review)", async () => {
     const { feedbackCardCheckChanges } = await import("../../packages/broker/src/aws/developer-task-notifier.js");
     const x = { id: "proposed-1", label: "Sentence present", command: { cwd: "repo/demo", executable: "grep", args: ["-q", "Old.", "README.md"], timeoutSeconds: 30 } };
