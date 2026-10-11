@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { App } from "aws-cdk-lib";
+import { Template } from "aws-cdk-lib/assertions";
 import { beforeAll, describe, expect, it, vi } from "vitest";
 import { isAssumedRoleOf } from "../../packages/broker/src/aws/lambda.js";
 import type { FakeDynamoDb } from "../support/fake-dynamodb.js";
@@ -9,6 +11,7 @@ import {
 import { GitHubMcpCatalogSchema, GitHubMcpResultSchema } from "../../packages/contracts/src/github-mcp.js";
 import { ConnectorCatalogSchema } from "../../packages/contracts/src/connectors.js";
 import { createSignedServiceFetch } from "../../packages/slack-service/src/signing-fetch.js";
+import { ControlPlaneStack } from "../../infra/lib/control-plane.js";
 // Broker code resolves @agentx/gateway to the built dist; importing from there (not from
 // packages/gateway/src) keeps this the same module copy the broker's connect fake must throw
 // through, so `instanceof McpUnauthorized` holds inside the engine.
@@ -29,6 +32,27 @@ beforeAll(async () => {
 });
 
 const admin = { subject: "admin-subject", admin: true };
+
+describe("workflow merge recovery schedule", () => {
+  it("runs every minute through the existing GitHub recovery role without requiring a webhook secret", () => {
+    const resources = Template.fromStack(new ControlPlaneStack(new App(), "MergeRecoveryControlPlane")).findResources("AWS::Scheduler::Schedule") as Record<string, { Properties: Record<string, unknown> }>;
+    const schedules = Object.values(resources).map((resource) => resource.Properties);
+    const merge = schedules.find((properties) => properties.Target !== undefined
+      && JSON.stringify(properties.Target).includes("agentx.workflow-merge-recovery"));
+    const webhook = schedules.find((properties) => properties.Target !== undefined
+      && JSON.stringify(properties.Target).includes("agentx.github-webhook-recovery"));
+    expect(merge).toMatchObject({
+      FlexibleTimeWindow: { Mode: "OFF" },
+      ScheduleExpression: "rate(1 minute)",
+      State: "ENABLED",
+      Target: {
+        Input: JSON.stringify({ source: "agentx.workflow-merge-recovery" }),
+        RetryPolicy: { MaximumRetryAttempts: 2, MaximumEventAgeInSeconds: 300 },
+      },
+    });
+    expect((merge!.Target as { RoleArn: unknown }).RoleArn).toEqual((webhook!.Target as { RoleArn: unknown }).RoleArn);
+  });
+});
 
 async function registerProjectAndBind(handler: Handler, integrations: boolean | Record<string, unknown> = false, extraRepositories: string[] = []): Promise<void> {
   await registerRevision(handler, 1, integrations, extraRepositories);

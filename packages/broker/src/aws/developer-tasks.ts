@@ -3897,7 +3897,7 @@ const RELEASABLE_WORKSPACE = new Set(["READY", "STOPPED", "UNHEALTHY"]);
 
 export type FinishedTaskRelease = "released" | "already_released" | "not_finished" | "busy";
 
-type ReleaseDeps = { tableName: string; actions: DeveloperTaskActions; documentClient: { send(command: unknown): Promise<unknown> } };
+export type ReleaseDeps = { tableName: string; actions: DeveloperTaskActions; documentClient: { send(command: unknown): Promise<unknown> } };
 
 /** The release's own audit record ID for a task: one per task, so a repeated release writes it once. */
 function releaseTurnId(taskId: string): string {
@@ -4072,6 +4072,19 @@ const RELEASE_RETRY_MAX_MS = 6 * 3_600_000;
 interface FinishedReleaseMark { taskId: string; markedAt?: string; attempts?: number; nextAttemptAt?: string }
 
 /**
+ * Durably queues a finished task for the existing release worker. This intentionally performs no workspace or compute
+ * work: a merge-recovery poll only establishes the hand-off, and the release sweep owns the destructive operation.
+ */
+export async function enqueueFinishedTaskRelease(deps: Pick<ReleaseDeps, "documentClient" | "tableName">, taskId: string): Promise<void> {
+  await deps.documentClient.send(new UpdateCommand({
+    TableName: deps.tableName,
+    Key: finishedReleaseKey(taskId),
+    UpdateExpression: "SET entityType = :entity, taskId = :task, markedAt = if_not_exists(markedAt, :now)",
+    ExpressionAttributeValues: { ":entity": FINISHED_RELEASE_PK, ":task": taskId, ":now": new Date().toISOString() },
+  }));
+}
+
+/**
  * releaseFinishedTask, logged and never thrown: for callers whose own work is done (a decision, a webhook, an operation's
  * result, a self-heal, the sweep). A finished task is marked as waiting for its release first and unmarked once it is
  * released, so a release that found the workspace busy, failed, or never ran (the process stopped) is tried again by the
@@ -4097,9 +4110,7 @@ export async function releaseFinishedTaskQuietly(deps: ReleaseDeps, taskId: stri
       await deps.documentClient.send(new DeleteCommand({ TableName: deps.tableName, Key: key }));
       return undefined;
     }
-    await deps.documentClient.send(new UpdateCommand({ TableName: deps.tableName, Key: key,
-      UpdateExpression: "SET entityType = :entity, taskId = :task, markedAt = if_not_exists(markedAt, :now)",
-      ExpressionAttributeValues: { ":entity": "FINISHED_RELEASE", ":task": taskId, ":now": new Date().toISOString() } }));
+    await enqueueFinishedTaskRelease(deps, taskId);
     marked = true;
     const outcome = await releaseFinishedTask(deps, task);
     if (outcome === "busy") await putOff();

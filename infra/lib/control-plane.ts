@@ -724,6 +724,17 @@ export class ControlPlaneStack extends Stack {
         retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 300 },
       },
     });
+    new scheduler.CfnSchedule(this, "WorkflowMergeRecoverySchedule", {
+      flexibleTimeWindow: { mode: "OFF" },
+      scheduleExpression: "rate(1 minute)",
+      state: "ENABLED",
+      target: {
+        arn: broker.functionArn,
+        roleArn: githubRecoveryRole.roleArn,
+        input: JSON.stringify({ source: "agentx.workflow-merge-recovery" }),
+        retryPolicy: { maximumRetryAttempts: 2, maximumEventAgeInSeconds: 300 },
+      },
+    });
     // Gap 6: re-run any workflow dispatch (an automatic review start) left behind after its result committed.
     const workflowDispatchRecoveryRole = new iam.Role(this, "WorkflowDispatchRecoveryRole", {
       assumedBy: schedulerPrincipal,
