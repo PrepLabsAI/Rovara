@@ -11,7 +11,9 @@
 //              the notifier words it), a failed feedback review has its Retry review card, and no thread message (text or
 //              blocks) uses jargon or runs past the brief limit;
 //   INV-ONCE   one task per thread, one decision per request, one push per approved fix, no message posted twice in a row;
-//   INV-DDB    the table refused no request (ValidationException), and no broker log line names one.
+//   INV-DDB    the table refused no request (ValidationException), and no broker log line names one;
+//   INV-SLOT   a finished (merged, or closed by its workflow) or closed task holds no open-task slot and no open workspace
+//              once nothing runs on its workspace.
 import { afterEach, beforeEach } from "vitest";
 import { WorkflowSnapshotSchema, openReviewFindings, type WorkflowSnapshot } from "@agentx/contracts";
 import { FEEDBACK_REVIEW_RETRY_ACTION, workflowDocumentName, workflowDocumentType, workflowMessage, type WorkflowMessage, type WorkflowMessageContext } from "../../packages/broker/src/developer/workflow-messages.js";
@@ -84,8 +86,26 @@ export class JourneyInvariantError extends Error {
 
 /** Throws a JourneyInvariantError naming every broken invariant; `logs` are the broker's log lines, when captured. */
 export function assertJourneyInvariants(journey: JourneyView, options: { logs?: readonly string[] } = {}): void {
-  const violations = [...checkState(journey), ...checkClick(journey), ...checkCode(journey), ...checkVoice(journey), ...checkOnce(journey), ...checkDdb(journey, options.logs ?? [])];
+  const violations = [...checkState(journey), ...checkClick(journey), ...checkCode(journey), ...checkVoice(journey), ...checkOnce(journey), ...checkDdb(journey, options.logs ?? []), ...checkSlot(journey)];
   if (violations.length > 0) throw new JourneyInvariantError(violations);
+}
+
+function checkSlot(journey: JourneyView): string[] {
+  return tasks(journey).flatMap((task) => {
+    const workflow = task.workflow as { stage?: string; state?: string; outcome?: string } | undefined;
+    const finished = workflow?.state === "COMPLETE" && ((workflow.stage === "MERGED" && workflow.outcome === "MERGED") || (workflow.stage === "CLOSED" && workflow.outcome === "CLOSED"));
+    if (!finished && task.closedAt === undefined) return [];
+    const workspace = journey.db.get(`WORKSPACE#${String(task.workspaceId)}`, "META");
+    // Something still runs there (a feedback review the merge overtook, a close's own check): its result releases it.
+    if (workspace?.activeOperationId != null || workspace?.status === "CLOSING") return [];
+    const charge = task.charge as { member?: { pk: string; sk: string } } | undefined;
+    const member = charge?.member === undefined ? undefined : journey.db.get(charge.member.pk, charge.member.sk);
+    const held = (member?.tasks as Set<string> | undefined)?.has(String(task.taskId)) === true;
+    return [
+      ...(held ? [`INV-SLOT: finished task ${String(task.taskId)} still holds an open-task slot`] : []),
+      ...(workspace !== undefined && workspace.status !== "CLOSED" ? [`INV-SLOT: finished task ${String(task.taskId)}'s workspace is still ${String(workspace.status)}`] : []),
+    ];
+  });
 }
 
 function tasks(journey: JourneyView): Item[] {

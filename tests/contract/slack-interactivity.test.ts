@@ -1669,7 +1669,7 @@ describe("Quick or Full buttons (gap 3)", () => {
   it("explains a refused start in plain words", async () => {
     const { handler, ephemeral, updates } = buttons(new SlackWorkflowStartError("WORKSPACE_LIMIT"));
     await handler(press("agentx_workflow_path_quick"));
-    expect(ephemeral).toEqual(["You've reached your open-task limit. Close a finished AgentX task, then try again."]);
+    expect(ephemeral).toEqual(["You've reached your limit of open AgentX tasks. Close one in its thread, or merge its pull request, then try again."]);
     expect(updates).toEqual([]);
     const unknown = buttons(new SlackWorkflowStartError("UNKNOWN"));
     await unknown.handler(press("agentx_workflow_path_quick"));

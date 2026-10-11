@@ -65,6 +65,11 @@ export interface DeveloperTaskRecord {
   createdAt: string;
   updatedAt: string;
   closedAt?: string;
+  /**
+   * When a finished workflow task (all its pull requests merged, or its workflow closed) gave back its workspace slot and
+   * its workspace. A closed task gives them back with its close instead, and has none.
+   */
+  releasedAt?: string;
   workflow?: WorkflowSnapshot;
   /** The commit each repository's preparation checked out, from the prepare result; the task's base until one is pinned. */
   preparedBase?: WorkflowReviewBase;

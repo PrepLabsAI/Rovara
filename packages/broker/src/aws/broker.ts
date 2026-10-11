@@ -208,7 +208,7 @@ import { readWorkspaceLimits } from "../developer/limits.js";
 import { WORKFLOW_DISPATCH_PK, workflowDispatchItem, type WorkflowDispatchRecord, AWS_TEMPORARY_MESSAGE, GATED_TASK_PULL_REQUEST_ACTION_REFUSAL, GATED_TASK_PULL_REQUEST_REFUSAL, GATED_TASK_TURN_REFUSAL, UNEXPECTED_REQUEST_MESSAGE, hashJson, isConditional, isTemporaryAwsError, PLAN_PHASE_LIMITS, WORKFLOW_PREAMBLE, planChecksInstructions, planDocumentInstructions, workerPrompt } from "./broker-shared.js";
 import { channelByNameThroughLambda, channelInfoThroughLambda, channelMembersThroughLambda, developerKeysThroughLambda, developerSinceFromEnvironment, developerTaskRouteDependencies, endDeveloperSessionsThroughLambda, routeDeveloperRequest, slackAuthCheckThroughLambda, slackUserByEmailThroughLambda, type DeveloperApiConfiguration, type DeveloperCaller } from "./developer-routes.js";
 import type { DeveloperTaskActions, ExtraItems, TransactItems } from "./developer-task-actions.js";
-import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowTaskAnswerContext } from "./developer-tasks.js";
+import { FEEDBACK_CHANGED_SINCE_CARD, FEEDBACK_REVIEW_RETRY_BUSY, FEEDBACK_REVIEW_RETRY_CHANGED, adminShareMode, captureWorkflowFeedbackNote, finishTaskClose, releaseFinishedTask, getWorkflowFeedbackReview, markWorkflowThreadNoteAnswered, planWhyEntries, recordWorkflowThreadNote, retryTaskWorkflowFeedbackReview, routeDeveloperTaskRequest, startTaskWorkflowFeedbackReviewFromWebhook, startTaskWorkflowPublicationFromSystem, startTaskWorkflowReviewFromSystem, submitWorkflowFeedbackDecision, taskPageUrl, workflowTaskAnswerContext } from "./developer-tasks.js";
 import { credentialRefusals, preflightConnectors, registrationWarnings, type PreflightOutcome } from "./registration-preflight.js";
 import { TurnRecordExport, dynamoTurnRecordSource, workspaceProjectReader } from "./turns.js";
 import { createCodeBuildGateway, type CodeBuildGateway } from "../codebuild.js";
@@ -5596,6 +5596,21 @@ async function completedTurnItems(
   return [{ Put: { TableName: table, Item: item, ConditionExpression: "attribute_not_exists(pk)" } }];
 }
 
+/**
+ * A finished workflow task gives back its workspace slot and its workspace (releaseFinishedTask). Best effort: a failure
+ * is logged, and the next event, operation result or limit-refused start tries again; it never fails the caller.
+ */
+async function releaseIfFinished(dependencies: AwsBrokerDependencies, taskId: string): Promise<void> {
+  try {
+    const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));
+    if (task === undefined || task.closedAt !== undefined || task.releasedAt !== undefined) return;
+    const outcome = await releaseFinishedTask({ tableName: dependencies.tableName, actions: developerTaskActions(dependencies), documentClient: dependencies.documentClient }, task);
+    if (outcome === "released" || outcome === "busy") console.log(JSON.stringify({ component: "broker", event: `developer.finished_task_${outcome}`, taskId }));
+  } catch (error) {
+    console.log(JSON.stringify({ component: "broker", event: "developer.finished_task_release_failed", taskId, error: error instanceof Error ? error.name : "unknown" }));
+  }
+}
+
 /** Refresh all linked PRs from the GitHub API before an owner decision (webhook payloads are hints only). */
 async function refreshTaskFeedbackForOwnerDecision(dependencies: AwsBrokerDependencies, taskId: string): Promise<void> {
   if (dependencies.githubPullRequests.getPullRequestFeedback === undefined) {
@@ -5705,6 +5720,8 @@ export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependen
     now: new Date().toISOString(),
   });
   const linked = await getItem<GithubWorkflowPullRequestRecord>(dependencies, githubWorkflowPullRequestKey(event.fullName, event.number));
+  // A merge that finished the task gives back its slot and workspace (again for a redelivery, which changes nothing).
+  if (linked !== undefined) await releaseIfFinished(dependencies, linked.taskId);
   if (linked !== undefined) {
     const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(linked.taskId));
     if (task !== undefined && dependencies.developer !== undefined) {
@@ -6849,6 +6866,8 @@ async function recordTerminalResult(
   if (closeCanFinish && taskPointer !== undefined) await finishDeveloperClose(dependencies, taskPointer, operation.id, operation.createdAt, operation.discardUnpublished === true && closePreflight?.safeToClose !== true);
   // Gap 6: start any step this result made due (its dispatch row committed above); a lost start is the sweep's.
   if (taskPointer !== undefined) await dispatchWorkflowContinuation(dependencies, taskPointer.taskId);
+  // A task that finished while this ran (merged during a feedback review, say) gives back its slot and workspace now.
+  if (taskPointer !== undefined && !closeCanFinish) await releaseIfFinished(dependencies, taskPointer.taskId);
   // Spec 061: read the code a new plan cites, in the background; a lost start is the sweep's.
   if (recordedStatus === terminalStatus) {
     await startPlanEvidenceJobs(dependencies, evidenceJobs);

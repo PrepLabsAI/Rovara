@@ -249,6 +249,8 @@ export async function createWorkflowE2E(options: {
   descriptionUpdateMaxMs?: number;
   /** "eventual": a read without ConsistentRead may see an item's previous version once after each write (DynamoDB's default read). */
   consistency?: "strong" | "eventual";
+  /** The open tasks one person may have (the stack's per-person workspace limit); absent, the default 3. */
+  memberLimit?: number;
 } = {}) {
   const github = new FakeGitHub(options.github?.realism === undefined ? {} : { realism: options.github.realism });
   // The webhook secret GitHub signs with, and the copy the broker's container has cached (it re-reads on { refresh: true }).
@@ -267,6 +269,7 @@ export async function createWorkflowE2E(options: {
   const planEvidenceJobs: PlanEvidenceEvent[] = [];
   const harness = await createDeveloperTaskBroker({
     register: false,
+    ...(options.memberLimit === undefined ? {} : { memberLimit: options.memberLimit }),
     ...(options.channelMembers === undefined ? {} : { channelMembers: options.channelMembers }),
     ...(options.slackRequestQueue === undefined ? {} : { developerExtra: { slackRequestQueue: options.slackRequestQueue } }),
     ...(options.consistency === undefined ? {} : { consistency: options.consistency }),
@@ -909,6 +912,8 @@ export async function createWorkflowE2E(options: {
     },
     db, s3, handler, slack, github, repoDirectory, baseCommit, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs,
     ledger, reviewedTrees, briefLimit, pushedWorkflows, reviewUrlBase: REVIEW_URL_BASE, canvasesDeleted,
+    /** The broker's EC2 session deleter: each call removes one workspace's compute. */
+    deleteEc2Session: harness.deleteEc2Session,
     /** The table's stream as the notifier reads it (`duplicateNext()` delivers the next record twice). */
     stream,
     /** How many times the notifier gave up on a notice Slack refused for good. */

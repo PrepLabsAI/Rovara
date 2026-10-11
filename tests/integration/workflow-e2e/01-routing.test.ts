@@ -184,7 +184,7 @@ describe("Suite 1: routing and start", () => {
     await e2e.settle();
     expect(tasks(e2e)).toHaveLength(1);
     expect(e2e.slack.posts.filter((post) => post.threadTs === "1695500700.000001").map((post) => post.text))
-      .toEqual(["You've reached your open-task limit. Close a finished AgentX task, then try again."]);
+      .toEqual(["You've reached your limit of open AgentX tasks. Close one in its thread, or merge its pull request, then try again."]);
   }, 120_000);
 
   it("1.16 starts each path with its own one-line notice", async () => {
