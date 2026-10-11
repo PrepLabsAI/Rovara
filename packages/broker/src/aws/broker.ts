@@ -42,6 +42,7 @@ import {
   WORKFLOW_REGRESSED_CHECK_MAX,
   WORKFLOW_REGRESSED_CHECKS_MAX,
   workflowIsReviewOnly,
+  workflowPullRequestTrees,
   workflowSelectedChecks,
   blockWorkflow,
   completeWorkflowFeedbackReview,
@@ -6637,26 +6638,6 @@ function pythonFileIsScript(file: string, script: string, cwd: string): boolean 
  * The tests a rerun found passed before this change and fail now: each label (a command, untrusted worker output) on one
  * line, redacted and cut short, without repeats, at most WORKFLOW_REGRESSED_CHECKS_MAX.
  */
-/**
- * The code each repository's open pull request holds, by repository: GitHub's tree for its head as recorded, or else the
- * tree of the reviewed code it was opened or last updated with when that is the current candidate (or a collected
- * feedback bundle's). A repository with no open pull request keeps the current candidate's tree. Undefined when the task
- * has no open pull request, or one's code is not known.
- */
-function workflowPullRequestTrees(workflow: WorkflowSnapshot): Map<string, string> | undefined {
-  const open = (workflow.pullRequests ?? []).filter((pullRequest) => pullRequest.state === "OPEN" || pullRequest.state === "UNKNOWN");
-  if (open.length === 0) return undefined;
-  const trees = new Map((workflow.candidate?.repositories ?? []).map((repository) => [repository.repositoryId, repository.treeSha] as const));
-  for (const pullRequest of open) {
-    const tree = pullRequest.headTreeSha
-      ?? (workflow.candidate?.digest === pullRequest.candidateDigest ? workflow.candidate.repositories.find((repository) => repository.repositoryId === pullRequest.repositoryId)?.treeSha : undefined)
-      ?? workflow.feedbackReview?.bundleRefs.find((bundle) => bundle.repositoryId === pullRequest.repositoryId && bundle.number === pullRequest.number
-        && bundle.candidateDigest === pullRequest.candidateDigest)?.headTreeSha;
-    if (tree === undefined) return undefined;
-    trees.set(pullRequest.repositoryId, tree);
-  }
-  return trees;
-}
 
 function regressedCheckLabels(entries: readonly CheckEntry[]): string[] {
   const labels = entries.filter((entry) => entry.class === "regression").map((entry) => {

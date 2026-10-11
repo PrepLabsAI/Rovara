@@ -429,6 +429,20 @@ describe("native task workflow contracts", () => {
   });
 });
 
+describe("what each pull request holds, for a fix that may have changed nothing", () => {
+  it("uses every pull request's recorded tree whatever its state, and the candidate only for a repository with no pull request", () => {
+    const tree = (c: string) => c.repeat(40);
+    const workflow = { candidate: { digest: "f".repeat(64), repositories: [{ repositoryId: "a", treeSha: tree("1") }, { repositoryId: "b", treeSha: tree("2") }, { repositoryId: "c", treeSha: tree("3") }] },
+      pullRequests: [
+        { repositoryId: "a", number: 1, state: "OPEN", headTreeSha: tree("a"), candidateDigest: "e".repeat(64) },
+        { repositoryId: "b", number: 2, state: "MERGED", headTreeSha: tree("b"), candidateDigest: "e".repeat(64) },
+      ] } as unknown as Parameters<typeof workflowContracts.workflowPullRequestTrees>[0];
+    expect(workflowContracts.workflowPullRequestTrees(workflow)).toEqual(new Map([["a", tree("a")], ["b", tree("b")], ["c", tree("3")]]));
+    const unknownOpen = { ...workflow, pullRequests: [{ repositoryId: "a", number: 1, state: "OPEN", candidateDigest: "e".repeat(64) }] } as typeof workflow;
+    expect(workflowContracts.workflowPullRequestTrees(unknownOpen)).toBeUndefined();
+  });
+});
+
 describe("the task snapshot's storage budget", () => {
   it("counts the review threads remembered between rounds (feedbackThreadObservations)", () => {
     const taskId = "11111111-2222-4333-8444-555555555555";

@@ -1694,6 +1694,28 @@ export function returnWorkflowToImplementation(
   });
 }
 
+/**
+ * The code each repository's pull request holds, by repository, for judging whether an approved fix changed anything:
+ * GitHub's tree for its head as recorded, whatever the pull request's state; else, for a pull request recorded without one,
+ * the tree of the reviewed code it was opened or last updated with when that is the current candidate (or a collected
+ * feedback bundle's). A repository with no pull request keeps the current candidate's tree. Undefined when the task has no
+ * open pull request, or an open one's code is not known.
+ */
+export function workflowPullRequestTrees(workflow: WorkflowSnapshot): Map<string, string> | undefined {
+  const pullRequests = workflow.pullRequests ?? [];
+  if (!pullRequests.some((pullRequest) => pullRequest.state === "OPEN" || pullRequest.state === "UNKNOWN")) return undefined;
+  const trees = new Map((workflow.candidate?.repositories ?? []).map((repository) => [repository.repositoryId, repository.treeSha] as const));
+  for (const pullRequest of pullRequests) {
+    const tree = pullRequest.headTreeSha
+      ?? (workflow.candidate?.digest === pullRequest.candidateDigest ? workflow.candidate.repositories.find((repository) => repository.repositoryId === pullRequest.repositoryId)?.treeSha : undefined)
+      ?? workflow.feedbackReview?.bundleRefs.find((bundle) => bundle.repositoryId === pullRequest.repositoryId && bundle.number === pullRequest.number
+        && bundle.candidateDigest === pullRequest.candidateDigest)?.headTreeSha;
+    if (tree !== undefined) trees.set(pullRequest.repositoryId, tree);
+    else if (pullRequest.state === "OPEN" || pullRequest.state === "UNKNOWN") return undefined;
+  }
+  return trees;
+}
+
 /** The note recorded with the owner's "Keep the pull request as it is" (a dismissal of the approved fix that changed nothing). */
 export const WORKFLOW_KEEP_PULL_REQUESTS_NOTE = "The owner kept the pull request as it is.";
 
