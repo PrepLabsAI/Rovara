@@ -459,7 +459,7 @@ describe("workflow Slack messages", () => {
     it("the answered-comments line", () => {
       const text = cardOf({}, { commentAnswers: { answered: 2, total: 3, fromVersion: 1 } }).text;
       expect(text).toContain("\nAgentX answered 2 of 3 comments from v1.\n");
-      expect(cardOf({}, { commentAnswers: { answered: 1, total: 1, fromVersion: 2 } }).text).toContain("AgentX answered 1 of 1 comments from v2.");
+      expect(cardOf({}, { commentAnswers: { answered: 1, total: 1, fromVersion: 2 } }).text).toContain("AgentX answered 1 of 1 comment from v2.");
       expect(cardOf({}).text).not.toContain("AgentX answered");
     });
 

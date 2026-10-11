@@ -130,12 +130,13 @@ export function feedbackReviewSlackMessage(input: {
     : input.highestPriority === "OPTIONAL" ? "optional" : "none recommended";
   const recommendationSummary = input.recommendedFindingIds.length === 0
     ? "No fixes are recommended."
-    : `${input.recommendedFindingIds.length} recommendations.`;
+    : `${input.recommendedFindingIds.length} ${input.recommendedFindingIds.length === 1 ? "recommendation" : "recommendations"}.`;
   const questions = (input.ownerQuestions ?? []).filter(({ question }) => question.trim().length > 0);
   // The answer is bound to exactly the questions the card shows; the others are answered from the details page.
   const shownQuestions = questions.slice(0, FEEDBACK_QUESTIONS_SHOWN);
   const recommended = input.recommendedFindingIds.length;
   const details = `<${slackText(url.href)}|Open details>.`;
+  const comments = `${input.totalComments} ${input.totalComments === 1 ? "comment" : "comments"}`;
   // Labels and commands are the plan's and the reviewer's words: each is made inert. A corrected check's command is at
   // most 300 plain characters with no backtick, so it is shown in full, its spacing kept, in exact code style (a backtick
   // is still replaced, so none can close it).
@@ -151,8 +152,8 @@ export function feedbackReviewSlackMessage(input: {
   let after = "";
   if (questions.length === 0) {
     before = checkLines.length === 0
-      ? `PR feedback is ready: ${input.totalComments} comments; ${recommendationSummary} Highest priority: ${priority}. ${details}`
-      : `PR feedback is ready: ${input.totalComments} comments; ${recommendationSummary} Highest priority: ${priority}.`;
+      ? `PR feedback is ready: ${comments}; ${recommendationSummary} Highest priority: ${priority}. ${details}`
+      : `PR feedback is ready: ${comments}; ${recommendationSummary} Highest priority: ${priority}.`;
     if (checkLines.length > 0) after = details;
   } else {
     const hidden = questions.length - shownQuestions.length;
@@ -160,7 +161,7 @@ export function feedbackReviewSlackMessage(input: {
     const several = shownQuestions.length > 1;
     const scope = recommended === 0 ? ""
       : ` Your answer covers only the ${several ? "questions" : "question"}. Approve ${recommended} recommended makes only the recommended ${recommended === 1 ? "fix" : "fixes"} and leaves the ${several ? "questions" : "question"} open.`;
-    before = `PR feedback is ready: ${input.totalComments} comments${recommended === 0 ? "" : `; ${recommendationSummary} Highest priority: ${priority}`}.`;
+    before = `PR feedback is ready: ${comments}${recommended === 0 ? "" : `; ${recommendationSummary} Highest priority: ${priority}`}.`;
     after = [
       "The reviewer needs your answer before changing any code:",
       ...shownQuestions.map(({ question }) => `> ${escapedLine(question, FEEDBACK_QUESTION_MAX)}`), ...more,

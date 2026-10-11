@@ -231,7 +231,7 @@ describe("Suite 11: MCP parity", () => {
     const retried = await tool(e2e, "agentx_decide_pr_feedback", { task_id: e2e.taskId(), decision: "RETRY_REVIEW", review_digest: review.review_digest });
     expect(retried.value).toMatchObject({ started: true });
     await e2e.settle();
-    expect(visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text)).toMatch(/^PR feedback is ready: 1 comments; 1 recommendations\./);
+    expect(visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text)).toMatch(/^PR feedback is ready: 1 comment; 1 recommendation\./);
     expect(retired(e2e, failed.ts)).toBe(true);
     // A second retry of the same failed review starts nothing.
     const again = await tool(e2e, "agentx_decide_pr_feedback", { task_id: e2e.taskId(), decision: "RETRY_REVIEW", review_digest: review.review_digest });

@@ -335,7 +335,7 @@ function planReview(context: WorkflowMessageContext, exits: ReturnType<typeof ex
   if (checks !== undefined) tail.push(checks);
   if ((context.newReplies ?? 0) > 0) tail.push(`${plural(context.newReplies!, "thread reply", "thread replies")} since the last step will be included.`);
   const answered = context.commentAnswers;
-  if (answered !== undefined && answered.total > 0) tail.push(`AgentX answered ${answered.answered} of ${answered.total} comments from v${answered.fromVersion}.`);
+  if (answered !== undefined && answered.total > 0) tail.push(`AgentX answered ${answered.answered} of ${plural(answered.total, "comment")} from v${answered.fromVersion}.`);
   const unlinked = `I couldn't link the full ${name}; ask an AgentX admin to check the task page.`;
   if (structured === undefined) {
     // A Markdown document: its first lines, and where the whole text reads.
@@ -482,7 +482,7 @@ function waitingForMerge(workflow: WorkflowSnapshot): string | undefined {
   }
   const remaining = required.filter((pullRequest) => pullRequest.state !== "MERGED")
     .map((pullRequest) => `${name(pullRequest)} is still ${pullRequest.state === "CLOSED" ? "closed" : "open"}.`).join(" ");
-  return `GitHub update: ${merged} of ${required.length} pull requests merged. ${remaining}`.trim();
+  return `GitHub update: ${merged} of ${plural(required.length, "pull request")} merged. ${remaining}`.trim();
 }
 
 /** "PR #3", or "PRs #3 and #4" (and "PRs #3, #4 and #5"), each named by `name`. */

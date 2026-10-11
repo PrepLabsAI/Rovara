@@ -18,7 +18,7 @@ import { visibleSlackText } from "../../support/strict-slack.js";
 import { E2E_CHECK, SLACK_MAYA, createWorkflowE2E, type WorkflowE2E } from "../../support/workflow-e2e.js";
 import { EDITS, FEEDBACK_FIX, FIXED, MERGED, PLAN, PLAN_DOCUMENT, PUSHED_FIX, TEAMMATE, actionIds, editsOrFix, journeySuite, openDraftPr, runs, said } from "../../support/workflow-e2e-journeys.js";
 
-const READY_ONE = /^PR feedback is ready: 1 comments; 1 recommendations\. Highest priority: should fix\. Open details\.$/;
+const READY_ONE = /^PR feedback is ready: 1 comment; 1 recommendation\. Highest priority: should fix\. Open details\.$/;
 
 /** A Quick task with the usual plan, whose coder writes the fix when a PR feedback fix is approved; counts the feedback reviews. */
 async function feedbackJourney(options: Parameters<typeof createWorkflowE2E>[0] = {}, feedback?: (prompt: string) => string | FauxResponseStep) {
@@ -94,7 +94,7 @@ describe("Suite 7: PR feedback loop", () => {
     expect((await e2e.webhook({ kind: "pull_request_review", action: "submitted", number: pullRequest.number, review, body: null, state: "COMMENTED" })).status).toBe(200);
     await e2e.settle();
     expect(visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text))
-      .toMatch(/^PR feedback is ready: 2 comments; 1 recommendations\./);
+      .toMatch(/^PR feedback is ready: 2 comments; 1 recommendation\./);
     expect(counts.feedback).toBe(1);
     const sent = feedbackBundles(counts.prompts[0]!).flatMap((bundle) => bundle.comments.map((entry) => entry.id));
     expect(sent.sort()).toEqual(comments.map((entry) => entry.id).sort());
@@ -131,7 +131,7 @@ describe("Suite 7: PR feedback loop", () => {
     const sent = feedbackBundles(counts.prompts[0]!).flatMap((bundle) => bundle.comments.map((entry) => entry.id));
     expect(sent).not.toContain(resolved.id);
     expect(sent).toContain(open.id);
-    expect(visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text)).toMatch(/^PR feedback is ready: 4 comments; 1 recommendations\./);
+    expect(visibleSlackText(e2e.slack.lastPostWithAction("agentx_feedback_review_recommended").text)).toMatch(/^PR feedback is ready: 4 comments; 1 recommendation\./);
     await e2e.click("agentx_feedback_review_recommended");
     await e2e.settle();
     expect(e2e.slack.ephemerals).toEqual([]);
@@ -203,7 +203,7 @@ describe("Suite 7: PR feedback loop", () => {
     await commented(e2e, pullRequest.number, "Tidy up the name.");
     expect(e2e.workflow().feedbackReview).toMatchObject({ status: "PENDING", reviewRef: { status: "COMPLETE" } });
     const card = e2e.slack.lastPostWithAction("agentx_feedback_review_changes");
-    expect(visibleSlackText(card.text)).toBe(["PR feedback is ready: 1 comments.", "The reviewer needs your answer before changing any code:", `> ${QUESTION}`,
+    expect(visibleSlackText(card.text)).toBe(["PR feedback is ready: 1 comment.", "The reviewer needs your answer before changing any code:", `> ${QUESTION}`,
       "Answer with instructions and I'll make that change. Open details."].join("\n"));
     expect(actionIds(card)).toEqual(["agentx_feedback_review_changes", "agentx_feedback_review_dismiss"]);
     const labels = (card.blocks as Array<{ elements?: Array<{ text: { text: string } }> }>).flatMap((block) => block.elements ?? []).map((element) => element.text.text);

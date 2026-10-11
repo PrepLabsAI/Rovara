@@ -1667,7 +1667,7 @@ describe("the PR feedback advisory summary", () => {
     });
     const grep: Added = { label: "Shorter sentence present in README.md", command: { cwd: "repo/demo", executable: "grep", args: ["-q", "Be respectful and kind.", "README.md"] } };
     const replaced = card([{ obsolete: ["Code of Conduct sentence present in README.md"], added: [grep] }]);
-    expect(visibleSlackText(replaced.text)).toBe("PR feedback is ready: 1 comments; 1 recommendations. Highest priority: should fix.\n"
+    expect(visibleSlackText(replaced.text)).toBe("PR feedback is ready: 1 comment; 1 recommendation. Highest priority: should fix.\n"
       + "Updates checks: `Code of Conduct sentence present in README.md` → `Shorter sentence present in README.md`\n"
       + "Adds check `Shorter sentence present in README.md`: `grep -q \"Be respectful and kind.\" README.md` in `repo/demo`\n"
       + "These commands run on the next step.\nOpen details.");
