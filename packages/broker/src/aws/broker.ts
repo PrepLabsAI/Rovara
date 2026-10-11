@@ -4808,6 +4808,8 @@ async function reconcilePullRequestUpdate(
     expected.pullRequestNumber,
   );
   if (record.expectedHeadCommit === input.commit) {
+    // A retried callback after the push was recorded: its description is brought up to date too.
+    if (expected.workflowCandidate !== undefined) await describeFeedbackFixes(dependencies, operation, record);
     return { url: record.url, state: record.state, reconciled: true };
   }
   if (record.expectedHeadCommit !== expected.expectedHeadCommit) {
@@ -4849,24 +4851,40 @@ async function reconcilePullRequestUpdate(
   return { url: remote.url, state: remote.state, reconciled: false };
 }
 
+/** How long the description update may hold up the worker's callback; past it the push is answered and the update gives up. */
+const DESCRIPTION_UPDATE_MAX_MS = 5_000;
+
 /**
  * D2: once an approved PR feedback fix is on the pull request, its description lists briefly what was changed for which
- * comments ("Fixes from PR feedback"), kept up to date across rounds. Best effort: the push is recorded whatever happens
- * here, and a description that could not be updated is logged.
+ * of that pull request's comments ("Fixes from PR feedback"), kept up to date across rounds. Best effort and bounded in
+ * time (at most the newest approvals' reports are read): the push is recorded whatever happens here, and a description
+ * that could not be updated, or whose section no longer fits, is logged. `body` is GitHub's description when the caller
+ * already read the pull request; otherwise it is read here.
  */
-async function describeFeedbackFixes(dependencies: AwsBrokerDependencies, operation: OperationRecord, record: PullRequestRecord, body: string): Promise<void> {
-  try {
+async function describeFeedbackFixes(dependencies: AwsBrokerDependencies, operation: Pick<OperationRecord, "id" | "workspaceId">, record: PullRequestRecord, body?: string): Promise<void> {
+  const log = (event: string, error?: unknown) => console.log(JSON.stringify({ component: "broker", event, operationId: operation.id,
+    ...(error === undefined ? {} : { error: error instanceof Error ? error.name : "unknown" }) }));
+  const update = async (): Promise<void> => {
     const pointer = await getItem<DeveloperTaskPointerRecord>(dependencies, taskPointerKey(operation.workspaceId));
     const task = pointer === undefined ? undefined : await getItem<DeveloperTaskRecord>(dependencies, taskKey(pointer.taskId));
     if (task?.workflow === undefined || task.workspaceId !== operation.workspaceId) return;
-    const fixes = await approvedFeedbackFixes(task.workflow, (key, maxBytes) => readObjectText(dependencies, key, maxBytes),
-      `private/${task.ownerKey}/${task.workspaceId}/feedback-reviews/`);
-    const next = withFeedbackFixes(body, fixes);
-    if (next === undefined) return;
-    await dependencies.githubPullRequests.updatePullRequest(record.repositoryUrl, record.number, { body: next });
+    const { fixes, earlier } = await approvedFeedbackFixes(task.workflow, { repositoryId: record.repository, number: record.number },
+      (key, maxBytes) => readObjectText(dependencies, key, maxBytes), `private/${task.ownerKey}/${task.workspaceId}/feedback-reviews/`);
+    const current = body ?? (await dependencies.githubPullRequests.getPullRequest(record.repositoryUrl, record.number)).body;
+    const next = withFeedbackFixes(current, fixes, earlier);
+    if (next.dropped) log("workflow.pull_request_description_section_dropped");
+    if (next.body === undefined) return;
+    await dependencies.githubPullRequests.updatePullRequest(record.repositoryUrl, record.number, { body: next.body });
+  };
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([update(), new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => reject(Object.assign(new Error("the description update took too long"), { name: "DescriptionUpdateTimeout" })), DESCRIPTION_UPDATE_MAX_MS);
+    })]);
   } catch (error) {
-    console.log(JSON.stringify({ component: "broker", event: "workflow.pull_request_description_not_updated", operationId: operation.id,
-      error: error instanceof Error ? error.name : "unknown" }));
+    log("workflow.pull_request_description_not_updated", error);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -5621,6 +5639,11 @@ export async function processGithubWorkflowEvent(dependencies: AwsBrokerDependen
         ]),
       ] }));
       console.log(JSON.stringify({ component: "broker", event: "workflow.landed_fix_push_recorded", taskId, pullRequests: pushes.map((push) => push.number) }));
+      // The fix is on the pull request as if its result had come: its description lists it too.
+      for (const push of pushes) {
+        const record = await getItem<PullRequestRecord>(dependencies, pullRequestKey(push.workspaceId, push.repositoryId, push.number));
+        if (record !== undefined) await describeFeedbackFixes(dependencies, { id: `landed-${deliveryId}`, workspaceId: push.workspaceId }, record);
+      }
     },
     reviewedComments: async (taskId, bundleDigests) => {
       const task = await getItem<DeveloperTaskRecord>(dependencies, taskKey(taskId));

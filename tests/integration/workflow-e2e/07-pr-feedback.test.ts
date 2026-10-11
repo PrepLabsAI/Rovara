@@ -375,7 +375,7 @@ describe("Suite 7: PR feedback loop", () => {
     await e2e.settle();
     expect(lastSaid(e2e)).toBe(PUSHED_FIX(pullRequest.number));
     const url = (comment: { id: string }) => `${pullRequest.url}#issuecomment-${comment.id.slice(comment.id.indexOf(":") + 1)}`;
-    const inert = "Trim the name in greet; thanks @\u200Doctocat, see https://\u200Dexample.com/x and #\u200D12";
+    const inert = "Trim the name in greet; thanks @\u200Doctocat, see https:/\u200D/example.com/x and \\#\u200D12 \\<img src=x\\>";
     expect(pullRequest.body).toBe(`${opened}\n\n<!-- agentx:pr-feedback-fixes -->\n### Fixes from PR feedback\n- ${inert} (for [this comment](${url(first)}))\n<!-- /agentx:pr-feedback-fixes -->`);
     // Round 2: the section is replaced in place, with both fixes, oldest first.
     const second = await commented(e2e, pullRequest.number, "And greet in lowercase.");

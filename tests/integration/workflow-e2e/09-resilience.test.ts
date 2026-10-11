@@ -213,6 +213,8 @@ describe("Suite 9: resilience", () => {
     expect(e2e.workflow()).toMatchObject({ stage: "WAIT_FOR_MERGE", state: "WAITING" });
     expect(e2e.workflow().pullRequests).toEqual([expect.objectContaining({ headSha: fixPushes(e2e)[0]!.commit })]);
     expect(said(e2e).at(-1)).toBe(PUSHED_FIX(pullRequest.number));
+    // The fix recorded this way is listed in the description too (D2), as a result from the worker would have.
+    expect(pullRequest.body).toContain("### Fixes from PR feedback\n- Apply the requested change. (for [this comment](");
   }, 120_000);
 
   it("9.9 [R3] stream records delivered twice post each notice once, and a Canvas's record is written once", async () => {
