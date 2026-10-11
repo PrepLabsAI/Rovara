@@ -25,9 +25,11 @@ const signer = localSigner();
  */
 export function memoryS3() {
   const objects = new Map<string, string>();
-  const send = vi.fn(async (command: { constructor: { name: string }; input: { Key?: string; Body?: unknown; Range?: string } }) => {
+  const send = vi.fn(async (command: { constructor: { name: string }; input: { Key?: string; Body?: unknown; Range?: string; IfNoneMatch?: string } }) => {
     const key = command.input.Key ?? "";
     if (command.constructor.name === "PutObjectCommand") {
+      // S3's conditional write: an object that is already there is not replaced.
+      if (command.input.IfNoneMatch === "*" && objects.has(key)) throw Object.assign(new Error("At least one of the pre-conditions you specified did not hold"), { name: "PreconditionFailed" });
       objects.set(key, String(command.input.Body));
       return {};
     }

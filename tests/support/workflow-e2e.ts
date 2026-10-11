@@ -29,7 +29,7 @@ import type { AttributeValue } from "@aws-sdk/client-dynamodb";
 import type { InvokeCommand } from "@aws-sdk/client-lambda";
 import { marshall, unmarshall } from "@aws-sdk/util-dynamodb";
 import type { HttpApiV2Event } from "../../packages/broker/src/aws/lambda.js";
-import { createNotifierHandler } from "../../packages/broker/src/aws/developer-task-notifier.js";
+import { canvasCloseoutService, createCanvasCloseoutStore, createNotifierHandler } from "../../packages/broker/src/aws/developer-task-notifier.js";
 import { captureFeedbackNoteThroughBroker, createSlackIngressHandler, recordThreadNoteThroughBroker, startWorkflowThroughBroker } from "../../packages/broker/src/aws/slack-ingress.js";
 import { createSlackInteractivityHandler, invokeWorkflowDecision, workflowSlackHandlers } from "../../packages/broker/src/aws/slack-interactivity.js";
 import { answerChosenRequest, createDynamoWorkflowChoiceStore, offerWorkflowChoice, startChosenWorkflow, type SlackWorkflowStartInput } from "../../packages/broker/src/aws/slack-workflow-choice.js";
@@ -619,7 +619,12 @@ export async function createWorkflowE2E(options: {
   const stream = recordStream(db);
   const queue: Array<{ notice: Notice; attempt: number }> = [];
   let canvas = 0;
+  /** Every plan Canvas Slack was asked to delete (the closeout of a merged or closed task), in order. */
+  const canvasesDeleted: string[] = [];
+  const closeoutStore = createCanvasCloseoutStore({ documentClient: db as never, s3: s3 as never, tableName: () => "state", bucketName: () => "artifacts",
+    deleteCanvas: async (canvasId) => { canvasesDeleted.push(canvasId); return "deleted"; }, now: () => new Date().toISOString() });
   const notify = createNotifierHandler({
+    closeTaskCanvases: canvasCloseoutService(closeoutStore),
     documentClient: db, tableName: "state",
     enqueue: async (notices) => { for (const notice of notices) queue.push({ notice, attempt: 0 }); },
     retryLater: async () => undefined,
@@ -858,7 +863,9 @@ export async function createWorkflowE2E(options: {
       }
     },
     db, s3, handler, slack, github, repoDirectory, baseCommit, prompts, turns, chatQueue, taskQuestions, taskQuestionRoutes, taskAnswerTurns, checkRuns, invocations, brokerCalls, credentialAttempts, routeCalls, routeLogs,
-    ledger, reviewedTrees, briefLimit, pushedWorkflows, reviewUrlBase: REVIEW_URL_BASE,
+    ledger, reviewedTrees, briefLimit, pushedWorkflows, reviewUrlBase: REVIEW_URL_BASE, canvasesDeleted,
+    /** The table's stream as the notifier reads it (`duplicateNext()` delivers the next record twice). */
+    stream,
 
     /** Delivers every notice the table's writes have queued (the stream, then the queue), without running any worker. */
     deliverNotices: pumpNotices,
