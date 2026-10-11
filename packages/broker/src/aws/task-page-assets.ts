@@ -126,6 +126,9 @@ main>section,.kind{border-top:1px solid var(--line);padding:.5rem 0}
 .evidence-quote,.why-quote{margin:.5rem 0;padding:.2rem 1rem;border-left:3px solid var(--line)}
 .evidence-quote footer,.why-quote footer{color:var(--muted);font-size:.85rem}
 .ln{display:inline-block;min-width:3ch;margin-right:1ch;text-align:right;color:var(--muted);user-select:none}
+.evidence-code pre,.evidence-sketch pre{white-space:pre-wrap;overflow-wrap:anywhere;tab-size:2}
+.code-line{display:inline-grid;grid-template-columns:auto minmax(0,1fr);vertical-align:top;width:100%}
+.code-text{min-width:0}
 .decision{border:1px solid var(--line);border-radius:.4rem;margin:.6rem 0;padding:.4rem .8rem;background:var(--panel)}
 .decision-id{font-weight:700}
 .options{list-style:none;margin:.3rem 0;padding:0}
