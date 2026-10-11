@@ -208,13 +208,16 @@ export function currentOperation(operations: readonly OperationFacts[]): Operati
 }
 
 const DISPATCH_OR_COMPUTE = /^RUNTIME_UNAVAILABLE:/;
+const WORKER_CALLBACK_REFUSED = /^RUNTIME_UNAVAILABLE: worker callback [a-z-]+ failed with HTTP \d{3}$/;
 /** F18: also matches the worker devcontainer's "timeout:<ms>" error text (packages/worker/src/devcontainer.ts). */
 const TIMED_OUT = /\btimed? ?out\b|\btimeout:/i;
 
 /** R5. */
 export function failureCategory(kind: string, status: string, error: string | undefined): DeveloperTaskFailureCategory {
   if (status === "INTERRUPTED") return "interrupted";
-  if (error !== undefined && DISPATCH_OR_COMPUTE.test(error)) return "worker_unavailable";
+  // A worker that ran and whose callback the control plane refused (opening the pull request on GitHub failed, say) was
+  // available: that is the step failing, not "no worker was free".
+  if (error !== undefined && DISPATCH_OR_COMPUTE.test(error) && !WORKER_CALLBACK_REFUSED.test(error)) return "worker_unavailable";
   if (kind === "prepare") return "setup_failed";
   if (kind === "publish") return "publication_failed";
   if (error !== undefined && TIMED_OUT.test(error)) return "timed_out";
