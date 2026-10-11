@@ -157,8 +157,8 @@ describe("task page API through the broker", () => {
   const NIA: Developer = { developerId: "a".repeat(64), name: "Nia Fox", provider: "slack", sessionId: "s-nia", slackUserId: "U0NIA0001" };
 
   /** A shared task whose structured coding plan v1 waits for Maya; Lee is in the channel, Nia and Omar are not. */
-  async function sharedTask() {
-    const harness = await createDeveloperTaskBroker({ channelMembers: async (request) => ({
+  async function sharedTask(onMembership: () => void = () => undefined) {
+    const harness = await createDeveloperTaskBroker({ channelMembers: async (request) => (onMembership(), {
       ok: true, memberOf: request.slackUserId === MAYA.slackUserId || request.slackUserId === LEE.slackUserId ? request.channelIds.filter((id) => id === SLACK_CHANNEL) : [],
     }) });
     const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Retry failed payments", client: "test", shareToChannel: true, workflow: true, workflowPath: "QUICK" });
@@ -296,13 +296,17 @@ describe("task page API through the broker", () => {
   });
 
   it("through the AI tool API a teammate cannot decide either, and hears the answer a missing task gets", async () => {
-    const t = await sharedTask();
+    let lookups = 0;
+    const t = await sharedTask(() => { lookups += 1; });
     for (const who of [LEE, NIA]) {
       t.harness.db.set({ pk: `SESSION#${who.sessionId}`, sk: "META", sessionId: who.sessionId, developerId: who.developerId, amr: who.provider, startedAt: new Date(Date.now() - 60_000).toISOString(), endsAt: Math.floor(Date.now() / 1000) + 604_800 });
     }
     const body = { requestId: randomUUID(), expectedRevision: t.revision, decision: "APPROVE", reason: "Looks right.", artifactDigest: t.sha256 };
+    const before = lookups;
     const teammate = await t.harness.dev(LEE, "POST", `/v1/dev/tasks/${t.id}/workflow/decision`, body);
     expect(teammate.status).toBe(404);
+    // Only owners decide, so a non-owner is refused before any channel-membership lookup.
+    expect(lookups).toBe(before);
     expect((teammate.body.error as { code: string }).code).toBe("TASK_NOT_FOUND");
     const outsider = await t.harness.dev(NIA, "POST", `/v1/dev/tasks/${t.id}/workflow/decision`, body);
     expect(outsider.body.error).toEqual(teammate.body.error);

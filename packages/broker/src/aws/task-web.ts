@@ -8,7 +8,7 @@ import type { TaskRole } from "../developer/task-access.js";
 import type { DeveloperCaller } from "./developer-routes.js";
 import type { AdaptedHttpRequest } from "./lambda.js";
 import { checksAnchor, renderPlanDocument, type PlanAnchor } from "./plan-page/render-plan.js";
-import type { PageCommentView, PageSuggestionView } from "./plan-page/comments.js";
+import { renderThreads, type PageCommentView, type PageSuggestionView } from "./plan-page/comments.js";
 import { TASK_PAGE_DECIDING_SCRIPT, TASK_PAGE_SCRIPT, TASK_PAGE_STYLE } from "./task-page-assets.js";
 import { TASK_PAGE_API_PREFIX } from "./task-web-api.js";
 import {
@@ -173,11 +173,11 @@ function signInQuery(url: URL): string {
   return `?doc=${doc}${from !== null && /^[1-9][0-9]{0,2}$/.test(from) ? `&from=${from}` : ""}`;
 }
 
-function markdownDocument(anchor: PlanAnchor, label: string, document: Extract<TaskDocumentEntry, { format: "markdown" }>, currentVersion: number): string {
+function markdownDocument(anchor: PlanAnchor, label: string, document: Extract<TaskDocumentEntry, { format: "markdown" }>, currentVersion: number, comments = ""): string {
   const status = document.current ? "" : ` <span class="not-current">This is v${document.version}. v${currentVersion} is the current one.</span>`;
   return `<section id="${anchor}-v${document.version}" class="doc doc-${anchor}"><header class="doc-header"><h3>${label} v${document.version}</h3>`
     + `<p class="doc-status"><span class="status ${document.approved ? "approved" : "pending"}">${document.approved ? "Approved" : "Not approved yet"}</span>${status}</p></header>`
-    + `<pre class="doc-text">${escapeHtml(document.markdown)}</pre></section>`;
+    + `<pre class="doc-text">${escapeHtml(document.markdown)}</pre>${comments}</section>`;
 }
 
 async function documentsHtml(view: TaskDocumentView, request: TaskPageRequest): Promise<string> {
@@ -199,7 +199,14 @@ async function documentsHtml(view: TaskDocumentView, request: TaskPageRequest): 
       if (approved?.format === "structured") { approvedEarlier = approved.plan; break; }
     }
     const render = async (document: TaskDocumentEntry): Promise<string> => {
-      if (document.format === "markdown") return markdownDocument(entry.anchor, entry.label, document, currentDocument.version);
+      if (document.format === "markdown") {
+        // A Markdown document takes whole-document comments only, shown on its current version.
+        const threads = document !== currentDocument || view.access === undefined ? "" : renderThreads(
+          (view.pageComments ?? []).filter((comment) => comment.document === entry.planKind && comment.version <= document.version && comment.target.kind === "document"),
+          { shownVersion: document.version, canComment: view.access.canComment, target: "document" },
+        );
+        return markdownDocument(entry.anchor, entry.label, document, currentDocument.version, threads === "" ? "" : `<section class="doc-comments"><h3>Comments on this document</h3>${threads}</section>`);
+      }
       const before = versions[versions.indexOf(document) - 1];
       const checks = entry.kind === "coding plan" && document === currentDocument
         ? view.checks.map((check) => ({ ...(check.id === undefined ? {} : { id: check.id }), label: check.label, proposed: check.proposed === true, proves: check.proves ?? [], status: checkWords(check) })) : undefined;
@@ -219,7 +226,9 @@ async function documentsHtml(view: TaskDocumentView, request: TaskPageRequest): 
         ...(document.createdAt === undefined ? {} : { createdAt: document.createdAt }), ...(view.now === undefined ? {} : { now: view.now }),
         ...(before?.format === "structured" ? { previous: { version: before.version, plan: before.plan } } : {}),
         ...(approvedEarlier === undefined ? {} : { approvedEarlier }),
-        ...(checks === undefined ? {} : { checks }), openWhatChanged: document === currentDocument && fromEarlier,
+        ...(checks === undefined ? {} : { checks }),
+        ...(entry.kind === "coding plan" && isCurrent && view.optionalChecks !== undefined ? { knownChecks: view.optionalChecks.map(({ id, label }) => ({ id, label })) } : {}),
+        openWhatChanged: document === currentDocument && fromEarlier,
       });
     };
     // The title is shown once, in the document's own header; the fold says only which version and whether it is approved.

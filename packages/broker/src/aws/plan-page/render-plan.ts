@@ -20,6 +20,8 @@ export interface RenderPlanInput {
   previous?: { version: number; plan: PlanDocument };
   approvedEarlier?: PlanDocument;
   checks?: Array<{ id?: string; label: string; proposed: boolean; proves: string[]; status: string }>;
+  /** Checks the task knows that the table does not list (an optional check not chosen): their threads stay with the checks. */
+  knownChecks?: Array<{ id: string; label: string }>;
   openWhatChanged: boolean;
   /** Spec 061 slice 2, the current version only: the task's comments (any document; this one's up to this version show). */
   comments?: PageCommentView[];
@@ -259,15 +261,24 @@ function provesLink(context: Context, id: string): string {
   return claimLink(context, id);
 }
 
+/** Checks with a place on this version but no row in the table: those the task knows of and the plan's own proposals. */
+function otherChecks(context: Context): Array<{ id: string; label: string }> {
+  const listed = new Set((context.input.checks ?? []).flatMap((check) => check.id === undefined ? [] : [check.id]));
+  const out = new Map<string, string>();
+  for (const check of [...(context.input.knownChecks ?? []), ...(context.input.plan.checks?.proposed ?? [])]) if (!listed.has(check.id) && !out.has(check.id)) out.set(check.id, check.label);
+  return [...out].map(([id, label]) => ({ id, label }));
+}
+
 function checksHtml(context: Context): string {
-  const { checks } = context.input;
-  if (checks === undefined || checks.length === 0) return "";
+  const { checks = [] } = context.input;
+  const others = otherChecks(context).map((check) => threadsHtml(context, `check:${check.id}`, { label: check.label, open: false })).join("");
+  if (checks.length === 0) return others === "" ? "" : `<section id="${escapeHtml(checksAnchor(context.input.version))}" class="checks"><h3>Checks</h3>${others}</section>`;
   // Class names let the stylesheet keep the short columns whole and, on a phone, stack each check as one block.
   const commentControl = (check: NonNullable<RenderPlanInput["checks"]>[number]) => check.id === undefined || !context.commenting || context.input.comments === undefined || !context.input.current ? ""
     : ` <button type="button" class="comment-open" data-target="check:${t(check.id)}" data-label="${t(check.label)}" hidden>Comment</button>`;
   const threads = checks.map((check) => check.id === undefined ? "" : threadsHtml(context, `check:${check.id}`, { label: check.label, open: false })).join("");
   const rows = checks.map((check) => `<tr><td class="check-label">${t(check.label)}${commentControl(check)}</td><td class="check-from">${check.proposed ? "Proposed" : "Project"}</td><td class="check-proves">${check.proves.length === 0 ? "None" : check.proves.map((id) => provesLink(context, id)).join(", ")}</td><td class="check-status">${t(check.status)}</td></tr>`).join("");
-  return `<section id="${escapeHtml(checksAnchor(context.input.version))}" class="checks"><h3>Checks</h3><table><thead><tr><th class="check-label">Check</th><th class="check-from">From</th><th class="check-proves">Proves</th><th class="check-status">Status</th></tr></thead><tbody>${rows}</tbody></table>${threads}</section>`;
+  return `<section id="${escapeHtml(checksAnchor(context.input.version))}" class="checks"><h3>Checks</h3><table><thead><tr><th class="check-label">Check</th><th class="check-from">From</th><th class="check-proves">Proves</th><th class="check-status">Status</th></tr></thead><tbody>${rows}</tbody></table>${threads}${others}</section>`;
 }
 
 /** "Comments on this document": the whole-document threads, and the Comment control for someone who may comment. */
@@ -283,7 +294,7 @@ function placeExists(context: Context, key: string): boolean {
   const [kind, id] = [key.slice(0, key.indexOf(":")), key.slice(key.indexOf(":") + 1)];
   if (kind === "claim") return flatten(plan.claims).some((claim) => claim.id === id);
   if (kind === "decision") return plan.decisions.some((decision) => decision.id === id);
-  return (checks ?? []).some((check) => check.id === id);
+  return (checks ?? []).some((check) => check.id === id) || otherChecks(context).some((check) => check.id === id);
 }
 
 /**

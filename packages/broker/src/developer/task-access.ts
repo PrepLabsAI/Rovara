@@ -36,15 +36,18 @@ const log = (deps: Pick<DeveloperTaskRouteDependencies, "log">, entry: Record<st
  * The task a task-page reader may see, and their role. Not theirs and no such task both read as TASK_NOT_FOUND; only an
  * eligible teammate on the task's own Slack workspace who is not in the task's channel gets TASK_ACCESS_DENIED, with the
  * owner's name (FR-029). Whatever fails on the way (the project check, the membership lookup) reads as not found too,
- * because an answer that differed would confirm the task exists.
+ * because an answer that differed would confirm the task exists. With `action`, a reader whose possible roles could
+ * not take it is refused as not found before any project or channel lookup.
  */
-export async function resolveTaskAccess(deps: AccessDependencies, caller: DeveloperCaller, taskId: string): Promise<TaskAccess> {
+export async function resolveTaskAccess(deps: AccessDependencies, caller: DeveloperCaller, taskId: string, action?: TaskAction): Promise<TaskAccess> {
   const notFound = () => agentXError("TASK_NOT_FOUND", "no task here that you can see");
   if (!TASK_ID.test(taskId)) throw notFound();
   const response = await deps.documentClient.send(new GetCommand({ TableName: deps.tableName, Key: taskKey(taskId), ConsistentRead: true })) as { Item?: DeveloperTaskRecord };
   const task = response.Item;
   if (task === undefined) throw notFound();
   if (task.developerId === caller.developerId) return { task, role: "owner" };
+  // An action only owners may take needs no project or channel lookup for anyone else: they read as not found.
+  if (action !== undefined && TASK_ACTION_ROLES[action].every((role) => role === "owner")) throw notFound();
   let usesProject = false;
   try {
     await deps.checkAccess(task.project);

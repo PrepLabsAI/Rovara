@@ -11,6 +11,7 @@ import { MAYA, createDeveloperTaskBroker } from "../support/developer-task-broke
 import { planAnswer } from "../support/plan-documents.js";
 import { pagePlan } from "../support/page-tasks.js";
 import { SLACK_CHANNEL } from "../support/slack-broker.js";
+import { validatingDocumentClient } from "../support/validating-document-client.js";
 
 type Harness = Awaited<ReturnType<typeof createDeveloperTaskBroker>>;
 const PREPARED = { result: { preparedBase: [{ repositoryId: "demo", baseCommitSha: "e".repeat(40) }] } };
@@ -27,7 +28,7 @@ const agentxReplies = (harness: Harness, taskId: string) => comments(harness, ta
 
 function routeDeps(harness: Harness): DeveloperTaskRouteDependencies {
   return {
-    documentClient: harness.db, tableName: "state", actions: harness.actions,
+    documentClient: validatingDocumentClient(harness.db), tableName: "state", actions: harness.actions,
     checkAccess: async () => ({ revision: 1, policy: {} as never, access: "channel", channelIds: [SLACK_CHANNEL] }),
     projectChannelIds: async () => [SLACK_CHANNEL], now: () => Date.now(), log: () => undefined,
   };
@@ -37,7 +38,7 @@ const answersBlock = (entries: unknown) => `\`\`\`agentx-comment-answers\n${type
 
 /** A Quick task whose v1 coding plan the owner sent back with three comments: c1 and c3 on claim 2.1, c2 a reply to c1. */
 async function changesRequested() {
-  const harness = await createDeveloperTaskBroker();
+  const harness = await createDeveloperTaskBroker({ mapOrder: "dynamodb" });
   const started = await harness.dev(MAYA, "POST", "/v1/dev/tasks", { requestId: randomUUID(), project: "payments", instructions: "Retry failed payments", client: "test-client", workflow: true, workflowPath: "QUICK" });
   const taskId = String((started.body.task as { taskId: string }).taskId);
   const record = harness.db.get(`DEVTASK#${taskId}`, "META") as Record<string, unknown> & { workspaceId: string; workflow: WorkflowSnapshot };
@@ -118,12 +119,39 @@ describe("planner answers to included comments", () => {
     // The same answers written again (a retried write) find their replies already there.
     const workflow = workflowOf(t.harness, t.taskId);
     const detail = (await readDecisionDetail(routeDeps(t.harness), t.taskId, t.requestId))!;
-    const again = await writePlannerReplies({ documentClient: t.harness.db, tableName: "state", now: () => Date.now(), log: () => undefined }, {
+    const again = await writePlannerReplies({ documentClient: validatingDocumentClient(t.harness.db), tableName: "state", now: () => Date.now(), log: () => undefined }, {
       taskId: t.taskId, artifactId: workflow.artifacts.at(-1)!.id, version: 2, detail, answers: parseCommentAnswers(answer, new Set(["c1", "c2", "c3"])),
     });
     expect(again).toEqual({ written: 0 });
     expect(agentxReplies(t.harness, t.taskId)).toHaveLength(2);
     expect(t.harness.db.get(`DEVTASK#${t.taskId}`, "COMMENTS")).toMatchObject({ count: 5 });
+  });
+
+  it("a write that meets another in flight is tried once more, and one entry that cannot be written never stops the rest", async () => {
+    const t = await changesRequested();
+    const workflow = workflowOf(t.harness, t.taskId);
+    const detail = (await readDecisionDetail(routeDeps(t.harness), t.taskId, t.requestId))!;
+    const inner = validatingDocumentClient(t.harness.db);
+    let transactions = 0;
+    const events: string[] = [];
+    const client = {
+      send: async (command: unknown) => {
+        if ((command as { constructor: { name: string } }).constructor.name === "TransactWriteCommand") {
+          transactions += 1;
+          if (transactions === 1) throw Object.assign(new Error("conflict"), { name: "TransactionCanceledException", CancellationReasons: [{ Code: "TransactionConflict" }, { Code: "None" }] });
+          if (transactions === 3) throw Object.assign(new Error("unexpected"), { name: "InternalServerError" });
+        }
+        return inner.send(command);
+      },
+    };
+    const result = await writePlannerReplies({ documentClient: client, tableName: "state", now: () => Date.now(), log: (entry) => { events.push(String(entry.event)); } }, {
+      taskId: t.taskId, artifactId: workflow.artifacts.at(-1)!.id, version: 2, detail,
+      answers: parseCommentAnswers(answersBlock([{ comment: "c1", outcome: "done", reason: "Moved it." }, { comment: "c3", outcome: "done", reason: "Shortened it." }, { comment: "c2", outcome: "not_changed", reason: "Kept it." }]), new Set(["c1", "c2", "c3"])),
+    });
+    expect(result).toEqual({ written: 2 });
+    expect(transactions).toBe(4);
+    expect(agentxReplies(t.harness, t.taskId).map((reply) => reply.commentId).sort()).toEqual([plannerReplyCommentId(t.c1, workflow.artifacts.at(-1)!.id), plannerReplyCommentId(t.c2, workflow.artifacts.at(-1)!.id)].sort());
+    expect(events).toContain("developer.planner_reply_not_written");
   });
 
   it("an answer with no block stores the plan and writes no replies", async () => {

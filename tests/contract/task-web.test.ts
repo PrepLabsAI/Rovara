@@ -1250,6 +1250,18 @@ describe("deciding and commenting on the task page (slice 2)", () => {
     }
   });
 
+  it("a Markdown document takes whole-document comments, so the ones a decision sends are on the page", async () => {
+    const onDocument = { id: "00000000-0000-4000-8000-000000000009", document: "plan" as const, version: 2, target: { kind: "document" as const }, author: { kind: "person" as const, name: "Sam", owner: false, you: false }, text: "Shorter, please.", createdAt: "2026-10-11T10:00:00.000Z", edited: false, deleted: false, sent: false, rev: 1 };
+    const { body } = await render({ access: commenter, pageComments: [onDocument] });
+    const current = body.slice(body.indexOf('id="coding-plan-v2"'));
+    expect(current).toContain("<h3>Comments on this document</h3>");
+    expect(current).toContain('data-comments="document"');
+    expect(current).toContain(`id="comment-${onDocument.id}"`);
+    expect(current).toMatch(/<button type="button" class="comment-open" data-target="document"[^>]*hidden>Comment<\/button>/);
+    // A reader who cannot comment sees no thread controls.
+    expect((await render({ pageComments: [onDocument] })).body).not.toContain('class="comment-open"');
+  });
+
   it("phone layout rules: sticky bar, 2.75rem controls, full-screen dialog under 35rem", async () => {
     const { body } = await deciding();
     expect(body).toContain('<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">');

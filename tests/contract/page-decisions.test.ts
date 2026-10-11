@@ -1,6 +1,6 @@
 // A decision on a plan with the owner's answers and the comments they chose, through the one transition Slack and MCP use.
 import { randomUUID } from "node:crypto";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { DeveloperTaskViewSchema, WorkflowDecisionSchema, createCandidateManifest, type PlanDocument, type TaskComment, type WorkflowSnapshot } from "@agentx/contracts";
 import { decideTaskWorkflow, promptTagId, type DeveloperTaskRouteDependencies } from "../../packages/broker/src/aws/developer-tasks.js";
 import type { DeveloperCaller } from "../../packages/broker/src/aws/developer-routes.js";
@@ -410,11 +410,17 @@ describe("page decisions", () => {
     const t = await waitingPlan(PLAN, { slackThread: thread });
     const shared = t.seed();
     const expectedRevision = workflowOf(t.harness, t.taskId).revision;
+    const logs: string[] = [];
+    const spy = vi.spyOn(console, "log").mockImplementation((line: unknown) => { logs.push(String(line)); });
     const pressed = await raceAgainstPage(t, [shared], (requestId) => t.harness.handler({ source: "agentx.slack-ingress", action: "workflow-decision", taskId: t.taskId, userId: MAYA.slackUserId, thread, requestId,
-      expectedRevision, artifactDigest: t.digest(), decision: "APPROVE", reason: "Approved in Slack.", selectedOptionalCheckIds: [] }) as Promise<{ statusCode: number; body: string }>);
+      expectedRevision, artifactDigest: t.digest(), decision: "APPROVE", reason: "Approved in Slack.", selectedOptionalCheckIds: [] }) as Promise<{ statusCode: number; body: string }>).finally(() => spy.mockRestore());
+    const refusedLog = logs.find((line) => line.includes("slack.workflow_decision_refused") || line.includes("_refused"));
+    expect(refusedLog).toContain('"reason":"already_decided"');
+    expect(logs.join("\n")).not.toContain("Already approved by");
     const answer = JSON.parse(pressed.body) as { refused?: boolean; message?: string };
-    // A task started in Slack has no stored name for its owner, so the sentence names the role.
-    expect(answer).toMatchObject({ refused: true, message: "Already approved by the task owner a moment ago." });
+    // In Slack the winner is named with a Slack mention.
+    expect(answer).toMatchObject({ refused: true, message: `Already approved by <@${MAYA.slackUserId}> a moment ago.` });
+    expect(MAYA.slackUserId).toBe("U0MAYA001");
     expect(workflowOf(t.harness, t.taskId).decisions.filter((decision) => decision.decision === "APPROVE")).toHaveLength(1);
   });
 

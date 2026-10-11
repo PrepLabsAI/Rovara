@@ -1289,7 +1289,7 @@ async function decidableTask(deps: DeveloperTaskRouteDependencies, caller: Devel
   const notYours = () => agentXError("TASK_NOT_FOUND", TASK_ID.test(taskId) ? `no task ${taskId} of yours` : "that is not a task ID of yours");
   let access: Awaited<ReturnType<typeof resolveTaskAccess>>;
   try {
-    access = await resolveTaskAccess(deps, caller, taskId);
+    access = await resolveTaskAccess(deps, caller, taskId, "decide");
   } catch (error) {
     if (error instanceof AgentXError && (error.code === "TASK_NOT_FOUND" || error.code === "TASK_ACCESS_DENIED")) throw notYours();
     throw error;
@@ -1317,10 +1317,19 @@ export async function decideTaskWorkflow(
   const prior = workflow.decisions.find((decision) => decision.requestId === request.requestId);
   const actor = { actorId: task.ownerKey, role: "TASK_OWNER" as const };
   const decideOptions = { now: iso(deps), allowedSkipStages: [] as WorkflowStage[], ...(options.via === undefined ? {} : { via: options.via }) };
-  const refused = (current: WorkflowSnapshot) => agentXError("IDEMPOTENCY_CONFLICT", refusalMessage({
-    workflow: current, ownerName: redactText(ownerLabel(task.developerName)), artifactSha256: request.artifactDigest ?? "", now: deps.now(),
-    labelOf: (type) => TASK_PAGE_DOCUMENTS.find((item) => item.type === type)?.label ?? "The document",
-  }));
+  const refused = (current: WorkflowSnapshot) => {
+    const ownerName = redactText(ownerLabel(task.developerName));
+    const message = refusalMessage({
+      workflow: current, ownerName, artifactSha256: request.artifactDigest ?? "", now: deps.now(),
+      labelOf: (type) => TASK_PAGE_DOCUMENTS.find((item) => item.type === type)?.label ?? "The document",
+    });
+    const error = agentXError("IDEMPOTENCY_CONFLICT", message);
+    // When the owner won the race, Slack can name them with a mention; the page and MCP keep the plain name.
+    if (task.slackUserId !== undefined && (message.startsWith(`Already approved by ${ownerName} `) || message.startsWith(`Changes were already requested by ${ownerName} `))) {
+      Object.assign(error, { decidedBy: { name: ownerName, slackUserId: task.slackUserId } });
+    }
+    return error;
+  };
   const transition = (decisionRequest: WorkflowDecisionRequest, decisions?: ReadonlyArray<{ id: string; optionIds: string[]; recommended: string }>) => {
     try {
       return decideWorkflow(workflow, decisionRequest, actor, { ...decideOptions, ...(decisions === undefined ? {} : { decisions }) });

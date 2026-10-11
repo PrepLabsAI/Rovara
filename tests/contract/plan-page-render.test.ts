@@ -566,4 +566,18 @@ describe("comments, suggestions and answers on the plan page", () => {
     expect(html).toContain('data-comments="document"');
     expect(html).toContain(`id="comment-${onDocument.id}"`);
   });
+
+  it("a comment on a check the table does not list stays with the checks, never under Removed claims", async () => {
+    const onOptional = { ...comment({ target: { kind: "check", id: "lint" } }), document: "plan" as const };
+    const html = await renderPlanDocument(input({ kind: "plan", anchor: "coding-plan", comments: [onOptional], access: commenting,
+      checks: [{ id: "unit-tests", label: "Unit tests", proposed: true, proves: [], status: "Not run yet" }], knownChecks: [{ id: "lint", label: "Lint" }] }));
+    expect(html).not.toContain("Removed claims");
+    const checks = html.slice(html.indexOf('class="checks"'));
+    expect(checks).toContain('data-comments="check:lint"');
+    expect(checks).toContain('<h4 class="comments-label">Lint</h4>');
+    // With no table at all (no checks selected) the thread still shows with the checks.
+    const bare = await renderPlanDocument(input({ kind: "plan", anchor: "coding-plan", comments: [onOptional], access: commenting, checks: [], knownChecks: [{ id: "lint", label: "Lint" }] }));
+    expect(bare).not.toContain("Removed claims");
+    expect(bare).toContain('data-comments="check:lint"');
+  });
 });

@@ -1018,12 +1018,23 @@ const SLACK_PLAIN_REFUSALS: ReadonlyMap<string, string> = new Map([
  */
 /** The decision's lost-race sentences (FR-035), which Slack says as they are. */
 const LOST_RACE = /^(Already approved by|Changes were already requested by) [^\n]{1,200}\.$/u;
-function slackRefusalMessage(code: string, outOfDate: string, reason = ""): string | undefined {
+/** The lost-race sentence for Slack: Slack's markup characters escaped, and the winner named with a mention when their Slack ID is known. */
+function slackLostRace(reason: string, decidedBy: unknown): string {
+  const escape = (text: string) => text.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;");
+  const escaped = escape(reason);
+  const { name, slackUserId } = (decidedBy ?? {}) as { name?: unknown; slackUserId?: unknown };
+  if (typeof name !== "string" || typeof slackUserId !== "string" || !/^[UW][A-Z0-9]{2,}$/u.test(slackUserId)) return escaped;
+  const plain = ` by ${escape(name)} `;
+  const at = escaped.indexOf(plain);
+  return at < 0 ? escaped : `${escaped.slice(0, at)} by <@${slackUserId}> ${escaped.slice(at + plain.length)}`;
+}
+
+function slackRefusalMessage(code: string, outOfDate: string, reason = "", decidedBy?: unknown): string | undefined {
   switch (code) {
     // A refusal the presser can act on is said as it is; any other means the press no longer fits the task.
     case "CONFIG_INVALID": return SLACK_PLAIN_REFUSALS.get(reason) ?? outOfDate;
     // A lost race says who decided and when (the owner's name is redacted; Slack's markup characters are escaped).
-    case "IDEMPOTENCY_CONFLICT": return LOST_RACE.test(reason) ? reason.replace(/&/gu, "&amp;").replace(/</gu, "&lt;").replace(/>/gu, "&gt;") : outOfDate;
+    case "IDEMPOTENCY_CONFLICT": return LOST_RACE.test(reason) ? slackLostRace(reason, decidedBy) : outOfDate;
     case "WORKSPACE_BUSY":
     case "TASK_BUSY": return "AgentX is still working on the previous step. Try again when it posts.";
     case "FORBIDDEN": return "Only the task owner can do that.";
@@ -1080,9 +1091,11 @@ async function answerSlackWorkflowEvent(
     if (typeof note === "string") await recordSlackWorkflowRefusal(dependencies, event, note, attemptId);
     return json(result, "slack-ingress");
   } catch (error) {
-    const refusal = error instanceof AgentXError ? slackRefusalMessage(error.code, options.outOfDate, stripCode(error.message, error.code)) : undefined;
+    const refusal = error instanceof AgentXError ? slackRefusalMessage(error.code, options.outOfDate, stripCode(error.message, error.code), (error as { decidedBy?: unknown }).decidedBy) : undefined;
     if (error instanceof AgentXError && refusal !== undefined) {
-      console.log(JSON.stringify({ component: "broker", event: `slack.workflow_${name}_refused`, taskId: event.taskId, requestId: event.requestId, errorCode: error.code, reason: stripCode(error.message, error.code) }));
+      // A lost race's sentence names a person: the log keeps a fixed label instead.
+      const reason = error.code === "IDEMPOTENCY_CONFLICT" ? "already_decided" : stripCode(error.message, error.code);
+      console.log(JSON.stringify({ component: "broker", event: `slack.workflow_${name}_refused`, taskId: event.taskId, requestId: event.requestId, errorCode: error.code, reason }));
       await recordSlackWorkflowRefusal(dependencies, event, refusal, attemptId);
       return json({ refused: true, message: refusal }, "slack-ingress");
     }
